@@ -34,7 +34,7 @@ impl ManeuverSequence {
     pub fn add(&mut self, node: ManeuverNode) {
         let pos = self
             .nodes
-            .binary_search_by(|n| n.time.partial_cmp(&node.time).unwrap())
+            .binary_search_by(|n| n.time.partial_cmp(&node.time).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap_or_else(|i| i);
         self.nodes.insert(pos, node);
     }
@@ -66,7 +66,7 @@ impl ManeuverSequence {
             .binary_search_by(|n| {
                 n.time
                     .partial_cmp(&time)
-                    .unwrap()
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap_or_else(|i| i);
         &self.nodes[start..]

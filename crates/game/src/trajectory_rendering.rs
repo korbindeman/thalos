@@ -143,24 +143,19 @@ fn render_segment(
         gizmos.line_gradient(p_a, p_b, color_a, color_b);
 
         // --- Cone proxy (wider translucent parallel offset lines) -----------
-        // TODO: Replace with a full translucent tube mesh for accurate cone
-        // visualisation.  The tube would be a cylinder with radius = cone_width
-        // at each end, rendered with an alpha-blended material.  The current
-        // approach uses a pair of offset line segments as a cheap proxy.
         let cw_a = cone_width(a) as f32 * RENDER_SCALE as f32;
         let cw_b = cone_width(b) as f32 * RENDER_SCALE as f32;
         if cw_a > 0.0 || cw_b > 0.0 {
             let cone_color_a = color_with_alpha(body_color(a.dominant_body, system), alpha_a * 0.35);
             let cone_color_b = color_with_alpha(body_color(b.dominant_body, system), alpha_b * 0.35);
 
-            // Build a perpendicular offset in the XZ plane (ecliptic) as a
-            // simple proxy.  A full implementation would compute the
-            // cross-section plane perpendicular to the velocity vector.
-            let edge = (p_b - p_a).normalize_or_zero();
-            let perp = perpendicular_xz(edge);
+            // Perpendicular to velocity at each sample, giving correct cone
+            // orientation even on inclined orbits.
+            let perp_a = velocity_perpendicular(a);
+            let perp_b = velocity_perpendicular(b);
 
-            let offset_a = perp * cw_a;
-            let offset_b = perp * cw_b;
+            let offset_a = perp_a * cw_a;
+            let offset_b = perp_b * cw_b;
 
             gizmos.line_gradient(p_a + offset_a, p_b + offset_b, cone_color_a, cone_color_b);
             gizmos.line_gradient(p_a - offset_a, p_b - offset_b, cone_color_a, cone_color_b);
@@ -173,10 +168,10 @@ fn render_segment(
     }
 
     // Ghost check for the final sample (loop above stops at len-1).
-    if let Some(last) = samples.last() {
-        if fade_alpha(last) > 0.0 {
-            maybe_draw_ghost(last, system, ephemeris, origin, sim_time, gizmos, body_pos_now_cache);
-        }
+    if let Some(last) = samples.last()
+        && fade_alpha(last) > 0.0
+    {
+        maybe_draw_ghost(last, system, ephemeris, origin, sim_time, gizmos, body_pos_now_cache);
     }
 }
 
@@ -316,15 +311,20 @@ fn color_with_alpha([r, g, b]: [f32; 3], alpha: f32) -> Color {
     Color::srgba(r, g, b, alpha)
 }
 
-/// Return a unit vector perpendicular to `v` in the XZ plane.  Falls back to
-/// Vec3::X when `v` is vertical (degenerate cross product).
-fn perpendicular_xz(v: Vec3) -> Vec3 {
-    let up = Vec3::Y;
-    let cross = up.cross(v);
-    if cross.length_squared() > 1e-6 {
-        cross.normalize()
-    } else {
+/// Compute a render-space unit vector perpendicular to a trajectory sample's
+/// velocity.  Uses `cross(velocity_dir, Y)` and falls back to `X` when the
+/// velocity is nearly parallel to Y.
+fn velocity_perpendicular(sample: &TrajectorySample) -> Vec3 {
+    let vel = sample.velocity;
+    if vel.length_squared() < 1e-20 {
+        return Vec3::X;
+    }
+    let dir = vel.normalize();
+    let cross = dir.cross(bevy::math::DVec3::Y);
+    if cross.length_squared() < 1e-12 {
         Vec3::X
+    } else {
+        cross.normalize().as_vec3()
     }
 }
 

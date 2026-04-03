@@ -2,26 +2,19 @@
 //!
 //! # Design
 //!
-//! At construction time, the full N-body system is integrated forward using
-//! RK4 with a fixed 1-hour timestep for the requested time span.  The star is
-//! pinned to the origin.  All other bodies interact gravitationally with every
-//! other body (including the star).
-//!
-//! Instead of storing every integration step, each body keeps an adaptively
-//! sampled list of `EphemerisSample` records.  A new sample is committed
-//! whenever the body's actual position deviates from a linear extrapolation of
-//! the previous sample by more than `CURVATURE_THRESHOLD` metres.  This gives
-//! dense coverage near periapsis and sparse coverage near apoapsis.
-//!
-//! Lookups use O(log n) binary search to bracket the query time, then cubic
-//! Hermite interpolation using the bracketing samples' positions and velocities
-//! to produce a C1-continuous result.
+//! The full N-body system is integrated forward with RK4 at a fixed 1-hour
+//! timestep. Instead of storing sampled states directly, each body is split
+//! into fixed-duration segments and each segment is encoded as Chebyshev
+//! polynomials over time for both position and velocity. This keeps lookup
+//! cheap while reducing disk usage by orders of magnitude compared to raw
+//! samples over millennial spans.
 
 use crate::types::{
     orbital_elements_to_cartesian, BodyId, BodyState, BodyStates, SolarSystemDefinition,
+    MIN_BODY_DISTANCE_SQ,
 };
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Write};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -30,72 +23,290 @@ use serde::{Deserialize, Serialize};
 /// Default precomputation time span: 100 Julian years in seconds.
 pub const DEFAULT_TIME_SPAN: f64 = 3.156e9;
 
-/// RK4 integration timestep (seconds).  1 hour is accurate enough for a
-/// 25-body solar system and finishes precomputation well under a second.
+/// RK4 integration timestep (seconds). 1 hour.
 pub(crate) const DT: f64 = 3600.0;
 
-/// Adaptive-sampling threshold (metres).  When the deviation of the current
-/// position from linear extrapolation exceeds this value a new sample is
-/// stored.  1 km gives a modest sample count per orbit for most planets.
-pub(crate) const CURVATURE_THRESHOLD: f64 = 1_000.0;
+/// Polynomial degree used for each Chebyshev segment.
+pub(crate) const CHEBYSHEV_DEGREE: usize = 12;
+pub(crate) const CHEBYSHEV_COEFFICIENTS: usize = CHEBYSHEV_DEGREE + 1;
+
+/// Default segment span in integration steps. Seven days at 1-hour steps.
+pub(crate) const SEGMENT_STEPS: usize = 24 * 7;
+
+/// Binary file magic for the custom ephemeris format.
+const FILE_MAGIC: [u8; 8] = *b"THEPHM02";
+
+/// One serialized segment payload in bytes.
+pub(crate) const SEGMENT_BYTES: usize =
+    2 * 8 + 6 * CHEBYSHEV_COEFFICIENTS * 8;
+
+/// Header bytes before the per-track payloads.
+pub(crate) const FILE_HEADER_BYTES: u64 = 8 + 4 + 4 + 8;
+
+/// Per-track bytes excluding segment payloads.
+pub(crate) const TRACK_HEADER_BYTES: u64 = 8 + 8;
 
 // ---------------------------------------------------------------------------
-// Internal sample type
+// Internal sample + segment types
 // ---------------------------------------------------------------------------
 
-/// A single committed sample for one body.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// A single RK4 sample used while fitting a segment.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct EphemerisSample {
     pub(crate) time: f64,
     pub(crate) position: DVec3,
     pub(crate) velocity: DVec3,
 }
 
+/// A Chebyshev-encoded time segment for one body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChebyshevSegment {
+    pub(crate) start_time: f64,
+    pub(crate) duration: f64,
+    pub(crate) position_coeffs: [[f64; CHEBYSHEV_COEFFICIENTS]; 3],
+    pub(crate) velocity_coeffs: [[f64; CHEBYSHEV_COEFFICIENTS]; 3],
+}
+
+impl ChebyshevSegment {
+    fn query(&self, time: f64) -> (DVec3, DVec3) {
+        if self.duration <= 0.0 {
+            let position = DVec3::new(
+                self.position_coeffs[0][0],
+                self.position_coeffs[1][0],
+                self.position_coeffs[2][0],
+            );
+            let velocity = DVec3::new(
+                self.velocity_coeffs[0][0],
+                self.velocity_coeffs[1][0],
+                self.velocity_coeffs[2][0],
+            );
+            return (position, velocity);
+        }
+
+        let x = (((time - self.start_time) / self.duration) * 2.0 - 1.0).clamp(-1.0, 1.0);
+        let position = DVec3::new(
+            eval_chebyshev(&self.position_coeffs[0], x),
+            eval_chebyshev(&self.position_coeffs[1], x),
+            eval_chebyshev(&self.position_coeffs[2], x),
+        );
+        let velocity = DVec3::new(
+            eval_chebyshev(&self.velocity_coeffs[0], x),
+            eval_chebyshev(&self.velocity_coeffs[1], x),
+            eval_chebyshev(&self.velocity_coeffs[2], x),
+        );
+
+        (position, velocity)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-body track
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct BodyTrack {
     pub(crate) mass_kg: f64,
-    pub(crate) samples: Vec<EphemerisSample>,
+    pub(crate) segments: Vec<ChebyshevSegment>,
 }
 
 impl BodyTrack {
-    /// Return the state at the given time using cubic Hermite interpolation.
+    /// Return the state at the given time using Chebyshev segment lookup.
     /// Times outside [t0, t_last] are clamped to the nearest endpoint.
     fn query(&self, time: f64) -> (DVec3, DVec3) {
-        let samples = &self.samples;
-
-        // Edge cases: empty or single sample.
-        if samples.is_empty() {
+        if self.segments.is_empty() {
             return (DVec3::ZERO, DVec3::ZERO);
         }
-        if samples.len() == 1 {
-            return (samples[0].position, samples[0].velocity);
+        if self.segments.len() == 1 {
+            let seg = &self.segments[0];
+            return seg.query(time.clamp(seg.start_time, seg.start_time + seg.duration));
         }
 
-        // Clamp to recorded range.
-        let t = time.clamp(samples.first().unwrap().time, samples.last().unwrap().time);
+        let first = &self.segments[0];
+        let last = self.segments.last().unwrap();
+        let t = time.clamp(first.start_time, last.start_time + last.duration);
 
-        // Binary search for the right bracket: find the largest index whose
-        // time <= t.
-        let idx = match samples.binary_search_by(|s| s.time.partial_cmp(&t).unwrap()) {
+        let idx = match self
+            .segments
+            .binary_search_by(|seg| seg.start_time.partial_cmp(&t).unwrap_or(std::cmp::Ordering::Equal))
+        {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         };
 
-        // Ensure we have a valid right neighbour.
-        let i0 = idx.min(samples.len() - 2);
-        let i1 = i0 + 1;
-
-        let s0 = &samples[i0];
-        let s1 = &samples[i1];
-
-        hermite_interp(
-            s0.time, s0.position, s0.velocity, s1.time, s1.position, s1.velocity, t,
-        )
+        let seg = &self.segments[idx.min(self.segments.len() - 1)];
+        seg.query(t)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Chebyshev helpers
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn eval_chebyshev(coeffs: &[f64; CHEBYSHEV_COEFFICIENTS], x: f64) -> f64 {
+    let mut b_kplus1 = 0.0;
+    let mut b_kplus2 = 0.0;
+
+    for &coeff in coeffs.iter().skip(1).rev() {
+        let b_k = 2.0 * x * b_kplus1 - b_kplus2 + coeff;
+        b_kplus2 = b_kplus1;
+        b_kplus1 = b_k;
+    }
+
+    coeffs[0] + x * b_kplus1 - b_kplus2
+}
+
+fn chebyshev_nodes() -> [f64; CHEBYSHEV_COEFFICIENTS] {
+    std::array::from_fn(|j| {
+        (std::f64::consts::PI * j as f64 / CHEBYSHEV_DEGREE as f64).cos()
+    })
+}
+
+fn chebyshev_coefficients(values: &[f64; CHEBYSHEV_COEFFICIENTS]) -> [f64; CHEBYSHEV_COEFFICIENTS] {
+    let n = CHEBYSHEV_DEGREE as f64;
+    let mut coeffs = [0.0; CHEBYSHEV_COEFFICIENTS];
+
+    for (k, coeff) in coeffs.iter_mut().enumerate() {
+        let mut sum = 0.0;
+        for (j, value) in values.iter().enumerate() {
+            let weight = if j == 0 || j == CHEBYSHEV_DEGREE { 0.5 } else { 1.0 };
+            let angle = std::f64::consts::PI * k as f64 * j as f64 / n;
+            sum += weight * value * angle.cos();
+        }
+        *coeff = 2.0 * sum / n;
+    }
+
+    coeffs[0] *= 0.5;
+    coeffs[CHEBYSHEV_DEGREE] *= 0.5;
+    coeffs
+}
+
+fn sample_at_time(samples: &[EphemerisSample], time: f64) -> EphemerisSample {
+    debug_assert!(!samples.is_empty());
+
+    if samples.len() == 1 {
+        return samples[0];
+    }
+
+    let first = samples[0];
+    let last = *samples.last().unwrap();
+    let t = time.clamp(first.time, last.time);
+    if (t - last.time).abs() < 1e-9 {
+        return last;
+    }
+
+    let idx = (((t - first.time) / DT).floor() as usize).min(samples.len() - 2);
+    let s0 = samples[idx];
+    let s1 = samples[idx + 1];
+    let (position, velocity) = hermite_interp(
+        s0.time, s0.position, s0.velocity, s1.time, s1.position, s1.velocity, t,
+    );
+
+    EphemerisSample { time: t, position, velocity }
+}
+
+pub(crate) fn fit_chebyshev_segment(samples: &[EphemerisSample]) -> ChebyshevSegment {
+    debug_assert!(!samples.is_empty());
+
+    let start_time = samples[0].time;
+    let end_time = samples.last().unwrap().time;
+    let duration = (end_time - start_time).max(0.0);
+
+    if duration <= 0.0 {
+        let sample = samples[0];
+        let mut position_coeffs = [[0.0; CHEBYSHEV_COEFFICIENTS]; 3];
+        let mut velocity_coeffs = [[0.0; CHEBYSHEV_COEFFICIENTS]; 3];
+        position_coeffs[0][0] = sample.position.x;
+        position_coeffs[1][0] = sample.position.y;
+        position_coeffs[2][0] = sample.position.z;
+        velocity_coeffs[0][0] = sample.velocity.x;
+        velocity_coeffs[1][0] = sample.velocity.y;
+        velocity_coeffs[2][0] = sample.velocity.z;
+        return ChebyshevSegment {
+            start_time,
+            duration: 0.0,
+            position_coeffs,
+            velocity_coeffs,
+        };
+    }
+
+    let nodes = chebyshev_nodes();
+    let mut px = [0.0; CHEBYSHEV_COEFFICIENTS];
+    let mut py = [0.0; CHEBYSHEV_COEFFICIENTS];
+    let mut pz = [0.0; CHEBYSHEV_COEFFICIENTS];
+    let mut vx = [0.0; CHEBYSHEV_COEFFICIENTS];
+    let mut vy = [0.0; CHEBYSHEV_COEFFICIENTS];
+    let mut vz = [0.0; CHEBYSHEV_COEFFICIENTS];
+
+    let mid = start_time + duration * 0.5;
+    let half = duration * 0.5;
+    for (i, &node) in nodes.iter().enumerate() {
+        let sample = sample_at_time(samples, mid + half * node);
+        px[i] = sample.position.x;
+        py[i] = sample.position.y;
+        pz[i] = sample.position.z;
+        vx[i] = sample.velocity.x;
+        vy[i] = sample.velocity.y;
+        vz[i] = sample.velocity.z;
+    }
+
+    ChebyshevSegment {
+        start_time,
+        duration,
+        position_coeffs: [
+            chebyshev_coefficients(&px),
+            chebyshev_coefficients(&py),
+            chebyshev_coefficients(&pz),
+        ],
+        velocity_coeffs: [
+            chebyshev_coefficients(&vx),
+            chebyshev_coefficients(&vy),
+            chebyshev_coefficients(&vz),
+        ],
+    }
+}
+
+pub(crate) fn write_segment(w: &mut impl Write, segment: &ChebyshevSegment) -> io::Result<()> {
+    w.write_all(&segment.start_time.to_le_bytes())?;
+    w.write_all(&segment.duration.to_le_bytes())?;
+
+    for coeffs in segment
+        .position_coeffs
+        .iter()
+        .chain(segment.velocity_coeffs.iter())
+    {
+        for coeff in coeffs {
+            w.write_all(&coeff.to_le_bytes())?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn read_segment(r: &mut impl Read) -> io::Result<ChebyshevSegment> {
+    let read_f64 = |reader: &mut dyn Read| -> io::Result<f64> {
+        let mut bytes = [0u8; 8];
+        reader.read_exact(&mut bytes)?;
+        Ok(f64::from_le_bytes(bytes))
+    };
+
+    let start_time = read_f64(r)?;
+    let duration = read_f64(r)?;
+    let mut position_coeffs = [[0.0; CHEBYSHEV_COEFFICIENTS]; 3];
+    let mut velocity_coeffs = [[0.0; CHEBYSHEV_COEFFICIENTS]; 3];
+
+    for coeffs in position_coeffs.iter_mut().chain(velocity_coeffs.iter_mut()) {
+        for coeff in coeffs {
+            *coeff = read_f64(r)?;
+        }
+    }
+
+    Ok(ChebyshevSegment {
+        start_time,
+        duration,
+        position_coeffs,
+        velocity_coeffs,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +327,6 @@ fn hermite_interp(
     t: f64,
 ) -> (DVec3, DVec3) {
     let dt = t1 - t0;
-    // Guard against degenerate intervals (shouldn't happen in practice).
     if dt.abs() < 1e-12 {
         return (p0, v0);
     }
@@ -125,7 +335,6 @@ fn hermite_interp(
     let u2 = u * u;
     let u3 = u2 * u;
 
-    // Hermite basis polynomials.
     let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
     let h10 = u3 - 2.0 * u2 + u;
     let h01 = -2.0 * u3 + 3.0 * u2;
@@ -133,7 +342,6 @@ fn hermite_interp(
 
     let position = h00 * p0 + h10 * dt * v0 + h01 * p1 + h11 * dt * v1;
 
-    // Derivatives of the Hermite basis (for velocity reconstruction).
     let dh00 = (6.0 * u2 - 6.0 * u) / dt;
     let dh10 = (3.0 * u2 - 4.0 * u + 1.0) / dt;
     let dh01 = (-6.0 * u2 + 6.0 * u) / dt;
@@ -161,8 +369,7 @@ fn acceleration(i: usize, positions: &[DVec3], gms: &[f64]) -> DVec3 {
         }
         let delta = rj - ri;
         let dist2 = delta.length_squared();
-        if dist2 < 1e6 {
-            // Bodies at effectively the same point — skip to avoid singularity.
+        if dist2 < MIN_BODY_DISTANCE_SQ {
             continue;
         }
         let dist = dist2.sqrt();
@@ -183,7 +390,6 @@ pub(crate) struct NBodyState {
 
 /// Pre-allocated scratch buffers for zero-allocation RK4 stepping.
 pub(crate) struct Rk4Scratch {
-    // k-stage velocities and accelerations.
     k1_v: Vec<DVec3>,
     k1_a: Vec<DVec3>,
     k2_v: Vec<DVec3>,
@@ -192,7 +398,6 @@ pub(crate) struct Rk4Scratch {
     k3_a: Vec<DVec3>,
     k4_v: Vec<DVec3>,
     k4_a: Vec<DVec3>,
-    // Temporary position buffer for evaluating accelerations at mid/endpoints.
     tmp_pos: Vec<DVec3>,
 }
 
@@ -212,8 +417,6 @@ impl Rk4Scratch {
     }
 }
 
-/// Compute all body accelerations from `positions` into `out`, reusing the
-/// output buffer.
 #[inline]
 fn accels_into(out: &mut [DVec3], positions: &[DVec3], gms: &[f64], star_id: usize) {
     for (i, acc) in out.iter_mut().enumerate() {
@@ -226,8 +429,6 @@ fn accels_into(out: &mut [DVec3], positions: &[DVec3], gms: &[f64], star_id: usi
 }
 
 /// Advance the N-body state by one RK4 step of `dt` seconds.
-/// Uses pre-allocated `scratch` buffers — zero heap allocations per call.
-/// The body at `star_id` is kept fixed at the origin throughout.
 pub(crate) fn rk4_step(
     state: &mut NBodyState,
     scratch: &mut Rk4Scratch,
@@ -238,11 +439,9 @@ pub(crate) fn rk4_step(
     let n = state.positions.len();
     let half_dt = dt * 0.5;
 
-    // k1: slopes at current state.
     scratch.k1_v.copy_from_slice(&state.velocities);
     accels_into(&mut scratch.k1_a, &state.positions, gms, star_id);
 
-    // k2: slopes at midpoint using k1.
     for i in 0..n {
         if i == star_id {
             scratch.tmp_pos[i] = DVec3::ZERO;
@@ -254,7 +453,6 @@ pub(crate) fn rk4_step(
     }
     accels_into(&mut scratch.k2_a, &scratch.tmp_pos, gms, star_id);
 
-    // k3: slopes at midpoint using k2.
     for i in 0..n {
         if i == star_id {
             scratch.tmp_pos[i] = DVec3::ZERO;
@@ -266,7 +464,6 @@ pub(crate) fn rk4_step(
     }
     accels_into(&mut scratch.k3_a, &scratch.tmp_pos, gms, star_id);
 
-    // k4: slopes at endpoint using k3.
     for i in 0..n {
         if i == star_id {
             scratch.tmp_pos[i] = DVec3::ZERO;
@@ -278,7 +475,6 @@ pub(crate) fn rk4_step(
     }
     accels_into(&mut scratch.k4_a, &scratch.tmp_pos, gms, star_id);
 
-    // Combine: weighted average of the four slopes.
     let sixth_dt = dt / 6.0;
     for i in 0..n {
         if i == star_id {
@@ -302,15 +498,15 @@ pub(crate) fn rk4_step(
 // ---------------------------------------------------------------------------
 
 /// Build heliocentric initial states for every body by recursively resolving
-/// parent chains.  Uses an iterative fixpoint so it tolerates any body
-/// ordering in the definition file.
-pub(crate) fn build_initial_states(system: &SolarSystemDefinition) -> (Vec<DVec3>, Vec<DVec3>, usize) {
+/// parent chains.
+pub(crate) fn build_initial_states(
+    system: &SolarSystemDefinition,
+) -> (Vec<DVec3>, Vec<DVec3>, usize) {
     let n = system.bodies.len();
     let mut positions = vec![DVec3::ZERO; n];
     let mut velocities = vec![DVec3::ZERO; n];
     let mut resolved = vec![false; n];
 
-    // The star is the body with no parent; it sits at the origin.
     let star_id = system
         .bodies
         .iter()
@@ -319,7 +515,6 @@ pub(crate) fn build_initial_states(system: &SolarSystemDefinition) -> (Vec<DVec3
         .unwrap_or(0);
     resolved[star_id] = true;
 
-    // Iterative passes until no more bodies can be resolved.
     let mut progress = true;
     while progress {
         progress = false;
@@ -330,14 +525,13 @@ pub(crate) fn build_initial_states(system: &SolarSystemDefinition) -> (Vec<DVec3
             let parent_id = match body.parent {
                 Some(id) => id,
                 None => {
-                    // A second parentless body (unusual) — fix at origin.
                     resolved[body.id] = true;
                     progress = true;
                     continue;
                 }
             };
             if !resolved[parent_id] {
-                continue; // Parent not yet resolved; try again next pass.
+                continue;
             }
 
             let sv = match &body.orbital_elements {
@@ -350,7 +544,6 @@ pub(crate) fn build_initial_states(system: &SolarSystemDefinition) -> (Vec<DVec3
                 },
             };
 
-            // Heliocentric = parent heliocentric + body-relative.
             positions[body.id] = positions[parent_id] + sv.position;
             velocities[body.id] = velocities[parent_id] + sv.velocity;
             resolved[body.id] = true;
@@ -366,20 +559,13 @@ pub(crate) fn build_initial_states(system: &SolarSystemDefinition) -> (Vec<DVec3
 // ---------------------------------------------------------------------------
 
 /// Precomputed N-body ephemeris for a solar system.
-///
-/// Constructed once and then queried at arbitrary times.  All states are in
-/// the heliocentric inertial frame with the star pinned to the origin.
-#[derive(Serialize, Deserialize)]
 pub struct Ephemeris {
     pub(crate) tracks: Vec<BodyTrack>,
-    time_span: f64,
+    pub(crate) time_span: f64,
 }
 
 impl Ephemeris {
     /// Precompute the ephemeris for `system` over `[0, time_span]` seconds.
-    ///
-    /// Uses N-body RK4 at a 1-hour fixed timestep with adaptive per-body
-    /// sampling based on positional curvature.
     pub fn new(system: &SolarSystemDefinition, time_span: f64) -> Self {
         Self::new_with_progress(system, time_span, |_, _| {})
     }
@@ -396,17 +582,21 @@ impl Ephemeris {
         let gms: Vec<f64> = system.bodies.iter().map(|b| b.gm).collect();
         let masses: Vec<f64> = system.bodies.iter().map(|b| b.mass_kg).collect();
 
-        // Seed each track with the t=0 sample.
         let mut tracks: Vec<BodyTrack> = (0..n)
-            .map(|i| BodyTrack {
-                mass_kg: masses[i],
-                samples: vec![EphemerisSample {
+            .map(|i| BodyTrack { mass_kg: masses[i], segments: Vec::new() })
+            .collect();
+
+        let mut buffers: Vec<Vec<EphemerisSample>> = (0..n)
+            .map(|i| {
+                vec![EphemerisSample {
                     time: 0.0,
                     position: init_positions[i],
                     velocity: init_velocities[i],
-                }],
+                }]
             })
             .collect();
+
+        tracks[star_id].segments.push(fit_chebyshev_segment(&buffers[star_id]));
 
         let mut state = NBodyState {
             positions: init_positions,
@@ -428,19 +618,20 @@ impl Ephemeris {
                     continue;
                 }
 
-                let last = tracks[i].samples.last().unwrap();
-                let dt_since = t - last.time;
+                buffers[i].push(EphemerisSample {
+                    time: t,
+                    position: state.positions[i],
+                    velocity: state.velocities[i],
+                });
 
-                // Linear extrapolation from the last committed sample.
-                let extrapolated = last.position + last.velocity * dt_since;
-                let deviation = (state.positions[i] - extrapolated).length();
+                let completed_steps = buffers[i].len() - 1;
+                if completed_steps >= SEGMENT_STEPS || is_last {
+                    let segment = fit_chebyshev_segment(&buffers[i]);
+                    tracks[i].segments.push(segment);
 
-                if deviation > CURVATURE_THRESHOLD || is_last {
-                    tracks[i].samples.push(EphemerisSample {
-                        time: t,
-                        position: state.positions[i],
-                        velocity: state.velocities[i],
-                    });
+                    let last_sample = *buffers[i].last().unwrap();
+                    buffers[i].clear();
+                    buffers[i].push(last_sample);
                 }
             }
 
@@ -458,10 +649,14 @@ impl Ephemeris {
     }
 
     /// Returns position, velocity, and mass for every body at `time`.
-    ///
-    /// `time` is clamped to `[0, time_span]`.
     pub fn query(&self, time: f64) -> BodyStates {
-        let t = time.clamp(0.0, self.time_span);
+        let t = if time < 0.0 || time > self.time_span {
+            #[cfg(debug_assertions)]
+            eprintln!("[ephemeris] query time {:.0}s clamped to [0, {:.0}]", time, self.time_span);
+            time.clamp(0.0, self.time_span)
+        } else {
+            time
+        };
         self.tracks
             .iter()
             .map(|track| {
@@ -472,13 +667,14 @@ impl Ephemeris {
     }
 
     /// Returns the state of a single body at `time`.
-    ///
-    /// `time` is clamped to `[0, time_span]`.
-    ///
-    /// # Panics
-    /// Panics if `body_id >= body_count()`.
     pub fn query_body(&self, body_id: BodyId, time: f64) -> BodyState {
-        let t = time.clamp(0.0, self.time_span);
+        let t = if time < 0.0 || time > self.time_span {
+            #[cfg(debug_assertions)]
+            eprintln!("[ephemeris] query_body({}) time {:.0}s clamped to [0, {:.0}]", body_id, time, self.time_span);
+            time.clamp(0.0, self.time_span)
+        } else {
+            time
+        };
         let track = &self.tracks[body_id];
         let (position, velocity) = track.query(t);
         BodyState { position, velocity, mass_kg: track.mass_kg }
@@ -494,29 +690,98 @@ impl Ephemeris {
         self.time_span
     }
 
-    /// Number of stored samples for the given body.  Useful for diagnostics.
-    pub fn sample_count(&self, body_id: BodyId) -> usize {
-        self.tracks[body_id].samples.len()
+    /// Number of stored segments for the given body.
+    pub fn segment_count(&self, body_id: BodyId) -> usize {
+        self.tracks[body_id].segments.len()
     }
 
-    /// Total number of samples across all bodies.
-    pub fn total_sample_count(&self) -> usize {
-        self.tracks.iter().map(|t| t.samples.len()).sum()
+    /// Total number of segments across all bodies.
+    pub fn total_segment_count(&self) -> usize {
+        self.tracks.iter().map(|t| t.segments.len()).sum()
     }
 
-    /// Serialize to bytes via bincode.
-    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let bytes = bincode::serialize(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, bytes)
+    /// Serialize using the custom binary format.
+    pub fn save(&self, path: &std::path::Path) -> io::Result<()> {
+        let mut out = io::BufWriter::new(std::fs::File::create(path)?);
+        self.write_to(&mut out)?;
+        out.flush()
     }
 
-    /// Deserialize from a bincode file on disk.
-    pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        bincode::deserialize(&bytes).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })
+    /// Deserialize from a custom ephemeris file on disk.
+    pub fn load(path: &std::path::Path) -> io::Result<Self> {
+        let mut reader = io::BufReader::new(std::fs::File::open(path)?);
+        Self::read_from(&mut reader)
     }
+
+    pub(crate) fn write_to(&self, out: &mut impl Write) -> io::Result<()> {
+        out.write_all(&FILE_MAGIC)?;
+        out.write_all(&(1u32).to_le_bytes())?;
+        out.write_all(&(self.tracks.len() as u32).to_le_bytes())?;
+        out.write_all(&self.time_span.to_le_bytes())?;
+
+        for track in &self.tracks {
+            out.write_all(&track.mass_kg.to_le_bytes())?;
+            out.write_all(&(track.segments.len() as u64).to_le_bytes())?;
+            for segment in &track.segments {
+                write_segment(out, segment)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn read_from(input: &mut impl Read) -> io::Result<Self> {
+        let mut magic = [0u8; 8];
+        input.read_exact(&mut magic)?;
+        if magic != FILE_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unrecognized ephemeris file format",
+            ));
+        }
+
+        let version = read_u32(input)?;
+        if version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Unsupported ephemeris version: {version}"),
+            ));
+        }
+
+        let track_count = read_u32(input)? as usize;
+        let time_span = read_f64(input)?;
+        let mut tracks = Vec::with_capacity(track_count);
+
+        for _ in 0..track_count {
+            let mass_kg = read_f64(input)?;
+            let segment_count = read_u64(input)? as usize;
+            let mut segments = Vec::with_capacity(segment_count);
+            for _ in 0..segment_count {
+                segments.push(read_segment(input)?);
+            }
+            tracks.push(BodyTrack { mass_kg, segments });
+        }
+
+        Ok(Self { tracks, time_span })
+    }
+}
+
+fn read_u32(input: &mut impl Read) -> io::Result<u32> {
+    let mut bytes = [0u8; 4];
+    input.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64(input: &mut impl Read) -> io::Result<u64> {
+    let mut bytes = [0u8; 8];
+    input.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_f64(input: &mut impl Read) -> io::Result<f64> {
+    let mut bytes = [0u8; 8];
+    input.read_exact(&mut bytes)?;
+    Ok(f64::from_le_bytes(bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -541,7 +806,6 @@ pub struct EnergyValidationReport {
 }
 
 /// Compute the specific orbital energy of body `i` in the full N-body system.
-/// E = 0.5 * v² - Σ(GM_j / |r_i - r_j|) for all j ≠ i.
 pub(crate) fn body_specific_energy(i: usize, positions: &[DVec3], velocities: &[DVec3], gms: &[f64]) -> f64 {
     let ke = 0.5 * velocities[i].length_squared();
     let mut pe = 0.0;
@@ -557,11 +821,6 @@ pub(crate) fn body_specific_energy(i: usize, positions: &[DVec3], velocities: &[
     ke + pe
 }
 
-/// Validate energy conservation by re-integrating the system for `duration`
-/// seconds and tracking per-body specific energy drift.
-///
-/// Returns a report with per-body results. A body "passes" if its maximum
-/// energy drift stays under `threshold_ppm` parts per million.
 pub fn validate_energy_conservation(
     system: &SolarSystemDefinition,
     duration: f64,
@@ -580,7 +839,6 @@ pub fn validate_energy_conservation_with_progress(
     let (init_positions, init_velocities, star_id) = build_initial_states(system);
     let gms: Vec<f64> = system.bodies.iter().map(|b| b.gm).collect();
 
-    // Compute initial energies.
     let initial_energies: Vec<f64> = (0..n)
         .map(|i| body_specific_energy(i, &init_positions, &init_velocities, &gms))
         .collect();
@@ -592,7 +850,7 @@ pub fn validate_energy_conservation_with_progress(
     let mut scratch = Rk4Scratch::new(n);
 
     let steps = (duration / DT).ceil() as u64;
-    let check_interval = (steps / 100).max(1); // sample ~100 times
+    let check_interval = (steps / 100).max(1);
     let progress_interval = (steps / 1000).max(1);
     let mut max_drifts = vec![0.0_f64; n];
     let mut on_progress = on_progress;
@@ -605,12 +863,7 @@ pub fn validate_energy_conservation_with_progress(
                 if i == star_id {
                     continue;
                 }
-                let e = body_specific_energy(
-                    i,
-                    &state.positions,
-                    &state.velocities,
-                    &gms,
-                );
+                let e = body_specific_energy(i, &state.positions, &state.velocities, &gms);
                 if initial_energies[i].abs() > 1e-30 {
                     let drift_ppm =
                         ((e - initial_energies[i]) / initial_energies[i]).abs() * 1e6;
@@ -630,15 +883,12 @@ pub fn validate_energy_conservation_with_progress(
 
     let bodies: Vec<BodyEnergyReport> = (0..n)
         .filter(|&i| i != star_id)
-        .map(|i| {
-            let passed = max_drifts[i] < threshold_ppm;
-            BodyEnergyReport {
-                body_id: i,
-                initial_energy: initial_energies[i],
-                final_energy: final_energies[i],
-                max_drift_ppm: max_drifts[i],
-                passed,
-            }
+        .map(|i| BodyEnergyReport {
+            body_id: i,
+            initial_energy: initial_energies[i],
+            final_energy: final_energies[i],
+            max_drift_ppm: max_drifts[i],
+            passed: max_drifts[i] < threshold_ppm,
         })
         .collect();
 
@@ -647,10 +897,9 @@ pub fn validate_energy_conservation_with_progress(
 }
 
 // ---------------------------------------------------------------------------
-// Stability analysis (run during generation)
+// Stability analysis
 // ---------------------------------------------------------------------------
 
-/// An event detected during ephemeris generation.
 #[derive(Debug)]
 pub struct StabilityEvent {
     pub time_s: f64,
@@ -658,9 +907,6 @@ pub struct StabilityEvent {
     pub description: String,
 }
 
-/// Analyse a freshly-built ephemeris for notable events:
-///  - Close approaches between non-star bodies (< 10× sum of radii)
-///  - Orbital radius changes > 10% from initial value
 pub fn check_stability(
     system: &SolarSystemDefinition,
     ephemeris: &Ephemeris,
@@ -670,7 +916,6 @@ pub fn check_stability(
     let n = system.bodies.len();
     let dt = ephemeris.time_span / check_points as f64;
 
-    // Initial orbital radii (distance from parent).
     let initial_radii: Vec<Option<f64>> = system
         .bodies
         .iter()
@@ -683,7 +928,6 @@ pub fn check_stability(
         })
         .collect();
 
-    // Track which events we've already reported to avoid flooding.
     let mut reported_close_approach: Vec<Vec<bool>> = vec![vec![false; n]; n];
     let mut reported_radius_drift: Vec<bool> = vec![false; n];
 
@@ -691,7 +935,6 @@ pub fn check_stability(
         let t = step as f64 * dt;
         let states = ephemeris.query(t);
 
-        // Close approach check.
         for i in 0..n {
             if system.bodies[i].parent.is_none() {
                 continue;
@@ -722,13 +965,10 @@ pub fn check_stability(
                 }
             }
 
-            // Orbital radius drift check.
             if !reported_radius_drift[i]
-                && let (Some(pid), Some(init_r)) =
-                    (system.bodies[i].parent, initial_radii[i])
+                && let (Some(pid), Some(init_r)) = (system.bodies[i].parent, initial_radii[i])
             {
-                let current_r =
-                    (states[i].position - states[pid].position).length();
+                let current_r = (states[i].position - states[pid].position).length();
                 let drift = (current_r - init_r).abs() / init_r;
                 if drift > 0.10 {
                     reported_radius_drift[i] = true;
@@ -764,7 +1004,7 @@ mod tests {
     use std::collections::HashMap;
 
     const AU: f64 = 1.496e11;
-    const SUN_GM: f64 = 1.327_124_4e20; // m^3/s^2
+    const SUN_GM: f64 = 1.327_124_4e20;
 
     fn make_two_body_system() -> SolarSystemDefinition {
         let sun_mass = SUN_GM / G;
@@ -780,7 +1020,6 @@ mod tests {
             orbital_elements: None,
         };
 
-        // Earth-like circular orbit at 1 AU.
         let earth = BodyDefinition {
             id: 1,
             name: "Earth".to_string(),
@@ -823,20 +1062,13 @@ mod tests {
         let system = make_two_body_system();
         let eph = Ephemeris::new(&system, 3.156e7);
         let state = eph.query_body(0, 1.5e7);
-        assert!(
-            state.position.length() < 1.0,
-            "Star drifted: {:?}",
-            state.position
-        );
+        assert!(state.position.length() < 1.0, "Star drifted: {:?}", state.position);
     }
 
     #[test]
     fn earth_orbit_radius_conserved() {
         let system = make_two_body_system();
-        // Two years.
         let eph = Ephemeris::new(&system, 2.0 * 3.156e7);
-
-        // Sample at several times and check the orbital radius stays near 1 AU.
         let times = [0.0, 1.0e7, 2.0e7, 3.0e7, 5.0e7, 6.0e7];
         for &t in &times {
             let state = eph.query_body(1, t);
@@ -859,12 +1091,10 @@ mod tests {
         let span = 3.156e7;
         let eph = Ephemeris::new(&system, span);
 
-        // Querying beyond the span should not panic and should equal the endpoint.
         let at_end = eph.query_body(1, span);
         let beyond = eph.query_body(1, span * 2.0);
         assert_eq!(at_end.position, beyond.position);
 
-        // Same for before t=0.
         let at_start = eph.query_body(1, 0.0);
         let before = eph.query_body(1, -1000.0);
         assert_eq!(at_start.position, before.position);
@@ -878,98 +1108,32 @@ mod tests {
         assert_eq!(states.len(), 2);
     }
 
-    /// Build a system with a highly eccentric orbit (e=0.9, comet-like).
-    /// Near apoapsis the body moves very slowly so linear extrapolation stays
-    /// accurate over many steps — giving genuinely sparse sampling there.
-    fn make_eccentric_system() -> SolarSystemDefinition {
-        let sun_mass = SUN_GM / G;
-        let sun = BodyDefinition {
-            id: 0,
-            name: "Sun".to_string(),
-            kind: BodyKind::Star,
-            parent: None,
-            mass_kg: sun_mass,
-            radius_m: 6.957e8,
-            color: [1.0, 1.0, 0.0],
-            gm: SUN_GM,
-            orbital_elements: None,
-        };
-
-        // Comet-like orbit: e=0.9, a=5 AU.
-        // Apoapsis = a*(1+e) = 9.5 AU, periapsis = a*(1-e) = 0.5 AU.
-        let comet = BodyDefinition {
-            id: 1,
-            name: "Comet".to_string(),
-            kind: BodyKind::Comet,
-            parent: Some(0),
-            mass_kg: 1e13,
-            radius_m: 5e3,
-            color: [0.8, 0.8, 0.8],
-            gm: G * 1e13,
-            orbital_elements: Some(OrbitalElements {
-                semi_major_axis_m: 5.0 * AU,
-                eccentricity: 0.9,
-                inclination_rad: 0.0,
-                lon_ascending_node_rad: 0.0,
-                arg_periapsis_rad: 0.0,
-                // Start near apoapsis (true anomaly = π) where the body is
-                // moving slowly and adaptive sampling should compress well.
-                true_anomaly_rad: std::f64::consts::PI * 0.99,
-            }),
-        };
-
-        let mut name_to_id = HashMap::new();
-        name_to_id.insert("Sun".to_string(), 0);
-        name_to_id.insert("Comet".to_string(), 1);
-
-        SolarSystemDefinition {
-            name: "Test".to_string(),
-            bodies: vec![sun, comet],
-            ship: ShipDefinition {
-                initial_state: StateVector {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                },
-                thrust_acceleration: 0.5,
-            },
-            name_to_id,
+    #[test]
+    fn chebyshev_coefficients_reconstruct_linear_function() {
+        let values = std::array::from_fn(|i| {
+            let x = chebyshev_nodes()[i];
+            3.0 + 2.0 * x
+        });
+        let coeffs = chebyshev_coefficients(&values);
+        for &x in &chebyshev_nodes() {
+            let y = eval_chebyshev(&coeffs, x);
+            assert!((y - (3.0 + 2.0 * x)).abs() < 1e-10);
         }
     }
 
     #[test]
-    fn adaptive_sampling_reduces_storage() {
-        // Use a highly eccentric orbit where adaptive sampling genuinely
-        // compresses: near apoapsis the body moves slowly so the linear
-        // extrapolation stays accurate over many steps.
-        //
-        // Orbital period T = 2π * sqrt(a³/GM) ≈ 35.4 years ≈ 1.116e9 s.
-        // At 1-hour steps that is ~310,000 steps per orbit.
-        // Near apoapsis (where we start) a comet spends ~90% of its time,
-        // so we expect far fewer than 310k samples over one orbit.
-        let system = make_eccentric_system();
-        let one_orbit = 1.116e9; // approx one orbital period
-        let steps = (one_orbit / DT) as usize;
-        let eph = Ephemeris::new(&system, one_orbit);
-        let samples = eph.sample_count(1);
+    fn save_roundtrip_preserves_queries() {
+        let system = make_two_body_system();
+        let eph = Ephemeris::new(&system, 30.0 * 24.0 * 3600.0);
+        let path = std::env::temp_dir().join("thalos_ephemeris_roundtrip.bin");
+        eph.save(&path).unwrap();
+        let loaded = Ephemeris::load(&path).unwrap();
+        std::fs::remove_file(path).ok();
 
-        // Adaptive sampling must produce fewer samples than the number of steps.
-        assert!(
-            samples < steps,
-            "Expected adaptive sampling to produce fewer than {steps} samples, got {samples}"
-        );
-        assert!(samples > 0, "Expected at least one sample");
-    }
-
-    #[test]
-    fn dvec3_bincode_is_raw_f64s() {
-        // Our streaming finalize assumes DVec3 serializes as 3 consecutive
-        // LE f64s with no length prefix.  Verify this.
-        let v = DVec3::new(1.0, 2.0, 3.0);
-        let bytes = bincode::serialize(&v).unwrap();
-        let mut raw = Vec::new();
-        raw.extend_from_slice(&1.0_f64.to_le_bytes());
-        raw.extend_from_slice(&2.0_f64.to_le_bytes());
-        raw.extend_from_slice(&3.0_f64.to_le_bytes());
-        assert_eq!(bytes, raw, "DVec3 bincode format changed — streaming finalize will break");
+        let t = 11.5 * 24.0 * 3600.0;
+        let a = eph.query_body(1, t);
+        let b = loaded.query_body(1, t);
+        assert!((a.position - b.position).length() < 1e-6);
+        assert!((a.velocity - b.velocity).length() < 1e-9);
     }
 }

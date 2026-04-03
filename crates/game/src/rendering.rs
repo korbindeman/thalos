@@ -15,7 +15,7 @@ use bevy::window::PrimaryWindow;
 use thalos_physics::{
     ephemeris::Ephemeris,
     simulation::Simulation,
-    types::{BodyKind, SolarSystemDefinition},
+    types::{BodyKind, BodyStates, SolarSystemDefinition},
 };
 
 use crate::camera::{CameraFocus, OrbitCamera};
@@ -61,6 +61,38 @@ pub struct SimulationState {
     pub simulation: Simulation,
     pub system: SolarSystemDefinition,
     pub ephemeris: Arc<Ephemeris>,
+}
+
+/// Per-frame cache of all body states at the current sim time. Populated once
+/// per frame by `cache_body_states` and read by multiple rendering systems to
+/// avoid redundant ephemeris queries.
+#[derive(Resource, Default)]
+pub struct FrameBodyStates {
+    pub states: Option<BodyStates>,
+    pub time: f64,
+}
+
+fn cache_body_states(sim: Res<SimulationState>, mut cache: ResMut<FrameBodyStates>) {
+    let t = sim.simulation.sim_time();
+    cache.states = Some(sim.ephemeris.query(t));
+    cache.time = t;
+}
+
+/// Convert an sRGB component (0..1) to linear light.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Distance (in render units) the focus body must move from the last-set
+/// origin before `update_render_origin` actually updates.  Prevents jitter
+/// from tiny frame-to-frame position changes.
+const ORIGIN_UPDATE_THRESHOLD: f64 = 1000.0; // ~1 000 000 km
+
+/// Tracks which entity the origin was last locked to, so a focus-body change
+/// always triggers an immediate origin update.
+#[derive(Resource, Default)]
+struct PreviousFocusEntity {
+    entity: Option<Entity>,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,9 +161,12 @@ impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
+            .insert_resource(FrameBodyStates::default())
+            .insert_resource(PreviousFocusEntity::default())
             .add_systems(Startup, (configure_gizmos, spawn_bodies, precompute_orbit_lines, focus_camera_on_homeworld.after(spawn_bodies)))
             .add_systems(Update, (
-                update_render_origin,
+                cache_body_states,
+                update_render_origin.after(cache_body_states),
                 update_body_positions.after(update_render_origin),
                 update_ship_position.after(update_render_origin),
                 draw_orbits.after(update_render_origin),
@@ -292,7 +327,12 @@ fn precompute_orbit_lines(mut commands: Commands, sim: Res<SimulationState>) {
             .collect();
 
         let [r, g, b] = body.color;
-        let orbit_color = Color::srgba(r * 0.4, g * 0.4, b * 0.4, 0.6);
+        let orbit_color = Color::linear_rgba(
+            srgb_to_linear(r) * 0.4,
+            srgb_to_linear(g) * 0.4,
+            srgb_to_linear(b) * 0.4,
+            0.6,
+        );
 
         lines.push(Some(OrbitLine {
             points,
@@ -310,25 +350,42 @@ fn precompute_orbit_lines(mut commands: Commands, sim: Res<SimulationState>) {
 
 /// Sets the render origin to the camera focus body's position so that nearby
 /// objects always have small render-space coordinates (full f32 precision).
+/// Applies hysteresis: only updates when the focus body has moved more than
+/// `ORIGIN_UPDATE_THRESHOLD` render units from the current origin, or when
+/// the focus entity changes.
 fn update_render_origin(
-    sim: Res<SimulationState>,
+    cache: Res<FrameBodyStates>,
     focus: Res<CameraFocus>,
     bodies: Query<&CelestialBody>,
     mut origin: ResMut<RenderOrigin>,
+    mut prev_focus: ResMut<PreviousFocusEntity>,
 ) {
-    origin.position = focus
+    let Some(ref states) = cache.states else { return };
+
+    let candidate = focus
         .target
         .and_then(|e| bodies.get(e).ok())
-        .map(|b| sim.ephemeris.query_body(b.body_id, sim.simulation.sim_time()).position)
+        .and_then(|b| states.get(b.body_id))
+        .map(|s| s.position)
         .unwrap_or(bevy::math::DVec3::ZERO);
+
+    let focus_changed = focus.target != prev_focus.entity;
+    if focus_changed {
+        prev_focus.entity = focus.target;
+    }
+
+    let delta_render = (candidate - origin.position) * RENDER_SCALE;
+    if focus_changed || delta_render.length() > ORIGIN_UPDATE_THRESHOLD {
+        origin.position = candidate;
+    }
 }
 
 fn update_body_positions(
-    sim: Res<SimulationState>,
+    cache: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
     mut query: Query<(&CelestialBody, &mut Transform)>,
 ) {
-    let states = sim.ephemeris.query(sim.simulation.sim_time());
+    let Some(ref states) = cache.states else { return };
 
     for (body, mut transform) in &mut query {
         if let Some(state) = states.get(body.body_id) {
@@ -367,7 +424,7 @@ const ORBIT_FADE_END: f64 = 100.0;
 fn draw_orbits(
     mut gizmos: Gizmos,
     orbit_lines: Option<Res<OrbitLines>>,
-    sim: Res<SimulationState>,
+    cache: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
     focus: Res<CameraFocus>,
     bodies: Query<&CelestialBody>,
@@ -375,18 +432,24 @@ fn draw_orbits(
     let Some(orbit_lines) = orbit_lines else {
         return;
     };
+    let Some(ref states) = cache.states else {
+        return;
+    };
 
     // Determine the camera focus position in metres.
     let focus_pos = focus
         .target
         .and_then(|e| bodies.get(e).ok())
-        .map(|b| sim.ephemeris.query_body(b.body_id, sim.simulation.sim_time()).position)
+        .and_then(|b| states.get(b.body_id))
+        .map(|s| s.position)
         .unwrap_or(bevy::math::DVec3::ZERO);
 
     let cam_dist = focus.distance;
 
     for line in orbit_lines.lines.iter().flatten() {
-        let parent_pos_m = sim.ephemeris.query_body(line.parent_id, sim.simulation.sim_time()).position;
+        let parent_pos_m = states.get(line.parent_id)
+            .map(|s| s.position)
+            .unwrap_or(bevy::math::DVec3::ZERO);
         let dist_to_parent = (parent_pos_m - focus_pos).length();
         let ratio = dist_to_parent / cam_dist;
 
@@ -418,12 +481,15 @@ fn draw_orbits(
 // Per-frame: toggle body mesh vs icon based on screen-space size
 // ---------------------------------------------------------------------------
 
+type IconFilter = (With<BodyIcon>, Without<CelestialBody>, Without<OrbitCamera>);
+type MeshFilter = (With<BodyMesh>, Without<BodyIcon>, Without<CelestialBody>, Without<OrbitCamera>);
+
 fn sync_body_icons(
     bodies: Query<(&CelestialBody, &Transform, &Children)>,
     focus: Res<CameraFocus>,
     camera_query: Query<&Transform, With<OrbitCamera>>,
-    mut icons: Query<(&mut Transform, &mut Visibility), (With<BodyIcon>, Without<CelestialBody>, Without<OrbitCamera>)>,
-    mut meshes: Query<&mut Visibility, (With<BodyMesh>, Without<BodyIcon>, Without<CelestialBody>, Without<OrbitCamera>)>,
+    mut icons: Query<(&mut Transform, &mut Visibility), IconFilter>,
+    mut meshes: Query<&mut Visibility, MeshFilter>,
 ) {
     let Ok(cam_tf) = camera_query.single() else {
         return;

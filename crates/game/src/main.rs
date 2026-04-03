@@ -79,9 +79,9 @@ fn main() {
         let eph = Ephemeris::load(ephemeris_path)
             .expect("Failed to load ephemeris.bin — try regenerating with `just generate`");
         println!(
-            "  Loaded {:.0}-year ephemeris ({} samples)",
+            "  Loaded {:.0}-year ephemeris ({} segments)",
             eph.time_span() / 3.156e7,
-            eph.total_sample_count(),
+            eph.total_segment_count(),
         );
         eph
     } else {

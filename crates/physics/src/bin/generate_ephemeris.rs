@@ -125,13 +125,13 @@ fn run_generation(system: &SolarSystemDefinition, time_span: f64, years: f64) {
     }
     bar.finish_and_clear();
 
-    // Print sample stats.
-    println!("  Total samples: {}", generator.total_sample_count());
-    for (i, &count) in generator.sample_counts().iter().enumerate() {
+    // Print segment stats.
+    println!("  Total segments: {}", generator.total_segment_count());
+    for (i, &count) in generator.segment_counts().iter().enumerate() {
         if i == generator.star_id() {
             continue;
         }
-        println!("    body {}: {} samples", i, count);
+        println!("    body {}: {} segments", i, count);
     }
 
     // Assemble final file.

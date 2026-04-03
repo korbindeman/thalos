@@ -205,6 +205,8 @@ pub struct Integrator {
     /// return to RK45 resumes from a sensible starting guess.
     rk_dt: f64,
     pi: PiController,
+    /// Consecutive RK45 steps accepted unconditionally at `rk_min_dt`.
+    min_step_streak: u32,
 }
 
 impl Integrator {
@@ -215,6 +217,7 @@ impl Integrator {
             mode: Mode::Symplectic,
             rk_dt,
             pi: PiController::new(),
+            min_step_streak: 0,
         }
     }
 
@@ -256,6 +259,7 @@ impl Integrator {
             Mode::Symplectic => {
                 let dt = self.config.symplectic_dt;
                 let s = self.verlet_step(state, time, dt, forces, &body_states, ephemeris);
+                self.min_step_streak = 0;
                 (s, dt)
             }
             Mode::Adaptive => {
@@ -389,6 +393,7 @@ impl Integrator {
                 // Accepted — set next step size and return.
                 self.rk_dt = (h * factor)
                     .clamp(self.config.rk_min_dt, self.config.rk_max_dt);
+                self.min_step_streak = 0;
                 return (new_state, h);
             }
 
@@ -398,6 +403,21 @@ impl Integrator {
             // unconditionally to prevent an infinite loop.
             if h <= self.config.rk_min_dt {
                 self.rk_dt = self.config.rk_min_dt;
+                self.min_step_streak += 1;
+                if self.min_step_streak > 100 {
+                    eprintln!(
+                        "WARNING: RK45 accepted {} consecutive steps at minimum dt ({:.4e} s). \
+                         t={:.6e} s, pos=({:.6e}, {:.6e}, {:.6e}) m. \
+                         Simulation may be inaccurate in this region.",
+                        self.min_step_streak,
+                        self.config.rk_min_dt,
+                        time,
+                        new_state.position.x,
+                        new_state.position.y,
+                        new_state.position.z,
+                    );
+                    self.min_step_streak = 0;
+                }
                 return (new_state, h);
             }
             self.rk_dt = h_new;

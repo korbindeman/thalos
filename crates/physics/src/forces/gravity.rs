@@ -4,11 +4,6 @@ use crate::types::*;
 
 use super::ForceFunction;
 
-/// Minimum distance (metres) below which a body is skipped to avoid
-/// singularities. 100 m is well inside any physical body, so this only
-/// triggers if the ship is coincident with a body centre in floating-point.
-const MIN_DISTANCE_M: f64 = 100.0;
-
 /// Computes the gravitational acceleration on the ship from all bodies in
 /// `BodyStates`.
 ///
@@ -28,14 +23,15 @@ impl ForceFunction for GravityForce {
 
         for body in body_states {
             let r_vec = position - body.position; // points from body to ship
-            let dist = r_vec.length();
+            let dist_sq = r_vec.length_squared();
 
-            if dist < MIN_DISTANCE_M {
+            if dist_sq < MIN_DISTANCE_SQ {
                 continue;
             }
 
             // a = -G * m / r² * r̂  =  -G * m * r_vec / r³
-            acceleration -= G * body.mass_kg * r_vec / (dist * dist * dist);
+            let dist = dist_sq.sqrt();
+            acceleration -= G * body.mass_kg * r_vec / (dist_sq * dist);
         }
 
         acceleration
