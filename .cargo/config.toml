@@ -1,0 +1,3 @@
+# Linker optimizations for faster compile times.
+# On macOS, the default linker is already fast. No custom linker needed.
+# On Linux, consider using mold or lld for faster linking.

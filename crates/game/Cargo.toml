@@ -1,0 +1,9 @@
+[package]
+name = "thalos_game"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_physics = { path = "../physics" }
+bevy = { version = "0.18", features = ["wayland", "dynamic_linking"] }
+bevy_egui = "0.39"

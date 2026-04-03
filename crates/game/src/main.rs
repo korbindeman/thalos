@@ -1,0 +1,176 @@
+mod bridge;
+mod camera;
+mod hud;
+mod rendering;
+mod trajectory_rendering;
+
+use std::sync::Arc;
+
+use bevy::asset::AssetPlugin;
+use bevy::prelude::*;
+use bevy::window::PresentMode;
+use thalos_physics::{
+    ephemeris::Ephemeris,
+    simulation::{Simulation, SimulationConfig},
+    types::{load_solar_system, StateVector},
+};
+
+use bridge::BridgePlugin;
+use camera::CameraPlugin;
+use hud::HudPlugin;
+use rendering::{RenderingPlugin, SimulationState};
+use trajectory_rendering::TrajectoryRenderingPlugin;
+
+// ---------------------------------------------------------------------------
+// System ordering
+// ---------------------------------------------------------------------------
+
+/// Execution stages within `Update`, ordered so that physics advances before
+/// positions are written, and positions are written before the camera reads them.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SimStage {
+    /// Bridge: advance sim_time and ship state.
+    Physics,
+    /// Rendering: update body/ship transforms from sim state.
+    Sync,
+    /// Camera: compute camera transform from body transforms.
+    Camera,
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeris paths and fallback
+// ---------------------------------------------------------------------------
+
+/// Pre-generated ephemeris file (produced by `generate_ephemeris`).
+const EPHEMERIS_PATH: &str = "assets/ephemeris.bin";
+
+/// Fallback time span when no pre-generated file exists (200 Julian years).
+const FALLBACK_TIME_SPAN: f64 = 6.312e9;
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+fn main() {
+    // ------------------------------------------------------------------
+    // 1. Load the solar system definition from the KDL asset file.
+    // ------------------------------------------------------------------
+    let kdl_source = std::fs::read_to_string("assets/solar_system.kdl")
+        .expect("Could not read assets/solar_system.kdl — run from the workspace root");
+
+    let system = load_solar_system(&kdl_source)
+        .expect("Failed to parse solar_system.kdl");
+
+    // ------------------------------------------------------------------
+    // 2. Print a startup banner.
+    // ------------------------------------------------------------------
+    println!("╔══════════════════════════════════════════╗");
+    println!("║             T H A L O S                  ║");
+    println!("╚══════════════════════════════════════════╝");
+    println!("  System:           {}", system.name);
+    println!("  Bodies:           {}", system.bodies.len());
+
+    // ------------------------------------------------------------------
+    // 3. Load or compute the ephemeris.
+    // ------------------------------------------------------------------
+    let ephemeris_path = std::path::Path::new(EPHEMERIS_PATH);
+    let ephemeris = Arc::new(if ephemeris_path.exists() {
+        println!("  Loading ephemeris from {}...", EPHEMERIS_PATH);
+        let eph = Ephemeris::load(ephemeris_path)
+            .expect("Failed to load ephemeris.bin — try regenerating with `just generate`");
+        println!(
+            "  Loaded {:.0}-year ephemeris ({} samples)",
+            eph.time_span() / 3.156e7,
+            eph.total_sample_count(),
+        );
+        eph
+    } else {
+        println!(
+            "  No pre-generated ephemeris found. Computing {:.0}-year fallback...",
+            FALLBACK_TIME_SPAN / 3.156e7,
+        );
+        println!("  (Run `just generate` to pre-generate a full ephemeris)");
+        let eph = Ephemeris::new(&system, FALLBACK_TIME_SPAN);
+        println!("  Ephemeris ready.");
+        eph
+    });
+
+    // ------------------------------------------------------------------
+    // 4. Resolve the ship's absolute initial state.
+    //
+    //    ShipDefinition.initial_state is relative to the homeworld.
+    //    Add the homeworld's t=0 ephemeris state to get heliocentric coords.
+    // ------------------------------------------------------------------
+    let homeworld_name = "Thalos";
+    let homeworld_id = system
+        .name_to_id
+        .get(homeworld_name)
+        .copied()
+        .unwrap_or_else(|| {
+            // Fall back to the first non-star body if "Thalos" isn't present.
+            system
+                .bodies
+                .iter()
+                .find(|b| b.parent.is_some())
+                .map(|b| b.id)
+                .expect("No non-star body found to use as homeworld fallback")
+        });
+
+    let homeworld_state = ephemeris.query_body(homeworld_id, 0.0);
+    let rel = system.ship.initial_state;
+    let ship_state = StateVector {
+        position: homeworld_state.position + rel.position,
+        velocity: homeworld_state.velocity + rel.velocity,
+    };
+
+    println!(
+        "  Ship spawned at {:.3e} m from origin, {:.0} m/s",
+        ship_state.position.length(),
+        ship_state.velocity.length(),
+    );
+
+    // ------------------------------------------------------------------
+    // 5. Build and run the Bevy app.
+    // ------------------------------------------------------------------
+    App::new()
+        .configure_sets(
+            Update,
+            (SimStage::Physics, SimStage::Sync, SimStage::Camera).chain(),
+        )
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Thalos".into(),
+                        present_mode: PresentMode::AutoNoVsync,
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(AssetPlugin {
+                    file_path: "../../assets".to_string(),
+                    ..default()
+                }),
+        )
+        .add_plugins(bevy_egui::EguiPlugin::default())
+        .insert_resource({
+            let simulation = Simulation::new(
+                ship_state,
+                Arc::clone(&ephemeris),
+                system.bodies.clone(),
+                SimulationConfig::default(),
+            );
+            SimulationState {
+                simulation,
+                system,
+                ephemeris,
+            }
+        })
+        .add_plugins(CameraPlugin)
+        .add_plugins(RenderingPlugin)
+        .add_plugins(BridgePlugin)
+        .add_plugins(TrajectoryRenderingPlugin)
+        .add_plugins(HudPlugin)
+        .run();
+}

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/physics",
+    "crates/game",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# Optimize dependencies in dev builds for runtime performance without
+# sacrificing incremental compile speed on our own crates.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Release: single codegen unit for cross-crate inlining + thin LTO.
+[profile.release]
+codegen-units = 1
+lto = "thin"
