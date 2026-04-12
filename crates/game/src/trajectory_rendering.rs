@@ -231,12 +231,14 @@ fn render_stable_orbit(
         .unwrap_or([1.0, 1.0, 1.0]);
     let color = ghost_adjust(Color::srgba(r, g, b, 1.0), is_ghost);
 
-    let first = sample_render_pos(&samples[0], body_states, origin);
+    // Drop the last sample: the orbit tracker fires as soon as cumulative
+    // sweep hits 2π, so the final sample overshoots the start by one step.
+    // Without this, a closing edge would cut a chord across the orbit.
+    let last = samples.len() - 1;
     gizmos.linestrip(
-        samples
+        samples[..last]
             .iter()
-            .map(|s| sample_render_pos(s, body_states, origin))
-            .chain(std::iter::once(first)),
+            .map(|s| sample_render_pos(s, body_states, origin)),
         color,
     );
 }

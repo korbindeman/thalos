@@ -6,3 +6,5 @@ edition.workspace = true
 [dependencies]
 thalos_terrain_gen = { path = "../terrain_gen" }
 bevy = { version = "0.18", features = ["wayland", "dynamic_linking"] }
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"

@@ -15,6 +15,31 @@ just clippy   # cargo clippy --workspace
 cargo test -p thalos_physics -- test_name
 ```
 
+## Profiling
+
+Two backends, both gated on cargo features so default builds stay clean.
+
+**Tracy (human-driven, interactive):** `just trace`. Requires Tracy
+Profiler GUI v0.11.x running on localhost before launch. Version must
+match the linked `tracy-client` (Bevy 0.18 → tracy-client 0.18.x).
+
+**Chrome tracing (Claude-driven, autonomous):** Claude runs this when
+the user asks to investigate performance. Not wired into `just` because
+it's a workflow, not a one-shot command:
+
+```bash
+cargo run --release -p thalos_game --features profile-chrome
+# play ~5–10 s, Ctrl-C → trace-<date>.json in cwd
+python3 scripts/analyze_trace.py trace-<date>.json
+```
+
+The script streams the JSON (handles huge files), aggregates by span
+name, and prints a top-N table Claude reads to identify hot spots.
+
+Custom `info_span!` markers live in `Simulation::step`,
+`propagate_flight_plan`, `compute_preview_flight_plan`,
+`advance_simulation`, `update_prediction`, `sync_maneuver_plan`.
+
 ## Architecture
 
 Thalos is an orbital mechanics sandbox game in Rust (edition 2024, Bevy 0.18, glam 0.30). Workspace crates:

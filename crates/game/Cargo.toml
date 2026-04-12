@@ -6,5 +6,13 @@ edition.workspace = true
 [dependencies]
 thalos_physics = { path = "../physics" }
 thalos_planet_rendering = { path = "../planet_rendering" }
+thalos_terrain_gen = { path = "../terrain_gen" }
 bevy = { version = "0.18", features = ["wayland", "dynamic_linking"] }
 bevy_egui = "0.39"
+tracing = "0.1"
+
+[features]
+# Profiling. Enable one at a time. Chrome produces trace-*.json in cwd;
+# Tracy streams to a running Tracy client over localhost.
+profile-chrome = ["bevy/trace_chrome"]
+profile-tracy = ["bevy/trace_tracy"]

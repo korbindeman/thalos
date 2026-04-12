@@ -4,7 +4,11 @@
 //! is a thin adapter that:
 //!
 //! 1. Calls [`Simulation::step`] each frame to advance the ship.
-//! 2. Refreshes prediction asynchronously when it is dirty or stale.
+//! 2. Dispatches prediction refreshes to a worker thread on every maneuver
+//!    edit. The worker runs a single unbudgeted pass per job — stable-orbit
+//!    termination keeps the typical pass well under one frame (~4 ms), so
+//!    the result lands on the next frame and the drag feels live. No
+//!    synchronous prediction work on the main thread.
 //! 3. Maps keyboard input to warp controls.
 
 use std::sync::{
@@ -16,22 +20,16 @@ use bevy::prelude::*;
 use thalos_physics::{
     maneuver::ManeuverNode,
     simulation::PredictionRequest,
-    trajectory::{PropagationBudget, TrajectoryPrediction, propagate_trajectory_budgeted},
+    trajectory::{TrajectoryPrediction, propagate_trajectory_budgeted},
 };
 
 use crate::SimStage;
 use crate::maneuver::ManeuverPlan;
 use crate::rendering::SimulationState;
 
-/// Progressive prediction budgets (total integrator steps per pass).
-///
-/// Worker passes run from coarse to fine so a first usable path appears before
-/// the final full-resolution prediction. Kept for future interplanetary use
-/// where full predictions may take hundreds of milliseconds.
-const PROGRESSIVE_BUDGETS: [usize; 3] = [2_000, 10_000, 40_000];
-
-/// Maximum real-world seconds before the trajectory prediction is re-submitted,
-/// even when nothing has changed. Keeps the trail origin close to the ship.
+/// Maximum real-world seconds before the trajectory prediction is re-submitted
+/// without a maneuver edit — keeps the trail origin close to the ship while it
+/// drifts during idle time.
 const PREDICTION_REAL_STALE_SECS: f64 = 2.0;
 
 // ---------------------------------------------------------------------------
@@ -46,16 +44,15 @@ struct PredictionResult {
     prediction: TrajectoryPrediction,
     epoch: u64,
     predicted_at_sim_time: f64,
-    is_final: bool,
 }
 
 #[derive(Resource)]
 struct PredictionWorker {
     request_tx: Sender<PredictionJob>,
     result_rx: Mutex<Receiver<PredictionResult>>,
-    in_flight: bool,
     latest_requested_epoch: Option<u64>,
-    /// Real time (from `Time::elapsed_secs_f64`) when the last prediction job was submitted.
+    /// Real time (from `Time::elapsed_secs_f64`) when the last prediction job
+    /// was submitted.
     last_submit_real_time: f64,
 }
 
@@ -72,7 +69,6 @@ impl PredictionWorker {
         Self {
             request_tx,
             result_rx: Mutex::new(result_rx),
-            in_flight: false,
             latest_requested_epoch: None,
             last_submit_real_time: 0.0,
         }
@@ -84,28 +80,31 @@ fn setup_prediction_worker(mut commands: Commands) {
 }
 
 pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
+    let _span = tracing::info_span!("advance_simulation").entered();
     sim.simulation.step(time.delta_secs_f64());
 }
 
-/// Drain all pending results from the worker, returning the final result if
-/// one is available. Intermediate progressive results are discarded — only
-/// the full-resolution final prediction is applied to avoid visual flashing.
-fn drain_final_result(worker: &PredictionWorker) -> Option<PredictionResult> {
+/// Drain pending results and return the one with the newest epoch. Older
+/// results are thrown away — they've already been superseded by a fresh edit.
+fn drain_latest_result(worker: &PredictionWorker) -> Option<PredictionResult> {
     let Ok(rx) = worker.result_rx.lock() else {
         return None;
     };
 
-    let mut final_result: Option<PredictionResult> = None;
+    let mut latest: Option<PredictionResult> = None;
     loop {
         match rx.try_recv() {
             Ok(result) => {
-                if result.is_final {
-                    final_result = Some(result);
+                let accept = latest
+                    .as_ref()
+                    .map(|prev| result.epoch > prev.epoch)
+                    .unwrap_or(true);
+                if accept {
+                    latest = Some(result);
                 }
-                // Non-final results are silently discarded.
             }
-            Err(TryRecvError::Empty) => return final_result,
-            Err(TryRecvError::Disconnected) => return final_result,
+            Err(TryRecvError::Empty) => return latest,
+            Err(TryRecvError::Disconnected) => return latest,
         }
     }
 }
@@ -123,7 +122,6 @@ fn submit_prediction_job(
         return;
     }
 
-    worker.in_flight = true;
     worker.latest_requested_epoch = Some(epoch);
     worker.last_submit_real_time = submit_real_time;
 }
@@ -133,43 +131,26 @@ fn update_prediction(
     mut sim: ResMut<SimulationState>,
     mut worker: ResMut<PredictionWorker>,
 ) {
-    // 1. Receive any pending results from the worker.
-    //    Only apply the final full-resolution result. Intermediate progressive
-    //    passes are silently discarded to avoid visual flashing from coarse
-    //    trajectories replacing full ones.
-    if let Some(result) = drain_final_result(&worker) {
-        let _accepted = sim.simulation.apply_prediction(
+    let _span = tracing::info_span!("update_prediction").entered();
+
+    if let Some(result) = drain_latest_result(&worker) {
+        sim.simulation.apply_prediction(
             result.prediction,
             result.predicted_at_sim_time,
             result.epoch,
         );
-        if worker.latest_requested_epoch == Some(result.epoch) {
-            worker.in_flight = false;
-        }
     }
 
-    // 2. Submit a replacement request immediately when maneuver edits advance
-    // the prediction epoch, even if a worker pass is already running. The
-    // worker thread will interrupt its progressive passes and restart from the
-    // newest queued request.
     let real_now = time.elapsed_secs_f64();
     let current_epoch = sim.simulation.prediction_epoch();
-    let needs_new_epoch = worker.latest_requested_epoch != Some(current_epoch);
-    if sim.simulation.prediction_needs_refresh() && needs_new_epoch {
+    let has_new_epoch = worker.latest_requested_epoch != Some(current_epoch);
+    let dirty = sim.simulation.prediction_needs_refresh();
+    let real_stale = (real_now - worker.last_submit_real_time) >= PREDICTION_REAL_STALE_SECS;
+
+    if dirty && (has_new_epoch || real_stale) {
         let request = sim.simulation.prediction_request();
         sim.simulation.clear_prediction_dirty();
         submit_prediction_job(&mut worker, request, real_now);
-        return;
-    }
-
-    // 3. Otherwise only resubmit on staleness when no request is already in flight.
-    if !worker.in_flight {
-        let real_stale = (real_now - worker.last_submit_real_time) >= PREDICTION_REAL_STALE_SECS;
-        if sim.simulation.prediction_needs_refresh() || real_stale {
-            let request = sim.simulation.prediction_request();
-            sim.simulation.clear_prediction_dirty();
-            submit_prediction_job(&mut worker, request, real_now);
-        }
     }
 }
 
@@ -195,14 +176,14 @@ pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<Sim
     }
 }
 
-/// Sync the UI-side ManeuverPlan to the physics ManeuverSequence when dirty.
-///
-/// Must run before `update_prediction` so the new nodes are included in the
-/// next prediction request. `maneuvers_mut()` marks the prediction dirty internally.
+/// Sync the UI-side [`ManeuverPlan`] to the physics `ManeuverSequence` when
+/// dirty. `maneuvers_mut()` marks the prediction dirty; `update_prediction`
+/// runs after this system and dispatches the fresh job to the worker.
 fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<SimulationState>) {
     if !plan.dirty {
         return;
     }
+    let _span = tracing::info_span!("sync_maneuver_plan").entered();
     plan.dirty = false;
 
     let seq = sim.simulation.maneuvers_mut();
@@ -245,81 +226,34 @@ impl Plugin for BridgePlugin {
 // Worker thread
 // ---------------------------------------------------------------------------
 
+/// Single-pass worker loop. Each job runs one unbudgeted
+/// `propagate_flight_plan` call — early termination (stable orbit, collision,
+/// cone fade) keeps typical passes at ~4 ms, so results land on the next
+/// frame from the user's edit.
+///
+/// If multiple jobs accumulated while a pass was running, only the newest is
+/// honored — earlier submissions are stale the moment a new one arrives.
 fn prediction_worker_loop(
     request_rx: Receiver<PredictionJob>,
     result_tx: Sender<PredictionResult>,
 ) {
-    let mut pending: Option<PredictionJob> = None;
-
     loop {
-        // Get next job: either carried over from an interrupted pass, or blocking recv.
-        let mut current = if let Some(job) = pending.take() {
-            job
-        } else {
-            match request_rx.recv() {
-                Ok(job) => job,
-                Err(_) => return,
-            }
+        let mut current = match request_rx.recv() {
+            Ok(job) => job,
+            Err(_) => return,
         };
 
-        // Drain to the latest queued job — if multiple accumulated while we were
-        // busy, only the most recent state matters.
+        // Drain to the newest queued job; anything older is already stale.
         while let Ok(newer) = request_rx.try_recv() {
             current = newer;
         }
 
-        // Run progressive passes (coarse → fine), sending intermediate results
-        // so the renderer can cross-fade to a usable preview quickly.
-        let coarse_budgets =
-            progressive_budgets(current.request.prediction_config.max_steps_per_segment);
-        let mut interrupted = false;
-        for budget_steps in &coarse_budgets {
-            let prediction =
-                run_prediction(&current.request, Some(PropagationBudget::new(*budget_steps)));
-            if result_tx
-                .send(PredictionResult {
-                    prediction,
-                    epoch: current.request.epoch,
-                    predicted_at_sim_time: current.request.sim_time,
-                    is_final: false,
-                })
-                .is_err()
-            {
-                return;
-            }
-
-            // Check for a newer job after each pass completes.
-            if let Ok(newer) = request_rx.try_recv() {
-                pending = Some(newer);
-                while let Ok(even_newer) = request_rx.try_recv() {
-                    pending = Some(even_newer);
-                }
-                interrupted = true;
-                break;
-            }
-        }
-
-        if interrupted {
-            continue;
-        }
-
-        // Check once more before the expensive final pass.
-        if let Ok(newer) = request_rx.try_recv() {
-            pending = Some(newer);
-            while let Ok(even_newer) = request_rx.try_recv() {
-                pending = Some(even_newer);
-            }
-            continue;
-        }
-
-        // Final unbounded pass.
-        let prediction = run_prediction(&current.request, None);
+        let prediction = run_prediction(&current.request);
         if result_tx
             .send(PredictionResult {
                 prediction,
                 epoch: current.request.epoch,
                 predicted_at_sim_time: current.request.sim_time,
-                is_final: true,
             })
             .is_err()
         {
@@ -328,21 +262,7 @@ fn prediction_worker_loop(
     }
 }
 
-fn progressive_budgets(max_steps_per_segment: usize) -> Vec<usize> {
-    let mut budgets: Vec<usize> = PROGRESSIVE_BUDGETS
-        .iter()
-        .map(|b| (*b).min(max_steps_per_segment))
-        .filter(|b| *b > 0)
-        .collect();
-    budgets.sort_unstable();
-    budgets.dedup();
-    budgets
-}
-
-fn run_prediction(
-    request: &PredictionRequest,
-    budget: Option<PropagationBudget>,
-) -> TrajectoryPrediction {
+fn run_prediction(request: &PredictionRequest) -> TrajectoryPrediction {
     propagate_trajectory_budgeted(
         request.ship_state,
         request.sim_time,
@@ -352,6 +272,6 @@ fn run_prediction(
         &request.prediction_config,
         request.integrator_config.clone(),
         request.ship_thrust_acceleration,
-        budget,
+        None,
     )
 }

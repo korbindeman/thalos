@@ -1,9 +1,11 @@
 pub mod bake;
 mod material;
+pub mod shader_types;
 mod texture;
 
-pub use bake::{bake_from_body_data, generate_flat_cubemap};
+pub use bake::bake_from_body_data;
 pub use material::{PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams};
+pub use shader_types::{GpuCellRange, GpuCrater, GpuMaterial};
 pub use texture::PlanetTextures;
 
 use bevy::prelude::*;

@@ -1,5 +1,7 @@
 use glam::DVec3;
+use serde::Deserialize;
 use std::collections::HashMap;
+use thalos_terrain_gen::GeneratorParams;
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
@@ -33,6 +35,9 @@ pub struct StateVector {
 }
 
 /// Static properties of a celestial body (immutable after load).
+///
+/// Built from a `BodyFile` at parse time. `id`, `parent`, and `gm` are
+/// resolved/computed by the loader; everything else mirrors the file.
 #[derive(Debug, Clone)]
 pub struct BodyDefinition {
     pub id: BodyId,
@@ -47,44 +52,10 @@ pub struct BodyDefinition {
     pub axial_tilt_rad: f64,
     pub gm: f64, // G * mass, precomputed
     pub orbital_elements: Option<OrbitalElements>,
-    pub procedural: Option<BodyProceduralProfile>,
+    pub generator: Option<GeneratorParams>,
 }
 
-/// Bulk composition fractions used by procedural generation.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BodyComposition {
-    pub silicate: f64,
-    pub iron: f64,
-    pub ice: f64,
-    pub volatiles: f64,
-    pub hydrogen_helium: f64,
-}
-
-/// Optional authored overrides for procedural generation and rendering.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct BodyProceduralOverrides {
-    pub surface_gravity_m_s2: Option<f64>,
-    pub equilibrium_temperature_k: Option<f64>,
-    pub total_heat_budget_w: Option<f64>,
-    pub hydrosphere_fraction: Option<f64>,
-    pub magnetic_field_strength_rel: Option<f64>,
-    pub tectonic_style: Option<String>,
-}
-
-/// Complete authored procedural profile for a body.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BodyProceduralProfile {
-    pub archetype: String,
-    pub surface_state: Option<String>,
-    pub age_gyr: f64,
-    pub impact_flux_multiplier: f64,
-    pub thermal_history: f64,
-    pub seed: u64,
-    pub composition: BodyComposition,
-    pub overrides: BodyProceduralOverrides,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BodyKind {
     Star,
     Planet,
@@ -94,7 +65,8 @@ pub enum BodyKind {
     Comet,
 }
 
-/// Keplerian orbital elements at epoch.
+/// Keplerian orbital elements at epoch. Stored in radians; the file format
+/// uses degrees and converts at load time.
 #[derive(Debug, Clone, Copy)]
 pub struct OrbitalElements {
     pub semi_major_axis_m: f64,
@@ -152,15 +124,6 @@ impl SolarSystemDefinition {
     pub fn body_by_name(&self, name: &str) -> Option<&BodyDefinition> {
         self.name_to_id.get(name).map(|&id| &self.bodies[id])
     }
-}
-
-/// Parse a hex color string like "#FFE54D" into [r, g, b] floats in 0..1.
-pub fn parse_hex_color(hex: &str) -> [f32; 3] {
-    let hex = hex.trim_start_matches('#');
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255) as f32 / 255.0;
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255) as f32 / 255.0;
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255) as f32 / 255.0;
-    [r, g, b]
 }
 
 /// Convert orbital elements to Cartesian state vector relative to parent.
@@ -249,20 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn test_hex_color() {
-        let c = parse_hex_color("#FF8000");
-        assert!((c[0] - 1.0).abs() < 0.01);
-        assert!((c[1] - 0.502).abs() < 0.01);
-        assert!((c[2] - 0.0).abs() < 0.01);
-    }
-
-    #[test]
     fn stability_diagnostic() {
         use crate::parsing::load_solar_system;
 
-        let kdl = std::fs::read_to_string("../../assets/solar_system.kdl")
+        let ron_src = std::fs::read_to_string("../../assets/solar_system.ron")
             .expect("run from workspace root");
-        let system = load_solar_system(&kdl).unwrap();
+        let system = load_solar_system(&ron_src).unwrap();
 
         let star = system
             .bodies

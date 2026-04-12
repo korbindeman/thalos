@@ -104,6 +104,48 @@ impl Rng {
         let y = lo + (hi - lo) * u; // in [hi, lo] since hi < lo for alpha>0
         y.powf(-1.0 / alpha)
     }
+
+    /// Two-slope (broken) power-law sample in `[d_min, d_max]` with a slope
+    /// break at `d_break`.  Above the break, cumulative exponent is
+    /// `alpha_large`; below it, `alpha_small`.  Used for lunar SFDs where
+    /// the small-crater tail is steeper than the large-crater slope
+    /// (Neukum Production Function piecewise approximation).
+    ///
+    /// The PDFs in the two branches are joined so there is no density jump
+    /// at `d_break`, then normalized, then sampled by inverse CDF.
+    pub fn broken_power_law(
+        &mut self,
+        d_min: f64,
+        d_break: f64,
+        d_max: f64,
+        alpha_small: f64,
+        alpha_large: f64,
+    ) -> f64 {
+        debug_assert!(d_min < d_break && d_break < d_max);
+        // Unnormalized cumulative mass in each branch (integral of PDF ∝ D^(-alpha-1))
+        let mass_small = d_min.powf(-alpha_small) - d_break.powf(-alpha_small);
+        // Large-branch PDF is scaled by k so it matches small-branch PDF at d_break:
+        // alpha_small × D^(-alpha_small-1) = k × alpha_large × D^(-alpha_large-1) at D=d_break
+        let k = (alpha_small / alpha_large) * d_break.powf(alpha_large - alpha_small);
+        let mass_large = k * (d_break.powf(-alpha_large) - d_max.powf(-alpha_large));
+        let total = mass_small + mass_large;
+        let u = self.next_f64();
+        if u * total < mass_small {
+            // Sample small branch
+            let u2 = (u * total) / mass_small;
+            let lo = d_min.powf(-alpha_small);
+            let hi = d_break.powf(-alpha_small);
+            let y = lo + (hi - lo) * u2;
+            y.powf(-1.0 / alpha_small)
+        } else {
+            // Sample large branch
+            let u2 = (u * total - mass_small) / mass_large;
+            let lo = d_break.powf(-alpha_large);
+            let hi = d_max.powf(-alpha_large);
+            let y = lo + (hi - lo) * u2;
+            y.powf(-1.0 / alpha_large)
+        }
+    }
 }
 
 #[cfg(test)]

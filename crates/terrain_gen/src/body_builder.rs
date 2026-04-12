@@ -1,6 +1,9 @@
+use glam::Vec3;
+
 use crate::body_data::BodyData;
-use crate::cubemap::{CubemapAccumulator, default_resolution};
+use crate::cubemap::{Cubemap, CubemapAccumulator, default_resolution};
 use crate::spatial_index::IcoBuckets;
+use crate::stages::{BasinDef, MAT_HIGHLAND};
 use crate::types::{
     Channel, Composition, Crater, DetailNoiseParams, DrainageNetwork, Material, PlateMap, Volcano,
 };
@@ -15,15 +18,36 @@ pub struct BodyBuilder {
     pub seed: u64,
     pub composition: Composition,
     pub cubemap_resolution: u32,
+    /// Body age in Gyr. Used by Cratering for age distribution and by the
+    /// shader detail layer. Single source of truth across stages.
+    pub body_age_gyr: f32,
+    /// Unit vector toward the parent body for tidally locked moons. `None`
+    /// for non-locked bodies. Stages requiring near/far asymmetry read this
+    /// instead of carrying their own per-stage axis.
+    pub tidal_axis: Option<Vec3>,
 
     /// Accumulating cubemap contributions before bake.
     pub height_contributions: CubemapAccumulator,
     pub albedo_contributions: CubemapAccumulator,
+    /// Per-texel material index (R8). Initialized to MAT_HIGHLAND at builder
+    /// construction; stages overwrite as needed (MareFlood flips flooded
+    /// regions to MAT_MARE, future cryovolcanism overwrites with ice, etc.).
+    /// Finalized into `BodyData::material_cubemap` without any transformation
+    /// — stages see the same buffer the GPU will see.
+    pub material_cubemap: Cubemap<u8>,
+    /// Cutoff below which craters stay SSBO-only; at-or-above, Cratering
+    /// rasterizes into the cubemap. Written by the Cratering stage from its
+    /// own parameter; the sampler and shader read it from BodyData to avoid
+    /// double-counting baked craters.
+    pub cubemap_bake_threshold_m: f32,
 
     /// Mid-frequency feature lists (stages append to these).
     pub craters: Vec<Crater>,
     pub volcanoes: Vec<Volcano>,
     pub channels: Vec<Channel>,
+    /// Megabasin definitions written by the Megabasin stage and read by
+    /// later stages (MareFlood selects flood targets from these).
+    pub megabasins: Vec<BasinDef>,
 
     /// High-frequency detail parameters.
     pub detail_params: DetailNoiseParams,
@@ -43,7 +67,14 @@ impl BodyBuilder {
     /// Create a new builder with default (empty) state.
     ///
     /// If `cubemap_resolution` is 0, a default is computed from `radius_m`.
-    pub fn new(radius_m: f32, seed: u64, composition: Composition, cubemap_resolution: u32) -> Self {
+    pub fn new(
+        radius_m: f32,
+        seed: u64,
+        composition: Composition,
+        cubemap_resolution: u32,
+        body_age_gyr: f32,
+        tidal_axis: Option<Vec3>,
+    ) -> Self {
         let resolution = if cubemap_resolution == 0 {
             default_resolution(radius_m)
         } else {
@@ -55,11 +86,26 @@ impl BodyBuilder {
             seed,
             composition,
             cubemap_resolution: resolution,
+            body_age_gyr,
+            tidal_axis,
             height_contributions: CubemapAccumulator::new(resolution),
             albedo_contributions: CubemapAccumulator::new(resolution),
+            material_cubemap: {
+                let mut mat = Cubemap::<u8>::new(resolution);
+                for face in crate::cubemap::CubemapFace::ALL {
+                    for v in mat.face_data_mut(face) {
+                        *v = MAT_HIGHLAND as u8;
+                    }
+                }
+                mat
+            },
+            // Defaults to +∞ so "nothing gets baked, everything goes to SSBO"
+            // until a Cratering stage runs and sets its real value.
+            cubemap_bake_threshold_m: f32::INFINITY,
             craters: Vec::new(),
             volcanoes: Vec::new(),
             channels: Vec::new(),
+            megabasins: Vec::new(),
             detail_params: DetailNoiseParams::default(),
             materials: Vec::new(),
             plates: None,
@@ -91,9 +137,11 @@ impl BodyBuilder {
 
         BodyData {
             radius_m: self.radius_m,
+            cubemap_bake_threshold_m: self.cubemap_bake_threshold_m,
             height_cubemap,
             height_range,
             albedo_cubemap,
+            material_cubemap: self.material_cubemap,
             craters: self.craters,
             volcanoes: self.volcanoes,
             channels: self.channels,
@@ -116,8 +164,8 @@ mod tests {
 
     #[test]
     fn build_with_no_stages_produces_valid_body_data() {
-        let builder = BodyBuilder::new(869_000.0, 42, test_composition(), 0);
-        assert_eq!(builder.cubemap_resolution, 512);
+        let builder = BodyBuilder::new(869_000.0, 42, test_composition(), 0, 4.5, None);
+        assert_eq!(builder.cubemap_resolution, 1024);
 
         let body = builder.build();
         assert_eq!(body.radius_m, 869_000.0);
@@ -131,7 +179,7 @@ mod tests {
 
     #[test]
     fn explicit_resolution_used() {
-        let builder = BodyBuilder::new(100.0, 1, test_composition(), 64);
+        let builder = BodyBuilder::new(100.0, 1, test_composition(), 64, 4.5, None);
         assert_eq!(builder.cubemap_resolution, 64);
     }
 }

@@ -11,6 +11,12 @@ use crate::types::{
 pub struct BodyData {
     pub radius_m: f32,
 
+    /// Craters with `radius_m >= cubemap_bake_threshold_m` are rasterized
+    /// into `height_cubemap` by the Cratering stage. The sampler and shader
+    /// SSBO iteration paths must skip these to avoid double-counting the
+    /// contribution (cubemap already holds it).
+    pub cubemap_bake_threshold_m: f32,
+
     /// Low-frequency baked height layer.  R16Unorm encoding:
     /// `real_meters = (texel / 65535 * 2 - 1) * height_range`.
     pub height_cubemap: Cubemap<u16>,
@@ -18,6 +24,11 @@ pub struct BodyData {
     pub height_range: f32,
     /// Low-frequency baked albedo layer.  sRGB RGBA8.
     pub albedo_cubemap: Cubemap<[u8; 4]>,
+    /// Per-texel material index into `materials`. R8Uint. Replaces the old
+    /// albedo-alpha hack as the source of truth for highland/mare tagging.
+    /// Stages write this directly (MareFlood marks flooded regions with
+    /// MAT_MARE; everything else stays at the initial MAT_HIGHLAND).
+    pub material_cubemap: Cubemap<u8>,
 
     /// Mid-frequency discrete features.
     pub craters: Vec<Crater>,

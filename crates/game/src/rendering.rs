@@ -13,6 +13,7 @@ use std::sync::Arc;
 use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PrimaryWindow;
 use thalos_physics::{
     body_state_provider::BodyStateProvider,
@@ -20,9 +21,11 @@ use thalos_physics::{
     types::{BodyKind, BodyStates, SolarSystemDefinition},
 };
 
+use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
-    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, generate_flat_cubemap,
+    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, bake_from_body_data,
 };
+use thalos_terrain_gen::{BodyBuilder, BodyData, Pipeline, StageDef};
 
 use crate::SimStage;
 use crate::camera::{CameraFocus, OrbitCamera};
@@ -58,6 +61,21 @@ fn body_surface_roughness(body: &thalos_physics::types::BodyDefinition) -> f32 {
         BodyKind::Centaur => 0.5,      // Irregular surface.
         BodyKind::Comet => 0.5,        // Irregular surface.
     }
+}
+
+/// Sun irradiance at 1 AU in shader units (W/m² scaled). Editor uses the same
+/// value — keep them in sync. Per-body intensity falls off as 1/r².
+const LIGHT_AT_1AU: f32 = 12.0;
+
+/// Ambient floor for the night side. Realistic vacuum is ~0, but a small lift
+/// keeps craters legible while the surface still reads as shadow.
+const PLANET_AMBIENT: f32 = 0.1;
+
+const AU_M: f64 = 1.496e11;
+
+fn light_intensity_at(distance_m: f64) -> f32 {
+    let ratio = AU_M / distance_m.max(1.0);
+    LIGHT_AT_1AU * (ratio * ratio) as f32
 }
 
 /// Points sampled along each orbit for gizmo line drawing.
@@ -152,6 +170,30 @@ struct BodyMesh;
 #[derive(Component)]
 struct BodyIcon;
 
+/// In-flight terrain generation task for a procedural body.
+///
+/// While this component is attached to the parent `CelestialBody` entity, the
+/// body renders with a plain placeholder sphere. Once the background task
+/// completes, `finalize_planet_generation` bakes the result into GPU textures,
+/// swaps the child mesh to the impostor billboard with a `PlanetMaterial`, and
+/// removes this component.
+#[derive(Component)]
+struct PendingPlanetGeneration {
+    task: Task<BodyData>,
+    body_id: usize,
+    render_radius: f32,
+    /// Child entity holding the placeholder mesh; gets swapped to the impostor
+    /// billboard when the task finishes.
+    mesh_entity: Entity,
+}
+
+/// Shared meshes reused across every procedural planet, cached once at
+/// startup so `finalize_planet_generation` doesn't need to re-add them.
+#[derive(Resource)]
+struct SharedPlanetMeshes {
+    billboard: Handle<Mesh>,
+}
+
 // ---------------------------------------------------------------------------
 // Orbit trail data (recomputed periodically from simulation)
 // ---------------------------------------------------------------------------
@@ -182,6 +224,16 @@ struct LastClick {
     position: Vec2,
 }
 
+/// Toggle for drawing celestial body orbit trails.
+#[derive(Resource)]
+pub struct ShowOrbits(pub bool);
+
+impl Default for ShowOrbits {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 const DOUBLE_CLICK_THRESHOLD: f64 = 0.4; // seconds
 const DOUBLE_CLICK_RADIUS: f32 = 10.0; // pixels — tolerance for cursor drift between clicks
 
@@ -193,6 +245,7 @@ impl Plugin for RenderingPlugin {
             .insert_resource(RenderOrigin::default())
             .insert_resource(FrameBodyStates::default())
             .insert_resource(PreviousFocusEntity::default())
+            .insert_resource(ShowOrbits::default())
             .add_systems(
                 Startup,
                 (
@@ -204,11 +257,14 @@ impl Plugin for RenderingPlugin {
             .add_systems(
                 Update,
                 (
+                    finalize_planet_generation,
                     cache_body_states,
                     update_render_origin.after(cache_body_states),
                     update_body_positions.after(update_render_origin),
                     update_sun_light.after(cache_body_states),
-                    update_planet_light_dirs.after(cache_body_states),
+                    update_planet_light_dirs
+                        .after(cache_body_states)
+                        .after(finalize_planet_generation),
                     update_ship_position.after(update_render_origin),
                     recompute_orbit_trails.after(cache_body_states),
                     draw_orbits
@@ -235,8 +291,6 @@ fn spawn_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
-    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
-    mut images: ResMut<Assets<Image>>,
     sim: Res<SimulationState>,
 ) {
     let bodies = &sim.system.bodies;
@@ -247,6 +301,9 @@ fn spawn_bodies(
     // Unit rectangle (corners at ±1) shared across all planet billboards.
     // The vertex shader scales it by params.radius each frame.
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
+    commands.insert_resource(SharedPlanetMeshes {
+        billboard: billboard_mesh.clone(),
+    });
 
     for body in bodies {
         let state = &initial_states[body.id];
@@ -300,21 +357,95 @@ fn spawn_bodies(
                     Visibility::Hidden,
                     BodyIcon,
                 ));
+        } else if let Some(gen_params) = &body.generator {
+            // Procedural body: dispatch the terrain_gen pipeline to a background
+            // task so startup isn't blocked. Meanwhile show a plain placeholder
+            // sphere; `finalize_planet_generation` swaps in the impostor
+            // billboard with a baked `PlanetMaterial` once the task completes.
+            let radius_m = body.radius_m as f32;
+            let seed = gen_params.seed;
+            let composition = gen_params.composition;
+            let cubemap_resolution = gen_params.cubemap_resolution;
+            let body_age_gyr = gen_params.body_age_gyr;
+            // Tidally-locked moons get their local +Z axis as the parent
+            // direction, matching the editor.
+            let tidal_axis = matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z);
+            let pipeline_defs: Vec<StageDef> = gen_params.pipeline.clone();
+
+            let task = AsyncComputeTaskPool::get().spawn(async move {
+                let mut builder = BodyBuilder::new(
+                    radius_m,
+                    seed,
+                    composition,
+                    cubemap_resolution,
+                    body_age_gyr,
+                    tidal_axis,
+                );
+                let stages = pipeline_defs
+                    .into_iter()
+                    .map(|s| s.into_stage())
+                    .collect::<Vec<_>>();
+                Pipeline::new(stages).run(&mut builder);
+                builder.build()
+            });
+
+            // Placeholder: same plain-sphere look as the non-procedural branch
+            // so the body is visible immediately at roughly the right size and
+            // colour while the terrain pipeline runs in the background.
+            let sphere_mesh =
+                meshes.add(Sphere::new(render_radius).mesh().ico(4).unwrap());
+            let placeholder_mat = std_materials.add(StandardMaterial {
+                base_color: Color::srgb(r * body.albedo, g * body.albedo, b * body.albedo),
+                perceptual_roughness: 0.9,
+                metallic: 0.0,
+                ..default()
+            });
+
+            let body_entity = commands
+                .spawn((
+                    Transform::from_translation(pos),
+                    Visibility::Inherited,
+                    CelestialBody { body_id: body.id, is_star, render_radius, radius_m: body.radius_m },
+                    Name::new(body.name.clone()),
+                ))
+                .id();
+
+            let mesh_entity = commands
+                .spawn((
+                    Mesh3d(sphere_mesh),
+                    MeshMaterial3d(placeholder_mat),
+                    BodyMesh,
+                    ChildOf(body_entity),
+                ))
+                .id();
+
+            commands.spawn((
+                Mesh3d(icon_mesh.clone()),
+                MeshMaterial3d(icon_material),
+                Transform::default(),
+                Visibility::Hidden,
+                BodyIcon,
+                ChildOf(body_entity),
+            ));
+
+            commands.entity(body_entity).insert(PendingPlanetGeneration {
+                task,
+                body_id: body.id,
+                render_radius,
+                mesh_entity,
+            });
         } else {
-            // Planets and moons: sphere impostor billboard.
-            let roughness = body_surface_roughness(body);
-            let textures = generate_flat_cubemap(body.color, body.albedo, &mut images);
-            let mat_handle = planet_materials.add(PlanetMaterial {
-                params: PlanetParams {
-                    radius: render_radius,
-                    rotation_phase: 0.0,
-                    light_intensity: 80.0,
-                    ambient_intensity: 2.0,
-                    light_dir: Vec4::new(0.0, 1.0, 0.0, roughness),
-                },
-                albedo: textures.albedo,
-                height: textures.height,
-                detail: PlanetDetailParams::default(),
+            // Non-procedural body: plain icosphere with StandardMaterial.
+            // No surface generator has been wired up for this body yet, so
+            // it shows as a solid-color ball matching the RON `physical`
+            // block — exactly the pre-migration behavior.
+            let sphere_mesh =
+                meshes.add(Sphere::new(render_radius).mesh().ico(4).unwrap());
+            let sphere_material = std_materials.add(StandardMaterial {
+                base_color: Color::srgb(r * body.albedo, g * body.albedo, b * body.albedo),
+                perceptual_roughness: 0.9,
+                metallic: 0.0,
+                ..default()
             });
 
             commands
@@ -322,13 +453,12 @@ fn spawn_bodies(
                     Transform::from_translation(pos),
                     Visibility::Inherited,
                     CelestialBody { body_id: body.id, is_star, render_radius, radius_m: body.radius_m },
-                    PlanetMaterialHandle(mat_handle.clone()),
                     Name::new(body.name.clone()),
                 ))
                 .with_children(|parent| {
                     parent.spawn((
-                        Mesh3d(billboard_mesh.clone()),
-                        MeshMaterial3d(mat_handle),
+                        Mesh3d(sphere_mesh),
+                        MeshMaterial3d(sphere_material),
                         BodyMesh,
                     ));
                 })
@@ -395,6 +525,70 @@ fn spawn_bodies(
 }
 
 // ---------------------------------------------------------------------------
+// Per-frame: finalise async terrain generation
+// ---------------------------------------------------------------------------
+
+/// Poll in-flight terrain tasks. When one completes, bake the result into GPU
+/// textures, build the `PlanetMaterial`, and swap the body's placeholder sphere
+/// for the impostor billboard.
+fn finalize_planet_generation(
+    mut commands: Commands,
+    mut pending_q: Query<(Entity, &mut PendingPlanetGeneration)>,
+    sim: Res<SimulationState>,
+    shared: Res<SharedPlanetMeshes>,
+    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
+) {
+    for (entity, mut pending) in &mut pending_q {
+        let _span = tracing::info_span!("finalize_planet_generation").entered();
+        let Some(baked) = block_on(poll_once(&mut pending.task)) else {
+            continue;
+        };
+
+        let body = &sim.system.bodies[pending.body_id];
+        let detail =
+            PlanetDetailParams::from_body(&baked.detail_params, baked.cubemap_bake_threshold_m);
+        let height_range = baked.height_range;
+        let textures = bake_from_body_data(&baked, &mut images, &mut storage_buffers);
+
+        let roughness = body_surface_roughness(body);
+        let mat_handle = planet_materials.add(PlanetMaterial {
+            params: PlanetParams {
+                radius: pending.render_radius,
+                rotation_phase: 0.0,
+                light_intensity: LIGHT_AT_1AU,
+                ambient_intensity: PLANET_AMBIENT,
+                light_dir: Vec4::new(0.0, 1.0, 0.0, roughness),
+                height_range,
+            },
+            albedo: textures.albedo,
+            height: textures.height,
+            detail,
+            material_cube: textures.material_cube,
+            craters: textures.craters,
+            cell_index: textures.cell_index,
+            feature_ids: textures.feature_ids,
+            materials: textures.materials,
+        });
+
+        let mesh_entity = pending.mesh_entity;
+        commands
+            .entity(mesh_entity)
+            .insert((
+                Mesh3d(shared.billboard.clone()),
+                MeshMaterial3d(mat_handle.clone()),
+            ))
+            .remove::<MeshMaterial3d<StandardMaterial>>();
+
+        commands
+            .entity(entity)
+            .insert(PlanetMaterialHandle(mat_handle))
+            .remove::<PendingPlanetGeneration>();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-frame: update planet impostor light directions
 // ---------------------------------------------------------------------------
 
@@ -411,10 +605,17 @@ fn update_planet_light_dirs(
     for (body, handle) in &query {
         let Some(mat) = materials.get_mut(&handle.0) else { continue };
         let body_pos = states.get(body.body_id).map(|s| s.position).unwrap_or_default();
-        let to_star = (star_pos - body_pos).normalize().as_vec3();
+        let offset = star_pos - body_pos;
+        let distance_m = offset.length();
+        let to_star = if distance_m > 0.0 {
+            (offset / distance_m).as_vec3()
+        } else {
+            Vec3::Y
+        };
         // Preserve w (surface roughness) — only update the direction xyz.
         let roughness = mat.params.light_dir.w;
         mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, roughness);
+        mat.params.light_intensity = light_intensity_at(distance_m);
     }
 }
 
@@ -595,7 +796,11 @@ fn draw_orbits(
     origin: Res<RenderOrigin>,
     focus: Res<CameraFocus>,
     bodies: Query<&CelestialBody>,
+    show_orbits: Res<ShowOrbits>,
 ) {
+    if !show_orbits.0 {
+        return;
+    }
     let Some(orbit_lines) = orbit_lines else {
         return;
     };

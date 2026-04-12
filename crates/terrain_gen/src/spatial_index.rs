@@ -1,9 +1,14 @@
 //! Icosahedral bucket spatial index for mid-frequency features on the sphere.
 //!
-//! Level-3 subdivision of the regular icosahedron produces 1280 triangular
-//! cells (~30 km characteristic spacing on an 869 km body).  Each cell stores
-//! indices into the feature arrays for features whose influence radius overlaps.
-//! Sampling iterates the cell containing a query direction plus its neighbors.
+//! Level-4 subdivision of the regular icosahedron produces 5120 triangular
+//! cells (~15 km characteristic spacing on an 869 km body). Each cell stores
+//! indices into the feature arrays for features whose influence radius
+//! overlaps. Sampling iterates the cell containing a query direction plus its
+//! neighbors (~18 cells total).
+//!
+//! Sized for Mira's 10 k-entry crater SSBO down to 500 m radius at SFD
+//! slope −2: ~90 k features / 5120 cells ≈ 18 per cell, ~125 per fragment
+//! including neighbors. Tractable for GPU fragment iteration.
 
 use glam::Vec3;
 
@@ -70,6 +75,24 @@ impl IcoBuckets {
             })
             .collect();
 
+        // Find the cell whose center is closest to `dir`. Used to guarantee
+        // each feature is registered in at least its home cell, even when the
+        // feature's influence radius is smaller than the cell spacing
+        // (~1.5° at subdivision 4). Without this, sub-cell-sized features
+        // vanish from the index entirely.
+        let home_cell = |dir: Vec3| -> usize {
+            let mut best = 0usize;
+            let mut best_dot = f32::NEG_INFINITY;
+            for (idx, c) in cell_centers.iter().enumerate() {
+                let d = dir.dot(*c);
+                if d > best_dot {
+                    best_dot = d;
+                    best = idx;
+                }
+            }
+            best
+        };
+
         for (i, crater) in craters.iter().enumerate() {
             let dir = crater.center.normalize();
             let cos_angle = cos_angular_radius(crater.influence_radius_m(), body_radius_m);
@@ -77,6 +100,10 @@ impl IcoBuckets {
                 if dir.dot(*center) >= cos_angle {
                     index.buckets[cell_idx].push(FeatureRef::Crater(i as u32));
                 }
+            }
+            let home = home_cell(dir);
+            if !index.buckets[home].contains(&FeatureRef::Crater(i as u32)) {
+                index.buckets[home].push(FeatureRef::Crater(i as u32));
             }
         }
 
@@ -87,6 +114,10 @@ impl IcoBuckets {
                 if dir.dot(*center) >= cos_angle {
                     index.buckets[cell_idx].push(FeatureRef::Volcano(i as u32));
                 }
+            }
+            let home = home_cell(dir);
+            if !index.buckets[home].contains(&FeatureRef::Volcano(i as u32)) {
+                index.buckets[home].push(FeatureRef::Volcano(i as u32));
             }
         }
 
@@ -102,6 +133,10 @@ impl IcoBuckets {
                         index.buckets[cell_idx].push(FeatureRef::Channel(i as u32));
                     }
                 }
+                let home = home_cell(dir);
+                if !index.buckets[home].contains(&FeatureRef::Channel(i as u32)) {
+                    index.buckets[home].push(FeatureRef::Channel(i as u32));
+                }
             }
         }
 
@@ -111,6 +146,13 @@ impl IcoBuckets {
     /// Number of cells in the index.
     pub fn cell_count(&self) -> usize {
         self.triangles.len()
+    }
+
+    /// Read-only access to the per-cell feature buckets. Indexed by cell
+    /// index (same order as `cell_count()`). Used by the renderer to flatten
+    /// buckets into GPU SSBO format.
+    pub fn buckets(&self) -> &[Vec<FeatureRef>] {
+        &self.buckets
     }
 
     /// Find the cell index whose center is closest to `dir`.
@@ -148,10 +190,9 @@ impl IcoBuckets {
     }
 }
 
-/// Subdivision level 3 = 1280 cells.  The design doc calls this "level 4"
-/// using a convention where the base icosahedron is level 1; in the
-/// standard Loop-subdivision convention the base is level 0.
-const SUBDIVISION_LEVEL: u32 = 3;
+/// Subdivision level 4 = 5120 cells. Base icosahedron is level 0; each
+/// subdivision quadruples triangle count. 20 × 4⁴ = 5120.
+const SUBDIVISION_LEVEL: u32 = 4;
 
 /// Cosine of the angular radius subtended by `linear_radius_m` on a
 /// sphere of `body_radius_m`.  Used for overlap tests.
@@ -163,7 +204,7 @@ fn cos_angular_radius(linear_radius_m: f32, body_radius_m: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Icosphere generation (subdivision level 4 → 1280 triangles, 642 vertices)
+// Icosphere generation (subdivision level 4 → 5120 triangles, 2562 vertices)
 // ---------------------------------------------------------------------------
 
 fn generate_icosphere(subdivisions: u32) -> (Vec<Vec3>, Vec<[u32; 3]>) {
@@ -270,10 +311,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn icosphere_has_1280_cells() {
+    fn icosphere_has_5120_cells() {
         let (verts, tris) = generate_icosphere(SUBDIVISION_LEVEL);
-        assert_eq!(tris.len(), 1280); // 20 * 4^3
-        assert_eq!(verts.len(), 642); // V = 10 * 4^L + 2
+        assert_eq!(tris.len(), 5120); // 20 * 4^4
+        assert_eq!(verts.len(), 2562); // V = 10 * 4^L + 2
     }
 
     #[test]

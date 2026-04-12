@@ -1,10 +1,12 @@
 use bevy::asset::AssetPlugin;
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 use thalos_physics::parsing::load_solar_system;
 use thalos_physics::types::{BodyKind, SolarSystemDefinition};
-use thalos_terrain_gen::{BodyBuilder, Composition, Pipeline};
+use thalos_terrain_gen::{BodyBuilder, GeneratorParams, Pipeline};
+use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
     PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
     PlanetRenderingPlugin, PlanetTextures, bake_from_body_data,
@@ -19,8 +21,8 @@ const AMBIENT_INTENSITY: f32 = 0.05;
 const AU_M: f64 = 1.496e11;
 const DEFAULT_BODY_NAME: &str = "Mira";
 
-const SOLAR_SYSTEM_KDL: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/solar_system.kdl"));
+const SOLAR_SYSTEM_RON: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/solar_system.ron"));
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -35,48 +37,55 @@ struct SystemData {
 struct EditedPlanet {
     selected_body: String,
     radius_m: f64,
-    seed: u64,
-    composition: Composition,
-    cubemap_resolution: u32,
+    /// Direction toward the parent body in the body's local frame. Used as
+    /// the tidal axis for tidally-locked moons. Currently fixed to +Z (the
+    /// body's local frame is unauthored — the parent direction is just a
+    /// per-body convention until we author it from orbital state).
+    tidal_axis: Option<Vec3>,
+    /// The full generator block for the body. Cloned from the loaded
+    /// `SolarSystemDefinition` and rebuilt into a Pipeline on every bake.
+    generator: GeneratorParams,
     heliocentric_distance_m: f64,
     light_intensity: f32,
     terminator_wrap: f32,
+    sun_azimuth: f32,
+    sun_elevation: f32,
     dirty: bool,
+}
+
+fn sun_direction(azimuth: f32, elevation: f32) -> Vec3 {
+    let (sa, ca) = azimuth.sin_cos();
+    let (se, ce) = elevation.sin_cos();
+    Vec3::new(ce * sa, se, ce * ca)
 }
 
 // ---------------------------------------------------------------------------
 // Body → editor params conversion
 // ---------------------------------------------------------------------------
 
+/// Resolved per-body editor inputs: physical/orbital info plus the cloned
+/// generator block. Bodies without a `generator` block in the file can't be
+/// previewed yet — the caller is expected to filter those out of the picker.
+struct ResolvedBody {
+    radius_m: f64,
+    tidal_axis: Option<Vec3>,
+    generator: GeneratorParams,
+    heliocentric_distance_m: f64,
+}
+
 fn build_params_for_body(
     system: &SolarSystemDefinition,
     body: &thalos_physics::types::BodyDefinition,
-) -> (f64, u64, Composition, f64) {
-    let heliocentric = heliocentric_sma(system, body);
-
-    let (composition, seed) = body
-        .procedural
-        .as_ref()
-        .map(|profile| {
-            (
-                Composition::new(
-                    profile.composition.silicate,
-                    profile.composition.iron,
-                    profile.composition.ice,
-                    profile.composition.volatiles,
-                    profile.composition.hydrogen_helium,
-                ),
-                profile.seed,
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                Composition::new(0.95, 0.05, 0.0, 0.0, 0.0),
-                hash_name_to_seed(&body.name),
-            )
-        });
-
-    (body.radius_m, seed, composition, heliocentric)
+) -> Option<ResolvedBody> {
+    let generator = body.generator.as_ref()?.clone();
+    Some(ResolvedBody {
+        radius_m: body.radius_m,
+        // For now, only moons get a tidal axis, and we treat it as +Z in the
+        // body's local frame. Authored axes per body would replace this.
+        tidal_axis: matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z),
+        generator,
+        heliocentric_distance_m: heliocentric_sma(system, body),
+    })
 }
 
 fn heliocentric_sma(system: &SolarSystemDefinition, start: &thalos_physics::types::BodyDefinition) -> f64 {
@@ -103,15 +112,6 @@ fn heliocentric_sma(system: &SolarSystemDefinition, start: &thalos_physics::type
 fn light_intensity_at(distance_m: f64) -> f32 {
     let ratio = AU_M / distance_m.max(1.0);
     LIGHT_AT_1AU * (ratio * ratio) as f32
-}
-
-fn hash_name_to_seed(name: &str) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    for b in name.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +171,7 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Msaa::Off,
         EditorCamera,
     ));
 }
@@ -229,24 +230,43 @@ fn camera_apply_transform(
 // Planet preview
 // ---------------------------------------------------------------------------
 
+struct BakeResult {
+    textures: PlanetTextures,
+    height_range: f32,
+    detail: PlanetDetailParams,
+}
+
 fn bake_preview(
     planet: &EditedPlanet,
     images: &mut Assets<Image>,
-) -> PlanetTextures {
-    let builder = BodyBuilder::new(
+    storage_buffers: &mut Assets<ShaderStorageBuffer>,
+) -> BakeResult {
+    let g = &planet.generator;
+
+    let mut builder = BodyBuilder::new(
         planet.radius_m as f32,
-        planet.seed,
-        planet.composition,
-        planet.cubemap_resolution,
+        g.seed,
+        g.composition,
+        g.cubemap_resolution,
+        g.body_age_gyr,
+        planet.tidal_axis,
     );
 
-    // No stages yet — pipeline is empty.
-    let pipeline = Pipeline::new(vec![]);
-    let mut builder = builder;
+    let stages = g
+        .pipeline
+        .iter()
+        .cloned()
+        .map(|s| s.into_stage())
+        .collect::<Vec<_>>();
+    let pipeline = Pipeline::new(stages);
     pipeline.run(&mut builder);
 
     let body = builder.build();
-    bake_from_body_data(&body, images)
+    let detail = PlanetDetailParams::from_body(&body.detail_params, body.cubemap_bake_threshold_m);
+    let height_range = body.height_range;
+    let textures = bake_from_body_data(&body, images, storage_buffers);
+
+    BakeResult { textures, height_range, detail }
 }
 
 fn spawn_preview_planet(
@@ -254,23 +274,31 @@ fn spawn_preview_planet(
     mut meshes: ResMut<Assets<Mesh>>,
     mut planet_materials: ResMut<Assets<PlanetMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     planet: Res<EditedPlanet>,
 ) {
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
 
-    let textures = bake_preview(&planet, &mut images);
+    let bake = bake_preview(&planet, &mut images, &mut storage_buffers);
 
+    let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
     let mat_handle = planet_materials.add(PlanetMaterial {
         params: PlanetParams {
             radius: 1.5,
             rotation_phase: 0.0,
             light_intensity: planet.light_intensity,
             ambient_intensity: AMBIENT_INTENSITY,
-            light_dir: Vec4::new(0.0, 0.0, 1.0, planet.terminator_wrap),
+            light_dir: Vec4::new(dir.x, dir.y, dir.z, planet.terminator_wrap),
+            height_range: bake.height_range,
         },
-        albedo: textures.albedo,
-        height: textures.height,
-        detail: PlanetDetailParams::default(),
+        albedo: bake.textures.albedo,
+        height: bake.textures.height,
+        detail: bake.detail,
+        material_cube: bake.textures.material_cube,
+        craters: bake.textures.craters,
+        cell_index: bake.textures.cell_index,
+        feature_ids: bake.textures.feature_ids,
+        materials: bake.textures.materials,
     });
 
     commands
@@ -297,16 +325,25 @@ fn editor_ui(
     mut contexts: bevy_egui::EguiContexts,
     mut planet: ResMut<EditedPlanet>,
     system: Res<SystemData>,
+    diagnostics: Res<DiagnosticsStore>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     bevy_egui::egui::Window::new("Planet Editor").show(ctx, |ui| {
+        let fps = diagnostics
+            .get(&FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(|d| d.smoothed())
+            .unwrap_or(0.0);
+        ui.label(format!("FPS: {:.0}", fps));
+        ui.separator();
+
         // ---- Body picker ------------------------------------------------
+        // Only bodies with a generator block are previewable.
         let mut new_body: Option<String> = None;
         bevy_egui::egui::ComboBox::from_label("Body")
             .selected_text(&planet.selected_body)
             .show_ui(ui, |ui| {
                 for b in &system.system.bodies {
-                    if b.kind == BodyKind::Star {
+                    if b.generator.is_none() {
                         continue;
                     }
                     if ui
@@ -319,15 +356,13 @@ fn editor_ui(
             });
         if let Some(name) = new_body
             && let Some(&id) = system.system.name_to_id.get(&name)
+            && let Some(resolved) = build_params_for_body(&system.system, &system.system.bodies[id])
         {
-            let body = &system.system.bodies[id];
-            let (radius_m, seed, composition, hel) = build_params_for_body(&system.system, body);
-            planet.radius_m = radius_m;
-            planet.seed = seed;
-            planet.composition = composition;
-            planet.cubemap_resolution = 0; // auto
-            planet.heliocentric_distance_m = hel;
-            planet.light_intensity = light_intensity_at(hel);
+            planet.radius_m = resolved.radius_m;
+            planet.tidal_axis = resolved.tidal_axis;
+            planet.generator = resolved.generator;
+            planet.heliocentric_distance_m = resolved.heliocentric_distance_m;
+            planet.light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
             planet.selected_body = name;
             planet.dirty = true;
         }
@@ -350,13 +385,29 @@ fn editor_ui(
         }
         ui.heading("Parameters");
         let mut changed = false;
-        changed |= fires(&ui.add(bevy_egui::egui::Slider::new(&mut planet.seed, 0..=9999).text("Seed")));
+        changed |= fires(&ui.add(
+            bevy_egui::egui::Slider::new(&mut planet.generator.seed, 0..=9999).text("Seed"),
+        ));
 
         ui.separator();
         ui.heading("Shading");
         changed |= fires(&ui.add(
             bevy_egui::egui::Slider::new(&mut planet.terminator_wrap, 0.0..=1.0)
                 .text("Terminator wrap"),
+        ));
+        changed |= fires(&ui.add(
+            bevy_egui::egui::Slider::new(
+                &mut planet.sun_azimuth,
+                -std::f32::consts::PI..=std::f32::consts::PI,
+            )
+            .text("Sun azimuth"),
+        ));
+        changed |= fires(&ui.add(
+            bevy_egui::egui::Slider::new(
+                &mut planet.sun_elevation,
+                -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2,
+            )
+            .text("Sun elevation"),
         ));
 
         if changed {
@@ -370,6 +421,7 @@ fn apply_descriptor_changes(
     query: Query<&PlanetMaterialHandle, With<PreviewPlanet>>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
     if !planet.dirty {
         return;
@@ -380,17 +432,19 @@ fn apply_descriptor_changes(
         let Some(mat) = materials.get_mut(&handle.0) else { continue };
         mat.params.light_intensity = planet.light_intensity;
         mat.params.ambient_intensity = AMBIENT_INTENSITY;
-        mat.params.light_dir = Vec4::new(
-            mat.params.light_dir.x,
-            mat.params.light_dir.y,
-            mat.params.light_dir.z,
-            planet.terminator_wrap,
-        );
+        let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
+        mat.params.light_dir = Vec4::new(dir.x, dir.y, dir.z, planet.terminator_wrap);
 
-        let textures = bake_preview(&planet, &mut images);
-        mat.albedo = textures.albedo;
-        mat.height = textures.height;
-        mat.detail = PlanetDetailParams::default();
+        let bake = bake_preview(&planet, &mut images, &mut storage_buffers);
+        mat.params.height_range = bake.height_range;
+        mat.albedo = bake.textures.albedo;
+        mat.height = bake.textures.height;
+        mat.detail = bake.detail;
+        mat.material_cube = bake.textures.material_cube;
+        mat.craters = bake.textures.craters;
+        mat.cell_index = bake.textures.cell_index;
+        mat.feature_ids = bake.textures.feature_ids;
+        mat.materials = bake.textures.materials;
     }
 }
 
@@ -399,40 +453,40 @@ fn apply_descriptor_changes(
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let system = load_solar_system(SOLAR_SYSTEM_KDL).expect("parse solar_system.kdl");
+    let system = load_solar_system(SOLAR_SYSTEM_RON).expect("parse solar_system.ron");
 
-    let (radius_m, seed, composition, heliocentric_distance_m, selected_body) = {
-        let id = system
-            .name_to_id
-            .get(DEFAULT_BODY_NAME)
-            .copied()
-            .or_else(|| {
-                system
-                    .bodies
-                    .iter()
-                    .find(|b| b.kind != BodyKind::Star)
-                    .map(|b| b.id)
+    // Pick a body that has a generator block. Prefer Mira; fall back to the
+    // first body with a pipeline.
+    let (selected_body, resolved) = system
+        .name_to_id
+        .get(DEFAULT_BODY_NAME)
+        .copied()
+        .and_then(|id| {
+            build_params_for_body(&system, &system.bodies[id])
+                .map(|r| (system.bodies[id].name.clone(), r))
+        })
+        .or_else(|| {
+            system.bodies.iter().find_map(|b| {
+                build_params_for_body(&system, b).map(|r| (b.name.clone(), r))
             })
-            .expect("no non-star body in solar system");
-        let body = &system.bodies[id];
-        let (radius_m, seed, composition, hel) = build_params_for_body(&system, body);
-        (radius_m, seed, composition, hel, body.name.clone())
-    };
+        })
+        .expect("no body in solar_system.ron has a generator block");
 
-    let light_intensity = light_intensity_at(heliocentric_distance_m);
+    let light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
 
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
         .insert_resource(SystemData { system })
         .insert_resource(EditedPlanet {
             selected_body,
-            radius_m,
-            seed,
-            composition,
-            cubemap_resolution: 0,
-            heliocentric_distance_m,
+            radius_m: resolved.radius_m,
+            tidal_axis: resolved.tidal_axis,
+            generator: resolved.generator,
+            heliocentric_distance_m: resolved.heliocentric_distance_m,
             light_intensity,
             terminator_wrap: 0.2,
+            sun_azimuth: 0.0,
+            sun_elevation: 0.0,
             dirty: false,
         })
         .init_resource::<OrbitCamera>()
@@ -451,6 +505,7 @@ fn main() {
                     ..default()
                 }),
         )
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_plugins(PlanetRenderingPlugin)
         .add_systems(Startup, (spawn_camera, spawn_preview_planet))

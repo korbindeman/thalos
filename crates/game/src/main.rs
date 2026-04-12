@@ -1,14 +1,17 @@
 mod bridge;
 mod camera;
 mod coords;
+mod ghost_bodies;
 mod hud;
 mod maneuver;
 mod rendering;
+mod target;
 mod trajectory_rendering;
 
 use std::sync::Arc;
 
 use bevy::asset::AssetPlugin;
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 use thalos_physics::{
@@ -20,10 +23,12 @@ use thalos_physics::{
 
 use bridge::BridgePlugin;
 use camera::CameraPlugin;
+use ghost_bodies::GhostBodiesPlugin;
 use hud::HudPlugin;
 use maneuver::ManeuverPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
 use rendering::{RenderingPlugin, SimulationState};
+use target::TargetPlugin;
 use trajectory_rendering::TrajectoryRenderingPlugin;
 
 // ---------------------------------------------------------------------------
@@ -55,12 +60,12 @@ const RUNTIME_TIME_SPAN: f64 = 3.156e11;
 
 fn main() {
     // ------------------------------------------------------------------
-    // 1. Load the solar system definition from the KDL asset file.
+    // 1. Load the solar system definition from the RON asset file.
     // ------------------------------------------------------------------
-    let kdl_source = std::fs::read_to_string("assets/solar_system.kdl")
-        .expect("Could not read assets/solar_system.kdl — run from the workspace root");
+    let ron_source = std::fs::read_to_string("assets/solar_system.ron")
+        .expect("Could not read assets/solar_system.ron — run from the workspace root");
 
-    let system = load_solar_system(&kdl_source).expect("Failed to parse solar_system.kdl");
+    let system = load_solar_system(&ron_source).expect("Failed to parse solar_system.ron");
 
     // ------------------------------------------------------------------
     // 2. Print a startup banner.
@@ -109,10 +114,11 @@ fn main() {
         velocity: homeworld_state.velocity + rel.velocity,
     };
 
+    let homeworld = &system.bodies[homeworld_id];
+    let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
     println!(
-        "  Ship spawned at {:.3e} m from origin, {:.0} m/s",
-        ship_state.position.length(),
-        ship_state.velocity.length(),
+        "  Ship:            {:.0} km orbit around {}",
+        altitude_km, homeworld.name,
     );
 
     // ------------------------------------------------------------------
@@ -139,6 +145,7 @@ fn main() {
                     ..default()
                 }),
         )
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .insert_resource({
             let simulation = Simulation::new(
@@ -160,6 +167,8 @@ fn main() {
         .add_plugins(RenderingPlugin)
         .add_plugins(BridgePlugin)
         .add_plugins(TrajectoryRenderingPlugin)
+        .add_plugins(TargetPlugin)
+        .add_plugins(GhostBodiesPlugin)
         .add_plugins(ManeuverPlugin)
         .add_plugins(HudPlugin)
         .run();

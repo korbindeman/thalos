@@ -109,6 +109,17 @@ impl Cubemap<f32> {
     }
 }
 
+/// Nearest-neighbor sampling for u8 cubemaps (material mask).
+impl Cubemap<u8> {
+    pub fn sample_nearest(&self, dir: Vec3) -> u8 {
+        let (face, u, v) = dir_to_face_uv(dir);
+        let res = self.resolution;
+        let x = ((u * res as f32) as u32).min(res - 1);
+        let y = ((v * res as f32) as u32).min(res - 1);
+        self.get(face, x, y)
+    }
+}
+
 /// Bilinear sampling for [f32; 4] cubemaps (albedo accumulator).
 impl Cubemap<[f32; 4]> {
     pub fn sample_bilinear(&self, dir: Vec3) -> [f32; 4] {
@@ -189,13 +200,13 @@ pub fn face_uv_to_dir(face: CubemapFace, u: f32, v: f32) -> Vec3 {
 }
 
 /// Compute a reasonable cubemap resolution for a body of the given radius.
-/// Targets ~3 km/texel at the equator, clamped to [4, 2048] and rounded to
+/// Targets ~1.5 km/texel at the equator, clamped to [4, 2048] and rounded to
 /// the next power of two.
 pub fn default_resolution(radius_m: f32) -> u32 {
     // Equator circumference / target_texel_size = total texels around equator
     // Each face spans 90° of the equator, so face_res ≈ total / 4.
-    // With target 3 km/texel: face_res ≈ (2π × radius_m) / (4 × 3000)
-    let raw = (std::f32::consts::TAU * radius_m / (4.0 * 3000.0)).ceil() as u32;
+    // With target 1.5 km/texel: face_res ≈ (2π × radius_m) / (4 × 1500)
+    let raw = (std::f32::consts::TAU * radius_m / (4.0 * 1500.0)).ceil() as u32;
     raw.next_power_of_two().clamp(4, 2048)
 }
 
@@ -351,6 +362,7 @@ pub mod bytemuck_compat {
     /// The type must have no padding, no internal pointers, and be `Copy`.
     /// It must be safe to interpret a contiguous slice of `T` as raw bytes.
     pub unsafe trait Pod: Copy + 'static {}
+    unsafe impl Pod for u8 {}
     unsafe impl Pod for u16 {}
     unsafe impl Pod for [u8; 4] {}
     unsafe impl Pod for f32 {}
@@ -400,13 +412,13 @@ mod tests {
 
     #[test]
     fn default_resolution_values() {
-        // Mira: 869 km radius → should be ~512
+        // Mira: 869 km radius at ~1.5 km/texel → 1024
         let mira = default_resolution(869_000.0);
-        assert_eq!(mira, 512);
+        assert_eq!(mira, 1024);
 
-        // Homeworld: 3186 km → should be ~2048
+        // Larger body → clamped to 2048 ceiling
         let home = default_resolution(3_186_000.0);
-        assert!(home >= 1024 && home <= 2048, "homeworld resolution: {home}");
+        assert!(home >= 2048, "homeworld resolution: {home}");
 
         // Tiny body → clamped to minimum
         let tiny = default_resolution(100.0);

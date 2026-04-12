@@ -188,22 +188,29 @@ impl PredictionState {
             .unwrap_or(true)
     }
 
-    /// Apply a computed prediction if it still matches the current epoch.
+    /// Apply a computed prediction, replacing whatever was there.
     ///
-    /// Returns `true` if the prediction was accepted, `false` if it was stale.
+    /// Previously this rejected any prediction whose epoch didn't match the
+    /// current (latest) epoch. That blocked real-time feedback during a
+    /// drag: each edit advances the epoch, so by the time the worker
+    /// returned a result the "current" epoch had already moved on and the
+    /// result was dropped. Showing a slightly stale prediction is strictly
+    /// better than showing a very stale one. `dirty` is only cleared when
+    /// the applied epoch actually matches.
     pub fn apply(
         &mut self,
         prediction: TrajectoryPrediction,
         predicted_at_sim_time: f64,
         epoch: u64,
     ) -> bool {
-        if epoch != self.epoch {
-            return false;
-        }
         self.prediction = Some(prediction);
-        self.dirty = false;
         self.last_prediction_time = Some(predicted_at_sim_time);
-        true
+        if epoch == self.epoch {
+            self.dirty = false;
+            true
+        } else {
+            false
+        }
     }
 
     /// Unconditionally set the prediction (no epoch check).
@@ -288,6 +295,7 @@ impl Simulation {
     /// Sub-steps use the integrator's native step size. A step budget prevents
     /// spiral-of-death when the integrator can't keep up at extreme warps.
     pub fn step(&mut self, real_dt: f64) {
+        let _span = tracing::info_span!("Simulation::step").entered();
         let real_delta = real_dt.min(self.max_real_delta);
         self.accumulator += real_delta * self.warp.speed();
 

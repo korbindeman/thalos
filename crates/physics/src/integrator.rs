@@ -40,7 +40,13 @@ pub struct IntegratorConfig {
     pub rk_min_dt: f64,
     /// Maximum allowed adaptive step size (seconds). Default: 3600 s.
     pub rk_max_dt: f64,
-    /// Local error tolerance for RK45 step acceptance. Default: 1e-9.
+    /// Local error tolerance for RK45 step acceptance. Default: 1e-6.
+    ///
+    /// Tighter tolerances force smaller steps (more accurate, slower). 1e-6
+    /// keeps per-step position error well below any renderable scale while
+    /// letting the integrator take larger steps in benign regions — roughly
+    /// halves the cost of a full prediction pass vs 1e-9 with no visible
+    /// difference in the drawn trajectory.
     pub rk_tolerance: f64,
     /// Perturbation ratio above which the integrator switches to RK45. Default: 0.01.
     pub switch_threshold: f64,
@@ -57,7 +63,7 @@ impl Default for IntegratorConfig {
             rk_initial_dt: 60.0,
             rk_min_dt: 0.01,
             rk_max_dt: 3600.0,
-            rk_tolerance: 1e-9,
+            rk_tolerance: 1e-6,
             switch_threshold: 0.01,
             hysteresis_factor: 0.5,
         }
@@ -643,7 +649,7 @@ mod tests {
             axial_tilt_rad: 0.0,
             gm: SUN_GM,
             orbital_elements: None,
-            procedural: None,
+            generator: None,
         };
         let earth_mass = 5.972e24;
         let earth = BodyDefinition {
@@ -666,7 +672,7 @@ mod tests {
                 arg_periapsis_rad: 0.0,
                 true_anomaly_rad: 0.0,
             }),
-            procedural: None,
+            generator: None,
         };
 
         let mut name_to_id = HashMap::new();

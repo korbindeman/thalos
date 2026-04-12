@@ -19,3 +19,8 @@ test:
 # Lint
 clippy:
     cargo clippy --workspace
+
+# Profile the game with Tracy. Requires a running Tracy client (tracy-profiler
+# or tracy-capture) listening on localhost before launch.
+trace:
+    cargo run --release -p thalos_game --features profile-tracy

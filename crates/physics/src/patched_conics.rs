@@ -454,7 +454,7 @@ mod tests {
             axial_tilt_rad: 0.0,
             gm: SUN_GM,
             orbital_elements: None,
-            procedural: None,
+            generator: None,
         };
 
         let earth = BodyDefinition {
@@ -477,7 +477,7 @@ mod tests {
                 arg_periapsis_rad: 0.0,
                 true_anomaly_rad: 0.0,
             }),
-            procedural: None,
+            generator: None,
         };
 
         let mut name_to_id = HashMap::new();

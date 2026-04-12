@@ -1,11 +1,12 @@
 use glam::Vec3;
+use serde::Deserialize;
 
 /// Bulk composition as mass fractions. Fractions must sum to 1.0.
 ///
 /// Stages meaningfully consume only `silicate`, `iron`, and `ice` in the
 /// current pipeline, but all fields exist so the data model stays stable
 /// as later stages are added.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub struct Composition {
     pub silicate: f64,
     pub iron: f64,
@@ -46,8 +47,9 @@ pub struct Crater {
 
 impl Crater {
     /// Outer influence radius for spatial indexing (ejecta blanket extent).
+    /// McGetchin et al. (1973): ~90% of ejecta falls within 5R of crater center.
     pub fn influence_radius_m(&self) -> f32 {
-        self.radius_m * 2.5
+        self.radius_m * 5.0
     }
 }
 
