@@ -34,7 +34,11 @@ impl ManeuverSequence {
     pub fn add(&mut self, node: ManeuverNode) {
         let pos = self
             .nodes
-            .binary_search_by(|n| n.time.partial_cmp(&node.time).unwrap_or(std::cmp::Ordering::Equal))
+            .binary_search_by(|n| {
+                n.time
+                    .partial_cmp(&node.time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .unwrap_or_else(|i| i);
         self.nodes.insert(pos, node);
     }
@@ -144,9 +148,21 @@ mod tests {
     #[test]
     fn test_sorted_insertion() {
         let mut seq = ManeuverSequence::new();
-        seq.add(ManeuverNode { time: 300.0, delta_v: DVec3::X, reference_body: 0 });
-        seq.add(ManeuverNode { time: 100.0, delta_v: DVec3::Y, reference_body: 0 });
-        seq.add(ManeuverNode { time: 200.0, delta_v: DVec3::Z, reference_body: 0 });
+        seq.add(ManeuverNode {
+            time: 300.0,
+            delta_v: DVec3::X,
+            reference_body: 0,
+        });
+        seq.add(ManeuverNode {
+            time: 100.0,
+            delta_v: DVec3::Y,
+            reference_body: 0,
+        });
+        seq.add(ManeuverNode {
+            time: 200.0,
+            delta_v: DVec3::Z,
+            reference_body: 0,
+        });
 
         assert_eq!(seq.len(), 3);
         assert!((seq.nodes[0].time - 100.0).abs() < f64::EPSILON);
@@ -157,9 +173,21 @@ mod tests {
     #[test]
     fn test_nodes_after() {
         let mut seq = ManeuverSequence::new();
-        seq.add(ManeuverNode { time: 100.0, delta_v: DVec3::ZERO, reference_body: 0 });
-        seq.add(ManeuverNode { time: 200.0, delta_v: DVec3::ZERO, reference_body: 0 });
-        seq.add(ManeuverNode { time: 300.0, delta_v: DVec3::ZERO, reference_body: 0 });
+        seq.add(ManeuverNode {
+            time: 100.0,
+            delta_v: DVec3::ZERO,
+            reference_body: 0,
+        });
+        seq.add(ManeuverNode {
+            time: 200.0,
+            delta_v: DVec3::ZERO,
+            reference_body: 0,
+        });
+        seq.add(ManeuverNode {
+            time: 300.0,
+            delta_v: DVec3::ZERO,
+            reference_body: 0,
+        });
 
         assert_eq!(seq.nodes_after(150.0).len(), 2);
         assert_eq!(seq.nodes_after(200.0).len(), 2);
@@ -170,11 +198,11 @@ mod tests {
     fn test_delta_v_prograde_only() {
         // Ship moving in +X relative to body → prograde = +X.
         let dv = delta_v_to_world(
-            DVec3::new(10.0, 0.0, 0.0), // 10 m/s prograde
+            DVec3::new(10.0, 0.0, 0.0),   // 10 m/s prograde
             DVec3::new(1000.0, 0.0, 0.0), // ship velocity
             DVec3::new(1e8, 0.0, 0.0),    // ship position
-            DVec3::ZERO,                   // body position
-            DVec3::ZERO,                   // body velocity
+            DVec3::ZERO,                  // body position
+            DVec3::ZERO,                  // body velocity
         );
         assert!((dv.x - 10.0).abs() < 1e-10);
         assert!(dv.y.abs() < 1e-10);
@@ -191,8 +219,16 @@ mod tests {
     #[test]
     fn test_total_delta_v() {
         let mut seq = ManeuverSequence::new();
-        seq.add(ManeuverNode { time: 0.0, delta_v: DVec3::new(3.0, 4.0, 0.0), reference_body: 0 });
-        seq.add(ManeuverNode { time: 1.0, delta_v: DVec3::new(0.0, 0.0, 5.0), reference_body: 0 });
+        seq.add(ManeuverNode {
+            time: 0.0,
+            delta_v: DVec3::new(3.0, 4.0, 0.0),
+            reference_body: 0,
+        });
+        seq.add(ManeuverNode {
+            time: 1.0,
+            delta_v: DVec3::new(0.0, 0.0, 5.0),
+            reference_body: 0,
+        });
         assert!((seq.total_delta_v() - 10.0).abs() < 1e-10);
     }
 }

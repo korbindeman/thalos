@@ -20,9 +20,11 @@ Ship propulsion is placeholder. The goal is to validate the simulation, trajecto
 
 All massive bodies are precomputed via a full N-body simulation run at startup. The star is fixed at the origin. All other bodies interact gravitationally with each other during precomputation, producing a high-fidelity ephemeris for the entire gameplay time span.
 
-The precomputed ephemeris is sampled adaptively per body. Sampling density is driven by curvature: denser near periapsis where velocity and curvature are high, sparser near apoapsis where the trajectory is nearly linear. Each body has independent sample rates tuned to its orbital characteristics.
+Adaptive per-body sampling drives ephemeris generation. Sampling density is driven by curvature and fitting error: denser near periapsis where velocity and curvature are high, sparser near apoapsis where the trajectory is nearly linear. Each body has independent knot densities tuned to its orbital characteristics.
 
-Samples store position and velocity at each timestamp. Queries use Hermite interpolation over non-uniform sample spacing, using both position and velocity at the bracketing samples for smooth and accurate lookups. Lookup is O(log n) via binary search for the bracketing pair.
+Those adaptive samples are an intermediate accuracy model, not necessarily the final stored format. The runtime/on-disk ephemeris may compress each body's trajectory into error-bounded Chebyshev segments fit over those samples, preserving smooth position/velocity queries while keeping file size and memory use reasonable over long spans.
+
+Queries use O(log n) segment lookup per body, then evaluate the segment representation to recover position and velocity in a heliocentric inertial frame. Hermite interpolation remains a valid fitting/intermediate tool, but the persisted query format does not need to be raw Hermite knots.
 
 The provider exposes a single interface: given a timestamp, return position, velocity, and mass for every body in a heliocentric inertial frame.
 
@@ -415,7 +417,7 @@ Under 1 microsecond per query. Called thousands of times per prediction update.
 
 ### Memory
 
-Precomputed ephemeris with adaptive per-body sampling. Compact due to curvature-driven sample rates.
+Precomputed ephemeris with adaptive per-body sampling as the accuracy model and compressed segment encoding as the storage model. Compact due to curvature-driven density plus polynomial compression.
 
 ### Ephemeris Precomputation
 
@@ -450,7 +452,7 @@ Two crates with a clean boundary between pure physics computation and the Bevy g
 
 Pure Rust library, no Bevy dependency. Testable in isolation.
 
-- `ephemeris` - N-body precomputation, adaptive sampling, Hermite interpolation lookups.
+- `ephemeris` - N-body precomputation, adaptive per-body sampling/error control, and compact runtime lookups via compressed trajectory segments (for example, Chebyshev fits).
 - `integrator` - Hybrid integrator (symplectic + adaptive RK), switching logic, hysteresis.
 - `forces/gravity` - Gravitational acceleration summation from all bodies.
 - `forces/thrust` - Linear constant-acceleration thrust model.

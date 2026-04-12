@@ -1,0 +1,32 @@
+system name="Pyros System" epoch="J2000.0" reference_plane="Thalos" homeworld="Thalos"
+
+// ─────────────────────────────────────────────
+// STAR
+// ─────────────────────────────────────────────
+
+body name="Pyros" kind="Star" parent=#null mass_kg=1.989e30 radius_km=696000.0 color="#FFE54D" albedo=1.0 rotation_period_hours=609.12 axial_tilt_deg=0.0 {
+    star luminosity_solar=1.0 temperature_k=5778.0 spectral_type="G2V" age_gyr=4.6
+}
+
+// ─────────────────────────────────────────────
+// THALOS SYSTEM
+// ─────────────────────────────────────────────
+
+body name="Thalos" kind="Planet" parent="Pyros" mass_kg=1.378e24 radius_km=3186.0 color="#3373E5" albedo=0.35 rotation_period_hours=21.3 axial_tilt_deg=23.0 {
+    orbit semi_major_axis_au=1.00 eccentricity=0.017 inclination_deg=0.0 lon_ascending_node_deg=0.0 arg_periapsis_deg=0.0 true_anomaly_deg=0.0
+    atmosphere surface_pressure_atm=0.85 {
+        component "N2" 0.741
+        component "O2" 0.231
+        component "Ar" 0.019
+        component "CO2" 0.003
+        component "other" 0.006
+    }
+}
+
+body name="Mira" kind="Moon" parent="Thalos" mass_kg=1.374e22 radius_km=869.0 color="#A6A09A" albedo=0.12 rotation_period_hours=381.6 axial_tilt_deg=1.2 {
+    orbit semi_major_axis_au=0.00128 eccentricity=0.0 inclination_deg=5.1 lon_ascending_node_deg=0.0 arg_periapsis_deg=0.0 true_anomaly_deg=135.0
+}
+
+body name="Selva" kind="Moon" parent="Thalos" mass_kg=3.6e19 radius_km=190.0 color="#A8C8B8" albedo=0.25 rotation_period_hours=312.0 axial_tilt_deg=0.0 {
+    orbit semi_major_axis_au=0.0018 eccentricity=0.0 inclination_deg=3.0 lon_ascending_node_deg=0.0 arg_periapsis_deg=0.0 true_anomaly_deg=210.0
+}

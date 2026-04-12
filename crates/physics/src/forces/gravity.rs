@@ -4,12 +4,67 @@ use crate::types::*;
 
 use super::ForceFunction;
 
+/// Per-body gravity breakdown: total acceleration plus the dominant body and
+/// perturbation ratio.  Computed in a single O(n) pass.
+pub struct GravityResult {
+    pub acceleration: DVec3,
+    /// Index into `BodyStates` of the strongest gravitational source.
+    pub dominant_body: BodyId,
+    /// Ratio of the second-largest to the largest gravitational acceleration
+    /// magnitude.  0.0 if there is only one body.
+    pub perturbation_ratio: f64,
+}
+
 /// Computes the gravitational acceleration on the ship from all bodies in
 /// `BodyStates`.
 ///
 /// For each body the contribution is:
 ///   a = -G * m * (ship_pos - body_pos) / |ship_pos - body_pos|³
 pub struct GravityForce;
+
+impl GravityForce {
+    /// Compute gravitational acceleration *and* dominant-body analysis in a
+    /// single pass over `body_states`.
+    pub fn compute_with_analysis(position: DVec3, body_states: &BodyStates) -> GravityResult {
+        let mut acceleration = DVec3::ZERO;
+        let mut best_id: BodyId = 0;
+        let mut best_mag: f64 = 0.0;
+        let mut second_mag: f64 = 0.0;
+
+        for (id, body) in body_states.iter().enumerate() {
+            let r_vec = position - body.position;
+            let dist_sq = r_vec.length_squared();
+
+            if dist_sq < MIN_DISTANCE_SQ {
+                continue;
+            }
+
+            let dist = dist_sq.sqrt();
+            let mag = G * body.mass_kg / dist_sq;
+            acceleration -= mag * r_vec / dist;
+
+            if mag > best_mag {
+                second_mag = best_mag;
+                best_mag = mag;
+                best_id = id;
+            } else if mag > second_mag {
+                second_mag = mag;
+            }
+        }
+
+        let perturbation_ratio = if best_mag > 0.0 {
+            second_mag / best_mag
+        } else {
+            0.0
+        };
+
+        GravityResult {
+            acceleration,
+            dominant_body: best_id,
+            perturbation_ratio,
+        }
+    }
+}
 
 impl ForceFunction for GravityForce {
     fn compute(
@@ -19,22 +74,7 @@ impl ForceFunction for GravityForce {
         _time: f64,
         body_states: &BodyStates,
     ) -> DVec3 {
-        let mut acceleration = DVec3::ZERO;
-
-        for body in body_states {
-            let r_vec = position - body.position; // points from body to ship
-            let dist_sq = r_vec.length_squared();
-
-            if dist_sq < MIN_DISTANCE_SQ {
-                continue;
-            }
-
-            // a = -G * m / r² * r̂  =  -G * m * r_vec / r³
-            let dist = dist_sq.sqrt();
-            acceleration -= G * body.mass_kg * r_vec / (dist_sq * dist);
-        }
-
-        acceleration
+        Self::compute_with_analysis(position, body_states).acceleration
     }
 }
 

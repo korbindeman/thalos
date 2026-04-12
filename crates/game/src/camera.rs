@@ -8,7 +8,8 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(CameraFocus::default())
+        app.init_resource::<BlockCameraInput>()
+            .insert_resource(CameraFocus::default())
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -33,6 +34,12 @@ struct SkyboxImage(Handle<Image>);
 /// Marker component placed on the orbit camera entity.
 #[derive(Component)]
 pub struct OrbitCamera;
+
+/// Set to true by the maneuver plugin when the pointer is over a maneuver
+/// element (arrow, slide sphere) or an active drag/placement is in progress.
+/// Camera rotation is suppressed while this is set.
+#[derive(Resource, Default)]
+pub struct BlockCameraInput(pub bool);
 
 /// The camera orbits around `target` (if Some) using spherical coordinates.
 ///
@@ -66,10 +73,10 @@ impl Default for CameraFocus {
     fn default() -> Self {
         Self {
             target: None,
-            distance: 5e11,  // ~3.3 AU, sees inner system
+            distance: 5e11, // ~3.3 AU, sees inner system
             target_distance: 5e11,
             azimuth: 0.0,
-            elevation: 0.3,  // slight downward tilt so the horizon is visible
+            elevation: 0.3, // slight downward tilt so the horizon is visible
             min_distance: DISTANCE_MIN_DEFAULT,
             focus_offset: Vec3::ZERO,
         }
@@ -77,7 +84,7 @@ impl Default for CameraFocus {
 }
 
 const DISTANCE_MIN_DEFAULT: f64 = 1e5; // 100 km
-const DISTANCE_MAX: f64 = 1e13;        // ~67 AU
+const DISTANCE_MAX: f64 = 1e13; // ~67 AU
 /// Camera stops at 3× the body's radius (comfortable viewing distance).
 const SURFACE_MARGIN: f64 = 3.0;
 
@@ -137,6 +144,7 @@ fn setup_skybox_cubemap(
 /// - Left-button drag  → rotate (azimuth / elevation)
 /// - Scroll wheel      → sets `target_distance` (actual zoom is interpolated by `camera_zoom_interpolation_system`)
 pub fn camera_input_system(
+    block: Res<BlockCameraInput>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut scroll_events: MessageReader<MouseWheel>,
@@ -144,11 +152,12 @@ pub fn camera_input_system(
 ) {
     const ROTATION_SENSITIVITY: f32 = 0.005; // rad per pixel
     const ZOOM_FACTOR_MIN: f64 = 0.005; // near surface / local system
-    const ZOOM_FACTOR_MAX: f64 = 0.01;  // interplanetary scale
+    const ZOOM_FACTOR_MAX: f64 = 0.01; // interplanetary scale
     const ELEVATION_MAX: f32 = 89.0_f32.to_radians();
 
     // --- Rotation -----------------------------------------------------------
-    if mouse_buttons.pressed(MouseButton::Left) {
+    // Suppressed while a maneuver element is hovered or being dragged.
+    if mouse_buttons.pressed(MouseButton::Left) && !block.0 {
         let delta = mouse_motion.delta;
         if delta != Vec2::ZERO {
             focus.azimuth += delta.x * ROTATION_SENSITIVITY;
@@ -169,7 +178,8 @@ pub fn camera_input_system(
     for event in scroll_events.read() {
         let ticks = event.y as f64;
         let multiplier = (1.0 - zoom_factor * ticks).max(0.01);
-        focus.target_distance = (focus.target_distance * multiplier).clamp(focus.min_distance, DISTANCE_MAX);
+        focus.target_distance =
+            (focus.target_distance * multiplier).clamp(focus.min_distance, DISTANCE_MAX);
     }
 }
 
@@ -178,10 +188,7 @@ pub fn camera_input_system(
 /// Log-space interpolation means the same lerp factor produces equal *proportional*
 /// change at every scale — zooming from 1 AU to 0.5 AU feels the same as
 /// zooming from 1000 km to 500 km.
-fn camera_zoom_interpolation_system(
-    time: Res<Time>,
-    mut focus: ResMut<CameraFocus>,
-) {
+fn camera_zoom_interpolation_system(time: Res<Time>, mut focus: ResMut<CameraFocus>) {
     const SMOOTHING_SPEED: f64 = 10.0; // higher = snappier
 
     let dt = time.delta_secs_f64();
@@ -200,9 +207,7 @@ fn camera_min_distance_system(
     bodies: Query<&crate::rendering::CelestialBody>,
 ) {
     let min = match focus.target.and_then(|e| bodies.get(e).ok()) {
-        Some(body) => {
-            (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT)
-        }
+        Some(body) => (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT),
         None => DISTANCE_MIN_DEFAULT,
     };
     focus.min_distance = min;
@@ -214,10 +219,7 @@ fn camera_min_distance_system(
 
 /// Smoothly decays `focus_offset` toward zero so the camera glides to the new
 /// target after a focus switch.
-fn camera_focus_offset_decay_system(
-    time: Res<Time>,
-    mut focus: ResMut<CameraFocus>,
-) {
+fn camera_focus_offset_decay_system(time: Res<Time>, mut focus: ResMut<CameraFocus>) {
     const TRANSITION_SPEED: f64 = 6.0; // higher = faster snap
 
     if focus.focus_offset == Vec3::ZERO {
@@ -281,6 +283,5 @@ pub fn camera_transform_system(
     // `looking_at` handles the degenerate case gracefully when the camera is
     // directly above/below (elevation ≈ ±90°), which we already prevent by
     // clamping to ±89°.
-    *camera_transform = Transform::from_translation(camera_pos)
-        .looking_at(target_pos, Vec3::Y);
+    *camera_transform = Transform::from_translation(camera_pos).looking_at(target_pos, Vec3::Y);
 }

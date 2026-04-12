@@ -1,8 +1,8 @@
 pub mod gravity;
 pub mod thrust;
 
-pub use gravity::GravityForce;
-pub use thrust::ThrustForce;
+pub use gravity::{GravityForce, GravityResult};
+pub use thrust::{ManeuverThrustForce, ThrustForce};
 
 use glam::DVec3;
 

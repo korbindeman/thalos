@@ -1,0 +1,11 @@
+[package]
+name = "thalos_planet_editor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_physics = { path = "../physics" }
+thalos_terrain_gen = { path = "../terrain_gen" }
+thalos_planet_rendering = { path = "../planet_rendering" }
+bevy = { version = "0.18", features = ["wayland", "dynamic_linking"] }
+bevy_egui = "0.39"

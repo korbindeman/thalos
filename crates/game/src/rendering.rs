@@ -10,46 +10,62 @@
 
 use std::sync::Arc;
 
+use bevy::light::cascade::CascadeShadowConfigBuilder;
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use thalos_physics::{
-    ephemeris::Ephemeris,
+    body_state_provider::BodyStateProvider,
     simulation::Simulation,
     types::{BodyKind, BodyStates, SolarSystemDefinition},
 };
 
-use crate::camera::{CameraFocus, OrbitCamera};
+use thalos_planet_rendering::{
+    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, generate_flat_cubemap,
+};
+
 use crate::SimStage;
-
-// ---------------------------------------------------------------------------
-// Scale
-// ---------------------------------------------------------------------------
-
-/// Metres → render units.  1 render unit = 1,000 km.
-pub const RENDER_SCALE: f64 = 1e-6;
-
-/// The physics-space position (metres, f64) that maps to the render-space
-/// origin.  Updated every frame to the camera focus body's position so that
-/// objects near the camera always have small render-space coordinates,
-/// preserving f32 precision at any zoom level.
-#[derive(Resource, Default)]
-pub struct RenderOrigin {
-    pub position: bevy::math::DVec3,
-}
+use crate::camera::{CameraFocus, OrbitCamera};
+// Re-export so existing `use crate::rendering::{RENDER_SCALE, RenderOrigin}` sites keep working.
+pub use crate::coords::{RENDER_SCALE, RenderOrigin, to_render_pos};
 
 /// Radius of screen-stable body icon markers as a fraction of camera distance
 /// (in render units). Bodies whose rendered sphere is smaller than this get
 /// replaced by a fixed-size circle billboard.
 const MARKER_RADIUS: f32 = 0.006;
 
-/// Convert a physics DVec3 (metres, f64) to a Bevy Vec3 (render units, f32).
-#[inline]
-fn to_render_pos(v: bevy::math::DVec3) -> Vec3 {
-    (v * RENDER_SCALE).as_vec3()
+/// Map body kind + size to a surface roughness value (0 = smooth, 1 = very rough).
+///
+/// This drives the terminator wrap in the planet impostor shader.
+/// On a smooth sphere (no normal map), wrap simulates *unresolved* scattering
+/// that softens the macro terminator — primarily atmospheric scattering, not
+/// surface craters.  Crater roughness creates a *textured* terminator boundary
+/// (individual shadow/lit patches), which only makes sense once normal maps
+/// provide that detail.
+///
+/// Roughness now serves double duty: it controls both procedural crater
+/// intensity (normal perturbation strength) and a small terminator wrap
+/// for unresolved sub-crater detail.
+fn body_surface_roughness(body: &thalos_physics::types::BodyDefinition) -> f32 {
+    match body.kind {
+        BodyKind::Star => 0.0,
+        BodyKind::Planet => {
+            // All planets in this system have atmospheres — no visible craters.
+            0.0
+        }
+        BodyKind::Moon => 0.8,        // Heavily cratered, airless.
+        BodyKind::DwarfPlanet => 0.7,  // Cratered, airless.
+        BodyKind::Centaur => 0.5,      // Irregular surface.
+        BodyKind::Comet => 0.5,        // Irregular surface.
+    }
 }
 
 /// Points sampled along each orbit for gizmo line drawing.
 const ORBIT_SAMPLES: usize = 256;
+
+/// Minimum sim-time advance (seconds) before orbit trails are recomputed.
+/// Trails are also recomputed on the first frame.
+const ORBIT_TRAIL_RECOMPUTE_INTERVAL: f64 = 3600.0;
 
 // ---------------------------------------------------------------------------
 // Resource
@@ -60,7 +76,7 @@ const ORBIT_SAMPLES: usize = 256;
 pub struct SimulationState {
     pub simulation: Simulation,
     pub system: SolarSystemDefinition,
-    pub ephemeris: Arc<Ephemeris>,
+    pub ephemeris: Arc<dyn BodyStateProvider>,
 }
 
 /// Per-frame cache of all body states at the current sim time. Populated once
@@ -72,15 +88,28 @@ pub struct FrameBodyStates {
     pub time: f64,
 }
 
-fn cache_body_states(sim: Res<SimulationState>, mut cache: ResMut<FrameBodyStates>) {
+pub fn cache_body_states(sim: Res<SimulationState>, mut cache: ResMut<FrameBodyStates>) {
     let t = sim.simulation.sim_time();
-    cache.states = Some(sim.ephemeris.query(t));
+    if cache.states.is_some() && (t - cache.time).abs() < f64::EPSILON {
+        return;
+    }
+    if let Some(states) = cache.states.as_mut() {
+        sim.ephemeris.query_into(t, states);
+    } else {
+        let mut states = Vec::with_capacity(sim.ephemeris.body_count());
+        sim.ephemeris.query_into(t, &mut states);
+        cache.states = Some(states);
+    }
     cache.time = t;
 }
 
 /// Convert an sRGB component (0..1) to linear light.
 fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Distance (in render units) the focus body must move from the last-set
@@ -111,6 +140,10 @@ pub struct CelestialBody {
 #[derive(Component)]
 pub struct ShipMarker;
 
+/// Marker for the directional light that simulates sunlight toward the focus body.
+#[derive(Component)]
+struct SunLight;
+
 /// Marker for the 3D sphere mesh child of a celestial body.
 #[derive(Component)]
 struct BodyMesh;
@@ -120,24 +153,21 @@ struct BodyMesh;
 struct BodyIcon;
 
 // ---------------------------------------------------------------------------
-// Precomputed orbit line data (computed once at startup)
+// Orbit trail data (recomputed periodically from simulation)
 // ---------------------------------------------------------------------------
 
-/// Stores precomputed orbit line points for each body. Computed at startup
-/// from the ephemeris and reused every frame to avoid per-frame queries.
+/// Stores orbit trail render data for each body. Recomputed periodically
+/// as sim time advances so trails reflect the forward trajectory.
 #[derive(Resource)]
 struct OrbitLines {
-    /// One entry per body. `None` for the star (no orbit). Each entry is a
-    /// vec of render-space points forming a closed loop.
     lines: Vec<Option<OrbitLine>>,
+    /// Sim time when trails were last computed.
+    last_compute_time: f64,
 }
 
 struct OrbitLine {
     points: Vec<Vec3>,
     color: Color,
-    /// Parent body whose position is subtracted from the orbit points.
-    /// The line must be translated by the parent's current render position
-    /// each frame so the orbit tracks the moving parent.
     parent_id: usize,
 }
 
@@ -153,7 +183,7 @@ struct LastClick {
 }
 
 const DOUBLE_CLICK_THRESHOLD: f64 = 0.4; // seconds
-const DOUBLE_CLICK_RADIUS: f32 = 10.0;   // pixels — tolerance for cursor drift between clicks
+const DOUBLE_CLICK_RADIUS: f32 = 10.0; // pixels — tolerance for cursor drift between clicks
 
 pub struct RenderingPlugin;
 
@@ -163,16 +193,32 @@ impl Plugin for RenderingPlugin {
             .insert_resource(RenderOrigin::default())
             .insert_resource(FrameBodyStates::default())
             .insert_resource(PreviousFocusEntity::default())
-            .add_systems(Startup, (configure_gizmos, spawn_bodies, precompute_orbit_lines, focus_camera_on_homeworld.after(spawn_bodies)))
-            .add_systems(Update, (
-                cache_body_states,
-                update_render_origin.after(cache_body_states),
-                update_body_positions.after(update_render_origin),
-                update_ship_position.after(update_render_origin),
-                draw_orbits.after(update_render_origin),
-                sync_body_icons,
-                double_click_focus_system,
-            ).in_set(SimStage::Sync));
+            .add_systems(
+                Startup,
+                (
+                    configure_gizmos,
+                    spawn_bodies,
+                    focus_camera_on_homeworld.after(spawn_bodies),
+                ),
+            )
+            .add_systems(
+                Update,
+                (
+                    cache_body_states,
+                    update_render_origin.after(cache_body_states),
+                    update_body_positions.after(update_render_origin),
+                    update_sun_light.after(cache_body_states),
+                    update_planet_light_dirs.after(cache_body_states),
+                    update_ship_position.after(update_render_origin),
+                    recompute_orbit_trails.after(cache_body_states),
+                    draw_orbits
+                        .after(recompute_orbit_trails)
+                        .after(update_render_origin),
+                    sync_body_icons,
+                    double_click_focus_system,
+                )
+                    .in_set(SimStage::Sync),
+            );
     }
 }
 
@@ -188,14 +234,19 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 fn spawn_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     sim: Res<SimulationState>,
 ) {
     let bodies = &sim.system.bodies;
     let initial_states = sim.ephemeris.query(0.0);
 
-    // Shared icon mesh: unit circle, scaled per frame.
+    // Shared meshes.
     let icon_mesh = meshes.add(Circle::new(1.0));
+    // Unit rectangle (corners at ±1) shared across all planet billboards.
+    // The vertex shader scales it by params.radius each frame.
+    let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
 
     for body in bodies {
         let state = &initial_states[body.id];
@@ -204,29 +255,12 @@ fn spawn_bodies(
         let radius_render = (body.radius_m * RENDER_SCALE) as f32;
         let render_radius = radius_render.max(0.005);
 
-        let sphere_mesh = meshes.add(Sphere::new(render_radius).mesh().ico(3).unwrap());
-
         let [r, g, b] = body.color;
         let base_color = Color::srgb(r, g, b);
         let is_star = body.kind == BodyKind::Star;
 
-        let sphere_material = if is_star {
-            materials.add(StandardMaterial {
-                base_color,
-                emissive: LinearRgba::new(r, g, b, 1.0) * 3.0,
-                ..default()
-            })
-        } else {
-            materials.add(StandardMaterial {
-                base_color,
-                perceptual_roughness: 0.8,
-                metallic: 0.0,
-                ..default()
-            })
-        };
-
         // Icon material: unlit, emissive, double-sided flat circle.
-        let icon_material = materials.add(StandardMaterial {
+        let icon_material = std_materials.add(StandardMaterial {
             base_color,
             emissive: LinearRgba::new(r, g, b, 1.0) * 2.0,
             unlit: true,
@@ -234,36 +268,84 @@ fn spawn_bodies(
             ..default()
         });
 
-        commands
-            .spawn((
-                Transform::from_translation(pos),
-                Visibility::Inherited,
-                CelestialBody {
-                    body_id: body.id,
-                    is_star,
-                    render_radius,
-                    radius_m: body.radius_m,
+        if is_star {
+            // Stars keep the simple emissive icosphere — no impostor needed.
+            let star_mesh = meshes.add(Sphere::new(render_radius).mesh().ico(5).unwrap());
+            let star_material = std_materials.add(StandardMaterial {
+                base_color,
+                emissive: LinearRgba::new(r, g, b, 1.0) * 18.0,
+                ..default()
+            });
+
+            commands
+                .spawn((
+                    Transform::from_translation(pos),
+                    Visibility::Inherited,
+                    CelestialBody { body_id: body.id, is_star, render_radius, radius_m: body.radius_m },
+                    Name::new(body.name.clone()),
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Mesh3d(star_mesh),
+                        MeshMaterial3d(star_material),
+                        NotShadowCaster,
+                        NotShadowReceiver,
+                        BodyMesh,
+                    ));
+                })
+                .with_child((
+                    Mesh3d(icon_mesh.clone()),
+                    MeshMaterial3d(icon_material),
+                    Transform::default(),
+                    Visibility::Hidden,
+                    BodyIcon,
+                ));
+        } else {
+            // Planets and moons: sphere impostor billboard.
+            let roughness = body_surface_roughness(body);
+            let textures = generate_flat_cubemap(body.color, body.albedo, &mut images);
+            let mat_handle = planet_materials.add(PlanetMaterial {
+                params: PlanetParams {
+                    radius: render_radius,
+                    rotation_phase: 0.0,
+                    light_intensity: 80.0,
+                    ambient_intensity: 2.0,
+                    light_dir: Vec4::new(0.0, 1.0, 0.0, roughness),
                 },
-                Name::new(body.name.clone()),
-            ))
-            .with_child((
-                Mesh3d(sphere_mesh),
-                MeshMaterial3d(sphere_material),
-                BodyMesh,
-            ))
-            .with_child((
-                Mesh3d(icon_mesh.clone()),
-                MeshMaterial3d(icon_material),
-                Transform::default(),
-                Visibility::Hidden,
-                BodyIcon,
-            ));
+                albedo: textures.albedo,
+                height: textures.height,
+                detail: PlanetDetailParams::default(),
+            });
+
+            commands
+                .spawn((
+                    Transform::from_translation(pos),
+                    Visibility::Inherited,
+                    CelestialBody { body_id: body.id, is_star, render_radius, radius_m: body.radius_m },
+                    PlanetMaterialHandle(mat_handle.clone()),
+                    Name::new(body.name.clone()),
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Mesh3d(billboard_mesh.clone()),
+                        MeshMaterial3d(mat_handle),
+                        BodyMesh,
+                    ));
+                })
+                .with_child((
+                    Mesh3d(icon_mesh.clone()),
+                    MeshMaterial3d(icon_material),
+                    Transform::default(),
+                    Visibility::Hidden,
+                    BodyIcon,
+                ));
+        }
     }
 
     // Ship marker: screen-stable billboard circle, white.
     let ship_pos = to_render_pos(sim.simulation.ship_state().position);
     let ship_icon = meshes.add(Circle::new(1.0));
-    let ship_material = materials.add(StandardMaterial {
+    let ship_material = std_materials.add(StandardMaterial {
         base_color: Color::WHITE,
         emissive: LinearRgba::WHITE * 2.0,
         unlit: true,
@@ -279,69 +361,110 @@ fn spawn_bodies(
         Name::new("Ship"),
     ));
 
-    // Point light at the star so the scene is lit.
+    // Directional light simulating sunlight. Direction is updated per-frame
+    // by `update_sun_light` to point from the star toward the camera focus body.
+    // Using a DirectionalLight with cascaded shadow maps instead of a PointLight
+    // because Bevy's point light can't handle solar-system-scale distances.
     commands.spawn((
-        PointLight {
-            intensity: 1_000_000.0,
-            range: 10_000.0,
+        DirectionalLight {
+            illuminance: 10_000.0,
             color: Color::WHITE,
-            shadows_enabled: false,
+            shadows_enabled: true,
+            shadow_depth_bias: 2.0,
+            shadow_normal_bias: 2.0,
             ..default()
         },
-        Transform::from_translation(Vec3::ZERO),
+        CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.1,
+            maximum_distance: 100_000.0,
+            first_cascade_far_bound: 10.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
+        Transform::default(),
+        SunLight,
     ));
+
+    // Dim ambient light so shadowed sides of planets aren't pitch black.
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::WHITE,
+        brightness: 50.0,
+        ..default()
+    });
 }
 
 // ---------------------------------------------------------------------------
-// Startup: precompute orbit lines from ephemeris (runs once)
+// Per-frame: update planet impostor light directions
 // ---------------------------------------------------------------------------
 
-fn precompute_orbit_lines(mut commands: Commands, sim: Res<SimulationState>) {
-    let bodies = &sim.system.bodies;
-    let mut lines = Vec::with_capacity(bodies.len());
+/// Updates each planet material's `light_dir` uniform to point from the body
+/// toward the star.  Must run after `cache_body_states`.
+fn update_planet_light_dirs(
+    query: Query<(&CelestialBody, &PlanetMaterialHandle)>,
+    mut materials: ResMut<Assets<PlanetMaterial>>,
+    cache: Res<FrameBodyStates>,
+) {
+    let Some(ref states) = cache.states else { return };
+    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
 
-    for body in bodies {
-        if body.parent.is_none() {
-            lines.push(None);
-            continue;
+    for (body, handle) in &query {
+        let Some(mat) = materials.get_mut(&handle.0) else { continue };
+        let body_pos = states.get(body.body_id).map(|s| s.position).unwrap_or_default();
+        let to_star = (star_pos - body_pos).normalize().as_vec3();
+        // Preserve w (surface roughness) — only update the direction xyz.
+        let roughness = mat.params.light_dir.w;
+        mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, roughness);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Periodic orbit trail recomputation
+// ---------------------------------------------------------------------------
+
+/// Recompute orbit trails when sim time has advanced enough, or on first frame.
+fn recompute_orbit_trails(
+    mut commands: Commands,
+    sim: Res<SimulationState>,
+    existing: Option<Res<OrbitLines>>,
+) {
+    let sim_time = sim.simulation.sim_time();
+
+    if let Some(ref orbit_lines) = existing {
+        let elapsed = sim_time - orbit_lines.last_compute_time;
+        if elapsed < ORBIT_TRAIL_RECOMPUTE_INTERVAL {
+            return;
         }
-
-        let period_s = match &body.orbital_elements {
-            Some(el) => {
-                let parent_id = body.parent.unwrap();
-                let parent_gm = bodies[parent_id].gm;
-                let a = el.semi_major_axis_m;
-                2.0 * std::f64::consts::PI * (a * a * a / parent_gm).sqrt()
-            }
-            None => sim.ephemeris.time_span() * 0.01,
-        };
-
-        let parent_id = body.parent.unwrap();
-        let points: Vec<Vec3> = (0..=ORBIT_SAMPLES)
-            .map(|i| {
-                let t = (i as f64 / ORBIT_SAMPLES as f64) * period_s;
-                let body_state = sim.ephemeris.query_body(body.id, t);
-                let parent_state = sim.ephemeris.query_body(parent_id, t);
-                to_render_pos(body_state.position - parent_state.position)
-            })
-            .collect();
-
-        let [r, g, b] = body.color;
-        let orbit_color = Color::linear_rgba(
-            srgb_to_linear(r) * 0.4,
-            srgb_to_linear(g) * 0.4,
-            srgb_to_linear(b) * 0.4,
-            0.6,
-        );
-
-        lines.push(Some(OrbitLine {
-            points,
-            color: orbit_color,
-            parent_id,
-        }));
     }
 
-    commands.insert_resource(OrbitLines { lines });
+    let trails = sim.simulation.body_orbit_trails(ORBIT_SAMPLES);
+    let bodies = sim.simulation.bodies();
+
+    let lines: Vec<Option<OrbitLine>> = trails
+        .into_iter()
+        .enumerate()
+        .map(|(i, trail)| {
+            let trail = trail?;
+            let body = &bodies[i];
+            let [r, g, b] = body.color;
+            let orbit_color = Color::linear_rgba(
+                srgb_to_linear(r) * 0.4,
+                srgb_to_linear(g) * 0.4,
+                srgb_to_linear(b) * 0.4,
+                0.6,
+            );
+            Some(OrbitLine {
+                points: trail.points.iter().map(|p| to_render_pos(*p)).collect(),
+                color: orbit_color,
+                parent_id: trail.parent_id,
+            })
+        })
+        .collect();
+
+    commands.insert_resource(OrbitLines {
+        lines,
+        last_compute_time: sim_time,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +483,9 @@ fn update_render_origin(
     mut origin: ResMut<RenderOrigin>,
     mut prev_focus: ResMut<PreviousFocusEntity>,
 ) {
-    let Some(ref states) = cache.states else { return };
+    let Some(ref states) = cache.states else {
+        return;
+    };
 
     let candidate = focus
         .target
@@ -385,12 +510,51 @@ fn update_body_positions(
     origin: Res<RenderOrigin>,
     mut query: Query<(&CelestialBody, &mut Transform)>,
 ) {
-    let Some(ref states) = cache.states else { return };
+    let Some(ref states) = cache.states else {
+        return;
+    };
 
     for (body, mut transform) in &mut query {
         if let Some(state) = states.get(body.body_id) {
             transform.translation = to_render_pos(state.position - origin.position);
         }
+    }
+}
+
+/// Point the directional sun light from the star toward the camera's focus body.
+fn update_sun_light(
+    cache: Res<FrameBodyStates>,
+    focus: Res<CameraFocus>,
+    bodies: Query<&CelestialBody>,
+    mut light_query: Query<&mut Transform, With<SunLight>>,
+) {
+    let Some(ref states) = cache.states else {
+        return;
+    };
+
+    // Find the focus body's physics-space position.
+    let focus_pos = focus
+        .target
+        .and_then(|e| bodies.get(e).ok())
+        .and_then(|b| states.get(b.body_id))
+        .map(|s| s.position)
+        .unwrap_or(bevy::math::DVec3::ZERO);
+
+    // Star is always at index 0.
+    let star_pos = states
+        .get(0)
+        .map(|s| s.position)
+        .unwrap_or(bevy::math::DVec3::ZERO);
+
+    let dir = (focus_pos - star_pos).normalize();
+    if dir.length_squared() < 0.5 {
+        return; // Focus is on the star itself; direction undefined.
+    }
+
+    let dir_f32 = dir.as_vec3();
+    for mut transform in &mut light_query {
+        // DirectionalLight shines along its local -Z, so we look in the light's travel direction.
+        transform.look_to(dir_f32, Vec3::Y);
     }
 }
 
@@ -401,12 +565,15 @@ fn update_ship_position(
     camera_query: Query<&Transform, With<OrbitCamera>>,
     mut query: Query<&mut Transform, (With<ShipMarker>, Without<OrbitCamera>)>,
 ) {
-    let Ok(cam_tf) = camera_query.single() else { return };
+    let Ok(cam_tf) = camera_query.single() else {
+        return;
+    };
     let cam_render_dist = (focus.distance * RENDER_SCALE) as f32;
     let icon_radius = cam_render_dist * MARKER_RADIUS;
 
     for mut transform in &mut query {
-        transform.translation = to_render_pos(sim.simulation.ship_state().position - origin.position);
+        transform.translation =
+            to_render_pos(sim.simulation.ship_state().position - origin.position);
         transform.rotation = cam_tf.rotation;
         transform.scale = Vec3::splat(icon_radius);
     }
@@ -447,7 +614,8 @@ fn draw_orbits(
     let cam_dist = focus.distance;
 
     for line in orbit_lines.lines.iter().flatten() {
-        let parent_pos_m = states.get(line.parent_id)
+        let parent_pos_m = states
+            .get(line.parent_id)
             .map(|s| s.position)
             .unwrap_or(bevy::math::DVec3::ZERO);
         let dist_to_parent = (parent_pos_m - focus_pos).length();
@@ -464,10 +632,7 @@ fn draw_orbits(
             let t = (ratio - ORBIT_FADE_START) / (ORBIT_FADE_END - ORBIT_FADE_START);
             let alpha = (1.0 - t) as f32;
             let faded = line.color.with_alpha(line.color.alpha() * alpha);
-            gizmos.linestrip(
-                line.points.iter().map(|p| *p + parent_render_pos),
-                faded,
-            );
+            gizmos.linestrip(line.points.iter().map(|p| *p + parent_render_pos), faded);
         } else {
             gizmos.linestrip(
                 line.points.iter().map(|p| *p + parent_render_pos),
@@ -482,7 +647,12 @@ fn draw_orbits(
 // ---------------------------------------------------------------------------
 
 type IconFilter = (With<BodyIcon>, Without<CelestialBody>, Without<OrbitCamera>);
-type MeshFilter = (With<BodyMesh>, Without<BodyIcon>, Without<CelestialBody>, Without<OrbitCamera>);
+type MeshFilter = (
+    With<BodyMesh>,
+    Without<BodyIcon>,
+    Without<CelestialBody>,
+    Without<OrbitCamera>,
+);
 
 fn sync_body_icons(
     bodies: Query<(&CelestialBody, &Transform, &Children)>,
@@ -504,20 +674,33 @@ fn sync_body_icons(
 
         for child in children.iter() {
             if let Ok((mut icon_tf, mut icon_vis)) = icons.get_mut(child) {
-                if use_icon {
-                    *icon_vis = Visibility::Inherited;
-                    icon_tf.rotation = cam_rotation;
-                    icon_tf.scale = Vec3::splat(icon_radius);
+                let target_vis = if use_icon {
+                    Visibility::Inherited
                 } else {
-                    *icon_vis = Visibility::Hidden;
+                    Visibility::Hidden
+                };
+                if *icon_vis != target_vis {
+                    *icon_vis = target_vis;
+                }
+                if use_icon {
+                    if icon_tf.rotation != cam_rotation {
+                        icon_tf.rotation = cam_rotation;
+                    }
+                    let target_scale = Vec3::splat(icon_radius);
+                    if icon_tf.scale != target_scale {
+                        icon_tf.scale = target_scale;
+                    }
                 }
             }
             if let Ok(mut mesh_vis) = meshes.get_mut(child) {
-                *mesh_vis = if use_icon {
+                let target_vis = if use_icon {
                     Visibility::Hidden
                 } else {
                     Visibility::Inherited
                 };
+                if *mesh_vis != target_vis {
+                    *mesh_vis = target_vis;
+                }
             }
         }
     }
@@ -564,8 +747,12 @@ fn double_click_focus_system(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok((camera, cam_gt)) = camera_q.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, cam_gt)) = camera_q.single() else {
+        return;
+    };
 
     let now = time.elapsed_secs_f64();
     let is_double = (now - last_click.time) < DOUBLE_CLICK_THRESHOLD
@@ -608,7 +795,9 @@ fn double_click_focus_system(
         }
     }
 
-    let Some((target_entity, _)) = best else { return };
+    let Some((target_entity, _)) = best else {
+        return;
+    };
 
     // Compute smooth transition offset.
     let old_pos = focus

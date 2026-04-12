@@ -1,6 +1,8 @@
 mod bridge;
 mod camera;
+mod coords;
 mod hud;
+mod maneuver;
 mod rendering;
 mod trajectory_rendering;
 
@@ -10,14 +12,17 @@ use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 use thalos_physics::{
-    ephemeris::Ephemeris,
+    body_state_provider::BodyStateProvider,
+    patched_conics::PatchedConics,
     simulation::{Simulation, SimulationConfig},
-    types::{load_solar_system, StateVector},
+    types::{StateVector, load_solar_system},
 };
 
 use bridge::BridgePlugin;
 use camera::CameraPlugin;
 use hud::HudPlugin;
+use maneuver::ManeuverPlugin;
+use thalos_planet_rendering::PlanetRenderingPlugin;
 use rendering::{RenderingPlugin, SimulationState};
 use trajectory_rendering::TrajectoryRenderingPlugin;
 
@@ -38,14 +43,11 @@ pub enum SimStage {
 }
 
 // ---------------------------------------------------------------------------
-// Ephemeris paths and fallback
+// Runtime body-state provider
 // ---------------------------------------------------------------------------
 
-/// Pre-generated ephemeris file (produced by `generate_ephemeris`).
-const EPHEMERIS_PATH: &str = "assets/ephemeris.bin";
-
-/// Fallback time span when no pre-generated file exists (200 Julian years).
-const FALLBACK_TIME_SPAN: f64 = 6.312e9;
+/// Patched-conics runtime span (10,000 Julian years).
+const RUNTIME_TIME_SPAN: f64 = 3.156e11;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -58,8 +60,7 @@ fn main() {
     let kdl_source = std::fs::read_to_string("assets/solar_system.kdl")
         .expect("Could not read assets/solar_system.kdl — run from the workspace root");
 
-    let system = load_solar_system(&kdl_source)
-        .expect("Failed to parse solar_system.kdl");
+    let system = load_solar_system(&kdl_source).expect("Failed to parse solar_system.kdl");
 
     // ------------------------------------------------------------------
     // 2. Print a startup banner.
@@ -71,29 +72,14 @@ fn main() {
     println!("  Bodies:           {}", system.bodies.len());
 
     // ------------------------------------------------------------------
-    // 3. Load or compute the ephemeris.
+    // 3. Build the runtime patched-conics provider.
     // ------------------------------------------------------------------
-    let ephemeris_path = std::path::Path::new(EPHEMERIS_PATH);
-    let ephemeris = Arc::new(if ephemeris_path.exists() {
-        println!("  Loading ephemeris from {}...", EPHEMERIS_PATH);
-        let eph = Ephemeris::load(ephemeris_path)
-            .expect("Failed to load ephemeris.bin — try regenerating with `just generate`");
-        println!(
-            "  Loaded {:.0}-year ephemeris ({} segments)",
-            eph.time_span() / 3.156e7,
-            eph.total_segment_count(),
-        );
-        eph
-    } else {
-        println!(
-            "  No pre-generated ephemeris found. Computing {:.0}-year fallback...",
-            FALLBACK_TIME_SPAN / 3.156e7,
-        );
-        println!("  (Run `just generate` to pre-generate a full ephemeris)");
-        let eph = Ephemeris::new(&system, FALLBACK_TIME_SPAN);
-        println!("  Ephemeris ready.");
-        eph
-    });
+    println!(
+        "  Using patched-conics runtime body states ({:.0}-year span).",
+        RUNTIME_TIME_SPAN / 3.156e7,
+    );
+    let ephemeris: Arc<dyn BodyStateProvider> =
+        Arc::new(PatchedConics::new(&system, RUNTIME_TIME_SPAN));
 
     // ------------------------------------------------------------------
     // 4. Resolve the ship's absolute initial state.
@@ -157,6 +143,7 @@ fn main() {
         .insert_resource({
             let simulation = Simulation::new(
                 ship_state,
+                system.ship.thrust_acceleration,
                 Arc::clone(&ephemeris),
                 system.bodies.clone(),
                 SimulationConfig::default(),
@@ -167,10 +154,13 @@ fn main() {
                 ephemeris,
             }
         })
+        .add_plugins(bevy::prelude::MeshPickingPlugin)
+        .add_plugins(PlanetRenderingPlugin)
         .add_plugins(CameraPlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(BridgePlugin)
         .add_plugins(TrajectoryRenderingPlugin)
+        .add_plugins(ManeuverPlugin)
         .add_plugins(HudPlugin)
         .run();
 }

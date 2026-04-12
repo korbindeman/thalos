@@ -1,0 +1,123 @@
+use glam::Vec3;
+
+/// Bulk composition as mass fractions. Fractions must sum to 1.0.
+///
+/// Stages meaningfully consume only `silicate`, `iron`, and `ice` in the
+/// current pipeline, but all fields exist so the data model stays stable
+/// as later stages are added.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Composition {
+    pub silicate: f64,
+    pub iron: f64,
+    pub ice: f64,
+    pub volatiles: f64,
+    pub hydrogen_helium: f64,
+}
+
+impl Composition {
+    pub const SUM_TOLERANCE: f64 = 1e-6;
+
+    pub fn new(
+        silicate: f64,
+        iron: f64,
+        ice: f64,
+        volatiles: f64,
+        hydrogen_helium: f64,
+    ) -> Self {
+        let total = silicate + iron + ice + volatiles + hydrogen_helium;
+        assert!(
+            (total - 1.0).abs() < Self::SUM_TOLERANCE,
+            "composition mass fractions must sum to 1.0, got {total}"
+        );
+        Self { silicate, iron, ice, volatiles, hydrogen_helium }
+    }
+}
+
+/// A discrete crater feature stored in the mid-frequency SSBO layer.
+#[derive(Clone, Debug)]
+pub struct Crater {
+    pub center: Vec3,
+    pub radius_m: f32,
+    pub depth_m: f32,
+    pub rim_height_m: f32,
+    pub age_gyr: f32,
+    pub material_id: u32,
+}
+
+impl Crater {
+    /// Outer influence radius for spatial indexing (ejecta blanket extent).
+    pub fn influence_radius_m(&self) -> f32 {
+        self.radius_m * 2.5
+    }
+}
+
+/// A discrete volcanic feature.
+#[derive(Clone, Debug)]
+pub struct Volcano {
+    pub center: Vec3,
+    pub radius_m: f32,
+    pub height_m: f32,
+    pub material_id: u32,
+}
+
+impl Volcano {
+    pub fn influence_radius_m(&self) -> f32 {
+        self.radius_m * 1.5
+    }
+}
+
+/// A linear/curved surface feature: rift, graben, ancient riverbed.
+#[derive(Clone, Debug)]
+pub struct Channel {
+    pub points: Vec<Vec3>,
+    pub width_m: f32,
+    pub depth_m: f32,
+    pub material_id: u32,
+}
+
+impl Channel {
+    pub fn influence_radius_m(&self) -> f32 {
+        self.width_m * 2.0
+    }
+}
+
+/// A surface material, indexed by `material_id` on features.
+#[derive(Clone, Debug)]
+pub struct Material {
+    pub albedo: [f32; 3],
+    pub roughness: f32,
+}
+
+/// Parameters for the high-frequency statistical detail noise layer.
+/// Drives per-fragment crater synthesis in the shader.
+#[derive(Clone, Debug)]
+pub struct DetailNoiseParams {
+    pub body_radius_m: f32,
+    pub d_min_m: f32,
+    pub d_max_m: f32,
+    pub sfd_alpha: f32,
+    pub global_k_per_km2: f32,
+    pub d_sc_m: f32,
+    pub body_age_gyr: f32,
+    pub seed: u64,
+}
+
+impl Default for DetailNoiseParams {
+    fn default() -> Self {
+        Self {
+            body_radius_m: 1.0,
+            d_min_m: 0.0,
+            d_max_m: 0.0,
+            sfd_alpha: 2.0,
+            global_k_per_km2: 0.0,
+            d_sc_m: 1.0,
+            body_age_gyr: 4.5,
+            seed: 0,
+        }
+    }
+}
+
+// Placeholder types for future global structures.
+// These will be replaced with real structs when homeworld / fluvial stages land.
+pub type PlateMap = ();
+pub type DrainageNetwork = ();

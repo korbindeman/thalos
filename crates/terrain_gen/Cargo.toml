@@ -1,0 +1,7 @@
+[package]
+name = "thalos_terrain_gen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = "0.30"

@@ -1,0 +1,8 @@
+[package]
+name = "thalos_planet_rendering"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_terrain_gen = { path = "../terrain_gen" }
+bevy = { version = "0.18", features = ["wayland", "dynamic_linking"] }
