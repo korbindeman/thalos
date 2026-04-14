@@ -1,16 +1,16 @@
-use fastnoise2::generator::prelude::*;
 use fastnoise2::SafeNode;
+use fastnoise2::generator::prelude::*;
 use glam::Vec3;
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::MAT_MARE;
+use super::util::{face_may_intersect_cap, face_position_arrays, for_face_texels_in_cap};
 use crate::body_builder::BodyBuilder;
 use crate::crater_profile::degradation_factor;
 use crate::cubemap::CubemapFace;
-use crate::seeding::{sub_seed, Rng};
+use crate::seeding::{Rng, sub_seed};
 use crate::stage::Stage;
-use super::util::{face_position_arrays, face_may_intersect_cap, for_face_texels_in_cap};
-use super::MAT_MARE;
 
 /// A candidate region for mare flooding.
 #[derive(Clone, Debug)]
@@ -87,8 +87,12 @@ pub struct ProcellarumConfig {
 }
 
 impl Stage for MareFlood {
-    fn name(&self) -> &str { "mare_flood" }
-    fn dependencies(&self) -> &[&str] { &["cratering"] }
+    fn name(&self) -> &str {
+        "mare_flood"
+    }
+    fn dependencies(&self) -> &[&str] {
+        &["cratering"]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let body_radius = builder.radius_m;
@@ -123,30 +127,35 @@ impl Stage for MareFlood {
             // and the ejecta blanket for smaller ones — so fill levels were
             // systematically wrong.
             let rim_angle = (basin.radius_m * 0.95) / body_radius;
-            let rim_h = sample_ring_height(
-                &builder.height_contributions.height,
-                center,
-                rim_angle,
-                16,
-            );
+            let rim_h =
+                sample_ring_height(&builder.height_contributions.height, center, rim_angle, 16);
 
             let fill_level = floor_h + self.fill_fraction * (rim_h - floor_h);
             // Search cap extends to ~1.2 R so the flood can reach embayments
             // beyond the nominal rim without running off into the ejecta.
             let search_radius_m = basin.radius_m * 1.2;
 
-            targets.push(FloodTarget { center, search_radius_m, fill_level });
+            targets.push(FloodTarget {
+                center,
+                search_radius_m,
+                fill_level,
+            });
         }
 
         // Additional large craters on the near side.
-        let mut near_side_craters: Vec<(usize, f32)> = builder.craters.iter()
+        let mut near_side_craters: Vec<(usize, f32)> = builder
+            .craters
+            .iter()
             .enumerate()
             .filter(|(_, c)| c.center.dot(near) > (1.0 - self.near_side_bias).max(0.0))
             .map(|(i, c)| (i, c.radius_m))
             .collect();
         near_side_craters.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        for &(idx, _) in near_side_craters.iter().take(self.additional_crater_count as usize) {
+        for &(idx, _) in near_side_craters
+            .iter()
+            .take(self.additional_crater_count as usize)
+        {
             let crater = &builder.craters[idx];
             let center = crater.center.normalize();
             let floor_h = builder.height_contributions.height.sample_bilinear(center);
@@ -161,12 +170,18 @@ impl Stage for MareFlood {
             );
 
             // Only flood if the crater is actually a depression.
-            if floor_h >= rim_h { continue; }
+            if floor_h >= rim_h {
+                continue;
+            }
 
             let fill_level = floor_h + self.fill_fraction * (rim_h - floor_h);
             let search_radius_m = crater.radius_m * 1.5;
 
-            targets.push(FloodTarget { center, search_radius_m, fill_level });
+            targets.push(FloodTarget {
+                center,
+                search_radius_m,
+                fill_level,
+            });
         }
 
         // Flood each target over multiple sequential episodes.
@@ -202,17 +217,12 @@ impl Stage for MareFlood {
                 // Boundary noise: warped combination of a large-scale
                 // embayment field (low freq) and a detail edge field
                 // (high freq). Output range ≈ [-1, 1].
-                let boundary_node: SafeNode = ((supersimplex()
-                    .fbm(0.55, 0.0, 4, 2.0)
-                    .domain_scale(lo_freq)
-                    * 0.7)
-                    + (supersimplex()
-                        .fbm(0.5, 0.0, 3, 2.0)
-                        .domain_scale(hi_freq)
-                        * 0.3))
-                    .domain_warp_gradient(0.02, warp_freq)
-                    .build()
-                    .0;
+                let boundary_node: SafeNode =
+                    ((supersimplex().fbm(0.55, 0.0, 4, 2.0).domain_scale(lo_freq) * 0.7)
+                        + (supersimplex().fbm(0.5, 0.0, 3, 2.0).domain_scale(hi_freq) * 0.3))
+                        .domain_warp_gradient(0.02, warp_freq)
+                        .build()
+                        .0;
 
                 // Surface relief: small-amplitude simplex texture kept on
                 // the mare surface so it isn't perfectly flat.
@@ -243,10 +253,24 @@ impl Stage for MareFlood {
                         let mut noise_out = vec![0.0f32; n];
                         let mut relief_out = vec![0.0f32; n];
                         boundary_ref.gen_position_array_3d(
-                            &mut noise_out, &xs, &ys, &zs, 0.0, 0.0, 0.0, ep_seed,
+                            &mut noise_out,
+                            &xs,
+                            &ys,
+                            &zs,
+                            0.0,
+                            0.0,
+                            0.0,
+                            ep_seed,
                         );
                         relief_ref.gen_position_array_3d(
-                            &mut relief_out, &xs, &ys, &zs, 0.0, 0.0, 0.0, relief_seed,
+                            &mut relief_out,
+                            &xs,
+                            &ys,
+                            &zs,
+                            0.0,
+                            0.0,
+                            0.0,
+                            relief_seed,
                         );
 
                         for_face_texels_in_cap(
@@ -329,13 +353,34 @@ impl Stage for MareFlood {
                     let mut fuzz_out = vec![0.0f32; n];
                     let mut relief_out = vec![0.0f32; n];
                     mask_ref.gen_position_array_3d(
-                        &mut mask_out, &xs, &ys, &zs, 0.0, 0.0, 0.0, mask_seed,
+                        &mut mask_out,
+                        &xs,
+                        &ys,
+                        &zs,
+                        0.0,
+                        0.0,
+                        0.0,
+                        mask_seed,
                     );
                     fuzz_ref.gen_position_array_3d(
-                        &mut fuzz_out, &xs, &ys, &zs, 0.0, 0.0, 0.0, fuzz_seed,
+                        &mut fuzz_out,
+                        &xs,
+                        &ys,
+                        &zs,
+                        0.0,
+                        0.0,
+                        0.0,
+                        fuzz_seed,
                     );
                     relief_ref.gen_position_array_3d(
-                        &mut relief_out, &xs, &ys, &zs, 0.0, 0.0, 0.0, surface_seed,
+                        &mut relief_out,
+                        &xs,
+                        &ys,
+                        &zs,
+                        0.0,
+                        0.0,
+                        0.0,
+                        surface_seed,
                     );
 
                     for y in 0..res {
@@ -344,12 +389,16 @@ impl Stage for MareFlood {
                             let dir = Vec3::new(xs[idx], ys[idx], zs[idx]);
 
                             let near_dot = dir.dot(near);
-                            if near_dot < cos_window { continue; }
+                            if near_dot < cos_window {
+                                continue;
+                            }
 
                             let near_weight =
                                 ((near_dot - cos_window) / (1.0 - cos_window)).clamp(0.0, 1.0);
                             let mask_effective = mask_out[idx] + (near_weight - 0.5) * 0.6;
-                            if mask_effective < mask_threshold { continue; }
+                            if mask_effective < mask_threshold {
+                                continue;
+                            }
 
                             let threshold = fill_level_m + fuzz_out[idx] * proc_boundary_amp;
                             let current_h = h_slice[idx];
@@ -409,7 +458,14 @@ impl Stage for MareFlood {
                             let (xs, ys, zs) = face_position_arrays(face, res);
                             let mut seg_out = vec![0.0f32; n];
                             seg_ref.gen_position_array_3d(
-                                &mut seg_out, &xs, &ys, &zs, 0.0, 0.0, 0.0, ridge_seed,
+                                &mut seg_out,
+                                &xs,
+                                &ys,
+                                &zs,
+                                0.0,
+                                0.0,
+                                0.0,
+                                ridge_seed,
                             );
 
                             for_face_texels_in_cap(
@@ -430,8 +486,7 @@ impl Stage for MareFlood {
                                     if seg_factor <= 0.0 {
                                         return;
                                     }
-                                    let gauss =
-                                        (-(dr_m * dr_m) / (2.0 * sigma_m * sigma_m)).exp();
+                                    let gauss = (-(dr_m * dr_m) / (2.0 * sigma_m * sigma_m)).exp();
                                     let add = ridge_h * gauss * seg_factor;
                                     if add > 0.5 {
                                         h_slice[idx] += add;
@@ -476,7 +531,11 @@ fn sample_ring_height(
     samples: u32,
 ) -> f32 {
     // Build a local tangent frame at `center`.
-    let up = if center.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+    let up = if center.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
     let right = center.cross(up).normalize();
     let forward = right.cross(center).normalize();
 

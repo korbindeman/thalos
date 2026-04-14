@@ -6,10 +6,10 @@
 use bevy::core_pipeline::FullscreenShader;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::ecs::query::QueryItem;
+use bevy::image::BevyDefault;
 use bevy::prelude::*;
-use bevy::transform::TransformSystems;
 use bevy::render::{
-    RenderApp, RenderStartup, RenderSystems,
+    Render, RenderApp, RenderStartup, RenderSystems,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     render_graph::{
         NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
@@ -25,10 +25,9 @@ use bevy::render::{
     },
     renderer::{RenderContext, RenderDevice, RenderQueue},
     view::{ExtractedView, ViewTarget},
-    Render,
 };
-use bevy::image::BevyDefault;
 use bevy::shader::Shader;
+use bevy::transform::TransformSystems;
 
 /// Tunable film grain component. Attach to a camera alongside the rest of the
 /// post stack. `FilmGrainState` is auto-added as a required component to
@@ -92,9 +91,7 @@ impl ExtractComponent for FilmGrain {
     type QueryFilter = ();
     type Out = ExtractedFilmGrain;
 
-    fn extract_component(
-        (grain, state): QueryItem<'_, '_, Self::QueryData>,
-    ) -> Option<Self::Out> {
+    fn extract_component((grain, state): QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         let scaled = grain.intensity * state.factor;
         if scaled > 0.0 {
             Some(ExtractedFilmGrain {
@@ -297,7 +294,9 @@ fn prepare_film_grain_uniforms(
             shadow_bias: grain.shadow_bias,
             _pad: 0.0,
         });
-        commands.entity(entity).insert(FilmGrainUniformOffset(offset));
+        commands
+            .entity(entity)
+            .insert(FilmGrainUniformOffset(offset));
     }
     buffer.0.write_buffer(&render_device, &render_queue);
 }
@@ -333,11 +332,7 @@ impl ViewNode for FilmGrainNode {
         let bind_group = render_context.render_device().create_bind_group(
             Some("film_grain_bind_group"),
             &pipeline_cache.get_bind_group_layout(&pipeline_res.layout),
-            &BindGroupEntries::sequential((
-                post_process.source,
-                &pipeline_res.sampler,
-                binding,
-            )),
+            &BindGroupEntries::sequential((post_process.source, &pipeline_res.sampler, binding)),
         );
 
         let mut pass = render_context

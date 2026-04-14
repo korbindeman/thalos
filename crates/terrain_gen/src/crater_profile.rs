@@ -27,15 +27,20 @@ pub(crate) enum Morphology {
 }
 
 /// Radius thresholds for morphology transitions (meters).
-const SIMPLE_MAX: f32    = 15_000.0;   // < 30 km diameter
-const COMPLEX_MAX: f32   = 68_500.0;   // < 137 km diameter
-const PEAK_RING_MAX: f32 = 150_000.0;  // < 300 km diameter
+const SIMPLE_MAX: f32 = 15_000.0; // < 30 km diameter
+const COMPLEX_MAX: f32 = 68_500.0; // < 137 km diameter
+const PEAK_RING_MAX: f32 = 150_000.0; // < 300 km diameter
 
 pub(crate) fn morphology_for_radius(radius_m: f32) -> Morphology {
-    if radius_m < SIMPLE_MAX      { Morphology::Simple }
-    else if radius_m < COMPLEX_MAX  { Morphology::Complex }
-    else if radius_m < PEAK_RING_MAX { Morphology::PeakRing }
-    else                           { Morphology::MultiRing }
+    if radius_m < SIMPLE_MAX {
+        Morphology::Simple
+    } else if radius_m < COMPLEX_MAX {
+        Morphology::Complex
+    } else if radius_m < PEAK_RING_MAX {
+        Morphology::PeakRing
+    } else {
+        Morphology::MultiRing
+    }
 }
 
 /// Crater depth and rim height from radius, using Pike (1977) lunar morphometry.
@@ -52,19 +57,19 @@ pub(crate) fn crater_dimensions(radius_m: f32) -> (f32, f32) {
         Morphology::Complex => {
             // Pike (1977): d = 0.196 D^0.301 km, h_rim = 0.236 D^0.399 km
             let depth_m = 196.0 * d_km.powf(0.301);
-            let rim_m   = 236.0 * d_km.powf(0.399);
+            let rim_m = 236.0 * d_km.powf(0.399);
             (depth_m, rim_m)
         }
         Morphology::PeakRing => {
             // Extrapolated Pike trend, d/D ≈ 0.03-0.04
             let depth_m = 140.0 * d_km.powf(0.25);
-            let rim_m   = 200.0 * d_km.powf(0.38);
+            let rim_m = 200.0 * d_km.powf(0.38);
             (depth_m, rim_m)
         }
         Morphology::MultiRing => {
             // Very shallow; isostatic relaxation dominates
             let depth_m = 100.0 * d_km.powf(0.20);
-            let rim_m   = 160.0 * d_km.powf(0.35);
+            let rim_m = 160.0 * d_km.powf(0.35);
             (depth_m, rim_m)
         }
     }
@@ -80,7 +85,9 @@ fn s01(t: f32) -> f32 {
 /// Ranged smoothstep: smooth 0→1 transition as `x` moves across `[edge0, edge1]`.
 #[inline]
 pub(crate) fn smoothstep_range(edge0: f32, edge1: f32, x: f32) -> f32 {
-    if edge1 <= edge0 { return if x >= edge1 { 1.0 } else { 0.0 }; }
+    if edge1 <= edge0 {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -130,7 +137,9 @@ fn rim_ridge(t: f32, softness: f32) -> f32 {
 /// rim ridge, keeping the apron continuous with the crest.
 #[inline]
 fn ejecta_apron(t: f32, radius_m: f32, ejecta_scale: f32, softness: f32) -> f32 {
-    if !(1.0..=EJECTA_MAX_T).contains(&t) { return 0.0; }
+    if !(1.0..=EJECTA_MAX_T).contains(&t) {
+        return 0.0;
+    }
     let thickness = 0.14 * radius_m.powf(0.74) * t.powi(-3);
     let gate = 1.0 - rim_ridge(t, softness);
     thickness * gate * ejecta_scale.max(0.0)
@@ -293,7 +302,9 @@ pub(crate) fn complex_profile(
         let mut sub_h = 0.0_f32;
         if peak_h > 0.0 {
             for sp in peak_subs.iter() {
-                if sp.amp <= 0.0 { continue; }
+                if sp.amp <= 0.0 {
+                    continue;
+                }
                 // Position of this sub-peak in (r/peak_t, azimuth) polar
                 // coordinates → squared chord distance to the texel.
                 let r_a = s;
@@ -301,9 +312,10 @@ pub(crate) fn complex_profile(
                 let mut d_az = (peak_azimuth - sp.az).abs();
                 let pi = std::f32::consts::PI;
                 let tau = std::f32::consts::TAU;
-                if d_az > pi { d_az = tau - d_az; }
-                let dist2 =
-                    r_a * r_a + r_b * r_b - 2.0 * r_a * r_b * d_az.cos();
+                if d_az > pi {
+                    d_az = tau - d_az;
+                }
+                let dist2 = r_a * r_a + r_b * r_b - 2.0 * r_a * r_b * d_az.cos();
                 let sigma = sp.sigma_frac.max(0.05);
                 let g = (-dist2 / (2.0 * sigma * sigma)).exp();
                 sub_h += peak_h * sp.amp * g;
@@ -430,13 +442,37 @@ pub(crate) fn crater_profile(
     softness: f32,
 ) -> f32 {
     match morph {
-        Morphology::Simple    => simple_profile(t, depth, rim_h, radius_m, ejecta_scale, softness),
-        Morphology::Complex   => complex_profile(
-            t, depth, rim_h, radius_m, wall_phase, peak_noise,
-            peak_azimuth, peak_subs, ejecta_scale, softness,
+        Morphology::Simple => simple_profile(t, depth, rim_h, radius_m, ejecta_scale, softness),
+        Morphology::Complex => complex_profile(
+            t,
+            depth,
+            rim_h,
+            radius_m,
+            wall_phase,
+            peak_noise,
+            peak_azimuth,
+            peak_subs,
+            ejecta_scale,
+            softness,
         ),
-        Morphology::PeakRing  => peak_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale, softness),
-        Morphology::MultiRing => multi_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale, softness),
+        Morphology::PeakRing => peak_ring_profile(
+            t,
+            depth,
+            rim_h,
+            radius_m,
+            wall_phase,
+            ejecta_scale,
+            softness,
+        ),
+        Morphology::MultiRing => multi_ring_profile(
+            t,
+            depth,
+            rim_h,
+            radius_m,
+            wall_phase,
+            ejecta_scale,
+            softness,
+        ),
     }
 }
 
@@ -515,7 +551,12 @@ pub(crate) fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
 mod tests {
     use super::*;
 
-    const NO_SUBS: SubPeaks = [SubPeak { az: 0.0, r_frac: 0.0, amp: 0.0, sigma_frac: 0.5 }; 3];
+    const NO_SUBS: SubPeaks = [SubPeak {
+        az: 0.0,
+        r_frac: 0.0,
+        amp: 0.0,
+        sigma_frac: 0.5,
+    }; 3];
 
     #[test]
     fn simple_profile_shape() {
@@ -557,11 +598,20 @@ mod tests {
         let t0 = t_floor + 0.05;
         let t1 = t_floor + 0.20;
         let t2 = t_floor + 0.35;
-        let h0 = complex_profile(t0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
-        let h1 = complex_profile(t1, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
-        let h2 = complex_profile(t2, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
+        let h0 = complex_profile(
+            t0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0,
+        );
+        let h1 = complex_profile(
+            t1, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0,
+        );
+        let h2 = complex_profile(
+            t2, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0,
+        );
         let secant = h0 + (h2 - h0) * ((t1 - t0) / (t2 - t0));
-        assert!((h1 - secant).abs() > 1.0, "wall looks smooth: {h0} {h1} {h2}");
+        assert!(
+            (h1 - secant).abs() > 1.0,
+            "wall looks smooth: {h0} {h1} {h2}"
+        );
     }
 
     #[test]
@@ -569,8 +619,12 @@ mod tests {
         let depth = 3000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        let center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
-        let floor  = complex_profile(0.2, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
+        let center = complex_profile(
+            0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0,
+        );
+        let floor = complex_profile(
+            0.2, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0,
+        );
         assert!(center > floor, "center={center} floor={floor}");
     }
 
@@ -579,8 +633,18 @@ mod tests {
         let depth = 1000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        assert!(complex_profile(4.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0) > 0.0);
-        assert!(complex_profile(5.5, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0).abs() < 0.01);
+        assert!(
+            complex_profile(
+                4.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0
+            ) > 0.0
+        );
+        assert!(
+            complex_profile(
+                5.5, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0
+            )
+            .abs()
+                < 0.01
+        );
     }
 
     #[test]
@@ -589,14 +653,22 @@ mod tests {
         // complex craters read as smooth bowls.
         let (depth, rim_h) = crater_dimensions(40_000.0);
         let radius_m = 40_000.0;
-        let pristine_center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
-        let soft_center     = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 1.0);
+        let pristine_center = complex_profile(
+            0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0,
+        );
+        let soft_center = complex_profile(
+            0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 1.0,
+        );
         // Pristine: floor + central peak. Soft: just floor.
-        assert!(pristine_center > soft_center,
-            "pristine={pristine_center} soft={soft_center}");
+        assert!(
+            pristine_center > soft_center,
+            "pristine={pristine_center} soft={soft_center}"
+        );
         // Soft-center should be at -depth (no peak above floor).
-        assert!((soft_center + depth).abs() < depth * 0.05,
-            "soft center should be ≈ -depth, got {soft_center}");
+        assert!(
+            (soft_center + depth).abs() < depth * 0.05,
+            "soft center should be ≈ -depth, got {soft_center}"
+        );
     }
 
     #[test]
@@ -605,9 +677,11 @@ mod tests {
         let (_, rim_h) = crater_dimensions(20_000.0);
         let r = 20_000.0;
         let pristine_off = complex_profile(1.30, 0.0, rim_h, r, 0.0, 0.0, 0.0, &NO_SUBS, 0.0, 0.0);
-        let soft_off     = complex_profile(1.30, 0.0, rim_h, r, 0.0, 0.0, 0.0, &NO_SUBS, 0.0, 1.0);
-        assert!(soft_off > pristine_off,
-            "softened rim should still contribute at t=1.30: pristine={pristine_off} soft={soft_off}");
+        let soft_off = complex_profile(1.30, 0.0, rim_h, r, 0.0, 0.0, 0.0, &NO_SUBS, 0.0, 1.0);
+        assert!(
+            soft_off > pristine_off,
+            "softened rim should still contribute at t=1.30: pristine={pristine_off} soft={soft_off}"
+        );
     }
 
     #[test]
@@ -618,10 +692,10 @@ mod tests {
         let depth = 4000.0;
         let rim_h = 800.0;
         let radius_m = 100_000.0;
-        let floor_in  = peak_ring_profile(0.30, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
-        let ring      = peak_ring_profile(0.50, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let floor_in = peak_ring_profile(0.30, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let ring = peak_ring_profile(0.50, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
         let floor_out = peak_ring_profile(0.65, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
-        assert!(ring > floor_in,  "ring={ring} floor_in={floor_in}");
+        assert!(ring > floor_in, "ring={ring} floor_in={floor_in}");
         assert!(ring > floor_out, "ring={ring} floor_out={floor_out}");
     }
 
@@ -632,9 +706,9 @@ mod tests {
         let depth = 6000.0;
         let rim_h = 1000.0;
         let radius_m = 200_000.0;
-        let inner  = multi_ring_profile(0.50,  depth, rim_h, radius_m, 0.0, 0.0, 0.0);
-        let valley = multi_ring_profile(0.60,  depth, rim_h, radius_m, 0.0, 0.0, 0.0);
-        let outer  = multi_ring_profile(0.707, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let inner = multi_ring_profile(0.50, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let valley = multi_ring_profile(0.60, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let outer = multi_ring_profile(0.707, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
         assert!(inner > valley, "inner={inner} valley={valley}");
         assert!(outer > valley, "outer={outer} valley={valley}");
     }
@@ -659,16 +733,28 @@ mod tests {
         // heights exact — relied on by complex_profile et al.
         for &phase in &[-0.5_f32, -0.25, 0.0, 0.25, 0.5] {
             assert!(terraced_ramp(0.0, phase).abs() < 1e-5, "phase={phase}");
-            assert!((terraced_ramp(1.0, phase) - 1.0).abs() < 1e-5, "phase={phase}");
+            assert!(
+                (terraced_ramp(1.0, phase) - 1.0).abs() < 1e-5,
+                "phase={phase}"
+            );
         }
     }
 
     #[test]
     fn morphology_thresholds() {
-        assert!(matches!(morphology_for_radius(5_000.0),   Morphology::Simple));
-        assert!(matches!(morphology_for_radius(30_000.0),  Morphology::Complex));
-        assert!(matches!(morphology_for_radius(100_000.0), Morphology::PeakRing));
-        assert!(matches!(morphology_for_radius(200_000.0), Morphology::MultiRing));
+        assert!(matches!(morphology_for_radius(5_000.0), Morphology::Simple));
+        assert!(matches!(
+            morphology_for_radius(30_000.0),
+            Morphology::Complex
+        ));
+        assert!(matches!(
+            morphology_for_radius(100_000.0),
+            Morphology::PeakRing
+        ));
+        assert!(matches!(
+            morphology_for_radius(200_000.0),
+            Morphology::MultiRing
+        ));
     }
 
     #[test]

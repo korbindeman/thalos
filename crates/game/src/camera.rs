@@ -154,10 +154,7 @@ fn setup_skybox_cubemap(
 /// skybox keeps a constant *perceived* brightness as focus moves outward.
 /// `update_camera_exposure` runs in the prior `Sync` stage, so its value is
 /// already current here.
-fn update_skybox_brightness(
-    exposure: Res<CameraExposure>,
-    mut skyboxes: Query<&mut Skybox>,
-) {
+fn update_skybox_brightness(exposure: Res<CameraExposure>, mut skyboxes: Query<&mut Skybox>) {
     let gain = exposure.gain.max(1.0e-3);
     let brightness = SKYBOX_BRIGHTNESS_BASE / gain;
     for mut skybox in &mut skyboxes {

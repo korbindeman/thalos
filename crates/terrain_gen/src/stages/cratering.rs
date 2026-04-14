@@ -1,17 +1,17 @@
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::MAT_HIGHLAND;
+use super::util::for_face_texels_in_cap_rows;
 use crate::body_builder::BodyBuilder;
 use crate::crater_profile::{
-    crater_dimensions, crater_profile, degradation_factor, degradation_softness,
-    morphology_for_radius, SubPeaks,
+    SubPeaks, crater_dimensions, crater_profile, degradation_factor, degradation_softness,
+    morphology_for_radius,
 };
 use crate::cubemap::CubemapFace;
 use crate::seeding::Rng;
 use crate::stage::Stage;
 use crate::types::Crater;
-use super::MAT_HIGHLAND;
-use super::util::for_face_texels_in_cap_rows;
 
 // ---------------------------------------------------------------------------
 // Per-crater angular warping
@@ -227,16 +227,32 @@ pub struct Cratering {
     pub chain_segment_count: u32,
 }
 
-fn default_age_bias() -> f64 { 2.0 }
-fn default_secondary_parent_threshold() -> f32 { 50_000.0 }
-fn default_secondaries_per_parent() -> u32 { 20 }
-fn default_saturation_fraction() -> f32 { 0.05 }
-fn default_chain_count() -> u32 { 3 }
-fn default_chain_segment_count() -> u32 { 10 }
+fn default_age_bias() -> f64 {
+    2.0
+}
+fn default_secondary_parent_threshold() -> f32 {
+    50_000.0
+}
+fn default_secondaries_per_parent() -> u32 {
+    20
+}
+fn default_saturation_fraction() -> f32 {
+    0.05
+}
+fn default_chain_count() -> u32 {
+    3
+}
+fn default_chain_segment_count() -> u32 {
+    10
+}
 
 impl Stage for Cratering {
-    fn name(&self) -> &str { "cratering" }
-    fn dependencies(&self) -> &[&str] { &["differentiate"] }
+    fn name(&self) -> &str {
+        "cratering"
+    }
+    fn dependencies(&self) -> &[&str] {
+        &["differentiate"]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let mut rng = Rng::new(builder.stage_seed());
@@ -327,17 +343,19 @@ impl Stage for Cratering {
                     let angular_dist = (parent.radius_m * r_mult) / body_radius;
                     let theta = rng.next_f64() as f32 * std::f32::consts::TAU;
                     let (sin_t, cos_t) = theta.sin_cos();
-                    let offset = tangent * (cos_t * angular_dist)
-                        + bitangent * (sin_t * angular_dist);
+                    let offset =
+                        tangent * (cos_t * angular_dist) + bitangent * (sin_t * angular_dist);
                     let child_center = (parent_center + offset).normalize();
 
                     // Secondary radius: fraction of parent, power-law biased
                     // small. Cap at parent_threshold / 4 so secondaries stay
                     // clearly smaller than primaries.
                     let sec_min = self.min_radius_m.max(parent.radius_m as f64 * 0.005);
-                    let sec_max = (parent.radius_m as f64 * 0.15)
-                        .min(parent_threshold as f64 * 0.25);
-                    if sec_max <= sec_min { continue; }
+                    let sec_max =
+                        (parent.radius_m as f64 * 0.15).min(parent_threshold as f64 * 0.25);
+                    if sec_max <= sec_min {
+                        continue;
+                    }
                     let radius_m = rng.power_law(sec_min, sec_max, 2.5) as f32;
 
                     let (base_depth, base_rim) = crater_dimensions(radius_m);
@@ -355,8 +373,7 @@ impl Stage for Cratering {
                         rim_height_m: base_rim * jitter * SECONDARY_SCALE,
                         // Slightly younger than parent (post-impact fracturing
                         // retriggers) but essentially the same epoch.
-                        age_gyr: (parent.age_gyr - rng.next_f64() as f32 * 0.05)
-                            .max(0.0),
+                        age_gyr: (parent.age_gyr - rng.next_f64() as f32 * 0.05).max(0.0),
                         material_id: MAT_HIGHLAND,
                     });
                 }
@@ -425,12 +442,10 @@ impl Stage for Cratering {
                 // Chain age — chains are typically young (the impactor's
                 // disruption was a single recent event) so they're
                 // morphologically fresh and stand out.
-                let chain_age =
-                    (body_age_gyr as f64 * rng.next_f64() * 0.15) as f32;
+                let chain_age = (body_age_gyr as f64 * rng.next_f64() * 0.15) as f32;
                 // Pick a single base radius per chain so all members read
                 // as siblings; jitter ±25% per crater for variety.
-                let base_r = chain_min_r
-                    + rng.next_f64() as f32 * (chain_max_r - chain_min_r);
+                let base_r = chain_min_r + rng.next_f64() as f32 * (chain_max_r - chain_min_r);
                 // Spacing in crater diameters along the great-circle arc.
                 let mut traveled_arc = 0.0_f32;
                 for _ in 0..self.chain_segment_count {
@@ -438,9 +453,7 @@ impl Stage for Cratering {
                     let step_diam = 1.5 + rng.next_f64() as f32 * 2.0;
                     let step_m = base_r * 2.0 * step_diam;
                     traveled_arc += step_m / body_radius;
-                    let pos = (center * traveled_arc.cos()
-                        + dir * traveled_arc.sin())
-                        .normalize();
+                    let pos = (center * traveled_arc.cos() + dir * traveled_arc.sin()).normalize();
                     let jitter = 1.0 + rng.next_f64_signed() as f32 * 0.25;
                     let radius_m = (base_r * jitter).clamp(chain_min_r, chain_max_r);
                     let (base_depth, base_rim) = crater_dimensions(radius_m);
@@ -452,8 +465,7 @@ impl Stage for Cratering {
                         radius_m,
                         depth_m: base_depth * CHAIN_SCALE,
                         rim_height_m: base_rim * CHAIN_SCALE,
-                        age_gyr: (chain_age - rng.next_f64() as f32 * 0.005)
-                            .max(0.0),
+                        age_gyr: (chain_age - rng.next_f64() as f32 * 0.005).max(0.0),
                         material_id: MAT_HIGHLAND,
                     });
                 }
@@ -526,7 +538,11 @@ impl Stage for Cratering {
                 let base_elevation_m = height_snapshot.sample_bilinear(center);
                 // Tangent basis for measuring azimuth around the crater.
                 // Matches the construction used by `space_weather.rs`.
-                let up = if center.y.abs() < 0.9 { glam::Vec3::Y } else { glam::Vec3::X };
+                let up = if center.y.abs() < 0.9 {
+                    glam::Vec3::Y
+                } else {
+                    glam::Vec3::X
+                };
                 let tangent = up.cross(center).normalize();
                 let bitangent = center.cross(tangent);
                 let seed = center_seed(center);
@@ -620,9 +636,7 @@ impl Stage for Cratering {
                                 // crater's local tangent plane and perturb t
                                 // so effective radius becomes r·(1 + ε·n(θ)).
                                 let proj = dir - c.center * dir.dot(c.center);
-                                let theta = proj
-                                    .dot(c.bitangent)
-                                    .atan2(proj.dot(c.tangent));
+                                let theta = proj.dot(c.bitangent).atan2(proj.dot(c.tangent));
                                 let n_r = angular_noise(theta, &c.radial_phases);
                                 let t = t_base / (1.0 + RADIAL_WARP_EPS * n_r);
 
@@ -641,12 +655,12 @@ impl Stage for Cratering {
                                 let pi = std::f32::consts::PI;
                                 let tau = std::f32::consts::TAU;
                                 let mut d_az = (theta - c.uprange_az).abs();
-                                if d_az > pi { d_az = tau - d_az; }
+                                if d_az > pi {
+                                    d_az = tau - d_az;
+                                }
                                 // 1.0 at wedge center, 0.0 at wedge edge.
-                                let in_wedge =
-                                    smoothstep01(c.wedge_half, c.wedge_half * 0.5, d_az);
-                                let ejecta_scale =
-                                    (1.0 - c.obliqueness * in_wedge).clamp(0.0, 1.0);
+                                let in_wedge = smoothstep01(c.wedge_half, c.wedge_half * 0.5, d_az);
+                                let ejecta_scale = (1.0 - c.obliqueness * in_wedge).clamp(0.0, 1.0);
 
                                 let h = crater_profile(
                                     t,
@@ -699,4 +713,3 @@ impl Stage for Cratering {
         builder.cubemap_bake_threshold_m = self.cubemap_bake_threshold_m;
     }
 }
-

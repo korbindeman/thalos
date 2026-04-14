@@ -248,12 +248,17 @@ impl CubemapAccumulator {
 
     pub fn add_albedo(&mut self, face: CubemapFace, x: u32, y: u32, rgba_delta: [f32; 4]) {
         let cur = self.albedo.get(face, x, y);
-        self.albedo.set(face, x, y, [
-            cur[0] + rgba_delta[0],
-            cur[1] + rgba_delta[1],
-            cur[2] + rgba_delta[2],
-            cur[3] + rgba_delta[3],
-        ]);
+        self.albedo.set(
+            face,
+            x,
+            y,
+            [
+                cur[0] + rgba_delta[0],
+                cur[1] + rgba_delta[1],
+                cur[2] + rgba_delta[2],
+                cur[3] + rgba_delta[3],
+            ],
+        );
     }
 
     /// Splat a height delta at the texel nearest to `dir`.
@@ -310,9 +315,9 @@ impl CubemapAccumulator {
         let res = self.albedo.resolution();
 
         // Check if any albedo was actually written.
-        let has_data = CubemapFace::ALL.iter().any(|&face| {
-            self.albedo.face_data(face).iter().any(|v| v[3] > 0.0)
-        });
+        let has_data = CubemapFace::ALL
+            .iter()
+            .any(|&face| self.albedo.face_data(face).iter().any(|v| v[3] > 0.0));
 
         let mut out = Cubemap::new(res);
         if !has_data {
@@ -391,8 +396,14 @@ mod tests {
         for (dir, expected_face) in cases {
             let (face, u, v) = dir_to_face_uv(dir);
             assert_eq!(face, expected_face, "wrong face for {dir}");
-            assert!((u - 0.5).abs() < 0.01, "u not centered for axis dir {dir}: {u}");
-            assert!((v - 0.5).abs() < 0.01, "v not centered for axis dir {dir}: {v}");
+            assert!(
+                (u - 0.5).abs() < 0.01,
+                "u not centered for axis dir {dir}: {u}"
+            );
+            assert!(
+                (v - 0.5).abs() < 0.01,
+                "v not centered for axis dir {dir}: {v}"
+            );
         }
     }
 

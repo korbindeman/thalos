@@ -70,7 +70,13 @@ pub(in crate::maneuver) fn maneuver_input(
     };
     let Some(ref sim) = sim else { return };
     let Some(prediction) = sim.simulation.prediction() else {
-        if let InteractionMode::PlacingNode { snap_time, snap_world_pos, snap_anchor_body, .. } = &mut *mode {
+        if let InteractionMode::PlacingNode {
+            snap_time,
+            snap_world_pos,
+            snap_anchor_body,
+            ..
+        } = &mut *mode
+        {
             *snap_time = None;
             *snap_world_pos = None;
             *snap_anchor_body = None;
@@ -82,7 +88,13 @@ pub(in crate::maneuver) fn maneuver_input(
     };
 
     match &mut *mode {
-        InteractionMode::DraggingArrow { axis, axis_screen_dir, drag_origin, rate_sign, .. } => {
+        InteractionMode::DraggingArrow {
+            axis,
+            axis_screen_dir,
+            drag_origin,
+            rate_sign,
+            ..
+        } => {
             if mouse.pressed(MouseButton::Left) {
                 let screen_delta = cursor_pos - *drag_origin;
                 let displacement = screen_delta.dot(*axis_screen_dir);
@@ -139,7 +151,11 @@ pub(in crate::maneuver) fn maneuver_input(
             }
         }
 
-        InteractionMode::PlacingNode { snap_time, snap_world_pos, snap_anchor_body } => {
+        InteractionMode::PlacingNode {
+            snap_time,
+            snap_world_pos,
+            snap_anchor_body,
+        } => {
             let closest = closest_trail_point(
                 prediction,
                 states,

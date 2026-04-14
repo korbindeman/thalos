@@ -9,9 +9,9 @@ The system uses a hybrid scaling approach optimized for the balance between phys
 | Star | 1:1 | Anchors all orbital dynamics and habitable zone calculations |
 | Orbital distances | 1:1 | Determined by stellar luminosity, not body size |
 | Gas/ice giants | 1:1 | Preserves visual spectacle, moon systems, and orbital dynamics |
-| Homeworld | 1:2 | Sweet spot for reaching orbit while maintaining ~0.9g |
-| Venus analogue | 2:3 | Harder to escape than homeworld |
-| Mars analogue | 1:3 | Easy to land on and launch from |
+| Thalos (homeworld) | 1:2 | Sweet spot for reaching orbit while maintaining ~0.9g |
+| Ashara (Venus analogue) | 2:3 | Harder to escape than Thalos |
+| Vaelen (Mars analogue) | 1:3 | Easy to land on and launch from |
 | Other rocky bodies/moons | 1:3 to 1:2 | Tuned per body for gameplay role |
 
 ## Formation: Metal-Rich Protoplanetary Disk
@@ -22,7 +22,7 @@ The disk produces a natural density gradient. Inner bodies accreted from hotter 
 
 ---
 
-## Star
+## Star — Pyros
 
 | Property | Value |
 |---|---|
@@ -37,7 +37,7 @@ Solar twin. All habitable zone distances, orbital periods, and insolation values
 
 ---
 
-## I. Hot Rocky World
+## I. Ignis (Hot Rocky World)
 
 | Property | Value |
 |---|---|
@@ -58,7 +58,7 @@ The innermost body and the densest (most iron-rich, formed where only metals cou
 
 ---
 
-## II. Venus Analogue
+## II. Ashara (Venus Analogue)
 
 | Property | Value |
 |---|---|
@@ -75,7 +75,7 @@ The innermost body and the densest (most iron-rich, formed where only metals cou
 | Surface temp | ~700 K |
 | Rotation | Slow retrograde (~180 days) |
 
-The largest and most massive rocky body in the system. Its 2/3 scale and high density (justified by proximity to the star in the metal-rich disk) produce surface gravity exceeding the homeworld's. Combined with a crushing 50-atmosphere greenhouse, this is the hardest body in the system to escape from.
+The largest and most massive rocky body in the system. Its 2/3 scale and high density (justified by proximity to the star in the metal-rich disk) produce surface gravity exceeding Thalos's. Combined with a crushing 50-atmosphere greenhouse, this is the hardest body in the system to escape from.
 
 ### Gameplay reference
 
@@ -89,7 +89,7 @@ Surface operations are impractical (700 K, 50 atm). Colonization means aerostat 
 
 ---
 
-## III. Homeworld
+## III. Thalos (Homeworld)
 
 | Property | Value |
 |---|---|
@@ -118,7 +118,7 @@ Surface operations are impractical (700 K, 50 atm). Colonization means aerostat 
 
 ### Physical character
 
-The homeworld is essentially a massive exposed iron core with a thin silicate mantle and crust, ~70% iron core by volume. The result of forming in the most metal-rich region of the disk at this orbital distance. The enormous liquid iron outer core generates a strong magnetic field that protects the atmosphere from stellar wind stripping.
+Thalos is essentially a massive exposed iron core with a thin silicate mantle and crust, ~70% iron core by volume. The result of forming in the most metal-rich region of the disk at this orbital distance. The enormous liquid iron outer core generates a strong magnetic field that protects the atmosphere from stellar wind stripping.
 
 **Atmosphere** is ~0.85 atm, slightly thinner than Earth's. Breathable N₂/O₂ mix. Equivalent to roughly 1,500 m altitude on Earth: unnoticeable to most people. Weather systems and hydrological cycling function normally but storms carry slightly less energy.
 
@@ -128,7 +128,7 @@ Plate tectonics has since entered a declining phase. The planet's small thermal 
 
 **Surface resources**: the metal-rich composition means iron, nickel, and siderophile elements are abnormally abundant near the surface. This shaped the civilization's technological trajectory.
 
-### Moon
+### Mira (Moon)
 
 | Property | Value |
 |---|---|
@@ -144,9 +144,22 @@ Plate tectonics has since entered a declining phase. The planet's small thermal 
 
 Formed from a giant impact that ejected silicate mantle material, so the Moon is less dense than the planet (silicate-dominated rather than iron-dominated). Tidally locked, airless, heavily cratered. Angular size is nearly identical to our Moon as seen from Earth, preserving familiar eclipse geometry. Provides axial tilt stabilization.
 
+### Selva (Minor Moon)
+
+| Property | Value |
+|---|---|
+| Orbital radius | 269,000 km |
+| Orbital period | ~13 days |
+| Radius | 190 km |
+| Mass | 3.6 × 10¹⁹ kg |
+| Albedo | 0.25 |
+| Inclination | 3.0° |
+
+Small captured or co-accreted body in a circular orbit beyond Mira. Silicate-dominated composition similar to Mira. A potential early-game waypoint between Thalos and Auron.
+
 ---
 
-## IV. Sub-Saturn (Nearby Gas Giant)
+## IV. Auron (Sub-Saturn)
 
 | Property | Value |
 |---|---|
@@ -161,9 +174,9 @@ Formed from a giant impact that ejected silicate mantle material, so the Moon is
 
 ### Orbital resonance
 
-Locked in a 3:2 mean-motion resonance with the homeworld. Conjunction occurs every ~3 years at a minimum separation of 0.31 AU (~46.4 million km). The resonance prevents chaotic perturbation accumulation and ensures long-term stability of both orbits.
+Locked in a 3:2 mean-motion resonance with Thalos. Conjunction occurs every ~3 years at a minimum separation of 0.31 AU (~46.4 million km). The resonance prevents chaotic perturbation accumulation and ensures long-term stability of both orbits.
 
-### Appearance from the homeworld
+### Appearance from Thalos
 
 | Feature | Angular size | Comparison |
 |---|---|---|
@@ -173,7 +186,7 @@ Locked in a 3:2 mean-motion resonance with the homeworld. Conjunction occurs eve
 
 At conjunction: a striking naked-eye disk with visible gold coloration. The ring system, at favorable inclination, extends the apparent size to nearly half the Moon's diameter. The brightest object in the night sky by a wide margin. At opposition: shrinks to a brilliant point, still brighter than any star.
 
-### IV-a. Ocean Moon (Cambrian World)
+### IV-a. Pelagos (Ocean Moon)
 
 | Property | Value |
 |---|---|
@@ -189,11 +202,11 @@ At conjunction: a striking naked-eye disk with visible gold coloration. The ring
 | Hydrosphere | ~85% ocean cover |
 | Surface temp | 270-290 K (-3 to 17 °C) |
 
-The most biologically significant body in the system. Dual energy input: stellar insolation from the habitable-zone-adjacent orbit and tidal heating from the sub-Saturn. Tidal forces maintain active volcanism and hydrothermal circulation, cycling nutrients through the ocean.
+The most biologically significant body in the system. Dual energy input: stellar insolation from the habitable-zone-adjacent orbit and tidal heating from Auron. Tidal forces maintain active volcanism and hydrothermal circulation, cycling nutrients through the ocean.
 
 At 0.54 g and 0.4 atm, this is a world you can stand on. The atmosphere is too thin and CO₂-rich for unassisted breathing, but pressure suits can be minimal: oxygen supply and thermal regulation, no full pressurization needed. Waves are long and slow. Rain falls gently. Volcanic island arcs break the ocean surface but there are no continents.
 
-**Sky from the surface**: the sub-Saturn dominates, subtending ~10° (20x the Moon from Earth). Regular stellar eclipses behind the gas giant. The homeworld is the brightest point in the night sky.
+**Sky from the surface**: Auron dominates, subtending ~10° (20x the Moon from Earth). Regular stellar eclipses behind the gas giant. Thalos is the brightest point in the night sky.
 
 #### Biology
 
@@ -215,13 +228,19 @@ The ecosystem is alien but recognizable. Convergent evolution produces body plan
 | Delta-v to orbit (est.) | ~4.2 km/s |
 | Escape velocity | 5.0 km/s |
 
-### IV-b, IV-c. Minor Moons
+### IV-b, IV-c, IV-d. Minor Moons — Carpo, Theron, Maren
 
-Two to four smaller captured bodies in irregular orbits (50-300 km radius). Mining and refueling waypoints.
+| Moon | Radius | Mass | Orbital radius | Eccentricity | Inclination | Albedo |
+|---|---|---|---|---|---|---|
+| Carpo (IV-b) | 180 km | 1.5 × 10¹⁹ kg | 799,000 km | 0.04 | 8.0° | 0.15 |
+| Maren (IV-c) | 75 km | 9.5 × 10¹⁷ kg | 1,198,000 km | 0.12 | 47.0° | 0.08 |
+| Theron (IV-d) | 120 km | 3.9 × 10¹⁸ kg | 2,094,000 km | 0.18 | 154.0° (retrograde) | 0.05 |
+
+Three captured bodies in irregular orbits. Carpo is the innermost and most accessible; Maren orbits at moderate inclination; Theron is retrograde with a very dark carbonaceous surface. Mining and refueling waypoints.
 
 ---
 
-## V. Mars Analogue (Dying World)
+## V. Vaelen (Mars Analogue)
 
 | Property | Value |
 |---|---|
@@ -245,17 +264,17 @@ Two to four smaller captured bodies in irregular orbits (50-300 km radius). Mini
 | Delta-v to orbit (est.) | ~1.7 km/s |
 | Escape velocity | 2.2 km/s |
 
-The easiest major body to land on and launch from. Single-stage landers with generous margins. Transfer windows from the homeworld vary dramatically due to high eccentricity: favorable windows are cheap, unfavorable ones significantly more expensive.
+The easiest major body to land on and launch from. Single-stage landers with generous margins. Transfer windows from Thalos vary dramatically due to high eccentricity: favorable windows are cheap, unfavorable ones significantly more expensive.
 
 ### Orbital instability
 
-Secularly unstable. Perturbations from the sub-Saturn (IV) and Jupiter-analogue (VII) slowly pump eccentricity. No damping mechanism exists (no massive moon, no thick atmosphere, no tidal interaction with a nearby giant).
+Secularly unstable. Perturbations from Auron and Teros slowly pump eccentricity. No damping mechanism exists (no massive moon, no thick atmosphere, no tidal interaction with a nearby giant).
 
 **Geological history**: formed with low eccentricity (~0.03) and likely had surface liquid water for its first ~1.5 billion years. Ancient riverbeds, evaporite deposits, and sedimentary layering record this wetter past. As eccentricity climbed, surface water was lost to sublimation at perihelion and permanent freezing at aphelion. Subsurface water ice persists at higher latitudes and in sheltered craters.
 
 **Current conditions**: eccentricity of ~0.20 produces perihelion insolation ~44% higher than aphelion. Extreme seasonal temperature swings. CO₂ cycles between polar caps and atmosphere. Dust storms triggered by perihelion heating.
 
-**Prognosis**: within ~1 billion years, eccentricity climbs high enough that perihelion approaches enter the sub-Saturn's sphere of influence. Most probable outcome: gravitational scattering and ejection from the system as a rogue planet.
+**Prognosis**: within ~1 billion years, eccentricity climbs high enough that perihelion approaches enter Auron's sphere of influence. Most probable outcome: gravitational scattering and ejection from the system as a rogue planet.
 
 ### Colonization value
 
@@ -267,6 +286,15 @@ The doom timescale is irrelevant to civilization. Primary value:
 - **Trivial gravity well**: cheap to operate from, ideal staging point
 - **Cultural weight**: a world visibly dying on geological timescales, with ancient riverbeds and a doomed orbit
 
+### Kael and Sorn (Moons)
+
+| Moon | Radius | Mass | Orbital radius | Eccentricity | Inclination |
+|---|---|---|---|---|---|
+| Kael | 14 km | 7.3 × 10¹³ kg | 94,000 km | 0.015 | 1.1° |
+| Sorn | 8 km | 1.7 × 10¹³ kg | 150,000 km | 0.002 | 1.8° |
+
+Two tiny moons in near-circular, low-inclination orbits. Likely captured asteroids or co-accreted debris. Too small for meaningful gravity; useful as navigation landmarks or micro-refueling stops.
+
 ---
 
 ## VI. Asteroid Belt
@@ -277,11 +305,11 @@ The doom timescale is irrelevant to civilization. Primary value:
 | Outer edge | ~3.8 AU |
 | Total mass | ~0.001 M🜨 |
 
-Sculpted by resonances with the Jupiter-analogue. Kirkwood-style gaps present. Mix of metallic (inner belt), silicate, and carbonaceous (outer belt) bodies. Largest body: ~400-600 km diameter, possibly differentiated. The metal-rich disk origin means the belt's metallic fraction is higher than our asteroid belt.
+Sculpted by resonances with Teros. Kirkwood-style gaps present. Mix of metallic (inner belt), silicate, and carbonaceous (outer belt) bodies. Largest body: ~400-600 km diameter, possibly differentiated. The metal-rich disk origin means the belt's metallic fraction is higher than our asteroid belt.
 
 ---
 
-## VII. Jupiter Analogue
+## VII. Teros (Jupiter Analogue)
 
 | Property | Value |
 |---|---|
@@ -295,9 +323,9 @@ Sculpted by resonances with the Jupiter-analogue. Kirkwood-style gaps present. M
 | Atmosphere | H₂/He, ammonia cloud bands, ochre/white |
 | Notable | Persistent storm systems, intense radiation belts |
 
-Primary debris shield for the inner system. Extensive moon system. Intense radiation environment complicates close operations.
+Primary debris shield for inner system. Extensive moon system. Intense radiation environment complicates close operations.
 
-### VII-a. Europa Analogue (Ice Moon)
+### VII-a. Glacis (Europa Analogue)
 
 | Property | Value |
 |---|---|
@@ -317,19 +345,23 @@ Tidal heating maintains a liquid ocean beneath the ice shell. Hydrothermal vents
 
 **Biology**: chemosynthetic microbial life. Biofilms around hydrothermal vents, free-swimming single-celled organisms in the water column. The energy budget of chemosynthesis imposes a complexity ceiling: diverse microbial ecosystem, but no multicellularity.
 
-Exploration requires drilling through the ice shell or sampling cryovolcanic deposits. The Jupiter-analogue's radiation belts are a significant hazard.
+Exploration requires drilling through the ice shell or sampling cryovolcanic deposits. Teros's radiation belts are a significant hazard.
 
-### VII-b through VII-e. Major Moons
+### VII-b through VII-d. Major Moons — Pyrith, Lithos, Calyx
 
-Three additional large moons:
+| Moon | Radius | Mass | Orbital radius | Albedo | Character |
+|---|---|---|---|---|---|
+| Pyrith (VII-b) | 910 km | 1.14 × 10²² kg | 422,000 km | 0.40 | Io analogue, volcanic |
+| Lithos (VII-c) | 1,315 km | 1.79 × 10²² kg | 1,070,000 km | 0.15 | Large icy, ancient cratered |
+| Calyx (VII-d) | 1,205 km | 1.37 × 10²² kg | 1,880,000 km | 0.10 | Mixed ice-rock, dark |
 
-- **VII-b**: Io analogue. Volcanic, tidally tortured, sulfur-rich surface. Deep in the radiation belts.
-- **VII-c**: Large icy moon, ancient cratered surface. Possible frozen fossil ocean. Geological record of early system bombardment.
-- **VII-d**: Largest moon, mixed ice-rock. Thin atmosphere possible. Most habitable of the outer moons due to lower radiation at its orbital distance.
+- **Pyrith**: Io analogue. Volcanic, tidally tortured, sulfur-rich surface. Deep in the radiation belts.
+- **Lithos**: Large icy moon, ancient cratered surface. Possible frozen fossil ocean. Geological record of early system bombardment.
+- **Calyx**: Mixed ice-rock. Thin atmosphere possible. Most habitable of the outer moons due to lower radiation at its orbital distance.
 
 ---
 
-## VIII. Second Gas Giant
+## VIII. Seraph (Second Gas Giant)
 
 | Property | Value |
 |---|---|
@@ -342,11 +374,25 @@ Three additional large moons:
 | Ring system | Prominent, wide, icy |
 | Atmosphere | H₂/He, muted blue-gold banding |
 
-The visual showpiece of the outer system. Dense, bright icy rings with visible gaps and divisions, more spectacular than the sub-Saturn's. Several mid-sized moons, including a Titan-class body with a thick nitrogen/methane atmosphere and hydrocarbon lakes.
+The visual showpiece of the outer system. Dense, bright icy rings with visible gaps and divisions, more spectacular than Auron's. Several mid-sized moons, including a Titan-class body with a thick nitrogen/methane atmosphere and hydrocarbon lakes.
+
+### VIII-a. Tethyn (Titan-Class Moon)
+
+| Property | Value |
+|---|---|
+| Orbital radius | 1,222,000 km |
+| Orbital period | ~16 days |
+| Radius | 1,288 km |
+| Mass | 1.79 × 10²² kg |
+| Eccentricity | 0.029 |
+| Inclination | 0.3° |
+| Albedo | 0.20 |
+
+The largest of Seraph's moons. Thick nitrogen/methane atmosphere with hydrocarbon lakes on the surface. The only moon in the outer system with a substantial atmosphere, making it a high-value exploration target despite the distance.
 
 ---
 
-## IX. Inner Ice Giant
+## IX. Nereus (Inner Ice Giant)
 
 | Property | Value |
 |---|---|
@@ -362,7 +408,7 @@ Methane absorption gives it a striking color. A few small icy moons. Missions he
 
 ---
 
-## X. Outer Ice Giant
+## X. Pallos (Outer Ice Giant)
 
 | Property | Value |
 |---|---|
@@ -389,21 +435,21 @@ The ten major planets orbit within 2-3° of the invariable plane, a direct conse
 
 ### Trojan populations
 
-#### VII L4/L5 Trojans (Jupiter-analogue)
+#### VII L4/L5 Trojans (Teros)
 
-Thousands of small bodies trapped at the Jupiter-analogue's leading and trailing Lagrange points, co-orbital at 5.0 AU. Compositionally more primitive than the main belt: volatile-rich, carbonaceous, dark surfaces. A few are large enough (100-200 km) to be individually significant. These are accessible from the Jupiter system without the delta-v cost of returning to the main belt, making them a convenient resource population for outer-system operations.
+Thousands of small bodies trapped at Teros's leading and trailing Lagrange points, co-orbital at 5.0 AU. Compositionally more primitive than the main belt: volatile-rich, carbonaceous, dark surfaces. A few are large enough (100-200 km) to be individually significant. These are accessible from Teros without the delta-v cost of returning to the main belt, making them a convenient resource population for outer-system operations.
 
-#### IV L4/L5 Trojans (Sub-Saturn)
+#### IV L4/L5 Trojans (Auron)
 
-A smaller population trapped at the sub-Saturn's Lagrange points at 1.31 AU. Less massive due to the sub-Saturn's lower mass, but notable because they sit in the habitable zone. Small volatile-rich bodies at Earth-like stellar distances. Potential early-game targets: closer than the main belt, scientifically interesting, and a testbed for asteroid rendezvous missions before committing to the belt.
+A smaller population trapped at Auron's Lagrange points at 1.31 AU. Less massive due to Auron's lower mass, but notable because they sit in the habitable zone. Small volatile-rich bodies at Earth-like stellar distances. Potential early-game targets: closer than the main belt, scientifically interesting, and a testbed for asteroid rendezvous missions before committing to the belt.
 
 ### Asteroid belt structure (VI, expanded)
 
-The belt (2.5-3.8 AU) is sculpted by the Jupiter-analogue's resonances. Kirkwood-style gaps at the 3:1 (~2.5 AU), 5:2, 7:3, and 2:1 (~3.8 AU) mean-motion resonances carve the belt into distinct zones. The metal-rich disk origin produces a higher metallic fraction than our asteroid belt:
+The belt (2.5-3.8 AU) is sculpted by Teros's resonances. Kirkwood-style gaps at the 3:1 (~2.5 AU), 5:2, 7:3, and 2:1 (~3.8 AU) mean-motion resonances carve the belt into distinct zones. The metal-rich disk origin produces a higher metallic fraction than our asteroid belt:
 
 - **Inner belt (2.5-2.8 AU)**: dominated by metallic (M-type) and silicate (S-type) bodies. Dense, iron-rich. Primary mining targets for platinum-group metals.
 - **Mid belt (2.8-3.3 AU)**: mixed composition. Transitional zone.
-- **Outer belt (3.3-3.8 AU)**: dominated by carbonaceous (C-type) bodies. Volatile-rich: water, organics, carbon compounds. Primary mining targets for the homeworld's scarcity resources.
+- **Outer belt (3.3-3.8 AU)**: dominated by carbonaceous (C-type) bodies. Volatile-rich: water, organics, carbon compounds. Primary mining targets for Thalos's scarcity resources.
 
 Largest body: ~500 km diameter, possibly differentiated with a metallic core and silicate mantle. A dwarf planet candidate with enough gravity to be roughly spherical. Potential site for a permanent belt operations hub.
 
@@ -411,10 +457,10 @@ Individual asteroids and minor bodies within the belt will be detailed separatel
 
 ### Kuiper belt analogue (30-55 AU)
 
-A broad disk of icy bodies beyond Planet X. The population has structure carved by resonances with the ice giants:
+A broad disk of icy bodies beyond Pallos. The population has structure carved by resonances with the ice giants:
 
 - **Classical belt (38-48 AU)**: dynamically cold, low eccentricity (< 0.1), low inclination (< 5°). These objects have sat undisturbed since formation. The most pristine material in the accessible system.
-- **Resonant populations**: objects locked in mean-motion resonances with Planet X (3:2, 2:1, 5:3). Protected from scattering by the resonance lock, some with significant eccentricity and inclination.
+- **Resonant populations**: objects locked in mean-motion resonances with Pallos (3:2, 2:1, 5:3). Protected from scattering by the resonance lock, some with significant eccentricity and inclination.
 - **Scattered belt (45-55+ AU)**: objects that had encounters with the ice giants and were kicked onto eccentric, inclined orbits (inclinations up to 30°). The transition zone between the Kuiper belt and the scattered disk.
 
 ### Scattered disk (50-200+ AU)
@@ -429,7 +475,7 @@ A spherical shell of icy bodies at thousands to tens of thousands of AU. Effecti
 
 ## Named Small Bodies
 
-### Pluto Analogue (Kuiper belt dwarf planet)
+### Erebos (Pluto Analogue)
 
 | Property | Value |
 |---|---|
@@ -437,21 +483,33 @@ A spherical shell of icy bodies at thousands to tens of thousands of AU. Effecti
 | Orbital period | 272 years |
 | Eccentricity | 0.25 |
 | Inclination | 17° |
-| Perihelion | 31.5 AU (crosses inside Planet X's orbit) |
+| Perihelion | 31.5 AU (crosses inside Pallos's orbit) |
 | Aphelion | 52.5 AU |
 | Radius | ~600 km |
 | Surface gravity | ~0.03 g |
 | Surface | Nitrogen/methane ices, reddish tholins |
 | Atmosphere | Thin N₂, partially freezes out at aphelion |
-| Resonance | 3:2 with Planet X |
+| Resonance | 3:2 with Pallos |
 
 Binary system. A large companion moon roughly 40% its diameter, tidally locked into a mutual orbit (both bodies face each other permanently, orbiting their common barycenter every ~6 days). The pair likely formed from a giant impact in the early Kuiper belt.
 
-The 3:2 resonance with Planet X keeps it safe despite its orbit crossing inside the ice giant's path. At perihelion, the thin nitrogen atmosphere sublimates and expands. At aphelion, it freezes back onto the surface as frost. A world that breathes on a 272-year cycle.
+The 3:2 resonance with Pallos keeps it safe despite its orbit crossing inside the ice giant's path. At perihelion, the thin nitrogen atmosphere sublimates and expands. At aphelion, it freezes back onto the surface as frost. A world that breathes on a 272-year cycle.
 
 Late-game exploration target. Reaching it is a statement of capability. The binary dynamics and seasonal atmosphere make it scientifically rich.
 
-### Haumea Analogue (Kuiper belt, collisional family)
+#### Nyx (Companion Moon)
+
+| Property | Value |
+|---|---|
+| Orbital radius | 19,400 km |
+| Radius | 240 km |
+| Mass | 5.2 × 10¹⁹ kg |
+| Albedo | 0.10 |
+| Composition | 60% ice, 38% silicate |
+
+The large companion in the Erebos binary system. Tidally locked into mutual orbit. Likely formed from the same giant impact that shaped the binary. Icy composition with a dirty surface.
+
+### Vorra (Haumea Analogue)
 
 | Property | Value |
 |---|---|
@@ -468,7 +526,7 @@ The fastest-spinning large body in the system. Its extreme rotation distorts it 
 
 The narrow ring, orbiting close to the surface, makes it the smallest known ringed body in the system. High inclination (28°) is a relic of the collision or subsequent scattering.
 
-### Sedna Analogue (Detached object)
+### Acheron (Sedna Analogue)
 
 | Property | Value |
 |---|---|
@@ -488,7 +546,7 @@ The surface has never been meaningfully warmed by the star. Ultraprocessed organ
 
 Reaching it is the ultimate deep-space challenge. A mission to the Sedna analogue is a multi-decade commitment at minimum. The reward is the most pristine sample of primordial material accessible anywhere.
 
-### Centaur (High-inclination stray)
+### Chiron (Centaur)
 
 | Property | Value |
 |---|---|
@@ -501,9 +559,9 @@ Reaching it is the ultimate deep-space challenge. A mission to the Sedna analogu
 | Radius | ~120 km |
 | Surface | Mixed ice and rock, intermittent cometary activity |
 
-A Kuiper belt refugee. It migrated inward through gravitational encounters and now orbits between the two outermost giant planets on an unstable orbit. It will eventually be ejected from the system, captured by a giant, or scattered further inward. Dynamical lifetime: tens of millions of years at most.
+A Kuiper belt refugee. It migrated inward through gravitational encounters and now orbits between Nereus and Pallos on an unstable orbit. It will eventually be ejected from the system, captured by a giant, or scattered further inward. Dynamical lifetime: tens of millions of years at most.
 
-Perihelion passages near the ringed giant (VIII) trigger cometary outbursts: subsurface volatiles heat, pressurize, and vent, producing brief comas and dust tails. Unpredictable and spectacular. The high inclination (35°) takes it well out of the ecliptic plane, requiring dedicated mission design to reach.
+Perihelion passages near Seraph trigger cometary outbursts: subsurface volatiles heat, pressurize, and vent, producing brief comas and dust tails. Unpredictable and spectacular. The high inclination (35°) takes it well out of the ecliptic plane, requiring dedicated mission design to reach.
 
 Scientifically valuable as a Kuiper belt sample that's come to the player rather than requiring a trip to 40+ AU.
 
@@ -511,7 +569,7 @@ Scientifically valuable as a Kuiper belt sample that's come to the player rather
 
 ## Named Comets
 
-### Short-period Comet (Cultural comet)
+### Wanderer (Short-period Comet)
 
 | Property | Value |
 |---|---|
@@ -519,13 +577,13 @@ Scientifically valuable as a Kuiper belt sample that's come to the player rather
 | Orbital period | ~52 years |
 | Eccentricity | 0.92 |
 | Inclination | 22° |
-| Perihelion | 1.4 AU (between homeworld and sub-Saturn) |
+| Perihelion | 1.4 AU (between Thalos and Auron) |
 | Aphelion | ~33 AU |
 | Nucleus radius | ~6 km |
 
 The civilization's Halley's comet. Returns within a lifetime but rarely: two or three appearances per century. Bright enough to be visible with the naked eye for weeks around perihelion, developing a prominent dust tail and a fainter ion tail. Deeply embedded in mythology, calendar systems, and cultural memory. Historical records of its appearances stretch back millennia.
 
-Its perihelion at 1.4 AU brings it between the homeworld and the sub-Saturn, meaning it passes through the busiest part of the system. An intercept mission during perihelion approach is a dramatic early-to-mid game objective: time-limited (the window is narrow), scientifically valuable (pristine volatiles and organics), and culturally resonant (you're visiting the mythological wanderer).
+Its perihelion at 1.4 AU brings it between Thalos and Auron, meaning it passes through the busiest part of the system. An intercept mission during perihelion approach is a dramatic early-to-mid game objective: time-limited (the window is narrow), scientifically valuable (pristine volatiles and organics), and culturally resonant (you're visiting the mythological wanderer).
 
 The comet is Kuiper belt-derived, captured into its current orbit by past interactions with the ice giants. It has been losing mass each perihelion for thousands of orbits. The surface is a dark, processed crust with active jets on the sunward side.
 
@@ -536,7 +594,7 @@ The comet is Kuiper belt-derived, captured into its current orbit by past intera
 | Semi-major axis | Effectively parabolic (~10,000+ AU) |
 | Eccentricity | ~0.9999 |
 | Inclination | 67° |
-| Perihelion | 0.45 AU (inside Venus-analogue orbit) |
+| Perihelion | 0.45 AU (inside Ashara's orbit) |
 | Nucleus radius | ~30 km |
 
 A long-period comet from the Oort cloud. Appears once during the game timeline, unpredicted. First detected as a faint smudge in deep-space survey data, it brightens over months as it falls sunward on a near-parabolic orbit.
@@ -545,7 +603,7 @@ At perihelion (0.45 AU), it is spectacularly bright: easily visible in daylight,
 
 The nucleus is enormous by cometary standards (30 km). This is likely its first pass through the inner system, so the surface is pristine: unprocessed primordial ices, pre-solar grains, organic compounds unaltered since the system formed. A one-time scientific opportunity.
 
-An intercept mission is challenging: the high inclination demands a large plane-change maneuver (expensive in delta-v), and the trajectory is only known with sufficient precision a few months before perihelion. A time-pressured, resource-intensive mission with irreplaceable scientific payoff. The player can also simply watch it from the homeworld, which is its own kind of experience.
+An intercept mission is challenging: the high inclination demands a large plane-change maneuver (expensive in delta-v), and the trajectory is only known with sufficient precision a few months before perihelion. A time-pressured, resource-intensive mission with irreplaceable scientific payoff. The player can also simply watch it from Thalos, which is its own kind of experience.
 
 After perihelion, it swings back outward and will not return for millions of years, if ever. The gravitational perturbations of the inner passage may alter its orbit enough to eject it from the system entirely.
 
@@ -561,53 +619,53 @@ After perihelion, it swings back outward and will not return for millions of yea
 
 | Body | Gravity | Delta-v to orbit | Character |
 |---|---|---|---|
-| I. Hot rocky | 0.16 g | ~0.9 km/s | Trivial landing, thermal hell |
-| V. Mars | 0.21 g | ~1.7 km/s | Easy, friendly waypoint |
-| IV-a. Ocean moon | 0.54 g | ~4.2 km/s | Moderate, scientifically priceless |
-| III. Homeworld | 0.91 g | ~6.5 km/s | Home base |
-| II. Venus | 1.09 g | ~9.5 km/s | Punishing, thick atmosphere |
+| I. Ignis | 0.16 g | ~0.9 km/s | Trivial landing, thermal hell |
+| V. Vaelen | 0.21 g | ~1.7 km/s | Easy, friendly waypoint |
+| IV-a. Pelagos | 0.54 g | ~4.2 km/s | Moderate, scientifically priceless |
+| III. Thalos | 0.91 g | ~6.5 km/s | Home base |
+| II. Ashara | 1.09 g | ~9.5 km/s | Punishing, thick atmosphere |
 
 ### Orbital distances
 
 | Route | Distance (AU) | Character |
 |---|---|---|
-| III to Moon | 0.0013 | First destination |
-| III to IV (conjunction) | 0.31 | Closest neighbor, every ~3 years |
-| III to II | ~0.35 | Short but punishing |
-| III to V (favorable) | ~0.5 | Varies with eccentricity |
-| III to V (unfavorable) | ~1.2 | Wait for a better window |
-| III to VII | ~4.0 | Major expedition |
-| III to VIII | ~7.5 | Ring tourism |
-| III to X | ~27 | Deep space |
-| III to Pluto analogue (perihelion) | ~30 | Kuiper belt, late-game |
-| III to Sedna analogue (perihelion) | ~77 | Extreme deep space |
+| Thalos to Mira | 0.0013 | First destination |
+| Thalos to Auron (conjunction) | 0.31 | Closest neighbor, every ~3 years |
+| Thalos to Ashara | ~0.35 | Short but punishing |
+| Thalos to Vaelen (favorable) | ~0.5 | Varies with eccentricity |
+| Thalos to Vaelen (unfavorable) | ~1.2 | Wait for a better window |
+| Thalos to Teros | ~4.0 | Major expedition |
+| Thalos to Seraph | ~7.5 | Ring tourism |
+| Thalos to Pallos | ~27 | Deep space |
+| Thalos to Erebos (perihelion) | ~30 | Kuiper belt, late-game |
+| Thalos to Acheron (perihelion) | ~77 | Extreme deep space |
 
 ### System structure by distance
 
 | Zone | Distance (AU) | Contents |
 |---|---|---|
-| Inner system | 0.3-1.7 | Planets I-V, sub-Saturn trojans |
+| Inner system | 0.3-1.7 | Ignis, Ashara, Thalos, Auron, Vaelen |
 | Main belt | 2.5-3.8 | Asteroids, dwarf planet candidate |
-| Giant planets | 5.0-28 | Planets VII-X, Jupiter trojans, centaur |
-| Kuiper belt | 30-55 | Icy dwarfs, Pluto/Haumea analogues |
-| Scattered disk | 50-200+ | Sedna analogue, detached objects |
+| Giant planets | 5.0-28 | Teros, Seraph, Nereus, Pallos; Chiron |
+| Kuiper belt | 30-55 | Erebos, Vorra, icy dwarfs |
+| Scattered disk | 50-200+ | Acheron, detached objects |
 | Oort cloud | 10,000+ | Source of long-period comets |
 
 ### System stability
 
 | Component | Status |
 |---|---|
-| III-IV resonance lock | Stable indefinitely |
-| Outer giants (VII-X) | Stable indefinitely |
-| Pluto analogue (3:2 with X) | Resonance-protected, stable |
-| V (Mars analogue) | Unstable, ejection in ~1 Gyr |
-| Centaur | Unstable, ejection or capture in ~10 Myr |
-| I (hot rocky) | Stable but slowly spiraling inward |
+| Thalos–Auron resonance lock | Stable indefinitely |
+| Outer giants (Teros–Pallos) | Stable indefinitely |
+| Erebos (3:2 with Pallos) | Resonance-protected, stable |
+| Vaelen | Unstable, ejection in ~1 Gyr |
+| Chiron | Unstable, ejection or capture in ~10 Myr |
+| Ignis | Stable but slowly spiraling inward |
 
 ### Biological inventory
 
 | Body | Life | Complexity | Energy source |
 |---|---|---|---|
-| III (homeworld) | Yes | Technological civilization | Photosynthesis |
-| IV-a (ocean moon) | Yes | Cambrian-equivalent marine | Photosynthesis + chemosynthesis |
-| VII-a (ice moon) | Yes | Microbial | Chemosynthesis |
+| Thalos | Yes | Technological civilization | Photosynthesis |
+| Pelagos | Yes | Cambrian-equivalent marine | Photosynthesis + chemosynthesis |
+| Glacis | Yes | Microbial | Chemosynthesis |

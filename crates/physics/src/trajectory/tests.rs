@@ -66,6 +66,7 @@ fn make_single_star_system() -> SolarSystemDefinition {
         soi_radius_m: f64::INFINITY,
         orbital_elements: None,
         generator: None,
+        atmosphere: None,
     };
 
     let mut name_to_id = HashMap::new();
@@ -102,6 +103,7 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
         soi_radius_m: f64::INFINITY,
         orbital_elements: None,
         generator: None,
+        atmosphere: None,
     };
 
     let thalos_mass = 1.378e24;
@@ -127,6 +129,7 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
             true_anomaly_rad: 0.0,
         }),
         generator: None,
+        atmosphere: None,
     };
 
     let mut name_to_id = HashMap::new();
@@ -386,7 +389,136 @@ fn stable_orbit_detected_after_prograde_burn() {
         "post-burn segment should detect stable orbit",
     );
     assert!(
-        post_burn.stable_orbit_start_index.is_some_and(|idx| idx > 0),
+        post_burn
+            .stable_orbit_start_index
+            .is_some_and(|idx| idx > 0),
         "stable orbit should start after finite-burn lead-in",
+    );
+}
+
+#[test]
+fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
+    let system = make_thalos_like_system();
+    let ephemeris = PatchedConics::new(&system, 2.0e7);
+
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_gm = system.bodies[1].gm;
+    let orbit_radius = system.bodies[1].radius_m + 200_000.0;
+    let circular_speed = (thalos_gm / orbit_radius).sqrt();
+    let orbital_period = std::f64::consts::TAU * (orbit_radius.powi(3) / thalos_gm).sqrt();
+
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(orbit_radius, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, circular_speed),
+    };
+
+    let node_time = orbital_period * 2.0;
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        time: node_time,
+        delta_v: DVec3::ZERO,
+        reference_body: 1,
+    });
+
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &maneuvers,
+        &ephemeris,
+        &system.bodies,
+        &PredictionConfig {
+            max_steps_per_segment: 40_000,
+            cone_fade_threshold: f64::INFINITY,
+            ..PredictionConfig::default()
+        },
+        IntegratorConfig {
+            symplectic_dt: 60.0,
+            rk_initial_dt: 60.0,
+            ..IntegratorConfig::default()
+        },
+        system.ship.thrust_acceleration,
+    );
+
+    assert!(
+        prediction.segments.len() >= 2,
+        "placing a node in the future should keep propagating past the node",
+    );
+    assert!(
+        prediction.segments[0]
+            .end_time()
+            .is_some_and(|end| (end - node_time).abs() <= 1e-6),
+        "the pre-node leg should reach the maneuver boundary",
+    );
+    assert!(
+        prediction
+            .segments
+            .iter()
+            .skip(1)
+            .flat_map(|seg| seg.samples.iter())
+            .any(|sample| sample.time > node_time),
+        "expected propagated samples after the maneuver node",
+    );
+}
+
+#[test]
+fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
+    let system = make_thalos_like_system();
+    let ephemeris = PatchedConics::new(&system, 2.0e7);
+
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_gm = system.bodies[1].gm;
+    let orbit_radius = system.bodies[1].radius_m + 200_000.0;
+    let circular_speed = (thalos_gm / orbit_radius).sqrt();
+    let orbital_period = std::f64::consts::TAU * (orbit_radius.powi(3) / thalos_gm).sqrt();
+
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(orbit_radius, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, circular_speed),
+    };
+
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        time: orbital_period * 2.0,
+        delta_v: DVec3::new(100.0, 0.0, 0.0),
+        reference_body: 1,
+    });
+
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &maneuvers,
+        &ephemeris,
+        &system.bodies,
+        &PredictionConfig {
+            max_steps_per_segment: 40_000,
+            cone_fade_threshold: f64::INFINITY,
+            ..PredictionConfig::default()
+        },
+        IntegratorConfig {
+            symplectic_dt: 60.0,
+            rk_initial_dt: 60.0,
+            ..IntegratorConfig::default()
+        },
+        system.ship.thrust_acceleration,
+    );
+
+    let mut post_node_samples = 0usize;
+    let mut max_r = 0.0_f64;
+    for seg in prediction.segments.iter().skip(1) {
+        for sample in &seg.samples {
+            let thalos_pos = ephemeris.query_body(1, sample.time).position;
+            let r = (sample.position - thalos_pos).length();
+            max_r = max_r.max(r);
+            post_node_samples += 1;
+        }
+    }
+
+    assert!(
+        post_node_samples > 0,
+        "expected propagated samples after the delayed burn"
+    );
+    assert!(
+        max_r > orbit_radius + 1.0e5,
+        "delayed prograde burn should still raise apoapsis",
     );
 }

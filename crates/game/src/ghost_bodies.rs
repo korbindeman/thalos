@@ -176,7 +176,6 @@ fn update_ghost_transforms(
     mut query: Query<(&GhostBody, &mut Transform)>,
 ) {
     for (ghost, mut transform) in &mut query {
-        transform.translation =
-            ((ghost.sim_position - origin.position) * RENDER_SCALE).as_vec3();
+        transform.translation = ((ghost.sim_position - origin.position) * RENDER_SCALE).as_vec3();
     }
 }

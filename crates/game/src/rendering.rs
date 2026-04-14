@@ -23,8 +23,9 @@ use thalos_physics::{
 
 use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
-    FilmGrain, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
-    bake_from_body_data,
+    FilmGrain, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams,
+    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, RingLayers,
+    RingMaterial, RingMaterialHandle, RingParams, bake_from_body_data, build_ring_mesh,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, Pipeline, StageDef};
 
@@ -324,6 +325,12 @@ impl Plugin for RenderingPlugin {
                     update_planet_orientations
                         .after(cache_body_states)
                         .after(finalize_planet_generation),
+                    update_gas_giant_params
+                        .after(cache_body_states)
+                        .after(update_camera_exposure),
+                    update_ring_params
+                        .after(cache_body_states)
+                        .after(update_camera_exposure),
                     update_ship_position.after(update_render_origin),
                     recompute_orbit_trails.after(cache_body_states),
                     draw_orbits
@@ -350,6 +357,8 @@ fn spawn_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut gas_giant_materials: ResMut<Assets<GasGiantMaterial>>,
+    mut ring_materials: ResMut<Assets<RingMaterial>>,
     sim: Res<SimulationState>,
 ) {
     let bodies = &sim.system.bodies;
@@ -375,12 +384,19 @@ fn spawn_bodies(
         let base_color = Color::srgb(r, g, b);
         let is_star = body.kind == BodyKind::Star;
 
-        // Icon material: unlit, emissive, double-sided flat circle.
+        // Icon material: unlit, emissive, double-sided flat circle. Alpha is
+        // driven per-frame by `sync_body_icons` to crossfade against the
+        // impostor mesh as the body shrinks through the icon threshold.
         let icon_material = std_materials.add(StandardMaterial {
-            base_color,
-            emissive: LinearRgba::new(r, g, b, 1.0) * 2.0,
+            base_color: base_color.with_alpha(0.0),
+            emissive: LinearRgba::new(r, g, b, 0.0) * 2.0,
             unlit: true,
             double_sided: true,
+            alpha_mode: AlphaMode::Blend,
+            // Modest positive bias: wins vs trajectory gizmos at the same
+            // body-center depth, but small enough that planet impostors
+            // (and other opaque surfaces in front) still occlude the icon.
+            depth_bias: 10.0,
             ..default()
         });
 
@@ -397,7 +413,12 @@ fn spawn_bodies(
                 .spawn((
                     Transform::from_translation(pos),
                     Visibility::Inherited,
-                    CelestialBody { body_id: body.id, is_star, render_radius, radius_m: body.radius_m },
+                    CelestialBody {
+                        body_id: body.id,
+                        is_star,
+                        render_radius,
+                        radius_m: body.radius_m,
+                    },
                     Name::new(body.name.clone()),
                 ))
                 .with_children(|parent| {
@@ -456,8 +477,7 @@ fn spawn_bodies(
             // Placeholder: same plain-sphere look as the non-procedural branch
             // so the body is visible immediately at roughly the right size and
             // colour while the terrain pipeline runs in the background.
-            let sphere_mesh =
-                meshes.add(Sphere::new(render_radius).mesh().ico(4).unwrap());
+            let sphere_mesh = meshes.add(Sphere::new(render_radius).mesh().ico(4).unwrap());
             let placeholder_mat = std_materials.add(StandardMaterial {
                 base_color: Color::srgb(r * body.albedo, g * body.albedo, b * body.albedo),
                 perceptual_roughness: 0.9,
@@ -469,7 +489,12 @@ fn spawn_bodies(
                 .spawn((
                     Transform::from_translation(pos),
                     Visibility::Inherited,
-                    CelestialBody { body_id: body.id, is_star, render_radius, radius_m: body.radius_m },
+                    CelestialBody {
+                        body_id: body.id,
+                        is_star,
+                        render_radius,
+                        radius_m: body.radius_m,
+                    },
                     Name::new(body.name.clone()),
                 ))
                 .id();
@@ -481,7 +506,9 @@ fn spawn_bodies(
             if tidal_axis.is_some()
                 && let Some(parent_id) = body.parent
             {
-                commands.entity(body_entity).insert(TidallyLocked { parent_id });
+                commands
+                    .entity(body_entity)
+                    .insert(TidallyLocked { parent_id });
             }
 
             let mesh_entity = commands
@@ -502,19 +529,134 @@ fn spawn_bodies(
                 ChildOf(body_entity),
             ));
 
-            commands.entity(body_entity).insert(PendingPlanetGeneration {
-                task,
-                body_id: body.id,
-                render_radius,
-                mesh_entity,
+            commands
+                .entity(body_entity)
+                .insert(PendingPlanetGeneration {
+                    task,
+                    body_id: body.id,
+                    render_radius,
+                    mesh_entity,
+                });
+        } else if let Some(atmos) = &body.atmosphere {
+            // Gas / ice giant path. No terrain bake, no placeholder
+            // swap: spawn the billboard + GasGiantMaterial directly.
+            // Per-frame updates flow through `update_gas_giant_params`
+            // exactly like `update_planet_light_dirs` does for baked
+            // bodies.
+            let meters_per_render_unit = (1.0 / RENDER_SCALE) as f32;
+            let layers = GasGiantLayers::from_params(atmos, meters_per_render_unit);
+
+            let gas_material = gas_giant_materials.add(GasGiantMaterial {
+                params: GasGiantParams {
+                    radius: render_radius,
+                    light_intensity: LIGHT_AT_1AU,
+                    // Match the `PLANET_AMBIENT = 0.0` convention used
+                    // by baked planet impostors so gas giants get the
+                    // same physically-dark shadowed hemisphere.
+                    ambient_intensity: PLANET_AMBIENT,
+                    rotation_phase: 0.0,
+                    light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
+                    orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                },
+                layers,
             });
+
+            let body_entity = commands
+                .spawn((
+                    Transform::from_translation(pos),
+                    Visibility::Inherited,
+                    CelestialBody {
+                        body_id: body.id,
+                        is_star,
+                        render_radius,
+                        radius_m: body.radius_m,
+                    },
+                    Name::new(body.name.clone()),
+                ))
+                .id();
+
+            commands.spawn((
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(gas_material.clone()),
+                BodyMesh,
+                NotShadowCaster,
+                NotShadowReceiver,
+                ChildOf(body_entity),
+            ));
+
+            commands.spawn((
+                Mesh3d(icon_mesh.clone()),
+                MeshMaterial3d(icon_material),
+                Transform::default(),
+                Visibility::Hidden,
+                BodyIcon,
+                ChildOf(body_entity),
+            ));
+
+            commands
+                .entity(body_entity)
+                .insert(GasGiantMaterialHandle(gas_material));
+
+            // ── Ring system ─────────────────────────────────────
+            //
+            // If the atmosphere authors a ring system, spawn a
+            // child entity carrying the annulus mesh and a
+            // dedicated `RingMaterial`. The ring child inherits
+            // the body's translation from the ECS hierarchy, then
+            // applies the body's axial tilt locally so the ring
+            // plane is aligned with the body equator. Per-frame
+            // updates flow through `update_ring_params`.
+            if let Some(rings) = &atmos.rings {
+                let inner_r = rings.inner_radius_m / meters_per_render_unit;
+                let outer_r = rings.outer_radius_m / meters_per_render_unit;
+                let ring_mesh = meshes.add(build_ring_mesh(inner_r, outer_r, 512));
+
+                let ring_layers = RingLayers::from_system(rings);
+                let ring_material = ring_materials.add(RingMaterial {
+                    params: RingParams {
+                        light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
+                        planet_center_radius: Vec4::new(
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            render_radius,
+                        ),
+                        light_intensity: LIGHT_AT_1AU,
+                        ambient_intensity: PLANET_AMBIENT,
+                        inner_radius: inner_r,
+                        outer_radius: outer_r,
+                    },
+                    layers: ring_layers,
+                });
+
+                // Ring child rotation is the INVERSE of the gas
+                // giant's `orientation = Rx(+tilt)`, because the
+                // cloud shader treats `orientation` as the
+                // world→body-local transform. That means the body's
+                // world-space equatorial plane normal is
+                // `Rx(-tilt) * (0,1,0)`, and the ring mesh — built
+                // with its geometric normal at +Y — needs `Rx(-tilt)`
+                // applied so it aligns with that world-space plane.
+                // If this is ever changed, update the ring-shadow
+                // test in `gas_giant.wgsl` to match — both sides
+                // must agree on the same plane.
+                let tilt = body.axial_tilt_rad as f32;
+                commands.spawn((
+                    Mesh3d(ring_mesh),
+                    MeshMaterial3d(ring_material.clone()),
+                    Transform::from_rotation(Quat::from_rotation_x(-tilt)),
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                    ChildOf(body_entity),
+                    RingMaterialHandle(ring_material),
+                ));
+            }
         } else {
             // Non-procedural body: plain icosphere with StandardMaterial.
             // No surface generator has been wired up for this body yet, so
             // it shows as a solid-color ball matching the RON `physical`
             // block — exactly the pre-migration behavior.
-            let sphere_mesh =
-                meshes.add(Sphere::new(render_radius).mesh().ico(4).unwrap());
+            let sphere_mesh = meshes.add(Sphere::new(render_radius).mesh().ico(4).unwrap());
             let sphere_material = std_materials.add(StandardMaterial {
                 base_color: Color::srgb(r * body.albedo, g * body.albedo, b * body.albedo),
                 perceptual_roughness: 0.9,
@@ -526,7 +668,12 @@ fn spawn_bodies(
                 .spawn((
                     Transform::from_translation(pos),
                     Visibility::Inherited,
-                    CelestialBody { body_id: body.id, is_star, render_radius, radius_m: body.radius_m },
+                    CelestialBody {
+                        body_id: body.id,
+                        is_star,
+                        render_radius,
+                        radius_m: body.radius_m,
+                    },
                     Name::new(body.name.clone()),
                 ))
                 .with_children(|parent| {
@@ -554,6 +701,9 @@ fn spawn_bodies(
         emissive: LinearRgba::WHITE * 2.0,
         unlit: true,
         double_sided: true,
+        // Push the ship marker in front of every planet/billboard so it
+        // never z-fights with a body that happens to share its depth.
+        depth_bias: 1.0e9,
         ..default()
     });
 
@@ -679,7 +829,9 @@ fn update_camera_exposure(
     bodies: Query<&CelestialBody>,
     mut exposure: ResMut<CameraExposure>,
 ) {
-    let Some(ref states) = cache.states else { return };
+    let Some(ref states) = cache.states else {
+        return;
+    };
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
 
     let focus_dist_m = focus
@@ -704,10 +856,7 @@ fn update_camera_exposure(
 /// is more grain. We add grain proportional to the positive EV push so Nyx
 /// reads as "dim, sensor-limited" rather than "just another 1 AU body in
 /// weird light."
-fn sync_film_grain_to_exposure(
-    exposure: Res<CameraExposure>,
-    mut grains: Query<&mut FilmGrain>,
-) {
+fn sync_film_grain_to_exposure(exposure: Res<CameraExposure>, mut grains: Query<&mut FilmGrain>) {
     // Only positive EV adds grain. Pulling bright scenes down (inner-system
     // focus) doesn't add noise in a real sensor.
     let push_ev = exposure.ev.max(0.0);
@@ -728,7 +877,9 @@ fn update_planet_light_dirs(
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
 ) {
-    let Some(ref states) = cache.states else { return };
+    let Some(ref states) = cache.states else {
+        return;
+    };
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     let body_defs = sim.simulation.bodies();
     let gain = exposure.gain;
@@ -741,14 +892,21 @@ fn update_planet_light_dirs(
         if body.is_star || body.render_radius < 0.001 {
             continue;
         }
-        let Some(state) = states.get(body.body_id) else { continue };
+        let Some(state) = states.get(body.body_id) else {
+            continue;
+        };
         let render_pos = to_render_pos(state.position - origin.position);
         occluders.push((body.body_id, render_pos, body.render_radius));
     }
 
     for (body, handle) in &query {
-        let Some(mat) = materials.get_mut(&handle.0) else { continue };
-        let body_pos = states.get(body.body_id).map(|s| s.position).unwrap_or_default();
+        let Some(mat) = materials.get_mut(&handle.0) else {
+            continue;
+        };
+        let body_pos = states
+            .get(body.body_id)
+            .map(|s| s.position)
+            .unwrap_or_default();
         let offset = star_pos - body_pos;
         let distance_m = offset.length();
         let to_star = if distance_m > 0.0 {
@@ -769,8 +927,12 @@ fn update_planet_light_dirs(
         mat.params.occluders = [Vec4::ZERO; thalos_planet_rendering::MAX_ECLIPSE_OCCLUDERS];
         let mut count = 0usize;
         for (other_id, pos, radius) in &occluders {
-            if *other_id == body.body_id { continue; }
-            if count >= thalos_planet_rendering::MAX_ECLIPSE_OCCLUDERS { break; }
+            if *other_id == body.body_id {
+                continue;
+            }
+            if count >= thalos_planet_rendering::MAX_ECLIPSE_OCCLUDERS {
+                break;
+            }
             mat.params.occluders[count] = Vec4::new(pos.x, pos.y, pos.z, *radius);
             count += 1;
         }
@@ -786,8 +948,7 @@ fn update_planet_light_dirs(
             let parent_def = &body_defs[parent_id];
             if !matches!(parent_def.kind, thalos_physics::types::BodyKind::Star) {
                 if let Some(parent_state) = states.get(parent_id) {
-                    let parent_render_pos =
-                        to_render_pos(parent_state.position - origin.position);
+                    let parent_render_pos = to_render_pos(parent_state.position - origin.position);
                     let parent_radius = (parent_def.radius_m * RENDER_SCALE) as f32;
                     let tint = Vec3::new(
                         parent_def.color[0],
@@ -820,12 +981,20 @@ fn update_planet_orientations(
     mut materials: ResMut<Assets<PlanetMaterial>>,
     cache: Res<FrameBodyStates>,
 ) {
-    let Some(ref states) = cache.states else { return };
+    let Some(ref states) = cache.states else {
+        return;
+    };
 
     for (body, lock, handle) in &query {
-        let Some(mat) = materials.get_mut(&handle.0) else { continue };
-        let Some(body_state) = states.get(body.body_id) else { continue };
-        let Some(parent_state) = states.get(lock.parent_id) else { continue };
+        let Some(mat) = materials.get_mut(&handle.0) else {
+            continue;
+        };
+        let Some(body_state) = states.get(body.body_id) else {
+            continue;
+        };
+        let Some(parent_state) = states.get(lock.parent_id) else {
+            continue;
+        };
 
         let offset = parent_state.position - body_state.position;
         let len = offset.length();
@@ -838,6 +1007,149 @@ fn update_planet_orientations(
         // fallback axis, so there's no degenerate pole for the moon's orbit.
         let q = Quat::from_rotation_arc(dir, Vec3::Z);
         mat.params.orientation = Vec4::new(q.x, q.y, q.z, q.w);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame: gas giant parameter update
+// ---------------------------------------------------------------------------
+
+/// Push camera/light/rotation state into every `GasGiantMaterial` each
+/// frame. Mirrors `update_planet_light_dirs` for baked planets but
+/// operates on the smaller `GasGiantParams` uniform.
+///
+/// Keeping this in its own system lets the scheduler parallelise with
+/// the terrestrial path — the two queries are disjoint.
+fn update_gas_giant_params(
+    query: Query<(&CelestialBody, &GasGiantMaterialHandle)>,
+    mut materials: ResMut<Assets<GasGiantMaterial>>,
+    cache: Res<FrameBodyStates>,
+    sim: Res<SimulationState>,
+    exposure: Res<CameraExposure>,
+) {
+    let Some(ref states) = cache.states else {
+        return;
+    };
+    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
+    let body_defs = sim.simulation.bodies();
+    let sim_time = sim.simulation.sim_time();
+    let gain = exposure.gain;
+
+    for (body, handle) in &query {
+        let Some(mat) = materials.get_mut(&handle.0) else {
+            continue;
+        };
+
+        // Radius can change if something later rescales the render unit;
+        // rewrite every frame to stay in sync.
+        mat.params.radius = body.render_radius;
+
+        // Light direction: unit vector from body toward star.
+        let body_pos = states
+            .get(body.body_id)
+            .map(|s| s.position)
+            .unwrap_or_default();
+        let offset = star_pos - body_pos;
+        let distance_m = offset.length();
+        let to_star = if distance_m > 0.0 {
+            (offset / distance_m).as_vec3()
+        } else {
+            Vec3::Y
+        };
+        // w carries raw sim seconds — the gas-giant shader uses it for
+        // differential rotation scroll, edge-wave phase, and edge
+        // vortex chain epoch hashing. Modulo a day-scale period so the
+        // f32 stays precise over long sessions.
+        let time_mod = (sim_time % 86_400.0) as f32;
+        mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, time_mod);
+
+        // Inverse-square flux × exposure gain — same contract as
+        // `update_planet_light_dirs` so gas giants share the scene's
+        // overall exposure calibration.
+        let au_over_d = AU_M / distance_m.max(1.0);
+        let raw = (au_over_d * au_over_d) as f32;
+        mat.params.light_intensity = LIGHT_AT_1AU * raw * gain;
+
+        // Rotation phase: advance bands at the body's real rotation
+        // rate. sim_time is seconds, rotation_period_s is seconds, so
+        // the modulo drops the large integer part before conversion
+        // to f32 and keeps precision high at long run times.
+        let body_def = &body_defs[body.body_id];
+        let period = body_def.rotation_period_s.max(1.0);
+        let phase = ((sim_time % period) / period) as f32 * std::f32::consts::TAU;
+        mat.params.rotation_phase = phase;
+
+        // Orientation: axial tilt around the X axis. Gas giants aren't
+        // tidally locked, so rotation is already folded into the band
+        // phase above; the quaternion here only carries the tilt.
+        let tilt = body_def.axial_tilt_rad as f32;
+        let q = Quat::from_rotation_x(tilt);
+        mat.params.orientation = Vec4::new(q.x, q.y, q.z, q.w);
+    }
+}
+
+/// Per-frame `RingParams` update.
+///
+/// Ring materials need two pieces of live state:
+///
+/// 1. **Sun direction** — the shader uses it for Lambert + forward
+///    scatter and for the planet-shadow ray test.
+/// 2. **Planet center in world space** — the ring mesh is a child of
+///    the body entity, so the body moves, so the center used by the
+///    shadow ray must move with it.
+///
+/// Light intensity is re-exposed each frame against the current
+/// camera exposure gain, matching `update_gas_giant_params` so the
+/// ring and disk stay photometrically consistent.
+fn update_ring_params(
+    ring_query: Query<(&ChildOf, &RingMaterialHandle)>,
+    body_query: Query<&CelestialBody>,
+    mut materials: ResMut<Assets<RingMaterial>>,
+    origin: Res<RenderOrigin>,
+    cache: Res<FrameBodyStates>,
+    exposure: Res<CameraExposure>,
+) {
+    let Some(ref states) = cache.states else {
+        return;
+    };
+    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
+    let gain = exposure.gain;
+
+    for (parent, handle) in &ring_query {
+        let Ok(body) = body_query.get(parent.0) else {
+            continue;
+        };
+        let Some(mat) = materials.get_mut(&handle.0) else {
+            continue;
+        };
+
+        let body_pos_m = states
+            .get(body.body_id)
+            .map(|s| s.position)
+            .unwrap_or_default();
+        let offset = star_pos - body_pos_m;
+        let distance_m = offset.length();
+        let to_star = if distance_m > 0.0 {
+            (offset / distance_m).as_vec3()
+        } else {
+            Vec3::Y
+        };
+
+        // Planet center in the render frame — same transform
+        // `update_body_positions` uses, so the shadow ray tests the
+        // right sphere regardless of the rolling render origin.
+        let center_render = to_render_pos(body_pos_m - origin.position);
+        mat.params.planet_center_radius = Vec4::new(
+            center_render.x,
+            center_render.y,
+            center_render.z,
+            body.render_radius,
+        );
+        mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, 0.0);
+
+        let au_over_d = AU_M / distance_m.max(1.0);
+        let raw = (au_over_d * au_over_d) as f32;
+        mat.params.light_intensity = LIGHT_AT_1AU * raw * gain;
     }
 }
 
@@ -1103,6 +1415,38 @@ fn draw_orbits(
 // ---------------------------------------------------------------------------
 
 type IconFilter = (With<BodyIcon>, Without<CelestialBody>, Without<OrbitCamera>);
+
+/// Width of the crossfade window as a multiple of `icon_radius`. When the
+/// body's render radius is between `icon_radius` and `icon_radius * (1 +
+/// ICON_FADE_WIDTH)`, the icon alpha smoothly ramps from 0 to 1 while the
+/// impostor mesh stays on top. Below `icon_radius` the mesh is hidden and
+/// the icon is already fully opaque, so the swap is invisible.
+const ICON_FADE_WIDTH: f32 = 0.25;
+
+/// Multiple of `focus.distance` beyond which a body's billboard is hidden.
+/// Bodies farther than this from the focus target (in render units) are
+/// considered "out of the current neighborhood" — e.g. when framing Thalos
+/// at ~20,000 km zoom, Auron is tens of millions of km away and its
+/// billboard would just add clutter.
+const BILLBOARD_NEIGHBORHOOD: f32 = 30.0;
+
+/// Width of the moon-vs-parent merge fade as a multiple of the combined
+/// icon radii. Moon alpha reaches 0 when its world-space separation from
+/// the parent drops below `parent_icon_r + moon_icon_r` (i.e. the two icon
+/// discs overlap and the moon can no longer be clicked separately), and
+/// reaches 1 at `(1 + SEPARATION_FADE_WIDTH)` times that threshold.
+const SEPARATION_FADE_WIDTH: f32 = 1.5;
+
+/// Alpha ramp for moon billboards based on angular separation from parent.
+/// Returns 1.0 when moon is clearly separable, 0.0 when icons fully merged.
+fn moon_separation_alpha(moon_pos: Vec3, parent_pos: Vec3, cam_pos: Vec3) -> f32 {
+    let moon_r = (moon_pos - cam_pos).length().max(1.0) * MARKER_RADIUS;
+    let parent_r = (parent_pos - cam_pos).length().max(1.0) * MARKER_RADIUS;
+    let merged = moon_r + parent_r;
+    let fade_end = merged * (1.0 + SEPARATION_FADE_WIDTH);
+    let sep = (moon_pos - parent_pos).length();
+    ((sep - merged) / (fade_end - merged)).clamp(0.0, 1.0)
+}
 type MeshFilter = (
     With<BodyMesh>,
     Without<BodyIcon>,
@@ -1111,26 +1455,97 @@ type MeshFilter = (
 );
 
 fn sync_body_icons(
-    bodies: Query<(&CelestialBody, &Transform, &Children)>,
+    bodies: Query<(Entity, &CelestialBody, &Transform, &Children)>,
+    sim: Res<SimulationState>,
     focus: Res<CameraFocus>,
     camera_query: Query<&Transform, With<OrbitCamera>>,
-    mut icons: Query<(&mut Transform, &mut Visibility), IconFilter>,
+    mut icons: Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &MeshMaterial3d<StandardMaterial>,
+        ),
+        IconFilter,
+    >,
     mut meshes: Query<&mut Visibility, MeshFilter>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let Ok(cam_tf) = camera_query.single() else {
         return;
     };
 
     let cam_rotation = cam_tf.rotation;
-    let cam_render_dist = (focus.distance * RENDER_SCALE) as f32;
-    let icon_radius = cam_render_dist * MARKER_RADIUS;
+    let cam_pos = cam_tf.translation;
+    let body_defs = sim.simulation.bodies();
 
-    for (body, _body_tf, children) in &bodies {
-        let use_icon = !body.is_star && body.render_radius < icon_radius;
+    // Per-body camera distance: each icon has a constant screen size, so the
+    // icon's world-space radius must scale with that body's own distance to
+    // the camera — not the focus distance shared across the whole scene.
+    let body_cam_dist = |tf: &Transform| (tf.translation - cam_pos).length().max(1.0);
+
+    // Billboard neighborhood: anything farther from the focus target than
+    // `focus.distance * BILLBOARD_NEIGHBORHOOD` (all in render units) is
+    // outside the current view's scope and gets hidden.
+    let focus_pos = focus
+        .target
+        .and_then(|e| bodies.get(e).ok())
+        .map(|(_, _, tf, _)| tf.translation);
+    let neighborhood_radius = (focus.distance * RENDER_SCALE) as f32 * BILLBOARD_NEIGHBORHOOD;
+
+    for (entity, body, body_tf, children) in &bodies {
+        let icon_radius = body_cam_dist(body_tf) * MARKER_RADIUS;
+        let is_focus = focus.target == Some(entity);
+
+        // Fade moons when their icon disc overlaps the parent's: at that
+        // point the user can no longer click the moon separately from the
+        // parent, so rendering it adds clutter. Focus is exempt so zooming
+        // out while focused on a moon doesn't hide the focus target.
+        let mut hidden = false;
+        let mut separation_alpha = 1.0f32;
+        if !is_focus
+            && matches!(body_defs[body.body_id].kind, BodyKind::Moon)
+            && let Some(parent_id) = body_defs[body.body_id].parent
+            && let Some((_, _, parent_tf, _)) =
+                bodies.iter().find(|(_, b, _, _)| b.body_id == parent_id)
+        {
+            separation_alpha =
+                moon_separation_alpha(body_tf.translation, parent_tf.translation, cam_pos);
+            if separation_alpha <= 0.0 {
+                hidden = true;
+            }
+        }
+
+        // Hide distant billboards: if this body is far outside the current
+        // focus neighborhood AND would only render as a billboard anyway
+        // (impostor radius below icon size), drop it entirely. Bodies that
+        // still resolve as a real impostor mesh stay visible — otherwise
+        // zooming in on a moon would make its huge parent disappear.
+        if !is_focus
+            && !body.is_star
+            && body.render_radius < icon_radius
+            && let Some(fp) = focus_pos
+            && (body_tf.translation - fp).length() > neighborhood_radius
+        {
+            hidden = true;
+        }
+
+        // Icon alpha ramps from 0 at `render_radius >= (1 + WIDTH) *
+        // icon_radius` to 1 at `render_radius <= icon_radius`. The impostor
+        // stays visible throughout the fade window so the two layers
+        // crossfade instead of popping.
+        let fade_start = icon_radius * (1.0 + ICON_FADE_WIDTH);
+        let icon_alpha = if body.is_star || hidden {
+            0.0
+        } else {
+            ((fade_start - body.render_radius) / (fade_start - icon_radius)).clamp(0.0, 1.0)
+                * separation_alpha
+        };
+        let show_icon = !hidden && icon_alpha > 0.0;
+        let show_mesh = !hidden && (body.is_star || body.render_radius >= icon_radius);
 
         for child in children.iter() {
-            if let Ok((mut icon_tf, mut icon_vis)) = icons.get_mut(child) {
-                let target_vis = if use_icon {
+            if let Ok((mut icon_tf, mut icon_vis, mat_handle)) = icons.get_mut(child) {
+                let target_vis = if show_icon {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
@@ -1138,7 +1553,7 @@ fn sync_body_icons(
                 if *icon_vis != target_vis {
                     *icon_vis = target_vis;
                 }
-                if use_icon {
+                if show_icon {
                     if icon_tf.rotation != cam_rotation {
                         icon_tf.rotation = cam_rotation;
                     }
@@ -1146,13 +1561,25 @@ fn sync_body_icons(
                     if icon_tf.scale != target_scale {
                         icon_tf.scale = target_scale;
                     }
+                    if let Some(mat) = std_materials.get_mut(&mat_handle.0) {
+                        let current = mat.base_color.alpha();
+                        if (current - icon_alpha).abs() > 1e-3 {
+                            mat.base_color.set_alpha(icon_alpha);
+                            // Emissive ignores material alpha in the forward
+                            // shader, so scale rgb directly to fade glow.
+                            let lin = mat.base_color.to_linear();
+                            mat.emissive =
+                                LinearRgba::new(lin.red, lin.green, lin.blue, 1.0) * 2.0
+                                    * icon_alpha;
+                        }
+                    }
                 }
             }
             if let Ok(mut mesh_vis) = meshes.get_mut(child) {
-                let target_vis = if use_icon {
-                    Visibility::Hidden
-                } else {
+                let target_vis = if show_mesh {
                     Visibility::Inherited
+                } else {
+                    Visibility::Hidden
                 };
                 if *mesh_vis != target_vis {
                     *mesh_vis = target_vis;
@@ -1195,9 +1622,16 @@ fn double_click_focus_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
     bodies: Query<(Entity, &CelestialBody, &Transform)>,
+    sim: Res<SimulationState>,
     mut focus: ResMut<CameraFocus>,
     mut last_click: ResMut<LastClick>,
 ) {
+    let focus_target = focus.target;
+    let focus_render_dist = (focus.distance * RENDER_SCALE) as f32;
+    let neighborhood_radius = focus_render_dist * BILLBOARD_NEIGHBORHOOD;
+    let focus_pos = focus_target
+        .and_then(|e| bodies.get(e).ok())
+        .map(|(_, _, t)| t.translation);
     if !mouse_buttons.just_pressed(MouseButton::Left) {
         return;
     }
@@ -1224,34 +1658,86 @@ fn double_click_focus_system(
     // Reset so a third click doesn't trigger another double-click.
     last_click.time = 0.0;
 
-    // Find the body whose screen-space projection is closest to the cursor.
-    let mut best: Option<(Entity, f32)> = None;
+    // Two-pass pick:
+    //   1. Bodies currently rendered as visible billboards (icon alpha > 0,
+    //      not hidden as a faraway moon) take priority. Among those, the one
+    //      closest to the camera wins — a visible billboard is always the
+    //      topmost selection target for any cursor inside its disc.
+    //   2. Otherwise, fall back to the nearest-center hit across all bodies.
+    let body_defs = sim.simulation.bodies();
+    let viewport_height = window.height();
+    let fov = std::f32::consts::FRAC_PI_4;
+    let half_fov_tan = (fov / 2.0).tan();
+    let cam_world = cam_gt.translation();
+
+    let fade_end_factor = 1.0 + ICON_FADE_WIDTH;
+
+    let mut billboard_best: Option<(Entity, f32)> = None; // (entity, cam_dist)
+    let mut fallback_best: Option<(Entity, f32)> = None; // (entity, cursor_dist)
+
     for (entity, body, transform) in &bodies {
         let Ok(screen) = camera.world_to_viewport(cam_gt, transform.translation) else {
             continue;
         };
-        // Hit radius: whichever is larger — the projected sphere or the icon.
-        let cam_dist = cam_gt.translation().distance(transform.translation);
-        let projected_radius = if cam_dist > 0.0 {
-            let viewport_height = window.height();
-            let fov = std::f32::consts::FRAC_PI_4; // Bevy default
-            let pixels_per_unit = viewport_height / (2.0 * (fov / 2.0).tan() * cam_dist);
-            (body.render_radius * pixels_per_unit).max(MARKER_RADIUS * cam_dist * pixels_per_unit)
-        } else {
-            20.0
-        };
-        let hit_radius = projected_radius.max(12.0); // minimum 12px so tiny dots are clickable
-
-        let dist = screen.distance(cursor_pos);
-        if dist > hit_radius {
+        let cam_dist = cam_world.distance(transform.translation);
+        if cam_dist <= 0.0 {
             continue;
         }
-        if best.is_none() || dist < best.unwrap().1 {
-            best = Some((entity, dist));
+        let pixels_per_unit = viewport_height / (2.0 * half_fov_tan * cam_dist);
+        let icon_radius_world = cam_dist * MARKER_RADIUS;
+        let icon_radius_px = icon_radius_world * pixels_per_unit;
+        let sphere_radius_px = body.render_radius * pixels_per_unit;
+
+        // Same visibility rules as `sync_body_icons`: moons fade out as
+        // their icon disc merges with the parent's, and far-away bodies
+        // outside the focus neighborhood get dropped. A moon that's fully
+        // merged is neither visible nor clickable separately.
+        if focus_target != Some(entity)
+            && matches!(body_defs[body.body_id].kind, BodyKind::Moon)
+            && let Some(parent_id) = body_defs[body.body_id].parent
+            && let Some((_, _, parent_tf)) =
+                bodies.iter().find(|(_, b, _)| b.body_id == parent_id)
+            && moon_separation_alpha(transform.translation, parent_tf.translation, cam_world)
+                <= 0.0
+        {
+            continue;
+        }
+
+        // Also skip bodies hidden by the distant-billboard rule (matches
+        // `sync_body_icons`): only drop when the body is billboard-sized.
+        if focus_target != Some(entity)
+            && !body.is_star
+            && body.render_radius < icon_radius_world
+            && let Some(fp) = focus_pos
+            && (transform.translation - fp).length() > neighborhood_radius
+        {
+            continue;
+        }
+
+        let is_visible_billboard =
+            !body.is_star && body.render_radius < icon_radius_world * fade_end_factor;
+
+        let dist_px = screen.distance(cursor_pos);
+
+        if is_visible_billboard && dist_px <= icon_radius_px {
+            if billboard_best.map(|(_, d)| cam_dist < d).unwrap_or(true) {
+                billboard_best = Some((entity, cam_dist));
+            }
+            continue;
+        }
+
+        // Fallback pass: mesh-sized hit circle for bodies not acting as a
+        // billboard, plus a 12px minimum so tiny dots stay clickable.
+        let hit_radius = sphere_radius_px.max(icon_radius_px).max(12.0);
+        if dist_px > hit_radius {
+            continue;
+        }
+        if fallback_best.map(|(_, d)| dist_px < d).unwrap_or(true) {
+            fallback_best = Some((entity, dist_px));
         }
     }
 
-    let Some((target_entity, _)) = best else {
+    let Some((target_entity, _)) = billboard_best.or(fallback_best) else {
         return;
     };
 

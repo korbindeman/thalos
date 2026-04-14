@@ -36,13 +36,13 @@ impl StageDef {
     pub fn into_stage(self) -> Box<dyn Stage> {
         match self {
             StageDef::Differentiate(s) => Box::new(s),
-            StageDef::Biomes(s)        => Box::new(s),
-            StageDef::Megabasin(s)     => Box::new(s),
-            StageDef::Cratering(s)     => Box::new(s),
-            StageDef::MareFlood(s)     => Box::new(s),
-            StageDef::Regolith(s)      => Box::new(s),
-            StageDef::Scarps(s)        => Box::new(s),
-            StageDef::SpaceWeather(s)  => Box::new(s),
+            StageDef::Biomes(s) => Box::new(s),
+            StageDef::Megabasin(s) => Box::new(s),
+            StageDef::Cratering(s) => Box::new(s),
+            StageDef::MareFlood(s) => Box::new(s),
+            StageDef::Regolith(s) => Box::new(s),
+            StageDef::Scarps(s) => Box::new(s),
+            StageDef::SpaceWeather(s) => Box::new(s),
         }
     }
 }

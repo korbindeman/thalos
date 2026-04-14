@@ -5,9 +5,9 @@
 
 use glam::Vec3;
 use std::time::Instant;
-use thalos_terrain_gen::*;
 #[allow(unused_imports)]
 use thalos_terrain_gen::Stage;
+use thalos_terrain_gen::*;
 
 fn main() {
     let resolution: u32 = std::env::args()
@@ -86,6 +86,7 @@ fn main() {
             highland_fresh_albedo: Some(0.18),
             mare_mature_albedo: 0.065,
             mare_fresh_albedo: 0.09,
+            mare_tint: [1.0, 1.0, 1.0],
             young_crater_age_threshold: 0.5,
             ray_age_threshold: 0.1,
             ray_extent_radii: 7.0,
@@ -98,5 +99,9 @@ fn main() {
     let total = Instant::now();
     Pipeline::new(stages).run(&mut builder);
     let _ = builder.build();
-    println!("  {:>14}  {:>8.2} s", "TOTAL", total.elapsed().as_secs_f32());
+    println!(
+        "  {:>14}  {:>8.2} s",
+        "TOTAL",
+        total.elapsed().as_secs_f32()
+    );
 }

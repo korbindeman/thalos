@@ -211,8 +211,7 @@ fn cubemap_to_bytes<T: Copy + Default>(
     resolution: u32,
     bytes_per_texel: usize,
 ) -> Vec<u8> {
-    let mut data =
-        Vec::with_capacity((resolution * resolution) as usize * bytes_per_texel * 6);
+    let mut data = Vec::with_capacity((resolution * resolution) as usize * bytes_per_texel * 6);
     for face in CubemapFace::ALL {
         let face_data = cubemap.face_data(face);
         let ptr = face_data.as_ptr() as *const u8;
@@ -319,4 +318,3 @@ fn create_storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(
     let buffer = ShaderStorageBuffer::new(&bytes, RenderAssetUsages::RENDER_WORLD);
     storage_buffers.add(buffer)
 }
-

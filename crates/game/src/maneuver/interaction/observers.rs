@@ -2,7 +2,7 @@ use bevy::picking::prelude::{DragEnd, DragStart, Pointer};
 use bevy::prelude::*;
 
 use super::super::state::{
-    ArrowHandle, ArrowHitbox, InteractionMode, BASE_ARROW_LEN, HITBOX_CAPSULE_RADIUS,
+    ArrowHandle, ArrowHitbox, BASE_ARROW_LEN, HITBOX_CAPSULE_RADIUS, InteractionMode,
     NodeSlideSphere, SLIDE_SPHERE_RADIUS, SelectedNodeView,
 };
 use crate::camera::{CameraFocus, OrbitCamera};

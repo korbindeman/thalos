@@ -216,8 +216,11 @@ fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<Simulation
             reference_body: node.reference_body,
         });
     }
-    seq.nodes
-        .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    seq.nodes.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 // ---------------------------------------------------------------------------

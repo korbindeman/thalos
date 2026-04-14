@@ -18,19 +18,19 @@ pub struct Composition {
 impl Composition {
     pub const SUM_TOLERANCE: f64 = 1e-6;
 
-    pub fn new(
-        silicate: f64,
-        iron: f64,
-        ice: f64,
-        volatiles: f64,
-        hydrogen_helium: f64,
-    ) -> Self {
+    pub fn new(silicate: f64, iron: f64, ice: f64, volatiles: f64, hydrogen_helium: f64) -> Self {
         let total = silicate + iron + ice + volatiles + hydrogen_helium;
         assert!(
             (total - 1.0).abs() < Self::SUM_TOLERANCE,
             "composition mass fractions must sum to 1.0, got {total}"
         );
-        Self { silicate, iron, ice, volatiles, hydrogen_helium }
+        Self {
+            silicate,
+            iron,
+            ice,
+            volatiles,
+            hydrogen_helium,
+        }
     }
 }
 
@@ -155,5 +155,9 @@ pub struct BiomeParams {
     pub roughness: f32,
 }
 
-fn default_tint() -> [f32; 3] { [1.0, 1.0, 1.0] }
-fn default_tonal() -> f32 { 0.18 }
+fn default_tint() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
+fn default_tonal() -> f32 {
+    0.18
+}

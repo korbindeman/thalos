@@ -4,7 +4,7 @@
 // sphere of the correct radius.  Every pixel gets the mathematically exact
 // surface normal, giving a perfectly smooth silhouette at any resolution.
 //
-// Surface detail comes from three layered sources (the sample.rs LOD contract):
+// Surface detail comes from two layered sources (the sample.rs LOD contract):
 //
 //   1. Cubemap textures from `thalos_terrain_gen` — albedo (sRGB RGBA8),
 //      height (R16Unorm displacement), and material ID (R8Uint palette index).
@@ -19,9 +19,8 @@
 //      crater's contribution is faded in by a screen-space smoothstep so it
 //      never pops during zoom.
 //
-//   3. Shader-hash detail (< 500 m) — statistical small-crater synthesis via a
-//      hashed 3D cell grid on the unit sphere. No identity; pure statistical
-//      tail handed off at 500 m from layer 2.
+// Sub-500 m craters are intentionally not rendered in the impostor — the
+// statistical shader-hash layer was dropped.
 //
 // Lighting: diffuse Lambertian + tiny ambient + terminator wrap + opposition
 // surge on the lit side.
@@ -33,9 +32,7 @@
 //                     (unit-sphere coords ⇒ ~52 km on Mira).
 //   CELL_TABLE_SIZE:  8192 (power of two, ~1.6× over-provision vs. ~5000
 //                     populated cells at cell_size 0.06 on Mira).
-//   hash function:    `hash_cell(ix, iy, iz, octave=0u)` — same primes as the
-//                     shader-hash layer, so any future SFD continuity across
-//                     layers uses one code path. The result is masked with
+//   hash function:    `hash_cell(ix, iy, iz, octave=0u)` — masked with
 //                     `& (CELL_TABLE_SIZE - 1u)` to index the dense table.
 //   neighborhood:     3×3×3 = 27 cells centered on the fragment's cell. Worley
 //                     pattern, correctness-first.
@@ -255,10 +252,6 @@ fn hash_cell(ix: i32, iy: i32, iz: i32, octave: u32) -> u32 {
     return pcg(h);
 }
 
-fn u32_to_unit(x: u32) -> f32 {
-    return f32(x) / 4294967296.0;
-}
-
 // ── Crater profile (must agree with planet_gen/src/crater.rs) ───────────────
 
 const SIMPLE_DEPTH_RATIO: f32       = 0.2;
@@ -348,14 +341,7 @@ fn fresh_crater_maturity(r: f32) -> f32 {
     return clamp(1.0 - freshness, 0.0, 1.0);
 }
 
-fn sample_diameter(u: f32, d_lo: f32, d_hi: f32, alpha: f32) -> f32 {
-    let lo = pow(d_lo, -alpha);
-    let hi = pow(d_hi, -alpha);
-    let y = lo + (hi - lo) * u;
-    return pow(y, -1.0 / alpha);
-}
-
-// ── Per-cell crater accumulator (shared by SSBO and hash layers) ───────────
+// ── Per-cell crater accumulator (SSBO layer) ───────────────────────────────
 
 struct CraterAccum {
     grad_tangent: vec3<f32>,
@@ -369,13 +355,13 @@ struct CraterAccum {
     // Signed albedo modulation. Interpreted at the call site as
     //   final_albedo = baked_albedo * clamp(1.0 + albedo_mod, 0.0, 4.0)
     // Per-crater zones: floor darken (negative), rim brighten + ejecta apron
-    // (positive). The SSBO and hash layers iterate craters below the cubemap
-    // bake threshold, so their craters carry no CPU-painted albedo and need
-    // an analytic equivalent here.
+    // (positive). The SSBO layer iterates craters below the cubemap bake
+    // threshold, so its craters carry no CPU-painted albedo and need an
+    // analytic equivalent here.
     albedo_mod: f32,
 }
 
-// Per-crater albedo signature shared by the SSBO and hash layers. Returns a
+// Per-crater albedo signature used by the SSBO layer. Returns a
 // signed scalar that should be folded into `albedo_mod`. `t` is the radial
 // distance from the crater center in units of crater radius. `freshness`
 // is in [0,1] (1 = pristine, 0 = mature) — older craters keep about half
@@ -420,10 +406,10 @@ fn apply_ssbo_crater(
 
     let diameter_m = 2.0 * crater.radius_m;
     let diameter_px = diameter_m / max(pixel_size_m, 1e-6);
-    // Fade window matches the hash layer (0.5 – 8 px) so sub-pixel features
-    // still contribute statistically to surface shading — real-Moon density
-    // comes from the *population* of barely-resolved craters, not just
-    // those big enough to cast individual shadows.
+    // Fade window 0.5 – 8 px so sub-pixel features still contribute
+    // statistically to surface shading — real-Moon density comes from the
+    // *population* of barely-resolved craters, not just those big enough to
+    // cast individual shadows.
     let weight = smoothstep(0.5, 8.0, diameter_px);
     if weight <= 0.0 {
         return;
@@ -440,7 +426,7 @@ fn apply_ssbo_crater(
 
     // Projection of `center` into p_unit's tangent plane — points FROM the
     // sample point TOWARD the crater center (i.e., direction of decreasing
-    // r). Matches the hash layer; sign is handled in the gradient line below.
+    // r). Sign is handled in the gradient line below.
     let proj = center - cos_theta * p_unit;
     let proj_len2 = dot(proj, proj);
 
@@ -559,8 +545,7 @@ fn iterate_ssbo_craters(
     // Whole-layer LOD cull. Every SSBO crater has `diameter < 2*bake_threshold`,
     // and `apply_ssbo_crater` fades in with `smoothstep(0.5, 8.0, diameter_px)`.
     // If even the largest possible crater is below 0.5 px, no crater in the
-    // layer can contribute — skip the 27-cell iteration entirely. This is the
-    // SSBO analog of the per-octave cull in `synthesize_small_craters`.
+    // layer can contribute — skip the 27-cell iteration entirely.
     let max_diameter_m = 2.0 * detail.cubemap_bake_threshold_m;
     if max_diameter_m < 0.5 * pixel_size_m {
         return accum;
@@ -612,276 +597,6 @@ fn iterate_ssbo_craters(
                 }
             }
         }
-    }
-
-    return accum;
-}
-
-// ── Shader-hash layer: statistical small-crater synthesis (< 500 m) ────────
-
-fn visit_cell(
-    accum: ptr<function, CraterAccum>,
-    p_unit: vec3<f32>,
-    ix: i32,
-    iy: i32,
-    iz: i32,
-    octave: u32,
-    cell_size_unit: f32,
-    d_lo: f32,
-    d_hi: f32,
-    expected_per_cell: f32,
-    pixel_size_m: f32,
-    light_dir_local: vec3<f32>,
-) {
-    let h = hash_cell(ix, iy, iz, octave);
-    let u_exists = u32_to_unit(h);
-    if u_exists >= expected_per_cell {
-        return;
-    }
-
-    let u_diam = u32_to_unit(pcg(h ^ 0x68E31DA4u));
-    let u_px   = u32_to_unit(pcg(h ^ 0xB5297A4Du));
-    let u_py   = u32_to_unit(pcg(h ^ 0xBE5466CFu));
-    let u_pz   = u32_to_unit(pcg(h ^ 0x1B873593u));
-    let u_age  = u32_to_unit(pcg(h ^ 0xD2A9C4B1u));
-    let u_ellip   = u32_to_unit(pcg(h ^ 0xA1C4E9F2u));
-    let u_orient  = u32_to_unit(pcg(h ^ 0x3F7B8C21u));
-    let u_rim_ph  = u32_to_unit(pcg(h ^ 0x9D2E5A73u));
-    let u_rim_lob = u32_to_unit(pcg(h ^ 0x54F1D8B6u));
-
-    let cell_origin = vec3<f32>(f32(ix), f32(iy), f32(iz)) * cell_size_unit;
-    let cand = cell_origin + vec3<f32>(u_px, u_py, u_pz) * cell_size_unit;
-    let cand_len = length(cand);
-    if cand_len < 1e-6 {
-        return;
-    }
-    let center = cand / cand_len;
-
-    let diameter_m = sample_diameter(u_diam, d_lo, d_hi, detail.sfd_alpha);
-
-    let diameter_px = diameter_m / max(pixel_size_m, 1e-6);
-    // Same smoothstep window as the SSBO layer — shared continuity contract.
-    let lod_weight = smoothstep(0.5, 4.0, diameter_px);
-    if lod_weight <= 0.0 {
-        return;
-    }
-
-    let radius_m = 0.5 * diameter_m;
-
-    let cos_theta = clamp(dot(p_unit, center), -1.0, 1.0);
-    let theta = acos(cos_theta);
-    let s_arc_m = theta * detail.body_radius_m;
-    var r = s_arc_m / radius_m;
-    if r >= EJECTA_EXTENT {
-        return;
-    }
-
-    let proj = center - cos_theta * p_unit;
-    let proj_len2 = dot(proj, proj);
-    var azimuth = 0.0;
-    if proj_len2 > 1e-12 {
-        let px = proj.x;
-        let py = proj.y + proj.z * 0.7;
-        azimuth = atan2(px, py);
-    }
-
-    let ellipticity = u_ellip * 0.2;
-    let ellip_angle = u_orient * TAU;
-    let ellip_factor = 1.0 + ellipticity * cos(2.0 * (azimuth - ellip_angle));
-    r = r / ellip_factor;
-
-    let rim_lobes = floor(u_rim_lob * 4.0 + 3.0);
-    let rim_phase = u_rim_ph * TAU;
-    var rim_irregular = 0.0;
-    if r > 0.85 && r < 1.15 {
-        let wave = sin(rim_lobes * azimuth + rim_phase);
-        let band = max(0.0, 1.0 - 4.0 * (r - 1.0) * (r - 1.0));
-        rim_irregular = 0.35 * wave * band;
-    }
-
-    let d_over_dsc = diameter_m / detail.d_sc_m;
-    let depth_ratio = select(SIMPLE_DEPTH_RATIO, complex_depth_ratio(d_over_dsc), d_over_dsc >= 1.0);
-    let depth = diameter_m * depth_ratio;
-    let rim = diameter_m * SIMPLE_RIM_RATIO;
-
-    var hd: vec2<f32>;
-    if d_over_dsc >= 1.0 {
-        hd = complex_profile(r, depth, rim);
-    } else {
-        hd = simple_profile(r, depth, rim);
-    }
-    let h_m = hd.x + rim_irregular * rim;
-    let dh_dr = hd.y;
-
-    let age_gyr = u_age * detail.body_age_gyr;
-    let age_blend = smoothstep(0.0, FRESH_AGE_GYR, age_gyr);
-    let fresh_m = fresh_crater_maturity(r);
-    let aged_m = mix(fresh_m, 1.0, age_blend);
-    let weighted_m = mix(1.0, aged_m, lod_weight);
-
-    let freshness_h = 1.0 - aged_m;
-    let albedo_delta_lw = crater_albedo_delta(r, freshness_h) * lod_weight;
-
-    let grad_proj_len = sqrt(proj_len2);
-    if grad_proj_len < 1e-8 {
-        (*accum).height = (*accum).height + h_m * lod_weight;
-        (*accum).min_maturity = min((*accum).min_maturity, weighted_m);
-        (*accum).albedo_mod = (*accum).albedo_mod + albedo_delta_lw;
-        return;
-    }
-    let t_hat = proj / grad_proj_len;
-
-    let grad = -(dh_dr) / radius_m * t_hat;
-
-    (*accum).grad_tangent = (*accum).grad_tangent + grad * lod_weight;
-    (*accum).height = (*accum).height + h_m * lod_weight;
-    (*accum).min_maturity = min((*accum).min_maturity, weighted_m);
-    (*accum).albedo_mod = (*accum).albedo_mod + albedo_delta_lw;
-
-    // Per-crater analytical shadow — covers interior and ejecta blanket.
-    // See `apply_ssbo_crater` for derivation. Synthesis rim peak is `rim`.
-    let sin_sun = dot(light_dir_local, p_unit);
-    if sin_sun > 0.0 {
-        let sun_tangent = light_dir_local - sin_sun * p_unit;
-        let cos_sun = length(sun_tangent);
-        if cos_sun > 1e-4 {
-            let sun_hat = sun_tangent / cos_sun;
-            let frag_rel = -t_hat * r;
-            let b = dot(frag_rel, sun_hat);
-            let c = r * r - 1.0;
-            let disc = b * b - c;
-            if disc > 0.0 {
-                let s_disc = sqrt(disc);
-                var t_hit: f32 = -1.0;
-                if c < 0.0 {
-                    t_hit = -b + s_disc;
-                } else {
-                    let t_near = -b - s_disc;
-                    if t_near > 0.0 { t_hit = t_near; }
-                }
-                if t_hit > 0.0 {
-                    let delta_h = rim - h_m;
-                    let lhs = delta_h * cos_sun;
-                    let rhs = t_hit * radius_m * sin_sun;
-                    if lhs > rhs {
-                        let margin = (lhs - rhs) / max(rhs, 1.0);
-                        let s = 1.0 - clamp(margin * 8.0, 0.0, 1.0);
-                        (*accum).shadow = min((*accum).shadow, mix(1.0, s, lod_weight));
-                    }
-                }
-            }
-        }
-    }
-}
-
-// High-frequency statistical crater tail.  Caps `d_max_m` at 500 m so the
-// shader-hash band never overlaps the SSBO band. Lower floor still obeys
-// `detail.d_min_m` (production value ~80 m).
-fn synthesize_small_craters(
-    p_unit: vec3<f32>,
-    pixel_size_m: f32,
-    light_dir_local: vec3<f32>,
-) -> CraterAccum {
-    var accum: CraterAccum;
-    accum.grad_tangent = vec3<f32>(0.0);
-    accum.height = 0.0;
-    accum.min_maturity = 1.0;
-    accum.shadow = 1.0;
-    accum.albedo_mod = 0.0;
-
-    if detail.global_k_per_km2 <= 0.0 || detail.d_min_m <= 0.0 {
-        return accum;
-    }
-
-    // LOD contract: shader-hash layer covers d < 500 m only.  The SSBO layer
-    // owns anything larger.
-    let hash_d_max = min(detail.d_max_m, 500.0);
-    if hash_d_max <= detail.d_min_m {
-        return accum;
-    }
-
-    let body_r = detail.body_radius_m;
-    for (var oi: u32 = 0u; oi < 11u; oi = oi + 1u) {
-        let d_lo = detail.d_min_m * pow(2.0, f32(oi));
-        let d_hi = min(detail.d_min_m * pow(2.0, f32(oi + 1u)), hash_d_max);
-        if d_hi <= d_lo {
-            break;
-        }
-
-        // Whole-octave LOD cull.  If the largest diameter in this octave is
-        // below half a pixel, every cell in the 3×3×3 neighborhood would
-        // contribute zero weight — skip the 27 hashes entirely.
-        if d_hi < 0.5 * pixel_size_m {
-            continue;
-        }
-
-        let d_lo_km = d_lo * 1e-3;
-        let d_hi_km = d_hi * 1e-3;
-        let per_km2 = detail.global_k_per_km2
-            * (pow(d_lo_km, -detail.sfd_alpha) - pow(d_hi_km, -detail.sfd_alpha));
-
-        let cell_size_m = 2.0 * d_hi;
-        let cell_area_km2 = (cell_size_m * 1e-3) * (cell_size_m * 1e-3);
-
-        let expected_per_cell = per_km2 * cell_area_km2 / 3.0;
-        if expected_per_cell <= 0.0 {
-            continue;
-        }
-
-        let cell_size_unit = cell_size_m / body_r;
-        let inv_cell = 1.0 / cell_size_unit;
-        let px_cell = p_unit.x * inv_cell;
-        let py_cell = p_unit.y * inv_cell;
-        let pz_cell = p_unit.z * inv_cell;
-        let cx = i32(floor(px_cell));
-        let cy = i32(floor(py_cell));
-        let cz = i32(floor(pz_cell));
-
-        // Adaptive neighborhood (replaces fixed 3×3×3). Max crater radius in
-        // this octave is 0.5*d_hi and ejecta extends EJECTA_EXTENT×radius, so
-        // a crater's influence reaches at most `HASH_INFLUENCE_CELLS` of the
-        // cell edge into any neighbor. A neighbor can therefore be skipped
-        // when the fragment's intra-cell position is far enough from that
-        // neighbor's boundary.
-        //
-        //   infl = EJECTA_EXTENT * 0.5 * d_hi / cell_size_m
-        //        = 2.5 * 0.5 / 2.0 = 0.625
-        //
-        // Average visited cells drops from 27 → ~11 (≈2.4× speedup) without
-        // losing any crater visible in a 3×3×3 sweep.
-        let infl: f32 = 0.625;
-        let fx = px_cell - f32(cx);
-        let fy = py_cell - f32(cy);
-        let fz = pz_cell - f32(cz);
-        let dx_lo = select(0, -1, fx < infl);
-        let dx_hi = select(0,  1, fx > 1.0 - infl);
-        let dy_lo = select(0, -1, fy < infl);
-        let dy_hi = select(0,  1, fy > 1.0 - infl);
-        let dz_lo = select(0, -1, fz < infl);
-        let dz_hi = select(0,  1, fz > 1.0 - infl);
-
-        for (var dx: i32 = dx_lo; dx <= dx_hi; dx = dx + 1) {
-            for (var dy: i32 = dy_lo; dy <= dy_hi; dy = dy + 1) {
-                for (var dz: i32 = dz_lo; dz <= dz_hi; dz = dz + 1) {
-                    visit_cell(
-                        &accum,
-                        p_unit,
-                        cx + dx, cy + dy, cz + dz,
-                        oi + 1u, // octave 0 is reserved for the SSBO hash
-                        cell_size_unit,
-                        d_lo, d_hi,
-                        expected_per_cell,
-                        pixel_size_m,
-                        light_dir_local,
-                    );
-                }
-            }
-        }
-    }
-
-    let grad_len = length(accum.grad_tangent);
-    if grad_len > 2.0 {
-        accum.grad_tangent = accum.grad_tangent * (2.0 / grad_len);
     }
 
     return accum;
@@ -1237,34 +952,27 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let light_dir_local = rotate_quat(params.orientation, params.light_dir.xyz);
 
     var ssbo_grad  = vec3<f32>(0.0);
-    var small_grad = vec3<f32>(0.0);
     var min_maturity = 1.0;
     var crater_shadow = 1.0;
     var crater_albedo_mod = 0.0;
     if !dark_side {
-        // Both SSBO craters and the procedural small-crater layer live in
-        // body-local space, so sample with the rotated `sample_dir`, not the
-        // world-space `normal`.
+        // SSBO craters live in body-local space, so sample with the rotated
+        // `sample_dir`, not the world-space `normal`.
         // ── Layer 2: SSBO craters (500 m – 5 km) ─────────────────────────
         let ssbo = iterate_ssbo_craters(sample_dir, pixel_size_m, light_dir_local);
 
-        // ── Layer 3: statistical small-crater synthesis (< 500 m) ──────
-        let small = synthesize_small_craters(sample_dir, pixel_size_m, light_dir_local);
-
         ssbo_grad  = ssbo.grad_tangent;
-        small_grad = small.grad_tangent;
-        min_maturity = min(ssbo.min_maturity, small.min_maturity);
-        crater_shadow = min(ssbo.shadow, small.shadow);
-        crater_albedo_mod = ssbo.albedo_mod + small.albedo_mod;
+        min_maturity = ssbo.min_maturity;
+        crater_shadow = ssbo.shadow;
+        crater_albedo_mod = ssbo.albedo_mod;
     }
 
-    // Combine mid + high frequency crater gradients. Both gradients are in
-    // body-local space (their tangent frames were built around `sample_dir`),
-    // so the projection and subtraction happen in body-local space; we
-    // rotate the final shading normal to world space afterwards.
-    var combined_grad = ssbo_grad + small_grad;
-    if length(combined_grad) > 0.0 {
-        let grad_tangent = combined_grad - dot(combined_grad, sample_dir) * sample_dir;
+    // SSBO crater gradient is in body-local space (its tangent frame was
+    // built around `sample_dir`), so the projection and subtraction happen
+    // in body-local space; we rotate the final shading normal to world
+    // space afterwards.
+    if length(ssbo_grad) > 0.0 {
+        let grad_tangent = ssbo_grad - dot(ssbo_grad, sample_dir) * sample_dir;
         shading_normal = normalize(shading_normal - grad_tangent);
     }
     // Transform the fully-perturbed shading normal from body-local to world
@@ -1273,11 +981,11 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // Fresh craters: subtle brightening.  The material palette already encodes
     // the "fresh regolith" bias, so the ad-hoc FRESH_BIAS_COLOR tint is gone.
     let fresh_boost = clamp((1.0 - min_maturity) * 0.3, 0.0, 0.4);
-    // Per-crater albedo signature from the SSBO + hash layers. Clamped to
-    // a sane range so a few stacked craters can't blow out the surface or
-    // drive it negative. The factor parallels the CPU `space_weather.rs`
-    // Pass 1.5 strength so cubemap-baked and shader-only craters look
-    // consistent across the bake threshold.
+    // Per-crater albedo signature from the SSBO layer. Clamped to a sane
+    // range so a few stacked craters can't blow out the surface or drive
+    // it negative. The factor parallels the CPU `space_weather.rs` Pass
+    // 1.5 strength so cubemap-baked and SSBO craters look consistent
+    // across the bake threshold.
     let crater_mod = clamp(crater_albedo_mod, -0.65, 1.20);
     let albedo = baked_albedo * (1.0 + fresh_boost + crater_mod);
     // mat_roughness: reserved for a future BRDF upgrade; Lambertian for now.

@@ -138,6 +138,7 @@ pub(super) fn propagate_segment(
     end_time: f64,
     burns: &[ScheduledBurn],
     ctx: &PropagationContext,
+    stop_on_stable_orbit: bool,
     remaining_budget: &mut Option<usize>,
 ) -> NumericSegment {
     let mut forces = ForceRegistry::new();
@@ -294,11 +295,12 @@ pub(super) fn propagate_segment(
                 DVec3::ZERO
             };
             let rel_pos = new_state.position - body_pos;
-            if tracker.update(
+            let closed_orbit = tracker.update(
                 rel_pos,
                 ctx.prediction_config.min_orbit_samples,
                 samples_since_reference,
-            ) {
+            );
+            if stop_on_stable_orbit && closed_orbit {
                 return NumericSegment {
                     samples,
                     is_stable_orbit: true,

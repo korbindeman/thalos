@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/physics",
     "crates/terrain_gen",
+    "crates/atmosphere_gen",
     "crates/planet_rendering",
     "crates/planet_editor",
     "crates/game",

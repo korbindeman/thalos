@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 
 use super::super::helpers::{node_world_position, overlay_marker_transform};
-use super::super::state::{InteractionMode, ManeuverPlan, NodeMarkerDisc, SelectedNode, SnapIndicator};
+use super::super::state::{
+    InteractionMode, ManeuverPlan, NodeMarkerDisc, SelectedNode, SnapIndicator,
+};
 use crate::camera::{CameraFocus, OrbitCamera};
 use crate::coords::{RENDER_SCALE, RenderOrigin};
 use crate::rendering::{FrameBodyStates, SimulationState};
@@ -45,7 +47,11 @@ pub(in crate::maneuver) fn update_snap_indicator(
         return;
     };
 
-    if let InteractionMode::PlacingNode { snap_world_pos: Some(pos), .. } = *mode {
+    if let InteractionMode::PlacingNode {
+        snap_world_pos: Some(pos),
+        ..
+    } = *mode
+    {
         let cam_dist = (focus.distance * RENDER_SCALE) as f32;
         let cam_rot = camera_q
             .single()
@@ -93,9 +99,7 @@ pub(in crate::maneuver) fn manage_node_markers(
 
         let node = plan.nodes.iter().find(|n| n.id == marker.node_id).unwrap();
         if let (Some(pred), Some(states), Some(sim)) = (prediction, states, sim_ref) {
-            if let Some(world_pos) =
-                node_world_position(node, pred, states, &origin, &sim.system)
-            {
+            if let Some(world_pos) = node_world_position(node, pred, states, &origin, &sim.system) {
                 *vis = Visibility::Inherited;
                 *tf = overlay_marker_transform(world_pos, cam_rot, cam_dist * MARKER_RADIUS);
                 continue;

@@ -76,14 +76,7 @@ fn render_trajectory(
     for (i, segment) in prediction.segments.iter().enumerate() {
         let is_ghost = i > 0;
         let pins = compute_segment_pins(&segment.samples, body_states, &sim.system, i == 0);
-        render_segment(
-            segment,
-            &pins,
-            is_ghost,
-            &sim.system,
-            &origin,
-            &mut gizmos,
-        );
+        render_segment(segment, &pins, is_ghost, &sim.system, &origin, &mut gizmos);
     }
 }
 

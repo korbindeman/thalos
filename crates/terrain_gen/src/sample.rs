@@ -55,8 +55,8 @@ use glam::Vec3;
 
 use crate::body_data::BodyData;
 use crate::crater_profile::{
-    crater_profile, degradation_factor, degradation_softness, morphology_for_radius,
-    smoothstep_range, SubPeaks,
+    SubPeaks, crater_profile, degradation_factor, degradation_softness, morphology_for_radius,
+    smoothstep_range,
 };
 use crate::cubemap::dir_to_face_uv;
 use crate::spatial_index::FeatureRef;
@@ -194,7 +194,11 @@ fn sample_albedo(body: &BodyData, dir: Vec3) -> Vec3 {
 
 fn srgb_to_linear(srgb: u8) -> f32 {
     let s = srgb as f32 / 255.0;
-    if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,8 +221,12 @@ fn sample_layer2_craters(body: &BodyData, dir: Vec3, lod: f32) -> f32 {
     let mut acc = 0.0_f32;
 
     for feat in body.feature_index.lookup_with_neighbors(dir) {
-        let FeatureRef::Crater(idx) = feat else { continue };
-        let Some(crater) = body.craters.get(idx as usize) else { continue };
+        let FeatureRef::Crater(idx) = feat else {
+            continue;
+        };
+        let Some(crater) = body.craters.get(idx as usize) else {
+            continue;
+        };
 
         // Skip craters already rasterized into the cubemap — their height
         // contribution is in the Layer 1 texel. Iterating them here would
@@ -269,8 +277,17 @@ fn crater_profile_at(crater: &Crater, dir: Vec3, body_radius_m: f32) -> Option<f
     // hashes from the crater seed; here we just want the smooth profile).
     let no_subs: SubPeaks = Default::default();
     Some(crater_profile(
-        t, depth, rim_h, crater.radius_m, morph,
-        0.0, 0.0, 0.0, &no_subs, 1.0, softness,
+        t,
+        depth,
+        rim_h,
+        crater.radius_m,
+        morph,
+        0.0,
+        0.0,
+        0.0,
+        &no_subs,
+        1.0,
+        softness,
     ))
 }
 
@@ -305,11 +322,7 @@ const COMPLEX_MIN_DEPTH_RATIO: f32 = 0.05;
 /// The renderer tangent-projects it to perturb the shading normal; for the
 /// CPU sampler we drop the gradient in `sample_height_only` (finite
 /// differences pick it up).
-pub fn sample_detail_noise(
-    params: &DetailNoiseParams,
-    dir: Vec3,
-    lod: f32,
-) -> (f32, Vec3) {
+pub fn sample_detail_noise(params: &DetailNoiseParams, dir: Vec3, lod: f32) -> (f32, Vec3) {
     let mut height = 0.0_f32;
     let mut grad_tangent = Vec3::ZERO;
 
@@ -686,15 +699,7 @@ mod tests {
         // so the feature spatial index contains one element pointing at
         // +X. Sampling at the crater center must land in the bowl below
         // the flat cubemap background.
-        let mut builder = BodyBuilder::new(
-            869_000.0,
-            7,
-            test_composition(),
-            8,
-            4.5,
-            None,
-            0.0,
-        );
+        let mut builder = BodyBuilder::new(869_000.0, 7, test_composition(), 8, 4.5, None, 0.0);
         builder.materials.push(Material {
             albedo: [0.5, 0.5, 0.5],
             roughness: 0.5,
@@ -716,7 +721,11 @@ mod tests {
         // Background: the cubemap is all zeros, so sampling off-crater must
         // be ~0. This is our reference.
         let off = sample(&body, Vec3::Y, 5.0);
-        assert!(off.height.abs() < 1.0, "off-crater background height: {}", off.height);
+        assert!(
+            off.height.abs() < 1.0,
+            "off-crater background height: {}",
+            off.height
+        );
 
         let s = sample(&body, Vec3::X, 5.0);
         assert!(

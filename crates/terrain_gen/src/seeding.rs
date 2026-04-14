@@ -58,7 +58,9 @@ pub struct Rng {
 impl Rng {
     pub fn new(seed: u64) -> Self {
         // Avoid the all-zero state trap by running the seed through splitmix.
-        Self { state: splitmix64(seed ^ 0xA5A5_A5A5_5A5A_5A5A) }
+        Self {
+            state: splitmix64(seed ^ 0xA5A5_A5A5_5A5A_5A5A),
+        }
     }
 
     /// Next uniformly-distributed u64.

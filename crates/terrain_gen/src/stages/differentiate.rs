@@ -36,8 +36,12 @@ const ROUGHNESS_FRESH_EJECTA: f32 = 0.7;
 const ROUGHNESS_MATURE_REGOLITH: f32 = 0.6;
 
 impl Stage for Differentiate {
-    fn name(&self) -> &str { "differentiate" }
-    fn dependencies(&self) -> &[&str] { &[] }
+    fn name(&self) -> &str {
+        "differentiate"
+    }
+    fn dependencies(&self) -> &[&str] {
+        &[]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let comp = &builder.composition;

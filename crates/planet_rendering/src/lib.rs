@@ -1,16 +1,25 @@
 pub mod bake;
 mod film_grain;
+mod gas_giant;
 mod material;
 pub mod post_stack;
+mod rings;
 pub mod shader_types;
 mod texture;
 
 pub use bake::bake_from_body_data;
 pub use film_grain::FilmGrain;
+pub use gas_giant::{
+    GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,
+};
 pub use material::{
     MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
 };
 pub use post_stack::space_camera_post_stack;
+pub use rings::{
+    MAX_RING_STOPS, RingLayers, RingMaterial, RingMaterialHandle, RingParams, build_ring_mesh,
+    ring_plane_normal,
+};
 pub use shader_types::{GpuCellRange, GpuCrater, GpuMaterial};
 pub use texture::PlanetTextures;
 
@@ -27,6 +36,8 @@ impl Plugin for PlanetRenderingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             MaterialPlugin::<PlanetMaterial>::default(),
+            MaterialPlugin::<GasGiantMaterial>::default(),
+            MaterialPlugin::<RingMaterial>::default(),
             film_grain::FilmGrainPlugin,
         ));
     }

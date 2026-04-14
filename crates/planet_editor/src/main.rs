@@ -9,11 +9,11 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PresentMode;
 use thalos_physics::parsing::load_solar_system;
 use thalos_physics::types::{BodyKind, SolarSystemDefinition};
-use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
 use thalos_planet_rendering::{
-    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
-    PlanetRenderingPlugin, bake_from_body_data,
+    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin,
+    bake_from_body_data,
 };
+use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -32,8 +32,10 @@ const FULLBRIGHT_LIGHT: f32 = std::f32::consts::PI;
 const AU_M: f64 = 1.496e11;
 const DEFAULT_BODY_NAME: &str = "Mira";
 
-const SOLAR_SYSTEM_RON: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/solar_system.ron"));
+const SOLAR_SYSTEM_RON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/solar_system.ron"
+));
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -126,7 +128,10 @@ fn build_params_for_body(
     })
 }
 
-fn heliocentric_sma(system: &SolarSystemDefinition, start: &thalos_physics::types::BodyDefinition) -> f64 {
+fn heliocentric_sma(
+    system: &SolarSystemDefinition,
+    start: &thalos_physics::types::BodyDefinition,
+) -> f64 {
     let mut current = start;
     for _ in 0..32 {
         match current.parent {
@@ -162,7 +167,11 @@ fn lighting_for(planet: &EditedPlanet) -> (f32, f32, f32) {
     if planet.full_bright {
         (FULLBRIGHT_LIGHT, AMBIENT_INTENSITY, FULLBRIGHT_WRAP)
     } else {
-        (planet.light_intensity, AMBIENT_INTENSITY, planet.terminator_wrap)
+        (
+            planet.light_intensity,
+            AMBIENT_INTENSITY,
+            planet.terminator_wrap,
+        )
     }
 }
 
@@ -235,7 +244,10 @@ fn camera_input(
     mut orbit: ResMut<OrbitCamera>,
     mut egui_ctx: bevy_egui::EguiContexts,
 ) {
-    if egui_ctx.ctx_mut().is_ok_and(|ctx| ctx.wants_pointer_input()) {
+    if egui_ctx
+        .ctx_mut()
+        .is_ok_and(|ctx| ctx.wants_pointer_input())
+    {
         return;
     }
 
@@ -274,7 +286,9 @@ fn camera_apply_transform(
     orbit: Res<OrbitCamera>,
     mut query: Query<&mut Transform, With<EditorCamera>>,
 ) {
-    let Ok(mut transform) = query.single_mut() else { return };
+    let Ok(mut transform) = query.single_mut() else {
+        return;
+    };
     let (sin_az, cos_az) = orbit.azimuth.sin_cos();
     let (sin_el, cos_el) = orbit.elevation.sin_cos();
     let pos = Vec3::new(
@@ -517,33 +531,40 @@ fn editor_ui(
         ui.heading("Parameters");
         let mut terrain_changed = false;
         let mut uniforms_changed = false;
-        terrain_changed |= fires(&ui.add(
-            bevy_egui::egui::Slider::new(&mut planet.generator.seed, 0..=9999).text("Seed"),
-        ));
+        terrain_changed |=
+            fires(&ui.add(
+                bevy_egui::egui::Slider::new(&mut planet.generator.seed, 0..=9999).text("Seed"),
+            ));
 
         ui.separator();
         ui.heading("Shading");
         uniforms_changed |= ui
             .checkbox(&mut planet.full_bright, "Full bright")
             .changed();
-        uniforms_changed |= fires(&ui.add(
-            bevy_egui::egui::Slider::new(&mut planet.terminator_wrap, 0.0..=1.0)
-                .text("Terminator wrap"),
-        ));
-        uniforms_changed |= fires(&ui.add(
-            bevy_egui::egui::Slider::new(
-                &mut planet.sun_azimuth,
-                -std::f32::consts::PI..=std::f32::consts::PI,
-            )
-            .text("Sun azimuth"),
-        ));
-        uniforms_changed |= fires(&ui.add(
-            bevy_egui::egui::Slider::new(
-                &mut planet.sun_elevation,
-                -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2,
-            )
-            .text("Sun elevation"),
-        ));
+        uniforms_changed |= fires(
+            &ui.add(
+                bevy_egui::egui::Slider::new(&mut planet.terminator_wrap, 0.0..=1.0)
+                    .text("Terminator wrap"),
+            ),
+        );
+        uniforms_changed |= fires(
+            &ui.add(
+                bevy_egui::egui::Slider::new(
+                    &mut planet.sun_azimuth,
+                    -std::f32::consts::PI..=std::f32::consts::PI,
+                )
+                .text("Sun azimuth"),
+            ),
+        );
+        uniforms_changed |= fires(
+            &ui.add(
+                bevy_egui::egui::Slider::new(
+                    &mut planet.sun_elevation,
+                    -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2,
+                )
+                .text("Sun elevation"),
+            ),
+        );
 
         if terrain_changed {
             planet.terrain_dirty = true;
@@ -568,7 +589,9 @@ fn apply_uniform_changes(
 
     let (light_intensity, ambient_intensity, wrap) = lighting_for(&planet);
     for handle in &query {
-        let Some(mat) = materials.get_mut(&handle.0) else { continue };
+        let Some(mat) = materials.get_mut(&handle.0) else {
+            continue;
+        };
         mat.params.light_intensity = light_intensity;
         mat.params.ambient_intensity = ambient_intensity;
         let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
@@ -587,8 +610,12 @@ fn dispatch_rebake(
     if !planet.terrain_dirty {
         return;
     }
-    let Ok((entity, children)) = preview_q.single() else { return };
-    let Some(mesh_entity) = children.iter().next() else { return };
+    let Ok((entity, children)) = preview_q.single() else {
+        return;
+    };
+    let Some(mesh_entity) = children.iter().next() else {
+        return;
+    };
     planet.terrain_dirty = false;
 
     let task = dispatch_terrain_bake(&planet);
@@ -616,9 +643,10 @@ fn main() {
                 .map(|r| (system.bodies[id].name.clone(), r))
         })
         .or_else(|| {
-            system.bodies.iter().find_map(|b| {
-                build_params_for_body(&system, b).map(|r| (b.name.clone(), r))
-            })
+            system
+                .bodies
+                .iter()
+                .find_map(|b| build_params_for_body(&system, b).map(|r| (b.name.clone(), r)))
         })
         .expect("no body in solar_system.ron has a generator block");
 

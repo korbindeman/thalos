@@ -298,7 +298,9 @@
             physical: (
                 mass_kg: 3.6e19,
                 radius_m: 190000.0,
-                color: "#A8C8B8",
+                // Olivine-rich silicate — pallasite/forsterite analog.
+                // Warm muted green from mantle-derived olivine + pyroxene.
+                color: "#A8B088",
                 albedo: 0.25,
                 rotation_period_s: 1123200.0,
                 axial_tilt_deg: 0.0,
@@ -318,9 +320,62 @@
                 body_age_gyr: 4.0,
                 pipeline: [
                     Differentiate(()),
+                    // Ancient mantle-exposing giant impact + two smaller
+                    // paleo-basins. The dominant 85 km basin is the event
+                    // that exposed olivine-rich mantle material and drives
+                    // Selva's distinct mineralogy. Megabasin supplies the
+                    // heavy fbm-warped rim contours, multi-ring structure,
+                    // and ejecta sculpture that Cratering's sine-harmonic
+                    // warp doesn't reach at this scale.
+                    //
+                    // Near-side (+Z) bias is mild — Selva has weak tidal
+                    // locking and basin placement is essentially random,
+                    // so centers are scattered instead of farside-biased.
+                    Megabasin((
+                        basins: [
+                            // 0: primary — giant impact, multi-ring.
+                            (center_dir: ( 0.35, -0.20,  0.92), radius_m: 85000.0, depth_m: 4200.0, ring_count: 3),
+                            // 1: older large basin, partially overprinted.
+                            (center_dir: (-0.62,  0.45, -0.65), radius_m: 52000.0, depth_m: 2400.0, ring_count: 2),
+                            // 2: ancient, degraded.
+                            (center_dir: ( 0.18,  0.78, -0.60), radius_m: 38000.0, depth_m: 1600.0, ring_count: 1),
+                        ],
+                        hemispheric_lowering_m: 0.0,
+                    )),
+                    // Olivine-rich silicate body — differentiated crust
+                    // exposed by an ancient giant impact. Unlike Mira's
+                    // neutral-gray anorthositic highlands, Selva's surface
+                    // is dominated by forsterite/pyroxene and reads as a
+                    // distinctly green-tinged body (Minmus-adjacent but
+                    // physically motivated by mineralogy).
+                    //
+                    // Single highland biome. Hard multi-biome boundaries
+                    // read as cut-out discs on a small airless body; real
+                    // regional color variation is better delivered by the
+                    // per-biome `tonal_amp` low-freq fbm field. Mare plains
+                    // carry their own chromatic tint via MareFlood →
+                    // SpaceWeather::mare_tint, and their boundaries are
+                    // topography-warped (noise-fuzzed flood fronts) rather
+                    // than biome-painted, so they blend softly into the
+                    // olivine highlands.
                     Biomes((
                         biomes: [
-                            (name: "silicate_regolith", albedo: 0.14, roughness: 0.8),
+                            (
+                                name: "olivine_regolith",
+                                albedo: 0.34,
+                                fresh_albedo: Some(0.52),
+                                // Aggressive green ratio — g:r ≈ 2.3,
+                                // g:b ≈ 2.7. Real olivine regolith is
+                                // less saturated, but sRGB + distant
+                                // lighting eats most of the chroma and
+                                // a mild tint reads as "faintly gray".
+                                tint: (0.58, 1.32, 0.48),
+                                // High tonal amp → strong soft brightness
+                                // variation across the surface without
+                                // any hard patch boundaries.
+                                tonal_amp: 0.32,
+                                roughness: 0.78,
+                            ),
                         ],
                     )),
                     Cratering((
@@ -340,11 +395,49 @@
                         secondary_parent_radius_m: 0.0,
                         secondaries_per_parent: 0,
                     )),
+                    // Paleo-volcanic flood plains. Selva had a short
+                    // radiogenic heating phase in its first ~500 Myr; the
+                    // largest impact basins on the slightly warmer "near"
+                    // hemisphere pooled olivine-rich melt. Now cold and
+                    // re-cratered, these read as smooth low-relief
+                    // embayments with irregular noise-warped boundaries —
+                    // Mercury's smooth plains, not lunar mare darkness.
+                    MareFlood((
+                        target_count: 0,
+                        // More plains than a lunar-style sparse flood —
+                        // Minmus-adjacent smooth-plain prominence so the
+                        // distinct flood-plain color reads strongly.
+                        additional_crater_count: 14,
+                        fill_fraction: 0.70,
+                        near_side_bias: 0.3,
+                        boundary_noise_amplitude_m: 500.0,
+                        boundary_noise_freq: 10.0,
+                        episode_count: 3,
+                        wrinkle_ridges: true,
+                    )),
+                    Regolith((
+                        // Sub-texel detail continuity — matches Mira's
+                        // shader-hash + Voronoi bake band approach.
+                        amplitude_m: 6.0,
+                        characteristic_wavelength_m: 90.0,
+                        crater_density_multiplier: 1.0,
+                        bake_d_min_m: 260.0,
+                        bake_scale: 1.0,
+                        density_modulation: 0.25,
+                        density_wavelength_m: 60000.0,
+                    )),
                     SpaceWeather((
-                        highland_mature_albedo: 0.14,
-                        highland_fresh_albedo: 0.26,
-                        mare_mature_albedo: 0.06,
-                        mare_fresh_albedo: 0.10,
+                        // Let biome palette drive highland color
+                        // (olivine/pyroxene) — no grayscale override.
+                        // Flood plains weather to a distinct pale olivine
+                        // green, appreciably cooler and brighter than
+                        // Mira's mare. `mare_tint` chromatic shift is
+                        // multiplied over the grayscale mare albedo.
+                        mare_mature_albedo: 0.28,
+                        mare_fresh_albedo: 0.44,
+                        // Flood plains: cooler pale green, distinctly
+                        // separable from the warmer olivine highlands.
+                        mare_tint: (0.52, 1.38, 0.55),
                         young_crater_age_threshold: 0.8,
                         ray_age_threshold: 0.15,
                         ray_extent_radii: 8.0,
@@ -375,6 +468,179 @@
                 true_anomaly_deg: 248.0,
             )),
             generator: None,
+            // Sub-Saturn, H₂/He atmosphere. Saturation-forward palette
+            // tuned against Cassini true-colour plates: deep ochre
+            // belts, bright cream zones, blue-grey north polar cap.
+            // No grey tint multiplier — all chromatic variation lives
+            // in the palette so the disk reads saturated at any
+            // exposure.
+            atmosphere: Some((
+                seed: 20100,
+                cloud_deck: (
+                    // Saturn-style cloud deck with the full Cassini
+                    // palette: warm ochre south, bright gold-cream
+                    // equatorial zone, cooling to a pale blue-grey
+                    // north polar cap. Stops are tuned to give
+                    // zone/belt pairs strong chromatic contrast on
+                    // top of the luminance swing.
+                    // Continuous smooth latitude gradient — Saturn
+                    // reference (Cassini true-colour plate). Jets
+                    // modulate luminance only, so this is authored
+                    // as a base colour ramp with no alternation.
+                    // South dusky ochre → equator warm cream → cool
+                    // olive-khaki temperate → pale haze blue polar.
+                    // Hue progression is monotonic and shallow so
+                    // the jets read as brightness variation on a
+                    // single gradient instead of stripes of
+                    // different colours.
+                    // Continuous warm gradient — no saturated blue jump.
+                    // Monotone warm ochre → cream → dusky taupe, matching
+                    // Saturn Cassini plates where hue wanders gently along
+                    // a single tone family.
+                    palette: [
+                        (lat: -1.00, color: (0.60, 0.50, 0.34)),
+                        (lat: -0.55, color: (0.78, 0.66, 0.44)),
+                        (lat: -0.10, color: (0.90, 0.80, 0.58)),
+                        (lat:  0.20, color: (0.92, 0.82, 0.60)),
+                        (lat:  0.55, color: (0.82, 0.72, 0.54)),
+                        (lat:  1.00, color: (0.62, 0.54, 0.42)),
+                    ],
+                    // Saturn's visible disk shows ~10 distinct
+                    // stripes at this scale. Each sine cycle is a
+                    // zone/belt pair, so `band_frequency = 5` packs
+                    // ~10 stripes pole-to-pole.
+                    // Base stripe count pole-to-pole. The shader
+                    // adds two harmonic sines on top of this
+                    // frequency, so the effective jet count is
+                    // higher and the widths are non-uniform.
+                    // Saturn shows ~20 jets pole-to-pole at this
+                    // scale; 13 base + harmonics lands near that.
+                    // Finer jets — Saturn shows many small bands per
+                    // hemisphere at cruise scale. 20 base + harmonics
+                    // packs ~30+ stripes pole-to-pole.
+                    band_frequency: 20.0,
+                    band_warp: 0.03,
+                    // Low turbulence — gates streak, detail, and
+                    // palette jitter amplitudes. Saturn reference has
+                    // very subdued high-freq contrast.
+                    turbulence: 0.09,
+                    // Now reinterpreted (see shader): this is the
+                    // per-band latitude step injected into the palette
+                    // lookup. Each jet discretizes a small monotone
+                    // jump along the palette gradient — no ± swing.
+                    band_contrast: 0.08,
+                    // Hard jet edges — Saturn's band transitions are
+                    // crisp steps, not smooth sines. Low sharpness
+                    // pushes the shape toward a square wave.
+                    band_sharpness: 0.30,
+                    // No grey/cool tint multiplier — the palette
+                    // carries all the chromatic information.
+                    tint: (1.00, 1.00, 1.00),
+                    // Differential rotation at a very small rate so
+                    // bands visibly drift at different speeds without
+                    // smearing the 3D noise field over session
+                    // timescales. The shear builds slowly — tens of
+                    // minutes for noticeable distortion, hours before
+                    // it's ugly.
+                    speed_profile: [
+                        -0.15, 0.10, -0.25, 0.35,
+                         0.60,
+                         0.35, -0.25, 0.10, -0.15,
+                    ],
+                    differential_rotation_rate: 0.0008,
+                    // Gentle pole turbulence, quiet equator — the
+                    // old 1.0-at-poles profile made the high-latitude
+                    // cloud bands rip apart into blobs.
+                    turbulence_profile: [
+                        0.45, 0.40, 0.30, 0.22,
+                        0.15,
+                        0.22, 0.30, 0.40, 0.45,
+                    ],
+                    edge_wave_amp: 0.25,
+                    curl_amp: 0.30,
+                    // Two-layer parallax removed from shader; kept at
+                    // zero for authoring-format compatibility.
+                    parallax_amp: 0.0,
+                    // No single large storm — the edge vortex chain
+                    // now carries all the small eddies that populate
+                    // the band boundaries.
+                    named_vortices: [],
+                    edge_vortex_chain: Some((
+                        // Small angular radius = fine eddies
+                        // compared to band width. With ~20 slots per
+                        // band this gives a populated boundary
+                        // without the eddies overlapping.
+                        base_radius: 0.020,
+                        strength: 0.9,
+                        lifetime_s: 90.0,
+                        slots_per_band: 20,
+                    )),
+                ),
+                haze: Some((
+                    tint: (0.78, 0.88, 0.92),
+                    thickness: 0.10,
+                    terminator_bias: 0.25,
+                )),
+                rim_halo: Some((
+                    color: (0.62, 0.86, 0.96),
+                    intensity: 0.35,
+                    scale_height_m: 45000.0,
+                    outer_altitude_m: 250000.0,
+                )),
+                limb: Some((
+                    terminator_warmth: (0.92, 0.78, 0.70),
+                    terminator_strength: 0.35,
+                    fresnel_color: (0.72, 0.88, 1.00),
+                    fresnel_strength: 0.35,
+                )),
+                // Rayleigh blue-gap layer is disabled until a real
+                // bake pipeline produces a high-frequency haze
+                // density channel. The per-fragment fBm version
+                // aliased into continent-sized blobs rather than the
+                // narrow clearings Cassini shows, so the blue in
+                // Auron's disk is now carried entirely by the
+                // palette's polar stops.
+                rayleigh: None,
+                // Per-channel Minnaert limb darkening. Red darkens
+                // slowest, blue fastest — reproduces the wavelength
+                // trend in Cassini photometry. Strength 0.9 keeps
+                // the effect strong but leaves a small floor so the
+                // silhouette doesn't go pitch-black.
+                limb_darkening: Some((
+                    red:    0.22,
+                    green:  0.30,
+                    blue:   0.42,
+                    strength: 0.90,
+                )),
+                // Saturn-style ring system. Inner edge roughly at
+                // 1.25 R, outer at 2.3 R — matches Saturn's B/A
+                // ring footprint. Cassini division lives around
+                // r=0.42 of the radial span; the profile also
+                // authors a dim C ring and a bright B ring core.
+                rings: Some((
+                    inner_radius_m:  55750000.0,
+                    outer_radius_m: 102580000.0,
+                    seed: 20101,
+                    opacity: 1.00,
+                    ringlet_noise: 0.55,
+                    ringlet_octaves: 7,
+                    palette: [
+                        // Inner edge — translucent C-ring: dusky grey.
+                        (r: 0.00, color: (0.32, 0.28, 0.24), opacity: 0.18),
+                        (r: 0.18, color: (0.48, 0.42, 0.34), opacity: 0.40),
+                        // Bright B-ring core — creamy gold.
+                        (r: 0.30, color: (0.92, 0.82, 0.62), opacity: 0.95),
+                        (r: 0.40, color: (1.00, 0.90, 0.68), opacity: 0.98),
+                        // Cassini division — authored as a dark gap.
+                        (r: 0.46, color: (0.18, 0.16, 0.14), opacity: 0.10),
+                        // A-ring — warm tan.
+                        (r: 0.55, color: (0.80, 0.68, 0.48), opacity: 0.82),
+                        (r: 0.80, color: (0.74, 0.62, 0.44), opacity: 0.70),
+                        // Outer edge — feathered F-ring stand-in.
+                        (r: 1.00, color: (0.55, 0.48, 0.38), opacity: 0.25),
+                    ],
+                )),
+            )),
         ),
         (
             name: "Pelagos",

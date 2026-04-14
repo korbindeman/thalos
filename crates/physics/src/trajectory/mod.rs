@@ -34,8 +34,8 @@ pub use propagation::{PredictionConfig, PropagationBudget};
 
 // Back-compat aliases so existing call sites and tests keep building.
 pub use flight_plan::FlightPlan as TrajectoryPrediction;
-pub use numeric::NumericSegment as TrajectorySegment;
 pub use flight_plan::propagate_flight_plan as propagate_trajectory_budgeted;
+pub use numeric::NumericSegment as TrajectorySegment;
 
 /// A queryable path through space: states can be sampled at any time within
 /// `epoch_range`, not only at pre-stored points.

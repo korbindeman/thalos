@@ -1,14 +1,14 @@
-use fastnoise2::generator::prelude::*;
 use fastnoise2::SafeNode;
+use fastnoise2::generator::prelude::*;
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::util::{face_position_arrays, texel_dir};
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::CubemapFace;
 use crate::sample::sample_detail_noise;
 use crate::stage::Stage;
 use crate::types::DetailNoiseParams;
-use super::util::{face_position_arrays, texel_dir};
 
 /// Configures the regolith: high-frequency detail noise for the realtime
 /// shader plus a cubemap bake of mid-frequency Voronoi crater texture that
@@ -64,14 +64,26 @@ pub struct Regolith {
     pub density_wavelength_m: f32,
 }
 
-fn default_bake_d_min() -> f32 { 600.0 }
-fn default_bake_scale() -> f32 { 1.0 }
-fn default_density_mod() -> f32 { 0.25 }
-fn default_density_wavelength() -> f32 { 250_000.0 }
+fn default_bake_d_min() -> f32 {
+    600.0
+}
+fn default_bake_scale() -> f32 {
+    1.0
+}
+fn default_density_mod() -> f32 {
+    0.25
+}
+fn default_density_wavelength() -> f32 {
+    250_000.0
+}
 
 impl Stage for Regolith {
-    fn name(&self) -> &str { "regolith" }
-    fn dependencies(&self) -> &[&str] { &["cratering"] }
+    fn name(&self) -> &str {
+        "regolith"
+    }
+    fn dependencies(&self) -> &[&str] {
+        &["cratering"]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         // ── Detail-noise params for the realtime shader ────────────────

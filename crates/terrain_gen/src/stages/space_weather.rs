@@ -2,14 +2,14 @@ use glam::Vec3;
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::MAT_MARE;
+use super::util::for_face_texels_in_cap;
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::{CubemapFace, face_uv_to_dir};
 use crate::noise::fbm3;
 use crate::seeding::Rng;
 use crate::stage::Stage;
 use crate::types::{BiomeParams, Crater};
-use super::util::for_face_texels_in_cap;
-use super::MAT_MARE;
 
 /// Visual freshness of a young crater, normalized to a freshness threshold.
 ///
@@ -59,6 +59,13 @@ pub struct SpaceWeather {
     /// Mare mature/fresh albedos — used for any texel tagged MAT_MARE.
     pub mare_mature_albedo: f32,
     pub mare_fresh_albedo: f32,
+    /// RGB tint applied multiplicatively to mare texels. Default is
+    /// neutral gray (lunar mare). Bodies with compositionally distinct
+    /// flood-plain material (olivine-rich, carbonaceous, etc.) can set a
+    /// chromatic tint here so the smooth plains read in their own color
+    /// instead of a neutral darkening.
+    #[serde(default = "default_mare_tint")]
+    pub mare_tint: [f32; 3],
     /// Craters younger than this (Gyr) get fresh-ejecta brightening.
     pub young_crater_age_threshold: f32,
     /// Craters younger than this get ray systems.
@@ -69,6 +76,10 @@ pub struct SpaceWeather {
     pub ray_count_per_crater: u32,
     /// Angular half-width of each ray arm (radians).
     pub ray_half_width: f32,
+}
+
+fn default_mare_tint() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
 }
 
 /// Precomputed ray data for a single rayed crater.
@@ -99,8 +110,12 @@ fn sw_splitmix64(mut z: u64) -> u64 {
 }
 
 impl Stage for SpaceWeather {
-    fn name(&self) -> &str { "space_weather" }
-    fn dependencies(&self) -> &[&str] { &["cratering"] }
+    fn name(&self) -> &str {
+        "space_weather"
+    }
+    fn dependencies(&self) -> &[&str] {
+        &["cratering"]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let res = builder.cubemap_resolution;
@@ -126,16 +141,24 @@ impl Stage for SpaceWeather {
         };
 
         // Classify young and rayed craters.
-        let young_craters: Vec<&Crater> = builder.craters.iter()
+        let young_craters: Vec<&Crater> = builder
+            .craters
+            .iter()
             .filter(|c| c.age_gyr < self.young_crater_age_threshold)
             .collect();
 
         let mut rng = Rng::new(seed);
-        let rayed_craters: Vec<RayedCrater> = builder.craters.iter()
+        let rayed_craters: Vec<RayedCrater> = builder
+            .craters
+            .iter()
             .filter(|c| c.age_gyr < self.ray_age_threshold)
             .map(|c| {
                 let center = c.center.normalize();
-                let up = if center.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+                let up = if center.y.abs() < 0.9 {
+                    Vec3::Y
+                } else {
+                    Vec3::X
+                };
                 let right = center.cross(up).normalize();
                 let forward = right.cross(center).normalize();
 
@@ -146,10 +169,8 @@ impl Stage for SpaceWeather {
                     .collect();
 
                 let uprange_az = rng.next_f64() as f32 * std::f32::consts::TAU;
-                let exclusion_half = rng.range_f64(
-                    std::f64::consts::FRAC_PI_6,
-                    std::f64::consts::FRAC_PI_2,
-                ) as f32;
+                let exclusion_half =
+                    rng.range_f64(std::f64::consts::FRAC_PI_6, std::f64::consts::FRAC_PI_2) as f32;
 
                 let age_frac = c.age_gyr / self.ray_age_threshold;
 
@@ -168,6 +189,7 @@ impl Stage for SpaceWeather {
 
         let mare_mature = self.mare_mature_albedo;
         let mare_fresh = self.mare_fresh_albedo;
+        let mare_tint = self.mare_tint;
         let hl_mature_override = self.highland_mature_albedo;
         let hl_fresh_override = self.highland_fresh_albedo;
         let ray_half_width = self.ray_half_width;
@@ -231,7 +253,7 @@ impl Stage for SpaceWeather {
                         let idx = (y * res + x) as usize;
                         let is_mare = material_cubemap.get(face, x, y) == MAT_MARE as u8;
                         let (base_gray, tint) = if is_mare {
-                            (mare_mature, [1.0, 1.0, 1.0])
+                            (mare_mature, mare_tint)
                         } else {
                             let biome = lookup_biome(face, x, y);
                             let biome_base = hl_mature_override.unwrap_or(biome.albedo);
@@ -243,9 +265,8 @@ impl Stage for SpaceWeather {
                             // tonal field rather than sharing one pattern.
                             let bs = seed
                                 ^ 0xA17B_5C2D_4E9F_1357
-                                ^ ((biome_map.get(face, x, y) as u64).wrapping_mul(
-                                    0xB3F9_4C78_CE32_1A5D,
-                                ));
+                                ^ ((biome_map.get(face, x, y) as u64)
+                                    .wrapping_mul(0xB3F9_4C78_CE32_1A5D));
                             let n = fbm3(
                                 dir.x as f64 * TONAL_FREQ,
                                 dir.y as f64 * TONAL_FREQ,
@@ -260,9 +281,7 @@ impl Stage for SpaceWeather {
                             // darkening and ejecta streaks ride on top of
                             // the biome base albedo so basin boundaries are
                             // soft/fractal instead of hard biome discs.
-                            let bf = basin_field
-                                .get(face, x, y)
-                                .clamp(-0.75, 0.5);
+                            let bf = basin_field.get(face, x, y).clamp(-0.75, 0.5);
                             let basin_mul = (1.0 + bf).max(0.0);
                             ((biome_base * scale * basin_mul).max(0.0), biome.tint)
                         };
@@ -305,11 +324,10 @@ impl Stage for SpaceWeather {
                             ^ ((center.y.to_bits() as u64) << 17)
                             ^ ((center.z.to_bits() as u64) << 33),
                     );
-                    let pond_phase_a = (pond_seed as u32 as f32 / u32::MAX as f32)
-                        * std::f32::consts::TAU;
-                    let pond_phase_b = ((pond_seed >> 32) as u32 as f32
-                        / u32::MAX as f32)
-                        * std::f32::consts::TAU;
+                    let pond_phase_a =
+                        (pond_seed as u32 as f32 / u32::MAX as f32) * std::f32::consts::TAU;
+                    let pond_phase_b =
+                        ((pond_seed >> 32) as u32 as f32 / u32::MAX as f32) * std::f32::consts::TAU;
                     let is_complex = radius_m >= 15_000.0;
 
                     for_face_texels_in_cap(
@@ -327,14 +345,11 @@ impl Stage for SpaceWeather {
                                 let base = 1.0 - t / 0.55;
                                 let pond_boost = if is_complex {
                                     let proj = dir - center * dir.dot(center);
-                                    let theta = proj
-                                        .dot(crater_bitangent)
-                                        .atan2(proj.dot(crater_tangent));
-                                    let n_az =
-                                        (3.0 * theta + pond_phase_a).sin()
+                                    let theta =
+                                        proj.dot(crater_bitangent).atan2(proj.dot(crater_tangent));
+                                    let n_az = (3.0 * theta + pond_phase_a).sin()
                                         + 0.5 * (5.0 * theta + pond_phase_b).sin();
-                                    let n_r =
-                                        (7.0 * t + pond_phase_a * 1.7).sin();
+                                    let n_r = (7.0 * t + pond_phase_a * 1.7).sin();
                                     let pond = (n_az + n_r) * 0.4;
                                     // Bias so only sparse patches darken.
                                     (pond - 0.15).max(0.0) * 0.7
@@ -357,14 +372,15 @@ impl Stage for SpaceWeather {
                                 delta += EJECTA_MAX * apron * fade;
                             }
 
-                            if delta.abs() < 1e-3 { return; }
+                            if delta.abs() < 1e-3 {
+                                return;
+                            }
 
                             let idx = (y * res + x) as usize;
                             let current = slice[idx];
-                            let is_mare =
-                                material_cubemap.get(face, x, y) == MAT_MARE as u8;
+                            let is_mare = material_cubemap.get(face, x, y) == MAT_MARE as u8;
                             let (bright, dark, tint) = if is_mare {
-                                (mare_fresh, mare_mature * 0.75, [1.0, 1.0, 1.0])
+                                (mare_fresh, mare_mature * 0.75, mare_tint)
                             } else {
                                 let b = lookup_biome(face, x, y);
                                 let mature = hl_mature_override.unwrap_or(b.albedo);
@@ -413,20 +429,16 @@ impl Stage for SpaceWeather {
                             if strength > 0.005 {
                                 let idx = (y * res + x) as usize;
                                 let current = slice[idx];
-                                let is_mare =
-                                    material_cubemap.get(face, x, y) == MAT_MARE as u8;
+                                let is_mare = material_cubemap.get(face, x, y) == MAT_MARE as u8;
                                 let (fresh_v, tint) = if is_mare {
-                                    (mare_fresh, [1.0, 1.0, 1.0])
+                                    (mare_fresh, mare_tint)
                                 } else {
                                     let b = lookup_biome(face, x, y);
                                     let fresh = hl_fresh_override.unwrap_or_else(|| biome_fresh(b));
                                     (fresh, b.tint)
                                 };
-                                let target = [
-                                    fresh_v * tint[0],
-                                    fresh_v * tint[1],
-                                    fresh_v * tint[2],
-                                ];
+                                let target =
+                                    [fresh_v * tint[0], fresh_v * tint[1], fresh_v * tint[2]];
                                 slice[idx] = [
                                     current[0] + (target[0] - current[0]) * strength,
                                     current[1] + (target[1] - current[1]) * strength,
@@ -451,7 +463,9 @@ impl Stage for SpaceWeather {
                         ray_angle,
                         |x, y, dir, angular_dist| {
                             let surface_dist = angular_dist * body_radius;
-                            if surface_dist < rc.radius_m { return; }
+                            if surface_dist < rc.radius_m {
+                                return;
+                            }
 
                             let to_texel = (dir - rc.center * dir.dot(rc.center)).normalize();
                             let az_x = to_texel.dot(rc.tangent_right);
@@ -468,9 +482,13 @@ impl Stage for SpaceWeather {
                                 if delta > std::f32::consts::PI {
                                     delta = std::f32::consts::TAU - delta;
                                 }
-                                if delta < min_delta { min_delta = delta; }
+                                if delta < min_delta {
+                                    min_delta = delta;
+                                }
                             }
-                            if min_delta >= ray_half_width * 1.6 { return; }
+                            if min_delta >= ray_half_width * 1.6 {
+                                return;
+                            }
                             let w = (1.0 - min_delta / (ray_half_width * 1.6)).max(0.0);
                             let arm_w = w * w * (3.0 - 2.0 * w);
 
@@ -478,7 +496,9 @@ impl Stage for SpaceWeather {
                             if delta_up > std::f32::consts::PI {
                                 delta_up = std::f32::consts::TAU - delta_up;
                             }
-                            if delta_up < rc.exclusion_half { return; }
+                            if delta_up < rc.exclusion_half {
+                                return;
+                            }
 
                             let dist_from_rim =
                                 (surface_dist - rc.radius_m) / (ray_extent_m - rc.radius_m);
@@ -488,7 +508,8 @@ impl Stage for SpaceWeather {
                                 let idx = (y * res + x) as usize;
                                 let current = slice[idx];
                                 let biome = lookup_biome(face, x, y);
-                                let fresh_v = hl_fresh_override.unwrap_or_else(|| biome_fresh(biome));
+                                let fresh_v =
+                                    hl_fresh_override.unwrap_or_else(|| biome_fresh(biome));
                                 let target = [
                                     fresh_v * biome.tint[0],
                                     fresh_v * biome.tint[1],

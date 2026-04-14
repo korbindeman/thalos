@@ -1,5 +1,5 @@
-use glam::Vec3;
 use crate::cubemap::{CubemapFace, face_uv_to_dir};
+use glam::Vec3;
 
 /// Normal vector for a cubemap face.
 pub fn face_normal(face: CubemapFace) -> Vec3 {
@@ -37,10 +37,7 @@ pub fn texel_dir(face: CubemapFace, x: u32, y: u32, res: u32) -> Vec3 {
 /// normalized unit-sphere directions. Row-major (y outer, x inner), matching
 /// the storage order of `Cubemap<T>::face_data`. Used by fastnoise2 bulk
 /// position-array sampling.
-pub fn face_position_arrays(
-    face: CubemapFace,
-    resolution: u32,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+pub fn face_position_arrays(face: CubemapFace, resolution: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let n = (resolution * resolution) as usize;
     let mut xs = Vec::with_capacity(n);
     let mut ys = Vec::with_capacity(n);
@@ -62,7 +59,9 @@ const FACE_HALF_DIAG: f32 = 0.9553; // atan(sqrt(2))
 /// Fast per-face cull: true if the cap around `center` with `half_angle`
 /// may intersect `face`. Used to skip faces entirely.
 pub fn face_may_intersect_cap(face: CubemapFace, center: Vec3, half_angle: f32) -> bool {
-    let cos_cull = (half_angle + FACE_HALF_DIAG).min(std::f32::consts::PI).cos();
+    let cos_cull = (half_angle + FACE_HALF_DIAG)
+        .min(std::f32::consts::PI)
+        .cos();
     center.dot(face_normal(face)) >= cos_cull
 }
 
@@ -138,8 +137,7 @@ pub fn for_face_texels_in_cap<F>(
 ) where
     F: FnMut(u32, u32, Vec3, f32),
 {
-    let Some((x0, x1, y0, y1)) = face_cap_texel_bbox(face, resolution, center, half_angle)
-    else {
+    let Some((x0, x1, y0, y1)) = face_cap_texel_bbox(face, resolution, center, half_angle) else {
         return;
     };
     iter_face_bbox(face, resolution, center, half_angle, x0, x1, y0, y1, f);
@@ -161,8 +159,7 @@ pub fn for_face_texels_in_cap_rows<F>(
     if y_start >= y_end_excl {
         return;
     }
-    let Some((x0, x1, y0, y1)) = face_cap_texel_bbox(face, resolution, center, half_angle)
-    else {
+    let Some((x0, x1, y0, y1)) = face_cap_texel_bbox(face, resolution, center, half_angle) else {
         return;
     };
     let y0 = y0.max(y_start);
@@ -293,4 +290,3 @@ mod tests {
         }
     }
 }
-

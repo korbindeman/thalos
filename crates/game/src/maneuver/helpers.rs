@@ -16,12 +16,7 @@ pub(super) struct ClosestTrailPoint {
 /// Compute the prograde/normal/radial frame as a Mat3 from ship + body state.
 ///
 /// Columns: [prograde, normal, radial] matching the ManeuverNode delta_v axes.
-fn orbital_frame_mat3(
-    ship_pos: DVec3,
-    ship_vel: DVec3,
-    body_pos: DVec3,
-    body_vel: DVec3,
-) -> Mat3 {
+fn orbital_frame_mat3(ship_pos: DVec3, ship_vel: DVec3, body_pos: DVec3, body_vel: DVec3) -> Mat3 {
     let rel_vel = ship_vel - body_vel;
     let rel_pos = ship_pos - body_pos;
 
@@ -51,11 +46,7 @@ fn orbital_frame_mat3(
 
     let radial = prograde.cross(normal);
 
-    Mat3::from_cols(
-        prograde.as_vec3(),
-        normal.as_vec3(),
-        radial.as_vec3(),
-    )
+    Mat3::from_cols(prograde.as_vec3(), normal.as_vec3(), radial.as_vec3())
 }
 
 /// Find the render-space position and orbital frame for a given simulation time
@@ -117,8 +108,7 @@ pub(super) fn node_world_position(
     origin: &RenderOrigin,
     system: &SolarSystemDefinition,
 ) -> Option<Vec3> {
-    node_world_pos_and_frame(prediction, node.time, body_states, origin, system)
-        .map(|(pos, _)| pos)
+    node_world_pos_and_frame(prediction, node.time, body_states, origin, system).map(|(pos, _)| pos)
 }
 
 pub(super) fn selected_node_world_and_frame(
@@ -149,8 +139,7 @@ pub(super) fn closest_node(
     let mut best_dist = max_distance;
 
     for node in &plan.nodes {
-        let Some(world_pos) =
-            node_world_position(node, prediction, body_states, origin, system)
+        let Some(world_pos) = node_world_position(node, prediction, body_states, origin, system)
         else {
             continue;
         };

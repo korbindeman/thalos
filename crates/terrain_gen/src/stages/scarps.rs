@@ -2,11 +2,11 @@ use glam::Vec3;
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::util::for_face_texels_in_cap;
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::CubemapFace;
 use crate::seeding::Rng;
 use crate::stage::Stage;
-use super::util::for_face_texels_in_cap;
 
 /// Lobate thrust-fault scarps. Sinuous compressional ridges produced by
 /// global radial contraction as the body's interior cools — visible at
@@ -42,11 +42,17 @@ pub struct Scarps {
     pub curvature: f32,
 }
 
-fn default_curvature() -> f32 { 0.12 }
+fn default_curvature() -> f32 {
+    0.12
+}
 
 impl Stage for Scarps {
-    fn name(&self) -> &str { "scarps" }
-    fn dependencies(&self) -> &[&str] { &["cratering"] }
+    fn name(&self) -> &str {
+        "scarps"
+    }
+    fn dependencies(&self) -> &[&str] {
+        &["cratering"]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         if self.count == 0 || self.height_m == 0.0 {
@@ -68,8 +74,8 @@ impl Stage for Scarps {
         }
         let mut scarps: Vec<Scarp> = Vec::with_capacity(self.count as usize);
         for _ in 0..self.count {
-            let length_m = self.min_length_m
-                + rng.next_f64() as f32 * (self.max_length_m - self.min_length_m);
+            let length_m =
+                self.min_length_m + rng.next_f64() as f32 * (self.max_length_m - self.min_length_m);
             let n_steps = ((length_m / step_m) as usize).max(2);
 
             let mut pos = rng.unit_vector().as_vec3().normalize();
@@ -108,9 +114,7 @@ impl Stage for Scarps {
         let across_sigma_m = self.width_m * 0.5;
         let across_extent_m = across_sigma_m * 3.0;
         let along_half_m = step_m * 1.0; // triangular window half-width
-        let cap_radius_m = (across_extent_m * across_extent_m
-            + along_half_m * along_half_m)
-            .sqrt();
+        let cap_radius_m = (across_extent_m * across_extent_m + along_half_m * along_half_m).sqrt();
         let cap_angle = cap_radius_m / body_radius;
         let across_sigma_ang = across_sigma_m / body_radius;
         let along_half_ang = along_half_m / body_radius;
@@ -154,13 +158,9 @@ impl Stage for Scarps {
                             if along.abs() > along_half_ang {
                                 return;
                             }
-                            let along_w =
-                                1.0 - along.abs() / along_half_ang;
+                            let along_w = 1.0 - along.abs() / along_half_ang;
                             // Across-track Gaussian.
-                            let g = (-(across / across_sigma_ang)
-                                .powi(2)
-                                * 0.5)
-                                .exp();
+                            let g = (-(across / across_sigma_ang).powi(2) * 0.5).exp();
                             let h_delta = height_m * g * along_w;
                             if h_delta < 0.5 {
                                 return;
@@ -202,6 +202,9 @@ mod tests {
                 }
             }
         }
-        assert!(max_h > 50.0, "scarp ridge should raise terrain, max={max_h}");
+        assert!(
+            max_h > 50.0,
+            "scarp ridge should raise terrain, max={max_h}"
+        );
     }
 }

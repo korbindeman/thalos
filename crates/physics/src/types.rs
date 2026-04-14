@@ -1,6 +1,7 @@
 use glam::DVec3;
 use serde::Deserialize;
 use std::collections::HashMap;
+use thalos_atmosphere_gen::AtmosphereParams;
 use thalos_terrain_gen::GeneratorParams;
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
@@ -57,6 +58,14 @@ pub struct BodyDefinition {
     pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
     pub generator: Option<GeneratorParams>,
+    /// Gas / ice giant atmosphere definition. Mutually meaningful with
+    /// `generator`: a body with `atmosphere: Some(_)` and no `generator`
+    /// is rendered as a gas giant (optically thick atmosphere all the
+    /// way down, no solid surface). Bodies with both set — terrestrials
+    /// with a thin atmosphere — will eventually composite the
+    /// atmosphere shell over the baked surface, but that path is not
+    /// wired up yet.
+    pub atmosphere: Option<AtmosphereParams>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

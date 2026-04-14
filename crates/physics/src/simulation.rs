@@ -148,20 +148,17 @@ impl WarpController {
 
     pub fn reset(&mut self) {
         self.resume_index = None;
-        self.level_index = self
-            .levels
-            .iter()
-            .position(|&w| w == 1.0)
-            .unwrap_or(0);
+        self.level_index = self.levels.iter().position(|&w| w == 1.0).unwrap_or(0);
     }
 
     /// Toggle between paused (level 0) and the last non-zero level.
     /// If already at level 0 and nothing to resume, advances to 1x.
     pub fn toggle_pause(&mut self) {
         if self.level_index == 0 {
-            let target = self.resume_index.take().unwrap_or_else(|| {
-                self.levels.iter().position(|&w| w == 1.0).unwrap_or(0)
-            });
+            let target = self
+                .resume_index
+                .take()
+                .unwrap_or_else(|| self.levels.iter().position(|&w| w == 1.0).unwrap_or(0));
             self.level_index = target;
         } else {
             self.resume_index = Some(self.level_index);
@@ -533,7 +530,8 @@ impl Simulation {
         predicted_at_sim_time: f64,
         epoch: u64,
     ) -> bool {
-        self.prediction_state.apply(prediction, predicted_at_sim_time, epoch)
+        self.prediction_state
+            .apply(prediction, predicted_at_sim_time, epoch)
     }
 
     /// Recompute trajectory prediction using the same integrator config as live
@@ -552,7 +550,9 @@ impl Simulation {
             req.ship_thrust_acceleration,
             None,
         );
-        let _ = self.prediction_state.apply(prediction, req.sim_time, req.epoch);
+        let _ = self
+            .prediction_state
+            .apply(prediction, req.sim_time, req.epoch);
     }
 
     pub fn prediction_needs_refresh(&self) -> bool {

@@ -10,13 +10,13 @@
 //! equivalent to a full rebuild — retained as the abstraction boundary for a
 //! future incremental recompute).
 
+use super::Trajectory;
 use super::events::{Encounter, EncounterId, detect_segment_events};
 use super::numeric::NumericSegment;
+pub use super::propagation::ScheduledBurn;
 use super::propagation::{
     PredictionConfig, PropagationBudget, PropagationContext, cone_width_scaled, propagate_segment,
 };
-pub use super::propagation::ScheduledBurn;
-use super::Trajectory;
 use crate::body_state_provider::BodyStateProvider;
 use crate::integrator::IntegratorConfig;
 use crate::maneuver::{ManeuverSequence, burn_duration};
@@ -196,6 +196,7 @@ pub fn propagate_flight_plan(
         } else {
             ephemeris_end
         };
+        let stop_on_stable_orbit = leg_idx + 1 == leg_count;
 
         active_burns.retain(|burn| burn.start_time + burn.duration > time);
         let segment = propagate_segment(
@@ -204,6 +205,7 @@ pub fn propagate_flight_plan(
             leg_end,
             &active_burns,
             &ctx,
+            stop_on_stable_orbit,
             &mut remaining_budget,
         );
 
@@ -215,14 +217,17 @@ pub fn propagate_flight_plan(
             &mut encounter_counter,
         ));
 
-        let early_exit = segment.is_stable_orbit
-            || segment.collision_body.is_some()
+        let early_exit = segment.collision_body.is_some()
             || segment
                 .samples
                 .last()
-                .map(|s| cone_width_scaled(s, ctx.prediction_config) > ctx.prediction_config.cone_fade_threshold)
+                .map(|s| {
+                    cone_width_scaled(s, ctx.prediction_config)
+                        > ctx.prediction_config.cone_fade_threshold
+                })
                 .unwrap_or(false)
-            || remaining_budget == Some(0);
+            || remaining_budget == Some(0)
+            || (stop_on_stable_orbit && segment.is_stable_orbit);
 
         // Carry the last known state forward so the next leg starts correctly.
         if let Some(last) = segment.last_state() {

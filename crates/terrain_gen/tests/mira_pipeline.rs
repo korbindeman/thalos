@@ -9,7 +9,7 @@ fn mira_megabasin() -> Megabasin {
     Megabasin {
         basins: vec![
             BasinDef {
-                center_dir: Vec3::new( 0.25,  0.35, 0.90).normalize(),
+                center_dir: Vec3::new(0.25, 0.35, 0.90).normalize(),
                 radius_m: 320_000.0,
                 depth_m: 7_500.0,
                 ring_count: 4,
@@ -69,6 +69,7 @@ fn mira_pipeline() -> Pipeline {
             highland_fresh_albedo: Some(0.18),
             mare_mature_albedo: 0.065,
             mare_fresh_albedo: 0.09,
+            mare_tint: [1.0, 1.0, 1.0],
             young_crater_age_threshold: 0.5,
             ray_age_threshold: 0.1,
             ray_extent_radii: 7.0,
@@ -135,7 +136,10 @@ fn mira_has_height_variation() {
     let range = max_h - min_h;
     // With ~7km megabasins, we expect at least several km of relief.
     assert!(range > 3_000.0, "height range too small: {range}");
-    assert!(min_h < -1_000.0, "no significant depressions: min_h = {min_h}");
+    assert!(
+        min_h < -1_000.0,
+        "no significant depressions: min_h = {min_h}"
+    );
 }
 
 #[test]
@@ -159,8 +163,11 @@ fn near_side_has_mare() {
                 // Mare texels have lower albedo than highland.
                 let is_mare = albedo[0] < 0.085;
                 if is_mare {
-                    if dir.z > 0.0 { near_mare += 1; }
-                    else { far_mare += 1; }
+                    if dir.z > 0.0 {
+                        near_mare += 1;
+                    } else {
+                        far_mare += 1;
+                    }
                 }
             }
         }
@@ -179,9 +186,18 @@ fn deterministic_across_runs() {
         let mut builder = mira_builder(64);
         mira_pipeline().run(&mut builder);
         // Sample a few height values
-        let h1 = builder.height_contributions.height.get(CubemapFace::PosZ, 32, 32);
-        let h2 = builder.height_contributions.height.get(CubemapFace::NegZ, 16, 16);
-        let a1 = builder.albedo_contributions.albedo.get(CubemapFace::PosX, 10, 10);
+        let h1 = builder
+            .height_contributions
+            .height
+            .get(CubemapFace::PosZ, 32, 32);
+        let h2 = builder
+            .height_contributions
+            .height
+            .get(CubemapFace::NegZ, 16, 16);
+        let a1 = builder
+            .albedo_contributions
+            .albedo
+            .get(CubemapFace::PosX, 10, 10);
         (h1, h2, a1)
     };
 

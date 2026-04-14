@@ -108,7 +108,10 @@ enum GhostShape {
     /// Asymmetric halo ring (analytic shader). Bright arc faces away from
     /// the sun — i.e., toward screen center — matching real lens halos.
     #[allow(dead_code)]
-    Halo { thickness: f32, crescent: f32 },
+    Halo {
+        thickness: f32,
+        crescent: f32,
+    },
 }
 
 /// Color gradient along the chain reads as optical dispersion: warm near
@@ -121,23 +124,68 @@ const GHOSTS: &[(f32, f32, Color, GhostShape)] = &[
     // (0.0, 220.0, Color::srgba(1.00, 1.00, 1.00, 0.09),
     //     GhostShape::Halo { thickness: 0.12, crescent: 0.0 }),
     // Starburst anchor at the source.
-    (0.0, 280.0, Color::srgba(1.00, 0.88, 0.65, 0.35), GhostShape::Starburst),
+    (
+        0.0,
+        280.0,
+        Color::srgba(1.00, 0.88, 0.65, 0.35),
+        GhostShape::Starburst,
+    ),
     // Tiny hot pip just off the sun.
-    (0.14, 18.0, Color::srgba(1.00, 0.70, 0.32, 0.12), GhostShape::Iris),
+    (
+        0.14,
+        18.0,
+        Color::srgba(1.00, 0.70, 0.32, 0.12),
+        GhostShape::Iris,
+    ),
     // Amber mid ghost.
-    (0.28, 64.0, Color::srgba(1.00, 0.58, 0.26, 0.07), GhostShape::Iris),
+    (
+        0.28,
+        64.0,
+        Color::srgba(1.00, 0.58, 0.26, 0.07),
+        GhostShape::Iris,
+    ),
     // Small magenta — color break that sells the optics.
-    (0.46, 30.0, Color::srgba(0.85, 0.35, 0.68, 0.10), GhostShape::Iris),
+    (
+        0.46,
+        30.0,
+        Color::srgba(0.85, 0.35, 0.68, 0.10),
+        GhostShape::Iris,
+    ),
     // Big faint cool ghost — long tail of the chain.
-    (0.64, 160.0, Color::srgba(0.38, 0.58, 1.00, 0.035), GhostShape::Iris),
+    (
+        0.64,
+        160.0,
+        Color::srgba(0.38, 0.58, 1.00, 0.035),
+        GhostShape::Iris,
+    ),
     // Sharp cyan near center.
-    (0.86, 24.0, Color::srgba(0.48, 0.82, 1.00, 0.11), GhostShape::Iris),
+    (
+        0.86,
+        24.0,
+        Color::srgba(0.48, 0.82, 1.00, 0.11),
+        GhostShape::Iris,
+    ),
     // Main centered ghost — cool.
-    (1.00, 100.0, Color::srgba(0.58, 0.78, 1.00, 0.06), GhostShape::Iris),
+    (
+        1.00,
+        100.0,
+        Color::srgba(0.58, 0.78, 1.00, 0.06),
+        GhostShape::Iris,
+    ),
     // Past-center pink.
-    (1.20, 42.0, Color::srgba(1.00, 0.52, 0.62, 0.08), GhostShape::Iris),
+    (
+        1.20,
+        42.0,
+        Color::srgba(1.00, 0.52, 0.62, 0.08),
+        GhostShape::Iris,
+    ),
     // Huge faint warm wash far past center.
-    (1.42, 240.0, Color::srgba(1.00, 0.72, 0.48, 0.025), GhostShape::Iris),
+    (
+        1.42,
+        240.0,
+        Color::srgba(1.00, 0.72, 0.48, 0.025),
+        GhostShape::Iris,
+    ),
 ];
 
 fn spawn_lens_flare_ghosts(
@@ -159,10 +207,17 @@ fn spawn_lens_flare_ghosts(
             top: Val::Px(-10_000.0),
             ..default()
         };
-        let ghost = LensFlareGhost { axis_t, size_px, base_tint };
+        let ghost = LensFlareGhost {
+            axis_t,
+            size_px,
+            base_tint,
+        };
 
         match shape {
-            GhostShape::Halo { thickness, crescent } => {
+            GhostShape::Halo {
+                thickness,
+                crescent,
+            } => {
                 let material = halo_materials.add(LensFlareHaloMaterial {
                     tint: LinearRgba::NONE,
                     params: Vec4::new(1.0, 0.0, *crescent, *thickness),
@@ -172,7 +227,10 @@ fn spawn_lens_flare_ghosts(
                     node,
                     Name::new("LensFlareHalo"),
                     ghost,
-                    HaloShape { thickness: *thickness, crescent: *crescent },
+                    HaloShape {
+                        thickness: *thickness,
+                        crescent: *crescent,
+                    },
                 ));
             }
             GhostShape::Iris | GhostShape::Starburst => {
@@ -250,7 +308,12 @@ fn update_lens_flare(
         .find(|(_, body)| body.is_star)
         .map(|(tf, _)| tf.translation());
     let Some(sun_world) = sun_world else {
-        hide(&mut tex_ghosts, &mut halo_ghosts, &mut tex_materials, &mut halo_materials);
+        hide(
+            &mut tex_ghosts,
+            &mut halo_ghosts,
+            &mut tex_materials,
+            &mut halo_materials,
+        );
         return;
     };
 
@@ -258,7 +321,12 @@ fn update_lens_flare(
     let to_sun = sun_world - cam_pos;
     let sun_dist = to_sun.length();
     if sun_dist < 1e-6 {
-        hide(&mut tex_ghosts, &mut halo_ghosts, &mut tex_materials, &mut halo_materials);
+        hide(
+            &mut tex_ghosts,
+            &mut halo_ghosts,
+            &mut tex_materials,
+            &mut halo_materials,
+        );
         return;
     }
     let ray_dir = to_sun / sun_dist;
@@ -288,7 +356,12 @@ fn update_lens_flare(
     let sun_screen = match camera.world_to_viewport(cam_tf, sun_world) {
         Ok(p) => p,
         Err(_) => {
-            hide(&mut tex_ghosts, &mut halo_ghosts, &mut tex_materials, &mut halo_materials);
+            hide(
+                &mut tex_ghosts,
+                &mut halo_ghosts,
+                &mut tex_materials,
+                &mut halo_materials,
+            );
             return;
         }
     };
@@ -321,7 +394,12 @@ fn update_lens_flare(
     let global_intensity = occlusion * on_screen * center_fade;
 
     if global_intensity <= 0.0 {
-        hide(&mut tex_ghosts, &mut halo_ghosts, &mut tex_materials, &mut halo_materials);
+        hide(
+            &mut tex_ghosts,
+            &mut halo_ghosts,
+            &mut tex_materials,
+            &mut halo_materials,
+        );
         return;
     }
 
@@ -388,7 +466,11 @@ fn bake_iris_ghost(size: u32) -> Image {
         }
     }
     Image::new(
-        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -436,7 +518,11 @@ fn bake_starburst(size: u32) -> Image {
         }
     }
     Image::new(
-        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,

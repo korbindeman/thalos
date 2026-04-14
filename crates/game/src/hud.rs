@@ -69,7 +69,11 @@ fn time_control_panel(
 
             ui.separator();
 
-            let orbits_label = if show_orbits.0 { "Orbits: On" } else { "Orbits: Off" };
+            let orbits_label = if show_orbits.0 {
+                "Orbits: On"
+            } else {
+                "Orbits: Off"
+            };
             if ui.button(orbits_label).clicked() {
                 show_orbits.0 = !show_orbits.0;
             }

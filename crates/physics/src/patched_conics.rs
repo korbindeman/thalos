@@ -456,6 +456,7 @@ mod tests {
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
             generator: None,
+            atmosphere: None,
         };
 
         let earth = BodyDefinition {
@@ -480,6 +481,7 @@ mod tests {
                 true_anomaly_rad: 0.0,
             }),
             generator: None,
+            atmosphere: None,
         };
 
         let mut name_to_id = HashMap::new();

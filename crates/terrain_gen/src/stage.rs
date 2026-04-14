@@ -78,8 +78,12 @@ mod tests {
         deps: Vec<&'static str>,
     }
     impl Stage for DummyStage {
-        fn name(&self) -> &str { self.name }
-        fn dependencies(&self) -> &[&str] { &self.deps }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn dependencies(&self) -> &[&str] {
+            &self.deps
+        }
         fn apply(&self, _builder: &mut BodyBuilder) {}
     }
 
@@ -92,9 +96,18 @@ mod tests {
     #[test]
     fn valid_dependency_order() {
         let stages: Vec<Box<dyn Stage>> = vec![
-            Box::new(DummyStage { name: "a", deps: vec![] }),
-            Box::new(DummyStage { name: "b", deps: vec!["a"] }),
-            Box::new(DummyStage { name: "c", deps: vec!["a", "b"] }),
+            Box::new(DummyStage {
+                name: "a",
+                deps: vec![],
+            }),
+            Box::new(DummyStage {
+                name: "b",
+                deps: vec!["a"],
+            }),
+            Box::new(DummyStage {
+                name: "c",
+                deps: vec!["a", "b"],
+            }),
         ];
         let p = Pipeline::new(stages);
         assert_eq!(p.stage_count(), 3);
@@ -104,8 +117,14 @@ mod tests {
     #[should_panic(expected = "depends on 'a'")]
     fn invalid_dependency_order_panics() {
         let stages: Vec<Box<dyn Stage>> = vec![
-            Box::new(DummyStage { name: "b", deps: vec!["a"] }),
-            Box::new(DummyStage { name: "a", deps: vec![] }),
+            Box::new(DummyStage {
+                name: "b",
+                deps: vec!["a"],
+            }),
+            Box::new(DummyStage {
+                name: "a",
+                deps: vec![],
+            }),
         ];
         Pipeline::new(stages);
     }

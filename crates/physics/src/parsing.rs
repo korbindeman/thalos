@@ -10,11 +10,12 @@ use std::collections::HashMap;
 
 use glam::DVec3;
 use serde::Deserialize;
+use thalos_atmosphere_gen::AtmosphereParams;
 use thalos_terrain_gen::GeneratorParams;
 
 use crate::types::{
-    BodyDefinition, BodyId, BodyKind, G, OrbitalElements, ShipDefinition,
-    SolarSystemDefinition, StateVector,
+    BodyDefinition, BodyId, BodyKind, G, OrbitalElements, ShipDefinition, SolarSystemDefinition,
+    StateVector,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,8 @@ pub struct BodyFile {
     pub physical: PhysicalParams,
     pub orbit: Option<OrbitFile>,
     pub generator: Option<GeneratorParams>,
+    #[serde(default)]
+    pub atmosphere: Option<AtmosphereParams>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +118,7 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             soi_radius_m: 0.0, // filled below once all bodies exist
             orbital_elements,
             generator: b.generator,
+            atmosphere: b.atmosphere,
         });
     }
 

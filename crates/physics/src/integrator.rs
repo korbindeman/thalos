@@ -654,6 +654,7 @@ mod tests {
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
             generator: None,
+            atmosphere: None,
         };
         let earth_mass = 5.972e24;
         let earth = BodyDefinition {
@@ -678,6 +679,7 @@ mod tests {
                 true_anomaly_rad: 0.0,
             }),
             generator: None,
+            atmosphere: None,
         };
 
         let mut name_to_id = HashMap::new();
@@ -732,7 +734,8 @@ mod tests {
                 mass_kg: 5.972e24,
             },
         ];
-        let result = GravityForce::compute_with_analysis(DVec3::new(ship_r, 0.0, 0.0), &body_states);
+        let result =
+            GravityForce::compute_with_analysis(DVec3::new(ship_r, 0.0, 0.0), &body_states);
         assert_eq!(result.dominant_body, 1, "Earth should dominate near LEO");
         assert!(
             result.perturbation_ratio < 1.0,

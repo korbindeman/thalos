@@ -2,12 +2,12 @@ use glam::Vec3;
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::util::texel_dir;
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::CubemapFace;
 use crate::noise::fbm3;
-use crate::seeding::{splitmix64, Rng};
+use crate::seeding::{Rng, splitmix64};
 use crate::stage::Stage;
-use super::util::texel_dir;
 
 /// A single large impact basin definition.
 #[derive(Clone, Debug, Deserialize)]
@@ -66,8 +66,12 @@ struct BasinPrecomp {
 const EJECTA_MAX_T: f32 = 3.0;
 
 impl Stage for Megabasin {
-    fn name(&self) -> &str { "megabasin" }
-    fn dependencies(&self) -> &[&str] { &["differentiate"] }
+    fn name(&self) -> &str {
+        "megabasin"
+    }
+    fn dependencies(&self) -> &[&str] {
+        &["differentiate"]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let body_radius = builder.radius_m;
@@ -80,13 +84,16 @@ impl Stage for Megabasin {
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let basin_seed = splitmix64(
-                    seed.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15)),
-                );
+                let basin_seed =
+                    splitmix64(seed.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15)));
                 let mut rng = Rng::new(basin_seed);
                 let center = b.center_dir.normalize();
                 // Build tangent frame at basin center for azimuth measurement.
-                let up = if center.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+                let up = if center.y.abs() < 0.9 {
+                    Vec3::Y
+                } else {
+                    Vec3::X
+                };
                 let tan1 = up.cross(center).normalize();
                 let tan2 = center.cross(tan1);
 
@@ -238,13 +245,11 @@ impl Stage for Megabasin {
                             // by basin size so small basins don't look as
                             // dark as the largest.
                             if t < 0.95 {
-                                let depth_scale =
-                                    (b.def.radius_m / 400_000.0).clamp(0.4, 1.0);
+                                let depth_scale = (b.def.radius_m / 400_000.0).clamp(0.4, 1.0);
                                 let interior_strength = {
                                     let edge0 = 0.95_f32;
                                     let edge1 = 0.35_f32;
-                                    let tt = ((t - edge0) / (edge1 - edge0))
-                                        .clamp(0.0, 1.0);
+                                    let tt = ((t - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
                                     tt * tt * (3.0 - 2.0 * tt)
                                 };
                                 field -= 0.45 * interior_strength * depth_scale;
@@ -256,13 +261,10 @@ impl Stage for Megabasin {
                             if t > 1.0 && t < EJECTA_MAX_T + 0.5 {
                                 let apron_base = 1.0 / (t * t * t);
                                 let fade_end = EJECTA_MAX_T + 0.5;
-                                let fade = ((fade_end - t) / (fade_end - 1.0))
-                                    .clamp(0.0, 1.0);
+                                let fade = ((fade_end - t) / (fade_end - 1.0)).clamp(0.0, 1.0);
                                 let fade_s = fade * fade * (3.0 - 2.0 * fade);
-                                let streak = 0.5
-                                    + 0.5
-                                        * (b.lobe_count * azimuth + b.lobe_phase)
-                                            .cos();
+                                let streak =
+                                    0.5 + 0.5 * (b.lobe_count * azimuth + b.lobe_phase).cos();
                                 field += 0.30 * apron_base * fade_s * (0.4 + 0.6 * streak);
                             }
                         }
@@ -354,10 +356,7 @@ fn basin_interior(t: f32, azimuth: f32, b: &BasinPrecomp) -> f32 {
             if ring_t < 0.94 && ring_t > 0.12 {
                 let dr = t - ring_t;
                 let ring_h = depth * 0.07 * 0.8_f32.powi((n - 1) as i32);
-                let ring_mask = azimuthal_rim_mask(
-                    azimuth + 1.7 * n as f32,
-                    b,
-                );
+                let ring_mask = azimuthal_rim_mask(azimuth + 1.7 * n as f32, b);
                 h += ring_h * ring_mask * (-(dr * dr) / (2.0 * 0.05 * 0.05)).exp();
             }
         }
@@ -437,7 +436,10 @@ mod tests {
     fn ejecta_vanishes_at_max_extent() {
         let b = sample_basin();
         let e = basin_ejecta(EJECTA_MAX_T, 0.0, &b);
-        assert!(e.abs() < 1.0, "ejecta should vanish at t=EJECTA_MAX_T, got {e}");
+        assert!(
+            e.abs() < 1.0,
+            "ejecta should vanish at t=EJECTA_MAX_T, got {e}"
+        );
     }
 
     #[test]
@@ -460,6 +462,9 @@ mod tests {
         let b = sample_basin();
         let h_peak = basin_interior(0.5, 0.0, &b);
         let h_floor = basin_interior(0.2, 0.0, &b);
-        assert!(h_peak > h_floor, "peak ring at 0.5 should be above floor at 0.2");
+        assert!(
+            h_peak > h_floor,
+            "peak ring at 0.5 should be above floor at 0.2"
+        );
     }
 }

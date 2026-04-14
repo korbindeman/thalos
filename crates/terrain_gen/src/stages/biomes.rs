@@ -22,7 +22,11 @@ pub enum BiomeRule {
     NearBasin { max_t: f32 },
     /// Match texels whose low-freq fbm noise exceeds `threshold`. Gives
     /// patchy regional assignment for highland subtypes (KREEP, melt).
-    Fbm { frequency: f64, threshold: f32, octaves: u32 },
+    Fbm {
+        frequency: f64,
+        threshold: f32,
+        octaves: u32,
+    },
 }
 
 /// Registers the body's biome palette and paints `biome_map` with biome ids.
@@ -38,12 +42,16 @@ pub struct Biomes {
 }
 
 impl Stage for Biomes {
-    fn name(&self) -> &str { "biomes" }
+    fn name(&self) -> &str {
+        "biomes"
+    }
     // Biomes stage runs after any structural stages (Differentiate and, if
     // present, Megabasin) so `NearBasin` rules see a populated basin list.
     // Listing Differentiate as the hard dependency keeps bodies that don't
     // run Megabasin free to still use Biomes.
-    fn dependencies(&self) -> &[&str] { &["differentiate"] }
+    fn dependencies(&self) -> &[&str] {
+        &["differentiate"]
+    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         assert!(
@@ -124,13 +132,16 @@ fn rule_matches(
             }
             false
         }
-        BiomeRule::Fbm { frequency, threshold, octaves } => {
+        BiomeRule::Fbm {
+            frequency,
+            threshold,
+            octaves,
+        } => {
             // Each rule needs an independent noise field — fold the rule
             // index into the seed so two Fbm rules at different frequencies
             // don't sample correlated patterns.
             let rule_seed = splitmix64(
-                seed
-                    ^ 0x8F17_C5D3_A209_B46F
+                seed ^ 0x8F17_C5D3_A209_B46F
                     ^ (rule_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
             );
             let n = fbm3(

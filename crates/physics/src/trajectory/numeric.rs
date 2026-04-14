@@ -141,10 +141,8 @@ impl Trajectory for NumericSegment {
         let h11 = tau3 - tau2;
 
         // Tangents in tau-space: m_i = v_i * h (since d tau / d time = 1/h).
-        let position = a.position * h00
-            + a.velocity * (h10 * h)
-            + b.position * h01
-            + b.velocity * (h11 * h);
+        let position =
+            a.position * h00 + a.velocity * (h10 * h) + b.position * h01 + b.velocity * (h11 * h);
 
         // Derivatives of the basis wrt tau.
         let dh00 = 6.0 * tau2 - 6.0 * tau;
@@ -173,10 +171,11 @@ impl Trajectory for NumericSegment {
             return None;
         }
         // Pick the sample closest in time.
-        let i = match self
-            .samples
-            .binary_search_by(|s| s.time.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal))
-        {
+        let i = match self.samples.binary_search_by(|s| {
+            s.time
+                .partial_cmp(&time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             Ok(i) => i,
             Err(0) => 0,
             Err(i) if i >= n => n - 1,

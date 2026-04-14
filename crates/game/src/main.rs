@@ -27,9 +27,9 @@ use camera::CameraPlugin;
 use ghost_bodies::GhostBodiesPlugin;
 use hud::HudPlugin;
 use maneuver::ManeuverPlugin;
-use thalos_planet_rendering::PlanetRenderingPlugin;
 use rendering::{RenderingPlugin, SimulationState};
 use target::TargetPlugin;
+use thalos_planet_rendering::PlanetRenderingPlugin;
 use trajectory_rendering::TrajectoryRenderingPlugin;
 
 // ---------------------------------------------------------------------------
