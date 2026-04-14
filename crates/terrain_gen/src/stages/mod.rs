@@ -3,6 +3,7 @@ mod cratering;
 mod differentiate;
 mod mare_flood;
 mod megabasin;
+mod noise_fbm;
 mod regolith;
 mod scarps;
 mod space_weather;

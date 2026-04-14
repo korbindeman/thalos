@@ -583,75 +583,56 @@ fn cloud_deck_color(p_local: vec3<f32>, t: f32) -> CloudDeckResult {
 
     warped_lat = clamp(warped_lat, -1.0, 1.0);
 
-    // ── Palette lookup ───────────────────────────────────────────
+    // ── Latitude quantization → monotone band staircase ──────────
     //
-    // Non-uniform band structure from a sum of three sines at
-    // incommensurate frequencies. A single sine gives uniform-width
-    // bands (every belt the same size as every zone); summing
-    // harmonics with irrational-ish ratios breaks that periodicity
-    // so the zero crossings (band boundaries) land at non-uniform
-    // latitudes. Amplitudes decay so the base frequency still
-    // dominates — you still read ~band_frequency stripes pole-to-
-    // pole, but with varied widths.
-    let k1 = layers.band_frequency * PI;
+    // Saturn's bands are a monotone staircase along latitude: each
+    // jet locks to a slightly different tone, and the overall drift
+    // across the disk is continuous from pole to pole. There is NO
+    // ± swing around a mean — that would produce alternating
+    // bright/dark belts, which Saturn does not have.
+    //
+    // Implementation: quantize warped latitude into `band_frequency`
+    // discrete plateaus. Each band samples ONE palette position, so
+    // adjacent bands differ only by the direction the palette is
+    // heading. Palette is authored monotone → bands are monotone.
+    //
+    // Non-uniform widths: warp the latitude by a small fraction of a
+    // band span using a three-sine harmonic sum before quantization.
+    // This shifts band boundaries away from the regular lattice
+    // without re-introducing a ± envelope.
+    let bands = max(layers.band_frequency, 1.0);
+    let quant_span = 1.0 / bands;
+    let k1 = bands * PI;
     let k2 = k1 * 1.618;
     let k3 = k1 * 2.414;
     let warp_phase = warp_field * 0.8;
-    // Harmonic amplitudes kept small so the base frequency dominates.
-    // Higher amplitudes (>0.3) create audible beats between the
-    // irrational-ratio harmonics — visible as large-scale envelope
-    // bands on top of the fine jets, which is wrong for Saturn.
-    let harm_raw =
+    let harm =
           sin(warped_lat * k1 + warp_phase)
-        + 0.18 * sin(warped_lat * k2 + warp_phase * 1.3)
-        + 0.10 * sin(warped_lat * k3 + warp_phase * 0.7);
-    // Normalise so the result lives in roughly [-1, 1] before
-    // sharpening — base sine + small harmonics peaks around 1.28.
-    let band_sin = clamp(harm_raw / 1.28, -1.0, 1.0);
-    // Sharpen into a stepped shape: flat interiors, steep
-    // transitions. Lower `band_sharpness` → closer to a square wave →
-    // crisper belt/zone boundaries. 0.55 = Saturn-ish; 0.30 = Jupiter.
-    let band_sharp = max(layers.band_shape_params.x, 0.05);
-    let band_shape = sign(band_sin) * pow(abs(band_sin), band_sharp);
+        + 0.35 * sin(warped_lat * k2 + warp_phase * 1.3)
+        + 0.18 * sin(warped_lat * k3 + warp_phase * 0.7);
+    let lat_for_quant = warped_lat + 0.22 * quant_span * harm;
+    let quant_lat = clamp(round(lat_for_quant * bands) / bands, -1.0, 1.0);
 
-    // ── Anisotropic streak detail (computed first so it can drive
-    //    both the palette hue and the luminance modulation) ─────────
+    // ── Anisotropic streak detail ────────────────────────────────
     //
     // Sampling fbm at `n * vec3(1, N, 1)` compresses the lattice in
     // latitude while leaving longitude free, producing narrow
-    // cross-latitude filaments that flow around the body. Two
-    // octaves: a medium layer (broader filament families) and a fine
-    // layer (pinstripe cloud fibres). The fine layer is what Saturn
-    // shows across every belt — thin dark/light threads packed
-    // inside the larger zones.
+    // cross-latitude filaments that flow around the body.
     let streak_mid  = fbm_3d(n * vec3<f32>(3.0, 32.0, 3.0), seed ^ 0xCAFEu);
     let streak_fine = fbm_3d(n * vec3<f32>(5.0, 90.0, 5.0), seed ^ 0xF1BEu);
 
-    // High-frequency isotropic palette jitter. Small, just to break
-    // up flat band interiors.
-    let palette_jitter = fbm_3d(n * 42.0, seed ^ 0xC01F7777u);
-
-    // Low-frequency organic drift. Gentle hue wander across the
-    // disk so the continuous palette gradient picks up local
-    // variation without hard stripes.
+    // Low-frequency organic drift — gentle hue wander across the
+    // disk so the staircase picks up subtle longitudinal variation.
     let hue_drift = fbm_3d(n * 4.0, seed ^ 0x51DE1u);
 
-    // Sub-band lat perturbation fed INTO the palette lookup.
-    // `band_shape` IS included here, scaled by `band_contrast`, so
-    // each jet discretizes a small step along the monotone palette.
-    // This replaces the old multiplicative ± luminance swing, which
-    // produced alternating bright/dark bands around a mean — Saturn
-    // does NOT do that. Saturn's bands are small monotone steps
-    // along a continuous gradient, which is what feeding band_shape
-    // into the palette lat achieves.
-    let band_contrast = layers.tint.w;
+    // Palette lookup at the quantized latitude. Small decorative
+    // perturbations keep each band's interior from being dead flat,
+    // but they do NOT alternate ± so the monotone read is preserved.
     let hue_shift_lat = clamp(
-        warped_lat
-            + band_contrast * band_shape
-            + 0.040 * hue_drift
-            + 0.030 * streak_fine * turb
-            + 0.022 * streak_mid  * turb
-            + 0.018 * palette_jitter * turb,
+        quant_lat
+            + 0.020 * hue_drift
+            + 0.012 * streak_fine * turb
+            + 0.010 * streak_mid  * turb,
         -1.0, 1.0,
     );
     var col = palette_lookup(hue_shift_lat);

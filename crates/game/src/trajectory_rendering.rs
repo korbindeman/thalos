@@ -13,7 +13,7 @@
 
 use bevy::math::{DVec3, Isometry3d, Vec3A};
 use bevy::prelude::*;
-use thalos_physics::trajectory::{TrajectorySegment, cone_width};
+use thalos_physics::trajectory::{NumericSegment, cone_width};
 use thalos_physics::types::{BodyId, BodyKind, SolarSystemDefinition, TrajectorySample};
 
 use crate::coords::{RENDER_SCALE, RenderOrigin, compute_segment_pins, sample_render_pos};
@@ -85,7 +85,7 @@ fn render_trajectory(
 // ---------------------------------------------------------------------------
 
 fn render_segment(
-    segment: &TrajectorySegment,
+    segment: &NumericSegment,
     pins: &[DVec3],
     is_ghost: bool,
     system: &SolarSystemDefinition,
@@ -178,7 +178,7 @@ fn render_open_samples(
 // ---------------------------------------------------------------------------
 
 fn render_stable_orbit_segment(
-    segment: &TrajectorySegment,
+    segment: &NumericSegment,
     pins: &[DVec3],
     is_ghost: bool,
     system: &SolarSystemDefinition,

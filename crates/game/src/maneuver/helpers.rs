@@ -1,6 +1,6 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::trajectory::TrajectoryPrediction;
+use thalos_physics::trajectory::FlightPlan;
 use thalos_physics::types::{BodyState, SolarSystemDefinition};
 
 use super::state::{GameNode, ManeuverPlan, NodeId};
@@ -52,7 +52,7 @@ fn orbital_frame_mat3(ship_pos: DVec3, ship_vel: DVec3, body_pos: DVec3, body_ve
 /// Find the render-space position and orbital frame for a given simulation time
 /// by searching the prediction for the closest sample.
 pub(super) fn node_world_pos_and_frame(
-    prediction: &TrajectoryPrediction,
+    prediction: &FlightPlan,
     time: f64,
     body_states: &[BodyState],
     origin: &RenderOrigin,
@@ -103,7 +103,7 @@ pub(super) fn node_world_pos_and_frame(
 
 pub(super) fn node_world_position(
     node: &GameNode,
-    prediction: &TrajectoryPrediction,
+    prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     system: &SolarSystemDefinition,
@@ -114,7 +114,7 @@ pub(super) fn node_world_position(
 pub(super) fn selected_node_world_and_frame(
     selected_id: Option<NodeId>,
     plan: &ManeuverPlan,
-    prediction: &TrajectoryPrediction,
+    prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     system: &SolarSystemDefinition,
@@ -126,7 +126,7 @@ pub(super) fn selected_node_world_and_frame(
 
 pub(super) fn closest_node(
     plan: &ManeuverPlan,
-    prediction: &TrajectoryPrediction,
+    prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     system: &SolarSystemDefinition,
@@ -157,7 +157,7 @@ pub(super) fn closest_node(
 }
 
 pub(super) fn closest_trail_point(
-    prediction: &TrajectoryPrediction,
+    prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     system: &SolarSystemDefinition,

@@ -22,7 +22,7 @@
 use glam::DVec3;
 
 use crate::body_state_provider::BodyStateProvider;
-use crate::forces::{ForceRegistry, GravityForce};
+use crate::forces::{Forces, GravityForce, compute_total_acceleration};
 use crate::types::{BodyStates, StateVector, TrajectorySample};
 
 // ---------------------------------------------------------------------------
@@ -238,7 +238,8 @@ impl Integrator {
     /// # Arguments
     /// * `state`     — Current position and velocity.
     /// * `time`      — Current simulation time (seconds from epoch).
-    /// * `forces`    — Active force registry (gravity, thrust, …).
+    /// * `forces`    — Active thrust set (gravity is always-on and computed
+    ///   directly).
     /// * `ephemeris` — Background body states at any time.
     ///
     /// # Returns
@@ -248,7 +249,7 @@ impl Integrator {
         &mut self,
         state: StateVector,
         time: f64,
-        forces: &ForceRegistry,
+        forces: &Forces,
         ephemeris: &dyn BodyStateProvider,
     ) -> (StateVector, TrajectorySample) {
         self.step_capped(state, time, forces, ephemeris, f64::INFINITY)
@@ -261,41 +262,37 @@ impl Integrator {
         &mut self,
         state: StateVector,
         time: f64,
-        forces: &ForceRegistry,
+        forces: &Forces,
         ephemeris: &dyn BodyStateProvider,
         max_step: f64,
     ) -> (StateVector, TrajectorySample) {
         // Query body states at the current time.  Used for the switching
-        // decision and, in Verlet mode, the first force evaluation.
+        // decision and, in both modes, the first-substep force evaluation.
         ephemeris.query_into(time, &mut self.body_states_buf);
 
-        // Identify the dominant body and the perturbation ratio; this drives
-        // the mode-switching logic.  Uses a single-pass gravity analysis that
-        // also computes the acceleration (avoiding a redundant O(n) scan).
+        // Single gravity pass: acceleration + dominant-body + perturbation
+        // ratio. The result is threaded into the first substep so gravity is
+        // never recomputed at the same (pos, time) twice.
         let gravity_result =
             GravityForce::compute_with_analysis(state.position, &self.body_states_buf);
 
         // Update mode with hysteresis.
         self.update_mode(gravity_result.perturbation_ratio);
 
+        // Initial acceleration at (state, time): reuse the gravity result,
+        // add any active thrusts.
+        let a0 = gravity_result.acceleration
+            + forces.sum_thrusts(state.position, state.velocity, time, &self.body_states_buf);
+
         // Perform the integration step in the selected mode.
         let (new_state, step_size) = match self.mode {
             Mode::Symplectic => {
                 let dt = self.config.symplectic_dt.min(max_step);
-                let a0 = forces.compute_acceleration(
-                    state.position,
-                    state.velocity,
-                    time,
-                    &self.body_states_buf,
-                );
                 let s = self.verlet_step(state, time, dt, forces, a0, ephemeris);
                 self.min_step_streak = 0;
                 (s, dt)
             }
-            Mode::Adaptive => {
-                let (s, dt) = self.rk45_step(state, time, forces, ephemeris, max_step);
-                (s, dt)
-            }
+            Mode::Adaptive => self.rk45_step(state, time, forces, ephemeris, a0, max_step),
         };
 
         ephemeris.query_into(time + step_size, &mut self.sample_body_states_buf);
@@ -368,7 +365,7 @@ impl Integrator {
         state: StateVector,
         time: f64,
         h: f64,
-        forces: &ForceRegistry,
+        forces: &Forces,
         a0: DVec3,
         ephemeris: &dyn BodyStateProvider,
     ) -> StateVector {
@@ -385,7 +382,8 @@ impl Integrator {
         // standard velocity-Verlet approximation and is correct to second order.
         let t1 = time + h;
         ephemeris.query_into(t1, &mut self.sample_body_states_buf);
-        let a1 = forces.compute_acceleration(pos1, vel, t1, &self.sample_body_states_buf);
+        let (a1, _) =
+            compute_total_acceleration(pos1, vel, t1, &self.sample_body_states_buf, forces);
 
         // Average acceleration update for velocity.
         let vel1 = vel + 0.5 * (a0 + a1) * h;
@@ -417,13 +415,14 @@ impl Integrator {
         &mut self,
         state: StateVector,
         time: f64,
-        forces: &ForceRegistry,
+        forces: &Forces,
         ephemeris: &dyn BodyStateProvider,
+        a0: DVec3,
         max_step: f64,
     ) -> (StateVector, f64) {
         loop {
             let h = self.rk_dt.min(max_step);
-            let (new_state, err) = self.dp45_attempt(state, time, h, forces, ephemeris);
+            let (new_state, err) = self.dp45_attempt(state, time, h, forces, ephemeris, a0);
 
             let factor = self.pi.factor(err);
 
@@ -470,16 +469,18 @@ impl Integrator {
         state: StateVector,
         t: f64,
         h: f64,
-        forces: &ForceRegistry,
+        forces: &Forces,
         ephemeris: &dyn BodyStateProvider,
+        a0: DVec3,
     ) -> (StateVector, f64) {
         let pos = state.position;
         let vel = state.velocity;
 
         // ---- Stage 1 (at t, pos, vel) ----
-        ephemeris.query_into(t, &mut self.sample_body_states_buf);
+        // `step_capped` already queried body_states_buf at t and computed a0
+        // (gravity + thrusts). Reuse both — no re-query, no re-scan.
         let k1_p = vel;
-        let k1_v = forces.compute_acceleration(pos, vel, t, &self.sample_body_states_buf);
+        let k1_v = a0;
 
         // ---- Stage 2 (at t + c2*h) ----
         let t2 = t + Dp45::C2 * h;
@@ -487,7 +488,8 @@ impl Integrator {
         let v2 = vel + h * Dp45::A21 * k1_v;
         ephemeris.query_into(t2, &mut self.sample_body_states_buf);
         let k2_p = v2;
-        let k2_v = forces.compute_acceleration(p2, v2, t2, &self.sample_body_states_buf);
+        let (k2_v, _) =
+            compute_total_acceleration(p2, v2, t2, &self.sample_body_states_buf, forces);
 
         // ---- Stage 3 (at t + c3*h) ----
         let t3 = t + Dp45::C3 * h;
@@ -495,7 +497,8 @@ impl Integrator {
         let v3 = vel + h * (Dp45::A31 * k1_v + Dp45::A32 * k2_v);
         ephemeris.query_into(t3, &mut self.sample_body_states_buf);
         let k3_p = v3;
-        let k3_v = forces.compute_acceleration(p3, v3, t3, &self.sample_body_states_buf);
+        let (k3_v, _) =
+            compute_total_acceleration(p3, v3, t3, &self.sample_body_states_buf, forces);
 
         // ---- Stage 4 (at t + c4*h) ----
         let t4 = t + Dp45::C4 * h;
@@ -503,7 +506,8 @@ impl Integrator {
         let v4 = vel + h * (Dp45::A41 * k1_v + Dp45::A42 * k2_v + Dp45::A43 * k3_v);
         ephemeris.query_into(t4, &mut self.sample_body_states_buf);
         let k4_p = v4;
-        let k4_v = forces.compute_acceleration(p4, v4, t4, &self.sample_body_states_buf);
+        let (k4_v, _) =
+            compute_total_acceleration(p4, v4, t4, &self.sample_body_states_buf, forces);
 
         // ---- Stage 5 (at t + c5*h) ----
         let t5 = t + Dp45::C5 * h;
@@ -513,7 +517,8 @@ impl Integrator {
             vel + h * (Dp45::A51 * k1_v + Dp45::A52 * k2_v + Dp45::A53 * k3_v + Dp45::A54 * k4_v);
         ephemeris.query_into(t5, &mut self.sample_body_states_buf);
         let k5_p = v5;
-        let k5_v = forces.compute_acceleration(p5, v5, t5, &self.sample_body_states_buf);
+        let (k5_v, _) =
+            compute_total_acceleration(p5, v5, t5, &self.sample_body_states_buf, forces);
 
         // ---- Stage 6 (at t + h) ----
         let t6 = t + h;
@@ -531,7 +536,8 @@ impl Integrator {
                 + Dp45::A65 * k5_v);
         ephemeris.query_into(t6, &mut self.sample_body_states_buf);
         let k6_p = v6;
-        let k6_v = forces.compute_acceleration(p6, v6, t6, &self.sample_body_states_buf);
+        let (k6_v, _) =
+            compute_total_acceleration(p6, v6, t6, &self.sample_body_states_buf, forces);
 
         // ---- 5th-order solution (propagated state) ----
         let new_pos = pos
@@ -550,7 +556,13 @@ impl Integrator {
         // ---- Stage 7 — FSAL evaluation at the new state (for error estimate) ----
         // Body states buffer already contains t6 from stage 6; no need to re-query.
         let k7_p = new_vel;
-        let k7_v = forces.compute_acceleration(new_pos, new_vel, t6, &self.sample_body_states_buf);
+        let (k7_v, _) = compute_total_acceleration(
+            new_pos,
+            new_vel,
+            t6,
+            &self.sample_body_states_buf,
+            forces,
+        );
 
         // ---- Error estimate ----
         // e = h * sum_i (E_i * k_i),  a linear combination of stage derivatives.
@@ -619,7 +631,7 @@ fn mixed_rms_norm(err_pos: DVec3, err_vel: DVec3, pos: DVec3, vel: DVec3, tol: f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forces::{ForceRegistry, GravityForce};
+    use crate::forces::{Forces, GravityForce};
     use crate::patched_conics::PatchedConics;
     use crate::types::{
         BodyDefinition, BodyKind, BodyState, G, OrbitalElements, ShipDefinition,
@@ -705,11 +717,9 @@ mod tests {
         PatchedConics::new(&system, 3.156e7)
     }
 
-    /// ForceRegistry with only gravity enabled.
-    fn gravity_forces() -> ForceRegistry {
-        let mut reg = ForceRegistry::new();
-        reg.add(Box::new(GravityForce));
-        reg
+    /// Forces set with no thrusts (gravity is always-on).
+    fn gravity_forces() -> Forces {
+        Forces::new()
     }
 
     // -----------------------------------------------------------------------
@@ -907,19 +917,41 @@ mod tests {
     // Integration smoke tests
     // -----------------------------------------------------------------------
 
+    /// Empty `BodyStateProvider` used by the "zero forces" smoke tests.
+    /// With no bodies, gravity contributes nothing — the integrator should
+    /// reproduce straight-line motion.
+    struct EmptyEphemeris;
+    impl BodyStateProvider for EmptyEphemeris {
+        fn query_into(&self, _time: f64, out: &mut crate::types::BodyStates) {
+            out.clear();
+        }
+        fn query_body(&self, _body_id: crate::types::BodyId, _time: f64) -> crate::types::BodyState {
+            crate::types::BodyState {
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                mass_kg: 0.0,
+            }
+        }
+        fn body_count(&self) -> usize {
+            0
+        }
+        fn time_span(&self) -> f64 {
+            f64::INFINITY
+        }
+    }
+
     /// With zero forces, Verlet must reproduce exact linear motion.
     #[test]
     fn verlet_with_no_forces_is_linear() {
-        let eph = test_ephemeris();
-        let forces = ForceRegistry::new(); // empty — no forces
+        let eph = EmptyEphemeris;
+        let forces = Forces::new();
         let state = StateVector {
             position: DVec3::new(1.5e11, 0.0, 0.0),
             velocity: DVec3::new(0.0, 2.978e4, 0.0),
         };
         let mut integrator = Integrator::new(IntegratorConfig::default());
         let h = 60.0;
-        let body_states = eph.query(0.0);
-        let a0 = forces.compute_acceleration(state.position, state.velocity, 0.0, &body_states);
+        let a0 = DVec3::ZERO; // no bodies → no gravity → zero initial accel
         let new_state = integrator.verlet_step(state, 0.0, h, &forces, a0, &eph);
 
         let expected_pos = state.position + state.velocity * h;
@@ -988,13 +1020,14 @@ mod tests {
         };
         let mut integrator = Integrator::new(config);
         integrator.mode = Mode::Adaptive;
-        let eph = test_ephemeris();
-        let forces = ForceRegistry::new(); // no forces
+        let eph = EmptyEphemeris;
+        let forces = Forces::new();
         let state = StateVector {
             position: DVec3::new(1.5e11, 0.0, 0.0),
             velocity: DVec3::new(0.0, 2.978e4, 0.0),
         };
-        let (new_state, dt) = integrator.rk45_step(state, 0.0, &forces, &eph, f64::INFINITY);
+        let (new_state, dt) =
+            integrator.rk45_step(state, 0.0, &forces, &eph, DVec3::ZERO, f64::INFINITY);
         assert!(dt > 0.0, "step size must be positive");
         // With zero forces y'(t) = [v, 0], so the exact solution is linear.
         let expected_pos = state.position + state.velocity * dt;

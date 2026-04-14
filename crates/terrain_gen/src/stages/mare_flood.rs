@@ -1,10 +1,9 @@
-use fastnoise2::SafeNode;
-use fastnoise2::generator::prelude::*;
 use glam::Vec3;
 use rayon::prelude::*;
 use serde::Deserialize;
 
 use super::MAT_MARE;
+use super::noise_fbm::{GradientWarp, SsFbm, bulk_sample};
 use super::util::{face_may_intersect_cap, face_position_arrays, for_face_texels_in_cap};
 use crate::body_builder::BodyBuilder;
 use crate::crater_profile::degradation_factor;
@@ -217,23 +216,23 @@ impl Stage for MareFlood {
                 // Boundary noise: warped combination of a large-scale
                 // embayment field (low freq) and a detail edge field
                 // (high freq). Output range ≈ [-1, 1].
-                let boundary_node: SafeNode =
-                    ((supersimplex().fbm(0.55, 0.0, 4, 2.0).domain_scale(lo_freq) * 0.7)
-                        + (supersimplex().fbm(0.5, 0.0, 3, 2.0).domain_scale(hi_freq) * 0.3))
-                        .domain_warp_gradient(0.02, warp_freq)
-                        .build()
-                        .0;
+                let boundary_fbm_lo = SsFbm::new(ep_seed, 0.55, 4, 2.0);
+                let boundary_fbm_hi = SsFbm::new(ep_seed.wrapping_add(0x9E37_79B9u32 as i32), 0.5, 3, 2.0);
+                let boundary_warp = GradientWarp::new(
+                    ep_seed.wrapping_add(0x517C_C1B7u32 as i32),
+                    0.02,
+                    warp_freq,
+                );
 
                 // Surface relief: small-amplitude simplex texture kept on
                 // the mare surface so it isn't perfectly flat.
-                let relief_node: SafeNode = supersimplex()
-                    .fbm(0.5, 0.0, 3, 2.0)
-                    .domain_scale(hi_freq * 1.7)
-                    .build()
-                    .0;
+                let relief_fbm = SsFbm::new(relief_seed, 0.5, 3, 2.0);
+                let relief_scale = hi_freq * 1.7;
 
-                let boundary_ref = &boundary_node;
-                let relief_ref = &relief_node;
+                let boundary_fbm_lo_ref = &boundary_fbm_lo;
+                let boundary_fbm_hi_ref = &boundary_fbm_hi;
+                let boundary_warp_ref = &boundary_warp;
+                let relief_fbm_ref = &relief_fbm;
 
                 let h_faces = builder.height_contributions.height.faces_mut();
                 let m_faces = builder.material_cubemap.faces_mut();
@@ -252,26 +251,14 @@ impl Stage for MareFlood {
                         let (xs, ys, zs) = face_position_arrays(face, res);
                         let mut noise_out = vec![0.0f32; n];
                         let mut relief_out = vec![0.0f32; n];
-                        boundary_ref.gen_position_array_3d(
-                            &mut noise_out,
-                            &xs,
-                            &ys,
-                            &zs,
-                            0.0,
-                            0.0,
-                            0.0,
-                            ep_seed,
-                        );
-                        relief_ref.gen_position_array_3d(
-                            &mut relief_out,
-                            &xs,
-                            &ys,
-                            &zs,
-                            0.0,
-                            0.0,
-                            0.0,
-                            relief_seed,
-                        );
+                        bulk_sample(&mut noise_out, &xs, &ys, &zs, |dir| {
+                            let pw = boundary_warp_ref.warp(dir);
+                            0.7 * boundary_fbm_lo_ref.sample(pw * lo_freq)
+                                + 0.3 * boundary_fbm_hi_ref.sample(pw * hi_freq)
+                        });
+                        bulk_sample(&mut relief_out, &xs, &ys, &zs, |dir| {
+                            relief_fbm_ref.sample(dir * relief_scale)
+                        });
 
                         for_face_texels_in_cap(
                             face,
@@ -316,28 +303,21 @@ impl Stage for MareFlood {
             let proc_boundary_amp = proc.boundary_noise_amplitude_m;
 
             // Low-freq mask, domain-warped for organic shapes.
-            let mask_node: SafeNode = supersimplex()
-                .fbm(0.55, 0.0, 5, 2.0)
-                .domain_warp_gradient(0.03, mask_freq * 0.4)
-                .domain_scale(mask_freq)
-                .build()
-                .0;
+            let mask_fbm = SsFbm::new(mask_seed, 0.55, 5, 2.0);
+            let mask_warp = GradientWarp::new(
+                mask_seed.wrapping_add(0x517C_C1B7u32 as i32),
+                0.03,
+                mask_freq * 0.4,
+            );
             // Threshold fuzz — mild noise on the altitude cutoff.
-            let fuzz_node: SafeNode = supersimplex()
-                .fbm(0.5, 0.0, 3, 2.0)
-                .domain_scale(mask_freq * 3.0)
-                .build()
-                .0;
+            let fuzz_fbm = SsFbm::new(fuzz_seed, 0.5, 3, 2.0);
             // Subtle surface relief on the flooded surface.
-            let relief_node: SafeNode = supersimplex()
-                .fbm(0.5, 0.0, 3, 2.0)
-                .domain_scale(mask_freq * 5.0)
-                .build()
-                .0;
+            let relief_fbm = SsFbm::new(surface_seed, 0.5, 3, 2.0);
 
-            let mask_ref = &mask_node;
-            let fuzz_ref = &fuzz_node;
-            let relief_ref = &relief_node;
+            let mask_fbm_ref = &mask_fbm;
+            let mask_warp_ref = &mask_warp;
+            let fuzz_fbm_ref = &fuzz_fbm;
+            let relief_fbm_ref = &relief_fbm;
 
             let h_faces = builder.height_contributions.height.faces_mut();
             let m_faces = builder.material_cubemap.faces_mut();
@@ -352,36 +332,17 @@ impl Stage for MareFlood {
                     let mut mask_out = vec![0.0f32; n];
                     let mut fuzz_out = vec![0.0f32; n];
                     let mut relief_out = vec![0.0f32; n];
-                    mask_ref.gen_position_array_3d(
-                        &mut mask_out,
-                        &xs,
-                        &ys,
-                        &zs,
-                        0.0,
-                        0.0,
-                        0.0,
-                        mask_seed,
-                    );
-                    fuzz_ref.gen_position_array_3d(
-                        &mut fuzz_out,
-                        &xs,
-                        &ys,
-                        &zs,
-                        0.0,
-                        0.0,
-                        0.0,
-                        fuzz_seed,
-                    );
-                    relief_ref.gen_position_array_3d(
-                        &mut relief_out,
-                        &xs,
-                        &ys,
-                        &zs,
-                        0.0,
-                        0.0,
-                        0.0,
-                        surface_seed,
-                    );
+                    bulk_sample(&mut mask_out, &xs, &ys, &zs, |dir| {
+                        let p = dir * mask_freq;
+                        let pw = mask_warp_ref.warp(p);
+                        mask_fbm_ref.sample(pw)
+                    });
+                    bulk_sample(&mut fuzz_out, &xs, &ys, &zs, |dir| {
+                        fuzz_fbm_ref.sample(dir * mask_freq * 3.0)
+                    });
+                    bulk_sample(&mut relief_out, &xs, &ys, &zs, |dir| {
+                        relief_fbm_ref.sample(dir * mask_freq * 5.0)
+                    });
 
                     for y in 0..res {
                         for x in 0..res {
@@ -435,12 +396,8 @@ impl Stage for MareFlood {
 
                     // Segment mask: fBm noise along the ridge curve, used as
                     // an on/off factor to break the ring into lobes.
-                    let seg_node: SafeNode = supersimplex()
-                        .fbm(0.5, 0.0, 3, 2.0)
-                        .domain_scale(seg_freq)
-                        .build()
-                        .0;
-                    let seg_ref = &seg_node;
+                    let seg_fbm = SsFbm::new(ridge_seed, 0.5, 3, 2.0);
+                    let seg_fbm_ref = &seg_fbm;
 
                     let material_cubemap = &builder.material_cubemap;
                     builder
@@ -457,16 +414,9 @@ impl Stage for MareFlood {
                             let n = (res * res) as usize;
                             let (xs, ys, zs) = face_position_arrays(face, res);
                             let mut seg_out = vec![0.0f32; n];
-                            seg_ref.gen_position_array_3d(
-                                &mut seg_out,
-                                &xs,
-                                &ys,
-                                &zs,
-                                0.0,
-                                0.0,
-                                0.0,
-                                ridge_seed,
-                            );
+                            bulk_sample(&mut seg_out, &xs, &ys, &zs, |dir| {
+                                seg_fbm_ref.sample(dir * seg_freq)
+                            });
 
                             for_face_texels_in_cap(
                                 face,

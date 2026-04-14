@@ -39,11 +39,11 @@ fn time_control_panel(
             // Warp controls.
             ui.label("Warp:");
             if ui.button("<").clicked() {
-                sim.simulation.decrease_warp();
+                sim.simulation.warp.decrease();
             }
-            ui.label(sim.simulation.warp_label());
+            ui.label(sim.simulation.warp.label());
             if ui.button(">").clicked() {
-                sim.simulation.increase_warp();
+                sim.simulation.warp.increase();
             }
 
             if sim.simulation.is_observation_mode() {

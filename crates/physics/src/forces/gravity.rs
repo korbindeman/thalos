@@ -2,8 +2,6 @@ use glam::DVec3;
 
 use crate::types::*;
 
-use super::ForceFunction;
-
 /// Per-body gravity breakdown: total acceleration plus the dominant body and
 /// perturbation ratio.  Computed in a single O(n) pass.
 pub struct GravityResult {
@@ -66,18 +64,6 @@ impl GravityForce {
     }
 }
 
-impl ForceFunction for GravityForce {
-    fn compute(
-        &self,
-        position: DVec3,
-        _velocity: DVec3,
-        _time: f64,
-        body_states: &BodyStates,
-    ) -> DVec3 {
-        Self::compute_with_analysis(position, body_states).acceleration
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,11 +81,11 @@ mod tests {
             mass_kg: body_mass,
         }];
 
-        let force = GravityForce;
-        let accel = force.compute(DVec3::new(r, 0.0, 0.0), DVec3::ZERO, 0.0, &body_states);
+        let result =
+            GravityForce::compute_with_analysis(DVec3::new(r, 0.0, 0.0), &body_states);
 
         let expected = G * body_mass / (r * r);
-        let actual = accel.length();
+        let actual = result.acceleration.length();
         let rel_error = (actual - expected).abs() / expected;
 
         assert!(rel_error < 1e-10, "Magnitude error: {rel_error}");
@@ -115,8 +101,9 @@ mod tests {
             mass_kg: 1.0e24,
         }];
 
-        let force = GravityForce;
-        let accel = force.compute(DVec3::new(1.0e9, 0.0, 0.0), DVec3::ZERO, 0.0, &body_states);
+        let result =
+            GravityForce::compute_with_analysis(DVec3::new(1.0e9, 0.0, 0.0), &body_states);
+        let accel = result.acceleration;
 
         assert!(accel.x < 0.0, "Should point toward body");
         assert!(accel.y.abs() < 1e-30);
@@ -132,8 +119,8 @@ mod tests {
             mass_kg: 1.0e30,
         }];
 
-        let force = GravityForce;
-        let accel = force.compute(DVec3::new(50.0, 0.0, 0.0), DVec3::ZERO, 0.0, &body_states);
-        assert_eq!(accel, DVec3::ZERO);
+        let result =
+            GravityForce::compute_with_analysis(DVec3::new(50.0, 0.0, 0.0), &body_states);
+        assert_eq!(result.acceleration, DVec3::ZERO);
     }
 }

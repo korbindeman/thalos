@@ -8,10 +8,11 @@
 #![cfg(test)]
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use glam::DVec3;
 
-use super::{PredictionConfig, cone_width, propagate_trajectory};
+use super::{FlightPlan, PredictionConfig, PredictionRequest, cone_width, propagate_flight_plan};
 use crate::body_state_provider::BodyStateProvider;
 use crate::integrator::IntegratorConfig;
 use crate::maneuver::{ManeuverNode, ManeuverSequence};
@@ -20,6 +21,33 @@ use crate::types::{
     BodyDefinition, BodyKind, G, OrbitalElements, ShipDefinition, SolarSystemDefinition,
     StateVector, TrajectorySample,
 };
+
+/// Local helper that mirrors the old `propagate_trajectory` convenience so the
+/// tests can stay focused on what they actually assert.
+fn propagate_trajectory(
+    initial_state: StateVector,
+    start_time: f64,
+    maneuvers: &ManeuverSequence,
+    ephemeris: Arc<dyn BodyStateProvider>,
+    bodies: &[BodyDefinition],
+    config: &PredictionConfig,
+    integrator_config: IntegratorConfig,
+    ship_thrust_acceleration: f64,
+) -> FlightPlan {
+    let request = PredictionRequest {
+        epoch: 0,
+        ship_state: initial_state,
+        sim_time: start_time,
+        maneuvers: maneuvers.clone(),
+        active_burns: Vec::new(),
+        ephemeris,
+        bodies: bodies.to_vec(),
+        prediction_config: config.clone(),
+        integrator_config,
+        ship_thrust_acceleration,
+    };
+    propagate_flight_plan(&request, None)
+}
 
 const AU: f64 = 1.496e11;
 const SUN_GM: f64 = 1.327_124_4e20;
@@ -153,7 +181,7 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
 #[test]
 fn maneuver_is_integrated_as_finite_burn() {
     let system = make_single_star_system();
-    let ephemeris = PatchedConics::new(&system, 1_000.0);
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1_000.0));
 
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
@@ -166,7 +194,7 @@ fn maneuver_is_integrated_as_finite_burn() {
         system.ship.initial_state,
         0.0,
         &maneuvers,
-        &ephemeris,
+        Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 32,
@@ -202,7 +230,7 @@ fn maneuver_is_integrated_as_finite_burn() {
 #[test]
 fn prograde_burn_raises_apoapsis_around_thalos() {
     let system = make_thalos_like_system();
-    let ephemeris = PatchedConics::new(&system, 1.0e7);
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
 
     let thalos_state_0 = ephemeris.query_body(1, 0.0);
     let thalos_gm = system.bodies[1].gm;
@@ -225,7 +253,7 @@ fn prograde_burn_raises_apoapsis_around_thalos() {
         ship_state,
         0.0,
         &maneuvers,
-        &ephemeris,
+        Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 20_000,
@@ -277,7 +305,7 @@ fn large_prograde_burn_escapes_without_collision() {
     // Regression for the "curls in and collides" bug. Long burn must track
     // the rotating orbital frame, not stay frozen at burn start.
     let system = make_thalos_like_system();
-    let ephemeris = PatchedConics::new(&system, 1.0e8);
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e8));
 
     let thalos_state_0 = ephemeris.query_body(1, 0.0);
     let thalos_gm = system.bodies[1].gm;
@@ -300,7 +328,7 @@ fn large_prograde_burn_escapes_without_collision() {
         ship_state,
         0.0,
         &maneuvers,
-        &ephemeris,
+        Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 200_000,
@@ -349,7 +377,7 @@ fn large_prograde_burn_escapes_without_collision() {
 #[test]
 fn stable_orbit_detected_after_prograde_burn() {
     let system = make_thalos_like_system();
-    let ephemeris = PatchedConics::new(&system, 1.0e7);
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
 
     let thalos_state_0 = ephemeris.query_body(1, 0.0);
     let thalos_gm = system.bodies[1].gm;
@@ -372,7 +400,7 @@ fn stable_orbit_detected_after_prograde_burn() {
         ship_state,
         0.0,
         &maneuvers,
-        &ephemeris,
+        Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
         IntegratorConfig {
@@ -399,7 +427,7 @@ fn stable_orbit_detected_after_prograde_burn() {
 #[test]
 fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
     let system = make_thalos_like_system();
-    let ephemeris = PatchedConics::new(&system, 2.0e7);
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 2.0e7));
 
     let thalos_state_0 = ephemeris.query_body(1, 0.0);
     let thalos_gm = system.bodies[1].gm;
@@ -424,7 +452,7 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
         ship_state,
         0.0,
         &maneuvers,
-        &ephemeris,
+        Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 40_000,
@@ -463,7 +491,7 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
 #[test]
 fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
     let system = make_thalos_like_system();
-    let ephemeris = PatchedConics::new(&system, 2.0e7);
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 2.0e7));
 
     let thalos_state_0 = ephemeris.query_body(1, 0.0);
     let thalos_gm = system.bodies[1].gm;
@@ -487,7 +515,7 @@ fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
         ship_state,
         0.0,
         &maneuvers,
-        &ephemeris,
+        Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 40_000,

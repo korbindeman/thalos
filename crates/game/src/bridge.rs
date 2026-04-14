@@ -19,8 +19,7 @@ use std::sync::{
 use bevy::prelude::*;
 use thalos_physics::{
     maneuver::ManeuverNode,
-    simulation::PredictionRequest,
-    trajectory::{TrajectoryPrediction, propagate_trajectory_budgeted},
+    trajectory::{FlightPlan, PredictionRequest, propagate_flight_plan},
 };
 
 use crate::SimStage;
@@ -41,7 +40,7 @@ struct PredictionJob {
 }
 
 struct PredictionResult {
-    prediction: TrajectoryPrediction,
+    prediction: FlightPlan,
     epoch: u64,
     predicted_at_sim_time: f64,
 }
@@ -168,21 +167,21 @@ fn update_prediction(
 /// - `\`      -- reset to 1x
 /// - `Space`  -- toggle pause (0x) / resume previous level
 pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<SimulationState>) {
-    let prev = sim.simulation.warp_speed();
+    let prev = sim.simulation.warp.speed();
 
     if keys.just_pressed(KeyCode::Period) {
-        sim.simulation.increase_warp();
+        sim.simulation.warp.increase();
     } else if keys.just_pressed(KeyCode::Comma) {
-        sim.simulation.decrease_warp();
+        sim.simulation.warp.decrease();
     } else if keys.just_pressed(KeyCode::Backslash) {
-        sim.simulation.reset_warp();
+        sim.simulation.warp.reset();
     } else if keys.just_pressed(KeyCode::Space) {
-        sim.simulation.toggle_pause();
+        sim.simulation.warp.toggle_pause();
     }
 
-    let new = sim.simulation.warp_speed();
+    let new = sim.simulation.warp.speed();
     if (new - prev).abs() > 0.5 {
-        info!("[bridge] warp speed: {}", sim.simulation.warp_label());
+        info!("[bridge] warp speed: {}", sim.simulation.warp.label());
     }
 }
 
@@ -286,17 +285,6 @@ fn prediction_worker_loop(
     }
 }
 
-fn run_prediction(request: &PredictionRequest) -> TrajectoryPrediction {
-    propagate_trajectory_budgeted(
-        request.ship_state,
-        request.sim_time,
-        &request.maneuvers,
-        request.active_burns.clone(),
-        request.ephemeris.as_ref(),
-        &request.bodies,
-        &request.prediction_config,
-        request.integrator_config.clone(),
-        request.ship_thrust_acceleration,
-        None,
-    )
+fn run_prediction(request: &PredictionRequest) -> FlightPlan {
+    propagate_flight_plan(request, None)
 }

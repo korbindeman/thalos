@@ -18,7 +18,7 @@ use glam::DVec3;
 
 use super::numeric::{NumericSegment, cone_width};
 use crate::body_state_provider::BodyStateProvider;
-use crate::forces::{ForceRegistry, GravityForce, ManeuverThrustForce};
+use crate::forces::{Forces, ManeuverThrustForce};
 use crate::integrator::{Integrator, IntegratorConfig};
 use crate::types::{BodyDefinition, BodyId, StateVector, TrajectorySample};
 
@@ -141,18 +141,20 @@ pub(super) fn propagate_segment(
     stop_on_stable_orbit: bool,
     remaining_budget: &mut Option<usize>,
 ) -> NumericSegment {
-    let mut forces = ForceRegistry::new();
-    forces.add(Box::new(GravityForce));
-
-    for burn in burns {
-        forces.add(Box::new(ManeuverThrustForce::new(
-            burn.delta_v_local,
-            burn.reference_body,
-            burn.acceleration,
-            burn.start_time,
-            burn.duration,
-        )));
-    }
+    let forces = Forces {
+        thrusts: burns
+            .iter()
+            .map(|burn| {
+                ManeuverThrustForce::new(
+                    burn.delta_v_local,
+                    burn.reference_body,
+                    burn.acceleration,
+                    burn.start_time,
+                    burn.duration,
+                )
+            })
+            .collect(),
+    };
 
     let mut integrator = Integrator::new(ctx.integrator_config.clone());
     let mut state = initial_state;

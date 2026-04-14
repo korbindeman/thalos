@@ -1,8 +1,7 @@
-use fastnoise2::SafeNode;
-use fastnoise2::generator::prelude::*;
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::noise_fbm::{SsFbm, bulk_sample};
 use super::util::{face_position_arrays, texel_dir};
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::CubemapFace;
@@ -144,12 +143,8 @@ impl Stage for Regolith {
         // output so the bake doesn't read as globally uniform. No biome
         // softmax — the crater shapes themselves are the main signal.
         let weight_freq = body_radius / self.density_wavelength_m.max(1.0);
-        let weight_node: SafeNode = supersimplex()
-            .fbm(0.5, 0.0, 3, 2.0)
-            .domain_scale(weight_freq)
-            .build()
-            .0;
         let weight_seed = (builder.stage_seed() & 0xFFFF_FFFF) as i32;
+        let weight_fbm = SsFbm::new(weight_seed, 0.5, 3, 2.0);
         let modulation = self.density_modulation.clamp(0.0, 0.95);
         let scale = self.bake_scale;
 
@@ -167,16 +162,9 @@ impl Stage for Regolith {
                 // Bulk-sample the regional weight field for this face.
                 let (xs, ys, zs) = face_position_arrays(face, res);
                 let mut weights = vec![0.0_f32; n];
-                weight_node.gen_position_array_3d(
-                    &mut weights,
-                    &xs,
-                    &ys,
-                    &zs,
-                    0.0,
-                    0.0,
-                    0.0,
-                    weight_seed,
-                );
+                bulk_sample(&mut weights, &xs, &ys, &zs, |dir| {
+                    weight_fbm.sample(dir * weight_freq)
+                });
 
                 slice.par_iter_mut().enumerate().for_each(|(i, h)| {
                     let x = (i as u32) % res;

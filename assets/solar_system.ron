@@ -493,17 +493,20 @@
                     // the jets read as brightness variation on a
                     // single gradient instead of stripes of
                     // different colours.
-                    // Continuous warm gradient — no saturated blue jump.
-                    // Monotone warm ochre → cream → dusky taupe, matching
-                    // Saturn Cassini plates where hue wanders gently along
-                    // a single tone family.
+                    // Sampled from Saturn Cassini latitude strip.
+                    // South pole warm gold → equator bright cream →
+                    // north pole cool sage-grey. Chromatic wander is
+                    // monotone along latitude (no hue reversal), which
+                    // keeps the staircase quantization reading as a
+                    // single continuous gradient broken into plateaus.
                     palette: [
-                        (lat: -1.00, color: (0.60, 0.50, 0.34)),
-                        (lat: -0.55, color: (0.78, 0.66, 0.44)),
-                        (lat: -0.10, color: (0.90, 0.80, 0.58)),
-                        (lat:  0.20, color: (0.92, 0.82, 0.60)),
-                        (lat:  0.55, color: (0.82, 0.72, 0.54)),
-                        (lat:  1.00, color: (0.62, 0.54, 0.42)),
+                        (lat: -1.00, color: (0.74, 0.60, 0.36)),
+                        (lat: -0.60, color: (0.84, 0.70, 0.44)),
+                        (lat: -0.20, color: (0.92, 0.80, 0.54)),
+                        (lat:  0.05, color: (0.90, 0.80, 0.56)),
+                        (lat:  0.35, color: (0.78, 0.72, 0.52)),
+                        (lat:  0.70, color: (0.62, 0.62, 0.50)),
+                        (lat:  1.00, color: (0.48, 0.54, 0.52)),
                     ],
                     // Saturn's visible disk shows ~10 distinct
                     // stripes at this scale. Each sine cycle is a

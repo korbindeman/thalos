@@ -28,14 +28,9 @@ mod propagation;
 mod tests;
 
 pub use events::{Encounter, EncounterKind, TrajectoryEvent, closest_approach};
-pub use flight_plan::{FlightPlan, ScheduledBurn, propagate_flight_plan};
+pub use flight_plan::{FlightPlan, PredictionRequest, ScheduledBurn, propagate_flight_plan};
 pub use numeric::{NumericSegment, cone_width};
 pub use propagation::{PredictionConfig, PropagationBudget};
-
-// Back-compat aliases so existing call sites and tests keep building.
-pub use flight_plan::FlightPlan as TrajectoryPrediction;
-pub use flight_plan::propagate_flight_plan as propagate_trajectory_budgeted;
-pub use numeric::NumericSegment as TrajectorySegment;
 
 /// A queryable path through space: states can be sampled at any time within
 /// `epoch_range`, not only at pre-stored points.
@@ -50,30 +45,4 @@ pub trait Trajectory: Send + Sync {
     /// Best known anchor body at `time`.  Numerical segments return the
     /// anchor body of the nearest stored sample.
     fn anchor_body_at(&self, time: f64) -> Option<BodyId>;
-}
-
-/// Back-compat: simplified unbudgeted propagation entry point used by tests.
-#[allow(clippy::too_many_arguments)]
-pub fn propagate_trajectory(
-    initial_state: StateVector,
-    start_time: f64,
-    maneuvers: &crate::maneuver::ManeuverSequence,
-    ephemeris: &dyn crate::body_state_provider::BodyStateProvider,
-    bodies: &[crate::types::BodyDefinition],
-    config: &PredictionConfig,
-    integrator_config: crate::integrator::IntegratorConfig,
-    ship_thrust_acceleration: f64,
-) -> FlightPlan {
-    propagate_flight_plan(
-        initial_state,
-        start_time,
-        maneuvers,
-        Vec::new(),
-        ephemeris,
-        bodies,
-        config,
-        integrator_config,
-        ship_thrust_acceleration,
-        None,
-    )
 }

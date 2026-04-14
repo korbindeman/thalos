@@ -10,6 +10,8 @@
 //! equivalent to a full rebuild — retained as the abstraction boundary for a
 //! future incremental recompute).
 
+use std::sync::Arc;
+
 use super::Trajectory;
 use super::events::{Encounter, EncounterId, detect_segment_events};
 use super::numeric::NumericSegment;
@@ -21,6 +23,25 @@ use crate::body_state_provider::BodyStateProvider;
 use crate::integrator::IntegratorConfig;
 use crate::maneuver::{ManeuverSequence, burn_duration};
 use crate::types::{BodyDefinition, BodyId, StateVector};
+
+/// Immutable inputs for trajectory prediction.
+///
+/// This can be sent to a worker thread so prediction can run without blocking
+/// the main simulation/update loop. Lives next to [`propagate_flight_plan`]
+/// which consumes it.
+#[derive(Clone)]
+pub struct PredictionRequest {
+    pub epoch: u64,
+    pub ship_state: StateVector,
+    pub sim_time: f64,
+    pub maneuvers: ManeuverSequence,
+    pub active_burns: Vec<ScheduledBurn>,
+    pub ephemeris: Arc<dyn BodyStateProvider>,
+    pub bodies: Vec<BodyDefinition>,
+    pub prediction_config: PredictionConfig,
+    pub integrator_config: IntegratorConfig,
+    pub ship_thrust_acceleration: f64,
+}
 
 /// A propagated trajectory through a maneuver sequence.
 #[derive(Debug, Clone)]
@@ -71,30 +92,19 @@ impl FlightPlan {
     /// For now this rebuilds the full plan from the stored initial state — it
     /// is kept as the abstraction boundary so a future implementation can
     /// reuse leading segments without rebuilding the whole thing.
-    #[allow(clippy::too_many_arguments)]
     pub fn recompute_from(
         &mut self,
         _node_index: usize,
-        maneuvers: &ManeuverSequence,
-        ephemeris: &dyn BodyStateProvider,
-        bodies: &[BodyDefinition],
-        config: &PredictionConfig,
-        integrator_config: IntegratorConfig,
-        ship_thrust_acceleration: f64,
+        request: &PredictionRequest,
         budget: Option<PropagationBudget>,
     ) {
-        let rebuilt = propagate_flight_plan(
-            self.initial_state,
-            self.initial_time,
-            maneuvers,
-            Vec::new(),
-            ephemeris,
-            bodies,
-            config,
-            integrator_config,
-            ship_thrust_acceleration,
-            budget,
-        );
+        // Rebuild from the plan's own starting state; `request` supplies
+        // everything else (bodies, ephemeris, integrator config, maneuvers).
+        let mut local_request = request.clone();
+        local_request.ship_state = self.initial_state;
+        local_request.sim_time = self.initial_time;
+        local_request.active_burns = Vec::new();
+        let rebuilt = propagate_flight_plan(&local_request, budget);
         self.segments = rebuilt.segments;
         self.encounters = rebuilt.encounters;
     }
@@ -142,19 +152,26 @@ impl Trajectory for FlightPlan {
 /// One segment per leg: `start_time → node_0`, `node_0 → node_1`, …,
 /// `node_last → end_of_horizon`. Propagation stops early on collision, stable
 /// orbit, cone fade, or budget exhaustion.
-#[allow(clippy::too_many_arguments)]
 pub fn propagate_flight_plan(
-    initial_state: StateVector,
-    start_time: f64,
-    maneuvers: &ManeuverSequence,
-    initial_active_burns: Vec<ScheduledBurn>,
-    ephemeris: &dyn BodyStateProvider,
-    bodies: &[BodyDefinition],
-    config: &PredictionConfig,
-    integrator_config: IntegratorConfig,
-    ship_thrust_acceleration: f64,
+    request: &PredictionRequest,
     budget: Option<PropagationBudget>,
 ) -> FlightPlan {
+    let PredictionRequest {
+        ship_state: initial_state,
+        sim_time: start_time,
+        maneuvers,
+        active_burns,
+        ephemeris,
+        bodies,
+        prediction_config,
+        integrator_config,
+        ship_thrust_acceleration,
+        ..
+    } = request;
+    let initial_state = *initial_state;
+    let start_time = *start_time;
+    let ship_thrust_acceleration = *ship_thrust_acceleration;
+
     let _span = tracing::info_span!(
         "propagate_flight_plan",
         budget = budget.map(|b| b.max_steps).unwrap_or(0),
@@ -162,10 +179,10 @@ pub fn propagate_flight_plan(
     )
     .entered();
     let ctx = PropagationContext {
-        ephemeris,
+        ephemeris: ephemeris.as_ref(),
         bodies,
-        prediction_config: config,
-        integrator_config,
+        prediction_config,
+        integrator_config: integrator_config.clone(),
     };
 
     let mut segments: Vec<NumericSegment> = Vec::new();
@@ -175,7 +192,7 @@ pub fn propagate_flight_plan(
     let mut state = initial_state;
     let mut time = start_time;
     let mut remaining_budget: Option<usize> = budget.map(|b| b.max_steps);
-    let mut active_burns: Vec<ScheduledBurn> = initial_active_burns;
+    let mut active_burns: Vec<ScheduledBurn> = active_burns.clone();
 
     // Sort node indices by time so out-of-order UI edits still propagate
     // correctly.
@@ -213,7 +230,7 @@ pub fn propagate_flight_plan(
         encounters.extend(detect_segment_events(
             &segment,
             bodies,
-            ephemeris,
+            ephemeris.as_ref(),
             &mut encounter_counter,
         ));
 

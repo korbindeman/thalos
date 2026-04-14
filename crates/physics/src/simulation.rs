@@ -10,11 +10,11 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::body_state_provider::BodyStateProvider;
-use crate::forces::{ForceRegistry, GravityForce, ManeuverThrustForce};
+use crate::forces::{Forces, ManeuverThrustForce};
 use crate::integrator::{Integrator, IntegratorConfig};
 use crate::maneuver::{ManeuverSequence, burn_duration};
 use crate::trajectory::{
-    PredictionConfig, ScheduledBurn, TrajectoryPrediction, propagate_flight_plan,
+    FlightPlan, PredictionConfig, PredictionRequest, ScheduledBurn, propagate_flight_plan,
 };
 use crate::types::{BodyDefinition, BodyId, BodyKind, StateVector};
 
@@ -25,24 +25,6 @@ pub struct BodyOrbitTrail {
     pub parent_id: BodyId,
     /// Positions in metres, relative to the parent body.
     pub points: Vec<DVec3>,
-}
-
-/// Immutable inputs for trajectory prediction.
-///
-/// This can be sent to a worker thread so prediction can run without blocking
-/// the main simulation/update loop.
-#[derive(Clone)]
-pub struct PredictionRequest {
-    pub epoch: u64,
-    pub ship_state: StateVector,
-    pub sim_time: f64,
-    pub maneuvers: ManeuverSequence,
-    pub active_burns: Vec<ScheduledBurn>,
-    pub ephemeris: Arc<dyn BodyStateProvider>,
-    pub bodies: Vec<BodyDefinition>,
-    pub prediction_config: PredictionConfig,
-    pub integrator_config: IntegratorConfig,
-    pub ship_thrust_acceleration: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +156,7 @@ impl WarpController {
 /// Tracks prediction lifecycle: dirty flag, epoch, staleness.
 pub struct PredictionState {
     config: PredictionConfig,
-    prediction: Option<TrajectoryPrediction>,
+    prediction: Option<FlightPlan>,
     dirty: bool,
     epoch: u64,
     stale_after: f64,
@@ -205,7 +187,7 @@ impl PredictionState {
         &self.config
     }
 
-    pub fn prediction(&self) -> Option<&TrajectoryPrediction> {
+    pub fn prediction(&self) -> Option<&FlightPlan> {
         self.prediction.as_ref()
     }
 
@@ -235,7 +217,7 @@ impl PredictionState {
     /// the applied epoch actually matches.
     pub fn apply(
         &mut self,
-        prediction: TrajectoryPrediction,
+        prediction: FlightPlan,
         predicted_at_sim_time: f64,
         epoch: u64,
     ) -> bool {
@@ -250,7 +232,7 @@ impl PredictionState {
     }
 
     /// Unconditionally set the prediction (no epoch check).
-    pub fn force_set(&mut self, prediction: TrajectoryPrediction) {
+    pub fn force_set(&mut self, prediction: FlightPlan) {
         self.prediction = Some(prediction);
     }
 
@@ -260,19 +242,21 @@ impl PredictionState {
     }
 }
 
-fn build_forces(active_burns: &[ScheduledBurn]) -> ForceRegistry {
-    let mut forces = ForceRegistry::new();
-    forces.add(Box::new(GravityForce));
-    for burn in active_burns {
-        forces.add(Box::new(ManeuverThrustForce::new(
-            burn.delta_v_local,
-            burn.reference_body,
-            burn.acceleration,
-            burn.start_time,
-            burn.duration,
-        )));
+fn build_forces(active_burns: &[ScheduledBurn]) -> Forces {
+    Forces {
+        thrusts: active_burns
+            .iter()
+            .map(|burn| {
+                ManeuverThrustForce::new(
+                    burn.delta_v_local,
+                    burn.reference_body,
+                    burn.acceleration,
+                    burn.start_time,
+                    burn.duration,
+                )
+            })
+            .collect(),
     }
-    forces
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +271,7 @@ pub struct Simulation {
     ship_state: StateVector,
     sim_time: f64,
     integrator: Integrator,
-    forces: ForceRegistry,
+    forces: Forces,
     integrator_config: IntegratorConfig,
 
     // Accumulator
@@ -448,36 +432,10 @@ impl Simulation {
         self.sim_time
     }
 
-    pub fn warp_speed(&self) -> f64 {
-        self.warp.speed()
-    }
-
     /// True when warp is at/above the observation threshold — ship integration
     /// and trajectory prediction are skipped to keep the frame cheap.
     pub fn is_observation_mode(&self) -> bool {
         self.warp.speed() >= self.observation_warp_threshold
-    }
-
-    pub fn warp_label(&self) -> String {
-        self.warp.label()
-    }
-
-    // -- Warp controls (convenience delegates) ------------------------------
-
-    pub fn increase_warp(&mut self) {
-        self.warp.increase();
-    }
-
-    pub fn decrease_warp(&mut self) {
-        self.warp.decrease();
-    }
-
-    pub fn reset_warp(&mut self) {
-        self.warp.reset();
-    }
-
-    pub fn toggle_pause(&mut self) {
-        self.warp.toggle_pause();
     }
 
     // -- Maneuvers ----------------------------------------------------------
@@ -526,7 +484,7 @@ impl Simulation {
     /// Apply a computed prediction if it still matches the current epoch.
     pub fn apply_prediction(
         &mut self,
-        prediction: TrajectoryPrediction,
+        prediction: FlightPlan,
         predicted_at_sim_time: f64,
         epoch: u64,
     ) -> bool {
@@ -538,18 +496,7 @@ impl Simulation {
     /// stepping, ensuring numerical consistency.
     pub fn recompute_prediction(&mut self) {
         let req = self.prediction_request();
-        let prediction = propagate_flight_plan(
-            req.ship_state,
-            req.sim_time,
-            &req.maneuvers,
-            req.active_burns,
-            req.ephemeris.as_ref(),
-            &req.bodies,
-            &req.prediction_config,
-            req.integrator_config,
-            req.ship_thrust_acceleration,
-            None,
-        );
+        let prediction = propagate_flight_plan(&req, None);
         let _ = self
             .prediction_state
             .apply(prediction, req.sim_time, req.epoch);
@@ -559,11 +506,11 @@ impl Simulation {
         self.prediction_state.needs_refresh(self.sim_time)
     }
 
-    pub fn prediction(&self) -> Option<&TrajectoryPrediction> {
+    pub fn prediction(&self) -> Option<&FlightPlan> {
         self.prediction_state.prediction()
     }
 
-    pub fn force_set_prediction(&mut self, prediction: TrajectoryPrediction) {
+    pub fn force_set_prediction(&mut self, prediction: FlightPlan) {
         self.prediction_state.force_set(prediction);
     }
 
