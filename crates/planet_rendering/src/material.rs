@@ -7,43 +7,68 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 
+/// Maximum number of eclipse occluders the shader can test per planet per
+/// frame. 8 covers solar-system-scale scenes with room to spare; extend if a
+/// future scenario needs more bodies in view at once.
+pub const MAX_ECLIPSE_OCCLUDERS: usize = 8;
+
 /// Per-planet uniform data sent to the impostor shader.
-///
-/// Field layout is explicit to match WGSL std140 alignment:
-///   offset 0  -- radius          (f32, 4 bytes)
-///   offset 4  -- rotation_phase  (f32, 4 bytes)
-///   offset 8  -- light_intensity (f32, 4 bytes)
-///   offset 12 -- ambient_intensity (f32, 4 bytes)
-///   offset 16 -- light_dir       (vec4, 16 bytes)
-///   offset 32 -- height_range    (f32, 4 bytes)
-///   total: 48 bytes (padded to 16-byte alignment)
 #[derive(Clone, ShaderType)]
 pub struct PlanetParams {
     /// Sphere radius in render units.
     pub radius: f32,
-    /// Rotation offset (radians / 2pi) added to the sample direction for planet spin.
-    pub rotation_phase: f32,
     /// Illuminance of the directional sun light in lux (matches DirectionalLight.illuminance).
     pub light_intensity: f32,
     /// Ambient illuminance in lux (matches GlobalAmbientLight.brightness).
     pub ambient_intensity: f32,
-    /// Normalised direction FROM the planet's surface TOWARD the star, in world space.
-    /// xyz = direction, w = surface roughness (0.0 = smooth gas giant, 1.0 = very rough).
-    pub light_dir: Vec4,
     /// Height range in meters — the maximum absolute displacement stored in the
     /// R16Unorm height cubemap.  The shader needs this to scale gradients correctly.
     pub height_range: f32,
+    /// Normalised direction FROM the planet's surface TOWARD the star, in world space.
+    /// xyz = direction, w = surface roughness (0.0 = smooth gas giant, 1.0 = very rough).
+    pub light_dir: Vec4,
+    /// Quaternion (xyzw) rotating world-space directions into body-local space
+    /// (where the cubemaps were baked). For tidally-locked moons this aligns
+    /// the baked near-side (+Z) with the direction toward the parent body.
+    /// Identity quaternion = no rotation.
+    pub orientation: Vec4,
+    /// Number of valid entries in `occluders`. Shader loops over this count.
+    pub occluder_count: u32,
+    /// Padding to keep the next field aligned on a 16-byte boundary.
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
+    /// Eclipse occluder list. Each entry: xyz = world render-space center,
+    /// w = render-unit radius. Tested by the shader as analytical sphere
+    /// shadows along the sun ray. Unused slots should be zeroed.
+    pub occluders: [Vec4; MAX_ECLIPSE_OCCLUDERS],
+    /// Parent body for planetshine (secondary illumination reflected off
+    /// the orbital parent). xyz = world render-space center of the parent,
+    /// w = parent render-unit radius. Used with `parent_tint` below.
+    /// Zero-radius disables planetshine for this body.
+    pub parent_pos: Vec4,
+    /// Parent body reflected-light color: xyz = Bond albedo × tint
+    /// (the effective per-wavelength reflectance the parent sends back at
+    /// zero phase), w = enable flag (1.0 = active, 0.0 = disabled).
+    pub parent_tint: Vec4,
 }
 
 impl Default for PlanetParams {
     fn default() -> Self {
         Self {
             radius: 1.0,
-            rotation_phase: 0.0,
             light_intensity: 80.0,
             ambient_intensity: 2.0,
-            light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
             height_range: 1.0,
+            light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            occluder_count: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            occluders: [Vec4::ZERO; MAX_ECLIPSE_OCCLUDERS],
+            parent_pos: Vec4::ZERO,
+            parent_tint: Vec4::ZERO,
         }
     }
 }

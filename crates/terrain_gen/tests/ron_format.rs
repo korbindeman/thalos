@@ -41,8 +41,8 @@ const MIRA_GENERATOR: &str = r#"(
             crater_density_multiplier: 1.0,
         )),
         SpaceWeather((
-            highland_mature_albedo: 0.10,
-            highland_fresh_albedo: 0.18,
+            highland_mature_albedo: Some(0.10),
+            highland_fresh_albedo: Some(0.18),
             mare_mature_albedo: 0.065,
             mare_fresh_albedo: 0.09,
             young_crater_age_threshold: 0.5,

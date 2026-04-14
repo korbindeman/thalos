@@ -69,11 +69,23 @@ const FRESH_AGE_GYR: f32 = 0.1;
 
 struct PlanetParams {
     radius:            f32,
-    rotation_phase:    f32,
     light_intensity:   f32,
     ambient_intensity: f32,
-    light_dir: vec4<f32>,
     height_range:      f32,
+    light_dir:         vec4<f32>,
+    // Quaternion (xyzw) rotating world-space directions into body-local space
+    // where the cubemaps were baked. Identity = no rotation.
+    orientation:       vec4<f32>,
+    // Eclipse occluders: analytical sphere-shadow test against other bodies.
+    occluder_count:    u32,
+    _pad0:             u32,
+    _pad1:             u32,
+    _pad2:             u32,
+    // xyz = world render-space center, w = render-unit radius.
+    occluders:         array<vec4<f32>, 8>,
+    // Planetshine: parent body for secondary illumination.
+    parent_pos:        vec4<f32>,  // xyz = render pos, w = render radius
+    parent_tint:       vec4<f32>,  // xyz = bond_albedo × tint, w = enable flag
 }
 
 // Layout matches `PlanetDetailParams` in `crates/planet_rendering/src/material.rs`.
@@ -349,6 +361,43 @@ struct CraterAccum {
     grad_tangent: vec3<f32>,
     height: f32,
     min_maturity: f32,
+    // Self-shadow term from per-crater rim-occlusion tests. 1.0 = fully lit,
+    // 0.0 = fully shadowed. Computed analytically: for each crater the
+    // fragment lies inside, check if the sun-side rim blocks the sun given
+    // the current sun elevation. `min` accumulator across craters.
+    shadow: f32,
+    // Signed albedo modulation. Interpreted at the call site as
+    //   final_albedo = baked_albedo * clamp(1.0 + albedo_mod, 0.0, 4.0)
+    // Per-crater zones: floor darken (negative), rim brighten + ejecta apron
+    // (positive). The SSBO and hash layers iterate craters below the cubemap
+    // bake threshold, so their craters carry no CPU-painted albedo and need
+    // an analytic equivalent here.
+    albedo_mod: f32,
+}
+
+// Per-crater albedo signature shared by the SSBO and hash layers. Returns a
+// signed scalar that should be folded into `albedo_mod`. `t` is the radial
+// distance from the crater center in units of crater radius. `freshness`
+// is in [0,1] (1 = pristine, 0 = mature) — older craters keep about half
+// of the contrast a fresh crater has, matching the Pass 1.5 CPU path in
+// `space_weather.rs`.
+fn crater_albedo_delta(t: f32, freshness: f32) -> f32 {
+    let strength = 0.55 + 0.45 * freshness;
+    var delta: f32 = 0.0;
+    if t < 0.55 {
+        delta = delta - 0.85 * (1.0 - t / 0.55);
+    }
+    let rim_half: f32 = 0.28;
+    if t > 1.0 - rim_half && t < 1.0 + rim_half {
+        let rim_w = 1.0 - abs(t - 1.0) / rim_half;
+        delta = delta + 1.15 * rim_w;
+    }
+    if t > 1.0 && t < 2.5 {
+        let apron = 1.0 / (t * t * t);
+        let fade = clamp((2.5 - t) / 1.5, 0.0, 1.0);
+        delta = delta + 0.75 * apron * fade;
+    }
+    return delta * strength;
 }
 
 // Evaluate a single explicit crater from the SSBO at `p_unit` and fold its
@@ -359,6 +408,7 @@ fn apply_ssbo_crater(
     p_unit: vec3<f32>,
     crater: Crater,
     pixel_size_m: f32,
+    light_dir_local: vec3<f32>,
 ) {
     // Skip craters already rasterized into the height cubemap — the Layer 1
     // texel lookup already includes their displacement, so iterating them
@@ -415,10 +465,14 @@ fn apply_ssbo_crater(
     let aged_m = mix(fresh_m, 1.0, age_blend);
     let weighted_m = mix(1.0, aged_m, weight);
 
+    let freshness = 1.0 - aged_m;
+    let albedo_delta_w = crater_albedo_delta(r, freshness) * weight;
+
     let grad_proj_len = sqrt(proj_len2);
     if grad_proj_len < 1e-8 {
         (*accum).height = (*accum).height + h_m * weight;
         (*accum).min_maturity = min((*accum).min_maturity, weighted_m);
+        (*accum).albedo_mod = (*accum).albedo_mod + albedo_delta_w;
         return;
     }
     let t_hat = proj / grad_proj_len;
@@ -427,6 +481,57 @@ fn apply_ssbo_crater(
     (*accum).grad_tangent = (*accum).grad_tangent + grad * weight;
     (*accum).height = (*accum).height + h_m * weight;
     (*accum).min_maturity = min((*accum).min_maturity, weighted_m);
+
+    // Per-crater albedo modulation — analytic version of CPU Pass 1.5.
+    // Computed before the early-return branch above so dead-center floor
+    // darkening (where grad_proj_len → 0) still gets folded in.
+    (*accum).albedo_mod = (*accum).albedo_mod + albedo_delta_w;
+
+    // ── Per-crater analytical shadow ───────────────────────────────────────
+    // The crater rim casts a shadow onto whatever fragment lies sun-ward of
+    // it — could be the crater floor (r < 1), the ejecta blanket (1 < r <
+    // EJECTA_EXTENT), or anywhere in between. Walks the sun direction in
+    // the fragment's tangent plane and finds where it crosses the rim
+    // circle, then compares the rim's height rise to the sun's elevation.
+    let sin_sun = dot(light_dir_local, p_unit);
+    if sin_sun > 0.0 {
+        let sun_tangent = light_dir_local - sin_sun * p_unit;
+        let cos_sun = length(sun_tangent);
+        if cos_sun > 1e-4 {
+            let sun_hat = sun_tangent / cos_sun;
+            // Fragment position relative to crater center, in crater radii.
+            // `t_hat` points from fragment toward center, so negate.
+            let frag_rel = -t_hat * r;
+            // Ray from frag in sun direction → rim circle |p|=1:
+            //   (frag_rel + t·sun_hat)·(frag_rel + t·sun_hat) = 1
+            //   t² + 2b·t + c = 0, b = frag_rel·sun_hat, c = r²-1
+            let b = dot(frag_rel, sun_hat);
+            let c = r * r - 1.0;
+            let disc = b * b - c;
+            if disc > 0.0 {
+                let s_disc = sqrt(disc);
+                // Interior: ray starts inside circle, take far exit (far rim).
+                // Exterior: ray outside circle, take near entry (first rim hit).
+                var t_hit: f32 = -1.0;
+                if c < 0.0 {
+                    t_hit = -b + s_disc;
+                } else {
+                    let t_near = -b - s_disc;
+                    if t_near > 0.0 { t_hit = t_near; }
+                }
+                if t_hit > 0.0 {
+                    let delta_h = crater.rim_height_m - h_m;
+                    let lhs = delta_h * cos_sun;
+                    let rhs = t_hit * crater.radius_m * sin_sun;
+                    if lhs > rhs {
+                        let margin = (lhs - rhs) / max(rhs, 1.0);
+                        let s = 1.0 - clamp(margin * 8.0, 0.0, 1.0);
+                        (*accum).shadow = min((*accum).shadow, mix(1.0, s, weight));
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Iterate every explicit crater in the 3×3×3 cell neighborhood of `p_unit`
@@ -434,11 +539,17 @@ fn apply_ssbo_crater(
 //   - `detail.ssbo_cell_size` is the cell edge length in unit-sphere coords.
 //   - `cell_index[hash & MASK]` → (start, count) into `feature_ids`.
 //   - Each `feature_ids[start+i]` is an index into `craters[]`.
-fn iterate_ssbo_craters(p_unit: vec3<f32>, pixel_size_m: f32) -> CraterAccum {
+fn iterate_ssbo_craters(
+    p_unit: vec3<f32>,
+    pixel_size_m: f32,
+    light_dir_local: vec3<f32>,
+) -> CraterAccum {
     var accum: CraterAccum;
     accum.grad_tangent = vec3<f32>(0.0);
     accum.height = 0.0;
     accum.min_maturity = 1.0;
+    accum.shadow = 1.0;
+    accum.albedo_mod = 0.0;
 
     let cell_size_unit = SSBO_CELL_SIZE_UNIT;
     if arrayLength(&cell_index) == 0u {
@@ -497,7 +608,7 @@ fn iterate_ssbo_craters(p_unit: vec3<f32>, pixel_size_m: f32) -> CraterAccum {
                 for (var i: u32 = 0u; i < range.count; i = i + 1u) {
                     let crater_idx = feature_ids[range.start + i];
                     let crater = craters[crater_idx];
-                    apply_ssbo_crater(&accum, p_unit, crater, pixel_size_m);
+                    apply_ssbo_crater(&accum, p_unit, crater, pixel_size_m, light_dir_local);
                 }
             }
         }
@@ -520,6 +631,7 @@ fn visit_cell(
     d_hi: f32,
     expected_per_cell: f32,
     pixel_size_m: f32,
+    light_dir_local: vec3<f32>,
 ) {
     let h = hash_cell(ix, iy, iz, octave);
     let u_exists = u32_to_unit(h);
@@ -607,10 +719,14 @@ fn visit_cell(
     let aged_m = mix(fresh_m, 1.0, age_blend);
     let weighted_m = mix(1.0, aged_m, lod_weight);
 
+    let freshness_h = 1.0 - aged_m;
+    let albedo_delta_lw = crater_albedo_delta(r, freshness_h) * lod_weight;
+
     let grad_proj_len = sqrt(proj_len2);
     if grad_proj_len < 1e-8 {
         (*accum).height = (*accum).height + h_m * lod_weight;
         (*accum).min_maturity = min((*accum).min_maturity, weighted_m);
+        (*accum).albedo_mod = (*accum).albedo_mod + albedo_delta_lw;
         return;
     }
     let t_hat = proj / grad_proj_len;
@@ -620,16 +736,58 @@ fn visit_cell(
     (*accum).grad_tangent = (*accum).grad_tangent + grad * lod_weight;
     (*accum).height = (*accum).height + h_m * lod_weight;
     (*accum).min_maturity = min((*accum).min_maturity, weighted_m);
+    (*accum).albedo_mod = (*accum).albedo_mod + albedo_delta_lw;
+
+    // Per-crater analytical shadow — covers interior and ejecta blanket.
+    // See `apply_ssbo_crater` for derivation. Synthesis rim peak is `rim`.
+    let sin_sun = dot(light_dir_local, p_unit);
+    if sin_sun > 0.0 {
+        let sun_tangent = light_dir_local - sin_sun * p_unit;
+        let cos_sun = length(sun_tangent);
+        if cos_sun > 1e-4 {
+            let sun_hat = sun_tangent / cos_sun;
+            let frag_rel = -t_hat * r;
+            let b = dot(frag_rel, sun_hat);
+            let c = r * r - 1.0;
+            let disc = b * b - c;
+            if disc > 0.0 {
+                let s_disc = sqrt(disc);
+                var t_hit: f32 = -1.0;
+                if c < 0.0 {
+                    t_hit = -b + s_disc;
+                } else {
+                    let t_near = -b - s_disc;
+                    if t_near > 0.0 { t_hit = t_near; }
+                }
+                if t_hit > 0.0 {
+                    let delta_h = rim - h_m;
+                    let lhs = delta_h * cos_sun;
+                    let rhs = t_hit * radius_m * sin_sun;
+                    if lhs > rhs {
+                        let margin = (lhs - rhs) / max(rhs, 1.0);
+                        let s = 1.0 - clamp(margin * 8.0, 0.0, 1.0);
+                        (*accum).shadow = min((*accum).shadow, mix(1.0, s, lod_weight));
+                    }
+                }
+            }
+        }
+    }
 }
 
 // High-frequency statistical crater tail.  Caps `d_max_m` at 500 m so the
 // shader-hash band never overlaps the SSBO band. Lower floor still obeys
 // `detail.d_min_m` (production value ~80 m).
-fn synthesize_small_craters(p_unit: vec3<f32>, pixel_size_m: f32) -> CraterAccum {
+fn synthesize_small_craters(
+    p_unit: vec3<f32>,
+    pixel_size_m: f32,
+    light_dir_local: vec3<f32>,
+) -> CraterAccum {
     var accum: CraterAccum;
     accum.grad_tangent = vec3<f32>(0.0);
     accum.height = 0.0;
     accum.min_maturity = 1.0;
+    accum.shadow = 1.0;
+    accum.albedo_mod = 0.0;
 
     if detail.global_k_per_km2 <= 0.0 || detail.d_min_m <= 0.0 {
         return accum;
@@ -714,6 +872,7 @@ fn synthesize_small_craters(p_unit: vec3<f32>, pixel_size_m: f32) -> CraterAccum
                         d_lo, d_hi,
                         expected_per_cell,
                         pixel_size_m,
+                        light_dir_local,
                     );
                 }
             }
@@ -783,10 +942,13 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
         return n;
     }
 
-    // Height is R16Unorm in [0, 1].  The differences are proportional to
-    // real meters only after scaling by height_range (the max absolute
-    // displacement in meters stored in the cubemap).
-    let scale = params.height_range / ds;
+    // Height is R16Unorm in [0, 1].  The stored encoding is
+    //   stored = 0.5 + real_meters / (2 * height_range)
+    // so a texture-space difference of Δstored corresponds to
+    //   Δreal = Δstored · 2 · height_range meters.
+    // The factor of 2 was missing previously, which halved the normal
+    // perturbation and produced a noticeably softer terminator.
+    let scale = (2.0 * params.height_range) / ds;
     let dh_dt = (h_e - h_w) * scale;
     let dh_db = (h_n - h_s) * scale;
 
@@ -795,17 +957,17 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
 
 // ── Rotation helper ────────────────────────────────────────────────────────
 //
-// Rotate a direction around the Y axis by `angle` radians.
-// Used to apply planet rotation to the cubemap sample direction.
+// Rotate a direction by a quaternion. Used to transform a world-space normal
+// into body-local space (where the cubemaps were baked) and back.
 
-fn rotate_y(dir: vec3<f32>, angle: f32) -> vec3<f32> {
-    let s = sin(angle);
-    let c = cos(angle);
-    return vec3<f32>(
-        dir.x * c + dir.z * s,
-        dir.y,
-        -dir.x * s + dir.z * c,
-    );
+fn rotate_quat(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let u = q.xyz;
+    let s = q.w;
+    return 2.0 * dot(u, v) * u + (s * s - dot(u, u)) * v + 2.0 * s * cross(u, v);
+}
+
+fn conjugate_quat(q: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(-q.xyz, q.w);
 }
 
 // ── Material cubemap lookup ────────────────────────────────────────────────
@@ -875,6 +1037,137 @@ fn sample_material_id(dir: vec3<f32>) -> u32 {
     return textureLoad(material_cube, vec2<i32>(x, y), face, 0).r;
 }
 
+// ── Self-shadow raymarch ───────────────────────────────────────────────────
+//
+// Casts a ray from the surface point along the sun direction through the
+// height cubemap. Captures basin/crater-rim shadows at the frequencies baked
+// into the cubemap (≥ 5 km features on Mira). Sub-texel features are not
+// shadowed — their normal perturbation already darkens the lit term. Cheap:
+// only runs near the terminator, where shadows actually reach across texels.
+
+fn sample_height_m(dir: vec3<f32>) -> f32 {
+    let stored = textureSampleLevel(height_tex, height_sampler, dir, 0.0).r;
+    return (stored - 0.5) * 2.0 * params.height_range;
+}
+
+fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
+    let radius_m = detail.body_radius_m;
+    let h0 = sample_height_m(sample_dir);
+
+    // Start a hair above the local surface so we don't self-intersect.
+    let bias_m = max(radius_m * 0.0001, 5.0);
+    let origin = sample_dir * (radius_m + h0 + bias_m);
+
+    // Exponentially growing step so the ray covers short-range rim shadows
+    // and long-range megabasin shadows in the same loop. 20 steps with
+    // growth 1.3 reach ~radius_m * 0.6 of horizontal distance — enough for
+    // megabasin-scale shadows at grazing sun.
+    var step_m: f32 = radius_m * 0.0003;
+    let growth: f32 = 1.3;
+    let num_steps: i32 = 20;
+
+    var shadow: f32 = 1.0;
+    var t: f32 = 0.0;
+    for (var i: i32 = 0; i < num_steps; i = i + 1) {
+        t = t + step_m;
+        let p = origin + light_dir_local * t;
+        let r = length(p);
+        let d = p / r;
+        let h = sample_height_m(d);
+        let surface_r = radius_m + h;
+        if surface_r > r {
+            let penetration = (surface_r - r) / (radius_m * 0.0003);
+            shadow = min(shadow, 1.0 - clamp(penetration, 0.0, 1.0));
+            if shadow <= 0.0 { break; }
+        }
+        step_m = step_m * growth;
+    }
+    return shadow;
+}
+
+// ── Hapke BRDF for airless regolith ────────────────────────────────────────
+//
+// Hapke (1981, 2002). Three physical ingredients:
+//   - Shadow-hiding opposition effect B(g)
+//   - Single-particle phase function P(g) (Henyey-Greenstein, back-scatter)
+//   - Multiple-scattering H-functions via Chandrasekhar approximation
+//
+// Returns a reflectance factor that multiplies incoming flux × albedo to
+// get reflected radiance. Parameters are tuned for lunar-type regolith.
+//
+// Inputs are all in the same space; handedness doesn't matter.
+fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32) -> f32 {
+    let mu0 = max(n_dot_l, 0.0);
+    let mu  = max(n_dot_v, 0.0);
+    if mu0 <= 0.0 || mu <= 0.0 { return 0.0; }
+
+    // Single-scattering albedo (0..1). Lunar highlands ~0.4, mare ~0.2.
+    // Picked to match the prior visual brightness when combined with the
+    // 2π global scale below.
+    let w: f32 = 0.45;
+
+    let cp = clamp(cos_phase, -1.0, 1.0);
+    let g  = acos(cp);
+
+    // Shadow-hiding opposition effect: B(g) = B0 / (1 + tan(g/2)/h).
+    // Matches the Moon's ~40% surge at α=0 with h ≈ 0.06 (~3.4°).
+    let B0: f32 = 1.0;
+    let h:  f32 = 0.06;
+    let B_g = B0 / (1.0 + tan(g * 0.5) / h);
+
+    // Single-particle phase function: Henyey-Greenstein with asymmetry
+    // g_hg = -0.3 (back-scatter, typical of rough regolith grains).
+    let g_hg: f32 = -0.3;
+    let denom = 1.0 + g_hg * g_hg - 2.0 * g_hg * cp;
+    let P_g = (1.0 - g_hg * g_hg) / pow(max(denom, 1e-6), 1.5);
+
+    // Chandrasekhar H-function (Hapke 2002 two-stream approximation).
+    let gamma = sqrt(max(1.0 - w, 0.0));
+    let H_mu0 = (1.0 + 2.0 * mu0) / (1.0 + 2.0 * mu0 * gamma);
+    let H_mu  = (1.0 + 2.0 * mu) / (1.0 + 2.0 * mu * gamma);
+
+    // Full radiance factor. The `(1 / (4π))` normalization is folded into
+    // a global scale at the call site so brightness matches the prior
+    // Lambert pipeline without re-tuning every planet's `light_intensity`.
+    let r = w * (mu0 / (mu0 + mu)) * ((1.0 + B_g) * P_g + H_mu0 * H_mu - 1.0);
+    return max(r, 0.0);
+}
+
+// ── Eclipse (cross-body shadow) ────────────────────────────────────────────
+//
+// Analytical sphere-shadow test: for each occluder (other body in the scene),
+// check whether the ray from the fragment toward the sun passes through the
+// occluder sphere. A simple soft penumbra scales with the occluder's apparent
+// radius over a small fraction — not a full solar-disk angular model, but
+// enough to avoid a hard on/off eclipse edge.
+//
+// Inputs: `hit_ws` fragment world position (render space), `light_dir_ws`
+// sun direction in world space.
+
+fn eclipse_term(hit_ws: vec3<f32>, light_dir_ws: vec3<f32>) -> f32 {
+    var factor: f32 = 1.0;
+    let count = params.occluder_count;
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let oc = params.occluders[i];
+        let center = oc.xyz;
+        let r = oc.w;
+        if r <= 0.0 { continue; }
+        let delta = center - hit_ws;
+        let t = dot(delta, light_dir_ws);
+        // Occluder must be on the sun-ward side of the fragment.
+        if t <= 0.0 { continue; }
+        // Perpendicular distance from sun ray to occluder center.
+        let perp2 = dot(delta, delta) - t * t;
+        let perp = sqrt(max(perp2, 0.0));
+        // Soft edge: full umbra inside r, fades out to ~1.1 r.
+        let penumbra = max(r * 0.1, 1.0);
+        let s = smoothstep(r, r + penumbra, perp);
+        factor = min(factor, s);
+        if factor <= 0.0 { break; }
+    }
+    return factor;
+}
+
 // ── Fragment ────────────────────────────────────────────────────────────────
 
 @fragment
@@ -894,8 +1187,10 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let hit    = cam_pos + t * ray_dir;
     let normal = normalize(hit - in.sphere_center);
 
-    // Apply planet rotation to the sample direction (not the geometry).
-    let sample_dir = rotate_y(normal, params.rotation_phase * TAU);
+    // Apply planet orientation to the sample direction (not the geometry).
+    // `orientation` maps world-space → body-local space (the frame the
+    // cubemaps, SSBO craters, and shader-synthesized features were baked in).
+    let sample_dir = rotate_quat(params.orientation, normal);
 
     // ── Layer 1a: material cube → primary albedo/roughness ─────────────────
     let mat_id = sample_material_id(sample_dir);
@@ -920,9 +1215,9 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let baked_albedo = mat_albedo * tint_mod * regional;
 
     // ── Layer 1b: height-derived normal perturbation ─────────────────────
+    // Kept in body-local space until after the SSBO/synthesis crater
+    // gradients are combined, then rotated back to world space for lighting.
     var shading_normal = perturb_normal_from_height(sample_dir);
-    // Transform back from rotated space to world space for lighting.
-    shading_normal = rotate_y(shading_normal, -params.rotation_phase * TAU);
 
     // ── Pixel size in meters ────────────────────────────────────────────
     // Carried from the vertex stage; see vertex() for the derivation.
@@ -937,53 +1232,120 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let wrap_slack  = params.light_dir.w * 0.08;
     let dark_side   = geo_n_dot_l < -(0.05 + wrap_slack);
 
+    // Sun direction in body-local space — shared by crater iteration (for
+    // per-crater analytical shadow) and the cubemap raymarch below.
+    let light_dir_local = rotate_quat(params.orientation, params.light_dir.xyz);
+
     var ssbo_grad  = vec3<f32>(0.0);
     var small_grad = vec3<f32>(0.0);
     var min_maturity = 1.0;
+    var crater_shadow = 1.0;
+    var crater_albedo_mod = 0.0;
     if !dark_side {
+        // Both SSBO craters and the procedural small-crater layer live in
+        // body-local space, so sample with the rotated `sample_dir`, not the
+        // world-space `normal`.
         // ── Layer 2: SSBO craters (500 m – 5 km) ─────────────────────────
-        let ssbo = iterate_ssbo_craters(normal, pixel_size_m);
+        let ssbo = iterate_ssbo_craters(sample_dir, pixel_size_m, light_dir_local);
 
         // ── Layer 3: statistical small-crater synthesis (< 500 m) ──────
-        let small = synthesize_small_craters(normal, pixel_size_m);
+        let small = synthesize_small_craters(sample_dir, pixel_size_m, light_dir_local);
 
         ssbo_grad  = ssbo.grad_tangent;
         small_grad = small.grad_tangent;
         min_maturity = min(ssbo.min_maturity, small.min_maturity);
+        crater_shadow = min(ssbo.shadow, small.shadow);
+        crater_albedo_mod = ssbo.albedo_mod + small.albedo_mod;
     }
 
-    // Combine mid + high frequency crater gradients.
+    // Combine mid + high frequency crater gradients. Both gradients are in
+    // body-local space (their tangent frames were built around `sample_dir`),
+    // so the projection and subtraction happen in body-local space; we
+    // rotate the final shading normal to world space afterwards.
     var combined_grad = ssbo_grad + small_grad;
     if length(combined_grad) > 0.0 {
-        let grad_tangent = combined_grad - dot(combined_grad, normal) * normal;
+        let grad_tangent = combined_grad - dot(combined_grad, sample_dir) * sample_dir;
         shading_normal = normalize(shading_normal - grad_tangent);
     }
+    // Transform the fully-perturbed shading normal from body-local to world
+    // space so the lighting dot product below is consistent with `light_dir`.
+    shading_normal = rotate_quat(conjugate_quat(params.orientation), shading_normal);
     // Fresh craters: subtle brightening.  The material palette already encodes
     // the "fresh regolith" bias, so the ad-hoc FRESH_BIAS_COLOR tint is gone.
     let fresh_boost = clamp((1.0 - min_maturity) * 0.3, 0.0, 0.4);
-    let albedo = baked_albedo * (1.0 + fresh_boost);
+    // Per-crater albedo signature from the SSBO + hash layers. Clamped to
+    // a sane range so a few stacked craters can't blow out the surface or
+    // drive it negative. The factor parallels the CPU `space_weather.rs`
+    // Pass 1.5 strength so cubemap-baked and shader-only craters look
+    // consistent across the bake threshold.
+    let crater_mod = clamp(crater_albedo_mod, -0.65, 1.20);
+    let albedo = baked_albedo * (1.0 + fresh_boost + crater_mod);
     // mat_roughness: reserved for a future BRDF upgrade; Lambertian for now.
 
-    // ── Lighting ───────────────────────────────────────────────────────────
-    // `geo_n_dot_l` and `wrap_slack` (== wrap) are already computed above.
-    let n_dot_l = min(dot(shading_normal, params.light_dir.xyz), geo_n_dot_l + 0.05);
-    let wrap    = wrap_slack;
-    let diffuse = max(0.0, (n_dot_l + wrap) / (1.0 + wrap));
-
-    // Opposition surge: coherent backscatter + shadow hiding on airless
-    // regolith produces a sharp brightness peak near zero phase angle. Real
-    // lunar surge is ~40% at α=0 with a half-width of a few degrees
-    // (Buratti et al., Clementine). Modeled as an exponential in the phase
-    // angle between the view ray and the light direction.
+    // ── Lighting: Hapke BRDF + planetshine ────────────────────────────────
+    //
+    // Replaces the previous Lambert + ad-hoc opposition surge. Hapke already
+    // contains its own shadow-hiding surge term. Headroom ramp still caps
+    // the perturbed shading normal against the geometric normal so crater
+    // rims can't out-light body curvature near the terminator.
+    let headroom = mix(0.05, 0.30, smoothstep(0.15, 0.40, geo_n_dot_l));
     let view_dir = normalize(cam_pos - hit);
-    let cos_phase = clamp(dot(view_dir, params.light_dir.xyz), -1.0, 1.0);
-    let phase_angle = acos(cos_phase);
-    let surge_width = 0.12; // ~7° half-width
-    let surge = 0.4 * exp(-phase_angle / surge_width);
-    let surge_lit = diffuse * (1.0 + surge);
+    let n_dot_v = max(dot(shading_normal, view_dir), 0.0);
 
-    let irradiance  = params.light_intensity * surge_lit + params.ambient_intensity;
-    let lit         = albedo * irradiance * (1.0 / PI);
+    // Primary: direct sunlight.
+    let sun_dir = params.light_dir.xyz;
+    let sun_n_dot_l_raw = dot(shading_normal, sun_dir);
+    let sun_n_dot_l = min(sun_n_dot_l_raw, geo_n_dot_l + headroom);
+    let cos_phase_sun = dot(view_dir, sun_dir);
+    var sun_r = hapke_brdf(max(sun_n_dot_l, 0.0), n_dot_v, cos_phase_sun);
+
+    // Apply all shadow terms to the sun contribution only. Planetshine uses
+    // a different incident direction so these don't apply to it.
+    sun_r = sun_r * crater_shadow;
+    if geo_n_dot_l > 0.0 {
+        sun_r = sun_r * self_shadow(sample_dir, light_dir_local);
+    }
+    sun_r = sun_r * eclipse_term(hit, sun_dir);
+
+    // Secondary: planetshine from the orbital parent.
+    //
+    // Physical model: the parent reflects sunlight back at the moon as a
+    // finite-angular-radius disk. Irradiance arriving at the fragment is
+    //     E_shine = E_sun · A_parent · (R/D)² · f(α)
+    // where α is the sun-parent-moon angle seen from the fragment and
+    //     f(α) = (sin α + (π-α) cos α) / π
+    // is the Lambert-sphere integrated phase function (f(0) = 1, f(π) = 0).
+    //
+    // Applied through the same Hapke BRDF with the parent direction as the
+    // light vector, so the moon's night side picks up a photographically
+    // faithful dim glow when the parent is "full" overhead.
+    var shine_rgb = vec3<f32>(0.0);
+    if params.parent_tint.w > 0.5 {
+        let to_parent = params.parent_pos.xyz - hit;
+        let parent_dist = length(to_parent);
+        let parent_radius = params.parent_pos.w;
+        if parent_dist > parent_radius && parent_radius > 0.0 {
+            let parent_dir = to_parent / parent_dist;
+            let shine_n_dot_l = dot(shading_normal, parent_dir);
+            let shine_cos_phase = dot(view_dir, parent_dir);
+            let shine_r = hapke_brdf(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase);
+            // Parent's illuminated-fraction phase function (Lambert sphere).
+            let cos_alpha = clamp(dot(sun_dir, parent_dir), -1.0, 1.0);
+            let alpha     = acos(cos_alpha);
+            let lambert_phase = (sin(alpha) + (PI - alpha) * cos_alpha) / PI;
+            let angular_ratio = parent_radius / parent_dist;
+            let angular_sq    = angular_ratio * angular_ratio;
+            let flux_factor   = params.light_intensity * angular_sq * lambert_phase;
+            shine_rgb = params.parent_tint.xyz * shine_r * flux_factor;
+        }
+    }
+
+    // Combine. Hapke's r is a radiance factor; the prior pipeline used a
+    // Lambert `/PI` normalization we now fold into a global scale so
+    // existing `light_intensity` values don't need re-tuning.
+    let hapke_scale: f32 = 0.5;
+    let sun_rgb = vec3<f32>(sun_r * params.light_intensity * hapke_scale);
+    let lit = albedo * (sun_rgb + shine_rgb + vec3<f32>(params.ambient_intensity));
 
     // Correct depth.
     let hit_clip = view.clip_from_world * vec4(hit, 1.0);

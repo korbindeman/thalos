@@ -68,7 +68,7 @@ pub enum InteractionMode {
     PlacingNode {
         snap_time: Option<f64>,
         snap_world_pos: Option<Vec3>,
-        snap_dominant_body: Option<usize>,
+        snap_anchor_body: Option<usize>,
     },
     /// Dragging an arrow handle to adjust delta-v.
     DraggingArrow {

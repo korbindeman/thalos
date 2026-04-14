@@ -64,17 +64,17 @@ pub(super) fn cone_width_scaled(sample: &TrajectorySample, config: &PredictionCo
     cone_width(sample) * config.cone_width_scale
 }
 
-/// Tracks angular progress around the dominant body to detect orbit closure.
+/// Tracks angular progress around the anchor body to detect orbit closure.
 #[derive(Debug, Clone)]
 pub(super) struct OrbitTracker {
-    pub dominant_body: BodyId,
+    pub anchor_body: BodyId,
     prev_rel_pos: DVec3,
     normal: DVec3,
     cumulative_angle: f64,
 }
 
 impl OrbitTracker {
-    pub(super) fn new(rel_position: DVec3, rel_velocity: DVec3, dominant_body: BodyId) -> Self {
+    pub(super) fn new(rel_position: DVec3, rel_velocity: DVec3, anchor_body: BodyId) -> Self {
         let normal = rel_position.cross(rel_velocity);
         let normal = if normal.length_squared() > 1e-20 {
             normal.normalize()
@@ -82,7 +82,7 @@ impl OrbitTracker {
             DVec3::Y
         };
         Self {
-            dominant_body,
+            anchor_body,
             prev_rel_pos: rel_position,
             normal,
             cumulative_angle: 0.0,
@@ -118,7 +118,7 @@ pub(super) struct PropagationContext<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ScheduledBurn {
+pub struct ScheduledBurn {
     /// Δv in the local prograde/normal/radial frame (m/s).  The world-frame
     /// direction is recomputed each integrator substep so long burns track
     /// the rotating orbital frame.
@@ -195,8 +195,27 @@ pub(super) fn propagate_segment(
 
         ctx.ephemeris.query_into(sample.time, &mut body_states_buf);
 
-        if sample.dominant_body < body_states_buf.len() {
-            sample.dominant_body_pos = body_states_buf[sample.dominant_body].position;
+        // Anchor body: smallest SOI that contains the ship.  Geometric
+        // containment is stable across steps, so the renderer can frame every
+        // sample to its anchor without per-sample frame jumps.  Falls back to
+        // the root body via INFINITY-SOI when no smaller SOI applies.
+        let mut anchor_id = sample.dominant_body;
+        let mut anchor_soi = f64::INFINITY;
+        for body_def in ctx.bodies.iter() {
+            if body_def.id >= body_states_buf.len() {
+                break;
+            }
+            let dist_sq =
+                (sample.position - body_states_buf[body_def.id].position).length_squared();
+            let soi = body_def.soi_radius_m;
+            if dist_sq <= soi * soi && soi <= anchor_soi {
+                anchor_id = body_def.id;
+                anchor_soi = soi;
+            }
+        }
+        sample.anchor_body = anchor_id;
+        if anchor_id < body_states_buf.len() {
+            sample.anchor_body_pos = body_states_buf[anchor_id].position;
         }
 
         // Surface collision check.
@@ -245,21 +264,21 @@ pub(super) fn propagate_segment(
             orbit_tracker.is_none() && sample.time >= last_burn_end
         };
         if should_capture {
-            let dom = sample.dominant_body;
-            let body_pos = if dom < body_states_buf.len() {
-                body_states_buf[dom].position
+            let anchor = sample.anchor_body;
+            let body_pos = if anchor < body_states_buf.len() {
+                body_states_buf[anchor].position
             } else {
                 DVec3::ZERO
             };
-            let body_vel = if dom < body_states_buf.len() {
-                body_states_buf[dom].velocity
+            let body_vel = if anchor < body_states_buf.len() {
+                body_states_buf[anchor].velocity
             } else {
                 DVec3::ZERO
             };
             orbit_tracker = Some(OrbitTracker::new(
                 new_state.position - body_pos,
                 new_state.velocity - body_vel,
-                dom,
+                anchor,
             ));
             samples_since_reference = 0;
             stable_orbit_start_index = samples.len().checked_sub(1);
@@ -268,9 +287,9 @@ pub(super) fn propagate_segment(
         }
 
         if let Some(ref mut tracker) = orbit_tracker {
-            let dom = tracker.dominant_body;
-            let body_pos = if dom < body_states_buf.len() {
-                body_states_buf[dom].position
+            let anchor = tracker.anchor_body;
+            let body_pos = if anchor < body_states_buf.len() {
+                body_states_buf[anchor].position
             } else {
                 DVec3::ZERO
             };

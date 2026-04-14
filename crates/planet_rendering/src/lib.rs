@@ -1,10 +1,16 @@
 pub mod bake;
+mod film_grain;
 mod material;
+pub mod post_stack;
 pub mod shader_types;
 mod texture;
 
 pub use bake::bake_from_body_data;
-pub use material::{PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams};
+pub use film_grain::FilmGrain;
+pub use material::{
+    MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
+};
+pub use post_stack::space_camera_post_stack;
 pub use shader_types::{GpuCellRange, GpuCrater, GpuMaterial};
 pub use texture::PlanetTextures;
 
@@ -19,6 +25,9 @@ pub struct PlanetRenderingPlugin;
 
 impl Plugin for PlanetRenderingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<PlanetMaterial>::default());
+        app.add_plugins((
+            MaterialPlugin::<PlanetMaterial>::default(),
+            film_grain::FilmGrainPlugin,
+        ));
     }
 }

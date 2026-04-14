@@ -67,6 +67,7 @@ fn update_selected_node_view(
         prediction,
         states,
         &origin,
+        &sim.system,
     ) {
         Some((world_pos, frame)) => {
             selected_view.world_pos = Some(world_pos);

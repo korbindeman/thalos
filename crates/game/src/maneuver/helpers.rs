@@ -1,15 +1,15 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics::trajectory::TrajectoryPrediction;
-use thalos_physics::types::BodyState;
+use thalos_physics::types::{BodyState, SolarSystemDefinition};
 
 use super::state::{GameNode, ManeuverPlan, NodeId};
-use crate::coords::{RenderOrigin, sample_render_pos};
+use crate::coords::{RenderOrigin, compute_segment_pins, sample_render_pos};
 
 pub(super) struct ClosestTrailPoint {
     pub time: f64,
     pub world_pos: Vec3,
-    pub dominant_body: usize,
+    pub anchor_body: usize,
     pub screen_distance: f32,
 }
 
@@ -65,8 +65,9 @@ pub(super) fn node_world_pos_and_frame(
     time: f64,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    system: &SolarSystemDefinition,
 ) -> Option<(Vec3, Mat3)> {
-    for seg in &prediction.segments {
+    for (seg_idx, seg) in prediction.segments.iter().enumerate() {
         if seg.samples.is_empty() {
             continue;
         }
@@ -89,17 +90,18 @@ pub(super) fn node_world_pos_and_frame(
             .map(|(i, _)| i)?;
 
         let sample = &seg.samples[idx];
-        let world_pos = sample_render_pos(sample, body_states, origin);
+        let pins = compute_segment_pins(&seg.samples, body_states, system, seg_idx == 0);
+        let world_pos = sample_render_pos(sample, pins[idx], origin);
 
         let body_vel = body_states
-            .get(sample.dominant_body)
+            .get(sample.anchor_body)
             .map(|bs| bs.velocity)
             .unwrap_or(DVec3::ZERO);
 
         let frame = orbital_frame_mat3(
             sample.position,
             sample.velocity,
-            sample.dominant_body_pos,
+            sample.anchor_body_pos,
             body_vel,
         );
 
@@ -113,8 +115,10 @@ pub(super) fn node_world_position(
     prediction: &TrajectoryPrediction,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    system: &SolarSystemDefinition,
 ) -> Option<Vec3> {
-    node_world_pos_and_frame(prediction, node.time, body_states, origin).map(|(pos, _)| pos)
+    node_world_pos_and_frame(prediction, node.time, body_states, origin, system)
+        .map(|(pos, _)| pos)
 }
 
 pub(super) fn selected_node_world_and_frame(
@@ -123,10 +127,11 @@ pub(super) fn selected_node_world_and_frame(
     prediction: &TrajectoryPrediction,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    system: &SolarSystemDefinition,
 ) -> Option<(Vec3, Mat3)> {
     let id = selected_id?;
     let node = plan.nodes.iter().find(|n| n.id == id)?;
-    node_world_pos_and_frame(prediction, node.time, body_states, origin)
+    node_world_pos_and_frame(prediction, node.time, body_states, origin, system)
 }
 
 pub(super) fn closest_node(
@@ -134,6 +139,7 @@ pub(super) fn closest_node(
     prediction: &TrajectoryPrediction,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    system: &SolarSystemDefinition,
     camera: &Camera,
     cam_transform: &GlobalTransform,
     cursor_pos: Vec2,
@@ -143,7 +149,9 @@ pub(super) fn closest_node(
     let mut best_dist = max_distance;
 
     for node in &plan.nodes {
-        let Some(world_pos) = node_world_position(node, prediction, body_states, origin) else {
+        let Some(world_pos) =
+            node_world_position(node, prediction, body_states, origin, system)
+        else {
             continue;
         };
         let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
@@ -163,15 +171,17 @@ pub(super) fn closest_trail_point(
     prediction: &TrajectoryPrediction,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    system: &SolarSystemDefinition,
     camera: &Camera,
     cam_transform: &GlobalTransform,
     cursor_pos: Vec2,
 ) -> Option<ClosestTrailPoint> {
     let mut best: Option<ClosestTrailPoint> = None;
 
-    for seg in &prediction.segments {
-        for sample in &seg.samples {
-            let world_pos = sample_render_pos(sample, body_states, origin);
+    for (seg_idx, seg) in prediction.segments.iter().enumerate() {
+        let pins = compute_segment_pins(&seg.samples, body_states, system, seg_idx == 0);
+        for (sample, &pin) in seg.samples.iter().zip(pins.iter()) {
+            let world_pos = sample_render_pos(sample, pin, origin);
             let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
                 continue;
             };
@@ -181,7 +191,7 @@ pub(super) fn closest_trail_point(
                 best = Some(ClosestTrailPoint {
                     time: sample.time,
                     world_pos,
-                    dominant_body: sample.dominant_body,
+                    anchor_body: sample.anchor_body,
                     screen_distance: d,
                 });
             }

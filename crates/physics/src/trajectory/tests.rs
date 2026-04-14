@@ -32,7 +32,8 @@ fn sample_with(perturbation_ratio: f64, step_size: f64) -> TrajectorySample {
         dominant_body: 0,
         perturbation_ratio,
         step_size,
-        dominant_body_pos: DVec3::ZERO,
+        anchor_body: 0,
+        anchor_body_pos: DVec3::ZERO,
     }
 }
 
@@ -62,6 +63,7 @@ fn make_single_star_system() -> SolarSystemDefinition {
         rotation_period_s: 0.0,
         axial_tilt_rad: 0.0,
         gm: G * star_mass,
+        soi_radius_m: f64::INFINITY,
         orbital_elements: None,
         generator: None,
     };
@@ -97,6 +99,7 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
         rotation_period_s: 0.0,
         axial_tilt_rad: 0.0,
         gm: SUN_GM,
+        soi_radius_m: f64::INFINITY,
         orbital_elements: None,
         generator: None,
     };
@@ -114,6 +117,7 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
         rotation_period_s: 21.3 * 3600.0,
         axial_tilt_rad: 23.0_f64.to_radians(),
         gm: G * thalos_mass,
+        soi_radius_m: AU * (thalos_mass / sun_mass).powf(0.4),
         orbital_elements: Some(OrbitalElements {
             semi_major_axis_m: AU,
             eccentricity: 0.0,

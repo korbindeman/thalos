@@ -453,6 +453,7 @@ mod tests {
             rotation_period_s: 0.0,
             axial_tilt_rad: 0.0,
             gm: SUN_GM,
+            soi_radius_m: f64::INFINITY,
             orbital_elements: None,
             generator: None,
         };
@@ -469,6 +470,7 @@ mod tests {
             rotation_period_s: 86_400.0,
             axial_tilt_rad: 0.0,
             gm: G * 5.972e24,
+            soi_radius_m: AU * (5.972e24 / sun_mass).powf(0.4),
             orbital_elements: Some(OrbitalElements {
                 semi_major_axis_m: AU,
                 eccentricity: 0.0,

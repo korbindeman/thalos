@@ -51,6 +51,10 @@ pub struct BodyDefinition {
     pub rotation_period_s: f64,
     pub axial_tilt_rad: f64,
     pub gm: f64, // G * mass, precomputed
+    /// Sphere-of-influence radius (m).  Computed at load time from
+    /// `a * (m / M_parent)^(2/5)`.  The star (no parent) gets `f64::INFINITY`
+    /// so any point in the system falls inside it as a fallback anchor.
+    pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
     pub generator: Option<GeneratorParams>,
 }
@@ -94,12 +98,20 @@ pub struct TrajectorySample {
     pub time: f64,
     pub position: DVec3,
     pub velocity: DVec3,
+    /// Body with the largest gravitational pull on the ship at this sample.
+    /// Used for color tinting and the perturbation cone signal — *not* for
+    /// rendering frame.  Can flicker between samples.
     pub dominant_body: BodyId,
     pub perturbation_ratio: f64,
     pub step_size: f64,
-    /// Position of the dominant body at `time`. Pre-computed so the renderer
+    /// Body whose sphere of influence contains the ship at this sample.
+    /// Stable across steps (geometric containment), so rendering anchors
+    /// every sample to its anchor body without per-sample frame jumps.
+    /// Falls back to the root parent (star) when no smaller SOI applies.
+    pub anchor_body: BodyId,
+    /// Position of `anchor_body` at `time`.  Pre-computed so the renderer
     /// can derive body-relative offsets without querying the ephemeris.
-    pub dominant_body_pos: DVec3,
+    pub anchor_body_pos: DVec3,
 }
 
 /// Ship definition — placeholder for MVP.

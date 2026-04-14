@@ -2,7 +2,7 @@
 //!
 //! A flight plan holds one [`NumericSegment`] per leg (pre-first-node, between
 //! nodes, post-last-node) and a flat list of detected [`Encounter`]s. It
-//! implements [`Trajectory`] by dispatching `state_at` / `dominant_body_at`
+//! implements [`Trajectory`] by dispatching `state_at` / `anchor_body_at`
 //! to the segment containing the query time.
 //!
 //! Build a flight plan by calling [`propagate_flight_plan`]; recompute from
@@ -13,9 +13,9 @@
 use super::events::{Encounter, EncounterId, detect_segment_events};
 use super::numeric::NumericSegment;
 use super::propagation::{
-    PredictionConfig, PropagationBudget, PropagationContext, ScheduledBurn, cone_width_scaled,
-    propagate_segment,
+    PredictionConfig, PropagationBudget, PropagationContext, cone_width_scaled, propagate_segment,
 };
+pub use super::propagation::ScheduledBurn;
 use super::Trajectory;
 use crate::body_state_provider::BodyStateProvider;
 use crate::integrator::IntegratorConfig;
@@ -87,6 +87,7 @@ impl FlightPlan {
             self.initial_state,
             self.initial_time,
             maneuvers,
+            Vec::new(),
             ephemeris,
             bodies,
             config,
@@ -125,11 +126,11 @@ impl Trajectory for FlightPlan {
         (start, end)
     }
 
-    fn dominant_body_at(&self, time: f64) -> Option<BodyId> {
+    fn anchor_body_at(&self, time: f64) -> Option<BodyId> {
         for seg in &self.segments {
             let (start, end) = seg.epoch_range();
             if time >= start && time <= end {
-                return seg.dominant_body_at(time);
+                return seg.anchor_body_at(time);
             }
         }
         None
@@ -146,6 +147,7 @@ pub fn propagate_flight_plan(
     initial_state: StateVector,
     start_time: f64,
     maneuvers: &ManeuverSequence,
+    initial_active_burns: Vec<ScheduledBurn>,
     ephemeris: &dyn BodyStateProvider,
     bodies: &[BodyDefinition],
     config: &PredictionConfig,
@@ -173,7 +175,7 @@ pub fn propagate_flight_plan(
     let mut state = initial_state;
     let mut time = start_time;
     let mut remaining_budget: Option<usize> = budget.map(|b| b.max_steps);
-    let mut active_burns: Vec<ScheduledBurn> = Vec::new();
+    let mut active_burns: Vec<ScheduledBurn> = initial_active_burns;
 
     // Sort node indices by time so out-of-order UI edits still propagate
     // correctly.

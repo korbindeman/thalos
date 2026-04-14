@@ -23,7 +23,8 @@ use thalos_physics::{
 
 use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
-    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, bake_from_body_data,
+    FilmGrain, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
+    bake_from_body_data,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, Pipeline, StageDef};
 
@@ -37,6 +38,15 @@ pub use crate::coords::{RENDER_SCALE, RenderOrigin, to_render_pos};
 /// replaced by a fixed-size circle billboard.
 const MARKER_RADIUS: f32 = 0.006;
 
+/// Dev-mode crater-count scale factor. Cratering + space_weather together
+/// dominate the terrain bake and both scale linearly with crater count, so
+/// cutting the authored count by 10× in dev brings bakes from minutes to
+/// ~20 s. Release builds keep the full authored counts.
+#[cfg(debug_assertions)]
+const DEV_CRATER_SCALE: f32 = 0.1;
+#[cfg(not(debug_assertions))]
+const DEV_CRATER_SCALE: f32 = 1.0;
+
 /// Map body kind + size to a surface roughness value (0 = smooth, 1 = very rough).
 ///
 /// This drives the terminator wrap in the planet impostor shader.
@@ -46,37 +56,30 @@ const MARKER_RADIUS: f32 = 0.006;
 /// (individual shadow/lit patches), which only makes sense once normal maps
 /// provide that detail.
 ///
-/// Roughness now serves double duty: it controls both procedural crater
-/// intensity (normal perturbation strength) and a small terminator wrap
-/// for unresolved sub-crater detail.
+/// Terminator wrap factor (shader `light_dir.w`). 0 = razor-sharp Lambert
+/// terminator (airless vacuum look); nonzero softens the edge to fake
+/// unresolved sub-pixel roughness on atmospheric bodies.
 fn body_surface_roughness(body: &thalos_physics::types::BodyDefinition) -> f32 {
     match body.kind {
         BodyKind::Star => 0.0,
-        BodyKind::Planet => {
-            // All planets in this system have atmospheres — no visible craters.
-            0.0
-        }
-        BodyKind::Moon => 0.8,        // Heavily cratered, airless.
-        BodyKind::DwarfPlanet => 0.7,  // Cratered, airless.
-        BodyKind::Centaur => 0.5,      // Irregular surface.
-        BodyKind::Comet => 0.5,        // Irregular surface.
+        BodyKind::Planet => 0.0,
+        BodyKind::Moon => 0.0,
+        BodyKind::DwarfPlanet => 0.0,
+        BodyKind::Centaur => 0.0,
+        BodyKind::Comet => 0.0,
     }
 }
 
 /// Sun irradiance at 1 AU in shader units (W/m² scaled). Editor uses the same
-/// value — keep them in sync. Per-body intensity falls off as 1/r².
-const LIGHT_AT_1AU: f32 = 12.0;
+/// value — keep them in sync. Per-body intensity is scaled by focus-relative
+/// exposure (see `update_planet_light_dirs`) rather than by raw inverse-square
+/// falloff, so distant bodies stay legible when the camera focuses on them.
+const LIGHT_AT_1AU: f32 = 10.0;
 
-/// Ambient floor for the night side. Realistic vacuum is ~0, but a small lift
-/// keeps craters legible while the surface still reads as shadow.
-const PLANET_AMBIENT: f32 = 0.1;
+/// Ambient floor. Vacuum has no fill light — night sides are black.
+const PLANET_AMBIENT: f32 = 0.0;
 
 const AU_M: f64 = 1.496e11;
-
-fn light_intensity_at(distance_m: f64) -> f32 {
-    let ratio = AU_M / distance_m.max(1.0);
-    LIGHT_AT_1AU * (ratio * ratio) as f32
-}
 
 /// Points sampled along each orbit for gizmo line drawing.
 const ORBIT_SAMPLES: usize = 256;
@@ -105,6 +108,47 @@ pub struct FrameBodyStates {
     pub states: Option<BodyStates>,
     pub time: f64,
 }
+
+/// Camera exposure model. Acts as the semantic "sensor" of the game camera:
+/// it owns how focus distance maps to display brightness and how much grain
+/// is added in consequence. Every system that cares about "how much flux
+/// does the shader see" or "how much noise should the post stack add" reads
+/// this resource rather than recomputing from focus distance.
+///
+/// Soft sqrt compensation: outer-system focus pulls distant bodies out of
+/// black without fully erasing the distance cue. Concretely, the display
+/// flux at the focus body scales as `LIGHT_AT_1AU * (1 AU / focus_d)^0.5`,
+/// so Thalos focus lands at 10, Nyx focus at ~1.5, Acheron (perihelion
+/// 78 AU) at ~1.1. Inverse-sqrt instead of inverse-square keeps the feeling
+/// that deep space is dim while staying legible.
+///
+/// The gain applied to each body's raw inverse-square flux in the impostor
+/// shader is `exposure.gain = (focus_d / 1 AU)^1.5`. Combined with the raw
+/// `(AU/body_d)^2` falloff baked into `update_planet_light_dirs`, this
+/// yields the display flux above.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct CameraExposure {
+    /// Camera focus body's distance from the star, in meters.
+    pub focus_dist_m: f64,
+    /// Multiplicative gain applied to per-body raw inverse-square flux.
+    pub gain: f32,
+    /// Log2(gain). Positive = we're pushing dark outer-system scenes;
+    /// negative = we're pulling down bright inner-system scenes. Drives
+    /// film grain strength (and, later, lens flare intensity).
+    pub ev: f32,
+}
+
+/// Exposure exponent. 2.0 = full compensation (distant bodies look identical
+/// to focused Thalos — destroys distance cue). 0.0 = no compensation (Nyx is
+/// black). 1.0 = linear-in-distance compensation: display flux at focus is
+/// `LIGHT_AT_1AU / focus_d_AU`, so Nyx focus lands at ~0.24 — visibly dim,
+/// leaves shadows dark, and doesn't collide with Bevy `AutoExposure` pulling
+/// the scene up independently in the post stack.
+const EXPOSURE_ALPHA: f64 = 1.0;
+
+/// Maximum positive EV used to drive grain. Beyond this, grain saturates.
+/// log2(42^1.0) ≈ 5.4 — Nyx is roughly here.
+const EXPOSURE_EV_GRAIN_MAX: f32 = 6.0;
 
 pub fn cache_body_states(sim: Res<SimulationState>, mut cache: ResMut<FrameBodyStates>) {
     let t = sim.simulation.sim_time();
@@ -153,6 +197,14 @@ pub struct CelestialBody {
     pub render_radius: f32,
     /// True physical radius in metres (not clamped like render_radius).
     pub radius_m: f64,
+}
+
+/// Marks a body whose baked surface is tidally locked to its parent. Each
+/// frame the orientation uniform is recomputed so the baked near-side (local
+/// +Z, where the mare/tidal asymmetry lives) keeps facing the parent body.
+#[derive(Component)]
+struct TidallyLocked {
+    parent_id: usize,
 }
 
 #[derive(Component)]
@@ -244,6 +296,7 @@ impl Plugin for RenderingPlugin {
         app.insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(FrameBodyStates::default())
+            .insert_resource(CameraExposure::default())
             .insert_resource(PreviousFocusEntity::default())
             .insert_resource(ShowOrbits::default())
             .add_systems(
@@ -262,7 +315,13 @@ impl Plugin for RenderingPlugin {
                     update_render_origin.after(cache_body_states),
                     update_body_positions.after(update_render_origin),
                     update_sun_light.after(cache_body_states),
+                    update_camera_exposure.after(cache_body_states),
+                    sync_film_grain_to_exposure.after(update_camera_exposure),
                     update_planet_light_dirs
+                        .after(cache_body_states)
+                        .after(update_camera_exposure)
+                        .after(finalize_planet_generation),
+                    update_planet_orientations
                         .after(cache_body_states)
                         .after(finalize_planet_generation),
                     update_ship_position.after(update_render_origin),
@@ -330,7 +389,7 @@ fn spawn_bodies(
             let star_mesh = meshes.add(Sphere::new(render_radius).mesh().ico(5).unwrap());
             let star_material = std_materials.add(StandardMaterial {
                 base_color,
-                emissive: LinearRgba::new(r, g, b, 1.0) * 18.0,
+                emissive: LinearRgba::WHITE * 5000.0,
                 ..default()
             });
 
@@ -362,6 +421,9 @@ fn spawn_bodies(
             // task so startup isn't blocked. Meanwhile show a plain placeholder
             // sphere; `finalize_planet_generation` swaps in the impostor
             // billboard with a baked `PlanetMaterial` once the task completes.
+            let mut gen_params = gen_params.clone();
+            gen_params.scale_crater_count(DEV_CRATER_SCALE);
+
             let radius_m = body.radius_m as f32;
             let seed = gen_params.seed;
             let composition = gen_params.composition;
@@ -370,7 +432,8 @@ fn spawn_bodies(
             // Tidally-locked moons get their local +Z axis as the parent
             // direction, matching the editor.
             let tidal_axis = matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z);
-            let pipeline_defs: Vec<StageDef> = gen_params.pipeline.clone();
+            let axial_tilt_rad = body.axial_tilt_rad as f32;
+            let pipeline_defs: Vec<StageDef> = gen_params.pipeline;
 
             let task = AsyncComputeTaskPool::get().spawn(async move {
                 let mut builder = BodyBuilder::new(
@@ -380,6 +443,7 @@ fn spawn_bodies(
                     cubemap_resolution,
                     body_age_gyr,
                     tidal_axis,
+                    axial_tilt_rad,
                 );
                 let stages = pipeline_defs
                     .into_iter()
@@ -409,6 +473,16 @@ fn spawn_bodies(
                     Name::new(body.name.clone()),
                 ))
                 .id();
+
+            // Moons with a tidal axis and a parent body are rendered tidally
+            // locked: `update_planet_orientations` rewrites the material's
+            // orientation quaternion each frame so the baked near-side keeps
+            // facing the parent.
+            if tidal_axis.is_some()
+                && let Some(parent_id) = body.parent
+            {
+                commands.entity(body_entity).insert(TidallyLocked { parent_id });
+            }
 
             let mesh_entity = commands
                 .spawn((
@@ -556,11 +630,12 @@ fn finalize_planet_generation(
         let mat_handle = planet_materials.add(PlanetMaterial {
             params: PlanetParams {
                 radius: pending.render_radius,
-                rotation_phase: 0.0,
                 light_intensity: LIGHT_AT_1AU,
                 ambient_intensity: PLANET_AMBIENT,
-                light_dir: Vec4::new(0.0, 1.0, 0.0, roughness),
                 height_range,
+                light_dir: Vec4::new(0.0, 1.0, 0.0, roughness),
+                orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                ..default()
             },
             albedo: textures.albedo,
             height: textures.height,
@@ -594,13 +669,82 @@ fn finalize_planet_generation(
 
 /// Updates each planet material's `light_dir` uniform to point from the body
 /// toward the star.  Must run after `cache_body_states`.
+/// Update the `CameraExposure` resource from the current focus body. This is
+/// the single source of truth for how much gain the "camera" applies to the
+/// raw inverse-square solar flux each body sees. Runs once per frame after
+/// `cache_body_states`, before any consumer reads `CameraExposure`.
+fn update_camera_exposure(
+    cache: Res<FrameBodyStates>,
+    focus: Res<CameraFocus>,
+    bodies: Query<&CelestialBody>,
+    mut exposure: ResMut<CameraExposure>,
+) {
+    let Some(ref states) = cache.states else { return };
+    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
+
+    let focus_dist_m = focus
+        .target
+        .and_then(|e| bodies.get(e).ok())
+        .filter(|b| !b.is_star)
+        .and_then(|b| states.get(b.body_id))
+        .map(|s| (s.position - star_pos).length())
+        .unwrap_or(AU_M);
+
+    let focus_d_au = (focus_dist_m / AU_M).max(1.0e-3);
+    let gain = focus_d_au.powf(EXPOSURE_ALPHA) as f32;
+
+    exposure.focus_dist_m = focus_dist_m;
+    exposure.gain = gain;
+    exposure.ev = gain.max(1.0e-6).log2();
+}
+
+/// Drive per-camera film grain strength from the current exposure push. When
+/// the exposure system is lifting a dark outer-system scene by several EV,
+/// that's equivalent to running a real sensor at high ISO: the visible result
+/// is more grain. We add grain proportional to the positive EV push so Nyx
+/// reads as "dim, sensor-limited" rather than "just another 1 AU body in
+/// weird light."
+fn sync_film_grain_to_exposure(
+    exposure: Res<CameraExposure>,
+    mut grains: Query<&mut FilmGrain>,
+) {
+    // Only positive EV adds grain. Pulling bright scenes down (inner-system
+    // focus) doesn't add noise in a real sensor.
+    let push_ev = exposure.ev.max(0.0);
+    let normalized = (push_ev / EXPOSURE_EV_GRAIN_MAX).clamp(0.0, 1.0);
+    const BASE_INTENSITY: f32 = 0.020;
+    const MAX_EXTRA: f32 = 0.100;
+    let target = BASE_INTENSITY + normalized * MAX_EXTRA;
+    for mut grain in &mut grains {
+        grain.intensity = target;
+    }
+}
+
 fn update_planet_light_dirs(
     query: Query<(&CelestialBody, &PlanetMaterialHandle)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
     cache: Res<FrameBodyStates>,
+    origin: Res<RenderOrigin>,
+    sim: Res<SimulationState>,
+    exposure: Res<CameraExposure>,
 ) {
     let Some(ref states) = cache.states else { return };
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
+    let body_defs = sim.simulation.bodies();
+    let gain = exposure.gain;
+
+    // Collect eclipse-occluder candidates once. Only non-star bodies with
+    // non-trivial render radius count — tiny comets add cost without ever
+    // producing a visible eclipse.
+    let mut occluders: Vec<(usize, Vec3, f32)> = Vec::new();
+    for (body, _) in &query {
+        if body.is_star || body.render_radius < 0.001 {
+            continue;
+        }
+        let Some(state) = states.get(body.body_id) else { continue };
+        let render_pos = to_render_pos(state.position - origin.position);
+        occluders.push((body.body_id, render_pos, body.render_radius));
+    }
 
     for (body, handle) in &query {
         let Some(mat) = materials.get_mut(&handle.0) else { continue };
@@ -615,7 +759,85 @@ fn update_planet_light_dirs(
         // Preserve w (surface roughness) — only update the direction xyz.
         let roughness = mat.params.light_dir.w;
         mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, roughness);
-        mat.params.light_intensity = light_intensity_at(distance_m);
+        // Raw inverse-square flux × exposure gain. Exposure math lives in
+        // `update_camera_exposure`; this stage just multiplies.
+        let au_over_d = AU_M / distance_m.max(1.0);
+        let raw = (au_over_d * au_over_d) as f32;
+        mat.params.light_intensity = LIGHT_AT_1AU * raw * gain;
+
+        // Fill eclipse occluder list from all other visible bodies.
+        mat.params.occluders = [Vec4::ZERO; thalos_planet_rendering::MAX_ECLIPSE_OCCLUDERS];
+        let mut count = 0usize;
+        for (other_id, pos, radius) in &occluders {
+            if *other_id == body.body_id { continue; }
+            if count >= thalos_planet_rendering::MAX_ECLIPSE_OCCLUDERS { break; }
+            mat.params.occluders[count] = Vec4::new(pos.x, pos.y, pos.z, *radius);
+            count += 1;
+        }
+        mat.params.occluder_count = count as u32;
+
+        // Planetshine: pick the orbital parent, skipping the star. The
+        // parent's Bond albedo × color is the effective reflected tint; its
+        // render-space position and radius go in `parent_pos`.
+        mat.params.parent_pos = Vec4::ZERO;
+        mat.params.parent_tint = Vec4::ZERO;
+        let body_def = &body_defs[body.body_id];
+        if let Some(parent_id) = body_def.parent {
+            let parent_def = &body_defs[parent_id];
+            if !matches!(parent_def.kind, thalos_physics::types::BodyKind::Star) {
+                if let Some(parent_state) = states.get(parent_id) {
+                    let parent_render_pos =
+                        to_render_pos(parent_state.position - origin.position);
+                    let parent_radius = (parent_def.radius_m * RENDER_SCALE) as f32;
+                    let tint = Vec3::new(
+                        parent_def.color[0],
+                        parent_def.color[1],
+                        parent_def.color[2],
+                    ) * parent_def.albedo;
+                    mat.params.parent_pos = Vec4::new(
+                        parent_render_pos.x,
+                        parent_render_pos.y,
+                        parent_render_pos.z,
+                        parent_radius,
+                    );
+                    mat.params.parent_tint = Vec4::new(tint.x, tint.y, tint.z, 1.0);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame: tidal-lock planet orientations
+// ---------------------------------------------------------------------------
+
+/// For each tidally-locked body, rewrite its material's orientation
+/// quaternion so the baked local +Z axis points toward the parent body. The
+/// terrain pipeline places mare / tidal asymmetry on +Z (`BodyBuilder::tidal_axis`);
+/// this system is what turns that baked data into a visible tidal lock.
+fn update_planet_orientations(
+    query: Query<(&CelestialBody, &TidallyLocked, &PlanetMaterialHandle)>,
+    mut materials: ResMut<Assets<PlanetMaterial>>,
+    cache: Res<FrameBodyStates>,
+) {
+    let Some(ref states) = cache.states else { return };
+
+    for (body, lock, handle) in &query {
+        let Some(mat) = materials.get_mut(&handle.0) else { continue };
+        let Some(body_state) = states.get(body.body_id) else { continue };
+        let Some(parent_state) = states.get(lock.parent_id) else { continue };
+
+        let offset = parent_state.position - body_state.position;
+        let len = offset.length();
+        if len < 1.0 {
+            continue;
+        }
+        let dir = (offset / len).as_vec3();
+        // `from_rotation_arc` produces the shortest rotation that maps `dir`
+        // onto +Z. glam's impl handles the antiparallel case with a stable
+        // fallback axis, so there's no degenerate pole for the moon's orbit.
+        let q = Quat::from_rotation_arc(dir, Vec3::Z);
+        mat.params.orientation = Vec4::new(q.x, q.y, q.z, q.w);
     }
 }
 
@@ -789,6 +1011,13 @@ const ORBIT_FADE_START: f64 = 20.0;
 /// Ratio at which orbit trails are fully hidden.
 const ORBIT_FADE_END: f64 = 100.0;
 
+/// Aggressive fade for the focus body's own orbit and its siblings (bodies
+/// sharing the same parent as the focus). Expressed as
+/// `focus_orbit_radius / cam_dist` — when the camera is well inside the
+/// focus body's orbit around its parent, these lines clutter the view.
+const SIBLING_FADE_START: f64 = 3.0;
+const SIBLING_FADE_END: f64 = 10.0;
+
 fn draw_orbits(
     mut gizmos: Gizmos,
     orbit_lines: Option<Res<OrbitLines>>,
@@ -797,6 +1026,7 @@ fn draw_orbits(
     focus: Res<CameraFocus>,
     bodies: Query<&CelestialBody>,
     show_orbits: Res<ShowOrbits>,
+    sim: Option<Res<SimulationState>>,
 ) {
     if !show_orbits.0 {
         return;
@@ -807,18 +1037,28 @@ fn draw_orbits(
     let Some(ref states) = cache.states else {
         return;
     };
+    let Some(sim) = sim else {
+        return;
+    };
 
-    // Determine the camera focus position in metres.
-    let focus_pos = focus
+    // Focus body id and its parent id, if any.
+    let focus_body_id = focus
         .target
         .and_then(|e| bodies.get(e).ok())
-        .and_then(|b| states.get(b.body_id))
+        .map(|b| b.body_id);
+    let focus_parent_id = focus_body_id.and_then(|id| sim.simulation.bodies()[id].parent);
+
+    // Determine the camera focus position in metres.
+    let focus_pos = focus_body_id
+        .and_then(|id| states.get(id))
         .map(|s| s.position)
         .unwrap_or(bevy::math::DVec3::ZERO);
 
     let cam_dist = focus.distance;
 
-    for line in orbit_lines.lines.iter().flatten() {
+    for (i, line) in orbit_lines.lines.iter().enumerate() {
+        let Some(line) = line else { continue };
+
         let parent_pos_m = states
             .get(line.parent_id)
             .map(|s| s.position)
@@ -826,15 +1066,26 @@ fn draw_orbits(
         let dist_to_parent = (parent_pos_m - focus_pos).length();
         let ratio = dist_to_parent / cam_dist;
 
-        if ratio > ORBIT_FADE_END {
+        // Focus body's own orbit, or a sibling (same parent). Apply an
+        // aggressive fade so close-up views aren't cluttered by the orbit
+        // ring cutting through the focus body.
+        let is_self_or_sibling = Some(i) == focus_body_id
+            || (focus_parent_id.is_some() && Some(line.parent_id) == focus_parent_id);
+
+        let (fade_start, fade_end) = if is_self_or_sibling {
+            (SIBLING_FADE_START, SIBLING_FADE_END)
+        } else {
+            (ORBIT_FADE_START, ORBIT_FADE_END)
+        };
+
+        if ratio > fade_end {
             continue;
         }
 
         let parent_render_pos = to_render_pos(parent_pos_m - origin.position);
 
-        if ratio > ORBIT_FADE_START {
-            // Smooth fade between ORBIT_FADE_START and ORBIT_FADE_END.
-            let t = (ratio - ORBIT_FADE_START) / (ORBIT_FADE_END - ORBIT_FADE_START);
+        if ratio > fade_start {
+            let t = (ratio - fade_start) / (fade_end - fade_start);
             let alpha = (1.0 - t) as f32;
             let faded = line.color.with_alpha(line.color.alpha() * alpha);
             gizmos.linestrip(line.points.iter().map(|p| *p + parent_render_pos), faded);

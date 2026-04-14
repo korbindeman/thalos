@@ -80,6 +80,7 @@ pub(in crate::maneuver) fn manage_node_markers(
 
     let prediction = sim.as_ref().and_then(|s| s.simulation.prediction());
     let states = body_states.states.as_deref();
+    let sim_ref = sim.as_deref();
 
     for (entity, marker, mut tf, mut vis) in &mut markers {
         let selected = selected.id == Some(marker.node_id);
@@ -91,8 +92,10 @@ pub(in crate::maneuver) fn manage_node_markers(
         }
 
         let node = plan.nodes.iter().find(|n| n.id == marker.node_id).unwrap();
-        if let (Some(pred), Some(states)) = (prediction, states) {
-            if let Some(world_pos) = node_world_position(node, pred, states, &origin) {
+        if let (Some(pred), Some(states), Some(sim)) = (prediction, states, sim_ref) {
+            if let Some(world_pos) =
+                node_world_position(node, pred, states, &origin, &sim.system)
+            {
                 *vis = Visibility::Inherited;
                 *tf = overlay_marker_transform(world_pos, cam_rot, cam_dist * MARKER_RADIUS);
                 continue;
@@ -126,7 +129,10 @@ pub(in crate::maneuver) fn manage_node_markers(
 
         let world_pos = prediction
             .zip(states)
-            .and_then(|(pred, states)| node_world_position(node, pred, states, &origin))
+            .zip(sim_ref)
+            .and_then(|((pred, states), sim)| {
+                node_world_position(node, pred, states, &origin, &sim.system)
+            })
             .unwrap_or(Vec3::ZERO);
 
         commands.spawn((

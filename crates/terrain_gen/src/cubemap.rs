@@ -66,6 +66,11 @@ impl<T: Copy + Default> Cubemap<T> {
     pub fn face_data_mut(&mut self, face: CubemapFace) -> &mut [T] {
         &mut self.faces[face as usize]
     }
+
+    /// Mutable slice view of all 6 faces (for parallel iteration).
+    pub fn faces_mut(&mut self) -> &mut [Vec<T>; 6] {
+        &mut self.faces
+    }
 }
 
 /// Contiguous byte export for GPU upload.  Faces are emitted in order

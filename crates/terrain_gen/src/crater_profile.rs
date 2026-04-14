@@ -96,7 +96,7 @@ pub(crate) fn smoothstep_range(edge0: f32, edge1: f32, x: f32) -> f32 {
 // correct apron that is lower than the rim crest — producing the "protruding
 // rim" silhouette. Ejecta is cut off at t = 5 (~90% of mass within 5R).
 
-const RIM_SIGMA: f32 = 0.10;
+const RIM_SIGMA: f32 = 0.13;
 const EJECTA_MAX_T: f32 = 5.0;
 
 /// Narrow Gaussian ridge centered on the rim crest (t = 1), normalized
@@ -108,10 +108,24 @@ fn rim_ridge(t: f32) -> f32 {
 }
 
 /// McGetchin ejecta apron thickness at normalized radial distance t ≥ 1.
+///
+/// A Gaussian rise gate (same σ as `rim_ridge`) makes the apron start at 0
+/// right at the rim crest (t = 1) and grow to its full thickness by the
+/// time the rim ridge has faded — so the apron sits below the crest and
+/// never produces a discontinuity.
+///
+/// `ejecta_mod ∈ [-1, 1]` modulates the radial apron angularly, turning
+/// the otherwise uniform trapezoidal halo into streaky rays. Values near
+/// +1 boost the apron (ray crests), near -1 suppress it entirely (gaps
+/// between rays), so the resulting apron reads as discrete brush strokes
+/// radiating outward instead of a continuous circular disk.
 #[inline]
-fn ejecta_apron(t: f32, radius_m: f32) -> f32 {
-    if t < 1.0 || t > EJECTA_MAX_T { return 0.0; }
-    0.14 * radius_m.powf(0.74) * t.powi(-3)
+fn ejecta_apron(t: f32, radius_m: f32, ejecta_mod: f32) -> f32 {
+    if !(1.0..=EJECTA_MAX_T).contains(&t) { return 0.0; }
+    let thickness = 0.14 * radius_m.powf(0.74) * t.powi(-3);
+    let gate = 1.0 - rim_ridge(t);
+    let streak = (0.5 + ejecta_mod).max(0.0);
+    thickness * gate * streak
 }
 
 /// Simple (bowl-shaped) crater profile.
@@ -120,14 +134,78 @@ fn ejecta_apron(t: f32, radius_m: f32) -> f32 {
 /// at t ≈ 1, plus a McGetchin ejecta apron (1 ≤ t ≤ 5). The ridge is narrow
 /// and sits above the surrounding ejecta so the crest reads as a distinct
 /// topographic high — essential for crisp terminator shadows.
-pub(crate) fn simple_profile(t: f32, depth: f32, rim_h: f32, radius_m: f32) -> f32 {
+pub(crate) fn simple_profile(
+    t: f32,
+    depth: f32,
+    rim_h: f32,
+    radius_m: f32,
+    ejecta_mod: f32,
+) -> f32 {
     let bowl = if t < 1.0 { -depth * (1.0 - t * t) } else { 0.0 };
     let ridge = rim_h * rim_ridge(t);
-    bowl + ridge + ejecta_apron(t, radius_m)
+    bowl + ridge + ejecta_apron(t, radius_m, ejecta_mod)
 }
 
+/// Number of terraces in a complex crater wall. Real complex craters
+/// typically show 2-4 stepped benches from gravitational slumping.
+const TERRACE_COUNT: f32 = 3.0;
+/// Fraction of each step's radial width occupied by the riser (steep scarp
+/// between benches); the rest is the flat terrace top.
+const TERRACE_RISER_FRAC: f32 = 0.35;
+
+/// Map a smooth 0..1 wall ramp to a stepped terraced ramp that still
+/// reaches 1.0 at s=1. The benches are flat tops; the risers are smoothed
+/// ramps between them. Output range: [0, 1].
+///
+/// `phase` shifts the step quantization by up to ~0.5 bench widths. A
+/// parabolic taper forces the effective phase to zero at s=0 and s=1 so
+/// the floor and rim boundary conditions stay exact. Used by the bake
+/// loop to jitter terrace positions per angle → breaks the concentric
+/// cookie-cutter look of complex craters.
+#[inline]
+fn terraced_ramp(s: f32, phase: f32) -> f32 {
+    let s = s.clamp(0.0, 1.0);
+    let taper = 4.0 * s * (1.0 - s);
+    let eff_phase = phase * taper;
+    let scaled = s * TERRACE_COUNT;
+    let step = (scaled - eff_phase).floor();
+    let local = scaled - eff_phase - step;
+    let riser_start = 1.0 - TERRACE_RISER_FRAC;
+    let riser_progress = if local <= riser_start {
+        0.0
+    } else {
+        (local - riser_start) / TERRACE_RISER_FRAC
+    };
+    ((step + s01(riser_progress)) / TERRACE_COUNT).clamp(0.0, 1.0)
+}
+
+/// Maximum fractional perturbation of central peak shape by angular noise.
+/// 0.35 lets the peak bulge or recede by ±35% at different azimuths, which
+/// reliably breaks the cookie-cutter "smooth paraboloid" look without ever
+/// inverting the profile into a hole.
+const PEAK_WARP_EPS: f32 = 0.35;
+
 /// Complex crater profile (flat floor, central peak, terraced wall).
-pub(crate) fn complex_profile(t: f32, depth: f32, rim_h: f32, radius_m: f32) -> f32 {
+///
+/// Additive decomposition mirroring `simple_profile`:
+///   h(t) = base(t) + rim_h × rim_ridge(t) + ejecta_apron(t, R)
+///
+/// The `base` term carries the floor, central peak, and terraced wall for
+/// t < 1 and returns 0 for t ≥ 1. The ridge and apron handle the crest and
+/// exterior, so the total profile is continuous at t = 1 by construction.
+///
+/// `peak_noise ∈ [-1, 1]` is a per-texel angular noise sample used to warp
+/// the central peak's effective size so it reads as a rugged mountain
+/// instead of a smooth symmetric cone.
+pub(crate) fn complex_profile(
+    t: f32,
+    depth: f32,
+    rim_h: f32,
+    radius_m: f32,
+    wall_phase: f32,
+    peak_noise: f32,
+    ejecta_mod: f32,
+) -> f32 {
     let d_km = radius_m * 2.0 / 1000.0;
 
     // Krüger et al. (2018): h_peak = 0.0049 × D^1.297 km (D in km)
@@ -139,25 +217,44 @@ pub(crate) fn complex_profile(t: f32, depth: f32, rim_h: f32, radius_m: f32) -> 
     // t_peak = 0.168 (Krüger et al.)
     let t_peak = 0.168_f32;
 
-    if t < t_peak {
-        let s = t / t_peak;
-        -depth + h_peak * (1.0 - s * s)
+    // Angular warp on the peak: effective peak radius grows/shrinks with
+    // azimuth, giving the central mountain an irregular footprint. A
+    // positive noise shrinks s (peak extends further out); negative pushes
+    // the interior of the peak down earlier. The warp amplitude also
+    // modulates h_peak so shrunken lobes aren't unnaturally tall.
+    let peak_warp = 1.0 + PEAK_WARP_EPS * peak_noise;
+    let peak_t = t_peak * peak_warp;
+    let peak_h = h_peak * (0.75 + 0.25 * peak_warp);
+
+    let base = if t < peak_t {
+        let s = t / peak_t;
+        -depth + peak_h * (1.0 - s * s)
     } else if t < t_floor {
         -depth
     } else if t < 1.0 {
+        // Terraced wall ramp: -depth at t_floor → 0 at t = 1. The rim ridge
+        // adds the crest height on top.
         let s = (t - t_floor) / (1.0 - t_floor);
-        -depth + (depth + rim_h) * s01(s)
-    } else if t <= 5.0 {
-        rim_h * t.powi(-3)
+        -depth * (1.0 - terraced_ramp(s, wall_phase))
     } else {
         0.0
-    }
+    };
+
+    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_mod)
 }
 
-/// Peak-ring basin profile.
-pub(crate) fn peak_ring_profile(t: f32, depth: f32, rim_h: f32) -> f32 {
+/// Peak-ring basin profile. Additive decomposition: interior base (with a
+/// peak ring replacing the central peak) + rim ridge + ejecta apron.
+pub(crate) fn peak_ring_profile(
+    t: f32,
+    depth: f32,
+    rim_h: f32,
+    radius_m: f32,
+    wall_phase: f32,
+    ejecta_mod: f32,
+) -> f32 {
     let ring_h = depth * 0.2;
-    if t < 0.25 {
+    let base = if t < 0.25 {
         -depth
     } else if t < 0.35 {
         let s = (t - 0.25) / 0.1;
@@ -166,19 +263,27 @@ pub(crate) fn peak_ring_profile(t: f32, depth: f32, rim_h: f32) -> f32 {
         -depth
     } else if t < 1.0 {
         let s = (t - 0.55) / 0.45;
-        -depth + (depth + rim_h) * s01(s)
-    } else if t <= 5.0 {
-        rim_h * t.powi(-3)
+        -depth * (1.0 - terraced_ramp(s, wall_phase))
     } else {
         0.0
-    }
+    };
+    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_mod)
 }
 
-/// Multi-ring basin profile.
-pub(crate) fn multi_ring_profile(t: f32, depth: f32, rim_h: f32) -> f32 {
+/// Multi-ring basin profile. Concentric rings at √2 spacing would be ideal
+/// but require per-crater ring count bookkeeping; this simplified form
+/// produces two interior rings plus the outer rim crest.
+pub(crate) fn multi_ring_profile(
+    t: f32,
+    depth: f32,
+    rim_h: f32,
+    radius_m: f32,
+    wall_phase: f32,
+    ejecta_mod: f32,
+) -> f32 {
     let inner_ring_h = depth * 0.15;
     let outer_ring_h = depth * 0.10;
-    if t < 0.2 {
+    let base = if t < 0.2 {
         -depth
     } else if t < 0.3 {
         let s = (t - 0.2) / 0.1;
@@ -190,49 +295,89 @@ pub(crate) fn multi_ring_profile(t: f32, depth: f32, rim_h: f32) -> f32 {
         -depth * 0.9 + outer_ring_h * (std::f32::consts::PI * s).sin()
     } else if t < 1.0 {
         let s = (t - 0.6) / 0.4;
-        -depth * 0.5 + (depth * 0.5 + rim_h) * s01(s)
-    } else if t <= 5.0 {
-        rim_h * t.powi(-3)
+        -depth * 0.5 * (1.0 - terraced_ramp(s, wall_phase))
     } else {
         0.0
-    }
+    };
+    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_mod)
 }
 
 /// Dispatch to the morphology-specific profile.
+///
+/// `wall_phase` jitters terrace step boundaries for complex and larger
+/// morphologies. `peak_noise` warps the central peak shape for Complex
+/// craters. `ejecta_mod` modulates the ejecta apron angularly into
+/// radial streaks. All in [-1, 1]; pass 0.0 for the unwarped profile.
+/// `wall_phase` and `peak_noise` are ignored by `Simple`.
 pub(crate) fn crater_profile(
     t: f32,
     depth: f32,
     rim_h: f32,
     radius_m: f32,
     morph: Morphology,
+    wall_phase: f32,
+    peak_noise: f32,
+    ejecta_mod: f32,
 ) -> f32 {
     match morph {
-        Morphology::Simple    => simple_profile(t, depth, rim_h),
-        Morphology::Complex   => complex_profile(t, depth, rim_h, radius_m),
-        Morphology::PeakRing  => peak_ring_profile(t, depth, rim_h),
-        Morphology::MultiRing => multi_ring_profile(t, depth, rim_h),
+        Morphology::Simple    => simple_profile(t, depth, rim_h, radius_m, ejecta_mod),
+        Morphology::Complex   => complex_profile(t, depth, rim_h, radius_m, wall_phase, peak_noise, ejecta_mod),
+        Morphology::PeakRing  => peak_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_mod),
+        Morphology::MultiRing => multi_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_mod),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Diffusion degradation
+// Degradation: diffusion + viscous relaxation
 // ---------------------------------------------------------------------------
 //
-// Topographic diffusion (Soderblom 1970, Fassett & Thomson 2014):
-//   ∂h/∂t = κ∇²h,  κ ≈ 5.5 m²/Myr (lunar)
+// Two processes erode crater topography over time, acting on opposite ends
+// of the size spectrum:
 //
-// Fractional depth retained ≈ exp(-C_DIFF × κt / D²)
+// 1. Topographic diffusion (Soderblom 1970, Fassett & Thomson 2014):
+//      ∂h/∂t = κ∇²h,  κ ≈ 5.5 m²/Myr (lunar)
+//      Fractional depth retained ≈ exp(-C_DIFF × κt / D²)
+//    The D² in the denominator makes this dominate small craters (a 300 m
+//    crater at 3 Gyr retains ~7%) while leaving large craters untouched.
+//
+// 2. Viscous / isostatic relaxation:
+//      Large impact basins flow under their own weight over Gyr timescales,
+//      lifting the floor and lowering the rim. Scales positively with size
+//      (bigger loads relax faster). This is what produces lunar "ghost
+//      basins" — ancient 50–200 km craters that read as faint circular
+//      discolorations with smaller craters scattered inside.
+//      Model: retained ≈ exp(-((D - D_relax_threshold) / D_relax_ref) × age/τ)
+//      Below the threshold, no relaxation. Above it, linear in excess
+//      diameter × age.
+//
 // C_DIFF = 14.5 calibrated so a 300 m crater at 3 Ga retains ~7% of depth,
 // while a 10 km crater retains ~99.8% (Fassett & Thomson 2014 Fig. 4).
+// D_RELAX_THRESHOLD = 30 km (simple→complex transition, where relaxation
+// starts mattering). D_RELAX_REF = 100 km, TAU = 3 Gyr → a 100 km crater
+// at 3 Gyr retains ~50% of its depth, a 200 km crater retains ~18%.
 
 const KAPPA_M2_PER_MYR: f32 = 5.5;
 const C_DIFF: f32 = 14.5;
 const MIN_RETENTION: f32 = 0.03;
 
+const D_RELAX_THRESHOLD_M: f32 = 30_000.0;
+const D_RELAX_REF_M: f32 = 100_000.0;
+const RELAX_TAU_GYR: f32 = 3.0;
+
 pub(crate) fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
-    let k = KAPPA_M2_PER_MYR * age_gyr * 1000.0;
     let d_m = radius_m * 2.0;
-    (-C_DIFF * k / (d_m * d_m)).exp().max(MIN_RETENTION)
+
+    let k = KAPPA_M2_PER_MYR * age_gyr * 1000.0;
+    let diffusion = (-C_DIFF * k / (d_m * d_m)).exp();
+
+    let relaxation = if d_m <= D_RELAX_THRESHOLD_M {
+        1.0
+    } else {
+        let excess = (d_m - D_RELAX_THRESHOLD_M) / D_RELAX_REF_M;
+        (-excess * (age_gyr / RELAX_TAU_GYR)).exp()
+    };
+
+    (diffusion * relaxation).max(MIN_RETENTION)
 }
 
 #[cfg(test)]
@@ -243,11 +388,47 @@ mod tests {
     fn simple_profile_shape() {
         let depth = 1000.0;
         let rim_h = 100.0;
-        assert!((simple_profile(0.0, depth, rim_h) + depth).abs() < 1.0);
-        assert!(simple_profile(1.0, depth, rim_h) > 0.0);
-        assert!(simple_profile(3.0, depth, rim_h) > 0.0);
-        assert!(simple_profile(3.0, depth, rim_h) < rim_h);
-        assert!(simple_profile(5.5, depth, rim_h).abs() < 0.01);
+        let radius_m = 5_000.0;
+        // Center ≈ -depth
+        assert!((simple_profile(0.0, depth, rim_h, radius_m, 0.0) + depth).abs() < 1.0);
+        // Rim crest peaks at ≈ rim_h
+        let crest = simple_profile(1.0, depth, rim_h, radius_m, 0.0);
+        assert!((crest - rim_h).abs() < 1.0, "crest={crest}");
+        // Rim ridge stands above the exterior apron just outside
+        let outside = simple_profile(1.15, depth, rim_h, radius_m, 0.0);
+        assert!(outside < crest, "outside={outside} crest={crest}");
+        // Apron fades by 5R
+        assert!(simple_profile(5.5, depth, rim_h, radius_m, 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn simple_profile_rim_protrudes_above_surroundings() {
+        // For a 5 km crater the rim must be higher than both inside and
+        // outside samples at ±0.2 rim units.
+        let (depth, rim_h) = crater_dimensions(5_000.0);
+        let crest = simple_profile(1.0, depth, rim_h, 5_000.0, 0.0);
+        let inside = simple_profile(0.8, depth, rim_h, 5_000.0, 0.0);
+        let outside = simple_profile(1.2, depth, rim_h, 5_000.0, 0.0);
+        assert!(crest > inside, "crest={crest} inside={inside}");
+        assert!(crest > outside, "crest={crest} outside={outside}");
+    }
+
+    #[test]
+    fn complex_profile_wall_is_terraced() {
+        // Terraced ramp should produce non-monotone second derivative —
+        // detectable by sampling three points on the wall and checking
+        // that the middle sample doesn't sit on the secant.
+        let (depth, rim_h) = crater_dimensions(40_000.0);
+        let radius_m = 40_000.0;
+        let t_floor = 0.55_f32;
+        let t0 = t_floor + 0.05;
+        let t1 = t_floor + 0.20;
+        let t2 = t_floor + 0.35;
+        let h0 = complex_profile(t0, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let h1 = complex_profile(t1, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let h2 = complex_profile(t2, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let secant = h0 + (h2 - h0) * ((t1 - t0) / (t2 - t0));
+        assert!((h1 - secant).abs() > 1.0, "wall looks smooth: {h0} {h1} {h2}");
     }
 
     #[test]
@@ -255,8 +436,8 @@ mod tests {
         let depth = 3000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        let center = complex_profile(0.0, depth, rim_h, radius_m);
-        let floor  = complex_profile(0.2, depth, rim_h, radius_m);
+        let center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let floor  = complex_profile(0.2, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
         assert!(center > floor, "center={center} floor={floor}");
     }
 
@@ -265,8 +446,18 @@ mod tests {
         let depth = 1000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        assert!(complex_profile(4.0, depth, rim_h, radius_m) > 0.0);
-        assert!(complex_profile(5.5, depth, rim_h, radius_m).abs() < 0.01);
+        assert!(complex_profile(4.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0) > 0.0);
+        assert!(complex_profile(5.5, depth, rim_h, radius_m, 0.0, 0.0, 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn terraced_ramp_anchors_at_endpoints() {
+        // Boundary conditions must hold for any phase to keep floor/rim
+        // heights exact — relied on by complex_profile et al.
+        for &phase in &[-0.5_f32, -0.25, 0.0, 0.25, 0.5] {
+            assert!(terraced_ramp(0.0, phase).abs() < 1e-5, "phase={phase}");
+            assert!((terraced_ramp(1.0, phase) - 1.0).abs() < 1e-5, "phase={phase}");
+        }
     }
 
     #[test]

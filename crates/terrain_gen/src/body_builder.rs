@@ -5,7 +5,8 @@ use crate::cubemap::{Cubemap, CubemapAccumulator, default_resolution};
 use crate::spatial_index::IcoBuckets;
 use crate::stages::{BasinDef, MAT_HIGHLAND};
 use crate::types::{
-    Channel, Composition, Crater, DetailNoiseParams, DrainageNetwork, Material, PlateMap, Volcano,
+    BiomeParams, Channel, Composition, Crater, DetailNoiseParams, DrainageNetwork, Material,
+    PlateMap, Volcano,
 };
 
 /// Mutable build-time state for surface generation.
@@ -25,10 +26,22 @@ pub struct BodyBuilder {
     /// for non-locked bodies. Stages requiring near/far asymmetry read this
     /// instead of carrying their own per-stage axis.
     pub tidal_axis: Option<Vec3>,
+    /// Axial tilt in radians. Used by biome seeding to bias polar regions.
+    /// Defaults to 0 when not plumbed through.
+    pub axial_tilt_rad: f32,
 
     /// Accumulating cubemap contributions before bake.
     pub height_contributions: CubemapAccumulator,
     pub albedo_contributions: CubemapAccumulator,
+    /// Signed multiplicative albedo modulation from megabasin-scale features.
+    /// Per-texel: negative darkens (basin interior, eroded lobes), positive
+    /// brightens (ejecta apron, anorthositic melt sheets). Read by the
+    /// SpaceWeather base pass: `albedo *= 1.0 + basin_albedo_field`.
+    ///
+    /// Megabasin writes this with soft noise-warped boundaries and Imbrium-
+    /// style radial ejecta sculpture so basins don't read as the hard discs
+    /// a clean biome-id threshold produces.
+    pub basin_albedo_field: Cubemap<f32>,
     /// Per-texel material index (R8). Initialized to MAT_HIGHLAND at builder
     /// construction; stages overwrite as needed (MareFlood flips flooded
     /// regions to MAT_MARE, future cryovolcanism overwrites with ice, etc.).
@@ -55,6 +68,12 @@ pub struct BodyBuilder {
     /// Materials palette.  Immutable after Differentiate stage.
     pub materials: Vec<Material>,
 
+    /// Biome palette. Registered by the Biomes stage; indexed by `biome_map`.
+    pub biomes: Vec<BiomeParams>,
+    /// Per-texel biome assignment (R8, indexes `biomes`). Defaults to 0 at
+    /// construction; the Biomes stage paints it.
+    pub biome_map: Cubemap<u8>,
+
     /// Optional global structures.
     pub plates: Option<PlateMap>,
     pub drainage: Option<DrainageNetwork>,
@@ -74,6 +93,7 @@ impl BodyBuilder {
         cubemap_resolution: u32,
         body_age_gyr: f32,
         tidal_axis: Option<Vec3>,
+        axial_tilt_rad: f32,
     ) -> Self {
         let resolution = if cubemap_resolution == 0 {
             default_resolution(radius_m)
@@ -88,8 +108,10 @@ impl BodyBuilder {
             cubemap_resolution: resolution,
             body_age_gyr,
             tidal_axis,
+            axial_tilt_rad,
             height_contributions: CubemapAccumulator::new(resolution),
             albedo_contributions: CubemapAccumulator::new(resolution),
+            basin_albedo_field: Cubemap::<f32>::new(resolution),
             material_cubemap: {
                 let mut mat = Cubemap::<u8>::new(resolution);
                 for face in crate::cubemap::CubemapFace::ALL {
@@ -106,8 +128,14 @@ impl BodyBuilder {
             volcanoes: Vec::new(),
             channels: Vec::new(),
             megabasins: Vec::new(),
-            detail_params: DetailNoiseParams::default(),
+            detail_params: DetailNoiseParams {
+                body_radius_m: radius_m,
+                body_age_gyr,
+                ..DetailNoiseParams::default()
+            },
             materials: Vec::new(),
+            biomes: Vec::new(),
+            biome_map: Cubemap::<u8>::new(resolution),
             plates: None,
             drainage: None,
             stage_seed: 0,
@@ -164,7 +192,7 @@ mod tests {
 
     #[test]
     fn build_with_no_stages_produces_valid_body_data() {
-        let builder = BodyBuilder::new(869_000.0, 42, test_composition(), 0, 4.5, None);
+        let builder = BodyBuilder::new(869_000.0, 42, test_composition(), 0, 4.5, None, 0.0);
         assert_eq!(builder.cubemap_resolution, 1024);
 
         let body = builder.build();
@@ -179,7 +207,7 @@ mod tests {
 
     #[test]
     fn explicit_resolution_used() {
-        let builder = BodyBuilder::new(100.0, 1, test_composition(), 64, 4.5, None);
+        let builder = BodyBuilder::new(100.0, 1, test_composition(), 64, 4.5, None, 0.0);
         assert_eq!(builder.cubemap_resolution, 64);
     }
 }

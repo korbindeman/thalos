@@ -1,20 +1,22 @@
 //! Trajectory line rendering for the predicted ship path.
 //!
 //! Each [`TrajectorySample`] carries an absolute heliocentric position, but we
-//! render every segment *relative to its dominant body's position at the sample
-//! time*.  This makes orbits appear as clean ellipses even as bodies move.
+//! render every segment *relative to its anchor body's position at the sample
+//! time*.  Anchor body is the smallest SOI containing the ship — geometric
+//! containment, not perturbation magnitude — so the rendering frame never
+//! flickers mid-orbit.  This makes orbits appear as clean ellipses even as
+//! bodies move.
 //!
-//! Line segments are colored by dominant body.  At body transitions the two
-//! adjacent colors are linearly blended using the sample's `perturbation_ratio`
-//! as the interpolant, giving a smooth visual gradient at sphere-of-influence
-//! boundaries.
+//! Line segments are still tinted by the per-sample `dominant_body` (the
+//! strongest gravitational source), so the user sees a smooth color gradient
+//! when a perturber's pull rises near an SOI boundary.
 
-use bevy::math::{Isometry3d, Vec3A};
+use bevy::math::{DVec3, Isometry3d, Vec3A};
 use bevy::prelude::*;
 use thalos_physics::trajectory::{TrajectorySegment, cone_width};
 use thalos_physics::types::{BodyId, BodyKind, SolarSystemDefinition, TrajectorySample};
 
-use crate::coords::{RENDER_SCALE, RenderOrigin, sample_render_pos};
+use crate::coords::{RENDER_SCALE, RenderOrigin, compute_segment_pins, sample_render_pos};
 use crate::rendering::FrameBodyStates;
 
 // ---------------------------------------------------------------------------
@@ -30,10 +32,7 @@ const CONE_INVISIBLE_THRESHOLD: f64 = 2e6;
 /// Minimum `perturbation_ratio` for a non-star body to merit a ghost marker.
 const GHOST_BODY_PERTURBATION_THRESHOLD: f64 = 0.05;
 
-/// Radius (render units) of the ghost body wireframe sphere gizmo.
-const GHOST_SPHERE_RADIUS: f32 = 0.5;
-
-use crate::rendering::SimulationState;
+use crate::rendering::{ShowOrbits, SimulationState};
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -60,8 +59,12 @@ fn render_trajectory(
     sim: Option<Res<SimulationState>>,
     origin: Res<RenderOrigin>,
     cache: Res<FrameBodyStates>,
+    show_orbits: Res<ShowOrbits>,
     mut gizmos: Gizmos,
 ) {
+    if !show_orbits.0 {
+        return;
+    }
     let Some(sim) = sim else { return };
     let Some(prediction) = sim.simulation.prediction() else {
         return;
@@ -72,7 +75,15 @@ fn render_trajectory(
 
     for (i, segment) in prediction.segments.iter().enumerate() {
         let is_ghost = i > 0;
-        render_segment(segment, is_ghost, &sim.system, body_states, &origin, &mut gizmos);
+        let pins = compute_segment_pins(&segment.samples, body_states, &sim.system, i == 0);
+        render_segment(
+            segment,
+            &pins,
+            is_ghost,
+            &sim.system,
+            &origin,
+            &mut gizmos,
+        );
     }
 }
 
@@ -82,9 +93,9 @@ fn render_trajectory(
 
 fn render_segment(
     segment: &TrajectorySegment,
+    pins: &[DVec3],
     is_ghost: bool,
     system: &SolarSystemDefinition,
-    body_states: &[thalos_physics::types::BodyState],
     origin: &RenderOrigin,
     gizmos: &mut Gizmos,
 ) {
@@ -93,25 +104,18 @@ fn render_segment(
     }
 
     if segment.is_stable_orbit {
-        render_stable_orbit_segment(segment, is_ghost, system, body_states, origin, gizmos);
+        render_stable_orbit_segment(segment, pins, is_ghost, system, origin, gizmos);
         return;
     }
 
-    render_open_samples(
-        &segment.samples,
-        is_ghost,
-        system,
-        body_states,
-        origin,
-        gizmos,
-    );
+    render_open_samples(&segment.samples, pins, is_ghost, system, origin, gizmos);
 }
 
 fn render_open_samples(
     samples: &[TrajectorySample],
+    pins: &[DVec3],
     is_ghost: bool,
     system: &SolarSystemDefinition,
-    body_states: &[thalos_physics::types::BodyState],
     origin: &RenderOrigin,
     gizmos: &mut Gizmos,
 ) {
@@ -131,8 +135,10 @@ fn render_open_samples(
         let alpha_a = cone_alpha * (0.3 + 0.7 * (1.0 - progress_a));
         let alpha_b = cone_alpha * (0.3 + 0.7 * (1.0 - progress_b));
 
-        let p_a = sample_render_pos(a, body_states, origin);
-        let p_b = sample_render_pos(b, body_states, origin);
+        let pin_a = pins[i];
+        let pin_b = pins[i + 1];
+        let p_a = sample_render_pos(a, pin_a, origin);
+        let p_b = sample_render_pos(b, pin_b, origin);
 
         // --- Trajectory line ---
         let color_a = ghost_adjust(line_color(a, b, system, alpha_a), is_ghost);
@@ -162,14 +168,15 @@ fn render_open_samples(
             gizmos.line_gradient(p_a - offset_a, p_b - offset_b, cone_color_a, cone_color_b);
         }
 
-        maybe_draw_ghost(a, system, body_states, origin, gizmos);
+        maybe_draw_ghost(a, pin_a, system, origin, gizmos);
     }
 
     // Ghost check for the final sample.
     if let Some(last) = samples.last()
         && fade_alpha(last) > 0.0
+        && let Some(&pin) = pins.last()
     {
-        maybe_draw_ghost(last, system, body_states, origin, gizmos);
+        maybe_draw_ghost(last, pin, system, origin, gizmos);
     }
 }
 
@@ -179,9 +186,9 @@ fn render_open_samples(
 
 fn render_stable_orbit_segment(
     segment: &TrajectorySegment,
+    pins: &[DVec3],
     is_ghost: bool,
     system: &SolarSystemDefinition,
-    body_states: &[thalos_physics::types::BodyState],
     origin: &RenderOrigin,
     gizmos: &mut Gizmos,
 ) {
@@ -193,9 +200,9 @@ fn render_stable_orbit_segment(
     if loop_start > 0 {
         render_open_samples(
             &segment.samples[..=loop_start],
+            &pins[..=loop_start],
             is_ghost,
             system,
-            body_states,
             origin,
             gizmos,
         );
@@ -203,9 +210,9 @@ fn render_stable_orbit_segment(
 
     render_stable_orbit(
         &segment.samples[loop_start..],
+        &pins[loop_start..],
         is_ghost,
         system,
-        body_states,
         origin,
         gizmos,
     );
@@ -213,9 +220,9 @@ fn render_stable_orbit_segment(
 
 fn render_stable_orbit(
     samples: &[TrajectorySample],
+    pins: &[DVec3],
     is_ghost: bool,
     system: &SolarSystemDefinition,
-    body_states: &[thalos_physics::types::BodyState],
     origin: &RenderOrigin,
     gizmos: &mut Gizmos,
 ) {
@@ -223,10 +230,10 @@ fn render_stable_orbit(
         return;
     }
 
-    let dominant = samples[0].dominant_body;
+    let anchor = samples[0].anchor_body;
     let [r, g, b] = system
         .bodies
-        .get(dominant)
+        .get(anchor)
         .map(|bd| bd.color)
         .unwrap_or([1.0, 1.0, 1.0]);
     let color = ghost_adjust(Color::srgba(r, g, b, 1.0), is_ghost);
@@ -238,7 +245,8 @@ fn render_stable_orbit(
     gizmos.linestrip(
         samples[..last]
             .iter()
-            .map(|s| sample_render_pos(s, body_states, origin)),
+            .zip(pins[..last].iter())
+            .map(|(s, &pin)| sample_render_pos(s, pin, origin)),
         color,
     );
 }
@@ -330,12 +338,12 @@ fn velocity_perpendicular(sample: &TrajectorySample) -> Vec3 {
     }
 }
 
-/// Draw a ghost body sphere gizmo at the dominant body's position when the
-/// sample has a non-star dominant body with meaningful gravitational influence.
+/// Draw a ghost body sphere gizmo at the anchor body's position when the
+/// sample's anchor is a non-star body with meaningful gravitational influence.
 fn maybe_draw_ghost(
     sample: &TrajectorySample,
+    pin: DVec3,
     system: &SolarSystemDefinition,
-    body_states: &[thalos_physics::types::BodyState],
     origin: &RenderOrigin,
     gizmos: &mut Gizmos,
 ) {
@@ -343,7 +351,7 @@ fn maybe_draw_ghost(
         return;
     }
 
-    let Some(body_def) = system.bodies.get(sample.dominant_body) else {
+    let Some(body_def) = system.bodies.get(sample.anchor_body) else {
         return;
     };
 
@@ -351,19 +359,19 @@ fn maybe_draw_ghost(
         return;
     }
 
-    let body_pos_now = body_states
-        .get(sample.dominant_body)
-        .map(|bs| bs.position)
-        .unwrap_or(bevy::math::DVec3::ZERO);
-    let ghost_pos = ((body_pos_now - origin.position) * RENDER_SCALE).as_vec3();
+    let ghost_pos = ((pin - origin.position) * RENDER_SCALE).as_vec3();
 
     let [r, g, b] = body_def.color;
-    let alpha = (sample.perturbation_ratio as f32 * 0.6).clamp(0.1, 0.5);
+    let alpha = (sample.perturbation_ratio as f32 * 0.6).clamp(0.2, 0.6);
     let color = Color::srgba(r, g, b, alpha);
+
+    // Match the actual body's rendered radius so the ghost is a proper
+    // same-size wireframe twin, not a tiny marker.
+    let radius = (body_def.radius_m * RENDER_SCALE) as f32;
 
     gizmos.sphere(
         Isometry3d::from_translation(Vec3A::from(ghost_pos)),
-        GHOST_SPHERE_RADIUS,
+        radius,
         color,
     );
 }

@@ -12,7 +12,9 @@
 use serde::Deserialize;
 
 use crate::stage::Stage;
-use crate::stages::{Cratering, Differentiate, MareFlood, Megabasin, Regolith, SpaceWeather};
+use crate::stages::{
+    Biomes, Cratering, Differentiate, MareFlood, Megabasin, Regolith, SpaceWeather,
+};
 use crate::types::Composition;
 
 /// One stage in a body's pipeline. Variants are 1:1 with stage param structs.
@@ -21,6 +23,7 @@ use crate::types::Composition;
 #[derive(Debug, Clone, Deserialize)]
 pub enum StageDef {
     Differentiate(Differentiate),
+    Biomes(Biomes),
     Megabasin(Megabasin),
     Cratering(Cratering),
     MareFlood(MareFlood),
@@ -32,6 +35,7 @@ impl StageDef {
     pub fn into_stage(self) -> Box<dyn Stage> {
         match self {
             StageDef::Differentiate(s) => Box::new(s),
+            StageDef::Biomes(s)        => Box::new(s),
             StageDef::Megabasin(s)     => Box::new(s),
             StageDef::Cratering(s)     => Box::new(s),
             StageDef::MareFlood(s)     => Box::new(s),
@@ -50,4 +54,20 @@ pub struct GeneratorParams {
     pub cubemap_resolution: u32,
     pub body_age_gyr: f32,
     pub pipeline: Vec<StageDef>,
+}
+
+impl GeneratorParams {
+    /// Multiplies `total_count` on every `Cratering` stage by `factor`.
+    /// Used by editor/game in dev builds to cut iteration time — the
+    /// `Cratering` and `SpaceWeather` stages both scale linearly with
+    /// crater count, and those two together dominate the Mira bake.
+    ///
+    /// Release builds should leave the authored counts alone.
+    pub fn scale_crater_count(&mut self, factor: f32) {
+        for stage in &mut self.pipeline {
+            if let StageDef::Cratering(c) = stage {
+                c.total_count = ((c.total_count as f32 * factor).round() as u32).max(1);
+            }
+        }
+    }
 }

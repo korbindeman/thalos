@@ -123,3 +123,37 @@ impl Default for DetailNoiseParams {
 // These will be replaced with real structs when homeworld / fluvial stages land.
 pub type PlateMap = ();
 pub type DrainageNetwork = ();
+
+/// Numeric identifier for a biome, indexing into `BodyBuilder::biomes`.
+pub type BiomeId = u8;
+
+/// A biome is a named region type with its own surface parameters. The
+/// Biomes stage registers a palette of these and paints `BodyBuilder::biome_map`
+/// with biome ids; downstream stages can later read the map to vary their
+/// behavior per region (crater density, weathering rate, base albedo).
+#[derive(Clone, Debug, Deserialize)]
+pub struct BiomeParams {
+    pub name: String,
+    /// Base linear albedo for mature (fully space-weathered) surface.
+    pub albedo: f32,
+    /// Base linear albedo for fresh (recently exposed) surface. Used by
+    /// SpaceWeather as the target color for crater rims, ejecta, and rays.
+    /// Defaults to `albedo * 1.9` if omitted.
+    #[serde(default)]
+    pub fresh_albedo: Option<f32>,
+    /// RGB tint (multiplicative, linear). A per-biome chromatic signature —
+    /// e.g. anorthosite slightly cool, KREEP slightly warm. Small values
+    /// (~0.02–0.08 deviation from 1.0) keep Moon-like realism. Defaults to
+    /// (1,1,1) if omitted.
+    #[serde(default = "default_tint")]
+    pub tint: [f32; 3],
+    /// Amplitude of low-freq tonal variation (±fraction) on top of base
+    /// albedo. Default 0.18 matches the previous single-biome behavior.
+    #[serde(default = "default_tonal")]
+    pub tonal_amp: f32,
+    /// Surface roughness (affects shading model).
+    pub roughness: f32,
+}
+
+fn default_tint() -> [f32; 3] { [1.0, 1.0, 1.0] }
+fn default_tonal() -> f32 { 0.18 }

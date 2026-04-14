@@ -309,9 +309,12 @@ impl Integrator {
             dominant_body: sample_gravity.dominant_body,
             perturbation_ratio: sample_gravity.perturbation_ratio,
             step_size,
-            // Populated by the caller (propagate_segment) which has the
-            // ephemeris context to query the dominant body at sample.time.
-            dominant_body_pos: DVec3::ZERO,
+            // Anchor body classification needs the SOI table, which lives in
+            // PropagationContext.  propagate_segment fills these fields after
+            // the integrator returns; default to dominant for live-sim paths
+            // that don't go through propagation.
+            anchor_body: sample_gravity.dominant_body,
+            anchor_body_pos: DVec3::ZERO,
         };
 
         (new_state, sample)
@@ -648,6 +651,7 @@ mod tests {
             rotation_period_s: 0.0,
             axial_tilt_rad: 0.0,
             gm: SUN_GM,
+            soi_radius_m: f64::INFINITY,
             orbital_elements: None,
             generator: None,
         };
@@ -664,6 +668,7 @@ mod tests {
             rotation_period_s: 86_400.0,
             axial_tilt_rad: 0.0,
             gm: G * earth_mass,
+            soi_radius_m: AU * (earth_mass / sun_mass).powf(0.4),
             orbital_elements: Some(OrbitalElements {
                 semi_major_axis_m: AU,
                 eccentricity: 0.0,

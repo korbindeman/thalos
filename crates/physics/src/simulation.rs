@@ -10,10 +10,12 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::body_state_provider::BodyStateProvider;
-use crate::forces::{ForceRegistry, GravityForce};
+use crate::forces::{ForceRegistry, GravityForce, ManeuverThrustForce};
 use crate::integrator::{Integrator, IntegratorConfig};
-use crate::maneuver::ManeuverSequence;
-use crate::trajectory::{PredictionConfig, TrajectoryPrediction, propagate_trajectory};
+use crate::maneuver::{ManeuverSequence, burn_duration};
+use crate::trajectory::{
+    PredictionConfig, ScheduledBurn, TrajectoryPrediction, propagate_flight_plan,
+};
 use crate::types::{BodyDefinition, BodyId, BodyKind, StateVector};
 
 /// Forward-looking orbit trail for a single body, relative to its parent.
@@ -35,6 +37,7 @@ pub struct PredictionRequest {
     pub ship_state: StateVector,
     pub sim_time: f64,
     pub maneuvers: ManeuverSequence,
+    pub active_burns: Vec<ScheduledBurn>,
     pub ephemeris: Arc<dyn BodyStateProvider>,
     pub bodies: Vec<BodyDefinition>,
     pub prediction_config: PredictionConfig,
@@ -55,6 +58,10 @@ pub struct SimulationConfig {
     pub max_steps_per_frame: u32,
     pub max_real_delta: f64,
     pub prediction_stale_after: f64,
+    /// Warp speeds at or above this skip ship integration entirely and just
+    /// advance `sim_time`. Analytical body positions still update, so planets
+    /// keep moving for observation. Ship state freezes.
+    pub observation_warp_threshold: f64,
 }
 
 impl Default for SimulationConfig {
@@ -69,10 +76,21 @@ impl Default for SimulationConfig {
                 max_steps_per_segment: 10_000,
                 ..PredictionConfig::default()
             },
-            warp_levels: vec![0.0, 1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0],
+            warp_levels: vec![
+                0.0,
+                1.0,
+                10.0,
+                100.0,
+                1_000.0,
+                10_000.0,
+                100_000.0,
+                1_000_000.0,
+                10_000_000.0,
+            ],
             max_steps_per_frame: 10_000,
             max_real_delta: 0.1,
             prediction_stale_after: 30.0,
+            observation_warp_threshold: 5_000_000.0,
         }
     }
 }
@@ -89,6 +107,7 @@ impl Default for SimulationConfig {
 pub struct WarpController {
     level_index: usize,
     levels: Vec<f64>,
+    resume_index: Option<usize>,
 }
 
 impl WarpController {
@@ -96,6 +115,7 @@ impl WarpController {
         Self {
             level_index: 0,
             levels,
+            resume_index: None,
         }
     }
 
@@ -107,6 +127,8 @@ impl WarpController {
         let speed = self.speed();
         if speed == 0.0 {
             "PAUSED".to_string()
+        } else if speed >= 1_000_000.0 {
+            format!("{:.0}M\u{00d7}", speed / 1_000_000.0)
         } else if speed >= 1000.0 {
             format!("{:.0}k\u{00d7}", speed / 1000.0)
         } else {
@@ -115,19 +137,36 @@ impl WarpController {
     }
 
     pub fn increase(&mut self) {
+        self.resume_index = None;
         self.level_index = (self.level_index + 1).min(self.levels.len() - 1);
     }
 
     pub fn decrease(&mut self) {
+        self.resume_index = None;
         self.level_index = self.level_index.saturating_sub(1);
     }
 
     pub fn reset(&mut self) {
+        self.resume_index = None;
         self.level_index = self
             .levels
             .iter()
             .position(|&w| w == 1.0)
             .unwrap_or(0);
+    }
+
+    /// Toggle between paused (level 0) and the last non-zero level.
+    /// If already at level 0 and nothing to resume, advances to 1x.
+    pub fn toggle_pause(&mut self) {
+        if self.level_index == 0 {
+            let target = self.resume_index.take().unwrap_or_else(|| {
+                self.levels.iter().position(|&w| w == 1.0).unwrap_or(0)
+            });
+            self.level_index = target;
+        } else {
+            self.resume_index = Some(self.level_index);
+            self.level_index = 0;
+        }
     }
 }
 
@@ -224,6 +263,21 @@ impl PredictionState {
     }
 }
 
+fn build_forces(active_burns: &[ScheduledBurn]) -> ForceRegistry {
+    let mut forces = ForceRegistry::new();
+    forces.add(Box::new(GravityForce));
+    for burn in active_burns {
+        forces.add(Box::new(ManeuverThrustForce::new(
+            burn.delta_v_local,
+            burn.reference_body,
+            burn.acceleration,
+            burn.start_time,
+            burn.duration,
+        )));
+    }
+    forces
+}
+
 // ---------------------------------------------------------------------------
 // Simulation
 // ---------------------------------------------------------------------------
@@ -243,12 +297,14 @@ pub struct Simulation {
     accumulator: f64,
     max_steps_per_frame: u32,
     max_real_delta: f64,
+    observation_warp_threshold: f64,
 
     // Shared state
     ephemeris: Arc<dyn BodyStateProvider>,
     bodies: Vec<BodyDefinition>,
     ship_thrust_acceleration: f64,
     maneuvers: ManeuverSequence,
+    active_burns: Vec<ScheduledBurn>,
 
     // Composed subsystems
     pub warp: WarpController,
@@ -265,8 +321,7 @@ impl Simulation {
     ) -> Self {
         let integrator = Integrator::new(config.integrator_config.clone());
 
-        let mut forces = ForceRegistry::new();
-        forces.add(Box::new(GravityForce));
+        let forces = build_forces(&[]);
 
         Self {
             ship_state,
@@ -277,10 +332,12 @@ impl Simulation {
             accumulator: 0.0,
             max_steps_per_frame: config.max_steps_per_frame,
             max_real_delta: config.max_real_delta,
+            observation_warp_threshold: config.observation_warp_threshold,
             ephemeris,
             bodies,
             ship_thrust_acceleration,
             maneuvers: ManeuverSequence::new(),
+            active_burns: Vec::new(),
             warp: WarpController::new(config.warp_levels),
             prediction_state: PredictionState::new(
                 config.prediction_config,
@@ -297,7 +354,19 @@ impl Simulation {
     pub fn step(&mut self, real_dt: f64) {
         let _span = tracing::info_span!("Simulation::step").entered();
         let real_delta = real_dt.min(self.max_real_delta);
-        self.accumulator += real_delta * self.warp.speed();
+        let warp_speed = self.warp.speed();
+
+        // Observation mode: at extreme warps, skip ship integration entirely.
+        // Just advance sim_time so analytical body positions keep updating.
+        // Ship state freezes — any ongoing maneuver/trajectory is invalidated
+        // until warp drops below the threshold.
+        if warp_speed >= self.observation_warp_threshold {
+            self.sim_time += real_delta * warp_speed;
+            self.accumulator = 0.0;
+            return;
+        }
+
+        self.accumulator += real_delta * warp_speed;
 
         if self.accumulator <= 0.0 {
             return;
@@ -311,6 +380,10 @@ impl Simulation {
 
         let mut steps = 0u32;
         while self.accumulator >= step_size && steps < self.max_steps_per_frame {
+            if self.update_active_burns() {
+                self.forces = build_forces(&self.active_burns);
+            }
+
             let (new_state, sample) = self.integrator.step(
                 self.ship_state,
                 self.sim_time,
@@ -323,6 +396,49 @@ impl Simulation {
             self.accumulator -= step_taken;
             steps += 1;
         }
+
+        if self.update_active_burns() {
+            self.forces = build_forces(&self.active_burns);
+        }
+    }
+
+    /// Drain maneuver nodes whose start time has passed into `active_burns`,
+    /// and retire completed burns. Returns true if the set changed.
+    fn update_active_burns(&mut self) -> bool {
+        let mut changed = false;
+
+        // Drain due nodes. `maneuvers.nodes` is kept time-sorted, so pop from
+        // the front while the head's time is in the past.
+        while let Some(node) = self.maneuvers.nodes.first() {
+            if node.time > self.sim_time {
+                break;
+            }
+            let node = self.maneuvers.nodes.remove(0);
+            self.prediction_state.mark_dirty();
+            changed = true;
+
+            let duration = burn_duration(node.delta_v.length(), self.ship_thrust_acceleration);
+            if duration > 0.0 && node.delta_v.length_squared() > 0.0 {
+                self.active_burns.push(ScheduledBurn {
+                    delta_v_local: node.delta_v,
+                    reference_body: node.reference_body,
+                    acceleration: self.ship_thrust_acceleration,
+                    start_time: node.time,
+                    duration,
+                });
+            }
+        }
+
+        // Retire completed burns.
+        let before = self.active_burns.len();
+        self.active_burns
+            .retain(|b| b.start_time + b.duration > self.sim_time);
+        if self.active_burns.len() != before {
+            self.prediction_state.mark_dirty();
+            changed = true;
+        }
+
+        changed
     }
 
     // -- Accessors ----------------------------------------------------------
@@ -337,6 +453,12 @@ impl Simulation {
 
     pub fn warp_speed(&self) -> f64 {
         self.warp.speed()
+    }
+
+    /// True when warp is at/above the observation threshold — ship integration
+    /// and trajectory prediction are skipped to keep the frame cheap.
+    pub fn is_observation_mode(&self) -> bool {
+        self.warp.speed() >= self.observation_warp_threshold
     }
 
     pub fn warp_label(&self) -> String {
@@ -355,6 +477,10 @@ impl Simulation {
 
     pub fn reset_warp(&mut self) {
         self.warp.reset();
+    }
+
+    pub fn toggle_pause(&mut self) {
+        self.warp.toggle_pause();
     }
 
     // -- Maneuvers ----------------------------------------------------------
@@ -391,6 +517,7 @@ impl Simulation {
             ship_state: self.ship_state,
             sim_time: self.sim_time,
             maneuvers: self.maneuvers.clone(),
+            active_burns: self.active_burns.clone(),
             ephemeris: Arc::clone(&self.ephemeris),
             bodies: self.bodies.clone(),
             prediction_config: self.prediction_state.config().clone(),
@@ -413,15 +540,17 @@ impl Simulation {
     /// stepping, ensuring numerical consistency.
     pub fn recompute_prediction(&mut self) {
         let req = self.prediction_request();
-        let prediction = propagate_trajectory(
+        let prediction = propagate_flight_plan(
             req.ship_state,
             req.sim_time,
             &req.maneuvers,
+            req.active_burns,
             req.ephemeris.as_ref(),
             &req.bodies,
             &req.prediction_config,
             req.integrator_config,
             req.ship_thrust_acceleration,
+            None,
         );
         let _ = self.prediction_state.apply(prediction, req.sim_time, req.epoch);
     }

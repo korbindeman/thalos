@@ -1,3 +1,4 @@
+#![enable(implicit_some)]
 // Pyros system definition.
 //
 // Format: see crates/physics/src/parsing.rs (`SolarSystemFile`).
@@ -55,7 +56,49 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 47.0,
             )),
-            generator: None,
+            generator: Some((
+                seed: 1100,
+                composition: (silicate: 0.28, iron: 0.70, ice: 0.0, volatiles: 0.02, hydrogen_helium: 0.0),
+                cubemap_resolution: 2048,
+                body_age_gyr: 4.6,
+                pipeline: [
+                    Differentiate(()),
+                    Biomes((
+                        biomes: [
+                            (name: "iron_crust", albedo: 0.07, roughness: 0.75),
+                        ],
+                    )),
+                    Cratering((
+                        // Per-steradian density matches Mira's reference
+                        // (~22k craters/sr above ~3 texel widths). Slope
+                        // 2.0 = lunar production function above the small
+                        // knee. Max kept moderate so cookie-cut basins
+                        // don't pile up as pasted discs (basin-class
+                        // features belong in a future Megabasin stage).
+                        total_count: 280000,
+                        sfd_slope: 2.0,
+                        sfd_slope_small: None,
+                        sfd_break_radius_m: None,
+                        min_radius_m: 1500.0,
+                        max_radius_m: 80000.0,
+                        age_bias: 1.0,
+                        cubemap_bake_threshold_m: 1500.0,
+                        secondary_parent_radius_m: 40000.0,
+                        secondaries_per_parent: 18,
+                    )),
+                    SpaceWeather((
+                        highland_mature_albedo: 0.07,
+                        highland_fresh_albedo: 0.12,
+                        mare_mature_albedo: 0.05,
+                        mare_fresh_albedo: 0.08,
+                        young_crater_age_threshold: 0.8,
+                        ray_age_threshold: 0.15,
+                        ray_extent_radii: 6.0,
+                        ray_count_per_crater: 10,
+                        ray_half_width: 0.05,
+                    )),
+                ],
+            )),
         ),
         (
             name: "Ashara",
@@ -124,49 +167,100 @@
             generator: Some((
                 seed: 1004,
                 composition: (silicate: 0.93, iron: 0.05, ice: 0.0, volatiles: 0.02, hydrogen_helium: 0.0),
-                cubemap_resolution: 1024,
+                cubemap_resolution: 2048,
                 body_age_gyr: 4.5,
                 pipeline: [
                     Differentiate(()),
+                    // Megabasin: farside-biased large basins (like SPA on the
+                    // Moon's farside). +Z = near-side (tidal axis), so -Z
+                    // biases centers to the far hemisphere we render.
                     Megabasin((
                         basins: [
-                            (center_dir: ( 0.25,  0.35, 0.90), radius_m: 320000.0, depth_m: 7500.0, ring_count: 4),
-                            (center_dir: (-0.35, -0.30, 0.85), radius_m: 220000.0, depth_m: 5200.0, ring_count: 3),
+                            // Basin-class features (100–520 km radius) live
+                            // here, not in Cratering — the cookie-cut SFD
+                            // stamps hard circles and overlapping them reads
+                            // as pasted discs. Megabasin supplies multi-
+                            // ring structure, noise-warped rims, and the
+                            // `basin_albedo_field` soft ejecta sculpture.
+                            (center_dir: (-0.15, -0.25, -0.96), radius_m: 520000.0, depth_m: 7200.0, ring_count: 4),
+                            (center_dir: ( 0.68,  0.10, -0.73), radius_m: 310000.0, depth_m: 5400.0, ring_count: 3),
+                            (center_dir: (-0.55,  0.35, -0.76), radius_m: 260000.0, depth_m: 4800.0, ring_count: 3),
+                            (center_dir: ( 0.12,  0.62, -0.78), radius_m: 200000.0, depth_m: 3800.0, ring_count: 2),
+                            (center_dir: (-0.40, -0.55, -0.73), radius_m: 170000.0, depth_m: 3100.0, ring_count: 2),
+                            (center_dir: ( 0.28, -0.60, -0.75), radius_m: 140000.0, depth_m: 2700.0, ring_count: 2),
+                            (center_dir: (-0.72, -0.10, -0.69), radius_m: 120000.0, depth_m: 2300.0, ring_count: 2),
+                            (center_dir: ( 0.45,  0.45, -0.77), radius_m: 105000.0, depth_m: 2000.0, ring_count: 1),
+                            (center_dir: (-0.05,  0.30, -0.95), radius_m:  95000.0, depth_m: 1800.0, ring_count: 1),
                         ],
-                        hemispheric_lowering_m: 2000.0,
+                        hemispheric_lowering_m: 0.0,
+                    )),
+                    // Biomes: no NearBasin rule — basin darkening comes from
+                    // the Megabasin stage's `basin_albedo_field`, which has
+                    // noise-warped fractal boundaries and Imbrium-style
+                    // radial ejecta streaks. Hard biome-disc boundaries are
+                    // the wrong tool for megabasin-scale features.
+                    Biomes((
+                        biomes: [
+                            // 0: KREEP-ish — slightly warmer, subtly darker.
+                            (
+                                name: "kreep",
+                                albedo: 0.122,
+                                fresh_albedo: Some(0.25),
+                                tint: (1.04, 1.01, 0.96),
+                                tonal_amp: 0.22,
+                                roughness: 0.82,
+                            ),
+                            // 1: impact-melt veneer — neutral slightly darker.
+                            (
+                                name: "impact_melt",
+                                albedo: 0.118,
+                                fresh_albedo: Some(0.23),
+                                tint: (1.00, 0.995, 0.99),
+                                tonal_amp: 0.22,
+                                roughness: 0.78,
+                            ),
+                            // 2: anorthositic feldspar — cool-white dominant
+                            // farside surface. Default catch-all.
+                            (
+                                name: "anorthosite",
+                                albedo: 0.140,
+                                fresh_albedo: Some(0.29),
+                                tint: (0.98, 0.99, 1.03),
+                                tonal_amp: 0.22,
+                                roughness: 0.85,
+                            ),
+                        ],
+                        rules: [
+                            Fbm(frequency: 3.7, threshold: 0.18, octaves: 4),
+                            Fbm(frequency: 2.1, threshold: 0.22, octaves: 4),
+                            Default,
+                        ],
                     )),
                     Cratering((
-                        total_count: 150000,
+                        // Max radius capped at 80 km — anything larger is
+                        // basin-class and lives in the Megabasin stage. The
+                        // cookie-cut SFD bake produces circular rims that
+                        // stack visibly when features overlap, which reads
+                        // as pasted discs above ~100 km.
+                        total_count: 280000,
                         sfd_slope: 2.0,
-                        min_radius_m: 500.0,
-                        max_radius_m: 250000.0,
-                        cubemap_bake_threshold_m: 5000.0,
-                    )),
-                    MareFlood((
-                        target_count: 5,
-                        additional_crater_count: 0,
-                        fill_fraction: 0.7,
-                        near_side_bias: 0.9,
-                        boundary_noise_amplitude_m: 500.0,
-                        boundary_noise_freq: 3.0,
-                        episode_count: 3,
-                        wrinkle_ridges: true,
-                    )),
-                    Regolith((
-                        amplitude_m: 3.0,
-                        characteristic_wavelength_m: 50.0,
-                        crater_density_multiplier: 1.0,
+                        sfd_slope_small: None,
+                        sfd_break_radius_m: None,
+                        min_radius_m: 1500.0,
+                        max_radius_m: 80000.0,
+                        age_bias: 1.0,
+                        cubemap_bake_threshold_m: 1500.0,
+                        secondary_parent_radius_m: 40000.0,
+                        secondaries_per_parent: 18,
                     )),
                     SpaceWeather((
-                        highland_mature_albedo: 0.10,
-                        highland_fresh_albedo: 0.18,
-                        mare_mature_albedo: 0.065,
-                        mare_fresh_albedo: 0.09,
-                        young_crater_age_threshold: 0.5,
-                        ray_age_threshold: 0.1,
-                        ray_extent_radii: 7.0,
-                        ray_count_per_crater: 8,
-                        ray_half_width: 0.06,
+                        mare_mature_albedo: 0.05,
+                        mare_fresh_albedo: 0.08,
+                        young_crater_age_threshold: 0.9,
+                        ray_age_threshold: 0.40,
+                        ray_extent_radii: 9.0,
+                        ray_count_per_crater: 14,
+                        ray_half_width: 0.055,
                     )),
                 ],
             )),
@@ -191,7 +285,48 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 210.0,
             )),
-            generator: None,
+            generator: Some((
+                seed: 1200,
+                composition: (silicate: 0.92, iron: 0.05, ice: 0.0, volatiles: 0.03, hydrogen_helium: 0.0),
+                cubemap_resolution: 1024,
+                body_age_gyr: 4.0,
+                pipeline: [
+                    Differentiate(()),
+                    Biomes((
+                        biomes: [
+                            (name: "silicate_regolith", albedo: 0.14, roughness: 0.8),
+                        ],
+                    )),
+                    Cratering((
+                        // Per-steradian density matches Mira above the
+                        // same fraction-of-radius threshold (~3 texel
+                        // widths at res 1024 → 650 m on a 190 km body).
+                        // Slope 2.0 unifies the SFD with Mira/Ignis so
+                        // visual size distribution is consistent.
+                        total_count: 89000,
+                        sfd_slope: 2.0,
+                        sfd_slope_small: None,
+                        sfd_break_radius_m: None,
+                        min_radius_m: 650.0,
+                        max_radius_m: 17500.0,
+                        age_bias: 1.0,
+                        cubemap_bake_threshold_m: 650.0,
+                        secondary_parent_radius_m: 0.0,
+                        secondaries_per_parent: 0,
+                    )),
+                    SpaceWeather((
+                        highland_mature_albedo: 0.14,
+                        highland_fresh_albedo: 0.26,
+                        mare_mature_albedo: 0.06,
+                        mare_fresh_albedo: 0.10,
+                        young_crater_age_threshold: 0.8,
+                        ray_age_threshold: 0.15,
+                        ray_extent_radii: 8.0,
+                        ray_count_per_crater: 12,
+                        ray_half_width: 0.05,
+                    )),
+                ],
+            )),
         ),
         (
             name: "Auron",
@@ -257,7 +392,43 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 310.0,
             )),
-            generator: None,
+            generator: Some((
+                seed: 1300,
+                composition: (silicate: 0.90, iron: 0.05, ice: 0.0, volatiles: 0.05, hydrogen_helium: 0.0),
+                cubemap_resolution: 1024,
+                body_age_gyr: 4.5,
+                pipeline: [
+                    Differentiate(()),
+                    Biomes((
+                        biomes: [
+                            (name: "captured_regolith", albedo: 0.13, roughness: 0.8),
+                        ],
+                    )),
+                    Cratering((
+                        total_count: 89000,
+                        sfd_slope: 2.0,
+                        sfd_slope_small: None,
+                        sfd_break_radius_m: None,
+                        min_radius_m: 600.0,
+                        max_radius_m: 16200.0,
+                        age_bias: 1.0,
+                        cubemap_bake_threshold_m: 600.0,
+                        secondary_parent_radius_m: 0.0,
+                        secondaries_per_parent: 0,
+                    )),
+                    SpaceWeather((
+                        highland_mature_albedo: 0.13,
+                        highland_fresh_albedo: 0.24,
+                        mare_mature_albedo: 0.06,
+                        mare_fresh_albedo: 0.09,
+                        young_crater_age_threshold: 0.8,
+                        ray_age_threshold: 0.15,
+                        ray_extent_radii: 8.0,
+                        ray_count_per_crater: 12,
+                        ray_half_width: 0.05,
+                    )),
+                ],
+            )),
         ),
         (
             name: "Theron",
@@ -279,7 +450,43 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 55.0,
             )),
-            generator: None,
+            generator: Some((
+                seed: 1301,
+                composition: (silicate: 0.85, iron: 0.05, ice: 0.0, volatiles: 0.10, hydrogen_helium: 0.0),
+                cubemap_resolution: 1024,
+                body_age_gyr: 4.5,
+                pipeline: [
+                    Differentiate(()),
+                    Biomes((
+                        biomes: [
+                            (name: "dark_carbonaceous", albedo: 0.05, roughness: 0.8),
+                        ],
+                    )),
+                    Cratering((
+                        total_count: 89000,
+                        sfd_slope: 2.0,
+                        sfd_slope_small: None,
+                        sfd_break_radius_m: None,
+                        min_radius_m: 400.0,
+                        max_radius_m: 10800.0,
+                        age_bias: 1.0,
+                        cubemap_bake_threshold_m: 400.0,
+                        secondary_parent_radius_m: 0.0,
+                        secondaries_per_parent: 0,
+                    )),
+                    SpaceWeather((
+                        highland_mature_albedo: 0.05,
+                        highland_fresh_albedo: 0.12,
+                        mare_mature_albedo: 0.03,
+                        mare_fresh_albedo: 0.06,
+                        young_crater_age_threshold: 0.8,
+                        ray_age_threshold: 0.15,
+                        ray_extent_radii: 8.0,
+                        ray_count_per_crater: 12,
+                        ray_half_width: 0.05,
+                    )),
+                ],
+            )),
         ),
         (
             name: "Maren",
@@ -301,7 +508,49 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 140.0,
             )),
-            generator: None,
+            generator: Some((
+                seed: 1302,
+                composition: (silicate: 0.90, iron: 0.05, ice: 0.0, volatiles: 0.05, hydrogen_helium: 0.0),
+                cubemap_resolution: 512,
+                body_age_gyr: 4.5,
+                pipeline: [
+                    Differentiate(()),
+                    Biomes((
+                        biomes: [
+                            (name: "captured_regolith", albedo: 0.08, roughness: 0.8),
+                        ],
+                    )),
+                    Cratering((
+                        // Smaller per-sr target than the 1024-res bodies
+                        // because Maren is res 512 — its smallest visible
+                        // crater is a larger fraction of body radius, so
+                        // the equivalent Mira-density slice has fewer
+                        // craters. Same physical justification, just a
+                        // coarser cutoff.
+                        total_count: 22000,
+                        sfd_slope: 2.0,
+                        sfd_slope_small: None,
+                        sfd_break_radius_m: None,
+                        min_radius_m: 475.0,
+                        max_radius_m: 6750.0,
+                        age_bias: 1.0,
+                        cubemap_bake_threshold_m: 475.0,
+                        secondary_parent_radius_m: 0.0,
+                        secondaries_per_parent: 0,
+                    )),
+                    SpaceWeather((
+                        highland_mature_albedo: 0.08,
+                        highland_fresh_albedo: 0.18,
+                        mare_mature_albedo: 0.04,
+                        mare_fresh_albedo: 0.07,
+                        young_crater_age_threshold: 0.8,
+                        ray_age_threshold: 0.15,
+                        ray_extent_radii: 8.0,
+                        ray_count_per_crater: 12,
+                        ray_half_width: 0.05,
+                    )),
+                ],
+            )),
         ),
         (
             name: "Vaelen",
@@ -617,7 +866,43 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 0.0,
             )),
-            generator: None,
+            generator: Some((
+                seed: 1400,
+                composition: (silicate: 0.38, iron: 0.0, ice: 0.60, volatiles: 0.02, hydrogen_helium: 0.0),
+                cubemap_resolution: 1024,
+                body_age_gyr: 4.6,
+                pipeline: [
+                    Differentiate(()),
+                    Biomes((
+                        biomes: [
+                            (name: "dirty_ice", albedo: 0.45, roughness: 0.6),
+                        ],
+                    )),
+                    Cratering((
+                        total_count: 89000,
+                        sfd_slope: 2.0,
+                        sfd_slope_small: None,
+                        sfd_break_radius_m: None,
+                        min_radius_m: 750.0,
+                        max_radius_m: 22000.0,
+                        age_bias: 1.0,
+                        cubemap_bake_threshold_m: 750.0,
+                        secondary_parent_radius_m: 0.0,
+                        secondaries_per_parent: 0,
+                    )),
+                    SpaceWeather((
+                        highland_mature_albedo: 0.45,
+                        highland_fresh_albedo: 0.70,
+                        mare_mature_albedo: 0.25,
+                        mare_fresh_albedo: 0.40,
+                        young_crater_age_threshold: 0.8,
+                        ray_age_threshold: 0.15,
+                        ray_extent_radii: 10.0,
+                        ray_count_per_crater: 14,
+                        ray_half_width: 0.05,
+                    )),
+                ],
+            )),
         ),
         (
             name: "Vorra",

@@ -133,6 +133,13 @@ fn update_prediction(
 ) {
     let _span = tracing::info_span!("update_prediction").entered();
 
+    // Observation mode: freeze prediction work entirely. Still drain any
+    // stray result so the channel doesn't back up.
+    if sim.simulation.is_observation_mode() {
+        let _ = drain_latest_result(&worker);
+        return;
+    }
+
     if let Some(result) = drain_latest_result(&worker) {
         sim.simulation.apply_prediction(
             result.prediction,
@@ -156,9 +163,10 @@ fn update_prediction(
 
 /// Handle keyboard input to adjust the warp multiplier.
 ///
-/// - `.`  -- increase to next warp level
-/// - `,`  -- decrease to previous warp level (0x = paused)
-/// - `\`  -- reset to 1x
+/// - `.`      -- increase to next warp level
+/// - `,`      -- decrease to previous warp level (0x = paused)
+/// - `\`      -- reset to 1x
+/// - `Space`  -- toggle pause (0x) / resume previous level
 pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<SimulationState>) {
     let prev = sim.simulation.warp_speed();
 
@@ -168,6 +176,8 @@ pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<Sim
         sim.simulation.decrease_warp();
     } else if keys.just_pressed(KeyCode::Backslash) {
         sim.simulation.reset_warp();
+    } else if keys.just_pressed(KeyCode::Space) {
+        sim.simulation.toggle_pause();
     }
 
     let new = sim.simulation.warp_speed();
@@ -179,7 +189,18 @@ pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<Sim
 /// Sync the UI-side [`ManeuverPlan`] to the physics `ManeuverSequence` when
 /// dirty. `maneuvers_mut()` marks the prediction dirty; `update_prediction`
 /// runs after this system and dispatches the fresh job to the worker.
+///
+/// Also drops UI nodes whose execution time has passed — the physics side
+/// auto-consumes them as burns, and leaving stale nodes in the UI would
+/// re-inject them on the next edit.
 fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<SimulationState>) {
+    let sim_time = sim.simulation.sim_time();
+    let before = plan.nodes.len();
+    plan.nodes.retain(|n| n.time > sim_time);
+    if plan.nodes.len() != before {
+        plan.dirty = true;
+    }
+
     if !plan.dirty {
         return;
     }
@@ -267,6 +288,7 @@ fn run_prediction(request: &PredictionRequest) -> TrajectoryPrediction {
         request.ship_state,
         request.sim_time,
         &request.maneuvers,
+        request.active_burns.clone(),
         request.ephemeris.as_ref(),
         &request.bodies,
         &request.prediction_config,

@@ -5,6 +5,7 @@ mod cratering;
 mod mare_flood;
 mod regolith;
 mod space_weather;
+mod biomes;
 
 pub use differentiate::{
     Differentiate, MAT_FRESH_EJECTA, MAT_HIGHLAND, MAT_MARE, MAT_MATURE_REGOLITH,
@@ -14,3 +15,4 @@ pub use cratering::Cratering;
 pub use mare_flood::MareFlood;
 pub use regolith::Regolith;
 pub use space_weather::SpaceWeather;
+pub use biomes::{Biomes, BiomeRule};

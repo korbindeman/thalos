@@ -20,6 +20,18 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# terrain_gen is heavy numeric code: cratering, mare_flood, regolith spend
+# most of their time in tight per-texel loops. At dev defaults a full 2048
+# bake takes minutes. Treating this one crate as release-like brings it in
+# line with release performance. Tradeoff: `debug_assert!` and arithmetic
+# overflow panics in terrain_gen are silent in dev — acceptable because the
+# crate is pure-Rust, well-tested, and its hot paths have no safety-critical
+# assertions.
+[profile.dev.package.thalos_terrain_gen]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
 # Release: single codegen unit for cross-crate inlining + thin LTO.
 [profile.release]
 codegen-units = 1

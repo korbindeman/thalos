@@ -3,7 +3,7 @@
 //! Layers:
 //!
 //! - [`Trajectory`] trait — a queryable path: `state_at(t)`, `epoch_range`,
-//!   `dominant_body_at`. Anything implementing this can be sampled at arbitrary
+//!   `anchor_body_at`. Anything implementing this can be sampled at arbitrary
 //!   time, not just at stored points.
 //! - [`NumericSegment`] — one discrete-sample trajectory leg produced by the
 //!   integrator. Implements `Trajectory` via cubic Hermite interpolation
@@ -28,7 +28,7 @@ mod propagation;
 mod tests;
 
 pub use events::{Encounter, EncounterKind, TrajectoryEvent, closest_approach};
-pub use flight_plan::{FlightPlan, propagate_flight_plan};
+pub use flight_plan::{FlightPlan, ScheduledBurn, propagate_flight_plan};
 pub use numeric::{NumericSegment, cone_width};
 pub use propagation::{PredictionConfig, PropagationBudget};
 
@@ -47,9 +47,9 @@ pub trait Trajectory: Send + Sync {
     /// defined.  Callers should clamp to this before querying.
     fn epoch_range(&self) -> (f64, f64);
 
-    /// Best known dominant body at `time`.  Numerical segments return the
-    /// dominant body of the nearest stored sample.
-    fn dominant_body_at(&self, time: f64) -> Option<BodyId>;
+    /// Best known anchor body at `time`.  Numerical segments return the
+    /// anchor body of the nearest stored sample.
+    fn anchor_body_at(&self, time: f64) -> Option<BodyId>;
 }
 
 /// Back-compat: simplified unbudgeted propagation entry point used by tests.
@@ -68,6 +68,7 @@ pub fn propagate_trajectory(
         initial_state,
         start_time,
         maneuvers,
+        Vec::new(),
         ephemeris,
         bodies,
         config,

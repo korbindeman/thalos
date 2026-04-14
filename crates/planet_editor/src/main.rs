@@ -1,23 +1,34 @@
+use std::time::{Duration, Instant};
+
 use bevy::asset::AssetPlugin;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
+use bevy::render::storage::ShaderStorageBuffer;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PresentMode;
 use thalos_physics::parsing::load_solar_system;
 use thalos_physics::types::{BodyKind, SolarSystemDefinition};
-use thalos_terrain_gen::{BodyBuilder, GeneratorParams, Pipeline};
-use bevy::render::storage::ShaderStorageBuffer;
+use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
 use thalos_planet_rendering::{
     PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
-    PlanetRenderingPlugin, PlanetTextures, bake_from_body_data,
+    PlanetRenderingPlugin, bake_from_body_data,
 };
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const LIGHT_AT_1AU: f32 = 12.0;
+const LIGHT_AT_1AU: f32 = 10.0;
 const AMBIENT_INTENSITY: f32 = 0.05;
+/// Fullbright wrap value stuffed into `light_dir.w`. Shader computes
+/// `wrap = light_dir.w * 0.08`, so 1250 → wrap ≈ 100 → diffuse ≈ 0.99 every
+/// where on the sphere. Surge term still adds ≤40% on the sun-facing cap.
+const FULLBRIGHT_WRAP: f32 = 1250.0;
+/// Fullbright light intensity. Picks a value such that, with wrap ≈ 100,
+/// `lit = albedo * light / PI ≈ albedo` on the night side. Bright side runs
+/// ~40% hotter from surge — fine for debug readout.
+const FULLBRIGHT_LIGHT: f32 = std::f32::consts::PI;
 const AU_M: f64 = 1.496e11;
 const DEFAULT_BODY_NAME: &str = "Mira";
 
@@ -42,6 +53,7 @@ struct EditedPlanet {
     /// body's local frame is unauthored — the parent direction is just a
     /// per-body convention until we author it from orbital state).
     tidal_axis: Option<Vec3>,
+    axial_tilt_rad: f32,
     /// The full generator block for the body. Cloned from the loaded
     /// `SolarSystemDefinition` and rebuilt into a Pipeline on every bake.
     generator: GeneratorParams,
@@ -50,7 +62,31 @@ struct EditedPlanet {
     terminator_wrap: f32,
     sun_azimuth: f32,
     sun_elevation: f32,
-    dirty: bool,
+    full_bright: bool,
+    /// Terrain pipeline inputs changed — requires an async rebake.
+    terrain_dirty: bool,
+    /// Only shader uniforms changed — cheap, applied in place.
+    uniforms_dirty: bool,
+}
+
+/// Tracks the running / last-completed terrain generation for the UI.
+#[derive(Resource, Default)]
+struct TerrainGenStatus {
+    current_started: Option<Instant>,
+    last_duration: Option<Duration>,
+}
+
+/// Billboard mesh used by the preview planet, created once at startup.
+#[derive(Resource)]
+struct BillboardMesh(Handle<Mesh>);
+
+/// In-flight terrain generation task attached to the preview planet entity.
+/// Re-baking just inserts a fresh `PendingTerrainGen`; the dropped component's
+/// `Task` is cancelled automatically.
+#[derive(Component)]
+struct PendingTerrainGen {
+    task: Task<BodyData>,
+    mesh_entity: Entity,
 }
 
 fn sun_direction(azimuth: f32, elevation: f32) -> Vec3 {
@@ -69,6 +105,7 @@ fn sun_direction(azimuth: f32, elevation: f32) -> Vec3 {
 struct ResolvedBody {
     radius_m: f64,
     tidal_axis: Option<Vec3>,
+    axial_tilt_rad: f32,
     generator: GeneratorParams,
     heliocentric_distance_m: f64,
 }
@@ -83,6 +120,7 @@ fn build_params_for_body(
         // For now, only moons get a tidal axis, and we treat it as +Z in the
         // body's local frame. Authored axes per body would replace this.
         tidal_axis: matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z),
+        axial_tilt_rad: body.axial_tilt_rad as f32,
         generator,
         heliocentric_distance_m: heliocentric_sma(system, body),
     })
@@ -114,6 +152,20 @@ fn light_intensity_at(distance_m: f64) -> f32 {
     LIGHT_AT_1AU * (ratio * ratio) as f32
 }
 
+/// Resolve the `(light, ambient)` pair fed to `PlanetParams`. Full bright
+/// collapses the directional contribution into ambient so the surface reads
+/// evenly without sculpting shadows.
+/// Returns `(light_intensity, ambient_intensity, wrap)`. Fullbright abuses the
+/// shader's terminator-wrap term: `diffuse = (n·l + wrap)/(1+wrap)` → ~1.0
+/// everywhere when `wrap` is huge, so the whole sphere reads as fully lit.
+fn lighting_for(planet: &EditedPlanet) -> (f32, f32, f32) {
+    if planet.full_bright {
+        (FULLBRIGHT_LIGHT, AMBIENT_INTENSITY, FULLBRIGHT_WRAP)
+    } else {
+        (planet.light_intensity, AMBIENT_INTENSITY, planet.terminator_wrap)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Components
 // ---------------------------------------------------------------------------
@@ -140,7 +192,6 @@ struct OrbitCamera {
     target_distance: f32,
     min_distance: f32,
     max_distance: f32,
-    #[allow(dead_code)]
     planet_render_radius: f32,
 }
 
@@ -170,6 +221,7 @@ impl Default for OrbitCamera {
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        thalos_planet_rendering::space_camera_post_stack(),
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
         Msaa::Off,
         EditorCamera,
@@ -188,7 +240,7 @@ fn camera_input(
     }
 
     const ROTATE_SENSITIVITY: f32 = 0.005;
-    const ZOOM_SENSITIVITY: f32 = 0.1;
+    const ZOOM_SENSITIVITY: f32 = 0.04;
 
     if mouse.pressed(MouseButton::Left) {
         let delta = motion.delta;
@@ -198,8 +250,15 @@ fn camera_input(
     }
 
     if scroll.delta.y != 0.0 {
-        let log_dist = orbit.target_distance.ln() - scroll.delta.y * ZOOM_SENSITIVITY;
-        orbit.target_distance = log_dist.exp().clamp(orbit.min_distance, orbit.max_distance);
+        // Log-space zoom on *height above surface*, so near-surface steps
+        // shrink to near-zero while far-away steps stay responsive.
+        let surface = orbit.planet_render_radius;
+        let min_h = (orbit.min_distance - surface).max(1e-4);
+        let max_h = orbit.max_distance - surface;
+        let h = (orbit.target_distance - surface).max(min_h);
+        let log_h = h.ln() - scroll.delta.y * ZOOM_SENSITIVITY;
+        let new_h = log_h.exp().clamp(min_h, max_h);
+        orbit.target_distance = surface + new_h;
     }
 }
 
@@ -230,91 +289,148 @@ fn camera_apply_transform(
 // Planet preview
 // ---------------------------------------------------------------------------
 
-struct BakeResult {
-    textures: PlanetTextures,
-    height_range: f32,
-    detail: PlanetDetailParams,
-}
+/// Dev-mode crater-count scale factor. Cratering + space_weather together
+/// dominate the Mira bake (~95% of wall time at authored 500k craters), and
+/// both scale linearly with total crater count. Cutting the count by 10×
+/// in dev brings the editor bake from ~190 s down to ~20 s with a uniform
+/// quality drop rather than visual artifacts.
+#[cfg(debug_assertions)]
+const DEV_CRATER_SCALE: f32 = 0.1;
+#[cfg(not(debug_assertions))]
+const DEV_CRATER_SCALE: f32 = 1.0;
 
-fn bake_preview(
-    planet: &EditedPlanet,
-    images: &mut Assets<Image>,
-    storage_buffers: &mut Assets<ShaderStorageBuffer>,
-) -> BakeResult {
-    let g = &planet.generator;
-
-    let mut builder = BodyBuilder::new(
-        planet.radius_m as f32,
-        g.seed,
-        g.composition,
-        g.cubemap_resolution,
-        g.body_age_gyr,
-        planet.tidal_axis,
-    );
-
-    let stages = g
-        .pipeline
-        .iter()
-        .cloned()
-        .map(|s| s.into_stage())
-        .collect::<Vec<_>>();
-    let pipeline = Pipeline::new(stages);
-    pipeline.run(&mut builder);
-
-    let body = builder.build();
-    let detail = PlanetDetailParams::from_body(&body.detail_params, body.cubemap_bake_threshold_m);
-    let height_range = body.height_range;
-    let textures = bake_from_body_data(&body, images, storage_buffers);
-
-    BakeResult { textures, height_range, detail }
+/// Dispatches the terrain pipeline for `planet` onto the async compute pool.
+fn dispatch_terrain_bake(planet: &EditedPlanet) -> Task<BodyData> {
+    let radius_m = planet.radius_m as f32;
+    let tidal_axis = planet.tidal_axis;
+    let axial_tilt_rad = planet.axial_tilt_rad;
+    let mut g = planet.generator.clone();
+    g.scale_crater_count(DEV_CRATER_SCALE);
+    AsyncComputeTaskPool::get().spawn(async move {
+        let mut builder = BodyBuilder::new(
+            radius_m,
+            g.seed,
+            g.composition,
+            g.cubemap_resolution,
+            g.body_age_gyr,
+            tidal_axis,
+            axial_tilt_rad,
+        );
+        let stages = g
+            .pipeline
+            .into_iter()
+            .map(|s| s.into_stage())
+            .collect::<Vec<_>>();
+        Pipeline::new(stages).run(&mut builder);
+        builder.build()
+    })
 }
 
 fn spawn_preview_planet(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut status: ResMut<TerrainGenStatus>,
     planet: Res<EditedPlanet>,
 ) {
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
+    commands.insert_resource(BillboardMesh(billboard_mesh));
 
-    let bake = bake_preview(&planet, &mut images, &mut storage_buffers);
-
-    let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
-    let mat_handle = planet_materials.add(PlanetMaterial {
-        params: PlanetParams {
-            radius: 1.5,
-            rotation_phase: 0.0,
-            light_intensity: planet.light_intensity,
-            ambient_intensity: AMBIENT_INTENSITY,
-            light_dir: Vec4::new(dir.x, dir.y, dir.z, planet.terminator_wrap),
-            height_range: bake.height_range,
-        },
-        albedo: bake.textures.albedo,
-        height: bake.textures.height,
-        detail: bake.detail,
-        material_cube: bake.textures.material_cube,
-        craters: bake.textures.craters,
-        cell_index: bake.textures.cell_index,
-        feature_ids: bake.textures.feature_ids,
-        materials: bake.textures.materials,
+    // Placeholder sphere shown until the first async bake completes.
+    let placeholder_mesh = meshes.add(Sphere::new(1.5).mesh().ico(4).unwrap());
+    let placeholder_mat = std_materials.add(StandardMaterial {
+        base_color: Color::srgb(0.4, 0.4, 0.45),
+        perceptual_roughness: 0.9,
+        metallic: 0.0,
+        ..default()
     });
 
-    commands
+    let parent = commands
         .spawn((
             Transform::default(),
             Visibility::Inherited,
-            PlanetMaterialHandle(mat_handle.clone()),
             PreviewPlanet,
             Name::new("Preview Planet"),
         ))
-        .with_children(|parent| {
-            parent.spawn((
-                Mesh3d(billboard_mesh),
-                MeshMaterial3d(mat_handle),
-            ));
+        .id();
+
+    let mesh_entity = commands
+        .spawn((
+            Mesh3d(placeholder_mesh),
+            MeshMaterial3d(placeholder_mat),
+            ChildOf(parent),
+        ))
+        .id();
+
+    let task = dispatch_terrain_bake(&planet);
+    status.current_started = Some(Instant::now());
+    commands
+        .entity(parent)
+        .insert(PendingTerrainGen { task, mesh_entity });
+}
+
+/// Poll in-flight terrain tasks. When one finishes, bake GPU textures, build
+/// a fresh `PlanetMaterial`, and swap it onto the mesh entity.
+fn finalize_terrain_bake(
+    mut commands: Commands,
+    mut pending_q: Query<(Entity, &mut PendingTerrainGen), With<PreviewPlanet>>,
+    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut status: ResMut<TerrainGenStatus>,
+    billboard: Res<BillboardMesh>,
+    planet: Res<EditedPlanet>,
+) {
+    for (entity, mut pending) in &mut pending_q {
+        let Some(body) = block_on(poll_once(&mut pending.task)) else {
+            continue;
+        };
+
+        let detail =
+            PlanetDetailParams::from_body(&body.detail_params, body.cubemap_bake_threshold_m);
+        let height_range = body.height_range;
+        let textures = bake_from_body_data(&body, &mut images, &mut storage_buffers);
+        let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
+        let (light_intensity, ambient_intensity, wrap) = lighting_for(&planet);
+
+        let mat_handle = planet_materials.add(PlanetMaterial {
+            params: PlanetParams {
+                radius: 1.5,
+                light_intensity,
+                ambient_intensity,
+                height_range,
+                light_dir: Vec4::new(dir.x, dir.y, dir.z, wrap),
+                orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                ..default()
+            },
+            albedo: textures.albedo,
+            height: textures.height,
+            detail,
+            material_cube: textures.material_cube,
+            craters: textures.craters,
+            cell_index: textures.cell_index,
+            feature_ids: textures.feature_ids,
+            materials: textures.materials,
         });
+
+        let mesh_entity = pending.mesh_entity;
+        commands
+            .entity(mesh_entity)
+            .insert((
+                Mesh3d(billboard.0.clone()),
+                MeshMaterial3d(mat_handle.clone()),
+            ))
+            .remove::<MeshMaterial3d<StandardMaterial>>();
+
+        commands
+            .entity(entity)
+            .insert(PlanetMaterialHandle(mat_handle))
+            .remove::<PendingTerrainGen>();
+
+        if let Some(started) = status.current_started.take() {
+            status.last_duration = Some(started.elapsed());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +442,7 @@ fn editor_ui(
     mut planet: ResMut<EditedPlanet>,
     system: Res<SystemData>,
     diagnostics: Res<DiagnosticsStore>,
+    status: Res<TerrainGenStatus>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     bevy_egui::egui::Window::new("Planet Editor").show(ctx, |ui| {
@@ -360,11 +477,25 @@ fn editor_ui(
         {
             planet.radius_m = resolved.radius_m;
             planet.tidal_axis = resolved.tidal_axis;
+            planet.axial_tilt_rad = resolved.axial_tilt_rad;
             planet.generator = resolved.generator;
             planet.heliocentric_distance_m = resolved.heliocentric_distance_m;
             planet.light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
             planet.selected_body = name;
-            planet.dirty = true;
+            planet.terrain_dirty = true;
+            planet.uniforms_dirty = true;
+        }
+
+        // ---- Terrain gen status ----------------------------------------
+        match (status.current_started, status.last_duration) {
+            (Some(started), _) => {
+                let elapsed = started.elapsed().as_secs_f32();
+                ui.label(format!("Generating terrain for {:.2}s…", elapsed));
+            }
+            (None, Some(d)) => {
+                ui.label(format!("Last bake: {:.2}s", d.as_secs_f32()));
+            }
+            (None, None) => {}
         }
 
         ui.separator();
@@ -384,25 +515,29 @@ fn editor_ui(
             r.drag_stopped() || (r.changed() && !r.dragged())
         }
         ui.heading("Parameters");
-        let mut changed = false;
-        changed |= fires(&ui.add(
+        let mut terrain_changed = false;
+        let mut uniforms_changed = false;
+        terrain_changed |= fires(&ui.add(
             bevy_egui::egui::Slider::new(&mut planet.generator.seed, 0..=9999).text("Seed"),
         ));
 
         ui.separator();
         ui.heading("Shading");
-        changed |= fires(&ui.add(
+        uniforms_changed |= ui
+            .checkbox(&mut planet.full_bright, "Full bright")
+            .changed();
+        uniforms_changed |= fires(&ui.add(
             bevy_egui::egui::Slider::new(&mut planet.terminator_wrap, 0.0..=1.0)
                 .text("Terminator wrap"),
         ));
-        changed |= fires(&ui.add(
+        uniforms_changed |= fires(&ui.add(
             bevy_egui::egui::Slider::new(
                 &mut planet.sun_azimuth,
                 -std::f32::consts::PI..=std::f32::consts::PI,
             )
             .text("Sun azimuth"),
         ));
-        changed |= fires(&ui.add(
+        uniforms_changed |= fires(&ui.add(
             bevy_egui::egui::Slider::new(
                 &mut planet.sun_elevation,
                 -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2,
@@ -410,42 +545,57 @@ fn editor_ui(
             .text("Sun elevation"),
         ));
 
-        if changed {
-            planet.dirty = true;
+        if terrain_changed {
+            planet.terrain_dirty = true;
+        }
+        if uniforms_changed {
+            planet.uniforms_dirty = true;
         }
     });
 }
 
-fn apply_descriptor_changes(
+/// Applies shader-uniform-only changes (lighting, terminator wrap) to the
+/// current `PlanetMaterial` in place. Cheap — no rebake required.
+fn apply_uniform_changes(
     mut planet: ResMut<EditedPlanet>,
     query: Query<&PlanetMaterialHandle, With<PreviewPlanet>>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
-    if !planet.dirty {
+    if !planet.uniforms_dirty {
         return;
     }
-    planet.dirty = false;
+    planet.uniforms_dirty = false;
 
+    let (light_intensity, ambient_intensity, wrap) = lighting_for(&planet);
     for handle in &query {
         let Some(mat) = materials.get_mut(&handle.0) else { continue };
-        mat.params.light_intensity = planet.light_intensity;
-        mat.params.ambient_intensity = AMBIENT_INTENSITY;
+        mat.params.light_intensity = light_intensity;
+        mat.params.ambient_intensity = ambient_intensity;
         let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
-        mat.params.light_dir = Vec4::new(dir.x, dir.y, dir.z, planet.terminator_wrap);
-
-        let bake = bake_preview(&planet, &mut images, &mut storage_buffers);
-        mat.params.height_range = bake.height_range;
-        mat.albedo = bake.textures.albedo;
-        mat.height = bake.textures.height;
-        mat.detail = bake.detail;
-        mat.material_cube = bake.textures.material_cube;
-        mat.craters = bake.textures.craters;
-        mat.cell_index = bake.textures.cell_index;
-        mat.feature_ids = bake.textures.feature_ids;
-        mat.materials = bake.textures.materials;
+        mat.params.light_dir = Vec4::new(dir.x, dir.y, dir.z, wrap);
     }
+}
+
+/// Dispatches a new terrain bake task whenever terrain inputs change. The
+/// currently-displayed material stays visible until the task finishes.
+fn dispatch_rebake(
+    mut commands: Commands,
+    mut planet: ResMut<EditedPlanet>,
+    mut status: ResMut<TerrainGenStatus>,
+    preview_q: Query<(Entity, &Children), With<PreviewPlanet>>,
+) {
+    if !planet.terrain_dirty {
+        return;
+    }
+    let Ok((entity, children)) = preview_q.single() else { return };
+    let Some(mesh_entity) = children.iter().next() else { return };
+    planet.terrain_dirty = false;
+
+    let task = dispatch_terrain_bake(&planet);
+    status.current_started = Some(Instant::now());
+    commands
+        .entity(entity)
+        .insert(PendingTerrainGen { task, mesh_entity });
 }
 
 // ---------------------------------------------------------------------------
@@ -481,15 +631,19 @@ fn main() {
             selected_body,
             radius_m: resolved.radius_m,
             tidal_axis: resolved.tidal_axis,
+            axial_tilt_rad: resolved.axial_tilt_rad,
             generator: resolved.generator,
             heliocentric_distance_m: resolved.heliocentric_distance_m,
             light_intensity,
             terminator_wrap: 0.2,
             sun_azimuth: 0.0,
             sun_elevation: 0.0,
-            dirty: false,
+            full_bright: false,
+            terrain_dirty: false,
+            uniforms_dirty: false,
         })
         .init_resource::<OrbitCamera>()
+        .init_resource::<TerrainGenStatus>()
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -516,7 +670,9 @@ fn main() {
                 camera_input,
                 camera_zoom_smoothing.after(camera_input),
                 camera_apply_transform.after(camera_zoom_smoothing),
-                apply_descriptor_changes,
+                apply_uniform_changes,
+                dispatch_rebake,
+                finalize_terrain_bake.after(dispatch_rebake),
             ),
         )
         .run();

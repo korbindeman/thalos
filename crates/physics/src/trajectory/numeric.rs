@@ -167,7 +167,7 @@ impl Trajectory for NumericSegment {
         (start, end)
     }
 
-    fn dominant_body_at(&self, time: f64) -> Option<BodyId> {
+    fn anchor_body_at(&self, time: f64) -> Option<BodyId> {
         let n = self.samples.len();
         if n == 0 {
             return None;
@@ -190,7 +190,7 @@ impl Trajectory for NumericSegment {
                 }
             }
         };
-        Some(self.samples[i].dominant_body)
+        Some(self.samples[i].anchor_body)
     }
 }
 
@@ -203,7 +203,7 @@ impl NumericSegment {
         body_states: &[crate::types::BodyState],
     ) -> Option<DVec3> {
         let state = self.state_at(time)?;
-        let body = self.dominant_body_at(time)?;
+        let body = self.anchor_body_at(time)?;
         let body_pos = body_states.get(body)?.position;
         Some(state.position - body_pos)
     }
@@ -221,7 +221,8 @@ mod tests {
             dominant_body: 0,
             perturbation_ratio: 0.0,
             step_size: 1.0,
-            dominant_body_pos: DVec3::ZERO,
+            anchor_body: 0,
+            anchor_body_pos: DVec3::ZERO,
         }
     }
 

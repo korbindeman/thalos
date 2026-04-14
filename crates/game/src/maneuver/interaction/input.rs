@@ -49,7 +49,7 @@ pub(in crate::maneuver) fn maneuver_input(
             *mode = InteractionMode::PlacingNode {
                 snap_time: None,
                 snap_world_pos: None,
-                snap_dominant_body: None,
+                snap_anchor_body: None,
             };
         }
     }
@@ -70,10 +70,10 @@ pub(in crate::maneuver) fn maneuver_input(
     };
     let Some(ref sim) = sim else { return };
     let Some(prediction) = sim.simulation.prediction() else {
-        if let InteractionMode::PlacingNode { snap_time, snap_world_pos, snap_dominant_body, .. } = &mut *mode {
+        if let InteractionMode::PlacingNode { snap_time, snap_world_pos, snap_anchor_body, .. } = &mut *mode {
             *snap_time = None;
             *snap_world_pos = None;
-            *snap_dominant_body = None;
+            *snap_anchor_body = None;
         }
         return;
     };
@@ -118,9 +118,15 @@ pub(in crate::maneuver) fn maneuver_input(
         InteractionMode::SlidingNode => {
             if mouse.pressed(MouseButton::Left) {
                 if let Some(sel_id) = selected.id {
-                    if let Some(closest) =
-                        closest_trail_point(prediction, states, &origin, camera, cam_transform, cursor_pos)
-                    {
+                    if let Some(closest) = closest_trail_point(
+                        prediction,
+                        states,
+                        &origin,
+                        &sim.system,
+                        camera,
+                        cam_transform,
+                        cursor_pos,
+                    ) {
                         writer.write(ManeuverEvent::SlideNode {
                             id: sel_id,
                             new_time: closest.time,
@@ -133,15 +139,22 @@ pub(in crate::maneuver) fn maneuver_input(
             }
         }
 
-        InteractionMode::PlacingNode { snap_time, snap_world_pos, snap_dominant_body } => {
-            let closest =
-                closest_trail_point(prediction, states, &origin, camera, cam_transform, cursor_pos);
+        InteractionMode::PlacingNode { snap_time, snap_world_pos, snap_anchor_body } => {
+            let closest = closest_trail_point(
+                prediction,
+                states,
+                &origin,
+                &sim.system,
+                camera,
+                cam_transform,
+                cursor_pos,
+            );
             *snap_time = closest.as_ref().map(|p| p.time);
             *snap_world_pos = closest.as_ref().map(|p| p.world_pos);
-            *snap_dominant_body = closest.as_ref().map(|p| p.dominant_body);
+            *snap_anchor_body = closest.as_ref().map(|p| p.anchor_body);
 
             if mouse.just_pressed(MouseButton::Left) {
-                if let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_dominant_body) {
+                if let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_anchor_body) {
                     writer.write(ManeuverEvent::PlaceNode {
                         trail_time,
                         reference_body,
@@ -161,6 +174,7 @@ pub(in crate::maneuver) fn maneuver_input(
             prediction,
             states,
             &origin,
+            &sim.system,
             camera,
             cam_transform,
             cursor_pos,

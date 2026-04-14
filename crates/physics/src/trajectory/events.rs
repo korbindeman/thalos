@@ -3,9 +3,9 @@
 //! Two different mechanisms operate on a propagated trajectory:
 //!
 //! 1. **Walking encounter detection** on a built [`NumericSegment`] — scans
-//!    consecutive samples for SOI entries (dominant-body id change), surface
+//!    consecutive samples for SOI entries (anchor-body id change), surface
 //!    impacts (distance-to-body < radius), and periapsis/apoapsis (sign flip
-//!    of `r · v` in the dominant-body frame). Uses the segment's own Hermite
+//!    of `r · v` in the anchor-body frame). Uses the segment's own Hermite
 //!    interpolation to refine the event epoch by bisection.
 //!
 //! 2. [`closest_approach`] — golden-section search over a [`Trajectory`] vs a
@@ -54,8 +54,8 @@ pub type TrajectoryEvent = Encounter;
 /// Walk a propagated segment and emit encounter records.
 ///
 /// Detection sources:
-/// - **SoiEntry / SoiExit**: consecutive samples disagree on `dominant_body`.
-/// - **SurfaceImpact**: distance to dominant body drops below its radius
+/// - **SoiEntry / SoiExit**: consecutive samples disagree on `anchor_body`.
+/// - **SurfaceImpact**: distance to anchor body drops below its radius
 ///   (the segment is also flagged via `collision_body`; the event carries the
 ///   exact epoch).
 /// - **Periapsis / Apoapsis**: sign flip of `(r_ship - r_body) · (v_ship -
@@ -81,10 +81,10 @@ pub(super) fn detect_segment_events(
         let b = pair[1];
 
         // 1. SOI transitions.
-        if a.dominant_body != b.dominant_body {
-            let kind = if is_child_of(bodies, b.dominant_body, a.dominant_body) {
+        if a.anchor_body != b.anchor_body {
+            let kind = if is_child_of(bodies, b.anchor_body, a.anchor_body) {
                 EncounterKind::SoiEntry
-            } else if is_child_of(bodies, a.dominant_body, b.dominant_body) {
+            } else if is_child_of(bodies, a.anchor_body, b.anchor_body) {
                 EncounterKind::SoiExit
             } else {
                 // Sibling SOI swap — count as an entry into the new body.
@@ -93,11 +93,11 @@ pub(super) fn detect_segment_events(
             let epoch = 0.5 * (a.time + b.time);
             if let (Some(craft), Some(body)) = (
                 segment.state_at(epoch),
-                query_body(ephemeris, b.dominant_body, epoch, &mut body_buf),
+                query_body(ephemeris, b.anchor_body, epoch, &mut body_buf),
             ) {
                 events.push(Encounter {
                     id: next_id(starting_id),
-                    body: b.dominant_body,
+                    body: b.anchor_body,
                     epoch,
                     kind,
                     craft_state: craft,
@@ -106,9 +106,9 @@ pub(super) fn detect_segment_events(
             }
         }
 
-        // 2. Periapsis / apoapsis on the dominant body.
-        if a.dominant_body == b.dominant_body {
-            let body_id = a.dominant_body;
+        // 2. Periapsis / apoapsis on the anchor body.
+        if a.anchor_body == b.anchor_body {
+            let body_id = a.anchor_body;
             let rv_a = radial_velocity(&a, ephemeris, &mut body_buf, body_id, a.time);
             let rv_b = radial_velocity(&b, ephemeris, &mut body_buf, body_id, b.time);
             if let (Some(rv_a), Some(rv_b)) = (rv_a, rv_b)

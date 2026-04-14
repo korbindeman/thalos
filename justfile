@@ -1,7 +1,7 @@
 # Thalos — orbital mechanics sandbox
 
 # Run the game
-run:
+game:
     cargo run -p thalos_game
 
 # Run the planet editor

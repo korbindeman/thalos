@@ -5,6 +5,7 @@ mod ghost_bodies;
 mod hud;
 mod maneuver;
 mod rendering;
+mod star_flare;
 mod target;
 mod trajectory_rendering;
 
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use bevy::asset::AssetPlugin;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
-use bevy::window::PresentMode;
+use bevy::window::{MonitorSelection, PresentMode, WindowMode};
 use thalos_physics::{
     body_state_provider::BodyStateProvider,
     patched_conics::PatchedConics,
@@ -136,6 +137,7 @@ fn main() {
                     primary_window: Some(Window {
                         title: "Thalos".into(),
                         present_mode: PresentMode::AutoNoVsync,
+                        mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
                         ..default()
                     }),
                     ..default()
@@ -164,6 +166,7 @@ fn main() {
         .add_plugins(bevy::prelude::MeshPickingPlugin)
         .add_plugins(PlanetRenderingPlugin)
         .add_plugins(CameraPlugin)
+        .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(BridgePlugin)
         .add_plugins(TrajectoryRenderingPlugin)

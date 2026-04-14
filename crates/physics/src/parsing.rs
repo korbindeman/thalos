@@ -112,9 +112,32 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             rotation_period_s: b.physical.rotation_period_s,
             axial_tilt_rad: b.physical.axial_tilt_deg.to_radians(),
             gm: G * b.physical.mass_kg,
+            soi_radius_m: 0.0, // filled below once all bodies exist
             orbital_elements,
             generator: b.generator,
         });
+    }
+
+    // SOI radius pass.  Needs parent mass, so do it after all bodies exist.
+    // r_SOI = a * (m / M_parent)^(2/5).  Root bodies (no parent) get
+    // f64::INFINITY so they always serve as the fallback anchor.
+    for i in 0..bodies.len() {
+        let soi = match bodies[i].parent {
+            None => f64::INFINITY,
+            Some(parent_id) => {
+                let parent_mass = bodies[parent_id].mass_kg;
+                let a = bodies[i]
+                    .orbital_elements
+                    .map(|o| o.semi_major_axis_m)
+                    .unwrap_or(0.0);
+                if a > 0.0 && parent_mass > 0.0 {
+                    a * (bodies[i].mass_kg / parent_mass).powf(0.4)
+                } else {
+                    0.0
+                }
+            }
+        };
+        bodies[i].soi_radius_m = soi;
     }
 
     // Build the ship state: 200 km altitude circular orbit around the homeworld.
