@@ -1,12 +1,12 @@
 # Thalos — orbital mechanics sandbox
 
-# Run the game
+# Run the game (dev build with dynamic linking for fast iteration)
 game:
-    cargo run -p thalos_game
+    cargo run -p thalos_game --features dev
 
 # Run the planet editor
 editor:
-    cargo run -p thalos_planet_editor
+    cargo run -p thalos_planet_editor --features dev
 
 # Build everything
 build:

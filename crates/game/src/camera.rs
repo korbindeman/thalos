@@ -1,5 +1,5 @@
 use bevy::core_pipeline::Skybox;
-use bevy::input::mouse::{AccumulatedMouseMotion, MouseWheel};
+use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension};
 use thalos_planet_rendering::space_camera_post_stack;
@@ -199,7 +199,11 @@ pub fn camera_input_system(
     let zoom_factor = ZOOM_FACTOR_MIN + (ZOOM_FACTOR_MAX - ZOOM_FACTOR_MIN) * t;
 
     for event in scroll_events.read() {
-        let ticks = event.y as f64;
+        let raw = event.y as f64;
+        let ticks = match event.unit {
+            MouseScrollUnit::Line => raw * 25.0,
+            MouseScrollUnit::Pixel => raw,
+        };
         let multiplier = (1.0 - zoom_factor * ticks).max(0.01);
         focus.target_distance =
             (focus.target_distance * multiplier).clamp(focus.min_distance, DISTANCE_MAX);

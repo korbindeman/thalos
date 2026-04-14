@@ -7,7 +7,7 @@ edition.workspace = true
 thalos_physics = { path = "../physics" }
 thalos_planet_rendering = { path = "../planet_rendering" }
 thalos_terrain_gen = { path = "../terrain_gen" }
-bevy = { version = "0.18", features = ["wayland", "dynamic_linking"] }
+bevy = { version = "0.18", features = ["wayland"] }
 bevy_egui = "0.39"
 tracing = "0.1"
 
@@ -16,3 +16,4 @@ tracing = "0.1"
 # Tracy streams to a running Tracy client over localhost.
 profile-chrome = ["bevy/trace_chrome"]
 profile-tracy = ["bevy/trace_tracy"]
+dev = ["bevy/dynamic_linking", "thalos_planet_rendering/dev"]
