@@ -22,13 +22,13 @@ pub fn space_camera_post_stack() -> impl Bundle {
         Hdr,
         Tonemapping::TonyMcMapface,
         Bloom {
-            intensity: 0.25,
+            intensity: 0.35,
             low_frequency_boost: 0.0,
             low_frequency_boost_curvature: 0.0,
             high_pass_frequency: 1.0,
             prefilter: BloomPrefilter {
-                threshold: 1.0,
-                threshold_softness: 0.2,
+                threshold: 0.6,
+                threshold_softness: 0.3,
             },
             composite_mode: BloomCompositeMode::Additive,
             ..Bloom::NATURAL

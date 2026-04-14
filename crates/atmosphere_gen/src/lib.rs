@@ -119,9 +119,11 @@ pub struct CloudDeck {
     #[serde(default = "default_band_contrast")]
     pub band_contrast: f32,
 
-    /// Exponent applied to the sharpened band-shape sine. Lower values
-    /// (0.25–0.35) give steeper belt/zone boundaries; higher values
-    /// (0.55+) soften them. Default matches Saturn.
+    /// Width of the colour blend zone between adjacent bands, in units
+    /// of a palette span. 1.0 = full smoothstep blend across the whole
+    /// span (soft, looks blurred at body scale). Smaller values squeeze
+    /// the blend into a narrower fraction of the span, producing crisp
+    /// Saturn-style band edges. 0.15–0.25 is a good range.
     #[serde(default = "default_band_sharpness")]
     pub band_sharpness: f32,
 
@@ -387,7 +389,7 @@ fn default_band_contrast() -> f32 {
     0.22
 }
 fn default_band_sharpness() -> f32 {
-    0.55
+    0.20
 }
 fn default_one() -> f32 {
     1.0

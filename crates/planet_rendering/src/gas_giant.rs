@@ -119,7 +119,9 @@ pub struct GasGiantLayers {
     /// luminance swing amplitude).
     pub tint: Vec4,
 
-    /// Band shaping. x = band_sharpness exponent, y..w = padding.
+    /// Band shaping. x = band edge transition narrowness (1.0 = full
+    /// smoothstep blend across a palette span, →0 = step-function edges
+    /// between adjacent bands). y..w = padding.
     pub band_shape_params: Vec4,
 
     /// Haze: xyz = tint, w = thickness. Thickness 0 disables the layer.
@@ -200,7 +202,7 @@ impl Default for GasGiantLayers {
             band_warp: 0.0,
             turbulence: 0.0,
             tint: Vec4::new(1.0, 1.0, 1.0, 0.22),
-            band_shape_params: Vec4::new(0.55, 0.0, 0.0, 0.0),
+            band_shape_params: Vec4::new(0.20, 0.0, 0.0, 0.0),
             haze_tint_thickness: Vec4::ZERO,
             haze_params: Vec4::ZERO,
             rim_color_intensity: Vec4::ZERO,

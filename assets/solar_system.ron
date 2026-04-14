@@ -63,18 +63,77 @@
                 body_age_gyr: 4.6,
                 pipeline: [
                     Differentiate(()),
+                    // Iron-rich Mercurian analog. Caloris-class giant basin
+                    // plus a scatter of older degraded basins. Slow rotator
+                    // with no strong tidal lock here, so basin placement is
+                    // random (no far-side bias like Mira).
+                    Megabasin((
+                        basins: [
+                            // 0: Caloris-class primary — dominant multi-ring
+                            // structure, ~47% of body radius.
+                            (center_dir: ( 0.55,  0.10,  0.83), radius_m: 380000.0, depth_m: 5200.0, ring_count: 4),
+                            // 1: older large basin, partially overprinted.
+                            (center_dir: (-0.70, -0.30, -0.65), radius_m: 240000.0, depth_m: 3800.0, ring_count: 3),
+                            // 2-5: degraded paleo-basins.
+                            (center_dir: ( 0.10,  0.78, -0.62), radius_m: 180000.0, depth_m: 2800.0, ring_count: 2),
+                            (center_dir: (-0.45,  0.55,  0.70), radius_m: 150000.0, depth_m: 2300.0, ring_count: 2),
+                            (center_dir: ( 0.30, -0.72,  0.62), radius_m: 120000.0, depth_m: 1800.0, ring_count: 1),
+                            (center_dir: (-0.85,  0.20,  0.49), radius_m: 100000.0, depth_m: 1500.0, ring_count: 1),
+                        ],
+                        hemispheric_lowering_m: 0.0,
+                    )),
+                    // Three-biome split modeled after Mercury:
+                    //   - heavily cratered iron-rich crust (dark, default),
+                    //   - intercrater plains (intermediate brightness, the
+                    //     volumetrically dominant Mercurian unit),
+                    //   - smooth plains (brighter volcanic infill around the
+                    //     Caloris-class basin and other low regions).
+                    // Rules are fbm fields so boundaries are fractal, not
+                    // disc cut-outs.
                     Biomes((
                         biomes: [
-                            (name: "iron_crust", albedo: 0.07, roughness: 0.75),
+                            // 0: smooth volcanic plains — brighter, slightly
+                            // warmer feldspathic/silicate veneer over iron.
+                            (
+                                name: "smooth_plains",
+                                albedo: 0.085,
+                                fresh_albedo: Some(0.17),
+                                tint: (1.05, 1.00, 0.94),
+                                tonal_amp: 0.22,
+                                roughness: 0.72,
+                            ),
+                            // 1: intercrater plains — intermediate, the
+                            // default Mercurian surface unit.
+                            (
+                                name: "intercrater_plains",
+                                albedo: 0.075,
+                                fresh_albedo: Some(0.14),
+                                tint: (1.02, 1.00, 0.97),
+                                tonal_amp: 0.24,
+                                roughness: 0.75,
+                            ),
+                            // 2: heavily cratered iron-rich crust — dark
+                            // oxidized iron-silicate, default catch-all.
+                            (
+                                name: "iron_crust",
+                                albedo: 0.065,
+                                fresh_albedo: Some(0.12),
+                                tint: (1.08, 0.98, 0.90),
+                                tonal_amp: 0.22,
+                                roughness: 0.78,
+                            ),
+                        ],
+                        rules: [
+                            Fbm(frequency: 2.6, threshold: 0.22, octaves: 4),
+                            Fbm(frequency: 1.8, threshold: 0.10, octaves: 4),
+                            Default,
                         ],
                     )),
                     Cratering((
-                        // Per-steradian density matches Mira's reference
-                        // (~22k craters/sr above ~3 texel widths). Slope
-                        // 2.0 = lunar production function above the small
-                        // knee. Max kept moderate so cookie-cut basins
-                        // don't pile up as pasted discs (basin-class
-                        // features belong in a future Megabasin stage).
+                        // Per-steradian density matches Mira (~22k craters/sr
+                        // above ~3 texel widths). Max capped at 80 km —
+                        // anything larger is basin-class and lives in the
+                        // Megabasin stage.
                         total_count: 280000,
                         sfd_slope: 2.0,
                         sfd_slope_small: None,
@@ -86,16 +145,54 @@
                         secondary_parent_radius_m: 40000.0,
                         secondaries_per_parent: 18,
                     )),
+                    // Smooth plains — Mercury-style effusive volcanic flood
+                    // infill pooling in basin interiors. Not as dark as
+                    // lunar mare (iron-rich crust is already dark), so the
+                    // mare albedo sits only slightly above the iron_crust
+                    // base. Wrinkle ridges on for that Mercurian character.
+                    MareFlood((
+                        target_count: 0,
+                        additional_crater_count: 18,
+                        fill_fraction: 0.60,
+                        near_side_bias: 0.0,
+                        boundary_noise_amplitude_m: 700.0,
+                        boundary_noise_freq: 9.0,
+                        episode_count: 2,
+                        wrinkle_ridges: true,
+                    )),
+                    // Lobate thrust scarps — Mercury's hallmark feature,
+                    // from >5 km global radius contraction as the iron core
+                    // cooled. Tall, long, and more numerous than on any
+                    // other body in the system.
+                    Scarps((
+                        count: 28,
+                        min_length_m: 120000.0,
+                        max_length_m: 420000.0,
+                        width_m: 6000.0,
+                        height_m: 1400.0,
+                        curvature: 0.12,
+                    )),
+                    Regolith((
+                        amplitude_m: 10.0,
+                        characteristic_wavelength_m: 130.0,
+                        crater_density_multiplier: 1.0,
+                        bake_d_min_m: 600.0,
+                        bake_scale: 1.0,
+                        density_modulation: 0.25,
+                        density_wavelength_m: 240000.0,
+                    )),
                     SpaceWeather((
-                        highland_mature_albedo: 0.07,
-                        highland_fresh_albedo: 0.12,
-                        mare_mature_albedo: 0.05,
-                        mare_fresh_albedo: 0.08,
-                        young_crater_age_threshold: 0.8,
-                        ray_age_threshold: 0.15,
-                        ray_extent_radii: 6.0,
-                        ray_count_per_crater: 10,
-                        ray_half_width: 0.05,
+                        // Biomes drive highland color — no grayscale override.
+                        mare_mature_albedo: 0.08,
+                        mare_fresh_albedo: 0.13,
+                        // Smooth plains weather slightly warmer than the
+                        // heavily cratered iron crust.
+                        mare_tint: (1.06, 1.00, 0.93),
+                        young_crater_age_threshold: 0.9,
+                        ray_age_threshold: 0.35,
+                        ray_extent_radii: 8.0,
+                        ray_count_per_crater: 12,
+                        ray_half_width: 0.055,
                     )),
                 ],
             )),
@@ -507,49 +604,46 @@
                         (lat:  0.60, color: (0.70, 0.60, 0.44)),
                         (lat:  1.00, color: (0.52, 0.58, 0.64)),
                     ],
-                    // Saturn's visible disk shows ~10 distinct
-                    // stripes at this scale. Each sine cycle is a
-                    // zone/belt pair, so `band_frequency = 5` packs
-                    // ~10 stripes pole-to-pole.
-                    // Base stripe count pole-to-pole. The shader
-                    // adds two harmonic sines on top of this
-                    // frequency, so the effective jet count is
-                    // higher and the widths are non-uniform.
-                    // Saturn shows ~20 jets pole-to-pole at this
-                    // scale; 13 base + harmonics lands near that.
-                    // Finer jets — Saturn shows many small bands per
-                    // hemisphere at cruise scale. 20 base + harmonics
-                    // packs ~30+ stripes pole-to-pole.
-                    band_frequency: 10.0,
+                    // ~32 jets pole-to-pole. The hue gradient is now
+                    // smooth (not a hue staircase), so the only cost
+                    // of more bands is more visible step edges from
+                    // the per-band luminance modulation. Saturn shows
+                    // many narrow jets at cruise scale.
+                    band_frequency: 16.0,
                     band_warp: 0.20,
                     // Low turbulence — gates streak, detail, and
                     // palette jitter amplitudes. Saturn reference has
                     // very subdued high-freq contrast.
                     turbulence: 0.05,
-                    // Now reinterpreted (see shader): this is the
-                    // per-band latitude step injected into the palette
-                    // lookup. Each jet discretizes a small monotone
-                    // jump along the palette gradient — no ± swing.
-                    band_contrast: 0.08,
-                    // Hard jet edges — Saturn's band transitions are
-                    // crisp steps, not smooth sines. Low sharpness
-                    // pushes the shape toward a square wave.
-                    band_sharpness: 0.30,
+                    // Per-band luminance step amplitude. Now drives an
+                    // alternating ± multiplier indexed by band id, so
+                    // adjacent jets read as a Saturn belt/zone pair.
+                    // 0.05 = ±5% luminance — visible crisp edges that
+                    // don't overpower the smooth hue gradient.
+                    band_contrast: 0.05,
+                    // No longer in use by the shader — kept for the
+                    // serde schema. Edge crispness is now a hard step
+                    // from the per-band luminance modulation.
+                    band_sharpness: 0.15,
                     // No grey/cool tint multiplier — the palette
                     // carries all the chromatic information.
                     tint: (1.00, 1.00, 1.00),
-                    // Differential rotation at a very small rate so
-                    // bands visibly drift at different speeds without
-                    // smearing the 3D noise field over session
-                    // timescales. The shear builds slowly — tens of
-                    // minutes for noticeable distortion, hours before
-                    // it's ugly.
+                    // Saturn-style zonal wind profile: strong eastward
+                    // equatorial superrotation flanked by alternating
+                    // prograde/retrograde jets at mid latitudes, quiet
+                    // poles. 16 stops so each jet at band_frequency=10
+                    // gets its own signed speed and adjacent bands
+                    // visibly counter-drift. Rate kept low so the noise
+                    // field doesn't smear within a play session — a few
+                    // minutes for clear differential motion, ~45 min
+                    // before high-shear bands start to look ugly.
                     speed_profile: [
-                        -0.15, 0.10, -0.25, 0.35,
-                         0.60,
-                         0.35, -0.25, 0.10, -0.15,
+                         0.05, -0.15,  0.25, -0.20,
+                         0.30, -0.25,  0.40,  0.85,
+                         1.00,  0.45, -0.30,  0.35,
+                        -0.25,  0.20, -0.15,  0.05,
                     ],
-                    differential_rotation_rate: 0.0008,
+                    differential_rotation_rate: 0.0012,
                     // Gentle pole turbulence, quiet equator — the
                     // old 1.0-at-poles profile made the high-latitude
                     // cloud bands rip apart into blobs.
@@ -693,9 +787,33 @@
                 body_age_gyr: 4.5,
                 pipeline: [
                     Differentiate(()),
+                    // Captured asteroid — small silicate body battered by
+                    // the full age of the system. Two prominent paleo-
+                    // basins up to ~1/3 body radius: captures of this size
+                    // routinely carry a dominant impact scar (Mathilde,
+                    // Lutetia, Vesta analog). No tidal lock; basin centers
+                    // are essentially random.
+                    Megabasin((
+                        basins: [
+                            // 0: dominant large impact, partially degraded.
+                            (center_dir: ( 0.42, -0.15,  0.90), radius_m: 62000.0, depth_m: 3200.0, ring_count: 2),
+                            // 1: older smaller basin on the opposite hemisphere.
+                            (center_dir: (-0.55,  0.48, -0.68), radius_m: 34000.0, depth_m: 1600.0, ring_count: 1),
+                            // 2: ancient, nearly erased.
+                            (center_dir: ( 0.20,  0.82,  0.53), radius_m: 22000.0, depth_m: 900.0, ring_count: 1),
+                        ],
+                        hemispheric_lowering_m: 0.0,
+                    )),
                     Biomes((
                         biomes: [
-                            (name: "captured_regolith", albedo: 0.13, roughness: 0.8),
+                            (
+                                name: "captured_regolith",
+                                albedo: 0.13,
+                                fresh_albedo: Some(0.26),
+                                tint: (1.02, 1.00, 0.97),
+                                tonal_amp: 0.26,
+                                roughness: 0.80,
+                            ),
                         ],
                     )),
                     Cratering((
@@ -709,6 +827,15 @@
                         cubemap_bake_threshold_m: 600.0,
                         secondary_parent_radius_m: 0.0,
                         secondaries_per_parent: 0,
+                    )),
+                    Regolith((
+                        amplitude_m: 5.0,
+                        characteristic_wavelength_m: 80.0,
+                        crater_density_multiplier: 1.0,
+                        bake_d_min_m: 240.0,
+                        bake_scale: 1.0,
+                        density_modulation: 0.25,
+                        density_wavelength_m: 55000.0,
                     )),
                     SpaceWeather((
                         highland_mature_albedo: 0.13,
@@ -751,9 +878,31 @@
                 body_age_gyr: 4.5,
                 pipeline: [
                     Differentiate(()),
+                    // Dark C-type captured on a retrograde inclined orbit.
+                    // One huge disrupting impact scar dominates — typical
+                    // of small carbonaceous bodies whose tensile strength
+                    // barely survives the largest cratering event.
+                    Megabasin((
+                        basins: [
+                            // 0: hemispheric near-disruption impact.
+                            (center_dir: (-0.25,  0.10,  0.96), radius_m: 48000.0, depth_m: 2600.0, ring_count: 2),
+                            // 1: older secondary basin.
+                            (center_dir: ( 0.68, -0.40, -0.62), radius_m: 24000.0, depth_m: 1100.0, ring_count: 1),
+                        ],
+                        hemispheric_lowering_m: 0.0,
+                    )),
                     Biomes((
                         biomes: [
-                            (name: "dark_carbonaceous", albedo: 0.05, roughness: 0.8),
+                            (
+                                name: "dark_carbonaceous",
+                                albedo: 0.05,
+                                fresh_albedo: Some(0.11),
+                                // Very slight red/warm cast — C-type
+                                // spectra are neutral-to-slightly-red.
+                                tint: (1.03, 1.00, 0.96),
+                                tonal_amp: 0.28,
+                                roughness: 0.82,
+                            ),
                         ],
                     )),
                     Cratering((
@@ -767,6 +916,15 @@
                         cubemap_bake_threshold_m: 400.0,
                         secondary_parent_radius_m: 0.0,
                         secondaries_per_parent: 0,
+                    )),
+                    Regolith((
+                        amplitude_m: 4.0,
+                        characteristic_wavelength_m: 70.0,
+                        crater_density_multiplier: 1.0,
+                        bake_d_min_m: 160.0,
+                        bake_scale: 1.0,
+                        density_modulation: 0.25,
+                        density_wavelength_m: 40000.0,
                     )),
                     SpaceWeather((
                         highland_mature_albedo: 0.05,
@@ -809,9 +967,27 @@
                 body_age_gyr: 4.5,
                 pipeline: [
                     Differentiate(()),
+                    // Very small irregular moon — one dominant near-
+                    // disrupting impact scar. At 75 km, a single basin of
+                    // ~30 km covers almost half the visible hemisphere and
+                    // is the defining feature.
+                    Megabasin((
+                        basins: [
+                            (center_dir: ( 0.30,  0.25,  0.92), radius_m: 30000.0, depth_m: 1800.0, ring_count: 2),
+                            (center_dir: (-0.55, -0.30, -0.78), radius_m: 16000.0, depth_m: 800.0, ring_count: 1),
+                        ],
+                        hemispheric_lowering_m: 0.0,
+                    )),
                     Biomes((
                         biomes: [
-                            (name: "captured_regolith", albedo: 0.08, roughness: 0.8),
+                            (
+                                name: "captured_regolith",
+                                albedo: 0.08,
+                                fresh_albedo: Some(0.17),
+                                tint: (1.02, 1.00, 0.97),
+                                tonal_amp: 0.28,
+                                roughness: 0.82,
+                            ),
                         ],
                     )),
                     Cratering((
@@ -831,6 +1007,15 @@
                         cubemap_bake_threshold_m: 475.0,
                         secondary_parent_radius_m: 0.0,
                         secondaries_per_parent: 0,
+                    )),
+                    Regolith((
+                        amplitude_m: 3.0,
+                        characteristic_wavelength_m: 50.0,
+                        crater_density_multiplier: 1.0,
+                        bake_d_min_m: 190.0,
+                        bake_scale: 1.0,
+                        density_modulation: 0.25,
+                        density_wavelength_m: 25000.0,
                     )),
                     SpaceWeather((
                         highland_mature_albedo: 0.08,
@@ -1167,9 +1352,68 @@
                 body_age_gyr: 4.6,
                 pipeline: [
                     Differentiate(()),
+                    // Dirty-ice moon of Erebos — tidally locked close-in
+                    // satellite. +Z = near-side. Large ancient impact on
+                    // the leading hemisphere plus scattered smaller basins.
+                    // Ice is much weaker than silicate, so basins are
+                    // shallower (depth/radius ratio) and relax over time.
+                    Megabasin((
+                        basins: [
+                            // 0: leading-hemisphere primary.
+                            (center_dir: ( 0.85,  0.10,  0.52), radius_m: 130000.0, depth_m: 3200.0, ring_count: 3),
+                            // 1: far-side older basin.
+                            (center_dir: (-0.40,  0.35, -0.85), radius_m: 80000.0, depth_m: 2000.0, ring_count: 2),
+                            // 2: degraded near-polar basin.
+                            (center_dir: ( 0.05,  0.88,  0.47), radius_m: 55000.0, depth_m: 1400.0, ring_count: 2),
+                            // 3-4: small overprinted scars.
+                            (center_dir: (-0.62, -0.55,  0.56), radius_m: 38000.0, depth_m: 900.0, ring_count: 1),
+                            (center_dir: ( 0.30, -0.80, -0.52), radius_m: 30000.0, depth_m: 700.0, ring_count: 1),
+                        ],
+                        hemispheric_lowering_m: 0.0,
+                    )),
+                    // Dirty-ice surface: three units reflecting how airless
+                    // icy regoliths actually look:
+                    //   - clean exposed ice (fresh tectonic ridges, bright),
+                    //   - dirty regolith (silicate dust lag over old ice),
+                    //   - cryo mantle (darker, volatile-rich patches).
+                    // Fbm rules give fractal boundaries instead of discs.
                     Biomes((
                         biomes: [
-                            (name: "dirty_ice", albedo: 0.45, roughness: 0.6),
+                            // 0: clean water ice — exposed ridges, fracture
+                            // scarps, bright cool-white with a faint blue cast.
+                            (
+                                name: "clean_ice",
+                                albedo: 0.62,
+                                fresh_albedo: Some(0.88),
+                                tint: (0.97, 1.00, 1.05),
+                                tonal_amp: 0.18,
+                                roughness: 0.55,
+                            ),
+                            // 1: cryo mantle — darker volatile-rich unit,
+                            // slightly reddish from organics/tholins.
+                            (
+                                name: "cryo_mantle",
+                                albedo: 0.28,
+                                fresh_albedo: Some(0.48),
+                                tint: (1.06, 1.00, 0.93),
+                                tonal_amp: 0.26,
+                                roughness: 0.70,
+                            ),
+                            // 2: dirty regolith — default catch-all, silicate
+                            // dust lag over old ice.
+                            (
+                                name: "dirty_ice",
+                                albedo: 0.42,
+                                fresh_albedo: Some(0.66),
+                                tint: (1.01, 1.00, 0.98),
+                                tonal_amp: 0.22,
+                                roughness: 0.62,
+                            ),
+                        ],
+                        rules: [
+                            Fbm(frequency: 3.2, threshold: 0.24, octaves: 4),
+                            Fbm(frequency: 2.0, threshold: 0.20, octaves: 4),
+                            Default,
                         ],
                     )),
                     Cratering((
@@ -1184,16 +1428,55 @@
                         secondary_parent_radius_m: 0.0,
                         secondaries_per_parent: 0,
                     )),
+                    // Cryovolcanic flood plains — Nyx sits deep in Erebos's
+                    // gravity well so tidal heating briefly melted near-
+                    // surface ice, flooding low regions with cryolava
+                    // (brine slush) that refroze into smooth plains. Much
+                    // darker than surrounding clean/dirty ice; wrinkle
+                    // ridges on for Europa/Ganymede-adjacent character.
+                    MareFlood((
+                        target_count: 0,
+                        additional_crater_count: 10,
+                        fill_fraction: 0.55,
+                        near_side_bias: 0.35,
+                        boundary_noise_amplitude_m: 450.0,
+                        boundary_noise_freq: 12.0,
+                        episode_count: 2,
+                        wrinkle_ridges: true,
+                    )),
+                    // Thermal-contraction scarps from the ice shell cooling
+                    // and freezing inward after the tidal heating episode.
+                    // Lower and shorter than Mercury's — ice can't sustain
+                    // the same elastic stress.
+                    Scarps((
+                        count: 16,
+                        min_length_m: 30000.0,
+                        max_length_m: 90000.0,
+                        width_m: 2500.0,
+                        height_m: 180.0,
+                        curvature: 0.08,
+                    )),
+                    Regolith((
+                        amplitude_m: 4.5,
+                        characteristic_wavelength_m: 85.0,
+                        crater_density_multiplier: 1.0,
+                        bake_d_min_m: 300.0,
+                        bake_scale: 1.0,
+                        density_modulation: 0.25,
+                        density_wavelength_m: 70000.0,
+                    )),
                     SpaceWeather((
-                        highland_mature_albedo: 0.45,
-                        highland_fresh_albedo: 0.70,
-                        mare_mature_albedo: 0.25,
-                        mare_fresh_albedo: 0.40,
-                        young_crater_age_threshold: 0.8,
-                        ray_age_threshold: 0.15,
+                        // Biomes drive highland color — no grayscale override.
+                        mare_mature_albedo: 0.24,
+                        mare_fresh_albedo: 0.42,
+                        // Cryolava plains weather slightly warm/brown from
+                        // organics concentrated at the refreezing front.
+                        mare_tint: (1.08, 1.00, 0.88),
+                        young_crater_age_threshold: 0.85,
+                        ray_age_threshold: 0.30,
                         ray_extent_radii: 10.0,
                         ray_count_per_crater: 14,
-                        ray_half_width: 0.05,
+                        ray_half_width: 0.055,
                     )),
                 ],
             )),

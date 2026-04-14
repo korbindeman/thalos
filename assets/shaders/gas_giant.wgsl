@@ -360,8 +360,12 @@ fn palette_lookup(lat: f32) -> vec3<f32> {
         if lat >= a.w && lat <= b.w {
             let span = max(b.w - a.w, 1e-6);
             let t = clamp((lat - a.w) / span, 0.0, 1.0);
-            // Smoothstep the interpolant so neighbouring palette regions
-            // blend without a visible crease at each stop.
+            // Smoothstep across the palette span. Hue is intentionally
+            // *smooth* between palette stops — the visible band edges
+            // come from a per-band luminance step layered on top in
+            // `cloud_deck_color`, not from sharpening this lookup. (If
+            // you sharpen here, the disc collapses into one flat zone
+            // per palette stop instead of showing every band.)
             let ts = t * t * (3.0 - 2.0 * t);
             return mix(a.xyz, b.xyz, ts);
         }
@@ -401,29 +405,27 @@ fn apply_named_vortices(p_in: vec3<f32>) -> VortexPass {
 }
 
 // Result of applying the edge vortex chain pass: an optionally
-// swirled sample position plus a multiplicative brightness factor
-// that lights the vortex centres as small pale spots. Without the
-// brightness output the vortices are invisible rotations of the
-// underlying noise; the spot term is what makes them read as
-// discrete features.
+// swirled sample position plus a per-channel colour multiplier that
+// shapes each eddy as a zonally elongated oval with a slightly warm
+// core and a faint darker rim — matches the look of real Jovian/
+// Saturnian band-shear vortices without reading as paint dots.
 struct EdgePass {
     pos:      vec3<f32>,
-    spot_mul: f32,
+    spot_mul: vec3<f32>,
 }
 
 // Hashed stateless edge vortex chain. Primitives spawn, grow, drift,
-// and fade along the latitude of the nearest band boundary. The doc
-// calls for spatial binning; we keep it band-indexed and check the
-// three longitude slots nearest the pixel's own longitude so the
-// per-pixel cost stays flat regardless of slot count.
+// and fade along the nearest band boundary. Each eddy has its own
+// lifecycle phase, size, latitude offset, and density gate so the
+// population reads as a natural scatter rather than a synced grid.
 fn apply_edge_vortices(p_in: vec3<f32>, t: f32) -> EdgePass {
     var p = p_in;
-    var spot = 1.0;
-    if layers.counts.z == 0u { return EdgePass(p, spot); }
+    var mul = vec3<f32>(1.0);
+    if layers.counts.z == 0u { return EdgePass(p, mul); }
     let slots = layers.counts.y;
-    if slots == 0u { return EdgePass(p, spot); }
+    if slots == 0u { return EdgePass(p, mul); }
     let bands = layers.band_frequency;
-    if bands <= 0.0 { return EdgePass(p, spot); }
+    if bands <= 0.0 { return EdgePass(p, mul); }
 
     let lifetime = max(layers.edge_chain.z, 1.0);
     let base_r = layers.edge_chain.x;
@@ -431,45 +433,104 @@ fn apply_edge_vortices(p_in: vec3<f32>, t: f32) -> EdgePass {
 
     let n = normalize(p);
     let lat = n.y;
-    // Nearest signed band boundary in [-1, 1]. Boundaries lie on the
-    // integer multiples of `1 / bands`.
     let b_idx = round(lat * bands);
     let b_lat = b_idx / bands;
-    if abs(lat - b_lat) > base_r * 2.5 { return EdgePass(p, spot); }
+    // Meridional reach includes lat jitter (≤0.7·base_r) plus the
+    // maximum meridional ellipse radius (~1.15·base_r). 3× covers it.
+    if abs(lat - b_lat) > base_r * 3.0 { return EdgePass(p, mul); }
+
+    // Per-band activity mask — only a fraction of boundaries host a
+    // chain, and each active band picks its own density.
+    let b_cell = u32(i32(b_idx) + 1024);
+    let band_seed = b_cell * 747796405u ^ layers.seed_lo;
+    if hash_f32(pcg(band_seed)) < 0.55 { return EdgePass(p, mul); }
+    let band_density = 0.25 + 0.55 * hash_f32(pcg(band_seed ^ 0xA5A5A5A5u));
 
     let lon = atan2(n.z, n.x);
     let lon_norm = lon / TAU + 0.5;
     let slot_f = lon_norm * f32(slots);
     let slot_center = i32(floor(slot_f));
-
     let i_slots = i32(slots);
+
     for (var ds = -1; ds <= 1; ds = ds + 1) {
         var s = (slot_center + ds) % i_slots;
         if s < 0 { s = s + i_slots; }
         let epoch = u32(floor(t / lifetime));
-        let b_cell = u32(i32(b_idx) + 1024);
         let seed_raw = (u32(s) * 2654435761u)
                      ^ (b_cell * 40503u)
                      ^ (epoch * 374761393u)
                      ^ layers.seed_lo;
-        let jitter = hash_f32(pcg(seed_raw));
-        let slot_lon = (f32(s) + jitter) / f32(slots) * TAU - PI;
-        let c = latlon_to_normal(b_lat, slot_lon);
-        let age = fract(t / lifetime);
-        let r = base_r * sin(age * PI);
-        let str = strength * sin(age * PI);
-        if r < 1e-4 { continue; }
-        let cosang = clamp(dot(n, c), -1.0, 1.0);
-        let ang = acos(cosang);
-        if ang < r {
-            let falloff = smoothstep(r, 0.0, ang);
-            // Vortex center is brighter than its rim, producing a
-            // small pale oval when viewed against a dark belt.
-            spot = spot + falloff * 0.45;
-            p = rotate_axis(p, c, str * falloff);
-        }
+        let h0 = pcg(seed_raw);
+        let h1 = pcg(h0 ^ 0x9e3779b9u);
+        let h2 = pcg(h1 ^ 0x85ebca6bu);
+        let h3 = pcg(h2 ^ 0xc2b2ae35u);
+        let h4 = pcg(h3 ^ 0x27d4eb2fu);
+        let h5 = pcg(h4 ^ 0x165667b1u);
+
+        // Density gate — most slots empty, population broken up.
+        if hash_f32(h0) > band_density { continue; }
+
+        let slot_jitter = hash_f32(h1);
+        let slot_lon = (f32(s) + slot_jitter) / f32(slots) * TAU - PI;
+        let lat_jitter = (hash_f32(h2) - 0.5) * base_r * 1.4;
+        let c_lat = clamp(b_lat + lat_jitter, -0.999, 0.999);
+        let c = latlon_to_normal(c_lat, slot_lon);
+
+        // Per-spot size and lifecycle phase — independent birth time
+        // kills the synced pulse across the population.
+        let size_mul = 0.35 + 1.30 * hash_f32(h3);
+        let phase_off = hash_f32(h4);
+        let age = fract(t / lifetime + phase_off);
+        let pulse = sin(age * PI);
+        if pulse < 1e-3 { continue; }
+        // Signed spin — half the vortices rotate the other way so
+        // neighbours don't all read as the same handedness.
+        let spin_sign = select(-1.0, 1.0, hash_f32(h5) > 0.5);
+
+        // Zonally elongated ellipse in the local tangent frame at the
+        // spot centre. Band-shear vortices stretch ~3:1 east-west;
+        // 2.2 / 0.7 is a readable approximation. Compare against the
+        // current (possibly already warped) sample position so
+        // overlapping vortices compose.
+        let rx = base_r * size_mul * 2.2 * pulse;
+        let ry = base_r * size_mul * 0.7 * pulse;
+        let east = normalize(vec3<f32>(-sin(slot_lon), 0.0, cos(slot_lon)));
+        let north = normalize(cross(east, c));
+        let n_cur = normalize(p);
+        let d_vec = n_cur - c;
+        let dx = dot(d_vec, east);
+        let dy = dot(d_vec, north);
+        let ed = sqrt((dx / rx) * (dx / rx) + (dy / ry) * (dy / ry));
+        if ed > 1.0 { continue; }
+
+        // Spiral swirl: inner rings rotate far more than outer, so
+        // the band colours shear into a visible cyclone. Angle drops
+        // to zero at the rim so the eddy blends cleanly into the
+        // surrounding flow.
+        let inner = 1.0 - smoothstep(0.0, 1.0, ed);
+        let rot_amt = strength * 3.0 * size_mul * pulse * inner * spin_sign;
+        let cs = cos(rot_amt);
+        let sn = sin(rot_amt);
+        let dx_r = cs * dx - sn * dy;
+        let dy_r = sn * dx + cs * dy;
+
+        // Meridional pinch: pulls the nearest band boundary inward
+        // so it visibly bows around the centre. Zonal axis barely
+        // compressed so the oval keeps its east-west shape.
+        let pinch = 0.55 * inner * inner * pulse;
+        let dx_p = dx_r * (1.0 - pinch * 0.12);
+        let dy_p = dy_r * (1.0 - pinch);
+
+        let warped = c + east * dx_p + north * dy_p;
+        p = normalize(warped);
+
+        // Very light core shade so the eddy is still legible when it
+        // sits inside a uniform band. No warm rim — the band
+        // distortion is the primary read.
+        let shade = mix(1.0, 0.90, inner * 0.6 * pulse);
+        mul = mul * vec3<f32>(shade);
     }
-    return EdgePass(p, spot);
+    return EdgePass(p, mul);
 }
 
 struct CloudDeckResult {
@@ -510,10 +571,21 @@ fn cloud_deck_color(p_local: vec3<f32>, t: f32) -> CloudDeckResult {
     // the Y axis at its own rate — retrograde belts go the other way
     // relative to bulk rotation. The bulk rotation itself is still
     // baked into `params.orientation`.
+    //
+    // The rate lookup is *quantized* to the band lattice: all pixels
+    // inside one band share the same `phi`, so the noise field rotates
+    // as a rigid strip with no intra-band shear. A continuous lat
+    // profile would otherwise shear the noise by `d(sample_speed)/dlat
+    // * diff_rate * t` per radian of latitude, growing without bound
+    // and aliasing into visible blur within minutes of sim time. The
+    // hard rate step at each band boundary coincides with the band
+    // staircase colour step downstream, so the seam is hidden.
     let diff_rate = layers.dynamics.x;
     if diff_rate != 0.0 && layers.counts.w == 1u {
         let lat0 = clamp(n.y, -1.0, 1.0);
-        let phi = sample_speed(lat0) * diff_rate * t;
+        let bands_for_rate = max(layers.band_frequency, 1.0);
+        let band_lat = clamp(round(lat0 * bands_for_rate) / bands_for_rate, -1.0, 1.0);
+        let phi = sample_speed(band_lat) * diff_rate * t;
         let cs = cos(phi);
         let sn = sin(phi);
         let px =  n.x * cs + n.z * sn;
@@ -625,17 +697,34 @@ fn cloud_deck_color(p_local: vec3<f32>, t: f32) -> CloudDeckResult {
     // disk so the staircase picks up subtle longitudinal variation.
     let hue_drift = fbm_3d(n * 4.0, seed ^ 0x51DE1u);
 
-    // Palette lookup at the quantized latitude. Small decorative
-    // perturbations keep each band's interior from being dead flat,
-    // but they do NOT alternate ± so the monotone read is preserved.
-    let hue_shift_lat = clamp(
-        quant_lat
+    // Hue: smooth palette lookup across the *un*-quantized warped
+    // latitude. The base hue gradient varies continuously pole-to-pole
+    // — band edges show up via the luminance step below, not via a
+    // hue staircase. Decorative noise perturbations add per-pixel
+    // wander without crossing band boundaries.
+    let hue_lat = clamp(
+        warped_lat
             + 0.020 * hue_drift
             + 0.012 * streak_fine * turb
             + 0.010 * streak_mid  * turb,
         -1.0, 1.0,
     );
-    var col = palette_lookup(hue_shift_lat);
+    var col = palette_lookup(hue_lat);
+
+    // ── Per-band luminance step ──────────────────────────────────
+    //
+    // Each quantized band gets a unique hashed luminance offset, so
+    // adjacent bands sit on different brightness plateaus and the
+    // edges read as crisp steps — but the offsets are random rather
+    // than ± alternating, which avoids the zebra pattern that strict
+    // alternation produces. `tint.w` (band_contrast) is the swing
+    // amplitude. Saturn's true-colour bands look like this: every jet
+    // has its own slightly different brightness, no obvious belt/zone
+    // metronome.
+    let band_idx_i = i32(round(lat_for_quant * bands));
+    let band_seed = u32(band_idx_i + 1024) * 747796405u ^ layers.seed_lo;
+    let band_rand = hash_f32(pcg(band_seed)) * 2.0 - 1.0;
+    col = col * (1.0 + layers.tint.w * band_rand);
 
     // Luminance pinstripe — the streak layers drive a multiplicative
     // swing on top of the palette so bright/dark fibres read across
@@ -991,6 +1080,24 @@ fn fragment(in: VertexOutput) -> FragOutput {
                 let lit_gate = clamp(n_dot_l, 0.0, 1.0);
                 let w = fresnel * lit_gate * lit_gate * fr_strength;
                 lit = mix(lit, lit * layers.fresnel_rim.xyz, clamp(w, 0.0, 1.0));
+            }
+
+            // ── Forward-scatter crescent ─────────────────────────
+            //
+            // Mie-like forward scatter from the atmosphere when the
+            // sun sits behind the planet relative to the camera.
+            // Paints a thin warm crescent around the unlit limb so
+            // the terminator does not cliff straight into black.
+            // Additive: the base `lit` is already ~0 on the night
+            // side, so there is nothing to blend against.
+            let fs_intensity = layers.rim_color_intensity.w;
+            if fs_intensity > 0.0 {
+                let phase = pow(max(dot(ray_dir, light_dir_ws), 0.0), 8.0);
+                let unlit_gate = smoothstep(0.15, -0.10, n_dot_l);
+                let rim_gate = pow(1.0 - clamp(n_dot_v, 0.0, 1.0), 3.0);
+                let w = phase * unlit_gate * rim_gate * fs_intensity
+                    * params.light_intensity * (1.0 / (4.0 * 3.14159265));
+                lit = lit + layers.rim_color_intensity.xyz * w;
             }
 
             // Apply ring shadow to the whole lit composite — sun
