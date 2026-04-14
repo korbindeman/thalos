@@ -252,15 +252,25 @@ impl BodyStateProvider for PatchedConics {
 
         match self.bodies[body_id].motion {
             BodyMotion::Keplerian(orbit) if orbit.parent_id == parent_id => {
-                let span = orbit.period_s.min((self.time_span - t0).max(0.0));
                 if num_samples == 0 {
                     return vec![keplerian_relative_state(&orbit, t0).position];
                 }
-
+                // Sample uniformly in eccentric anomaly, not time. Uniform-time
+                // sampling equals uniform mean anomaly — sparse at perihelion
+                // where the body moves fastest, causing jagged trails on
+                // eccentric orbits. Uniform E gives arc lengths proportional
+                // to sqrt((a sinE)^2 + (b cosE)^2), which is densest at
+                // peri/apo (high curvature) and sparser on the sides.
+                let a = orbit.semi_major_axis_m;
+                let b = a * orbit.sqrt_one_minus_e_sq;
+                let e = orbit.eccentricity;
                 (0..=num_samples)
                     .map(|i| {
-                        let t = t0 + (i as f64 / num_samples as f64) * span;
-                        keplerian_relative_state(&orbit, t).position
+                        let ecc = (i as f64 / num_samples as f64) * TAU;
+                        let (sin_e, cos_e) = ecc.sin_cos();
+                        let x = a * (cos_e - e);
+                        let y = b * sin_e;
+                        orbit.basis_p * x + orbit.basis_q * y
                     })
                     .collect()
             }
