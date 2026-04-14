@@ -57,6 +57,9 @@ fn main() {
             cubemap_bake_threshold_m: 2_500.0,
             secondary_parent_radius_m: 50_000.0,
             secondaries_per_parent: 25,
+            saturation_fraction: 0.05,
+            chain_count: 3,
+            chain_segment_count: 10,
         }),
         Box::new(MareFlood {
             target_count: 5,

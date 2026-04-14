@@ -40,6 +40,9 @@ fn mira_pipeline() -> Pipeline {
             cubemap_bake_threshold_m: 10_000.0,
             secondary_parent_radius_m: 50_000.0,
             secondaries_per_parent: 20,
+            saturation_fraction: 0.05,
+            chain_count: 3,
+            chain_segment_count: 10,
         }),
         Box::new(MareFlood {
             target_count: 5,

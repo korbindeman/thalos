@@ -3,7 +3,8 @@ use serde::Deserialize;
 
 use crate::body_builder::BodyBuilder;
 use crate::crater_profile::{
-    crater_dimensions, crater_profile, degradation_factor, morphology_for_radius,
+    crater_dimensions, crater_profile, degradation_factor, degradation_softness,
+    morphology_for_radius, SubPeaks,
 };
 use crate::cubemap::CubemapFace;
 use crate::seeding::Rng;
@@ -81,6 +82,80 @@ fn angular_noise(theta: f32, phases: &[f32; 4]) -> f32 {
         + 0.10 * (5.0 * theta + phases[3]).sin()
 }
 
+/// Per-bin saturation cull: walks √2-spaced diameter bins from largest
+/// down to smallest and removes the oldest craters in any bin whose
+/// population exceeds the equilibrium budget. The equilibrium SFD has
+/// cumulative slope -2 regardless of the production slope, so binning
+/// in factor-√2 steps keeps every bin's cap proportional to D⁻². Doc
+/// §2 (procedural_mira.md): "If density exceeds ~3% of geometric
+/// saturation, cull the oldest craters at that size."
+fn cull_to_saturation(craters: &mut Vec<Crater>, body_radius_m: f32, fraction: f32) {
+    if fraction <= 0.0 || craters.is_empty() {
+        return;
+    }
+    let area_km2 = 4.0 * std::f32::consts::PI * (body_radius_m * 1e-3).powi(2);
+    // 1.54 × D⁻² is the geometric-saturation cumulative density per km²
+    // (Gault 1970), so the body-wide cumulative budget at diameter D is
+    // `fraction × 1.54 × area_km2 / D²`.
+    let cap_const = fraction * 1.54 * area_km2;
+
+    let max_r = craters.iter().map(|c| c.radius_m).fold(0.0_f32, f32::max);
+    let min_r = craters
+        .iter()
+        .map(|c| c.radius_m)
+        .fold(f32::INFINITY, f32::min);
+    if max_r <= 0.0 || !min_r.is_finite() {
+        return;
+    }
+    let max_d_km = max_r * 2.0 * 1e-3;
+    let min_d_km = (min_r * 2.0 * 1e-3).max(1e-3);
+
+    let bin_step = std::f32::consts::SQRT_2;
+    let mut to_remove = vec![false; craters.len()];
+    let mut d_hi = max_d_km * bin_step; // open upper edge so the largest crater lands in the first bin
+    while d_hi > min_d_km {
+        let d_lo = d_hi / bin_step;
+        // Allowed count of craters whose diameter lies in [d_lo, d_hi).
+        // Differential of N(>D): allowed_in_bin ≈ cap(d_lo) - cap(d_hi).
+        let allowed = (cap_const / (d_lo * d_lo) - cap_const / (d_hi * d_hi)).max(0.0);
+
+        let mut bin: Vec<usize> = craters
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                if to_remove[*i] {
+                    return false;
+                }
+                let dk = c.radius_m * 2.0 * 1e-3;
+                dk >= d_lo && dk < d_hi
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if (bin.len() as f32) > allowed {
+            // Cull oldest first.
+            bin.sort_by(|&a, &b| {
+                craters[b]
+                    .age_gyr
+                    .partial_cmp(&craters[a].age_gyr)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let cull_count = bin.len() - (allowed.floor() as usize);
+            for &i in bin.iter().take(cull_count) {
+                to_remove[i] = true;
+            }
+        }
+        d_hi = d_lo;
+    }
+
+    let mut idx = 0;
+    craters.retain(|_| {
+        let keep = !to_remove[idx];
+        idx += 1;
+        keep
+    });
+}
+
 /// Hermite smoothstep: 0 at edge0, 1 at edge1, smooth in between.
 #[inline]
 fn smoothstep01(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -133,11 +208,31 @@ pub struct Cratering {
     pub secondary_parent_radius_m: f32,
     #[serde(default = "default_secondaries_per_parent")]
     pub secondaries_per_parent: u32,
+    /// Equilibrium saturation cap as a fraction of geometric saturation.
+    /// Geometric saturation (Gault 1970, Xiao & Werner 2015): cumulative
+    /// density `N_gs(>D) = 1.54 / D²` (D in km, per km²) ≈ 7.6% area
+    /// coverage. Real airless surfaces equilibrate at 1–5% of geometric
+    /// saturation; above the cap, crater destruction balances creation.
+    /// Set to 0 to skip culling. Default 0.05 = 5%.
+    #[serde(default = "default_saturation_fraction")]
+    pub saturation_fraction: f32,
+    /// Number of crater chains (catenae) to spawn. Chains are linear
+    /// strings of similar-sized craters formed by tidally-disrupted
+    /// impactors (e.g. Catena Davy, Catena Mendeleev) — rare but iconic
+    /// "I know that feature" surface markings. Set to 0 to disable.
+    #[serde(default = "default_chain_count")]
+    pub chain_count: u32,
+    /// Crater count per chain segment. Real catenae range 5–30. Default 10.
+    #[serde(default = "default_chain_segment_count")]
+    pub chain_segment_count: u32,
 }
 
 fn default_age_bias() -> f64 { 2.0 }
 fn default_secondary_parent_threshold() -> f32 { 50_000.0 }
 fn default_secondaries_per_parent() -> u32 { 20 }
+fn default_saturation_fraction() -> f32 { 0.05 }
+fn default_chain_count() -> u32 { 3 }
+fn default_chain_segment_count() -> u32 { 10 }
 
 impl Stage for Cratering {
     fn name(&self) -> &str { "cratering" }
@@ -304,6 +399,76 @@ impl Stage for Cratering {
             craters[i].age_gyr = (body_age_gyr as f64 * 0.08 * u) as f32;
         }
 
+        // Crater chains (catenae). Each chain is a great-circle string of
+        // similar-sized craters from a tidally-disrupted impactor train —
+        // think Comet Shoemaker-Levy 9 striking Jupiter, but at moon
+        // scales. Rare but visually iconic; even one or two per body adds
+        // a "real surface" detail that random Poisson placement misses.
+        // Chain craters land in the [bake_threshold, 2.5 × bake_threshold]
+        // radius band so the impostor sees them (the SSBO sees them all).
+        if self.chain_count > 0 && self.chain_segment_count > 0 {
+            let chain_min_r = self.cubemap_bake_threshold_m;
+            let chain_max_r = self.cubemap_bake_threshold_m * 2.5;
+            for _ in 0..self.chain_count {
+                let center = rng.unit_vector().as_vec3().normalize();
+                // Tangent basis at the chain's start point.
+                let up = if center.x.abs() < 0.9 {
+                    glam::Vec3::X
+                } else {
+                    glam::Vec3::Y
+                };
+                let tangent = up.cross(center).normalize();
+                let bitangent = center.cross(tangent);
+                // Random direction in tangent plane.
+                let phi = rng.next_f64() as f32 * std::f32::consts::TAU;
+                let dir = tangent * phi.cos() + bitangent * phi.sin();
+                // Chain age — chains are typically young (the impactor's
+                // disruption was a single recent event) so they're
+                // morphologically fresh and stand out.
+                let chain_age =
+                    (body_age_gyr as f64 * rng.next_f64() * 0.15) as f32;
+                // Pick a single base radius per chain so all members read
+                // as siblings; jitter ±25% per crater for variety.
+                let base_r = chain_min_r
+                    + rng.next_f64() as f32 * (chain_max_r - chain_min_r);
+                // Spacing in crater diameters along the great-circle arc.
+                let mut traveled_arc = 0.0_f32;
+                for _ in 0..self.chain_segment_count {
+                    // Step is 1.5–3.5 base diameters with jitter.
+                    let step_diam = 1.5 + rng.next_f64() as f32 * 2.0;
+                    let step_m = base_r * 2.0 * step_diam;
+                    traveled_arc += step_m / body_radius;
+                    let pos = (center * traveled_arc.cos()
+                        + dir * traveled_arc.sin())
+                        .normalize();
+                    let jitter = 1.0 + rng.next_f64_signed() as f32 * 0.25;
+                    let radius_m = (base_r * jitter).clamp(chain_min_r, chain_max_r);
+                    let (base_depth, base_rim) = crater_dimensions(radius_m);
+                    // Chain craters formed from low-velocity disrupted
+                    // impactor fragments — same shallow d/D as secondaries.
+                    const CHAIN_SCALE: f32 = 0.5;
+                    craters.push(Crater {
+                        center: pos,
+                        radius_m,
+                        depth_m: base_depth * CHAIN_SCALE,
+                        rim_height_m: base_rim * CHAIN_SCALE,
+                        age_gyr: (chain_age - rng.next_f64() as f32 * 0.005)
+                            .max(0.0),
+                        material_id: MAT_HIGHLAND,
+                    });
+                }
+            }
+        }
+
+        // Equilibrium saturation cap. Production-function sampling can
+        // far exceed real surface populations at small sizes; the cull
+        // brings every diameter bin down to ~`saturation_fraction` × the
+        // geometric saturation budget by removing the oldest craters
+        // first. Diffusive degradation already hides them visually, but
+        // keeping them in the SSBO wastes the per-fragment iteration
+        // budget and over-stamps the bake at small sizes.
+        cull_to_saturation(&mut craters, body_radius, self.saturation_fraction);
+
         // Sort oldest-first so younger craters stamp over older ones in the cubemap.
         craters.sort_by(|a, b| b.age_gyr.partial_cmp(&a.age_gyr).unwrap());
 
@@ -325,6 +490,11 @@ impl Stage for Cratering {
             rim_phases: [f32; 4],
             wall_phases: [f32; 4],
             peak_phases: [f32; 4],
+            /// Hashed sub-peak rubble bumps for the central peak (Complex
+            /// craters only). Real complex craters' central peaks are
+            /// multi-summit massifs, never smooth cones; these break the
+            /// cookie-cutter symmetry.
+            sub_peaks: SubPeaks,
             /// Azimuth (rad) pointing at the uprange side of the impact.
             /// Ejecta apron is suppressed within the wedge centered here,
             /// modelling the characteristic "zone of avoidance" of
@@ -335,6 +505,11 @@ impl Stage for Cratering {
             /// Obliqueness ∈ [0, 0.85]. Fraction of the apron that's
             /// carved away at the wedge center. 0 → uniform blanket.
             obliqueness: f32,
+            /// Morphology softening factor ∈ [0, 1] from
+            /// `degradation_softness`. Drives Pohn class progression
+            /// inside `crater_profile` — wider rim, narrower flat floor,
+            /// shrinking central peak, smoother walls.
+            softness: f32,
             /// Pre-Cratering terrain height at crater center. Used as the
             /// base elevation for absolute-mode interior writes so younger
             /// craters cookie-cut older ones overlapping their interior
@@ -370,6 +545,19 @@ impl Stage for Cratering {
                 // ratio distribution for real oblique impacts.
                 let oh = unit_from_seed(seed, 12);
                 let obliqueness = (oh * oh) * 0.85;
+                let softness = degradation_softness(c.radius_m, c.age_gyr);
+                // Hash 3 sub-peaks per crater. Position covers the inner
+                // ~80% of the peak base; amplitude in [0.25, 0.7] of the
+                // main peak height; sigma narrow enough to read as
+                // discrete summits, not a smooth bulge.
+                let mut sub_peaks: SubPeaks = Default::default();
+                for (i, sp) in sub_peaks.iter_mut().enumerate() {
+                    let ch = 20 + i as u64 * 5;
+                    sp.az = unit_from_seed(seed, ch) * tau;
+                    sp.r_frac = 0.25 + unit_from_seed(seed, ch + 1) * 0.55;
+                    sp.amp = 0.25 + unit_from_seed(seed, ch + 2) * 0.45;
+                    sp.sigma_frac = 0.18 + unit_from_seed(seed, ch + 3) * 0.18;
+                }
                 BakedCrater {
                     center,
                     radius_m: c.radius_m,
@@ -383,9 +571,11 @@ impl Stage for Cratering {
                     rim_phases: phases_from_seed(seed, 1),
                     wall_phases: phases_from_seed(seed, 2),
                     peak_phases: phases_from_seed(seed, 3),
+                    sub_peaks,
                     uprange_az,
                     wedge_half,
                     obliqueness,
+                    softness,
                     base_elevation_m,
                 }
             })
@@ -466,7 +656,10 @@ impl Stage for Cratering {
                                     c.morph,
                                     wall_phase,
                                     n_p,
+                                    theta,
+                                    &c.sub_peaks,
                                     ejecta_scale,
+                                    c.softness,
                                 );
 
                                 // Interior-absolute / exterior-additive blend.

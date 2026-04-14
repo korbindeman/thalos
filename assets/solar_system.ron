@@ -267,6 +267,18 @@
                         density_modulation: 0.25,
                         density_wavelength_m: 250000.0,
                     )),
+                    // Lobate thrust scarps from global cooling contraction.
+                    // Tidally-locked moons sustain a stable stress field, so
+                    // these are physically motivated. Subtle on the height
+                    // field but read strongly at terminator lighting.
+                    Scarps((
+                        count: 12,
+                        min_length_m: 80000.0,
+                        max_length_m: 220000.0,
+                        width_m: 4500.0,
+                        height_m: 220.0,
+                        curvature: 0.10,
+                    )),
                     SpaceWeather((
                         mare_mature_albedo: 0.05,
                         mare_fresh_albedo: 0.08,

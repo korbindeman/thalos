@@ -88,6 +88,16 @@ fn biome_fresh(b: &BiomeParams) -> f32 {
     b.fresh_albedo.unwrap_or(b.albedo * 1.9)
 }
 
+/// SplitMix64 — used here to hash a crater center direction into a
+/// per-crater pond pattern phase pair without pulling in `cratering.rs`.
+#[inline]
+fn sw_splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 impl Stage for SpaceWeather {
     fn name(&self) -> &str { "space_weather" }
     fn dependencies(&self) -> &[&str] { &["cratering"] }
@@ -278,19 +288,60 @@ impl Stage for SpaceWeather {
                     let f = freshness(crater.age_gyr, young_threshold);
                     let strength = PERSISTENCE_FLOOR + (1.0 - PERSISTENCE_FLOOR) * f;
 
+                    // Per-crater impact-melt pond hash. Real complex craters
+                    // show dark melt-pool patches on the floor (Copernicus,
+                    // Tycho); modelled here as low-freq angular + radial
+                    // noise that boosts the floor-darken in scattered
+                    // patches rather than uniformly across the floor.
+                    let tangent_basis_up = if center.y.abs() < 0.9 {
+                        Vec3::Y
+                    } else {
+                        Vec3::X
+                    };
+                    let crater_tangent = tangent_basis_up.cross(center).normalize();
+                    let crater_bitangent = center.cross(crater_tangent);
+                    let pond_seed = sw_splitmix64(
+                        (center.x.to_bits() as u64)
+                            ^ ((center.y.to_bits() as u64) << 17)
+                            ^ ((center.z.to_bits() as u64) << 33),
+                    );
+                    let pond_phase_a = (pond_seed as u32 as f32 / u32::MAX as f32)
+                        * std::f32::consts::TAU;
+                    let pond_phase_b = ((pond_seed >> 32) as u32 as f32
+                        / u32::MAX as f32)
+                        * std::f32::consts::TAU;
+                    let is_complex = radius_m >= 15_000.0;
+
                     for_face_texels_in_cap(
                         face,
                         res,
                         center,
                         cap_angle,
-                        |x, y, _dir, angular_dist| {
+                        |x, y, dir, angular_dist| {
                             let surface_dist = angular_dist * body_radius;
                             let t = surface_dist / radius_m;
 
                             let mut delta = 0.0_f32;
                             // Floor darken — linear falloff from center to 0.55 R.
                             if t < 0.55 {
-                                delta -= FLOOR_MAX * (1.0 - t / 0.55);
+                                let base = 1.0 - t / 0.55;
+                                let pond_boost = if is_complex {
+                                    let proj = dir - center * dir.dot(center);
+                                    let theta = proj
+                                        .dot(crater_bitangent)
+                                        .atan2(proj.dot(crater_tangent));
+                                    let n_az =
+                                        (3.0 * theta + pond_phase_a).sin()
+                                        + 0.5 * (5.0 * theta + pond_phase_b).sin();
+                                    let n_r =
+                                        (7.0 * t + pond_phase_a * 1.7).sin();
+                                    let pond = (n_az + n_r) * 0.4;
+                                    // Bias so only sparse patches darken.
+                                    (pond - 0.15).max(0.0) * 0.7
+                                } else {
+                                    0.0
+                                };
+                                delta -= FLOOR_MAX * base * (1.0 + pond_boost);
                             }
                             // Rim crest brighten — wider triangular band at t=1.
                             let lo = 1.0 - RIM_HALF;

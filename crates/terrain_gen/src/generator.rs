@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::stage::Stage;
 use crate::stages::{
-    Biomes, Cratering, Differentiate, MareFlood, Megabasin, Regolith, SpaceWeather,
+    Biomes, Cratering, Differentiate, MareFlood, Megabasin, Regolith, Scarps, SpaceWeather,
 };
 use crate::types::Composition;
 
@@ -28,6 +28,7 @@ pub enum StageDef {
     Cratering(Cratering),
     MareFlood(MareFlood),
     Regolith(Regolith),
+    Scarps(Scarps),
     SpaceWeather(SpaceWeather),
 }
 
@@ -40,6 +41,7 @@ impl StageDef {
             StageDef::Cratering(s)     => Box::new(s),
             StageDef::MareFlood(s)     => Box::new(s),
             StageDef::Regolith(s)      => Box::new(s),
+            StageDef::Scarps(s)        => Box::new(s),
             StageDef::SpaceWeather(s)  => Box::new(s),
         }
     }

@@ -55,7 +55,8 @@ use glam::Vec3;
 
 use crate::body_data::BodyData;
 use crate::crater_profile::{
-    crater_profile, degradation_factor, morphology_for_radius, smoothstep_range,
+    crater_profile, degradation_factor, degradation_softness, morphology_for_radius,
+    smoothstep_range, SubPeaks,
 };
 use crate::cubemap::dir_to_face_uv;
 use crate::spatial_index::FeatureRef;
@@ -263,7 +264,14 @@ fn crater_profile_at(crater: &Crater, dir: Vec3, body_radius_m: f32) -> Option<f
     let depth = crater.depth_m * degrad;
     let rim_h = crater.rim_height_m * degrad;
     let morph = morphology_for_radius(crater.radius_m);
-    Some(crater_profile(t, depth, rim_h, crater.radius_m, morph, 0.0, 0.0, 1.0))
+    let softness = degradation_softness(crater.radius_m, crater.age_gyr);
+    // SSBO sample path: no per-texel sub-peak rubble (the bake path
+    // hashes from the crater seed; here we just want the smooth profile).
+    let no_subs: SubPeaks = Default::default();
+    Some(crater_profile(
+        t, depth, rim_h, crater.radius_m, morph,
+        0.0, 0.0, 0.0, &no_subs, 1.0, softness,
+    ))
 }
 
 // ---------------------------------------------------------------------------

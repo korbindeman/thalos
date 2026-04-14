@@ -98,12 +98,20 @@ pub(crate) fn smoothstep_range(edge0: f32, edge1: f32, x: f32) -> f32 {
 
 const RIM_SIGMA: f32 = 0.13;
 const EJECTA_MAX_T: f32 = 5.0;
+/// Maximum widening of the rim ridge σ at full softness. Pohn & Offield
+/// class-1 ghost craters show rims that are barely distinguishable from
+/// the background — modelled here as a 4× wider Gaussian.
+const RIM_SOFT_BROADEN: f32 = 3.0;
 
 /// Narrow Gaussian ridge centered on the rim crest (t = 1), normalized
-/// so its peak value is 1.0. Width is controlled by `RIM_SIGMA`.
+/// so its peak value is 1.0. The base width is `RIM_SIGMA`; `softness ∈
+/// [0, 1]` widens the Gaussian linearly to model the diffusive rounding
+/// of degraded rims (an old crater shows a low broad scarp instead of a
+/// sharp ridge).
 #[inline]
-fn rim_ridge(t: f32) -> f32 {
-    let x = (t - 1.0) / RIM_SIGMA;
+fn rim_ridge(t: f32, softness: f32) -> f32 {
+    let sigma = RIM_SIGMA * (1.0 + softness * RIM_SOFT_BROADEN);
+    let x = (t - 1.0) / sigma;
     (-x * x).exp()
 }
 
@@ -118,12 +126,13 @@ fn rim_ridge(t: f32) -> f32 {
 /// Used by the bake loop to carve an uprange suppression wedge for oblique
 /// impacts. Angular ray streaks are an albedo phenomenon (exposed fresh
 /// material) and live in the SpaceWeather stage's albedo bake — never in
-/// the height channel.
+/// the height channel. `softness` widens the gate to match the broadened
+/// rim ridge, keeping the apron continuous with the crest.
 #[inline]
-fn ejecta_apron(t: f32, radius_m: f32, ejecta_scale: f32) -> f32 {
+fn ejecta_apron(t: f32, radius_m: f32, ejecta_scale: f32, softness: f32) -> f32 {
     if !(1.0..=EJECTA_MAX_T).contains(&t) { return 0.0; }
     let thickness = 0.14 * radius_m.powf(0.74) * t.powi(-3);
-    let gate = 1.0 - rim_ridge(t);
+    let gate = 1.0 - rim_ridge(t, softness);
     thickness * gate * ejecta_scale.max(0.0)
 }
 
@@ -133,16 +142,21 @@ fn ejecta_apron(t: f32, radius_m: f32, ejecta_scale: f32) -> f32 {
 /// at t ≈ 1, plus a McGetchin ejecta apron (1 ≤ t ≤ 5). The ridge is narrow
 /// and sits above the surrounding ejecta so the crest reads as a distinct
 /// topographic high — essential for crisp terminator shadows.
+///
+/// `softness ∈ [0, 1]` widens the rim ridge so degraded simple craters
+/// read as soft saucers. Bowl shape is unchanged because Simple is
+/// already morphologically minimal — only the rim sharpness varies.
 pub(crate) fn simple_profile(
     t: f32,
     depth: f32,
     rim_h: f32,
     radius_m: f32,
     ejecta_scale: f32,
+    softness: f32,
 ) -> f32 {
     let bowl = if t < 1.0 { -depth * (1.0 - t * t) } else { 0.0 };
-    let ridge = rim_h * rim_ridge(t);
-    bowl + ridge + ejecta_apron(t, radius_m, ejecta_scale)
+    let ridge = rim_h * rim_ridge(t, softness);
+    bowl + ridge + ejecta_apron(t, radius_m, ejecta_scale, softness)
 }
 
 /// Number of terraces in a complex crater wall. Real complex craters
@@ -184,6 +198,34 @@ fn terraced_ramp(s: f32, phase: f32) -> f32 {
 /// inverting the profile into a hole.
 const PEAK_WARP_EPS: f32 = 0.35;
 
+/// Number of off-center sub-peaks that ride on top of the main central
+/// peak. Real complex craters show clustered massifs (e.g. Tycho's
+/// central peak is a multi-summit ridge, not a smooth cone). Each sub-
+/// peak is a small Gaussian bump at a hashed offset; together they
+/// break the cookie-cutter symmetry without adding much cost.
+const SUB_PEAK_COUNT: u32 = 3;
+
+/// Sub-peak placement: angular offset and radial fraction of the parent
+/// peak's footprint. Hashed from the crater seed by the bake loop and
+/// passed in as `peak_subs`. The amplitude term is a fraction of the
+/// main peak height.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SubPeak {
+    /// Tangent-plane azimuth of the sub-peak (radians).
+    pub az: f32,
+    /// Radial offset from crater center as a fraction of `peak_t`.
+    /// Values in [0.2, 0.95] keep sub-peaks inside the main peak base.
+    pub r_frac: f32,
+    /// Sub-peak height as a fraction of the main `h_peak`.
+    pub amp: f32,
+    /// Sub-peak width (Gaussian σ) as a fraction of `peak_t`.
+    pub sigma_frac: f32,
+}
+
+/// Bundle of `SubPeak` data for a Complex crater. Fixed-size to avoid
+/// allocations in the bake hot path.
+pub(crate) type SubPeaks = [SubPeak; SUB_PEAK_COUNT as usize];
+
 /// Complex crater profile (flat floor, central peak, terraced wall).
 ///
 /// Additive decomposition mirroring `simple_profile`:
@@ -195,7 +237,15 @@ const PEAK_WARP_EPS: f32 = 0.35;
 ///
 /// `peak_noise ∈ [-1, 1]` is a per-texel angular noise sample used to warp
 /// the central peak's effective size so it reads as a rugged mountain
-/// instead of a smooth symmetric cone.
+/// instead of a smooth symmetric cone. `peak_subs` adds 0..N hashed sub-
+/// peak bumps for additional ruggedness; pass `&Default::default()` for a
+/// smooth peak.
+///
+/// `softness ∈ [0, 1]` lerps the morphology toward a soft Hermite saucer
+/// (Pohn class 1): the central peak shrinks, the flat floor narrows
+/// toward zero radius, terraces fade into a smooth wall ramp, and the
+/// rim ridge widens. At full softness only a smooth bowl remains.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn complex_profile(
     t: f32,
     depth: f32,
@@ -203,18 +253,27 @@ pub(crate) fn complex_profile(
     radius_m: f32,
     wall_phase: f32,
     peak_noise: f32,
+    peak_azimuth: f32,
+    peak_subs: &SubPeaks,
     ejecta_scale: f32,
+    softness: f32,
 ) -> f32 {
     let d_km = radius_m * 2.0 / 1000.0;
 
     // Krüger et al. (2018): h_peak = 0.0049 × D^1.297 km (D in km)
-    let h_peak = 4.9 * d_km.powf(1.297); // meters above the floor
+    let h_peak_pristine = 4.9 * d_km.powf(1.297); // meters above the floor
+    // Peak fades linearly with softness — fully degraded craters have no
+    // visible central peak.
+    let h_peak = h_peak_pristine * (1.0 - softness);
 
     // Pike (1977): D_floor = 0.187 × D^1.249 → t_floor = 0.187 × D^0.249
-    let t_floor = (0.187 * d_km.powf(0.249)).clamp(0.30, 0.75);
+    let t_floor_pristine = (0.187 * d_km.powf(0.249)).clamp(0.30, 0.75);
+    // Floor narrows toward zero so the wall ramp covers the whole interior
+    // at full softness, producing a smooth saucer.
+    let t_floor = t_floor_pristine * (1.0 - softness).max(1e-3);
 
     // t_peak = 0.168 (Krüger et al.)
-    let t_peak = 0.168_f32;
+    let t_peak_base = 0.168_f32 * (1.0 - softness * 0.5);
 
     // Angular warp on the peak: effective peak radius grows/shrinks with
     // azimuth, giving the central mountain an irregular footprint. A
@@ -222,24 +281,51 @@ pub(crate) fn complex_profile(
     // the interior of the peak down earlier. The warp amplitude also
     // modulates h_peak so shrunken lobes aren't unnaturally tall.
     let peak_warp = 1.0 + PEAK_WARP_EPS * peak_noise;
-    let peak_t = t_peak * peak_warp;
+    let peak_t = (t_peak_base * peak_warp).max(1e-4);
     let peak_h = h_peak * (0.75 + 0.25 * peak_warp);
 
     let base = if t < peak_t {
         let s = t / peak_t;
-        -depth + peak_h * (1.0 - s * s)
+        let main_peak = peak_h * (1.0 - s * s);
+        // Sub-peak rubble: each Gaussian bump at hashed offset (az, r_frac).
+        // Distance is computed in the local tangent frame using `peak_azimuth`
+        // as the texel's azimuth around crater center.
+        let mut sub_h = 0.0_f32;
+        if peak_h > 0.0 {
+            for sp in peak_subs.iter() {
+                if sp.amp <= 0.0 { continue; }
+                // Position of this sub-peak in (r/peak_t, azimuth) polar
+                // coordinates → squared chord distance to the texel.
+                let r_a = s;
+                let r_b = sp.r_frac;
+                let mut d_az = (peak_azimuth - sp.az).abs();
+                let pi = std::f32::consts::PI;
+                let tau = std::f32::consts::TAU;
+                if d_az > pi { d_az = tau - d_az; }
+                let dist2 =
+                    r_a * r_a + r_b * r_b - 2.0 * r_a * r_b * d_az.cos();
+                let sigma = sp.sigma_frac.max(0.05);
+                let g = (-dist2 / (2.0 * sigma * sigma)).exp();
+                sub_h += peak_h * sp.amp * g;
+            }
+        }
+        -depth + main_peak + sub_h
     } else if t < t_floor {
         -depth
     } else if t < 1.0 {
-        // Terraced wall ramp: -depth at t_floor → 0 at t = 1. The rim ridge
-        // adds the crest height on top.
+        // Wall ramp: -depth at t_floor → 0 at t = 1. The terraced ramp
+        // is lerped toward a smooth Hermite ramp by `softness` so degraded
+        // craters lose their stepped wall benches.
         let s = (t - t_floor) / (1.0 - t_floor);
-        -depth * (1.0 - terraced_ramp(s, wall_phase))
+        let stepped = terraced_ramp(s, wall_phase);
+        let smooth = s * s * (3.0 - 2.0 * s);
+        let ramp = stepped * (1.0 - softness) + smooth * softness;
+        -depth * (1.0 - ramp)
     } else {
         0.0
     };
 
-    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_scale)
+    base + rim_h * rim_ridge(t, softness) + ejecta_apron(t, radius_m, ejecta_scale, softness)
 }
 
 /// Peak-ring basin profile. Additive decomposition: interior base (with a
@@ -255,8 +341,11 @@ pub(crate) fn peak_ring_profile(
     radius_m: f32,
     wall_phase: f32,
     ejecta_scale: f32,
+    softness: f32,
 ) -> f32 {
-    let ring_h = depth * 0.2;
+    // Ring height fades with softness; large basins relax over Gyr but
+    // the floor itself stays roughly flat.
+    let ring_h = depth * 0.2 * (1.0 - softness);
     const T_RING_LO: f32 = 0.45;
     const T_RING_HI: f32 = 0.55;
     let base = if t < T_RING_LO {
@@ -266,11 +355,14 @@ pub(crate) fn peak_ring_profile(
         -depth + ring_h * (std::f32::consts::PI * s).sin()
     } else if t < 1.0 {
         let s = (t - T_RING_HI) / (1.0 - T_RING_HI);
-        -depth * (1.0 - terraced_ramp(s, wall_phase))
+        let stepped = terraced_ramp(s, wall_phase);
+        let smooth = s * s * (3.0 - 2.0 * s);
+        let ramp = stepped * (1.0 - softness) + smooth * softness;
+        -depth * (1.0 - ramp)
     } else {
         0.0
     };
-    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_scale)
+    base + rim_h * rim_ridge(t, softness) + ejecta_apron(t, radius_m, ejecta_scale, softness)
 }
 
 /// Multi-ring basin profile. Concentric interior rings at √2 diameter
@@ -285,13 +377,15 @@ pub(crate) fn multi_ring_profile(
     radius_m: f32,
     wall_phase: f32,
     ejecta_scale: f32,
+    softness: f32,
 ) -> f32 {
     let _ = wall_phase;
     const T_INNER: f32 = 0.5;
     const T_OUTER: f32 = std::f32::consts::FRAC_1_SQRT_2; // ≈ 0.707
     const RING_SIGMA: f32 = 0.05;
-    let inner_ring_h = depth * 0.15;
-    let outer_ring_h = depth * 0.10;
+    let ring_amp = 1.0 - softness;
+    let inner_ring_h = depth * 0.15 * ring_amp;
+    let outer_ring_h = depth * 0.10 * ring_amp;
     let base = if t < 1.0 {
         let bowl = -depth * (1.0 - t).clamp(0.0, 1.0);
         let g_inner = (-((t - T_INNER) / RING_SIGMA).powi(2)).exp();
@@ -300,19 +394,28 @@ pub(crate) fn multi_ring_profile(
     } else {
         0.0
     };
-    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_scale)
+    base + rim_h * rim_ridge(t, softness) + ejecta_apron(t, radius_m, ejecta_scale, softness)
 }
 
 /// Dispatch to the morphology-specific profile.
 ///
 /// `wall_phase` jitters terrace step boundaries for complex and larger
 /// morphologies (in [-1, 1]; pass 0.0 for unjittered). `peak_noise` warps
-/// the central peak shape for Complex craters (same range).
+/// the central peak shape for Complex craters (same range). `peak_azimuth`
+/// is the texel azimuth around the crater center used to position the
+/// hashed sub-peak rubble bumps in `peak_subs` (Complex only).
 ///
 /// `ejecta_scale ∈ [0, 1]` is a direct multiplier on the radial ejecta
 /// apron thickness. Pass 1.0 for the full uniform blanket; lower values
 /// are used by the bake loop to carve an uprange suppression wedge for
-/// oblique impacts. `wall_phase` and `peak_noise` are ignored by Simple.
+/// oblique impacts. `wall_phase`, `peak_noise`, `peak_azimuth`, and
+/// `peak_subs` are ignored by Simple.
+///
+/// `softness ∈ [0, 1]` softens crater morphology toward a bowl saucer
+/// to model diffusive degradation (Pohn & Offield class progression).
+/// Pass `degradation_softness(radius_m, age_gyr)` from the bake loop;
+/// pass 0.0 for the pristine shape.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn crater_profile(
     t: f32,
     depth: f32,
@@ -321,13 +424,19 @@ pub(crate) fn crater_profile(
     morph: Morphology,
     wall_phase: f32,
     peak_noise: f32,
+    peak_azimuth: f32,
+    peak_subs: &SubPeaks,
     ejecta_scale: f32,
+    softness: f32,
 ) -> f32 {
     match morph {
-        Morphology::Simple    => simple_profile(t, depth, rim_h, radius_m, ejecta_scale),
-        Morphology::Complex   => complex_profile(t, depth, rim_h, radius_m, wall_phase, peak_noise, ejecta_scale),
-        Morphology::PeakRing  => peak_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale),
-        Morphology::MultiRing => multi_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale),
+        Morphology::Simple    => simple_profile(t, depth, rim_h, radius_m, ejecta_scale, softness),
+        Morphology::Complex   => complex_profile(
+            t, depth, rim_h, radius_m, wall_phase, peak_noise,
+            peak_azimuth, peak_subs, ejecta_scale, softness,
+        ),
+        Morphology::PeakRing  => peak_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale, softness),
+        Morphology::MultiRing => multi_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale, softness),
     }
 }
 
@@ -368,6 +477,24 @@ const D_RELAX_THRESHOLD_M: f32 = 30_000.0;
 const D_RELAX_REF_M: f32 = 100_000.0;
 const RELAX_TAU_GYR: f32 = 3.0;
 
+/// Morphology softening factor ∈ [0, 1]. Independent of `degradation_factor`:
+///
+/// - `degradation_factor` shrinks crater amplitude (depth, rim height).
+/// - `degradation_softness` reshapes the morphology — wider rim, narrower
+///   floor, smaller central peak, smoother walls — toward a soft saucer.
+///
+/// Same diffusion kinetics (`κ ≈ 5.5 m²/Myr`) but with a separate constant
+/// chosen so visible softening kicks in well before total depth erasure.
+/// At default tuning, a 5 km crater at 3 Gyr is ~70% softened (clearly
+/// degraded) while a 30 km crater at the same age is barely affected
+/// (~3%) — matches the observed Pohn & Offield class spread.
+pub(crate) fn degradation_softness(radius_m: f32, age_gyr: f32) -> f32 {
+    let d_m = radius_m * 2.0;
+    let k = KAPPA_M2_PER_MYR * age_gyr * 1000.0;
+    const C_SOFT: f32 = 7270.0;
+    (1.0 - (-C_SOFT * k / (d_m * d_m)).exp()).clamp(0.0, 1.0)
+}
+
 pub(crate) fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
     let d_m = radius_m * 2.0;
 
@@ -388,21 +515,23 @@ pub(crate) fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
 mod tests {
     use super::*;
 
+    const NO_SUBS: SubPeaks = [SubPeak { az: 0.0, r_frac: 0.0, amp: 0.0, sigma_frac: 0.5 }; 3];
+
     #[test]
     fn simple_profile_shape() {
         let depth = 1000.0;
         let rim_h = 100.0;
         let radius_m = 5_000.0;
         // Center ≈ -depth
-        assert!((simple_profile(0.0, depth, rim_h, radius_m, 1.0) + depth).abs() < 1.0);
+        assert!((simple_profile(0.0, depth, rim_h, radius_m, 1.0, 0.0) + depth).abs() < 1.0);
         // Rim crest peaks at ≈ rim_h
-        let crest = simple_profile(1.0, depth, rim_h, radius_m, 1.0);
+        let crest = simple_profile(1.0, depth, rim_h, radius_m, 1.0, 0.0);
         assert!((crest - rim_h).abs() < 1.0, "crest={crest}");
         // Rim ridge stands above the exterior apron just outside
-        let outside = simple_profile(1.15, depth, rim_h, radius_m, 1.0);
+        let outside = simple_profile(1.15, depth, rim_h, radius_m, 1.0, 0.0);
         assert!(outside < crest, "outside={outside} crest={crest}");
         // Apron fades by 5R
-        assert!(simple_profile(5.5, depth, rim_h, radius_m, 1.0).abs() < 0.1);
+        assert!(simple_profile(5.5, depth, rim_h, radius_m, 1.0, 0.0).abs() < 0.1);
     }
 
     #[test]
@@ -410,9 +539,9 @@ mod tests {
         // For a 5 km crater the rim must be higher than both inside and
         // outside samples at ±0.2 rim units.
         let (depth, rim_h) = crater_dimensions(5_000.0);
-        let crest = simple_profile(1.0, depth, rim_h, 5_000.0, 1.0);
-        let inside = simple_profile(0.8, depth, rim_h, 5_000.0, 1.0);
-        let outside = simple_profile(1.2, depth, rim_h, 5_000.0, 1.0);
+        let crest = simple_profile(1.0, depth, rim_h, 5_000.0, 1.0, 0.0);
+        let inside = simple_profile(0.8, depth, rim_h, 5_000.0, 1.0, 0.0);
+        let outside = simple_profile(1.2, depth, rim_h, 5_000.0, 1.0, 0.0);
         assert!(crest > inside, "crest={crest} inside={inside}");
         assert!(crest > outside, "crest={crest} outside={outside}");
     }
@@ -428,9 +557,9 @@ mod tests {
         let t0 = t_floor + 0.05;
         let t1 = t_floor + 0.20;
         let t2 = t_floor + 0.35;
-        let h0 = complex_profile(t0, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
-        let h1 = complex_profile(t1, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
-        let h2 = complex_profile(t2, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
+        let h0 = complex_profile(t0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
+        let h1 = complex_profile(t1, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
+        let h2 = complex_profile(t2, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
         let secant = h0 + (h2 - h0) * ((t1 - t0) / (t2 - t0));
         assert!((h1 - secant).abs() > 1.0, "wall looks smooth: {h0} {h1} {h2}");
     }
@@ -440,8 +569,8 @@ mod tests {
         let depth = 3000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        let center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
-        let floor  = complex_profile(0.2, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
+        let center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
+        let floor  = complex_profile(0.2, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
         assert!(center > floor, "center={center} floor={floor}");
     }
 
@@ -450,8 +579,35 @@ mod tests {
         let depth = 1000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        assert!(complex_profile(4.0, depth, rim_h, radius_m, 0.0, 0.0, 1.0) > 0.0);
-        assert!(complex_profile(5.5, depth, rim_h, radius_m, 0.0, 0.0, 1.0).abs() < 0.01);
+        assert!(complex_profile(4.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0) > 0.0);
+        assert!(complex_profile(5.5, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn complex_softening_removes_peak() {
+        // At full softness the central peak must be gone — degraded
+        // complex craters read as smooth bowls.
+        let (depth, rim_h) = crater_dimensions(40_000.0);
+        let radius_m = 40_000.0;
+        let pristine_center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 0.0);
+        let soft_center     = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0, &NO_SUBS, 1.0, 1.0);
+        // Pristine: floor + central peak. Soft: just floor.
+        assert!(pristine_center > soft_center,
+            "pristine={pristine_center} soft={soft_center}");
+        // Soft-center should be at -depth (no peak above floor).
+        assert!((soft_center + depth).abs() < depth * 0.05,
+            "soft center should be ≈ -depth, got {soft_center}");
+    }
+
+    #[test]
+    fn complex_softening_widens_rim_ridge() {
+        // A degraded rim should be wider but lower at offsets from t=1.
+        let (_, rim_h) = crater_dimensions(20_000.0);
+        let r = 20_000.0;
+        let pristine_off = complex_profile(1.30, 0.0, rim_h, r, 0.0, 0.0, 0.0, &NO_SUBS, 0.0, 0.0);
+        let soft_off     = complex_profile(1.30, 0.0, rim_h, r, 0.0, 0.0, 0.0, &NO_SUBS, 0.0, 1.0);
+        assert!(soft_off > pristine_off,
+            "softened rim should still contribute at t=1.30: pristine={pristine_off} soft={soft_off}");
     }
 
     #[test]
@@ -462,9 +618,9 @@ mod tests {
         let depth = 4000.0;
         let rim_h = 800.0;
         let radius_m = 100_000.0;
-        let floor_in  = peak_ring_profile(0.30, depth, rim_h, radius_m, 0.0, 0.0);
-        let ring      = peak_ring_profile(0.50, depth, rim_h, radius_m, 0.0, 0.0);
-        let floor_out = peak_ring_profile(0.65, depth, rim_h, radius_m, 0.0, 0.0);
+        let floor_in  = peak_ring_profile(0.30, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let ring      = peak_ring_profile(0.50, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let floor_out = peak_ring_profile(0.65, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
         assert!(ring > floor_in,  "ring={ring} floor_in={floor_in}");
         assert!(ring > floor_out, "ring={ring} floor_out={floor_out}");
     }
@@ -476,11 +632,25 @@ mod tests {
         let depth = 6000.0;
         let rim_h = 1000.0;
         let radius_m = 200_000.0;
-        let inner  = multi_ring_profile(0.50,  depth, rim_h, radius_m, 0.0, 0.0);
-        let valley = multi_ring_profile(0.60,  depth, rim_h, radius_m, 0.0, 0.0);
-        let outer  = multi_ring_profile(0.707, depth, rim_h, radius_m, 0.0, 0.0);
+        let inner  = multi_ring_profile(0.50,  depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let valley = multi_ring_profile(0.60,  depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let outer  = multi_ring_profile(0.707, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
         assert!(inner > valley, "inner={inner} valley={valley}");
         assert!(outer > valley, "outer={outer} valley={valley}");
+    }
+
+    #[test]
+    fn degradation_softness_small_old_crater_is_softened() {
+        // 5 km crater at 3 Gyr → ~70% softened (Pohn class 3-4 ish).
+        let s = degradation_softness(2_500.0, 3.0);
+        assert!(s > 0.6, "softness={s}");
+    }
+
+    #[test]
+    fn degradation_softness_large_crater_resists() {
+        // 30 km crater at 3 Gyr → barely softened.
+        let s = degradation_softness(15_000.0, 3.0);
+        assert!(s < 0.2, "softness={s}");
     }
 
     #[test]
