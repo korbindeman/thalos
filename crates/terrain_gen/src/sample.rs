@@ -263,7 +263,7 @@ fn crater_profile_at(crater: &Crater, dir: Vec3, body_radius_m: f32) -> Option<f
     let depth = crater.depth_m * degrad;
     let rim_h = crater.rim_height_m * degrad;
     let morph = morphology_for_radius(crater.radius_m);
-    Some(crater_profile(t, depth, rim_h, crater.radius_m, morph, 0.0, 0.0, 0.0))
+    Some(crater_profile(t, depth, rim_h, crater.radius_m, morph, 0.0, 0.0, 1.0))
 }
 
 // ---------------------------------------------------------------------------

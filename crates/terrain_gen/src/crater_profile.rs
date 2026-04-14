@@ -114,18 +114,17 @@ fn rim_ridge(t: f32) -> f32 {
 /// time the rim ridge has faded — so the apron sits below the crest and
 /// never produces a discontinuity.
 ///
-/// `ejecta_mod ∈ [-1, 1]` modulates the radial apron angularly, turning
-/// the otherwise uniform trapezoidal halo into streaky rays. Values near
-/// +1 boost the apron (ray crests), near -1 suppress it entirely (gaps
-/// between rays), so the resulting apron reads as discrete brush strokes
-/// radiating outward instead of a continuous circular disk.
+/// `ejecta_scale ∈ [0, 1]` is a direct multiplier on the apron thickness.
+/// Used by the bake loop to carve an uprange suppression wedge for oblique
+/// impacts. Angular ray streaks are an albedo phenomenon (exposed fresh
+/// material) and live in the SpaceWeather stage's albedo bake — never in
+/// the height channel.
 #[inline]
-fn ejecta_apron(t: f32, radius_m: f32, ejecta_mod: f32) -> f32 {
+fn ejecta_apron(t: f32, radius_m: f32, ejecta_scale: f32) -> f32 {
     if !(1.0..=EJECTA_MAX_T).contains(&t) { return 0.0; }
     let thickness = 0.14 * radius_m.powf(0.74) * t.powi(-3);
     let gate = 1.0 - rim_ridge(t);
-    let streak = (0.5 + ejecta_mod).max(0.0);
-    thickness * gate * streak
+    thickness * gate * ejecta_scale.max(0.0)
 }
 
 /// Simple (bowl-shaped) crater profile.
@@ -139,11 +138,11 @@ pub(crate) fn simple_profile(
     depth: f32,
     rim_h: f32,
     radius_m: f32,
-    ejecta_mod: f32,
+    ejecta_scale: f32,
 ) -> f32 {
     let bowl = if t < 1.0 { -depth * (1.0 - t * t) } else { 0.0 };
     let ridge = rim_h * rim_ridge(t);
-    bowl + ridge + ejecta_apron(t, radius_m, ejecta_mod)
+    bowl + ridge + ejecta_apron(t, radius_m, ejecta_scale)
 }
 
 /// Number of terraces in a complex crater wall. Real complex craters
@@ -204,7 +203,7 @@ pub(crate) fn complex_profile(
     radius_m: f32,
     wall_phase: f32,
     peak_noise: f32,
-    ejecta_mod: f32,
+    ejecta_scale: f32,
 ) -> f32 {
     let d_km = radius_m * 2.0 / 1000.0;
 
@@ -240,75 +239,80 @@ pub(crate) fn complex_profile(
         0.0
     };
 
-    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_mod)
+    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_scale)
 }
 
 /// Peak-ring basin profile. Additive decomposition: interior base (with a
 /// peak ring replacing the central peak) + rim ridge + ejecta apron.
+///
+/// Ring sits at t ≈ 0.5 — empirical ring-to-rim diameter ratio ≈ 0.47 for
+/// real peak-ring basins (Schrödinger: 150/320; Pike & Spudis 1987). The
+/// ring is a narrow sinusoidal bump between t_floor and t_wall.
 pub(crate) fn peak_ring_profile(
     t: f32,
     depth: f32,
     rim_h: f32,
     radius_m: f32,
     wall_phase: f32,
-    ejecta_mod: f32,
+    ejecta_scale: f32,
 ) -> f32 {
     let ring_h = depth * 0.2;
-    let base = if t < 0.25 {
+    const T_RING_LO: f32 = 0.45;
+    const T_RING_HI: f32 = 0.55;
+    let base = if t < T_RING_LO {
         -depth
-    } else if t < 0.35 {
-        let s = (t - 0.25) / 0.1;
+    } else if t < T_RING_HI {
+        let s = (t - T_RING_LO) / (T_RING_HI - T_RING_LO);
         -depth + ring_h * (std::f32::consts::PI * s).sin()
-    } else if t < 0.55 {
-        -depth
     } else if t < 1.0 {
-        let s = (t - 0.55) / 0.45;
+        let s = (t - T_RING_HI) / (1.0 - T_RING_HI);
         -depth * (1.0 - terraced_ramp(s, wall_phase))
     } else {
         0.0
     };
-    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_mod)
+    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_scale)
 }
 
-/// Multi-ring basin profile. Concentric rings at √2 spacing would be ideal
-/// but require per-crater ring count bookkeeping; this simplified form
-/// produces two interior rings plus the outer rim crest.
+/// Multi-ring basin profile. Concentric interior rings at √2 diameter
+/// spacing (Pike & Spudis 1987): with the rim at t=1, rings fall at
+/// t = 1/√2 ≈ 0.707 and t = 0.5. Modelled as two Gaussian bumps on a
+/// smooth shallow bowl — multi-ring basins are heavily isostatically
+/// relaxed and do not show terraced walls.
 pub(crate) fn multi_ring_profile(
     t: f32,
     depth: f32,
     rim_h: f32,
     radius_m: f32,
     wall_phase: f32,
-    ejecta_mod: f32,
+    ejecta_scale: f32,
 ) -> f32 {
+    let _ = wall_phase;
+    const T_INNER: f32 = 0.5;
+    const T_OUTER: f32 = std::f32::consts::FRAC_1_SQRT_2; // ≈ 0.707
+    const RING_SIGMA: f32 = 0.05;
     let inner_ring_h = depth * 0.15;
     let outer_ring_h = depth * 0.10;
-    let base = if t < 0.2 {
-        -depth
-    } else if t < 0.3 {
-        let s = (t - 0.2) / 0.1;
-        -depth + inner_ring_h * (std::f32::consts::PI * s).sin()
-    } else if t < 0.5 {
-        -depth * 0.9
-    } else if t < 0.6 {
-        let s = (t - 0.5) / 0.1;
-        -depth * 0.9 + outer_ring_h * (std::f32::consts::PI * s).sin()
-    } else if t < 1.0 {
-        let s = (t - 0.6) / 0.4;
-        -depth * 0.5 * (1.0 - terraced_ramp(s, wall_phase))
+    let base = if t < 1.0 {
+        let bowl = -depth * (1.0 - t).clamp(0.0, 1.0);
+        let g_inner = (-((t - T_INNER) / RING_SIGMA).powi(2)).exp();
+        let g_outer = (-((t - T_OUTER) / RING_SIGMA).powi(2)).exp();
+        bowl + inner_ring_h * g_inner + outer_ring_h * g_outer
     } else {
         0.0
     };
-    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_mod)
+    base + rim_h * rim_ridge(t) + ejecta_apron(t, radius_m, ejecta_scale)
 }
 
 /// Dispatch to the morphology-specific profile.
 ///
 /// `wall_phase` jitters terrace step boundaries for complex and larger
-/// morphologies. `peak_noise` warps the central peak shape for Complex
-/// craters. `ejecta_mod` modulates the ejecta apron angularly into
-/// radial streaks. All in [-1, 1]; pass 0.0 for the unwarped profile.
-/// `wall_phase` and `peak_noise` are ignored by `Simple`.
+/// morphologies (in [-1, 1]; pass 0.0 for unjittered). `peak_noise` warps
+/// the central peak shape for Complex craters (same range).
+///
+/// `ejecta_scale ∈ [0, 1]` is a direct multiplier on the radial ejecta
+/// apron thickness. Pass 1.0 for the full uniform blanket; lower values
+/// are used by the bake loop to carve an uprange suppression wedge for
+/// oblique impacts. `wall_phase` and `peak_noise` are ignored by Simple.
 pub(crate) fn crater_profile(
     t: f32,
     depth: f32,
@@ -317,13 +321,13 @@ pub(crate) fn crater_profile(
     morph: Morphology,
     wall_phase: f32,
     peak_noise: f32,
-    ejecta_mod: f32,
+    ejecta_scale: f32,
 ) -> f32 {
     match morph {
-        Morphology::Simple    => simple_profile(t, depth, rim_h, radius_m, ejecta_mod),
-        Morphology::Complex   => complex_profile(t, depth, rim_h, radius_m, wall_phase, peak_noise, ejecta_mod),
-        Morphology::PeakRing  => peak_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_mod),
-        Morphology::MultiRing => multi_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_mod),
+        Morphology::Simple    => simple_profile(t, depth, rim_h, radius_m, ejecta_scale),
+        Morphology::Complex   => complex_profile(t, depth, rim_h, radius_m, wall_phase, peak_noise, ejecta_scale),
+        Morphology::PeakRing  => peak_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale),
+        Morphology::MultiRing => multi_ring_profile(t, depth, rim_h, radius_m, wall_phase, ejecta_scale),
     }
 }
 
@@ -390,15 +394,15 @@ mod tests {
         let rim_h = 100.0;
         let radius_m = 5_000.0;
         // Center ≈ -depth
-        assert!((simple_profile(0.0, depth, rim_h, radius_m, 0.0) + depth).abs() < 1.0);
+        assert!((simple_profile(0.0, depth, rim_h, radius_m, 1.0) + depth).abs() < 1.0);
         // Rim crest peaks at ≈ rim_h
-        let crest = simple_profile(1.0, depth, rim_h, radius_m, 0.0);
+        let crest = simple_profile(1.0, depth, rim_h, radius_m, 1.0);
         assert!((crest - rim_h).abs() < 1.0, "crest={crest}");
         // Rim ridge stands above the exterior apron just outside
-        let outside = simple_profile(1.15, depth, rim_h, radius_m, 0.0);
+        let outside = simple_profile(1.15, depth, rim_h, radius_m, 1.0);
         assert!(outside < crest, "outside={outside} crest={crest}");
         // Apron fades by 5R
-        assert!(simple_profile(5.5, depth, rim_h, radius_m, 0.0).abs() < 0.1);
+        assert!(simple_profile(5.5, depth, rim_h, radius_m, 1.0).abs() < 0.1);
     }
 
     #[test]
@@ -406,9 +410,9 @@ mod tests {
         // For a 5 km crater the rim must be higher than both inside and
         // outside samples at ±0.2 rim units.
         let (depth, rim_h) = crater_dimensions(5_000.0);
-        let crest = simple_profile(1.0, depth, rim_h, 5_000.0, 0.0);
-        let inside = simple_profile(0.8, depth, rim_h, 5_000.0, 0.0);
-        let outside = simple_profile(1.2, depth, rim_h, 5_000.0, 0.0);
+        let crest = simple_profile(1.0, depth, rim_h, 5_000.0, 1.0);
+        let inside = simple_profile(0.8, depth, rim_h, 5_000.0, 1.0);
+        let outside = simple_profile(1.2, depth, rim_h, 5_000.0, 1.0);
         assert!(crest > inside, "crest={crest} inside={inside}");
         assert!(crest > outside, "crest={crest} outside={outside}");
     }
@@ -424,9 +428,9 @@ mod tests {
         let t0 = t_floor + 0.05;
         let t1 = t_floor + 0.20;
         let t2 = t_floor + 0.35;
-        let h0 = complex_profile(t0, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
-        let h1 = complex_profile(t1, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
-        let h2 = complex_profile(t2, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let h0 = complex_profile(t0, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
+        let h1 = complex_profile(t1, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
+        let h2 = complex_profile(t2, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
         let secant = h0 + (h2 - h0) * ((t1 - t0) / (t2 - t0));
         assert!((h1 - secant).abs() > 1.0, "wall looks smooth: {h0} {h1} {h2}");
     }
@@ -436,8 +440,8 @@ mod tests {
         let depth = 3000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        let center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
-        let floor  = complex_profile(0.2, depth, rim_h, radius_m, 0.0, 0.0, 0.0);
+        let center = complex_profile(0.0, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
+        let floor  = complex_profile(0.2, depth, rim_h, radius_m, 0.0, 0.0, 1.0);
         assert!(center > floor, "center={center} floor={floor}");
     }
 
@@ -446,8 +450,37 @@ mod tests {
         let depth = 1000.0;
         let rim_h = 500.0;
         let radius_m = 30_000.0;
-        assert!(complex_profile(4.0, depth, rim_h, radius_m, 0.0, 0.0, 0.0) > 0.0);
-        assert!(complex_profile(5.5, depth, rim_h, radius_m, 0.0, 0.0, 0.0).abs() < 0.01);
+        assert!(complex_profile(4.0, depth, rim_h, radius_m, 0.0, 0.0, 1.0) > 0.0);
+        assert!(complex_profile(5.5, depth, rim_h, radius_m, 0.0, 0.0, 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn peak_ring_basin_has_ring_near_half_radius() {
+        // Peak-ring basins: interior ring sits at t ≈ 0.5 (Schrödinger
+        // analogue; Pike & Spudis 1987). The ring must lie higher than
+        // the surrounding floor at t=0.3 and t=0.65.
+        let depth = 4000.0;
+        let rim_h = 800.0;
+        let radius_m = 100_000.0;
+        let floor_in  = peak_ring_profile(0.30, depth, rim_h, radius_m, 0.0, 0.0);
+        let ring      = peak_ring_profile(0.50, depth, rim_h, radius_m, 0.0, 0.0);
+        let floor_out = peak_ring_profile(0.65, depth, rim_h, radius_m, 0.0, 0.0);
+        assert!(ring > floor_in,  "ring={ring} floor_in={floor_in}");
+        assert!(ring > floor_out, "ring={ring} floor_out={floor_out}");
+    }
+
+    #[test]
+    fn multi_ring_basin_rings_at_sqrt2_spacing() {
+        // Two interior rings at t = 0.5 and t = 1/√2 ≈ 0.707 must both
+        // sit above the valley at t = 0.6 between them.
+        let depth = 6000.0;
+        let rim_h = 1000.0;
+        let radius_m = 200_000.0;
+        let inner  = multi_ring_profile(0.50,  depth, rim_h, radius_m, 0.0, 0.0);
+        let valley = multi_ring_profile(0.60,  depth, rim_h, radius_m, 0.0, 0.0);
+        let outer  = multi_ring_profile(0.707, depth, rim_h, radius_m, 0.0, 0.0);
+        assert!(inner > valley, "inner={inner} valley={valley}");
+        assert!(outer > valley, "outer={outer} valley={valley}");
     }
 
     #[test]

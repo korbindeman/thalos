@@ -1,26 +1,33 @@
-use fastnoise2::generator::cellular::CellularDistanceReturnType;
 use fastnoise2::generator::prelude::*;
-use fastnoise2::generator::DistanceFunction;
 use fastnoise2::SafeNode;
 use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::CubemapFace;
+use crate::sample::sample_detail_noise;
 use crate::stage::Stage;
 use crate::types::DetailNoiseParams;
-use super::util::face_position_arrays;
+use super::util::{face_position_arrays, texel_dir};
 
-/// Configures the regolith: both the high-frequency detail noise for the
-/// realtime shader and the baked background terrain on the cubemap.
+/// Configures the regolith: high-frequency detail noise for the realtime
+/// shader plus a cubemap bake of mid-frequency Voronoi crater texture that
+/// fills the gap between explicit baked craters.
 ///
-/// The bake-time contribution is critical — without it, the cubemap reads as
-/// a plastic sphere between explicit craters. Instead of generic biased fBm
-/// we now bake a three-biome blend (rugged highlands, subdued plains, ridged
-/// dorsa) sampled through `fastnoise2`. Biome weights come from three
-/// decorrelated supersimplex fields combined via softmax, yielding soft 2–5
-/// km transitions characteristic of intra-highland variation on real airless
-/// bodies.
+/// The bake uses the same multi-octave crater hash as the runtime shader
+/// (`sample_detail_noise`), tuned for the size band the cubemap can resolve.
+/// SFD continuity across the three layers is enforced by tying ranges to
+/// the explicit cratering threshold:
+///
+/// ```text
+///   shader hash   :  d_min_m       … bake_d_min_m       (sub-texel detail)
+///   regolith bake :  bake_d_min_m  … 2 × bake_threshold  (cubemap mid band)
+///   explicit bake :  ≥ 2 × bake_threshold (diameter)     (Cratering stage)
+/// ```
+///
+/// fBm biome stacks were removed: standard fractional brownian motion reads
+/// as eroded terrestrial terrain, never as a crater-saturated airless body.
+/// See docs/gen/procedural_mira.md §6 for the rationale.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Regolith {
     /// Typical depth of small-crater texture in meters (detail shader).
@@ -30,33 +37,37 @@ pub struct Regolith {
     /// Density multiplier relative to continued SFD from explicit craters.
     pub crater_density_multiplier: f32,
 
-    /// Reference amplitude in meters for the rugged-highlands biome. Other
-    /// biomes are scaled relative to this. Set to 0 to disable baking.
-    #[serde(default = "default_bake_amplitude")]
-    pub bake_amplitude_m: f32,
-    /// Dominant wavelength of the finest biome noise octave in meters.
-    /// Sets the sampling frequency: `base_freq = radius_m / wavelength_m`.
-    #[serde(default = "default_bake_wavelength")]
-    pub bake_wavelength_m: f32,
-    /// Octaves for each biome's fractal stack.
-    #[serde(default = "default_bake_octaves")]
-    pub bake_octaves: u32,
+    /// Lower diameter bound for the bake-time Voronoi crater stack, in
+    /// meters. Sets the handoff with the runtime shader hash layer (whose
+    /// `d_max_m` is clamped here so it never overlaps the bake range).
+    /// Default 600 m ≈ 1 cubemap texel on Mira at 2048².
+    #[serde(default = "default_bake_d_min")]
+    pub bake_d_min_m: f32,
 
-    /// How many biome cells fit across the sphere. Higher → more frequent
-    /// biome transitions. Defaults to ~6.
-    #[serde(default = "default_biome_cell_count")]
-    pub biome_cell_count: f32,
-    /// Softmax temperature for biome blending. Smaller = harder boundaries
-    /// (0.1 ≈ near-sharp), larger = more diffuse (1.0 ≈ even mixture).
-    #[serde(default = "default_biome_softness")]
-    pub biome_softness: f32,
+    /// Multiplicative scale on the baked Voronoi crater contribution.
+    /// 1.0 = unscaled profile depths from `sample_detail_noise`. Set to 0
+    /// to disable baking entirely (useful for tests / small bodies).
+    #[serde(default = "default_bake_scale")]
+    pub bake_scale: f32,
+
+    /// Half-amplitude of the regional density modulation. 0.25 ≈ ±25% on
+    /// the Voronoi contribution, driven by a single low-frequency
+    /// supersimplex weight field. Prevents the bake from looking globally
+    /// uniform while keeping the underlying crater shapes intact.
+    #[serde(default = "default_density_mod")]
+    pub density_modulation: f32,
+
+    /// Wavelength of the regional density modulation, in meters of surface
+    /// distance. 250 km gives Mira ~6 distinct macro-regions across each
+    /// hemisphere.
+    #[serde(default = "default_density_wavelength")]
+    pub density_wavelength_m: f32,
 }
 
-fn default_bake_amplitude() -> f32 { 80.0 }
-fn default_bake_wavelength() -> f32 { 15_000.0 }
-fn default_bake_octaves() -> u32 { 6 }
-fn default_biome_cell_count() -> f32 { 6.0 }
-fn default_biome_softness() -> f32 { 0.35 }
+fn default_bake_d_min() -> f32 { 600.0 }
+fn default_bake_scale() -> f32 { 1.0 }
+fn default_density_mod() -> f32 { 0.25 }
+fn default_density_wavelength() -> f32 { 250_000.0 }
 
 impl Stage for Regolith {
     fn name(&self) -> &str { "regolith" }
@@ -64,10 +75,16 @@ impl Stage for Regolith {
 
     fn apply(&self, builder: &mut BodyBuilder) {
         // ── Detail-noise params for the realtime shader ────────────────
+        //
+        // `d_max_m` is capped at `bake_d_min_m` so the runtime shader hash
+        // and the cubemap bake don't double-count the same craters. The
+        // shader's own `hash_d_max = min(d_max_m, 500.0)` further restricts
+        // it to <500 m on Mira; the cap here keeps the CPU sampler honest.
+        let runtime_d_max = self.bake_d_min_m.max(80.0);
         builder.detail_params = DetailNoiseParams {
             body_radius_m: builder.radius_m,
             d_min_m: 80.0,
-            d_max_m: 60_000.0,
+            d_max_m: runtime_d_max,
             sfd_alpha: 2.0,
             global_k_per_km2: self.crater_density_multiplier * 0.05,
             d_sc_m: 30_000.0,
@@ -75,82 +92,56 @@ impl Stage for Regolith {
             seed: builder.stage_seed(),
         };
 
-        if self.bake_amplitude_m <= 0.0 { return; }
+        // ── Bake-time Voronoi crater stack ─────────────────────────────
+        let bake_thresh = builder.cubemap_bake_threshold_m;
+        if self.bake_scale <= 0.0 || !bake_thresh.is_finite() || bake_thresh <= 0.0 {
+            return;
+        }
 
         let res = builder.cubemap_resolution;
         let body_radius = builder.radius_m;
-        let stage_seed = builder.stage_seed() as i32;
 
-        // ── Build noise trees ──────────────────────────────────────────
+        // Voronoi diameter band: `bake_d_min_m` to twice the explicit bake
+        // threshold (the smallest baked explicit crater's diameter).
+        let bake_d_max = bake_thresh * 2.0;
+        if bake_d_max <= self.bake_d_min_m {
+            return;
+        }
+
+        let bake_params = DetailNoiseParams {
+            body_radius_m: body_radius,
+            d_min_m: self.bake_d_min_m,
+            d_max_m: bake_d_max,
+            sfd_alpha: 2.0,
+            global_k_per_km2: self.crater_density_multiplier * 0.05,
+            d_sc_m: 30_000.0,
+            body_age_gyr: builder.body_age_gyr,
+            seed: builder.stage_seed() ^ 0xC0FF_EE15_BAAD_F00D,
+        };
+
+        // LOD chosen so the largest Voronoi crater (`d_max`) hits the upper
+        // edge of `sample_detail_noise`'s 0.5..8 px smoothstep — i.e. the
+        // biggest baked craters render at full amplitude, smaller ones
+        // progressively fade. Treat `pixel_size_m = d_max / 8`.
+        let pixel_size_m = bake_d_max / 8.0;
+        let lod = pixel_size_m.log2();
+
+        // ── Single supersimplex weight field for regional modulation ───
         //
-        // Input coords are raw unit-sphere directions (`dir.x, y, z` in
-        // [-1, 1]). Each tree bakes its own `domain_scale` to set the
-        // frequency. `base_freq` is chosen so one period at the finest
-        // octave matches `bake_wavelength_m` of surface distance.
-        let base_freq = body_radius / self.bake_wavelength_m;
-        let weight_freq = base_freq * (self.biome_cell_count / 10.0).max(0.05);
-
-        // Biome weight source — a smooth supersimplex fBm. We sample it
-        // three times with decorrelated seeds to get three weight fields,
-        // then softmax into per-texel weights that sum to 1.
+        // Drives ±`density_modulation` amplitude variation on the Voronoi
+        // output so the bake doesn't read as globally uniform. No biome
+        // softmax — the crater shapes themselves are the main signal.
+        let weight_freq = body_radius / self.density_wavelength_m.max(1.0);
         let weight_node: SafeNode = supersimplex()
-            .fbm(0.5, 0.0, 2, 2.0)
+            .fbm(0.5, 0.0, 3, 2.0)
             .domain_scale(weight_freq)
             .build()
             .0;
+        let weight_seed = (builder.stage_seed() & 0xFFFF_FFFF) as i32;
+        let modulation = self.density_modulation.clamp(0.0, 0.95);
+        let scale = self.bake_scale;
 
-        // Biome A: Rugged Highlands — ridged supersimplex gives overlapping
-        // rim-ridge impression; cellular distance carves crater-like pits.
-        // Together they produce the hummocky rubble that dominates real
-        // lunar highlands at impostor scale.
-        let octs = self.bake_octaves.max(1) as i32;
-        let biome_a: SafeNode = (supersimplex()
-            .ridged(0.5, 0.0, octs, 2.0)
-            .domain_scale(base_freq)
-            + cellular_distance(
-                1.0,
-                DistanceFunction::Euclidean,
-                0,
-                1,
-                CellularDistanceReturnType::Index0Sub1,
-            )
-            .domain_scale(base_freq * 0.7)
-                * 0.6)
-            .remap(-2.0, 2.0, -1.0, 1.0)
-            .build()
-            .0;
-
-        // Biome B: Subdued Plains — low-amplitude supersimplex fBm, rolling
-        // character. Emerges from post-impact ejecta infill that buried
-        // earlier small craters.
-        let biome_b: SafeNode = supersimplex()
-            .fbm(0.5, 0.0, octs, 2.0)
-            .domain_scale(base_freq * 0.6)
-            .build()
-            .0;
-
-        // Biome C: Dorsa / Scarps — warped ridged noise produces linear
-        // ridges and subtle scarp features. Higher amplitude than baseline.
-        let biome_c: SafeNode = supersimplex()
-            .ridged(0.55, 0.0, octs, 2.0)
-            .domain_warp_gradient(0.25, base_freq * 0.4)
-            .domain_scale(base_freq * 0.8)
-            .build()
-            .0;
-
-        // Biome amplitudes in meters.
-        let amp_a = self.bake_amplitude_m;
-        let amp_b = self.bake_amplitude_m * 0.25;
-        let amp_c = self.bake_amplitude_m * 1.3;
-
-        // Three weight seeds chosen to be widely spaced in the seed space.
-        let seed_w_a = stage_seed;
-        let seed_w_b = stage_seed.wrapping_add(0x5EED_B10E_u32 as i32);
-        let seed_w_c = stage_seed.wrapping_add(0x3F00_BA11_u32 as i32);
-
-        let softness = self.biome_softness.max(0.05);
-
-        // ── Per-face parallel bulk sample + blend ──────────────────────
+        // ── Per-face parallel bake ─────────────────────────────────────
         builder
             .height_contributions
             .height
@@ -160,48 +151,29 @@ impl Stage for Regolith {
             .for_each(|(face_idx, slice)| {
                 let face = CubemapFace::ALL[face_idx];
                 let n = (res * res) as usize;
+
+                // Bulk-sample the regional weight field for this face.
                 let (xs, ys, zs) = face_position_arrays(face, res);
-
-                // Biome weight fields — one tree sampled with three seeds.
-                let mut wa = vec![0.0f32; n];
-                let mut wb = vec![0.0f32; n];
-                let mut wc = vec![0.0f32; n];
+                let mut weights = vec![0.0_f32; n];
                 weight_node.gen_position_array_3d(
-                    &mut wa, &xs, &ys, &zs, 0.0, 0.0, 0.0, seed_w_a,
-                );
-                weight_node.gen_position_array_3d(
-                    &mut wb, &xs, &ys, &zs, 0.0, 0.0, 0.0, seed_w_b,
-                );
-                weight_node.gen_position_array_3d(
-                    &mut wc, &xs, &ys, &zs, 0.0, 0.0, 0.0, seed_w_c,
+                    &mut weights,
+                    &xs,
+                    &ys,
+                    &zs,
+                    0.0,
+                    0.0,
+                    0.0,
+                    weight_seed,
                 );
 
-                // Biome terrain outputs.
-                let mut ha = vec![0.0f32; n];
-                let mut hb = vec![0.0f32; n];
-                let mut hc = vec![0.0f32; n];
-                biome_a.gen_position_array_3d(
-                    &mut ha, &xs, &ys, &zs, 0.0, 0.0, 0.0, stage_seed,
-                );
-                biome_b.gen_position_array_3d(
-                    &mut hb, &xs, &ys, &zs, 0.0, 0.0, 0.0, stage_seed,
-                );
-                biome_c.gen_position_array_3d(
-                    &mut hc, &xs, &ys, &zs, 0.0, 0.0, 0.0, stage_seed,
-                );
-
-                // Softmax blend and accumulate into the face slice.
-                for i in 0..n {
-                    let max = wa[i].max(wb[i]).max(wc[i]);
-                    let ea = ((wa[i] - max) / softness).exp();
-                    let eb = ((wb[i] - max) / softness).exp();
-                    let ec = ((wc[i] - max) / softness).exp();
-                    let s = ea + eb + ec;
-                    let blended =
-                        (ha[i] * amp_a * ea + hb[i] * amp_b * eb + hc[i] * amp_c * ec)
-                            / s;
-                    slice[i] += blended;
-                }
+                slice.par_iter_mut().enumerate().for_each(|(i, h)| {
+                    let x = (i as u32) % res;
+                    let y = (i as u32) / res;
+                    let dir = texel_dir(face, x, y, res).normalize();
+                    let (dh, _grad) = sample_detail_noise(&bake_params, dir, lod);
+                    let w = 1.0 + modulation * weights[i].clamp(-1.0, 1.0);
+                    *h += dh * w * scale;
+                });
             });
     }
 }

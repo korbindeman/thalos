@@ -66,6 +66,12 @@ fn phases_from_seed(seed: u64, channel: u64) -> [f32; 4] {
     [to_phase(s0), to_phase(s1), to_phase(s2), to_phase(s3)]
 }
 
+/// One uniform `f32` in [0, 1) from the given seed + channel.
+fn unit_from_seed(seed: u64, channel: u64) -> f32 {
+    let s = splitmix64(seed ^ channel.wrapping_mul(0xD1B5_4A32_D192_ED03));
+    (s as u32 as f32) / (u32::MAX as f32 + 1.0)
+}
+
 /// Normalized sum of 4 sine harmonics in θ. Output range: [-1, 1].
 #[inline]
 fn angular_noise(theta: f32, phases: &[f32; 4]) -> f32 {
@@ -73,18 +79,6 @@ fn angular_noise(theta: f32, phases: &[f32; 4]) -> f32 {
         + 0.28 * (2.0 * theta + phases[1]).sin()
         + 0.17 * (3.0 * theta + phases[2]).sin()
         + 0.10 * (5.0 * theta + phases[3]).sin()
-}
-
-/// High-harmonic angular noise for ejecta ray patterns. Uses harmonics at
-/// 2, 5, 9, 14 cycles per turn so the sum produces narrow peaks (rays) and
-/// narrow troughs (gaps between rays) instead of the broad lobes that the
-/// low-harmonic `angular_noise` gives. Output roughly in [-1, 1].
-#[inline]
-fn ejecta_ray_noise(theta: f32, phases: &[f32; 4]) -> f32 {
-    0.32 * (2.0 * theta + phases[0]).sin()
-        + 0.28 * (5.0 * theta + phases[1]).sin()
-        + 0.22 * (9.0 * theta + phases[2]).sin()
-        + 0.18 * (14.0 * theta + phases[3]).sin()
 }
 
 /// Hermite smoothstep: 0 at edge0, 1 at edge1, smooth in between.
@@ -254,11 +248,16 @@ impl Stage for Cratering {
                     let (base_depth, base_rim) = crater_dimensions(radius_m);
                     let jitter = 1.0 + rng.next_f64_signed() as f32 * 0.15;
 
+                    // Secondary craters form from low-velocity ballistic
+                    // ejecta rather than hypervelocity impacts, so their
+                    // depth/diameter is roughly half the primary value
+                    // (Pike & Wilhelms 1978, also lunar survey data).
+                    const SECONDARY_SCALE: f32 = 0.5;
                     craters.push(Crater {
                         center: child_center,
                         radius_m,
-                        depth_m: base_depth * jitter,
-                        rim_height_m: base_rim * jitter,
+                        depth_m: base_depth * jitter * SECONDARY_SCALE,
+                        rim_height_m: base_rim * jitter * SECONDARY_SCALE,
                         // Slightly younger than parent (post-impact fracturing
                         // retriggers) but essentially the same epoch.
                         age_gyr: (parent.age_gyr - rng.next_f64() as f32 * 0.05)
@@ -283,20 +282,26 @@ impl Stage for Cratering {
         const YOUNG_COUNT: usize = 16;
         let young_min_r = body_radius * 0.015;
         let young_max_r = body_radius * 0.09;
-        let candidate_indices: Vec<usize> = craters
+        let mut candidate_indices: Vec<usize> = craters
             .iter()
             .enumerate()
             .filter_map(|(i, c)| {
                 (c.radius_m >= young_min_r && c.radius_m <= young_max_r).then_some(i)
             })
             .collect();
-        if !candidate_indices.is_empty() {
-            for _ in 0..YOUNG_COUNT {
-                let pick = (rng.next_f64() * candidate_indices.len() as f64) as usize;
-                let i = candidate_indices[pick.min(candidate_indices.len() - 1)];
-                let u = rng.next_f64();
-                craters[i].age_gyr = (body_age_gyr as f64 * 0.08 * u) as f32;
-            }
+        // Partial Fisher–Yates shuffle: draw `YOUNG_COUNT` unique picks
+        // without replacement so no candidate is refreshed twice. Pulling
+        // with replacement (old behavior) could pick the same crater
+        // multiple times, wasting the fresh-crater budget.
+        let picks = YOUNG_COUNT.min(candidate_indices.len());
+        for k in 0..picks {
+            let span = candidate_indices.len() - k;
+            let j = k + (rng.next_f64() * span as f64) as usize;
+            let j = j.min(candidate_indices.len() - 1);
+            candidate_indices.swap(k, j);
+            let i = candidate_indices[k];
+            let u = rng.next_f64();
+            craters[i].age_gyr = (body_age_gyr as f64 * 0.08 * u) as f32;
         }
 
         // Sort oldest-first so younger craters stamp over older ones in the cubemap.
@@ -320,7 +325,16 @@ impl Stage for Cratering {
             rim_phases: [f32; 4],
             wall_phases: [f32; 4],
             peak_phases: [f32; 4],
-            ejecta_phases: [f32; 4],
+            /// Azimuth (rad) pointing at the uprange side of the impact.
+            /// Ejecta apron is suppressed within the wedge centered here,
+            /// modelling the characteristic "zone of avoidance" of
+            /// oblique impacts (Proclus-type, up to ~60° half-width).
+            uprange_az: f32,
+            /// Half-angle (rad) of the uprange wedge. Constant 30°–60°.
+            wedge_half: f32,
+            /// Obliqueness ∈ [0, 0.85]. Fraction of the apron that's
+            /// carved away at the wedge center. 0 → uniform blanket.
+            obliqueness: f32,
             /// Pre-Cratering terrain height at crater center. Used as the
             /// base elevation for absolute-mode interior writes so younger
             /// craters cookie-cut older ones overlapping their interior
@@ -345,6 +359,17 @@ impl Stage for Cratering {
                 // (1 + eps) so we don't clip texels on positive-noise angles.
                 let influence_angle =
                     (c.influence_radius_m() / body_radius) * (1.0 + RADIAL_WARP_EPS);
+                let tau = std::f32::consts::TAU;
+                let pi = std::f32::consts::PI;
+                let uprange_az = unit_from_seed(seed, 10) * tau;
+                // Half-angle in [30°, 60°]. Wider wedges read as strongly
+                // asymmetric ejecta blankets; narrower as mild.
+                let wedge_half = pi / 6.0 + unit_from_seed(seed, 11) * (pi / 6.0);
+                // Obliqueness hashed so ~30% of craters exceed 0.5 (strong
+                // wedge), but most are mild — matches the 1.0–1.2 axis-
+                // ratio distribution for real oblique impacts.
+                let oh = unit_from_seed(seed, 12);
+                let obliqueness = (oh * oh) * 0.85;
                 BakedCrater {
                     center,
                     radius_m: c.radius_m,
@@ -358,7 +383,9 @@ impl Stage for Cratering {
                     rim_phases: phases_from_seed(seed, 1),
                     wall_phases: phases_from_seed(seed, 2),
                     peak_phases: phases_from_seed(seed, 3),
-                    ejecta_phases: phases_from_seed(seed, 4),
+                    uprange_az,
+                    wedge_half,
+                    obliqueness,
                     base_elevation_m,
                 }
             })
@@ -416,7 +443,20 @@ impl Stage for Cratering {
                                 let wall_phase = WALL_PHASE_EPS * n_w;
 
                                 let n_p = angular_noise(theta, &c.peak_phases);
-                                let n_e = ejecta_ray_noise(theta, &c.ejecta_phases);
+
+                                // Uprange ejecta wedge. Angular distance
+                                // from the crater's uprange direction; the
+                                // apron is smoothly suppressed inside
+                                // `wedge_half` by a factor of `obliqueness`.
+                                let pi = std::f32::consts::PI;
+                                let tau = std::f32::consts::TAU;
+                                let mut d_az = (theta - c.uprange_az).abs();
+                                if d_az > pi { d_az = tau - d_az; }
+                                // 1.0 at wedge center, 0.0 at wedge edge.
+                                let in_wedge =
+                                    smoothstep01(c.wedge_half, c.wedge_half * 0.5, d_az);
+                                let ejecta_scale =
+                                    (1.0 - c.obliqueness * in_wedge).clamp(0.0, 1.0);
 
                                 let h = crater_profile(
                                     t,
@@ -426,7 +466,7 @@ impl Stage for Cratering {
                                     c.morph,
                                     wall_phase,
                                     n_p,
-                                    n_e,
+                                    ejecta_scale,
                                 );
 
                                 // Interior-absolute / exterior-additive blend.

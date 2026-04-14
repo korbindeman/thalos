@@ -253,6 +253,20 @@
                         secondary_parent_radius_m: 40000.0,
                         secondaries_per_parent: 18,
                     )),
+                    Regolith((
+                        // Shader hash params (sub-`bake_d_min_m`).
+                        amplitude_m: 8.0,
+                        characteristic_wavelength_m: 120.0,
+                        crater_density_multiplier: 1.0,
+                        // Voronoi bake band: 600 m → 3000 m diameter
+                        // (matches `2 × cubemap_bake_threshold_m`). Fills
+                        // the gap between explicit baked craters with
+                        // multi-octave crater shapes instead of fbm.
+                        bake_d_min_m: 600.0,
+                        bake_scale: 1.0,
+                        density_modulation: 0.25,
+                        density_wavelength_m: 250000.0,
+                    )),
                     SpaceWeather((
                         mare_mature_albedo: 0.05,
                         mare_fresh_albedo: 0.08,
