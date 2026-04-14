@@ -521,12 +521,12 @@
                     // Finer jets — Saturn shows many small bands per
                     // hemisphere at cruise scale. 20 base + harmonics
                     // packs ~30+ stripes pole-to-pole.
-                    band_frequency: 20.0,
-                    band_warp: 0.03,
+                    band_frequency: 10.0,
+                    band_warp: 0.20,
                     // Low turbulence — gates streak, detail, and
                     // palette jitter amplitudes. Saturn reference has
                     // very subdued high-freq contrast.
-                    turbulence: 0.09,
+                    turbulence: 0.05,
                     // Now reinterpreted (see shader): this is the
                     // per-band latitude step injected into the palette
                     // lookup. Each jet discretizes a small monotone
