@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 just run      # cargo run -p thalos_game
-just editor   # cargo run -p thalos_planet_editor
+just edit auron  # planet editor, optional body name (default: Mira)
 just build    # cargo build --workspace
 just test     # cargo test -p thalos_physics -p thalos_terrain_gen
 just clippy   # cargo clippy --workspace
