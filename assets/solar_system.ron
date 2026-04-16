@@ -1076,7 +1076,7 @@
             generator: None,
         ),
         (
-            name: "Sorn",
+            name: "Xxirt",
             kind: Moon,
             parent: Some("Vaelen"),
             physical: (

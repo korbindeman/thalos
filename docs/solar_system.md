@@ -286,12 +286,12 @@ The doom timescale is irrelevant to civilization. Primary value:
 - **Trivial gravity well**: cheap to operate from, ideal staging point
 - **Cultural weight**: a world visibly dying on geological timescales, with ancient riverbeds and a doomed orbit
 
-### Kael and Sorn (Moons)
+### Kael and Xxirt (Moons)
 
 | Moon | Radius | Mass | Orbital radius | Eccentricity | Inclination |
 |---|---|---|---|---|---|
 | Kael | 14 km | 7.3 × 10¹³ kg | 94,000 km | 0.015 | 1.1° |
-| Sorn | 8 km | 1.7 × 10¹³ kg | 150,000 km | 0.002 | 1.8° |
+| Xxirt | 8 km | 1.7 × 10¹³ kg | 150,000 km | 0.002 | 1.8° |
 
 Two tiny moons in near-circular, low-inclination orbits. Likely captured asteroids or co-accreted debris. Too small for meaningful gravity; useful as navigation landmarks or micro-refueling stops.
 
