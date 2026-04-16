@@ -22,7 +22,7 @@
 use glam::DVec3;
 
 use crate::body_state_provider::BodyStateProvider;
-use crate::forces::{Forces, GravityForce, compute_total_acceleration};
+use crate::effects::{EffectContext, EffectRegistry, compute_total_acceleration};
 use crate::types::{BodyStates, StateVector, TrajectorySample};
 
 // ---------------------------------------------------------------------------
@@ -238,8 +238,7 @@ impl Integrator {
     /// # Arguments
     /// * `state`     — Current position and velocity.
     /// * `time`      — Current simulation time (seconds from epoch).
-    /// * `forces`    — Active thrust set (gravity is always-on and computed
-    ///   directly).
+    /// * `registry`  — Gravity + active effects.
     /// * `ephemeris` — Background body states at any time.
     ///
     /// # Returns
@@ -249,10 +248,10 @@ impl Integrator {
         &mut self,
         state: StateVector,
         time: f64,
-        forces: &Forces,
+        registry: &EffectRegistry,
         ephemeris: &dyn BodyStateProvider,
     ) -> (StateVector, TrajectorySample) {
-        self.step_capped(state, time, forces, ephemeris, f64::INFINITY)
+        self.step_capped(state, time, registry, ephemeris, f64::INFINITY)
     }
 
     /// Like [`Self::step`] but clamps the accepted step so the sample never
@@ -262,7 +261,7 @@ impl Integrator {
         &mut self,
         state: StateVector,
         time: f64,
-        forces: &Forces,
+        registry: &EffectRegistry,
         ephemeris: &dyn BodyStateProvider,
         max_step: f64,
     ) -> (StateVector, TrajectorySample) {
@@ -270,34 +269,35 @@ impl Integrator {
         // decision and, in both modes, the first-substep force evaluation.
         ephemeris.query_into(time, &mut self.body_states_buf);
 
-        // Single gravity pass: acceleration + dominant-body + perturbation
-        // ratio. The result is threaded into the first substep so gravity is
-        // never recomputed at the same (pos, time) twice.
-        let gravity_result =
-            GravityForce::compute_with_analysis(state.position, &self.body_states_buf);
+        // Single pass over effects: gravity acceleration + analysis, plus
+        // any active thrusts/drag/etc. The result is threaded into the first
+        // substep so gravity is never recomputed at the same (pos, time).
+        let ctx0 = EffectContext {
+            position: state.position,
+            velocity: state.velocity,
+            time,
+            bodies: &self.body_states_buf,
+        };
+        let (a0, gravity_result) = compute_total_acceleration(&ctx0, registry);
 
         // Update mode with hysteresis.
         self.update_mode(gravity_result.perturbation_ratio);
-
-        // Initial acceleration at (state, time): reuse the gravity result,
-        // add any active thrusts.
-        let a0 = gravity_result.acceleration
-            + forces.sum_thrusts(state.position, state.velocity, time, &self.body_states_buf);
 
         // Perform the integration step in the selected mode.
         let (new_state, step_size) = match self.mode {
             Mode::Symplectic => {
                 let dt = self.config.symplectic_dt.min(max_step);
-                let s = self.verlet_step(state, time, dt, forces, a0, ephemeris);
+                let s = self.verlet_step(state, time, dt, registry, a0, ephemeris);
                 self.min_step_streak = 0;
                 (s, dt)
             }
-            Mode::Adaptive => self.rk45_step(state, time, forces, ephemeris, a0, max_step),
+            Mode::Adaptive => self.rk45_step(state, time, registry, ephemeris, a0, max_step),
         };
 
         ephemeris.query_into(time + step_size, &mut self.sample_body_states_buf);
-        let sample_gravity =
-            GravityForce::compute_with_analysis(new_state.position, &self.sample_body_states_buf);
+        let sample_gravity = registry
+            .gravity
+            .compute(new_state.position, &self.sample_body_states_buf);
 
         let sample = TrajectorySample {
             time: time + step_size,
@@ -365,7 +365,7 @@ impl Integrator {
         state: StateVector,
         time: f64,
         h: f64,
-        forces: &Forces,
+        registry: &EffectRegistry,
         a0: DVec3,
         ephemeris: &dyn BodyStateProvider,
     ) -> StateVector {
@@ -382,8 +382,13 @@ impl Integrator {
         // standard velocity-Verlet approximation and is correct to second order.
         let t1 = time + h;
         ephemeris.query_into(t1, &mut self.sample_body_states_buf);
-        let (a1, _) =
-            compute_total_acceleration(pos1, vel, t1, &self.sample_body_states_buf, forces);
+        let ctx1 = EffectContext {
+            position: pos1,
+            velocity: vel,
+            time: t1,
+            bodies: &self.sample_body_states_buf,
+        };
+        let (a1, _) = compute_total_acceleration(&ctx1, registry);
 
         // Average acceleration update for velocity.
         let vel1 = vel + 0.5 * (a0 + a1) * h;
@@ -415,14 +420,14 @@ impl Integrator {
         &mut self,
         state: StateVector,
         time: f64,
-        forces: &Forces,
+        registry: &EffectRegistry,
         ephemeris: &dyn BodyStateProvider,
         a0: DVec3,
         max_step: f64,
     ) -> (StateVector, f64) {
         loop {
             let h = self.rk_dt.min(max_step);
-            let (new_state, err) = self.dp45_attempt(state, time, h, forces, ephemeris, a0);
+            let (new_state, err) = self.dp45_attempt(state, time, h, registry, ephemeris, a0);
 
             let factor = self.pi.factor(err);
 
@@ -469,7 +474,7 @@ impl Integrator {
         state: StateVector,
         t: f64,
         h: f64,
-        forces: &Forces,
+        registry: &EffectRegistry,
         ephemeris: &dyn BodyStateProvider,
         a0: DVec3,
     ) -> (StateVector, f64) {
@@ -478,36 +483,47 @@ impl Integrator {
 
         // ---- Stage 1 (at t, pos, vel) ----
         // `step_capped` already queried body_states_buf at t and computed a0
-        // (gravity + thrusts). Reuse both — no re-query, no re-scan.
+        // (gravity + effects). Reuse both — no re-query, no re-scan.
         let k1_p = vel;
         let k1_v = a0;
+
+        // Helper: build a context scoped to the current stage's (pos, vel, t)
+        // and sum all effects. The ephemeris query must happen separately —
+        // each stage advances `sample_body_states_buf`.
+        macro_rules! eval_stage {
+            ($p:expr, $v:expr, $ts:expr) => {{
+                ephemeris.query_into($ts, &mut self.sample_body_states_buf);
+                let ctx = EffectContext {
+                    position: $p,
+                    velocity: $v,
+                    time: $ts,
+                    bodies: &self.sample_body_states_buf,
+                };
+                let (a, _) = compute_total_acceleration(&ctx, registry);
+                a
+            }};
+        }
 
         // ---- Stage 2 (at t + c2*h) ----
         let t2 = t + Dp45::C2 * h;
         let p2 = pos + h * Dp45::A21 * k1_p;
         let v2 = vel + h * Dp45::A21 * k1_v;
-        ephemeris.query_into(t2, &mut self.sample_body_states_buf);
         let k2_p = v2;
-        let (k2_v, _) =
-            compute_total_acceleration(p2, v2, t2, &self.sample_body_states_buf, forces);
+        let k2_v = eval_stage!(p2, v2, t2);
 
         // ---- Stage 3 (at t + c3*h) ----
         let t3 = t + Dp45::C3 * h;
         let p3 = pos + h * (Dp45::A31 * k1_p + Dp45::A32 * k2_p);
         let v3 = vel + h * (Dp45::A31 * k1_v + Dp45::A32 * k2_v);
-        ephemeris.query_into(t3, &mut self.sample_body_states_buf);
         let k3_p = v3;
-        let (k3_v, _) =
-            compute_total_acceleration(p3, v3, t3, &self.sample_body_states_buf, forces);
+        let k3_v = eval_stage!(p3, v3, t3);
 
         // ---- Stage 4 (at t + c4*h) ----
         let t4 = t + Dp45::C4 * h;
         let p4 = pos + h * (Dp45::A41 * k1_p + Dp45::A42 * k2_p + Dp45::A43 * k3_p);
         let v4 = vel + h * (Dp45::A41 * k1_v + Dp45::A42 * k2_v + Dp45::A43 * k3_v);
-        ephemeris.query_into(t4, &mut self.sample_body_states_buf);
         let k4_p = v4;
-        let (k4_v, _) =
-            compute_total_acceleration(p4, v4, t4, &self.sample_body_states_buf, forces);
+        let k4_v = eval_stage!(p4, v4, t4);
 
         // ---- Stage 5 (at t + c5*h) ----
         let t5 = t + Dp45::C5 * h;
@@ -515,10 +531,8 @@ impl Integrator {
             pos + h * (Dp45::A51 * k1_p + Dp45::A52 * k2_p + Dp45::A53 * k3_p + Dp45::A54 * k4_p);
         let v5 =
             vel + h * (Dp45::A51 * k1_v + Dp45::A52 * k2_v + Dp45::A53 * k3_v + Dp45::A54 * k4_v);
-        ephemeris.query_into(t5, &mut self.sample_body_states_buf);
         let k5_p = v5;
-        let (k5_v, _) =
-            compute_total_acceleration(p5, v5, t5, &self.sample_body_states_buf, forces);
+        let k5_v = eval_stage!(p5, v5, t5);
 
         // ---- Stage 6 (at t + h) ----
         let t6 = t + h;
@@ -534,10 +548,8 @@ impl Integrator {
                 + Dp45::A63 * k3_v
                 + Dp45::A64 * k4_v
                 + Dp45::A65 * k5_v);
-        ephemeris.query_into(t6, &mut self.sample_body_states_buf);
         let k6_p = v6;
-        let (k6_v, _) =
-            compute_total_acceleration(p6, v6, t6, &self.sample_body_states_buf, forces);
+        let k6_v = eval_stage!(p6, v6, t6);
 
         // ---- 5th-order solution (propagated state) ----
         let new_pos = pos
@@ -556,13 +568,13 @@ impl Integrator {
         // ---- Stage 7 — FSAL evaluation at the new state (for error estimate) ----
         // Body states buffer already contains t6 from stage 6; no need to re-query.
         let k7_p = new_vel;
-        let (k7_v, _) = compute_total_acceleration(
-            new_pos,
-            new_vel,
-            t6,
-            &self.sample_body_states_buf,
-            forces,
-        );
+        let k7_ctx = EffectContext {
+            position: new_pos,
+            velocity: new_vel,
+            time: t6,
+            bodies: &self.sample_body_states_buf,
+        };
+        let (k7_v, _) = compute_total_acceleration(&k7_ctx, registry);
 
         // ---- Error estimate ----
         // e = h * sum_i (E_i * k_i),  a linear combination of stage derivatives.
@@ -631,7 +643,7 @@ fn mixed_rms_norm(err_pos: DVec3, err_vel: DVec3, pos: DVec3, vel: DVec3, tol: f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forces::{Forces, GravityForce};
+    use crate::effects::{EffectRegistry, GravityModel, NewtonianGravity};
     use crate::patched_conics::PatchedConics;
     use crate::types::{
         BodyDefinition, BodyKind, BodyState, G, OrbitalElements, ShipDefinition,
@@ -717,9 +729,9 @@ mod tests {
         PatchedConics::new(&system, 3.156e7)
     }
 
-    /// Forces set with no thrusts (gravity is always-on).
-    fn gravity_forces() -> Forces {
-        Forces::new()
+    /// Registry with Newtonian gravity and no other effects.
+    fn gravity_registry() -> EffectRegistry {
+        EffectRegistry::newtonian()
     }
 
     // -----------------------------------------------------------------------
@@ -745,7 +757,7 @@ mod tests {
             },
         ];
         let result =
-            GravityForce::compute_with_analysis(DVec3::new(ship_r, 0.0, 0.0), &body_states);
+            NewtonianGravity.compute(DVec3::new(ship_r, 0.0, 0.0), &body_states);
         assert_eq!(result.dominant_body, 1, "Earth should dominate near LEO");
         assert!(
             result.perturbation_ratio < 1.0,
@@ -760,7 +772,7 @@ mod tests {
             velocity: DVec3::ZERO,
             mass_kg: 5.972e24,
         }];
-        let result = GravityForce::compute_with_analysis(DVec3::new(7e6, 0.0, 0.0), &body_states);
+        let result = NewtonianGravity.compute(DVec3::new(7e6, 0.0, 0.0), &body_states);
         assert_eq!(result.dominant_body, 0);
         assert_eq!(result.perturbation_ratio, 0.0);
     }
@@ -780,7 +792,7 @@ mod tests {
                 mass_kg: 1e24,
             },
         ];
-        let result = GravityForce::compute_with_analysis(DVec3::ZERO, &body_states);
+        let result = NewtonianGravity.compute(DVec3::ZERO, &body_states);
         // Both accelerations are equal so ratio == 1.
         assert!(
             (result.perturbation_ratio - 1.0).abs() < 1e-12,
@@ -944,7 +956,7 @@ mod tests {
     #[test]
     fn verlet_with_no_forces_is_linear() {
         let eph = EmptyEphemeris;
-        let forces = Forces::new();
+        let registry = EffectRegistry::newtonian();
         let state = StateVector {
             position: DVec3::new(1.5e11, 0.0, 0.0),
             velocity: DVec3::new(0.0, 2.978e4, 0.0),
@@ -952,7 +964,7 @@ mod tests {
         let mut integrator = Integrator::new(IntegratorConfig::default());
         let h = 60.0;
         let a0 = DVec3::ZERO; // no bodies → no gravity → zero initial accel
-        let new_state = integrator.verlet_step(state, 0.0, h, &forces, a0, &eph);
+        let new_state = integrator.verlet_step(state, 0.0, h, &registry, a0, &eph);
 
         let expected_pos = state.position + state.velocity * h;
         // With no forces, position must advance exactly by v*dt.
@@ -972,13 +984,13 @@ mod tests {
         let config = IntegratorConfig::default();
         let mut integrator = Integrator::new(config.clone());
         let eph = test_ephemeris();
-        let forces = gravity_forces();
+        let registry = gravity_registry();
         let state = StateVector {
             position: DVec3::new(1.5e11, 0.0, 0.0),
             velocity: DVec3::new(0.0, 2.978e4, 0.0),
         };
         let t0 = 1000.0_f64;
-        let (_new, sample) = integrator.step(state, t0, &forces, &eph);
+        let (_new, sample) = integrator.step(state, t0, &registry, &eph);
         let expected = t0 + config.symplectic_dt;
         assert!(
             (sample.time - expected).abs() < 1e-9,
@@ -992,14 +1004,14 @@ mod tests {
         let config = IntegratorConfig::default();
         let mut integrator = Integrator::new(config);
         let eph = test_ephemeris();
-        let forces = gravity_forces();
+        let registry = gravity_registry();
         let state = StateVector {
             position: DVec3::new(1.5e11, 0.0, 0.0),
             velocity: DVec3::new(0.0, 2.978e4, 0.0),
         };
         let t0 = 1000.0_f64;
         let max_step = 5.0_f64;
-        let (_new, sample) = integrator.step_capped(state, t0, &forces, &eph, max_step);
+        let (_new, sample) = integrator.step_capped(state, t0, &registry, &eph, max_step);
         assert!(
             (sample.time - (t0 + max_step)).abs() < 1e-9,
             "sample.time should stop exactly at the segment boundary"
@@ -1021,13 +1033,13 @@ mod tests {
         let mut integrator = Integrator::new(config);
         integrator.mode = Mode::Adaptive;
         let eph = EmptyEphemeris;
-        let forces = Forces::new();
+        let registry = EffectRegistry::newtonian();
         let state = StateVector {
             position: DVec3::new(1.5e11, 0.0, 0.0),
             velocity: DVec3::new(0.0, 2.978e4, 0.0),
         };
         let (new_state, dt) =
-            integrator.rk45_step(state, 0.0, &forces, &eph, DVec3::ZERO, f64::INFINITY);
+            integrator.rk45_step(state, 0.0, &registry, &eph, DVec3::ZERO, f64::INFINITY);
         assert!(dt > 0.0, "step size must be positive");
         // With zero forces y'(t) = [v, 0], so the exact solution is linear.
         let expected_pos = state.position + state.velocity * dt;
@@ -1045,13 +1057,13 @@ mod tests {
     fn step_with_gravity_moves_ship() {
         let mut integrator = Integrator::new(IntegratorConfig::default());
         let eph = test_ephemeris();
-        let forces = gravity_forces();
+        let registry = gravity_registry();
         // Ship in a roughly Earth-like orbit.
         let state = StateVector {
             position: DVec3::new(AU, 0.0, 0.0),
             velocity: DVec3::new(0.0, 2.978e4, 0.0),
         };
-        let (new_state, sample) = integrator.step(state, 0.0, &forces, &eph);
+        let (new_state, sample) = integrator.step(state, 0.0, &registry, &eph);
         // Position should have changed.
         assert!(
             (new_state.position - state.position).length() > 1.0,

@@ -1,16 +1,6 @@
-use bevy::core_pipeline::Skybox;
 use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
-use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension};
 use thalos_planet_rendering::space_camera_post_stack;
-
-use crate::rendering::CameraExposure;
-
-/// Skybox brightness at 1 AU focus (gain = 1). Outer-system focus divides this
-/// by `CameraExposure.gain` so the skybox tracks the exposure compensation
-/// applied to body flux — without this, AutoExposure pumps the constant
-/// skybox into a blown-out backdrop when the metered planet face is dim.
-const SKYBOX_BRIGHTNESS_BASE: f32 = 500.0;
 
 /// Plugin that registers the orbit camera systems and spawns the camera entity.
 pub struct CameraPlugin;
@@ -19,6 +9,9 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BlockCameraInput>()
             .insert_resource(CameraFocus::default())
+            // Background is pure black — the forward-rendered
+            // `SkyRenderPlugin` draws stars additively on top.
+            .insert_resource(ClearColor(Color::BLACK))
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -28,18 +21,12 @@ impl Plugin for CameraPlugin {
                     camera_zoom_interpolation_system,
                     camera_focus_offset_decay_system,
                     camera_transform_system,
-                    setup_skybox_cubemap,
-                    update_skybox_brightness,
                 )
                     .chain()
                     .in_set(crate::SimStage::Camera),
             );
     }
 }
-
-/// Holds the skybox image handle so we can reinterpret it as a cubemap once loaded.
-#[derive(Resource)]
-struct SkyboxImage(Handle<Image>);
 
 /// Marker component placed on the orbit camera entity.
 #[derive(Component)]
@@ -102,65 +89,20 @@ const SURFACE_MARGIN: f64 = 3.0;
 // Startup
 // ---------------------------------------------------------------------------
 
-fn spawn_camera(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let skybox_handle: Handle<Image> = asset_server.load("skybox.png");
-
+fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         space_camera_post_stack(),
         OrbitCamera,
-        Skybox {
-            image: skybox_handle.clone(),
-            brightness: SKYBOX_BRIGHTNESS_BASE,
-            rotation: Quat::IDENTITY,
-        },
         // Transform is overwritten every frame by camera_transform_system.
         // We set a sane default so the first frame renders something.
         Transform::from_xyz(0.0, 0.0, 5e6).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-
-    commands.insert_resource(SkyboxImage(skybox_handle));
 }
 
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
-
-/// Reinterprets the skybox image from a vertical strip (6 stacked faces) into a
-/// cubemap texture. Runs once after the image finishes loading.
-fn setup_skybox_cubemap(
-    skybox: Option<Res<SkyboxImage>>,
-    mut images: ResMut<Assets<Image>>,
-    mut done: Local<bool>,
-) {
-    if *done {
-        return;
-    }
-    let Some(skybox) = skybox else { return };
-    let Some(image) = images.get_mut(&skybox.0) else {
-        return;
-    };
-
-    let _ = image.reinterpret_stacked_2d_as_array(image.height() / image.width());
-    image.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::Cube),
-        ..default()
-    });
-
-    *done = true;
-}
-
-/// Scales `Skybox.brightness` inversely with `CameraExposure.gain` so the
-/// skybox keeps a constant *perceived* brightness as focus moves outward.
-/// `update_camera_exposure` runs in the prior `Sync` stage, so its value is
-/// already current here.
-fn update_skybox_brightness(exposure: Res<CameraExposure>, mut skyboxes: Query<&mut Skybox>) {
-    let gain = exposure.gain.max(1.0e-3);
-    let brightness = SKYBOX_BRIGHTNESS_BASE / gain;
-    for mut skybox in &mut skyboxes {
-        skybox.brightness = brightness;
-    }
-}
 
 /// Reads mouse input and updates [`CameraFocus`].
 ///

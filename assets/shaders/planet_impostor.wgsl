@@ -44,6 +44,7 @@
 
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::get_world_from_local
+#import thalos::lighting::{SceneLighting, StarLight, PlanetShineSample, eclipse_factor, planetshine_sample}
 
 const PI: f32 = 3.14159265358979323846;
 const TAU: f32 = 6.28318530717958647692;
@@ -65,24 +66,18 @@ const FRESH_AGE_GYR: f32 = 0.1;
 // ── Material uniforms (binding group 3) ─────────────────────────────────────
 
 struct PlanetParams {
-    radius:            f32,
-    light_intensity:   f32,
-    ambient_intensity: f32,
-    height_range:      f32,
-    light_dir:         vec4<f32>,
+    radius:          f32,
+    height_range:    f32,
+    // Terminator wrap factor (0 = razor-sharp Lambert, >0 = softened edge
+    // for atmospheric/rough bodies). Replaces the old `light_dir.w` slot.
+    terminator_wrap: f32,
+    _pad0:           f32,
     // Quaternion (xyzw) rotating world-space directions into body-local space
     // where the cubemaps were baked. Identity = no rotation.
-    orientation:       vec4<f32>,
-    // Eclipse occluders: analytical sphere-shadow test against other bodies.
-    occluder_count:    u32,
-    _pad0:             u32,
-    _pad1:             u32,
-    _pad2:             u32,
-    // xyz = world render-space center, w = render-unit radius.
-    occluders:         array<vec4<f32>, 8>,
-    // Planetshine: parent body for secondary illumination.
-    parent_pos:        vec4<f32>,  // xyz = render pos, w = render radius
-    parent_tint:       vec4<f32>,  // xyz = bond_albedo × tint, w = enable flag
+    orientation:     vec4<f32>,
+    // Shared scene-lighting description: stars, ambient, eclipse occluders,
+    // planetshine parent. Mirror of `thalos::lighting::SceneLighting`.
+    scene:           SceneLighting,
 }
 
 // Layout matches `PlanetDetailParams` in `crates/planet_rendering/src/material.rs`.
@@ -848,41 +843,6 @@ fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32) -> f32 {
     return max(r, 0.0);
 }
 
-// ── Eclipse (cross-body shadow) ────────────────────────────────────────────
-//
-// Analytical sphere-shadow test: for each occluder (other body in the scene),
-// check whether the ray from the fragment toward the sun passes through the
-// occluder sphere. A simple soft penumbra scales with the occluder's apparent
-// radius over a small fraction — not a full solar-disk angular model, but
-// enough to avoid a hard on/off eclipse edge.
-//
-// Inputs: `hit_ws` fragment world position (render space), `light_dir_ws`
-// sun direction in world space.
-
-fn eclipse_term(hit_ws: vec3<f32>, light_dir_ws: vec3<f32>) -> f32 {
-    var factor: f32 = 1.0;
-    let count = params.occluder_count;
-    for (var i: u32 = 0u; i < count; i = i + 1u) {
-        let oc = params.occluders[i];
-        let center = oc.xyz;
-        let r = oc.w;
-        if r <= 0.0 { continue; }
-        let delta = center - hit_ws;
-        let t = dot(delta, light_dir_ws);
-        // Occluder must be on the sun-ward side of the fragment.
-        if t <= 0.0 { continue; }
-        // Perpendicular distance from sun ray to occluder center.
-        let perp2 = dot(delta, delta) - t * t;
-        let perp = sqrt(max(perp2, 0.0));
-        // Soft edge: full umbra inside r, fades out to ~1.1 r.
-        let penumbra = max(r * 0.1, 1.0);
-        let s = smoothstep(r, r + penumbra, perp);
-        factor = min(factor, s);
-        if factor <= 0.0 { break; }
-    }
-    return factor;
-}
-
 // ── Fragment ────────────────────────────────────────────────────────────────
 
 @fragment
@@ -938,18 +898,26 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // Carried from the vertex stage; see vertex() for the derivation.
     let pixel_size_m = in.pixel_size_m;
 
+    // Primary star — single-star path today. Multi-star support lives in
+    // `params.scene.stars[0..star_count]` and the lighting helpers; the
+    // crater iteration / SSBO layer is still expressed against a single
+    // star direction, so add a loop here when more than one star is live.
+    let primary_star = params.scene.stars[0];
+    let sun_dir_ws = primary_star.dir_flux.xyz;
+    let sun_flux   = primary_star.dir_flux.w;
+
     // ── Dark-hemisphere early-out ───────────────────────────────────────
     // Crater normal perturbation is clamped to `geo_n_dot_l + 0.05` below,
     // and the terminator wrap adds at most `roughness * 0.08`. Any fragment
     // deeper than that on the dark side is unreachable by both sources, so
     // the crater layers cannot change the final color — skip them.
-    let geo_n_dot_l = dot(normal, params.light_dir.xyz);
-    let wrap_slack  = params.light_dir.w * 0.08;
+    let geo_n_dot_l = dot(normal, sun_dir_ws);
+    let wrap_slack  = params.terminator_wrap * 0.08;
     let dark_side   = geo_n_dot_l < -(0.05 + wrap_slack);
 
     // Sun direction in body-local space — shared by crater iteration (for
     // per-crater analytical shadow) and the cubemap raymarch below.
-    let light_dir_local = rotate_quat(params.orientation, params.light_dir.xyz);
+    let light_dir_local = rotate_quat(params.orientation, sun_dir_ws);
 
     var ssbo_grad  = vec3<f32>(0.0);
     var min_maturity = 1.0;
@@ -1001,10 +969,9 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let n_dot_v = max(dot(shading_normal, view_dir), 0.0);
 
     // Primary: direct sunlight.
-    let sun_dir = params.light_dir.xyz;
-    let sun_n_dot_l_raw = dot(shading_normal, sun_dir);
+    let sun_n_dot_l_raw = dot(shading_normal, sun_dir_ws);
     let sun_n_dot_l = min(sun_n_dot_l_raw, geo_n_dot_l + headroom);
-    let cos_phase_sun = dot(view_dir, sun_dir);
+    let cos_phase_sun = dot(view_dir, sun_dir_ws);
     var sun_r = hapke_brdf(max(sun_n_dot_l, 0.0), n_dot_v, cos_phase_sun);
 
     // Apply all shadow terms to the sun contribution only. Planetshine uses
@@ -1013,47 +980,30 @@ fn fragment(in: VertexOutput) -> FragOutput {
     if geo_n_dot_l > 0.0 {
         sun_r = sun_r * self_shadow(sample_dir, light_dir_local);
     }
-    sun_r = sun_r * eclipse_term(hit, sun_dir);
+    sun_r = sun_r * eclipse_factor(params.scene, hit, sun_dir_ws);
 
     // Secondary: planetshine from the orbital parent.
     //
     // Physical model: the parent reflects sunlight back at the moon as a
-    // finite-angular-radius disk. Irradiance arriving at the fragment is
-    //     E_shine = E_sun · A_parent · (R/D)² · f(α)
-    // where α is the sun-parent-moon angle seen from the fragment and
-    //     f(α) = (sin α + (π-α) cos α) / π
-    // is the Lambert-sphere integrated phase function (f(0) = 1, f(π) = 0).
-    //
-    // Applied through the same Hapke BRDF with the parent direction as the
-    // light vector, so the moon's night side picks up a photographically
+    // finite-angular-radius disk. `planetshine_sample_uniform` returns the
+    // direction and arriving flux; we feed the same Hapke BRDF with that
+    // direction so the moon's night side picks up a photographically
     // faithful dim glow when the parent is "full" overhead.
     var shine_rgb = vec3<f32>(0.0);
-    if params.parent_tint.w > 0.5 {
-        let to_parent = params.parent_pos.xyz - hit;
-        let parent_dist = length(to_parent);
-        let parent_radius = params.parent_pos.w;
-        if parent_dist > parent_radius && parent_radius > 0.0 {
-            let parent_dir = to_parent / parent_dist;
-            let shine_n_dot_l = dot(shading_normal, parent_dir);
-            let shine_cos_phase = dot(view_dir, parent_dir);
-            let shine_r = hapke_brdf(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase);
-            // Parent's illuminated-fraction phase function (Lambert sphere).
-            let cos_alpha = clamp(dot(sun_dir, parent_dir), -1.0, 1.0);
-            let alpha     = acos(cos_alpha);
-            let lambert_phase = (sin(alpha) + (PI - alpha) * cos_alpha) / PI;
-            let angular_ratio = parent_radius / parent_dist;
-            let angular_sq    = angular_ratio * angular_ratio;
-            let flux_factor   = params.light_intensity * angular_sq * lambert_phase;
-            shine_rgb = params.parent_tint.xyz * shine_r * flux_factor;
-        }
+    let shine = planetshine_sample(params.scene, hit, sun_dir_ws, sun_flux);
+    if shine.enabled {
+        let shine_n_dot_l = dot(shading_normal, shine.dir);
+        let shine_cos_phase = dot(view_dir, shine.dir);
+        let shine_r = hapke_brdf(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase);
+        shine_rgb = shine.tint * shine_r * shine.flux;
     }
 
     // Combine. Hapke's r is a radiance factor; the prior pipeline used a
     // Lambert `/PI` normalization we now fold into a global scale so
-    // existing `light_intensity` values don't need re-tuning.
+    // existing flux values don't need re-tuning.
     let hapke_scale: f32 = 0.5;
-    let sun_rgb = vec3<f32>(sun_r * params.light_intensity * hapke_scale);
-    let lit = albedo * (sun_rgb + shine_rgb + vec3<f32>(params.ambient_intensity));
+    let sun_rgb = vec3<f32>(sun_r * sun_flux * hapke_scale);
+    let lit = albedo * (sun_rgb + shine_rgb + vec3<f32>(params.scene.ambient_intensity));
 
     // Correct depth.
     let hit_clip = view.clip_from_world * vec4(hit, 1.0);

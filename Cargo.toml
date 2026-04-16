@@ -4,9 +4,11 @@ members = [
     "crates/physics",
     "crates/terrain_gen",
     "crates/atmosphere_gen",
+    "crates/celestial",
     "crates/planet_rendering",
     "crates/planet_editor",
     "crates/game",
+    "crates/shipyard",
 ]
 
 [workspace.package]

@@ -71,13 +71,13 @@ fn rebuild_ghosts(
         return;
     };
 
-    let epoch = sim.simulation.prediction_epoch();
+    let version = sim.simulation.prediction_version();
     let target_changed = cache.last_target != target.target;
-    let epoch_changed = cache.last_epoch != epoch;
-    if cache.built_once && !epoch_changed && !target_changed {
+    let version_changed = cache.last_epoch != version;
+    if cache.built_once && !version_changed && !target_changed {
         return;
     }
-    cache.last_epoch = epoch;
+    cache.last_epoch = version;
     cache.last_target = target.target;
     cache.built_once = true;
 

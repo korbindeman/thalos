@@ -1,0 +1,30 @@
+//! Parametric ship construction for Thalos.
+//!
+//! Ships are ECS trees of parts connected by typed attach nodes. Fixed parts
+//! (CommandPod, Engine) declare static node sizes; parametric parts
+//! (Decoupler, Adapter, FuelTank) have their node sizes computed from the
+//! parent they are attached to, via `sizing::propagate_node_sizes`.
+//!
+//! Serialization goes through a flat `ShipBlueprint` struct so that the ECS
+//! representation stays query-friendly while the on-disk format stays stable.
+
+use bevy::prelude::*;
+
+pub mod attach;
+pub mod blueprint;
+pub mod part;
+pub mod resource;
+pub mod sizing;
+
+pub use attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
+pub use blueprint::{Connection, PartBlueprint, PartData, ShipBlueprint};
+pub use part::{Adapter, CommandPod, Decoupler, Engine, FuelTank, Part};
+pub use resource::{PartResources, ResourcePool};
+
+pub struct ShipyardPlugin;
+
+impl Plugin for ShipyardPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, sizing::propagate_node_sizes);
+    }
+}

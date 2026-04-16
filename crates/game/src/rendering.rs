@@ -24,8 +24,9 @@ use thalos_physics::{
 use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
     FilmGrain, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams,
-    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, RingLayers,
-    RingMaterial, RingMaterialHandle, RingParams, bake_from_body_data, build_ring_mesh,
+    MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
+    RingLayers, RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight,
+    bake_from_body_data, build_ring_mesh,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, Pipeline, StageDef};
 
@@ -549,14 +550,7 @@ fn spawn_bodies(
             let gas_material = gas_giant_materials.add(GasGiantMaterial {
                 params: GasGiantParams {
                     radius: render_radius,
-                    light_intensity: LIGHT_AT_1AU,
-                    // Match the `PLANET_AMBIENT = 0.0` convention used
-                    // by baked planet impostors so gas giants get the
-                    // same physically-dark shadowed hemisphere.
-                    ambient_intensity: PLANET_AMBIENT,
-                    rotation_phase: 0.0,
-                    light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
-                    orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                    ..default()
                 },
                 layers,
             });
@@ -614,17 +608,15 @@ fn spawn_bodies(
                 let ring_layers = RingLayers::from_system(rings);
                 let ring_material = ring_materials.add(RingMaterial {
                     params: RingParams {
-                        light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
                         planet_center_radius: Vec4::new(
                             pos.x,
                             pos.y,
                             pos.z,
                             render_radius,
                         ),
-                        light_intensity: LIGHT_AT_1AU,
-                        ambient_intensity: PLANET_AMBIENT,
                         inner_radius: inner_r,
                         outer_radius: outer_r,
+                        ..default()
                     },
                     layers: ring_layers,
                 });
@@ -780,11 +772,8 @@ fn finalize_planet_generation(
         let mat_handle = planet_materials.add(PlanetMaterial {
             params: PlanetParams {
                 radius: pending.render_radius,
-                light_intensity: LIGHT_AT_1AU,
-                ambient_intensity: PLANET_AMBIENT,
                 height_range,
-                light_dir: Vec4::new(0.0, 1.0, 0.0, roughness),
-                orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                terminator_wrap: roughness,
                 ..default()
             },
             albedo: textures.albedo,
@@ -862,11 +851,81 @@ fn sync_film_grain_to_exposure(exposure: Res<CameraExposure>, mut grains: Query<
     let push_ev = exposure.ev.max(0.0);
     let normalized = (push_ev / EXPOSURE_EV_GRAIN_MAX).clamp(0.0, 1.0);
     const BASE_INTENSITY: f32 = 0.020;
-    const MAX_EXTRA: f32 = 0.100;
+    const MAX_EXTRA: f32 = 0.030;
     let target = BASE_INTENSITY + normalized * MAX_EXTRA;
     for mut grain in &mut grains {
         grain.intensity = target;
     }
+}
+
+/// Build a `SceneLighting` snapshot for one body: one star (index 0),
+/// eclipse occluders drawn from every other non-trivial body, shared
+/// exposure gain, ambient floor. Planetshine is filled separately by
+/// the caller because only terrestrial moons need it.
+fn build_scene_lighting(
+    body_id: usize,
+    states: &BodyStates,
+    occluders: &[(usize, Vec3, f32)],
+    gain: f32,
+) -> SceneLighting {
+    let mut scene = SceneLighting::default();
+    scene.ambient_intensity = PLANET_AMBIENT;
+
+    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
+    let body_pos = states
+        .get(body_id)
+        .map(|s| s.position)
+        .unwrap_or_default();
+    let offset = star_pos - body_pos;
+    let distance_m = offset.length();
+    let to_star = if distance_m > 0.0 {
+        (offset / distance_m).as_vec3()
+    } else {
+        Vec3::Y
+    };
+    let au_over_d = AU_M / distance_m.max(1.0);
+    let flux = LIGHT_AT_1AU * (au_over_d * au_over_d) as f32 * gain;
+
+    scene.star_count = 1;
+    scene.stars[0] = StarLight {
+        dir_flux: Vec4::new(to_star.x, to_star.y, to_star.z, flux),
+        color: Vec4::new(1.0, 1.0, 1.0, 0.0),
+    };
+
+    let mut count = 0usize;
+    for (other_id, pos, radius) in occluders {
+        if *other_id == body_id {
+            continue;
+        }
+        if count >= MAX_ECLIPSE_OCCLUDERS {
+            break;
+        }
+        scene.occluders[count] = Vec4::new(pos.x, pos.y, pos.z, *radius);
+        count += 1;
+    }
+    scene.occluder_count = count as u32;
+
+    scene
+}
+
+/// Collect eclipse-occluder candidates from every visible non-star body.
+fn collect_occluders<'a>(
+    states: &BodyStates,
+    origin: &RenderOrigin,
+    bodies: impl IntoIterator<Item = &'a CelestialBody>,
+) -> Vec<(usize, Vec3, f32)> {
+    let mut occluders: Vec<(usize, Vec3, f32)> = Vec::new();
+    for body in bodies {
+        if body.is_star || body.render_radius < 0.001 {
+            continue;
+        }
+        let Some(state) = states.get(body.body_id) else {
+            continue;
+        };
+        let render_pos = to_render_pos(state.position - origin.position);
+        occluders.push((body.body_id, render_pos, body.render_radius));
+    }
+    occluders
 }
 
 fn update_planet_light_dirs(
@@ -880,69 +939,18 @@ fn update_planet_light_dirs(
     let Some(ref states) = cache.states else {
         return;
     };
-    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     let body_defs = sim.simulation.bodies();
     let gain = exposure.gain;
-
-    // Collect eclipse-occluder candidates once. Only non-star bodies with
-    // non-trivial render radius count — tiny comets add cost without ever
-    // producing a visible eclipse.
-    let mut occluders: Vec<(usize, Vec3, f32)> = Vec::new();
-    for (body, _) in &query {
-        if body.is_star || body.render_radius < 0.001 {
-            continue;
-        }
-        let Some(state) = states.get(body.body_id) else {
-            continue;
-        };
-        let render_pos = to_render_pos(state.position - origin.position);
-        occluders.push((body.body_id, render_pos, body.render_radius));
-    }
+    let occluders = collect_occluders(states, &origin, query.iter().map(|(b, _)| b));
 
     for (body, handle) in &query {
         let Some(mat) = materials.get_mut(&handle.0) else {
             continue;
         };
-        let body_pos = states
-            .get(body.body_id)
-            .map(|s| s.position)
-            .unwrap_or_default();
-        let offset = star_pos - body_pos;
-        let distance_m = offset.length();
-        let to_star = if distance_m > 0.0 {
-            (offset / distance_m).as_vec3()
-        } else {
-            Vec3::Y
-        };
-        // Preserve w (surface roughness) — only update the direction xyz.
-        let roughness = mat.params.light_dir.w;
-        mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, roughness);
-        // Raw inverse-square flux × exposure gain. Exposure math lives in
-        // `update_camera_exposure`; this stage just multiplies.
-        let au_over_d = AU_M / distance_m.max(1.0);
-        let raw = (au_over_d * au_over_d) as f32;
-        mat.params.light_intensity = LIGHT_AT_1AU * raw * gain;
-
-        // Fill eclipse occluder list from all other visible bodies.
-        mat.params.occluders = [Vec4::ZERO; thalos_planet_rendering::MAX_ECLIPSE_OCCLUDERS];
-        let mut count = 0usize;
-        for (other_id, pos, radius) in &occluders {
-            if *other_id == body.body_id {
-                continue;
-            }
-            if count >= thalos_planet_rendering::MAX_ECLIPSE_OCCLUDERS {
-                break;
-            }
-            mat.params.occluders[count] = Vec4::new(pos.x, pos.y, pos.z, *radius);
-            count += 1;
-        }
-        mat.params.occluder_count = count as u32;
+        let mut scene = build_scene_lighting(body.body_id, states, &occluders, gain);
 
         // Planetshine: pick the orbital parent, skipping the star. The
-        // parent's Bond albedo × color is the effective reflected tint; its
-        // render-space position and radius go in `parent_pos`.
-        mat.params.parent_pos = Vec4::ZERO;
-        mat.params.parent_tint = Vec4::ZERO;
+        // parent's Bond albedo × color is the effective reflected tint.
         let body_def = &body_defs[body.body_id];
         if let Some(parent_id) = body_def.parent {
             let parent_def = &body_defs[parent_id];
@@ -955,16 +963,18 @@ fn update_planet_light_dirs(
                         parent_def.color[1],
                         parent_def.color[2],
                     ) * parent_def.albedo;
-                    mat.params.parent_pos = Vec4::new(
+                    scene.planetshine_pos_radius = Vec4::new(
                         parent_render_pos.x,
                         parent_render_pos.y,
                         parent_render_pos.z,
                         parent_radius,
                     );
-                    mat.params.parent_tint = Vec4::new(tint.x, tint.y, tint.z, 1.0);
+                    scene.planetshine_tint_flag = Vec4::new(tint.x, tint.y, tint.z, 1.0);
                 }
             }
         }
+
+        mat.params.scene = scene;
     }
 }
 
@@ -1022,18 +1032,25 @@ fn update_planet_orientations(
 /// the terrestrial path — the two queries are disjoint.
 fn update_gas_giant_params(
     query: Query<(&CelestialBody, &GasGiantMaterialHandle)>,
+    all_bodies: Query<&CelestialBody>,
     mut materials: ResMut<Assets<GasGiantMaterial>>,
     cache: Res<FrameBodyStates>,
+    origin: Res<RenderOrigin>,
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
 ) {
     let Some(ref states) = cache.states else {
         return;
     };
-    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     let body_defs = sim.simulation.bodies();
     let sim_time = sim.simulation.sim_time();
     let gain = exposure.gain;
+    let occluders = collect_occluders(states, &origin, all_bodies.iter());
+
+    // Raw sim seconds — the gas-giant shader uses this for differential
+    // rotation scroll, edge-wave phase, and edge vortex chain epoch
+    // hashing. Modulo a day-scale period so the f32 stays precise.
+    let time_mod = (sim_time % 86_400.0) as f32;
 
     for (body, handle) in &query {
         let Some(mat) = materials.get_mut(&handle.0) else {
@@ -1043,32 +1060,8 @@ fn update_gas_giant_params(
         // Radius can change if something later rescales the render unit;
         // rewrite every frame to stay in sync.
         mat.params.radius = body.render_radius;
-
-        // Light direction: unit vector from body toward star.
-        let body_pos = states
-            .get(body.body_id)
-            .map(|s| s.position)
-            .unwrap_or_default();
-        let offset = star_pos - body_pos;
-        let distance_m = offset.length();
-        let to_star = if distance_m > 0.0 {
-            (offset / distance_m).as_vec3()
-        } else {
-            Vec3::Y
-        };
-        // w carries raw sim seconds — the gas-giant shader uses it for
-        // differential rotation scroll, edge-wave phase, and edge
-        // vortex chain epoch hashing. Modulo a day-scale period so the
-        // f32 stays precise over long sessions.
-        let time_mod = (sim_time % 86_400.0) as f32;
-        mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, time_mod);
-
-        // Inverse-square flux × exposure gain — same contract as
-        // `update_planet_light_dirs` so gas giants share the scene's
-        // overall exposure calibration.
-        let au_over_d = AU_M / distance_m.max(1.0);
-        let raw = (au_over_d * au_over_d) as f32;
-        mat.params.light_intensity = LIGHT_AT_1AU * raw * gain;
+        mat.params.elapsed_time = time_mod;
+        mat.params.scene = build_scene_lighting(body.body_id, states, &occluders, gain);
 
         // Rotation phase: advance bands at the body's real rotation
         // rate. sim_time is seconds, rotation_period_s is seconds, so
@@ -1112,8 +1105,8 @@ fn update_ring_params(
     let Some(ref states) = cache.states else {
         return;
     };
-    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     let gain = exposure.gain;
+    let occluders = collect_occluders(states, &origin, body_query.iter());
 
     for (parent, handle) in &ring_query {
         let Ok(body) = body_query.get(parent.0) else {
@@ -1127,13 +1120,6 @@ fn update_ring_params(
             .get(body.body_id)
             .map(|s| s.position)
             .unwrap_or_default();
-        let offset = star_pos - body_pos_m;
-        let distance_m = offset.length();
-        let to_star = if distance_m > 0.0 {
-            (offset / distance_m).as_vec3()
-        } else {
-            Vec3::Y
-        };
 
         // Planet center in the render frame — same transform
         // `update_body_positions` uses, so the shadow ray tests the
@@ -1145,11 +1131,7 @@ fn update_ring_params(
             center_render.z,
             body.render_radius,
         );
-        mat.params.light_dir = Vec4::new(to_star.x, to_star.y, to_star.z, 0.0);
-
-        let au_over_d = AU_M / distance_m.max(1.0);
-        let raw = (au_over_d * au_over_d) as f32;
-        mat.params.light_intensity = LIGHT_AT_1AU * raw * gain;
+        mat.params.scene = build_scene_lighting(body.body_id, states, &occluders, gain);
     }
 }
 

@@ -8,6 +8,10 @@ game:
 editor:
     cargo run -p thalos_planet_editor --features dev
 
+# Run the ship editor (shipyard crate)
+shipyard:
+    cargo run -p thalos_shipyard --bin ship_editor
+
 # Build everything
 build:
     cargo build --workspace

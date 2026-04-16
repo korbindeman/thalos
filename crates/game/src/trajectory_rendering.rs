@@ -73,11 +73,54 @@ fn render_trajectory(
         return;
     };
 
-    for (i, segment) in prediction.segments.iter().enumerate() {
-        let is_ghost = i > 0;
-        let pins = compute_segment_pins(&segment.samples, body_states, &sim.system, i == 0);
-        render_segment(segment, &pins, is_ghost, &sim.system, &origin, &mut gizmos);
+    for (leg_idx, leg) in prediction.legs().iter().enumerate() {
+        // Burn sub-segment is rendered first (when present) as a bright
+        // thrust arc — never ghost-dimmed, so the player always sees where
+        // the burn happened regardless of how far into the plan it is.
+        if let Some(burn) = &leg.burn_segment {
+            let pins = compute_segment_pins(&burn.samples, body_states, &sim.system, false);
+            render_burn_segment(burn, &pins, &origin, &mut gizmos);
+        }
+
+        // Coast sub-segment uses the standard trajectory rendering. Legs
+        // after the first get the "ghost" (post-maneuver) dim because the
+        // ship has had at least one burn applied by then.
+        let is_ghost = leg_idx > 0;
+        let pins = compute_segment_pins(
+            &leg.coast_segment.samples,
+            body_states,
+            &sim.system,
+            leg_idx == 0,
+        );
+        render_segment(
+            &leg.coast_segment,
+            &pins,
+            is_ghost,
+            &sim.system,
+            &origin,
+            &mut gizmos,
+        );
     }
+}
+
+/// Render a burn sub-segment as a bright orange arc so the player sees the
+/// thrust interval without relying on ghost/ghost-less dimming.
+fn render_burn_segment(
+    segment: &NumericSegment,
+    pins: &[DVec3],
+    origin: &RenderOrigin,
+    gizmos: &mut Gizmos,
+) {
+    if segment.samples.len() < 2 {
+        return;
+    }
+    let burn_color = Color::srgba(1.0, 0.65, 0.1, 1.0);
+    let points = segment
+        .samples
+        .iter()
+        .zip(pins.iter())
+        .map(|(s, &pin)| sample_render_pos(s, pin, origin));
+    gizmos.linestrip(points, burn_color);
 }
 
 // ---------------------------------------------------------------------------

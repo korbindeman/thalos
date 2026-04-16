@@ -1,6 +1,7 @@
 pub mod bake;
 mod film_grain;
 mod gas_giant;
+pub mod lighting;
 mod material;
 pub mod post_stack;
 mod rings;
@@ -12,6 +13,7 @@ pub use film_grain::FilmGrain;
 pub use gas_giant::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,
 };
+pub use lighting::{MAX_STARS, SceneLighting, StarLight};
 pub use material::{
     MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
 };
@@ -34,6 +36,7 @@ pub struct PlanetRenderingPlugin;
 
 impl Plugin for PlanetRenderingPlugin {
     fn build(&self, app: &mut App) {
+        bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
         app.add_plugins((
             MaterialPlugin::<PlanetMaterial>::default(),
             MaterialPlugin::<GasGiantMaterial>::default(),

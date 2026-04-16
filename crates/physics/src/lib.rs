@@ -1,5 +1,5 @@
 pub mod body_state_provider;
-pub mod forces;
+pub mod effects;
 pub mod integrator;
 pub mod maneuver;
 pub mod parsing;

@@ -1,0 +1,19 @@
+[package]
+name = "thalos_shipyard"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = "0.18"
+bevy_egui = "0.39"
+glam = { version = "0.30", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.12"
+
+[[example]]
+name = "roundtrip"
+path = "examples/roundtrip.rs"
+
+[[bin]]
+name = "ship_editor"
+path = "src/bin/ship_editor.rs"

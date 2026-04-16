@@ -10,7 +10,7 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::body_state_provider::BodyStateProvider;
-use crate::forces::{Forces, ManeuverThrustForce};
+use crate::effects::{Effect, EffectRegistry, ManeuverThrustEffect};
 use crate::integrator::{Integrator, IntegratorConfig};
 use crate::maneuver::{ManeuverSequence, burn_duration};
 use crate::trajectory::{
@@ -153,14 +153,21 @@ impl WarpController {
 // Prediction state
 // ---------------------------------------------------------------------------
 
-/// Tracks prediction lifecycle: dirty flag, epoch, staleness.
+/// Tracks the cached prediction: whether it's dirty, when it was last
+/// recomputed, and the [`PredictionConfig`] used to build it.
+///
+/// Prediction is now recomputed synchronously on the main thread, so there
+/// is no worker-thread epoch/stale-message machinery — a single `dirty` flag
+/// plus a last-recompute timestamp are enough.
 pub struct PredictionState {
     config: PredictionConfig,
     prediction: Option<FlightPlan>,
     dirty: bool,
-    epoch: u64,
     stale_after: f64,
-    last_prediction_time: Option<f64>,
+    last_recompute_time: Option<f64>,
+    /// Monotonic counter bumped every time a fresh prediction is installed.
+    /// Consumers (ghost-body rebuild, etc.) key their caches on this.
+    version: u64,
 }
 
 impl PredictionState {
@@ -169,14 +176,10 @@ impl PredictionState {
             config,
             prediction: None,
             dirty: true,
-            epoch: 1,
             stale_after,
-            last_prediction_time: None,
+            last_recompute_time: None,
+            version: 0,
         }
-    }
-
-    pub fn epoch(&self) -> u64 {
-        self.epoch
     }
 
     pub fn stale_after(&self) -> f64 {
@@ -191,72 +194,48 @@ impl PredictionState {
         self.prediction.as_ref()
     }
 
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
-        self.epoch = self.epoch.wrapping_add(1);
     }
 
     pub fn needs_refresh(&self, sim_time: f64) -> bool {
         if self.dirty || self.prediction.is_none() {
             return true;
         }
-
-        self.last_prediction_time
+        self.last_recompute_time
             .map(|t| (sim_time - t) >= self.stale_after)
             .unwrap_or(true)
     }
 
-    /// Apply a computed prediction, replacing whatever was there.
-    ///
-    /// Previously this rejected any prediction whose epoch didn't match the
-    /// current (latest) epoch. That blocked real-time feedback during a
-    /// drag: each edit advances the epoch, so by the time the worker
-    /// returned a result the "current" epoch had already moved on and the
-    /// result was dropped. Showing a slightly stale prediction is strictly
-    /// better than showing a very stale one. `dirty` is only cleared when
-    /// the applied epoch actually matches.
-    pub fn apply(
-        &mut self,
-        prediction: FlightPlan,
-        predicted_at_sim_time: f64,
-        epoch: u64,
-    ) -> bool {
+    /// Install a freshly computed prediction, clear the dirty flag, and
+    /// bump the version counter so cache consumers rebuild.
+    fn install(&mut self, prediction: FlightPlan, at_sim_time: f64) {
         self.prediction = Some(prediction);
-        self.last_prediction_time = Some(predicted_at_sim_time);
-        if epoch == self.epoch {
-            self.dirty = false;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Unconditionally set the prediction (no epoch check).
-    pub fn force_set(&mut self, prediction: FlightPlan) {
-        self.prediction = Some(prediction);
-    }
-
-    /// Clear the dirty flag without applying a prediction.
-    pub fn clear_dirty(&mut self) {
+        self.last_recompute_time = Some(at_sim_time);
         self.dirty = false;
+        self.version = self.version.wrapping_add(1);
     }
 }
 
-fn build_forces(active_burns: &[ScheduledBurn]) -> Forces {
-    Forces {
-        thrusts: active_burns
+fn build_registry(active_burns: &[ScheduledBurn]) -> EffectRegistry {
+    EffectRegistry::with_effects(
+        active_burns
             .iter()
             .map(|burn| {
-                ManeuverThrustForce::new(
+                Arc::new(ManeuverThrustEffect::new(
                     burn.delta_v_local,
                     burn.reference_body,
                     burn.acceleration,
                     burn.start_time,
                     burn.duration,
-                )
+                )) as Arc<dyn Effect>
             })
             .collect(),
-    }
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +250,7 @@ pub struct Simulation {
     ship_state: StateVector,
     sim_time: f64,
     integrator: Integrator,
-    forces: Forces,
+    registry: EffectRegistry,
     integrator_config: IntegratorConfig,
 
     // Accumulator
@@ -302,13 +281,13 @@ impl Simulation {
     ) -> Self {
         let integrator = Integrator::new(config.integrator_config.clone());
 
-        let forces = build_forces(&[]);
+        let registry = build_registry(&[]);
 
         Self {
             ship_state,
             sim_time: 0.0,
             integrator,
-            forces,
+            registry,
             integrator_config: config.integrator_config,
             accumulator: 0.0,
             max_steps_per_frame: config.max_steps_per_frame,
@@ -362,13 +341,13 @@ impl Simulation {
         let mut steps = 0u32;
         while self.accumulator >= step_size && steps < self.max_steps_per_frame {
             if self.update_active_burns() {
-                self.forces = build_forces(&self.active_burns);
+                self.registry = build_registry(&self.active_burns);
             }
 
             let (new_state, sample) = self.integrator.step(
                 self.ship_state,
                 self.sim_time,
-                &self.forces,
+                &self.registry,
                 self.ephemeris.as_ref(),
             );
             let step_taken = sample.time - self.sim_time;
@@ -379,7 +358,7 @@ impl Simulation {
         }
 
         if self.update_active_burns() {
-            self.forces = build_forces(&self.active_burns);
+            self.registry = build_registry(&self.active_burns);
         }
     }
 
@@ -451,24 +430,20 @@ impl Simulation {
 
     // -- Prediction ---------------------------------------------------------
 
-    pub fn prediction_epoch(&self) -> u64 {
-        self.prediction_state.epoch()
-    }
-
     pub fn prediction_stale_after(&self) -> f64 {
         self.prediction_state.stale_after()
     }
 
-    pub fn prediction_request(&self) -> PredictionRequest {
-        // Prediction uses a coarser time step than the live simulation —
-        // orbit shape doesn't need 1 s resolution, and larger steps let us
-        // cover multiple full orbits within the step budget.
-        let mut prediction_integrator = self.integrator_config.clone();
-        prediction_integrator.symplectic_dt = IntegratorConfig::default().symplectic_dt;
-        prediction_integrator.rk_initial_dt = IntegratorConfig::default().rk_initial_dt;
+    /// Monotonic counter bumped each time `recompute_prediction` installs a
+    /// fresh result. Consumers use this to invalidate caches.
+    pub fn prediction_version(&self) -> u64 {
+        self.prediction_state.version()
+    }
 
-        PredictionRequest {
-            epoch: self.prediction_state.epoch(),
+    /// Recompute trajectory prediction synchronously using the same
+    /// integrator config as live stepping, ensuring numerical consistency.
+    pub fn recompute_prediction(&mut self) {
+        let req = PredictionRequest {
             ship_state: self.ship_state,
             sim_time: self.sim_time,
             maneuvers: self.maneuvers.clone(),
@@ -476,30 +451,11 @@ impl Simulation {
             ephemeris: Arc::clone(&self.ephemeris),
             bodies: self.bodies.clone(),
             prediction_config: self.prediction_state.config().clone(),
-            integrator_config: prediction_integrator,
+            integrator_config: self.integrator_config.clone(),
             ship_thrust_acceleration: self.ship_thrust_acceleration,
-        }
-    }
-
-    /// Apply a computed prediction if it still matches the current epoch.
-    pub fn apply_prediction(
-        &mut self,
-        prediction: FlightPlan,
-        predicted_at_sim_time: f64,
-        epoch: u64,
-    ) -> bool {
-        self.prediction_state
-            .apply(prediction, predicted_at_sim_time, epoch)
-    }
-
-    /// Recompute trajectory prediction using the same integrator config as live
-    /// stepping, ensuring numerical consistency.
-    pub fn recompute_prediction(&mut self) {
-        let req = self.prediction_request();
+        };
         let prediction = propagate_flight_plan(&req, None);
-        let _ = self
-            .prediction_state
-            .apply(prediction, req.sim_time, req.epoch);
+        self.prediction_state.install(prediction, req.sim_time);
     }
 
     pub fn prediction_needs_refresh(&self) -> bool {
@@ -508,14 +464,6 @@ impl Simulation {
 
     pub fn prediction(&self) -> Option<&FlightPlan> {
         self.prediction_state.prediction()
-    }
-
-    pub fn force_set_prediction(&mut self, prediction: FlightPlan) {
-        self.prediction_state.force_set(prediction);
-    }
-
-    pub fn clear_prediction_dirty(&mut self) {
-        self.prediction_state.clear_dirty();
     }
 
     // -- Body orbit trails --------------------------------------------------

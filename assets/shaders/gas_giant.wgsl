@@ -30,6 +30,7 @@
 
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::get_world_from_local
+#import thalos::lighting::{SceneLighting, eclipse_factor}
 
 // ── Uniforms ────────────────────────────────────────────────────────────────
 
@@ -40,16 +41,16 @@ const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
 
 // Matches `GasGiantParams` in `gas_giant.rs`. Field order is load-bearing.
-// `light_dir.w` carries `elapsed_seconds` — raw sim time wrapped to a
-// day so f32 precision stays tight. Used by differential rotation, edge
-// wave phase, and edge vortex chain epoch hashing.
+// `elapsed_time` carries raw sim time wrapped to a day so f32 precision
+// stays tight — used by differential rotation, edge wave phase, and
+// edge vortex chain epoch hashing.
 struct GasGiantParams {
-    radius:            f32,
-    light_intensity:   f32,
-    ambient_intensity: f32,
-    rotation_phase:    f32,
-    light_dir:         vec4<f32>,
-    orientation:       vec4<f32>,
+    radius:         f32,
+    rotation_phase: f32,
+    elapsed_time:   f32,
+    _pad0:          f32,
+    orientation:    vec4<f32>,
+    scene:          SceneLighting,
 }
 
 // Matches `GasGiantLayers` in `gas_giant.rs`. Field order is load-bearing.
@@ -176,11 +177,7 @@ fn hash_f32(x: u32) -> f32 {
     return f32(pcg(x)) / 4294967295.0;
 }
 
-fn hash_cell(ix: f32, iy: f32, k: u32) -> f32 {
-    // Bitcast the lattice coordinates so negative floats produce
-    // deterministic integer values. WGSL's `u32(f)` is undefined for
-    // negative inputs, and `floor(p)` can easily be negative on a
-    // full-sphere sample field — bitcasting sidesteps the whole mess.
+fn hash_cell(ix: i32, iy: i32, k: u32) -> f32 {
     let xu = bitcast<u32>(ix);
     let yu = bitcast<u32>(iy);
     return hash_f32(xu ^ (yu * 374761393u) ^ k);
@@ -190,21 +187,27 @@ fn value_noise_2d(p: vec2<f32>, seed: u32) -> f32 {
     let i = floor(p);
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
-    let a = hash_cell(i.x,       i.y,       seed);
-    let b = hash_cell(i.x + 1.0, i.y,       seed);
-    let c = hash_cell(i.x,       i.y + 1.0, seed);
-    let d = hash_cell(i.x + 1.0, i.y + 1.0, seed);
+    let ix = i32(i.x);
+    let iy = i32(i.y);
+    let a = hash_cell(ix,     iy,     seed);
+    let b = hash_cell(ix + 1, iy,     seed);
+    let c = hash_cell(ix,     iy + 1, seed);
+    let d = hash_cell(ix + 1, iy + 1, seed);
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 2.0 - 1.0;
 }
 
 fn fbm_2d(p: vec2<f32>, seed: u32) -> f32 {
+    let pw = max(length(dpdx(p)), length(dpdy(p)));
     var sum = 0.0;
     var amp = 0.5;
+    var freq = 1.0;
     var q = p;
     for (var i = 0u; i < 4u; i = i + 1u) {
+        if freq * pw > 0.5 { break; }
         sum = sum + amp * value_noise_2d(q, seed + i * 1013u);
         q = q * 2.0;
         amp = amp * 0.5;
+        freq = freq * 2.0;
     }
     return sum;
 }
@@ -217,7 +220,7 @@ fn fbm_2d(p: vec2<f32>, seed: u32) -> f32 {
 // lattice is finite at `y = ±1`, so turbulence can go fully chaotic at
 // high latitudes without streaking toward the pole.
 
-fn hash_cell_3d(ix: f32, iy: f32, iz: f32, k: u32) -> f32 {
+fn hash_cell_3d(ix: i32, iy: i32, iz: i32, k: u32) -> f32 {
     let xu = bitcast<u32>(ix);
     let yu = bitcast<u32>(iy);
     let zu = bitcast<u32>(iz);
@@ -228,14 +231,17 @@ fn value_noise_3d(p: vec3<f32>, seed: u32) -> f32 {
     let i = floor(p);
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
-    let c000 = hash_cell_3d(i.x,       i.y,       i.z,       seed);
-    let c100 = hash_cell_3d(i.x + 1.0, i.y,       i.z,       seed);
-    let c010 = hash_cell_3d(i.x,       i.y + 1.0, i.z,       seed);
-    let c110 = hash_cell_3d(i.x + 1.0, i.y + 1.0, i.z,       seed);
-    let c001 = hash_cell_3d(i.x,       i.y,       i.z + 1.0, seed);
-    let c101 = hash_cell_3d(i.x + 1.0, i.y,       i.z + 1.0, seed);
-    let c011 = hash_cell_3d(i.x,       i.y + 1.0, i.z + 1.0, seed);
-    let c111 = hash_cell_3d(i.x + 1.0, i.y + 1.0, i.z + 1.0, seed);
+    let ix = i32(i.x);
+    let iy = i32(i.y);
+    let iz = i32(i.z);
+    let c000 = hash_cell_3d(ix,     iy,     iz,     seed);
+    let c100 = hash_cell_3d(ix + 1, iy,     iz,     seed);
+    let c010 = hash_cell_3d(ix,     iy + 1, iz,     seed);
+    let c110 = hash_cell_3d(ix + 1, iy + 1, iz,     seed);
+    let c001 = hash_cell_3d(ix,     iy,     iz + 1, seed);
+    let c101 = hash_cell_3d(ix + 1, iy,     iz + 1, seed);
+    let c011 = hash_cell_3d(ix,     iy + 1, iz + 1, seed);
+    let c111 = hash_cell_3d(ix + 1, iy + 1, iz + 1, seed);
     let x00 = mix(c000, c100, u.x);
     let x10 = mix(c010, c110, u.x);
     let x01 = mix(c001, c101, u.x);
@@ -246,13 +252,36 @@ fn value_noise_3d(p: vec3<f32>, seed: u32) -> f32 {
 }
 
 fn fbm_3d(p: vec3<f32>, seed: u32) -> f32 {
+    let pw = max(length(dpdx(p)), length(dpdy(p)));
     var sum = 0.0;
     var amp = 0.5;
+    var freq = 1.0;
     var q = p;
     for (var i = 0u; i < 5u; i = i + 1u) {
+        if freq * pw > 0.5 { break; }
         sum = sum + amp * value_noise_3d(q, seed + i * 1013u);
         q = q * 2.0;
         amp = amp * 0.5;
+        freq = freq * 2.0;
+    }
+    return sum;
+}
+
+// Cheap 3-octave fBm for domain-warp vectors. Warp outputs feed into
+// downstream fbm sampling which reblurs the high octaves anyway, so
+// paying 5 octaves here is waste. Caller-visible identical within 1%.
+fn fbm_3d_warp(p: vec3<f32>, seed: u32) -> f32 {
+    let pw = max(length(dpdx(p)), length(dpdy(p)));
+    var sum = 0.0;
+    var amp = 0.5;
+    var freq = 1.0;
+    var q = p;
+    for (var i = 0u; i < 3u; i = i + 1u) {
+        if freq * pw > 0.5 { break; }
+        sum = sum + amp * value_noise_3d(q, seed + i * 1013u);
+        q = q * 2.0;
+        amp = amp * 0.5;
+        freq = freq * 2.0;
     }
     return sum;
 }
@@ -264,6 +293,15 @@ fn fbm_3d_vec3(p: vec3<f32>, seed: u32) -> vec3<f32> {
         fbm_3d(p,                                 seed),
         fbm_3d(p + vec3<f32>(5.2, 1.3, 2.7),      seed ^ 0xA3u),
         fbm_3d(p + vec3<f32>(1.7, 9.2, 4.1),      seed ^ 0x5Bu),
+    );
+}
+
+// Vector variant of `fbm_3d_warp` — 3 octaves, for domain-warp vectors.
+fn fbm_3d_warp_vec3(p: vec3<f32>, seed: u32) -> vec3<f32> {
+    return vec3<f32>(
+        fbm_3d_warp(p,                                 seed),
+        fbm_3d_warp(p + vec3<f32>(5.2, 1.3, 2.7),      seed ^ 0xA3u),
+        fbm_3d_warp(p + vec3<f32>(1.7, 9.2, 4.1),      seed ^ 0x5Bu),
     );
 }
 
@@ -610,8 +648,8 @@ fn cloud_deck_color(p_local: vec3<f32>, t: f32) -> CloudDeckResult {
     // via two successive fBm domain warps. Base frequency raised so
     // warp features are planet-scale small (handful of degrees, not
     // planet-spanning) — Saturn-scale turbulence lives at this tier.
-    let q = fbm_3d_vec3(n * 8.0, seed);
-    let r = fbm_3d_vec3(n * 8.0 + 4.0 * q, seed ^ 0x1u);
+    let q = fbm_3d_warp_vec3(n * 8.0, seed);
+    let r = fbm_3d_warp_vec3(n * 8.0 + 4.0 * q, seed ^ 0x1u);
     let warp_field = fbm_3d(n * 18.0 + 4.0 * r, seed ^ 0x2u);
     // `band_warp` is authored as a fraction of a band's width. A
     // band's latitude span is `1 / band_frequency`, so multiplying
@@ -690,8 +728,20 @@ fn cloud_deck_color(p_local: vec3<f32>, t: f32) -> CloudDeckResult {
     // Sampling fbm at `n * vec3(1, N, 1)` compresses the lattice in
     // latitude while leaving longitude free, producing narrow
     // cross-latitude filaments that flow around the body.
-    let streak_mid  = fbm_3d(n * vec3<f32>(3.0, 32.0, 3.0), seed ^ 0xCAFEu);
-    let streak_fine = fbm_3d(n * vec3<f32>(5.0, 90.0, 5.0), seed ^ 0xF1BEu);
+    //
+    // Before sampling we warp the sample position with a low-freq
+    // 3D fbm displacement scaled by `turbulence`. This bends streaks
+    // up/down and introduces natural break-ups where the warp shifts
+    // the anisotropic lattice out of phase. Quiet bodies (low
+    // turbulence) barely see it; Jupiter-class (turbulence ≳ 0.1)
+    // gets visible meandering jets.
+    //
+    // Reuses the already-computed IQ warp vector `r` instead of
+    // evaluating a fresh fbm_3d_vec3 — free pseudorandom 3D vector.
+    let streak_n = normalize(n + r * layers.turbulence * 1.8);
+    let streak_mid   = fbm_3d(streak_n * vec3<f32>(4.0,  48.0, 4.0),  seed ^ 0xCAFEu);
+    let streak_fine  = fbm_3d(streak_n * vec3<f32>(7.0, 140.0, 7.0),  seed ^ 0xF1BEu);
+    let streak_ultra = fbm_3d(streak_n * vec3<f32>(11.0, 230.0, 11.0), seed ^ 0xA55Eu);
 
     // Low-frequency organic drift — gentle hue wander across the
     // disk so the staircase picks up subtle longitudinal variation.
@@ -721,25 +771,33 @@ fn cloud_deck_color(p_local: vec3<f32>, t: f32) -> CloudDeckResult {
     // amplitude. Saturn's true-colour bands look like this: every jet
     // has its own slightly different brightness, no obvious belt/zone
     // metronome.
+    // `band_shape_params.x` repurposed as parity mix: 0 = random swings
+    // (Saturn — no belt/zone metronome), 1 = strict alternation
+    // (Jupiter — clear belt/zone contrast). Intermediate values blend.
     let band_idx_i = i32(round(lat_for_quant * bands));
     let band_seed = u32(band_idx_i + 1024) * 747796405u ^ layers.seed_lo;
     let band_rand = hash_f32(pcg(band_seed)) * 2.0 - 1.0;
-    col = col * (1.0 + layers.tint.w * band_rand);
+    let band_parity = select(-1.0, 1.0, (band_idx_i & 1) == 0);
+    let parity_mix = clamp(layers.band_shape_params.x, 0.0, 1.0);
+    let band_swing = mix(band_rand, band_parity, parity_mix);
+    col = col * (1.0 + layers.tint.w * band_swing);
 
     // Luminance pinstripe — the streak layers drive a multiplicative
     // swing on top of the palette so bright/dark fibres read across
     // every band. Fine layer carries the strongest swing because
     // that is the scale Cassini resolves.
     col = col * (1.0
-        + layers.turbulence * turb * streak_fine * 3.4
-        + layers.turbulence * turb * streak_mid  * 2.0);
+        + layers.turbulence * turb * streak_fine  * 3.0
+        + layers.turbulence * turb * streak_mid   * 1.8
+        + layers.turbulence * turb * streak_ultra * 2.2);
 
     // ── Fine-scale turbulence ────────────────────────────────────
     if layers.turbulence > 0.0 {
-        let mid = fbm_3d(n * 8.0,  seed ^ 0x9E3779B9u);
-        let hi  = fbm_3d(n * 22.0, seed ^ 0xDEADBEEFu);
-        let detail = mid * 0.7 + hi * 0.45;
-        col = col * (1.0 + layers.turbulence * turb * detail * 1.2);
+        let mid   = fbm_3d(n * 10.0, seed ^ 0x9E3779B9u);
+        let hi    = fbm_3d(n * 28.0, seed ^ 0xDEADBEEFu);
+        let ultra = fbm_3d(n * 70.0, seed ^ 0x1234ABCDu);
+        let detail = mid * 0.6 + hi * 0.45 + ultra * 0.35;
+        col = col * (1.0 + layers.turbulence * turb * detail * 1.3);
     }
 
     col = col * vortex.tint;
@@ -896,7 +954,12 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let cam_pos = view.world_position;
     let ray_dir = normalize(in.world_position - cam_pos);
     let center = in.sphere_center;
-    let light_dir_ws = params.light_dir.xyz;
+    // Primary star. Multi-star support lives in `params.scene`; wrap the
+    // lit composite in a star loop when more than one live source is
+    // needed.
+    let primary_star = params.scene.stars[0];
+    let light_dir_ws = primary_star.dir_flux.xyz;
+    let sun_flux = primary_star.dir_flux.w;
 
     // Ray-sphere intersection against the cloud deck.
     let oc = cam_pos - center;
@@ -915,7 +978,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
             let normal = normalize(hit - center);
             let p_local = rotate_quat(params.orientation, normal);
 
-            let elapsed = params.light_dir.w;
+            let elapsed = params.elapsed_time;
 
             let deck = cloud_deck_color(p_local, elapsed);
             var base = deck.color;
@@ -1001,8 +1064,11 @@ fn fragment(in: VertexOutput) -> FragOutput {
                 }
             }
 
-            let sun_term = base * params.light_intensity * lambert;
-            var lit = sun_term + base * params.ambient_intensity;
+            // Eclipse extinction: a gas giant passing through its
+            // sibling's shadow cone should dim just like a rocky body.
+            let eclipse = eclipse_factor(params.scene, hit, light_dir_ws);
+            let sun_term = base * sun_flux * lambert * eclipse;
+            var lit = sun_term + base * params.scene.ambient_intensity;
 
             // ── Per-channel Minnaert limb darkening ──────────────
             //
@@ -1042,7 +1108,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
                 let path = 1.0 + pow(1.0 - n_dot_v, 1.5) * 1.4;
                 let rayleigh_contrib = layers.rayleigh_color.xyz
                     * ray_strength * gap * soft_nl * path
-                    * params.light_intensity * (1.0 / (4.0 * 3.14159265));
+                    * sun_flux * (1.0 / (4.0 * 3.14159265));
                 // Additive composite — leaks on top of the darkened
                 // cloud deck, can't turn the disk black.
                 lit = lit + rayleigh_contrib;
@@ -1096,7 +1162,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
                 let unlit_gate = smoothstep(0.15, -0.10, n_dot_l);
                 let rim_gate = pow(1.0 - clamp(n_dot_v, 0.0, 1.0), 3.0);
                 let w = phase * unlit_gate * rim_gate * fs_intensity
-                    * params.light_intensity * (1.0 / (4.0 * 3.14159265));
+                    * sun_flux * (1.0 / (4.0 * 3.14159265));
                 lit = lit + layers.rim_color_intensity.xyz * w;
             }
 
@@ -1128,7 +1194,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let rim_hidden = cloud_opacity;
     let rim = rim_halo_contribution(cam_pos, ray_dir, center, light_dir_ws);
     let rim_contrib = rim.contribution
-        * params.light_intensity
+        * sun_flux
         * (1.0 / (4.0 * 3.14159265))
         * (1.0 - rim_hidden);
 

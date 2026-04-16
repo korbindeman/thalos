@@ -5,6 +5,7 @@ mod ghost_bodies;
 mod hud;
 mod maneuver;
 mod rendering;
+mod sky_render;
 mod star_flare;
 mod target;
 mod trajectory_rendering;
@@ -166,6 +167,7 @@ fn main() {
         .add_plugins(bevy::prelude::MeshPickingPlugin)
         .add_plugins(PlanetRenderingPlugin)
         .add_plugins(CameraPlugin)
+        .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(BridgePlugin)

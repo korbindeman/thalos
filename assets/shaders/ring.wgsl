@@ -33,21 +33,21 @@
 
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::get_world_from_local
+#import thalos::lighting::{SceneLighting, eclipse_factor}
 
 const MAX_RING_STOPS: u32 = 8u;
 const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
 
 struct RingParams {
-    // xyz = direction toward sun in world space; w = elapsed time
-    // (unused today, reserved for phase-dependent effects).
-    light_dir:            vec4<f32>,
     // xyz = planet center in world space; w = planet render radius.
     planet_center_radius: vec4<f32>,
-    light_intensity:      f32,
-    ambient_intensity:    f32,
     inner_radius:         f32,
     outer_radius:         f32,
+    _pad0:                f32,
+    _pad1:                f32,
+    // Stars, ambient, eclipse occluders (shared scene lighting).
+    scene:                SceneLighting,
 }
 
 struct RingLayers {
@@ -116,7 +116,7 @@ fn hash_f32(x: u32) -> f32 {
 
 fn value_noise_1d(x: f32, seed: u32) -> f32 {
     let xf = floor(x);
-    let xu = bitcast<u32>(xf);
+    let xu = u32(xf);
     let f = x - xf;
     let u = f * f * (3.0 - 2.0 * f);
     let a = hash_f32(pcg(xu ^ seed));
@@ -124,12 +124,15 @@ fn value_noise_1d(x: f32, seed: u32) -> f32 {
     return mix(a, b, u) * 2.0 - 1.0;
 }
 
-fn fbm_1d(x: f32, seed: u32, octaves: u32) -> f32 {
+fn fbm_1d(x: f32, seed: u32, octaves: u32, pixel_width: f32) -> f32 {
     var sum = 0.0;
     var amp = 0.5;
     var freq = 1.0;
     for (var i = 0u; i < 8u; i = i + 1u) {
         if i >= octaves { break; }
+        // Stop before this octave aliases: if one pixel spans more
+        // than half a noise cell, the octave is above Nyquist.
+        if freq * pixel_width > 0.5 { break; }
         sum = sum + amp * value_noise_1d(x * freq, seed + i * 1013u);
         freq = freq * 2.0;
         amp = amp * 0.5;
@@ -238,8 +241,16 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // between a luminance modulation and an opacity modulation so
     // dark rings can actually show gaps instead of just darker
     // bands.
+    //
+    // The noise input is `u * 140.0`, so one noise cell = 1/140
+    // of the ring width. Screen-space derivatives tell us how many
+    // noise cells one pixel spans; octaves whose frequency would
+    // exceed the Nyquist limit are culled to prevent aliasing
+    // (the "flashing dots" artifact).
     if layers.ringlet_noise > 0.0 && layers.ringlet_octaves > 0u {
-        let n = fbm_1d(u * 140.0, seed, layers.ringlet_octaves);
+        let noise_coord = u * 140.0;
+        let pixel_width = max(abs(dpdx(noise_coord)), abs(dpdy(noise_coord)));
+        let n = fbm_1d(noise_coord, seed, layers.ringlet_octaves, pixel_width);
         let amp = layers.ringlet_noise;
         color = color * clamp(1.0 + n * amp * 0.8, 0.0, 2.0);
         opacity = clamp(opacity * (1.0 + n * amp * 0.6), 0.0, 1.0);
@@ -248,7 +259,10 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // ── Geometry ────────────────────────────────────────────────
     let normal = normalize(in.world_normal);
     let to_cam = normalize(view.world_position - in.world_position);
-    let light_dir = normalize(params.light_dir.xyz);
+    // Primary star — see the gas giant shader for the multi-star note.
+    let primary_star = params.scene.stars[0];
+    let light_dir = normalize(primary_star.dir_flux.xyz);
+    let star_flux = primary_star.dir_flux.w;
 
     // The ring faces both ways — pick whichever normal is toward the
     // viewer so Lambert/forward-scatter both make sense.
@@ -268,17 +282,18 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let hg_denom = pow(1.0 + g * g - 2.0 * g * cos_theta, 1.5);
     let forward_scatter = (1.0 - g * g) / (4.0 * PI * max(hg_denom, 1e-4));
 
-    // ── Planet shadow ──────────────────────────────────────────
+    // ── Planet shadow + cross-body eclipse ─────────────────────
     let shadow = planet_shadow_attenuation(in.world_position, light_dir);
+    let eclipse = eclipse_factor(params.scene, in.world_position, light_dir);
 
     // Combine lighting terms. Forward scatter doesn't care about
     // which face you're looking at, but it is still extinguished by
     // planet shadow — a ring particle behind the planet isn't
     // picking up sunlight to forward-scatter.
     let lambert = lit_side * (1.0 / PI);
-    let direct = (lambert + forward_scatter * 0.8) * shadow;
-    let lit = color * params.light_intensity * direct
-            + color * params.ambient_intensity;
+    let direct = (lambert + forward_scatter * 0.8) * shadow * eclipse;
+    let lit = color * star_flux * direct
+            + color * params.scene.ambient_intensity;
 
     // Opacity drops toward the edges of each ringlet so the feathered
     // border reads as dust, not a cookie-cutter stamp.

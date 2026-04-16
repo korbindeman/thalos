@@ -38,6 +38,8 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
+use crate::lighting::SceneLighting;
+
 /// Maximum palette stops the shader supports. Ten covers Saturn's
 /// full north/south Cassini palette (nine authored stops + a reserve
 /// slot) with room to grow. If a body needs more, bump this constant
@@ -61,35 +63,31 @@ pub const MAX_VORTICES: usize = 16;
 pub struct GasGiantParams {
     /// Sphere radius in render units (cloud-deck altitude).
     pub radius: f32,
-    /// Sun illuminance (lux). Matches DirectionalLight.illuminance so
-    /// the shader can scale its internal lighting to match terrestrial
-    /// bodies rendered with `PlanetMaterial`.
-    pub light_intensity: f32,
-    /// Ambient floor (lux). Same contract as `PlanetParams::ambient_intensity`.
-    pub ambient_intensity: f32,
     /// Cumulative rotation phase, radians. Advances at the rate implied
     /// by the body's `rotation_period_s` so bands scroll slowly.
     pub rotation_phase: f32,
-    /// Normalised direction from the cloud-deck surface toward the sun,
-    /// in world render space. w carries `elapsed_seconds` — raw sim
-    /// time used by differential rotation, edge waves, and edge vortex
-    /// chain epochs. Keeps the uniform compact.
-    pub light_dir: Vec4,
+    /// Raw sim time used by differential rotation, edge waves, and edge
+    /// vortex chain epochs.
+    pub elapsed_time: f32,
+    pub _pad0: f32,
     /// Quaternion (xyzw) rotating world-space directions into
     /// body-local space. Identity = no rotation. Axial tilt and
     /// `rotation_phase` both fold into this.
     pub orientation: Vec4,
+    /// Stars, eclipse occluders, ambient. See `crate::lighting::SceneLighting`.
+    /// Gas giants leave the planetshine parent slot zeroed.
+    pub scene: SceneLighting,
 }
 
 impl Default for GasGiantParams {
     fn default() -> Self {
         Self {
             radius: 1.0,
-            light_intensity: 80.0,
-            ambient_intensity: 2.0,
             rotation_phase: 0.0,
-            light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            elapsed_time: 0.0,
+            _pad0: 0.0,
             orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            scene: SceneLighting::default(),
         }
     }
 }

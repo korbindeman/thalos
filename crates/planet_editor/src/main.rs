@@ -11,7 +11,7 @@ use thalos_physics::parsing::load_solar_system;
 use thalos_physics::types::{BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
     PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin,
-    bake_from_body_data,
+    SceneLighting, StarLight, bake_from_body_data,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
 
@@ -173,6 +173,21 @@ fn lighting_for(planet: &EditedPlanet) -> (f32, f32, f32) {
             planet.terminator_wrap,
         )
     }
+}
+
+/// Build a `SceneLighting` for the preview. Single star, no eclipse
+/// occluders, no planetshine — editor scenes are one body at a time.
+fn scene_lighting_for(planet: &EditedPlanet) -> SceneLighting {
+    let (light_intensity, ambient_intensity, _wrap) = lighting_for(planet);
+    let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
+    let mut scene = SceneLighting::default();
+    scene.ambient_intensity = ambient_intensity;
+    scene.star_count = 1;
+    scene.stars[0] = StarLight {
+        dir_flux: Vec4::new(dir.x, dir.y, dir.z, light_intensity),
+        color: Vec4::new(1.0, 1.0, 1.0, 0.0),
+    };
+    scene
 }
 
 // ---------------------------------------------------------------------------
@@ -404,17 +419,15 @@ fn finalize_terrain_bake(
             PlanetDetailParams::from_body(&body.detail_params, body.cubemap_bake_threshold_m);
         let height_range = body.height_range;
         let textures = bake_from_body_data(&body, &mut images, &mut storage_buffers);
-        let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
-        let (light_intensity, ambient_intensity, wrap) = lighting_for(&planet);
+        let (_, _, wrap) = lighting_for(&planet);
+        let scene = scene_lighting_for(&planet);
 
         let mat_handle = planet_materials.add(PlanetMaterial {
             params: PlanetParams {
                 radius: 1.5,
-                light_intensity,
-                ambient_intensity,
                 height_range,
-                light_dir: Vec4::new(dir.x, dir.y, dir.z, wrap),
-                orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                terminator_wrap: wrap,
+                scene,
                 ..default()
             },
             albedo: textures.albedo,
@@ -587,15 +600,14 @@ fn apply_uniform_changes(
     }
     planet.uniforms_dirty = false;
 
-    let (light_intensity, ambient_intensity, wrap) = lighting_for(&planet);
+    let (_, _, wrap) = lighting_for(&planet);
+    let scene = scene_lighting_for(&planet);
     for handle in &query {
         let Some(mat) = materials.get_mut(&handle.0) else {
             continue;
         };
-        mat.params.light_intensity = light_intensity;
-        mat.params.ambient_intensity = ambient_intensity;
-        let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
-        mat.params.light_dir = Vec4::new(dir.x, dir.y, dir.z, wrap);
+        mat.params.terminator_wrap = wrap;
+        mat.params.scene = scene.clone();
     }
 }
 

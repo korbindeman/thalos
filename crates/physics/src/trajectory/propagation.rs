@@ -18,7 +18,7 @@ use glam::DVec3;
 
 use super::numeric::{NumericSegment, cone_width};
 use crate::body_state_provider::BodyStateProvider;
-use crate::forces::{Forces, ManeuverThrustForce};
+use crate::effects::EffectRegistry;
 use crate::integrator::{Integrator, IntegratorConfig};
 use crate::types::{BodyDefinition, BodyId, StateVector, TrajectorySample};
 
@@ -117,6 +117,8 @@ pub(super) struct PropagationContext<'a> {
     pub integrator_config: IntegratorConfig,
 }
 
+/// Definition of a finite-duration maneuver burn that can be turned into a
+/// `ManeuverThrustEffect` at flight-plan construction time.
 #[derive(Debug, Clone, Copy)]
 pub struct ScheduledBurn {
     /// Δv in the local prograde/normal/radial frame (m/s).  The world-frame
@@ -130,49 +132,32 @@ pub struct ScheduledBurn {
 }
 
 /// Propagate one segment from `initial_state` at `start_time` until `end_time`
-/// or a termination condition trips.  Events are detected and returned via the
-/// built [`NumericSegment`] separately by [`super::events`].
+/// or a termination condition trips. Effects active during this segment must
+/// be baked into `registry` by the caller (thrust is not threaded as a
+/// separate concept here — it's just another effect).
+///
+/// Stable-orbit detection fires only when `stop_on_stable_orbit` is true and
+/// the registry has no active thrust (a burn interval can't close a stable
+/// orbit by definition). The caller enforces the latter by splitting each
+/// leg into burn + coast sub-segments.
 pub(super) fn propagate_segment(
     initial_state: StateVector,
     start_time: f64,
     end_time: f64,
-    burns: &[ScheduledBurn],
+    registry: &EffectRegistry,
     ctx: &PropagationContext,
     stop_on_stable_orbit: bool,
     remaining_budget: &mut Option<usize>,
 ) -> NumericSegment {
-    let forces = Forces {
-        thrusts: burns
-            .iter()
-            .map(|burn| {
-                ManeuverThrustForce::new(
-                    burn.delta_v_local,
-                    burn.reference_body,
-                    burn.acceleration,
-                    burn.start_time,
-                    burn.duration,
-                )
-            })
-            .collect(),
-    };
-
     let mut integrator = Integrator::new(ctx.integrator_config.clone());
     let mut state = initial_state;
     let mut time = start_time;
     let mut samples: Vec<TrajectorySample> =
         Vec::with_capacity(ctx.prediction_config.max_steps_per_segment.min(8192));
-    let mut body_states_buf = Vec::new();
-
-    // Stable-orbit detection needs a reference captured after all burns end.
-    // For coast-only segments, use the first sample.
-    let last_burn_end = burns
-        .iter()
-        .map(|b| b.start_time + b.duration)
-        .fold(f64::NEG_INFINITY, f64::max);
+    let mut body_states_buf = Vec::with_capacity(ctx.bodies.len());
 
     let mut orbit_tracker: Option<OrbitTracker> = None;
     let mut stable_orbit_start_index: Option<usize> = None;
-    let needs_initial_reference = burns.is_empty();
     let mut samples_since_reference: usize = 0;
 
     loop {
@@ -194,7 +179,7 @@ pub(super) fn propagate_segment(
         }
 
         let (new_state, mut sample) =
-            integrator.step_capped(state, time, &forces, ctx.ephemeris, remaining_time);
+            integrator.step_capped(state, time, registry, ctx.ephemeris, remaining_time);
 
         ctx.ephemeris.query_into(sample.time, &mut body_states_buf);
 
@@ -202,8 +187,11 @@ pub(super) fn propagate_segment(
         // containment is stable across steps, so the renderer can frame every
         // sample to its anchor without per-sample frame jumps.  Falls back to
         // the root body via INFINITY-SOI when no smaller SOI applies.
+        // Surface collision check is fused into the same loop to avoid a
+        // second O(N) pass over bodies per sample.
         let mut anchor_id = sample.dominant_body;
         let mut anchor_soi = f64::INFINITY;
+        let mut collision_id: Option<BodyId> = None;
         for body_def in ctx.bodies.iter() {
             if body_def.id >= body_states_buf.len() {
                 break;
@@ -215,24 +203,13 @@ pub(super) fn propagate_segment(
                 anchor_id = body_def.id;
                 anchor_soi = soi;
             }
+            if collision_id.is_none() && dist_sq < body_def.radius_m * body_def.radius_m {
+                collision_id = Some(body_def.id);
+            }
         }
         sample.anchor_body = anchor_id;
         if anchor_id < body_states_buf.len() {
             sample.anchor_body_pos = body_states_buf[anchor_id].position;
-        }
-
-        // Surface collision check.
-        let mut collision_id: Option<BodyId> = None;
-        for body_def in ctx.bodies.iter() {
-            if body_def.id >= body_states_buf.len() {
-                break;
-            }
-            let body_state = body_states_buf[body_def.id];
-            let dist_sq = (sample.position - body_state.position).length_squared();
-            if dist_sq < body_def.radius_m * body_def.radius_m {
-                collision_id = Some(body_def.id);
-                break;
-            }
         }
         if let Some(cid) = collision_id {
             samples.push(sample);
@@ -259,14 +236,10 @@ pub(super) fn propagate_segment(
             break;
         }
 
-        // Capture the orbit reference state once all burns have ended (or
-        // on the first sample for coast-only segments).
-        let should_capture = if needs_initial_reference {
-            orbit_tracker.is_none()
-        } else {
-            orbit_tracker.is_none() && sample.time >= last_burn_end
-        };
-        if should_capture {
+        // Capture the orbit reference state on the first sample. Callers
+        // only enable `stop_on_stable_orbit` for coast sub-segments, so no
+        // burn-end synchronisation is needed here.
+        if orbit_tracker.is_none() {
             let anchor = sample.anchor_body;
             let body_pos = if anchor < body_states_buf.len() {
                 body_states_buf[anchor].position
@@ -285,7 +258,7 @@ pub(super) fn propagate_segment(
             ));
             samples_since_reference = 0;
             stable_orbit_start_index = samples.len().checked_sub(1);
-        } else if orbit_tracker.is_some() {
+        } else {
             samples_since_reference += 1;
         }
 

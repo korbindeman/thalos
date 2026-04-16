@@ -32,40 +32,38 @@ use bevy::shader::ShaderRef;
 
 use thalos_atmosphere_gen::RingSystem;
 
+use crate::lighting::SceneLighting;
+
 /// Maximum number of radial palette stops the ring shader supports.
 /// Matches the WGSL `MAX_RING_STOPS` constant.
 pub const MAX_RING_STOPS: usize = 8;
 
-/// Per-frame uniform: camera/lighting state + planet shadow geometry.
+/// Per-frame uniform: planet shadow geometry + shared scene lighting.
 #[derive(Clone, ShaderType)]
 pub struct RingParams {
-    /// Direction from the ring plane toward the sun, in world space.
-    /// w carries elapsed sim seconds (unused for now but pre-wired).
-    pub light_dir: Vec4,
     /// Planet center in world space (for shadow ray test).
     /// w = planet render radius (used as ray-sphere radius).
     pub planet_center_radius: Vec4,
-    /// Sun illuminance (lux). Matches `GasGiantParams::light_intensity`
-    /// so rings and cloud deck share exposure.
-    pub light_intensity: f32,
-    /// Ambient floor (lux). Typically 0 — vacuum has no fill.
-    pub ambient_intensity: f32,
     /// Inner radius in render units. Mirrors the per-body authoring
     /// so the shader can recover the normalised radial coordinate.
     pub inner_radius: f32,
     /// Outer radius in render units.
     pub outer_radius: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    /// Stars, ambient, eclipse occluders. Rings leave planetshine zeroed.
+    pub scene: SceneLighting,
 }
 
 impl Default for RingParams {
     fn default() -> Self {
         Self {
-            light_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
             planet_center_radius: Vec4::ZERO,
-            light_intensity: 10.0,
-            ambient_intensity: 0.0,
             inner_radius: 1.0,
             outer_radius: 2.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            scene: SceneLighting::default(),
         }
     }
 }

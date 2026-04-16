@@ -35,7 +35,6 @@ fn propagate_trajectory(
     ship_thrust_acceleration: f64,
 ) -> FlightPlan {
     let request = PredictionRequest {
-        epoch: 0,
         ship_state: initial_state,
         sim_time: start_time,
         maneuvers: maneuvers.clone(),
@@ -411,16 +410,18 @@ fn stable_orbit_detected_after_prograde_burn() {
         system.ship.thrust_acceleration,
     );
 
-    let post_burn = &prediction.segments[prediction.segments.len() - 1];
+    // The final leg's coast sub-segment is propagated entirely post-burn, so
+    // stable-orbit detection there captures from sample 0 (the burn-end
+    // state) and the `start_index` is always `Some(0)`. The meaningful check
+    // is that closure is detected at all.
+    let last_leg = prediction.legs.last().expect("at least one leg");
     assert!(
-        post_burn.is_stable_orbit,
-        "post-burn segment should detect stable orbit",
+        last_leg.coast_segment.is_stable_orbit,
+        "post-burn coast sub-segment should detect stable orbit",
     );
     assert!(
-        post_burn
-            .stable_orbit_start_index
-            .is_some_and(|idx| idx > 0),
-        "stable orbit should start after finite-burn lead-in",
+        last_leg.coast_segment.stable_orbit_start_index.is_some(),
+        "stable orbit tracker should be initialised on coast",
     );
 }
 
