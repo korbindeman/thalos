@@ -6,6 +6,7 @@ use super::super::state::{
 };
 use crate::camera::{CameraFocus, OrbitCamera};
 use crate::coords::{RENDER_SCALE, RenderOrigin};
+use crate::flight_plan_view::FlightPlanView;
 use crate::rendering::{FrameBodyStates, SimulationState};
 
 const MARKER_RADIUS: f32 = 0.006;
@@ -74,6 +75,7 @@ pub(in crate::maneuver) fn manage_node_markers(
     sim: Option<Res<SimulationState>>,
     body_states: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
+    flight_plan_view: Res<FlightPlanView>,
     focus: Res<CameraFocus>,
     camera_q: Query<&Transform, (With<OrbitCamera>, Without<NodeMarkerDisc>)>,
     mut markers: Query<(Entity, &NodeMarkerDisc, &mut Transform, &mut Visibility)>,
@@ -99,7 +101,15 @@ pub(in crate::maneuver) fn manage_node_markers(
 
         let node = plan.nodes.iter().find(|n| n.id == marker.node_id).unwrap();
         if let (Some(pred), Some(states), Some(sim)) = (prediction, states, sim_ref) {
-            if let Some(world_pos) = node_world_position(node, pred, states, &origin, &sim.system) {
+            if let Some(world_pos) = node_world_position(
+                node,
+                pred,
+                states,
+                &origin,
+                &sim.system,
+                sim.ephemeris.as_ref(),
+                &flight_plan_view,
+            ) {
                 *vis = Visibility::Inherited;
                 *tf = overlay_marker_transform(world_pos, cam_rot, cam_dist * MARKER_RADIUS);
                 continue;
@@ -135,7 +145,15 @@ pub(in crate::maneuver) fn manage_node_markers(
             .zip(states)
             .zip(sim_ref)
             .and_then(|((pred, states), sim)| {
-                node_world_position(node, pred, states, &origin, &sim.system)
+                node_world_position(
+                    node,
+                    pred,
+                    states,
+                    &origin,
+                    &sim.system,
+                    sim.ephemeris.as_ref(),
+                    &flight_plan_view,
+                )
             })
             .unwrap_or(Vec3::ZERO);
 

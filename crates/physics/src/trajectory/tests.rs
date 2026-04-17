@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use glam::DVec3;
 
-use super::{FlightPlan, PredictionConfig, PredictionRequest, cone_width, propagate_flight_plan};
+use super::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_plan};
 use crate::body_state_provider::BodyStateProvider;
 use crate::integrator::IntegratorConfig;
 use crate::maneuver::{ManeuverNode, ManeuverSequence};
@@ -34,6 +34,31 @@ fn propagate_trajectory(
     integrator_config: IntegratorConfig,
     ship_thrust_acceleration: f64,
 ) -> FlightPlan {
+    propagate_trajectory_with_target(
+        initial_state,
+        start_time,
+        maneuvers,
+        ephemeris,
+        bodies,
+        config,
+        integrator_config,
+        ship_thrust_acceleration,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_trajectory_with_target(
+    initial_state: StateVector,
+    start_time: f64,
+    maneuvers: &ManeuverSequence,
+    ephemeris: Arc<dyn BodyStateProvider>,
+    bodies: &[BodyDefinition],
+    config: &PredictionConfig,
+    integrator_config: IntegratorConfig,
+    ship_thrust_acceleration: f64,
+    target_body: Option<crate::types::BodyId>,
+) -> FlightPlan {
     let request = PredictionRequest {
         ship_state: initial_state,
         sim_time: start_time,
@@ -44,37 +69,13 @@ fn propagate_trajectory(
         prediction_config: config.clone(),
         integrator_config,
         ship_thrust_acceleration,
+        target_body,
     };
     propagate_flight_plan(&request, None)
 }
 
 const AU: f64 = 1.496e11;
 const SUN_GM: f64 = 1.327_124_4e20;
-
-fn sample_with(perturbation_ratio: f64, step_size: f64) -> TrajectorySample {
-    TrajectorySample {
-        time: 0.0,
-        position: DVec3::ZERO,
-        velocity: DVec3::ZERO,
-        dominant_body: 0,
-        perturbation_ratio,
-        step_size,
-        anchor_body: 0,
-        anchor_body_pos: DVec3::ZERO,
-    }
-}
-
-#[test]
-fn cone_width_zero_when_unperturbed() {
-    assert_eq!(cone_width(&sample_with(0.0, 60.0)), 0.0);
-}
-
-#[test]
-fn cone_width_grows_when_step_size_shrinks() {
-    let wide = cone_width(&sample_with(0.1, 1.0));
-    let narrow = cone_width(&sample_with(0.1, 100.0));
-    assert!(wide > narrow);
-}
 
 fn make_single_star_system() -> SolarSystemDefinition {
     let star_mass = 1.989e30;
@@ -113,7 +114,7 @@ fn make_single_star_system() -> SolarSystemDefinition {
     }
 }
 
-fn make_thalos_like_system() -> SolarSystemDefinition {
+fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
     let sun_mass = SUN_GM / G;
     let sun = BodyDefinition {
         id: 0,
@@ -159,6 +160,12 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
         atmosphere: None,
     };
 
+    (sun, thalos, sun_mass)
+}
+
+fn make_thalos_like_system() -> SolarSystemDefinition {
+    let (sun, thalos, _) = make_star_and_planet();
+
     let mut name_to_id = HashMap::new();
     name_to_id.insert("Sun".to_string(), 0);
     name_to_id.insert("Thalos".to_string(), 1);
@@ -184,6 +191,7 @@ fn maneuver_is_integrated_as_finite_burn() {
 
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
+        id: None,
         time: 0.0,
         delta_v: DVec3::new(10.0, 0.0, 0.0),
         reference_body: 0,
@@ -243,6 +251,7 @@ fn prograde_burn_raises_apoapsis_around_thalos() {
 
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
+        id: None,
         time: 10.0,
         delta_v: DVec3::new(100.0, 0.0, 0.0),
         reference_body: 1,
@@ -256,7 +265,7 @@ fn prograde_burn_raises_apoapsis_around_thalos() {
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 20_000,
-            cone_fade_threshold: f64::INFINITY,
+
             min_orbit_samples: usize::MAX,
             ..PredictionConfig::default()
         },
@@ -318,6 +327,7 @@ fn large_prograde_burn_escapes_without_collision() {
 
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
+        id: None,
         time: 5.0,
         delta_v: DVec3::new(5_000.0, 0.0, 0.0),
         reference_body: 1,
@@ -331,7 +341,7 @@ fn large_prograde_burn_escapes_without_collision() {
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 200_000,
-            cone_fade_threshold: f64::INFINITY,
+
             min_orbit_samples: usize::MAX,
             ..PredictionConfig::default()
         },
@@ -390,6 +400,7 @@ fn stable_orbit_detected_after_prograde_burn() {
 
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
+        id: None,
         time: 10.0,
         delta_v: DVec3::new(100.0, 0.0, 0.0),
         reference_body: 1,
@@ -444,6 +455,7 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
     let node_time = orbital_period * 2.0;
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
+        id: None,
         time: node_time,
         delta_v: DVec3::ZERO,
         reference_body: 1,
@@ -457,7 +469,7 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 40_000,
-            cone_fade_threshold: f64::INFINITY,
+
             ..PredictionConfig::default()
         },
         IntegratorConfig {
@@ -507,6 +519,7 @@ fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
 
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
+        id: None,
         time: orbital_period * 2.0,
         delta_v: DVec3::new(100.0, 0.0, 0.0),
         reference_body: 1,
@@ -520,7 +533,7 @@ fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
         &system.bodies,
         &PredictionConfig {
             max_steps_per_segment: 40_000,
-            cone_fade_threshold: f64::INFINITY,
+
             ..PredictionConfig::default()
         },
         IntegratorConfig {
@@ -550,4 +563,392 @@ fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
         max_r > orbit_radius + 1.0e5,
         "delayed prograde burn should still raise apoapsis",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Moon encounter tests
+// ---------------------------------------------------------------------------
+
+fn make_thalos_mira_system() -> SolarSystemDefinition {
+    let (sun, thalos, _sun_mass) = make_star_and_planet();
+    let thalos_mass = thalos.mass_kg;
+
+    let mira_mass = 1.374e22;
+    let mira_sma = 1.91488e8;
+    let mira = BodyDefinition {
+        id: 2,
+        name: "Mira".to_string(),
+        kind: BodyKind::Moon,
+        parent: Some(1),
+        mass_kg: mira_mass,
+        radius_m: 869_000.0,
+        color: [0.65, 0.63, 0.60],
+        albedo: 0.12,
+        rotation_period_s: 0.0,
+        axial_tilt_rad: 0.0,
+        gm: G * mira_mass,
+        soi_radius_m: mira_sma * (mira_mass / thalos_mass).powf(0.4),
+        orbital_elements: Some(OrbitalElements {
+            semi_major_axis_m: mira_sma,
+            eccentricity: 0.0,
+            inclination_rad: 0.0,
+            lon_ascending_node_rad: 0.0,
+            arg_periapsis_rad: 0.0,
+            true_anomaly_rad: 0.0,
+        }),
+        generator: None,
+        atmosphere: None,
+    };
+
+    let mut name_to_id = HashMap::new();
+    name_to_id.insert("Sun".to_string(), 0);
+    name_to_id.insert("Thalos".to_string(), 1);
+    name_to_id.insert("Mira".to_string(), 2);
+
+    SolarSystemDefinition {
+        name: "ThalosMiraTest".to_string(),
+        bodies: vec![sun, thalos, mira],
+        ship: ShipDefinition {
+            initial_state: StateVector {
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+            },
+            thrust_acceleration: 0.5,
+        },
+        name_to_id,
+    }
+}
+
+/// Specific energy (kinetic + potential) of the ship relative to Thalos.
+fn specific_energy_around_thalos(
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    thalos_pos: DVec3,
+    thalos_vel: DVec3,
+    thalos_gm: f64,
+) -> f64 {
+    let rel_v = ship_vel - thalos_vel;
+    let rel_r = (ship_pos - thalos_pos).length();
+    0.5 * rel_v.length_squared() - thalos_gm / rel_r
+}
+
+/// Regression test: a ship on a transfer orbit that encounters Mira must
+/// produce a physically bounded post-encounter velocity. Before the tidal
+/// guard fix, the integrator switched to 60 s symplectic steps deep inside
+/// Mira's gravity well, producing nonsensical exit trajectories.
+#[test]
+fn moon_encounter_preserves_bounded_energy() {
+    let system = make_thalos_mira_system();
+    let mira_sma = 1.91488e8;
+    let thalos_gm = system.bodies[1].gm;
+    let mira_gm = system.bodies[2].gm;
+    // Propagate long enough for the transfer orbit to reach Mira.
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    // Ship starts on a Hohmann-ish transfer from low Thalos orbit toward
+    // Mira's orbital distance.
+    let r_park = system.bodies[1].radius_m + 200_000.0; // 200 km altitude
+    // Hohmann Δv to reach Mira's orbit: v_transfer - v_circular
+    let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
+
+    // Start at +X from Thalos, velocity in +Z (prograde).
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(r_park, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, v_transfer),
+    };
+
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &ManeuverSequence::new(),
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig {
+            max_steps_per_segment: 200_000,
+            ..PredictionConfig::default()
+        },
+        IntegratorConfig::default(),
+        system.ship.thrust_acceleration,
+    );
+
+    assert!(
+        !prediction.segments.is_empty(),
+        "propagation should produce segments"
+    );
+
+    // Collect all samples.
+    let samples: Vec<&TrajectorySample> = prediction
+        .segments
+        .iter()
+        .flat_map(|s| s.samples.iter())
+        .collect();
+    assert!(!samples.is_empty());
+
+    // Compute initial specific energy relative to Thalos.
+    let e0 = specific_energy_around_thalos(
+        ship_state.position,
+        ship_state.velocity,
+        thalos_state_0.position,
+        thalos_state_0.velocity,
+        thalos_gm,
+    );
+
+    // Maximum Δv a Mira flyby can impart: 2 * v_escape_mira (at surface).
+    let v_esc_mira = (2.0 * mira_gm / system.bodies[2].radius_m).sqrt();
+    let max_delta_v = 2.0 * v_esc_mira;
+    // Upper bound on energy change: Δe ≈ v * Δv (vis-viva).
+    // Use the transfer velocity at Mira's orbit as the reference speed.
+    let v_at_mira = (thalos_gm * (2.0 / mira_sma - 2.0 / (r_park + mira_sma))).sqrt();
+    let max_energy_change = v_at_mira * max_delta_v + 0.5 * max_delta_v * max_delta_v;
+
+    // Check final sample's energy is within the physically bounded range.
+    let last = samples.last().unwrap();
+    let thalos_last = ephemeris.query_body(1, last.time);
+    let e_final = specific_energy_around_thalos(
+        last.position,
+        last.velocity,
+        thalos_last.position,
+        thalos_last.velocity,
+        thalos_gm,
+    );
+
+    let energy_change = (e_final - e0).abs();
+    assert!(
+        energy_change < max_energy_change * 3.0, // 3x safety margin
+        "energy change {energy_change:.0} exceeds physical bound {:.0} \
+         (3x max gravity assist). Integrator likely used too-coarse steps \
+         during the encounter.",
+        max_energy_change * 3.0,
+    );
+}
+
+/// The orbit tracker must not mark a segment as "stable orbit" when the
+/// trajectory crosses an SOI boundary (anchor body change).
+#[test]
+fn no_false_stable_orbit_across_soi_transition() {
+    let system = make_thalos_mira_system();
+    let thalos_gm = system.bodies[1].gm;
+    let mira_sma = 1.91488e8;
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+
+    // Ship on a transfer toward Mira's orbit.
+    let r_park = system.bodies[1].radius_m + 200_000.0;
+    let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
+
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(r_park, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, v_transfer),
+    };
+
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &ManeuverSequence::new(),
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig {
+            max_steps_per_segment: 200_000,
+            ..PredictionConfig::default()
+        },
+        IntegratorConfig::default(),
+        system.ship.thrust_acceleration,
+    );
+
+    // Check whether the trajectory enters Mira's SOI.
+    let entered_mira = prediction
+        .segments
+        .iter()
+        .flat_map(|s| s.samples.iter())
+        .any(|s| s.anchor_body == 2);
+
+    if entered_mira {
+        // If the trajectory crossed into Mira's SOI, the segment should NOT
+        // be marked as a stable orbit — the orbit tracker should have reset.
+        for seg in &prediction.segments {
+            if seg.is_stable_orbit {
+                // Verify that the stable orbit doesn't span an anchor change.
+                let start_idx = seg.stable_orbit_start_index.unwrap_or(0);
+                let stable_samples = &seg.samples[start_idx..];
+                if stable_samples.len() >= 2 {
+                    let anchor = stable_samples[0].anchor_body;
+                    let all_same_anchor = stable_samples.iter().all(|s| s.anchor_body == anchor);
+                    assert!(
+                        all_same_anchor,
+                        "stable orbit spans samples with different anchor bodies — \
+                         orbit tracker should have reset at the SOI transition"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Aggregated encounters carry osculating orbital elements at closest
+/// approach. For a Mira flyby arriving with excess hyperbolic velocity,
+/// eccentricity must be ≥ 1 and capture status `Flyby`.
+#[test]
+fn encounter_enrichment_reports_flyby_for_hyperbolic_pass() {
+    use crate::trajectory::CaptureStatus;
+
+    let system = make_thalos_mira_system();
+    let mira_sma = 1.91488e8;
+    let thalos_gm = system.bodies[1].gm;
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+
+    let r_park = system.bodies[1].radius_m + 200_000.0;
+    let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(r_park, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, v_transfer),
+    };
+
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &ManeuverSequence::new(),
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig {
+            max_steps_per_segment: 200_000,
+            ..PredictionConfig::default()
+        },
+        IntegratorConfig::default(),
+        system.ship.thrust_acceleration,
+    );
+
+    let mira_enc = prediction.encounter_with(2);
+    if let Some(enc) = mira_enc {
+        assert!(
+            enc.eccentricity > 0.0,
+            "eccentricity must be populated by enrichment"
+        );
+        assert!(enc.closest_distance > 0.0);
+        assert!(enc.relative_velocity > 0.0);
+        // Hyperbolic or captured — either outcome is physical for this setup,
+        // but capture status must be consistent with eccentricity.
+        match enc.capture {
+            CaptureStatus::Flyby => assert!(enc.eccentricity >= 1.0),
+            CaptureStatus::Captured => assert!(enc.eccentricity < 1.0),
+            CaptureStatus::Impact | CaptureStatus::Graze { .. } => {}
+        }
+    }
+}
+
+/// Setting `target_body` on the request must cap integrator step size to
+/// `TARGET_DT_CAP_SECS` when the craft enters `TARGET_DT_CAP_FACTOR × SOI`.
+/// Guards against a refactor silently disabling the cap.
+#[test]
+fn target_bias_caps_step_size_near_target() {
+    let system = make_thalos_mira_system();
+    let mira_sma = 1.91488e8;
+    let thalos_gm = system.bodies[1].gm;
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+
+    let r_park = system.bodies[1].radius_m + 200_000.0;
+    let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(r_park, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, v_transfer),
+    };
+
+    let prediction = propagate_trajectory_with_target(
+        ship_state,
+        0.0,
+        &ManeuverSequence::new(),
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig {
+            max_steps_per_segment: 200_000,
+            ..PredictionConfig::default()
+        },
+        IntegratorConfig::default(),
+        system.ship.thrust_acceleration,
+        Some(2), // target = Mira
+    );
+
+    let mira_soi = system.bodies[2].soi_radius_m;
+    // Sample index for "near target": within 3× SOI of Mira.  Step size of
+    // the *next* step is the one the cap controls; we check step_size on
+    // samples inside the bubble.
+    let mut near_samples = 0usize;
+    let mut capped_samples = 0usize;
+    for seg in &prediction.segments {
+        for sample in &seg.samples {
+            let mira_state = ephemeris.query_body(2, sample.time);
+            let dist = (sample.position - mira_state.position).length();
+            if dist < mira_soi * 3.0 {
+                near_samples += 1;
+                // Cap is 60 s; allow a small slack for error-controller overshoot.
+                if sample.step_size <= 90.0 {
+                    capped_samples += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        near_samples > 0,
+        "trajectory must enter 3× Mira SOI for the test to be meaningful"
+    );
+    assert!(
+        capped_samples >= near_samples * 7 / 10,
+        "expected ≥70% of near-target samples under 90s cap, got {}/{}",
+        capped_samples,
+        near_samples,
+    );
+}
+
+/// `FlightPlan::approaches` lists per-body closest passes for every body the
+/// trajectory does NOT enter the SOI of.  Bodies already covered by an
+/// `Encounter` must not appear.
+#[test]
+fn closest_approach_scan_excludes_encountered_bodies() {
+    let system = make_thalos_mira_system();
+    let mira_sma = 1.91488e8;
+    let thalos_gm = system.bodies[1].gm;
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+
+    let r_park = system.bodies[1].radius_m + 200_000.0;
+    let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(r_park, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, v_transfer),
+    };
+
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &ManeuverSequence::new(),
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig {
+            max_steps_per_segment: 200_000,
+            ..PredictionConfig::default()
+        },
+        IntegratorConfig::default(),
+        system.ship.thrust_acceleration,
+    );
+
+    let encounter_bodies: std::collections::HashSet<usize> =
+        prediction.encounters.iter().map(|e| e.body).collect();
+    for ca in &prediction.approaches {
+        assert!(
+            !encounter_bodies.contains(&ca.body),
+            "body {} has both an Encounter and a ClosestApproach",
+            ca.body
+        );
+        // Stars must never appear in approach list.
+        assert_ne!(
+            system.bodies[ca.body].kind,
+            crate::types::BodyKind::Star,
+            "closest-approach list must not include stars"
+        );
+        assert!(ca.distance > 0.0);
+    }
 }

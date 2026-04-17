@@ -17,12 +17,24 @@ pub(in crate::maneuver) fn manage_arrow_handles(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     selected_view: Res<SelectedNodeView>,
+    mode: Res<InteractionMode>,
     existing_handles: Query<Entity, With<ArrowHandle>>,
     existing_spheres: Query<Entity, With<NodeSlideSphere>>,
 ) {
     let has_node = selected_view.world_pos.is_some() && selected_view.frame.is_some();
 
     if !has_node {
+        // Keep handles alive while the user is actively dragging. Despawning
+        // mid-drag makes Bevy fire DragEnd on the despawned entity, which
+        // exits the interaction mode and silently ends the user's slide —
+        // perceived as the node "disappearing". The next frame's prediction
+        // rebuild will restore a valid position.
+        if matches!(
+            *mode,
+            InteractionMode::SlidingNode | InteractionMode::DraggingArrow { .. }
+        ) {
+            return;
+        }
         for entity in &existing_handles {
             commands.entity(entity).despawn();
         }

@@ -133,6 +133,20 @@ impl WarpController {
         self.level_index = self.levels.iter().position(|&w| w == 1.0).unwrap_or(0);
     }
 
+    /// Drop to the highest level strictly below `max_speed`. Used to pull out
+    /// of observation mode when an upcoming maneuver needs real integration.
+    pub fn clamp_below(&mut self, max_speed: f64) {
+        if self.levels[self.level_index] < max_speed {
+            return;
+        }
+        self.level_index = self
+            .levels
+            .iter()
+            .rposition(|&w| w < max_speed)
+            .unwrap_or(0);
+        self.resume_index = None;
+    }
+
     /// Toggle between paused (level 0) and the last non-zero level.
     /// If already at level 0 and nothing to resume, advances to 1x.
     pub fn toggle_pause(&mut self) {
@@ -202,10 +216,17 @@ impl PredictionState {
         self.dirty = true;
     }
 
-    pub fn needs_refresh(&self, sim_time: f64) -> bool {
+    pub fn needs_refresh(&self, sim_time: f64, _warp_speed: f64) -> bool {
         if self.dirty || self.prediction.is_none() {
             return true;
         }
+        // Refresh on the sim-time staleness threshold regardless of warp.
+        // The old optimization skipped recomputes during warp under the
+        // assumption that live stepping and prediction follow identical
+        // trajectories — but the adaptive integrator accumulates tiny
+        // per-step differences, so the ship visibly drifts off the drawn
+        // trail over long warps.  Frequency is still bounded (one recompute
+        // every `stale_after` sim-seconds) and is cheap.
         self.last_recompute_time
             .map(|t| (sim_time - t) >= self.stale_after)
             .unwrap_or(true)
@@ -265,6 +286,13 @@ pub struct Simulation {
     ship_thrust_acceleration: f64,
     maneuvers: ManeuverSequence,
     active_burns: Vec<ScheduledBurn>,
+    /// IDs of maneuver nodes drained into `active_burns` since the last
+    /// `drain_consumed_node_ids()` call. Lets the bridge reconcile its UI
+    /// state against what physics actually executed.
+    consumed_node_ids: Vec<u64>,
+    /// Currently selected target body.  Forwarded into `PredictionRequest`
+    /// for biased adaptive step sizing near the target.
+    target_body: Option<BodyId>,
 
     // Composed subsystems
     pub warp: WarpController,
@@ -298,6 +326,8 @@ impl Simulation {
             ship_thrust_acceleration,
             maneuvers: ManeuverSequence::new(),
             active_burns: Vec::new(),
+            consumed_node_ids: Vec::new(),
+            target_body: None,
             warp: WarpController::new(config.warp_levels),
             prediction_state: PredictionState::new(
                 config.prediction_config,
@@ -321,7 +351,23 @@ impl Simulation {
         // Ship state freezes — any ongoing maneuver/trajectory is invalidated
         // until warp drops below the threshold.
         if warp_speed >= self.observation_warp_threshold {
-            self.sim_time += real_delta * warp_speed;
+            let sim_delta = real_delta * warp_speed;
+            // If any pending maneuver falls within the jump window or an
+            // active burn is in flight, drop out of observation mode so the
+            // integrator can execute it. Don't advance this frame; next frame
+            // runs normal integration.
+            let threshold = self.observation_warp_threshold;
+            let maneuver_due = self
+                .maneuvers
+                .nodes
+                .first()
+                .is_some_and(|n| n.time <= self.sim_time + sim_delta);
+            if maneuver_due || !self.active_burns.is_empty() {
+                self.warp.clamp_below(threshold);
+                self.accumulator = 0.0;
+                return;
+            }
+            self.sim_time += sim_delta;
             self.accumulator = 0.0;
             return;
         }
@@ -374,6 +420,9 @@ impl Simulation {
                 break;
             }
             let node = self.maneuvers.nodes.remove(0);
+            if let Some(id) = node.id {
+                self.consumed_node_ids.push(id);
+            }
             self.prediction_state.mark_dirty();
             changed = true;
 
@@ -428,6 +477,30 @@ impl Simulation {
         &mut self.maneuvers
     }
 
+    /// Drain the list of maneuver node IDs that physics has consumed since
+    /// the last call. The caller (typically the bridge) uses this to remove
+    /// the corresponding UI nodes — tying UI lifetime to actual execution
+    /// rather than a wall-clock time comparison.
+    pub fn drain_consumed_node_ids(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.consumed_node_ids)
+    }
+
+    // -- Target body --------------------------------------------------------
+
+    pub fn target_body(&self) -> Option<BodyId> {
+        self.target_body
+    }
+
+    /// Set (or clear) the currently selected target body.  Marks the
+    /// prediction dirty so the next refresh uses biased adaptive step sizing
+    /// near the new target.
+    pub fn set_target_body(&mut self, body: Option<BodyId>) {
+        if self.target_body != body {
+            self.target_body = body;
+            self.prediction_state.mark_dirty();
+        }
+    }
+
     // -- Prediction ---------------------------------------------------------
 
     pub fn prediction_stale_after(&self) -> f64 {
@@ -453,13 +526,15 @@ impl Simulation {
             prediction_config: self.prediction_state.config().clone(),
             integrator_config: self.integrator_config.clone(),
             ship_thrust_acceleration: self.ship_thrust_acceleration,
+            target_body: self.target_body,
         };
         let prediction = propagate_flight_plan(&req, None);
         self.prediction_state.install(prediction, req.sim_time);
     }
 
     pub fn prediction_needs_refresh(&self) -> bool {
-        self.prediction_state.needs_refresh(self.sim_time)
+        self.prediction_state
+            .needs_refresh(self.sim_time, self.warp.speed())
     }
 
     pub fn prediction(&self) -> Option<&FlightPlan> {

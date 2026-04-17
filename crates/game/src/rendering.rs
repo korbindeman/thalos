@@ -1263,12 +1263,12 @@ fn update_sun_light(
         .map(|s| s.position)
         .unwrap_or(bevy::math::DVec3::ZERO);
 
-    let dir = (focus_pos - star_pos).normalize();
-    if dir.length_squared() < 0.5 {
-        return; // Focus is on the star itself; direction undefined.
+    let offset = focus_pos - star_pos;
+    if offset.length_squared() < 1.0e6 {
+        return; // Focus is on (or very near) the star; direction undefined.
     }
 
-    let dir_f32 = dir.as_vec3();
+    let dir_f32 = offset.normalize().as_vec3();
     for mut transform in &mut light_query {
         // DirectionalLight shines along its local -Z, so we look in the light's travel direction.
         transform.look_to(dir_f32, Vec3::Y);
@@ -1604,6 +1604,7 @@ fn double_click_focus_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
     bodies: Query<(Entity, &CelestialBody, &Transform)>,
+    ghosts: Query<(Entity, &crate::flight_plan_view::GhostBody, &Transform), Without<CelestialBody>>,
     sim: Res<SimulationState>,
     mut focus: ResMut<CameraFocus>,
     mut last_click: ResMut<LastClick>,
@@ -1719,6 +1720,21 @@ fn double_click_focus_system(
         }
     }
 
+    // Also check ghost bodies (translucent encounter previews).
+    for (entity, _ghost, transform) in &ghosts {
+        let Ok(screen) = camera.world_to_viewport(cam_gt, transform.translation) else {
+            continue;
+        };
+        let dist_px = screen.distance(cursor_pos);
+        // Ghost bodies are screen-size-stable, use generous hit radius.
+        if dist_px > 20.0 {
+            continue;
+        }
+        if fallback_best.map(|(_, d)| dist_px < d).unwrap_or(true) {
+            fallback_best = Some((entity, dist_px));
+        }
+    }
+
     let Some((target_entity, _)) = billboard_best.or(fallback_best) else {
         return;
     };
@@ -1726,14 +1742,21 @@ fn double_click_focus_system(
     // Compute smooth transition offset.
     let old_pos = focus
         .target
-        .and_then(|e| bodies.get(e).ok())
-        .map(|(_, _, t)| t.translation)
+        .and_then(|e| {
+            bodies
+                .get(e)
+                .map(|(_, _, t)| t.translation)
+                .ok()
+                .or_else(|| ghosts.get(e).map(|(_, _, t)| t.translation).ok())
+        })
         .unwrap_or(Vec3::ZERO)
         + focus.focus_offset;
 
     let new_pos = bodies
         .get(target_entity)
         .map(|(_, _, t)| t.translation)
+        .ok()
+        .or_else(|| ghosts.get(target_entity).map(|(_, _, t)| t.translation).ok())
         .unwrap_or(Vec3::ZERO);
 
     focus.focus_offset = old_pos - new_pos;

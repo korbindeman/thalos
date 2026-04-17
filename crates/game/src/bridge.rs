@@ -19,10 +19,6 @@ use crate::SimStage;
 use crate::maneuver::ManeuverPlan;
 use crate::rendering::SimulationState;
 
-/// Warn if a synchronous prediction pass eats more than this fraction of a
-/// 60 Hz frame. Purely diagnostic — no behaviour change.
-const SYNC_PREDICTION_WARN_MS: f64 = 8.0;
-
 pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("advance_simulation").entered();
     sim.simulation.step(time.delta_secs_f64());
@@ -39,15 +35,7 @@ fn update_prediction(mut sim: ResMut<SimulationState>) {
         return;
     }
 
-    let t0 = std::time::Instant::now();
     sim.simulation.recompute_prediction();
-    let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    if elapsed_ms > SYNC_PREDICTION_WARN_MS {
-        warn!(
-            "[bridge] sync prediction pass took {:.1} ms (> {:.0} ms budget)",
-            elapsed_ms, SYNC_PREDICTION_WARN_MS
-        );
-    }
 }
 
 /// Handle keyboard input to adjust the warp multiplier.
@@ -75,19 +63,31 @@ pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<Sim
     }
 }
 
-/// Sync the UI-side [`ManeuverPlan`] to the physics `ManeuverSequence` when
-/// dirty. `maneuvers_mut()` marks the prediction dirty; `update_prediction`
-/// runs after this system and recomputes synchronously.
+/// Sync the UI-side [`ManeuverPlan`] with the physics `ManeuverSequence`.
 ///
-/// Also drops UI nodes whose execution time has passed — the physics side
-/// auto-consumes them as burns, and leaving stale nodes in the UI would
-/// re-inject them on the next edit.
+/// Lifecycle:
+/// 1. Remove UI nodes that physics reports as consumed this frame. This is
+///    the only way UI nodes retire — never by comparing time to `sim_time`,
+///    which would silently drop nodes whose execution was skipped (e.g. at
+///    observation warp). A UI node still sitting with `time <= sim_time`
+///    means physics didn't burn it — a bug signal worth surfacing, not
+///    hiding.
+/// 2. When `plan.dirty` (user edit or consumption), push the current UI
+///    list into physics, tagging each entry with its `NodeId` so the next
+///    consumption cycle can round-trip.
 fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<SimulationState>) {
-    let sim_time = sim.simulation.sim_time();
-    let before = plan.nodes.len();
-    plan.nodes.retain(|n| n.time > sim_time);
-    if plan.nodes.len() != before {
-        plan.dirty = true;
+    let consumed = sim.simulation.drain_consumed_node_ids();
+    if !consumed.is_empty() {
+        info!(
+            "[bridge] physics consumed maneuver node ids: {:?} (sim_time={:.2})",
+            consumed,
+            sim.simulation.sim_time()
+        );
+        let before = plan.nodes.len();
+        plan.nodes.retain(|n| !consumed.contains(&n.id.0));
+        if plan.nodes.len() != before {
+            plan.dirty = true;
+        }
     }
 
     if !plan.dirty {
@@ -100,6 +100,7 @@ fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<Simulation
     seq.nodes.clear();
     for node in &plan.nodes {
         seq.nodes.push(ManeuverNode {
+            id: Some(node.id.0),
             time: node.time,
             delta_v: node.delta_v,
             reference_body: node.reference_body,

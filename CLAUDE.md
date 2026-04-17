@@ -5,11 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-just run      # cargo run -p thalos_game
-just edit auron  # planet editor, optional body name (default: Mira)
-just build    # cargo build --workspace
-just test     # cargo test -p thalos_physics -p thalos_terrain_gen
-just clippy   # cargo clippy --workspace
+just game      # cargo run -p thalos_game --features dev
+just editor    # cargo run -p thalos_planet_editor --features dev
+just shipyard  # cargo run -p thalos_shipyard --bin ship_editor
+just build     # cargo build --workspace
+just test      # cargo test -p thalos_physics -p thalos_terrain_gen
+just clippy    # cargo clippy --workspace
+just trace     # cargo run --release -p thalos_game --features profile-tracy
 
 # Run a single test
 cargo test -p thalos_physics -- test_name
@@ -47,10 +49,13 @@ Thalos is an orbital mechanics sandbox game in Rust (edition 2024, Bevy 0.18, gl
 - **`thalos_physics`** — pure Rust library, zero Bevy dependency, fully testable in isolation
 - **`thalos_game`** — thin Bevy consumer of physics outputs
 - **`thalos_terrain_gen`** — procedural terrain generation pipeline framework (no Bevy dependency)
-- **`thalos_planet_rendering`** — Bevy rendering for generated planets (cubemap impostor)
+- **`thalos_atmosphere_gen`** — gas giant atmosphere definition (cloud decks, hazes, rings; no Bevy dependency)
+- **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
+- **`thalos_planet_rendering`** — Bevy rendering for planets (impostor), gas giants, and rings
 - **`thalos_planet_editor`** — interactive planet editor tool
+- **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
 
-Core separation: physics and terrain_gen are pure Rust libraries; game, planet_rendering, and planet_editor are Bevy consumers. `crates/planet_gen/` exists but is NOT in the workspace — older spec-faithful approach, kept for reference.
+Core separation: physics, terrain_gen, atmosphere_gen, and celestial are pure Rust libraries; game, planet_rendering, planet_editor, and shipyard are Bevy consumers. `crates/planet_gen/` exists but is NOT in the workspace — older spec-faithful approach, kept for reference.
 
 ### Physics crate (`crates/physics/`)
 
@@ -59,16 +64,18 @@ Key modules and their roles:
 - `types` — `StateVector`, `BodyDefinition`, `TrajectorySample` (each sample carries dominant body ID, perturbation ratio, step size — used directly by the renderer)
 - `patched_conics` — `BodyStateProvider` implementation using analytical Keplerian orbits. Bodies form a parent-child tree; evaluated in topological order. This is the authoritative source of body positions.
 - `integrator` — Hybrid: symplectic leapfrog (fixed timestep, energy-conserving) for low-perturbation regions; adaptive RK45 (Dormand-Prince) when perturbation ratio exceeds threshold. Live stepping and trajectory prediction share the same `IntegratorConfig` — this is intentional and critical.
-- `simulation` — Central `Simulation` struct: owns ship state, integrator, `ForceRegistry` (gravity + thrust), `ManeuverSequence`. `step()` is called each frame.
+- `simulation` — Central `Simulation` struct: owns ship state, integrator, `EffectRegistry`, `ManeuverSequence`. `step()` is called each frame.
 - `trajectory` — Background trajectory prediction engine. Runs on a worker thread, progressively refines (coarse → fine budget). Cancels and restarts on maneuver edits.
 - `maneuver` — `ManeuverNode`: time, delta-v in prograde/radial/normal frame, optional reference body.
-- `forces` — Force registry. MVP: gravity (sum over all bodies), thrust. Extensible by adding force functions.
-- `parsing` — Loads `assets/solar_system.kdl` into `BodyDefinition[]`.
+- `effects` — Effect system. Gravity is distinguished (own slot on registry, returns `GravityResult` with dominant body + perturbation ratio). Other effects (thrust, future: drag, SRP) implement `Effect` trait and live in `EffectRegistry::effects`. Each effect is a pure function of `(state, time, body_states)`.
+- `parsing` — Loads `assets/solar_system.ron` into `SolarSystemDefinition`.
 
 ### Game crate (`crates/game/`)
 
 - `bridge` — The core adapter. Calls `Simulation::step()` each frame, manages async prediction worker thread, syncs maneuver edits, handles warp controls.
 - `rendering` / `trajectory_rendering` — Reads body positions from `PatchedConics` and trajectory samples from prediction. Cone width is derived from perturbation ratio directly.
+- `ghost_bodies` — Renders ghost planet positions during time warp preview.
+- `sky_render` — Renders procedural sky from `thalos_celestial` catalog (stars, galaxies as GPU meshes).
 - `maneuver/` — Maneuver node placement/editing UI. Delta-v handles in local reference frame.
 - `camera` — KSP-style orbit camera.
 
@@ -84,23 +91,43 @@ Cubemap-based procedural surface generation. No Bevy dependency.
 - `Pipeline` — validates dependency ordering at construction; runs stages in order with deterministic per-stage seeding via `sub_seed()`.
 - `sample()` / `SurfaceSample` — single sampling contract for reading finished surface data.
 
+### Celestial crate (`crates/celestial/`)
+
+Procedural sky model. Pure Rust, no Bevy. Works in physical quantities (flux, temperature, SED) — never pre-baked RGB.
+
+- `Universe` — collection of `Source` objects (stars, galaxies, nebulae)
+- `Spectrum` — spectral energy distributions: `Blackbody`, `PowerLaw`, `Tabulated`; `Passband` filtering
+- `generate/` — procedural star field and galaxy placement
+- `render/` — cubemap baking and telescope PSF
+
+### Shipyard crate (`crates/shipyard/`)
+
+Parametric ship editor. Bevy + egui.
+
+- `AttachNode` / `Ship` — ECS tree structure for ship assembly
+- `Part` trait — `CommandPod`, `Engine`, `FuelTank`, `Decoupler`, `Adapter`
+- `ShipBlueprint` — RON serialization format for ship designs
+- `sizing` — parametric node sizing (adapters/tanks scale from parent)
+
 ### Planet rendering crate (`crates/planet_rendering/`)
 
 Thin Bevy rendering layer. No generation logic.
 
-- `PlanetRenderingPlugin` — registers `PlanetMaterial` asset type.
-- `PlanetMaterial` — Bevy `Asset + AsBindGroup`. Binds cubemap height/albedo textures and uniforms. Uses `assets/shaders/planet_impostor.wgsl`.
-- `bake_from_body_data()` — consumes `terrain_gen::BodyData` → `PlanetTextures` (albedo + height image handles).
+- `PlanetRenderingPlugin` — registers `PlanetMaterial`, `GasGiantMaterial`, `RingMaterial`.
+- `PlanetMaterial` — cubemap height/albedo textures. Uses `assets/shaders/planet_impostor.wgsl`.
+- `GasGiantMaterial` — gas giant cloud/haze rendering. Uses `assets/shaders/gas_giant.wgsl`.
+- `RingMaterial` — ring system rendering. Uses `assets/shaders/ring.wgsl`.
+- `bake_from_body_data()` — consumes `terrain_gen::BodyData` → `PlanetTextures`.
 
 ### Planet editor (`crates/planet_editor/`)
 
-Standalone Bevy binary for interactive planet preview. Loads `solar_system.kdl`, selects a body, runs terrain pipeline, renders with `PlanetMaterial` via billboard mesh. Uses `bevy_egui` for UI.
+Standalone Bevy binary for interactive planet preview. Loads `solar_system.ron`, selects a body, runs terrain pipeline, renders with `PlanetMaterial` via billboard mesh. Uses `bevy_egui` for UI.
 
 ### Data flow
 
 ```
-assets/solar_system.kdl
-  → [parsing] BodyDefinition[]
+assets/solar_system.ron
+  → [parsing] SolarSystemDefinition
   → [PatchedConics] body positions at any time t
   → [Simulation::step] per frame → TrajectorySample (ship)
   → [trajectory worker] background → TrajectoryPrediction (legs between maneuver nodes)
@@ -114,15 +141,21 @@ assets/solar_system.kdl
 - **Physics crate has no Bevy.** All physics logic must remain in `thalos_physics`. `thalos_game` is only presentation and input.
 - **`TrajectorySample` carries its own metadata.** Dominant body, perturbation ratio, and step size travel with each sample so the renderer needs no heuristics to draw uncertainty cones.
 - **Terrain gen stages are pure transforms.** Each `Stage` reads/writes `BodyBuilder` only. Pipeline handles seeding and ordering. No ambient state.
+- **Effects are pure functions.** Each effect depends only on `(state, time, body_states)`. Prediction and live stepping share identical code paths.
 
 ### Assets
 
-- `assets/solar_system.kdl` — full solar system definition (KDL format), consumed by game and editor.
-- `assets/simple_solar_system.kdl` — simpler variant for testing.
+- `assets/solar_system.ron` — full solar system definition (RON format with `#![enable(implicit_some)]`), consumed by game and editor.
 - `assets/shaders/planet_impostor.wgsl` — impostor shader (3-layer: baked cubemap low-freq, SSBO mid-freq features, shader-synthesized high-freq detail).
+- `assets/shaders/gas_giant.wgsl` — gas giant cloud/haze/rim rendering.
+- `assets/shaders/ring.wgsl` — planetary ring system shader.
+- `assets/shaders/stars.wgsl`, `galaxy.wgsl` — celestial sphere rendering from procedural catalog.
+- `assets/shaders/lighting.wgsl` — shared lighting library (loaded via `load_shader_library!`).
 
 ### Documentation (`docs/`)
 
 - `solar_system.md` — per-body reference with scale philosophy (hybrid 1:1/1:2/1:3 scale rationale) and formation scenario.
 - `surface_generator_design.md` — architecture design doc for the 3-layer terrain representation, BodyData/BodyBuilder contract, sampling contract.
-- `mira_processes.md` — stage-by-stage pipeline recipe for Mira (Sphere → Differentiate → Megabasin → Cratering → MareFlood → Regolith → SpaceWeather).
+- `celestial.md` — celestial sphere design: source model, spectrum, generation, rendering pipeline.
+- `new_physics.md` — future N-body ephemeris proposal (currently using patched conics).
+- `gen/mira_processes.md` — stage-by-stage pipeline recipe for Mira.

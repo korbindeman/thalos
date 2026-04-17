@@ -174,13 +174,20 @@ fn camera_zoom_interpolation_system(time: Res<Time>, mut focus: ResMut<CameraFoc
 fn camera_min_distance_system(
     mut focus: ResMut<CameraFocus>,
     bodies: Query<&crate::rendering::CelestialBody>,
+    ghosts: Query<&crate::flight_plan_view::GhostBody>,
 ) {
-    let min = match focus.target.and_then(|e| bodies.get(e).ok()) {
-        Some(body) => (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT),
-        None => DISTANCE_MIN_DEFAULT,
+    let min = if let Some(target) = focus.target {
+        if let Ok(body) = bodies.get(target) {
+            (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT)
+        } else if let Ok(ghost) = ghosts.get(target) {
+            (ghost.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT)
+        } else {
+            DISTANCE_MIN_DEFAULT
+        }
+    } else {
+        DISTANCE_MIN_DEFAULT
     };
     focus.min_distance = min;
-    // If target_distance is already below the new min, clamp it.
     if focus.target_distance < min {
         focus.target_distance = min;
     }

@@ -177,23 +177,33 @@ fn hash_f32(x: u32) -> f32 {
     return f32(pcg(x)) / 4294967295.0;
 }
 
-fn hash_cell(ix: i32, iy: i32, k: u32) -> f32 {
+// Per-cell 2D gradient from hash. Returns a unit-ish direction.
+fn grad_2d(ix: i32, iy: i32, k: u32) -> vec2<f32> {
     let xu = bitcast<u32>(ix);
     let yu = bitcast<u32>(iy);
-    return hash_f32(xu ^ (yu * 374761393u) ^ k);
+    let h = pcg(xu ^ (yu * 374761393u) ^ k);
+    // Angle from hash — cheap uniform distribution on the circle.
+    let angle = f32(h) * (TAU / 4294967295.0);
+    return vec2<f32>(cos(angle), sin(angle));
 }
 
-fn value_noise_2d(p: vec2<f32>, seed: u32) -> f32 {
+fn gradient_noise_2d(p: vec2<f32>, seed: u32) -> f32 {
     let i = floor(p);
     let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
+    // Quintic interpolant: 6t^5 - 15t^4 + 10t^3. Matches second
+    // derivative at lattice points → no visible crease at cell edges.
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     let ix = i32(i.x);
     let iy = i32(i.y);
-    let a = hash_cell(ix,     iy,     seed);
-    let b = hash_cell(ix + 1, iy,     seed);
-    let c = hash_cell(ix,     iy + 1, seed);
-    let d = hash_cell(ix + 1, iy + 1, seed);
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 2.0 - 1.0;
+    let d00 = f - vec2<f32>(0.0, 0.0);
+    let d10 = f - vec2<f32>(1.0, 0.0);
+    let d01 = f - vec2<f32>(0.0, 1.0);
+    let d11 = f - vec2<f32>(1.0, 1.0);
+    let a = dot(grad_2d(ix,     iy,     seed), d00);
+    let b = dot(grad_2d(ix + 1, iy,     seed), d10);
+    let c = dot(grad_2d(ix,     iy + 1, seed), d01);
+    let d = dot(grad_2d(ix + 1, iy + 1, seed), d11);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
 fn fbm_2d(p: vec2<f32>, seed: u32) -> f32 {
@@ -204,7 +214,7 @@ fn fbm_2d(p: vec2<f32>, seed: u32) -> f32 {
     var q = p;
     for (var i = 0u; i < 4u; i = i + 1u) {
         if freq * pw > 0.5 { break; }
-        sum = sum + amp * value_noise_2d(q, seed + i * 1013u);
+        sum = sum + amp * gradient_noise_2d(q, seed + i * 1013u);
         q = q * 2.0;
         amp = amp * 0.5;
         freq = freq * 2.0;
@@ -212,43 +222,62 @@ fn fbm_2d(p: vec2<f32>, seed: u32) -> f32 {
     return sum;
 }
 
-// ── 3D value noise ──────────────────────────────────────────────────────────
+// ── 3D gradient noise ──────────────────────────────────────────────────────
 //
-// Used everywhere the cloud deck pipeline touches the sphere surface.
+// Perlin-style gradient noise. Each lattice cell stores a pseudo-random
+// gradient direction; the returned value is the trilinearly interpolated
+// dot product of that gradient with the fractional offset. Produces
+// smooth, organic patterns free of the grid-aligned block artifacts
+// inherent in value noise.
+//
 // Sampling on (x, y, z) avoids the degenerate (x, z)-only projection
 // that made the previous pipeline kill all warp near the poles: the
 // lattice is finite at `y = ±1`, so turbulence can go fully chaotic at
 // high latitudes without streaking toward the pole.
 
-fn hash_cell_3d(ix: i32, iy: i32, iz: i32, k: u32) -> f32 {
+fn grad_3d(ix: i32, iy: i32, iz: i32, k: u32) -> vec3<f32> {
     let xu = bitcast<u32>(ix);
     let yu = bitcast<u32>(iy);
     let zu = bitcast<u32>(iz);
-    return hash_f32(xu ^ (yu * 374761393u) ^ (zu * 2246822519u) ^ k);
+    let h = pcg(xu ^ (yu * 374761393u) ^ (zu * 2246822519u) ^ k);
+    // Decode two angles from hash bits for a point on the unit sphere.
+    let phi   = f32(h & 0xFFFFu) * (TAU / 65535.0);
+    let cos_th = f32((h >> 16u) & 0xFFFFu) / 65535.0 * 2.0 - 1.0;
+    let sin_th = sqrt(max(1.0 - cos_th * cos_th, 0.0));
+    return vec3<f32>(sin_th * cos(phi), cos_th, sin_th * sin(phi));
 }
 
-fn value_noise_3d(p: vec3<f32>, seed: u32) -> f32 {
+fn gradient_noise_3d(p: vec3<f32>, seed: u32) -> f32 {
     let i = floor(p);
     let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
+    // Quintic interpolant — C2 continuous, no crease at cell edges.
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     let ix = i32(i.x);
     let iy = i32(i.y);
     let iz = i32(i.z);
-    let c000 = hash_cell_3d(ix,     iy,     iz,     seed);
-    let c100 = hash_cell_3d(ix + 1, iy,     iz,     seed);
-    let c010 = hash_cell_3d(ix,     iy + 1, iz,     seed);
-    let c110 = hash_cell_3d(ix + 1, iy + 1, iz,     seed);
-    let c001 = hash_cell_3d(ix,     iy,     iz + 1, seed);
-    let c101 = hash_cell_3d(ix + 1, iy,     iz + 1, seed);
-    let c011 = hash_cell_3d(ix,     iy + 1, iz + 1, seed);
-    let c111 = hash_cell_3d(ix + 1, iy + 1, iz + 1, seed);
+    let d000 = f - vec3<f32>(0.0, 0.0, 0.0);
+    let d100 = f - vec3<f32>(1.0, 0.0, 0.0);
+    let d010 = f - vec3<f32>(0.0, 1.0, 0.0);
+    let d110 = f - vec3<f32>(1.0, 1.0, 0.0);
+    let d001 = f - vec3<f32>(0.0, 0.0, 1.0);
+    let d101 = f - vec3<f32>(1.0, 0.0, 1.0);
+    let d011 = f - vec3<f32>(0.0, 1.0, 1.0);
+    let d111 = f - vec3<f32>(1.0, 1.0, 1.0);
+    let c000 = dot(grad_3d(ix,     iy,     iz,     seed), d000);
+    let c100 = dot(grad_3d(ix + 1, iy,     iz,     seed), d100);
+    let c010 = dot(grad_3d(ix,     iy + 1, iz,     seed), d010);
+    let c110 = dot(grad_3d(ix + 1, iy + 1, iz,     seed), d110);
+    let c001 = dot(grad_3d(ix,     iy,     iz + 1, seed), d001);
+    let c101 = dot(grad_3d(ix + 1, iy,     iz + 1, seed), d101);
+    let c011 = dot(grad_3d(ix,     iy + 1, iz + 1, seed), d011);
+    let c111 = dot(grad_3d(ix + 1, iy + 1, iz + 1, seed), d111);
     let x00 = mix(c000, c100, u.x);
     let x10 = mix(c010, c110, u.x);
     let x01 = mix(c001, c101, u.x);
     let x11 = mix(c011, c111, u.x);
     let y0 = mix(x00, x10, u.y);
     let y1 = mix(x01, x11, u.y);
-    return mix(y0, y1, u.z) * 2.0 - 1.0;
+    return mix(y0, y1, u.z);
 }
 
 fn fbm_3d(p: vec3<f32>, seed: u32) -> f32 {
@@ -259,7 +288,7 @@ fn fbm_3d(p: vec3<f32>, seed: u32) -> f32 {
     var q = p;
     for (var i = 0u; i < 5u; i = i + 1u) {
         if freq * pw > 0.5 { break; }
-        sum = sum + amp * value_noise_3d(q, seed + i * 1013u);
+        sum = sum + amp * gradient_noise_3d(q, seed + i * 1013u);
         q = q * 2.0;
         amp = amp * 0.5;
         freq = freq * 2.0;
@@ -278,7 +307,7 @@ fn fbm_3d_warp(p: vec3<f32>, seed: u32) -> f32 {
     var q = p;
     for (var i = 0u; i < 3u; i = i + 1u) {
         if freq * pw > 0.5 { break; }
-        sum = sum + amp * value_noise_3d(q, seed + i * 1013u);
+        sum = sum + amp * gradient_noise_3d(q, seed + i * 1013u);
         q = q * 2.0;
         amp = amp * 0.5;
         freq = freq * 2.0;
@@ -352,12 +381,12 @@ fn latlon_to_normal(lat: f32, lon: f32) -> vec3<f32> {
 // downstream cloud deck already stacks multiple fbm samples.
 fn curl_warp(p: vec3<f32>, seed: u32) -> vec3<f32> {
     let eps = 0.15;
-    let a1 = value_noise_3d(p + vec3<f32>(0.0, eps, 0.0), seed);
-    let a2 = value_noise_3d(p - vec3<f32>(0.0, eps, 0.0), seed);
-    let b1 = value_noise_3d(p + vec3<f32>(0.0, 0.0, eps), seed);
-    let b2 = value_noise_3d(p - vec3<f32>(0.0, 0.0, eps), seed);
-    let c1 = value_noise_3d(p + vec3<f32>(eps, 0.0, 0.0), seed);
-    let c2 = value_noise_3d(p - vec3<f32>(eps, 0.0, 0.0), seed);
+    let a1 = gradient_noise_3d(p + vec3<f32>(0.0, eps, 0.0), seed);
+    let a2 = gradient_noise_3d(p - vec3<f32>(0.0, eps, 0.0), seed);
+    let b1 = gradient_noise_3d(p + vec3<f32>(0.0, 0.0, eps), seed);
+    let b2 = gradient_noise_3d(p - vec3<f32>(0.0, 0.0, eps), seed);
+    let c1 = gradient_noise_3d(p + vec3<f32>(eps, 0.0, 0.0), seed);
+    let c2 = gradient_noise_3d(p - vec3<f32>(eps, 0.0, 0.0), seed);
     let da = (a1 - a2) * 0.5;
     let db = (b1 - b2) * 0.5;
     let dc = (c1 - c2) * 0.5;

@@ -9,23 +9,8 @@
 //! `NumericSegment` also caches termination metadata (stable orbit, collision)
 //! that the renderer uses to draw closed ellipses or collision markers.
 
-use glam::DVec3;
-
 use super::Trajectory;
 use crate::types::{BodyId, StateVector, TrajectorySample};
-
-/// Proxy for trajectory cone width at a sample point (metres).
-///
-/// Uses perturbation ratio scaled by *inverse* step size: smaller accepted
-/// adaptive steps mean the integrator found the region numerically sensitive,
-/// so uncertainty grows as `step_size` shrinks.
-pub fn cone_width(sample: &TrajectorySample) -> f64 {
-    const NOMINAL_STEP_SIZE: f64 = 60.0;
-    const NOMINAL_CONE_WIDTH_M: f64 = 1.0e6;
-
-    let step_factor = NOMINAL_STEP_SIZE / sample.step_size.max(1e-3);
-    sample.perturbation_ratio * step_factor * NOMINAL_CONE_WIDTH_M
-}
 
 /// One propagated leg of a [`FlightPlan`](super::FlightPlan).
 ///
@@ -45,19 +30,6 @@ pub struct NumericSegment {
 }
 
 impl NumericSegment {
-    pub fn empty() -> Self {
-        Self {
-            samples: Vec::new(),
-            is_stable_orbit: false,
-            stable_orbit_start_index: None,
-            collision_body: None,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.samples.is_empty()
-    }
-
     pub fn start_time(&self) -> Option<f64> {
         self.samples.first().map(|s| s.time)
     }
@@ -193,24 +165,10 @@ impl Trajectory for NumericSegment {
     }
 }
 
-/// Helper used by flight-plan rendering: body-relative position preserved
-/// through interpolation, so callers can query at any time without tearing.
-impl NumericSegment {
-    pub fn relative_position_at(
-        &self,
-        time: f64,
-        body_states: &[crate::types::BodyState],
-    ) -> Option<DVec3> {
-        let state = self.state_at(time)?;
-        let body = self.anchor_body_at(time)?;
-        let body_pos = body_states.get(body)?.position;
-        Some(state.position - body_pos)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::DVec3;
 
     fn sample(time: f64, pos: DVec3, vel: DVec3) -> TrajectorySample {
         TrajectorySample {
@@ -221,7 +179,9 @@ mod tests {
             perturbation_ratio: 0.0,
             step_size: 1.0,
             anchor_body: 0,
-            anchor_body_pos: DVec3::ZERO,
+            ref_pos: DVec3::ZERO,
+            soi_body: 0,
+            body_weights: crate::types::EMPTY_BODY_WEIGHTS,
         }
     }
 

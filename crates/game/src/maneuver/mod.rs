@@ -43,8 +43,30 @@ fn update_selected_node_view(
     sim: Option<Res<crate::rendering::SimulationState>>,
     body_states: Res<crate::rendering::FrameBodyStates>,
     origin: Res<crate::coords::RenderOrigin>,
+    flight_plan_view: Res<crate::flight_plan_view::FlightPlanView>,
     mut selected_view: ResMut<SelectedNodeView>,
+    mut last_selected: Local<Option<state::NodeId>>,
+    mut last_plan_size: Local<usize>,
 ) {
+    if *last_selected != selected.id {
+        info!(
+            "[maneuver] SelectedNode changed: {:?} -> {:?} (plan has {} nodes: ids {:?})",
+            *last_selected,
+            selected.id,
+            plan.nodes.len(),
+            plan.nodes.iter().map(|n| n.id).collect::<Vec<_>>()
+        );
+        *last_selected = selected.id;
+    }
+    if *last_plan_size != plan.nodes.len() {
+        info!(
+            "[maneuver] plan.nodes size changed: {} -> {} (ids {:?})",
+            *last_plan_size,
+            plan.nodes.len(),
+            plan.nodes.iter().map(|n| n.id).collect::<Vec<_>>()
+        );
+        *last_plan_size = plan.nodes.len();
+    }
     let Some(ref sim) = sim else {
         selected_view.world_pos = None;
         selected_view.frame = None;
@@ -68,12 +90,37 @@ fn update_selected_node_view(
         states,
         &origin,
         &sim.system,
+        sim.ephemeris.as_ref(),
+        &flight_plan_view,
     ) {
         Some((world_pos, frame)) => {
+            if selected_view.world_pos.is_none() && selected.id.is_some() {
+                info!(
+                    "[maneuver] selected_view.world_pos restored (id={:?})",
+                    selected.id
+                );
+            }
             selected_view.world_pos = Some(world_pos);
             selected_view.frame = Some(frame);
         }
         None => {
+            if selected_view.world_pos.is_some() {
+                let node_info = selected
+                    .id
+                    .and_then(|id| plan.nodes.iter().find(|n| n.id == id))
+                    .map(|n| format!("id={:?} time={:.2} ref_body={}", n.id, n.time, n.reference_body));
+                let seg_ranges: Vec<(f64, f64)> = prediction
+                    .segments
+                    .iter()
+                    .chain(prediction.baseline.iter())
+                    .filter(|s| !s.samples.is_empty())
+                    .map(|s| (s.samples[0].time, s.samples.last().unwrap().time))
+                    .collect();
+                warn!(
+                    "[maneuver] selected_view.world_pos LOST — node {:?}, segments {:?}",
+                    node_info, seg_ranges
+                );
+            }
             selected_view.world_pos = None;
             selected_view.frame = None;
         }

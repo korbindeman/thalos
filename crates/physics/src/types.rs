@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use thalos_atmosphere_gen::AtmosphereParams;
 use thalos_terrain_gen::GeneratorParams;
 
+pub use crate::effects::gravity::{BODY_WEIGHTS_CAP, EMPTY_BODY_WEIGHTS};
+
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
 
@@ -89,6 +91,23 @@ pub struct OrbitalElements {
     pub true_anomaly_rad: f64,
 }
 
+/// Compute the gravity-weighted barycenter `Σᵢ wᵢ · rᵢ` over the bodies
+/// listed in `body_weights`, looking up each body's position in `bodies`.
+/// Missing-id entries (slot weight 0, or id ≥ len) contribute nothing.
+#[inline]
+pub fn weighted_barycenter(
+    body_weights: &[(BodyId, f32); BODY_WEIGHTS_CAP],
+    bodies: &[BodyState],
+) -> DVec3 {
+    let mut acc = DVec3::ZERO;
+    for &(id, w) in body_weights.iter() {
+        if w > 0.0 && id < bodies.len() {
+            acc += bodies[id].position * w as f64;
+        }
+    }
+    acc
+}
+
 /// A timestamped state for a body — used in ephemeris samples.
 #[derive(Debug, Clone, Copy)]
 pub struct BodyState {
@@ -112,14 +131,29 @@ pub struct TrajectorySample {
     pub dominant_body: BodyId,
     pub perturbation_ratio: f64,
     pub step_size: f64,
-    /// Body whose sphere of influence contains the ship at this sample.
-    /// Stable across steps (geometric containment), so rendering anchors
-    /// every sample to its anchor body without per-sample frame jumps.
-    /// Falls back to the root parent (star) when no smaller SOI applies.
+    /// Rendering anchor: the hierarchical parent used for drawing the
+    /// trajectory.  For moons, this is stepped up to the parent planet so
+    /// the trajectory stays in the planet's reference frame.
+    ///
+    /// Retained for legacy consumers (label-coloring, encounter detection).
+    /// The renderer itself uses `body_weights` + `ref_pos` via the
+    /// gravity-weighted barycenter rule (§7.2).
     pub anchor_body: BodyId,
-    /// Position of `anchor_body` at `time`.  Pre-computed so the renderer
-    /// can derive body-relative offsets without querying the ephemeris.
-    pub anchor_body_pos: DVec3,
+    /// Gravity-weighted barycenter `Σᵢ wᵢ · rᵢ(sample.t)` at this sample's
+    /// time, computed from `body_weights`. The renderer subtracts this to
+    /// place the sample in the barycenter-relative frame, then adds the
+    /// current-time barycenter to pin the trajectory to where the dominant
+    /// bodies are now (§7.2).
+    pub ref_pos: DVec3,
+    /// SOI-level body: the smallest sphere-of-influence that contains the
+    /// ship.  Used for encounter detection (SOI entry/exit, periapsis)
+    /// independently of the rendering anchor.
+    pub soi_body: BodyId,
+    /// Top-K gravity weights at this sample, `wᵢ = aᵢ / Σⱼ aⱼ` renormalised
+    /// across the stored entries. Drives the renderer's gravity-weighted
+    /// barycenter rule: `render_pos = sample.pos - Σ wᵢ · rᵢ(t)`. Unused
+    /// slots have weight 0.0.
+    pub body_weights: [(BodyId, f32); BODY_WEIGHTS_CAP],
 }
 
 /// Ship definition — placeholder for MVP.

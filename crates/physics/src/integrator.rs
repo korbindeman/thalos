@@ -194,6 +194,17 @@ impl PiController {
 }
 
 // ---------------------------------------------------------------------------
+// Tidal safety guard
+// ---------------------------------------------------------------------------
+
+/// Maximum fraction of distance-to-dominant-body that a single symplectic
+/// step may traverse before the tidal guard forces adaptive mode.  Prevents
+/// the integrator from using coarse fixed steps deep in a small body's
+/// gravity well (e.g. a moon flyby) where the perturbation ratio is low
+/// but the field gradient is steep.
+const TIDAL_STEP_FRACTION_LIMIT: f64 = 0.01;
+
+// ---------------------------------------------------------------------------
 // Public integrator struct
 // ---------------------------------------------------------------------------
 
@@ -280,8 +291,24 @@ impl Integrator {
         };
         let (a0, gravity_result) = compute_total_acceleration(&ctx0, registry);
 
-        // Update mode with hysteresis.
-        self.update_mode(gravity_result.perturbation_ratio);
+        // Tidal safety: even when one body dominates (low perturbation
+        // ratio), the symplectic step can be too coarse near a small body.
+        // Compute whether a single fixed step would cover a safe fraction
+        // of the distance to the dominant body.
+        let tidal_safe = {
+            let dom = gravity_result.dominant_body;
+            if dom < self.body_states_buf.len() {
+                let body = &self.body_states_buf[dom];
+                let dist = (state.position - body.position).length();
+                let rel_speed = (state.velocity - body.velocity).length();
+                rel_speed * self.config.symplectic_dt <= dist * TIDAL_STEP_FRACTION_LIMIT
+            } else {
+                true
+            }
+        };
+
+        // Update mode with hysteresis + tidal guard.
+        self.update_mode(gravity_result.perturbation_ratio, tidal_safe);
 
         // Perform the integration step in the selected mode.
         let (new_state, step_size) = match self.mode {
@@ -311,7 +338,18 @@ impl Integrator {
             // the integrator returns; default to dominant for live-sim paths
             // that don't go through propagation.
             anchor_body: sample_gravity.dominant_body,
-            anchor_body_pos: DVec3::ZERO,
+            // `ref_pos` is the anchor body's position at sample time. For
+            // live stepping this is just the dominant body; propagation
+            // overrides `anchor_body` to the leg-locked anchor and refills
+            // `ref_pos` accordingly so every sample in a leg renders in
+            // the same body's frame.
+            ref_pos: self
+                .sample_body_states_buf
+                .get(sample_gravity.dominant_body)
+                .map(|b| b.position)
+                .unwrap_or(DVec3::ZERO),
+            soi_body: sample_gravity.dominant_body,
+            body_weights: sample_gravity.body_weights,
         };
 
         (new_state, sample)
@@ -321,10 +359,10 @@ impl Integrator {
     // Mode switching
     // -----------------------------------------------------------------------
 
-    fn update_mode(&mut self, perturbation_ratio: f64) {
+    fn update_mode(&mut self, perturbation_ratio: f64, tidal_safe: bool) {
         match self.mode {
             Mode::Symplectic => {
-                if perturbation_ratio > self.config.switch_threshold {
+                if perturbation_ratio > self.config.switch_threshold || !tidal_safe {
                     self.mode = Mode::Adaptive;
                     // Clamp rk_dt in case it drifted out of range during a
                     // previous adaptive phase.
@@ -339,7 +377,7 @@ impl Integrator {
             Mode::Adaptive => {
                 let hysteresis_threshold =
                     self.config.switch_threshold * self.config.hysteresis_factor;
-                if perturbation_ratio < hysteresis_threshold {
+                if perturbation_ratio < hysteresis_threshold && tidal_safe {
                     self.mode = Mode::Symplectic;
                 }
             }
@@ -819,7 +857,7 @@ mod tests {
             ..Default::default()
         };
         let mut integrator = Integrator::new(cfg);
-        integrator.update_mode(0.02);
+        integrator.update_mode(0.02, true);
         assert_eq!(integrator.mode, Mode::Adaptive);
     }
 
@@ -832,17 +870,17 @@ mod tests {
         };
         let mut integrator = Integrator::new(cfg);
         // Enter adaptive mode.
-        integrator.update_mode(0.02);
+        integrator.update_mode(0.02, true);
         assert_eq!(integrator.mode, Mode::Adaptive);
         // Ratio below switch_threshold but above hysteresis band — stay adaptive.
-        integrator.update_mode(0.008);
+        integrator.update_mode(0.008, true);
         assert_eq!(
             integrator.mode,
             Mode::Adaptive,
             "hysteresis should prevent premature switch-back"
         );
         // Now drop below the hysteresis band.
-        integrator.update_mode(0.004);
+        integrator.update_mode(0.004, true);
         assert_eq!(integrator.mode, Mode::Symplectic);
     }
 
@@ -855,10 +893,50 @@ mod tests {
             ..Default::default()
         };
         let mut integrator = Integrator::new(cfg);
-        integrator.update_mode(0.01); // == threshold, not >
+        integrator.update_mode(0.01, true); // == threshold, not >
         assert_eq!(integrator.mode, Mode::Symplectic);
-        integrator.update_mode(0.010_000_000_1); // just above
+        integrator.update_mode(0.010_000_000_1, true); // just above
         assert_eq!(integrator.mode, Mode::Adaptive);
+    }
+
+    #[test]
+    fn tidal_guard_prevents_downgrade_near_small_body() {
+        let cfg = IntegratorConfig {
+            switch_threshold: 0.01,
+            hysteresis_factor: 0.5,
+            ..Default::default()
+        };
+        let mut integrator = Integrator::new(cfg);
+        // Enter adaptive mode via high perturbation.
+        integrator.update_mode(0.02, true);
+        assert_eq!(integrator.mode, Mode::Adaptive);
+        // Perturbation drops (one body dominates) but tidal guard says unsafe.
+        integrator.update_mode(0.001, false);
+        assert_eq!(
+            integrator.mode,
+            Mode::Adaptive,
+            "tidal guard should block downgrade to symplectic"
+        );
+        // Once tidal guard is satisfied, downgrade proceeds.
+        integrator.update_mode(0.001, true);
+        assert_eq!(integrator.mode, Mode::Symplectic);
+    }
+
+    #[test]
+    fn tidal_guard_upgrades_from_symplectic() {
+        let cfg = IntegratorConfig {
+            switch_threshold: 0.01,
+            ..Default::default()
+        };
+        let mut integrator = Integrator::new(cfg);
+        assert_eq!(integrator.mode, Mode::Symplectic);
+        // Low perturbation but tidal unsafe — should upgrade.
+        integrator.update_mode(0.001, false);
+        assert_eq!(
+            integrator.mode,
+            Mode::Adaptive,
+            "tidal guard should force upgrade even with low perturbation"
+        );
     }
 
     // -----------------------------------------------------------------------

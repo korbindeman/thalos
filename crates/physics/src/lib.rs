@@ -2,6 +2,7 @@ pub mod body_state_provider;
 pub mod effects;
 pub mod integrator;
 pub mod maneuver;
+pub mod orbital_math;
 pub mod parsing;
 pub mod patched_conics;
 pub mod simulation;

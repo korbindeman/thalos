@@ -3,13 +3,16 @@ use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use super::super::helpers::{closest_node, closest_trail_point};
+use super::super::helpers::{
+    closest_node, closest_trail_point, closest_trail_point_on_leg, orbit_sensitivity_scale,
+};
 use super::super::state::{
     ArrowHitbox, InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, NodeSlideSphere,
     SELECT_THRESHOLD_PX, SelectedNode,
 };
 use crate::camera::OrbitCamera;
 use crate::coords::RenderOrigin;
+use crate::flight_plan_view::FlightPlanView;
 use crate::rendering::{FrameBodyStates, SimulationState};
 
 /// Main input system for maneuver nodes.
@@ -24,6 +27,7 @@ pub(in crate::maneuver) fn maneuver_input(
     sim: Option<Res<SimulationState>>,
     body_states: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
+    flight_plan_view: Res<FlightPlanView>,
     plan: ResMut<ManeuverPlan>,
     mut mode: ResMut<InteractionMode>,
     mut selected: ResMut<SelectedNode>,
@@ -54,9 +58,16 @@ pub(in crate::maneuver) fn maneuver_input(
         }
     }
 
+    if keys.just_pressed(KeyCode::Escape)
+        && matches!(*mode, InteractionMode::PlacingNode { .. })
+    {
+        *mode = InteractionMode::Idle;
+    }
+
     if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace) {
         if let Some(id) = selected.id {
             writer.write(ManeuverEvent::DeleteNode { id });
+            info!("[maneuver] selection cleared: Delete/Backspace key");
             selected.id = None;
         }
     }
@@ -98,13 +109,44 @@ pub(in crate::maneuver) fn maneuver_input(
             if mouse.pressed(MouseButton::Left) {
                 let screen_delta = cursor_pos - *drag_origin;
                 let displacement = screen_delta.dot(*axis_screen_dir);
-                let rate = displacement as f64 * 10.0;
+                let raw_rate = displacement as f64 * 10.0;
+
+                // Scale drag gain by the post-burn orbit's semi-major axis so
+                // the mapping from tug-pixels to trajectory shift stays
+                // roughly uniform as the user stretches the trajectory out.
+                let sensitivity_scale = selected
+                    .id
+                    .and_then(|id| plan.nodes.iter().find(|n| n.id == id))
+                    .and_then(|node| {
+                        orbit_sensitivity_scale(
+                            prediction,
+                            node.time,
+                            node.delta_v,
+                            node.reference_body,
+                            sim.ephemeris.as_ref(),
+                            &sim.system,
+                        )
+                    })
+                    .unwrap_or(1.0);
+
+                // Precision modifiers: Shift = 10× finer, Ctrl = 100× finer.
+                let mut modifier_scale = 1.0;
+                if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+                    modifier_scale *= 0.1;
+                }
+                if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+                    modifier_scale *= 0.01;
+                }
+
+                let rate = raw_rate * sensitivity_scale * modifier_scale;
                 let dt = time.delta_secs_f64();
 
-                *rate_sign = if rate.abs() < 0.01 {
+                // Arrow stretch visual follows the raw drag signal so it still
+                // animates when sensitivity scaling drives `rate` very small.
+                *rate_sign = if raw_rate.abs() < 0.01 {
                     0.0
                 } else {
-                    rate.signum() as f32
+                    raw_rate.signum() as f32
                 };
 
                 let axis = *axis;
@@ -130,11 +172,20 @@ pub(in crate::maneuver) fn maneuver_input(
         InteractionMode::SlidingNode => {
             if mouse.pressed(MouseButton::Left) {
                 if let Some(sel_id) = selected.id {
-                    if let Some(closest) = closest_trail_point(
+                    let node_time = plan
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == sel_id)
+                        .map(|n| n.time)
+                        .unwrap_or(0.0);
+                    if let Some(closest) = closest_trail_point_on_leg(
                         prediction,
+                        node_time,
                         states,
                         &origin,
                         &sim.system,
+                        sim.ephemeris.as_ref(),
+                        &flight_plan_view,
                         camera,
                         cam_transform,
                         cursor_pos,
@@ -161,6 +212,8 @@ pub(in crate::maneuver) fn maneuver_input(
                 states,
                 &origin,
                 &sim.system,
+                sim.ephemeris.as_ref(),
+                &flight_plan_view,
                 camera,
                 cam_transform,
                 cursor_pos,
@@ -171,6 +224,18 @@ pub(in crate::maneuver) fn maneuver_input(
 
             if mouse.just_pressed(MouseButton::Left) {
                 if let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_anchor_body) {
+                    let ref_name = sim
+                        .system
+                        .bodies
+                        .get(reference_body)
+                        .map(|b| b.name.as_str())
+                        .unwrap_or("?");
+                    info!(
+                        "[maneuver] placed node at t+{:.0}s, reference_body = {} (id {})",
+                        trail_time - sim.simulation.sim_time(),
+                        ref_name,
+                        reference_body,
+                    );
                     writer.write(ManeuverEvent::PlaceNode {
                         trail_time,
                         reference_body,
@@ -185,12 +250,20 @@ pub(in crate::maneuver) fn maneuver_input(
     }
 
     if mouse.just_pressed(MouseButton::Left) && !pointer_on_arrow {
+        info!(
+            "[maneuver] mouse just_pressed Left (mode={:?}, pressed={}, selected={:?})",
+            std::mem::discriminant(&*mode),
+            mouse.pressed(MouseButton::Left),
+            selected.id
+        );
         if let Some(id) = closest_node(
             &plan,
             prediction,
             states,
             &origin,
             &sim.system,
+            sim.ephemeris.as_ref(),
+            &flight_plan_view,
             camera,
             cam_transform,
             cursor_pos,
@@ -202,6 +275,7 @@ pub(in crate::maneuver) fn maneuver_input(
                 selected.id = Some(id);
             }
         } else {
+            info!("[maneuver] selection cleared: click missed all nodes");
             selected.id = None;
         }
     }

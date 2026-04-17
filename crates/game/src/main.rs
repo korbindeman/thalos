@@ -1,14 +1,13 @@
 mod bridge;
 mod camera;
 mod coords;
-mod ghost_bodies;
+mod flight_plan_view;
 mod hud;
 mod maneuver;
 mod rendering;
 mod sky_render;
 mod star_flare;
 mod target;
-mod trajectory_rendering;
 
 use std::sync::Arc;
 
@@ -25,13 +24,12 @@ use thalos_physics::{
 
 use bridge::BridgePlugin;
 use camera::CameraPlugin;
-use ghost_bodies::GhostBodiesPlugin;
+use flight_plan_view::FlightPlanViewPlugin;
 use hud::HudPlugin;
 use maneuver::ManeuverPlugin;
 use rendering::{RenderingPlugin, SimulationState};
 use target::TargetPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
-use trajectory_rendering::TrajectoryRenderingPlugin;
 
 // ---------------------------------------------------------------------------
 // System ordering
@@ -171,9 +169,8 @@ fn main() {
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(BridgePlugin)
-        .add_plugins(TrajectoryRenderingPlugin)
         .add_plugins(TargetPlugin)
-        .add_plugins(GhostBodiesPlugin)
+        .add_plugins(FlightPlanViewPlugin)
         .add_plugins(ManeuverPlugin)
         .add_plugins(HudPlugin)
         .run();

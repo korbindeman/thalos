@@ -50,14 +50,22 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                 }
             }
             ManeuverEvent::SlideNode { id, new_time } => {
+                if !new_time.is_finite() {
+                    warn!("[maneuver] ignoring SlideNode with non-finite time {new_time}");
+                    continue;
+                }
                 if let Some(node) = plan.nodes.iter_mut().find(|n| n.id == id) {
                     node.time = new_time;
                     plan.dirty = true;
                 }
             }
             ManeuverEvent::DeleteNode { id } => {
+                let before = plan.nodes.len();
                 plan.nodes.retain(|n| n.id != id);
-                plan.dirty = true;
+                if plan.nodes.len() != before {
+                    info!("[maneuver] DeleteNode consumed id={:?}", id);
+                    plan.dirty = true;
+                }
             }
         }
     }

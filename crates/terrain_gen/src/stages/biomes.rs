@@ -82,6 +82,16 @@ impl Stage for Biomes {
             "Biomes: last rule must be Default (catch-all)",
         );
 
+        let has_near_basin_rule = self
+            .rules
+            .iter()
+            .any(|r| matches!(r, BiomeRule::NearBasin { .. }));
+        assert!(
+            !has_near_basin_rule || !builder.megabasins.is_empty(),
+            "Biomes: NearBasin rules require the Megabasin stage to run first \
+             (megabasins list is empty)",
+        );
+
         let basins = builder.megabasins.clone();
         let body_radius = builder.radius_m;
         let seed = builder.stage_seed();

@@ -16,6 +16,7 @@ pub(super) fn node_editor_panel(
 ) {
     let Some(sel_id) = selected.id else { return };
     let Some(node_idx) = plan.nodes.iter().position(|n| n.id == sel_id) else {
+        info!("[maneuver] selection cleared: panel (site)");
         selected.id = None;
         return;
     };
@@ -49,7 +50,8 @@ pub(super) fn node_editor_panel(
             ui.separator();
             if ui.button("Delete").clicked() {
                 writer.write(ManeuverEvent::DeleteNode { id: sel_id });
-                selected.id = None;
+                info!("[maneuver] selection cleared: panel (site)");
+        selected.id = None;
             }
         });
 
