@@ -8,14 +8,15 @@ mod rings;
 pub mod shader_types;
 mod texture;
 
-pub use bake::bake_from_body_data;
+pub use bake::{bake_cloud_cover_image, bake_from_body_data, blank_cloud_cover_image};
 pub use film_grain::FilmGrain;
 pub use gas_giant::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,
 };
 pub use lighting::{MAX_STARS, SceneLighting, StarLight};
 pub use material::{
-    MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
+    AtmosphereBlock, MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial,
+    PlanetMaterialHandle, PlanetParams,
 };
 pub use post_stack::space_camera_post_stack;
 pub use rings::{
@@ -37,6 +38,7 @@ pub struct PlanetRenderingPlugin;
 impl Plugin for PlanetRenderingPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
         app.add_plugins((
             MaterialPlugin::<PlanetMaterial>::default(),
             MaterialPlugin::<GasGiantMaterial>::default(),

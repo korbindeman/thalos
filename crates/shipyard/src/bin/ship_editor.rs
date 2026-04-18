@@ -14,19 +14,36 @@
 
 use bevy::input::gestures::PinchGesture;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::picking::events::{Click, Pointer};
+use bevy::picking::events::{Click, DragEnd, DragStart, Pointer};
+use bevy::picking::hover::HoverMap;
 use bevy::picking::mesh_picking::ray_cast::RayCastVisibility;
 use bevy::picking::mesh_picking::{MeshPickingPlugin, MeshPickingSettings};
 use bevy::picking::Pickable;
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContextSettings, EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use thalos_shipyard::sizing::propagate_node_sizes;
+use thalos_shipyard::Resource as ShipResource;
 use thalos_shipyard::*;
 
 const SHIPS_DIR: &str = "ships";
+
+/// Methalox reactant mix at O/F ≈ 3.6 (Raptor-ish).
+fn methalox_reactants() -> Vec<ReactantRatio> {
+    vec![
+        ReactantRatio {
+            resource: ShipResource::Methane,
+            mass_fraction: 1.0 / 4.6,
+        },
+        ReactantRatio {
+            resource: ShipResource::Lox,
+            mass_fraction: 3.6 / 4.6,
+        },
+    ]
+}
 
 fn sanitize_name(name: &str) -> String {
     let s: String = name
@@ -79,10 +96,14 @@ fn main() {
         .add_plugins(MeshPickingPlugin)
         .insert_resource(MeshPickingSettings {
             require_markers: false,
-            ray_cast_visibility: RayCastVisibility::Any,
+            // `VisibleInView` so hidden handles (resize arrow, non-pending
+            // pins) don't absorb clicks from the body behind them.
+            ray_cast_visibility: RayCastVisibility::VisibleInView,
         })
         .add_plugins(ShipyardPlugin)
         .init_resource::<EditorState>()
+        .init_resource::<TankResizeDrag>()
+        .init_resource::<DeselectTracker>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -94,6 +115,11 @@ fn main() {
                 update_node_pin_style,
                 disable_egui_pointer_capture,
                 sync_self_nodes,
+                spawn_tank_resize_arrow,
+                update_tank_resize_arrow.after(update_part_transforms),
+                update_tank_resize_drag,
+                update_selection_highlight.after(rebuild_visuals),
+                deselect_on_empty_click,
             ),
         )
         .add_systems(EguiPrimaryContextPass, editor_ui)
@@ -108,10 +134,12 @@ fn main() {
 struct EditorState {
     ship_root: Option<Entity>,
     ship_entity: Option<Entity>,
+    ship_name: String,
     selected: Option<Entity>,
     pending: Option<PartData>,
     place_at: Option<(Entity, String)>,
     delete_selected: bool,
+    set_as_root: bool,
     save_requested: bool,
     load_target: Option<String>,
     delete_file: Option<String>,
@@ -123,8 +151,12 @@ struct EditorState {
 #[derive(Resource)]
 struct EditorAssets {
     part_material: Handle<StandardMaterial>,
+    hover_material: Handle<StandardMaterial>,
+    selected_material: Handle<StandardMaterial>,
     pending_node_material: Handle<StandardMaterial>,
     node_mesh: Handle<Mesh>,
+    resize_arrow_mesh: Handle<Mesh>,
+    resize_arrow_material: Handle<StandardMaterial>,
 }
 
 #[derive(Component)]
@@ -139,6 +171,31 @@ struct AttachNodePin {
     node_id: NodeId,
 }
 
+#[derive(Component)]
+struct TankResizeArrow {
+    tank: Entity,
+}
+
+#[derive(Resource, Default)]
+struct TankResizeDrag {
+    active: Option<TankDragState>,
+}
+
+struct TankDragState {
+    tank: Entity,
+    start_length: f32,
+    start_cursor: Vec2,
+    screen_axis: Vec2,
+    world_per_pixel: f32,
+}
+
+/// Tracks the cursor at mouse-down when the press landed on empty space,
+/// so a release at near-the-same position clears the selection but a
+/// press→drag→release (camera orbit) does not.
+#[derive(Resource, Default)]
+struct DeselectTracker {
+    press_cursor: Option<Vec2>,
+}
 
 #[derive(Component)]
 struct OrbitCamera {
@@ -165,12 +222,34 @@ fn setup(
             metallic: 0.6,
             ..default()
         }),
+        hover_material: mats.add(StandardMaterial {
+            base_color: Color::srgb(0.82, 0.85, 0.88),
+            perceptual_roughness: 0.4,
+            metallic: 0.6,
+            emissive: LinearRgba::rgb(0.08, 0.08, 0.08),
+            ..default()
+        }),
+        selected_material: mats.add(StandardMaterial {
+            base_color: Color::srgb(0.85, 0.9, 1.0),
+            perceptual_roughness: 0.4,
+            metallic: 0.6,
+            emissive: LinearRgba::rgb(0.15, 0.35, 0.7),
+            ..default()
+        }),
         pending_node_material: mats.add(StandardMaterial {
             base_color: Color::srgb(0.2, 0.9, 1.0),
             emissive: LinearRgba::rgb(0.1, 0.6, 0.9),
             ..default()
         }),
         node_mesh: meshes.add(Sphere::new(0.25).mesh()),
+        resize_arrow_mesh: meshes.add(Cone::new(0.3, 0.8).mesh()),
+        resize_arrow_material: mats.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.75, 0.2),
+            emissive: LinearRgba::rgb(0.9, 0.5, 0.05),
+            perceptual_roughness: 0.5,
+            unlit: false,
+            ..default()
+        }),
     });
 
     commands.spawn((
@@ -202,24 +281,9 @@ fn setup(
     ));
 
 
-    // Initial ship: single command pod.
-    let pod_data = PartData::CommandPod {
-        model: "Mk1".into(),
-        diameter: 1.25,
-        dry_mass: 840.0,
-    };
-    let pod = ShipBlueprint::spawn_part(&mut commands, &pod_data, HashMap::new());
-    let ship = commands
-        .spawn(Ship {
-            name: "New Ship".into(),
-            root: pod,
-        })
-        .id();
-    state.ship_root = Some(pod);
-    state.ship_entity = Some(ship);
-    state.selected = Some(pod);
+    state.ship_name = "New Ship".into();
     state.ship_list = list_ships();
-    state.status = "Ready".into();
+    state.status = "Click a part to begin".into();
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +385,7 @@ fn rebuild_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<EditorAssets>,
+    state: Res<EditorState>,
     parts: VisualQuery,
     stale: Query<(), Or<(With<PartVisual>, With<AttachNodePin>)>>,
 ) {
@@ -336,10 +401,15 @@ fn rebuild_visuals(
         // ---- Body visual --------------------------------------------------
         if let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine) {
             let mesh = meshes.add(spec.mesh);
+            let initial_material = if Some(e) == state.selected {
+                assets.selected_material.clone()
+            } else {
+                assets.part_material.clone()
+            };
             let body = commands
                 .spawn((
                     Mesh3d(mesh),
-                    MeshMaterial3d(assets.part_material.clone()),
+                    MeshMaterial3d(initial_material),
                     Transform::from_xyz(0.0, -spec.height * 0.5, 0.0),
                     Visibility::default(),
                     PartVisual,
@@ -405,9 +475,14 @@ fn update_part_transforms(
                 .map(|kids| {
                     kids.iter()
                         .filter_map(|(c, att)| {
-                            parent_nodes
-                                .get(&att.parent_node)
-                                .map(|n| (*c, parent_pos + n.offset))
+                            let pn = parent_nodes.get(&att.parent_node)?;
+                            let child_offset = nodes
+                                .get(*c)
+                                .ok()
+                                .and_then(|cn| cn.get(&att.my_node))
+                                .map(|n| n.offset)
+                                .unwrap_or(Vec3::ZERO);
+                            Some((*c, parent_pos + pn.offset - child_offset))
                         })
                         .collect()
                 })
@@ -521,6 +596,250 @@ fn pointer_over_egui(contexts: &mut EguiContexts) -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// Tank resize arrow (parametric handle)
+// ---------------------------------------------------------------------------
+
+/// Spawn a single resize arrow per fuel tank on creation. The arrow is a
+/// child of the tank entity, hidden until the tank becomes the current
+/// selection, and positioned each frame by `update_tank_resize_arrow`.
+fn spawn_tank_resize_arrow(
+    mut commands: Commands,
+    assets: Res<EditorAssets>,
+    new_tanks: Query<Entity, Added<FuelTank>>,
+) {
+    for tank in new_tanks.iter() {
+        let arrow = commands
+            .spawn((
+                Mesh3d(assets.resize_arrow_mesh.clone()),
+                MeshMaterial3d(assets.resize_arrow_material.clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                TankResizeArrow { tank },
+                Pickable::default(),
+            ))
+            .observe(on_arrow_drag_start)
+            .observe(on_arrow_drag_end)
+            .id();
+        commands.entity(tank).add_child(arrow);
+    }
+}
+
+/// Show the arrow only while the owning tank is selected; each frame, place
+/// it on the camera-facing side of the tank at mid-height with the tip
+/// pointing down along the tank's growth axis.
+fn update_tank_resize_arrow(
+    state: Res<EditorState>,
+    tanks: Query<(&FuelTank, &AttachNodes), Without<TankResizeArrow>>,
+    cameras: Query<&Transform, (With<OrbitCamera>, Without<TankResizeArrow>, Without<FuelTank>)>,
+    mut arrows: Query<(&TankResizeArrow, &mut Transform, &mut Visibility)>,
+) {
+    let Ok(cam_transform) = cameras.single() else {
+        return;
+    };
+
+    for (arrow, mut transform, mut vis) in arrows.iter_mut() {
+        let is_selected = state.selected == Some(arrow.tank);
+        let Ok((tank, nodes)) = tanks.get(arrow.tank) else {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+            continue;
+        };
+
+        if !is_selected {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+            continue;
+        }
+        if *vis != Visibility::Inherited {
+            *vis = Visibility::Inherited;
+        }
+
+        // Place the arrow on the camera's right so it doesn't occlude the
+        // tank body. Parts never rotate in this editor, so world-space XZ
+        // equals local-space XZ.
+        let cam_right = cam_transform.right();
+        let right_xz =
+            Vec2::new(cam_right.x, cam_right.z).try_normalize().unwrap_or(Vec2::X);
+        let radius = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
+        let offset_r = radius + 0.55;
+        transform.translation = Vec3::new(
+            right_xz.x * offset_r,
+            -tank.length * 0.5,
+            right_xz.y * offset_r,
+        );
+        // Bevy's Cone has its tip at +Y and base at -Y; rotate PI around X
+        // to point the tip down (i.e., the direction the tank grows).
+        transform.rotation = Quat::from_rotation_x(std::f32::consts::PI);
+    }
+}
+
+/// On drag start: snapshot the tank's current length, the cursor origin,
+/// and project the world growth axis (-Y) into screen space. Subsequent
+/// cursor motion is decomposed along that axis and rescaled to world units.
+fn on_arrow_drag_start(
+    trigger: On<Pointer<DragStart>>,
+    arrows: Query<&TankResizeArrow>,
+    tanks: Query<(&FuelTank, &Transform)>,
+    camera_q: Query<(&Camera, &GlobalTransform)>,
+    mut drag: ResMut<TankResizeDrag>,
+) {
+    let event = trigger.event();
+    let Ok(arrow) = arrows.get(event.entity) else {
+        return;
+    };
+    let Ok((tank, tank_transform)) = tanks.get(arrow.tank) else {
+        return;
+    };
+    let Ok((camera, cam_transform)) = camera_q.single() else {
+        return;
+    };
+
+    let origin_world = tank_transform.translation;
+    // Tanks grow in the -Y direction (bottom node offset = -length * Y).
+    // Flip this if that ever changes.
+    let grow_world = origin_world + Vec3::NEG_Y;
+    let Ok(origin_screen) = camera.world_to_viewport(cam_transform, origin_world) else {
+        return;
+    };
+    let Ok(grow_screen) = camera.world_to_viewport(cam_transform, grow_world) else {
+        return;
+    };
+
+    let axis = grow_screen - origin_screen;
+    let axis_len = axis.length();
+    if axis_len < 1e-3 {
+        return;
+    }
+
+    drag.active = Some(TankDragState {
+        tank: arrow.tank,
+        start_length: tank.length,
+        start_cursor: event.pointer_location.position,
+        screen_axis: axis / axis_len,
+        world_per_pixel: 1.0 / axis_len,
+    });
+}
+
+fn on_arrow_drag_end(_trigger: On<Pointer<DragEnd>>, mut drag: ResMut<TankResizeDrag>) {
+    drag.active = None;
+}
+
+/// Apply the active drag to the tank's length each frame. Bails (and
+/// clears) if the button was released without a DragEnd — can happen when
+/// the pointer leaves the window mid-drag.
+fn update_tank_resize_drag(
+    mut drag: ResMut<TankResizeDrag>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut tanks: Query<&mut FuelTank>,
+) {
+    let Some(state) = drag.active.as_ref() else {
+        return;
+    };
+    if !mouse.pressed(MouseButton::Left) {
+        drag.active = None;
+        return;
+    }
+    let Ok(window) = windows.single() else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+
+    let cursor_delta = cursor - state.start_cursor;
+    let pixels_along = cursor_delta.dot(state.screen_axis);
+    let world_growth = pixels_along * state.world_per_pixel;
+    let raw_length = state.start_length + world_growth;
+    // Magnetic snap: smooth drag in-between, stick to nearest 0.5 within
+    // a small neighborhood so users can dial in round values without
+    // losing fine control.
+    const SNAP_GRID: f32 = 0.5;
+    const SNAP_THRESHOLD: f32 = 0.06;
+    let nearest = (raw_length / SNAP_GRID).round() * SNAP_GRID;
+    let length = if (raw_length - nearest).abs() < SNAP_THRESHOLD {
+        nearest
+    } else {
+        raw_length
+    };
+    let new_length = length.clamp(0.5, 12.0);
+
+    if let Ok(mut tank) = tanks.get_mut(state.tank) {
+        if (tank.length - new_length).abs() > f32::EPSILON {
+            tank.length = new_length;
+        }
+    }
+}
+
+/// Clear selection when the user clicks on empty space. Tracks the
+/// press cursor so a camera orbit (press → drag → release) doesn't
+/// deselect at release.
+fn deselect_on_empty_click(
+    mut tracker: ResMut<DeselectTracker>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    hover_map: Res<HoverMap>,
+    pickables: Query<(), Or<(With<PartBody>, With<AttachNodePin>, With<TankResizeArrow>)>>,
+    mut state: ResMut<EditorState>,
+    mut contexts: EguiContexts,
+) {
+    const CLICK_THRESHOLD_PX: f32 = 4.0;
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let cursor = window.cursor_position();
+
+    if mouse.just_pressed(MouseButton::Left) {
+        if pointer_over_egui(&mut contexts) {
+            tracker.press_cursor = None;
+        } else {
+            let on_pickable = hover_map
+                .0
+                .values()
+                .any(|hovers| hovers.keys().any(|e| pickables.get(*e).is_ok()));
+            tracker.press_cursor = if on_pickable { None } else { cursor };
+        }
+    }
+
+    if mouse.just_released(MouseButton::Left) {
+        if let (Some(press), Some(current)) = (tracker.press_cursor.take(), cursor) {
+            if (current - press).length() < CLICK_THRESHOLD_PX {
+                state.selected = None;
+            }
+        }
+    }
+}
+
+/// Swap each part body's material based on selection and hover state.
+/// Priority: selected > hovered > default.
+fn update_selection_highlight(
+    state: Res<EditorState>,
+    assets: Res<EditorAssets>,
+    hover_map: Res<HoverMap>,
+    mut bodies: Query<(Entity, &PartBody, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    let hovered: HashSet<Entity> = hover_map
+        .0
+        .values()
+        .flat_map(|hovers| hovers.keys().copied())
+        .collect();
+
+    for (body_entity, body, mut mat) in bodies.iter_mut() {
+        let target = if Some(body.0) == state.selected {
+            &assets.selected_material
+        } else if hovered.contains(&body_entity) {
+            &assets.hover_material
+        } else {
+            &assets.part_material
+        };
+        if mat.0.id() != target.id() {
+            mat.0 = target.clone();
+        }
+    }
+}
+
 fn on_body_click(
     click: On<Pointer<Click>>,
     bodies: Query<&PartBody>,
@@ -566,11 +885,19 @@ fn orbit_camera(
     mut pinch: MessageReader<PinchGesture>,
     mut contexts: EguiContexts,
     state: Res<EditorState>,
+    resize_drag: Res<TankResizeDrag>,
+    hover_map: Res<HoverMap>,
+    arrows: Query<(), With<TankResizeArrow>>,
 ) {
     let pointer_over_egui = contexts
         .ctx_mut()
         .map(|c| c.is_pointer_over_area() || c.wants_pointer_input())
         .unwrap_or(false);
+
+    let pointer_on_arrow = hover_map
+        .0
+        .values()
+        .any(|hovers| hovers.keys().any(|e| arrows.get(*e).is_ok()));
 
     let mut delta = Vec2::ZERO;
     for m in motion.read() {
@@ -596,8 +923,13 @@ fn orbit_camera(
     // While a part is pending, suppress orbit so a press→release on a pin
     // stays hovered on that pin and picking actually fires a Click. Any
     // camera rotation between press and release breaks hover and drops the
-    // event into the window fallback entity.
-    let orbit_allowed = !pointer_over_egui && state.pending.is_none();
+    // event into the window fallback entity. Also suppress while the
+    // pointer is over a resize arrow (or actively dragging one) so the
+    // camera doesn't twitch between mouse-down and DragStart firing.
+    let orbit_allowed = !pointer_over_egui
+        && state.pending.is_none()
+        && resize_drag.active.is_none()
+        && !pointer_on_arrow;
 
     for (mut t, mut orbit) in cam.iter_mut() {
         if orbit_allowed && mouse.pressed(MouseButton::Left) {
@@ -687,15 +1019,17 @@ fn collect_blueprint(
         } else if let Some(d) = dec {
             PartData::Decoupler {
                 ejection_impulse: d.ejection_impulse,
+                dry_mass: d.dry_mass,
             }
         } else if let Some(a) = adapter {
             PartData::Adapter {
                 target_diameter: a.target_diameter,
+                dry_mass: a.dry_mass,
             }
         } else if let Some(t) = tank {
             PartData::FuelTank {
                 length: t.length,
-                fuel_density: t.fuel_density,
+                dry_mass: t.dry_mass,
             }
         } else if let Some(en) = engine {
             PartData::Engine {
@@ -703,6 +1037,9 @@ fn collect_blueprint(
                 diameter: en.diameter,
                 thrust: en.thrust,
                 isp: en.isp,
+                dry_mass: en.dry_mass,
+                reactants: en.reactants.clone(),
+                power_draw_kw: en.power_draw_kw,
             }
         } else {
             return None;
@@ -740,7 +1077,7 @@ fn collect_blueprint(
 fn process_commands(
     mut commands: Commands,
     mut state: ResMut<EditorState>,
-    ships: Query<&Ship>,
+    mut ships: Query<&mut Ship>,
     parts_q: CollectQuery,
     attachments: Query<(Entity, &Attachment)>,
     all_parts: Query<Entity, With<Part>>,
@@ -796,11 +1133,15 @@ fn process_commands(
                         let mut cmds = world.commands();
                         let ship_entity = bp.spawn(&mut cmds);
                         world.flush();
-                        let root = world.get::<Ship>(ship_entity).map(|s| s.root);
+                        let (root, name) = world
+                            .get::<Ship>(ship_entity)
+                            .map(|s| (Some(s.root), s.name.clone()))
+                            .unwrap_or((None, String::new()));
                         let mut st = world.resource_mut::<EditorState>();
                         st.ship_entity = Some(ship_entity);
                         st.ship_root = root;
                         st.selected = root;
+                        st.ship_name = name;
                         st.status = format!("Loaded {path_disp}");
                     });
                 }
@@ -828,12 +1169,29 @@ fn process_commands(
         state.ship_list = list_ships();
     }
 
-    // ---- Delete selected (cannot delete root) -------------------------
+    // ---- Delete selected ---------------------------------------------
+    // Deleting the root clears the whole canvas (despawns ship + all
+    // parts). Deleting a non-root part despawns its subtree.
     if state.delete_selected {
         state.delete_selected = false;
         if let Some(sel) = state.selected {
-            if Some(sel) != state.ship_root {
-                // collect all descendants, despawn them
+            if Some(sel) == state.ship_root {
+                if let Some(se) = state.ship_entity {
+                    if let Ok(ship) = ships.get(se) {
+                        state.ship_name = ship.name.clone();
+                    }
+                }
+                for e in all_parts.iter() {
+                    commands.entity(e).despawn();
+                }
+                for e in all_ships.iter() {
+                    commands.entity(e).despawn();
+                }
+                state.ship_root = None;
+                state.ship_entity = None;
+                state.selected = None;
+                state.status = "Cleared canvas".into();
+            } else {
                 let mut child_map: HashMap<Entity, Vec<Entity>> = HashMap::new();
                 for (e, att) in attachments.iter() {
                     child_map.entry(att.parent).or_default().push(e);
@@ -851,8 +1209,45 @@ fn process_commands(
                 }
                 state.selected = state.ship_root;
                 state.status = "Deleted selection".into();
-            } else {
-                state.status = "Cannot delete root pod".into();
+            }
+        }
+    }
+
+    // ---- Set selection as root ---------------------------------------
+    // Walk from the selection up through Attachment components to the
+    // current root; reverse each link by inserting an Attachment on the
+    // former parent pointing at the former child, with parent_node /
+    // my_node swapped. Parts off the chain keep their attachments, so
+    // branches follow their original subtree.
+    if state.set_as_root {
+        state.set_as_root = false;
+        if let Some(sel) = state.selected {
+            if Some(sel) != state.ship_root {
+                let att_map: HashMap<Entity, Attachment> = attachments
+                    .iter()
+                    .map(|(e, a)| (e, a.clone()))
+                    .collect();
+                let mut chain: Vec<(Entity, Attachment)> = Vec::new();
+                let mut current = sel;
+                while let Some(att) = att_map.get(&current) {
+                    chain.push((current, att.clone()));
+                    current = att.parent;
+                }
+                commands.entity(sel).remove::<Attachment>();
+                for (entity, att) in chain {
+                    commands.entity(att.parent).insert(Attachment {
+                        parent: entity,
+                        parent_node: att.my_node,
+                        my_node: att.parent_node,
+                    });
+                }
+                if let Some(ship_entity) = state.ship_entity {
+                    if let Ok(mut ship) = ships.get_mut(ship_entity) {
+                        ship.root = sel;
+                    }
+                }
+                state.ship_root = Some(sel);
+                state.status = "Re-rooted ship".into();
             }
         }
     }
@@ -862,7 +1257,8 @@ fn process_commands(
         let Some(pending) = state.pending.take() else {
             return;
         };
-        let child = ShipBlueprint::spawn_part(&mut commands, &pending, HashMap::new());
+        let resources = blueprint::default_resources_for(&pending);
+        let child = ShipBlueprint::spawn_part(&mut commands, &pending, resources);
         commands.entity(child).insert(Attachment {
             parent,
             parent_node: node,
@@ -870,6 +1266,23 @@ fn process_commands(
         });
         state.selected = Some(child);
         state.status = "Placed part".into();
+    }
+
+    // ---- Auto-place pending as root on empty canvas ------------------
+    if state.ship_root.is_none() && state.pending.is_some() {
+        let pending = state.pending.take().unwrap();
+        let resources = blueprint::default_resources_for(&pending);
+        let part = ShipBlueprint::spawn_part(&mut commands, &pending, resources);
+        let ship = commands
+            .spawn(Ship {
+                name: state.ship_name.clone(),
+                root: part,
+            })
+            .id();
+        state.ship_root = Some(part);
+        state.ship_entity = Some(ship);
+        state.selected = Some(part);
+        state.status = "Placed root".into();
     }
 }
 
@@ -909,35 +1322,47 @@ fn editor_ui(
         .default_width(180.0)
         .show(&ctx, |ui| {
             ui.heading("Parts");
-            if ui.button("Command Pod").clicked() {
+            if ui.button("Command Pod (1.25m)").clicked() {
                 state.pending = Some(PartData::CommandPod {
                     model: "Mk1".into(),
                     diameter: 1.25,
                     dry_mass: 840.0,
                 });
             }
+            if ui.button("Command Pod (2.5m)").clicked() {
+                state.pending = Some(PartData::CommandPod {
+                    model: "Mk1-3".into(),
+                    diameter: 2.5,
+                    dry_mass: 2720.0,
+                });
+            }
             if ui.button("Decoupler").clicked() {
                 state.pending = Some(PartData::Decoupler {
                     ejection_impulse: 250.0,
+                    dry_mass: 50.0,
                 });
             }
             if ui.button("Adapter").clicked() {
                 state.pending = Some(PartData::Adapter {
                     target_diameter: 2.5,
+                    dry_mass: 100.0,
                 });
             }
             if ui.button("Fuel Tank").clicked() {
                 state.pending = Some(PartData::FuelTank {
-                    length: 4.0,
-                    fuel_density: 5.0,
+                    length: 1.0,
+                    dry_mass: 250.0,
                 });
             }
             if ui.button("Engine (2.5m)").clicked() {
                 state.pending = Some(PartData::Engine {
-                    model: "LV-T45".into(),
+                    model: "Poodle".into(),
                     diameter: 2.5,
-                    thrust: 215_000.0,
-                    isp: 320.0,
+                    thrust: 250_000.0,
+                    isp: 350.0,
+                    dry_mass: 250.0,
+                    reactants: methalox_reactants(),
+                    power_draw_kw: 0.0,
                 });
             }
             if ui.button("Engine (1.25m)").clicked() {
@@ -946,22 +1371,29 @@ fn editor_ui(
                     diameter: 1.25,
                     thrust: 60_000.0,
                     isp: 345.0,
+                    dry_mass: 50.0,
+                    reactants: methalox_reactants(),
+                    power_draw_kw: 0.0,
                 });
             }
 
             ui.separator();
             ui.heading("Ship");
-            if let Some(se) = state.ship_entity {
-                if let Ok(mut ship) = ships.get_mut(se) {
-                    ui.horizontal(|ui| {
-                        ui.label("Name:");
+            ui.horizontal(|ui| {
+                ui.label("Name:");
+                if let Some(se) = state.ship_entity {
+                    if let Ok(mut ship) = ships.get_mut(se) {
                         ui.text_edit_singleline(&mut ship.name);
-                    });
+                    }
+                } else {
+                    ui.text_edit_singleline(&mut state.ship_name);
                 }
-            }
-            if ui.button("Save").clicked() {
-                state.save_requested = true;
-            }
+            });
+            ui.add_enabled_ui(state.ship_entity.is_some(), |ui| {
+                if ui.button("Save").clicked() {
+                    state.save_requested = true;
+                }
+            });
             if ui.button("Refresh list").clicked() {
                 state.refresh_list = true;
             }
@@ -1017,31 +1449,43 @@ fn editor_ui(
             if let Some(p) = pod.as_deref_mut() {
                 ui.label("Kind: CommandPod");
                 ui.label(format!("Model: {}", p.model));
-                ui.add(egui::Slider::new(&mut p.diameter, 0.5..=5.0).text("Diameter"));
-                ui.add(egui::Slider::new(&mut p.dry_mass, 100.0..=5000.0).text("Dry mass"));
+                ui.label(format!("Diameter: {:.2}m (fixed)", p.diameter));
+                ui.label(format!("Dry mass: {:.0} kg (fixed)", p.dry_mass));
             } else if let Some(d) = dec.as_deref_mut() {
                 ui.label("Kind: Decoupler");
                 ui.add(
                     egui::Slider::new(&mut d.ejection_impulse, 0.0..=2000.0)
                         .text("Ejection impulse"),
                 );
+                ui.label(format!("Dry mass: {:.0} kg (fixed)", d.dry_mass));
             } else if let Some(a) = adapter.as_deref_mut() {
                 ui.label("Kind: Adapter");
                 ui.add(
                     egui::Slider::new(&mut a.target_diameter, 0.3..=6.0).text("Target diameter"),
                 );
+                ui.label(format!("Dry mass: {:.0} kg (fixed)", a.dry_mass));
             } else if let Some(t) = tank.as_deref_mut() {
                 ui.label("Kind: Fuel Tank");
                 ui.add(egui::Slider::new(&mut t.length, 0.5..=12.0).text("Length"));
-                ui.add(
-                    egui::Slider::new(&mut t.fuel_density, 0.5..=20.0).text("Fuel density"),
-                );
+                ui.label(format!("Dry mass: {:.0} kg (fixed)", t.dry_mass));
             } else if let Some(e) = engine.as_deref_mut() {
-                ui.label("Kind: Engine");
+                ui.label("Kind: Engine (vacuum)");
                 ui.label(format!("Model: {}", e.model));
                 ui.label(format!("Diameter: {:.2}m (fixed)", e.diameter));
-                ui.add(egui::Slider::new(&mut e.thrust, 1_000.0..=2_000_000.0).text("Thrust (N)"));
-                ui.add(egui::Slider::new(&mut e.isp, 100.0..=450.0).text("Isp (s)"));
+                ui.label(format!("Thrust: {:.1} kN (fixed)", e.thrust / 1000.0));
+                ui.label(format!("Isp: {:.0} s (fixed)", e.isp));
+                ui.label(format!("Dry mass: {:.0} kg (fixed)", e.dry_mass));
+                if e.power_draw_kw > 0.0 {
+                    ui.label(format!("Power draw: {:.1} kW (fixed)", e.power_draw_kw));
+                }
+                ui.label("Reactants:");
+                for r in &e.reactants {
+                    ui.label(format!(
+                        "  {}: {:.1}%",
+                        r.resource.display_name(),
+                        r.mass_fraction * 100.0,
+                    ));
+                }
             }
 
             ui.separator();
@@ -1053,10 +1497,13 @@ fn editor_ui(
             ui.separator();
             ui.label("Resources:");
             if let Some(r) = res.as_deref_mut() {
-                for (name, pool) in r.pools.iter_mut() {
+                for (resource, pool) in r.pools.iter_mut() {
                     ui.label(format!(
-                        "{name}: {:.0}/{:.0} (ρ={:.1})",
-                        pool.amount, pool.capacity, pool.density
+                        "{}: {:.0}/{:.0} {}",
+                        resource.display_name(),
+                        pool.amount,
+                        pool.capacity,
+                        resource.unit_label(),
                     ));
                     ui.add(egui::Slider::new(&mut pool.amount, 0.0..=pool.capacity).text("amount"));
                 }
@@ -1066,6 +1513,12 @@ fn editor_ui(
             }
 
             ui.separator();
+            let is_root = Some(sel) == state.ship_root;
+            ui.add_enabled_ui(!is_root, |ui| {
+                if ui.button("Set as root").clicked() {
+                    state.set_as_root = true;
+                }
+            });
             if ui.button("Delete part").clicked() {
                 state.delete_selected = true;
             }

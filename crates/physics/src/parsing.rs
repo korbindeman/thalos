@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use glam::DVec3;
 use serde::Deserialize;
-use thalos_atmosphere_gen::AtmosphereParams;
+use thalos_atmosphere_gen::{AtmosphereParams, TerrestrialAtmosphere};
 use thalos_terrain_gen::GeneratorParams;
 
 use crate::types::{
@@ -44,6 +44,8 @@ pub struct BodyFile {
     pub generator: Option<GeneratorParams>,
     #[serde(default)]
     pub atmosphere: Option<AtmosphereParams>,
+    #[serde(default)]
+    pub terrestrial_atmosphere: Option<TerrestrialAtmosphere>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +121,7 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             orbital_elements,
             generator: b.generator,
             atmosphere: b.atmosphere,
+            terrestrial_atmosphere: b.terrestrial_atmosphere,
         });
     }
 

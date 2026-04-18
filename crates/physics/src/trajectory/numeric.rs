@@ -175,13 +175,8 @@ mod tests {
             time,
             position: pos,
             velocity: vel,
-            dominant_body: 0,
-            perturbation_ratio: 0.0,
-            step_size: 1.0,
             anchor_body: 0,
             ref_pos: DVec3::ZERO,
-            soi_body: 0,
-            body_weights: crate::types::EMPTY_BODY_WEIGHTS,
         }
     }
 

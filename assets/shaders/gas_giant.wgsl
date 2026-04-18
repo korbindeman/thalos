@@ -22,8 +22,9 @@
 //!    view-angle-dependent bias that strengthens near the terminator.
 //!
 //! 4. **Rim halo** (`rim_halo_contribution`): exponential-density ring
-//!    just outside the cloud deck. Contributes on both hit and miss
-//!    paths so the glow wraps the silhouette.
+//!    just outside the cloud deck. Backlit-only now (Cassini "In
+//!    Saturn's Shadow" crescent); suppressed on hit-path fragments —
+//!    internal limb effects carry the sunlit-side silhouette tinge.
 //!
 //! Later layers (storms, auroras) plug in between steps 2 and 3; the
 //! uniform layout already has space reserved for their data.
@@ -935,12 +936,6 @@ fn rim_halo_contribution(
     // deck (we still want a rim contribution from the front shell).
     let closest_alt = clamp((closest_d - r_inner) / max(r_outer - r_inner, 1e-6), -1.0, 1.0);
 
-    // Exponential falloff with altitude — stand-in for atmospheric
-    // density. Scale height is in render units.
-    let scale_h = max(layers.rim_shape.x, 1e-4);
-    let rel_h = (closest_alt * max(r_outer - r_inner, 1e-6)) / scale_h;
-    let density = exp(-max(rel_h, 0.0));
-
     // Column length along the ray between entry and exit of the shell,
     // clamped at the cloud-deck sphere if the ray hits it.
     let c_inner = dot(oc, oc) - r_inner * r_inner;
@@ -954,12 +949,31 @@ fn rim_halo_contribution(
     }
     let column = max(t_exit - t_entry, 0.0);
 
-    // Sunlit factor — halo only appears on the lit side. `closest` is
-    // the closest-approach vector relative to the planet center, so its
-    // projection onto the light direction tells us which face the
-    // column is on.
-    let closest_dir = normalize(oc + ray_dir * (-half_b));
-    let sun_factor = clamp(dot(closest_dir, light_dir_ws) * 0.5 + 0.5, 0.0, 1.0);
+    // Only the Mie forward-scatter peak is kept here: sunlit-side
+    // wide-angle scatter produced a bright blue halo around the disk
+    // at cruise distance, but in reality gas-giant upper atmospheres
+    // are effectively invisible at planet-radii distances except
+    // when backlit. The limb-darkening + fresnel_rim paths inside
+    // the cloud deck carry the subtle Rayleigh tinge visible at the
+    // silhouette on a sunlit disk.
+    //
+    // `forward_peak` is `pow(mu, 3)` — cheap stand-in for a
+    // Henyey–Greenstein phase function keyed on
+    // `dot(ray_dir, light_dir_ws)`. Dominates Cassini's "In Saturn's
+    // Shadow" halo.
+    //
+    // Density falloff tightened to `exp(-closest_alt * 10)` so the
+    // backlit glow hugs the silhouette as a thin crescent rather
+    // than smearing across the full shell altitude. Shell-relative
+    // rather than in absolute altitude units because real scale
+    // heights (tens of km) are sub-pixel at gas-giant radii and
+    // collapse the halo to an aliased 1-pixel line. `scale_height_m`
+    // from the authored config is currently unused by this path —
+    // kept in the schema for a future column-integral pass.
+    let mu = max(dot(ray_dir, light_dir_ws), 0.0);
+    let forward_peak = pow(mu, 3.0);
+    let density_haze = exp(-closest_alt * 10.0);
+    let scattered = forward_peak * 2.5 * density_haze;
 
     let color = layers.rim_color_intensity.xyz;
     // Normalise the column length by the outer shell thickness so the
@@ -967,12 +981,12 @@ fn rim_halo_contribution(
     // changes. A grazing tangent ray can see many shell thicknesses of
     // atmosphere, so clamp the saturating path factor into [0, 1]
     // rather than letting it climb unboundedly — otherwise the
-    // rim halo outruns the tonemapper and pins to white on the sunlit
-    // silhouette. Replace with a proper along-ray scattering integral
-    // when fidelity goes up.
+    // backlit halo outruns the tonemapper and pins to white along the
+    // sunward tangent. Replace with a proper along-ray scattering
+    // integral when fidelity goes up.
     let column_norm = column / max(r_outer - r_inner, 1e-6);
     let path_factor = column_norm / (1.0 + column_norm);
-    let strength = clamp(intensity * density * sun_factor * path_factor, 0.0, intensity);
+    let strength = clamp(intensity * scattered * path_factor, 0.0, intensity * 3.0);
     return RimHit(color * strength, min(strength, 1.0));
 }
 
@@ -996,14 +1010,40 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let c_deck = dot(oc, oc) - params.radius * params.radius;
     let disc_deck = half_b * half_b - c_deck;
 
+    // Analytical silhouette coverage for AA. `perp_dist` is the
+    // perpendicular distance from the sphere center to the ray; a ray
+    // hits the sphere when perp_dist < radius. `fwidth` on the signed
+    // edge distance gives the per-pixel world-space change, so a
+    // smoothstep across ±fwidth/2 produces a 1-pixel-wide AA band at
+    // the silhouette. Without this, the ray-sphere decision is a hard
+    // binary per fragment and the silhouette staircase-aliases
+    // against the dark sky and the halo transition.
+    let perp_dist = sqrt(max(dot(oc, oc) - half_b * half_b, 0.0));
+    let signed_edge = perp_dist - params.radius;
+    let aa = max(fwidth(signed_edge), 1e-6);
+    let cloud_coverage = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, signed_edge);
+
     var cloud_color = vec3<f32>(0.0);
     var cloud_opacity = 0.0;
     var depth_out = 0.0;
 
-    if disc_deck >= 0.0 {
-        let t_hit = -half_b - sqrt(max(disc_deck, 0.0));
-        if t_hit > 0.0 {
-            let hit = cam_pos + t_hit * ray_dir;
+    if cloud_coverage > 0.001 {
+        // Hit position. Prefer the real ray-sphere intersection; for
+        // AA-edge fragments that geometrically miss (disc_deck < 0 but
+        // coverage > 0), project the ray's closest-approach point onto
+        // the sphere surface. Both converge to the same point at the
+        // exact silhouette, so lighting stays continuous across the AA
+        // band.
+        var hit: vec3<f32>;
+        if disc_deck >= 0.0 {
+            let t_hit = -half_b - sqrt(max(disc_deck, 0.0));
+            hit = cam_pos + t_hit * ray_dir;
+        } else {
+            let closest = cam_pos + (-half_b) * ray_dir;
+            let dir = normalize(closest - center);
+            hit = center + dir * params.radius;
+        }
+        {
             let normal = normalize(hit - center);
             let p_local = rotate_quat(params.orientation, normal);
 
@@ -1070,25 +1110,30 @@ fn fragment(in: VertexOutput) -> FragOutput {
                         let r_hit = length(hit_xz) * params.radius;
                         let r_in = layers.ring_shadow.x;
                         let r_out = layers.ring_shadow.y;
-                        if r_hit >= r_in && r_hit <= r_out {
-                            // Procedural ring opacity lookup. Smooth
-                            // ramp at edges so the shadow falloff
-                            // isn't a hard cookie-cutter; coarse
-                            // radial noise breaks the single ring
-                            // into bright/dark bands (Cassini gap,
-                            // Encke, ringlets) using the same seed
-                            // that drives the ring shader.
-                            let u = (r_hit - r_in) / max(r_out - r_in, 1e-6);
-                            let edge = smoothstep(0.0, 0.05, u)
-                                     * smoothstep(0.0, 0.05, 1.0 - u);
-                            // Cassini-style gap at u ≈ 0.42
-                            let gap = smoothstep(0.03, 0.0, abs(u - 0.42));
-                            let noise_amp = layers.ring_shadow.z;
-                            let n_ring = fbm_2d(vec2<f32>(u * 80.0, 0.0), layers.seed_lo ^ 0x7A5u);
-                            let dens = clamp(edge - gap * 0.9
-                                + noise_amp * n_ring * 0.35, 0.0, 1.0);
-                            ring_shadow_t = 1.0 - 0.85 * dens;
-                        }
+                        // Evaluate u unconditionally (may fall outside
+                        // [0, 1]) and let the rim smoothstep below gate
+                        // the contribution. The previous hard range
+                        // check + fixed 5% feather aliased hard at the
+                        // ring rims — 5% of the ring in u-space can be
+                        // many pixels at steep angles or sub-pixel at
+                        // shallow angles, so the transition was never
+                        // actually 1 pixel wide.
+                        let u = (r_hit - r_in) / max(r_out - r_in, 1e-6);
+                        let du = max(fwidth(u), 1e-6);
+                        let rim = smoothstep(0.0, du, u)
+                                * smoothstep(0.0, du, 1.0 - u);
+                        // Cassini-style gap at u ≈ 0.42
+                        let gap = smoothstep(0.03, 0.0, abs(u - 0.42));
+                        let noise_amp = layers.ring_shadow.z;
+                        let n_ring = fbm_2d(vec2<f32>(u * 80.0, 0.0), layers.seed_lo ^ 0x7A5u);
+                        // Gate every contribution by `rim` so the
+                        // whole shadow vanishes cleanly outside the
+                        // annulus with no hard edge.
+                        let dens = clamp(
+                            rim * (1.0 - gap * 0.9 + noise_amp * n_ring * 0.35),
+                            0.0, 1.0,
+                        );
+                        ring_shadow_t = 1.0 - 0.85 * dens;
                     }
                 }
             }
@@ -1098,6 +1143,53 @@ fn fragment(in: VertexOutput) -> FragOutput {
             let eclipse = eclipse_factor(params.scene, hit, light_dir_ws);
             let sun_term = base * sun_flux * lambert * eclipse;
             var lit = sun_term + base * params.scene.ambient_intensity;
+
+            // ── Ringshine ───────────────────────────────────────
+            //
+            // Sunlight reflects off the lit face of the rings and
+            // softly illuminates the planet's night side — the same
+            // reason Cassini's "In Saturn's Shadow" image shows
+            // cloud bands across a hemisphere that receives zero
+            // direct sunlight. Strongest near the equator (most
+            // solid angle of ring visible), fading to the poles,
+            // and gated to the night hemisphere so it doesn't
+            // double-count the lit side where direct sun already
+            // dominates.
+            //
+            // Simplified model: ring as an equatorial-plane disk.
+            // `abs(l_local.y) = |sin(sun elevation above ring plane)|`
+            // approximates what fraction of the ring face is lit:
+            // zero when sun sits in the ring plane (ring seen
+            // edge-on, nothing for the planet to reflect), max when
+            // sun is directly above/below. Low-axial-tilt bodies
+            // like Auron (3.1°) legitimately get near-zero
+            // ringshine — bump `axial_tilt_deg` for a more
+            // Cassini-like geometry. A proper integral over the
+            // visible ring arc would refine this further.
+            if layers.ring_shadow.w > 0.5 {
+                let l_local = rotate_quat(params.orientation, light_dir_ws);
+                let ring_lit = abs(l_local.y);
+                let lat_factor = pow(1.0 - abs(p_local.y), 1.5);
+                let night_factor = 1.0 - smoothstep(-0.1, 0.2, n_dot_l);
+                // Warm tint approximating the averaged A/B-ring
+                // palette. Pulled from the authored palette when
+                // we add a proper ring-tint uniform.
+                let ring_tint = vec3<f32>(0.85, 0.75, 0.55);
+                // Tuned as a fraction of direct-sun peak. Note: the
+                // `1/(4π)` factor was intentionally dropped here —
+                // that normalization belongs to point-source
+                // Lambert lighting, not to an extended area light.
+                // Current value puts ringshine at a few percent of
+                // lit-side brightness at peak sun-ring geometry
+                // (after tonemapping; the linear-space value is
+                // lower because the tonemapper compresses bright
+                // lit regions more than dim night-side regions).
+                let ringshine_strength = 0.01;
+                let ringshine = ring_tint * ringshine_strength
+                    * ring_lit * lat_factor * night_factor
+                    * sun_flux * eclipse;
+                lit = lit + base * ringshine;
+            }
 
             // ── Per-channel Minnaert limb darkening ──────────────
             //
@@ -1165,13 +1257,20 @@ fn fragment(in: VertexOutput) -> FragOutput {
 
             // ── Fresnel rim ──────────────────────────────────────
             //
-            // Cool desaturated rim on the lit limb as a cheap
-            // Rayleigh stand-in. Multiplicative tint instead of
-            // additive so bright hemispheres don't clip, and tightly
-            // gated by `n_dot_l^2` so the unlit limb stays dark.
+            // Cool desaturated rim on the lit limb — the spectral
+            // stand-in for Saturn's bluer limb, where the line of
+            // sight samples upper-atmosphere Rayleigh scattering
+            // rather than the deep-cloud chromophore. Minnaert
+            // limb_darkening above only handles geometric falloff,
+            // so this path carries the hue shift. Broadened from
+            // `^4` to `^3` so the tint reaches a few percent of
+            // radius inward from the silhouette instead of living
+            // in the outer pixel. Multiplicative so bright
+            // hemispheres don't clip; gated by `n_dot_l^2` so the
+            // unlit limb stays dark.
             let fr_strength = layers.fresnel_rim.w;
             if fr_strength > 0.0 {
-                let fresnel = pow(1.0 - n_dot_v, 4.0);
+                let fresnel = pow(1.0 - n_dot_v, 3.0);
                 let lit_gate = clamp(n_dot_l, 0.0, 1.0);
                 let w = fresnel * lit_gate * lit_gate * fr_strength;
                 lit = mix(lit, lit * layers.fresnel_rim.xyz, clamp(w, 0.0, 1.0));
@@ -1183,16 +1282,27 @@ fn fragment(in: VertexOutput) -> FragOutput {
             // sun sits behind the planet relative to the camera.
             // Paints a thin warm crescent around the unlit limb so
             // the terminator does not cliff straight into black.
-            // Additive: the base `lit` is already ~0 on the night
-            // side, so there is nothing to blend against.
-            let fs_intensity = layers.rim_color_intensity.w;
-            if fs_intensity > 0.0 {
+            //
+            // Colour + strength come from `terminator_warmth`: same
+            // physical phenomenon (warm scattered light at the day/
+            // night boundary) viewed from the opposite side. Reusing
+            // `rim_color_intensity` was wrong — that is the blue
+            // Rayleigh halo colour of the sunlit limb, which painted
+            // a blue glow across the night-side silhouette instead
+            // of a warm crescent.
+            //
+            // `rim_gate^6` keeps the contribution within a few degrees
+            // of the silhouette; the previous `^3` let the glow spread
+            // across most of the disk at high phase angles, which made
+            // ring shadows readable on what should be a dark hemisphere.
+            let fs_strength = layers.terminator_warmth.w;
+            if fs_strength > 0.0 {
                 let phase = pow(max(dot(ray_dir, light_dir_ws), 0.0), 8.0);
                 let unlit_gate = smoothstep(0.15, -0.10, n_dot_l);
-                let rim_gate = pow(1.0 - clamp(n_dot_v, 0.0, 1.0), 3.0);
-                let w = phase * unlit_gate * rim_gate * fs_intensity
+                let rim_gate = pow(1.0 - clamp(n_dot_v, 0.0, 1.0), 6.0);
+                let w = phase * unlit_gate * rim_gate * fs_strength
                     * sun_flux * (1.0 / (4.0 * 3.14159265));
-                lit = lit + layers.rim_color_intensity.xyz * w;
+                lit = lit + layers.terminator_warmth.xyz * w;
             }
 
             // Apply ring shadow to the whole lit composite — sun
@@ -1202,7 +1312,11 @@ fn fragment(in: VertexOutput) -> FragOutput {
             lit = lit * ring_shadow_t;
 
             cloud_color = lit;
-            cloud_opacity = 1.0;
+            // Smooth silhouette coverage instead of a binary 1. This
+            // feeds into `rim_hidden` below so the halo transitions
+            // smoothly from "full" (outside silhouette) to "suppressed"
+            // (inside silhouette) across one pixel at the edge.
+            cloud_opacity = cloud_coverage;
 
             let clip = view.clip_from_world * vec4(hit, 1.0);
             depth_out = clip.z / clip.w;

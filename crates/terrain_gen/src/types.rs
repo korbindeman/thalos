@@ -119,10 +119,79 @@ impl Default for DetailNoiseParams {
     }
 }
 
-// Placeholder types for future global structures.
-// These will be replaced with real structs when homeworld / fluvial stages land.
-pub type PlateMap = ();
+/// Placeholder — drainage networks land with the Hydrology stage.
 pub type DrainageNetwork = ();
+
+/// Whether a plate carries buoyant felsic (continental) crust or dense mafic
+/// (oceanic) crust. Drives everything downstream: subduction type, orogen
+/// eligibility, ocean-floor-age applicability, base isostatic elevation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub enum PlateKind {
+    Continental,
+    Oceanic,
+}
+
+/// One tectonic plate on the sphere. Represented kinematically by an Euler
+/// pole + angular velocity rather than by an integrated trajectory; boundary
+/// motions and types are derived analytically from pairs of Euler poles at
+/// the boundary midpoint. See `docs/gen/thalos_processes.md §Plates`.
+#[derive(Clone, Debug)]
+pub struct Plate {
+    pub id: u16,
+    pub kind: PlateKind,
+    /// Voronoi seed position (unit vector on the sphere).
+    pub centroid: Vec3,
+    /// Rotation axis of this plate relative to the mantle (unit vector).
+    pub euler_pole: Vec3,
+    /// Signed rotation rate around `euler_pole`, in rad/Myr. Sign encodes
+    /// rotation sense.
+    pub angular_velocity_rad_per_myr: f32,
+}
+
+/// Qualitative classification of a plate boundary's current motion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryKind {
+    Convergent,
+    Divergent,
+    Transform,
+}
+
+/// A boundary segment between two plates. Attributes are populated by the
+/// Tectonics stage after walking the plate adjacency graph.
+#[derive(Clone, Debug)]
+pub struct Boundary {
+    /// Ordered pair of plate IDs sharing this boundary.
+    pub plates: (u16, u16),
+    pub kind: BoundaryKind,
+    /// Relative plate velocity magnitude at a representative midpoint, in
+    /// m/Myr. Drives orogen intensity accumulation and ocean-floor spreading.
+    pub relative_speed_m_per_myr: f32,
+    /// Time this boundary has been in its current configuration (convergent /
+    /// divergent / transform). Older configurations have had more time to
+    /// build orogens or spread ocean floor.
+    pub establishment_age_myr: f32,
+    /// Whether this boundary is currently moving. In Thalos's declining era
+    /// roughly 20% are active; the rest are stagnant but still carry their
+    /// historical record.
+    pub is_active: bool,
+    /// Accumulated unitless orogen intensity over this boundary's active
+    /// lifetime. Zero for divergent/transform and for non-continental-
+    /// participating convergent boundaries.
+    pub cumulative_orogeny: f32,
+}
+
+/// Global tectonic structure produced by the Plates + Tectonics stages.
+///
+/// `plate_id_cubemap` stores per-texel plate assignments; downstream stages
+/// look up their cell's plate via `plate_id_cubemap.sample_nearest(dir)` and
+/// index into `plates` by the returned id.
+#[derive(Clone, Debug)]
+pub struct PlateMap {
+    pub plates: Vec<Plate>,
+    pub boundaries: Vec<Boundary>,
+    /// Per-texel plate ID. u16 covers more plates than we'd ever want.
+    pub plate_id_cubemap: crate::cubemap::Cubemap<u16>,
+}
 
 /// Numeric identifier for a biome, indexing into `BodyBuilder::biomes`.
 pub type BiomeId = u8;

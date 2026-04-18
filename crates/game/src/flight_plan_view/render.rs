@@ -243,18 +243,19 @@ fn line_color(
     system: &SolarSystemDefinition,
     alpha: f32,
 ) -> Color {
-    let [r0, g0, b0] = body_color(this.dominant_body, system);
-
-    if this.dominant_body == other.dominant_body {
+    // Under patched conics each sample has a single anchor body. When two
+    // consecutive samples land in different SOIs (i.e. we just crossed a
+    // Hill-sphere boundary), interpolate half-and-half between the two body
+    // colours so the line reads as a soft handoff rather than a hard cut.
+    let [r0, g0, b0] = body_color(this.anchor_body, system);
+    if this.anchor_body == other.anchor_body {
         return Color::srgba(r0, g0, b0, alpha);
     }
-
-    let [r1, g1, b1] = body_color(other.dominant_body, system);
-    let t = this.perturbation_ratio.clamp(0.0, 1.0) as f32;
+    let [r1, g1, b1] = body_color(other.anchor_body, system);
     Color::srgba(
-        r0 + (r1 - r0) * t,
-        g0 + (g1 - g0) * t,
-        b0 + (b1 - b0) * t,
+        0.5 * (r0 + r1),
+        0.5 * (g0 + g1),
+        0.5 * (b0 + b1),
         alpha,
     )
 }

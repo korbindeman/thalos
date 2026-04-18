@@ -525,6 +525,31 @@ impl Stage for SpaceWeather {
                         },
                     );
                 }
+
+                // ── Re-encode for the chromatic-tint shader convention ──
+                //
+                // The planet impostor formerly composed surface colour as
+                //   final = mat_albedo × (0.5 + baked_tint) × regional
+                // and SpaceWeather wrote `baked_tint = biome_base × tint`
+                // (roughly the absolute biome colour) so the formula
+                // averaged the material albedo and the baked tint to give
+                // back the surface colour.
+                //
+                // The shader now uses
+                //   final = mat_albedo × baked_tint × 2 × regional
+                // (so PaintBiomes can drive the surface colour directly
+                // through the filterable albedo cube — see PaintBiomes for
+                // the polygon-look fix that motivated the change). To keep
+                // the SpaceWeather visuals identical, every slice value
+                // produced by Pass 1–3 above is re-encoded here as
+                //     new = (0.5 + old) × 0.5
+                // which makes  mat × new × 2 = mat × (0.5 + old)  on the
+                // shader side — bit-identical pixels for Mira.
+                for v in slice.iter_mut() {
+                    v[0] = (0.5 + v[0]) * 0.5;
+                    v[1] = (0.5 + v[1]) * 0.5;
+                    v[2] = (0.5 + v[2]) * 0.5;
+                }
             });
     }
 }

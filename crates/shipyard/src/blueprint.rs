@@ -1,6 +1,6 @@
 use crate::attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
-use crate::part::{Adapter, CommandPod, Decoupler, Engine, FuelTank, Part};
-use crate::resource::{PartResources, ResourcePool};
+use crate::part::{Adapter, CommandPod, Decoupler, Engine, FuelTank, Part, ReactantRatio};
+use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,19 +15,24 @@ pub enum PartData {
     },
     Decoupler {
         ejection_impulse: f32,
+        dry_mass: f32,
     },
     Adapter {
         target_diameter: f32,
+        dry_mass: f32,
     },
     FuelTank {
         length: f32,
-        fuel_density: f32,
+        dry_mass: f32,
     },
     Engine {
         model: String,
         diameter: f32,
         thrust: f32,
         isp: f32,
+        dry_mass: f32,
+        reactants: Vec<ReactantRatio>,
+        power_draw_kw: f32,
     },
 }
 
@@ -35,7 +40,7 @@ pub enum PartData {
 pub struct PartBlueprint {
     pub data: PartData,
     #[serde(default)]
-    pub resources: HashMap<String, ResourcePool>,
+    pub resources: HashMap<Resource, ResourcePool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -69,15 +74,13 @@ impl ShipBlueprint {
     pub fn spawn_part(
         commands: &mut Commands,
         data: &PartData,
-        resources: HashMap<String, ResourcePool>,
+        resources: HashMap<Resource, ResourcePool>,
     ) -> Entity {
         let nodes = default_nodes_for(data);
         let mut ec = commands.spawn((
             Part,
             AttachNodes { nodes },
             PartResources { pools: resources },
-            Transform::default(),
-            Visibility::default(),
         ));
         match data.clone() {
             PartData::CommandPod {
@@ -91,32 +94,44 @@ impl ShipBlueprint {
                     dry_mass,
                 });
             }
-            PartData::Decoupler { ejection_impulse } => {
-                ec.insert(Decoupler { ejection_impulse });
-            }
-            PartData::Adapter { target_diameter } => {
-                ec.insert(Adapter { target_diameter });
-            }
-            PartData::FuelTank {
-                length,
-                fuel_density,
+            PartData::Decoupler {
+                ejection_impulse,
+                dry_mass,
             } => {
-                ec.insert(FuelTank {
-                    length,
-                    fuel_density,
+                ec.insert(Decoupler {
+                    ejection_impulse,
+                    dry_mass,
                 });
+            }
+            PartData::Adapter {
+                target_diameter,
+                dry_mass,
+            } => {
+                ec.insert(Adapter {
+                    target_diameter,
+                    dry_mass,
+                });
+            }
+            PartData::FuelTank { length, dry_mass } => {
+                ec.insert(FuelTank { length, dry_mass });
             }
             PartData::Engine {
                 model,
                 diameter,
                 thrust,
                 isp,
+                dry_mass,
+                reactants,
+                power_draw_kw,
             } => {
                 ec.insert(Engine {
                     model,
                     diameter,
                     thrust,
                     isp,
+                    dry_mass,
+                    reactants,
+                    power_draw_kw,
                 });
             }
         }
@@ -152,32 +167,44 @@ impl ShipBlueprint {
                         dry_mass,
                     });
                 }
-                PartData::Decoupler { ejection_impulse } => {
-                    ec.insert(Decoupler { ejection_impulse });
-                }
-                PartData::Adapter { target_diameter } => {
-                    ec.insert(Adapter { target_diameter });
-                }
-                PartData::FuelTank {
-                    length,
-                    fuel_density,
+                PartData::Decoupler {
+                    ejection_impulse,
+                    dry_mass,
                 } => {
-                    ec.insert(FuelTank {
-                        length,
-                        fuel_density,
+                    ec.insert(Decoupler {
+                        ejection_impulse,
+                        dry_mass,
                     });
+                }
+                PartData::Adapter {
+                    target_diameter,
+                    dry_mass,
+                } => {
+                    ec.insert(Adapter {
+                        target_diameter,
+                        dry_mass,
+                    });
+                }
+                PartData::FuelTank { length, dry_mass } => {
+                    ec.insert(FuelTank { length, dry_mass });
                 }
                 PartData::Engine {
                     model,
                     diameter,
                     thrust,
                     isp,
+                    dry_mass,
+                    reactants,
+                    power_draw_kw,
                 } => {
                     ec.insert(Engine {
                         model,
                         diameter,
                         thrust,
                         isp,
+                        dry_mass,
+                        reactants,
+                        power_draw_kw,
                     });
                 }
             }
@@ -199,6 +226,57 @@ impl ShipBlueprint {
             })
             .id()
     }
+}
+
+/// Default resource pools a freshly-spawned part should carry.
+///
+/// - [`PartData::CommandPod`] ships with a small electricity reserve scaled
+///   to its diameter (onboard battery for avionics + life support).
+/// - [`PartData::FuelTank`] spawns pre-filled with a methalox mix at the
+///   Raptor-style O/F ≈ 3.6 mass ratio, sized from the tank's length.
+///   Volumes scale with `length`: 1000 L of CH4 per metre + a matching
+///   1331 L of LOX.
+/// - Other parts spawn dry.
+pub fn default_resources_for(data: &PartData) -> HashMap<Resource, ResourcePool> {
+    let mut pools = HashMap::new();
+    match data {
+        PartData::CommandPod { diameter, .. } => {
+            // 1 kWh per metre of diameter — small but visible.
+            let capacity = diameter.max(0.5);
+            pools.insert(
+                Resource::Electricity,
+                ResourcePool {
+                    capacity,
+                    amount: capacity,
+                },
+            );
+        }
+        PartData::FuelTank { length, .. } => {
+            let ch4 = (*length).max(0.5) * 1000.0;
+            // Volume of LOX that carries 3.6× the mass of `ch4` litres of
+            // methane, given the two canonical densities.
+            let lox = ch4
+                * 3.6
+                * Resource::Methane.density_kg_per_unit() as f32
+                / Resource::Lox.density_kg_per_unit() as f32;
+            pools.insert(
+                Resource::Methane,
+                ResourcePool {
+                    capacity: ch4,
+                    amount: ch4,
+                },
+            );
+            pools.insert(
+                Resource::Lox,
+                ResourcePool {
+                    capacity: lox,
+                    amount: lox,
+                },
+            );
+        }
+        _ => {}
+    }
+    pools
 }
 
 /// Build the initial attach-node layout for a part. Parametric parts are
@@ -232,7 +310,7 @@ pub fn default_nodes_for(data: &PartData) -> HashMap<NodeId, AttachNode> {
                 },
             );
         }
-        PartData::Adapter { target_diameter } => {
+        PartData::Adapter { target_diameter, .. } => {
             nodes.insert(
                 "top".into(),
                 AttachNode {

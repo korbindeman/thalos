@@ -1,0 +1,9 @@
+[package]
+name = "thalos_cloud_gen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = "0.30"
+rayon = "1.10"
+thalos_terrain_gen = { path = "../terrain_gen" }

@@ -114,76 +114,81 @@ enum GhostShape {
     },
 }
 
-/// Color gradient along the chain reads as optical dispersion: warm near
-/// the sun → magenta → cool blue near center → pink past center → warm
-/// far-trailing. Scale spread is wide so ghosts don't cluster into same-
-/// size blobs that read as planets. Chromatic aberration is baked into
-/// the iris textures and analytic in the halo shader.
+/// Two-cluster chain mimicking a real anamorphic lens: a warm group tight
+/// against the sun, a cool group bunched around the anti-flare point past
+/// screen center, and an empty gap between. Colors are deliberately low-
+/// saturation — these are camera glass reflections, not decorative orbs;
+/// the spectral tint should come from the baked chromatic aberration at
+/// each ghost's rim, not from saturated base fills.
 const GHOSTS: &[(f32, f32, Color, GhostShape)] = &[
     // Halo disabled — revisit once the rainbow blur feels right.
     // (0.0, 220.0, Color::srgba(1.00, 1.00, 1.00, 0.09),
     //     GhostShape::Halo { thickness: 0.12, crescent: 0.0 }),
-    // Starburst anchor at the source.
+
+    // --- Near-sun cluster ------------------------------------------------
+    // Starburst anchor — soft warm white.
     (
         0.0,
         280.0,
-        Color::srgba(1.00, 0.88, 0.65, 0.35),
+        Color::srgba(1.00, 0.93, 0.78, 0.38),
         GhostShape::Starburst,
     ),
-    // Tiny hot pip just off the sun.
+    // Pale amber pip.
     (
-        0.14,
+        0.08,
         18.0,
-        Color::srgba(1.00, 0.70, 0.32, 0.12),
+        Color::srgba(1.00, 0.80, 0.52, 0.15),
         GhostShape::Iris,
     ),
-    // Amber mid ghost.
+    // Soft peach iris.
     (
-        0.28,
+        0.16,
         64.0,
-        Color::srgba(1.00, 0.58, 0.26, 0.07),
+        Color::srgba(1.00, 0.82, 0.62, 0.08),
         GhostShape::Iris,
     ),
-    // Small magenta — color break that sells the optics.
+    // Muted rose-gold — subtle color break, not a primary red.
     (
-        0.46,
+        0.22,
         30.0,
-        Color::srgba(0.85, 0.35, 0.68, 0.10),
+        Color::srgba(1.00, 0.65, 0.58, 0.11),
         GhostShape::Iris,
     ),
-    // Big faint cool ghost — long tail of the chain.
+
+    // --- Anti-flare cluster (past screen center) -------------------------
+    // Pale steel-blue wash.
     (
-        0.64,
+        0.92,
         160.0,
-        Color::srgba(0.38, 0.58, 1.00, 0.035),
+        Color::srgba(0.58, 0.72, 0.90, 0.05),
         GhostShape::Iris,
     ),
-    // Sharp cyan near center.
+    // Soft cyan-white pip.
     (
-        0.86,
+        0.98,
         24.0,
-        Color::srgba(0.48, 0.82, 1.00, 0.11),
+        Color::srgba(0.78, 0.90, 0.98, 0.12),
         GhostShape::Iris,
     ),
-    // Main centered ghost — cool.
+    // Main ghost — muted cool.
     (
-        1.00,
+        1.04,
         100.0,
-        Color::srgba(0.58, 0.78, 1.00, 0.06),
+        Color::srgba(0.62, 0.78, 0.95, 0.07),
         GhostShape::Iris,
     ),
-    // Past-center pink.
+    // Soft mauve pip — subtle warm note inside the cool cluster.
     (
-        1.20,
+        1.10,
         42.0,
-        Color::srgba(1.00, 0.52, 0.62, 0.08),
+        Color::srgba(0.88, 0.74, 0.82, 0.09),
         GhostShape::Iris,
     ),
-    // Huge faint warm wash far past center.
+    // Warm cream trailing wash — closes the chain back toward sun tones.
     (
-        1.42,
+        1.18,
         240.0,
-        Color::srgba(1.00, 0.72, 0.48, 0.025),
+        Color::srgba(1.00, 0.85, 0.68, 0.035),
         GhostShape::Iris,
     ),
 ];
@@ -438,9 +443,9 @@ fn update_lens_flare(
 
 /// Iris bokeh: nearly-flat disc with a soft edge. Mimics a defocused
 /// point source through a spherical aperture. Per-channel radial offset
-/// bakes chromatic aberration directly into the sprite — R disc slightly
-/// larger than B — so additive blending produces a colored fringe at the
-/// rim without any extra draws or shader samples.
+/// bakes chromatic aberration directly into the sprite — B disc ~15%
+/// larger than R — so additive blending produces a visible rainbow
+/// fringe at the rim without any extra draws or shader samples.
 fn bake_iris_ghost(size: u32) -> Image {
     let mut data = vec![0u8; (size * size * 4) as usize];
     let s = size as f32;
@@ -455,9 +460,9 @@ fn bake_iris_ghost(size: u32) -> Image {
             let dx = (x as f32 + 0.5) / s * 2.0 - 1.0;
             let dy = (y as f32 + 0.5) / s * 2.0 - 1.0;
             let r = (dx * dx + dy * dy).sqrt();
-            let vr = disc(r * 1.03);
+            let vr = disc(r * 1.07);
             let vg = disc(r);
-            let vb = disc(r * 0.97);
+            let vb = disc(r * 0.93);
             let idx = ((y * size + x) * 4) as usize;
             data[idx] = (vr * 255.0) as u8;
             data[idx + 1] = (vg * 255.0) as u8;

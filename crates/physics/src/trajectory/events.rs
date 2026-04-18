@@ -168,10 +168,10 @@ pub(super) fn detect_segment_events(
 
         // SOI transitions (uses soi_body, not anchor_body, because the
         // rendering anchor is stepped up to the parent planet for moons).
-        if a.soi_body != b.soi_body {
-            let kind = if is_child_of(bodies, b.soi_body, a.soi_body) {
+        if a.anchor_body != b.anchor_body {
+            let kind = if is_child_of(bodies, b.anchor_body, a.anchor_body) {
                 TrajectoryEventKind::SoiEntry
-            } else if is_child_of(bodies, a.soi_body, b.soi_body) {
+            } else if is_child_of(bodies, a.anchor_body, b.anchor_body) {
                 TrajectoryEventKind::SoiExit
             } else {
                 TrajectoryEventKind::SoiEntry
@@ -179,11 +179,11 @@ pub(super) fn detect_segment_events(
             let epoch = 0.5 * (a.time + b.time);
             if let (Some(craft), Some(body)) = (
                 segment.state_at(epoch),
-                query_body(ephemeris, b.soi_body, epoch, &mut body_buf),
+                query_body(ephemeris, b.anchor_body, epoch, &mut body_buf),
             ) {
                 events.push(TrajectoryEvent {
                     id: next_id(starting_id),
-                    body: b.soi_body,
+                    body: b.anchor_body,
                     epoch,
                     kind,
                     craft_state: craft,
@@ -194,8 +194,8 @@ pub(super) fn detect_segment_events(
         }
 
         // Periapsis / apoapsis on the SOI body.
-        if a.soi_body == b.soi_body {
-            let body_id = a.soi_body;
+        if a.anchor_body == b.anchor_body {
+            let body_id = a.anchor_body;
             let rv_a = radial_velocity(&a, ephemeris, &mut body_buf, body_id, a.time);
             let rv_b = radial_velocity(&b, ephemeris, &mut body_buf, body_id, b.time);
             if let (Some(rv_a), Some(rv_b)) = (rv_a, rv_b)

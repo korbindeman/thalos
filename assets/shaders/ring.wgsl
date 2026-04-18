@@ -295,6 +295,17 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let lit = color * star_flux * direct
             + color * params.scene.ambient_intensity;
 
+    // Analytical edge AA at the inner and outer ring rims. The ring
+    // mesh terminates at u=0 / u=1; if the authored palette carries
+    // non-zero opacity at those boundaries the alpha steps hard from
+    // "some" to "discarded", which staircase-aliases. `fwidth(u)` is
+    // the per-pixel change in the radial coordinate — smoothstepping
+    // across it gives a 1-pixel AA band at each rim, independent of
+    // viewing angle.
+    let du = max(fwidth(u), 1e-6);
+    let rim_fade = smoothstep(0.0, du, u) * smoothstep(0.0, du, 1.0 - u);
+    opacity = opacity * rim_fade;
+
     // Opacity drops toward the edges of each ringlet so the feathered
     // border reads as dust, not a cookie-cutter stamp.
     if opacity <= 0.004 {

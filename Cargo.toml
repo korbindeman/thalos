@@ -4,6 +4,7 @@ members = [
     "crates/physics",
     "crates/terrain_gen",
     "crates/atmosphere_gen",
+    "crates/cloud_gen",
     "crates/celestial",
     "crates/planet_rendering",
     "crates/planet_editor",
@@ -31,6 +32,15 @@ opt-level = 3
 # crate is pure-Rust, well-tested, and its hot paths have no safety-critical
 # assertions.
 [profile.dev.package.thalos_terrain_gen]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+# cloud_gen bakes a curl-noise warp cubemap: a 50-iteration Lagrangian
+# advection over 6 × N² texels with Worley-volume lookups at every
+# sample. Matches terrain_gen's justification — pure-Rust, well-tested,
+# hot-path numeric code that's unusable at dev defaults.
+[profile.dev.package.thalos_cloud_gen]
 opt-level = 3
 debug-assertions = false
 overflow-checks = false

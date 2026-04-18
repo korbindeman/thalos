@@ -45,6 +45,19 @@
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::get_world_from_local
 #import thalos::lighting::{SceneLighting, StarLight, PlanetShineSample, eclipse_factor, planetshine_sample}
+#import thalos::atmosphere::{
+    AtmosphereBlock,
+    RimHit,
+    rim_halo_contribution,
+    apply_terminator_warmth,
+    apply_fresnel_rim,
+    apply_limb_darkening,
+    apply_rayleigh_ground_transmission,
+    apply_rayleigh_inscatter,
+    atmosphere_is_active,
+    composite_clouds,
+    rotate_cloud_dir_local,
+}
 
 const PI: f32 = 3.14159265358979323846;
 const TAU: f32 = 6.28318530717958647692;
@@ -158,6 +171,16 @@ struct Material {
 @group(3) @binding(9)  var<storage, read> cell_index:  array<CellRange>;
 @group(3) @binding(10) var<storage, read> feature_ids: array<u32>;
 @group(3) @binding(11) var<storage, read> materials:   array<Material>;
+// Optional atmosphere layer — see `thalos::atmosphere`. For bodies with
+// no atmosphere (Mira, Ignis, …) every layer's intensity scalar is zero
+// and the atmosphere path is effectively skipped.
+@group(3) @binding(12) var<uniform> atmosphere:      AtmosphereBlock;
+// Baked cloud-cover cubemap (R8Unorm). Produced by `thalos_cloud_gen`
+// via Wedekind curl-noise warp advection. For airless bodies this is a
+// 1×1 blank cube; the cloud path gates on `cloud_albedo_coverage.w > 0`
+// so those bodies pay just the branch cost.
+@group(3) @binding(13) var          cloud_cover_tex: texture_cube<f32>;
+@group(3) @binding(14) var          cloud_cover_sampler: sampler;
 
 // ── Vertex stage ─────────────────────────────────────────────────────────────
 
@@ -844,20 +867,87 @@ fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32) -> f32 {
 }
 
 // ── Fragment ────────────────────────────────────────────────────────────────
+//
+// Atmosphere integration (terrestrial impostor):
+//
+// - Surface-hit rays: compute Hapke lighting as before, then apply
+//   limb darkening + terminator warmth + Fresnel rim + additive rim
+//   halo on top of the lit output.
+// - Miss rays (ray doesn't hit the solid sphere): check whether the
+//   ray passes through the atmospheric shell. If it does and the rim
+//   halo contribution is non-negligible, return the halo as the
+//   fragment colour; otherwise discard as before.
+//
+// Bodies without a `terrestrial_atmosphere` block (Mira, Ignis, the
+// airless moons) have every `atmosphere.*` scalar at zero — the helpers
+// early-out and the shader's output is bit-identical to the pre-
+// atmosphere pipeline.
+
+// Primary star accessor — every caller of the atmosphere helpers needs
+// this same triple, so compute it once per fragment.
+struct PrimaryLight {
+    dir_ws: vec3<f32>,
+    flux: f32,
+}
+
+fn primary_light() -> PrimaryLight {
+    let s = params.scene.stars[0];
+    return PrimaryLight(s.dir_flux.xyz, s.dir_flux.w);
+}
+
+fn sample_rim_halo(
+    cam_pos: vec3<f32>,
+    ray_dir: vec3<f32>,
+    center: vec3<f32>,
+    light: PrimaryLight,
+) -> RimHit {
+    return rim_halo_contribution(
+        cam_pos, ray_dir, center, light.dir_ws,
+        params.radius,
+        atmosphere.rim_shape.y,
+        atmosphere.rim_shape.x,
+        atmosphere.rim_color_intensity.xyz,
+        atmosphere.rim_color_intensity.w,
+    );
+}
 
 @fragment
 fn fragment(in: VertexOutput) -> FragOutput {
     let cam_pos  = view.world_position;
     let ray_dir  = normalize(in.world_position - cam_pos);
+    let light = primary_light();
 
     // Ray-sphere intersection.
     let oc      = cam_pos - in.sphere_center;
     let half_b  = dot(oc, ray_dir);
     let c       = dot(oc, oc) - params.radius * params.radius;
     let disc    = half_b * half_b - c;
-    if disc < 0.0 { discard; }
+
+    // Miss path: no solid-surface hit. Compute rim halo only.
+    if disc < 0.0 {
+        let rim = sample_rim_halo(cam_pos, ray_dir, in.sphere_center, light);
+        if rim.opacity <= 0.001 {
+            discard;
+        }
+        let color = rim.contribution * light.flux * (1.0 / (4.0 * PI));
+        let closest_point = cam_pos + ray_dir * max(-half_b, 0.0);
+        let clip = view.clip_from_world * vec4(closest_point, 1.0);
+        return FragOutput(vec4(color, rim.opacity), clip.z / clip.w);
+    }
     let t = -half_b - sqrt(max(disc, 0.0));
-    if t < 0.0 { discard; }
+    if t < 0.0 {
+        // Sphere is behind the camera — rim halo still matters if the
+        // shell itself extends toward the camera. Same treatment as
+        // the pure-miss branch.
+        let rim = sample_rim_halo(cam_pos, ray_dir, in.sphere_center, light);
+        if rim.opacity <= 0.001 {
+            discard;
+        }
+        let color = rim.contribution * light.flux * (1.0 / (4.0 * PI));
+        let closest_point = cam_pos + ray_dir * max(-half_b, 0.0);
+        let clip = view.clip_from_world * vec4(closest_point, 1.0);
+        return FragOutput(vec4(color, rim.opacity), clip.z / clip.w);
+    }
 
     let hit    = cam_pos + t * ray_dir;
     let normal = normalize(hit - in.sphere_center);
@@ -884,9 +974,16 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // variation a stage painted (splotches, basin rays, etc.).
     let baked_tint = textureSample(albedo_tex, albedo_sampler, sample_dir).rgb;
     let regional = clamp(regional_albedo_mod(sample_dir), 0.7, 1.3);
-    // Modulate the palette albedo by the baked tint (treated as a multiplier
-    // around grey) and the regional low-frequency modulation.
-    let tint_mod = mix(vec3<f32>(1.0), baked_tint * 2.0, 0.5);
+    // Multiplicative tint composition.
+    //   baked_tint = 0.5 → tint_mult = 1.0  (legacy neutral, identical to old formula)
+    //   baked_tint = 0.0 → tint_mult = 0.0  (was 0.5 × mat under old `mix(1, …, 0.5)`)
+    //   baked_tint = 1.0 → tint_mult = 2.0  (was 1.5 × mat — gains chromatic headroom)
+    // The full 0..2 range lets stages that bake real chromatic colours into
+    // the albedo cube (PaintBiomes) drive the surface colour through the
+    // FILTERABLE texture path, which the discrete material-id lookup can
+    // never do — biome polygons go away because the GPU's bilinear filter
+    // smooths boundary transitions automatically.
+    let tint_mod = baked_tint * 2.0;
     let baked_albedo = mat_albedo * tint_mod * regional;
 
     // ── Layer 1b: height-derived normal perturbation ─────────────────────
@@ -1003,7 +1100,147 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // existing flux values don't need re-tuning.
     let hapke_scale: f32 = 0.5;
     let sun_rgb = vec3<f32>(sun_r * sun_flux * hapke_scale);
-    let lit = albedo * (sun_rgb + shine_rgb + vec3<f32>(params.scene.ambient_intensity));
+    var lit = albedo * (sun_rgb + shine_rgb + vec3<f32>(params.scene.ambient_intensity));
+
+    // ── Rayleigh ground transmission ────────────────────────────────────
+    //
+    // Attenuate the lit surface by the per-channel optical depth of the
+    // sun's column to the ground. At the terminator the sun's path is
+    // an order of magnitude longer than at noon — blue is scattered
+    // out, so the surface is lit by progressively redder light. This is
+    // the physical cause of sunset colouring on the ground; previously
+    // approximated with a flat "terminator warmth" tint.
+    //
+    // Applied BEFORE cloud compositing so the surface already carries
+    // the transmitted colour when clouds darken it with cast shadows.
+    lit = apply_rayleigh_ground_transmission(
+        lit,
+        geo_n_dot_l,
+        atmosphere.rayleigh.xyz,
+        atmosphere.rayleigh.w,
+    );
+
+    // ── Cloud layer ─────────────────────────────────────────────────────
+    //
+    // Main cumulus layer is a baked cubemap produced by
+    // `thalos_cloud_gen` (Wedekind curl-warp advection) — density
+    // lives on the sphere, no live fBm evaluation. Drift over sim
+    // time is reintroduced here by rotating the sample direction via
+    // `rotate_cloud_dir_local` (equator-fastest, decision 1.B).
+    //
+    // Cloud-shell intersection. Clouds live on a shell at a slight
+    // altitude above the surface (~0.15 % of body radius ≈ 9 km on a
+    // 6000 km body). Using THIS intersection point for the cloud
+    // sample — rather than the surface sample — introduces visible
+    // parallax at grazing viewing angles: the same cloud mass appears
+    // displaced outward from the terrain below it, the dominant
+    // perceptual cue that clouds float above the surface.
+    let cloud_altitude = params.radius * 0.0015;
+    let cloud_r = params.radius + cloud_altitude;
+    let c_cloud = dot(oc, oc) - cloud_r * cloud_r;
+    let disc_cloud = half_b * half_b - c_cloud;
+    var cloud_sample_dir = sample_dir;
+    if disc_cloud > 0.0 {
+        let t_cloud = -half_b - sqrt(disc_cloud);
+        if t_cloud > 0.0 {
+            let cloud_hit = cam_pos + t_cloud * ray_dir;
+            let cloud_normal_ws = normalize(cloud_hit - in.sphere_center);
+            cloud_sample_dir = rotate_quat(params.orientation, cloud_normal_ws);
+        }
+    }
+
+    // Main density: rotate the cloud-shell direction by the drift
+    // phase (differential rotation baked into `atmosphere.wgsl`'s
+    // helper), then fetch the baked cover cube.
+    let cloud_dir_main = rotate_cloud_dir_local(cloud_sample_dir, atmosphere);
+    let main_cloud_density =
+        textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, cloud_dir_main, 0.0).r;
+
+    // Shadow density: offset the SURFACE direction toward the sun
+    // (0.018 rad ≈ 100 km on a 6000 km body) then apply the same
+    // drift rotation before the cube fetch. This reads "what cloud
+    // sits between this terrain pixel and the sun".
+    let shadow_offset = 0.018;
+    let shadow_dir_raw = normalize(sample_dir + light_dir_local * shadow_offset);
+    let shadow_dir_rot = rotate_cloud_dir_local(shadow_dir_raw, atmosphere);
+    let shadow_cloud_density =
+        textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, shadow_dir_rot, 0.0).r;
+
+    lit = composite_clouds(
+        lit,
+        cloud_sample_dir,
+        normal,
+        sun_dir_ws,
+        sun_flux * hapke_scale,
+        params.scene.ambient_intensity,
+        atmosphere,
+        main_cloud_density,
+        shadow_cloud_density,
+    );
+
+    // ── Atmosphere composition ──────────────────────────────────────────
+    //
+    // Applied on top of the Hapke-lit surface. Each helper early-outs on
+    // a zero scalar so bodies without a `terrestrial_atmosphere` block
+    // cost nothing here.
+    //
+    // Order: limb darkening first (it multiplies the lit colour before
+    // any rim tints fold in), then terminator warmth, then Fresnel rim.
+    //
+    // The rim halo is NOT added on surface-hit fragments — only on miss
+    // rays (outside the silhouette). Adding it on hit was the cause of
+    // two visible bugs:
+    //   1. Night side never went dark. The halo's `sun_factor` bottoms
+    //      out at 0.5, so every hit fragment picked up a uniform blue
+    //      tint no matter which hemisphere the ray terminated on.
+    //   2. A bright singular point at the screen-space centre of the
+    //      planet. A ray aimed exactly at the body centre has
+    //      `closest = oc + ray_dir * -half_b = 0`, and `normalize(0)`
+    //      is undefined — the NaN propagated into `sun_factor` and
+    //      lit a pinprick pixel.
+    //
+    // A proper in-scatter integral (Rayleigh scattering along the
+    // column from camera to surface, sun-gated per sample) would
+    // restore a physical "atmosphere over surface" contribution; that
+    // is a follow-up. Limb shading below already carries the dominant
+    // "blue atmosphere on the lit disk" cue.
+    lit = apply_limb_darkening(
+        lit,
+        n_dot_v,
+        atmosphere.limb_exponents.xyz,
+        atmosphere.limb_exponents.w,
+    );
+    // Rayleigh view-path in-scatter. At the sub-solar point this adds
+    // the familiar blue daylight haze (β_blue >> β_red, short sun
+    // column so T_sun is still mostly white, blue wins the β · T
+    // product). At the terminator the long sun column wipes blue
+    // entirely and the orange/red residue dominates — the in-scatter
+    // band visible at the limb in every orbital sunset photograph.
+    lit = apply_rayleigh_inscatter(
+        lit,
+        geo_n_dot_l,
+        n_dot_v,
+        atmosphere.rayleigh.xyz,
+        atmosphere.rayleigh.w,
+        sun_flux * hapke_scale,
+    );
+    // Legacy tint helpers — retained for artistic control on bodies
+    // without a full Rayleigh setup. With Rayleigh authored, both
+    // `terminator_warmth` and `fresnel_rim` are zero-strength on the
+    // relevant bodies so they cost only the early-return.
+    lit = apply_terminator_warmth(
+        lit,
+        geo_n_dot_l,
+        atmosphere.terminator_warmth.xyz,
+        atmosphere.terminator_warmth.w,
+    );
+    lit = apply_fresnel_rim(
+        lit,
+        geo_n_dot_l,
+        n_dot_v,
+        atmosphere.fresnel_rim.xyz,
+        atmosphere.fresnel_rim.w,
+    );
 
     // Correct depth.
     let hit_clip = view.clip_from_world * vec4(hit, 1.0);

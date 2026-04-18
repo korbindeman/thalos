@@ -46,18 +46,6 @@ fn time_control_panel(
                 sim.simulation.warp.increase();
             }
 
-            if sim.simulation.is_observation_mode() {
-                ui.label(
-                    egui::RichText::new("SIM OFF")
-                        .color(egui::Color32::from_rgb(255, 180, 0))
-                        .strong(),
-                )
-                .on_hover_text(
-                    "Observation mode: ship physics and trajectory prediction are \
-                     paused. Lower warp to resume.",
-                );
-            }
-
             ui.separator();
 
             // Simulation time display.

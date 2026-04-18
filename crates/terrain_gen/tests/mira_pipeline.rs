@@ -158,10 +158,14 @@ fn near_side_has_mare() {
                 let u = (x as f32 + 0.5) / res as f32;
                 let v = (y as f32 + 0.5) / res as f32;
                 let dir = thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
-                let albedo = builder.albedo_contributions.albedo.get(face, x, y);
-                // SpaceWeather writes all texels with alpha=1.
-                // Mare texels have lower albedo than highland.
-                let is_mare = albedo[0] < 0.085;
+                // Inspect the material cubemap directly — encoding-
+                // independent and the source of truth for "is this cell
+                // mare". The previous absolute-albedo threshold (0.085)
+                // was coupled to the SpaceWeather output range and broke
+                // when SpaceWeather started re-encoding for the new
+                // chromatic-tint shader convention.
+                let is_mare = builder.material_cubemap.get(face, x, y)
+                    == thalos_terrain_gen::stages::MAT_MARE as u8;
                 if is_mare {
                     if dir.z > 0.0 {
                         near_mare += 1;

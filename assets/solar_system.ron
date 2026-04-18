@@ -239,7 +239,606 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 0.0,
             )),
-            generator: None,
+            // Thalos MVP tectonic recipe.
+            //
+            // Full roadmap in `docs/gen/thalos_processes.md`. This pipeline
+            // implements Plates → Tectonics → Topography (MVP — no IQ
+            // analytical-derivative noise yet) and drives Biomes from the
+            // baked height field so land/ocean matches the plate geometry.
+            //
+            // Remaining stages (Hotspots, Hydrology, Climate, Biomes
+            // expansion for rainforest/savannah/desert/rust signature)
+            // ship after MVP signoff.
+            generator: Some((
+                seed: 1003,
+                // Iron-core Earth analog: ~70% iron by volume, thin silicate
+                // crust, residual volatiles as N₂/O₂ atmosphere + hydrosphere.
+                // Matches `docs/solar_system.md` §III composition.
+                composition: (silicate: 0.26, iron: 0.70, ice: 0.0, volatiles: 0.04, hydrogen_helium: 0.0),
+                cubemap_resolution: 2048,
+                body_age_gyr: 4.5,
+                pipeline: [
+                    Differentiate(()),
+                    // Voronoi plate partition. 40 plates, 35% continental
+                    // area (→ 65% ocean), clustered into ~4 seed groups to
+                    // produce Earth-like loose-cluster continents rather
+                    // than a checkerboard or a single supercontinent.
+                    Plates((
+                        n_plates: 40,
+                        // Dropped from 0.35 → 0.30 together with the sea-
+                        // level bump below. The pair produces more Earth-
+                        // like continent separation (islands in a
+                        // connected ocean) instead of the "big joined
+                        // landmass" failure mode that 0.35 + 0.55 sea
+                        // level was prone to.
+                        continental_area_fraction: 0.30,
+                        n_continental_seeds: 4,
+                        neighbour_continental_bias: 0.5,
+                        lloyd_iterations: 3,
+                    )),
+                    // Boundary classification. 20% active boundaries
+                    // matches the "declining phase" narrative (most
+                    // orogens old and worn; only a few still rising).
+                    // This stage no longer writes orogen fields — that's
+                    // OrogenDla's job; see below.
+                    Tectonics((
+                        active_boundary_fraction: 0.20,
+                        orogen_age_peak_gyr: 2.0,
+                    )),
+                    // Diffusion-Limited Aggregation mountain ranges
+                    // anchored to convergent boundaries. Replaces the
+                    // old Voronoi-distance orogen field (which printed
+                    // hexagonal cell outlines into the height map) with
+                    // dendritic ridge networks grown from seeds planted
+                    // along each convergent boundary.
+                    OrogenDla((
+                        // Level 7 → ~160k verts (~28 km spacing on
+                        // Thalos) gives DLA enough resolution that
+                        // dendritic branches fill in at mountain-ridge
+                        // scale without individual stamps being visible
+                        // as cells.
+                        subdivision_level: 7,
+                        seed_density: 6.0,
+                        walkers_per_seed: 400,
+                        walker_step_budget: 400,
+                        launch_cap_km: 500.0,
+                        // Stamp radius chosen slightly larger than the
+                        // inter-sample spacing along an edge (edge ~28
+                        // km / 8 samples ≈ 3.5 km), so stamps overlap
+                        // into continuous ridges under quartic falloff.
+                        ridge_falloff_km: 8.0,
+                        depth_saturation: 5.0,
+                        samples_per_edge: 8,
+                        midpoint_jitter_frac: 0.4,
+                    )),
+                    // Height field: continentalness-lerped baseline
+                    // + orogen bumps + fbm roughness + multi-scale
+                    // regional fbm (warp-sampled) + coastal detail,
+                    // renormalized so sea level sits at the target
+                    // percentile of the distribution.
+                    //
+                    // Plate identity still decides where land *tends* to
+                    // sit, but through a smooth weighted-blend of all
+                    // plate kinds (`continentalness_bandwidth`-wide
+                    // transitions at boundaries) — not a nearest-texel
+                    // cubemap lookup. The lookup approach produced
+                    // half-a-texel-wide discontinuities at cube-face
+                    // seams that the shader's normal-gradient computation
+                    // rendered as visible seam lines. Smooth blend keeps
+                    // the height cubemap continuous.
+                    //
+                    // Regional fbm (±~4100 m total) overlaid on the
+                    // baseline gap (±2000 m) lets cells flip across sea
+                    // level near plate margins — inland seas and open-
+                    // ocean islands emerge naturally. Peak active orogen
+                    // budget 7 km (Thalos's 0.91 g gives near-Everest
+                    // headroom). Ancient orogens decay via
+                    // exp(-age / 1500 Myr) to rolling hills.
+                    Topography((
+                        // Baseline gap shrunk from (+500, −3500) to (+150,
+                        // −1500) so the regional fbm field (±~4100 m
+                        // total) dominates the land/ocean decision instead
+                        // of the plate baselines. With the old gap the
+                        // continental-vs-oceanic step printed plate
+                        // shapes into the height field as visible
+                        // pentagons; the smaller gap leaves continents to
+                        // emerge from the noise + plate bias instead of
+                        // from a hard step. Sea-level percentile (below)
+                        // still hits the ~35% land target.
+                        continental_baseline_m: 150.0,
+                        oceanic_baseline_m: -1500.0,
+                        // Gaussian-kernel `exp(−d²/bw²)` convention
+                        // (changed when the previous exp-distance kernel
+                        // was sprouting centroid spikes). bw = 0.12 ≈
+                        // 28° ≈ 1600 km lets every cell receive
+                        // meaningful weight from 2–3 neighbouring plates,
+                        // so continentalness becomes a genuinely
+                        // smooth low-frequency field rather than a
+                        // per-plate plateau.
+                        continentalness_bandwidth: 0.12,
+                        peak_orogen_m: 7000.0,
+                        // Uniform roughness — continentalness-gated
+                        // amplitude would reintroduce a plate-kind step
+                        // and re-create the seam problem.
+                        roughness_m: 700.0,
+                        orogen_age_scale_myr: 1500.0,
+                        // 4.0 base × 7 octaves × 2.1 lacunarity puts the
+                        // finest resolvable roughness at ~60 km features —
+                        // mountain/hill scale, visible in the shader's
+                        // height-gradient normal perturbation.
+                        noise_frequency: 4.0,
+                        // Three-level nested IQ-style domain warp
+                        // (`f(p + s(p))` recursive). Inner perturbs mid's
+                        // sample point; mid perturbs outer's; outer IS the
+                        // warp applied to the plate-lookup direction.
+                        // Nesting (not additive) gives multi-scale fractal
+                        // coastlines: peninsulas at continent scale, bays
+                        // inside, inlets inside those.
+                        warp_amplitude: 0.16,
+                        warp_frequency: 1.8,
+                        warp_amplitude_mid: 0.10,
+                        warp_frequency_mid: 5.0,
+                        warp_amplitude_hi: 0.04,
+                        warp_frequency_hi: 14.0,
+                        // Multi-scale regional fbm: three independent bands
+                        // composed additively. Lo picks where landmasses
+                        // broadly sit; mid shapes subcontinents; hi fills
+                        // in interior relief variation. Summed peaks reach
+                        // ~4100 m — comparable to the baseline gap, so the
+                        // combined field (not plate identity) decides
+                        // where land sits.
+                        regional_height_lo_m: 2000.0,
+                        regional_frequency_lo: 0.5,
+                        regional_height_m: 1500.0,
+                        regional_frequency: 1.5,
+                        regional_height_hi_m: 600.0,
+                        regional_frequency_hi: 4.0,
+                        // High-freq detail concentrated near sea level.
+                        // Peaks at the coastline, decays within ±1300 m —
+                        // producing fjord-like and archipelago-scatter
+                        // roughness on shorelines without polluting
+                        // mountain peaks or deep ocean. Widened from the
+                        // initial ±800 m band so the fractal character
+                        // reaches further inland (fjord-scale inlets) and
+                        // further offshore (archipelago scatter).
+                        // Amplitude kept smaller than the narrowest biome
+                        // band it can cross (150 m coast) so speckle
+                        // doesn't flip cells between coast and land/deep-
+                        // ocean.
+                        coastal_detail_m: 220.0,
+                        coastal_detail_frequency: 18.0,
+                        coastal_detail_scale_m: 1300.0,
+                        // Renormalize so 65% of cells fall below sea level.
+                        // Matches the design target in
+                        // docs/gen/thalos_processes.md ("~65% ocean cover")
+                        // and Earth's 71% for visual lineage. Higher ocean
+                        // fraction also statistically separates continents
+                        // more — a common Earth-like orbit-look pattern
+                        // that 0.55 didn't reliably produce.
+                        sea_level_percentile: 0.65,
+                    )),
+                    // Climate: annual-mean temperature and precipitation
+                    // over the surface. Temperature is the latitude × lapse
+                    // model; precipitation is zonal Hadley/Ferrel/polar
+                    // bands plus wind advection (trade winds equatorward,
+                    // westerlies mid-lat, polar easterlies) with
+                    // continentality decay over land and orographic lift /
+                    // rain shadow against mountain belts. Drives Biomes'
+                    // Whittaker-style TempPrecip rules so the continent is
+                    // partitioned into rainforest / savanna / desert /
+                    // grassland / forest / taiga / tundra rather than a
+                    // single rust-tinted "highland" tan.
+                    Climate((
+                        // Equator/pole annual means. Thalos is warmer than
+                        // Earth at 1 AU because its 0.85 atm atmosphere is
+                        // slightly less efficient at radiating, but the
+                        // iron core heat flux is near-zero — pick a
+                        // moderate Earth-like gradient.
+                        equator_temp_c: 27.0,
+                        polar_temp_c: -28.0,
+                        // >1 widens the tropics and concentrates the drop
+                        // near the poles; matches Earth's band widths.
+                        lat_exponent: 1.3,
+                        // Standard environmental lapse rate.
+                        lapse_c_per_km: 6.5,
+                        // Nine 10° bins, equator → pole. ITCZ wet, horse
+                        // latitudes (20-30°) dry, Ferrel wet, subpolar
+                        // medium, polar desert dry.
+                        zonal_precip_mm: (2500.0, 2000.0, 600.0, 700.0, 1200.0, 1100.0, 800.0, 400.0, 200.0),
+                        // 12 steps × 0.05 rad ≈ 0.60 rad ≈ 1900 km upwind
+                        // trace on Thalos's 3186 km radius. Captures the
+                        // dominant rain-shadow and continentality signal.
+                        upwind_steps: 12,
+                        step_arc_rad: 0.05,
+                        // Each land step retains 90 % of moisture →
+                        // 12 land steps retain 0.9^12 ≈ 0.28, producing
+                        // clearly drier continental interiors without
+                        // completely desiccating mid-continent.
+                        continentality_decay: 0.90,
+                        // Windward-slope boost and leeward rain-shadow.
+                        // 0.5/km × 3 km rise ≈ 2.5× precip boost;
+                        // 0.4/km × 3 km drop ≈ 2.2× divisor.
+                        orographic_gain_per_km: 0.5,
+                        rain_shadow_per_km: 0.4,
+                        // Jitter breaks hard zonal bands into irregular
+                        // blobs. 25 % wobble produces visibly chaotic
+                        // precipitation patterns on top of the underlying
+                        // latitudinal structure — matches Earth's mix of
+                        // "Hadley cell gave this band the budget, but the
+                        // actual rainfall is lumpy."
+                        precip_noise_amp: 0.25,
+                        precip_noise_frequency: 3.0,
+                    )),
+                    // Climate-driven biome palette. The previous elevation-
+                    // only banding (highland/arid_lowland/lowland) painted
+                    // most of the continent a single warm tan because
+                    // Topography pushes the majority of land above 800 m;
+                    // TempPrecip subdivides land by temperature × rainfall
+                    // (Whittaker diagram) into realistic regional biomes.
+                    //
+                    // Rules are evaluated in order, first match wins. Ice /
+                    // ocean / coast / alpine / orogen claim their cells
+                    // first (these have hard physical definitions); the
+                    // remaining land cells are then partitioned by climate.
+                    // Iron-oxide rust tint is authored directly into
+                    // hot_desert, cold_desert, and orogen_active — the
+                    // "metal world signature" from docs/gen/thalos_processes.md.
+                    Biomes((
+                        biomes: [
+                            (
+                                // Deep ocean classifier. The *visible*
+                                // ocean colour comes from PaintBiomes'
+                                // ocean_depth overlay — this biome exists
+                                // so the classifier has something to
+                                // return below sea level and so roughness
+                                // flows per-surface-type through the
+                                // material palette.
+                                name: "ocean",
+                                albedo: 0.05,
+                                fresh_albedo: Some(0.08),
+                                tint: (0.30, 0.50, 1.00),
+                                tonal_amp: 0.08,
+                                roughness: 0.05,
+                            ),
+                            (
+                                // Continental-shelf classifier. Same
+                                // story — real colour comes from
+                                // ocean_depth; tint kept close to the
+                                // shallow-end target so any fallback
+                                // stays in-family.
+                                name: "coast",
+                                albedo: 0.09,
+                                fresh_albedo: Some(0.12),
+                                tint: (0.55, 0.85, 1.00),
+                                tonal_amp: 0.10,
+                                roughness: 0.08,
+                            ),
+                            (
+                                // Active tectonic uplift belts. Base tint
+                                // slightly warm; the slope-driven
+                                // rock_overlay paints bare rock on the
+                                // steepest cells so the ridge reads
+                                // independently of climate biome.
+                                name: "orogen_active",
+                                albedo: 0.18,
+                                fresh_albedo: Some(0.26),
+                                tint: (1.05, 0.92, 0.78),
+                                tonal_amp: 0.20,
+                                roughness: 0.92,
+                            ),
+                            (
+                                // Equatorial wet — dense canopy. Muted
+                                // olive from orbit, not the Crayola green
+                                // the earlier tint printed as.
+                                name: "rainforest",
+                                albedo: 0.09,
+                                fresh_albedo: Some(0.14),
+                                tint: (0.65, 0.92, 0.62),
+                                tonal_amp: 0.20,
+                                roughness: 0.85,
+                            ),
+                            (
+                                // Hot + dry — iron-rust Sahara analog.
+                                // Red tint pulled back from 1.25→1.12 so
+                                // it reads as warm tan, not neon orange.
+                                name: "hot_desert",
+                                albedo: 0.28,
+                                fresh_albedo: Some(0.36),
+                                tint: (1.12, 0.88, 0.62),
+                                tonal_amp: 0.22,
+                                roughness: 0.90,
+                            ),
+                            (
+                                // Hot + moderate precip — golden savanna.
+                                name: "savanna",
+                                albedo: 0.20,
+                                fresh_albedo: Some(0.28),
+                                tint: (1.02, 0.95, 0.68),
+                                tonal_amp: 0.24,
+                                roughness: 0.80,
+                            ),
+                            (
+                                // Temperate moist forest.
+                                name: "temperate_forest",
+                                albedo: 0.12,
+                                fresh_albedo: Some(0.18),
+                                tint: (0.78, 0.95, 0.66),
+                                tonal_amp: 0.22,
+                                roughness: 0.85,
+                            ),
+                            (
+                                // Dry mid-latitudes + cold-zone steppe —
+                                // muted rust/ochre.
+                                name: "cold_desert",
+                                albedo: 0.23,
+                                fresh_albedo: Some(0.30),
+                                tint: (1.08, 0.94, 0.72),
+                                tonal_amp: 0.20,
+                                roughness: 0.85,
+                            ),
+                            (
+                                // Boreal coniferous forest.
+                                name: "taiga",
+                                albedo: 0.10,
+                                fresh_albedo: Some(0.16),
+                                tint: (0.72, 0.90, 0.75),
+                                tonal_amp: 0.22,
+                                roughness: 0.80,
+                            ),
+                            (
+                                // Polar land — permafrost tundra. Snow
+                                // overlay blends this base colour toward
+                                // white as temperature drops; warm edge
+                                // of the tundra reads as greyed earth,
+                                // cold edge as fully snow-covered.
+                                name: "tundra",
+                                albedo: 0.22,
+                                fresh_albedo: Some(0.30),
+                                tint: (0.92, 0.94, 0.96),
+                                tonal_amp: 0.12,
+                                roughness: 0.70,
+                            ),
+                            (
+                                // Default catch-all — temperate grassland.
+                                name: "grassland",
+                                albedo: 0.18,
+                                fresh_albedo: Some(0.25),
+                                tint: (0.98, 0.96, 0.72),
+                                tonal_amp: 0.26,
+                                roughness: 0.80,
+                            ),
+                        ],
+                        rules: [
+                            // Deep ocean and shelf — claim before climate
+                            // rules so TempPrecip only sees land. Jitter
+                            // softens shelf-edge and shoreline contours.
+                            HeightBelow(m: -150.0, jitter_amp_m: 250.0, jitter_frequency: 3.5),
+                            HeightBelow(m: 0.0, jitter_amp_m: 200.0, jitter_frequency: 4.0),
+                            // Active mountain chains.
+                            Orogen(min_intensity: 0.30, max_age_myr: Some(500.0), jitter_amp: 0.10, jitter_frequency: 4.0),
+                            // ── Whittaker climate zones ───────────────
+                            // Order: most-specific first.
+                            // Tropical very wet → rainforest.
+                            TempPrecip(
+                                min_temp_c: 22.0,
+                                min_precip_mm: 1700.0,
+                                jitter_amp: 0.18,
+                            ),
+                            // Tropical dry → hot desert.
+                            TempPrecip(
+                                min_temp_c: 22.0,
+                                max_precip_mm: 500.0,
+                                jitter_amp: 0.18,
+                            ),
+                            // Remaining warm cells → savanna.
+                            TempPrecip(
+                                min_temp_c: 20.0,
+                                jitter_amp: 0.18,
+                            ),
+                            // Temperate wet → forest.
+                            TempPrecip(
+                                min_temp_c: 5.0,
+                                max_temp_c: 22.0,
+                                min_precip_mm: 700.0,
+                                jitter_amp: 0.18,
+                            ),
+                            // Any remaining dry cell → cold desert.
+                            TempPrecip(
+                                max_precip_mm: 250.0,
+                                jitter_amp: 0.18,
+                            ),
+                            // Cool (−5..5 °C) with moisture → taiga.
+                            TempPrecip(
+                                min_temp_c: -5.0,
+                                max_temp_c: 5.0,
+                                jitter_amp: 0.18,
+                            ),
+                            // Very cold → tundra (snow overlay blends on top).
+                            TempPrecip(
+                                max_temp_c: -5.0,
+                                jitter_amp: 0.18,
+                            ),
+                            // Fallback: grassland.
+                            Default,
+                        ],
+                    )),
+                    // Continuous-colour PaintBiomes: per-texel ocean
+                    // depth gradient, climate-driven snow coverage, and
+                    // slope-driven rock exposure + AO, layered over the
+                    // biome-palette base. Kills the "three concentric
+                    // flat-colour rings at the pole" look that discrete
+                    // ice/alpine biomes produced, and gives mountains
+                    // shaded relief at orbital distance.
+                    PaintBiomes((
+                        ocean_depth: Some((
+                            // Muted shelf teal — Apollo-era Bahamas /
+                            // Caribbean shallows. Linear (0.04, 0.11,
+                            // 0.16) ≈ sRGB (56, 96, 116): a dim teal
+                            // at orbital distance, not the bright
+                            // pool-water cyan the earlier
+                            // (0.16, 0.34, 0.44) config produced once
+                            // Rayleigh scatter lifted it on top.
+                            shallow_color: (0.04, 0.11, 0.16),
+                            // Deep basin — near-black navy.
+                            deep_color: (0.003, 0.010, 0.028),
+                            // Saturates at 1.5 km so Thalos's typical
+                            // −1500 m oceanic baseline reads as full
+                            // deep colour. The prior 4 km saturation
+                            // left most of the ocean at a half-shallow
+                            // half-deep blend, i.e. uniform cyan.
+                            // Coastlines still get their few-hundred-m
+                            // shallow band from the smoothstep.
+                            deep_m: 1500.0,
+                        )),
+                        rock_overlay: Some((
+                            // Tangent slope threshold (rise/run). 0.08
+                            // ≈ 4.6°, 0.25 ≈ 14° — matches the range
+                            // where real landscapes transition from
+                            // soil-covered to exposed-rock. Thalos's
+                            // noise field has plenty of cells above
+                            // 0.25; the orogen cores push into 0.5+.
+                            slope_start: 0.08,
+                            slope_full: 0.25,
+                            // Rocks start getting exposed above 3.5 km
+                            // regardless of slope; full by 3.5 + 2.5 km
+                            // (since boost is 0.4/km).
+                            height_boost_from_m: 3500.0,
+                            height_boost_per_km: 0.40,
+                            // Warm grey-brown iron-rust rock — Thalos's
+                            // "metal world" signature expressed as
+                            // oxidised basement rather than a flat red.
+                            color: (0.26, 0.22, 0.18),
+                            tonal_amp: 0.25,
+                            tonal_frequency: 4.5,
+                        )),
+                        snow_overlay: Some((
+                            // Coverage = 1.0 at temp_full_c or colder,
+                            // 0.0 at temp_none_c or warmer. With
+                            // Thalos's climate (27 °C equator,
+                            // −28 °C pole, 6.5 °C/km lapse), a 0 →
+                            // −20 °C band puts full snow at genuinely
+                            // polar latitudes, a partial-cover belt
+                            // reaching down toward ~50° latitude at
+                            // sea level, and glaciated high peaks
+                            // well into the mid-latitudes. Wider
+                            // than −5 → −15 so the spatial transition
+                            // spans a few-km-wide partial-cover belt
+                            // rather than collapsing to a sharp edge.
+                            temp_none_c: 0.0,
+                            temp_full_c: -20.0,
+                            jitter_amp_c: 5.0,
+                            jitter_frequency: 2.4,
+                            // Slightly warm off-white — fresh orbital
+                            // snow is rarely pure (1,1,1); edges pick
+                            // up dust and vegetation understory.
+                            land_color: (0.82, 0.82, 0.84),
+                            // Sea ice reads colder/bluer than land
+                            // snow because the water beneath scatters
+                            // longer wavelengths out of the column.
+                            sea_ice_color: (0.74, 0.78, 0.82),
+                            tonal_amp: 0.08,
+                        )),
+                        slope_ao: Some((
+                            // Start darkening earlier than rock shows
+                            // up so cliffs and canyon walls read as
+                            // "shaded" before they read as "bare rock".
+                            slope_start: 0.05,
+                            slope_full: 0.40,
+                            // Gentle — the shader also darkens lit
+                            // normals via `perturb_normal_from_height`,
+                            // so large `max_darken` here would double-
+                            // count with real terminator shading and
+                            // crush steep sun-facing slopes into black.
+                            // 0.18 is enough to read as relief on the
+                            // albedo at orbital distance without
+                            // dominating the shaded gradient.
+                            max_darken: 0.18,
+                        )),
+                    )),
+                ],
+            )),
+            // Thin N₂/O₂ atmosphere (~0.85 atm). Rim halo + limb
+            // shading compose the "blue halo + chromatic limb" read
+            // that distinguishes a living planet from an airless
+            // twin at impostor distance. Clouds/storms are a
+            // separate layer (see docs/gen/thalos_processes.md
+            // §Atmosphere/Clouds).
+            terrestrial_atmosphere: Some((
+                // Pale blue rim glow. Scale height tuned to Earth's
+                // ~8.4 km × 0.85 atm ≈ 7 km at 1 AU insolation;
+                // outer shell cuts off around 80 km, above which
+                // column density is negligible.
+                rim_halo: Some((
+                    color: (0.45, 0.65, 0.95),
+                    intensity: 0.30,
+                    scale_height_m: 7000.0,
+                    outer_altitude_m: 80000.0,
+                )),
+                // Disabled: `rayleigh` below produces the terminator
+                // reddening and lit-limb Rayleigh band as an emergent
+                // physical effect. Keeping an additive `terminator_warmth`
+                // on top double-counts and pushes the sunset band
+                // orange-saturated. Left as `None` rather than removed so
+                // the slot stays available for artistic tint overrides.
+                limb: None,
+                // Terrestrial limb darkening is weak — the scattering
+                // column isn't long enough to drive strong chromatic
+                // darkening. Disabled for the first pass.
+                limb_darkening: None,
+                // Per-wavelength Rayleigh scattering. `vertical_optical_depth`
+                // is at zenith: blue has ~6× more optical depth than red,
+                // so the sun's column reddens strongly at low elevation.
+                // These are Earth-like sea-level values; Thalos's
+                // atmosphere is a bit thinner but the qualitative
+                // behaviour (sunset ring, blue daylight haze, red-lit
+                // terrain at the terminator) reads the same.
+                //
+                // `strength: 1.0` is physical; values above push the
+                // effect into artistic territory (over-saturated
+                // sunsets). Values below attenuate.
+                rayleigh: Some((
+                    vertical_optical_depth: (0.046, 0.108, 0.264),
+                    strength: 1.0,
+                )),
+                // Cloud cover. Shader-synthesised weather field —
+                // domain-warped fBm for cyclonic curves, zonal
+                // banding (ITCZ / subtropical dry / mid-latitude
+                // storm track), Beer-Lambert opacity so edges fade
+                // instead of cliff into binary cloud/no-cloud.
+                //
+                // `coverage` is the *base* fraction before latitude
+                // weighting. The ITCZ bumps it to ~1.45× at the
+                // equator and the storm track to ~1.35× near 50°
+                // latitude; the subtropical lobes drop it to ~0.6×.
+                // Tune `coverage` to set the overall wetness of the
+                // planet without reshaping the circulation profile.
+                clouds: Some((
+                    // Sparse coverage: roughly 25% of pixels carry
+                    // cloud, leaving 75% fully clear. Apollo imagery
+                    // shows large cloud-free swathes between bands;
+                    // anything higher washes the planet out.
+                    coverage: 0.25,
+                    // Density ramp width, NOT a smoothstep half-width
+                    // any more. The density rises from 0 at the cloud
+                    // threshold to 1.0 `softness` above it, so this
+                    // controls how much of each cloud reads as a
+                    // thin, semi-transparent margin versus a dense
+                    // fully-opaque core. 0.15 keeps a visible soft
+                    // fringe around every structure.
+                    softness: 0.15,
+                    frequency: 2.8,
+                    octaves: 10,
+                    // Off-white with a faint cool tint. Pure-white
+                    // clouds read as pasted-on paint at orbital
+                    // scale; real cumulus tops reflect ~72–78%
+                    // broadband with a slight Rayleigh-blue bias
+                    // from the atmospheric column above them.
+                    albedo: (0.74, 0.76, 0.80),
+                    scroll_rate: 2.0e-5,
+                    differential_rotation: 0.40,
+                    seed: 7142,
+                )),
+            )),
         ),
         (
             name: "Mira",
@@ -554,7 +1153,7 @@
                 color: "#D9BF74",
                 albedo: 0.50,
                 rotation_period_s: 36720.0,
-                axial_tilt_deg: 3.1,
+                axial_tilt_deg: 14.0,
             ),
             orbit: Some((
                 semi_major_axis_m: 1.95976e11,
@@ -681,13 +1280,25 @@
                     color: (0.62, 0.86, 0.96),
                     intensity: 0.35,
                     scale_height_m: 45000.0,
-                    outer_altitude_m: 250000.0,
+                    // Backlit-only shell. 180 km outer extent gives a
+                    // thin Cassini-style crescent when the sun is
+                    // behind Auron relative to the camera; lit-side
+                    // external halo is no longer produced by the
+                    // shader, so this value controls crescent width
+                    // only.
+                    outer_altitude_m: 180000.0,
                 )),
                 limb: Some((
                     terminator_warmth: (0.92, 0.78, 0.70),
                     terminator_strength: 0.35,
                     fresnel_color: (0.72, 0.88, 1.00),
-                    fresnel_strength: 0.35,
+                    // Stand-in for the spectral shift at Saturn's
+                    // lit limb (upper-atmosphere Rayleigh dominant,
+                    // not deep-cloud chromophore). 0.60 puts a clear
+                    // cool tint on the edge without washing the
+                    // palette — internal to the disk, no external
+                    // glow.
+                    fresnel_strength: 0.60,
                 )),
                 // Rayleigh blue-gap layer is disabled until a real
                 // bake pipeline produces a high-frequency haze
@@ -1320,7 +1931,7 @@
                 color: "#8C99BF",
                 albedo: 0.35,
                 rotation_period_s: 39960.0,
-                axial_tilt_deg: 9.2,
+                axial_tilt_deg: 26.7,
             ),
             orbit: Some((
                 semi_major_axis_m: 1.2716e12,

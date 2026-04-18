@@ -15,11 +15,15 @@ pub mod blueprint;
 pub mod part;
 pub mod resource;
 pub mod sizing;
+pub mod stats;
 
 pub use attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
 pub use blueprint::{Connection, PartBlueprint, PartData, ShipBlueprint};
-pub use part::{Adapter, CommandPod, Decoupler, Engine, FuelTank, Part};
-pub use resource::{PartResources, ResourcePool};
+pub use part::{
+    Adapter, CommandPod, Decoupler, Engine, EngineValidationError, FuelTank, Part, ReactantRatio,
+};
+pub use resource::{PartResources, Resource, ResourcePool};
+pub use stats::{G0, ResourceTotals, ShipStats};
 
 pub struct ShipyardPlugin;
 

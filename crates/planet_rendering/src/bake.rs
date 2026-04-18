@@ -16,11 +16,20 @@ use bevy::render::render_resource::{
 };
 use bevy::render::storage::ShaderStorageBuffer;
 
+use thalos_cloud_gen::{CloudBakeConfig, bake_cloud_cover};
 use thalos_terrain_gen::BodyData;
+use thalos_terrain_gen::Cubemap;
 use thalos_terrain_gen::cubemap::CubemapFace;
 
 use crate::shader_types::{GpuCellRange, GpuCrater, GpuMaterial};
 use crate::texture::PlanetTextures;
+
+// Cubemap resolution for baked cloud cover. 256² is ~1.5 MB at R8Unorm
+// and bakes in ~2 s on 8 cores; 512² would be 4× that. At orbital
+// viewing scale (the only distance this impostor is rendered at), 256
+// is visually indistinguishable from 512. If per-planet detail needs
+// to climb later, bump this constant and expect a ~4× bake-time hit.
+const CLOUD_COVER_RESOLUTION: u32 = 256;
 
 // ---------------------------------------------------------------------------
 // SSBO cell hash — CONTRACT WITH `planet_impostor.wgsl`.
@@ -293,6 +302,48 @@ fn create_2d_array_image<T: Copy + Default>(
     });
     image.sampler = non_filtering_sampler();
     images.add(image)
+}
+
+// ---------------------------------------------------------------------------
+// Cloud cover bake
+// ---------------------------------------------------------------------------
+
+/// Bake the procedural cloud-cover cubemap for a body and upload it as an
+/// R8Unorm cube. Density is linearly encoded: texel value `v / 255` is the
+/// raw Worley-fBm weighted sum at the advected direction, in `[0, 1]`.
+/// Thresholding / coverage scaling happens shader-side from
+/// `AtmosphereBlock::cloud_albedo_coverage`.
+///
+/// Runs synchronously on the current thread. Typical cost at 256² is
+/// ~2 s on a modern 8-core machine; if that becomes a load-time issue,
+/// move this call onto the same worker thread that already runs terrain
+/// generation.
+pub fn bake_cloud_cover_image(seed: u64, images: &mut Assets<Image>) -> Handle<Image> {
+    let cfg = CloudBakeConfig::wedekind_defaults(seed, CLOUD_COVER_RESOLUTION);
+    let cover_f32 = bake_cloud_cover(&cfg);
+
+    // Convert Cubemap<f32> → Cubemap<u8> for R8Unorm upload. Raw Worley
+    // fBm peaks around 0.8, so `* 255` fills most of the 8-bit range
+    // without wasting precision.
+    let size = cover_f32.resolution();
+    let mut cover_u8 = Cubemap::<u8>::new(size);
+    for face in CubemapFace::ALL {
+        let src = cover_f32.face_data(face);
+        let dst = cover_u8.face_data_mut(face);
+        for (s, d) in src.iter().zip(dst.iter_mut()) {
+            *d = (s.clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    }
+    create_cubemap_image(&cover_u8, size, TextureFormat::R8Unorm, 1, images)
+}
+
+/// 1×1 black cubemap used when a body has no cloud layer. Binding slots
+/// must still be populated — WGSL has no optional texture bindings — so
+/// airless bodies get a blank cube that the shader multiplies by zero
+/// coverage.
+pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
+    let blank = Cubemap::<u8>::new(1);
+    create_cubemap_image(&blank, 1, TextureFormat::R8Unorm, 1, images)
 }
 
 /// Upload a slice of Pod data as a read-only storage buffer.

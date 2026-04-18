@@ -78,6 +78,30 @@ pub struct BodyBuilder {
     pub plates: Option<PlateMap>,
     pub drainage: Option<DrainageNetwork>,
 
+    /// Build-time tectonic intermediates written by the Tectonics stage and
+    /// read by Topography / Biomes. None of these appear in `BodyData` — once
+    /// Topography has consumed them, the signal is baked into the height /
+    /// albedo / material cubemaps and these can be dropped.
+    ///
+    /// `orogen_intensity`: 0..1, how vigorously this cell has been uplifted.
+    /// `orogen_age_myr`: Myr since the most recent orogenic peak at this
+    ///   cell; 0 on cells with no orogen.
+    /// `boundary_distance_km`: km along the surface to the nearest plate
+    /// boundary. Initialized to f32::INFINITY so cells the Tectonics stage
+    /// never reaches are treated as arbitrarily far from any boundary.
+    pub orogen_intensity: Cubemap<f32>,
+    pub orogen_age_myr: Cubemap<f32>,
+    pub boundary_distance_km: Cubemap<f32>,
+
+    /// Climate fields written by the Climate stage and read by Biomes. Both
+    /// are dropped at finalize; the Biomes stage is the only downstream
+    /// consumer and bakes them into material + albedo assignments.
+    ///
+    /// `temperature_c`: annual-mean surface temperature in °C.
+    /// `precipitation_mm`: annual total precipitation in mm/yr.
+    pub temperature_c: Cubemap<f32>,
+    pub precipitation_mm: Cubemap<f32>,
+
     /// Per-stage seed, set by the pipeline runner before each stage.
     pub(crate) stage_seed: u64,
 }
@@ -138,6 +162,19 @@ impl BodyBuilder {
             biome_map: Cubemap::<u8>::new(resolution),
             plates: None,
             drainage: None,
+            orogen_intensity: Cubemap::<f32>::new(resolution),
+            orogen_age_myr: Cubemap::<f32>::new(resolution),
+            boundary_distance_km: {
+                let mut m = Cubemap::<f32>::new(resolution);
+                for face in crate::cubemap::CubemapFace::ALL {
+                    for v in m.face_data_mut(face) {
+                        *v = f32::INFINITY;
+                    }
+                }
+                m
+            },
+            temperature_c: Cubemap::<f32>::new(resolution),
+            precipitation_mm: Cubemap::<f32>::new(resolution),
             stage_seed: 0,
         }
     }

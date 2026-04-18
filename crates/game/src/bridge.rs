@@ -27,10 +27,6 @@ pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
 fn update_prediction(mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("update_prediction").entered();
 
-    if sim.simulation.is_observation_mode() {
-        return;
-    }
-
     if !sim.simulation.prediction_needs_refresh() {
         return;
     }

@@ -3,6 +3,7 @@ pub mod body_data;
 pub(crate) mod crater_profile;
 pub mod cubemap;
 pub mod generator;
+pub mod icosphere;
 pub mod noise;
 pub mod sample;
 pub mod seeding;

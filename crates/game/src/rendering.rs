@@ -23,10 +23,11 @@ use thalos_physics::{
 
 use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
-    FilmGrain, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams,
-    MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
-    RingLayers, RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight,
-    bake_from_body_data, build_ring_mesh,
+    AtmosphereBlock, FilmGrain, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle,
+    GasGiantParams, MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle,
+    PlanetParams, RingLayers, RingMaterial, RingMaterialHandle, RingParams, SceneLighting,
+    StarLight, bake_cloud_cover_image, bake_from_body_data, blank_cloud_cover_image,
+    build_ring_mesh,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, Pipeline, StageDef};
 
@@ -769,6 +770,30 @@ fn finalize_planet_generation(
         let textures = bake_from_body_data(&baked, &mut images, &mut storage_buffers);
 
         let roughness = body_surface_roughness(body);
+        // Build the atmosphere uniform from the body's
+        // `terrestrial_atmosphere` block. Bodies without one get
+        // `AtmosphereBlock::default()`, which the shader treats as
+        // "no atmosphere" via its per-layer intensity gating.
+        let atmosphere = body
+            .terrestrial_atmosphere
+            .as_ref()
+            .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / RENDER_SCALE) as f32))
+            .unwrap_or_default();
+
+        // Bake the cloud-cover cubemap when the body has a cloud layer.
+        // Bodies without clouds get a 1×1 blank fallback; the shader
+        // gates its cloud path on `cloud_albedo_coverage.w > 0` so the
+        // blank cube is effectively free.
+        let cloud_cover = body
+            .terrestrial_atmosphere
+            .as_ref()
+            .and_then(|a| a.clouds.as_ref())
+            .map(|c| {
+                let _span = tracing::info_span!("bake_cloud_cover").entered();
+                bake_cloud_cover_image(c.seed, &mut images)
+            })
+            .unwrap_or_else(|| blank_cloud_cover_image(&mut images));
+
         let mat_handle = planet_materials.add(PlanetMaterial {
             params: PlanetParams {
                 radius: pending.render_radius,
@@ -784,6 +809,8 @@ fn finalize_planet_generation(
             cell_index: textures.cell_index,
             feature_ids: textures.feature_ids,
             materials: textures.materials,
+            atmosphere,
+            cloud_cover,
         });
 
         let mesh_entity = pending.mesh_entity;
@@ -942,6 +969,11 @@ fn update_planet_light_dirs(
     let body_defs = sim.simulation.bodies();
     let gain = exposure.gain;
     let occluders = collect_occluders(states, &origin, query.iter().map(|(b, _)| b));
+    // Cloud layer drift uses sim time modulo a day-scale period so f32
+    // precision stays tight even after hours of play. Matches the gas
+    // giant's `time_mod` convention so the two shaders read time the
+    // same way.
+    let cloud_time_mod = (sim.simulation.sim_time() % 86_400.0) as f32;
 
     for (body, handle) in &query {
         let Some(mat) = materials.get_mut(&handle.0) else {
@@ -975,6 +1007,10 @@ fn update_planet_light_dirs(
         }
 
         mat.params.scene = scene;
+        // Drive the cloud layer's time uniform. Bodies without a cloud
+        // layer have `cloud_albedo_coverage.w = 0`, so the shader
+        // skips the layer entirely and this value is ignored.
+        mat.atmosphere.cloud_dynamics.y = cloud_time_mod;
     }
 }
 

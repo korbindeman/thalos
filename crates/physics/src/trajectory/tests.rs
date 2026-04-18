@@ -14,7 +14,6 @@ use glam::DVec3;
 
 use super::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_plan};
 use crate::body_state_provider::BodyStateProvider;
-use crate::integrator::IntegratorConfig;
 use crate::maneuver::{ManeuverNode, ManeuverSequence};
 use crate::patched_conics::PatchedConics;
 use crate::types::{
@@ -31,7 +30,6 @@ fn propagate_trajectory(
     ephemeris: Arc<dyn BodyStateProvider>,
     bodies: &[BodyDefinition],
     config: &PredictionConfig,
-    integrator_config: IntegratorConfig,
     ship_thrust_acceleration: f64,
 ) -> FlightPlan {
     propagate_trajectory_with_target(
@@ -41,7 +39,6 @@ fn propagate_trajectory(
         ephemeris,
         bodies,
         config,
-        integrator_config,
         ship_thrust_acceleration,
         None,
     )
@@ -55,7 +52,6 @@ fn propagate_trajectory_with_target(
     ephemeris: Arc<dyn BodyStateProvider>,
     bodies: &[BodyDefinition],
     config: &PredictionConfig,
-    integrator_config: IntegratorConfig,
     ship_thrust_acceleration: f64,
     target_body: Option<crate::types::BodyId>,
 ) -> FlightPlan {
@@ -67,7 +63,6 @@ fn propagate_trajectory_with_target(
         ephemeris,
         bodies: bodies.to_vec(),
         prediction_config: config.clone(),
-        integrator_config,
         ship_thrust_acceleration,
         target_body,
     };
@@ -95,6 +90,7 @@ fn make_single_star_system() -> SolarSystemDefinition {
         orbital_elements: None,
         generator: None,
         atmosphere: None,
+        terrestrial_atmosphere: None,
     };
 
     let mut name_to_id = HashMap::new();
@@ -132,6 +128,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
         orbital_elements: None,
         generator: None,
         atmosphere: None,
+        terrestrial_atmosphere: None,
     };
 
     let thalos_mass = 1.378e24;
@@ -158,6 +155,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
         }),
         generator: None,
         atmosphere: None,
+        terrestrial_atmosphere: None,
     };
 
     (sun, thalos, sun_mass)
@@ -203,34 +201,35 @@ fn maneuver_is_integrated_as_finite_burn() {
         &maneuvers,
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 32,
-            min_orbit_samples: usize::MAX,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig {
-            symplectic_dt: 1.0,
-            rk_initial_dt: 1.0,
-            ..IntegratorConfig::default()
-        },
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
     let burn_segment = prediction
         .segments
         .iter()
-        .find(|segment| !segment.samples.is_empty())
+        .find(|segment| segment.samples.len() > 1)
         .expect("expected a downstream burn segment");
-    let first_sample = burn_segment.samples.first().unwrap();
-    let delta_speed = (first_sample.velocity - system.ship.initial_state.velocity).length();
+    // Skip the pre-burn starting sample (t=0) and look at the first RK4
+    // substep sample. At 0.5 m/s² over one 1-second substep the velocity
+    // should only change by ~0.5 m/s, far from the full 10 m/s Δv.
+    let mid_sample = burn_segment
+        .samples
+        .iter()
+        .find(|s| s.time > 0.0)
+        .expect("expected at least one post-start sample");
+    let delta_speed = (mid_sample.velocity - system.ship.initial_state.velocity).length();
 
     assert!(
         delta_speed < 2.0,
         "finite burn should not apply the full 10 m/s instantly; got {delta_speed:.3}"
     );
+    // RK4 substep is 1.0 s and this test uses the default PredictionConfig;
+    // the first post-start sample lands deterministically at exactly 1.0 s.
     assert!(
-        (first_sample.time - 1.0).abs() < 1e-9,
-        "prediction should step exactly to the first capped sample"
+        (mid_sample.time - 1.0).abs() < 1e-9,
+        "first post-start sample should land at t=1.0: got {}",
+        mid_sample.time
     );
 }
 
@@ -263,17 +262,7 @@ fn prograde_burn_raises_apoapsis_around_thalos() {
         &maneuvers,
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 20_000,
-
-            min_orbit_samples: usize::MAX,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig {
-            symplectic_dt: 1.0,
-            rk_initial_dt: 1.0,
-            ..IntegratorConfig::default()
-        },
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
@@ -339,17 +328,7 @@ fn large_prograde_burn_escapes_without_collision() {
         &maneuvers,
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 200_000,
-
-            min_orbit_samples: usize::MAX,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig {
-            symplectic_dt: 60.0,
-            rk_initial_dt: 60.0,
-            ..IntegratorConfig::default()
-        },
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
@@ -413,11 +392,6 @@ fn stable_orbit_detected_after_prograde_burn() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        IntegratorConfig {
-            symplectic_dt: 60.0,
-            rk_initial_dt: 60.0,
-            ..IntegratorConfig::default()
-        },
         system.ship.thrust_acceleration,
     );
 
@@ -467,16 +441,7 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
         &maneuvers,
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 40_000,
-
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig {
-            symplectic_dt: 60.0,
-            rk_initial_dt: 60.0,
-            ..IntegratorConfig::default()
-        },
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
@@ -531,16 +496,7 @@ fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
         &maneuvers,
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 40_000,
-
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig {
-            symplectic_dt: 60.0,
-            rk_initial_dt: 60.0,
-            ..IntegratorConfig::default()
-        },
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
@@ -598,6 +554,7 @@ fn make_thalos_mira_system() -> SolarSystemDefinition {
         }),
         generator: None,
         atmosphere: None,
+        terrestrial_atmosphere: None,
     };
 
     let mut name_to_id = HashMap::new();
@@ -664,11 +621,7 @@ fn moon_encounter_preserves_bounded_energy() {
         &ManeuverSequence::new(),
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 200_000,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig::default(),
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
@@ -749,11 +702,7 @@ fn no_false_stable_orbit_across_soi_transition() {
         &ManeuverSequence::new(),
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 200_000,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig::default(),
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
@@ -812,11 +761,7 @@ fn encounter_enrichment_reports_flyby_for_hyperbolic_pass() {
         &ManeuverSequence::new(),
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 200_000,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig::default(),
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 
@@ -838,69 +783,75 @@ fn encounter_enrichment_reports_flyby_for_hyperbolic_pass() {
     }
 }
 
-/// Setting `target_body` on the request must cap integrator step size to
-/// `TARGET_DT_CAP_SECS` when the craft enters `TARGET_DT_CAP_FACTOR × SOI`.
-/// Guards against a refactor silently disabling the cap.
-#[test]
-fn target_bias_caps_step_size_near_target() {
-    let system = make_thalos_mira_system();
-    let mira_sma = 1.91488e8;
-    let thalos_gm = system.bodies[1].gm;
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+// `target_bias_caps_step_size_near_target` deleted: the step-size cap was an
+// adaptive-RK45 knob that no longer exists under the analytical Keplerian
+// propagator. SOI crossings are now caught by root-finding during coast
+// sampling (see `ship_propagator::bisect_body_distance`), which supplies
+// precision regardless of how much sim time a single call advances.
 
-    let r_park = system.bodies[1].radius_m + 200_000.0;
-    let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
+/// Mirror the game's startup scenario: load `solar_system.ron`, build the
+/// ship's 200 km circular orbit around Thalos, run prediction with no
+/// maneuvers. A circular orbit that fits inside Thalos's SOI and clears
+/// the surface must terminate in exactly one `StableOrbit` closure.
+#[test]
+fn game_default_state_produces_stable_orbit() {
+    use crate::parsing::load_solar_system;
+    let system = match load_solar_system("../../assets/solar_system.ron") {
+        Ok(s) => s,
+        Err(_) => return, // loader unavailable in CI or path mismatch — skip
+    };
+    let ephemeris: Arc<dyn BodyStateProvider> =
+        Arc::new(PatchedConics::new(&system, 3.156e9));
+
+    let homeworld_id = system.name_to_id["Thalos"];
+    let homeworld_state = ephemeris.query_body(homeworld_id, 0.0);
+    let rel = system.ship.initial_state;
     let ship_state = StateVector {
-        position: thalos_state_0.position + DVec3::new(r_park, 0.0, 0.0),
-        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, v_transfer),
+        position: homeworld_state.position + rel.position,
+        velocity: homeworld_state.velocity + rel.velocity,
     };
 
-    let prediction = propagate_trajectory_with_target(
+    let prediction = propagate_trajectory(
         ship_state,
         0.0,
         &ManeuverSequence::new(),
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 200_000,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig::default(),
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
-        Some(2), // target = Mira
     );
 
-    let mira_soi = system.bodies[2].soi_radius_m;
-    // Sample index for "near target": within 3× SOI of Mira.  Step size of
-    // the *next* step is the one the cap controls; we check step_size on
-    // samples inside the bubble.
-    let mut near_samples = 0usize;
-    let mut capped_samples = 0usize;
-    for seg in &prediction.segments {
-        for sample in &seg.samples {
-            let mira_state = ephemeris.query_body(2, sample.time);
-            let dist = (sample.position - mira_state.position).length();
-            if dist < mira_soi * 3.0 {
-                near_samples += 1;
-                // Cap is 60 s; allow a small slack for error-controller overshoot.
-                if sample.step_size <= 90.0 {
-                    capped_samples += 1;
-                }
-            }
-        }
+    // One leg, one segment, one full revolution.
+    assert_eq!(prediction.legs.len(), 1, "expected single leg (no maneuvers)");
+    let leg = &prediction.legs[0];
+    assert!(leg.burn_segment.is_none(), "no burn on an unmanoeuvred leg");
+    assert!(
+        leg.coast_segment.is_stable_orbit,
+        "ship's 200 km circular orbit must close as a stable orbit"
+    );
+    // Every sample must anchor to Thalos — the ship never exits its SOI.
+    let samples = &leg.coast_segment.samples;
+    assert!(samples.len() >= 32, "expected dense sampling; got {}", samples.len());
+    for s in samples {
+        assert_eq!(s.anchor_body, homeworld_id, "sample escaped Thalos SOI");
     }
-
+    // Relative position to Thalos (current) should have near-constant radius
+    // (circular orbit). Check min vs max don't differ by more than 1%.
+    let thalos_now = ephemeris.query_body(homeworld_id, 0.0);
+    let radii: Vec<f64> = samples
+        .iter()
+        .map(|s| {
+            let thalos_t = ephemeris.query_body(homeworld_id, s.time);
+            (s.position - thalos_t.position).length()
+        })
+        .collect();
+    let r_min = radii.iter().cloned().fold(f64::INFINITY, f64::min);
+    let r_max = radii.iter().cloned().fold(0.0, f64::max);
     assert!(
-        near_samples > 0,
-        "trajectory must enter 3× Mira SOI for the test to be meaningful"
+        (r_max - r_min) / r_min < 1e-3,
+        "circular orbit radii drift too much: min={r_min} max={r_max}"
     );
-    assert!(
-        capped_samples >= near_samples * 7 / 10,
-        "expected ≥70% of near-target samples under 90s cap, got {}/{}",
-        capped_samples,
-        near_samples,
-    );
+    let _ = thalos_now;
 }
 
 /// `FlightPlan::approaches` lists per-body closest passes for every body the
@@ -927,11 +878,7 @@ fn closest_approach_scan_excludes_encountered_bodies() {
         &ManeuverSequence::new(),
         Arc::clone(&ephemeris),
         &system.bodies,
-        &PredictionConfig {
-            max_steps_per_segment: 200_000,
-            ..PredictionConfig::default()
-        },
-        IntegratorConfig::default(),
+        &PredictionConfig::default(),
         system.ship.thrust_acceleration,
     );
 

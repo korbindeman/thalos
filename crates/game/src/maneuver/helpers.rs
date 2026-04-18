@@ -72,7 +72,7 @@ pub(super) fn node_world_pos_and_frame(
         let sample = &seg.samples[idx];
         let world_pos = sample_render_pos(sample, pin_for, origin);
 
-        let ref_state = ephemeris.query_body(sample.soi_body, sample.time);
+        let ref_state = ephemeris.query_body(sample.anchor_body, sample.time);
         let frame = orbital_frame_mat3(
             sample.position,
             sample.velocity,
@@ -308,7 +308,7 @@ pub(super) fn closest_trail_point_on_leg(
                 best = Some(ClosestTrailPoint {
                     time: sample.time,
                     world_pos,
-                    anchor_body: sample.soi_body,
+                    anchor_body: sample.anchor_body,
                     screen_distance: d,
                 });
             }
@@ -345,7 +345,7 @@ pub(super) fn closest_trail_point(
                 best = Some(ClosestTrailPoint {
                     time: sample.time,
                     world_pos,
-                    anchor_body: sample.soi_body,
+                    anchor_body: sample.anchor_body,
                     screen_distance: d,
                 });
             }

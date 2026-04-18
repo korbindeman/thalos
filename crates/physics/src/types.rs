@@ -1,25 +1,11 @@
 use glam::DVec3;
 use serde::Deserialize;
 use std::collections::HashMap;
-use thalos_atmosphere_gen::AtmosphereParams;
+use thalos_atmosphere_gen::{AtmosphereParams, TerrestrialAtmosphere};
 use thalos_terrain_gen::GeneratorParams;
-
-pub use crate::effects::gravity::{BODY_WEIGHTS_CAP, EMPTY_BODY_WEIGHTS};
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
-
-/// Minimum distance squared (m²) below which gravitational interactions are
-/// skipped to avoid singularities. Equivalent to 100 m.
-pub const MIN_DISTANCE_SQ: f64 = 1e4;
-
-/// Minimum distance (m) for gravitational interaction cutoff.
-pub const MIN_DISTANCE_M: f64 = 100.0;
-
-/// Minimum distance squared (m²) for body-body gravitational interactions.
-/// Set to 1 km² — appropriate for N-body integration where bodies have
-/// meaningful radii.
-pub const MIN_BODY_DISTANCE_SQ: f64 = 1e6;
 
 // TODO: Uncomment after adding `pub mod parsing;` to lib.rs
 pub use crate::parsing::load_solar_system;
@@ -59,14 +45,17 @@ pub struct BodyDefinition {
     pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
     pub generator: Option<GeneratorParams>,
-    /// Gas / ice giant atmosphere definition. Mutually meaningful with
-    /// `generator`: a body with `atmosphere: Some(_)` and no `generator`
-    /// is rendered as a gas giant (optically thick atmosphere all the
-    /// way down, no solid surface). Bodies with both set — terrestrials
-    /// with a thin atmosphere — will eventually composite the
-    /// atmosphere shell over the baked surface, but that path is not
-    /// wired up yet.
+    /// Gas / ice giant atmosphere definition. A body with
+    /// `atmosphere: Some(_)` and no `generator` is rendered as a gas
+    /// giant (optically thick all the way down, no solid surface).
+    /// Mutually exclusive with `terrestrial_atmosphere` — a body has at
+    /// most one atmosphere schema attached.
     pub atmosphere: Option<AtmosphereParams>,
+    /// Thin atmosphere over a solid surface. Paired with `generator`:
+    /// a body with both set renders the baked impostor with an
+    /// atmosphere shell composited over it (rim halo, limb shading).
+    /// Mutually exclusive with `atmosphere` (the gas-giant schema).
+    pub terrestrial_atmosphere: Option<TerrestrialAtmosphere>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -91,23 +80,6 @@ pub struct OrbitalElements {
     pub true_anomaly_rad: f64,
 }
 
-/// Compute the gravity-weighted barycenter `Σᵢ wᵢ · rᵢ` over the bodies
-/// listed in `body_weights`, looking up each body's position in `bodies`.
-/// Missing-id entries (slot weight 0, or id ≥ len) contribute nothing.
-#[inline]
-pub fn weighted_barycenter(
-    body_weights: &[(BodyId, f32); BODY_WEIGHTS_CAP],
-    bodies: &[BodyState],
-) -> DVec3 {
-    let mut acc = DVec3::ZERO;
-    for &(id, w) in body_weights.iter() {
-        if w > 0.0 && id < bodies.len() {
-            acc += bodies[id].position * w as f64;
-        }
-    }
-    acc
-}
-
 /// A timestamped state for a body — used in ephemeris samples.
 #[derive(Debug, Clone, Copy)]
 pub struct BodyState {
@@ -120,40 +92,21 @@ pub struct BodyState {
 pub type BodyStates = Vec<BodyState>;
 
 /// A single sample of the ship's propagated trajectory.
+///
+/// Under the analytical patched-conics propagator there is one gravitational
+/// source per sample — the SOI body — so rendering, colouring, and encounter
+/// detection all share the single `anchor_body` field. `ref_pos` is the
+/// anchor body's heliocentric position at `time`, cached on the sample so
+/// the renderer can compute the anchor-relative position without an
+/// ephemeris query per sample per frame.
 #[derive(Debug, Clone, Copy)]
 pub struct TrajectorySample {
     pub time: f64,
     pub position: DVec3,
     pub velocity: DVec3,
-    /// Body with the largest gravitational pull on the ship at this sample.
-    /// Used for color tinting and the perturbation cone signal — *not* for
-    /// rendering frame.  Can flicker between samples.
-    pub dominant_body: BodyId,
-    pub perturbation_ratio: f64,
-    pub step_size: f64,
-    /// Rendering anchor: the hierarchical parent used for drawing the
-    /// trajectory.  For moons, this is stepped up to the parent planet so
-    /// the trajectory stays in the planet's reference frame.
-    ///
-    /// Retained for legacy consumers (label-coloring, encounter detection).
-    /// The renderer itself uses `body_weights` + `ref_pos` via the
-    /// gravity-weighted barycenter rule (§7.2).
     pub anchor_body: BodyId,
-    /// Gravity-weighted barycenter `Σᵢ wᵢ · rᵢ(sample.t)` at this sample's
-    /// time, computed from `body_weights`. The renderer subtracts this to
-    /// place the sample in the barycenter-relative frame, then adds the
-    /// current-time barycenter to pin the trajectory to where the dominant
-    /// bodies are now (§7.2).
+    /// `anchor_body`'s position at `time`, cached for cheap rendering.
     pub ref_pos: DVec3,
-    /// SOI-level body: the smallest sphere-of-influence that contains the
-    /// ship.  Used for encounter detection (SOI entry/exit, periapsis)
-    /// independently of the rendering anchor.
-    pub soi_body: BodyId,
-    /// Top-K gravity weights at this sample, `wᵢ = aᵢ / Σⱼ aⱼ` renormalised
-    /// across the stored entries. Drives the renderer's gravity-weighted
-    /// barycenter rule: `render_pos = sample.pos - Σ wᵢ · rᵢ(t)`. Unused
-    /// slots have weight 0.0.
-    pub body_weights: [(BodyId, f32); BODY_WEIGHTS_CAP],
 }
 
 /// Ship definition — placeholder for MVP.

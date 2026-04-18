@@ -1,17 +1,18 @@
 //! [`FlightPlan`]: a leg-based propagation through a maneuver sequence.
 //!
-//! A flight plan is a chain of [`Leg`]s. Each leg is the trajectory that
-//! starts from the ship's state at some epoch, optionally applies a burn for
-//! a finite duration, and then coasts until the next leg's start time (the
-//! next maneuver) or the horizon.
+//! A flight plan is a chain of [`Leg`]s. Each leg starts at a known ship
+//! state and epoch, optionally applies a finite burn, and then coasts until
+//! the next leg's start time (the next maneuver) or the ephemeris horizon.
 //!
 //! Burn and coast are modelled as separate `NumericSegment`s so they can be
-//! propagated under different effect registries:
+//! propagated independently:
 //!
-//! - **`burn_segment`** — propagated with the leg's `ManeuverThrustEffect`
-//!   active in the registry. Time span `[burn_start, burn_end)`.
-//! - **`coast_segment`** — propagated with only the baseline registry
-//!   (gravity + ambient effects). Time span `[burn_end, leg_end)`.
+//! - **`burn_segment`** — propagated with RK4 substeps under SOI-body gravity
+//!   plus constant-acceleration thrust in the ship's local frame. Time span
+//!   `[burn_start, burn_end)`.
+//! - **`coast_segment`** — propagated analytically via Kepler in the SOI
+//!   body's frame, SOI transitions detected and refined by root-finding.
+//!   Time span `[burn_end, leg_end)`.
 //!
 //! The flat `segments` list is a back-compat mirror that flattens all burn +
 //! coast segments in leg order; consumers that don't care about leg structure
@@ -26,12 +27,8 @@ use super::events::{
 };
 use super::numeric::NumericSegment;
 pub use super::propagation::ScheduledBurn;
-use super::propagation::{
-    PredictionConfig, PropagationBudget, PropagationContext, propagate_segment,
-};
+use super::propagation::{PredictionConfig, PropagationBudget, PropagationContext, propagate_segment};
 use crate::body_state_provider::BodyStateProvider;
-use crate::effects::{Effect, EffectRegistry, ManeuverThrustEffect};
-use crate::integrator::IntegratorConfig;
 use crate::maneuver::{ManeuverSequence, burn_duration};
 use crate::types::{BodyDefinition, BodyId, StateVector};
 use glam::DVec3;
@@ -46,11 +43,9 @@ pub struct PredictionRequest {
     pub ephemeris: Arc<dyn BodyStateProvider>,
     pub bodies: Vec<BodyDefinition>,
     pub prediction_config: PredictionConfig,
-    pub integrator_config: IntegratorConfig,
     pub ship_thrust_acceleration: f64,
-    /// Optional target body for biased adaptive-step sizing.  When set, the
-    /// propagator caps its maximum step size as the craft approaches this
-    /// body so a coarse dt can't skip over a grazing flyby.
+    /// Currently selected target body. Informational only — analytical
+    /// propagation needs no step-size bias because Kepler has no step size.
     pub target_body: Option<BodyId>,
 }
 
@@ -280,7 +275,7 @@ impl Trajectory for FlightPlan {
 /// Collision, cone fade, and budget exhaustion end propagation early.
 pub fn propagate_flight_plan(
     request: &PredictionRequest,
-    budget: Option<PropagationBudget>,
+    _budget: Option<PropagationBudget>,
 ) -> FlightPlan {
     let PredictionRequest {
         ship_state: initial_state,
@@ -290,7 +285,6 @@ pub fn propagate_flight_plan(
         ephemeris,
         bodies,
         prediction_config,
-        integrator_config,
         ship_thrust_acceleration,
         target_body,
         ..
@@ -302,26 +296,21 @@ pub fn propagate_flight_plan(
 
     let _span = tracing::info_span!(
         "propagate_flight_plan",
-        budget = budget.map(|b| b.max_steps).unwrap_or(0),
         nodes = maneuvers.nodes.len(),
     )
     .entered();
 
+    let _ = target_body; // retained on PredictionRequest for UI; unused here
     let ctx = PropagationContext {
         ephemeris: ephemeris.as_ref(),
         bodies,
         prediction_config,
-        integrator_config: integrator_config.clone(),
-        target_body,
     };
-
-    let coast_registry = EffectRegistry::newtonian();
 
     let mut legs: Vec<Leg> = Vec::new();
     let mut segments: Vec<NumericSegment> = Vec::new();
     let mut events: Vec<TrajectoryEvent> = Vec::new();
     let mut id_counter: EncounterId = 0;
-    let mut remaining_budget: Option<usize> = budget.map(|b| b.max_steps);
 
     // Sort node indices by time so out-of-order UI edits still propagate
     // correctly.
@@ -336,17 +325,16 @@ pub fn propagate_flight_plan(
     let ephemeris_end = start_time + ctx.ephemeris.time_span();
     let leg_count = node_order.len() + 1;
 
-    // Baseline: full coast from initial state with no maneuvers.
-    // Propagated with its own budget so it doesn't starve the main plan.
+    // Baseline: full coast from initial state with no maneuvers. Cheap in
+    // analytical propagation, so we always produce it when maneuvers exist.
     let mut baseline = if !maneuvers.nodes.is_empty() {
         Some(propagate_segment(
             initial_state,
             start_time,
             ephemeris_end,
-            &coast_registry,
+            None,
             &ctx,
             true,
-            &mut None,
         ))
     } else {
         None
@@ -373,45 +361,37 @@ pub fn propagate_flight_plan(
         // Leg 0: use any `carried_burns` that are still active at `time`
         //   (the live-sim in-progress burn).
         // Leg i>0: synthesize a new burn from the node that starts leg i.
-        let burn_spec: Option<ManeuverThrustEffect> = if leg_idx == 0 {
+        let scheduled_burn: Option<ScheduledBurn> = if leg_idx == 0 {
             carried_burns
                 .iter()
+                .copied()
                 .find(|b| b.start_time <= time && b.start_time + b.duration > time)
-                .map(|b| {
+                .inspect(|b| {
                     // If a queued node falls inside this active burn, extend
                     // the leg so the burn completes before the next leg starts.
-                    // Without this, the burn would be silently truncated and
-                    // the predicted trajectory would under-apply delta-v.
                     let burn_end = b.start_time + b.duration;
                     if burn_end > leg_end {
                         leg_end = burn_end;
                     }
-                    ManeuverThrustEffect::new(
-                        b.delta_v_local,
-                        b.reference_body,
-                        b.acceleration,
-                        b.start_time,
-                        b.duration,
-                    )
                 })
         } else {
             let prev_node = &maneuvers.nodes[node_order[leg_idx - 1]];
             let duration = burn_duration(prev_node.delta_v.length(), ship_thrust_acceleration);
             if duration > 0.0 && prev_node.delta_v.length_squared() > 0.0 {
-                Some(ManeuverThrustEffect::new(
-                    prev_node.delta_v,
-                    prev_node.reference_body,
-                    ship_thrust_acceleration,
-                    prev_node.time,
+                Some(ScheduledBurn {
+                    delta_v_local: prev_node.delta_v,
+                    reference_body: prev_node.reference_body,
+                    acceleration: ship_thrust_acceleration,
+                    start_time: prev_node.time,
                     duration,
-                ))
+                })
             } else {
                 None
             }
         };
 
         let applied_delta_v: Option<DVec3> = if leg_idx == 0 {
-            burn_spec.as_ref().map(|e| e.delta_v_local)
+            scheduled_burn.as_ref().map(|b| b.delta_v_local)
         } else {
             Some(maneuvers.nodes[node_order[leg_idx - 1]].delta_v)
         };
@@ -420,20 +400,10 @@ pub fn propagate_flight_plan(
         let leg_start_time = time;
 
         // 1. Burn sub-segment.
-        let burn_segment = if let Some(spec) = burn_spec {
-            let burn_end = spec.end_time;
+        let burn_segment = if let Some(b) = scheduled_burn {
+            let burn_end = b.start_time + b.duration;
             let burn_stop = burn_end.min(leg_end);
-            let burn_effect: Arc<dyn Effect> = Arc::new(spec);
-            let burn_registry = EffectRegistry::with_effects(vec![burn_effect]);
-            let seg = propagate_segment(
-                state,
-                time,
-                burn_stop,
-                &burn_registry,
-                &ctx,
-                false,
-                &mut remaining_budget,
-            );
+            let seg = propagate_segment(state, time, burn_stop, Some(b), &ctx, false);
             if let Some(last) = seg.last_state() {
                 state = last;
             }
@@ -445,8 +415,7 @@ pub fn propagate_flight_plan(
             None
         };
 
-        // If the burn ate the whole leg (unusual) or ran into a collision,
-        // short-circuit with an empty coast.
+        // If the burn ran into a collision, short-circuit with an empty coast.
         let burn_collided = burn_segment
             .as_ref()
             .map(|s| s.collision_body.is_some())
@@ -462,15 +431,7 @@ pub fn propagate_flight_plan(
                 collision_body: None,
             }
         } else {
-            propagate_segment(
-                state,
-                time,
-                leg_end,
-                &coast_registry,
-                &ctx,
-                stop_on_stable_orbit,
-                &mut remaining_budget,
-            )
+            propagate_segment(state, time, leg_end, None, &ctx, stop_on_stable_orbit)
         };
 
         // Event detection runs over each sub-segment individually.
@@ -491,17 +452,14 @@ pub fn propagate_flight_plan(
             leg_idx,
         ));
 
-        // Mirror into flat segments list (burn first if present, then coast).
         if let Some(seg) = &burn_segment {
             segments.push(seg.clone());
         }
         segments.push(coast_segment.clone());
 
-        // Carry ship state forward for the next leg.
         let coast_collided = coast_segment.collision_body.is_some();
         let early_exit = burn_collided
             || coast_collided
-            || remaining_budget == Some(0)
             || (stop_on_stable_orbit && coast_segment.is_stable_orbit);
 
         legs.push(Leg {
@@ -531,46 +489,52 @@ pub fn propagate_flight_plan(
         }
     }
 
-    // Lock the whole prediction to a single rendering anchor (the body
-    // dominating at t=0). Per-leg anchors create frame discontinuities at
-    // node boundaries — e.g. a capture-planning node near a flyby would
-    // flip leg N+1 into the encounter body's frame, so the ghost and
-    // adjacent legs could not all coincide. For intra-system trajectories
-    // this collapses to "draw everything in the starting body's frame",
-    // which matches the player's mental model of departing from home.
-    let prediction_anchor = segments
-        .iter()
-        .flat_map(|s| s.samples.first())
-        .next()
-        .map(|s| s.anchor_body);
-    if let Some(anchor) = prediction_anchor {
-        for seg in segments.iter_mut() {
-            for sample in seg.samples.iter_mut() {
-                sample.anchor_body = anchor;
-                sample.ref_pos = ephemeris.query_body(anchor, sample.time).position;
-            }
+    // Per-leg anchor relock.
+    //
+    // The propagator emits samples whose `anchor_body` / `ref_pos` match the
+    // SOI actually containing the ship at each sample. That is physically
+    // correct but visually wrong: the renderer pins each anchor to its
+    // *current* world position, so when a leg crosses an SOI boundary the
+    // trajectory jumps by the anchor's intervening motion (Thalos moves a
+    // lot over a year-long prediction — the inside-SOI and outside-SOI
+    // segments no longer meet in the rendered frame).
+    //
+    // We therefore relock each leg to the SOI body of its first sample, so
+    // the whole leg is drawn in one consistent frame. Distinct legs
+    // (separated by maneuver nodes) can still differ — a capture-planning
+    // node at an encounter ghost produces a downstream leg whose first
+    // sample is in that moon's SOI, so that leg renders in the moon's
+    // frame and pins to the ghost, which is exactly the encounter UX
+    // described in §6.
+    let relock_samples = |samples: &mut [crate::types::TrajectorySample]| {
+        let Some(first) = samples.first() else {
+            return;
+        };
+        let anchor = first.anchor_body;
+        for sample in samples.iter_mut() {
+            sample.anchor_body = anchor;
+            sample.ref_pos = ephemeris.query_body(anchor, sample.time).position;
         }
-        for leg in legs.iter_mut() {
-            if let Some(burn) = leg.burn_segment.as_mut() {
-                for sample in burn.samples.iter_mut() {
-                    sample.anchor_body = anchor;
-                    sample.ref_pos = ephemeris.query_body(anchor, sample.time).position;
-                }
-            }
-            for sample in leg.coast_segment.samples.iter_mut() {
-                sample.anchor_body = anchor;
-                sample.ref_pos = ephemeris.query_body(anchor, sample.time).position;
-            }
+    };
+    for leg in legs.iter_mut() {
+        if let Some(burn) = leg.burn_segment.as_mut() {
+            relock_samples(&mut burn.samples);
         }
-        if let Some(base) = baseline.as_mut() {
-            for sample in base.samples.iter_mut() {
-                sample.anchor_body = anchor;
-                sample.ref_pos = ephemeris.query_body(anchor, sample.time).position;
-            }
+        relock_samples(&mut leg.coast_segment.samples);
+    }
+    // Mirror into the flat segments list so consumers that iterate it see
+    // the same anchors.
+    segments.clear();
+    for leg in legs.iter() {
+        if let Some(burn) = &leg.burn_segment {
+            segments.push(burn.clone());
         }
+        segments.push(leg.coast_segment.clone());
+    }
+    if let Some(base) = baseline.as_mut() {
+        relock_samples(&mut base.samples);
     }
 
-    // Aggregate SOI-window encounters from the low-level events.
     let encounters = aggregate_encounters(
         &events,
         &segments,
@@ -579,8 +543,6 @@ pub fn propagate_flight_plan(
         &mut id_counter,
     );
 
-    // Scan every segment sample for closest approaches to bodies the
-    // trajectory does *not* enter (SOI entries already become encounters).
     let encounter_bodies: std::collections::HashSet<BodyId> =
         encounters.iter().map(|e| e.body).collect();
     let approaches =

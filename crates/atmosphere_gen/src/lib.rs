@@ -1,11 +1,28 @@
-//! Gas / ice giant atmosphere parameter schema.
+//! Atmosphere parameter schemas.
 //!
-//! This crate holds the *data* definition of a gas giant's atmosphere —
-//! not the renderer, not the shader, not the GPU uniforms. It is the
-//! analogue of `thalos_terrain_gen` for bodies that have no solid surface:
+//! This crate holds the *data* definition of a body's atmosphere — not
+//! the renderer, not the shader, not the GPU uniforms. It is the
+//! analogue of `thalos_terrain_gen` for the gaseous layer above a body:
 //! a pure-Rust, Bevy-free definition of what a body's atmosphere looks
 //! like and how its layers are configured, parsed straight from the RON
 //! body file.
+//!
+//! Two sibling schemas live here:
+//!
+//! - [`AtmosphereParams`] — gas / ice giants. The cloud deck IS the
+//!   visible disk; there is no solid surface. Rich schema: cloud palette,
+//!   zonal banding, haze, rim halo, Rayleigh blue gaps, limb darkening,
+//!   ring system.
+//! - [`TerrestrialAtmosphere`] — terrestrial bodies with a thin gas
+//!   shell over a baked solid surface. Much sparser schema: rim halo +
+//!   limb shading + optional limb darkening. Built to composite over
+//!   the impostor rather than replace it.
+//!
+//! The two schemas are sibling-exclusive at the body level: a body
+//! carries either `atmosphere: Some(AtmosphereParams)` or
+//! `terrestrial_atmosphere: Some(TerrestrialAtmosphere)`, never both.
+//! (Sibling fields, not an enum, because the gas-giant schema is large
+//! and already stable; an enum migration is a follow-up.)
 //!
 //! ## Layer model
 //!
@@ -300,6 +317,35 @@ pub struct RayleighLayer {
     pub latitude_bias: f32,
 }
 
+/// Per-wavelength Rayleigh scattering for a terrestrial atmosphere.
+///
+/// Drives both the ground-illumination reddening at low sun (sunsets)
+/// and the view-path in-scatter glow (the orange band seen from orbit
+/// at the terminator, the blue haze at the sub-solar point). Unlike
+/// [`RayleighLayer`] above — which is a gas-giant "blue gap" modulation
+/// of the cloud-deck colour — this models the actual physical process:
+/// short wavelengths accumulate more optical depth per unit path, so
+/// long paths (low sun, grazing views) preferentially transmit red.
+///
+/// Parameters are per-channel vertical optical depth `τ_v`. Canonical
+/// Earth values at sea level: `(0.046, 0.108, 0.264)` for R/G/B. Other
+/// bodies scale with atmospheric column depth (thinner atmospheres
+/// → smaller τ_v uniformly; dustier atmospheres → elevated red).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RayleighAtmosphere {
+    /// Vertical optical depth per RGB channel at zenith (unit airmass).
+    /// Drives both transmission of sunlight to the ground and in-scatter
+    /// intensity toward the viewer. Earth-like: `(0.046, 0.108, 0.264)`.
+    pub vertical_optical_depth: [f32; 3],
+    /// Overall multiplier on both ground transmission and view-path
+    /// in-scatter. 0 disables Rayleigh entirely; 1 = physical scale.
+    /// Values above 1 exaggerate the effect for artistic purposes
+    /// (more saturated sunsets, deeper daylight haze) at the cost of
+    /// physical accuracy.
+    #[serde(default = "default_one")]
+    pub strength: f32,
+}
+
 /// Per-channel Minnaert-style limb darkening.
 ///
 /// Applied as a luminance-only multiplier `pow(n_dot_v, k_channel)`
@@ -405,4 +451,152 @@ fn default_ringlet_noise() -> f32 {
 }
 fn default_ringlet_octaves() -> u32 {
     6
+}
+
+// ---------------------------------------------------------------------------
+// Terrestrial atmospheres
+// ---------------------------------------------------------------------------
+
+/// Thin atmosphere layered over a terrestrial (solid-surface) body.
+///
+/// Where `AtmosphereParams` describes the entirety of a gas giant's
+/// visible disk, `TerrestrialAtmosphere` describes only what modifies
+/// light passing through a thin gas shell above a baked planet impostor.
+/// First-pass schema: the gas-giant `RimHalo` + `LimbShading` primitives
+/// are reused directly — they already model the two dominant cues that
+/// read as "planet with atmosphere" from orbit (blue halo outside the
+/// silhouette, cool limb on the lit side, warm sunset band near the
+/// terminator). A proper Rayleigh/Mie scattering model with per-fragment
+/// in-scatter integration is a later pass.
+///
+/// Every field is optional. A body with `TerrestrialAtmosphere::default`
+/// renders identically to a body with no atmosphere — the shader gates
+/// each layer on its own intensity scalar.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TerrestrialAtmosphere {
+    /// Rim glow visible just outside the body's silhouette. Uses the
+    /// same exponential-density column integration the gas-giant
+    /// shader uses. None disables the rim entirely.
+    #[serde(default)]
+    pub rim_halo: Option<RimHalo>,
+
+    /// Terminator warmth (sunset band) plus Fresnel-style limb tint on
+    /// the lit hemisphere. For a terrestrial impostor, the Fresnel tint
+    /// is the dominant "blue atmosphere on the lit disk" cue. None
+    /// disables limb shading.
+    #[serde(default)]
+    pub limb: Option<LimbShading>,
+
+    /// Per-channel Minnaert limb darkening. Terrestrials typically show
+    /// weaker chromatic limb darkening than gas giants (thinner
+    /// scattering path), so this is usually left off for a first pass.
+    /// None disables the effect.
+    #[serde(default)]
+    pub limb_darkening: Option<LimbDarkening>,
+
+    /// Per-wavelength Rayleigh scattering: produces sunset-coloured
+    /// terrain at the terminator, blue haze across the lit disk, and
+    /// the red-orange in-scatter band seen from orbit. None disables
+    /// the effect entirely and the impostor renders with unattenuated
+    /// white sunlight.
+    #[serde(default)]
+    pub rayleigh: Option<RayleighAtmosphere>,
+
+    /// Cloud cover layer. A shader-synthesized cloud field composited
+    /// over the lit surface — bright white in sunlight, alpha-blended
+    /// by density, drifting with differential rotation by latitude so
+    /// weather systems evolve visibly as the impostor rotates. None
+    /// disables the layer.
+    ///
+    /// The physical model is deliberately the cheapest thing that
+    /// reads as "weather" at impostor distance: fractal noise on the
+    /// sphere, no explicit storm list, no shadow-casting on the
+    /// surface below. A real physical cloud volume (shadow casting,
+    /// proper altitude parallax, named storms) belongs in the
+    /// real-size volumetric renderer that comes after UDLOD lands;
+    /// this layer is the stand-in so Thalos reads as a living planet
+    /// from orbit today.
+    #[serde(default)]
+    pub clouds: Option<CloudCover>,
+}
+
+/// Shader-synthesized cloud layer for a terrestrial impostor.
+///
+/// Clouds are modelled as a fractal-noise density field over the unit
+/// sphere, drifted by differential rotation (faster at the equator,
+/// slower at the poles) and composited on top of the lit surface. The
+/// parameters below are authored per body so different worlds can have
+/// visibly distinct weather characters — Thalos's scattered mid-latitude
+/// systems vs. an Exo-Venus's global overcast vs. a thin-atmosphere
+/// Mars-analog with occasional dust haze.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CloudCover {
+    /// Total disk coverage fraction in [0, 1]. 0 = clear skies, 1 =
+    /// fully overcast. Earth sits around 0.55–0.65; Thalos with a
+    /// thinner atmosphere nominally a bit lower.
+    pub coverage: f32,
+
+    /// Soft-edge width of the cloud/no-cloud boundary in density units.
+    /// Smaller = crisp cumulus edges, larger = hazy boundaries. Typical
+    /// range 0.04–0.15.
+    #[serde(default = "default_cloud_softness")]
+    pub softness: f32,
+
+    /// Base spatial frequency of the cloud fBm field, in cycles over
+    /// the unit sphere. 3–5 → continent-sized cloud clusters; 8+ →
+    /// fine-grained clutter suitable for tropical convection. Earth-
+    /// analog starting point: 4.
+    #[serde(default = "default_cloud_frequency")]
+    pub frequency: f32,
+
+    /// Number of fBm octaves. 3 is the minimum for recognisable shape;
+    /// 5–6 gives storm-like substructure at the cost of per-fragment
+    /// work.
+    #[serde(default = "default_cloud_octaves")]
+    pub octaves: u32,
+
+    /// Linear-space RGB albedo of sunlit clouds. Typically very near
+    /// `(1, 1, 1)` — water-vapour clouds are close to spectrally
+    /// neutral. Tint here can model dust storms (warm ochre) or
+    /// sulphate hazes (pale yellow).
+    #[serde(default = "default_cloud_albedo")]
+    pub albedo: [f32; 3],
+
+    /// Scroll rate, in radians per second of sim time, at the equator.
+    /// Positive = prograde drift. Typical Earth-analog weather moves
+    /// at ~15 m/s zonal mean, which at Thalos's 3186 km radius is
+    /// ~4.7e-6 rad/s relative to the surface.
+    #[serde(default = "default_cloud_scroll_rate")]
+    pub scroll_rate: f32,
+
+    /// Differential rotation coefficient in [0, 1]. 0 = solid-body
+    /// drift (all latitudes at `scroll_rate`), 1 = strongly latitude-
+    /// banded (equator at `scroll_rate`, poles stationary). Typical
+    /// terrestrial: 0.3–0.5.
+    #[serde(default = "default_cloud_differential")]
+    pub differential_rotation: f32,
+
+    /// Per-body noise seed. Changes the cloud pattern without touching
+    /// any other parameter.
+    #[serde(default)]
+    pub seed: u64,
+}
+
+fn default_cloud_softness() -> f32 {
+    0.08
+}
+fn default_cloud_frequency() -> f32 {
+    4.0
+}
+fn default_cloud_octaves() -> u32 {
+    5
+}
+fn default_cloud_albedo() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
+fn default_cloud_scroll_rate() -> f32 {
+    4.7e-6
+}
+fn default_cloud_differential() -> f32 {
+    0.35
 }
