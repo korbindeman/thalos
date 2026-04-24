@@ -239,16 +239,13 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 0.0,
             )),
-            // Thalos MVP tectonic recipe.
+            // Thalos terrain pipeline (in rebuild).
             //
-            // Full roadmap in `docs/gen/thalos_processes.md`. This pipeline
-            // implements Plates → Tectonics → Topography (MVP — no IQ
-            // analytical-derivative noise yet) and drives Biomes from the
-            // baked height field so land/ocean matches the plate geometry.
+            // Target spec: `docs/thalos_terrain_pipeline.md`. Six stages,
+            // icosphere-canonical, cubemap is a derived render output.
             //
-            // Remaining stages (Hotspots, Hydrology, Climate, Biomes
-            // expansion for rainforest/savannah/desert/rust signature)
-            // ship after MVP signoff.
+            // Status: Stage 1 (TectonicSkeleton) only. Old stages cleared
+            // pending the full rebuild.
             generator: Some((
                 seed: 1003,
                 // Iron-core Earth analog: ~70% iron by volume, thin silicate
@@ -258,502 +255,285 @@
                 cubemap_resolution: 2048,
                 body_age_gyr: 4.5,
                 pipeline: [
-                    Differentiate(()),
-                    // Voronoi plate partition. 40 plates, 35% continental
-                    // area (→ 65% ocean), clustered into ~4 seed groups to
-                    // produce Earth-like loose-cluster continents rather
-                    // than a checkerboard or a single supercontinent.
-                    Plates((
-                        n_plates: 40,
-                        // Dropped from 0.35 → 0.30 together with the sea-
-                        // level bump below. The pair produces more Earth-
-                        // like continent separation (islands in a
-                        // connected ocean) instead of the "big joined
-                        // landmass" failure mode that 0.35 + 0.55 sea
-                        // level was prone to.
-                        continental_area_fraction: 0.30,
-                        n_continental_seeds: 4,
-                        neighbour_continental_bias: 0.5,
+                    // Stage 1 — Tectonic Skeleton. Typed province map that
+                    // every subsequent stage cascades from. Low-resolution
+                    // icosphere (level 6 ≈ 40 k verts, ~55 km cells on
+                    // Thalos). Debug albedo paint is on while Stage 2+
+                    // don't exist yet.
+                    TectonicSkeleton((
+                        // Level 8 icosphere → ~655 k vertices, ~14 km
+                        // per hop on Thalos. Resolution where mesh
+                        // topology stops visibly leaking into rivers
+                        // and coastlines.
+                        subdivision_level: 8,
+                        // 20 cratons → each ~500 km radius, matching
+                        // Archean craton scale.
+                        n_cratons: 20,
+                        // Noise-warped Voronoi: domain-warps each
+                        // vertex before plate assignment, so plate
+                        // boundaries become fractal at the warp's
+                        // spatial frequency. Continents are decided
+                        // *independently* by Stage 2's noise mask —
+                        // plates here only drive tectonic features
+                        // (sutures / rifts / active margins /
+                        // hotspots), which can land on continent or
+                        // ocean without aligning to coastlines.
+                        plate_warp_amplitude: 0.4,
+                        plate_warp_frequency: 3.0,
+                        plate_warp_octaves: 5,
+                        n_active_margins: 1,
+                        n_rift_scars: 2,
+                        n_hotspot_tracks: 4,
+                        // 12 hops ≈ 170 km on level 8 — Hawaii-scale,
+                        // not a 560 km ridge. Only the youngest few
+                        // vertices read above water after Stage 2/3
+                        // process the track.
+                        hotspot_track_length: 12,
                         lloyd_iterations: 3,
+                        // Stage 2 paints its own elevation-relief debug
+                        // albedo. Turning Stage 1's off keeps the final
+                        // bake showing the elevation field, not the flat
+                        // province skeleton.
+                        debug_paint_albedo: false,
                     )),
-                    // Boundary classification. 20% active boundaries
-                    // matches the "declining phase" narrative (most
-                    // orogens old and worn; only a few still rising).
-                    // This stage no longer writes orogen fields — that's
-                    // OrogenDla's job; see below.
-                    Tectonics((
-                        active_boundary_fraction: 0.20,
-                        orogen_age_peak_gyr: 2.0,
+                    // Stage 2 — Coarse Elevation. Continental mask
+                    // comes from warped fBm noise thresholded to the
+                    // target ocean fraction — *independent of the
+                    // plate partition*. Plate boundaries drive
+                    // tectonic features (sutures, rifts, active
+                    // margins, hotspots) that land on continent or
+                    // ocean without aligning to coastlines. Matches
+                    // Earth: Pacific plate has no continent; Eurasia
+                    // carries Europe + Asia; Mid-Atlantic Ridge runs
+                    // underwater.
+                    CoarseElevation((
+                        // Continent mask — warped fBm, thresholded to
+                        // hit 65 % ocean by percentile, then
+                        // connected-component-filtered to remove
+                        // tiny land/ocean fragments.
+                        target_ocean_fraction: 0.65,
+                        // 6 octaves × 0.55 persistence × freq 2.0 is
+                        // the standard fBm "continent profile" — gives
+                        // a handful of continent-scale features plus
+                        // rich fractal coastline detail at the scales
+                        // the mask is designed to show. Fragmentation
+                        // from marginal threshold-crossings is cleaned
+                        // up after the fact by the component filter.
+                        continent_noise_frequency: 2.0,
+                        continent_noise_octaves: 6,
+                        continent_noise_persistence: 0.55,
+                        continent_warp_amplitude: 0.45,
+                        continent_warp_frequency: 2.2,
+                        // Anisotropic stretch: compress the N-S axis
+                        // before noise sampling so features read
+                        // wider E-W. 1.5 is Earth-ish (Eurasia-wide
+                        // but not striped); >2 starts looking
+                        // banded.
+                        horizontal_stretch: 1.5,
+                        // Quadratic latitude bias `bias·(0.5 - sin²lat)`
+                        // added to the mask. Positive pulls land
+                        // toward mid/low latitudes. 0.2 is gentle
+                        // enough not to carve a hard belt.
+                        mid_latitude_bias: 0.2,
+                        // Drop land components smaller than 0.3 % of
+                        // the sphere (~Madagascar scale) — kills
+                        // noise-fragment islands while preserving
+                        // real island arcs. Ocean fill disabled:
+                        // interior seas are realistic and filling
+                        // them drops sea level to hold the 65 %
+                        // target, which drowns continental interior.
+                        min_land_fraction: 0.003,
+                        min_ocean_fraction: 0.0,
+                        // Earth-relative baseline elevations:
+                        // +500 m continent / -3500 m ocean floor.
+                        // Gives a 4 km bias gap; with noise at
+                        // 1500 m (half-gap − 500 m buffer) the
+                        // distributions stay separate, no coastline
+                        // speckle. After erosion, sea level settles
+                        // ~−1500 m and continents sit ≈500–3500 m
+                        // above sea level — matches Earth's
+                        // hypsometric profile.
+                        continental_bias_m: 500.0,
+                        oceanic_bias_m: -3500.0,
+                        // Suture: ~85 km mountain-belt half-width
+                        // (Himalayas / Urals scale). Previous values
+                        // were 4× too wide, causing 3σ uplift discs
+                        // to blanket ~70 % of the planet and push
+                        // sea level into collapse.
+                        suture_height_m: 1500.0,
+                        suture_falloff_hops: 6.0,
+                        suture_age_decay_myr: 800.0,
+                        rift_depth_m: 800.0,
+                        rift_falloff_hops: 3.0,
+                        // Active margin: Andes-scale arc + offshore
+                        // trench. 4 hops ≈ 56 km (narrower than
+                        // Andes' 100 km but matches sharp-relief
+                        // spec). Trench peak 10 hops offshore ≈ 140
+                        // km.
+                        active_uplift_m: 3500.0,
+                        active_trench_m: 3500.0,
+                        active_falloff_hops: 4.0,
+                        trench_offset_hops: 10.0,
+                        trench_width_hops: 3.0,
+                        // Seamounts as point-like bumps (1.5-hop tight
+                        // Gaussian) rather than a continuous ridge.
+                        // Paired with shorter track length below,
+                        // renders as Hawaii-style isolated island
+                        // chain (just a couple above water) rather
+                        // than a visible linear ridge in the ocean.
+                        hotspot_height_m: 800.0,
+                        hotspot_falloff_hops: 1.5,
+                        // 1500 m noise, inside the 2000 m half-gap
+                        // with 500 m buffer. Gives visible
+                        // elevation variation inside continents and
+                        // oceans without letting ocean noise push
+                        // above sea level as speckle islands.
+                        noise_amplitude_m: 1500.0,
+                        noise_frequency: 2.5,
+                        noise_octaves: 7,
+                        noise_persistence: 0.62,
+                        // Doubled warp amplitude (0.30 vs 0.15) — domain
+                        // warp displaces each sample point by ~30% of
+                        // the unit-sphere radius in each axis before
+                        // fbm is evaluated. That's enough distortion
+                        // that the noise structure bends the
+                        // continentalness-derived coastline into
+                        // peninsulas, bays, and detached island arcs
+                        // instead of gently-lumpy blobs.
+                        // Strong domain warp: displaces sample position
+                        // by ~45 % of the unit sphere radius before fbm
+                        // evaluation. Enough distortion that the
+                        // continentalness-derived coastline bends into
+                        // complex peninsulas and detached fragments,
+                        // burying the underlying craton Voronoi shape.
+                        warp_amplitude: 0.45,
+                        warp_frequency: 3.0,
+                        // Stage 3 repaints the albedo on top of this;
+                        // we still want Stage 2's bake in place in case
+                        // Stage 3 is truncated via `--up-to-stage`.
+                        debug_paint_albedo: true,
                     )),
-                    // Diffusion-Limited Aggregation mountain ranges
-                    // anchored to convergent boundaries. Replaces the
-                    // old Voronoi-distance orogen field (which printed
-                    // hexagonal cell outlines into the height map) with
-                    // dendritic ridge networks grown from seeds planted
-                    // along each convergent boundary.
-                    OrogenDla((
-                        // Level 7 → ~160k verts (~28 km spacing on
-                        // Thalos) gives DLA enough resolution that
-                        // dendritic branches fill in at mountain-ridge
-                        // scale without individual stamps being visible
-                        // as cells.
-                        subdivision_level: 7,
-                        seed_density: 6.0,
-                        walkers_per_seed: 400,
-                        walker_step_budget: 400,
-                        launch_cap_km: 500.0,
-                        // Stamp radius chosen slightly larger than the
-                        // inter-sample spacing along an edge (edge ~28
-                        // km / 8 samples ≈ 3.5 km), so stamps overlap
-                        // into continuous ridges under quartic falloff.
-                        ridge_falloff_km: 8.0,
-                        depth_saturation: 5.0,
-                        samples_per_edge: 8,
-                        midpoint_jitter_frac: 0.4,
+                    // Stage 3 — Hydrological Carving. The character-
+                    // defining stage: water carves the Stage 2
+                    // heightfield into dendritic valleys, sediment
+                    // fills lowlands, and sea level is set last to hit
+                    // the 65% ocean target. Drainage graph and sediment
+                    // map persist to BodyData for later stages and
+                    // gameplay.
+                    HydrologicalCarving((
+                        // 100 iterations of stream-power erosion —
+                        // enough to carve visible valleys into all but
+                        // the flattest lowlands without pounding the
+                        // continents into flatness.
+                        erosion_iterations: 100,
+                        erosion_k: 2.0e-4,
+                        stream_power_m: 0.5,
+                        stream_power_n: 1.0,
+                        max_erosion_per_iter_m: 50.0,
+                        deposition_rate: 0.08,
+                        pit_fill_epsilon_m: 0.001,
+                        // Spec: Thalos is 65% ocean.
+                        target_ocean_fraction: 0.65,
+                        // Only show trunk rivers — at level 8 every
+                        // headwater is resolved, but capillaries are
+                        // sub-pixel at orbital view.
+                        river_accumulation_threshold_m2: 2.0e11,
+                        // ~2.5 km half-width — visible as thin lines
+                        // from orbital view without dominating. Real
+                        // equivalent: Amazon / Mississippi reading
+                        // from ISS altitude.
+                        river_half_width_rad: 0.0008,
+                        // Stage 5 paints the material map over the top;
+                        // leaving Stage 3's hypsometric paint off so the
+                        // final bake shows the material assignments.
+                        debug_paint_albedo: false,
                     )),
-                    // Height field: continentalness-lerped baseline
-                    // + orogen bumps + fbm roughness + multi-scale
-                    // regional fbm (warp-sampled) + coastal detail,
-                    // renormalized so sea level sits at the target
-                    // percentile of the distribution.
-                    //
-                    // Plate identity still decides where land *tends* to
-                    // sit, but through a smooth weighted-blend of all
-                    // plate kinds (`continentalness_bandwidth`-wide
-                    // transitions at boundaries) — not a nearest-texel
-                    // cubemap lookup. The lookup approach produced
-                    // half-a-texel-wide discontinuities at cube-face
-                    // seams that the shader's normal-gradient computation
-                    // rendered as visible seam lines. Smooth blend keeps
-                    // the height cubemap continuous.
-                    //
-                    // Regional fbm (±~4100 m total) overlaid on the
-                    // baseline gap (±2000 m) lets cells flip across sea
-                    // level near plate margins — inland seas and open-
-                    // ocean islands emerge naturally. Peak active orogen
-                    // budget 7 km (Thalos's 0.91 g gives near-Everest
-                    // headroom). Ancient orogens decay via
-                    // exp(-age / 1500 Myr) to rolling hills.
-                    Topography((
-                        // Baseline gap shrunk from (+500, −3500) to (+150,
-                        // −1500) so the regional fbm field (±~4100 m
-                        // total) dominates the land/ocean decision instead
-                        // of the plate baselines. With the old gap the
-                        // continental-vs-oceanic step printed plate
-                        // shapes into the height field as visible
-                        // pentagons; the smaller gap leaves continents to
-                        // emerge from the noise + plate bias instead of
-                        // from a hard step. Sea-level percentile (below)
-                        // still hits the ~35% land target.
-                        continental_baseline_m: 150.0,
-                        oceanic_baseline_m: -1500.0,
-                        // Gaussian-kernel `exp(−d²/bw²)` convention
-                        // (changed when the previous exp-distance kernel
-                        // was sprouting centroid spikes). bw = 0.12 ≈
-                        // 28° ≈ 1600 km lets every cell receive
-                        // meaningful weight from 2–3 neighbouring plates,
-                        // so continentalness becomes a genuinely
-                        // smooth low-frequency field rather than a
-                        // per-plate plateau.
-                        continentalness_bandwidth: 0.12,
-                        peak_orogen_m: 7000.0,
-                        // Uniform roughness — continentalness-gated
-                        // amplitude would reintroduce a plate-kind step
-                        // and re-create the seam problem.
-                        roughness_m: 700.0,
-                        orogen_age_scale_myr: 1500.0,
-                        // 4.0 base × 7 octaves × 2.1 lacunarity puts the
-                        // finest resolvable roughness at ~60 km features —
-                        // mountain/hill scale, visible in the shader's
-                        // height-gradient normal perturbation.
-                        noise_frequency: 4.0,
-                        // Three-level nested IQ-style domain warp
-                        // (`f(p + s(p))` recursive). Inner perturbs mid's
-                        // sample point; mid perturbs outer's; outer IS the
-                        // warp applied to the plate-lookup direction.
-                        // Nesting (not additive) gives multi-scale fractal
-                        // coastlines: peninsulas at continent scale, bays
-                        // inside, inlets inside those.
-                        warp_amplitude: 0.16,
-                        warp_frequency: 1.8,
-                        warp_amplitude_mid: 0.10,
-                        warp_frequency_mid: 5.0,
-                        warp_amplitude_hi: 0.04,
-                        warp_frequency_hi: 14.0,
-                        // Multi-scale regional fbm: three independent bands
-                        // composed additively. Lo picks where landmasses
-                        // broadly sit; mid shapes subcontinents; hi fills
-                        // in interior relief variation. Summed peaks reach
-                        // ~4100 m — comparable to the baseline gap, so the
-                        // combined field (not plate identity) decides
-                        // where land sits.
-                        regional_height_lo_m: 2000.0,
-                        regional_frequency_lo: 0.5,
-                        regional_height_m: 1500.0,
-                        regional_frequency: 1.5,
-                        regional_height_hi_m: 600.0,
-                        regional_frequency_hi: 4.0,
-                        // High-freq detail concentrated near sea level.
-                        // Peaks at the coastline, decays within ±1300 m —
-                        // producing fjord-like and archipelago-scatter
-                        // roughness on shorelines without polluting
-                        // mountain peaks or deep ocean. Widened from the
-                        // initial ±800 m band so the fractal character
-                        // reaches further inland (fjord-scale inlets) and
-                        // further offshore (archipelago scatter).
-                        // Amplitude kept smaller than the narrowest biome
-                        // band it can cross (150 m coast) so speckle
-                        // doesn't flip cells between coast and land/deep-
-                        // ocean.
-                        coastal_detail_m: 220.0,
-                        coastal_detail_frequency: 18.0,
-                        coastal_detail_scale_m: 1300.0,
-                        // Renormalize so 65% of cells fall below sea level.
-                        // Matches the design target in
-                        // docs/gen/thalos_processes.md ("~65% ocean cover")
-                        // and Earth's 71% for visual lineage. Higher ocean
-                        // fraction also statistically separates continents
-                        // more — a common Earth-like orbit-look pattern
-                        // that 0.55 didn't reliably produce.
-                        sea_level_percentile: 0.65,
-                    )),
-                    // Climate: annual-mean temperature and precipitation
-                    // over the surface. Temperature is the latitude × lapse
-                    // model; precipitation is zonal Hadley/Ferrel/polar
-                    // bands plus wind advection (trade winds equatorward,
-                    // westerlies mid-lat, polar easterlies) with
-                    // continentality decay over land and orographic lift /
-                    // rain shadow against mountain belts. Drives Biomes'
-                    // Whittaker-style TempPrecip rules so the continent is
-                    // partitioned into rainforest / savanna / desert /
-                    // grassland / forest / taiga / tundra rather than a
-                    // single rust-tinted "highland" tan.
-                    Climate((
-                        // Equator/pole annual means. Thalos is warmer than
-                        // Earth at 1 AU because its 0.85 atm atmosphere is
-                        // slightly less efficient at radiating, but the
-                        // iron core heat flux is near-zero — pick a
-                        // moderate Earth-like gradient.
-                        equator_temp_c: 27.0,
-                        polar_temp_c: -28.0,
-                        // >1 widens the tropics and concentrates the drop
-                        // near the poles; matches Earth's band widths.
-                        lat_exponent: 1.3,
-                        // Standard environmental lapse rate.
-                        lapse_c_per_km: 6.5,
-                        // Nine 10° bins, equator → pole. ITCZ wet, horse
-                        // latitudes (20-30°) dry, Ferrel wet, subpolar
-                        // medium, polar desert dry.
-                        zonal_precip_mm: (2500.0, 2000.0, 600.0, 700.0, 1200.0, 1100.0, 800.0, 400.0, 200.0),
-                        // 12 steps × 0.05 rad ≈ 0.60 rad ≈ 1900 km upwind
-                        // trace on Thalos's 3186 km radius. Captures the
-                        // dominant rain-shadow and continentality signal.
-                        upwind_steps: 12,
-                        step_arc_rad: 0.05,
-                        // Each land step retains 90 % of moisture →
-                        // 12 land steps retain 0.9^12 ≈ 0.28, producing
-                        // clearly drier continental interiors without
-                        // completely desiccating mid-continent.
-                        continentality_decay: 0.90,
-                        // Windward-slope boost and leeward rain-shadow.
-                        // 0.5/km × 3 km rise ≈ 2.5× precip boost;
-                        // 0.4/km × 3 km drop ≈ 2.2× divisor.
-                        orographic_gain_per_km: 0.5,
-                        rain_shadow_per_km: 0.4,
-                        // Jitter breaks hard zonal bands into irregular
-                        // blobs. 25 % wobble produces visibly chaotic
-                        // precipitation patterns on top of the underlying
-                        // latitudinal structure — matches Earth's mix of
-                        // "Hadley cell gave this band the budget, but the
-                        // actual rainfall is lumpy."
-                        precip_noise_amp: 0.25,
-                        precip_noise_frequency: 3.0,
-                    )),
-                    // Climate-driven biome palette. The previous elevation-
-                    // only banding (highland/arid_lowland/lowland) painted
-                    // most of the continent a single warm tan because
-                    // Topography pushes the majority of land above 800 m;
-                    // TempPrecip subdivides land by temperature × rainfall
-                    // (Whittaker diagram) into realistic regional biomes.
-                    //
-                    // Rules are evaluated in order, first match wins. Ice /
-                    // ocean / coast / alpine / orogen claim their cells
-                    // first (these have hard physical definitions); the
-                    // remaining land cells are then partitioned by climate.
-                    // Iron-oxide rust tint is authored directly into
-                    // hot_desert, cold_desert, and orogen_active — the
-                    // "metal world signature" from docs/gen/thalos_processes.md.
-                    Biomes((
-                        biomes: [
-                            (
-                                // Deep ocean classifier. The *visible*
-                                // ocean colour comes from PaintBiomes'
-                                // ocean_depth overlay — this biome exists
-                                // so the classifier has something to
-                                // return below sea level and so roughness
-                                // flows per-surface-type through the
-                                // material palette.
-                                name: "ocean",
-                                albedo: 0.05,
-                                fresh_albedo: Some(0.08),
-                                tint: (0.30, 0.50, 1.00),
-                                tonal_amp: 0.08,
-                                roughness: 0.05,
-                            ),
-                            (
-                                // Continental-shelf classifier. Same
-                                // story — real colour comes from
-                                // ocean_depth; tint kept close to the
-                                // shallow-end target so any fallback
-                                // stays in-family.
-                                name: "coast",
-                                albedo: 0.09,
-                                fresh_albedo: Some(0.12),
-                                tint: (0.55, 0.85, 1.00),
-                                tonal_amp: 0.10,
-                                roughness: 0.08,
-                            ),
-                            (
-                                // Active tectonic uplift belts. Base tint
-                                // slightly warm; the slope-driven
-                                // rock_overlay paints bare rock on the
-                                // steepest cells so the ridge reads
-                                // independently of climate biome.
-                                name: "orogen_active",
-                                albedo: 0.18,
-                                fresh_albedo: Some(0.26),
-                                tint: (1.05, 0.92, 0.78),
-                                tonal_amp: 0.20,
-                                roughness: 0.92,
-                            ),
-                            (
-                                // Equatorial wet — dense canopy. Muted
-                                // olive from orbit, not the Crayola green
-                                // the earlier tint printed as.
-                                name: "rainforest",
-                                albedo: 0.09,
-                                fresh_albedo: Some(0.14),
-                                tint: (0.65, 0.92, 0.62),
-                                tonal_amp: 0.20,
-                                roughness: 0.85,
-                            ),
-                            (
-                                // Hot + dry — iron-rust Sahara analog.
-                                // Red tint pulled back from 1.25→1.12 so
-                                // it reads as warm tan, not neon orange.
-                                name: "hot_desert",
-                                albedo: 0.28,
-                                fresh_albedo: Some(0.36),
-                                tint: (1.12, 0.88, 0.62),
-                                tonal_amp: 0.22,
-                                roughness: 0.90,
-                            ),
-                            (
-                                // Hot + moderate precip — golden savanna.
-                                name: "savanna",
-                                albedo: 0.20,
-                                fresh_albedo: Some(0.28),
-                                tint: (1.02, 0.95, 0.68),
-                                tonal_amp: 0.24,
-                                roughness: 0.80,
-                            ),
-                            (
-                                // Temperate moist forest.
-                                name: "temperate_forest",
-                                albedo: 0.12,
-                                fresh_albedo: Some(0.18),
-                                tint: (0.78, 0.95, 0.66),
-                                tonal_amp: 0.22,
-                                roughness: 0.85,
-                            ),
-                            (
-                                // Dry mid-latitudes + cold-zone steppe —
-                                // muted rust/ochre.
-                                name: "cold_desert",
-                                albedo: 0.23,
-                                fresh_albedo: Some(0.30),
-                                tint: (1.08, 0.94, 0.72),
-                                tonal_amp: 0.20,
-                                roughness: 0.85,
-                            ),
-                            (
-                                // Boreal coniferous forest.
-                                name: "taiga",
-                                albedo: 0.10,
-                                fresh_albedo: Some(0.16),
-                                tint: (0.72, 0.90, 0.75),
-                                tonal_amp: 0.22,
-                                roughness: 0.80,
-                            ),
-                            (
-                                // Polar land — permafrost tundra. Snow
-                                // overlay blends this base colour toward
-                                // white as temperature drops; warm edge
-                                // of the tundra reads as greyed earth,
-                                // cold edge as fully snow-covered.
-                                name: "tundra",
-                                albedo: 0.22,
-                                fresh_albedo: Some(0.30),
-                                tint: (0.92, 0.94, 0.96),
-                                tonal_amp: 0.12,
-                                roughness: 0.70,
-                            ),
-                            (
-                                // Default catch-all — temperate grassland.
-                                name: "grassland",
-                                albedo: 0.18,
-                                fresh_albedo: Some(0.25),
-                                tint: (0.98, 0.96, 0.72),
-                                tonal_amp: 0.26,
-                                roughness: 0.80,
-                            ),
-                        ],
-                        rules: [
-                            // Deep ocean and shelf — claim before climate
-                            // rules so TempPrecip only sees land. Jitter
-                            // softens shelf-edge and shoreline contours.
-                            HeightBelow(m: -150.0, jitter_amp_m: 250.0, jitter_frequency: 3.5),
-                            HeightBelow(m: 0.0, jitter_amp_m: 200.0, jitter_frequency: 4.0),
-                            // Active mountain chains.
-                            Orogen(min_intensity: 0.30, max_age_myr: Some(500.0), jitter_amp: 0.10, jitter_frequency: 4.0),
-                            // ── Whittaker climate zones ───────────────
-                            // Order: most-specific first.
-                            // Tropical very wet → rainforest.
-                            TempPrecip(
-                                min_temp_c: 22.0,
-                                min_precip_mm: 1700.0,
-                                jitter_amp: 0.18,
-                            ),
-                            // Tropical dry → hot desert.
-                            TempPrecip(
-                                min_temp_c: 22.0,
-                                max_precip_mm: 500.0,
-                                jitter_amp: 0.18,
-                            ),
-                            // Remaining warm cells → savanna.
-                            TempPrecip(
-                                min_temp_c: 20.0,
-                                jitter_amp: 0.18,
-                            ),
-                            // Temperate wet → forest.
-                            TempPrecip(
-                                min_temp_c: 5.0,
-                                max_temp_c: 22.0,
-                                min_precip_mm: 700.0,
-                                jitter_amp: 0.18,
-                            ),
-                            // Any remaining dry cell → cold desert.
-                            TempPrecip(
-                                max_precip_mm: 250.0,
-                                jitter_amp: 0.18,
-                            ),
-                            // Cool (−5..5 °C) with moisture → taiga.
-                            TempPrecip(
-                                min_temp_c: -5.0,
-                                max_temp_c: 5.0,
-                                jitter_amp: 0.18,
-                            ),
-                            // Very cold → tundra (snow overlay blends on top).
-                            TempPrecip(
-                                max_temp_c: -5.0,
-                                jitter_amp: 0.18,
-                            ),
-                            // Fallback: grassland.
-                            Default,
-                        ],
-                    )),
-                    // Continuous-colour PaintBiomes: per-texel ocean
-                    // depth gradient, climate-driven snow coverage, and
-                    // slope-driven rock exposure + AO, layered over the
-                    // biome-palette base. Kills the "three concentric
-                    // flat-colour rings at the pole" look that discrete
-                    // ice/alpine biomes produced, and gives mountains
-                    // shaded relief at orbital distance.
-                    PaintBiomes((
-                        ocean_depth: Some((
-                            // Muted shelf teal — Apollo-era Bahamas /
-                            // Caribbean shallows. Linear (0.04, 0.11,
-                            // 0.16) ≈ sRGB (56, 96, 116): a dim teal
-                            // at orbital distance, not the bright
-                            // pool-water cyan the earlier
-                            // (0.16, 0.34, 0.44) config produced once
-                            // Rayleigh scatter lifted it on top.
-                            shallow_color: (0.04, 0.11, 0.16),
-                            // Deep basin — near-black navy.
-                            deep_color: (0.003, 0.010, 0.028),
-                            // Saturates at 1.5 km so Thalos's typical
-                            // −1500 m oceanic baseline reads as full
-                            // deep colour. The prior 4 km saturation
-                            // left most of the ocean at a half-shallow
-                            // half-deep blend, i.e. uniform cyan.
-                            // Coastlines still get their few-hundred-m
-                            // shallow band from the smoothstep.
-                            deep_m: 1500.0,
-                        )),
-                        rock_overlay: Some((
-                            // Tangent slope threshold (rise/run). 0.08
-                            // ≈ 4.6°, 0.25 ≈ 14° — matches the range
-                            // where real landscapes transition from
-                            // soil-covered to exposed-rock. Thalos's
-                            // noise field has plenty of cells above
-                            // 0.25; the orogen cores push into 0.5+.
-                            slope_start: 0.08,
-                            slope_full: 0.25,
-                            // Rocks start getting exposed above 3.5 km
-                            // regardless of slope; full by 3.5 + 2.5 km
-                            // (since boost is 0.4/km).
-                            height_boost_from_m: 3500.0,
-                            height_boost_per_km: 0.40,
-                            // Warm grey-brown iron-rust rock — Thalos's
-                            // "metal world" signature expressed as
-                            // oxidised basement rather than a flat red.
-                            color: (0.26, 0.22, 0.18),
-                            tonal_amp: 0.25,
-                            tonal_frequency: 4.5,
-                        )),
-                        snow_overlay: Some((
-                            // Coverage = 1.0 at temp_full_c or colder,
-                            // 0.0 at temp_none_c or warmer. With
-                            // Thalos's climate (27 °C equator,
-                            // −28 °C pole, 6.5 °C/km lapse), a 0 →
-                            // −20 °C band puts full snow at genuinely
-                            // polar latitudes, a partial-cover belt
-                            // reaching down toward ~50° latitude at
-                            // sea level, and glaciated high peaks
-                            // well into the mid-latitudes. Wider
-                            // than −5 → −15 so the spatial transition
-                            // spans a few-km-wide partial-cover belt
-                            // rather than collapsing to a sharp edge.
-                            temp_none_c: 0.0,
-                            temp_full_c: -20.0,
-                            jitter_amp_c: 5.0,
-                            jitter_frequency: 2.4,
-                            // Slightly warm off-white — fresh orbital
-                            // snow is rarely pure (1,1,1); edges pick
-                            // up dust and vegetation understory.
-                            land_color: (0.82, 0.82, 0.84),
-                            // Sea ice reads colder/bluer than land
-                            // snow because the water beneath scatters
-                            // longer wavelengths out of the column.
-                            sea_ice_color: (0.74, 0.78, 0.82),
-                            tonal_amp: 0.08,
-                        )),
-                        slope_ao: Some((
-                            // Start darkening earlier than rock shows
-                            // up so cliffs and canyon walls read as
-                            // "shaded" before they read as "bare rock".
-                            slope_start: 0.05,
-                            slope_full: 0.40,
-                            // Gentle — the shader also darkens lit
-                            // normals via `perturb_normal_from_height`,
-                            // so large `max_darken` here would double-
-                            // count with real terminator shading and
-                            // crush steep sun-facing slopes into black.
-                            // 0.18 is enough to read as relief on the
-                            // albedo at orbital distance without
-                            // dominating the shaded gradient.
-                            max_darken: 0.18,
-                        )),
+                    // Stage 5 — Surface Materials. Assigns a material
+                    // ID to every vertex based on history: province
+                    // kind + age, drainage accumulation, sediment
+                    // thickness, and upstream iron provenance. The
+                    // "Thalos is rust" read comes from Stage 3's
+                    // drainage routing iron-rich sediment (eroded
+                    // arc volcanics from ActiveMargin + HotspotTrack
+                    // provinces) to lowland floodplains and beaches.
+                    SurfaceMaterials((
+                        // Narrow coastal band: 200 m below sea level.
+                        // Stage 3's continental-shelf deposition
+                        // elevates the inner seabed fast, so a wider
+                        // band fills nearly half the ocean. 200 m
+                        // keeps the shelf reading as a visible ring
+                        // along coasts rather than overtaking the
+                        // abyssal plains.
+                        shelf_depth_m: 200.0,
+                        // log10(5·10⁹ m²) ≈ 9.7 — catches mid-sized
+                        // rivers, not just continental-trunk mains.
+                        // At level 8 (~655 k verts, ~2·10⁸ m² per
+                        // cell) this is a catchment of ~25 cells,
+                        // about where dendritic tributaries start
+                        // showing visible accumulation in Stage 3.
+                        floodplain_log10_accumulation_m2: 9.7,
+                        // 0.5 m sediment — Stage 3's sediment is
+                        // heavily skewed (median 0, 90th pct ~1 m,
+                        // peak ~2 km). 0.5 m captures "visible
+                        // deposition" without requiring the vertex
+                        // to be a sink.
+                        floodplain_min_sediment_m: 0.5,
+                        // Below 1500 m above sea level: lowland /
+                        // foothill reading. Floodplains up to this
+                        // height cover a broad belt of continental
+                        // interior at Thalos's post-erosion profile.
+                        floodplain_max_elevation_m: 1500.0,
+                        // Above 2500 m with <0.3 m sediment = scoured
+                        // upland. Rare at Thalos's mature profile;
+                        // only the peaks in Suture belts and the
+                        // live ActiveMargin arc qualify.
+                        bare_rock_min_elevation_m: 2500.0,
+                        bare_rock_max_sediment_m: 0.3,
+                        // Stable terrain can carry up to 5 m of
+                        // weathered blanket and still read as
+                        // "Craton at surface." Above that it's
+                        // regolith — transported-sediment drape,
+                        // not in-place weathering. Combined with
+                        // the sediment distribution this keeps
+                        // most craton interiors in granite/BIF
+                        // rather than generic regolith.
+                        ancient_stable_max_sediment_m: 5.0,
+                        // ActiveMargin + HotspotTrack vertices with
+                        // age ≤ 30 Myr still carry fresh basalt
+                        // signatures. Older than that and even
+                        // the rare live provinces read as
+                        // weathered volcanic soils in the
+                        // downstream-rule pass.
+                        fresh_volcanic_max_age_myr: 30.0,
+                        // Source weights. Active arcs are the
+                        // strongest iron emitters per unit area,
+                        // hotspots the most concentrated, Suture
+                        // belts weakest. Suture is a fallback
+                        // stand-in for ArcRemnant (which
+                        // TectonicSkeleton doesn't emit yet); keep
+                        // it below the "active" tier so 51 sutures
+                        // don't swamp the drainage network.
+                        iron_source_active_margin: 1.0,
+                        iron_source_hotspot_track: 1.0,
+                        iron_source_suture: 0.15,
+                        // Floodplain iron cutoff ≈ 5 % catchment-
+                        // averaged iron source. Previous 1 %
+                        // painted rust on every trunk river; 10 %
+                        // eliminated it almost entirely (61 texels).
+                        // 5 % catches floodplains that are genuinely
+                        // downstream of an iron source — active
+                        // margins clear it easily, suture-dominated
+                        // catchments clear it if the upstream is
+                        // >33 % suture.
+                        iron_fraction_threshold: 0.05,
+                        // BIF: an old Suture is iron-bearing even
+                        // without supercatchment downstream —
+                        // being part of the belt itself counts.
+                        // Pair with the suture source weight so a
+                        // suture vertex in a suture-dominated
+                        // catchment clears it.
+                        iron_fraction_bif_threshold: 0.04,
+                        debug_paint_albedo: true,
                     )),
                 ],
             )),
@@ -1153,7 +933,7 @@
                 color: "#D9BF74",
                 albedo: 0.50,
                 rotation_period_s: 36720.0,
-                axial_tilt_deg: 14.0,
+                axial_tilt_deg: 7.0,
             ),
             orbit: Some((
                 semi_major_axis_m: 1.95976e11,
@@ -1369,7 +1149,252 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 72.0,
             )),
-            generator: None,
+            // Ocean moon. 85% ocean cover, volcanic island arcs, no
+            // continents proper. Tidal heating from Auron drives two
+            // active margins and a handful of hotspot tracks — those
+            // are the only things that reliably break the waterline.
+            // Matches `docs/solar_system.md §IV-a`.
+            generator: Some((
+                seed: 1250,
+                // Iron-rich core (8000 kg/m³ density) with residual
+                // silicate mantle and thick hydrosphere + N₂/H₂O
+                // atmosphere as the volatile budget.
+                composition: (silicate: 0.20, iron: 0.70, ice: 0.05, volatiles: 0.05, hydrogen_helium: 0.0),
+                cubemap_resolution: 1024,
+                body_age_gyr: 4.5,
+                pipeline: [
+                    // Stage 1 — Tectonic Skeleton. Plate partition
+                    // supplies the scaffold the active margins and
+                    // hotspot tracks attach to. Pelagos has no
+                    // continents, so the plates themselves don't read
+                    // visually — their boundaries do, through tidal-
+                    // heated arcs.
+                    TectonicSkeleton((
+                        // Level 7 ≈ 164 k vertices, ~20 km per hop on
+                        // a 2350 km body. One level below Thalos —
+                        // the island arcs read at ~100 km scales so
+                        // 20 km resolution is adequate and keeps the
+                        // pipeline fast while the rest of the body
+                        // design settles.
+                        subdivision_level: 7,
+                        // 10 plates — small-world plate count. More
+                        // than needed for tectonic drama, tuned so
+                        // active-margin and hotspot placement has
+                        // several distinct boundary tracks to pick
+                        // from.
+                        n_cratons: 10,
+                        plate_warp_amplitude: 0.4,
+                        plate_warp_frequency: 3.0,
+                        plate_warp_octaves: 5,
+                        // Two active margins — Pelagos is tidally
+                        // heated by Auron, which drives more
+                        // persistent active volcanism than a
+                        // thermally-isolated body this size would
+                        // have.
+                        n_active_margins: 2,
+                        // One rift scar for the sake of variety;
+                        // doesn't read as a continental feature
+                        // since there are no continents to rift.
+                        n_rift_scars: 1,
+                        // Six hotspot tracks — these ARE the visible
+                        // island arc chains above water. More than
+                        // Thalos because the arcs are the planet's
+                        // whole above-water story.
+                        n_hotspot_tracks: 6,
+                        // 10 hops ≈ 200 km at level 7 — Hawaii-
+                        // Emperor scale island chain. Each track
+                        // contributes a few islands above water plus
+                        // submerged seamount trail.
+                        hotspot_track_length: 10,
+                        lloyd_iterations: 3,
+                        debug_paint_albedo: false,
+                    )),
+                    // Stage 2 — Coarse Elevation. Continental mask
+                    // still comes from warped fBm thresholded at 15 %
+                    // land, but the continental bias is tuned low so
+                    // the "continents" read as shallow shelves with
+                    // small island exposures rather than proper
+                    // landmasses. Hotspots are tall enough (1500 m) to
+                    // reliably pop above the waterline regardless of
+                    // whether they land on the shelf or in open ocean.
+                    CoarseElevation((
+                        // 0.92 → ~8 % land. The spec's "85 % ocean"
+                        // number produces ~30 % of the visible disk
+                        // as land after hemisphere concentration,
+                        // which reads as continents rather than
+                        // "volcanic island arcs, no continents". 8 %
+                        // global keeps a meaningful amount of land
+                        // to form arcs without the continental read.
+                        target_ocean_fraction: 0.92,
+                        // Higher base frequency than Thalos (3.0 vs
+                        // 2.0) — Thalos's 2.0 produces ~5 continent-
+                        // scale patches, which on a body that's
+                        // supposed to have no continents reads
+                        // exactly wrong. 3.0 splits the land into
+                        // roughly 10–15 smaller clusters, closer to
+                        // archipelago scale.
+                        continent_noise_frequency: 3.0,
+                        continent_noise_octaves: 6,
+                        continent_noise_persistence: 0.55,
+                        continent_warp_amplitude: 0.45,
+                        continent_warp_frequency: 2.2,
+                        // Isotropic — no Earth-style E-W elongation
+                        // bias. Ocean-world island clusters should
+                        // read as blobs, not belts.
+                        horizontal_stretch: 1.0,
+                        // No latitude bias — tidal heating + ocean
+                        // thermal inertia flattens the pole/equator
+                        // gradient that drives Thalos's mid-lat
+                        // preference.
+                        mid_latitude_bias: 0.0,
+                        // Keep small archipelagos (~0.05 % of sphere
+                        // ≈ 35 000 km² ≈ Iceland-scale). Smaller than
+                        // Thalos's 0.3 % filter because island arcs
+                        // *are* the land.
+                        min_land_fraction: 0.0005,
+                        min_ocean_fraction: 0.0,
+                        // Low shelf bias: +200 m on the continental
+                        // side, −3000 m on oceanic. 200 m above
+                        // sea level puts most of the "continental"
+                        // surface as shallow shelf just above water,
+                        // with noise-driven peaks rising as islands.
+                        // Ocean floor at 3 km below sea level —
+                        // shallower than Thalos's 3.5 km; spreading
+                        // ridges on a tidally-heated moon would lift
+                        // the average seafloor.
+                        continental_bias_m: 200.0,
+                        oceanic_bias_m: -3000.0,
+                        // Modest suture relief — no major orogenies
+                        // on a body with no sustained continent-
+                        // continent collisions.
+                        suture_height_m: 800.0,
+                        suture_falloff_hops: 5.0,
+                        suture_age_decay_myr: 800.0,
+                        rift_depth_m: 600.0,
+                        rift_falloff_hops: 3.0,
+                        // Active margin: volcanic arc uplift + deep
+                        // offshore trench. 2.5 km uplift → visible
+                        // arc above water; 3 km trench sits 8 hops
+                        // offshore.
+                        active_uplift_m: 2500.0,
+                        active_trench_m: 3000.0,
+                        active_falloff_hops: 3.0,
+                        trench_offset_hops: 8.0,
+                        trench_width_hops: 3.0,
+                        // 1500 m seamounts — with the +200 m
+                        // continental bias or against the -3000 m
+                        // ocean floor, a 1500 m bump plants a cone
+                        // that reaches 1300 m ABOVE sea level on
+                        // shelves and sits 1500 m below on deep
+                        // ocean floor (seamounts). Tight falloff
+                        // (1.5 hops) keeps them as isolated island
+                        // points, not ridges.
+                        hotspot_height_m: 1500.0,
+                        hotspot_falloff_hops: 1.5,
+                        // 1000 m noise — half the 2000 m gap
+                        // between continental/oceanic bias, plenty
+                        // of seafloor texture without pushing ocean
+                        // noise above sea level.
+                        noise_amplitude_m: 1000.0,
+                        noise_frequency: 2.5,
+                        noise_octaves: 7,
+                        noise_persistence: 0.62,
+                        warp_amplitude: 0.45,
+                        warp_frequency: 3.0,
+                        // Stage 3 repaints; leaving off to avoid
+                        // wasted bake work.
+                        debug_paint_albedo: false,
+                    )),
+                    // Stage 3 — Hydrological Carving. Fewer erosion
+                    // iterations than Thalos: island arcs are small
+                    // and young relative to continental cratons;
+                    // there's not much topography to pound flat. The
+                    // stage still runs to fix the sea level cleanly
+                    // at the 85 % percentile and produce a drainage
+                    // graph for the islands that do exist.
+                    HydrologicalCarving((
+                        erosion_iterations: 40,
+                        erosion_k: 2.0e-4,
+                        stream_power_m: 0.5,
+                        stream_power_n: 1.0,
+                        max_erosion_per_iter_m: 50.0,
+                        deposition_rate: 0.08,
+                        pit_fill_epsilon_m: 0.001,
+                        target_ocean_fraction: 0.92,
+                        // Islands have small catchments — drop the
+                        // river threshold so any meaningful island
+                        // drainage still shows up as a ribbon.
+                        river_accumulation_threshold_m2: 5.0e10,
+                        river_half_width_rad: 0.0008,
+                        // No SurfaceMaterials stage yet — leave the
+                        // hypsometric debug paint on so the final
+                        // bake shows the sea level and bathymetry
+                        // readably. Swap off once materials land.
+                        debug_paint_albedo: true,
+                    )),
+                ],
+            )),
+            // N₂-dominant atmosphere at ~0.4 atm with CO₂/H₂O. Thinner
+            // than Thalos's 0.85 atm, but lower gravity (0.54 g) lifts
+            // the scale height — column height reads taller than a
+            // naive pressure ratio would suggest. Clouds are a humid
+            // ocean world's most distinctive read from orbit: high
+            // coverage, fine-grained convective structure.
+            terrestrial_atmosphere: Some((
+                // Cool blue rim, slightly dimmer than Thalos's. N₂
+                // Rayleigh still dominates the tint. Scale height
+                // 10 km = Earth's 8.4 km × (0.4 atm / 0.85 atm) ÷
+                // (0.54 g / 0.91 g) ≈ 10 km when the lower gravity
+                // raises the column. Outer shell out to 120 km for
+                // smoothed rim falloff.
+                rim_halo: Some((
+                    color: (0.45, 0.65, 0.95),
+                    intensity: 0.18,
+                    scale_height_m: 10000.0,
+                    outer_altitude_m: 120000.0,
+                )),
+                limb: None,
+                limb_darkening: None,
+                // Rayleigh optical depth scales with column depth,
+                // roughly 0.47 × Thalos at 0.4 atm / 0.85 atm. Produces
+                // visibly softer sunsets and a paler blue haze than
+                // Thalos — consistent with a thinner atmosphere.
+                rayleigh: Some((
+                    vertical_optical_depth: (0.022, 0.051, 0.124),
+                    strength: 1.0,
+                )),
+                // Humid ocean moon. Coverage 0.30 — modestly wetter
+                // than Thalos's 0.25, since 85 % ocean cover and tidal
+                // heating sustain more evaporation and convection.
+                // Raw Worley fBm peaks around 0.8 and the shader's
+                // `cov_scale = 2·coverage` gate means much higher than
+                // 0.30 pushes the disk into near-solid overcast.
+                //
+                // NOTE: `frequency`, `octaves`, `softness` have no
+                // effect on the current render — the cloud cube is
+                // baked with fixed Wedekind defaults (seed-only
+                // variation), and the haze layer that would read
+                // those fields is currently disabled in the shader.
+                // They're kept for schema parity with Thalos / so
+                // they're already populated when the haze layer and
+                // per-body bake params return.
+                clouds: Some((
+                    coverage: 0.30,
+                    softness: 0.18,
+                    frequency: 3.5,
+                    octaves: 10,
+                    // Pale blue-cool cloud albedo. Slightly cooler
+                    // than Thalos's off-white — thinner atmosphere
+                    // gives less orange twilight reflection bias.
+                    albedo: (0.78, 0.80, 0.84),
+                    // Pelagos rotates every 6.2 days (~7× slower
+                    // than Thalos); weather systems drift more
+                    // slowly relative to the surface.
+                    scroll_rate: 1.5e-5,
+                    differential_rotation: 0.40,
+                    seed: 7143,
+                )),
+            )),
         ),
         (
             name: "Carpo",
