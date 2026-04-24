@@ -10,6 +10,7 @@ members = [
     "crates/planet_editor",
     "crates/game",
     "crates/shipyard",
+    "crates/bake_dump",
 ]
 
 [workspace.package]
@@ -23,27 +24,6 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
-
-# terrain_gen is heavy numeric code: cratering, mare_flood, regolith spend
-# most of their time in tight per-texel loops. At dev defaults a full 2048
-# bake takes minutes. Treating this one crate as release-like brings it in
-# line with release performance. Tradeoff: `debug_assert!` and arithmetic
-# overflow panics in terrain_gen are silent in dev — acceptable because the
-# crate is pure-Rust, well-tested, and its hot paths have no safety-critical
-# assertions.
-[profile.dev.package.thalos_terrain_gen]
-opt-level = 3
-debug-assertions = false
-overflow-checks = false
-
-# cloud_gen bakes a curl-noise warp cubemap: a 50-iteration Lagrangian
-# advection over 6 × N² texels with Worley-volume lookups at every
-# sample. Matches terrain_gen's justification — pure-Rust, well-tested,
-# hot-path numeric code that's unusable at dev defaults.
-[profile.dev.package.thalos_cloud_gen]
-opt-level = 3
-debug-assertions = false
-overflow-checks = false
 
 # Release: single codegen unit for cross-crate inlining + thin LTO.
 [profile.release]

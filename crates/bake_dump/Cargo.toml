@@ -1,0 +1,14 @@
+[package]
+name = "thalos_bake_dump"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bake_dump"
+path = "src/main.rs"
+
+[dependencies]
+thalos_physics = { path = "../physics" }
+thalos_terrain_gen = { path = "../terrain_gen" }
+glam = "0.30"
+image = { version = "0.25", default-features = false, features = ["png"] }
