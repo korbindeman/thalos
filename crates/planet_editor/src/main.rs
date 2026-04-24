@@ -13,7 +13,7 @@ use thalos_planet_rendering::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams,
     PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin,
     RingLayers, RingMaterial, RingMaterialHandle, RingParams,
-    SceneLighting, StarLight, bake_from_body_data, build_ring_mesh,
+    SceneLighting, StarLight, bake_from_body_data, blank_cloud_cover_image, build_ring_mesh,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
 
@@ -23,8 +23,6 @@ use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
 
 const LIGHT_AT_1AU: f32 = 10.0;
 const AMBIENT_INTENSITY: f32 = 0.05;
-const FULLBRIGHT_WRAP: f32 = 1250.0;
-const FULLBRIGHT_LIGHT: f32 = std::f32::consts::PI;
 const AU_M: f64 = 1.496e11;
 const DEFAULT_BODY_NAME: &str = "Mira";
 const RENDER_RADIUS: f32 = 1.5;
@@ -194,15 +192,11 @@ fn light_intensity_at(distance_m: f64) -> f32 {
 }
 
 fn lighting_for(planet: &EditedPlanet) -> (f32, f32, f32) {
-    if planet.full_bright {
-        (FULLBRIGHT_LIGHT, AMBIENT_INTENSITY, FULLBRIGHT_WRAP)
-    } else {
-        (
-            planet.light_intensity,
-            AMBIENT_INTENSITY,
-            planet.terminator_wrap,
-        )
-    }
+    (
+        planet.light_intensity,
+        AMBIENT_INTENSITY,
+        planet.terminator_wrap,
+    )
 }
 
 /// Build a `SceneLighting` for the preview. Single star, no eclipse
@@ -354,16 +348,29 @@ const DEV_CRATER_SCALE: f32 = 0.1;
 #[cfg(not(debug_assertions))]
 const DEV_CRATER_SCALE: f32 = 1.0;
 
+fn terrain_cache_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/terrain_cache")
+}
+
 fn dispatch_terrain_bake(
     generator: &GeneratorParams,
     radius_m: f64,
     tidal_axis: Option<Vec3>,
     axial_tilt_rad: f32,
+    body_name: String,
 ) -> Task<BodyData> {
     let radius_m = radius_m as f32;
     let mut g = generator.clone();
     g.scale_crater_count(DEV_CRATER_SCALE);
     AsyncComputeTaskPool::get().spawn(async move {
+        let cache_dir = terrain_cache_dir();
+        let key = thalos_terrain_gen::cache::cache_key(&g, radius_m, tidal_axis, axial_tilt_rad);
+        let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
+        if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
+            info!("terrain cache hit: {body_name}");
+            return data;
+        }
+        info!("terrain cache miss, baking: {body_name}");
         let mut builder = BodyBuilder::new(
             radius_m,
             g.seed,
@@ -379,7 +386,12 @@ fn dispatch_terrain_bake(
             .map(|s| s.into_stage())
             .collect::<Vec<_>>();
         Pipeline::new(stages).run(&mut builder);
-        builder.build()
+        let data = builder.build();
+        match thalos_terrain_gen::cache::store(&path, key, &data) {
+            Ok(()) => info!("terrain cache wrote: {body_name}"),
+            Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
+        }
+        data
     })
 }
 
@@ -429,6 +441,7 @@ fn spawn_preview(
                 planet.radius_m,
                 *tidal_axis,
                 planet.axial_tilt_rad,
+                planet.selected_body.clone(),
             );
             status.current_started = Some(Instant::now());
             commands
@@ -577,7 +590,9 @@ fn finalize_terrain_bake(
                 radius: RENDER_RADIUS,
                 height_range,
                 terminator_wrap: wrap,
+                fullbright: if planet.full_bright { 1.0 } else { 0.0 },
                 scene,
+                sea_level_m: body.sea_level_m.unwrap_or(-1.0e9),
                 ..default()
             },
             albedo: textures.albedo,
@@ -588,6 +603,8 @@ fn finalize_terrain_bake(
             cell_index: textures.cell_index,
             feature_ids: textures.feature_ids,
             materials: textures.materials,
+            atmosphere: default(),
+            cloud_cover: blank_cloud_cover_image(&mut images),
         });
 
         let mesh_entity = pending.mesh_entity;
@@ -802,6 +819,7 @@ fn apply_uniform_changes(
                     continue;
                 };
                 mat.params.terminator_wrap = wrap;
+                mat.params.fullbright = if planet.full_bright { 1.0 } else { 0.0 };
                 mat.params.scene = scene.clone();
             }
         }
@@ -851,7 +869,13 @@ fn dispatch_rebake(
     let axial_tilt_rad = planet.axial_tilt_rad;
     planet.terrain_dirty = false;
 
-    let task = dispatch_terrain_bake(&generator, radius_m, tidal_axis, axial_tilt_rad);
+    let task = dispatch_terrain_bake(
+        &generator,
+        radius_m,
+        tidal_axis,
+        axial_tilt_rad,
+        planet.selected_body.clone(),
+    );
     status.current_started = Some(Instant::now());
     commands
         .entity(entity)
