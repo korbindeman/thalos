@@ -92,172 +92,22 @@ impl ShipBlueprint {
         data: &PartData,
         resources: HashMap<Resource, ResourcePool>,
     ) -> Entity {
-        let nodes = default_nodes_for(data);
-        let mut ec = commands.spawn((
-            Part,
-            AttachNodes { nodes },
-            PartResources { pools: resources },
-        ));
-        match data.clone() {
-            PartData::CommandPod {
-                model,
-                diameter,
-                dry_mass,
-            } => {
-                ec.insert(CommandPod {
-                    model,
-                    diameter,
-                    dry_mass,
-                });
-            }
-            PartData::Decoupler {
-                diameter,
-                ejection_impulse,
-                dry_mass,
-            } => {
-                ec.insert((
-                    Decoupler {
-                        diameter,
-                        ejection_impulse,
-                        dry_mass,
-                    },
-                    ShroudProvider,
-                    PartMaterial::default(),
-                ));
-            }
-            PartData::Adapter {
-                diameter,
-                target_diameter,
-                dry_mass,
-            } => {
-                ec.insert((
-                    Adapter {
-                        diameter,
-                        target_diameter,
-                        dry_mass,
-                    },
-                    PartMaterial::default(),
-                ));
-            }
-            PartData::FuelTank { diameter, length, dry_mass } => {
-                ec.insert((
-                    FuelTank { diameter, length, dry_mass },
-                    PartMaterial::default(),
-                ));
-            }
-            PartData::Engine {
-                model,
-                diameter,
-                thrust,
-                isp,
-                dry_mass,
-                reactants,
-                power_draw_kw,
-            } => {
-                ec.insert((
-                    Engine {
-                        model,
-                        diameter,
-                        thrust,
-                        isp,
-                        dry_mass,
-                        reactants,
-                        power_draw_kw,
-                    },
-                    Shroudable,
-                ));
-            }
-        }
+        let mut ec = commands.spawn_empty();
+        insert_part(&mut ec, data, resources);
         ec.id()
     }
 
     /// Spawn the blueprint into the world, returning the `Ship` entity.
     pub fn spawn(&self, commands: &mut Commands) -> Entity {
+        // Pre-allocate entity ids so `Attachment` can refer to them as we
+        // iterate below.
         let ids: Vec<Entity> = (0..self.parts.len())
             .map(|_| commands.spawn_empty().id())
             .collect();
 
         for (i, pb) in self.parts.iter().enumerate() {
-            let e = ids[i];
-            let nodes = default_nodes_for(&pb.data);
-            let mut ec = commands.entity(e);
-            ec.insert((
-                Part,
-                AttachNodes { nodes },
-                PartResources {
-                    pools: pb.resources.clone(),
-                },
-            ));
-            match pb.data.clone() {
-                PartData::CommandPod {
-                    model,
-                    diameter,
-                    dry_mass,
-                } => {
-                    ec.insert(CommandPod {
-                        model,
-                        diameter,
-                        dry_mass,
-                    });
-                }
-                PartData::Decoupler {
-                    diameter,
-                    ejection_impulse,
-                    dry_mass,
-                } => {
-                    ec.insert((
-                        Decoupler {
-                            diameter,
-                            ejection_impulse,
-                            dry_mass,
-                        },
-                        ShroudProvider,
-                        PartMaterial::default(),
-                    ));
-                }
-                PartData::Adapter {
-                    diameter,
-                    target_diameter,
-                    dry_mass,
-                } => {
-                    ec.insert((
-                        Adapter {
-                            diameter,
-                            target_diameter,
-                            dry_mass,
-                        },
-                        PartMaterial::default(),
-                    ));
-                }
-                PartData::FuelTank { diameter, length, dry_mass } => {
-                    ec.insert((
-                        FuelTank { diameter, length, dry_mass },
-                        PartMaterial::default(),
-                    ));
-                }
-                PartData::Engine {
-                    model,
-                    diameter,
-                    thrust,
-                    isp,
-                    dry_mass,
-                    reactants,
-                    power_draw_kw,
-                } => {
-                    ec.insert((
-                        Engine {
-                            model,
-                            diameter,
-                            thrust,
-                            isp,
-                            dry_mass,
-                            reactants,
-                            power_draw_kw,
-                        },
-                        Shroudable,
-                    ));
-                }
-            }
+            let mut ec = commands.entity(ids[i]);
+            insert_part(&mut ec, &pb.data, pb.resources.clone());
         }
 
         for c in &self.connections {
@@ -275,6 +125,102 @@ impl ShipBlueprint {
                 root,
             })
             .id()
+    }
+}
+
+/// Populate a pre-spawned entity with the components for `data` plus the
+/// universal (Part, AttachNodes, PartResources) bundle. Shared between
+/// `spawn_part` (which spawns a fresh entity) and `ShipBlueprint::spawn`
+/// (which pre-allocates ids so Attachment references can resolve before
+/// all parts are materialized).
+fn insert_part(
+    ec: &mut EntityCommands,
+    data: &PartData,
+    resources: HashMap<Resource, ResourcePool>,
+) {
+    let nodes = default_nodes_for(data);
+    ec.insert((
+        Part,
+        AttachNodes { nodes },
+        PartResources { pools: resources },
+    ));
+    match data.clone() {
+        PartData::CommandPod {
+            model,
+            diameter,
+            dry_mass,
+        } => {
+            ec.insert(CommandPod {
+                model,
+                diameter,
+                dry_mass,
+            });
+        }
+        PartData::Decoupler {
+            diameter,
+            ejection_impulse,
+            dry_mass,
+        } => {
+            ec.insert((
+                Decoupler {
+                    diameter,
+                    ejection_impulse,
+                    dry_mass,
+                },
+                ShroudProvider,
+                PartMaterial::default(),
+            ));
+        }
+        PartData::Adapter {
+            diameter,
+            target_diameter,
+            dry_mass,
+        } => {
+            ec.insert((
+                Adapter {
+                    diameter,
+                    target_diameter,
+                    dry_mass,
+                },
+                PartMaterial::default(),
+            ));
+        }
+        PartData::FuelTank {
+            diameter,
+            length,
+            dry_mass,
+        } => {
+            ec.insert((
+                FuelTank {
+                    diameter,
+                    length,
+                    dry_mass,
+                },
+                PartMaterial::default(),
+            ));
+        }
+        PartData::Engine {
+            model,
+            diameter,
+            thrust,
+            isp,
+            dry_mass,
+            reactants,
+            power_draw_kw,
+        } => {
+            ec.insert((
+                Engine {
+                    model,
+                    diameter,
+                    thrust,
+                    isp,
+                    dry_mass,
+                    reactants,
+                    power_draw_kw,
+                },
+                Shroudable,
+            ));
+        }
     }
 }
 
