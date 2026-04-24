@@ -12,24 +12,43 @@
 //!   attach node, parts rendered as cylinders/frustums sized from their
 //!   attach-node diameters.
 
+use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::NoFrustumCulling;
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::gestures::PinchGesture;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::picking::events::{Click, DragEnd, DragStart, Pointer};
 use bevy::picking::hover::HoverMap;
 use bevy::picking::mesh_picking::ray_cast::RayCastVisibility;
 use bevy::picking::mesh_picking::{MeshPickingPlugin, MeshPickingSettings};
 use bevy::picking::Pickable;
 use bevy::prelude::*;
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+};
+use bevy::shader::ShaderRef;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContextSettings, EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
+use thalos_celestial::Universe;
+use thalos_celestial::generate::{DefaultGenParams, generate_default};
+use thalos_ship_rendering::{
+    ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
+};
 use thalos_shipyard::sizing::propagate_node_sizes;
 use thalos_shipyard::Resource as ShipResource;
 use thalos_shipyard::*;
 
 const SHIPS_DIR: &str = "ships";
+
+/// Radial segment count for cylindrical/frustum part meshes. Bevy's
+/// default is 32, which leaves a visibly faceted silhouette at editor
+/// zoom levels. Cost is negligible at the part counts we render.
+const PART_RESOLUTION: u32 = 128;
 
 /// Methalox reactant mix at O/F ≈ 3.6 (Raptor-ish).
 fn methalox_reactants() -> Vec<ReactantRatio> {
@@ -85,14 +104,24 @@ fn list_ships() -> Vec<String> {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Thalos Shipyard".into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Thalos Shipyard".into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(bevy::asset::AssetPlugin {
+                    // Resolve shaders from the workspace-root `assets/` dir,
+                    // matching `thalos_game` and `thalos_planet_editor`.
+                    file_path: "../../assets".to_string(),
+                    ..default()
+                }),
+        )
         .add_plugins(EguiPlugin::default())
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(MeshPickingPlugin)
         .insert_resource(MeshPickingSettings {
             require_markers: false,
@@ -101,9 +130,12 @@ fn main() {
             ray_cast_visibility: RayCastVisibility::VisibleInView,
         })
         .add_plugins(ShipyardPlugin)
+        .add_plugins(ShipRenderingPlugin)
+        .add_plugins(SkyBackdropPlugin)
         .init_resource::<EditorState>()
         .init_resource::<TankResizeDrag>()
         .init_resource::<DeselectTracker>()
+        .init_resource::<SkyBackdropEnabled>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -119,7 +151,12 @@ fn main() {
                 update_tank_resize_arrow.after(update_part_transforms),
                 update_tank_resize_drag,
                 update_selection_highlight.after(rebuild_visuals),
+                update_part_shader_params.after(rebuild_visuals),
+                update_part_shader_highlight.after(rebuild_visuals),
                 deselect_on_empty_click,
+                propagate_coupled_material.after(rebuild_visuals),
+                sync_shrouds.after(update_part_transforms),
+                update_shroud_transparency.after(sync_shrouds),
             ),
         )
         .add_systems(EguiPrimaryContextPass, editor_ui)
@@ -164,6 +201,14 @@ struct PartVisual;
 
 #[derive(Component)]
 struct PartBody(Entity);
+
+/// Per-part `ShipPartMaterial` asset handle, cached on the part entity
+/// so it survives child rebuilds (e.g. resizing a tank despawns and
+/// respawns the body, but the material asset — and its tint state — is
+/// stable). Used by any part that carries [`PartMaterial`] — tanks and
+/// decouplers today.
+#[derive(Component, Clone)]
+struct PartShaderHandle(Handle<ShipPartMaterial>);
 
 #[derive(Component)]
 struct AttachNodePin {
@@ -313,6 +358,7 @@ fn visual_spec(
                 height: h,
             }
             .mesh()
+            .resolution(PART_RESOLUTION)
             .into(),
             height: h,
         })
@@ -323,7 +369,10 @@ fn visual_spec(
             .unwrap_or(1.0);
         let h = 0.2;
         Some(VisualSpec {
-            mesh: Cylinder::new(d * 0.55, h).mesh().into(),
+            mesh: Cylinder::new(d * 0.5, h)
+                .mesh()
+                .resolution(PART_RESOLUTION)
+                .into(),
             height: h,
         })
     } else if let Some(a) = adapter {
@@ -337,6 +386,7 @@ fn visual_spec(
                 height: h,
             }
             .mesh()
+            .resolution(PART_RESOLUTION)
             .into(),
             height: h,
         })
@@ -344,24 +394,71 @@ fn visual_spec(
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         let h = t.length;
         Some(VisualSpec {
-            mesh: Cylinder::new(d * 0.5, h).mesh().into(),
+            mesh: Cylinder::new(d * 0.5, h)
+                .mesh()
+                .resolution(PART_RESOLUTION)
+                .into(),
             height: h,
         })
     } else if let Some(e) = engine {
-        let d = e.diameter;
-        let h = d * 0.9;
+        let (r_top, r_bot, h) = engine_visual_profile(e.diameter);
         Some(VisualSpec {
             mesh: ConicalFrustum {
-                radius_top: d * 0.35,
-                radius_bottom: d * 0.5,
+                radius_top: r_top,
+                radius_bottom: r_bot,
                 height: h,
             }
             .mesh()
+            .resolution(PART_RESOLUTION)
             .into(),
             height: h,
         })
     } else {
         None
+    }
+}
+
+/// Engine body silhouette: `(radius_top, radius_bottom, height)` for a
+/// given engine diameter. Single source for both the engine mesh and the
+/// matching shroud geometry — drift between the two would leave the
+/// shroud edge either floating off the engine or clipping into it.
+fn engine_visual_profile(diameter: f32) -> (f32, f32, f32) {
+    (diameter * 0.35, diameter * 0.5, diameter * 0.9)
+}
+
+/// Pick `ShipPartMaterial` uniforms for a given part. Length / radius
+/// drive the procedural panel + rivet layout; each part picks its own
+/// dimensions so the pattern reads consistently across tank–decoupler
+/// boundaries without sharing an asset handle.
+fn ship_part_params(
+    nodes: &AttachNodes,
+    tank: Option<&FuelTank>,
+    dec: Option<&Decoupler>,
+    adapter: Option<&Adapter>,
+    seed: u32,
+) -> ShipPartParams {
+    let top_r = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
+    // Tanks and decouplers are cylinders; adapters are conical frustums
+    // from `top_r` at the mesh's +Y end to `target_diameter / 2` at -Y.
+    let (radius_top, radius_bottom, length) = if let Some(t) = tank {
+        (top_r, top_r, t.length)
+    } else if dec.is_some() {
+        (top_r, top_r, 0.2)
+    } else if let Some(a) = adapter {
+        let bot_r = a.target_diameter * 0.5;
+        let h = (top_r + bot_r).max(0.4); // same formula as `visual_spec`
+        let dr = top_r - bot_r;
+        let slant = (h * h + dr * dr).sqrt();
+        (top_r, bot_r, slant)
+    } else {
+        (top_r, top_r, 1.0)
+    };
+    ShipPartParams {
+        length,
+        radius_top,
+        radius_bottom,
+        seed,
+        ..default()
     }
 }
 
@@ -377,6 +474,8 @@ type VisualQuery<'w, 's> = Query<
         Option<&'static FuelTank>,
         Option<&'static Engine>,
         Option<&'static Children>,
+        Option<&'static PartShaderHandle>,
+        Has<PartMaterial>,
     ),
     Or<(Added<Part>, Changed<AttachNodes>)>,
 >;
@@ -384,12 +483,15 @@ type VisualQuery<'w, 's> = Query<
 fn rebuild_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
     assets: Res<EditorAssets>,
     state: Res<EditorState>,
     parts: VisualQuery,
     stale: Query<(), Or<(With<PartVisual>, With<AttachNodePin>)>>,
 ) {
-    for (e, nodes, pod, dec, adapter, tank, engine, children) in parts.iter() {
+    for (e, nodes, pod, dec, adapter, tank, engine, children, part_shader, has_part_mat) in
+        parts.iter()
+    {
         if let Some(ch) = children {
             for c in ch.into_iter() {
                 if stale.get(*c).is_ok() {
@@ -401,24 +503,57 @@ fn rebuild_visuals(
         // ---- Body visual --------------------------------------------------
         if let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine) {
             let mesh = meshes.add(spec.mesh);
-            let initial_material = if Some(e) == state.selected {
-                assets.selected_material.clone()
+
+            // Parts carrying `PartMaterial` render with `ShipPartMaterial`
+            // (procedural stainless); others use the shared
+            // `StandardMaterial`. The ship-material asset is created lazily
+            // on first rebuild and cached on the part entity so resizing
+            // doesn't churn assets or drop per-part state (seed/tint).
+            let body_id = if has_part_mat {
+                let params = ship_part_params(nodes, tank, dec, adapter, e.index_u32());
+                let handle = match part_shader {
+                    Some(h) => h.0.clone(),
+                    None => {
+                        let h = ship_materials.add(ShipPartMaterial {
+                            base: stainless_steel_base(),
+                            extension: ShipPartExtension { params },
+                        });
+                        commands.entity(e).insert(PartShaderHandle(h.clone()));
+                        h
+                    }
+                };
+                commands
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(handle),
+                        Transform::from_xyz(0.0, -spec.height * 0.5, 0.0),
+                        Visibility::default(),
+                        PartVisual,
+                        PartBody(e),
+                        Pickable::default(),
+                    ))
+                    .observe(on_body_click)
+                    .id()
             } else {
-                assets.part_material.clone()
+                let initial_material = if Some(e) == state.selected {
+                    assets.selected_material.clone()
+                } else {
+                    assets.part_material.clone()
+                };
+                commands
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(initial_material),
+                        Transform::from_xyz(0.0, -spec.height * 0.5, 0.0),
+                        Visibility::default(),
+                        PartVisual,
+                        PartBody(e),
+                        Pickable::default(),
+                    ))
+                    .observe(on_body_click)
+                    .id()
             };
-            let body = commands
-                .spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(initial_material),
-                    Transform::from_xyz(0.0, -spec.height * 0.5, 0.0),
-                    Visibility::default(),
-                    PartVisual,
-                    PartBody(e),
-                    Pickable::default(),
-                ))
-                .observe(on_body_click)
-                .id();
-            commands.entity(e).add_child(body);
+            commands.entity(e).add_child(body_id);
         }
 
         // ---- Attach node pins --------------------------------------------
@@ -546,24 +681,87 @@ fn disable_egui_pointer_capture(mut q: Query<&mut EguiContextSettings>) {
 /// touching the component when a value actually differs. This way editor
 /// sliders drive AttachNodes → rebuild_visuals deterministically, without
 /// the kind component's spurious Changed signals causing per-frame respawns.
+///
+/// For parametric radius parts (Decoupler/Adapter/FuelTank) the sync is
+/// bidirectional by root state:
+/// - **Root**: `self.diameter → nodes.top` so the Diameter slider drives
+///   the part's visual size.
+/// - **Child**: `nodes.top → self.diameter` so the diameter inherited via
+///   `sizing::propagate_node_sizes` is mirrored onto the component. This
+///   way a later re-root starts from the displayed size instead of
+///   snapping back to the palette's placeholder.
 fn sync_self_nodes(
     mut q: Query<(
         &mut AttachNodes,
+        Option<&Attachment>,
         Option<&CommandPod>,
-        Option<&FuelTank>,
+        Option<&mut Decoupler>,
+        Option<&mut Adapter>,
+        Option<&mut FuelTank>,
         Option<&Engine>,
     )>,
 ) {
-    for (mut nodes, pod, tank, engine) in q.iter_mut() {
+    for (mut nodes, attachment, pod, mut dec, mut adapter, mut tank, engine) in q.iter_mut() {
+        let is_root = attachment.is_none();
         let mut targets: Vec<(String, f32, Vec3)> = Vec::new();
         if let Some(p) = pod {
             let d = p.diameter;
             targets.push(("bottom".into(), d, Vec3::new(0.0, -d * 0.9, 0.0)));
         }
-        if let Some(t) = tank {
-            // keep bottom offset in sync with length regardless of parent
-            let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
-            targets.push(("bottom".into(), d, Vec3::new(0.0, -t.length, 0.0)));
+        // Read kind-component fields through `as_ref()` so the borrow only
+        // goes through Bevy's `Mut::deref` (no Changed trigger). The write
+        // path below reaches for `as_mut()` only when the value actually
+        // needs to change.
+        if let Some(d) = dec.as_ref() {
+            let self_d = d.diameter;
+            let top_d = if is_root {
+                targets.push(("top".into(), self_d, Vec3::ZERO));
+                self_d
+            } else {
+                let inherited = nodes.get("top").map(|n| n.diameter).unwrap_or(self_d);
+                if (self_d - inherited).abs() > f32::EPSILON {
+                    if let Some(m) = dec.as_mut() {
+                        m.diameter = inherited;
+                    }
+                }
+                inherited
+            };
+            targets.push(("bottom".into(), top_d, Vec3::new(0.0, -0.2, 0.0)));
+        }
+        if let Some(a) = adapter.as_ref() {
+            let self_d = a.diameter;
+            let target_d = a.target_diameter;
+            let top_d = if is_root {
+                targets.push(("top".into(), self_d, Vec3::ZERO));
+                self_d
+            } else {
+                let inherited = nodes.get("top").map(|n| n.diameter).unwrap_or(self_d);
+                if (self_d - inherited).abs() > f32::EPSILON {
+                    if let Some(m) = adapter.as_mut() {
+                        m.diameter = inherited;
+                    }
+                }
+                inherited
+            };
+            let h = ((top_d + target_d) * 0.5).max(0.4);
+            targets.push(("bottom".into(), target_d, Vec3::new(0.0, -h, 0.0)));
+        }
+        if let Some(t) = tank.as_ref() {
+            let self_d = t.diameter;
+            let length = t.length;
+            let top_d = if is_root {
+                targets.push(("top".into(), self_d, Vec3::ZERO));
+                self_d
+            } else {
+                let inherited = nodes.get("top").map(|n| n.diameter).unwrap_or(self_d);
+                if (self_d - inherited).abs() > f32::EPSILON {
+                    if let Some(m) = tank.as_mut() {
+                        m.diameter = inherited;
+                    }
+                }
+                inherited
+            };
+            targets.push(("bottom".into(), top_d, Vec3::new(0.0, -length, 0.0)));
         }
         if let Some(e) = engine {
             targets.push(("top".into(), e.diameter, Vec3::ZERO));
@@ -812,6 +1010,75 @@ fn deselect_on_empty_click(
     }
 }
 
+/// Keep `ShipPartMaterial` uniforms in sync with the part's dimensions
+/// (tank length, decoupler/tank radius). Triggered whenever the
+/// kind-component or attach nodes change, so slider and resize-drag
+/// updates flow through to the panel / rivet layout live.
+fn update_part_shader_params(
+    mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
+    parts: Query<
+        (
+            &AttachNodes,
+            &PartShaderHandle,
+            Option<&FuelTank>,
+            Option<&Decoupler>,
+            Option<&Adapter>,
+        ),
+        Or<(
+            Changed<FuelTank>,
+            Changed<Decoupler>,
+            Changed<Adapter>,
+            Changed<AttachNodes>,
+        )>,
+    >,
+) {
+    for (nodes, handle, tank, dec, adapter) in parts.iter() {
+        let Some(mat) = ship_materials.get_mut(&handle.0) else {
+            continue;
+        };
+        let params = ship_part_params(nodes, tank, dec, adapter, mat.extension.params.seed);
+        mat.extension.params.length = params.length;
+        mat.extension.params.radius_top = params.radius_top;
+        mat.extension.params.radius_bottom = params.radius_bottom;
+    }
+}
+
+/// Selection / hover tint for parts rendering through `ShipPartMaterial`
+/// (tanks, decouplers). Writes into the material's tint uniform rather
+/// than swapping handles so each part keeps its procedural detail.
+/// Shrouds are excluded — they manage their own hover feedback via
+/// `update_shroud_transparency`.
+fn update_part_shader_highlight(
+    state: Res<EditorState>,
+    hover_map: Res<HoverMap>,
+    mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
+    bodies: Query<
+        (Entity, &PartBody, &MeshMaterial3d<ShipPartMaterial>),
+        Without<ShroudBody>,
+    >,
+) {
+    let hovered: HashSet<Entity> = hover_map
+        .0
+        .values()
+        .flat_map(|hovers| hovers.keys().copied())
+        .collect();
+
+    for (body_entity, body, mesh_mat) in bodies.iter() {
+        let target = if Some(body.0) == state.selected {
+            Vec3::new(0.88, 1.0, 1.35)
+        } else if hovered.contains(&body_entity) {
+            Vec3::new(1.08, 1.08, 1.12)
+        } else {
+            Vec3::ONE
+        };
+        if let Some(mat) = ship_materials.get_mut(&mesh_mat.0) {
+            if (mat.extension.params.tint - target).length_squared() > 1.0e-6 {
+                mat.extension.params.tint = target;
+            }
+        }
+    }
+}
+
 /// Swap each part body's material based on selection and hover state.
 /// Priority: selected > hovered > default.
 fn update_selection_highlight(
@@ -1018,16 +1285,19 @@ fn collect_blueprint(
             }
         } else if let Some(d) = dec {
             PartData::Decoupler {
+                diameter: d.diameter,
                 ejection_impulse: d.ejection_impulse,
                 dry_mass: d.dry_mass,
             }
         } else if let Some(a) = adapter {
             PartData::Adapter {
+                diameter: a.diameter,
                 target_diameter: a.target_diameter,
                 dry_mass: a.dry_mass,
             }
         } else if let Some(t) = tank {
             PartData::FuelTank {
+                diameter: t.diameter,
                 length: t.length,
                 dry_mass: t.dry_mass,
             }
@@ -1311,6 +1581,9 @@ fn editor_ui(
     mut parts: InspectorQuery,
     mut ships: Query<&mut Ship>,
     attachments: Query<(Entity, &Attachment)>,
+    mut sky: ResMut<SkyBackdropEnabled>,
+    mut clear_color: ResMut<ClearColor>,
+    diagnostics: Res<DiagnosticsStore>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -1321,6 +1594,12 @@ fn editor_ui(
     egui::SidePanel::left("palette")
         .default_width(180.0)
         .show(&ctx, |ui| {
+            let fps = diagnostics
+                .get(&FrameTimeDiagnosticsPlugin::FPS)
+                .and_then(|d| d.smoothed())
+                .unwrap_or(0.0);
+            ui.label(format!("FPS: {:.0}", fps));
+            ui.separator();
             ui.heading("Parts");
             if ui.button("Command Pod (1.25m)").clicked() {
                 state.pending = Some(PartData::CommandPod {
@@ -1338,18 +1617,21 @@ fn editor_ui(
             }
             if ui.button("Decoupler").clicked() {
                 state.pending = Some(PartData::Decoupler {
+                    diameter: 1.25,
                     ejection_impulse: 250.0,
                     dry_mass: 50.0,
                 });
             }
             if ui.button("Adapter").clicked() {
                 state.pending = Some(PartData::Adapter {
+                    diameter: 1.25,
                     target_diameter: 2.5,
                     dry_mass: 100.0,
                 });
             }
             if ui.button("Fuel Tank").clicked() {
                 state.pending = Some(PartData::FuelTank {
+                    diameter: 1.25,
                     length: 1.0,
                     dry_mass: 250.0,
                 });
@@ -1417,6 +1699,19 @@ fn editor_ui(
             }
 
             ui.separator();
+            ui.heading("View");
+            if ui.checkbox(&mut sky.0, "Celestial backdrop").changed() {
+                // Black clears behind the additively-blended stars so
+                // they read as points of light; the default grey washes
+                // them out.
+                clear_color.0 = if sky.0 {
+                    Color::BLACK
+                } else {
+                    ClearColor::default().0
+                };
+            }
+
+            ui.separator();
             ui.label(format!("Status: {}", state.status));
             if state.pending.is_some() {
                 ui.colored_label(
@@ -1445,6 +1740,7 @@ fn editor_ui(
                 return;
             };
             ui.label(format!("Entity: {entity:?}"));
+            let is_root = Some(sel) == state.ship_root;
 
             if let Some(p) = pod.as_deref_mut() {
                 ui.label("Kind: CommandPod");
@@ -1453,6 +1749,13 @@ fn editor_ui(
                 ui.label(format!("Dry mass: {:.0} kg (fixed)", p.dry_mass));
             } else if let Some(d) = dec.as_deref_mut() {
                 ui.label("Kind: Decoupler");
+                if is_root {
+                    ui.add(
+                        egui::Slider::new(&mut d.diameter, 0.3..=6.0).text("Diameter"),
+                    );
+                } else {
+                    ui.label(format!("Diameter: {:.2}m (from parent)", d.diameter));
+                }
                 ui.add(
                     egui::Slider::new(&mut d.ejection_impulse, 0.0..=2000.0)
                         .text("Ejection impulse"),
@@ -1460,12 +1763,22 @@ fn editor_ui(
                 ui.label(format!("Dry mass: {:.0} kg (fixed)", d.dry_mass));
             } else if let Some(a) = adapter.as_deref_mut() {
                 ui.label("Kind: Adapter");
+                if is_root {
+                    ui.add(egui::Slider::new(&mut a.diameter, 0.3..=6.0).text("Diameter"));
+                } else {
+                    ui.label(format!("Diameter: {:.2}m (from parent)", a.diameter));
+                }
                 ui.add(
                     egui::Slider::new(&mut a.target_diameter, 0.3..=6.0).text("Target diameter"),
                 );
                 ui.label(format!("Dry mass: {:.0} kg (fixed)", a.dry_mass));
             } else if let Some(t) = tank.as_deref_mut() {
                 ui.label("Kind: Fuel Tank");
+                if is_root {
+                    ui.add(egui::Slider::new(&mut t.diameter, 0.3..=6.0).text("Diameter"));
+                } else {
+                    ui.label(format!("Diameter: {:.2}m (from parent)", t.diameter));
+                }
                 ui.add(egui::Slider::new(&mut t.length, 0.5..=12.0).text("Length"));
                 ui.label(format!("Dry mass: {:.0} kg (fixed)", t.dry_mass));
             } else if let Some(e) = engine.as_deref_mut() {
@@ -1513,7 +1826,6 @@ fn editor_ui(
             }
 
             ui.separator();
-            let is_root = Some(sel) == state.ship_root;
             ui.add_enabled_ui(!is_root, |ui| {
                 if ui.button("Set as root").clicked() {
                     state.set_as_root = true;
@@ -1596,6 +1908,524 @@ fn draw_hierarchy(
     if let Some(kids) = child_map.get(&entity) {
         for (c, _) in kids {
             draw_hierarchy(ui, *c, child_map, state, depth + 1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Celestial backdrop
+// ---------------------------------------------------------------------------
+//
+// Duplicated from `thalos_game::sky_render` with the game-specific bits
+// (CameraExposure, SimStage, OrbitCamera) stripped out. Keep until sky
+// rendering is extracted into its own crate.
+
+#[derive(Resource, Default)]
+struct SkyBackdropEnabled(bool);
+
+#[derive(Component)]
+struct SkyBackdrop;
+
+#[derive(Clone, Copy, ShaderType)]
+struct StarsParams {
+    pixel_radius: f32,
+    brightness: f32,
+    size_gamma: f32,
+    _pad0: f32,
+}
+
+impl Default for StarsParams {
+    fn default() -> Self {
+        Self { pixel_radius: 4.0, brightness: 140.0, size_gamma: 0.50, _pad0: 0.0 }
+    }
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct StarsMaterial {
+    #[uniform(0)]
+    params: StarsParams,
+}
+
+impl Material for StarsMaterial {
+    fn vertex_shader() -> ShaderRef { "shaders/stars.wgsl".into() }
+    fn fragment_shader() -> ShaderRef { "shaders/stars.wgsl".into() }
+    fn prepass_vertex_shader() -> ShaderRef { "shaders/stars_prepass.wgsl".into() }
+    fn prepass_fragment_shader() -> ShaderRef { "shaders/stars_prepass.wgsl".into() }
+    fn alpha_mode(&self) -> AlphaMode { AlphaMode::Add }
+
+    fn specialize(
+        _: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let vertex_layout = layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
+        ])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = false;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, ShaderType)]
+struct GalaxyParams {
+    pixel_radius_scale: f32,
+    min_pixel_radius: f32,
+    brightness: f32,
+    _pad0: f32,
+}
+
+impl Default for GalaxyParams {
+    fn default() -> Self {
+        Self {
+            pixel_radius_scale: 2000.0,
+            min_pixel_radius: 1.2,
+            brightness: 1_500.0,
+            _pad0: 0.0,
+        }
+    }
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct GalaxyMaterial {
+    #[uniform(0)]
+    params: GalaxyParams,
+}
+
+impl Material for GalaxyMaterial {
+    fn vertex_shader() -> ShaderRef { "shaders/galaxy.wgsl".into() }
+    fn fragment_shader() -> ShaderRef { "shaders/galaxy.wgsl".into() }
+    fn prepass_vertex_shader() -> ShaderRef { "shaders/galaxy_prepass.wgsl".into() }
+    fn prepass_fragment_shader() -> ShaderRef { "shaders/galaxy_prepass.wgsl".into() }
+    fn alpha_mode(&self) -> AlphaMode { AlphaMode::Add }
+
+    fn specialize(
+        _: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let vertex_layout = layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(2),
+            Mesh::ATTRIBUTE_TANGENT.at_shader_location(3),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(4),
+        ])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = false;
+        }
+        Ok(())
+    }
+}
+
+struct SkyBackdropPlugin;
+
+impl Plugin for SkyBackdropPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(MaterialPlugin::<StarsMaterial>::default())
+            .add_plugins(MaterialPlugin::<GalaxyMaterial>::default())
+            .add_systems(Startup, spawn_sky_backdrop)
+            .add_systems(Update, (update_sky_visibility, update_galaxy_uniform));
+    }
+}
+
+fn spawn_sky_backdrop(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut stars_materials: ResMut<Assets<StarsMaterial>>,
+    mut galaxy_materials: ResMut<Assets<GalaxyMaterial>>,
+) {
+    let universe = generate_default(&DefaultGenParams::default());
+
+    commands.spawn((
+        SkyBackdrop,
+        Mesh3d(meshes.add(build_star_mesh(&universe))),
+        MeshMaterial3d(stars_materials.add(StarsMaterial { params: StarsParams::default() })),
+        Transform::IDENTITY,
+        Visibility::Hidden,
+        NoFrustumCulling,
+    ));
+
+    commands.spawn((
+        SkyBackdrop,
+        Mesh3d(meshes.add(build_galaxy_mesh(&universe))),
+        MeshMaterial3d(galaxy_materials.add(GalaxyMaterial { params: GalaxyParams::default() })),
+        Transform::IDENTITY,
+        Visibility::Hidden,
+        NoFrustumCulling,
+    ));
+}
+
+fn update_sky_visibility(
+    enabled: Res<SkyBackdropEnabled>,
+    mut q: Query<&mut Visibility, With<SkyBackdrop>>,
+) {
+    let target = if enabled.0 { Visibility::Inherited } else { Visibility::Hidden };
+    for mut v in q.iter_mut() {
+        if *v != target {
+            *v = target;
+        }
+    }
+}
+
+fn update_galaxy_uniform(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<&Projection, With<Camera3d>>,
+    handles: Query<&MeshMaterial3d<GalaxyMaterial>>,
+    mut materials: ResMut<Assets<GalaxyMaterial>>,
+) {
+    let Ok(window) = windows.single() else { return };
+    let Ok(projection) = cameras.single() else { return };
+    let Projection::Perspective(p) = projection else { return };
+    let px_per_rad = window.resolution.physical_height() as f32 / p.fov;
+
+    for handle in &handles {
+        if let Some(mat) = materials.get_mut(&handle.0) {
+            mat.params.pixel_radius_scale = px_per_rad;
+        }
+    }
+}
+
+fn build_star_mesh(universe: &Universe) -> Mesh {
+    let n = universe.stars.len();
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(n * 4);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
+
+    const CORNERS: [[f32; 2]; 4] =
+        [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+
+    for (i, star) in universe.stars.iter().enumerate() {
+        let dir = star.position.normalize();
+        let rgb = star.linear_srgb();
+        let flux = star.magnitude_flux();
+        for corner in CORNERS {
+            positions.push([dir.x, dir.y, dir.z]);
+            uvs.push(corner);
+            colors.push([rgb[0], rgb[1], rgb[2], flux]);
+        }
+        let base = (i * 4) as u32;
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn build_galaxy_mesh(universe: &Universe) -> Mesh {
+    let n = universe.galaxies.len();
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(n * 4);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
+    let mut tangents: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
+
+    const CORNERS: [[f32; 2]; 4] =
+        [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+
+    for (i, galaxy) in universe.galaxies.iter().enumerate() {
+        let dir = galaxy.position.normalize();
+        let rgb = galaxy.linear_srgb();
+        let flux = galaxy.magnitude_flux();
+        let (sin_pa, cos_pa) = galaxy.position_angle_rad.sin_cos();
+        for corner in CORNERS {
+            positions.push([dir.x, dir.y, dir.z]);
+            uvs.push(corner);
+            normals.push([galaxy.effective_radius_rad, galaxy.sersic_n, 0.0]);
+            tangents.push([galaxy.axis_ratio, cos_pa, sin_pa, 0.0]);
+            colors.push([rgb[0], rgb[1], rgb[2], flux]);
+        }
+        let base = (i * 4) as u32;
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, tangents);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+// ---------------------------------------------------------------------------
+// Shrouds (auto-generated cones wrapping a [`Shroudable`] above a
+// [`ShroudProvider`])
+// ---------------------------------------------------------------------------
+
+/// Attached to a shroud entity — a mesh child of the provider
+/// (e.g. a decoupler) that wraps the shrouded part above. Spawned and
+/// reconciled by [`sync_shrouds`]; not part of the persisted blueprint
+/// and not user-spawnable.
+#[derive(Component, Debug, Clone, Copy)]
+struct Shroud {
+    provider: Entity,
+    shrouded: Entity,
+    // Cached spec, compared each frame so we only rebuild the mesh /
+    // material when geometry actually changed.
+    bottom_radius: f32,
+    top_radius: f32,
+    height: f32,
+}
+
+/// Marker on the shroud entity's body. Kept distinct from [`PartBody`] so
+/// part-level highlight systems (tint, material swap) don't fire on
+/// hovered shrouds — the shroud manages its own hover feedback
+/// (transparency) in [`update_shroud_transparency`].
+#[derive(Component, Debug, Clone, Copy)]
+struct ShroudBody;
+
+/// Expected geometry for a shroud covering a given attachment. `None`
+/// when no shroud should exist for this pair (misconfigured attachment,
+/// shrouded part missing [`Shroudable`], or provider not wider than the
+/// shrouded's top — the cone would degenerate).
+struct ShroudSpec {
+    bottom_radius: f32,
+    top_radius: f32,
+    height: f32,
+    shrouded: Entity,
+}
+
+fn compute_shroud_spec(
+    attachment: &Attachment,
+    provider_nodes: &AttachNodes,
+    shroudables: &Query<(&Engine, Has<Shroudable>)>,
+) -> Option<ShroudSpec> {
+    // Only the canonical "provider sits below shroudable" orientation
+    // gets a shroud: provider's `top` mates with shroudable's `bottom`.
+    if attachment.my_node != "top" || attachment.parent_node != "bottom" {
+        return None;
+    }
+    let (engine, is_shroudable) = shroudables.get(attachment.parent).ok()?;
+    if !is_shroudable {
+        return None;
+    }
+    let provider_top_d = provider_nodes.get("top")?.diameter;
+    // Shroud top matches the shrouded part's *attach* diameter — the
+    // interface the stage above would mate with. That sits outside the
+    // engine's narrowing visual silhouette, so the shroud stays clear
+    // of the engine body instead of hugging (and z-fighting) it.
+    let bottom_r = provider_top_d * 0.5;
+    let top_r = engine.diameter * 0.5;
+    let (_, _, height) = engine_visual_profile(engine.diameter);
+    // Only generate when the provider is at least as wide as the
+    // shrouded part at its top — a narrower provider would invert the
+    // cone. Equal diameter gives a clean cylindrical interstage.
+    if bottom_r + 1.0e-4 < top_r {
+        return None;
+    }
+    Some(ShroudSpec {
+        bottom_radius: bottom_r,
+        top_radius: top_r,
+        height,
+        shrouded: attachment.parent,
+    })
+}
+
+fn spec_matches(s: &Shroud, spec: &ShroudSpec) -> bool {
+    s.shrouded == spec.shrouded
+        && (s.bottom_radius - spec.bottom_radius).abs() < 1.0e-4
+        && (s.top_radius - spec.top_radius).abs() < 1.0e-4
+        && (s.height - spec.height).abs() < 1.0e-4
+}
+
+/// Reconcile shroud entities against current attachment state: spawn
+/// missing shrouds, update ones whose geometry changed, and despawn
+/// orphans. Idempotent per frame; cheap when attachment is stable.
+fn sync_shrouds(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
+    providers: Query<(Entity, &Attachment, &AttachNodes), With<ShroudProvider>>,
+    shroudables: Query<(&Engine, Has<Shroudable>)>,
+    existing: Query<(Entity, &Shroud)>,
+) {
+    // Map provider -> (shroud_entity, current Shroud component).
+    let mut current_by_provider: HashMap<Entity, (Entity, Shroud)> = HashMap::new();
+    for (entity, shroud) in existing.iter() {
+        current_by_provider.insert(shroud.provider, (entity, *shroud));
+    }
+
+    let mut kept: HashSet<Entity> = HashSet::new();
+
+    for (provider, attachment, provider_nodes) in providers.iter() {
+        let Some(spec) = compute_shroud_spec(attachment, provider_nodes, &shroudables) else {
+            continue;
+        };
+        kept.insert(provider);
+
+        // Reuse in-place if the cached spec still matches.
+        if let Some((_, current)) = current_by_provider.get(&provider) {
+            if spec_matches(current, &spec) {
+                continue;
+            }
+        }
+        if let Some((old, _)) = current_by_provider.get(&provider) {
+            commands.entity(*old).despawn();
+        }
+
+        let shroud_mesh: Mesh = ConicalFrustum {
+            radius_top: spec.top_radius,
+            radius_bottom: spec.bottom_radius,
+            height: spec.height,
+        }
+        .mesh()
+        .resolution(PART_RESOLUTION)
+        .into();
+        let mesh_handle = meshes.add(shroud_mesh);
+
+        // Slant length — the actual surface distance v = 0 → v = 1.
+        // Matches the vertical height only when the two radii agree.
+        let dr = spec.bottom_radius - spec.top_radius;
+        let slant_length = (spec.height * spec.height + dr * dr).sqrt();
+        // Blend mode is set once here; we only vary base-color alpha
+        // from the hover system so the pipeline stays hot.
+        let material = ship_materials.add(ShipPartMaterial {
+            base: StandardMaterial {
+                alpha_mode: AlphaMode::Blend,
+                ..stainless_steel_base()
+            },
+            extension: ShipPartExtension {
+                params: ShipPartParams {
+                    length: slant_length,
+                    radius_top: spec.top_radius,
+                    radius_bottom: spec.bottom_radius,
+                    // Mix provider index with a fixed mask so shroud
+                    // detail doesn't look identical to the decoupler's.
+                    seed: provider.index_u32() ^ 0x5A5A_5A5A,
+                    ..default()
+                },
+            },
+        });
+
+        // Shroud mesh center sits at +height/2 in the provider's local
+        // frame, since the provider's "top" node (y = 0) meets the
+        // shrouded's base and the shroud extends upward from there.
+        let shroud_entity = commands
+            .spawn((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(material),
+                Transform::from_xyz(0.0, spec.height * 0.5, 0.0),
+                Visibility::default(),
+                Shroud {
+                    provider,
+                    shrouded: spec.shrouded,
+                    bottom_radius: spec.bottom_radius,
+                    top_radius: spec.top_radius,
+                    height: spec.height,
+                },
+                ShroudBody,
+                Pickable::default(),
+            ))
+            .observe(on_shroud_click)
+            .id();
+        commands.entity(provider).add_child(shroud_entity);
+    }
+
+    // Despawn shrouds whose provider no longer qualifies (detachment,
+    // geometry change below threshold, shrouded part removed, etc.).
+    for (provider, (entity, _)) in &current_by_provider {
+        if !kept.contains(provider) {
+            commands.entity(*entity).despawn();
+        }
+    }
+}
+
+/// Drive the shroud's base-color alpha from hover: opaque by default
+/// (engine hidden inside), partial transparency while hovered so the
+/// shrouded silhouette reads through.
+fn update_shroud_transparency(
+    hover_map: Res<HoverMap>,
+    mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
+    shrouds: Query<(Entity, &MeshMaterial3d<ShipPartMaterial>), With<ShroudBody>>,
+) {
+    let hovered: HashSet<Entity> = hover_map
+        .0
+        .values()
+        .flat_map(|hovers| hovers.keys().copied())
+        .collect();
+
+    for (entity, mesh_mat) in shrouds.iter() {
+        let target_alpha: f32 = if hovered.contains(&entity) { 0.18 } else { 1.0 };
+        let Some(mat) = ship_materials.get_mut(&mesh_mat.0) else {
+            continue;
+        };
+        let srgba = mat.base.base_color.to_srgba();
+        if (srgba.alpha - target_alpha).abs() > 1.0e-3 {
+            mat.base.base_color = Color::srgba(srgba.red, srgba.green, srgba.blue, target_alpha);
+        }
+    }
+}
+
+/// Click on a shroud selects the provider that owns it — the shroud is
+/// a visual extension of the decoupler, not an independent part.
+fn on_shroud_click(
+    click: On<Pointer<Click>>,
+    shrouds: Query<&Shroud>,
+    mut state: ResMut<EditorState>,
+    mut contexts: EguiContexts,
+) {
+    if pointer_over_egui(&mut contexts) {
+        return;
+    }
+    if let Ok(shroud) = shrouds.get(click.entity) {
+        state.selected = Some(shroud.provider);
+    }
+}
+
+/// Propagate the coupled neighbor's [`MaterialKind`] onto parts that
+/// visually continue with whatever is attached to their `bottom` node —
+/// currently [`Decoupler`] (so the decoupler + its shroud read as part
+/// of the stage below on staging) and [`Adapter`] (so a diameter
+/// transition inherits from the narrower stage it feeds into). Parts
+/// with nothing attached below keep their default [`MaterialKind`].
+fn propagate_coupled_material(
+    attachments: Query<(Entity, &Attachment)>,
+    mut params: ParamSet<(
+        Query<(Entity, &PartMaterial)>,
+        Query<
+            (Entity, &mut PartMaterial),
+            Or<(With<Decoupler>, With<Adapter>)>,
+        >,
+    )>,
+) {
+    // Build parent → bottom-attached-child entity map.
+    let mut coupled: HashMap<Entity, Entity> = HashMap::new();
+    for (child, att) in attachments.iter() {
+        if att.parent_node == "bottom" {
+            coupled.insert(att.parent, child);
+        }
+    }
+
+    // Snapshot every part's current MaterialKind so read + write on
+    // PartMaterial can both run in this system without conflicting
+    // mutable borrows.
+    let kinds: HashMap<Entity, MaterialKind> =
+        params.p0().iter().map(|(e, m)| (e, m.kind)).collect();
+
+    for (entity, mut my_mat) in params.p1().iter_mut() {
+        let Some(coupled_entity) = coupled.get(&entity).copied() else {
+            continue;
+        };
+        let Some(&kind) = kinds.get(&coupled_entity) else {
+            continue;
+        };
+        if my_mat.kind != kind {
+            my_mat.kind = kind;
         }
     }
 }

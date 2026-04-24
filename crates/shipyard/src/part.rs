@@ -6,6 +6,25 @@ use bevy::prelude::*;
 #[require(Transform, Visibility)]
 pub struct Part;
 
+/// Surface finish for a ship part. Drives which procedural shader /
+/// parameter set the rendering layer picks. Only one variant today; the
+/// enum is here so call sites (editor palette, blueprint round-trip) can
+/// be extended additively.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MaterialKind {
+    #[default]
+    StainlessSteel,
+}
+
+/// Attached to any part whose surface should be driven by the ship
+/// rendering layer (as opposed to a plain `StandardMaterial`). The
+/// rendering layer reacts to the `kind` field; parts without this
+/// component keep whatever material the editor / game assigned.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct PartMaterial {
+    pub kind: MaterialKind,
+}
+
 #[derive(Component, Debug, Clone)]
 pub struct CommandPod {
     pub model: String,
@@ -13,22 +32,45 @@ pub struct CommandPod {
     pub dry_mass: f32,
 }
 
+/// Parametric in radius: `diameter` drives this part's `top` node when it
+/// is a ship root; when attached to a parent, the parent's node diameter
+/// overrides via `sizing::propagate_node_sizes`.
 #[derive(Component, Debug, Clone)]
 pub struct Decoupler {
+    pub diameter: f32,
     pub ejection_impulse: f32,
     pub dry_mass: f32,
 }
 
+/// Marker: this part has a silhouette that a neighboring [`ShroudProvider`]
+/// can wrap with an auto-generated shroud. Inserted at spawn on parts
+/// that are shroudable (currently: engines).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Shroudable;
+
+/// Marker: when this part's `top` node is attached to a [`Shroudable`]'s
+/// `bottom` node, the editor spawns a shroud entity as its child, sized
+/// to cover the shrouded silhouette. The shroud stays with the provider
+/// on staging, matching the KSP-style "interstage" convention.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct ShroudProvider;
+
+/// `diameter` is the `top` diameter (used when this part is the root);
+/// `target_diameter` is always the `bottom` diameter. Child-attached
+/// adapters get their `top` overridden from the parent.
 #[derive(Component, Debug, Clone)]
 pub struct Adapter {
+    pub diameter: f32,
     pub target_diameter: f32,
     pub dry_mass: f32,
 }
 
 /// Pure geometry — contents live in [`crate::PartResources`]. A tank can
-/// hold any resource; this part does not restrict which.
+/// hold any resource; this part does not restrict which. `diameter`
+/// drives node sizing when root; overridden by parent when attached.
 #[derive(Component, Debug, Clone)]
 pub struct FuelTank {
+    pub diameter: f32,
     pub length: f32,
     pub dry_mass: f32,
 }

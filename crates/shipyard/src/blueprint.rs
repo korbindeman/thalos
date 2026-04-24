@@ -1,9 +1,19 @@
 use crate::attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
-use crate::part::{Adapter, CommandPod, Decoupler, Engine, FuelTank, Part, ReactantRatio};
+use crate::part::{
+    Adapter, CommandPod, Decoupler, Engine, FuelTank, Part, PartMaterial, ReactantRatio,
+    Shroudable, ShroudProvider,
+};
 use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Default diameter for parametric parts (Decoupler/Adapter/FuelTank) when
+/// a blueprint omits the field — applied to old saves written before the
+/// field existed.
+fn default_parametric_diameter() -> f32 {
+    1.25
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "kind")]
@@ -14,14 +24,20 @@ pub enum PartData {
         dry_mass: f32,
     },
     Decoupler {
+        #[serde(default = "default_parametric_diameter")]
+        diameter: f32,
         ejection_impulse: f32,
         dry_mass: f32,
     },
     Adapter {
+        #[serde(default = "default_parametric_diameter")]
+        diameter: f32,
         target_diameter: f32,
         dry_mass: f32,
     },
     FuelTank {
+        #[serde(default = "default_parametric_diameter")]
+        diameter: f32,
         length: f32,
         dry_mass: f32,
     },
@@ -95,25 +111,39 @@ impl ShipBlueprint {
                 });
             }
             PartData::Decoupler {
+                diameter,
                 ejection_impulse,
                 dry_mass,
             } => {
-                ec.insert(Decoupler {
-                    ejection_impulse,
-                    dry_mass,
-                });
+                ec.insert((
+                    Decoupler {
+                        diameter,
+                        ejection_impulse,
+                        dry_mass,
+                    },
+                    ShroudProvider,
+                    PartMaterial::default(),
+                ));
             }
             PartData::Adapter {
+                diameter,
                 target_diameter,
                 dry_mass,
             } => {
-                ec.insert(Adapter {
-                    target_diameter,
-                    dry_mass,
-                });
+                ec.insert((
+                    Adapter {
+                        diameter,
+                        target_diameter,
+                        dry_mass,
+                    },
+                    PartMaterial::default(),
+                ));
             }
-            PartData::FuelTank { length, dry_mass } => {
-                ec.insert(FuelTank { length, dry_mass });
+            PartData::FuelTank { diameter, length, dry_mass } => {
+                ec.insert((
+                    FuelTank { diameter, length, dry_mass },
+                    PartMaterial::default(),
+                ));
             }
             PartData::Engine {
                 model,
@@ -124,15 +154,18 @@ impl ShipBlueprint {
                 reactants,
                 power_draw_kw,
             } => {
-                ec.insert(Engine {
-                    model,
-                    diameter,
-                    thrust,
-                    isp,
-                    dry_mass,
-                    reactants,
-                    power_draw_kw,
-                });
+                ec.insert((
+                    Engine {
+                        model,
+                        diameter,
+                        thrust,
+                        isp,
+                        dry_mass,
+                        reactants,
+                        power_draw_kw,
+                    },
+                    Shroudable,
+                ));
             }
         }
         ec.id()
@@ -168,25 +201,39 @@ impl ShipBlueprint {
                     });
                 }
                 PartData::Decoupler {
+                    diameter,
                     ejection_impulse,
                     dry_mass,
                 } => {
-                    ec.insert(Decoupler {
-                        ejection_impulse,
-                        dry_mass,
-                    });
+                    ec.insert((
+                        Decoupler {
+                            diameter,
+                            ejection_impulse,
+                            dry_mass,
+                        },
+                        ShroudProvider,
+                        PartMaterial::default(),
+                    ));
                 }
                 PartData::Adapter {
+                    diameter,
                     target_diameter,
                     dry_mass,
                 } => {
-                    ec.insert(Adapter {
-                        target_diameter,
-                        dry_mass,
-                    });
+                    ec.insert((
+                        Adapter {
+                            diameter,
+                            target_diameter,
+                            dry_mass,
+                        },
+                        PartMaterial::default(),
+                    ));
                 }
-                PartData::FuelTank { length, dry_mass } => {
-                    ec.insert(FuelTank { length, dry_mass });
+                PartData::FuelTank { diameter, length, dry_mass } => {
+                    ec.insert((
+                        FuelTank { diameter, length, dry_mass },
+                        PartMaterial::default(),
+                    ));
                 }
                 PartData::Engine {
                     model,
@@ -197,15 +244,18 @@ impl ShipBlueprint {
                     reactants,
                     power_draw_kw,
                 } => {
-                    ec.insert(Engine {
-                        model,
-                        diameter,
-                        thrust,
-                        isp,
-                        dry_mass,
-                        reactants,
-                        power_draw_kw,
-                    });
+                    ec.insert((
+                        Engine {
+                            model,
+                            diameter,
+                            thrust,
+                            isp,
+                            dry_mass,
+                            reactants,
+                            power_draw_kw,
+                        },
+                        Shroudable,
+                    ));
                 }
             }
         }
@@ -294,27 +344,32 @@ pub fn default_nodes_for(data: &PartData) -> HashMap<NodeId, AttachNode> {
                 },
             );
         }
-        PartData::Decoupler { .. } => {
+        PartData::Decoupler { diameter, .. } => {
             nodes.insert(
                 "top".into(),
                 AttachNode {
-                    diameter: 1.0,
+                    diameter: *diameter,
                     offset: Vec3::ZERO,
                 },
             );
             nodes.insert(
                 "bottom".into(),
                 AttachNode {
-                    diameter: 1.0,
+                    diameter: *diameter,
                     offset: Vec3::new(0.0, -0.2, 0.0),
                 },
             );
         }
-        PartData::Adapter { target_diameter, .. } => {
+        PartData::Adapter {
+            diameter,
+            target_diameter,
+            ..
+        } => {
+            let h = ((*diameter + *target_diameter) * 0.5).max(0.4);
             nodes.insert(
                 "top".into(),
                 AttachNode {
-                    diameter: 1.0,
+                    diameter: *diameter,
                     offset: Vec3::ZERO,
                 },
             );
@@ -322,22 +377,22 @@ pub fn default_nodes_for(data: &PartData) -> HashMap<NodeId, AttachNode> {
                 "bottom".into(),
                 AttachNode {
                     diameter: *target_diameter,
-                    offset: Vec3::new(0.0, -0.5, 0.0),
+                    offset: Vec3::new(0.0, -h, 0.0),
                 },
             );
         }
-        PartData::FuelTank { length, .. } => {
+        PartData::FuelTank { diameter, length, .. } => {
             nodes.insert(
                 "top".into(),
                 AttachNode {
-                    diameter: 1.0,
+                    diameter: *diameter,
                     offset: Vec3::ZERO,
                 },
             );
             nodes.insert(
                 "bottom".into(),
                 AttachNode {
-                    diameter: 1.0,
+                    diameter: *diameter,
                     offset: Vec3::new(0.0, -*length, 0.0),
                 },
             );

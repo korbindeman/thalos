@@ -1,0 +1,10 @@
+[package]
+name = "thalos_ship_rendering"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.18", features = ["wayland"] }
+
+[features]
+dev = ["bevy/dynamic_linking"]

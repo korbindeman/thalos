@@ -9,6 +9,7 @@ members = [
     "crates/planet_rendering",
     "crates/planet_editor",
     "crates/game",
+    "crates/ship_rendering",
     "crates/shipyard",
     "crates/bake_dump",
 ]

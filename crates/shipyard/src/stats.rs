@@ -275,6 +275,7 @@ mod tests {
         );
         PartBlueprint {
             data: PartData::FuelTank {
+                diameter: 2.0,
                 length: 3.0,
                 dry_mass: 500.0,
             },

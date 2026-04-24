@@ -1,0 +1,129 @@
+(
+    name: "apollo_booster",
+    root: 0,
+    parts: [
+        (
+            data: (
+                kind: "CommandPod",
+                model: "Mk1-3",
+                diameter: 2.5,
+                dry_mass: 2720.0,
+            ),
+            resources: {
+                Electricity: (
+                    capacity: 2.5,
+                    amount: 2.5,
+                ),
+            },
+        ),
+        (
+            data: (
+                kind: "FuelTank",
+                length: 3.0,
+                dry_mass: 250.0,
+            ),
+            resources: {},
+        ),
+        (
+            data: (
+                kind: "Engine",
+                model: "Poodle",
+                diameter: 2.5,
+                thrust: 250000.0,
+                isp: 350.0,
+                dry_mass: 250.0,
+                reactants: [
+                    (
+                        resource: Methane,
+                        mass_fraction: 0.21739131,
+                    ),
+                    (
+                        resource: Lox,
+                        mass_fraction: 0.7826087,
+                    ),
+                ],
+                power_draw_kw: 0.0,
+            ),
+            resources: {},
+        ),
+        (
+            data: (
+                kind: "Decoupler",
+                ejection_impulse: 250.0,
+                dry_mass: 50.0,
+            ),
+            resources: {},
+        ),
+        (
+            data: (
+                kind: "FuelTank",
+                length: 12.0,
+                dry_mass: 250.0,
+            ),
+            resources: {
+                Methane: (
+                    capacity: 1000.0,
+                    amount: 1000.0,
+                ),
+                Lox: (
+                    capacity: 1331.4635,
+                    amount: 1331.4635,
+                ),
+            },
+        ),
+        (
+            data: (
+                kind: "Engine",
+                model: "Poodle",
+                diameter: 2.5,
+                thrust: 250000.0,
+                isp: 350.0,
+                dry_mass: 250.0,
+                reactants: [
+                    (
+                        resource: Methane,
+                        mass_fraction: 0.21739131,
+                    ),
+                    (
+                        resource: Lox,
+                        mass_fraction: 0.7826087,
+                    ),
+                ],
+                power_draw_kw: 0.0,
+            ),
+            resources: {},
+        ),
+    ],
+    connections: [
+        (
+            parent: 0,
+            parent_node: "bottom",
+            child: 1,
+            child_node: "top",
+        ),
+        (
+            parent: 3,
+            parent_node: "bottom",
+            child: 4,
+            child_node: "top",
+        ),
+        (
+            parent: 1,
+            parent_node: "bottom",
+            child: 2,
+            child_node: "top",
+        ),
+        (
+            parent: 4,
+            parent_node: "bottom",
+            child: 5,
+            child_node: "top",
+        ),
+        (
+            parent: 2,
+            parent_node: "bottom",
+            child: 3,
+            child_node: "top",
+        ),
+    ],
+)

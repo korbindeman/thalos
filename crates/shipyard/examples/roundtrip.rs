@@ -49,6 +49,7 @@ fn main() {
             },
             PartBlueprint {
                 data: PartData::Decoupler {
+                    diameter: 1.25,
                     ejection_impulse: 250.0,
                     dry_mass: 50.0,
                 },
@@ -56,6 +57,7 @@ fn main() {
             },
             PartBlueprint {
                 data: PartData::Adapter {
+                    diameter: 1.25,
                     target_diameter: 2.5,
                     dry_mass: 100.0,
                 },
@@ -63,6 +65,7 @@ fn main() {
             },
             PartBlueprint {
                 data: PartData::FuelTank {
+                    diameter: 2.5,
                     length: 4.0,
                     dry_mass: 1000.0,
                 },
@@ -70,6 +73,7 @@ fn main() {
             },
             PartBlueprint {
                 data: PartData::FuelTank {
+                    diameter: 2.5,
                     length: 4.0,
                     dry_mass: 1200.0,
                 },

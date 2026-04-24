@@ -20,7 +20,8 @@ pub mod stats;
 pub use attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
 pub use blueprint::{Connection, PartBlueprint, PartData, ShipBlueprint};
 pub use part::{
-    Adapter, CommandPod, Decoupler, Engine, EngineValidationError, FuelTank, Part, ReactantRatio,
+    Adapter, CommandPod, Decoupler, Engine, EngineValidationError, FuelTank, MaterialKind, Part,
+    PartMaterial, ReactantRatio, Shroudable, ShroudProvider,
 };
 pub use resource::{PartResources, Resource, ResourcePool};
 pub use stats::{G0, ResourceTotals, ShipStats};
