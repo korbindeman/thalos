@@ -84,6 +84,9 @@ const DISTANCE_MIN_DEFAULT: f64 = 1e5; // 100 km
 const DISTANCE_MAX: f64 = 1e13; // ~67 AU
 /// Camera stops at 3× the body's radius (comfortable viewing distance).
 const SURFACE_MARGIN: f64 = 3.0;
+/// Closest the camera may zoom to the player ship in ship view (metres).
+/// Small enough to put the camera a few metres off the hull.
+const SHIP_MIN_DISTANCE_M: f64 = 5.0;
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -175,12 +178,15 @@ fn camera_min_distance_system(
     mut focus: ResMut<CameraFocus>,
     bodies: Query<&crate::rendering::CelestialBody>,
     ghosts: Query<&crate::flight_plan_view::GhostBody>,
+    ships: Query<(), With<crate::rendering::PlayerShip>>,
 ) {
     let min = if let Some(target) = focus.target {
         if let Ok(body) = bodies.get(target) {
             (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT)
         } else if let Ok(ghost) = ghosts.get(target) {
             (ghost.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT)
+        } else if ships.get(target).is_ok() {
+            SHIP_MIN_DISTANCE_M
         } else {
             DISTANCE_MIN_DEFAULT
         }

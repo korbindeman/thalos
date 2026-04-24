@@ -67,7 +67,6 @@ pub(in crate::maneuver) fn maneuver_input(
     if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace) {
         if let Some(id) = selected.id {
             writer.write(ManeuverEvent::DeleteNode { id });
-            info!("[maneuver] selection cleared: Delete/Backspace key");
             selected.id = None;
         }
     }
@@ -224,18 +223,6 @@ pub(in crate::maneuver) fn maneuver_input(
 
             if mouse.just_pressed(MouseButton::Left) {
                 if let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_anchor_body) {
-                    let ref_name = sim
-                        .system
-                        .bodies
-                        .get(reference_body)
-                        .map(|b| b.name.as_str())
-                        .unwrap_or("?");
-                    info!(
-                        "[maneuver] placed node at t+{:.0}s, reference_body = {} (id {})",
-                        trail_time - sim.simulation.sim_time(),
-                        ref_name,
-                        reference_body,
-                    );
                     writer.write(ManeuverEvent::PlaceNode {
                         trail_time,
                         reference_body,
@@ -250,12 +237,6 @@ pub(in crate::maneuver) fn maneuver_input(
     }
 
     if mouse.just_pressed(MouseButton::Left) && !pointer_on_arrow {
-        info!(
-            "[maneuver] mouse just_pressed Left (mode={:?}, pressed={}, selected={:?})",
-            std::mem::discriminant(&*mode),
-            mouse.pressed(MouseButton::Left),
-            selected.id
-        );
         if let Some(id) = closest_node(
             &plan,
             prediction,
@@ -275,7 +256,6 @@ pub(in crate::maneuver) fn maneuver_input(
                 selected.id = Some(id);
             }
         } else {
-            info!("[maneuver] selection cleared: click missed all nodes");
             selected.id = None;
         }
     }

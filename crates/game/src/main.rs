@@ -4,10 +4,14 @@ mod coords;
 mod flight_plan_view;
 mod hud;
 mod maneuver;
+mod photo_mode;
+mod reflection_probe;
 mod rendering;
+mod ship_view;
 mod sky_render;
 mod star_flare;
 mod target;
+mod view;
 
 use std::sync::Arc;
 
@@ -27,9 +31,12 @@ use camera::CameraPlugin;
 use flight_plan_view::FlightPlanViewPlugin;
 use hud::HudPlugin;
 use maneuver::ManeuverPlugin;
+use photo_mode::PhotoModePlugin;
 use rendering::{RenderingPlugin, SimulationState};
+use ship_view::ShipViewPlugin;
 use target::TargetPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
+use view::ViewPlugin;
 
 // ---------------------------------------------------------------------------
 // System ordering
@@ -165,6 +172,7 @@ fn main() {
         .add_plugins(bevy::prelude::MeshPickingPlugin)
         .add_plugins(PlanetRenderingPlugin)
         .add_plugins(CameraPlugin)
+        .add_plugins(reflection_probe::ReflectionProbePlugin)
         .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
@@ -173,5 +181,8 @@ fn main() {
         .add_plugins(FlightPlanViewPlugin)
         .add_plugins(ManeuverPlugin)
         .add_plugins(HudPlugin)
+        .add_plugins(PhotoModePlugin)
+        .add_plugins(ViewPlugin)
+        .add_plugins(ShipViewPlugin)
         .run();
 }

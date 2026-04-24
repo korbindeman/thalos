@@ -8,7 +8,9 @@ thalos_physics = { path = "../physics" }
 thalos_planet_rendering = { path = "../planet_rendering" }
 thalos_terrain_gen = { path = "../terrain_gen" }
 thalos_celestial = { path = "../celestial" }
-bevy = { version = "0.18", features = ["wayland"] }
+thalos_shipyard = { path = "../shipyard" }
+thalos_ship_rendering = { path = "../ship_rendering" }
+bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 bevy_egui = "0.39"
 tracing = "0.1"
 

@@ -21,7 +21,38 @@ use crate::rendering::SimulationState;
 
 pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("advance_simulation").entered();
+
+    let pre_pos = sim.simulation.ship_state().position;
+    let pre_t = sim.simulation.sim_time();
+
     sim.simulation.step(time.delta_secs_f64());
+
+    // Diagnostic: log anything that looks physically impossible so we can
+    // catch state corruption the instant it happens instead of noticing it
+    // visually a few frames later.
+    let post_pos = sim.simulation.ship_state().position;
+    let post_t = sim.simulation.sim_time();
+    let dt = post_t - pre_t;
+    let dx = (post_pos - pre_pos).length();
+    let warp = sim.simulation.warp.speed();
+    // A ship in LEO around Thalos moves ~7 km/s relative to the body, but
+    // the body itself drifts heliocentrically at ~30 km/s. Cap at
+    // 100 km/s * dt as a rough sanity ceiling.
+    let max_reasonable = 1.0e5 * dt.max(1.0);
+    if dt > 0.0 && dx > max_reasonable {
+        warn!(
+            "ship jumped {:.3e} m in {:.2}s (warp={:.0}x, ratio={:.3}x reasonable); pre=({:.3e},{:.3e},{:.3e}) post=({:.3e},{:.3e},{:.3e})",
+            dx, dt, warp, dx / max_reasonable,
+            pre_pos.x, pre_pos.y, pre_pos.z,
+            post_pos.x, post_pos.y, post_pos.z,
+        );
+    }
+    if !post_pos.is_finite() {
+        warn!(
+            "ship position went non-finite: {:?} at sim_time {:.3} (warp={:.0}x)",
+            post_pos, post_t, warp,
+        );
+    }
 }
 
 fn update_prediction(mut sim: ResMut<SimulationState>) {

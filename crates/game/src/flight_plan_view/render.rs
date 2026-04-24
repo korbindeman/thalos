@@ -13,7 +13,7 @@ use thalos_physics::trajectory::NumericSegment;
 use thalos_physics::types::{SolarSystemDefinition, TrajectorySample};
 
 use crate::coords::{RenderOrigin, sample_render_pos};
-use crate::rendering::{FrameBodyStates, ShowOrbits, SimulationState};
+use crate::rendering::{FrameBodyStates, SimulationState};
 
 use super::view::FlightPlanView;
 
@@ -26,12 +26,8 @@ pub(super) fn render_trajectory(
     origin: Res<RenderOrigin>,
     cache: Res<FrameBodyStates>,
     view: Res<FlightPlanView>,
-    show_orbits: Res<ShowOrbits>,
     mut gizmos: Gizmos,
 ) {
-    if !show_orbits.0 {
-        return;
-    }
     let Some(sim) = sim else { return };
     let Some(prediction) = sim.simulation.prediction() else {
         return;
@@ -208,15 +204,17 @@ fn render_stable_orbit(
         .unwrap_or([1.0, 1.0, 1.0]);
     let color = ghost_adjust(Color::srgba(r, g, b, 1.0), is_ghost);
 
-    let last = samples.len() - 1;
-    let end_pos = sample_render_pos(&samples[last - 1], pin_for, origin);
+    // The last sample sits at `time + period`, which for a closed Kepler
+    // orbit coincides with samples[0] in the anchor frame. Include it so
+    // the linestrip's final edge closes the loop; dropping it leaves a
+    // visible gap of one sample spacing (~2.8° for 128 samples).
     gizmos.linestrip(
-        samples[..last]
+        samples
             .iter()
             .map(|s| sample_render_pos(s, pin_for, origin)),
         color,
     );
-    Some(end_pos)
+    Some(sample_render_pos(samples.last()?, pin_for, origin))
 }
 
 // ---------------------------------------------------------------------------

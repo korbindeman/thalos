@@ -7,7 +7,9 @@ use super::super::state::{
 use crate::camera::{CameraFocus, OrbitCamera};
 use crate::coords::{RENDER_SCALE, RenderOrigin};
 use crate::flight_plan_view::FlightPlanView;
+use crate::photo_mode::HideInPhotoMode;
 use crate::rendering::{FrameBodyStates, SimulationState};
+use crate::view::HideInShipView;
 
 const MARKER_RADIUS: f32 = 0.006;
 
@@ -34,6 +36,8 @@ pub(in crate::maneuver) fn spawn_snap_indicator(
         Transform::default(),
         Visibility::Hidden,
         SnapIndicator,
+        HideInPhotoMode,
+        HideInShipView,
     ));
 }
 
@@ -162,6 +166,8 @@ pub(in crate::maneuver) fn manage_node_markers(
             MeshMaterial3d(mat),
             overlay_marker_transform(world_pos, cam_rot, cam_dist * MARKER_RADIUS),
             NodeMarkerDisc { node_id: node.id },
+            HideInPhotoMode,
+            HideInShipView,
         ));
     }
 }

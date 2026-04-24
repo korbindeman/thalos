@@ -11,7 +11,9 @@ use bevy::prelude::*;
 
 use crate::camera::CameraFocus;
 use crate::coords::{RENDER_SCALE, RenderOrigin};
+use crate::photo_mode::HideInPhotoMode;
 use crate::rendering::{CelestialBody, FrameBodyStates, SimulationState};
+use crate::view::HideInShipView;
 
 use super::view::{FlightPlanView, GhostPhase};
 
@@ -107,6 +109,8 @@ pub(super) fn sync_ghost_bodies(
                         encounter_epoch: spec.encounter_epoch,
                         phase: GhostPhase::Active,
                     },
+                    HideInPhotoMode,
+                    HideInShipView,
                     Name::new(format!("Ghost: {}", body_def.name)),
                 ))
                 .id();

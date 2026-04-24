@@ -5,13 +5,17 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
 use crate::camera::CameraFocus;
-use crate::rendering::{CelestialBody, ShowOrbits, SimulationState};
+use crate::photo_mode::not_in_photo_mode;
+use crate::rendering::{CelestialBody, SimulationState};
 
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(bevy_egui::EguiPrimaryContextPass, time_control_panel);
+        app.add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            time_control_panel.run_if(not_in_photo_mode),
+        );
     }
 }
 
@@ -21,7 +25,6 @@ fn time_control_panel(
     focus: Res<CameraFocus>,
     bodies: Query<(&CelestialBody, &Name)>,
     diagnostics: Res<DiagnosticsStore>,
-    mut show_orbits: ResMut<ShowOrbits>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -54,17 +57,6 @@ fn time_control_panel(
             let hours = ((t % 86400.0) / 3600.0) as u64;
             let minutes = ((t % 3600.0) / 60.0) as u64;
             ui.label(format!("T+ {}d {:02}h {:02}m", days, hours, minutes));
-
-            ui.separator();
-
-            let orbits_label = if show_orbits.0 {
-                "Orbits: On"
-            } else {
-                "Orbits: Off"
-            };
-            if ui.button(orbits_label).clicked() {
-                show_orbits.0 = !show_orbits.0;
-            }
 
             ui.separator();
 

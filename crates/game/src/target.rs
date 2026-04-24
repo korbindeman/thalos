@@ -1,6 +1,6 @@
 //! Target-body selection and cycling.
 //!
-//! The player picks a target body with `Tab` (forward) / `Shift+Tab` (reverse);
+//! The player picks a target body with `T` (forward) / `Shift+T` (reverse);
 //! `Escape` clears. The selected target drives the ghost-body projection in
 //! [`crate::flight_plan_view`]: a translucent duplicate of the target body placed
 //! at its future position at the flight plan's closest-approach epoch.
@@ -50,7 +50,7 @@ fn cycle_target_input(
         return;
     }
 
-    if !keys.just_pressed(KeyCode::Tab) {
+    if !keys.just_pressed(KeyCode::KeyT) {
         return;
     }
     let reverse = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);

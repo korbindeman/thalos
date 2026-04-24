@@ -10,6 +10,8 @@ use super::super::state::{
 };
 use crate::camera::{CameraFocus, OrbitCamera};
 use crate::coords::RENDER_SCALE;
+use crate::photo_mode::HideInPhotoMode;
+use crate::view::HideInShipView;
 
 /// Spawn/despawn arrow handles and the slide sphere when node selection changes.
 pub(in crate::maneuver) fn manage_arrow_handles(
@@ -94,6 +96,8 @@ pub(in crate::maneuver) fn manage_arrow_handles(
                         base_color,
                     },
                     Pickable::default(),
+                    HideInPhotoMode,
+                    HideInShipView,
                 ))
                 .with_children(|parent| {
                     parent.spawn((
@@ -130,6 +134,8 @@ pub(in crate::maneuver) fn manage_arrow_handles(
             material: sphere_mat,
         },
         Pickable::default(),
+        HideInPhotoMode,
+        HideInShipView,
     ));
 }
 

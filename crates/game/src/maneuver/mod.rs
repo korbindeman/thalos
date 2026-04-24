@@ -147,10 +147,30 @@ impl Plugin for ManeuverPlugin {
                     handle_maneuver_events.after(maneuver_input),
                     sync_node_delta_v.after(handle_maneuver_events),
                     update_selected_node_view.after(sync_node_delta_v),
-                    manage_arrow_handles.after(update_selected_node_view),
-                    update_arrow_transforms.after(manage_arrow_handles),
-                    manage_node_markers.after(update_selected_node_view),
-                    update_snap_indicator.after(maneuver_input),
+                    manage_arrow_handles
+                        .after(update_selected_node_view)
+                        .run_if(
+                            crate::photo_mode::not_in_photo_mode
+                                .and(crate::view::in_map_view),
+                        ),
+                    update_arrow_transforms
+                        .after(manage_arrow_handles)
+                        .run_if(
+                            crate::photo_mode::not_in_photo_mode
+                                .and(crate::view::in_map_view),
+                        ),
+                    manage_node_markers
+                        .after(update_selected_node_view)
+                        .run_if(
+                            crate::photo_mode::not_in_photo_mode
+                                .and(crate::view::in_map_view),
+                        ),
+                    update_snap_indicator
+                        .after(maneuver_input)
+                        .run_if(
+                            crate::photo_mode::not_in_photo_mode
+                                .and(crate::view::in_map_view),
+                        ),
                 )
                     .before(crate::SimStage::Physics),
             )
@@ -158,6 +178,12 @@ impl Plugin for ManeuverPlugin {
             .add_observer(arrow_drag_end)
             .add_observer(slide_sphere_drag_start)
             .add_observer(slide_sphere_drag_end)
-            .add_systems(bevy_egui::EguiPrimaryContextPass, node_editor_panel);
+            .add_systems(
+                bevy_egui::EguiPrimaryContextPass,
+                node_editor_panel.run_if(
+                    crate::photo_mode::not_in_photo_mode
+                        .and(crate::view::in_map_view),
+                ),
+            );
     }
 }

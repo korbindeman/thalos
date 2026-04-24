@@ -38,7 +38,10 @@ impl Plugin for FlightPlanViewPlugin {
                 ghost::update_ghost_lifecycle,
                 ghost::sync_ghost_bodies,
                 ghost::update_ghost_transforms,
-                render::render_trajectory,
+                render::render_trajectory.run_if(
+                    crate::photo_mode::not_in_photo_mode
+                        .and(crate::view::in_map_view),
+                ),
             )
                 .chain()
                 .after(crate::rendering::cache_body_states)
