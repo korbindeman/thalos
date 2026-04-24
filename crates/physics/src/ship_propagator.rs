@@ -303,123 +303,54 @@ impl KeplerianPropagator {
         let mut prev_t = time;
         let mut prev_state = state;
 
-        // Track whether the ship has already entered the SOI of a candidate
-        // (so we don't re-trigger on the next sample).
-        let active_children: Vec<bool> = vec![false; bodies.len()];
-        let _ = active_children; // reserved for future per-body re-entry logic
+        let soi_radius = bodies[soi_body].soi_radius_m;
+        let body_radius = bodies[soi_body].radius_m;
 
         // Skip index 0 (it equals `time`, already emitted as the start sample).
         for t in sample_times.into_iter().skip(1) {
             let cur_state = eval_at(t);
 
-            // Check for SOI exit between prev_t and t.
-            let soi_radius = bodies[soi_body].soi_radius_m;
-            if soi_radius.is_finite() {
-                let prev_rel = prev_state.position - ephemeris.query_body(soi_body, prev_t).position;
-                let cur_rel = cur_state.position - ephemeris.query_body(soi_body, t).position;
-                let prev_out = prev_rel.length() - soi_radius;
-                let cur_out = cur_rel.length() - soi_radius;
-                if prev_out < 0.0 && cur_out >= 0.0 {
-                    let t_cross = bisect_distance_sign_change(
-                        prev_t,
-                        t,
-                        soi_body,
-                        soi_radius,
-                        rel0,
-                        mu,
-                        time,
-                        ephemeris,
-                    );
-                    let cross_state = eval_at(t_cross);
-                    let parent = bodies[soi_body].parent.unwrap_or(soi_body);
-                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                    return SegmentResult {
-                        samples,
-                        terminator: SegmentTerminator::SoiExit {
-                            from: soi_body,
-                            to: parent,
-                            time: t_cross,
-                        },
-                        end_state: cross_state,
-                        end_time: t_cross,
-                        end_soi_body: parent,
-                    };
-                }
-            }
+            let xings = detect_step_crossings(
+                prev_state.position,
+                prev_t,
+                cur_state.position,
+                t,
+                soi_body,
+                soi_radius,
+                body_radius,
+                &threat_bodies,
+                ephemeris,
+                bodies,
+            );
 
-            // Check for SOI entry into any threat body.
-            for &child in &threat_bodies {
+            // Coast resolution order (exit > enter > collision) preserved from
+            // the pre-extraction code. Burn uses a different order; see
+            // `burn_segment_impl`. Unifying the two is a semantics decision,
+            // not a refactor — tracked as a follow-up.
+            if xings.exit {
+                let t_cross = bisect_body_distance(
+                    prev_t, t, soi_body, soi_radius, rel0, mu, time, soi_body, ephemeris,
+                );
+                let cross_state = eval_at(t_cross);
+                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                return SegmentResult::exit(samples, cross_state, t_cross, soi_body, bodies);
+            }
+            if let Some(child) = xings.enter {
                 let child_soi = bodies[child].soi_radius_m;
-                if !child_soi.is_finite() || child_soi <= 0.0 {
-                    continue;
-                }
-                let prev_child = ephemeris.query_body(child, prev_t);
-                let cur_child = ephemeris.query_body(child, t);
-                let prev_rel = prev_state.position - prev_child.position;
-                let cur_rel = cur_state.position - cur_child.position;
-                let prev_d = prev_rel.length();
-                let cur_d = cur_rel.length();
-                if prev_d >= child_soi && cur_d < child_soi {
-                    let t_cross = bisect_body_distance(
-                        prev_t,
-                        t,
-                        child,
-                        child_soi,
-                        rel0,
-                        mu,
-                        time,
-                        soi_body,
-                        ephemeris,
-                        DistanceTarget::EnterFrom,
-                    );
-                    let cross_state = eval_at(t_cross);
-                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                    return SegmentResult {
-                        samples,
-                        terminator: SegmentTerminator::SoiEnter {
-                            body: child,
-                            time: t_cross,
-                        },
-                        end_state: cross_state,
-                        end_time: t_cross,
-                        end_soi_body: child,
-                    };
-                }
+                let t_cross = bisect_body_distance(
+                    prev_t, t, child, child_soi, rel0, mu, time, soi_body, ephemeris,
+                );
+                let cross_state = eval_at(t_cross);
+                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                return SegmentResult::enter(samples, cross_state, t_cross, child);
             }
-
-            // Check for collision with the SOI body.
-            let body_radius = bodies[soi_body].radius_m;
-            if body_radius > 0.0 {
-                let prev_rel = prev_state.position - ephemeris.query_body(soi_body, prev_t).position;
-                let cur_rel = cur_state.position - ephemeris.query_body(soi_body, t).position;
-                let prev_d = prev_rel.length();
-                let cur_d = cur_rel.length();
-                if prev_d > body_radius && cur_d <= body_radius {
-                    let t_cross = bisect_body_distance(
-                        prev_t,
-                        t,
-                        soi_body,
-                        body_radius,
-                        rel0,
-                        mu,
-                        time,
-                        soi_body,
-                        ephemeris,
-                        DistanceTarget::EnterFrom,
-                    );
-                    let cross_state = eval_at(t_cross);
-                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                    return SegmentResult {
-                        samples,
-                        terminator: SegmentTerminator::Collision {
-                            body: soi_body,
-                            time: t_cross,
-                        },
-                        end_state: cross_state,
-                        end_time: t_cross,
-                        end_soi_body: soi_body,
-                    };
-                }
+            if xings.collision {
+                let t_cross = bisect_body_distance(
+                    prev_t, t, soi_body, body_radius, rel0, mu, time, soi_body, ephemeris,
+                );
+                let cross_state = eval_at(t_cross);
+                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                return SegmentResult::collision(samples, cross_state, t_cross, soi_body);
             }
 
             samples.push(build_sample(t, cur_state, soi_body, ephemeris));
@@ -486,6 +417,20 @@ impl KeplerianPropagator {
             .filter(|&b| b != soi_body && can_intercept(b, soi_body, bodies))
             .collect();
 
+        // Linear refinement of a crossing at fraction `frac` into the current
+        // substep, via a shortened RK4 step from (cur_state, cur_time).
+        // Sub-second accuracy is fine at typical burn substeps.
+        let refine_burn_crossing = |cur_state: StateVector,
+                                    cur_time: f64,
+                                    h: f64,
+                                    frac: f64|
+         -> (f64, StateVector) {
+            let t_cross = cur_time + frac * h;
+            let (cross_state, _) =
+                rk4_burn_step(cur_state, cur_time, frac * h, soi_body, mu, &burn, ephemeris);
+            (t_cross, cross_state)
+        };
+
         while cur_time < target_time {
             let h = self.burn_substep_s.min(target_time - cur_time);
 
@@ -500,115 +445,57 @@ impl KeplerianPropagator {
             );
             let next_time = cur_time + h;
 
-            // SOI / collision checks at substep boundary.
-            let prev_soi_rel =
-                cur_state.position - ephemeris.query_body(soi_body, cur_time).position;
-            let next_soi_rel =
-                next_state.position - ephemeris.query_body(soi_body, next_time).position;
+            let xings = detect_step_crossings(
+                cur_state.position,
+                cur_time,
+                next_state.position,
+                next_time,
+                soi_body,
+                soi_radius,
+                body_radius,
+                &threat_bodies,
+                ephemeris,
+                bodies,
+            );
 
-            // Exit?
-            if soi_radius.is_finite()
-                && prev_soi_rel.length() < soi_radius
-                && next_soi_rel.length() >= soi_radius
-            {
-                // Simple linear interpolation — sub-second accuracy is fine.
-                let frac = inv_lerp(
-                    prev_soi_rel.length(),
-                    next_soi_rel.length(),
-                    soi_radius,
-                );
-                let t_cross = cur_time + frac * h;
-                let (cross_state, _) = rk4_burn_step(
-                    cur_state,
-                    cur_time,
-                    frac * h,
-                    soi_body,
-                    mu,
-                    &burn,
-                    ephemeris,
-                );
+            // Burn resolution order (exit > collision > enter) preserved from
+            // the pre-extraction code. Coast uses a different order; see
+            // `coast_segment_impl`. Unifying the two is a semantics decision,
+            // not a refactor — tracked as a follow-up.
+            if xings.exit {
+                let prev_d =
+                    (cur_state.position - ephemeris.query_body(soi_body, cur_time).position).length();
+                let next_d = (next_state.position
+                    - ephemeris.query_body(soi_body, next_time).position)
+                    .length();
+                let frac = inv_lerp(prev_d, next_d, soi_radius);
+                let (t_cross, cross_state) = refine_burn_crossing(cur_state, cur_time, h, frac);
                 samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                let parent = bodies[soi_body].parent.unwrap_or(soi_body);
-                return SegmentResult {
-                    samples,
-                    terminator: SegmentTerminator::SoiExit {
-                        from: soi_body,
-                        to: parent,
-                        time: t_cross,
-                    },
-                    end_state: cross_state,
-                    end_time: t_cross,
-                    end_soi_body: parent,
-                };
+                return SegmentResult::exit(samples, cross_state, t_cross, soi_body, bodies);
             }
-
-            // Collision?
-            if body_radius > 0.0
-                && prev_soi_rel.length() > body_radius
-                && next_soi_rel.length() <= body_radius
-            {
-                let frac = inv_lerp(
-                    prev_soi_rel.length(),
-                    next_soi_rel.length(),
-                    body_radius,
-                );
-                let t_cross = cur_time + frac * h;
-                let (cross_state, _) = rk4_burn_step(
-                    cur_state,
-                    cur_time,
-                    frac * h,
-                    soi_body,
-                    mu,
-                    &burn,
-                    ephemeris,
-                );
+            if xings.collision {
+                let prev_d =
+                    (cur_state.position - ephemeris.query_body(soi_body, cur_time).position).length();
+                let next_d = (next_state.position
+                    - ephemeris.query_body(soi_body, next_time).position)
+                    .length();
+                let frac = inv_lerp(prev_d, next_d, body_radius);
+                let (t_cross, cross_state) = refine_burn_crossing(cur_state, cur_time, h, frac);
                 samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                return SegmentResult {
-                    samples,
-                    terminator: SegmentTerminator::Collision {
-                        body: soi_body,
-                        time: t_cross,
-                    },
-                    end_state: cross_state,
-                    end_time: t_cross,
-                    end_soi_body: soi_body,
-                };
+                return SegmentResult::collision(samples, cross_state, t_cross, soi_body);
             }
-
-            // SOI entry into a child body?
-            for &child in &threat_bodies {
+            if let Some(child) = xings.enter {
                 let child_soi = bodies[child].soi_radius_m;
-                if !child_soi.is_finite() || child_soi <= 0.0 {
-                    continue;
-                }
-                let prev_rel =
-                    cur_state.position - ephemeris.query_body(child, cur_time).position;
-                let next_rel =
-                    next_state.position - ephemeris.query_body(child, next_time).position;
-                if prev_rel.length() >= child_soi && next_rel.length() < child_soi {
-                    let frac = inv_lerp(prev_rel.length(), next_rel.length(), child_soi);
-                    let t_cross = cur_time + frac * h;
-                    let (cross_state, _) = rk4_burn_step(
-                        cur_state,
-                        cur_time,
-                        frac * h,
-                        soi_body,
-                        mu,
-                        &burn,
-                        ephemeris,
-                    );
-                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                    return SegmentResult {
-                        samples,
-                        terminator: SegmentTerminator::SoiEnter {
-                            body: child,
-                            time: t_cross,
-                        },
-                        end_state: cross_state,
-                        end_time: t_cross,
-                        end_soi_body: child,
-                    };
-                }
+                let prev_d = (cur_state.position
+                    - ephemeris.query_body(child, cur_time).position)
+                    .length();
+                let next_d = (next_state.position
+                    - ephemeris.query_body(child, next_time).position)
+                    .length();
+                let frac = inv_lerp(prev_d, next_d, child_soi);
+                let (t_cross, cross_state) = refine_burn_crossing(cur_state, cur_time, h, frac);
+                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                return SegmentResult::enter(samples, cross_state, t_cross, child);
             }
 
             cur_state = next_state;
@@ -747,56 +634,12 @@ fn can_intercept(candidate: BodyId, soi: BodyId, bodies: &[BodyDefinition]) -> b
     false
 }
 
-/// Bisect to find the time in [t_lo, t_hi] where `|ship_rel_soi| - soi_radius`
-/// changes sign. Assumes a single sign change in the interval (checked by
-/// the caller).
-#[allow(clippy::too_many_arguments)]
-fn bisect_distance_sign_change(
-    t_lo: f64,
-    t_hi: f64,
-    soi_body: BodyId,
-    soi_radius: f64,
-    rel0: StateVector,
-    mu: f64,
-    time0: f64,
-    ephemeris: &dyn BodyStateProvider,
-) -> f64 {
-    let mut lo = t_lo;
-    let mut hi = t_hi;
-    let distance_minus_radius = |t: f64| -> f64 {
-        let rel = propagate_kepler(rel0, mu, t - time0);
-        let body = ephemeris.query_body(soi_body, t);
-        let ship_pos = body.position + rel.position;
-        let d = (ship_pos - body.position).length();
-        d - soi_radius
-    };
-    let f_lo = distance_minus_radius(lo);
-
-    for _ in 0..60 {
-        let mid = 0.5 * (lo + hi);
-        let f_mid = distance_minus_radius(mid);
-        if f_mid.signum() == f_lo.signum() {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-        if (hi - lo).abs() < 1e-6 {
-            break;
-        }
-    }
-    0.5 * (lo + hi)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DistanceTarget {
-    /// Sign changes from > target to < target (entering).
-    EnterFrom,
-}
-
 /// Bisect to find the time in [t_lo, t_hi] where the ship's distance to
-/// `target_body` crosses `target_distance`. Used for both SOI entry and
-/// collision detection. The sign convention is embedded via the caller's
-/// pre-check (we assume exactly one crossing in the interval).
+/// `target_body` crosses `target_distance`. Used for SOI exit (target =
+/// soi_body, distance = soi_radius), SOI entry (target = child, distance =
+/// child_soi), and collision (target = soi_body, distance = body_radius).
+/// Sign convention is embedded by the caller, which pre-checks that exactly
+/// one crossing lies in the interval.
 #[allow(clippy::too_many_arguments)]
 fn bisect_body_distance(
     t_lo: f64,
@@ -808,7 +651,6 @@ fn bisect_body_distance(
     time0: f64,
     soi_body: BodyId,
     ephemeris: &dyn BodyStateProvider,
-    _target: DistanceTarget,
 ) -> f64 {
     let mut lo = t_lo;
     let mut hi = t_hi;
@@ -834,6 +676,124 @@ fn bisect_body_distance(
         }
     }
     0.5 * (lo + hi)
+}
+
+// ---------------------------------------------------------------------------
+// Shared step-boundary crossing detection
+// ---------------------------------------------------------------------------
+
+/// Which boundaries were crossed between two adjacent sample/substep points.
+/// Refinement (locating the exact crossing time) and termination are the
+/// caller's responsibility — coast uses Kepler bisection, burn uses linear
+/// interpolation plus a shortened RK4 step — but the "did we cross?" test
+/// is identical in both paths.
+#[derive(Debug, Clone, Copy, Default)]
+struct StepCrossings {
+    /// Ship passed from inside `soi_body`'s SOI to outside.
+    exit: bool,
+    /// Ship passed through `soi_body`'s surface.
+    collision: bool,
+    /// Ship entered this child body's SOI (first match wins if several
+    /// children are entered in the same step).
+    enter: Option<BodyId>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detect_step_crossings(
+    prev_pos: DVec3,
+    prev_t: f64,
+    next_pos: DVec3,
+    next_t: f64,
+    soi_body: BodyId,
+    soi_radius: f64,
+    body_radius: f64,
+    threat_bodies: &[BodyId],
+    ephemeris: &dyn BodyStateProvider,
+    bodies: &[BodyDefinition],
+) -> StepCrossings {
+    let mut out = StepCrossings::default();
+
+    let prev_soi_pos = ephemeris.query_body(soi_body, prev_t).position;
+    let next_soi_pos = ephemeris.query_body(soi_body, next_t).position;
+    let prev_soi_d = (prev_pos - prev_soi_pos).length();
+    let next_soi_d = (next_pos - next_soi_pos).length();
+
+    if soi_radius.is_finite() && prev_soi_d < soi_radius && next_soi_d >= soi_radius {
+        out.exit = true;
+    }
+    if body_radius > 0.0 && prev_soi_d > body_radius && next_soi_d <= body_radius {
+        out.collision = true;
+    }
+
+    for &child in threat_bodies {
+        let child_soi = bodies[child].soi_radius_m;
+        if !child_soi.is_finite() || child_soi <= 0.0 {
+            continue;
+        }
+        let prev_child = ephemeris.query_body(child, prev_t).position;
+        let next_child = ephemeris.query_body(child, next_t).position;
+        let prev_d = (prev_pos - prev_child).length();
+        let next_d = (next_pos - next_child).length();
+        if prev_d >= child_soi && next_d < child_soi {
+            out.enter = Some(child);
+            break;
+        }
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// SegmentResult constructors for the three crossing outcomes
+// ---------------------------------------------------------------------------
+
+impl SegmentResult {
+    fn exit(
+        samples: Vec<TrajectorySample>,
+        end_state: StateVector,
+        t_cross: f64,
+        from: BodyId,
+        bodies: &[BodyDefinition],
+    ) -> Self {
+        let parent = bodies[from].parent.unwrap_or(from);
+        Self {
+            samples,
+            terminator: SegmentTerminator::SoiExit { from, to: parent, time: t_cross },
+            end_state,
+            end_time: t_cross,
+            end_soi_body: parent,
+        }
+    }
+
+    fn collision(
+        samples: Vec<TrajectorySample>,
+        end_state: StateVector,
+        t_cross: f64,
+        body: BodyId,
+    ) -> Self {
+        Self {
+            samples,
+            terminator: SegmentTerminator::Collision { body, time: t_cross },
+            end_state,
+            end_time: t_cross,
+            end_soi_body: body,
+        }
+    }
+
+    fn enter(
+        samples: Vec<TrajectorySample>,
+        end_state: StateVector,
+        t_cross: f64,
+        child: BodyId,
+    ) -> Self {
+        Self {
+            samples,
+            terminator: SegmentTerminator::SoiEnter { body: child, time: t_cross },
+            end_state,
+            end_time: t_cross,
+            end_soi_body: child,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
