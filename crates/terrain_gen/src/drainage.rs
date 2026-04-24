@@ -36,3 +36,35 @@ impl DrainageGraph {
         self.downstream[vi as usize] == vi
     }
 }
+
+/// Sort vertex indices by decreasing elevation. A valid topological
+/// order for a single-flow drainage tree: each vertex's downstream
+/// neighbor is strictly lower (or equal, at sinks), so processing in
+/// this order guarantees every upstream contributor is visited before
+/// its receiver.
+pub(crate) fn topological_order(elevations: &[f32]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..elevations.len() as u32).collect();
+    order.sort_by(|&a, &b| {
+        elevations[b as usize]
+            .partial_cmp(&elevations[a as usize])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    order
+}
+
+/// Walk every non-sink vertex in topological order, calling `f(from, to)`
+/// for each upstream→downstream vertex pair. The caller owns whatever
+/// flux vectors are being propagated; this helper only provides the
+/// traversal.
+pub(crate) fn accumulate_downstream<F: FnMut(usize, usize)>(
+    elevations: &[f32],
+    downstream: &[u32],
+    mut f: F,
+) {
+    for vi in topological_order(elevations) {
+        let ds = downstream[vi as usize];
+        if ds != vi {
+            f(vi as usize, ds as usize);
+        }
+    }
+}

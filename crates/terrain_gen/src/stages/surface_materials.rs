@@ -506,20 +506,10 @@ fn compute_iron_fraction(
     let mut area_flux = vec![1.0f32; n];
     let mut iron_flux = iron_source.to_vec();
 
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    order.sort_by(|&a, &b| {
-        elevations[b as usize]
-            .partial_cmp(&elevations[a as usize])
-            .unwrap_or(std::cmp::Ordering::Equal)
+    crate::drainage::accumulate_downstream(elevations, downstream, |from, to| {
+        area_flux[to] += area_flux[from];
+        iron_flux[to] += iron_flux[from];
     });
-
-    for &vi in &order {
-        let ds = downstream[vi as usize];
-        if ds != vi {
-            area_flux[ds as usize] += area_flux[vi as usize];
-            iron_flux[ds as usize] += iron_flux[vi as usize];
-        }
-    }
 
     (0..n)
         .map(|i| {

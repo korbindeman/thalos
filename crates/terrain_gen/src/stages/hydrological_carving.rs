@@ -341,27 +341,14 @@ fn flow_routing(sphere: &Icosphere, elevations: &[f32], sea_level: f32) -> Vec<u
 // Flow accumulation
 // ---------------------------------------------------------------------------
 
-/// Propagate upstream area downstream. Vertices are processed in order
-/// of decreasing elevation (valid topological order for a drainage
-/// tree); each vertex's accumulation gets added to its downstream
-/// neighbor's.
+/// Propagate upstream area downstream. Each vertex starts with its own
+/// area; in topological order (decreasing elevation) every vertex adds
+/// its running total to its downstream neighbor.
 fn flow_accumulation(elevations: &[f32], downstream: &[u32], vertex_area_m2: f32) -> Vec<f32> {
-    let n = elevations.len();
-    let mut accum = vec![vertex_area_m2; n];
-
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    order.sort_by(|&a, &b| {
-        elevations[b as usize]
-            .partial_cmp(&elevations[a as usize])
-            .unwrap_or(std::cmp::Ordering::Equal)
+    let mut accum = vec![vertex_area_m2; elevations.len()];
+    crate::drainage::accumulate_downstream(elevations, downstream, |from, to| {
+        accum[to] += accum[from];
     });
-
-    for &vi in &order {
-        let ds = downstream[vi as usize];
-        if ds != vi {
-            accum[ds as usize] += accum[vi as usize];
-        }
-    }
     accum
 }
 
@@ -394,12 +381,7 @@ fn erode_and_deposit(
 
     // Process vertices in order of decreasing elevation so downstream
     // deposition accumulates sediment flux correctly per hop.
-    let mut order: Vec<u32> = (0..n_verts as u32).collect();
-    order.sort_by(|&a, &b| {
-        elevations[b as usize]
-            .partial_cmp(&elevations[a as usize])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let order = crate::drainage::topological_order(elevations);
 
     // Per-vertex sediment flux arriving from upstream (m³-per-iteration
     // in m-units × vertex-area; we track as "equivalent height delta
