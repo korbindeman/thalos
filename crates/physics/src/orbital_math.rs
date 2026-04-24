@@ -112,6 +112,17 @@ pub fn cartesian_to_elements(rel: StateVector, mu: f64) -> Option<OsculatingElem
             w = std::f64::consts::TAU - w;
         }
         w
+    } else if eccentricity > 1e-9 {
+        // Equatorial non-circular: ascending node is undefined, so measure
+        // the periapsis longitude directly from +X in the orbital plane.
+        // This matches `orbital_elements_to_cartesian`'s P-vector at i=0
+        // (P = (cos w, 0, sin w)) for prograde (h in -Y) and at i=π
+        // (P = (cos w, 0, -sin w)) for retrograde (h in +Y).
+        if h.y <= 0.0 {
+            e_vec.z.atan2(e_vec.x).rem_euclid(std::f64::consts::TAU)
+        } else {
+            (-e_vec.z).atan2(e_vec.x).rem_euclid(std::f64::consts::TAU)
+        }
     } else {
         0.0
     };

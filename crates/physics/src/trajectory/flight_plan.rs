@@ -300,19 +300,6 @@ pub fn propagate_flight_plan(
     )
     .entered();
 
-    tracing::info!(
-        "[flight_plan] start: sim_time={:.3} ship_pos=({:.3e},{:.3e},{:.3e}) n_nodes={}",
-        start_time,
-        initial_state.position.x, initial_state.position.y, initial_state.position.z,
-        maneuvers.nodes.len(),
-    );
-    for (i, n) in maneuvers.nodes.iter().enumerate() {
-        tracing::info!(
-            "[flight_plan]   node {}: time={:.3} dv_local=({:.3},{:.3},{:.3}) ref_body={}",
-            i, n.time, n.delta_v.x, n.delta_v.y, n.delta_v.z, n.reference_body,
-        );
-    }
-
     let _ = target_body; // retained on PredictionRequest for UI; unused here
     let ctx = PropagationContext {
         ephemeris: ephemeris.as_ref(),
@@ -416,13 +403,6 @@ pub fn propagate_flight_plan(
         let burn_segment = if let Some(b) = scheduled_burn {
             let burn_end = b.start_time + b.duration;
             let burn_stop = burn_end.min(leg_end);
-            tracing::info!(
-                "[flight_plan] leg {} burn: t_start={:.3} b.start_time={:.3} pos=({:.3e},{:.3e},{:.3e}) vel=({:.3e},{:.3e},{:.3e}) dv_local=({:.3},{:.3},{:.3})",
-                leg_idx, time, b.start_time,
-                state.position.x, state.position.y, state.position.z,
-                state.velocity.x, state.velocity.y, state.velocity.z,
-                b.delta_v_local.x, b.delta_v_local.y, b.delta_v_local.z,
-            );
             let seg = propagate_segment(state, time, burn_stop, Some(b), &ctx, false);
             if let Some(last) = seg.last_state() {
                 state = last;
