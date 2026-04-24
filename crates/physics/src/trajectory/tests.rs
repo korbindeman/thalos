@@ -347,6 +347,17 @@ fn burn_happens_at_node_position_not_ship_start() {
             apo_offset = rel.normalize();
         }
     }
+    // Dump a handful of coast samples so we can see the orbit shape.
+    for i in [0usize, 10, 30, 50, 64, 80, 100, 120] {
+        if let Some(s) = burn_leg.coast_segment.samples.get(i) {
+            let th = ephemeris.query_body(1, s.time).position;
+            let rel = s.position - th;
+            println!(
+                "coast[{:3}] t={:.3} rel=({:.3e},{:.3e},{:.3e}) |rel|={:.3e} anchor={}",
+                i, s.time, rel.x, rel.y, rel.z, rel.length(), s.anchor_body,
+            );
+        }
+    }
     let cos_apo_to_neg_z = apo_offset.dot(-expected_dir);
     let cos_apo_to_neg_x = apo_offset.dot(-start_offset);
     println!(
