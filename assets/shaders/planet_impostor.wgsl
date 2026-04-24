@@ -57,6 +57,9 @@
     atmosphere_is_active,
     composite_clouds,
     rotate_cloud_dir_local,
+    cloud_band_phase,
+    rotate_around_y,
+    CLOUD_BAND_COUNT,
 }
 
 const PI: f32 = 3.14159265358979323846;
@@ -84,13 +87,21 @@ struct PlanetParams {
     // Terminator wrap factor (0 = razor-sharp Lambert, >0 = softened edge
     // for atmospheric/rough bodies). Replaces the old `light_dir.w` slot.
     terminator_wrap: f32,
-    _pad0:           f32,
+    // Debug fullbright toggle (0.0 = off, >= 0.5 = on). When on, the direct
+    // sun term collapses to a constant so albedo reads uniformly; atmosphere,
+    // Rayleigh, and clouds still composite normally.
+    fullbright:      f32,
     // Quaternion (xyzw) rotating world-space directions into body-local space
     // where the cubemaps were baked. Identity = no rotation.
     orientation:     vec4<f32>,
     // Shared scene-lighting description: stars, ambient, eclipse occluders,
     // planetshine parent. Mirror of `thalos::lighting::SceneLighting`.
     scene:           SceneLighting,
+    // Sea-level elevation (m, same encoding as the height cubemap). The
+    // water BRDF fires where `sample_height_m(dir) < sea_level_m`. Airless
+    // bodies set this to a large negative sentinel so the threshold is
+    // never crossed.
+    sea_level_m:     f32,
 }
 
 // Layout matches `PlanetDetailParams` in `crates/planet_rendering/src/material.rs`.
@@ -212,10 +223,19 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let right  = normalize(cross(ref_up, to_cam));
     let up     = normalize(cross(to_cam, right));
 
+    // Expand the billboard to the atmosphere shell silhouette, not just
+    // the solid sphere. The quad is square with the silhouette inscribed,
+    // so along the cardinal edges (up/right) the quad has zero margin
+    // beyond the inscribed circle — and the rim-halo shell, which lives
+    // at altitudes up to `atmosphere.rim_shape.y`, gets scissored off
+    // there. Sizing from the outer shell radius keeps the halo visible
+    // all the way around. Airless bodies have `rim_shape.y == 0`, so
+    // this collapses to the original formula.
+    let effective_radius = params.radius + atmosphere.rim_shape.y;
     let d      = length(cam_pos - sphere_center);
-    let d_safe = max(d, params.radius * 1.0001);
-    let billboard_radius = params.radius * d_safe
-        / sqrt(d_safe * d_safe - params.radius * params.radius);
+    let d_safe = max(d, effective_radius * 1.0001);
+    let billboard_radius = effective_radius * d_safe
+        / sqrt(d_safe * d_safe - effective_radius * effective_radius);
 
     let world_pos = sphere_center
         + in.position.x * right * billboard_radius
@@ -866,6 +886,124 @@ fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32) -> f32 {
     return max(r, 0.0);
 }
 
+// ── Water BRDF (Cook-Torrance) ─────────────────────────────────────────────
+//
+// Replaces the Hapke path where the sampled height sits below sea level.
+// Hapke is tuned for back-scattering regolith (opposition surge at phase 0);
+// water is the opposite — a forward-scattering near-mirror that peaks at
+// the specular direction. Ingredients:
+//
+//   - GGX (Trowbridge-Reitz) D lobe, roughness α = 0.06. Deliberately
+//     non-mirror so the sun glint reads as a visible ~5–10 %-of-disk
+//     patch from orbit rather than a single-pixel mirror flash.
+//   - Smith G with the UE4 Schlick-k remap.
+//   - Schlick Fresnel with F0 = 0.02 (water's normal-incidence reflectance
+//     at 550 nm). Drives the darker-near-nadir / brighter-at-limb signature.
+//   - Subsurface diffuse: shallow water shows the seabed through a clear
+//     column; deeper water replaces it with the absorption-tinted column
+//     colour over a 30 m e-folding scale. Below ~150 m the seabed is
+//     fully obscured.
+//   - Grazing-angle reflection tinted by Rayleigh β so the limb reads
+//     as "reflecting sky", not a white sun disk on vacuum.
+//
+// Drives both direct-star and planetshine through the same BRDF via the
+// shared `thalos::lighting` helpers (`planetshine_sample`, `eclipse_factor`)
+// so calibration matches the Hapke land path. Uses the geometric sphere
+// normal — water is smooth at planetary scale. Self-shadow and crater
+// shadows do not apply (flat surface).
+fn water_brdf(
+    n: vec3<f32>,
+    v: vec3<f32>,
+    l: vec3<f32>,
+    n_dot_v: f32,
+    f_nv: f32,
+    alpha: f32,
+    f0: f32,
+    subsurface: vec3<f32>,
+) -> vec3<f32> {
+    let n_dot_l = max(dot(n, l), 0.0);
+    if n_dot_l <= 0.0 || n_dot_v <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let h = normalize(l + v);
+    let n_dot_h = max(dot(n, h), 0.0);
+    let v_dot_h = max(dot(v, h), 0.0);
+
+    let a2 = alpha * alpha;
+    let d_denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    let d_ggx = a2 / (PI * d_denom * d_denom);
+
+    let k = (alpha + 1.0) * (alpha + 1.0) / 8.0;
+    let g_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    let g_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    let g_smith = g_v * g_l;
+
+    let f_h = f0 + (1.0 - f0) * pow(max(1.0 - v_dot_h, 0.0), 5.0);
+
+    let specular = (d_ggx * g_smith * f_h) / max(4.0 * n_dot_v, 1e-4);
+    let diffuse = (1.0 - f_nv) * subsurface * n_dot_l / PI;
+    return diffuse + vec3<f32>(specular);
+}
+
+fn shade_water(
+    n: vec3<f32>,
+    v: vec3<f32>,
+    l: vec3<f32>,
+    depth_m: f32,
+    sun_flux: f32,
+    ambient: f32,
+    sky_tint: vec3<f32>,
+    seabed: vec3<f32>,
+    hit: vec3<f32>,
+) -> vec3<f32> {
+    let f0 = 0.02;
+    // Cox-Munk wave-slope σ for moderate wind (~5 m/s) is ~6–8°. GGX
+    // roughness here encodes that statistical sub-pixel slope spread,
+    // not "how rough each individual facet is" — a wider lobe means
+    // many sub-resolution wave facets, mathematically equivalent to
+    // explicit wave normals at sub-pixel scale (which would alias).
+    // α = 0.10 puts the glint at ~12° across, matching ISS imagery.
+    let alpha = 0.10;
+    // Matches `hapke_scale` on the land path so both BRDFs calibrate
+    // against the same `sun_flux`.
+    let brdf_scale = 0.5;
+
+    let n_dot_v = max(dot(n, v), 0.0);
+
+    // Subsurface colour: blend seabed visibility with absorbed water
+    // column. Shallow water shows the baked seabed (so dark-side coastal
+    // shelves stay visible at the same ambient brightness as the land);
+    // deep water replaces it with the column colour.
+    let shallow = vec3<f32>(0.10, 0.35, 0.42);
+    let deep = vec3<f32>(0.005, 0.02, 0.06);
+    let column = mix(shallow, deep, 1.0 - exp(-max(depth_m, 0.0) / 200.0));
+    let seabed_visibility = exp(-max(depth_m, 0.0) / 30.0);
+    let subsurface = mix(column, seabed, seabed_visibility);
+
+    let f_nv = f0 + (1.0 - f0) * pow(max(1.0 - n_dot_v, 0.0), 5.0);
+
+    // Ambient: Fresnel-modulated sky reflection + subsurface diffuse,
+    // both on the same `ambient` scale so dark-side water sits at the
+    // same brightness as the dark-side seabed it replaces.
+    var lit = (f_nv * sky_tint + (1.0 - f_nv) * subsurface) * ambient;
+
+    // Direct star.
+    let sun_brdf = water_brdf(n, v, l, n_dot_v, f_nv, alpha, f0, subsurface);
+    let sun_shadow = eclipse_factor(params.scene, hit, l);
+    lit = lit + sun_brdf * sun_flux * brdf_scale * sun_shadow;
+
+    // Planetshine — parent body acting as a Lambert reflector. Same BRDF
+    // with the parent's direction as the incoming light, mirroring how
+    // the Hapke land path runs `hapke_brdf` twice.
+    let shine = planetshine_sample(params.scene, hit, l, sun_flux);
+    if shine.enabled {
+        let shine_brdf = water_brdf(n, v, shine.dir, n_dot_v, f_nv, alpha, f0, subsurface);
+        lit = lit + shine_brdf * shine.tint * shine.flux * brdf_scale;
+    }
+
+    return lit;
+}
+
 // ── Fragment ────────────────────────────────────────────────────────────────
 //
 // Atmosphere integration (terrestrial impostor):
@@ -909,6 +1047,33 @@ fn sample_rim_halo(
         atmosphere.rim_color_intensity.xyz,
         atmosphere.rim_color_intensity.w,
     );
+}
+
+/// Sample the cloud-cover cube with banded differential rotation.
+///
+/// Each fragment's latitude determines a position in `sin²(lat) ∈
+/// [0, 1]`. The K bands partition that interval evenly; two bracketing
+/// bands supply their own rigidly-wrapped rotation phases, which we
+/// use to rotate the sample direction twice (once per band) around
+/// the body-local +Y axis. We fetch the cube at both rotated directions
+/// and blend the scalar densities by the fragment's fractional
+/// position between the bands. Because each band's phase wraps
+/// independently mod TAU on the CPU (see `CloudBandState`), there is
+/// no discontinuity anywhere on the sphere — rotation is seamless
+/// forever, at every latitude, across save/load boundaries.
+fn sample_cloud_banded(dir_local: vec3<f32>) -> f32 {
+    let sin2 = clamp(dir_local.y * dir_local.y, 0.0, 1.0);
+    let bf = sin2 * f32(CLOUD_BAND_COUNT - 1u);
+    let lo = u32(floor(bf));
+    let hi = min(lo + 1u, CLOUD_BAND_COUNT - 1u);
+    let alpha = bf - floor(bf);
+    let phase_lo = cloud_band_phase(lo, atmosphere);
+    let phase_hi = cloud_band_phase(hi, atmosphere);
+    let dir_lo = rotate_around_y(dir_local, phase_lo);
+    let dir_hi = rotate_around_y(dir_local, phase_hi);
+    let s_lo = textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, dir_lo, 0.0).r;
+    let s_hi = textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, dir_hi, 0.0).r;
+    return mix(s_lo, s_hi, alpha);
 }
 
 @fragment
@@ -1099,8 +1264,47 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // Lambert `/PI` normalization we now fold into a global scale so
     // existing flux values don't need re-tuning.
     let hapke_scale: f32 = 0.5;
-    let sun_rgb = vec3<f32>(sun_r * sun_flux * hapke_scale);
-    var lit = albedo * (sun_rgb + shine_rgb + vec3<f32>(params.scene.ambient_intensity));
+    var sun_rgb = vec3<f32>(sun_r * sun_flux * hapke_scale);
+    var ambient_term = vec3<f32>(params.scene.ambient_intensity);
+    if params.fullbright >= 0.5 {
+        // Collapse direct-light contribution so `lit = albedo` everywhere.
+        // Atmosphere/Rayleigh/clouds still shade downstream so surface detail
+        // is readable without losing atmosphere authoring cues.
+        sun_rgb = vec3<f32>(1.0);
+        shine_rgb = vec3<f32>(0.0);
+        ambient_term = vec3<f32>(0.0);
+    }
+    var lit = albedo * (sun_rgb + shine_rgb + ambient_term);
+
+    // ── Water shading branch ────────────────────────────────────────────
+    //
+    // Where the filtered height sits below sea level (encoded midpoint at
+    // 0 m in `sample_height_m`), overlay a Cook-Torrance water BRDF on
+    // top of the Hapke-shaded seabed. The smoothstep gives a soft
+    // coastline at the height cube's bilinear-filter scale — no separate
+    // coastline mask needed.
+    let height_above_sea_m = sample_height_m(sample_dir) - params.sea_level_m;
+    let water_depth_m = -height_above_sea_m;
+    let water_t = smoothstep(-1.0, 1.0, water_depth_m);
+    if water_t > 0.0 {
+        // Sky tint for grazing-angle reflection. Rayleigh τ carries the
+        // per-channel atmosphere tint cue (blue > green > red on Earth-
+        // like). Airless bodies have rayleigh = 0 → black sky reflection,
+        // which is physically correct for vacuum.
+        let sky_tint = atmosphere.rayleigh.xyz * atmosphere.rayleigh.w * 3.0;
+        let water_lit = shade_water(
+            normal,
+            view_dir,
+            sun_dir_ws,
+            water_depth_m,
+            sun_flux,
+            params.scene.ambient_intensity,
+            sky_tint,
+            albedo,
+            hit,
+        );
+        lit = mix(lit, water_lit, water_t);
+    }
 
     // ── Rayleigh ground transmission ────────────────────────────────────
     //
@@ -1149,22 +1353,21 @@ fn fragment(in: VertexOutput) -> FragOutput {
         }
     }
 
-    // Main density: rotate the cloud-shell direction by the drift
-    // phase (differential rotation baked into `atmosphere.wgsl`'s
-    // helper), then fetch the baked cover cube.
-    let cloud_dir_main = rotate_cloud_dir_local(cloud_sample_dir, atmosphere);
-    let main_cloud_density =
-        textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, cloud_dir_main, 0.0).r;
+    // Main density + shadow probe both go through the banded
+    // rotation sampler: each of the K bands carries its own phase
+    // wrapped mod TAU on the CPU, so per-band sampling is always
+    // seamless; differential rotation emerges from sampling the two
+    // bands bracketing each fragment's latitude and blending by its
+    // position in sin²(lat). See `sample_cloud_banded` below.
+    let main_cloud_density = sample_cloud_banded(cloud_sample_dir);
 
-    // Shadow density: offset the SURFACE direction toward the sun
-    // (0.018 rad ≈ 100 km on a 6000 km body) then apply the same
-    // drift rotation before the cube fetch. This reads "what cloud
-    // sits between this terrain pixel and the sun".
+    // Shadow probe: offset the SURFACE direction toward the sun
+    // (0.018 rad ≈ 100 km on a 6000 km body) then run the same
+    // banded sampler. This reads "what cloud sits between this
+    // terrain pixel and the sun".
     let shadow_offset = 0.018;
     let shadow_dir_raw = normalize(sample_dir + light_dir_local * shadow_offset);
-    let shadow_dir_rot = rotate_cloud_dir_local(shadow_dir_raw, atmosphere);
-    let shadow_cloud_density =
-        textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, shadow_dir_rot, 0.0).r;
+    let shadow_cloud_density = sample_cloud_banded(shadow_dir_raw);
 
     lit = composite_clouds(
         lit,

@@ -25,7 +25,10 @@ pub struct PlanetParams {
     /// giant, 1.0 = very rough regolith). Feeds the Lambert wrap slack used to
     /// fake multiple scattering near the day/night line.
     pub terminator_wrap: f32,
-    pub _pad0: f32,
+    /// Debug fullbright toggle (0.0 = off, 1.0 = on). When on, the direct-sun
+    /// term is flattened so the surface reads as unshaded albedo; atmosphere,
+    /// Rayleigh, and cloud compositing still run normally for authoring.
+    pub fullbright: f32,
     /// Quaternion (xyzw) rotating world-space directions into body-local space
     /// (where the cubemaps were baked). For tidally-locked moons this aligns
     /// the baked near-side (+Z) with the direction toward the parent body.
@@ -34,6 +37,12 @@ pub struct PlanetParams {
     /// Stars, eclipse occluders, ambient, and planetshine parent. See
     /// `crate::lighting::SceneLighting`.
     pub scene: SceneLighting,
+    /// Sea-level elevation (meters, in the same encoding as the height
+    /// cubemap — 0 m = the post-rebase sea level on water worlds). The
+    /// shader triggers the water BRDF where `sample_height_m(dir) <
+    /// sea_level_m`. Set to a large negative sentinel for airless bodies
+    /// so no fragment ever crosses the threshold.
+    pub sea_level_m: f32,
 }
 
 impl Default for PlanetParams {
@@ -42,9 +51,13 @@ impl Default for PlanetParams {
             radius: 1.0,
             height_range: 1.0,
             terminator_wrap: 0.0,
-            _pad0: 0.0,
+            fullbright: 0.0,
             orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
             scene: SceneLighting::default(),
+            // Large negative sentinel — airless bodies leave this at the
+            // default, and the shader's `sample_height_m(dir) < sea_level_m`
+            // test never fires.
+            sea_level_m: -1.0e9,
         }
     }
 }
@@ -142,6 +155,18 @@ pub struct AtmosphereBlock {
     /// disables Rayleigh entirely — `apply_rayleigh_*` early-out and
     /// the impostor renders with unattenuated white sunlight.
     pub rayleigh: Vec4,
+    /// Cloud main-deck band phases 0..=3. 16 total phases packed into
+    /// four `Vec4`s carry the per-latitude-strip rotation state for
+    /// the banded cloud decomposition. See
+    /// `CLOUD_BAND_COUNT` / `CloudBandState` on the CPU side and
+    /// `sample_cloud_banded` in `planet_impostor.wgsl` for usage.
+    pub cloud_bands_a: Vec4,
+    /// Cloud main-deck band phases 4..=7.
+    pub cloud_bands_b: Vec4,
+    /// Cloud main-deck band phases 8..=11.
+    pub cloud_bands_c: Vec4,
+    /// Cloud main-deck band phases 12..=15.
+    pub cloud_bands_d: Vec4,
 }
 
 impl Default for AtmosphereBlock {
@@ -156,9 +181,25 @@ impl Default for AtmosphereBlock {
             cloud_shape: Vec4::ZERO,
             cloud_dynamics: Vec4::ZERO,
             rayleigh: Vec4::ZERO,
+            cloud_bands_a: Vec4::ZERO,
+            cloud_bands_b: Vec4::ZERO,
+            cloud_bands_c: Vec4::ZERO,
+            cloud_bands_d: Vec4::ZERO,
         }
     }
 }
+
+/// Number of latitudinal cloud rotation bands. Each band has its own
+/// rigid rotation speed `ω_i = scroll_rate × (1 − diff × sin²(lat_i))`
+/// where `sin²(lat_i) = i / (CLOUD_BAND_COUNT − 1)`. Per-band phases are
+/// accumulated on the CPU (see `CloudBandState` in the game crate), mod
+/// `TAU` in f64, uploaded as four `Vec4`s into `AtmosphereBlock`, and
+/// consumed by `sample_cloud_banded` in `planet_impostor.wgsl` — which
+/// samples the cloud cube at the two bands bracketing a fragment's
+/// latitude and blends. Because each per-band phase wraps independently
+/// mod TAU, there is no latitude at which rotation seams — rotation is
+/// seamless forever. State persists trivially as 16 × f64 per body.
+pub const CLOUD_BAND_COUNT: usize = 16;
 
 impl AtmosphereBlock {
     /// Build from a `TerrestrialAtmosphere` and the body's
@@ -213,9 +254,26 @@ impl AtmosphereBlock {
                 ray.strength.max(0.0),
             );
         }
-        // Terrestrial cloud layer temporarily disabled — leaving
-        // `cloud_albedo_coverage.w = 0` so the shader short-circuits the
-        // pass. Re-enable by restoring the `if let Some(clouds)` branch.
+        if let Some(clouds) = &atmos.clouds {
+            out.cloud_albedo_coverage = Vec4::new(
+                clouds.albedo[0],
+                clouds.albedo[1],
+                clouds.albedo[2],
+                clouds.coverage.clamp(0.0, 1.0),
+            );
+            out.cloud_shape = Vec4::new(
+                clouds.frequency.max(0.0),
+                clouds.softness.max(0.0),
+                0.0,
+                clouds.differential_rotation,
+            );
+            out.cloud_dynamics = Vec4::new(
+                clouds.scroll_rate,
+                0.0,
+                f32::from_bits(clouds.seed as u32),
+                f32::from_bits((clouds.seed >> 32) as u32),
+            );
+        }
         out
     }
 }
@@ -311,6 +369,19 @@ impl Material for PlanetMaterial {
         "shaders/planet_impostor.wgsl".into()
     }
 
+    // Premultiplied because the fragment shader's miss path outputs
+    // `(rim.contribution, rim.opacity)` where `contribution = color *
+    // strength` and `opacity = strength`, i.e. the RGB is already
+    // premultiplied by alpha. With Opaque, the small dim premultiplied
+    // RGB overwrites whatever is behind (e.g. a gas giant) with
+    // near-black, producing a visible dark band at the shell. Premult
+    // compositing gives `src.rgb + dst * (1 - src.a)` — physically
+    // correct in-scatter over the background. Hit-path fragments output
+    // `(lit, 1.0)` which resolves to just `lit`, unchanged.
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Premultiplied
+    }
+
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -318,6 +389,20 @@ impl Material for PlanetMaterial {
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
+        // Bevy disables depth-write for Premultiplied by default (a
+        // transparent-phase standard). Re-enable it: the hit path outputs
+        // `α=1` and must occlude anything drawn later in the transparent
+        // phase (stars/galaxies are `AlphaMode::Add`, depth-test but don't
+        // write), otherwise the celestial backdrop leaks through the
+        // planet's silhouette. The halo miss-path pixels also write their
+        // closest-approach depth — a thin ring-shaped region where stars
+        // directly behind the shell get depth-culled instead of shining
+        // through. Acceptable because the shell is narrow (~5 % of radius)
+        // and star-through-atmosphere is a subtle cue anyway; revisit with
+        // a split halo-entity pass if it becomes visually objectionable.
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = true;
+        }
         Ok(())
     }
 }

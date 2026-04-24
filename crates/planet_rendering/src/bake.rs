@@ -188,14 +188,30 @@ pub fn bake_from_body_data(
         seed_hi,
     );
 
-    let materials: Vec<GpuMaterial> = body
-        .materials
-        .iter()
-        .map(|m| GpuMaterial {
-            albedo: Vec3::from(m.albedo),
-            roughness: m.roughness,
-        })
-        .collect();
+    // Neutral fallback when the pipeline produced no material palette
+    // (e.g. Thalos — the baked albedo cube is the sole colour source).
+    // `create_storage_buffer_from_slice` pads an empty slice with one
+    // zero-initialized element to keep the binding valid, but the shader
+    // reads `materials[0]` unconditionally whenever `arrayLength(&materials)`
+    // is nonzero, and a zeroed material has `albedo = vec3(0)` — which
+    // zeros out `baked_albedo = mat_albedo * tint_mod * regional` and
+    // turns the surface black. A neutral (0.5, 1.0) entry collapses the
+    // formula to `baked_tint * regional`, matching the intent of the
+    // `baked_tint = 0.5 → neutral` design at `planet_impostor.wgsl:1011`.
+    let materials: Vec<GpuMaterial> = if body.materials.is_empty() {
+        vec![GpuMaterial {
+            albedo: Vec3::splat(0.5),
+            roughness: 1.0,
+        }]
+    } else {
+        body.materials
+            .iter()
+            .map(|m| GpuMaterial {
+                albedo: Vec3::from(m.albedo),
+                roughness: m.roughness,
+            })
+            .collect()
+    };
 
     let craters_handle = create_storage_buffer_from_slice(&craters, storage_buffers);
     let cell_index_handle = create_storage_buffer_from_slice(&cell_index, storage_buffers);
@@ -231,13 +247,12 @@ fn cubemap_to_bytes<T: Copy + Default>(
 }
 
 /// Create a Bevy `Image` from a `Cubemap<T>` with a cube view descriptor.
-fn create_cubemap_image<T: Copy + Default>(
+fn cubemap_image<T: Copy + Default>(
     cubemap: &thalos_terrain_gen::Cubemap<T>,
     resolution: u32,
     format: TextureFormat,
     bytes_per_texel: usize,
-    images: &mut Assets<Image>,
-) -> Handle<Image> {
+) -> Image {
     let data = cubemap_to_bytes(cubemap, resolution, bytes_per_texel);
     let mut image = Image::new(
         Extent3d {
@@ -254,7 +269,17 @@ fn create_cubemap_image<T: Copy + Default>(
         dimension: Some(TextureViewDimension::Cube),
         ..default()
     });
-    images.add(image)
+    image
+}
+
+fn create_cubemap_image<T: Copy + Default>(
+    cubemap: &thalos_terrain_gen::Cubemap<T>,
+    resolution: u32,
+    format: TextureFormat,
+    bytes_per_texel: usize,
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
+    images.add(cubemap_image(cubemap, resolution, format, bytes_per_texel))
 }
 
 /// Nearest-neighbor, non-filtering sampler for integer textures. The layout
@@ -335,6 +360,64 @@ pub fn bake_cloud_cover_image(seed: u64, images: &mut Assets<Image>) -> Handle<I
         }
     }
     create_cubemap_image(&cover_u8, size, TextureFormat::R8Unorm, 1, images)
+}
+
+/// Project an equirectangular 2D image into an R8Unorm cubemap used as
+/// cloud cover density. Luminance-weighted: density = 0.299·R + 0.587·G +
+/// 0.114·B (per texel, linear 0–255 byte values).
+///
+/// TEMPORARY: used to drop a reference storm-clouds photo onto Thalos
+/// while the procedural cloud pipeline is being redesigned. Remove once
+/// `thalos_cloud_gen` covers the Thalos use-case.
+///
+/// `source` must be an RGBA8 (SRGB or linear) image — the format Bevy's
+/// default JPG loader produces. Other formats panic rather than silently
+/// miscolour.
+pub fn equirect_to_cloud_cover_image(source: &Image, resolution: u32) -> Image {
+    let fmt = source.texture_descriptor.format;
+    assert!(
+        matches!(
+            fmt,
+            TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb
+        ),
+        "equirect_to_cloud_cover_image: expected Rgba8Unorm{{Srgb}}, got {fmt:?}",
+    );
+    let src_w = source.texture_descriptor.size.width as usize;
+    let src_h = source.texture_descriptor.size.height as usize;
+    let src_data = source
+        .data
+        .as_ref()
+        .expect("equirect source image has no CPU data");
+
+    let mut cover = Cubemap::<u8>::new(resolution);
+    let inv = 1.0 / resolution as f32;
+    for face in CubemapFace::ALL {
+        let dst = cover.face_data_mut(face);
+        for y in 0..resolution {
+            let v = (y as f32 + 0.5) * inv;
+            for x in 0..resolution {
+                let u = (x as f32 + 0.5) * inv;
+                let dir =
+                    thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
+                // Equirectangular: longitude from atan2(x, z), latitude
+                // from asin(y). Maps to [0, 1] UV matching source image
+                // layout (longitude → x, latitude → y, north pole at top).
+                let lon = dir.z.atan2(dir.x);
+                let lat = dir.y.clamp(-1.0, 1.0).asin();
+                let su = (lon / std::f32::consts::TAU + 0.5).fract();
+                let sv = 0.5 - lat / std::f32::consts::PI;
+                let sx = ((su * src_w as f32) as usize).min(src_w - 1);
+                let sy = ((sv * src_h as f32) as usize).min(src_h - 1);
+                let i = (sy * src_w + sx) * 4;
+                let r = src_data[i] as f32;
+                let g = src_data[i + 1] as f32;
+                let b = src_data[i + 2] as f32;
+                let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+                dst[(y * resolution + x) as usize] = lum.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    cubemap_image(&cover, resolution, TextureFormat::R8Unorm, 1)
 }
 
 /// 1×1 black cubemap used when a body has no cloud layer. Binding slots

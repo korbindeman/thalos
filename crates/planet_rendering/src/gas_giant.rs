@@ -433,6 +433,15 @@ impl Material for GasGiantMaterial {
         "shaders/gas_giant.wgsl".into()
     }
 
+    // Must stay Opaque so the gas giant writes depth before rings (a
+    // Blend material) draw — otherwise the single ring mesh, which
+    // straddles the planet, sorts as one unit against the gas giant and
+    // flips between "whole ring in front" and "whole ring behind" as
+    // the camera moves, causing visible flashing. The rim-halo
+    // compositing bug documented for `PlanetMaterial` exists here too
+    // but is currently invisible: the halo only overwrites the black
+    // sky. Revisit if a gas giant ever needs to render in front of
+    // another bright body.
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,

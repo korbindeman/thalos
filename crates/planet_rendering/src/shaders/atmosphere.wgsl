@@ -68,6 +68,55 @@ struct AtmosphereBlock {
     ///         entirely and the surface renders with unattenuated
     ///         white sunlight.
     rayleigh: vec4<f32>,
+    /// Cloud main-deck band phases 0..=3. 16 phases total spread across
+    /// four vec4s — `cloud_band_phase()` unpacks by index. Each band
+    /// carries a rigidly-wrapped rotation angle (mod TAU) so
+    /// `sample_cloud_banded()` can sample the cloud cubemap at two
+    /// adjacent bands and blend, yielding seamless differential
+    /// rotation at every latitude. See material.rs `CLOUD_BAND_COUNT`.
+    cloud_bands_a: vec4<f32>,
+    /// Cloud main-deck band phases 4..=7.
+    cloud_bands_b: vec4<f32>,
+    /// Cloud main-deck band phases 8..=11.
+    cloud_bands_c: vec4<f32>,
+    /// Cloud main-deck band phases 12..=15.
+    cloud_bands_d: vec4<f32>,
+}
+
+const CLOUD_BAND_COUNT: u32 = 16u;
+
+/// Fetch band `i`'s rotation phase (radians, wrapped to `[0, TAU)`).
+/// 16 phases packed into four vec4s; this helper is the unpack.
+fn cloud_band_phase(i: u32, layers: AtmosphereBlock) -> f32 {
+    let clamped = min(i, CLOUD_BAND_COUNT - 1u);
+    let vec_idx = clamped / 4u;
+    let comp_idx = clamped % 4u;
+    var v: vec4<f32>;
+    if vec_idx == 0u {
+        v = layers.cloud_bands_a;
+    } else if vec_idx == 1u {
+        v = layers.cloud_bands_b;
+    } else if vec_idx == 2u {
+        v = layers.cloud_bands_c;
+    } else {
+        v = layers.cloud_bands_d;
+    }
+    if comp_idx == 0u { return v.x; }
+    if comp_idx == 1u { return v.y; }
+    if comp_idx == 2u { return v.z; }
+    return v.w;
+}
+
+/// Rotate `dir` around the body-local +Y axis by `phase` radians. Used
+/// by the banded cloud sampler to build per-band sample directions.
+fn rotate_around_y(dir: vec3<f32>, phase: f32) -> vec3<f32> {
+    let cp = cos(phase);
+    let sp = sin(phase);
+    return vec3<f32>(
+        dir.x * cp - dir.z * sp,
+        dir.y,
+        dir.x * sp + dir.z * cp,
+    );
 }
 
 /// Result of a rim-halo column integration.
@@ -530,6 +579,12 @@ fn sample_haze_density(
     sample_dir_local: vec3<f32>,
     layers: AtmosphereBlock,
 ) -> f32 {
+    // TEMP: procedural haze disabled while the baked cube (currently a
+    // storm-clouds reference photo) is the sole cloud source. Drop this
+    // early-return when `thalos_cloud_gen` is back in charge of cloud
+    // geometry — the fBm body below is the intended production path.
+    return 0.0;
+
     let base_cov = layers.cloud_albedo_coverage.w;
     if base_cov <= 0.0 {
         return 0.0;
