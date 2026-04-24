@@ -1,12 +1,12 @@
 use glam::Vec3;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Bulk composition as mass fractions. Fractions must sum to 1.0.
 ///
 /// Stages meaningfully consume only `silicate`, `iron`, and `ice` in the
 /// current pipeline, but all fields exist so the data model stays stable
 /// as later stages are added.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Composition {
     pub silicate: f64,
     pub iron: f64,
@@ -35,7 +35,7 @@ impl Composition {
 }
 
 /// A discrete crater feature stored in the mid-frequency SSBO layer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Crater {
     pub center: Vec3,
     pub radius_m: f32,
@@ -54,7 +54,7 @@ impl Crater {
 }
 
 /// A discrete volcanic feature.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Volcano {
     pub center: Vec3,
     pub radius_m: f32,
@@ -69,7 +69,7 @@ impl Volcano {
 }
 
 /// A linear/curved surface feature: rift, graben, ancient riverbed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
     pub points: Vec<Vec3>,
     pub width_m: f32,
@@ -84,7 +84,7 @@ impl Channel {
 }
 
 /// A surface material, indexed by `material_id` on features.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Material {
     pub albedo: [f32; 3],
     pub roughness: f32,
@@ -92,7 +92,7 @@ pub struct Material {
 
 /// Parameters for the high-frequency statistical detail noise layer.
 /// Drives per-fragment crater synthesis in the shader.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DetailNoiseParams {
     pub body_radius_m: f32,
     pub d_min_m: f32,
@@ -125,7 +125,7 @@ pub type DrainageNetwork = ();
 /// Whether a plate carries buoyant felsic (continental) crust or dense mafic
 /// (oceanic) crust. Drives everything downstream: subduction type, orogen
 /// eligibility, ocean-floor-age applicability, base isostatic elevation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PlateKind {
     Continental,
     Oceanic,
@@ -135,7 +135,7 @@ pub enum PlateKind {
 /// pole + angular velocity rather than by an integrated trajectory; boundary
 /// motions and types are derived analytically from pairs of Euler poles at
 /// the boundary midpoint. See `docs/gen/thalos_processes.md §Plates`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plate {
     pub id: u16,
     pub kind: PlateKind,
@@ -149,7 +149,7 @@ pub struct Plate {
 }
 
 /// Qualitative classification of a plate boundary's current motion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     Convergent,
     Divergent,
@@ -158,7 +158,7 @@ pub enum BoundaryKind {
 
 /// A boundary segment between two plates. Attributes are populated by the
 /// Tectonics stage after walking the plate adjacency graph.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Boundary {
     /// Ordered pair of plate IDs sharing this boundary.
     pub plates: (u16, u16),
@@ -185,7 +185,7 @@ pub struct Boundary {
 /// `plate_id_cubemap` stores per-texel plate assignments; downstream stages
 /// look up their cell's plate via `plate_id_cubemap.sample_nearest(dir)` and
 /// index into `plates` by the returned id.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlateMap {
     pub plates: Vec<Plate>,
     pub boundaries: Vec<Boundary>,

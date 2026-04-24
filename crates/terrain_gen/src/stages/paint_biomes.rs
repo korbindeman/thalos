@@ -8,9 +8,15 @@ use crate::stage::Stage;
 use crate::types::Material;
 
 /// Paint the baked albedo as a continuous function of biome color plus
-/// optional physical overlays (ocean depth, rock exposure, snow coverage,
-/// slope AO). Biome ids drive per-texel roughness via the material palette,
-/// same as before; colour decouples from the discrete biome assignment.
+/// optional physical overlays (rock exposure, snow coverage, slope AO).
+/// Biome ids drive per-texel roughness via the material palette, same as
+/// before; colour decouples from the discrete biome assignment.
+///
+/// Ocean water is NOT painted here — below-sea-level texels receive the
+/// raw biome color (treat the ocean biome's albedo/tint as seabed, not
+/// surface water). The planet shader draws water + ice on top at render
+/// time using `sea_level_m` from `BodyData`, so bake output stays a
+/// "dry planet" read.
 ///
 /// ── Why overlays instead of more biomes ────────────────────────────────
 /// A discrete "ice" biome paints every cold cell the same flat white and
@@ -22,48 +28,32 @@ use crate::types::Material;
 /// Treating snow and rock as *continuous coverage fractions* over the
 /// underlying biome base eliminates the iso-contour entirely: a pixel 2 °C
 /// warmer than its neighbour carries slightly less snow, not zero snow.
-/// Climate (temp), terrain (slope, height), and bathymetry (depth below
-/// sea level) already vary smoothly at the texel scale, so every coverage
-/// derived from them varies smoothly too. The 3×3 CPU blend and GPU
-/// bilinear filter are still there on top — they only have to hide
-/// sub-texel noise now, not rule boundaries.
+/// Climate (temp) and terrain (slope, height) vary smoothly at the texel
+/// scale, so every coverage derived from them varies smoothly too. The
+/// 3×3 CPU blend and GPU bilinear filter are still there on top — they
+/// only have to hide sub-texel noise now, not rule boundaries.
 ///
 /// Composition order (each step paints on top of the previous):
-///   1. **Base** = biome color (from the 3×3 biome-id blend, as before).
-///   2. **Ocean depth**: if `height < 0` and `ocean_depth` is configured,
-///      base = mix(shallow, deep, clamp(-height / deep_m, 0, 1)).
-///   3. **Rock overlay**: if `rock_overlay` is configured, on land cells
+///   1. **Base** = biome color (from the 3×3 biome-id blend).
+///   2. **Rock overlay**: if `rock_overlay` is configured, on land cells
 ///      base = mix(base, rock_color, rock_fraction(slope, height)).
-///   4. **Snow overlay**: if `snow_overlay` is configured, everywhere
-///      base = mix(base, snow_color_for_surface, snow_fraction(temp)).
-///   5. **Slope AO**: if `slope_ao` is configured, base *= slope_darken(slope).
-///   6. **Tonal noise**: two-octave fbm, ±(biome.tonal_amp × tonal_mix),
+///   3. **Snow overlay**: if `snow_overlay` is configured, on land cells
+///      base = mix(base, snow_color, snow_fraction(temp)). Sea ice is a
+///      shader concern — it sits on water, not on seabed.
+///   4. **Slope AO**: if `slope_ao` is configured, base *= slope_darken(slope).
+///   5. **Tonal noise**: two-octave fbm, ±(biome.tonal_amp × tonal_mix),
 ///      so each biome retains its per-biome texture character.
 ///
-/// Bodies that want the legacy behaviour leave every overlay at `None`
-/// and get identical output to the old `PaintBiomes(())` (single biome
-/// color + single tonal fbm octave).
+/// Bodies that want the minimal behaviour leave every overlay at `None`
+/// and get pure biome-color output + single tonal fbm octave.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PaintBiomes {
-    #[serde(default)]
-    pub ocean_depth: Option<OceanDepth>,
     #[serde(default)]
     pub rock_overlay: Option<RockOverlay>,
     #[serde(default)]
     pub snow_overlay: Option<SnowOverlay>,
     #[serde(default)]
     pub slope_ao: Option<SlopeAO>,
-}
-
-/// Colour gradient for underwater cells: depth 0 m → `shallow_color`,
-/// depth `deep_m` → `deep_color`, interpolated with a fixed tonal curve.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OceanDepth {
-    pub shallow_color: [f32; 3],
-    pub deep_color: [f32; 3],
-    /// Depth (m, positive down) at which the gradient saturates on the
-    /// deep side. Typical: 3000–5000 m for an Earth-like ocean.
-    pub deep_m: f32,
 }
 
 /// Expose bedrock on steep slopes and high altitude by blending the base
@@ -91,10 +81,10 @@ pub struct RockOverlay {
     pub tonal_frequency: f64,
 }
 
-/// Blend a snow/ice colour in on top of whatever the underlying surface
-/// ended up being. Coverage driven by temperature rather than latitude so
-/// equatorial peaks can carry glaciers and warm polar basins (oceanic
-/// heat transport equivalent) can stay open.
+/// Blend a snow/ice colour in on top of land. Coverage is driven by
+/// temperature rather than latitude so equatorial peaks can carry
+/// glaciers and warm polar land can stay bare. Sea ice is NOT painted
+/// here — the shader handles it alongside the water surface.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SnowOverlay {
     /// Temperature at or above which snow coverage is 0 (°C).
@@ -107,8 +97,6 @@ pub struct SnowOverlay {
     pub jitter_frequency: f64,
     /// Land snow colour.
     pub land_color: [f32; 3],
-    /// Sea ice colour (slightly greyer/bluer, overlaid on ocean cells).
-    pub sea_ice_color: [f32; 3],
     /// Tonal amp on the snow colour (fbm-modulated). Small — snow is
     /// almost homogeneous at orbital scale.
     pub tonal_amp: f32,
@@ -205,7 +193,6 @@ impl Stage for PaintBiomes {
         let biome_map = &builder.biome_map;
         let height_field = &builder.height_contributions.height;
         let temperature_c = &builder.temperature_c;
-        let ocean_depth = self.ocean_depth.clone();
         let rock_overlay = self.rock_overlay.clone();
         let snow_overlay = self.snow_overlay.clone();
         let slope_ao = self.slope_ao.clone();
@@ -272,22 +259,13 @@ impl Stage for PaintBiomes {
                         let center_bid = bm_face[idx] as usize;
                         let center_biome = &biomes[center_bid.min(n_biomes - 1)];
 
-                        // ── B. Ocean depth gradient ──
+                        // Below-sea-level cells keep their biome base
+                        // color (interpreted as seabed). Water + sea
+                        // ice are drawn by the shader using
+                        // `sea_level_m`, so no ocean tint is baked.
                         let is_ocean = height_m <= 0.0;
-                        if is_ocean && let Some(od) = &ocean_depth {
-                            let depth = (-height_m).max(0.0);
-                            let t = (depth / od.deep_m.max(1.0)).clamp(0.0, 1.0);
-                            // Gentle curve: shallow dominates near shore,
-                            // deep dominates from ~deep_m/2 onward.
-                            let t = t * t * (3.0 - 2.0 * t);
-                            color = [
-                                lerp(od.shallow_color[0], od.deep_color[0], t),
-                                lerp(od.shallow_color[1], od.deep_color[1], t),
-                                lerp(od.shallow_color[2], od.deep_color[2], t),
-                            ];
-                        }
 
-                        // ── C. Rock exposure overlay (land only) ──
+                        // ── B. Rock exposure overlay (land only) ──
                         if !is_ocean && let Some(ro) = &rock_overlay {
                             let slope_cov = smoothstep(ro.slope_start, ro.slope_full, slope);
                             let height_cov = if height_m >= ro.height_boost_from_m {
@@ -322,8 +300,10 @@ impl Stage for PaintBiomes {
                             ];
                         }
 
-                        // ── D. Snow/ice coverage (temperature driven) ──
-                        if let Some(so) = &snow_overlay {
+                        // ── C. Snow coverage on land (temperature driven) ──
+                        //       Sea ice is a shader-layer concern; below
+                        //       sea level we leave the biome color alone.
+                        if !is_ocean && let Some(so) = &snow_overlay {
                             let snow_seed = seed ^ 0xB3F0_71A4_9C28_DE15;
                             let t_jitter = fbm3(
                                 dir.x as f64 * so.jitter_frequency,
@@ -349,15 +329,10 @@ impl Stage for PaintBiomes {
                                     2.1,
                                 ) as f32;
                                 let snow_scale = (1.0 + so.tonal_amp * snow_n).max(0.0);
-                                let base_snow = if is_ocean {
-                                    so.sea_ice_color
-                                } else {
-                                    so.land_color
-                                };
                                 let snow_c = [
-                                    base_snow[0] * snow_scale,
-                                    base_snow[1] * snow_scale,
-                                    base_snow[2] * snow_scale,
+                                    so.land_color[0] * snow_scale,
+                                    so.land_color[1] * snow_scale,
+                                    so.land_color[2] * snow_scale,
                                 ];
                                 color = [
                                     lerp(color[0], snow_c[0], snow_cov),
@@ -367,14 +342,14 @@ impl Stage for PaintBiomes {
                             }
                         }
 
-                        // ── E. Slope AO darkening ──
+                        // ── D. Slope AO darkening ──
                         if let Some(ao) = &slope_ao {
                             let ao_cov = smoothstep(ao.slope_start, ao.slope_full, slope);
                             let darken = 1.0 - ao.max_darken * ao_cov;
                             color = [color[0] * darken, color[1] * darken, color[2] * darken];
                         }
 
-                        // ── F. Two-octave biome tonal noise ──
+                        // ── E. Two-octave biome tonal noise ──
                         // A second higher-freq octave adds 1-3 texel speckle
                         // so within-biome patches don't read as a single flat
                         // slab even without overlays. The center biome's id

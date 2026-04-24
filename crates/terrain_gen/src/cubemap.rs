@@ -1,7 +1,8 @@
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 /// Identifies one face of a cubemap, following the standard OpenGL convention.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum CubemapFace {
     PosX = 0,
@@ -29,7 +30,7 @@ impl CubemapFace {
 /// allows different pixel formats: `f32` for height accumulators, `[f32; 4]`
 /// for albedo accumulators, `u16` for finalized R16 height, `[u8; 4]` for
 /// finalized RGBA8 albedo.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cubemap<T: Copy + Default> {
     resolution: u32,
     faces: [Vec<T>; 6],

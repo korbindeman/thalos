@@ -2,6 +2,9 @@ use glam::Vec3;
 
 use crate::body_data::BodyData;
 use crate::cubemap::{Cubemap, CubemapAccumulator, default_resolution};
+use crate::drainage::DrainageGraph;
+use crate::icosphere::Icosphere;
+use crate::province::ProvinceDef;
 use crate::spatial_index::IcoBuckets;
 use crate::stages::{BasinDef, MAT_HIGHLAND};
 use crate::types::{
@@ -77,6 +80,45 @@ pub struct BodyBuilder {
     /// Optional global structures.
     pub plates: Option<PlateMap>,
     pub drainage: Option<DrainageNetwork>,
+
+    /// Icosphere mesh shared across icosphere-native stages in the Thalos
+    /// pipeline (tectonic skeleton → coarse elevation → hydrology). Built
+    /// by the first stage that needs it and read by the rest. `None` until
+    /// such a stage runs. Coexists with the cubemap accumulators — the
+    /// Mira-family pipeline ignores it entirely.
+    pub sphere: Option<Icosphere>,
+    /// Per-vertex province ID on `sphere`, indexed by icosphere vertex
+    /// index. `None` until `TectonicSkeleton` runs.
+    pub vertex_provinces: Option<Vec<u32>>,
+    /// Per-vertex "home craton" province ID — the craton this vertex was
+    /// assigned to by the Voronoi step, even if its current
+    /// `vertex_provinces` entry has been rewritten to a boundary
+    /// classification (Suture, RiftScar, ActiveMargin, HotspotTrack).
+    /// Always points to a `Craton` or `OceanicBasin` province. Lets
+    /// downstream stages determine the continental-vs-oceanic side of a
+    /// boundary vertex — e.g. CoarseElevation reading which side of an
+    /// ActiveMargin to uplift vs. trench.
+    pub vertex_craton_provinces: Option<Vec<u32>>,
+    /// Province table, indexed by `ProvinceDef::id`.
+    pub provinces: Vec<ProvinceDef>,
+
+    /// Per-vertex elevation in meters on `sphere`. Populated by
+    /// `CoarseElevation` (Stage 2) and refined by `HydrologicalCarving`
+    /// (Stage 3). Reference elevation is nominal zero — sea level is
+    /// picked later by Stage 3 from the distribution.
+    pub vertex_elevations_m: Option<Vec<f32>>,
+    /// Per-vertex sediment thickness in meters. Populated by Stage 3
+    /// deposition. Stage 5 reads it to decide where
+    /// weathered/floodplain/beach materials go.
+    pub vertex_sediment_m: Option<Vec<f32>>,
+    /// Drainage graph on `sphere`. Populated by Stage 3. Persists to
+    /// `BodyData` — the spec calls out navigable rivers and settlement
+    /// placement at confluences as downstream gameplay consumers.
+    pub drainage_graph: Option<DrainageGraph>,
+    /// Elevation where the sea surface cuts the heightfield. Picked by
+    /// Stage 3 to hit the target ocean fraction. Above ⇒ land; below ⇒
+    /// ocean floor. `None` until Stage 3 runs.
+    pub sea_level_m: Option<f32>,
 
     /// Build-time tectonic intermediates written by the Tectonics stage and
     /// read by Topography / Biomes. None of these appear in `BodyData` — once
@@ -162,6 +204,14 @@ impl BodyBuilder {
             biome_map: Cubemap::<u8>::new(resolution),
             plates: None,
             drainage: None,
+            sphere: None,
+            vertex_provinces: None,
+            vertex_craton_provinces: None,
+            provinces: Vec::new(),
+            vertex_elevations_m: None,
+            vertex_sediment_m: None,
+            drainage_graph: None,
+            sea_level_m: None,
             orogen_intensity: Cubemap::<f32>::new(resolution),
             orogen_age_myr: Cubemap::<f32>::new(resolution),
             boundary_distance_km: {
@@ -215,6 +265,14 @@ impl BodyBuilder {
             materials: self.materials,
             plates: self.plates,
             drainage: self.drainage,
+            sphere: self.sphere,
+            vertex_provinces: self.vertex_provinces,
+            vertex_craton_provinces: self.vertex_craton_provinces,
+            provinces: self.provinces,
+            vertex_elevations_m: self.vertex_elevations_m,
+            vertex_sediment_m: self.vertex_sediment_m,
+            drainage_graph: self.drainage_graph,
+            sea_level_m: self.sea_level_m,
         }
     }
 }

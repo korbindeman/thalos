@@ -11,10 +11,11 @@
 //! a Thalos-sized (3186 km) body.
 
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Icosphere mesh: positions + triangles + per-vertex neighbor lists.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Icosphere {
     /// Unit-sphere vertex positions.
     pub vertices: Vec<Vec3>,
@@ -24,6 +25,11 @@ pub struct Icosphere {
     /// 5 neighbors (at the 12 original icosahedron corners) or 6 (every
     /// vertex introduced by subdivision) — standard icosphere property.
     pub vertex_neighbors: Vec<Vec<u32>>,
+    /// Per-vertex list of triangle indices touching that vertex. Each
+    /// vertex borders 5 or 6 triangles. Used by `barycentric_triangle`
+    /// to smoothly interpolate per-vertex fields instead of producing
+    /// nearest-neighbor hexagon artifacts at bake time.
+    pub vertex_triangles: Vec<Vec<u32>>,
 }
 
 impl Icosphere {
@@ -31,10 +37,12 @@ impl Icosphere {
     pub fn new(subdivision_level: u32) -> Self {
         let (vertices, triangles) = generate_icosphere(subdivision_level);
         let vertex_neighbors = compute_vertex_neighbors(&triangles, vertices.len());
+        let vertex_triangles = compute_vertex_triangles(&triangles, vertices.len());
         Self {
             vertices,
             triangles,
             vertex_neighbors,
+            vertex_triangles,
         }
     }
 
@@ -54,12 +62,151 @@ impl Icosphere {
         best
     }
 
+    /// Nearest vertex to `dir`, starting a greedy walk from `start`. Steps
+    /// to whichever neighbor has the higher `v · dir` until no neighbor
+    /// improves — O(log V) in practice. On an icosphere the Voronoi cells
+    /// are convex, so local maxima are also global: the climb returns the
+    /// true nearest vertex as long as the graph is connected. Intended for
+    /// per-texel loops where `start` is seeded from a nearby texel's
+    /// result.
+    pub fn nearest_vertex_from(&self, dir: Vec3, start: u32) -> u32 {
+        let mut current = start as usize;
+        let mut best_dot = self.vertices[current].dot(dir);
+        loop {
+            let mut moved = false;
+            for &nb in &self.vertex_neighbors[current] {
+                let d = self.vertices[nb as usize].dot(dir);
+                if d > best_dot {
+                    best_dot = d;
+                    current = nb as usize;
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        current as u32
+    }
+
     /// Characteristic angular spacing between neighboring vertices, in
     /// radians. Derived from the surface area per vertex. Useful for
     /// sizing rasterization caps.
     pub fn characteristic_spacing_rad(&self) -> f32 {
         (4.0 * std::f32::consts::PI / self.vertices.len() as f32).sqrt()
     }
+
+    /// Return the triangle that contains `dir` on the sphere, plus the
+    /// three barycentric weights in `[0, 1]`. `start` is a hint vertex
+    /// passed to `nearest_vertex_from`; the search examines only the
+    /// triangles touching the nearest vertex, which is sufficient
+    /// because `dir` always lies inside one of them on a closed icosphere.
+    ///
+    /// Output order matches `triangles[ti]`: `(ti, [w_a, w_b, w_c])`
+    /// with `w_a + w_b + w_c ≈ 1`. Callers read the three vertex IDs
+    /// via `self.triangles[ti]` and combine the per-vertex values as
+    /// `w_a · v_a + w_b · v_b + w_c · v_c`.
+    pub fn barycentric_triangle(&self, dir: Vec3, start: u32) -> (u32, [f32; 3]) {
+        let v = self.nearest_vertex_from(dir, start);
+
+        let mut best: Option<(u32, [f32; 3], f32)> = None;
+        for &ti in &self.vertex_triangles[v as usize] {
+            let tri = self.triangles[ti as usize];
+            let pa = self.vertices[tri[0] as usize];
+            let pb = self.vertices[tri[1] as usize];
+            let pc = self.vertices[tri[2] as usize];
+            if let Some((w, margin)) = triangle_barycentric(dir, pa, pb, pc) {
+                // On a sphere, borders are fuzzy at the millimeter level,
+                // so multiple candidates may both return positive weights.
+                // Pick the one that sits most squarely inside the
+                // triangle (largest minimum weight → biggest margin).
+                match best {
+                    None => best = Some((ti, w, margin)),
+                    Some((_, _, prev)) if margin > prev => best = Some((ti, w, margin)),
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some((ti, w, _)) = best {
+            return (ti, w);
+        }
+
+        // Numerical fallback: slot the value entirely at the nearest
+        // vertex. Shouldn't fire on a well-formed mesh with `dir` on
+        // the unit sphere.
+        let ti = self.vertex_triangles[v as usize][0];
+        let tri = self.triangles[ti as usize];
+        let which = if tri[0] == v {
+            0
+        } else if tri[1] == v {
+            1
+        } else {
+            2
+        };
+        let mut w = [0.0f32; 3];
+        w[which] = 1.0;
+        (ti, w)
+    }
+}
+
+/// Planar barycentric coordinates for `dir` projected onto the triangle
+/// `(pa, pb, pc)`. On a unit sphere with small-enough triangles the
+/// planar projection is a fine approximation — the triangle side is
+/// a few degrees at subdivision level 6. Returns `None` if the
+/// projected point falls outside the triangle. The second component of
+/// the success tuple is the *margin* (smallest barycentric weight) —
+/// used by the caller to pick the most-inside triangle when two
+/// candidates straddle a shared edge.
+fn triangle_barycentric(dir: Vec3, pa: Vec3, pb: Vec3, pc: Vec3) -> Option<([f32; 3], f32)> {
+    // Project `dir` onto the triangle's plane. `n` is the plane normal;
+    // the ray from origin along `dir` hits the plane at `dir * t`.
+    let n = (pb - pa).cross(pc - pa);
+    let denom = n.dot(dir);
+    if denom.abs() < 1e-10 {
+        return None;
+    }
+    let t = n.dot(pa) / denom;
+    let p = dir * t;
+
+    let v0 = pb - pa;
+    let v1 = pc - pa;
+    let v2 = p - pa;
+    let d00 = v0.dot(v0);
+    let d01 = v0.dot(v1);
+    let d11 = v1.dot(v1);
+    let d20 = v2.dot(v0);
+    let d21 = v2.dot(v1);
+    let denom2 = d00 * d11 - d01 * d01;
+    if denom2.abs() < 1e-10 {
+        return None;
+    }
+    let beta = (d11 * d20 - d01 * d21) / denom2;
+    let gamma = (d00 * d21 - d01 * d20) / denom2;
+    let alpha = 1.0 - beta - gamma;
+
+    const TOL: f32 = 1e-4;
+    if alpha >= -TOL && beta >= -TOL && gamma >= -TOL {
+        let a = alpha.clamp(0.0, 1.0);
+        let b = beta.clamp(0.0, 1.0);
+        let c = gamma.clamp(0.0, 1.0);
+        let sum = a + b + c;
+        let w = [a / sum, b / sum, c / sum];
+        let margin = w[0].min(w[1]).min(w[2]);
+        Some((w, margin))
+    } else {
+        None
+    }
+}
+
+fn compute_vertex_triangles(triangles: &[[u32; 3]], num_vertices: usize) -> Vec<Vec<u32>> {
+    let mut v2t: Vec<Vec<u32>> = vec![Vec::new(); num_vertices];
+    for (ti, tri) in triangles.iter().enumerate() {
+        for &v in tri {
+            v2t[v as usize].push(ti as u32);
+        }
+    }
+    v2t
 }
 
 /// Build the mesh for a subdivided icosahedron. Shared by `spatial_index`

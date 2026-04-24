@@ -13,8 +13,9 @@ use serde::Deserialize;
 
 use crate::stage::Stage;
 use crate::stages::{
-    Biomes, Climate, Cratering, Differentiate, MareFlood, Megabasin, OrogenDla, PaintBiomes,
-    Plates, Regolith, Scarps, SpaceWeather, Tectonics, Topography,
+    Biomes, Climate, CoarseElevation, Cratering, Differentiate, HydrologicalCarving, MareFlood,
+    Megabasin, OrogenDla, PaintBiomes, Plates, Regolith, Scarps, SpaceWeather, SurfaceMaterials,
+    TectonicSkeleton, Tectonics, Topography,
 };
 use crate::types::Composition;
 
@@ -26,6 +27,8 @@ pub enum StageDef {
     Differentiate(Differentiate),
     Biomes(Biomes),
     Climate(Climate),
+    CoarseElevation(CoarseElevation),
+    HydrologicalCarving(HydrologicalCarving),
     Megabasin(Megabasin),
     Cratering(Cratering),
     MareFlood(MareFlood),
@@ -35,6 +38,8 @@ pub enum StageDef {
     Regolith(Regolith),
     Scarps(Scarps),
     SpaceWeather(SpaceWeather),
+    SurfaceMaterials(SurfaceMaterials),
+    TectonicSkeleton(TectonicSkeleton),
     Tectonics(Tectonics),
     Topography(Topography),
 }
@@ -45,6 +50,8 @@ impl StageDef {
             StageDef::Differentiate(s) => Box::new(s),
             StageDef::Biomes(s) => Box::new(s),
             StageDef::Climate(s) => Box::new(s),
+            StageDef::CoarseElevation(s) => Box::new(s),
+            StageDef::HydrologicalCarving(s) => Box::new(s),
             StageDef::Megabasin(s) => Box::new(s),
             StageDef::Cratering(s) => Box::new(s),
             StageDef::MareFlood(s) => Box::new(s),
@@ -54,6 +61,8 @@ impl StageDef {
             StageDef::Regolith(s) => Box::new(s),
             StageDef::Scarps(s) => Box::new(s),
             StageDef::SpaceWeather(s) => Box::new(s),
+            StageDef::SurfaceMaterials(s) => Box::new(s),
+            StageDef::TectonicSkeleton(s) => Box::new(s),
             StageDef::Tectonics(s) => Box::new(s),
             StageDef::Topography(s) => Box::new(s),
         }

@@ -11,11 +11,12 @@
 //! including neighbors. Tractable for GPU fragment iteration.
 
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{Channel, Crater, Volcano};
 
 /// Reference to a feature in one of the typed arrays on `BodyData`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeatureRef {
     Crater(u32),
     Volcano(u32),
@@ -26,7 +27,7 @@ pub enum FeatureRef {
 ///
 /// Built once during `BodyBuilder::build()` from the populated feature arrays.
 /// Immutable after construction — lives on `BodyData`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IcoBuckets {
     /// Cell vertex indices into `vertices` (3 per triangle).
     triangles: Vec<[u32; 3]>,

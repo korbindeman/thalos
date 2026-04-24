@@ -66,3 +66,99 @@ fn mira_generator_ron_parses() {
     assert!(matches!(parsed.pipeline[1], StageDef::Megabasin(_)));
     assert!(matches!(parsed.pipeline[5], StageDef::SpaceWeather(_)));
 }
+
+const THALOS_GENERATOR: &str = r#"(
+    seed: 1003,
+    composition: (silicate: 0.26, iron: 0.70, ice: 0.0, volatiles: 0.04, hydrogen_helium: 0.0),
+    cubemap_resolution: 2048,
+    body_age_gyr: 4.5,
+    pipeline: [
+        TectonicSkeleton((
+            subdivision_level: 8,
+            n_cratons: 20,
+            plate_warp_amplitude: 0.4,
+            plate_warp_frequency: 3.0,
+            plate_warp_octaves: 5,
+            n_active_margins: 1,
+            n_rift_scars: 2,
+            n_hotspot_tracks: 4,
+            hotspot_track_length: 12,
+            lloyd_iterations: 3,
+            debug_paint_albedo: false,
+        )),
+        CoarseElevation((
+            target_ocean_fraction: 0.65,
+            continent_noise_frequency: 2.0,
+            continent_noise_octaves: 6,
+            continent_noise_persistence: 0.55,
+            continent_warp_amplitude: 0.45,
+            continent_warp_frequency: 2.2,
+            horizontal_stretch: 1.5,
+            mid_latitude_bias: 0.2,
+            min_land_fraction: 0.003,
+            min_ocean_fraction: 0.0,
+            continental_bias_m: 500.0,
+            oceanic_bias_m: -3500.0,
+            suture_height_m: 2500.0,
+            suture_falloff_hops: 2.5,
+            suture_age_decay_myr: 1500.0,
+            rift_depth_m: 800.0,
+            rift_falloff_hops: 2.0,
+            active_uplift_m: 3500.0,
+            active_trench_m: 3500.0,
+            active_falloff_hops: 3.0,
+            trench_offset_hops: 3.0,
+            trench_width_hops: 1.5,
+            hotspot_height_m: 800.0,
+            hotspot_falloff_hops: 1.5,
+            noise_amplitude_m: 2500.0,
+            noise_frequency: 2.5,
+            noise_octaves: 7,
+            noise_persistence: 0.62,
+            warp_amplitude: 0.45,
+            warp_frequency: 3.0,
+            debug_paint_albedo: true,
+        )),
+        HydrologicalCarving((
+            erosion_iterations: 100,
+            erosion_k: 2.0e-4,
+            stream_power_m: 0.5,
+            stream_power_n: 1.0,
+            max_erosion_per_iter_m: 50.0,
+            deposition_rate: 0.08,
+            pit_fill_epsilon_m: 0.001,
+            target_ocean_fraction: 0.65,
+            river_accumulation_threshold_m2: 2.0e11,
+            river_half_width_rad: 0.0008,
+            debug_paint_albedo: false,
+        )),
+        SurfaceMaterials((
+            shelf_depth_m: 200.0,
+            floodplain_log10_accumulation_m2: 9.7,
+            floodplain_min_sediment_m: 0.5,
+            floodplain_max_elevation_m: 1500.0,
+            bare_rock_min_elevation_m: 2500.0,
+            bare_rock_max_sediment_m: 0.3,
+            ancient_stable_max_sediment_m: 5.0,
+            fresh_volcanic_max_age_myr: 30.0,
+            iron_source_active_margin: 1.0,
+            iron_source_hotspot_track: 1.0,
+            iron_source_suture: 0.3,
+            iron_fraction_threshold: 0.01,
+            iron_fraction_bif_threshold: 0.03,
+            debug_paint_albedo: true,
+        )),
+    ],
+)"#;
+
+#[test]
+fn thalos_generator_ron_parses() {
+    let parsed: GeneratorParams =
+        ron::from_str(THALOS_GENERATOR).expect("Thalos generator RON failed to parse");
+    assert_eq!(parsed.seed, 1003);
+    assert_eq!(parsed.pipeline.len(), 4);
+    assert!(matches!(parsed.pipeline[0], StageDef::TectonicSkeleton(_)));
+    assert!(matches!(parsed.pipeline[1], StageDef::CoarseElevation(_)));
+    assert!(matches!(parsed.pipeline[2], StageDef::HydrologicalCarving(_)));
+    assert!(matches!(parsed.pipeline[3], StageDef::SurfaceMaterials(_)));
+}
