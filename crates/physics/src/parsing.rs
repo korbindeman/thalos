@@ -158,8 +158,8 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
 
     let ship = ShipDefinition {
         initial_state: StateVector {
-            position: DVec3::new(orbit_radius, 0.0, 0.0),
-            velocity: DVec3::new(0.0, 0.0, orbital_speed),
+            position: DVec3::new(-orbit_radius, 0.0, 0.0),
+            velocity: DVec3::new(0.0, 0.0, -orbital_speed),
         },
         thrust_acceleration: 10.0,
     };

@@ -132,13 +132,12 @@ pub fn cartesian_to_elements(rel: StateVector, mu: f64) -> Option<OsculatingElem
         }
         u
     } else {
-        // Circular equatorial: true longitude.
-        let cos_l = (r.x / r_mag).clamp(-1.0, 1.0);
-        let mut l = cos_l.acos();
-        if r.z > 0.0 {
-            l = std::f64::consts::TAU - l;
-        }
-        l
+        // Circular equatorial. h along −Y is prograde (+X → +Z advance),
+        // h along +Y is retrograde (+X → −Z advance). Flip the swept axis
+        // for retrograde so the angle sweeps in the actual direction of
+        // motion; `atan2` then handles all four quadrants.
+        let swept_z = if h.y <= 0.0 { r.z } else { -r.z };
+        swept_z.atan2(r.x).rem_euclid(std::f64::consts::TAU)
     };
 
     let (periapsis_m, apoapsis_m) = if eccentricity < 1.0 && semi_major_axis_m.is_finite() {
@@ -589,6 +588,61 @@ mod tests {
         let vel_err = (back.velocity - state.velocity).length() / v_circ;
         assert!(pos_err < 1e-8, "hyperbolic round-trip pos err: {pos_err}");
         assert!(vel_err < 1e-8, "hyperbolic round-trip vel err: {vel_err}");
+    }
+
+    #[test]
+    fn propagate_circular_equatorial_iterates_forward() {
+        // Regression: `cartesian_to_elements`'s circular-equatorial branch
+        // used an inverted quadrant flip, which made repeated propagation of
+        // a circular XZ-plane orbit oscillate between two angles instead of
+        // advancing. One full period always landed back at the start, so the
+        // existing period-return test passed even with the bug. This fires
+        // the propagator repeatedly over partial periods to catch it, in
+        // both prograde and retrograde directions.
+        fn run(direction_sign: f64) {
+            let r = 7.0e6;
+            let v = (EARTH_GM / r).sqrt();
+            let mut state = StateVector {
+                position: DVec3::new(r, 0.0, 0.0),
+                velocity: DVec3::new(0.0, 0.0, direction_sign * v),
+            };
+            let period = std::f64::consts::TAU * (r.powi(3) / EARTH_GM).sqrt();
+            // 3.92 periods per step: partial-period remainder is different
+            // on every iteration, so if the elements round-trip is broken the
+            // ship will jump back and forth instead of sweeping around.
+            let dt = 3.92 * period;
+
+            let mut prev_angle = 0.0_f64;
+            for i in 1..=8 {
+                state = propagate_kepler(state, EARTH_GM, dt);
+                let expected_nu = (direction_sign
+                    * (i as f64)
+                    * dt
+                    * (EARTH_GM / r.powi(3)).sqrt())
+                    .rem_euclid(std::f64::consts::TAU);
+                let actual_nu = state.position.z.atan2(state.position.x)
+                    .rem_euclid(std::f64::consts::TAU);
+                let err = {
+                    let raw = (actual_nu - expected_nu).abs();
+                    raw.min(std::f64::consts::TAU - raw)
+                };
+                assert!(
+                    err < 1e-6,
+                    "dir={direction_sign} iter {i}: expected nu={expected_nu:.6}, got {actual_nu:.6} (err {err})",
+                );
+                assert!(
+                    (actual_nu - prev_angle).abs() > 1e-3,
+                    "dir={direction_sign} iter {i}: position did not advance (stuck at {actual_nu})",
+                );
+                prev_angle = actual_nu;
+                assert!(
+                    ((state.position.length() - r).abs() / r) < 1e-9,
+                    "dir={direction_sign} iter {i}: radius drift",
+                );
+            }
+        }
+        run(1.0);
+        run(-1.0);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use glam::DVec3;
 
-use super::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_plan};
+use super::{FlightPlan, PredictionConfig, PredictionRequest, Trajectory, propagate_flight_plan};
 use crate::body_state_provider::BodyStateProvider;
 use crate::maneuver::{ManeuverNode, ManeuverSequence};
 use crate::patched_conics::PatchedConics;
@@ -230,6 +230,145 @@ fn maneuver_is_integrated_as_finite_burn() {
         (mid_sample.time - 1.0).abs() < 1e-9,
         "first post-start sample should land at t=1.0: got {}",
         mid_sample.time
+    );
+}
+
+/// Regression: a prograde Δv node placed a quarter orbit ahead of the ship
+/// must burn at the node's *future* position, not at the ship's start
+/// position. Apoapsis should appear ~opposite the node, not opposite the
+/// ship's initial position.
+#[test]
+fn burn_happens_at_node_position_not_ship_start() {
+    let system = make_thalos_like_system();
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_gm = system.bodies[1].gm;
+    let orbit_radius = system.bodies[1].radius_m + 200_000.0;
+    let circular_speed = (thalos_gm / orbit_radius).sqrt();
+    let orbital_period = std::f64::consts::TAU * (orbit_radius.powi(3) / thalos_gm).sqrt();
+
+    // Ship starts on +X axis relative to Thalos, moving in +Z (prograde CCW
+    // looking down -Y).
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(orbit_radius, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, circular_speed),
+    };
+
+    // Node a quarter-orbit in the future → ship should be at ~+Z direction.
+    let node_time = orbital_period * 0.25;
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        id: None,
+        time: node_time,
+        delta_v: DVec3::new(100.0, 0.0, 0.0),
+        reference_body: 1,
+    });
+
+    // Use a very high thrust acceleration so the finite burn approximates
+    // an impulsive Δv — the orbital frame barely rotates during the burn,
+    // so apoapsis localization should be crisp.
+    let impulsive_thrust = 1_000.0; // 100 m/s in 0.1 s
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &maneuvers,
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig::default(),
+        impulsive_thrust,
+    );
+
+    // The burn's first sample must be at the NODE time / NODE position,
+    // not the start position.
+    let burn_leg = &prediction.legs[1];
+    let burn_seg = burn_leg
+        .burn_segment
+        .as_ref()
+        .expect("leg 1 should have a burn");
+    let first = burn_seg.samples.first().expect("burn has samples");
+    let thalos_at_node = ephemeris.query_body(1, node_time).position;
+    let thalos_vel_at_node = ephemeris.query_body(1, node_time).velocity;
+    let start_offset = (ship_state.position - thalos_state_0.position).normalize();
+    let burn_start_offset = (first.position - thalos_at_node).normalize();
+    let burn_start_relvel = first.velocity - thalos_vel_at_node;
+    println!(
+        "burn_first: t={:.3} pos_rel_thalos=({:.3e},{:.3e},{:.3e}) vel_rel_thalos=({:.3e},{:.3e},{:.3e})",
+        first.time,
+        first.position.x - thalos_at_node.x,
+        first.position.y - thalos_at_node.y,
+        first.position.z - thalos_at_node.z,
+        burn_start_relvel.x, burn_start_relvel.y, burn_start_relvel.z,
+    );
+    // Expected at node time: pos ~ (0,0,r), vel ~ (-v,0,0)
+    println!("expected pos_rel ~ (0, 0, {:.3e}), vel_rel ~ ({:.3e}, 0, 0)", orbit_radius, -circular_speed);
+
+    // Check leg 0 coast's state_at(node_time)
+    let leg0 = &prediction.legs[0];
+    if let Some(s_at) = leg0.coast_segment.state_at(node_time) {
+        println!(
+            "leg0.state_at({:.3}) pos_rel_thalos=({:.3e},{:.3e},{:.3e}) vel_rel_thalos=({:.3e},{:.3e},{:.3e})",
+            node_time,
+            s_at.position.x - thalos_at_node.x,
+            s_at.position.y - thalos_at_node.y,
+            s_at.position.z - thalos_at_node.z,
+            s_at.velocity.x - thalos_vel_at_node.x,
+            s_at.velocity.y - thalos_vel_at_node.y,
+            s_at.velocity.z - thalos_vel_at_node.z,
+        );
+    }
+
+    // Ship start is on +X; after a quarter orbit CCW (around -Y) it is on +Z.
+    // The burn's first sample direction (Thalos→ship) should be close to +Z.
+    let expected_dir = DVec3::new(0.0, 0.0, 1.0);
+    let cos_expected = burn_start_offset.dot(expected_dir);
+    let cos_start = burn_start_offset.dot(start_offset);
+    assert!(
+        cos_expected > 0.95,
+        "burn should start at node position (+Z dir), got offset direction {:?} cos_to_+Z={}",
+        burn_start_offset, cos_expected,
+    );
+    assert!(
+        cos_start < 0.2,
+        "burn must NOT start at ship's initial position (+X dir); got cos_to_+X={}",
+        cos_start,
+    );
+
+    // Apoapsis of the post-burn coast should be roughly OPPOSITE the node
+    // (i.e. on -Z), not opposite the ship start (-X).
+    let mut max_r = 0.0_f64;
+    let mut apo_offset = DVec3::ZERO;
+    for s in &burn_leg.coast_segment.samples {
+        let th = ephemeris.query_body(1, s.time).position;
+        let rel = s.position - th;
+        let r = rel.length();
+        if r > max_r {
+            max_r = r;
+            apo_offset = rel.normalize();
+        }
+    }
+    let cos_apo_to_neg_z = apo_offset.dot(-expected_dir);
+    let cos_apo_to_neg_x = apo_offset.dot(-start_offset);
+    println!(
+        "apo_offset={:?}  cos_to_-Z={:.4}  cos_to_-X={:.4}  max_r={:.3e}",
+        apo_offset, cos_apo_to_neg_z, cos_apo_to_neg_x, max_r,
+    );
+    println!(
+        "leg1.coast_segment: samples={} first.time={:.3} last.time={:.3} is_stable={}",
+        burn_leg.coast_segment.samples.len(),
+        burn_leg.coast_segment.samples.first().map(|s| s.time).unwrap_or(-1.0),
+        burn_leg.coast_segment.samples.last().map(|s| s.time).unwrap_or(-1.0),
+        burn_leg.coast_segment.is_stable_orbit,
+    );
+    assert!(
+        cos_apo_to_neg_z > 0.8,
+        "apoapsis should be ~opposite the node (-Z); got cos_to_-Z={}",
+        cos_apo_to_neg_z,
+    );
+    assert!(
+        cos_apo_to_neg_x < 0.3,
+        "apoapsis must NOT be opposite the ship's start (-X); got cos_to_-X={}",
+        cos_apo_to_neg_x,
     );
 }
 

@@ -489,6 +489,17 @@ impl KeplerianPropagator {
         while cur_time < target_time {
             let h = self.burn_substep_s.min(target_time - cur_time);
 
+            let body_cur = ephemeris.query_body(soi_body, cur_time);
+            eprintln!(
+                "[rk4.before] t={:.6} h={:.6} pos_rel=({:.3e},{:.3e},{:.3e}) vel_rel=({:.3e},{:.3e},{:.3e})",
+                cur_time, h,
+                cur_state.position.x - body_cur.position.x,
+                cur_state.position.y - body_cur.position.y,
+                cur_state.position.z - body_cur.position.z,
+                cur_state.velocity.x - body_cur.velocity.x,
+                cur_state.velocity.y - body_cur.velocity.y,
+                cur_state.velocity.z - body_cur.velocity.z,
+            );
             let (next_state, _) = rk4_burn_step(
                 cur_state,
                 cur_time,
@@ -499,6 +510,17 @@ impl KeplerianPropagator {
                 ephemeris,
             );
             let next_time = cur_time + h;
+            let body_next = ephemeris.query_body(soi_body, next_time);
+            eprintln!(
+                "[rk4.after]  t={:.6}      pos_rel=({:.3e},{:.3e},{:.3e}) vel_rel=({:.3e},{:.3e},{:.3e})",
+                next_time,
+                next_state.position.x - body_next.position.x,
+                next_state.position.y - body_next.position.y,
+                next_state.position.z - body_next.position.z,
+                next_state.velocity.x - body_next.velocity.x,
+                next_state.velocity.y - body_next.velocity.y,
+                next_state.velocity.z - body_next.velocity.z,
+            );
 
             // SOI / collision checks at substep boundary.
             let prev_soi_rel =
@@ -664,6 +686,14 @@ fn rk4_burn_step(
             let rb = ref_at(tt);
             let dir =
                 delta_v_to_world(burn.delta_v_local, vel, pos, rb.position, rb.velocity);
+            eprintln!(
+                "[thrust] tt={:.6} pos_rel=({:.3e},{:.3e},{:.3e}) vel_rel=({:.3e},{:.3e},{:.3e}) dir=({:.3e},{:.3e},{:.3e}) dv_local=({:.3},{:.3},{:.3})",
+                tt,
+                pos.x - rb.position.x, pos.y - rb.position.y, pos.z - rb.position.z,
+                vel.x - rb.velocity.x, vel.y - rb.velocity.y, vel.z - rb.velocity.z,
+                dir.x, dir.y, dir.z,
+                burn.delta_v_local.x, burn.delta_v_local.y, burn.delta_v_local.z,
+            );
             if dir.length_squared() > 0.0 {
                 dir.normalize() * burn.acceleration
             } else {
