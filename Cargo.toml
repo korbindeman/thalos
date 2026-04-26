@@ -22,6 +22,9 @@ edition = "2024"
 # sacrificing incremental compile speed on our own crates.
 [profile.dev]
 opt-level = 1
+# Disabled to avoid macOS incremental-compilation linker bug (stale
+# .llvm.<hash> anonymous symbol references between rcgu objects).
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 3

@@ -43,6 +43,45 @@ pub struct PlanetParams {
     /// sea_level_m`. Set to a large negative sentinel for airless bodies
     /// so no fragment ever crosses the threshold.
     pub sea_level_m: f32,
+    /// Amplitude (in radians of arc on the unit sphere) of the canonical
+    /// high-frequency *domain warp* applied before the impostor reads
+    /// the baked height cubemap. The cubemap-texel staircase visible
+    /// from orbit is a function of the texel grid; perturbing the
+    /// sample direction by ~1 texel of arc (~7.5e-4 rad on Thalos)
+    /// breaks the iso-contour out of the grid without adding any
+    /// surface height roughness — the bake's bilinear-interpolated
+    /// height field is read at a fractally perturbed location instead.
+    ///
+    /// Continues the same fractal-warp scheme that
+    /// `topography.rs`/`coarse_elevation.rs` apply at lower
+    /// frequencies during the bake. Bake + shader warps compose into
+    /// a single canonical multi-band warp.
+    ///
+    /// Set to 0 to disable (e.g. airless bodies whose bake already
+    /// captures all visible bands). For Earth-like bodies, ~8e-4 rad
+    /// (~1 texel on Thalos) is the design point.
+    pub coastline_warp_amp_radians: f32,
+    /// Cycles-per-meter of the warp's base octave. `1.0 / 2500.0`
+    /// puts the largest warp wavelength at ~2.5 km on the surface;
+    /// subsequent octaves (lacunarity 2) extend into sub-km territory
+    /// to give fractal texture below the cubemap Nyquist.
+    pub coastline_warp_freq_per_m: f32,
+    /// Amplitude (in meters) of the canonical high-frequency *height
+    /// jitter* added on top of the (warped) baked height. Provides
+    /// sub-texel surface detail visible on close approach. Set to 0
+    /// to disable. ~30 m is a sensible default — invisible at orbit,
+    /// visible up close.
+    pub coastline_jitter_amp_m: f32,
+    /// Cycles-per-meter of the height-jitter's base octave.
+    pub coastline_jitter_freq_per_m: f32,
+    /// Octave count, shared by the warp and jitter fbm calls.
+    /// Capped at 8 in the shader.
+    pub coastline_octaves: u32,
+    /// Per-body seed for the canonical high-frequency bands. Folds
+    /// the 64-bit body seed (low XOR high halves), then xors a
+    /// per-band magic so the warp/jitter fields decorrelate from any
+    /// bake-time fbm fields that share the body seed.
+    pub coastline_seed: u32,
 }
 
 impl Default for PlanetParams {
@@ -58,6 +97,16 @@ impl Default for PlanetParams {
             // default, and the shader's `sample_height_m(dir) < sea_level_m`
             // test never fires.
             sea_level_m: -1.0e9,
+            // Defaults are 0 so airless / preview bodies pay zero
+            // cost. Bodies with a sea level should set warp_amp to
+            // ~8e-4 rad (≈1 texel on Thalos) and jitter_amp_m to
+            // ~30 m for the design-point Earth-like look.
+            coastline_warp_amp_radians: 0.0,
+            coastline_warp_freq_per_m: 1.0 / 2500.0,
+            coastline_jitter_amp_m: 0.0,
+            coastline_jitter_freq_per_m: 1.0 / 1500.0,
+            coastline_octaves: 4,
+            coastline_seed: 0,
         }
     }
 }

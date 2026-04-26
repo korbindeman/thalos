@@ -1,11 +1,12 @@
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 
 use glam::DVec3;
 
 use crate::body_state_provider::BodyStateProvider;
+use crate::orbital_math::{eccentric_from_true_elliptic, solve_kepler_elliptic};
 use crate::types::{
     BodyId, BodyState, BodyStates, OrbitalElements, SolarSystemDefinition, StateVector,
-    orbital_elements_to_cartesian,
+    keplerian_basis, orbital_elements_to_cartesian,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -100,16 +101,13 @@ impl PatchedConics {
     }
 
     fn clamp_time(&self, time: f64) -> f64 {
-        if time < 0.0 || time > self.time_span {
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "[patched_conics] query time {:.0}s clamped to [0, {:.0}]",
-                time, self.time_span
-            );
-            time.clamp(0.0, self.time_span)
-        } else {
-            time
-        }
+        debug_assert!(
+            (0.0..=self.time_span).contains(&time),
+            "query time {time}s outside [0, {span}]; callers must clamp before \
+             querying so the silent fallback doesn't mask a horizon overshoot",
+            span = self.time_span,
+        );
+        time.clamp(0.0, self.time_span)
     }
 }
 
@@ -159,56 +157,28 @@ impl BodyStateProvider for PatchedConics {
     fn query_body(&self, body_id: BodyId, time: f64) -> BodyState {
         let t = self.clamp_time(time);
 
-        let mut lineage = [usize::MAX; 16];
-        let mut len = 0usize;
+        // Walk the lineage from leaf to root, then sum motions root-first so
+        // each ancestor's frame anchors the next.
+        let mut lineage: Vec<BodyId> = Vec::with_capacity(8);
         let mut current = Some(body_id);
-        let mut fallback: Vec<BodyId> = Vec::new();
-
         while let Some(id) = current {
-            if len < lineage.len() {
-                lineage[len] = id;
-            } else {
-                if fallback.is_empty() {
-                    fallback.extend_from_slice(&lineage[..len]);
-                }
-                fallback.push(id);
-            }
-            len += 1;
+            lineage.push(id);
             current = self.bodies[id].parent_id;
         }
 
         let mut position = DVec3::ZERO;
         let mut velocity = DVec3::ZERO;
-        let mass_kg = self.bodies[body_id].mass_kg;
-
-        if fallback.is_empty() {
-            for &id in lineage[..len].iter().rev() {
-                match self.bodies[id].motion {
-                    BodyMotion::Static => {}
-                    BodyMotion::FixedRelative(fixed) => {
-                        position += fixed.state.position;
-                        velocity += fixed.state.velocity;
-                    }
-                    BodyMotion::Keplerian(orbit) => {
-                        let relative = keplerian_relative_state(&orbit, t);
-                        position += relative.position;
-                        velocity += relative.velocity;
-                    }
+        for &id in lineage.iter().rev() {
+            match self.bodies[id].motion {
+                BodyMotion::Static => {}
+                BodyMotion::FixedRelative(fixed) => {
+                    position += fixed.state.position;
+                    velocity += fixed.state.velocity;
                 }
-            }
-        } else {
-            for &id in fallback.iter().rev() {
-                match self.bodies[id].motion {
-                    BodyMotion::Static => {}
-                    BodyMotion::FixedRelative(fixed) => {
-                        position += fixed.state.position;
-                        velocity += fixed.state.velocity;
-                    }
-                    BodyMotion::Keplerian(orbit) => {
-                        let relative = keplerian_relative_state(&orbit, t);
-                        position += relative.position;
-                        velocity += relative.velocity;
-                    }
+                BodyMotion::Keplerian(orbit) => {
+                    let relative = keplerian_relative_state(&orbit, t);
+                    position += relative.position;
+                    velocity += relative.velocity;
                 }
             }
         }
@@ -216,7 +186,7 @@ impl BodyStateProvider for PatchedConics {
         BodyState {
             position,
             velocity,
-            mass_kg,
+            mass_kg: self.bodies[body_id].mass_kg,
         }
     }
 
@@ -341,28 +311,6 @@ fn build_keplerian_orbit(
     }
 }
 
-fn keplerian_basis(elements: &OrbitalElements) -> (DVec3, DVec3) {
-    let cos_o = elements.lon_ascending_node_rad.cos();
-    let sin_o = elements.lon_ascending_node_rad.sin();
-    let cos_w = elements.arg_periapsis_rad.cos();
-    let sin_w = elements.arg_periapsis_rad.sin();
-    let cos_i = elements.inclination_rad.cos();
-    let sin_i = elements.inclination_rad.sin();
-
-    let basis_p = DVec3::new(
-        cos_o * cos_w - sin_o * sin_w * cos_i,
-        sin_i * sin_w,
-        sin_o * cos_w + cos_o * sin_w * cos_i,
-    );
-    let basis_q = DVec3::new(
-        -cos_o * sin_w - sin_o * cos_w * cos_i,
-        sin_i * cos_w,
-        -sin_o * sin_w + cos_o * cos_w * cos_i,
-    );
-
-    (basis_p, basis_q)
-}
-
 fn mean_motion_rad_per_s(semi_major_axis_m: f64, parent_gm: f64) -> f64 {
     if semi_major_axis_m <= 0.0 || parent_gm <= 0.0 {
         0.0
@@ -375,48 +323,14 @@ fn mean_anomaly_from_true_anomaly(eccentricity: f64, true_anomaly_rad: f64) -> f
     if eccentricity.abs() < 1e-12 {
         return true_anomaly_rad.rem_euclid(TAU);
     }
-
-    let cos_nu = true_anomaly_rad.cos();
-    let sin_nu = true_anomaly_rad.sin();
-    let denom = 1.0 + eccentricity * cos_nu;
-    let cos_e = (eccentricity + cos_nu) / denom;
-    let sin_e = ((1.0 - eccentricity * eccentricity).max(0.0).sqrt() * sin_nu) / denom;
-    let eccentric_anomaly = sin_e.atan2(cos_e);
-    (eccentric_anomaly - eccentricity * sin_e).rem_euclid(TAU)
-}
-
-fn solve_kepler_equation(eccentricity: f64, mean_anomaly_rad: f64) -> f64 {
-    let mean = (mean_anomaly_rad + PI).rem_euclid(TAU) - PI;
-    let mut eccentric_anomaly = if eccentricity < 0.8 {
-        mean
-    } else if mean >= 0.0 {
-        PI
-    } else {
-        -PI
-    };
-
-    for _ in 0..16 {
-        let sin_e = eccentric_anomaly.sin();
-        let cos_e = eccentric_anomaly.cos();
-        let residual = eccentric_anomaly - eccentricity * sin_e - mean;
-        let slope = 1.0 - eccentricity * cos_e;
-        if slope.abs() < 1e-12 {
-            break;
-        }
-        let delta = residual / slope;
-        eccentric_anomaly -= delta;
-        if delta.abs() < 1e-13 {
-            break;
-        }
-    }
-
-    eccentric_anomaly
+    let big_e = eccentric_from_true_elliptic(eccentricity, true_anomaly_rad);
+    (big_e - eccentricity * big_e.sin()).rem_euclid(TAU)
 }
 
 fn keplerian_relative_state(orbit: &KeplerianOrbit, time: f64) -> StateVector {
     let mean_anomaly =
         (orbit.epoch_mean_anomaly_rad + orbit.mean_motion_rad_per_s * time).rem_euclid(TAU);
-    let eccentric_anomaly = solve_kepler_equation(orbit.eccentricity, mean_anomaly);
+    let eccentric_anomaly = solve_kepler_elliptic(orbit.eccentricity, mean_anomaly);
     let cos_e = eccentric_anomaly.cos();
     let sin_e = eccentric_anomaly.sin();
     let denom = 1.0 - orbit.eccentricity * cos_e;
@@ -508,7 +422,6 @@ mod tests {
                     position: DVec3::ZERO,
                     velocity: DVec3::ZERO,
                 },
-                thrust_acceleration: 0.5,
             },
             name_to_id,
         }

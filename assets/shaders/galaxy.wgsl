@@ -134,10 +134,12 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let ndc_per_pixel = vec2<f32>(2.0 / viewport.x, 2.0 / viewport.y);
     let offset_clip = corner_px * radius_px * ndc_per_pixel * center_clip.w;
 
+    // NDC z = 0 → reverse-Z far plane (see stars.wgsl for rationale).
+    // Depth compare is `GreaterEqual` via `GalaxyMaterial::specialize`.
     var out: VertexOutput;
     out.clip_position = vec4<f32>(
         center_clip.xy + offset_clip,
-        1.0e-7 * center_clip.w,
+        0.0,
         center_clip.w,
     );
     out.shape_uv = vec2<f32>(corner_ext.x, corner_ext.y / max(axis_ratio, 0.15));

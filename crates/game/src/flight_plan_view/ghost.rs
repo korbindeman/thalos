@@ -10,7 +10,7 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use crate::camera::CameraFocus;
-use crate::coords::{RENDER_SCALE, RenderOrigin};
+use crate::coords::{RenderOrigin, WorldScale};
 use crate::photo_mode::HideInPhotoMode;
 use crate::rendering::{CelestialBody, FrameBodyStates, SimulationState};
 use crate::view::HideInShipView;
@@ -36,7 +36,6 @@ pub struct GhostBody {
     pub body_position: DVec3,
     /// Leg anchor's position at projection epoch (`r_anchor(t_enc)`).
     pub leg_anchor_pos: DVec3,
-    pub render_radius: f32,
     pub radius_m: f64,
     /// SOI entry epoch — drives handoff timing.
     pub encounter_epoch: f64,
@@ -50,6 +49,7 @@ pub struct GhostBody {
 pub(super) fn sync_ghost_bodies(
     mut commands: Commands,
     sim: Option<Res<SimulationState>>,
+    scale: Res<WorldScale>,
     mut view: ResMut<FlightPlanView>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -78,7 +78,7 @@ pub(super) fn sync_ghost_bodies(
             let Some(body_def) = sim.system.bodies.get(spec.body_id) else {
                 continue;
             };
-            let render_radius = (body_def.radius_m * RENDER_SCALE) as f32;
+            let render_radius = (body_def.radius_m * scale.0) as f32;
             let [r, g, b] = body_def.color;
 
             let mesh = meshes.add(Sphere::new(1.0).mesh().ico(3).unwrap());
@@ -104,7 +104,6 @@ pub(super) fn sync_ghost_bodies(
                         leg_anchor_id: spec.leg_anchor_id,
                         body_position: spec.body_position,
                         leg_anchor_pos: spec.leg_anchor_pos,
-                        render_radius,
                         radius_m: body_def.radius_m,
                         encounter_epoch: spec.encounter_epoch,
                         phase: GhostPhase::Active,
@@ -201,11 +200,12 @@ pub(super) fn update_ghost_lifecycle(
 pub(super) fn update_ghost_transforms(
     origin: Res<RenderOrigin>,
     focus: Res<CameraFocus>,
+    scale: Res<WorldScale>,
     cache: Res<FrameBodyStates>,
     view: Res<super::view::FlightPlanView>,
     mut query: Query<(&GhostBody, &mut Transform)>,
 ) {
-    let cam_dist_render = (focus.distance * RENDER_SCALE) as f32;
+    let cam_dist_render = (focus.distance * scale.0) as f32;
     let min_radius = cam_dist_render * 0.008;
 
     let body_states = match &cache.states {
@@ -222,8 +222,9 @@ pub(super) fn update_ghost_transforms(
         let pin = view.pin_for_body(ghost.leg_anchor_id, body_states);
         let sim_pos = ghost.body_position - ghost.leg_anchor_pos + pin;
 
-        transform.translation = ((sim_pos - origin.position) * RENDER_SCALE).as_vec3();
-        let radius = ghost.render_radius.max(min_radius);
+        transform.translation = ((sim_pos - origin.position) * scale.0).as_vec3();
+        let body_radius_render = (ghost.radius_m * scale.0) as f32;
+        let radius = body_radius_render.max(min_radius);
         transform.scale = Vec3::splat(radius);
     }
 }

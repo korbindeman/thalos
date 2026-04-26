@@ -64,21 +64,34 @@ pub(super) struct PropagationContext<'a> {
 
 /// Finite-duration maneuver burn. Turned into a [`BurnParams`] at propagation
 /// time so the engine can thread the thrust direction through each RK4 stage.
+///
+/// `initial_mass_kg` is the ship mass at `start_time` — captured once when
+/// the burn is scheduled, not re-derived later. The propagator computes
+/// mass at any point inside `[start_time, start_time + duration]` from
+/// this anchor, so a mid-burn prediction rebuild produces the same
+/// trajectory as if it had run uninterrupted. `dry_mass_kg` is the floor
+/// at which thrust cuts off (propellant exhausted).
 #[derive(Debug, Clone, Copy)]
 pub struct ScheduledBurn {
     pub delta_v_local: DVec3,
     pub reference_body: BodyId,
-    pub acceleration: f64,
+    pub thrust_n: f64,
+    pub initial_mass_kg: f64,
+    pub mass_flow_kg_per_s: f64,
+    pub dry_mass_kg: f64,
     pub start_time: f64,
     pub duration: f64,
 }
 
 impl ScheduledBurn {
-    fn to_burn_params(self) -> BurnParams {
+    pub(crate) fn to_burn_params(self) -> BurnParams {
         BurnParams {
             delta_v_local: self.delta_v_local,
             reference_body: self.reference_body,
-            acceleration: self.acceleration,
+            thrust_n: self.thrust_n,
+            initial_mass_kg: self.initial_mass_kg,
+            mass_flow_kg_per_s: self.mass_flow_kg_per_s,
+            dry_mass_kg: self.dry_mass_kg,
             start_time: self.start_time,
             end_time: self.start_time + self.duration,
         }

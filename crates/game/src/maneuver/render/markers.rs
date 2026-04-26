@@ -4,8 +4,8 @@ use super::super::helpers::{node_world_position, overlay_marker_transform};
 use super::super::state::{
     InteractionMode, ManeuverPlan, NodeMarkerDisc, SelectedNode, SnapIndicator,
 };
-use crate::camera::{CameraFocus, OrbitCamera};
-use crate::coords::{RENDER_SCALE, RenderOrigin};
+use crate::camera::{ActiveCamera, CameraFocus};
+use crate::coords::{RenderOrigin, WorldScale};
 use crate::flight_plan_view::FlightPlanView;
 use crate::photo_mode::HideInPhotoMode;
 use crate::rendering::{FrameBodyStates, SimulationState};
@@ -45,7 +45,8 @@ pub(in crate::maneuver) fn spawn_snap_indicator(
 pub(in crate::maneuver) fn update_snap_indicator(
     mode: Res<InteractionMode>,
     focus: Res<CameraFocus>,
-    camera_q: Query<&Transform, (With<OrbitCamera>, Without<SnapIndicator>)>,
+    scale: Res<WorldScale>,
+    camera_q: Query<&Transform, (With<ActiveCamera>, With<crate::camera::OrbitCamera>, Without<SnapIndicator>)>,
     mut indicators: Query<(&mut Transform, &mut Visibility), With<SnapIndicator>>,
 ) {
     let Ok((mut tf, mut vis)) = indicators.single_mut() else {
@@ -57,7 +58,7 @@ pub(in crate::maneuver) fn update_snap_indicator(
         ..
     } = *mode
     {
-        let cam_dist = (focus.distance * RENDER_SCALE) as f32;
+        let cam_dist = (focus.distance * scale.0) as f32;
         let cam_rot = camera_q
             .single()
             .map(|t| t.rotation)
@@ -81,10 +82,11 @@ pub(in crate::maneuver) fn manage_node_markers(
     origin: Res<RenderOrigin>,
     flight_plan_view: Res<FlightPlanView>,
     focus: Res<CameraFocus>,
-    camera_q: Query<&Transform, (With<OrbitCamera>, Without<NodeMarkerDisc>)>,
+    scale: Res<WorldScale>,
+    camera_q: Query<&Transform, (With<ActiveCamera>, With<crate::camera::OrbitCamera>, Without<NodeMarkerDisc>)>,
     mut markers: Query<(Entity, &NodeMarkerDisc, &mut Transform, &mut Visibility)>,
 ) {
-    let cam_dist = (focus.distance * RENDER_SCALE) as f32;
+    let cam_dist = (focus.distance * scale.0) as f32;
     let cam_rot = camera_q
         .single()
         .map(|t| t.rotation)
@@ -110,6 +112,7 @@ pub(in crate::maneuver) fn manage_node_markers(
                 pred,
                 states,
                 &origin,
+                &scale,
                 &sim.system,
                 sim.ephemeris.as_ref(),
                 &flight_plan_view,
@@ -154,6 +157,7 @@ pub(in crate::maneuver) fn manage_node_markers(
                     pred,
                     states,
                     &origin,
+                    &scale,
                     &sim.system,
                     sim.ephemeris.as_ref(),
                     &flight_plan_view,

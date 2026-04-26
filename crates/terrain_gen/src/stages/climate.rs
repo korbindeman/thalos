@@ -20,7 +20,11 @@
 //! Prevailing wind direction by latitude band follows Earth's three-cell
 //! circulation: tropics easterlies, mid-latitudes westerlies, polar easterlies.
 //!
-//! Dependencies: Topography (reads height_contributions.height).
+//! Reads `height_contributions.height` — must run after a stage that
+//! populates it (Topography on the legacy pipeline, or
+//! CoarseElevation / HydrologicalCarving on the icosphere pipeline). No
+//! stage-name dependency is declared because no single name covers
+//! both pipelines; ordering is the caller's responsibility.
 
 use glam::Vec3;
 use rayon::prelude::*;
@@ -68,7 +72,7 @@ pub struct Climate {
     /// breaks up sharp zonal-band iso-contours.
     pub precip_noise_amp: f32,
     /// Noise frequency for precip jitter.
-    pub precip_noise_frequency: f64,
+    pub precip_noise_frequency: f32,
 }
 
 impl Climate {
@@ -88,14 +92,19 @@ impl Stage for Climate {
         "climate"
     }
     fn dependencies(&self) -> &[&str] {
-        &["topography"]
+        // Climate reads `height_contributions.height` but doesn't care
+        // which stage populated it. Topography (legacy pipeline) and
+        // CoarseElevation/HydrologicalCarving (icosphere pipeline) both
+        // qualify; declaring a single name would lock Climate to one
+        // pipeline. Ordering is the caller's responsibility.
+        &[]
     }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let res = builder.cubemap_resolution;
         let inv_res = 1.0 / res as f32;
         let seed = builder.stage_seed();
-        let noise_seed = splitmix64(seed ^ 0xC117_A7ED_12B0_0F91);
+        let noise_seed = splitmix64(seed ^ 0xC117_A7ED_12B0_0F91) as u32;
 
         let height = &builder.height_contributions.height;
 
@@ -183,14 +192,14 @@ impl Stage for Climate {
 
                     // Noise jitter.
                     let noise = fbm3(
-                        dir.x as f64 * self.precip_noise_frequency,
-                        dir.y as f64 * self.precip_noise_frequency,
-                        dir.z as f64 * self.precip_noise_frequency,
+                        dir.x * self.precip_noise_frequency,
+                        dir.y * self.precip_noise_frequency,
+                        dir.z * self.precip_noise_frequency,
                         noise_seed,
                         4,
                         0.55,
                         2.1,
-                    ) as f32;
+                    );
                     p *= 1.0 + noise * self.precip_noise_amp;
 
                     // Ocean: maritime climate — never drier than 70 % of the

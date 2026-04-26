@@ -29,8 +29,8 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let world_pos = view.world_position + in.direction * INFINITY_DISTANCE;
     let center_clip = view.clip_from_world * vec4<f32>(world_pos, 1.0);
     var out: VertexOutput;
-    // Force to far plane under reverse-Z.
-    out.clip_position = vec4<f32>(center_clip.xy, 1.0e-7 * center_clip.w, center_clip.w);
+    // Reverse-Z far plane. See `stars.wgsl` for why 0 instead of 1e-7.
+    out.clip_position = vec4<f32>(center_clip.xy, 0.0, center_clip.w);
     return out;
 }
 

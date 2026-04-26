@@ -144,6 +144,14 @@ pub struct BodyBuilder {
     pub temperature_c: Cubemap<f32>,
     pub precipitation_mm: Cubemap<f32>,
 
+    /// Per-texel iron-fraction in [0, 1] — fraction of upstream catchment
+    /// area whose source rock contributed iron-rich sediment to the cell.
+    /// Written by `SurfaceMaterials` and read by `PaintBiomes`'s
+    /// `IronOverlay` to stain biomes downstream of mafic provinces.
+    /// Default zeros so bodies without the iron-provenance pass paint
+    /// no rust regardless of overlay configuration.
+    pub iron_fraction: Cubemap<f32>,
+
     /// Per-stage seed, set by the pipeline runner before each stage.
     pub(crate) stage_seed: u64,
 }
@@ -225,6 +233,7 @@ impl BodyBuilder {
             },
             temperature_c: Cubemap::<f32>::new(resolution),
             precipitation_mm: Cubemap::<f32>::new(resolution),
+            iron_fraction: Cubemap::<f32>::new(resolution),
             stage_seed: 0,
         }
     }

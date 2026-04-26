@@ -407,42 +407,31 @@ fn nearest_centroid_warped(
     params: &TectonicSkeleton,
     warp_seed: u64,
 ) -> u32 {
-    let f = params.plate_warp_frequency as f64;
+    let f = params.plate_warp_frequency;
     let oct = params.plate_warp_octaves;
-    let wx = fbm3(
-        dir.x as f64 * f,
-        dir.y as f64 * f,
-        dir.z as f64 * f,
-        warp_seed,
-        oct,
-        0.5,
-        2.0,
-    );
+    let seed_u32 = warp_seed as u32;
+    let wx = fbm3(dir.x * f, dir.y * f, dir.z * f, seed_u32, oct, 0.5, 2.0);
     let wy = fbm3(
-        dir.x as f64 * f + 17.31,
-        dir.y as f64 * f + 17.31,
-        dir.z as f64 * f + 17.31,
-        warp_seed.wrapping_add(1),
+        dir.x * f + 17.31,
+        dir.y * f + 17.31,
+        dir.z * f + 17.31,
+        seed_u32.wrapping_add(1),
         oct,
         0.5,
         2.0,
     );
     let wz = fbm3(
-        dir.x as f64 * f + 41.17,
-        dir.y as f64 * f + 41.17,
-        dir.z as f64 * f + 41.17,
-        warp_seed.wrapping_add(2),
+        dir.x * f + 41.17,
+        dir.y * f + 41.17,
+        dir.z * f + 41.17,
+        seed_u32.wrapping_add(2),
         oct,
         0.5,
         2.0,
     );
     let amp = params.plate_warp_amplitude;
-    let warped = Vec3::new(
-        dir.x + amp * wx as f32,
-        dir.y + amp * wy as f32,
-        dir.z + amp * wz as f32,
-    )
-    .normalize_or_zero();
+    let warped = Vec3::new(dir.x + amp * wx, dir.y + amp * wy, dir.z + amp * wz)
+        .normalize_or_zero();
 
     let mut best = 0u32;
     let mut best_dot = f32::MIN;

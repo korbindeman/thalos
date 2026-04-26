@@ -49,13 +49,24 @@ use crate::types::{BodyDefinition, BodyId, BodyState, G, StateVector, Trajectory
 /// the ship's live state at every substep — the only honest interpretation
 /// of a local Δv when the burn duration is a meaningful fraction of the
 /// orbital period.
+///
+/// Thrust is modeled as constant force `thrust_n` with linear mass loss
+/// at `mass_flow_kg_per_s`, so acceleration grows over the burn:
+/// `m(t) = initial_mass_kg − mass_flow_kg_per_s · (t − start_time)`.
+/// Once `m(t)` reaches `dry_mass_kg` propellant is exhausted and thrust
+/// cuts off cleanly — the integrator continues coasting under gravity
+/// alone for the remainder of `[start_time, end_time]`.
 #[derive(Debug, Clone, Copy)]
 pub struct BurnParams {
     /// Direction in the prograde/normal/radial frame. Magnitude is not used
-    /// for the force (that's `acceleration`) — only the direction matters.
+    /// for the force (that's `thrust_n`) — only the direction matters.
     pub delta_v_local: DVec3,
     pub reference_body: BodyId,
-    pub acceleration: f64,
+    pub thrust_n: f64,
+    pub initial_mass_kg: f64,
+    pub mass_flow_kg_per_s: f64,
+    /// Floor under which thrust stops applying — physical "out of fuel".
+    pub dry_mass_kg: f64,
     pub start_time: f64,
     pub end_time: f64,
 }
@@ -306,14 +317,56 @@ impl KeplerianPropagator {
         let soi_radius = bodies[soi_body].soi_radius_m;
         let body_radius = bodies[soi_body].radius_m;
 
-        // Skip index 0 (it equals `time`, already emitted as the start sample).
-        for t in sample_times.into_iter().skip(1) {
+        // Worklist of pending sample times. Subdivision pushes back, so we
+        // need a mutable stack — `Vec::pop` returns the last element, so we
+        // store in reverse order of intended processing.
+        let mut work: Vec<f64> = sample_times.into_iter().skip(1).collect();
+        work.reverse();
+
+        // Step cap: bounds the cubic Hermite's accuracy in
+        // [`detect_step_crossings`] — the swept-min check assumes the cubic
+        // tracks the actual trajectory, which holds as long as the
+        // trajectory doesn't swing wildly within one step. Two
+        // complementary triggers, both relative to the smaller endpoint
+        // altitude:
+        //   - altitude-change cap, for steps that obviously cross many
+        //     altitude bands;
+        //   - relative-speed × h cap, for steps whose endpoints land at
+        //     similar altitudes but cover a long path through periapsis
+        //     (the canonical "symmetric dip" — `|cur_alt − prev_alt| ≈ 0`,
+        //     so the altitude cap alone doesn't fire).
+        const MAX_ALT_CHANGE_RATIO: f64 = 0.25;
+        const MAX_PATH_RATIO: f64 = 0.25;
+        // Lower bound on subdivided step duration. Stops runaway recursion if
+        // a cap becomes unsatisfiable (e.g. ship grazing the surface).
+        const MIN_STEP_S: f64 = 1e-3;
+
+        while let Some(t) = work.pop() {
             let cur_state = eval_at(t);
 
+            let prev_body = ephemeris.query_body(soi_body, prev_t);
+            let cur_body = ephemeris.query_body(soi_body, t);
+            let prev_alt = (prev_state.position - prev_body.position).length();
+            let cur_alt = (cur_state.position - cur_body.position).length();
+            let min_alt = prev_alt.min(cur_alt);
+            let alt_change = (cur_alt - prev_alt).abs();
+            let rel_speed = (prev_state.velocity - prev_body.velocity)
+                .length()
+                .max((cur_state.velocity - cur_body.velocity).length());
+            let path = rel_speed * (t - prev_t);
+            let needs_subdivide = alt_change > MAX_ALT_CHANGE_RATIO * min_alt
+                || path > MAX_PATH_RATIO * min_alt;
+            if needs_subdivide && (t - prev_t) > MIN_STEP_S {
+                let mid = 0.5 * (prev_t + t);
+                work.push(t);
+                work.push(mid);
+                continue;
+            }
+
             let xings = detect_step_crossings(
-                prev_state.position,
+                prev_state,
                 prev_t,
-                cur_state.position,
+                cur_state,
                 t,
                 soi_body,
                 soi_radius,
@@ -323,34 +376,43 @@ impl KeplerianPropagator {
                 bodies,
             );
 
-            // Coast resolution order (exit > enter > collision) preserved from
-            // the pre-extraction code. Burn uses a different order; see
-            // `burn_segment_impl`. Unifying the two is a semantics decision,
-            // not a refactor — tracked as a follow-up.
-            if xings.exit {
-                let t_cross = bisect_body_distance(
+            // Resolve crossings in `exit > collision > enter` order. Exit
+            // and collision are geometrically mutually exclusive (one is
+            // outward through the SOI radius, the other is inward through
+            // the body radius); collision wins over enter because hitting
+            // the SOI body wrecks the ship, so any near-miss into a child
+            // SOI in the same step is moot. `refine_crossing` returns
+            // `None` when the swept-extremum check turned out to be a
+            // Hermite false positive — fall through to the next event in
+            // that case instead of aborting the segment. The burn path
+            // uses the same priority — see `burn_segment_impl`.
+            if xings.exit
+                && let Some(t_cross) = refine_crossing(
                     prev_t, t, soi_body, soi_radius, rel0, mu, time, soi_body, ephemeris,
-                );
+                )
+            {
                 let cross_state = eval_at(t_cross);
                 samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
                 return SegmentResult::exit(samples, cross_state, t_cross, soi_body, bodies);
             }
-            if let Some(child) = xings.enter {
-                let child_soi = bodies[child].soi_radius_m;
-                let t_cross = bisect_body_distance(
-                    prev_t, t, child, child_soi, rel0, mu, time, soi_body, ephemeris,
-                );
-                let cross_state = eval_at(t_cross);
-                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                return SegmentResult::enter(samples, cross_state, t_cross, child);
-            }
-            if xings.collision {
-                let t_cross = bisect_body_distance(
+            if xings.collision
+                && let Some(t_cross) = refine_crossing(
                     prev_t, t, soi_body, body_radius, rel0, mu, time, soi_body, ephemeris,
-                );
+                )
+            {
                 let cross_state = eval_at(t_cross);
                 samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
                 return SegmentResult::collision(samples, cross_state, t_cross, soi_body);
+            }
+            if let Some(child) = xings.enter {
+                let child_soi = bodies[child].soi_radius_m;
+                if let Some(t_cross) = refine_crossing(
+                    prev_t, t, child, child_soi, rel0, mu, time, soi_body, ephemeris,
+                ) {
+                    let cross_state = eval_at(t_cross);
+                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                    return SegmentResult::enter(samples, cross_state, t_cross, child);
+                }
             }
 
             samples.push(build_sample(t, cur_state, soi_body, ephemeris));
@@ -446,9 +508,9 @@ impl KeplerianPropagator {
             let next_time = cur_time + h;
 
             let xings = detect_step_crossings(
-                cur_state.position,
+                cur_state,
                 cur_time,
-                next_state.position,
+                next_state,
                 next_time,
                 soi_body,
                 soi_radius,
@@ -458,44 +520,76 @@ impl KeplerianPropagator {
                 bodies,
             );
 
-            // Burn resolution order (exit > collision > enter) preserved from
-            // the pre-extraction code. Coast uses a different order; see
-            // `coast_segment_impl`. Unifying the two is a semantics decision,
-            // not a refactor — tracked as a follow-up.
-            if xings.exit {
-                let prev_d =
-                    (cur_state.position - ephemeris.query_body(soi_body, cur_time).position).length();
-                let next_d = (next_state.position
-                    - ephemeris.query_body(soi_body, next_time).position)
+            // Pick the refinement fraction. When endpoints bracket the
+            // target (one inside, one outside) `inv_lerp` is the standard
+            // first-order estimate. When only the cubic Hermite swept-min
+            // flagged the crossing (both endpoints on the same side), drop
+            // back to the midpoint — burn substeps are 1 s by default so
+            // the worst-case error is bounded. The verification step below
+            // rejects the crossing if the refined state didn't actually
+            // cross the threshold (Hermite false positive).
+            let pick_inward_frac = |target_body: BodyId, target_distance: f64| -> f64 {
+                let prev_d = (cur_state.position
+                    - ephemeris.query_body(target_body, cur_time).position)
                     .length();
-                let frac = inv_lerp(prev_d, next_d, soi_radius);
+                let next_d = (next_state.position
+                    - ephemeris.query_body(target_body, next_time).position)
+                    .length();
+                if prev_d > target_distance && next_d <= target_distance {
+                    inv_lerp(prev_d, next_d, target_distance)
+                } else {
+                    0.5
+                }
+            };
+            let pick_outward_frac = |target_body: BodyId, target_distance: f64| -> f64 {
+                let prev_d = (cur_state.position
+                    - ephemeris.query_body(target_body, cur_time).position)
+                    .length();
+                let next_d = (next_state.position
+                    - ephemeris.query_body(target_body, next_time).position)
+                    .length();
+                if prev_d < target_distance && next_d >= target_distance {
+                    inv_lerp(prev_d, next_d, target_distance)
+                } else {
+                    0.5
+                }
+            };
+            let crossed_inward = |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
+                let d = (state.position - ephemeris.query_body(target_body, t).position).length();
+                d <= target_distance
+            };
+            let crossed_outward = |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
+                let d = (state.position - ephemeris.query_body(target_body, t).position).length();
+                d >= target_distance
+            };
+
+            // Resolve crossings in the same `exit > collision > enter`
+            // order as `coast_segment_impl`; see the comment there for the
+            // rationale. Verification rejects Hermite false positives.
+            if xings.exit {
+                let frac = pick_outward_frac(soi_body, soi_radius);
                 let (t_cross, cross_state) = refine_burn_crossing(cur_state, cur_time, h, frac);
-                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                return SegmentResult::exit(samples, cross_state, t_cross, soi_body, bodies);
+                if crossed_outward(cross_state, t_cross, soi_body, soi_radius) {
+                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                    return SegmentResult::exit(samples, cross_state, t_cross, soi_body, bodies);
+                }
             }
             if xings.collision {
-                let prev_d =
-                    (cur_state.position - ephemeris.query_body(soi_body, cur_time).position).length();
-                let next_d = (next_state.position
-                    - ephemeris.query_body(soi_body, next_time).position)
-                    .length();
-                let frac = inv_lerp(prev_d, next_d, body_radius);
+                let frac = pick_inward_frac(soi_body, body_radius);
                 let (t_cross, cross_state) = refine_burn_crossing(cur_state, cur_time, h, frac);
-                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                return SegmentResult::collision(samples, cross_state, t_cross, soi_body);
+                if crossed_inward(cross_state, t_cross, soi_body, body_radius) {
+                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                    return SegmentResult::collision(samples, cross_state, t_cross, soi_body);
+                }
             }
             if let Some(child) = xings.enter {
                 let child_soi = bodies[child].soi_radius_m;
-                let prev_d = (cur_state.position
-                    - ephemeris.query_body(child, cur_time).position)
-                    .length();
-                let next_d = (next_state.position
-                    - ephemeris.query_body(child, next_time).position)
-                    .length();
-                let frac = inv_lerp(prev_d, next_d, child_soi);
+                let frac = pick_inward_frac(child, child_soi);
                 let (t_cross, cross_state) = refine_burn_crossing(cur_state, cur_time, h, frac);
-                samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
-                return SegmentResult::enter(samples, cross_state, t_cross, child);
+                if crossed_inward(cross_state, t_cross, child, child_soi) {
+                    samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
+                    return SegmentResult::enter(samples, cross_state, t_cross, child);
+                }
             }
 
             cur_state = next_state;
@@ -547,12 +641,25 @@ fn rk4_burn_step(
         } else {
             DVec3::ZERO
         };
-        let thrust = if tt >= burn.start_time && tt < burn.end_time {
+        // Inclusive at both ends so RK4's k4 evaluation at `burn.end_time`
+        // (when a substep lands exactly there) still picks up the boundary
+        // thrust — otherwise the integrator silently under-delivers Δv on
+        // the final substep. The burn-segment loop never asks us to step
+        // past `burn.end_time`, so doubling up with a following coast
+        // segment is not a concern here.
+        let thrust = if tt >= burn.start_time && tt <= burn.end_time {
             let rb = ref_at(tt);
             let dir =
                 delta_v_to_world(burn.delta_v_local, vel, pos, rb.position, rb.velocity);
-            if dir.length_squared() > 0.0 {
-                dir.normalize() * burn.acceleration
+            // Linear mass model: thrust cuts off cleanly once propellant
+            // exhausts (`mass <= dry_mass_kg`), so an over-budget burn
+            // coasts under gravity alone for the rest of the window
+            // instead of diverging.
+            let mass = burn.initial_mass_kg
+                - burn.mass_flow_kg_per_s * (tt - burn.start_time);
+            if dir.length_squared() > 0.0 && mass > burn.dry_mass_kg {
+                let accel_mag = burn.thrust_n / mass;
+                dir.normalize() * accel_mag
             } else {
                 DVec3::ZERO
             }
@@ -634,14 +741,22 @@ fn can_intercept(candidate: BodyId, soi: BodyId, bodies: &[BodyDefinition]) -> b
     false
 }
 
-/// Bisect to find the time in [t_lo, t_hi] where the ship's distance to
+/// Refine the time in [t_lo, t_hi] where the ship's distance to
 /// `target_body` crosses `target_distance`. Used for SOI exit (target =
 /// soi_body, distance = soi_radius), SOI entry (target = child, distance =
 /// child_soi), and collision (target = soi_body, distance = body_radius).
-/// Sign convention is embedded by the caller, which pre-checks that exactly
-/// one crossing lies in the interval.
+///
+/// Two cases:
+/// 1. Endpoints bracket the target distance (one above, one below) — the
+///    classic inward/outward sign change. Bisect.
+/// 2. Endpoints sit on the same side. The Hermite swept-min/max in
+///    [`detect_step_crossings`] flagged a crossing in between, so we
+///    golden-section search for the extremum and bisect on the half that
+///    actually brackets. Returns `None` if the extremum confirms no real
+///    crossing — i.e. Hermite was a false positive — and the caller should
+///    treat the step as no-event.
 #[allow(clippy::too_many_arguments)]
-fn bisect_body_distance(
+fn refine_crossing(
     t_lo: f64,
     t_hi: f64,
     target_body: BodyId,
@@ -651,22 +766,45 @@ fn bisect_body_distance(
     time0: f64,
     soi_body: BodyId,
     ephemeris: &dyn BodyStateProvider,
-) -> f64 {
-    let mut lo = t_lo;
-    let mut hi = t_hi;
-    let distance_minus_target = |t: f64| -> f64 {
+) -> Option<f64> {
+    let f = |t: f64| -> f64 {
         let rel = propagate_kepler(rel0, mu, t - time0);
         let soi_bs = ephemeris.query_body(soi_body, t);
         let ship_pos = soi_bs.position + rel.position;
         let target = ephemeris.query_body(target_body, t);
         (ship_pos - target.position).length() - target_distance
     };
-    let f_lo = distance_minus_target(lo);
+    let f_lo = f(t_lo);
+    let f_hi = f(t_hi);
 
+    if f_lo.signum() != f_hi.signum() {
+        return Some(bisect_signs(t_lo, t_hi, &f, f_lo));
+    }
+
+    // Same sign: f_lo > 0 → both outside target sphere, look for inward dip
+    // (min); f_lo < 0 → both inside, look for outward bulge (max). Equal-zero
+    // is degenerate — treat as crossing exactly at t_lo.
+    if f_lo == 0.0 {
+        return Some(t_lo);
+    }
+    let seek_min = f_lo > 0.0;
+    let t_extremum = golden_section_extremum(t_lo, t_hi, &f, seek_min);
+    let f_ext = f(t_extremum);
+    if f_ext.signum() == f_lo.signum() {
+        return None;
+    }
+    Some(bisect_signs(t_lo, t_extremum, &f, f_lo))
+}
+
+/// Standard bisection assuming `f(t_lo)` and `f(t_hi)` have opposite signs.
+fn bisect_signs(t_lo: f64, t_hi: f64, f: &impl Fn(f64) -> f64, f_lo: f64) -> f64 {
+    let f_lo_sgn = f_lo.signum();
+    let mut lo = t_lo;
+    let mut hi = t_hi;
     for _ in 0..60 {
         let mid = 0.5 * (lo + hi);
-        let f_mid = distance_minus_target(mid);
-        if f_mid.signum() == f_lo.signum() {
+        let f_mid = f(mid);
+        if f_mid.signum() == f_lo_sgn {
             lo = mid;
         } else {
             hi = mid;
@@ -678,15 +816,52 @@ fn bisect_body_distance(
     0.5 * (lo + hi)
 }
 
+/// Golden-section search on [t_lo, t_hi]. `seek_min = true` finds the
+/// minimum; `false` finds the maximum.
+fn golden_section_extremum(
+    t_lo: f64,
+    t_hi: f64,
+    f: &impl Fn(f64) -> f64,
+    seek_min: bool,
+) -> f64 {
+    const INV_PHI: f64 = 0.618_033_988_749_894_9; // 1/φ
+    let mut a = t_lo;
+    let mut b = t_hi;
+    let mut c = b - INV_PHI * (b - a);
+    let mut d = a + INV_PHI * (b - a);
+    let mut fc = f(c);
+    let mut fd = f(d);
+    for _ in 0..60 {
+        if (b - a).abs() < 1e-6 {
+            break;
+        }
+        let pick_left = if seek_min { fc < fd } else { fc > fd };
+        if pick_left {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - INV_PHI * (b - a);
+            fc = f(c);
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + INV_PHI * (b - a);
+            fd = f(d);
+        }
+    }
+    0.5 * (a + b)
+}
+
 // ---------------------------------------------------------------------------
 // Shared step-boundary crossing detection
 // ---------------------------------------------------------------------------
 
 /// Which boundaries were crossed between two adjacent sample/substep points.
 /// Refinement (locating the exact crossing time) and termination are the
-/// caller's responsibility — coast uses Kepler bisection, burn uses linear
-/// interpolation plus a shortened RK4 step — but the "did we cross?" test
-/// is identical in both paths.
+/// caller's responsibility — coast uses [`refine_crossing`], burn uses linear
+/// interpolation plus a shortened RK4 step — but the "did we cross?" test is
+/// identical in both paths.
 #[derive(Debug, Clone, Copy, Default)]
 struct StepCrossings {
     /// Ship passed from inside `soi_body`'s SOI to outside.
@@ -698,11 +873,27 @@ struct StepCrossings {
     enter: Option<BodyId>,
 }
 
+/// Detect SOI/surface crossings on the segment between two propagator
+/// samples.
+///
+/// Two layers:
+/// 1. Endpoint distances catch any crossing where one end is inside and the
+///    other outside the target sphere — the common case.
+/// 2. A cubic Hermite of relative position (using ship − body velocities at
+///    both endpoints) gets sampled at three interior points; if the swept
+///    minimum dips below the body radius (or below a child SOI) while both
+///    endpoints sit outside, we still flag the crossing. This catches the
+///    "skip-over-periapsis" failure mode where uniform-time sampling misses
+///    a brief sub-surface dip.
+///
+/// SOI exit only uses the endpoint test — a swept-max excursion outside the
+/// SOI that returns inside isn't physically an exit (the ship is still
+/// inside at both endpoints), so we don't flag it.
 #[allow(clippy::too_many_arguments)]
 fn detect_step_crossings(
-    prev_pos: DVec3,
+    prev_state: StateVector,
     prev_t: f64,
-    next_pos: DVec3,
+    next_state: StateVector,
     next_t: f64,
     soi_body: BodyId,
     soi_radius: f64,
@@ -712,17 +903,31 @@ fn detect_step_crossings(
     bodies: &[BodyDefinition],
 ) -> StepCrossings {
     let mut out = StepCrossings::default();
+    let h = next_t - prev_t;
 
-    let prev_soi_pos = ephemeris.query_body(soi_body, prev_t).position;
-    let next_soi_pos = ephemeris.query_body(soi_body, next_t).position;
-    let prev_soi_d = (prev_pos - prev_soi_pos).length();
-    let next_soi_d = (next_pos - next_soi_pos).length();
+    let prev_soi_bs = ephemeris.query_body(soi_body, prev_t);
+    let next_soi_bs = ephemeris.query_body(soi_body, next_t);
+    let q0 = prev_state.position - prev_soi_bs.position;
+    let q1 = next_state.position - next_soi_bs.position;
+    let qv0 = prev_state.velocity - prev_soi_bs.velocity;
+    let qv1 = next_state.velocity - next_soi_bs.velocity;
+    let prev_d_sq = q0.length_squared();
+    let next_d_sq = q1.length_squared();
+    let (interior_min_sq, _) = swept_dist_sq_extremes(q0, qv0, q1, qv1, h);
+    let segment_min_sq = prev_d_sq.min(next_d_sq).min(interior_min_sq);
 
-    if soi_radius.is_finite() && prev_soi_d < soi_radius && next_soi_d >= soi_radius {
-        out.exit = true;
+    if soi_radius.is_finite() {
+        let r_sq = soi_radius * soi_radius;
+        if prev_d_sq < r_sq && next_d_sq >= r_sq {
+            out.exit = true;
+        }
     }
-    if body_radius > 0.0 && prev_soi_d > body_radius && next_soi_d <= body_radius {
-        out.collision = true;
+
+    if body_radius > 0.0 {
+        let r_sq = body_radius * body_radius;
+        if prev_d_sq > r_sq && (next_d_sq <= r_sq || segment_min_sq <= r_sq) {
+            out.collision = true;
+        }
     }
 
     for &child in threat_bodies {
@@ -730,17 +935,66 @@ fn detect_step_crossings(
         if !child_soi.is_finite() || child_soi <= 0.0 {
             continue;
         }
-        let prev_child = ephemeris.query_body(child, prev_t).position;
-        let next_child = ephemeris.query_body(child, next_t).position;
-        let prev_d = (prev_pos - prev_child).length();
-        let next_d = (next_pos - next_child).length();
-        if prev_d >= child_soi && next_d < child_soi {
+        let r_sq = child_soi * child_soi;
+        let prev_child = ephemeris.query_body(child, prev_t);
+        let next_child = ephemeris.query_body(child, next_t);
+        let cq0 = prev_state.position - prev_child.position;
+        let cq1 = next_state.position - next_child.position;
+        let cqv0 = prev_state.velocity - prev_child.velocity;
+        let cqv1 = next_state.velocity - next_child.velocity;
+        let prev_child_d_sq = cq0.length_squared();
+        let next_child_d_sq = cq1.length_squared();
+        let (cinterior_min_sq, _) = swept_dist_sq_extremes(cq0, cqv0, cq1, cqv1, h);
+        let child_min_sq = prev_child_d_sq.min(next_child_d_sq).min(cinterior_min_sq);
+        if prev_child_d_sq >= r_sq && (next_child_d_sq < r_sq || child_min_sq < r_sq) {
             out.enter = Some(child);
             break;
         }
     }
 
     out
+}
+
+/// Cubic Hermite interpolant of `(p0, v0)` at s=0 and `(p1, v1)` at s=1,
+/// where `h` is the time interval (so the velocities are honored as
+/// position/time, not position/parameter).
+#[inline]
+fn hermite_cubic(p0: DVec3, v0: DVec3, p1: DVec3, v1: DVec3, h: f64, s: f64) -> DVec3 {
+    let s2 = s * s;
+    let s3 = s2 * s;
+    let h00 = 2.0 * s3 - 3.0 * s2 + 1.0;
+    let h10 = s3 - 2.0 * s2 + s;
+    let h01 = -2.0 * s3 + 3.0 * s2;
+    let h11 = s3 - s2;
+    h00 * p0 + (h10 * h) * v0 + h01 * p1 + (h11 * h) * v1
+}
+
+/// Min and max of `|q(s)|²` along the cubic Hermite over the open interval
+/// `s ∈ (0, 1)`. Sampled at three interior points (s = 0.25, 0.5, 0.75) —
+/// dense enough to catch any reasonable curvature given that step caps
+/// upstream keep altitude change bounded per step. Endpoints aren't included
+/// because callers already have `|q0|²` and `|q1|²`.
+#[inline]
+fn swept_dist_sq_extremes(
+    q0: DVec3,
+    qv0: DVec3,
+    q1: DVec3,
+    qv1: DVec3,
+    h: f64,
+) -> (f64, f64) {
+    let mut min_sq = f64::INFINITY;
+    let mut max_sq = 0.0_f64;
+    for s in [0.25_f64, 0.5, 0.75] {
+        let q = hermite_cubic(q0, qv0, q1, qv1, h, s);
+        let d_sq = q.length_squared();
+        if d_sq < min_sq {
+            min_sq = d_sq;
+        }
+        if d_sq > max_sq {
+            max_sq = d_sq;
+        }
+    }
+    (min_sq, max_sq)
 }
 
 // ---------------------------------------------------------------------------
@@ -887,10 +1141,15 @@ fn coast_sample_times(
 }
 
 /// Elliptic Kepler solve that stays on the revolution following the anchor
-/// `big_e0`. `solve_kepler_elliptic` wraps `M` into `[-π, π]` for
-/// convergence, which would drop `E1` onto the wrong revolution when
-/// `M1 - M0` crosses a wrap boundary. We snap the wrapped result back to
-/// the 2π multiple closest to `big_e0 + (m1 - m0)` (the linear estimate).
+/// `big_e0`.
+///
+/// [`solve_kepler_elliptic`] wraps `M` into `[-π, π]` for Newton-Raphson
+/// convergence — the right call for any single-shot solve, since the result
+/// modulo `2π` is unique. But [`coast_sample_times`] linearly interpolates
+/// `E` between an anchor `big_e0` and a horizon `big_e1`, so it needs the
+/// same revolution at both endpoints; otherwise samples jump across a
+/// `2π` discontinuity mid-orbit. We snap the wrapped result to the `2π`
+/// multiple closest to `big_e0 + (m1 - m0)` (the linear estimate).
 fn solve_kepler_elliptic_continuous(e: f64, big_e0: f64, m0: f64, m1: f64) -> f64 {
     let tau = std::f64::consts::TAU;
     let big_e1_wrapped = solve_kepler_elliptic(e, m1);
@@ -1002,7 +1261,6 @@ mod tests {
                     position: DVec3::ZERO,
                     velocity: DVec3::ZERO,
                 },
-                thrust_acceleration: 0.5,
             },
             name_to_id,
         };
@@ -1209,10 +1467,15 @@ mod tests {
             velocity: earth.velocity + DVec3::new(0.0, 0.0, v),
         };
         let propagator = KeplerianPropagator::default();
+        // Pick `thrust_n` and `initial_mass_kg` so the starting acceleration
+        // is 10 m/s² (matches the constant-accel value the legacy test used).
         let burn = BurnParams {
             delta_v_local: DVec3::new(100.0, 0.0, 0.0), // prograde
             reference_body: 1,
-            acceleration: 10.0,
+            thrust_n: 100_000.0,
+            initial_mass_kg: 10_000.0,
+            mass_flow_kg_per_s: 30.0,
+            dry_mass_kg: 1_000.0,
             start_time: 0.0,
             end_time: 10.0,
         };
@@ -1232,4 +1495,160 @@ mod tests {
         assert!(v1 > v0, "burn did not increase orbital speed: {v0} -> {v1}");
     }
 
+    /// End-to-end check that the rocket equation is honored: a long
+    /// straight-line burn (no gravity) should achieve `Δv = ve · ln(m0/mf)`
+    /// when integrated for the duration that [`crate::maneuver::burn_duration`]
+    /// returns for that target Δv.
+    #[test]
+    fn burn_segment_achieves_target_delta_v() {
+        use crate::maneuver::burn_duration;
+
+        // Build a synthetic massless body so gravity is effectively zero —
+        // we only want to measure thrust integration accuracy.
+        let mut bodies = vec![BodyDefinition {
+            id: 0,
+            name: "Origin".into(),
+            kind: BodyKind::Star,
+            parent: None,
+            mass_kg: 0.0,
+            radius_m: 0.0,
+            color: [1.0; 3],
+            albedo: 1.0,
+            rotation_period_s: 0.0,
+            axial_tilt_rad: 0.0,
+            gm: 0.0,
+            soi_radius_m: f64::INFINITY,
+            orbital_elements: None,
+            generator: None,
+            atmosphere: None,
+            terrestrial_atmosphere: None,
+        }];
+        bodies[0].id = 0;
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("Origin".into(), 0);
+        let system = SolarSystemDefinition {
+            name: "Massless".into(),
+            bodies,
+            ship: ShipDefinition {
+                initial_state: StateVector {
+                    position: DVec3::new(1e9, 0.0, 0.0),
+                    velocity: DVec3::new(0.0, 0.0, 1.0),
+                },
+            },
+            name_to_id,
+        };
+        let pc = PatchedConics::new(&system, 3.156e9);
+
+        let target_dv = 500.0;
+        let thrust_n = 250_000.0;
+        let initial_mass_kg = 10_000.0;
+        let mass_flow_kg_per_s = 75.0;
+        let dry_mass_kg = 1_000.0;
+        let duration = burn_duration(
+            target_dv,
+            thrust_n,
+            initial_mass_kg,
+            mass_flow_kg_per_s,
+            dry_mass_kg,
+        );
+        assert!(duration > 0.0);
+
+        let state = StateVector {
+            position: DVec3::new(1e9, 0.0, 0.0),
+            velocity: DVec3::new(0.0, 0.0, 1.0), // small prograde so the local frame is well-defined
+        };
+        let propagator = KeplerianPropagator::default();
+        let burn = BurnParams {
+            delta_v_local: DVec3::new(1.0, 0.0, 0.0), // direction only — prograde
+            reference_body: 0,
+            thrust_n,
+            initial_mass_kg,
+            mass_flow_kg_per_s,
+            dry_mass_kg,
+            start_time: 0.0,
+            end_time: duration,
+        };
+        let result = propagator.burn_segment(BurnRequest {
+            state,
+            time: 0.0,
+            soi_body: 0,
+            target_time: duration,
+            burn,
+            ephemeris: &pc,
+            bodies: &system.bodies,
+        });
+        assert!(matches!(result.terminator, SegmentTerminator::BurnEnd { .. }));
+        let achieved_dv = (result.end_state.velocity - state.velocity).length();
+        let err = (achieved_dv - target_dv).abs() / target_dv;
+        assert!(err < 1e-3, "Δv error {err} (got {achieved_dv}, target {target_dv})");
+    }
+
+    /// Multi-period prediction with periapsis below the surface: forces the
+    /// `coast_sample_times` uniform-time fallback. Without swept-min CCD or
+    /// step capping the sub-surface dip can fall between two outside
+    /// endpoints and the propagator continues straight through the body.
+    #[test]
+    fn coast_collision_detected_on_multi_period_horizon() {
+        let (system, pc) = sun_earth_system();
+        let earth = pc.query_body(1, 0.0);
+
+        // Highly eccentric orbit. Periapsis 3e6 m (well inside the 6.37e6 m
+        // surface), apoapsis 5e7 m → e ≈ 0.887.
+        let r_apo = 5.0e7_f64;
+        let r_per = 3.0e6_f64;
+        let a = 0.5 * (r_apo + r_per);
+        let e = (r_apo - r_per) / (r_apo + r_per);
+        let v_apo = (EARTH_GM * (1.0 - e) / (a * (1.0 + e))).sqrt();
+        let period = std::f64::consts::TAU * (a.powi(3) / EARTH_GM).sqrt();
+
+        let state = StateVector {
+            position: earth.position + DVec3::new(r_apo, 0.0, 0.0),
+            velocity: earth.velocity + DVec3::new(0.0, 0.0, v_apo),
+        };
+        let propagator = KeplerianPropagator::default();
+        let result = propagator.coast_segment(CoastRequest {
+            state,
+            time: 0.0,
+            soi_body: 1,
+            // > 1.01 periods so `coast_sample_times` returns uniform-time
+            // (not uniform-E) — the failure mode we're guarding against.
+            target_time: period * 2.5,
+            stop_on_stable_orbit: false,
+            sample_count_hint: 16,
+            ephemeris: &pc,
+            bodies: &system.bodies,
+        });
+        match result.terminator {
+            SegmentTerminator::Collision { body, time } => {
+                assert_eq!(body, 1);
+                // Surface impact has to be on the first periapsis pass —
+                // half an orbit from apoapsis.
+                assert!(
+                    time < period,
+                    "collision should be on first orbit (t < {period}), got t = {time}"
+                );
+            }
+            other => panic!("expected collision, got {:?}", other),
+        }
+    }
+
+    /// `swept_dist_sq_extremes` should report the cubic Hermite's interior
+    /// minimum below a threshold even when both endpoints sit above it.
+    #[test]
+    fn swept_dist_sq_extremes_catches_interior_dip() {
+        // Construct a relative-position curve that starts at altitude 10,
+        // reaches a minimum near s = 0.5 well below 5, and ends at altitude
+        // 10 again. Use velocities to drive the cubic toward and away from
+        // the body.
+        let q0 = DVec3::new(10.0, 0.0, 0.0);
+        let q1 = DVec3::new(-10.0, 0.0, 0.0);
+        let qv0 = DVec3::new(-30.0, 0.0, 0.0);
+        let qv1 = DVec3::new(-30.0, 0.0, 0.0);
+        let h = 1.0;
+        let (min_sq, max_sq) = swept_dist_sq_extremes(q0, qv0, q1, qv1, h);
+        // At s = 0.5 the cubic passes near the origin; the swept-min should
+        // be well under both endpoints (|q0|² = |q1|² = 100).
+        assert!(min_sq < 25.0, "interior min² should be small, got {min_sq}");
+        assert!(max_sq <= 100.0 + 1e-6);
+    }
 }

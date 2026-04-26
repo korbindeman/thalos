@@ -8,6 +8,7 @@
                 model: "Mk1-3",
                 diameter: 2.5,
                 dry_mass: 2720.0,
+                reaction_wheel_torque: 15000.0,
             ),
             resources: {
                 Electricity: (
@@ -19,10 +20,20 @@
         (
             data: (
                 kind: "FuelTank",
+                diameter: 2.5,
                 length: 3.0,
                 dry_mass: 250.0,
             ),
-            resources: {},
+            resources: {
+                Methane: (
+                    capacity: 3000.0,
+                    amount: 3000.0,
+                ),
+                Lox: (
+                    capacity: 3996.0,
+                    amount: 3996.0,
+                ),
+            },
         ),
         (
             data: (

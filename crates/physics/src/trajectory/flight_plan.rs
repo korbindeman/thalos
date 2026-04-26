@@ -43,7 +43,18 @@ pub struct PredictionRequest {
     pub ephemeris: Arc<dyn BodyStateProvider>,
     pub bodies: Vec<BodyDefinition>,
     pub prediction_config: PredictionConfig,
-    pub ship_thrust_acceleration: f64,
+    /// Total engine thrust in newtons.
+    pub ship_thrust_n: f64,
+    /// Ship mass at `sim_time`. Prediction tracks how this evolves through
+    /// each scheduled burn so the rocket equation stays honored across
+    /// long flight plans.
+    pub ship_mass_kg: f64,
+    /// Engine mass flow at full throttle, kg/s.
+    pub ship_mass_flow_kg_per_s: f64,
+    /// Dry mass — the floor at which propellant exhausts and thrust cuts
+    /// off. Predictions cap each burn at the time it would drain to this
+    /// floor.
+    pub ship_dry_mass_kg: f64,
     /// Currently selected target body. Informational only — analytical
     /// propagation needs no step-size bias because Kepler has no step size.
     pub target_body: Option<BodyId>,
@@ -285,13 +296,19 @@ pub fn propagate_flight_plan(
         ephemeris,
         bodies,
         prediction_config,
-        ship_thrust_acceleration,
+        ship_thrust_n,
+        ship_mass_kg,
+        ship_mass_flow_kg_per_s,
+        ship_dry_mass_kg,
         target_body,
         ..
     } = request;
     let initial_state = *initial_state;
     let start_time = *start_time;
-    let ship_thrust_acceleration = *ship_thrust_acceleration;
+    let ship_thrust_n = *ship_thrust_n;
+    let ship_mass_flow_kg_per_s = *ship_mass_flow_kg_per_s;
+    let ship_dry_mass_kg = *ship_dry_mass_kg;
+    let mut running_mass_kg = *ship_mass_kg;
     let target_body = *target_body;
 
     let _span = tracing::info_span!(
@@ -359,8 +376,10 @@ pub fn propagate_flight_plan(
         // Build the burn for this leg.
         //
         // Leg 0: use any `carried_burns` that are still active at `time`
-        //   (the live-sim in-progress burn).
-        // Leg i>0: synthesize a new burn from the node that starts leg i.
+        //   (the live-sim in-progress burn). The carried burn already
+        //   carries its own `initial_mass_kg` set when it was scheduled.
+        // Leg i>0: synthesize a new burn from the node that starts leg i,
+        //   using the running mass at the leg start as the burn's anchor.
         let scheduled_burn: Option<ScheduledBurn> = if leg_idx == 0 {
             carried_burns
                 .iter()
@@ -376,12 +395,21 @@ pub fn propagate_flight_plan(
                 })
         } else {
             let prev_node = &maneuvers.nodes[node_order[leg_idx - 1]];
-            let duration = burn_duration(prev_node.delta_v.length(), ship_thrust_acceleration);
+            let duration = burn_duration(
+                prev_node.delta_v.length(),
+                ship_thrust_n,
+                running_mass_kg,
+                ship_mass_flow_kg_per_s,
+                ship_dry_mass_kg,
+            );
             if duration > 0.0 && prev_node.delta_v.length_squared() > 0.0 {
                 Some(ScheduledBurn {
                     delta_v_local: prev_node.delta_v,
                     reference_body: prev_node.reference_body,
-                    acceleration: ship_thrust_acceleration,
+                    thrust_n: ship_thrust_n,
+                    initial_mass_kg: running_mass_kg,
+                    mass_flow_kg_per_s: ship_mass_flow_kg_per_s,
+                    dry_mass_kg: ship_dry_mass_kg,
                     start_time: prev_node.time,
                     duration,
                 })
@@ -408,6 +436,16 @@ pub fn propagate_flight_plan(
                 state = last;
             }
             if let Some(t) = seg.end_time() {
+                // Drain mass for the duration of thrust within this segment.
+                // For leg-0 carried burns the burn started before `start_time`
+                // (already accounted for in `request.ship_mass_kg`); for
+                // leg-i>0 burns the burn starts at `leg_start_time`. Either
+                // way the segment integrates thrust across [leg_start_time, t]
+                // so `t - leg_start_time` is the active-burn duration here.
+                let burn_dt = (t - leg_start_time).max(0.0);
+                running_mass_kg = (running_mass_kg
+                    - ship_mass_flow_kg_per_s * burn_dt)
+                    .max(ship_dry_mass_kg);
                 time = t;
             }
             Some(seg)
@@ -451,11 +489,6 @@ pub fn propagate_flight_plan(
             &mut id_counter,
             leg_idx,
         ));
-
-        if let Some(seg) = &burn_segment {
-            segments.push(seg.clone());
-        }
-        segments.push(coast_segment.clone());
 
         let coast_collided = coast_segment.collision_body.is_some();
         let early_exit = burn_collided
@@ -522,9 +555,11 @@ pub fn propagate_flight_plan(
         }
         relock_samples(&mut leg.coast_segment.samples);
     }
-    // Mirror into the flat segments list so consumers that iterate it see
-    // the same anchors.
-    segments.clear();
+    // Build the flat segments cache from the post-relock legs in one pass.
+    // Event detection (which needs the *pre-relock* per-sample anchors to
+    // see SOI transitions) ran above against the leg sub-segments directly,
+    // so this cache is consumed only by post-relock readers — renderer,
+    // closest-approach scan, encounter aggregation.
     for leg in legs.iter() {
         if let Some(burn) = &leg.burn_segment {
             segments.push(burn.clone());

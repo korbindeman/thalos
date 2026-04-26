@@ -30,6 +30,34 @@ pub struct CommandPod {
     pub model: String,
     pub diameter: f32,
     pub dry_mass: f32,
+    /// Torque this pod's built-in reaction wheel can produce per body
+    /// axis, N·m. The blueprint loader auto-attaches a matching
+    /// [`ReactionWheel`] component so the runtime aggregator only has
+    /// to query for the capability.
+    pub reaction_wheel_torque: f32,
+}
+
+/// Capability component: this part contributes reaction-wheel torque to
+/// the ship's attitude control budget. Built-in to every [`CommandPod`];
+/// future dedicated reaction-wheel parts attach the same component.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ReactionWheel {
+    /// Maximum torque per body axis, N·m. Symmetric — reaction wheels
+    /// are isotropic. Per-axis-asymmetric torque (RCS arrangements)
+    /// belongs on a separate component.
+    pub max_torque: f32,
+}
+
+/// Per-engine runtime thrust output, N. Updated each frame by the game
+/// crate from the gated effective throttle. Stays at zero while the
+/// engine isn't firing. Plumbing for visual feedback (current temporary
+/// red mesh tint, future particle/plume effects) so consumers don't
+/// have to rederive `engine.thrust * throttle.effective` themselves and
+/// stay in sync with whatever gating the bridge applies (fuel-out,
+/// auto-burn vs. manual, warp-disabled, etc.).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct EngineThrust {
+    pub current_n: f32,
 }
 
 /// Parametric in radius: `diameter` drives this part's `top` node when it

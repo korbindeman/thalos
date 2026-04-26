@@ -259,38 +259,44 @@ impl Stage for Topography {
         let peak_orogen = self.peak_orogen_m;
         let rough_amp = self.roughness_m;
         let age_scale_myr = self.orogen_age_scale_myr;
-        let noise_freq = self.noise_frequency as f64;
+        let noise_freq = self.noise_frequency;
         let warp_amp = self.warp_amplitude;
-        let warp_freq = self.warp_frequency as f64;
+        let warp_freq = self.warp_frequency;
         let warp_amp_mid = self.warp_amplitude_mid;
-        let warp_freq_mid = self.warp_frequency_mid as f64;
+        let warp_freq_mid = self.warp_frequency_mid;
         let warp_amp_hi = self.warp_amplitude_hi;
-        let warp_freq_hi = self.warp_frequency_hi as f64;
+        let warp_freq_hi = self.warp_frequency_hi;
         let regional_amp = self.regional_height_m;
-        let regional_freq = self.regional_frequency as f64;
+        let regional_freq = self.regional_frequency;
         let regional_amp_lo = self.regional_height_lo_m;
-        let regional_freq_lo = self.regional_frequency_lo as f64;
+        let regional_freq_lo = self.regional_frequency_lo;
         let regional_amp_hi = self.regional_height_hi_m;
-        let regional_freq_hi = self.regional_frequency_hi as f64;
+        let regional_freq_hi = self.regional_frequency_hi;
         let sea_level_pct = self.sea_level_percentile;
+        // Sub-seeds for fbm3 are u32. Fold the body seed's high+low
+        // halves so both 32-bit halves contribute, then xor a per-band
+        // magic to decorrelate fields.
+        let body_seed = (seed as u32) ^ ((seed >> 32) as u32);
         // Outer warp seeds (largest scale).
-        let warp_seed_x = seed ^ 0x1A2B_3C4D_5E6F_7081;
-        let warp_seed_y = seed ^ 0xFE01_DCBA_9876_5432;
-        let warp_seed_z = seed ^ 0x0123_4567_89AB_CDEF;
+        let warp_seed_x: u32 = body_seed ^ 0x5E6F_7081;
+        let warp_seed_y: u32 = body_seed ^ 0x9876_5432;
+        let warp_seed_z: u32 = body_seed ^ 0x89AB_CDEF;
         // Middle warp seeds.
-        let warp_seed_xm = seed ^ 0x2EC4_9A51_F3D8_B7A0;
-        let warp_seed_ym = seed ^ 0x6B3F_18DE_5C94_A721;
-        let warp_seed_zm = seed ^ 0xC518_3E7A_29B0_F643;
+        let warp_seed_xm: u32 = body_seed ^ 0xF3D8_B7A0;
+        let warp_seed_ym: u32 = body_seed ^ 0x5C94_A721;
+        let warp_seed_zm: u32 = body_seed ^ 0x29B0_F643;
         // Inner warp seeds (smallest scale).
-        let warp_seed_xh = seed ^ 0x4B7C_8A91_2E3D_5F06;
-        let warp_seed_yh = seed ^ 0x9F2E_AB34_C5D6_E708;
-        let warp_seed_zh = seed ^ 0x6789_ABCD_EF01_2345;
+        let warp_seed_xh: u32 = body_seed ^ 0x2E3D_5F06;
+        let warp_seed_yh: u32 = body_seed ^ 0xC5D6_E708;
+        let warp_seed_zh: u32 = body_seed ^ 0xEF01_2345;
         // Regional field seeds (one set per scale so the three bands are
         // decorrelated — otherwise low-freq and high-freq would share zero
         // crossings and the composition would look mono-scale).
-        let regional_seed = seed ^ 0x2345_6789_ABCD_EF01;
-        let regional_seed_lo = seed ^ 0xA95F_6D8E_3218_C704;
-        let regional_seed_hi = seed ^ 0x4FC8_71E9_5A32_B608;
+        let regional_seed: u32 = body_seed ^ 0xABCD_EF01;
+        let regional_seed_lo: u32 = body_seed ^ 0x3218_C704;
+        let regional_seed_hi: u32 = body_seed ^ 0x5A32_B608;
+        let roughness_seed: u32 = body_seed ^ 0x7E_E9_2D_F1;
+        let coastal_seed: u32 = body_seed ^ 0x4F8D_1753;
 
         let oi_cm = &builder.orogen_intensity;
         let oa_cm = &builder.orogen_age_myr;
@@ -326,32 +332,32 @@ impl Stage for Topography {
                     let q = if warp_amp_hi > 0.0 {
                         Vec3::new(
                             fbm3(
-                                dir.x as f64 * warp_freq_hi,
-                                dir.y as f64 * warp_freq_hi,
-                                dir.z as f64 * warp_freq_hi,
+                                dir.x * warp_freq_hi,
+                                dir.y * warp_freq_hi,
+                                dir.z * warp_freq_hi,
                                 warp_seed_xh,
                                 2,
                                 0.5,
                                 2.1,
-                            ) as f32,
+                            ),
                             fbm3(
-                                dir.x as f64 * warp_freq_hi + 13.7,
-                                dir.y as f64 * warp_freq_hi,
-                                dir.z as f64 * warp_freq_hi,
+                                dir.x * warp_freq_hi + 13.7,
+                                dir.y * warp_freq_hi,
+                                dir.z * warp_freq_hi,
                                 warp_seed_yh,
                                 2,
                                 0.5,
                                 2.1,
-                            ) as f32,
+                            ),
                             fbm3(
-                                dir.x as f64 * warp_freq_hi,
-                                dir.y as f64 * warp_freq_hi + 23.1,
-                                dir.z as f64 * warp_freq_hi,
+                                dir.x * warp_freq_hi,
+                                dir.y * warp_freq_hi + 23.1,
+                                dir.z * warp_freq_hi,
                                 warp_seed_zh,
                                 2,
                                 0.5,
                                 2.1,
-                            ) as f32,
+                            ),
                         ) * warp_amp_hi
                     } else {
                         Vec3::ZERO
@@ -360,32 +366,32 @@ impl Stage for Topography {
                     let r = if warp_amp_mid > 0.0 {
                         Vec3::new(
                             fbm3(
-                                sample_mid.x as f64 * warp_freq_mid,
-                                sample_mid.y as f64 * warp_freq_mid,
-                                sample_mid.z as f64 * warp_freq_mid,
+                                sample_mid.x * warp_freq_mid,
+                                sample_mid.y * warp_freq_mid,
+                                sample_mid.z * warp_freq_mid,
                                 warp_seed_xm,
                                 3,
                                 0.55,
                                 2.1,
-                            ) as f32,
+                            ),
                             fbm3(
-                                sample_mid.x as f64 * warp_freq_mid + 11.1,
-                                sample_mid.y as f64 * warp_freq_mid,
-                                sample_mid.z as f64 * warp_freq_mid,
+                                sample_mid.x * warp_freq_mid + 11.1,
+                                sample_mid.y * warp_freq_mid,
+                                sample_mid.z * warp_freq_mid,
                                 warp_seed_ym,
                                 3,
                                 0.55,
                                 2.1,
-                            ) as f32,
+                            ),
                             fbm3(
-                                sample_mid.x as f64 * warp_freq_mid,
-                                sample_mid.y as f64 * warp_freq_mid + 19.4,
-                                sample_mid.z as f64 * warp_freq_mid,
+                                sample_mid.x * warp_freq_mid,
+                                sample_mid.y * warp_freq_mid + 19.4,
+                                sample_mid.z * warp_freq_mid,
                                 warp_seed_zm,
                                 3,
                                 0.55,
                                 2.1,
-                            ) as f32,
+                            ),
                         ) * warp_amp_mid
                     } else {
                         Vec3::ZERO
@@ -394,32 +400,32 @@ impl Stage for Topography {
                     let s = if warp_amp > 0.0 {
                         Vec3::new(
                             fbm3(
-                                sample_outer.x as f64 * warp_freq,
-                                sample_outer.y as f64 * warp_freq,
-                                sample_outer.z as f64 * warp_freq,
+                                sample_outer.x * warp_freq,
+                                sample_outer.y * warp_freq,
+                                sample_outer.z * warp_freq,
                                 warp_seed_x,
                                 3,
                                 0.55,
                                 2.1,
-                            ) as f32,
+                            ),
                             fbm3(
-                                sample_outer.x as f64 * warp_freq + 17.3,
-                                sample_outer.y as f64 * warp_freq,
-                                sample_outer.z as f64 * warp_freq,
+                                sample_outer.x * warp_freq + 17.3,
+                                sample_outer.y * warp_freq,
+                                sample_outer.z * warp_freq,
                                 warp_seed_y,
                                 3,
                                 0.55,
                                 2.1,
-                            ) as f32,
+                            ),
                             fbm3(
-                                sample_outer.x as f64 * warp_freq,
-                                sample_outer.y as f64 * warp_freq + 29.7,
-                                sample_outer.z as f64 * warp_freq,
+                                sample_outer.x * warp_freq,
+                                sample_outer.y * warp_freq + 29.7,
+                                sample_outer.z * warp_freq,
                                 warp_seed_z,
                                 3,
                                 0.55,
                                 2.1,
-                            ) as f32,
+                            ),
                         ) * warp_amp
                     } else {
                         Vec3::ZERO
@@ -509,14 +515,14 @@ impl Stage for Topography {
                     // relief shows up in the shader's height-gradient
                     // normal perturbation.
                     let n = fbm3(
-                        dir.x as f64 * noise_freq,
-                        dir.y as f64 * noise_freq,
-                        dir.z as f64 * noise_freq,
-                        seed,
+                        dir.x * noise_freq,
+                        dir.y * noise_freq,
+                        dir.z * noise_freq,
+                        roughness_seed,
                         7,
                         0.55,
                         2.1,
-                    ) as f32;
+                    );
                     let rough = n * roughness_amp;
 
                     // 4. Multi-scale regional height field — three
@@ -531,42 +537,42 @@ impl Stage for Topography {
                     // cutting across it.
                     let regional_lo = if regional_amp_lo > 0.0 {
                         let p = fbm3(
-                            warped_dir.x as f64 * regional_freq_lo,
-                            warped_dir.y as f64 * regional_freq_lo,
-                            warped_dir.z as f64 * regional_freq_lo,
+                            warped_dir.x * regional_freq_lo,
+                            warped_dir.y * regional_freq_lo,
+                            warped_dir.z * regional_freq_lo,
                             regional_seed_lo,
                             4,
                             0.55,
                             2.1,
-                        ) as f32;
+                        );
                         p * regional_amp_lo
                     } else {
                         0.0
                     };
                     let regional_mid = if regional_amp > 0.0 {
                         let p = fbm3(
-                            warped_dir.x as f64 * regional_freq,
-                            warped_dir.y as f64 * regional_freq,
-                            warped_dir.z as f64 * regional_freq,
+                            warped_dir.x * regional_freq,
+                            warped_dir.y * regional_freq,
+                            warped_dir.z * regional_freq,
                             regional_seed,
                             4,
                             0.55,
                             2.1,
-                        ) as f32;
+                        );
                         p * regional_amp
                     } else {
                         0.0
                     };
                     let regional_hi = if regional_amp_hi > 0.0 {
                         let p = fbm3(
-                            warped_dir.x as f64 * regional_freq_hi,
-                            warped_dir.y as f64 * regional_freq_hi,
-                            warped_dir.z as f64 * regional_freq_hi,
+                            warped_dir.x * regional_freq_hi,
+                            warped_dir.y * regional_freq_hi,
+                            warped_dir.z * regional_freq_hi,
                             regional_seed_hi,
                             4,
                             0.55,
                             2.1,
-                        ) as f32;
+                        );
                         p * regional_amp_hi
                     } else {
                         0.0
@@ -621,10 +627,9 @@ impl Stage for Topography {
         // uses true height-above-sea (= 0 at the coastline).
         if self.coastal_detail_m > 0.0 {
             let amp = self.coastal_detail_m;
-            let freq = self.coastal_detail_frequency as f64;
+            let freq = self.coastal_detail_frequency;
             let scale = self.coastal_detail_scale_m.max(1.0);
             let inv_scale = 1.0 / scale;
-            let coastal_seed = seed ^ 0x31B9_62CA_4F8D_1753;
 
             let height = &mut builder.height_contributions.height;
             for face in CubemapFace::ALL {
@@ -642,14 +647,14 @@ impl Stage for Topography {
                         return;
                     }
                     let n = fbm3(
-                        dir.x as f64 * freq,
-                        dir.y as f64 * freq,
-                        dir.z as f64 * freq,
+                        dir.x * freq,
+                        dir.y * freq,
+                        dir.z * freq,
                         coastal_seed,
                         5,
                         0.55,
                         2.1,
-                    ) as f32;
+                    );
                     *h_v += n * amp * weight;
                 });
             }

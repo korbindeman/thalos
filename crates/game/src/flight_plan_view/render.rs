@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use thalos_physics::trajectory::NumericSegment;
 use thalos_physics::types::{SolarSystemDefinition, TrajectorySample};
 
-use crate::coords::{RenderOrigin, sample_render_pos};
+use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
 use crate::rendering::{FrameBodyStates, SimulationState};
 
 use super::view::FlightPlanView;
@@ -24,6 +24,7 @@ use super::view::FlightPlanView;
 pub(super) fn render_trajectory(
     sim: Option<Res<SimulationState>>,
     origin: Res<RenderOrigin>,
+    scale: Res<WorldScale>,
     cache: Res<FrameBodyStates>,
     view: Res<FlightPlanView>,
     mut gizmos: Gizmos,
@@ -44,18 +45,18 @@ pub(super) fn render_trajectory(
 
         if let Some(burn) = &leg.burn_segment {
             if let (Some(prev), Some(first)) = (prev_end_pos, burn.samples.first()) {
-                let first_pos = sample_render_pos(first, &pin_for, &origin);
+                let first_pos = sample_render_pos(first, &pin_for, &origin, &scale);
                 let color = ghost_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), is_ghost_leg);
                 gizmos.line(prev, first_pos, color);
             }
-            render_burn_segment(burn, &pin_for, &origin, &mut gizmos);
+            render_burn_segment(burn, &pin_for, &origin, &scale, &mut gizmos);
             if let Some(last) = burn.samples.last() {
-                prev_end_pos = Some(sample_render_pos(last, &pin_for, &origin));
+                prev_end_pos = Some(sample_render_pos(last, &pin_for, &origin, &scale));
             }
         }
 
         if let (Some(prev), Some(first)) = (prev_end_pos, leg.coast_segment.samples.first()) {
-            let first_pos = sample_render_pos(first, &pin_for, &origin);
+            let first_pos = sample_render_pos(first, &pin_for, &origin, &scale);
             let color = ghost_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), is_ghost_leg);
             gizmos.line(prev, first_pos, color);
         }
@@ -65,6 +66,7 @@ pub(super) fn render_trajectory(
             is_ghost_leg,
             &sim.system,
             &origin,
+            &scale,
             &mut gizmos,
         );
     }
@@ -73,7 +75,7 @@ pub(super) fn render_trajectory(
     if let Some(baseline) = &prediction.baseline
         && !baseline.samples.is_empty()
     {
-        render_segment(baseline, &pin_for, true, &sim.system, &origin, &mut gizmos);
+        render_segment(baseline, &pin_for, true, &sim.system, &origin, &scale, &mut gizmos);
     }
 }
 
@@ -85,6 +87,7 @@ fn render_burn_segment(
     segment: &NumericSegment,
     pin_for: &impl Fn(usize) -> bevy::math::DVec3,
     origin: &RenderOrigin,
+    scale: &WorldScale,
     gizmos: &mut Gizmos,
 ) {
     if segment.samples.len() < 2 {
@@ -94,7 +97,7 @@ fn render_burn_segment(
     let points = segment
         .samples
         .iter()
-        .map(|s| sample_render_pos(s, pin_for, origin));
+        .map(|s| sample_render_pos(s, pin_for, origin, scale));
     gizmos.linestrip(points, burn_color);
 }
 
@@ -104,6 +107,7 @@ fn render_segment(
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
+    scale: &WorldScale,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
     if segment.samples.is_empty() {
@@ -111,10 +115,10 @@ fn render_segment(
     }
 
     if segment.is_stable_orbit {
-        return render_stable_orbit_segment(segment, pin_for, is_ghost, system, origin, gizmos);
+        return render_stable_orbit_segment(segment, pin_for, is_ghost, system, origin, scale, gizmos);
     }
 
-    render_open_samples(&segment.samples, pin_for, is_ghost, system, origin, gizmos)
+    render_open_samples(&segment.samples, pin_for, is_ghost, system, origin, scale, gizmos)
 }
 
 fn render_open_samples(
@@ -123,6 +127,7 @@ fn render_open_samples(
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
+    scale: &WorldScale,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
     if samples.is_empty() {
@@ -139,15 +144,15 @@ fn render_open_samples(
         let alpha_a = 0.3 + 0.7 * (1.0 - progress_a);
         let alpha_b = 0.3 + 0.7 * (1.0 - progress_b);
 
-        let p_a = sample_render_pos(a, pin_for, origin);
-        let p_b = sample_render_pos(b, pin_for, origin);
+        let p_a = sample_render_pos(a, pin_for, origin, scale);
+        let p_b = sample_render_pos(b, pin_for, origin, scale);
 
         let color_a = ghost_adjust(line_color(a, b, system, alpha_a), is_ghost);
         let color_b = ghost_adjust(line_color(b, a, system, alpha_b), is_ghost);
         gizmos.line_gradient(p_a, p_b, color_a, color_b);
     }
 
-    Some(sample_render_pos(&samples[total - 1], pin_for, origin))
+    Some(sample_render_pos(&samples[total - 1], pin_for, origin, scale))
 }
 
 fn render_stable_orbit_segment(
@@ -156,6 +161,7 @@ fn render_stable_orbit_segment(
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
+    scale: &WorldScale,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
     let loop_start = segment
@@ -170,6 +176,7 @@ fn render_stable_orbit_segment(
             is_ghost,
             system,
             origin,
+            scale,
             gizmos,
         );
     }
@@ -180,6 +187,7 @@ fn render_stable_orbit_segment(
         is_ghost,
         system,
         origin,
+        scale,
         gizmos,
     )
 }
@@ -190,6 +198,7 @@ fn render_stable_orbit(
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
+    scale: &WorldScale,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
     if samples.len() < 2 {
@@ -211,10 +220,10 @@ fn render_stable_orbit(
     gizmos.linestrip(
         samples
             .iter()
-            .map(|s| sample_render_pos(s, pin_for, origin)),
+            .map(|s| sample_render_pos(s, pin_for, origin, scale)),
         color,
     );
-    Some(sample_render_pos(samples.last()?, pin_for, origin))
+    Some(sample_render_pos(samples.last()?, pin_for, origin, scale))
 }
 
 // ---------------------------------------------------------------------------

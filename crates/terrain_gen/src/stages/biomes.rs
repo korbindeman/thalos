@@ -23,7 +23,7 @@ pub enum BiomeRule {
     /// Match texels whose low-freq fbm noise exceeds `threshold`. Gives
     /// patchy regional assignment for highland subtypes (KREEP, melt).
     Fbm {
-        frequency: f64,
+        frequency: f32,
         threshold: f32,
         octaves: u32,
     },
@@ -52,7 +52,7 @@ pub enum BiomeRule {
         #[serde(default)]
         jitter_amp_m: f32,
         #[serde(default = "default_height_jitter_freq")]
-        jitter_frequency: f64,
+        jitter_frequency: f32,
     },
     /// Match texels whose baked height exceeds `m` meters. Inverse of
     /// `HeightAbove` — useful for ice-shelf / shallow-sea partitioning
@@ -62,7 +62,7 @@ pub enum BiomeRule {
         #[serde(default)]
         jitter_amp_m: f32,
         #[serde(default = "default_height_jitter_freq")]
-        jitter_frequency: f64,
+        jitter_frequency: f32,
     },
     /// Whittaker-style climate rule. Matches cells whose climate falls in
     /// the given temperature and precipitation box:
@@ -86,7 +86,7 @@ pub enum BiomeRule {
         jitter_amp: f32,
         /// Noise frequency for boundary jitter.
         #[serde(default = "default_climate_jitter_freq")]
-        jitter_frequency: f64,
+        jitter_frequency: f32,
     },
     /// Orogen / mountain-chain rule. Matches cells whose cumulative orogen
     /// intensity (from the Tectonics stage) exceeds `min_intensity`.
@@ -105,17 +105,17 @@ pub enum BiomeRule {
         #[serde(default)]
         jitter_amp: f32,
         #[serde(default = "default_orogen_jitter_freq")]
-        jitter_frequency: f64,
+        jitter_frequency: f32,
     },
 }
 
-fn default_climate_jitter_freq() -> f64 {
+fn default_climate_jitter_freq() -> f32 {
     3.0
 }
-fn default_height_jitter_freq() -> f64 {
+fn default_height_jitter_freq() -> f32 {
     3.0
 }
-fn default_orogen_jitter_freq() -> f64 {
+fn default_orogen_jitter_freq() -> f32 {
     3.5
 }
 
@@ -135,12 +135,16 @@ impl Stage for Biomes {
     fn name(&self) -> &str {
         "biomes"
     }
-    // Biomes stage runs after any structural stages (Differentiate and, if
-    // present, Megabasin) so `NearBasin` rules see a populated basin list.
-    // Listing Differentiate as the hard dependency keeps bodies that don't
-    // run Megabasin free to still use Biomes.
+    // Biomes reads height, climate, orogen, and (optionally) megabasin
+    // state — all populated by various upstream stages depending on the
+    // pipeline in use. Each rule that needs a particular field runtime-
+    // asserts its presence (NearBasin checks megabasins, TempPrecip relies
+    // on Climate having run). Declaring a single stage-name dep would
+    // lock Biomes to one pipeline (Differentiate is on the legacy path
+    // but absent from the icosphere path); ordering is the caller's
+    // responsibility.
     fn dependencies(&self) -> &[&str] {
-        &["differentiate"]
+        &[]
     }
 
     fn apply(&self, builder: &mut BodyBuilder) {
@@ -279,14 +283,14 @@ fn rule_matches(
                         ^ (rule_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
                 let n = fbm3(
-                    dir.x as f64 * *jitter_frequency,
-                    dir.y as f64 * *jitter_frequency,
-                    dir.z as f64 * *jitter_frequency,
-                    s,
+                    dir.x * *jitter_frequency,
+                    dir.y * *jitter_frequency,
+                    dir.z * *jitter_frequency,
+                    s as u32,
                     4,
                     0.55,
                     2.1,
-                ) as f32;
+                );
                 *m + n * *jitter_amp_m
             } else {
                 *m
@@ -304,14 +308,14 @@ fn rule_matches(
                         ^ (rule_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
                 let n = fbm3(
-                    dir.x as f64 * *jitter_frequency,
-                    dir.y as f64 * *jitter_frequency,
-                    dir.z as f64 * *jitter_frequency,
-                    s,
+                    dir.x * *jitter_frequency,
+                    dir.y * *jitter_frequency,
+                    dir.z * *jitter_frequency,
+                    s as u32,
                     4,
                     0.55,
                     2.1,
-                ) as f32;
+                );
                 *m + n * *jitter_amp_m
             } else {
                 *m
@@ -346,14 +350,14 @@ fn rule_matches(
                     ^ (rule_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
             );
             let jitter = fbm3(
-                dir.x as f64 * 2.4,
-                dir.y as f64 * 2.4,
-                dir.z as f64 * 2.4,
-                rule_seed,
+                dir.x * 2.4,
+                dir.y * 2.4,
+                dir.z * 2.4,
+                rule_seed as u32,
                 4,
                 0.55,
                 2.1,
-            ) as f32;
+            );
             let effective_threshold = *min_abs - jitter * *soft_width;
             abs_lat >= effective_threshold
         }
@@ -370,14 +374,14 @@ fn rule_matches(
                     ^ (rule_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
             );
             let n = fbm3(
-                dir.x as f64 * *frequency,
-                dir.y as f64 * *frequency,
-                dir.z as f64 * *frequency,
-                rule_seed,
+                dir.x * *frequency,
+                dir.y * *frequency,
+                dir.z * *frequency,
+                rule_seed as u32,
                 *octaves,
                 0.55,
                 2.1,
-            ) as f32;
+            );
             // High-frequency fractal dither on the threshold crossing.
             // Without this the Fbm iso-contour is a smooth curve at the
             // noise's characteristic scale, and any albedo gap between the
@@ -388,14 +392,14 @@ fn rule_matches(
             // noise octave from the same seed family.
             let jitter_seed = splitmix64(rule_seed ^ 0x4D58_A1F3_92BE_CA71);
             let jitter = fbm3(
-                dir.x as f64 * *frequency * 7.0,
-                dir.y as f64 * *frequency * 7.0,
-                dir.z as f64 * *frequency * 7.0,
-                jitter_seed,
+                dir.x * *frequency * 7.0,
+                dir.y * *frequency * 7.0,
+                dir.z * *frequency * 7.0,
+                jitter_seed as u32,
                 3,
                 0.5,
                 2.3,
-            ) as f32;
+            );
             let effective = n + jitter * 0.22;
             effective >= *threshold
         }
@@ -417,23 +421,23 @@ fn rule_matches(
                         ^ (rule_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
                 let tj = fbm3(
-                    dir.x as f64 * *jitter_frequency,
-                    dir.y as f64 * *jitter_frequency,
-                    dir.z as f64 * *jitter_frequency,
-                    rule_seed,
+                    dir.x * *jitter_frequency,
+                    dir.y * *jitter_frequency,
+                    dir.z * *jitter_frequency,
+                    rule_seed as u32,
                     3,
                     0.55,
                     2.1,
-                ) as f32;
+                );
                 let pj = fbm3(
-                    dir.x as f64 * *jitter_frequency * 1.7,
-                    dir.y as f64 * *jitter_frequency * 1.7,
-                    dir.z as f64 * *jitter_frequency * 1.7,
-                    splitmix64(rule_seed ^ 0xA1B2_C3D4_E5F6_0789),
+                    dir.x * *jitter_frequency * 1.7,
+                    dir.y * *jitter_frequency * 1.7,
+                    dir.z * *jitter_frequency * 1.7,
+                    splitmix64(rule_seed ^ 0xA1B2_C3D4_E5F6_0789) as u32,
                     3,
                     0.55,
                     2.1,
-                ) as f32;
+                );
                 (tj, pj)
             } else {
                 (0.0, 0.0)
@@ -487,14 +491,14 @@ fn rule_matches(
                         ^ (rule_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
                 let n = fbm3(
-                    dir.x as f64 * *jitter_frequency,
-                    dir.y as f64 * *jitter_frequency,
-                    dir.z as f64 * *jitter_frequency,
-                    s,
+                    dir.x * *jitter_frequency,
+                    dir.y * *jitter_frequency,
+                    dir.z * *jitter_frequency,
+                    s as u32,
                     4,
                     0.55,
                     2.1,
-                ) as f32;
+                );
                 cx.orogen_intensity + n * *jitter_amp
             } else {
                 cx.orogen_intensity

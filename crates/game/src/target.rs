@@ -77,8 +77,4 @@ fn cycle_target_input(
         (Some(i), true) => (i + candidates.len() - 1) % candidates.len(),
     };
     target.target = Some(candidates[next]);
-    info!(
-        "[target] selected {}",
-        sim.system.bodies[candidates[next]].name
-    );
 }

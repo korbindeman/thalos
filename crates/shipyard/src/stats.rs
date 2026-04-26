@@ -18,10 +18,12 @@
 //! reactant — it never enters the rocket equation; engines instead declare
 //! a continuous `power_draw_kw` for the duration of the burn.
 
-use crate::blueprint::{PartData, ShipBlueprint};
+use crate::blueprint::{Connection, PartBlueprint, PartData, ShipBlueprint};
 use crate::part::ReactantRatio;
 use crate::resource::Resource;
-use std::collections::HashMap;
+use bevy::math::Vec3;
+use glam::DVec3;
+use std::collections::{HashMap, VecDeque};
 
 /// Standard gravity, m/s². Used to convert between Isp (s) and exhaust
 /// velocity (m/s).
@@ -60,6 +62,17 @@ pub struct ShipStats {
     pub reactant_fractions: HashMap<Resource, f64>,
     /// Snapshot of every resource pool on the ship, aggregated by kind.
     pub resources: HashMap<Resource, ResourceTotals>,
+    /// Principal-axis moment of inertia about the ship CoM, kg·m². Each
+    /// part is approximated as a uniform solid cylinder along the body
+    /// Y axis with `r = effective_diameter/2` and `L` from its visual
+    /// height; per-part inertia is then shifted to the ship CoM via
+    /// the parallel-axis theorem. Off-diagonal terms are ignored —
+    /// adequate for axially-symmetric stacks.
+    pub moment_of_inertia_kg_m2: DVec3,
+    /// Sum of every [`crate::ReactionWheel`]'s `max_torque`, in N·m
+    /// per body axis. Symmetric — the per-axis cap is the same on all
+    /// three. Per-axis-asymmetric torque is reserved for RCS arrangements.
+    pub max_reaction_torque_n_m: f64,
 }
 
 impl ShipStats {
@@ -202,6 +215,56 @@ impl ShipBlueprint {
             HashMap::new()
         };
 
+        let geo = ship_geometry(self);
+
+        let mut com_total_mass = 0.0_f64;
+        let mut com_weighted = DVec3::ZERO;
+        for (i, pb) in self.parts.iter().enumerate() {
+            let m = part_total_mass(pb);
+            com_total_mass += m;
+            com_weighted += geo[i].position * m;
+        }
+        let com = if com_total_mass > 0.0 {
+            com_weighted / com_total_mass
+        } else {
+            DVec3::ZERO
+        };
+
+        let mut moment_of_inertia_kg_m2 = DVec3::ZERO;
+        for (i, pb) in self.parts.iter().enumerate() {
+            let m = part_total_mass(pb);
+            let (r, l) = part_cylinder_dims(&pb.data, geo[i].diameter);
+            // Solid cylinder, long axis = body Y:
+            //   I_yy = m·r²/2
+            //   I_xx = I_zz = m·(3r² + L²)/12
+            let i_yy_self = m * r * r * 0.5;
+            let i_xz_self = m * (3.0 * r * r + l * l) / 12.0;
+
+            let d = geo[i].position - com;
+            let par = DVec3::new(
+                m * (d.y * d.y + d.z * d.z),
+                m * (d.x * d.x + d.z * d.z),
+                m * (d.x * d.x + d.y * d.y),
+            );
+
+            moment_of_inertia_kg_m2 += DVec3::new(
+                i_xz_self + par.x,
+                i_yy_self + par.y,
+                i_xz_self + par.z,
+            );
+        }
+
+        let mut max_reaction_torque_n_m = 0.0_f64;
+        for pb in &self.parts {
+            if let PartData::CommandPod {
+                reaction_wheel_torque,
+                ..
+            } = pb.data
+            {
+                max_reaction_torque_n_m += reaction_wheel_torque as f64;
+            }
+        }
+
         ShipStats {
             dry_mass_kg,
             propellant_mass_kg,
@@ -211,8 +274,198 @@ impl ShipBlueprint {
             power_draw_kw,
             reactant_fractions,
             resources,
+            moment_of_inertia_kg_m2,
+            max_reaction_torque_n_m,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Geometry — per-part CoM positions in ship body frame
+//
+// `ship_geometry` mirrors the runtime's BFS in `sizing::propagate_node_sizes`
+// + `update_ship_part_transforms`, but operates on blueprint indices instead
+// of ECS entities. This keeps the inertia model honest for blueprints that
+// rely on parametric diameter inheritance (e.g. a tank declared with the
+// default 1.25 m diameter but attached under a 2.5 m pod).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+struct PartGeometry {
+    /// Position in ship body frame, metres. The root sits at the origin.
+    position: DVec3,
+    /// Effective outer diameter after parametric inheritance from the
+    /// parent's mating node, metres.
+    diameter: f32,
+}
+
+fn ship_geometry(blueprint: &ShipBlueprint) -> Vec<PartGeometry> {
+    let mut geo: Vec<PartGeometry> = blueprint
+        .parts
+        .iter()
+        .map(|pb| PartGeometry {
+            position: DVec3::ZERO,
+            diameter: declared_diameter(&pb.data),
+        })
+        .collect();
+
+    let mut children_map: HashMap<usize, Vec<&Connection>> = HashMap::new();
+    for c in &blueprint.connections {
+        children_map.entry(c.parent).or_default().push(c);
+    }
+
+    let mut visited = vec![false; blueprint.parts.len()];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    if blueprint.root < visited.len() {
+        visited[blueprint.root] = true;
+        queue.push_back(blueprint.root);
+    }
+
+    while let Some(parent_idx) = queue.pop_front() {
+        let parent_pb = &blueprint.parts[parent_idx];
+        let parent_d = geo[parent_idx].diameter;
+        let parent_pos = geo[parent_idx].position;
+        let Some(kids) = children_map.get(&parent_idx) else {
+            continue;
+        };
+        for c in kids {
+            if c.child >= visited.len() || visited[c.child] {
+                continue;
+            }
+            visited[c.child] = true;
+
+            let child_pb = &blueprint.parts[c.child];
+
+            if is_parametric(&child_pb.data)
+                && let Some(input_d) = node_diameter(&parent_pb.data, parent_d, &c.parent_node)
+            {
+                geo[c.child].diameter = effective_diameter_for(&child_pb.data, input_d);
+            }
+
+            let parent_offset = node_offset(&parent_pb.data, parent_d, &c.parent_node)
+                .unwrap_or(Vec3::ZERO);
+            let child_offset =
+                node_offset(&child_pb.data, geo[c.child].diameter, &c.child_node)
+                    .unwrap_or(Vec3::ZERO);
+            geo[c.child].position =
+                parent_pos + (parent_offset - child_offset).as_dvec3();
+
+            queue.push_back(c.child);
+        }
+    }
+
+    geo
+}
+
+fn declared_diameter(data: &PartData) -> f32 {
+    match data {
+        PartData::CommandPod { diameter, .. }
+        | PartData::Engine { diameter, .. }
+        | PartData::Adapter { diameter, .. }
+        | PartData::Decoupler { diameter, .. }
+        | PartData::FuelTank { diameter, .. } => *diameter,
+    }
+}
+
+fn is_parametric(data: &PartData) -> bool {
+    matches!(
+        data,
+        PartData::FuelTank { .. } | PartData::Decoupler { .. } | PartData::Adapter { .. }
+    )
+}
+
+/// Effective single-cylinder diameter after a parametric child inherits
+/// its top diameter from the parent. Adapters are tapered, so we average
+/// top (= parent's mating diameter) and bottom (= `target_diameter`) —
+/// the cylinder model can't represent both anyway.
+fn effective_diameter_for(data: &PartData, parent_node_d: f32) -> f32 {
+    match data {
+        PartData::Adapter {
+            target_diameter, ..
+        } => (parent_node_d + target_diameter) * 0.5,
+        _ => parent_node_d,
+    }
+}
+
+/// Diameter of the named attach node on this part, given its (possibly
+/// propagated) effective body diameter. Mirrors [`crate::blueprint::default_nodes_for`]
+/// but with the propagated diameter substituted for the declared one.
+fn node_diameter(data: &PartData, effective_d: f32, node: &str) -> Option<f32> {
+    match data {
+        PartData::CommandPod { .. } => (node == "bottom").then_some(effective_d),
+        PartData::Engine { .. } | PartData::Decoupler { .. } | PartData::FuelTank { .. } => {
+            (node == "top" || node == "bottom").then_some(effective_d)
+        }
+        PartData::Adapter {
+            target_diameter, ..
+        } => match node {
+            "top" => Some(effective_d),
+            "bottom" => Some(*target_diameter),
+            _ => None,
+        },
+    }
+}
+
+/// Offset of the named attach node, in the part's local frame (Y points
+/// out the top). Mirrors [`crate::blueprint::default_nodes_for`].
+fn node_offset(data: &PartData, effective_d: f32, node: &str) -> Option<Vec3> {
+    match data {
+        PartData::CommandPod { .. } => {
+            (node == "bottom").then_some(Vec3::new(0.0, -effective_d * 0.9, 0.0))
+        }
+        PartData::Engine { .. } => match node {
+            "top" => Some(Vec3::ZERO),
+            "bottom" => Some(Vec3::new(0.0, -effective_d * 0.9, 0.0)),
+            _ => None,
+        },
+        PartData::Decoupler { .. } => match node {
+            "top" => Some(Vec3::ZERO),
+            "bottom" => Some(Vec3::new(0.0, -0.2, 0.0)),
+            _ => None,
+        },
+        PartData::Adapter {
+            target_diameter, ..
+        } => match node {
+            "top" => Some(Vec3::ZERO),
+            "bottom" => {
+                let h = ((effective_d + target_diameter) * 0.5).max(0.4);
+                Some(Vec3::new(0.0, -h, 0.0))
+            }
+            _ => None,
+        },
+        PartData::FuelTank { length, .. } => match node {
+            "top" => Some(Vec3::ZERO),
+            "bottom" => Some(Vec3::new(0.0, -length, 0.0)),
+            _ => None,
+        },
+    }
+}
+
+/// Cylinder approximation `(radius, length)` in metres for a part.
+/// Length matches the visual mesh's body height in [`crate::part`] / the
+/// editor's `visual_spec` — keeping rendering and physics in sync.
+fn part_cylinder_dims(data: &PartData, effective_d: f32) -> (f64, f64) {
+    let r = (effective_d * 0.5) as f64;
+    let l = match data {
+        PartData::CommandPod { .. } => (effective_d * 0.9) as f64,
+        PartData::Engine { .. } => (effective_d * 0.9) as f64,
+        PartData::Decoupler { .. } => 0.2,
+        PartData::Adapter {
+            target_diameter, ..
+        } => ((effective_d + target_diameter) * 0.5).max(0.4) as f64,
+        PartData::FuelTank { length, .. } => *length as f64,
+    };
+    (r, l)
+}
+
+fn part_total_mass(pb: &PartBlueprint) -> f64 {
+    let dry = part_dry_mass(&pb.data) as f64;
+    let prop: f64 = pb
+        .resources
+        .iter()
+        .map(|(res, pool)| pool.mass_kg(*res))
+        .sum();
+    dry + prop
 }
 
 fn accumulate_engine_reactants(
@@ -293,6 +546,7 @@ mod tests {
                         model: "P".into(),
                         diameter: 2.0,
                         dry_mass: 2000.0,
+                        reaction_wheel_torque: 0.0,
                     },
                     resources: HashMap::new(),
                 },
@@ -381,6 +635,7 @@ mod tests {
                         model: "P".into(),
                         diameter: 1.0,
                         dry_mass: 100.0,
+                        reaction_wheel_torque: 0.0,
                     },
                     resources: battery_pools,
                 },
@@ -519,5 +774,155 @@ mod tests {
         assert!(s.resources.is_empty());
         assert_eq!(s.delta_v_capacity(), 0.0);
         assert!(s.burn_time_at_full_throttle_s().is_none());
+        assert_eq!(s.moment_of_inertia_kg_m2, DVec3::ZERO);
+        assert_eq!(s.max_reaction_torque_n_m, 0.0);
+    }
+
+    #[test]
+    fn lone_command_pod_inertia_matches_solid_cylinder() {
+        // Single pod at the origin — its CoM coincides with the ship CoM,
+        // so MOI equals the part's self-inertia (no parallel-axis term).
+        let bp = ShipBlueprint {
+            name: "P".into(),
+            root: 0,
+            parts: vec![PartBlueprint {
+                data: PartData::CommandPod {
+                    model: "Mk1-3".into(),
+                    diameter: 2.5,
+                    dry_mass: 2720.0,
+                    reaction_wheel_torque: 15_000.0,
+                },
+                resources: HashMap::new(),
+            }],
+            connections: vec![],
+        };
+        let s = bp.stats();
+        let m = 2720.0_f64;
+        let r = 1.25_f64;
+        let l = 2.5_f64 * 0.9;
+        let expected_yy = m * r * r * 0.5;
+        let expected_xz = m * (3.0 * r * r + l * l) / 12.0;
+        assert!((s.moment_of_inertia_kg_m2.y - expected_yy).abs() < 1e-6);
+        assert!((s.moment_of_inertia_kg_m2.x - expected_xz).abs() < 1e-6);
+        assert!((s.moment_of_inertia_kg_m2.z - expected_xz).abs() < 1e-6);
+        assert_eq!(s.max_reaction_torque_n_m, 15_000.0);
+    }
+
+    #[test]
+    fn stack_inertia_has_smaller_roll_than_pitch() {
+        // Apollo-shaped column along body Y. Parallel-axis terms only
+        // contribute to the transverse axes (X, Z) — the roll axis (Y)
+        // stays at the cylinder self-inertia and remains the smallest.
+        let bp = ShipBlueprint {
+            name: "stack".into(),
+            root: 0,
+            parts: vec![
+                PartBlueprint {
+                    data: PartData::CommandPod {
+                        model: "Mk1-3".into(),
+                        diameter: 2.5,
+                        dry_mass: 2720.0,
+                        reaction_wheel_torque: 15_000.0,
+                    },
+                    resources: HashMap::new(),
+                },
+                PartBlueprint {
+                    data: PartData::FuelTank {
+                        diameter: 2.5,
+                        length: 3.0,
+                        dry_mass: 250.0,
+                    },
+                    resources: HashMap::new(),
+                },
+                PartBlueprint {
+                    data: PartData::Engine {
+                        model: "Poodle".into(),
+                        diameter: 2.5,
+                        thrust: 0.0,
+                        isp: 1.0,
+                        dry_mass: 250.0,
+                        reactants: vec![ReactantRatio {
+                            resource: Resource::Methane,
+                            mass_fraction: 1.0,
+                        }],
+                        power_draw_kw: 0.0,
+                    },
+                    resources: HashMap::new(),
+                },
+            ],
+            connections: vec![
+                Connection {
+                    parent: 0,
+                    parent_node: "bottom".into(),
+                    child: 1,
+                    child_node: "top".into(),
+                },
+                Connection {
+                    parent: 1,
+                    parent_node: "bottom".into(),
+                    child: 2,
+                    child_node: "top".into(),
+                },
+            ],
+        };
+        let s = bp.stats();
+        // Roll (Y) is the long-axis self-inertia only; pitch (X) and yaw
+        // (Z) pick up the parallel-axis term and dwarf it for a stack.
+        assert!(s.moment_of_inertia_kg_m2.y > 0.0);
+        assert!(s.moment_of_inertia_kg_m2.x > s.moment_of_inertia_kg_m2.y);
+        assert!(s.moment_of_inertia_kg_m2.z > s.moment_of_inertia_kg_m2.y);
+        // Stack is rotationally symmetric in body X/Z so those are equal.
+        assert!(
+            (s.moment_of_inertia_kg_m2.x - s.moment_of_inertia_kg_m2.z).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn parametric_tank_inherits_parent_diameter_for_inertia() {
+        // Tank declared at the default 1.25 m but attached under a 2.5 m
+        // pod — the geometry walk must propagate the pod's bottom-node
+        // diameter into the tank, otherwise the cylinder radius (and
+        // therefore MOI_y) is computed against the wrong dimension.
+        let bp = ShipBlueprint {
+            name: "inherit".into(),
+            root: 0,
+            parts: vec![
+                PartBlueprint {
+                    data: PartData::CommandPod {
+                        model: "Mk1-3".into(),
+                        diameter: 2.5,
+                        dry_mass: 1000.0,
+                        reaction_wheel_torque: 0.0,
+                    },
+                    resources: HashMap::new(),
+                },
+                PartBlueprint {
+                    // No diameter ⇒ default 1.25 m on the blueprint, but
+                    // the pod's bottom node should propagate 2.5 m down.
+                    data: PartData::FuelTank {
+                        diameter: 1.25,
+                        length: 2.0,
+                        dry_mass: 500.0,
+                    },
+                    resources: HashMap::new(),
+                },
+            ],
+            connections: vec![Connection {
+                parent: 0,
+                parent_node: "bottom".into(),
+                child: 1,
+                child_node: "top".into(),
+            }],
+        };
+        let s = bp.stats();
+        // If propagation didn't run, the tank's r=0.625 would dominate
+        // and the roll-axis MOI would be ~4× smaller than this.
+        let m_tank = 500.0;
+        let r_tank_propagated = 1.25; // = 2.5 / 2
+        let tank_yy_self = m_tank * r_tank_propagated * r_tank_propagated * 0.5;
+        // Pod's roll inertia at r=1.25:
+        let pod_yy_self = 1000.0 * 1.25 * 1.25 * 0.5;
+        let expected_y = tank_yy_self + pod_yy_self;
+        assert!((s.moment_of_inertia_kg_m2.y - expected_y).abs() < 1e-6);
     }
 }

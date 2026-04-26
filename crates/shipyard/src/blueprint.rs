@@ -1,7 +1,7 @@
 use crate::attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
 use crate::part::{
-    Adapter, CommandPod, Decoupler, Engine, FuelTank, Part, PartMaterial, ReactantRatio,
-    Shroudable, ShroudProvider,
+    Adapter, CommandPod, Decoupler, Engine, EngineThrust, FuelTank, Part, PartMaterial,
+    ReactantRatio, ReactionWheel, Shroudable, ShroudProvider,
 };
 use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
@@ -15,6 +15,13 @@ fn default_parametric_diameter() -> f32 {
     1.25
 }
 
+/// Default reaction-wheel torque on a CommandPod, N·m per body axis. KSP
+/// Mk1-3-class baseline; per-pod-model tuning can override via the
+/// blueprint field.
+fn default_pod_reaction_wheel_torque() -> f32 {
+    15_000.0
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "kind")]
 pub enum PartData {
@@ -22,6 +29,8 @@ pub enum PartData {
         model: String,
         diameter: f32,
         dry_mass: f32,
+        #[serde(default = "default_pod_reaction_wheel_torque")]
+        reaction_wheel_torque: f32,
     },
     Decoupler {
         #[serde(default = "default_parametric_diameter")]
@@ -149,12 +158,19 @@ fn insert_part(
             model,
             diameter,
             dry_mass,
+            reaction_wheel_torque,
         } => {
-            ec.insert(CommandPod {
-                model,
-                diameter,
-                dry_mass,
-            });
+            ec.insert((
+                CommandPod {
+                    model,
+                    diameter,
+                    dry_mass,
+                    reaction_wheel_torque,
+                },
+                ReactionWheel {
+                    max_torque: reaction_wheel_torque,
+                },
+            ));
         }
         PartData::Decoupler {
             diameter,
@@ -219,6 +235,7 @@ fn insert_part(
                     power_draw_kw,
                 },
                 Shroudable,
+                EngineThrust::default(),
             ));
         }
     }

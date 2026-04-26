@@ -98,15 +98,20 @@ Core separation: physics, terrain_gen, atmosphere_gen, and celestial are pure Ru
 
 ### Physics crate (`crates/physics/`)
 
-Key modules and their roles:
+Two trait abstractions draw the boundaries:
 
-- `types` — `StateVector`, `BodyDefinition`, `TrajectorySample` (each sample carries dominant body ID, perturbation ratio, step size — used directly by the renderer)
-- `patched_conics` — `BodyStateProvider` implementation using analytical Keplerian orbits. Bodies form a parent-child tree; evaluated in topological order. This is the authoritative source of body positions.
-- `integrator` — Hybrid: symplectic leapfrog (fixed timestep, energy-conserving) for low-perturbation regions; adaptive RK45 (Dormand-Prince) when perturbation ratio exceeds threshold. Live stepping and trajectory prediction share the same `IntegratorConfig` — this is intentional and critical.
-- `simulation` — Central `Simulation` struct: owns ship state, integrator, `EffectRegistry`, `ManeuverSequence`. `step()` is called each frame.
-- `trajectory` — Background trajectory prediction engine. Runs on a worker thread, progressively refines (coarse → fine budget). Cancels and restarts on maneuver edits.
-- `maneuver` — `ManeuverNode`: time, delta-v in prograde/radial/normal frame, optional reference body.
-- `effects` — Effect system. Gravity is distinguished (own slot on registry, returns `GravityResult` with dominant body + perturbation ratio). Other effects (thrust, future: drag, SRP) implement `Effect` trait and live in `EffectRegistry::effects`. Each effect is a pure function of `(state, time, body_states)`.
+- `BodyStateProvider` (`body_state_provider.rs`) — answers "where is body `i` at time `t`?" Implemented by `PatchedConics`; could be swapped for a baked ephemeris.
+- `ShipPropagator` (`ship_propagator.rs`) — propagates the ship across one segment of coast or burn. Implemented by `KeplerianPropagator`: analytical Kepler coast under a single SOI body + RK4 finite-burn. SOI transitions are detected per substep and refined by bisection (coast) or shortened RK4 (burn).
+
+Key modules:
+
+- `types` — `StateVector`, `BodyDefinition`, `TrajectorySample` (each sample carries `anchor_body` + `ref_pos` so the renderer can draw without a per-sample ephemeris query).
+- `orbital_math` — Cartesian↔Keplerian conversions, Kepler-equation solvers (elliptic + hyperbolic), `propagate_kepler`. Pure math, well-tested.
+- `patched_conics` — `BodyStateProvider` impl using analytical Keplerian orbits. Bodies form a parent-child tree; queries walk the lineage and sum each ancestor's motion.
+- `ship_propagator` — `ShipPropagator` trait + `KeplerianPropagator` impl. Coast and burn segments terminate on the first of: target time, SOI exit, collision, SOI enter, burn end, or stable-orbit closure. Resolution order at boundaries: `exit > collision > enter`.
+- `simulation` — Central `Simulation` struct: owns ship state, attitude, warp, `KeplerianPropagator` instance, `ManeuverSequence`. `step()` is called each frame and consumes maneuver nodes as their start time arrives.
+- `trajectory` — Flight-plan prediction. `propagate_flight_plan` runs the same `ShipPropagator` across the maneuver sequence, producing `Leg`s of `(burn?, coast)` `NumericSegment`s. Includes event detection (SOI / apsis / impact), encounter aggregation, closest-approach scans.
+- `maneuver` — `ManeuverNode`: time, delta-v in local prograde/normal/radial frame, reference body. Plus the frame-conversion helpers.
 - `parsing` — Loads `assets/solar_system.ron` into `SolarSystemDefinition`.
 
 ### Game crate (`crates/game/`)
@@ -168,19 +173,18 @@ Standalone Bevy binary for interactive planet preview. Loads `solar_system.ron`,
 assets/solar_system.ron
   → [parsing] SolarSystemDefinition
   → [PatchedConics] body positions at any time t
-  → [Simulation::step] per frame → TrajectorySample (ship)
-  → [trajectory worker] background → TrajectoryPrediction (legs between maneuver nodes)
+  → [Simulation::step] per frame → live ship state, consumes ManeuverNodes
+  → [propagate_flight_plan] background → FlightPlan (legs of burn?+coast NumericSegments)
   → [bridge] → rendering, maneuver UI, collision warnings
 ```
 
 ### Design invariants
 
-- **Same integrator config everywhere.** Live stepping and prediction use the same `IntegratorConfig`. Never split them or numerical divergence appears between "where ship is" and "where it will be."
+- **One propagator everywhere.** Live stepping and prediction route through the same `ShipPropagator` (today, `KeplerianPropagator`). Never split them or numerical divergence appears between "where ship is" and "where it will be."
 - **`BodyStateProvider` is the abstraction boundary.** Body positions are always queried through this trait. `PatchedConics` is the current impl; a precomputed ephemeris could replace it without touching simulation or rendering.
 - **Physics crate has no Bevy.** All physics logic must remain in `thalos_physics`. `thalos_game` is only presentation and input.
-- **`TrajectorySample` carries its own metadata.** Dominant body, perturbation ratio, and step size travel with each sample so the renderer needs no heuristics to draw uncertainty cones.
+- **`TrajectorySample` carries its own metadata.** `anchor_body` + `ref_pos` travel with each sample so the renderer can pin to its parent body without a per-sample ephemeris query.
 - **Terrain gen stages are pure transforms.** Each `Stage` reads/writes `BodyBuilder` only. Pipeline handles seeding and ordering. No ambient state.
-- **Effects are pure functions.** Each effect depends only on `(state, time, body_states)`. Prediction and live stepping share identical code paths.
 
 ### Assets
 

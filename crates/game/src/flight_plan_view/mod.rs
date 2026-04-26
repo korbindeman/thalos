@@ -16,6 +16,7 @@
 //!   as the real body catches up, and hand off camera focus on retirement.
 
 mod ghost;
+mod markers;
 mod render;
 mod view;
 
@@ -31,21 +32,27 @@ impl Plugin for FlightPlanViewPlugin {
         // Lifecycle runs BEFORE sync_ghost_bodies so retired ghosts (either
         // from sim-time advance or reconcile churn) get a chance to hand off
         // camera focus before their entity is despawned.
-        app.init_resource::<FlightPlanView>().add_systems(
-            Update,
-            (
-                view::rebuild_flight_plan_view,
-                ghost::update_ghost_lifecycle,
-                ghost::sync_ghost_bodies,
-                ghost::update_ghost_transforms,
-                render::render_trajectory.run_if(
-                    crate::photo_mode::not_in_photo_mode
-                        .and(crate::view::in_map_view),
-                ),
-            )
-                .chain()
-                .after(crate::rendering::cache_body_states)
-                .in_set(crate::SimStage::Sync),
-        );
+        app.init_resource::<FlightPlanView>()
+            .add_systems(Startup, markers::setup_trajectory_marker_assets)
+            .add_systems(
+                Update,
+                (
+                    view::rebuild_flight_plan_view,
+                    ghost::update_ghost_lifecycle,
+                    ghost::sync_ghost_bodies,
+                    ghost::update_ghost_transforms,
+                    render::render_trajectory.run_if(
+                        crate::photo_mode::not_in_photo_mode
+                            .and(crate::view::in_map_view),
+                    ),
+                    markers::manage_trajectory_markers.run_if(
+                        crate::photo_mode::not_in_photo_mode
+                            .and(crate::view::in_map_view),
+                    ),
+                )
+                    .chain()
+                    .after(crate::rendering::cache_body_states)
+                    .in_set(crate::SimStage::Sync),
+            );
     }
 }

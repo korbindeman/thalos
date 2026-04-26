@@ -32,7 +32,7 @@
 
 use std::collections::VecDeque;
 
-use glam::{DVec3, Vec3};
+use glam::Vec3;
 use rayon::prelude::*;
 use serde::Deserialize;
 
@@ -286,14 +286,14 @@ impl Stage for CoarseElevation {
                 // amplitude into isolated peaks (Aleutian-style).
                 if active_dist[vi] < f32::MAX {
                     let along_belt_noise = fbm3(
-                        pos.x as f64 * 18.0,
-                        pos.y as f64 * 18.0,
-                        pos.z as f64 * 18.0,
-                        splitmix64(seed ^ 0xAC71_5E_BE_17_42),
+                        pos.x * 18.0,
+                        pos.y * 18.0,
+                        pos.z * 18.0,
+                        splitmix64(seed ^ 0xAC71_5E_BE_17_42) as u32,
                         4,
                         0.55,
                         2.0,
-                    ) as f32;
+                    );
                     let t = (along_belt_noise * 0.5 + 0.5).clamp(0.0, 1.0);
                     let mult = t * t * t * 1.8;
                     if is_continental[vi] {
@@ -344,50 +344,43 @@ fn sample_continent_noise(pos: Vec3, seed: u64, params: &CoarseElevation) -> f32
     let stretch = params.horizontal_stretch;
     let p = Vec3::new(pos.x, pos.y * stretch, pos.z);
 
-    let warp_seed = splitmix64(seed ^ 0x21_BC_83_42_5E_A1_00_11);
-    let wf = params.continent_warp_frequency as f64;
-    let wx = fbm3(
-        p.x as f64 * wf,
-        p.y as f64 * wf,
-        p.z as f64 * wf,
-        warp_seed,
-        4,
-        0.5,
-        2.0,
-    );
+    let warp_seed = splitmix64(seed ^ 0x21_BC_83_42_5E_A1_00_11) as u32;
+    let wf = params.continent_warp_frequency;
+    let wx = fbm3(p.x * wf, p.y * wf, p.z * wf, warp_seed, 4, 0.5, 2.0);
     let wy = fbm3(
-        p.x as f64 * wf + 17.31,
-        p.y as f64 * wf + 17.31,
-        p.z as f64 * wf + 17.31,
+        p.x * wf + 17.31,
+        p.y * wf + 17.31,
+        p.z * wf + 17.31,
         warp_seed.wrapping_add(1),
         4,
         0.5,
         2.0,
     );
     let wz = fbm3(
-        p.x as f64 * wf + 41.17,
-        p.y as f64 * wf + 41.17,
-        p.z as f64 * wf + 41.17,
+        p.x * wf + 41.17,
+        p.y * wf + 41.17,
+        p.z * wf + 41.17,
         warp_seed.wrapping_add(2),
         4,
         0.5,
         2.0,
     );
-    let warped = DVec3::new(
-        p.x as f64 + params.continent_warp_amplitude as f64 * wx,
-        p.y as f64 + params.continent_warp_amplitude as f64 * wy,
-        p.z as f64 + params.continent_warp_amplitude as f64 * wz,
+    let warp_amp = params.continent_warp_amplitude;
+    let warped = Vec3::new(
+        p.x + warp_amp * wx,
+        p.y + warp_amp * wy,
+        p.z + warp_amp * wz,
     );
-    let f = params.continent_noise_frequency as f64;
+    let f = params.continent_noise_frequency;
     fbm3(
         warped.x * f,
         warped.y * f,
         warped.z * f,
-        seed,
+        seed as u32,
         params.continent_noise_octaves,
-        params.continent_noise_persistence as f64,
+        params.continent_noise_persistence,
         2.0,
-    ) as f32
+    )
 }
 
 /// Flip any land component smaller than `min_land_size` to ocean, and
@@ -531,53 +524,46 @@ fn gaussian_hops(hops: f32, one_over_e_hops: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 fn warped_fbm(pos: Vec3, seed: u64, params: &CoarseElevation) -> f32 {
-    let warp_seed = splitmix64(seed ^ 0x9E37_79B9_7F4A_7C15);
-    let freq = params.warp_frequency as f64;
-    let wx = fbm3(
-        pos.x as f64 * freq,
-        pos.y as f64 * freq,
-        pos.z as f64 * freq,
-        warp_seed,
-        4,
-        0.5,
-        2.0,
-    );
+    let warp_seed = splitmix64(seed ^ 0x9E37_79B9_7F4A_7C15) as u32;
+    let freq = params.warp_frequency;
+    let wx = fbm3(pos.x * freq, pos.y * freq, pos.z * freq, warp_seed, 4, 0.5, 2.0);
     let wy = fbm3(
-        pos.x as f64 * freq + 17.31,
-        pos.y as f64 * freq + 17.31,
-        pos.z as f64 * freq + 17.31,
+        pos.x * freq + 17.31,
+        pos.y * freq + 17.31,
+        pos.z * freq + 17.31,
         warp_seed.wrapping_add(1),
         4,
         0.5,
         2.0,
     );
     let wz = fbm3(
-        pos.x as f64 * freq + 41.17,
-        pos.y as f64 * freq + 41.17,
-        pos.z as f64 * freq + 41.17,
+        pos.x * freq + 41.17,
+        pos.y * freq + 41.17,
+        pos.z * freq + 41.17,
         warp_seed.wrapping_add(2),
         4,
         0.5,
         2.0,
     );
 
-    let warped = DVec3::new(
-        pos.x as f64 + params.warp_amplitude as f64 * wx,
-        pos.y as f64 + params.warp_amplitude as f64 * wy,
-        pos.z as f64 + params.warp_amplitude as f64 * wz,
+    let warp_amp = params.warp_amplitude;
+    let warped = Vec3::new(
+        pos.x + warp_amp * wx,
+        pos.y + warp_amp * wy,
+        pos.z + warp_amp * wz,
     );
 
-    let base_seed = splitmix64(seed);
-    let f = params.noise_frequency as f64;
+    let base_seed = splitmix64(seed) as u32;
+    let f = params.noise_frequency;
     fbm3(
         warped.x * f,
         warped.y * f,
         warped.z * f,
         base_seed,
         params.noise_octaves,
-        params.noise_persistence as f64,
+        params.noise_persistence,
         2.0,
-    ) as f32
+    )
 }
 
 // ---------------------------------------------------------------------------

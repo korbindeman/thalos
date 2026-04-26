@@ -161,23 +161,23 @@ impl Stage for Megabasin {
                             // rim position is not a smooth circle but a
                             // fractally perturbed contour.
                             let warp_lo = fbm3(
-                                dir.x as f64 * 2.2,
-                                dir.y as f64 * 2.2,
-                                dir.z as f64 * 2.2,
-                                b.seed,
+                                dir.x * 2.2,
+                                dir.y * 2.2,
+                                dir.z * 2.2,
+                                b.seed as u32,
                                 4,
                                 0.55,
                                 2.0,
-                            ) as f32;
+                            );
                             let warp_hi = fbm3(
-                                dir.x as f64 * 7.5,
-                                dir.y as f64 * 7.5,
-                                dir.z as f64 * 7.5,
-                                b.seed ^ 0x27F1_AC63_5B2E_94D8,
+                                dir.x * 7.5,
+                                dir.y * 7.5,
+                                dir.z * 7.5,
+                                (b.seed ^ 0x27F1_AC63_5B2E_94D8) as u32,
                                 3,
                                 0.5,
                                 2.2,
-                            ) as f32;
+                            );
                             let warp = warp_lo * 0.25 + warp_hi * 0.10;
                             let t = t_raw / (1.0 + warp);
 
@@ -221,23 +221,23 @@ impl Stage for Megabasin {
                             let azimuth = ty.atan2(tx);
 
                             let warp_lo = fbm3(
-                                dir.x as f64 * 2.0,
-                                dir.y as f64 * 2.0,
-                                dir.z as f64 * 2.0,
-                                b.seed ^ 0xC3A9_17B5_FD21_48C7,
+                                dir.x * 2.0,
+                                dir.y * 2.0,
+                                dir.z * 2.0,
+                                (b.seed ^ 0xC3A9_17B5_FD21_48C7) as u32,
                                 4,
                                 0.55,
                                 2.1,
-                            ) as f32;
+                            );
                             let warp_hi = fbm3(
-                                dir.x as f64 * 6.5,
-                                dir.y as f64 * 6.5,
-                                dir.z as f64 * 6.5,
-                                b.seed ^ 0x5E71_B2F9_3D88_9156,
+                                dir.x * 6.5,
+                                dir.y * 6.5,
+                                dir.z * 6.5,
+                                (b.seed ^ 0x5E71_B2F9_3D88_9156) as u32,
                                 3,
                                 0.5,
                                 2.3,
-                            ) as f32;
+                            );
                             let warp = warp_lo * 0.35 + warp_hi * 0.12;
                             let t = t_raw / (1.0 + warp);
 

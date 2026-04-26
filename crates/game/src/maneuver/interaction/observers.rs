@@ -5,8 +5,8 @@ use super::super::state::{
     ArrowHandle, ArrowHitbox, BASE_ARROW_LEN, HITBOX_CAPSULE_RADIUS, InteractionMode,
     NodeSlideSphere, SLIDE_SPHERE_RADIUS, SelectedNodeView,
 };
-use crate::camera::{CameraFocus, OrbitCamera};
-use crate::coords::RENDER_SCALE;
+use crate::camera::{ActiveCamera, CameraFocus};
+use crate::coords::WorldScale;
 
 /// Handle drag start on an arrow hitbox — record which axis and compute the
 /// screen-space direction for projecting mouse delta to delta-v.
@@ -16,7 +16,8 @@ pub(in crate::maneuver) fn arrow_drag_start(
     mut mode: ResMut<InteractionMode>,
     selected_view: Res<SelectedNodeView>,
     focus: Res<CameraFocus>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    scale: Res<WorldScale>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
 ) {
     let event = trigger.event();
     let entity = event.entity;
@@ -33,7 +34,7 @@ pub(in crate::maneuver) fn arrow_drag_start(
         return;
     };
 
-    let s = (focus.distance * RENDER_SCALE) as f32;
+    let s = (focus.distance * scale.0) as f32;
     let arrow_len = BASE_ARROW_LEN * s;
     let sphere_gap = (SLIDE_SPHERE_RADIUS + HITBOX_CAPSULE_RADIUS) * s;
     let dir = frame.col(handle.axis).normalize();

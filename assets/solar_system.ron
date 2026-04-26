@@ -533,7 +533,204 @@
                         // suture vertex in a suture-dominated
                         // catchment clears it.
                         iron_fraction_bif_threshold: 0.04,
-                        debug_paint_albedo: true,
+                        // PaintBiomes paints the final albedo using
+                        // the climate-driven biome palette. Material
+                        // IDs from this stage still drive per-texel
+                        // roughness; we just don't bake their flat
+                        // colours.
+                        debug_paint_albedo: false,
+                    )),
+                    // Stage 6 — Climate. Earth-like annual-mean
+                    // temperature + precipitation derived from
+                    // latitude, altitude, and upwind-traced
+                    // continentality / orographic effects. Tuned to
+                    // Thalos's slightly-thinner atmosphere and smaller
+                    // radius: equator a touch cooler than Earth, polar
+                    // gradient a touch sharper. Drives the Whittaker-
+                    // style biome rules below.
+                    Climate((
+                        equator_temp_c: 28.0,
+                        polar_temp_c: -15.0,
+                        // 1.6 keeps mid-latitudes temperate and pushes
+                        // the cold drop into the polar circle —
+                        // without it the gradient runs through 0 °C
+                        // at ~50° latitude and tundra eats the
+                        // continents.
+                        lat_exponent: 1.6,
+                        lapse_c_per_km: 6.5,
+                        // Earth-like zonal precipitation profile with
+                        // a sharper subtropical-high desert band
+                        // (10–30° latitude). Bands: ITCZ → subtropical
+                        // highs → mid-latitude westerlies → polar
+                        // deserts.
+                        zonal_precip_mm: (2400.0, 1800.0, 350.0, 600.0, 1200.0, 1100.0, 800.0, 400.0, 200.0),
+                        // 12 steps × 0.025 rad ≈ 0.3 rad ≈ 950 km
+                        // trace. At Thalos's 1:2 scale (radius 3186
+                        // km), continents are smaller than Earth's, so
+                        // a wider step (0.05 rad ≈ 160 km/step on a
+                        // 1:1 body, but only 80 km/step here in
+                        // surface terms) ran the upwind ray off
+                        // continents in 2-3 steps and continentality
+                        // never bit. A finer step keeps the trace
+                        // inside continental interiors long enough to
+                        // dry them out.
+                        upwind_steps: 12,
+                        step_arc_rad: 0.025,
+                        // Aggressive decay: 0.85^12 ≈ 0.14, so the
+                        // deepest continental interior receives only
+                        // ~14 % of the zonal moisture even before
+                        // mountain shadowing. With 0.90 the same
+                        // figure was 0.28 — twice as wet, so deserts
+                        // never formed away from subtropical bands.
+                        continentality_decay: 0.85,
+                        orographic_gain_per_km: 0.5,
+                        rain_shadow_per_km: 0.4,
+                        // 0.30 fbm jitter (was 0.15) — breaks the
+                        // visible east-west banding that arises when
+                        // precipitation tracks the zonal profile too
+                        // cleanly.
+                        precip_noise_amp: 0.30,
+                        precip_noise_frequency: 3.0,
+                    )),
+                    // Stage 7 — Biomes. Whittaker-style climate
+                    // partition. Order matters (first-match-wins) so
+                    // tundra / taiga / desert eat their corners of
+                    // the (T, P) plane before temperate / grassland
+                    // catch the broad middle. Per-biome
+                    // `iron_visibility` controls how much the
+                    // PaintBiomes IronOverlay shows through: closed-
+                    // canopy biomes hide rust, exposed-ground biomes
+                    // show it.
+                    Biomes((
+                        biomes: [
+                            // 0 — tundra. High latitude, treeless
+                            // mineral soil and lichen. Iron-rich
+                            // catchments stain visibly through the
+                            // sparse cover.
+                            (name: "tundra", albedo: 0.34, tint: (1.00, 1.05, 0.95), tonal_amp: 0.20, roughness: 0.78, iron_visibility: 0.65),
+                            // 1 — taiga (boreal forest). Dark conifer
+                            // canopy hides almost all substrate.
+                            (name: "taiga", albedo: 0.15, tint: (0.78, 1.06, 0.62), tonal_amp: 0.22, roughness: 0.72, iron_visibility: 0.10),
+                            // 2 — cold steppe / cold desert. Sparse
+                            // grass over mineral soil; iron shows
+                            // through.
+                            (name: "cold_steppe", albedo: 0.32, tint: (1.05, 1.00, 0.78), tonal_amp: 0.22, roughness: 0.78, iron_visibility: 0.60),
+                            // 3 — hot desert. Bare regolith, fully
+                            // exposed; rust paints through at full
+                            // strength on iron-rich catchments.
+                            (name: "hot_desert", albedo: 0.42, tint: (1.18, 1.00, 0.62), tonal_amp: 0.18, roughness: 0.82, iron_visibility: 1.00),
+                            // 4 — tropical rainforest. Saturated
+                            // green; deep canopy hides everything
+                            // below.
+                            (name: "tropical_rainforest", albedo: 0.18, tint: (0.62, 1.10, 0.42), tonal_amp: 0.16, roughness: 0.65, iron_visibility: 0.05),
+                            // 5 — tropical savanna / dry forest. Tan-
+                            // green mosaic with seasonal grass cover;
+                            // moderate iron exposure.
+                            (name: "tropical_savanna", albedo: 0.30, tint: (1.10, 1.05, 0.55), tonal_amp: 0.22, roughness: 0.75, iron_visibility: 0.55),
+                            // 6 — temperate forest. Mid-green deciduous
+                            // / mixed canopy. Mostly closed.
+                            (name: "temperate_forest", albedo: 0.20, tint: (0.78, 1.05, 0.55), tonal_amp: 0.20, roughness: 0.70, iron_visibility: 0.15),
+                            // 7 — grassland / prairie. Yellow-green
+                            // continuous grass; partial soil exposure.
+                            (name: "grassland", albedo: 0.28, tint: (1.02, 1.10, 0.60), tonal_amp: 0.22, roughness: 0.75, iron_visibility: 0.50),
+                            // 8 — semiarid steppe. Default catch-all:
+                            // pale dry sparse vegetation, mineral soil
+                            // visible.
+                            (name: "semiarid_steppe", albedo: 0.36, tint: (1.10, 1.00, 0.72), tonal_amp: 0.20, roughness: 0.78, iron_visibility: 0.80),
+                        ],
+                        rules: [
+                            TempPrecip(max_temp_c: -3.0, jitter_amp: 0.22, jitter_frequency: 3.0),
+                            TempPrecip(max_temp_c: 5.0, min_precip_mm: 350.0, jitter_amp: 0.22, jitter_frequency: 3.0),
+                            TempPrecip(max_temp_c: 5.0, jitter_amp: 0.22, jitter_frequency: 3.0),
+                            TempPrecip(min_temp_c: 15.0, max_precip_mm: 400.0, jitter_amp: 0.12, jitter_frequency: 3.5),
+                            TempPrecip(min_temp_c: 22.0, min_precip_mm: 1800.0, jitter_amp: 0.22, jitter_frequency: 3.0),
+                            TempPrecip(min_temp_c: 20.0, jitter_amp: 0.22, jitter_frequency: 3.0),
+                            TempPrecip(min_precip_mm: 700.0, jitter_amp: 0.22, jitter_frequency: 3.0),
+                            TempPrecip(min_precip_mm: 250.0, jitter_amp: 0.22, jitter_frequency: 3.0),
+                            Default,
+                        ],
+                    )),
+                    // Stage 8 — PaintBiomes. Continuous overlays on
+                    // top of the biome base palette: iron staining
+                    // (downstream of mafic provinces, gated by per-
+                    // biome ground exposure), bare-rock outcrops
+                    // (steep slopes, high altitude), snow/ice cover
+                    // (temperature-driven), slope-AO darkening.
+                    PaintBiomes((
+                        // Iron oxide rust paints through exposed-ground
+                        // biomes (deserts, tundra, steppe) where the
+                        // upstream catchment routed mafic-derived
+                        // sediment to the cell. min/max bracket the
+                        // SurfaceMaterials threshold (0.05) so staining
+                        // ramps up across the same iron_fraction range
+                        // the classifier flags as iron-rich.
+                        iron_overlay: (
+                            // After SurfaceMaterials' dilation+blur,
+                            // peaks of the iron_fraction field stay
+                            // close to their original (0.05–0.5)
+                            // range — dilation preserves max values
+                            // and only the soft fade-out band drops.
+                            // Threshold sits just above the
+                            // classifier cutoff (0.05) so the same
+                            // catchments the classifier flags get
+                            // visible staining.
+                            min_iron_fraction: 0.04,
+                            max_iron_fraction: 0.22,
+                            // Cap at 0.55 strength so iron-rich
+                            // regions read as warm reddish biome,
+                            // not pure rust paint. Biome character
+                            // (sand colour, grass tint) bleeds
+                            // through at full saturation.
+                            max_strength: 0.55,
+                            // Warm earth-rust, less saturated than
+                            // the previous Mars-orange — reads as
+                            // iron-stained soil rather than safety-
+                            // cone paint.
+                            color: (0.50, 0.32, 0.22),
+                            tonal_amp: 0.22,
+                            tonal_frequency: 9.0,
+                        ),
+                        // Bare rock above 3 km or on steep slopes.
+                        // Cool gray basalt / weathered granite — sits
+                        // visibly cooler than the surrounding biomes
+                        // so peaks read as snow-shoulders even before
+                        // snow_overlay paints them white.
+                        rock_overlay: (
+                            slope_start: 0.20,
+                            slope_full: 0.55,
+                            height_boost_from_m: 3000.0,
+                            height_boost_per_km: 0.30,
+                            color: (0.52, 0.50, 0.50),
+                            tonal_amp: 0.12,
+                            tonal_frequency: 14.0,
+                        ),
+                        // Snow/ice on land. Coverage by temperature
+                        // (jittered) so equatorial peaks can carry
+                        // glaciers and warm polar land can stay bare.
+                        // Sea ice is a shader-side concern.
+                        snow_overlay: (
+                            // Coverage ramp: starts at 0 °C, full at
+                            // -12 °C. Earlier values (full at -8 °C)
+                            // turned every continent's mid-latitude
+                            // interior into a polar cap. With the
+                            // current Climate config, this leaves
+                            // snow concentrated above ~50° latitude
+                            // and on alpine peaks.
+                            temp_none_c: 0.0,
+                            temp_full_c: -12.0,
+                            jitter_amp_c: 4.0,
+                            jitter_frequency: 3.0,
+                            land_color: (0.92, 0.93, 0.96),
+                            tonal_amp: 0.04,
+                        ),
+                        // Slope-AO darkens steep terrain so mountain
+                        // relief reads from orbit even when the sun
+                        // angle hides detailed normals.
+                        slope_ao: (
+                            slope_start: 0.18,
+                            slope_full: 0.55,
+                            max_darken: 0.30,
+                        ),
                     )),
                 ],
             )),
@@ -921,6 +1118,54 @@
                         ray_half_width: 0.05,
                     )),
                 ],
+            )),
+        ),
+        // Temporary placeholder — bright pink, Pluto-sized, ringed.
+        // Uses the gas-giant atmosphere path because the renderer
+        // only spawns rings when `atmosphere: Some(_)` is present
+        // and `generator` is None. Cloud-deck palette is flat
+        // hot-pink so the disk reads as a uniform ball.
+        (
+            name: "Roselle",
+            kind: Planet,
+            parent: Some("Pyros"),
+            physical: (
+                mass_kg: 1.303e22,
+                radius_m: 1188000.0,
+                color: "#FF69B4",
+                albedo: 0.50,
+                rotation_period_s: 86400.0,
+                axial_tilt_deg: 25.0,
+            ),
+            orbit: Some((
+                semi_major_axis_m: 1.72788e11,
+                eccentricity: 0.05,
+                inclination_deg: 1.5,
+                lon_ascending_node_deg: 0.0,
+                arg_periapsis_deg: 0.0,
+                true_anomaly_deg: 90.0,
+            )),
+            generator: None,
+            atmosphere: Some((
+                seed: 99001,
+                cloud_deck: (
+                    palette: [
+                        (lat: -1.00, color: (1.00, 0.41, 0.71)),
+                        (lat:  1.00, color: (1.00, 0.41, 0.71)),
+                    ],
+                    band_frequency: 1.0,
+                ),
+                rings: Some((
+                    inner_radius_m: 1782000.0,
+                    outer_radius_m: 2970000.0,
+                    seed: 99002,
+                    palette: [
+                        (r: 0.00, color: (1.00, 0.60, 0.80), opacity: 0.30),
+                        (r: 0.30, color: (1.00, 0.45, 0.75), opacity: 0.90),
+                        (r: 0.60, color: (1.00, 0.55, 0.80), opacity: 0.75),
+                        (r: 1.00, color: (1.00, 0.70, 0.85), opacity: 0.35),
+                    ],
+                )),
             )),
         ),
         (

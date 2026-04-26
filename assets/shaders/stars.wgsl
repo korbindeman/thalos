@@ -68,16 +68,17 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let ndc_per_pixel = vec2<f32>(2.0 / viewport.x, 2.0 / viewport.y);
     let offset_clip = in.corner * radius_px * ndc_per_pixel * center_clip.w;
 
-    // Force z to 0 — reverse-Z places the far plane there, so stars
-    // land behind every body.
+    // NDC z = 0 is the reverse-Z far plane — the projective expression
+    // of "at infinity." Paired with `CompareFunction::GreaterEqual` in
+    // `StarsMaterial::specialize`, fragments pass against the cleared
+    // depth buffer (also 0) but fail against any real body, whose NDC z
+    // is strictly positive. A previous `1e-7 * w` offset worked under
+    // map-view scale but broke in ship view, where planet NDC z can dip
+    // below 1e-7 and let stars bleed through.
     var out: VertexOutput;
-    // Tiny positive z (reverse-Z) so the fragment passes the default
-    // `Greater` depth test against the cleared depth buffer (0) but
-    // still sits effectively at the far plane. Bodies with larger z
-    // will occlude stars correctly.
     out.clip_position = vec4<f32>(
         center_clip.xy + offset_clip,
-        1.0e-7 * center_clip.w,
+        0.0,
         center_clip.w,
     );
     out.quad_uv = in.corner;

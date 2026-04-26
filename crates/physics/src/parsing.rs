@@ -161,7 +161,6 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             position: DVec3::new(-orbit_radius, 0.0, 0.0),
             velocity: DVec3::new(0.0, 0.0, -orbital_speed),
         },
-        thrust_acceleration: 10.0,
     };
 
     Ok(SolarSystemDefinition {

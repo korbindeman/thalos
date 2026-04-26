@@ -23,6 +23,11 @@ use crate::types::{
 
 /// Local helper that mirrors the old `propagate_trajectory` convenience so the
 /// tests can stay focused on what they actually assert.
+///
+/// The original signature took a single `ship_thrust_acceleration` (m/s²);
+/// we synthesize a thrust/mass/flow triple that yields the same starting
+/// acceleration with negligible mass change over typical test burn lengths,
+/// so the existing assertions still hold.
 fn propagate_trajectory(
     initial_state: StateVector,
     start_time: f64,
@@ -55,6 +60,14 @@ fn propagate_trajectory_with_target(
     ship_thrust_acceleration: f64,
     target_body: Option<crate::types::BodyId>,
 ) -> FlightPlan {
+    // Synthesize a high-mass / low-flow ship so accel ≈ ship_thrust_acceleration
+    // throughout any reasonable burn — the test fixtures predate the rocket
+    // equation and assert against the constant-accel limit. Dry mass is set
+    // far below the wet mass so the propellant-exhaustion cap never binds.
+    let ship_mass_kg = 1.0e6;
+    let ship_thrust_n = ship_thrust_acceleration * ship_mass_kg;
+    let ship_mass_flow_kg_per_s = 1.0e-6;
+    let ship_dry_mass_kg = 1.0;
     let request = PredictionRequest {
         ship_state: initial_state,
         sim_time: start_time,
@@ -63,7 +76,10 @@ fn propagate_trajectory_with_target(
         ephemeris,
         bodies: bodies.to_vec(),
         prediction_config: config.clone(),
-        ship_thrust_acceleration,
+        ship_thrust_n,
+        ship_mass_kg,
+        ship_mass_flow_kg_per_s,
+        ship_dry_mass_kg,
         target_body,
     };
     propagate_flight_plan(&request, None)
@@ -71,6 +87,12 @@ fn propagate_trajectory_with_target(
 
 const AU: f64 = 1.496e11;
 const SUN_GM: f64 = 1.327_124_4e20;
+
+/// Default thrust acceleration used by these legacy integration tests.
+/// Matches the original `make_single_star_system` fixture so the
+/// thrust-magnitude-sensitive assertions (e.g. `delta_speed < 2.0`
+/// after a 1 s substep, which expects ~1 m/s) keep their margins.
+const TEST_THRUST_ACCEL: f64 = 1.0;
 
 fn make_single_star_system() -> SolarSystemDefinition {
     let star_mass = 1.989e30;
@@ -104,7 +126,6 @@ fn make_single_star_system() -> SolarSystemDefinition {
                 position: DVec3::new(1.0e11, 0.0, 0.0),
                 velocity: DVec3::new(0.0, 1000.0, 0.0),
             },
-            thrust_acceleration: 1.0,
         },
         name_to_id,
     }
@@ -176,7 +197,6 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
                 position: DVec3::ZERO,
                 velocity: DVec3::ZERO,
             },
-            thrust_acceleration: 0.5,
         },
         name_to_id,
     }
@@ -202,7 +222,7 @@ fn maneuver_is_integrated_as_finite_burn() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     let burn_segment = prediction
@@ -211,8 +231,8 @@ fn maneuver_is_integrated_as_finite_burn() {
         .find(|segment| segment.samples.len() > 1)
         .expect("expected a downstream burn segment");
     // Skip the pre-burn starting sample (t=0) and look at the first RK4
-    // substep sample. At 0.5 m/s² over one 1-second substep the velocity
-    // should only change by ~0.5 m/s, far from the full 10 m/s Δv.
+    // substep sample. At 1.0 m/s² over one 1-second substep the velocity
+    // should only change by ~1.0 m/s, far from the full 10 m/s Δv.
     let mid_sample = burn_segment
         .samples
         .iter()
@@ -363,7 +383,7 @@ fn prograde_burn_raises_apoapsis_around_thalos() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     let mut max_r = 0.0_f64;
@@ -429,7 +449,7 @@ fn large_prograde_burn_escapes_without_collision() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     let mut max_r = 0.0_f64;
@@ -492,7 +512,7 @@ fn stable_orbit_detected_after_prograde_burn() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     // The final leg's coast sub-segment is propagated entirely post-burn, so
@@ -542,7 +562,7 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     assert!(
@@ -597,7 +617,7 @@ fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     let mut post_node_samples = 0usize;
@@ -670,7 +690,6 @@ fn make_thalos_mira_system() -> SolarSystemDefinition {
                 position: DVec3::ZERO,
                 velocity: DVec3::ZERO,
             },
-            thrust_acceleration: 0.5,
         },
         name_to_id,
     }
@@ -722,7 +741,7 @@ fn moon_encounter_preserves_bounded_energy() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     assert!(
@@ -803,7 +822,7 @@ fn no_false_stable_orbit_across_soi_transition() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     // Check whether the trajectory enters Mira's SOI.
@@ -862,7 +881,7 @@ fn encounter_enrichment_reports_flyby_for_hyperbolic_pass() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     let mira_enc = prediction.encounter_with(2);
@@ -918,7 +937,7 @@ fn game_default_state_produces_stable_orbit() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     // One leg, one segment, one full revolution.
@@ -979,7 +998,7 @@ fn closest_approach_scan_excludes_encountered_bodies() {
         Arc::clone(&ephemeris),
         &system.bodies,
         &PredictionConfig::default(),
-        system.ship.thrust_acceleration,
+        TEST_THRUST_ACCEL,
     );
 
     let encounter_bodies: std::collections::HashSet<usize> =

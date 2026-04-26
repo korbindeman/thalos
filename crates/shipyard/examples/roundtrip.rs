@@ -38,6 +38,7 @@ fn main() {
         model: "Mk1".into(),
         diameter: 1.25,
         dry_mass: 840.0,
+        reaction_wheel_torque: 5_000.0,
     };
     let blueprint = ShipBlueprint {
         name: "TestRocket".into(),

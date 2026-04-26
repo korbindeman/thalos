@@ -8,8 +8,8 @@ use super::super::state::{
     HITBOX_CAPSULE_RADIUS, HOVER_BRIGHTNESS, InteractionMode, NodeSlideSphere, SHAFT_RADIUS,
     SLIDE_SPHERE_RADIUS, STRETCH_LERP_SPEED, SelectedNodeView, SphereVisual,
 };
-use crate::camera::{CameraFocus, OrbitCamera};
-use crate::coords::RENDER_SCALE;
+use crate::camera::{ActiveCamera, CameraFocus};
+use crate::coords::WorldScale;
 use crate::photo_mode::HideInPhotoMode;
 use crate::view::HideInShipView;
 
@@ -144,6 +144,7 @@ pub(in crate::maneuver) fn manage_arrow_handles(
 pub(in crate::maneuver) fn update_arrow_transforms(
     selected_view: Res<SelectedNodeView>,
     focus: Res<CameraFocus>,
+    scale: Res<WorldScale>,
     mode: Res<InteractionMode>,
     hover_map: Res<HoverMap>,
     time: Res<Time>,
@@ -152,7 +153,8 @@ pub(in crate::maneuver) fn update_arrow_transforms(
     camera_q: Query<
         &Transform,
         (
-            With<OrbitCamera>,
+            With<ActiveCamera>,
+            With<crate::camera::OrbitCamera>,
             Without<ArrowHitbox>,
             Without<NodeSlideSphere>,
             Without<ArrowShaft>,
@@ -223,7 +225,7 @@ pub(in crate::maneuver) fn update_arrow_transforms(
         .flat_map(|hovers| hovers.keys().copied())
         .collect();
 
-    let s = (focus.distance * RENDER_SCALE) as f32;
+    let s = (focus.distance * scale.0) as f32;
     let arrow_len = BASE_ARROW_LEN * s;
     let sphere_gap = (SLIDE_SPHERE_RADIUS + HITBOX_CAPSULE_RADIUS) * s;
 

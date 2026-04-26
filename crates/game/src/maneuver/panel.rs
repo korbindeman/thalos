@@ -16,7 +16,6 @@ pub(super) fn node_editor_panel(
 ) {
     let Some(sel_id) = selected.id else { return };
     let Some(node_idx) = plan.nodes.iter().position(|n| n.id == sel_id) else {
-        info!("[maneuver] selection cleared: panel (site)");
         selected.id = None;
         return;
     };
@@ -26,15 +25,13 @@ pub(super) fn node_editor_panel(
     let sim_time = sim.as_ref().map(|s| s.simulation.sim_time()).unwrap_or(0.0);
     let time_until = burn_time - sim_time;
 
-    let thrust_accel = sim
+    // Tsiolkovsky burn duration at the ship's *current* mass — close
+    // enough for the panel display; the live integrator picks up the
+    // mass-anchor at the burn's actual start time.
+    let burn_duration = sim
         .as_ref()
-        .map(|s| s.system.ship.thrust_acceleration)
+        .map(|s| s.simulation.estimated_burn_duration(total_dv))
         .unwrap_or(0.0);
-    let burn_duration = if thrust_accel > 0.0 {
-        total_dv / thrust_accel
-    } else {
-        0.0
-    };
 
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::TopBottomPanel::bottom("node_editor").show(ctx, |ui| {
@@ -50,8 +47,7 @@ pub(super) fn node_editor_panel(
             ui.separator();
             if ui.button("Delete").clicked() {
                 writer.write(ManeuverEvent::DeleteNode { id: sel_id });
-                info!("[maneuver] selection cleared: panel (site)");
-        selected.id = None;
+                selected.id = None;
             }
         });
 

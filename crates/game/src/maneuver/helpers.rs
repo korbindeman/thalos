@@ -6,7 +6,7 @@ use thalos_physics::trajectory::{FlightPlan, Trajectory};
 use thalos_physics::types::{BodyState, SolarSystemDefinition};
 
 use super::state::{GameNode, ManeuverPlan, NodeId};
-use crate::coords::{RenderOrigin, sample_render_pos};
+use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
 use crate::flight_plan_view::FlightPlanView;
 
 pub(super) struct ClosestTrailPoint {
@@ -36,6 +36,7 @@ pub(super) fn node_world_pos_and_frame(
     time: f64,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    scale: &WorldScale,
     system: &SolarSystemDefinition,
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
@@ -70,7 +71,7 @@ pub(super) fn node_world_pos_and_frame(
         let _ = system;
         let pin_for = |id| flight_plan_view.pin_for_body(id, body_states);
         let sample = &seg.samples[idx];
-        let world_pos = sample_render_pos(sample, pin_for, origin);
+        let world_pos = sample_render_pos(sample, pin_for, origin, scale);
 
         let ref_state = ephemeris.query_body(sample.anchor_body, sample.time);
         let frame = orbital_frame_mat3(
@@ -90,6 +91,7 @@ pub(super) fn node_world_position(
     prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    scale: &WorldScale,
     system: &SolarSystemDefinition,
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
@@ -99,6 +101,7 @@ pub(super) fn node_world_position(
         node.time,
         body_states,
         origin,
+        scale,
         system,
         ephemeris,
         flight_plan_view,
@@ -112,6 +115,7 @@ pub(super) fn selected_node_world_and_frame(
     prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    scale: &WorldScale,
     system: &SolarSystemDefinition,
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
@@ -123,6 +127,7 @@ pub(super) fn selected_node_world_and_frame(
         node.time,
         body_states,
         origin,
+        scale,
         system,
         ephemeris,
         flight_plan_view,
@@ -191,6 +196,7 @@ pub(super) fn closest_node(
     prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    scale: &WorldScale,
     system: &SolarSystemDefinition,
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
@@ -208,6 +214,7 @@ pub(super) fn closest_node(
             prediction,
             body_states,
             origin,
+            scale,
             system,
             ephemeris,
             flight_plan_view,
@@ -255,6 +262,7 @@ pub(super) fn closest_trail_point_on_leg(
     node_time: f64,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    scale: &WorldScale,
     system: &SolarSystemDefinition,
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
@@ -297,7 +305,7 @@ pub(super) fn closest_trail_point_on_leg(
             continue;
         }
         for sample in coast.samples.iter() {
-            let world_pos = sample_render_pos(sample, &pin_for, origin);
+            let world_pos = sample_render_pos(sample, &pin_for, origin, scale);
             let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok()
             else {
                 continue;
@@ -322,6 +330,7 @@ pub(super) fn closest_trail_point(
     prediction: &FlightPlan,
     body_states: &[BodyState],
     origin: &RenderOrigin,
+    scale: &WorldScale,
     system: &SolarSystemDefinition,
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
@@ -335,7 +344,7 @@ pub(super) fn closest_trail_point(
     let pin_for = |id| flight_plan_view.pin_for_body(id, body_states);
     for seg in prediction.segments.iter() {
         for sample in seg.samples.iter() {
-            let world_pos = sample_render_pos(sample, &pin_for, origin);
+            let world_pos = sample_render_pos(sample, &pin_for, origin, scale);
             let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
                 continue;
             };

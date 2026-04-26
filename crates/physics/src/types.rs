@@ -1,4 +1,4 @@
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 use serde::Deserialize;
 use std::collections::HashMap;
 use thalos_atmosphere_gen::{AtmosphereParams, TerrestrialAtmosphere};
@@ -6,9 +6,6 @@ use thalos_terrain_gen::GeneratorParams;
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
-
-// TODO: Uncomment after adding `pub mod parsing;` to lib.rs
-pub use crate::parsing::load_solar_system;
 
 pub const AU_TO_METERS: f64 = 1.496e11;
 
@@ -20,6 +17,92 @@ pub type BodyId = usize;
 pub struct StateVector {
     pub position: DVec3,
     pub velocity: DVec3,
+}
+
+/// Ship attitude state. Kept separate from [`StateVector`] so trajectory
+/// prediction (which doesn't care about orientation) stays cheap.
+///
+/// `orientation` is the body→world quaternion; `angular_velocity` is
+/// expressed in the **body frame** (rad/s) — convention `Iω̇ = τ` plays
+/// out cleanly when both `ω` and `τ` are in body coordinates.
+#[derive(Debug, Clone, Copy)]
+pub struct AttitudeState {
+    pub orientation: DQuat,
+    pub angular_velocity: DVec3,
+}
+
+impl Default for AttitudeState {
+    fn default() -> Self {
+        Self {
+            orientation: DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+        }
+    }
+}
+
+/// Static physical properties needed to integrate ship attitude and thrust.
+///
+/// `moment_of_inertia` is the principal-axis MOI tensor's diagonal in
+/// kg·m², expressed in the body frame. Off-diagonal terms are assumed
+/// zero — adequate for axially-symmetric ship stacks. `max_torque` is
+/// the per-axis torque cap from all reaction-wheel-providing parts
+/// summed, in N·m.
+///
+/// `thrust_n`, `mass_flow_kg_per_s`, and `dry_mass_kg` are constants for
+/// v1 (no staging). Current ship mass is tracked separately on
+/// [`crate::Simulation`] because it changes as fuel burns; once it
+/// reaches `dry_mass_kg` thrust cuts off cleanly (the propellant tanks
+/// are empty).
+#[derive(Debug, Clone, Copy)]
+pub struct ShipParameters {
+    pub moment_of_inertia: DVec3,
+    pub max_torque: DVec3,
+    pub thrust_n: f64,
+    pub mass_flow_kg_per_s: f64,
+    /// Dry mass — the floor under which `Simulation::ship_mass_kg` cannot
+    /// fall, and the threshold below which thrust stops being applied.
+    /// "Out of fuel" in physical units rather than an arbitrary numerical
+    /// safety floor.
+    pub dry_mass_kg: f64,
+}
+
+impl Default for ShipParameters {
+    fn default() -> Self {
+        // Sentinel values: nonzero MOI to avoid divide-by-zero, zero
+        // torque so a ship with no parameters set can't accidentally
+        // accept attitude commands. Zero thrust = drifting until a real
+        // ship is spawned and pushes its blueprint stats in. Dry mass
+        // sits at the safety floor so the integrator's mass never
+        // divides by zero before a real ship has been pushed in.
+        Self {
+            moment_of_inertia: DVec3::ONE,
+            max_torque: DVec3::ZERO,
+            thrust_n: 0.0,
+            mass_flow_kg_per_s: 0.0,
+            dry_mass_kg: MIN_SHIP_MASS_KG,
+        }
+    }
+}
+
+/// Hard numerical floor on ship mass — keeps the integrator from dividing
+/// by zero before a real ship has been spawned and `dry_mass_kg` set. Once
+/// a ship is spawned, its actual `dry_mass_kg` is the operative floor.
+pub(crate) const MIN_SHIP_MASS_KG: f64 = 1.0;
+
+/// Player attitude + thrust command sampled each frame and pushed into
+/// the simulation via [`crate::simulation::Simulation::set_control`].
+///
+/// `torque_command` is in body frame, components in `[-1, 1]`. Each
+/// axis is multiplied by the matching [`ShipParameters::max_torque`]
+/// component to produce the actual torque applied. `throttle` is the
+/// player's commanded engine throttle, in `[0, 1]`. The bridge gates
+/// this on fuel availability before sending; the simulation trusts the
+/// value it receives and applies thrust along the body nose direction.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ControlInput {
+    pub torque_command: DVec3,
+    pub sas_enabled: bool,
+    pub throttle: f64,
 }
 
 /// Static properties of a celestial body (immutable after load).
@@ -109,12 +192,12 @@ pub struct TrajectorySample {
     pub ref_pos: DVec3,
 }
 
-/// Ship definition — placeholder for MVP.
+/// Ship definition — placeholder for MVP. Holds only the spawn state;
+/// thrust/mass/mass-flow come from the ship blueprint at spawn time and
+/// are pushed into [`crate::Simulation`] via setters.
 #[derive(Debug, Clone)]
 pub struct ShipDefinition {
     pub initial_state: StateVector,
-    /// Thrust acceleration magnitude in m/s².
-    pub thrust_acceleration: f64,
 }
 
 /// Full solar system definition loaded from file.
@@ -133,61 +216,61 @@ impl SolarSystemDefinition {
     }
 }
 
+/// Orbital-plane → ecliptic basis (P, Q) for a set of Keplerian elements.
+///
+/// `P` points toward periapsis in the inertial frame; `Q` is in the orbital
+/// plane, perpendicular to `P`, in the direction of motion at periapsis. The
+/// pair forms an orthonormal basis sufficient to lift any (x_orb, y_orb)
+/// orbital-plane coordinate into the inertial XZ-ecliptic frame.
+pub fn keplerian_basis(elements: &OrbitalElements) -> (DVec3, DVec3) {
+    let cos_o = elements.lon_ascending_node_rad.cos();
+    let sin_o = elements.lon_ascending_node_rad.sin();
+    let cos_w = elements.arg_periapsis_rad.cos();
+    let sin_w = elements.arg_periapsis_rad.sin();
+    let cos_i = elements.inclination_rad.cos();
+    let sin_i = elements.inclination_rad.sin();
+
+    let p = DVec3::new(
+        cos_o * cos_w - sin_o * sin_w * cos_i,
+        sin_i * sin_w,
+        sin_o * cos_w + cos_o * sin_w * cos_i,
+    );
+    let q = DVec3::new(
+        -cos_o * sin_w - sin_o * cos_w * cos_i,
+        sin_i * cos_w,
+        -sin_o * sin_w + cos_o * cos_w * cos_i,
+    );
+    (p, q)
+}
+
 /// Convert orbital elements to Cartesian state vector relative to parent.
 pub fn orbital_elements_to_cartesian(elements: &OrbitalElements, parent_gm: f64) -> StateVector {
     let a = elements.semi_major_axis_m;
     let e = elements.eccentricity;
-    let i = elements.inclination_rad;
-    let omega = elements.lon_ascending_node_rad;
-    let w = elements.arg_periapsis_rad;
     let nu = elements.true_anomaly_rad;
 
     // Semi-latus rectum.
-    let p = a * (1.0 - e * e);
+    let p_slr = a * (1.0 - e * e);
 
     // Distance from focus.
-    let r = p / (1.0 + e * nu.cos());
+    let r = p_slr / (1.0 + e * nu.cos());
 
     // Position in orbital plane.
     let x_orb = r * nu.cos();
     let y_orb = r * nu.sin();
 
     // Velocity in orbital plane.
-    let mu_over_p = parent_gm / p;
+    let mu_over_p = parent_gm / p_slr;
     let vx_orb = -mu_over_p.sqrt() * nu.sin();
     let vy_orb = mu_over_p.sqrt() * (e + nu.cos());
 
-    // Rotation matrix from orbital plane to 3D (ecliptic) frame.
-    // Using the standard aerospace convention: XZ ecliptic, Y up.
-    let cos_o = omega.cos();
-    let sin_o = omega.sin();
-    let cos_w = w.cos();
-    let sin_w = w.sin();
-    let cos_i = i.cos();
-    let sin_i = i.sin();
+    // Lift orbital-plane coords into the inertial (XZ-ecliptic, Y up) frame.
+    let (basis_p, basis_q) = keplerian_basis(elements);
 
-    let px = cos_o * cos_w - sin_o * sin_w * cos_i;
-    let py = sin_i * sin_w;
-    let pz = sin_o * cos_w + cos_o * sin_w * cos_i;
-
-    let qx = -cos_o * sin_w - sin_o * cos_w * cos_i;
-    let qy = sin_i * cos_w;
-    let qz = -sin_o * sin_w + cos_o * cos_w * cos_i;
-
-    // Note: Y is up in our coordinate system (ecliptic is XZ plane).
-    let position = DVec3::new(
-        x_orb * px + y_orb * qx,
-        x_orb * py + y_orb * qy,
-        x_orb * pz + y_orb * qz,
-    );
-
-    let velocity = DVec3::new(
-        vx_orb * px + vy_orb * qx,
-        vx_orb * py + vy_orb * qy,
-        vx_orb * pz + vy_orb * qz,
-    );
-
-    StateVector { position, velocity }
+    StateVector {
+        position: basis_p * x_orb + basis_q * y_orb,
+        velocity: basis_p * vx_orb + basis_q * vy_orb,
+    }
 }
 
 #[cfg(test)]

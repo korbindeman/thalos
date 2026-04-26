@@ -1282,6 +1282,7 @@ fn collect_blueprint(
                 model: p.model.clone(),
                 diameter: p.diameter,
                 dry_mass: p.dry_mass,
+                reaction_wheel_torque: p.reaction_wheel_torque,
             }
         } else if let Some(d) = dec {
             PartData::Decoupler {
@@ -1606,6 +1607,7 @@ fn editor_ui(
                     model: "Mk1".into(),
                     diameter: 1.25,
                     dry_mass: 840.0,
+                    reaction_wheel_torque: 5_000.0,
                 });
             }
             if ui.button("Command Pod (2.5m)").clicked() {
@@ -1613,6 +1615,7 @@ fn editor_ui(
                     model: "Mk1-3".into(),
                     diameter: 2.5,
                     dry_mass: 2720.0,
+                    reaction_wheel_torque: 15_000.0,
                 });
             }
             if ui.button("Decoupler").clicked() {

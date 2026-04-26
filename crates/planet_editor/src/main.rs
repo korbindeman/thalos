@@ -585,6 +585,14 @@ fn finalize_terrain_bake(
         let (_, _, wrap) = lighting_for(&planet);
         let scene = scene_lighting_for(&planet);
 
+        let body_seed = body.detail_params.seed;
+        let coastline_seed = (body_seed as u32)
+            ^ ((body_seed >> 32) as u32)
+            ^ 0xC0A5_71_1Eu32;
+        let has_ocean = body.sea_level_m.is_some();
+        let coastline_warp_amp_radians = if has_ocean { 8.0e-4 } else { 0.0 };
+        let coastline_jitter_amp_m = if has_ocean { 30.0 } else { 0.0 };
+
         let mat_handle = planet_materials.add(PlanetMaterial {
             params: PlanetParams {
                 radius: RENDER_RADIUS,
@@ -593,6 +601,9 @@ fn finalize_terrain_bake(
                 fullbright: if planet.full_bright { 1.0 } else { 0.0 },
                 scene,
                 sea_level_m: body.sea_level_m.unwrap_or(-1.0e9),
+                coastline_warp_amp_radians,
+                coastline_jitter_amp_m,
+                coastline_seed,
                 ..default()
             },
             albedo: textures.albedo,

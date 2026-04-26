@@ -1,9 +1,12 @@
 mod bridge;
 mod camera;
 mod coords;
+mod engine;
 mod flight_plan_view;
+mod fuel;
 mod hud;
 mod maneuver;
+mod navigation;
 mod photo_mode;
 mod reflection_probe;
 mod rendering;
@@ -17,20 +20,25 @@ use std::sync::Arc;
 
 use bevy::asset::AssetPlugin;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
+use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, WindowMode};
 use thalos_physics::{
     body_state_provider::BodyStateProvider,
+    parsing::load_solar_system,
     patched_conics::PatchedConics,
     simulation::{Simulation, SimulationConfig},
-    types::{StateVector, load_solar_system},
+    types::{AttitudeState, StateVector},
 };
 
 use bridge::BridgePlugin;
 use camera::CameraPlugin;
+use engine::EnginePlugin;
 use flight_plan_view::FlightPlanViewPlugin;
+use fuel::FuelPlugin;
 use hud::HudPlugin;
 use maneuver::ManeuverPlugin;
+use navigation::NavigationPlugin;
 use photo_mode::PhotoModePlugin;
 use rendering::{RenderingPlugin, SimulationState};
 use ship_view::ShipViewPlugin;
@@ -156,13 +164,20 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .insert_resource({
-            let simulation = Simulation::new(
+            let mut simulation = Simulation::new(
                 ship_state,
-                system.ship.thrust_acceleration,
                 Arc::clone(&ephemeris),
                 system.bodies.clone(),
                 SimulationConfig::default(),
             );
+            // Spawn facing prograde — rotate the body nose axis onto the
+            // ship's velocity relative to its homeworld (the dominant body
+            // at spawn).
+            let prograde = rel.velocity.normalize();
+            simulation.set_attitude(AttitudeState {
+                orientation: DQuat::from_rotation_arc(navigation::SHIP_NOSE_BODY, prograde),
+                angular_velocity: DVec3::ZERO,
+            });
             SimulationState {
                 simulation,
                 system,
@@ -170,6 +185,15 @@ fn main() {
             }
         })
         .add_plugins(bevy::prelude::MeshPickingPlugin)
+        // Opt-in picking: body meshes (and any other Pickable-less mesh) would
+        // otherwise absorb rays before the maneuver arrows, since the hover-map
+        // builder treats unmarked entities as opaque blockers. At zoomed-out
+        // ranges those bodies sit on top of the arrow's screen region and made
+        // the arrows silently unhoverable.
+        .insert_resource(bevy::picking::mesh_picking::MeshPickingSettings {
+            require_markers: true,
+            ..default()
+        })
         .add_plugins(PlanetRenderingPlugin)
         .add_plugins(CameraPlugin)
         .add_plugins(reflection_probe::ReflectionProbePlugin)
@@ -177,9 +201,12 @@ fn main() {
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(BridgePlugin)
+        .add_plugins(FuelPlugin)
+        .add_plugins(EnginePlugin)
         .add_plugins(TargetPlugin)
         .add_plugins(FlightPlanViewPlugin)
         .add_plugins(ManeuverPlugin)
+        .add_plugins(NavigationPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ViewPlugin)

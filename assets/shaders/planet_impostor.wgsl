@@ -45,6 +45,7 @@
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::get_world_from_local
 #import thalos::lighting::{SceneLighting, StarLight, PlanetShineSample, eclipse_factor, planetshine_sample}
+#import thalos::noise::fbm3
 #import thalos::atmosphere::{
     AtmosphereBlock,
     RimHit,
@@ -102,6 +103,29 @@ struct PlanetParams {
     // bodies set this to a large negative sentinel so the threshold is
     // never crossed.
     sea_level_m:     f32,
+    // Canonical high-frequency terrain bands. The impostor applies a
+    // domain warp (perturbs the cubemap sample direction) AND adds a
+    // height-jitter fbm — both defined in
+    // `crates/planet_rendering/src/shaders/noise.wgsl`, mirrored
+    // bit-exact by `crates/terrain_gen/src/noise.rs`.
+    //
+    // The warp is what breaks the cubemap-texel staircase visible
+    // from orbit: a few-texel arc displacement on the sphere shifts
+    // the iso-contour out of grid alignment without adding height
+    // roughness. The height-jitter adds sub-texel detail visible
+    // up close. Both feed `sample_height_m`, so water mask,
+    // surface normals, and self-shadow all see the same canonical
+    // perturbed surface.
+    //
+    // Future 3D terrain meshing must evaluate the same fbm with the
+    // same parameters at vertex/sample time so the LOD handoff is
+    // continuous.
+    coastline_warp_amp_radians:  f32,
+    coastline_warp_freq_per_m:   f32,
+    coastline_jitter_amp_m:      f32,
+    coastline_jitter_freq_per_m: f32,
+    coastline_octaves:           u32,
+    coastline_seed:              u32,
 }
 
 // Layout matches `PlanetDetailParams` in `crates/planet_rendering/src/material.rs`.
@@ -684,10 +708,17 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
     // Offset ~1.5 texels on the cubemap.
     let offset = 1.5 / res;
 
-    let h_e = textureSample(height_tex, height_sampler, n + tangent * offset).r;
-    let h_w = textureSample(height_tex, height_sampler, n - tangent * offset).r;
-    let h_n = textureSample(height_tex, height_sampler, n + bitangent * offset).r;
-    let h_s = textureSample(height_tex, height_sampler, n - bitangent * offset).r;
+    // Sample the canonical surface height (baked cubemap + fbm jitter)
+    // at four neighbours. Auto-LOD on the cubemap part keeps far
+    // bodies' normals stable (preserves the original mip-blur on the
+    // baked height); the fbm contribution rides on top so all three
+    // consumers — water mask, self-shadow, normals — agree on the
+    // perturbed surface even though the cubemap LOD selection
+    // differs between them.
+    let h_e = sample_height_baked_auto_lod_m(n + tangent * offset);
+    let h_w = sample_height_baked_auto_lod_m(n - tangent * offset);
+    let h_n = sample_height_baked_auto_lod_m(n + bitangent * offset);
+    let h_s = sample_height_baked_auto_lod_m(n - bitangent * offset);
 
     // Convert texel offset to world-space distance on the body surface.
     let ds = detail.body_radius_m * offset * 2.0;
@@ -695,15 +726,9 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
         return n;
     }
 
-    // Height is R16Unorm in [0, 1].  The stored encoding is
-    //   stored = 0.5 + real_meters / (2 * height_range)
-    // so a texture-space difference of Δstored corresponds to
-    //   Δreal = Δstored · 2 · height_range meters.
-    // The factor of 2 was missing previously, which halved the normal
-    // perturbation and produced a noticeably softer terminator.
-    let scale = (2.0 * params.height_range) / ds;
-    let dh_dt = (h_e - h_w) * scale;
-    let dh_db = (h_n - h_s) * scale;
+    // h_* are already in meters; central-difference slope is m / m.
+    let dh_dt = (h_e - h_w) / ds;
+    let dh_db = (h_n - h_s) / ds;
 
     return normalize(n - tangent * dh_dt - bitangent * dh_db);
 }
@@ -798,14 +823,85 @@ fn sample_material_id(dir: vec3<f32>) -> u32 {
 // shadowed — their normal perturbation already darkens the lit term. Cheap:
 // only runs near the terminator, where shadows actually reach across texels.
 
-fn sample_height_m(dir: vec3<f32>) -> f32 {
+// Canonical high-frequency *direction* warp. Perturbs the cubemap
+// sample direction by a vec3 fbm field; the displacement on the
+// sphere is `amp * fbm * R`. With `amp ≈ 1 texel of arc`, this
+// breaks the cubemap-texel staircase out of grid alignment without
+// adding any height roughness — the bilinear-interpolated baked
+// height field is simply read at a fractally perturbed location.
+//
+// Three independent fbm evaluations (seed-decorrelated by `+1`,
+// `+2` on the sub-seed). Each fbm shares the same lattice via the
+// `+offset` constants on the input — same trick as
+// `topography.rs::nearest_centroid_warped`.
+fn coastline_warp_dir(dir: vec3<f32>) -> vec3<f32> {
+    if params.coastline_warp_amp_radians <= 0.0 {
+        return dir;
+    }
+    let p = dir * detail.body_radius_m * params.coastline_warp_freq_per_m;
+    let oct = params.coastline_octaves;
+    let s = params.coastline_seed;
+    let wx = fbm3(p,                                   s,                  oct, 0.5, 2.0);
+    let wy = fbm3(p + vec3<f32>(17.31, 17.31, 17.31), s + 1u,             oct, 0.5, 2.0);
+    let wz = fbm3(p + vec3<f32>(41.17, 41.17, 41.17), s + 2u,             oct, 0.5, 2.0);
+    let warp = vec3<f32>(wx, wy, wz) * params.coastline_warp_amp_radians;
+    return normalize(dir + warp);
+}
+
+// Canonical high-frequency *height* jitter. Adds a scalar fbm in
+// meters on top of the (already warp-sampled) baked height. Gives
+// sub-texel surface detail visible on close approach.
+fn coastline_jitter_m(dir: vec3<f32>) -> f32 {
+    if params.coastline_jitter_amp_m <= 0.0 {
+        return 0.0;
+    }
+    let p = dir * detail.body_radius_m * params.coastline_jitter_freq_per_m;
+    let n = fbm3(p, params.coastline_seed, params.coastline_octaves, 0.5, 2.0);
+    return n * params.coastline_jitter_amp_m;
+}
+
+// Bare cubemap height in meters, LOD 0. No warp, no jitter — the
+// raw baked field. Used by the self-shadow ray march, where the
+// canonical high-frequency band (sub-texel) costs ~21 fbm
+// evaluations per fragment to evaluate and contributes shadows
+// below the impostor's visible shadow scale. The bake's resolved
+// frequencies are what the shadow march needs.
+fn sample_height_baked_m(dir: vec3<f32>) -> f32 {
     let stored = textureSampleLevel(height_tex, height_sampler, dir, 0.0).r;
     return (stored - 0.5) * 2.0 * params.height_range;
 }
 
+// Bare cubemap height in meters, auto-LOD. Used by the
+// normal-perturbation finite-difference pass: at orbital distance
+// the GPU mip-blurs the cubemap so normals don't shimmer, and at
+// approach the canonical high-freq band would only contribute
+// ~5° of normal slope — invisible against the bake's native
+// terrain detail. Skipping warp+jitter here keeps the per-fragment
+// cost low (4 cubemap reads, no fbm).
+fn sample_height_baked_auto_lod_m(dir: vec3<f32>) -> f32 {
+    let stored = textureSample(height_tex, height_sampler, dir).r;
+    return (stored - 0.5) * 2.0 * params.height_range;
+}
+
+// Canonical surface height in meters: bake (sampled at the warped
+// direction) + height jitter. This is the function the future 3D
+// mesher must reproduce at the iso-contour to keep the LOD handoff
+// continuous. Currently only consumed by the water-mask test —
+// that's where the iso-contour lives, and the only place the cost
+// of evaluating warp + jitter (4 fbm calls) is justified.
+fn sample_height_m(dir: vec3<f32>) -> f32 {
+    let warped = coastline_warp_dir(dir);
+    let stored = textureSampleLevel(height_tex, height_sampler, warped, 0.0).r;
+    let baked_m = (stored - 0.5) * 2.0 * params.height_range;
+    return baked_m + coastline_jitter_m(warped);
+}
+
 fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
     let radius_m = detail.body_radius_m;
-    let h0 = sample_height_m(sample_dir);
+    // Bare baked height — the canonical high-freq band would only
+    // contribute sub-texel shadows below the impostor's visible
+    // shadow scale, and 21 fbm evaluations per ray is too costly.
+    let h0 = sample_height_baked_m(sample_dir);
 
     // Start a hair above the local surface so we don't self-intersect.
     let bias_m = max(radius_m * 0.0001, 5.0);
@@ -826,7 +922,7 @@ fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
         let p = origin + light_dir_local * t;
         let r = length(p);
         let d = p / r;
-        let h = sample_height_m(d);
+        let h = sample_height_baked_m(d);
         let surface_r = radius_m + h;
         if surface_r > r {
             let penetration = (surface_r - r) / (radius_m * 0.0003);

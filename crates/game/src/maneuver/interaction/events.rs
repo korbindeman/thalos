@@ -63,7 +63,6 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                 let before = plan.nodes.len();
                 plan.nodes.retain(|n| n.id != id);
                 if plan.nodes.len() != before {
-                    info!("[maneuver] DeleteNode consumed id={:?}", id);
                     plan.dirty = true;
                 }
             }

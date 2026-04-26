@@ -42,6 +42,7 @@ impl Plugin for PlanetRenderingPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/noise.wgsl");
         app.add_plugins((
             MaterialPlugin::<PlanetMaterial>::default(),
             MaterialPlugin::<GasGiantMaterial>::default(),

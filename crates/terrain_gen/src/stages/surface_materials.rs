@@ -254,6 +254,13 @@ impl Stage for SurfaceMaterials {
             self,
         );
 
+        // 5. Persist iron_fraction as a per-texel cubemap so downstream
+        //    stages (PaintBiomes' IronOverlay) can read provenance
+        //    without re-running the flow accumulation. Uses the same
+        //    barycentric blend as the material classifier so the iron
+        //    field on a texel matches what classify() saw.
+        bake_iron_fraction_to_cubemap(builder, &sphere, &iron_fraction);
+
         if self.debug_paint_albedo {
             paint_materials_debug_albedo(
                 builder,
@@ -430,16 +437,22 @@ fn palette() -> Vec<Material> {
         // 3 MAT_IRON_RUST_FLOODPLAIN — signature Thalos color. Warm
         // iron-oxide brown, *not* saturated red — on Earth, heavily
         // iron-stained ground reads as rusty earth tones rather than
-        // painted lines. Desaturated so the debug albedo doesn't
-        // look cartoonish when this material fires along rivers.
+        // painted lines. Brightened slightly from a darker rust so it
+        // reads as iron-stained earth against the surrounding granite
+        // rather than a dark scar along rivers.
         Material {
-            albedo: [0.38, 0.26, 0.20],
+            albedo: [0.46, 0.30, 0.22],
             roughness: 0.75,
         },
-        // 4 MAT_PEAT_WETLAND — dark brown-black. Depositional lowland
-        // without iron provenance; boggy mud-and-organics.
+        // 4 MAT_PEAT_WETLAND — warm river silt. Depositional lowland
+        // without iron provenance. Was a near-black bog colour, which
+        // painted every trunk river as a dark stripe (peat is the
+        // smoothstep base for the iron-rust overlay, so it shows up
+        // along every floodplain regardless of iron). Now sits close
+        // to weathered-granite brightness so non-iron rivers fade into
+        // the surroundings, and only iron-rich stretches stain visibly.
         Material {
-            albedo: [0.10, 0.08, 0.05],
+            albedo: [0.40, 0.36, 0.26],
             roughness: 0.65,
         },
         // 5 MAT_BARE_SCOURED_ROCK — cool mid-gray. Recently scoured
@@ -627,6 +640,180 @@ fn bake_materials_to_cubemap(
     }
 }
 
+/// Bake the per-vertex iron-fraction array into a per-texel cubemap on
+/// `builder.iron_fraction` via barycentric blending — same blend as the
+/// material classifier uses — and then spatially smooth so the
+/// drainage-traced field reads as catchment-scale staining instead of
+/// thin river lines.
+///
+/// The flow-accumulated iron_fraction is nonzero only on the drainage
+/// tree, so PaintBiomes' IronOverlay would otherwise paint thin rust
+/// lines tracing every river. The smoothing pass is a *visual
+/// approximation* of how iron-rich sediment spreads across a floodplain
+/// and the surrounding catchment over geologic time — it doesn't
+/// physically model deposition. ~36-texel effective spread (4 box-
+/// blur passes of radius 16) widens rivers to floodplain-scale stains
+/// (~35 km on Thalos at 2048²).
+fn bake_iron_fraction_to_cubemap(
+    builder: &mut BodyBuilder,
+    sphere: &Icosphere,
+    iron_fraction: &[f32],
+) {
+    let res = builder.cubemap_resolution;
+    let inv = 1.0 / res as f32;
+
+    for face in CubemapFace::ALL {
+        let data = builder.iron_fraction.face_data_mut(face);
+        data.par_chunks_mut(res as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let mut last_v = 0u32;
+                for (x, texel) in row.iter_mut().enumerate() {
+                    let u = (x as f32 + 0.5) * inv;
+                    let v = (y as f32 + 0.5) * inv;
+                    let dir = face_uv_to_dir(face, u, v);
+                    let (ti, w) = sphere.barycentric_triangle(dir, last_v);
+                    let tri = sphere.triangles[ti as usize];
+                    last_v = tri[0];
+
+                    *texel = w[0] * iron_fraction[tri[0] as usize]
+                        + w[1] * iron_fraction[tri[1] as usize]
+                        + w[2] * iron_fraction[tri[2] as usize];
+                }
+            });
+    }
+
+    // Spread the river-network signal into catchment-scale stains.
+    // Two-step morphology, per face, edge-clamped:
+    //   1. Max-filter (dilation) — propagates high-iron values from a
+    //      drainage centerline outward without diluting them, so the
+    //      stain reads as "this region is downstream of mafic
+    //      provinces" rather than "this is a riverbank."
+    //   2. Box blur — softens the dilation's hard edges so the stain
+    //      fades into surrounding non-iron terrain instead of stopping
+    //      at a sharp boundary.
+    // ~30-texel dilation + ~13-texel blur sigma ≈ 70-80 texel stain
+    // width (~70-80 km on Thalos at 2048²) — floodplain to small-
+    // catchment scale.
+    dilate_iron_fraction(&mut builder.iron_fraction, /*radius=*/ 30);
+    smooth_iron_fraction_box_blur(
+        &mut builder.iron_fraction,
+        /*radius=*/ 10,
+        /*passes=*/ 2,
+    );
+}
+
+/// Separable max-filter (morphological dilation), per face, edge-
+/// clamped. Each output pixel is the max over a (2R+1)² window. Max is
+/// associative over rectangles, so horizontal-then-vertical passes give
+/// the correct 2D result.
+fn dilate_iron_fraction(cube: &mut crate::cubemap::Cubemap<f32>, radius: i32) {
+    let res = cube.resolution() as i32;
+    if res == 0 || radius <= 0 {
+        return;
+    }
+
+    for face in CubemapFace::ALL {
+        let data = cube.face_data_mut(face);
+        let src = data.to_vec();
+        let mut tmp = vec![0.0f32; data.len()];
+
+        // Horizontal pass: src → tmp.
+        tmp.par_chunks_mut(res as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let row_offset = y * res as usize;
+                for x in 0..res {
+                    let x0 = (x - radius).max(0);
+                    let x1 = (x + radius).min(res - 1);
+                    let mut m = src[row_offset + x0 as usize];
+                    for sx in (x0 + 1)..=x1 {
+                        let v = src[row_offset + sx as usize];
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    row[x as usize] = m;
+                }
+            });
+
+        // Vertical pass: tmp → data.
+        data.par_chunks_mut(res as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let y_i = y as i32;
+                let y0 = (y_i - radius).max(0);
+                let y1 = (y_i + radius).min(res - 1);
+                for x in 0..res {
+                    let mut m = tmp[(y0 as usize) * res as usize + x as usize];
+                    for sy in (y0 + 1)..=y1 {
+                        let v = tmp[(sy as usize) * res as usize + x as usize];
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    row[x as usize] = m;
+                }
+            });
+    }
+}
+
+/// Iterated separable box-blur, per face, edge-clamped. Used after
+/// dilation to soften the binary-feeling stain edges into a fade.
+fn smooth_iron_fraction_box_blur(
+    cube: &mut crate::cubemap::Cubemap<f32>,
+    radius: i32,
+    passes: u32,
+) {
+    let res = cube.resolution() as i32;
+    if res == 0 || radius <= 0 || passes == 0 {
+        return;
+    }
+
+    for face in CubemapFace::ALL {
+        let data = cube.face_data_mut(face);
+        let mut buf = data.to_vec();
+        let mut tmp = vec![0.0f32; data.len()];
+        for _ in 0..passes {
+            // Horizontal pass: buf → tmp.
+            tmp.par_chunks_mut(res as usize)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    let row_offset = y * res as usize;
+                    for x in 0..res {
+                        let mut sum = 0.0f32;
+                        let mut count = 0u32;
+                        let x0 = (x - radius).max(0);
+                        let x1 = (x + radius).min(res - 1);
+                        for sx in x0..=x1 {
+                            sum += buf[row_offset + sx as usize];
+                            count += 1;
+                        }
+                        row[x as usize] = sum / count as f32;
+                    }
+                });
+            // Vertical pass: tmp → buf.
+            buf.par_chunks_mut(res as usize)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    let y_i = y as i32;
+                    let y0 = (y_i - radius).max(0);
+                    let y1 = (y_i + radius).min(res - 1);
+                    for x in 0..res {
+                        let mut sum = 0.0f32;
+                        let mut count = 0u32;
+                        for sy in y0..=y1 {
+                            sum += tmp[(sy as usize) * res as usize + x as usize];
+                            count += 1;
+                        }
+                        row[x as usize] = sum / count as f32;
+                    }
+                });
+        }
+        data.copy_from_slice(&buf);
+    }
+}
+
 /// Paint the debug albedo by barycentric-blending per-vertex colors
 /// across each triangle. Two reasons not to use per-texel nearest-
 /// vertex lookup here:
@@ -662,11 +849,12 @@ fn paint_materials_debug_albedo(
     let rust = palette[MAT_IRON_RUST_FLOODPLAIN as usize].albedo;
 
     // Iron overlay fade window: fully-peat at 0 iron-fraction, fully-
-    // rust around 2.5× the classifier threshold. This gives a smooth
-    // ramp so mildly-iron-stained floodplains read as warm peat and
-    // heavily-stained ones read as saturated rust, with no visible
-    // edge at the classifier's binary cutoff.
-    let iron_ramp_top = iron_fraction_threshold * 2.5;
+    // rust around 3.5× the classifier threshold. Wider window than
+    // the original 2.5× so the staining fades in gradually across the
+    // drainage network — the binary classifier cutoff sits well below
+    // the ramp's centre, and only catchments that clear the threshold
+    // by a comfortable margin paint as fully-saturated rust.
+    let iron_ramp_top = iron_fraction_threshold * 3.5;
 
     // Pre-compute per-vertex final colour. For peat/rust vertices we
     // mix peat → rust by smoothstepped iron-fraction; every other

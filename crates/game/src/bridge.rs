@@ -12,12 +12,15 @@
 //!    on frame N — no worker-thread lag.
 //! 3. Maps keyboard input to warp controls.
 
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics::maneuver::ManeuverNode;
 
 use crate::SimStage;
 use crate::maneuver::ManeuverPlan;
+use crate::navigation::{NavigationState, compute_attitude_control};
 use crate::rendering::SimulationState;
+use crate::target::TargetBody;
 
 pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("advance_simulation").entered();
@@ -65,6 +68,56 @@ fn update_prediction(mut sim: ResMut<SimulationState>) {
     sim.simulation.recompute_prediction();
 }
 
+/// Sample player attitude input + active navigation mode and push the
+/// resulting [`ControlInput`] into the simulation.
+///
+/// Player keys (W/S pitch, A/D yaw, Q/E roll) override any active
+/// [`NavigationMode`] for the duration they're held; T toggles SAS for
+/// free-flight rate damping. Mode-specific autopilot logic lives in
+/// [`compute_attitude_control`] — this system just collects inputs.
+pub fn handle_attitude_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    nav: Res<NavigationState>,
+    target: Res<TargetBody>,
+    plan: Res<ManeuverPlan>,
+    mut sim: ResMut<SimulationState>,
+    mut sas_enabled: Local<bool>,
+) {
+    if keys.just_pressed(KeyCode::KeyT) {
+        *sas_enabled = !*sas_enabled;
+    }
+
+    let mut player_torque = DVec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) {
+        player_torque.x += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        player_torque.x -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        player_torque.z += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        player_torque.z -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyE) {
+        player_torque.y += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyQ) {
+        player_torque.y -= 1.0;
+    }
+
+    let control = compute_attitude_control(
+        player_torque,
+        nav.mode,
+        &target,
+        &plan,
+        &sim.simulation,
+        *sas_enabled,
+    );
+    sim.simulation.set_control(control);
+}
+
 /// Handle keyboard input to adjust the warp multiplier.
 ///
 /// - `.`      -- increase to next warp level
@@ -72,8 +125,6 @@ fn update_prediction(mut sim: ResMut<SimulationState>) {
 /// - `\`      -- reset to 1x
 /// - `Space`  -- toggle pause (0x) / resume previous level
 pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<SimulationState>) {
-    let prev = sim.simulation.warp.speed();
-
     if keys.just_pressed(KeyCode::Period) {
         sim.simulation.warp.increase();
     } else if keys.just_pressed(KeyCode::Comma) {
@@ -82,11 +133,6 @@ pub fn handle_warp_controls(keys: Res<ButtonInput<KeyCode>>, mut sim: ResMut<Sim
         sim.simulation.warp.reset();
     } else if keys.just_pressed(KeyCode::Space) {
         sim.simulation.warp.toggle_pause();
-    }
-
-    let new = sim.simulation.warp.speed();
-    if (new - prev).abs() > 0.5 {
-        info!("[bridge] warp speed: {}", sim.simulation.warp.label());
     }
 }
 
@@ -152,6 +198,7 @@ impl Plugin for BridgePlugin {
             Update,
             (
                 handle_warp_controls,
+                handle_attitude_controls,
                 advance_simulation,
                 sync_maneuver_plan,
                 update_prediction,

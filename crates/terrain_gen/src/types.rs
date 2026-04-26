@@ -222,6 +222,14 @@ pub struct BiomeParams {
     pub tonal_amp: f32,
     /// Surface roughness (affects shading model).
     pub roughness: f32,
+    /// Fraction of bare ground visible through this biome's surface
+    /// cover. 1.0 = fully exposed regolith (desert, badlands, tundra).
+    /// 0.0 = full canopy hiding the substrate (closed-canopy forest).
+    /// Used as a multiplier on `IronOverlay` strength so iron-rich
+    /// catchments stain visibly through deserts but stay buried under
+    /// rainforest. Default 1.0 keeps existing palettes back-compatible.
+    #[serde(default = "default_iron_visibility")]
+    pub iron_visibility: f32,
 }
 
 fn default_tint() -> [f32; 3] {
@@ -229,4 +237,7 @@ fn default_tint() -> [f32; 3] {
 }
 fn default_tonal() -> f32 {
     0.18
+}
+fn default_iron_visibility() -> f32 {
+    1.0
 }

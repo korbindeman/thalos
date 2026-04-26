@@ -49,6 +49,8 @@ use crate::types::Material;
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PaintBiomes {
     #[serde(default)]
+    pub iron_overlay: Option<IronOverlay>,
+    #[serde(default)]
     pub rock_overlay: Option<RockOverlay>,
     #[serde(default)]
     pub snow_overlay: Option<SnowOverlay>,
@@ -78,7 +80,37 @@ pub struct RockOverlay {
     /// Per-texel tonal amplitude for the rock colour (fbm-based, fraction).
     pub tonal_amp: f32,
     /// Rock biome fbm frequency. Keep in-scale with biome tonal_frequency.
-    pub tonal_frequency: f64,
+    pub tonal_frequency: f32,
+}
+
+/// Stain land texels with rust where the upstream catchment carried
+/// iron-rich source rock — read from `BodyBuilder::iron_fraction`,
+/// populated by SurfaceMaterials. Coverage = smoothstep(min, max,
+/// iron_fraction) × biome.iron_visibility × max_strength, so closed-
+/// canopy biomes (rainforest) hide the rust while exposed-ground
+/// biomes (desert, badlands, tundra) show it. Applied between the
+/// biome base and the rock overlay so bare-rock exposure paints
+/// cleanly on top of stained regolith.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IronOverlay {
+    /// Iron-fraction below which no staining is applied. Pairs naturally
+    /// with `SurfaceMaterials::iron_fraction_threshold` — the classifier's
+    /// peat/rust cutoff.
+    pub min_iron_fraction: f32,
+    /// Iron-fraction at and above which staining is at full strength.
+    pub max_iron_fraction: f32,
+    /// Maximum blend toward `color` on a fully-exposed biome
+    /// (`iron_visibility = 1.0`) at saturating iron fraction. Caps at
+    /// 1.0 = pure rust; smaller keeps even badlands somewhere between
+    /// biome base and rust.
+    pub max_strength: f32,
+    /// Rust colour (linear sRGB).
+    pub color: [f32; 3],
+    /// Tonal modulation amplitude (fbm). Breaks the rust patches into
+    /// non-uniform tints so they don't read as a flat slab.
+    pub tonal_amp: f32,
+    /// Tonal modulation frequency.
+    pub tonal_frequency: f32,
 }
 
 /// Blend a snow/ice colour in on top of land. Coverage is driven by
@@ -94,7 +126,7 @@ pub struct SnowOverlay {
     /// Amplitude of the fbm jitter on the effective temperature (°C).
     /// 2–6 °C keeps the edge lobed without eating large swathes of land.
     pub jitter_amp_c: f32,
-    pub jitter_frequency: f64,
+    pub jitter_frequency: f32,
     /// Land snow colour.
     pub land_color: [f32; 3],
     /// Tonal amp on the snow colour (fbm-modulated). Small — snow is
@@ -120,8 +152,8 @@ pub struct SlopeAO {
 /// ±2 texel CPU smoothing, ~10 km on Thalos at 2048²; bilinear filtering
 /// on the GPU adds another ~1 texel, so biome transitions span ~25 km.
 const KERNEL_OFFSET_TEXELS: f32 = 2.0;
-const TONAL_FREQ_LO: f64 = 3.5;
-const TONAL_FREQ_HI: f64 = 14.0;
+const TONAL_FREQ_LO: f32 = 3.5;
+const TONAL_FREQ_HI: f32 = 14.0;
 const TONAL_HI_MIX: f32 = 0.35;
 
 impl Stage for PaintBiomes {
@@ -193,6 +225,8 @@ impl Stage for PaintBiomes {
         let biome_map = &builder.biome_map;
         let height_field = &builder.height_contributions.height;
         let temperature_c = &builder.temperature_c;
+        let iron_field = &builder.iron_fraction;
+        let iron_overlay = self.iron_overlay.clone();
         let rock_overlay = self.rock_overlay.clone();
         let snow_overlay = self.snow_overlay.clone();
         let slope_ao = self.slope_ao.clone();
@@ -209,6 +243,7 @@ impl Stage for PaintBiomes {
                 let h_face = height_field.face_data(face);
                 let t_face = temperature_c.face_data(face);
                 let s_face = slope_field.face_data(face);
+                let iron_face = iron_field.face_data(face);
 
                 for y in 0..res {
                     for x in 0..res {
@@ -265,6 +300,46 @@ impl Stage for PaintBiomes {
                         // `sea_level_m`, so no ocean tint is baked.
                         let is_ocean = height_m <= 0.0;
 
+                        // ── B0. Iron-stain overlay (land only) ──
+                        //        Sits between biome base and rock
+                        //        exposure: stained regolith is the
+                        //        substrate; bare-rock outcrops paint
+                        //        cleanly on top via the rock overlay.
+                        if !is_ocean && let Some(io) = &iron_overlay {
+                            let iron_f = iron_face[idx];
+                            let raw_cov = smoothstep(
+                                io.min_iron_fraction,
+                                io.max_iron_fraction,
+                                iron_f,
+                            );
+                            let iron_cov = raw_cov
+                                * center_biome.iron_visibility.clamp(0.0, 1.0)
+                                * io.max_strength.clamp(0.0, 1.0);
+                            if iron_cov > 0.0 {
+                                let iron_tone_seed = (seed as u32) ^ 0xC5B6_2E91;
+                                let iron_n = fbm3(
+                                    dir.x * io.tonal_frequency,
+                                    dir.y * io.tonal_frequency,
+                                    dir.z * io.tonal_frequency,
+                                    iron_tone_seed,
+                                    4,
+                                    0.55,
+                                    2.1,
+                                );
+                                let iron_scale = (1.0 + io.tonal_amp * iron_n).max(0.0);
+                                let iron_c = [
+                                    io.color[0] * iron_scale,
+                                    io.color[1] * iron_scale,
+                                    io.color[2] * iron_scale,
+                                ];
+                                color = [
+                                    lerp(color[0], iron_c[0], iron_cov),
+                                    lerp(color[1], iron_c[1], iron_cov),
+                                    lerp(color[2], iron_c[2], iron_cov),
+                                ];
+                            }
+                        }
+
                         // ── B. Rock exposure overlay (land only) ──
                         if !is_ocean && let Some(ro) = &rock_overlay {
                             let slope_cov = smoothstep(ro.slope_start, ro.slope_full, slope);
@@ -277,16 +352,16 @@ impl Stage for PaintBiomes {
                             let rock_cov = (slope_cov + height_cov).clamp(0.0, 1.0);
                             // Per-texel rock tonal modulation so bare rock
                             // isn't a single flat slab either.
-                            let rock_tone_seed = seed ^ 0xD7C4_1A3B_92F0_E465;
+                            let rock_tone_seed = (seed as u32) ^ 0x92F0_E465;
                             let rock_n = fbm3(
-                                dir.x as f64 * ro.tonal_frequency,
-                                dir.y as f64 * ro.tonal_frequency,
-                                dir.z as f64 * ro.tonal_frequency,
+                                dir.x * ro.tonal_frequency,
+                                dir.y * ro.tonal_frequency,
+                                dir.z * ro.tonal_frequency,
                                 rock_tone_seed,
                                 4,
                                 0.55,
                                 2.1,
-                            ) as f32;
+                            );
                             let rock_scale = (1.0 + ro.tonal_amp * rock_n).max(0.0);
                             let rock_c = [
                                 ro.color[0] * rock_scale,
@@ -304,30 +379,30 @@ impl Stage for PaintBiomes {
                         //       Sea ice is a shader-layer concern; below
                         //       sea level we leave the biome color alone.
                         if !is_ocean && let Some(so) = &snow_overlay {
-                            let snow_seed = seed ^ 0xB3F0_71A4_9C28_DE15;
+                            let snow_seed = (seed as u32) ^ 0x9C28_DE15;
                             let t_jitter = fbm3(
-                                dir.x as f64 * so.jitter_frequency,
-                                dir.y as f64 * so.jitter_frequency,
-                                dir.z as f64 * so.jitter_frequency,
+                                dir.x * so.jitter_frequency,
+                                dir.y * so.jitter_frequency,
+                                dir.z * so.jitter_frequency,
                                 snow_seed,
                                 4,
                                 0.55,
                                 2.1,
-                            ) as f32;
+                            );
                             let t_eff = temp_c + t_jitter * so.jitter_amp_c;
                             // Fully snow at temp <= temp_full, none at temp >= temp_none.
                             let snow_cov = smoothstep(so.temp_none_c, so.temp_full_c, t_eff);
                             if snow_cov > 0.0 {
-                                let snow_tone_seed = seed ^ 0x5F19_A6D2_30C7_4E83;
+                                let snow_tone_seed = (seed as u32) ^ 0x30C7_4E83;
                                 let snow_n = fbm3(
-                                    dir.x as f64 * (so.jitter_frequency * 2.0),
-                                    dir.y as f64 * (so.jitter_frequency * 2.0),
-                                    dir.z as f64 * (so.jitter_frequency * 2.0),
+                                    dir.x * (so.jitter_frequency * 2.0),
+                                    dir.y * (so.jitter_frequency * 2.0),
+                                    dir.z * (so.jitter_frequency * 2.0),
                                     snow_tone_seed,
                                     3,
                                     0.55,
                                     2.1,
-                                ) as f32;
+                                );
                                 let snow_scale = (1.0 + so.tonal_amp * snow_n).max(0.0);
                                 let snow_c = [
                                     so.land_color[0] * snow_scale,
@@ -355,27 +430,27 @@ impl Stage for PaintBiomes {
                         // slab even without overlays. The center biome's id
                         // keys the seed so adjacent biomes don't share a
                         // pattern.
-                        let bs = seed
-                            ^ 0xA17B_5C2D_4E9F_1357
-                            ^ ((center_bid as u64).wrapping_mul(0xB3F9_4C78_CE32_1A5D));
+                        let bs: u32 = (seed as u32)
+                            ^ 0x4E9F_1357
+                            ^ (center_bid as u32).wrapping_mul(0xCE32_1A5D);
                         let n_lo = fbm3(
-                            dir.x as f64 * TONAL_FREQ_LO,
-                            dir.y as f64 * TONAL_FREQ_LO,
-                            dir.z as f64 * TONAL_FREQ_LO,
+                            dir.x * TONAL_FREQ_LO,
+                            dir.y * TONAL_FREQ_LO,
+                            dir.z * TONAL_FREQ_LO,
                             bs,
                             4,
                             0.55,
                             2.1,
-                        ) as f32;
+                        );
                         let n_hi = fbm3(
-                            dir.x as f64 * TONAL_FREQ_HI,
-                            dir.y as f64 * TONAL_FREQ_HI,
-                            dir.z as f64 * TONAL_FREQ_HI,
-                            bs.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                            dir.x * TONAL_FREQ_HI,
+                            dir.y * TONAL_FREQ_HI,
+                            dir.z * TONAL_FREQ_HI,
+                            bs.wrapping_mul(0x7F4A_7C15),
                             3,
                             0.5,
                             2.3,
-                        ) as f32;
+                        );
                         let n = n_lo * (1.0 - TONAL_HI_MIX) + n_hi * TONAL_HI_MIX;
                         let tonal = (1.0 + center_biome.tonal_amp * n).max(0.0);
 

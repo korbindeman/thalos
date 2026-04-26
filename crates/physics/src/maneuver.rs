@@ -125,12 +125,38 @@ pub fn delta_v_to_world(
     delta_v.x * prograde + delta_v.y * normal + delta_v.z * radial
 }
 
-/// Compute burn duration given delta-v magnitude and thrust acceleration.
-pub fn burn_duration(delta_v_magnitude: f64, thrust_acceleration: f64) -> f64 {
-    if thrust_acceleration <= 0.0 {
+/// Burn time required to achieve `delta_v_magnitude` of Δv given constant
+/// thrust and propellant mass flow, with mass decreasing as fuel burns
+/// (Tsiolkovsky inverse). Capped at the time when propellant exhausts:
+/// a burn that asks for more Δv than the ship can deliver returns the
+/// time to drain the tanks, not the unachievable Tsiolkovsky time.
+///
+/// Derivation: under constant thrust F and mass-flow ṁ, exhaust velocity
+/// `ve = F/ṁ`. Mass at time `t` after burn start is `m(t) = m0 - ṁ·t`.
+/// Tsiolkovsky gives `Δv = ve · ln(m0 / m(t))`, so
+///   `t = (m0 / ṁ) · (1 - exp(-Δv / ve))`.
+/// Propellant exhausts when `m(t) = m_dry`, i.e. at
+///   `t_max = (m0 - m_dry) / ṁ`.
+///
+/// Returns 0 for any degenerate input (no thrust, no flow, no mass, or
+/// already at/below dry mass).
+pub fn burn_duration(
+    delta_v_magnitude: f64,
+    thrust_n: f64,
+    mass_kg: f64,
+    mass_flow_kg_per_s: f64,
+    dry_mass_kg: f64,
+) -> f64 {
+    if thrust_n <= 0.0 || mass_flow_kg_per_s <= 0.0 || mass_kg <= dry_mass_kg {
         return 0.0;
     }
-    delta_v_magnitude / thrust_acceleration
+    let ve = thrust_n / mass_flow_kg_per_s;
+    if ve <= 0.0 {
+        return 0.0;
+    }
+    let requested = (mass_kg / mass_flow_kg_per_s) * (1.0 - (-delta_v_magnitude / ve).exp());
+    let max_until_dry = (mass_kg - dry_mass_kg) / mass_flow_kg_per_s;
+    requested.min(max_until_dry).max(0.0)
 }
 
 #[cfg(test)]
@@ -181,10 +207,63 @@ mod tests {
     }
 
     #[test]
-    fn test_burn_duration_basic() {
-        assert!((burn_duration(100.0, 10.0) - 10.0).abs() < f64::EPSILON);
-        assert!((burn_duration(0.0, 10.0)).abs() < f64::EPSILON);
-        assert!((burn_duration(100.0, 0.0)).abs() < f64::EPSILON);
+    fn test_burn_duration_zero_dv_is_instant() {
+        assert!(burn_duration(0.0, 250_000.0, 9000.0, 75.0, 3200.0).abs() < f64::EPSILON);
     }
 
+    #[test]
+    fn test_burn_duration_degenerate_inputs_return_zero() {
+        assert_eq!(burn_duration(100.0, 0.0, 9000.0, 75.0, 3200.0), 0.0);
+        assert_eq!(burn_duration(100.0, 250_000.0, 9000.0, 0.0, 3200.0), 0.0);
+        // Already at dry mass — no propellant left to burn.
+        assert_eq!(burn_duration(100.0, 250_000.0, 3200.0, 75.0, 3200.0), 0.0);
+        assert_eq!(burn_duration(100.0, 250_000.0, 100.0, 75.0, 3200.0), 0.0);
+    }
+
+    #[test]
+    fn test_burn_duration_at_one_ve_matches_tsiolkovsky_inverse() {
+        // At Δv = ve, expect t = (m0 / ṁ) · (1 - 1/e). Pick dry low enough
+        // that propellant doesn't bind.
+        let thrust = 250_000.0;
+        let flow = 75.0;
+        let m0 = 9000.0;
+        let dry = 100.0;
+        let ve = thrust / flow;
+        let expected = (m0 / flow) * (1.0 - (-1.0_f64).exp());
+        let got = burn_duration(ve, thrust, m0, flow, dry);
+        assert!((got - expected).abs() < 1e-9, "got {got}, want {expected}");
+    }
+
+    #[test]
+    fn test_burn_duration_small_dv_matches_constant_accel_limit() {
+        // Δv ≪ ve → burn duration ≈ Δv / (F/m₀) (mass change negligible).
+        let thrust = 250_000.0;
+        let flow = 75.0;
+        let m0 = 9000.0;
+        let dry = 3200.0;
+        let dv = 1.0; // very small
+        let constant_accel_estimate = dv / (thrust / m0);
+        let got = burn_duration(dv, thrust, m0, flow, dry);
+        assert!(
+            (got - constant_accel_estimate).abs() / constant_accel_estimate < 1e-3,
+            "got {got}, want ≈ {constant_accel_estimate}"
+        );
+    }
+
+    #[test]
+    fn test_burn_duration_caps_at_propellant_exhaustion() {
+        // Apollo-ish ship: 250 kN, ṁ = 75 kg/s, m0 = 9000, m_dry = 3200.
+        // ve = 3333 m/s, Δv_max = ve · ln(9000/3200) ≈ 3447 m/s.
+        // Asking for 10x that should clip to (m0 − m_dry)/ṁ = 5800/75 ≈ 77.33 s.
+        let thrust = 250_000.0;
+        let flow = 75.0;
+        let m0 = 9000.0;
+        let dry = 3200.0;
+        let expected_max = (m0 - dry) / flow;
+        let got = burn_duration(40_000.0, thrust, m0, flow, dry);
+        assert!(
+            (got - expected_max).abs() < 1e-9,
+            "got {got}, want {expected_max} (propellant-limited)"
+        );
+    }
 }

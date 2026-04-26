@@ -10,8 +10,8 @@ use super::super::state::{
     ArrowHitbox, InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, NodeSlideSphere,
     SELECT_THRESHOLD_PX, SelectedNode,
 };
-use crate::camera::OrbitCamera;
-use crate::coords::RenderOrigin;
+use crate::camera::ActiveCamera;
+use crate::coords::{RenderOrigin, WorldScale};
 use crate::flight_plan_view::FlightPlanView;
 use crate::rendering::{FrameBodyStates, SimulationState};
 
@@ -23,10 +23,11 @@ pub(in crate::maneuver) fn maneuver_input(
         Res<Time>,
     ),
     windows: Query<&Window, With<PrimaryWindow>>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
     sim: Option<Res<SimulationState>>,
     body_states: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
+    scale: Res<WorldScale>,
     flight_plan_view: Res<FlightPlanView>,
     plan: ResMut<ManeuverPlan>,
     mut mode: ResMut<InteractionMode>,
@@ -182,6 +183,7 @@ pub(in crate::maneuver) fn maneuver_input(
                         node_time,
                         states,
                         &origin,
+                        &scale,
                         &sim.system,
                         sim.ephemeris.as_ref(),
                         &flight_plan_view,
@@ -210,6 +212,7 @@ pub(in crate::maneuver) fn maneuver_input(
                 prediction,
                 states,
                 &origin,
+                &scale,
                 &sim.system,
                 sim.ephemeris.as_ref(),
                 &flight_plan_view,
@@ -242,6 +245,7 @@ pub(in crate::maneuver) fn maneuver_input(
             prediction,
             states,
             &origin,
+            &scale,
             &sim.system,
             sim.ephemeris.as_ref(),
             &flight_plan_view,

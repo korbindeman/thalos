@@ -135,6 +135,7 @@ impl Stage for SpaceWeather {
                 tint: [1.0, 1.0, 1.0],
                 tonal_amp: 0.18,
                 roughness: 0.8,
+                iron_visibility: 1.0,
             }]
         } else {
             builder.biomes.clone()
@@ -246,7 +247,7 @@ impl Stage for SpaceWeather {
                 // Highland biomes carry their own `tonal_amp`; each biome
                 // uses a private noise channel so neighboring biomes don't
                 // share a pattern.
-                const TONAL_FREQ: f64 = 3.5;
+                const TONAL_FREQ: f32 = 3.5;
                 let inv_res = 1.0 / res as f32;
                 for y in 0..res {
                     for x in 0..res {
@@ -263,19 +264,19 @@ impl Stage for SpaceWeather {
                             // Biome-private noise channel: xor the biome id
                             // into the seed so each biome gets an independent
                             // tonal field rather than sharing one pattern.
-                            let bs = seed
-                                ^ 0xA17B_5C2D_4E9F_1357
-                                ^ ((biome_map.get(face, x, y) as u64)
-                                    .wrapping_mul(0xB3F9_4C78_CE32_1A5D));
+                            let bs: u32 = (seed as u32)
+                                ^ 0x4E9F_1357
+                                ^ (biome_map.get(face, x, y) as u32)
+                                    .wrapping_mul(0xCE32_1A5D);
                             let n = fbm3(
-                                dir.x as f64 * TONAL_FREQ,
-                                dir.y as f64 * TONAL_FREQ,
-                                dir.z as f64 * TONAL_FREQ,
+                                dir.x * TONAL_FREQ,
+                                dir.y * TONAL_FREQ,
+                                dir.z * TONAL_FREQ,
                                 bs,
                                 4,
                                 0.55,
                                 2.1,
-                            ) as f32;
+                            );
                             let scale = 1.0 + biome.tonal_amp * n;
                             // Fold in megabasin albedo field: interior
                             // darkening and ejecta streaks ride on top of

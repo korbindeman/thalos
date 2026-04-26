@@ -2,18 +2,23 @@
 //! parts as children of a [`PlayerShip`] root, and keeps the root's world
 //! position in sync with the physics ship state each frame.
 //!
-//! The root carries `Transform::from_scale(RENDER_SCALE)` so the parts,
-//! authored in meters, compose into the solar-system-wide render-units
-//! coordinate space at their real physical size. Part meshes and the
-//! [`ShipPartMaterial`] uniforms are rebuilt whenever `AttachNodes`
-//! changes and kept in sync via ported versions of the editor's systems.
+//! Ship parts are authored in metres. The root's scale is kept at
+//! [`Vec3::ONE`]; in ship view the global [`WorldScale`] is `1.0`, so a
+//! part's metre-sized mesh vertices end up in real-metre render units.
+//! In map view [`WorldScale`] flips to `1e-6` and the ship collapses to
+//! sub-unit size, but ship entities carry [`HideInMapView`] so they are
+//! hidden anyway. Part meshes and the [`ShipPartMaterial`] uniforms are
+//! rebuilt whenever `AttachNodes` changes and kept in sync via ported
+//! versions of the editor's systems.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::math::DVec3;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
+use thalos_physics::types::ShipParameters;
 use thalos_ship_rendering::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
 };
@@ -22,11 +27,11 @@ use thalos_shipyard::{
     Ship, ShipBlueprint, ShipyardPlugin,
 };
 
+use crate::fuel::ShipFuelParams;
+
 use crate::SimStage;
-use crate::camera::CameraFocus;
-use crate::rendering::{
-    PlayerShip, RENDER_SCALE, RenderOrigin, SimulationState, to_render_pos,
-};
+use crate::camera::{CameraFocus, CameraTargetOffset};
+use crate::rendering::{PlayerShip, RenderOrigin, SimulationState, to_render_pos};
 use crate::view::{HideInMapView, ViewMode};
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
@@ -51,6 +56,7 @@ impl Plugin for ShipViewPlugin {
                     rebuild_ship_visuals,
                     update_ship_part_transforms.after(rebuild_ship_visuals),
                     update_ship_part_shader_params.after(rebuild_ship_visuals),
+                    update_ship_camera_offset.after(update_ship_part_transforms),
                     sync_view_mode_changed
                         .run_if(resource_changed::<ViewMode>)
                         .before(crate::SimStage::Physics),
@@ -62,8 +68,11 @@ impl Plugin for ShipViewPlugin {
     }
 }
 
+/// Marker on the child mesh entity rendered for each ship part. The
+/// engine-tint system in `crate::engine` queries this to find the
+/// material it should mutate.
 #[derive(Component)]
-struct PartVisual;
+pub(crate) struct PartVisual;
 
 #[derive(Component, Clone)]
 struct PartShaderHandle(Handle<ShipPartMaterial>);
@@ -75,10 +84,9 @@ pub struct PlayerShipEntity(pub Entity);
 
 fn spawn_player_ship(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
     view: Res<ViewMode>,
-    sim: Res<SimulationState>,
+    mut sim: ResMut<SimulationState>,
+    mut fuel_params: ResMut<ShipFuelParams>,
 ) {
     let ron_path = PathBuf::from("ships/apollo.ron");
     let text = match std::fs::read_to_string(&ron_path) {
@@ -96,6 +104,37 @@ fn spawn_player_ship(
         }
     };
 
+    // Push the ship's MOI + reaction-wheel torque + propulsion stats into
+    // the physics simulation so attitude integration and the rocket-equation
+    // burn model know what we're flying. Also populate `ShipFuelParams` so
+    // the fuel-drain system knows how fast to deplete tanks. v1 computes
+    // these once at spawn — no staging or in-flight design changes to
+    // react to yet.
+    let stats = blueprint.stats();
+    sim.simulation.set_ship_params(ShipParameters {
+        moment_of_inertia: stats.moment_of_inertia_kg_m2,
+        max_torque: DVec3::splat(stats.max_reaction_torque_n_m),
+        thrust_n: stats.total_thrust_n,
+        mass_flow_kg_per_s: stats.mass_flow_kg_per_s,
+        dry_mass_kg: stats.dry_mass_kg,
+    });
+    sim.simulation.set_ship_mass(stats.wet_mass_kg());
+    fuel_params.dry_mass_kg = stats.dry_mass_kg;
+    fuel_params.mass_flow_kg_per_s = stats.mass_flow_kg_per_s;
+    fuel_params.reactant_fractions = stats.reactant_fractions.clone();
+    info!(
+        "ship params: MOI = ({:.0}, {:.0}, {:.0}) kg·m², max torque = {:.0} N·m/axis, F = {:.0} N, m_dry = {:.0} kg, m₀ = {:.0} kg, ṁ = {:.2} kg/s, a₀ = {:.2} m/s²",
+        stats.moment_of_inertia_kg_m2.x,
+        stats.moment_of_inertia_kg_m2.y,
+        stats.moment_of_inertia_kg_m2.z,
+        stats.max_reaction_torque_n_m,
+        stats.total_thrust_n,
+        stats.dry_mass_kg,
+        stats.wet_mass_kg(),
+        stats.mass_flow_kg_per_s,
+        stats.current_acceleration(),
+    );
+
     let ship_entity = blueprint.spawn(&mut commands);
     info!(
         "spawned ship blueprint '{}' with {} parts",
@@ -103,10 +142,11 @@ fn spawn_player_ship(
         blueprint.parts.len(),
     );
 
-    let initial_pos = to_render_pos(sim.simulation.ship_state().position);
     // Visibility is driven by `apply_view_mode_visibility` via the
     // [`HideInMapView`] tag — start at whatever the tag implies for the
-    // current view.
+    // current view. Transform is overwritten every frame by
+    // `update_player_ship_world_position`, so the initial value is
+    // arbitrary.
     let initial_visibility = match *view {
         ViewMode::Map => Visibility::Hidden,
         ViewMode::Ship => Visibility::Inherited,
@@ -116,33 +156,15 @@ fn spawn_player_ship(
         .spawn((
             PlayerShip,
             HideInMapView,
-            Transform {
-                translation: initial_pos,
-                rotation: Quat::IDENTITY,
-                scale: Vec3::splat(RENDER_SCALE as f32),
-            },
+            Transform::IDENTITY,
             initial_visibility,
+            // Pivot the camera around the ship's centre of mass, recomputed
+            // every frame by `update_ship_camera_offset` so it tracks staging
+            // and design changes.
+            CameraTargetOffset::default(),
             Name::new("PlayerShip"),
         ))
         .id();
-
-    // DEBUG: bright emissive cube child at origin so we can see where
-    // PlayerShip renders even if the ship meshes don't.
-    let debug_cube = meshes.add(Cuboid::new(20.0, 20.0, 20.0));
-    let debug_mat = mats.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.0, 1.0),
-        emissive: LinearRgba::new(5.0, 0.0, 5.0, 1.0),
-        unlit: true,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(debug_cube),
-        MeshMaterial3d(debug_mat),
-        Transform::from_xyz(0.0, 20.0, 0.0),
-        NoFrustumCulling,
-        ChildOf(player_ship),
-        Name::new("DEBUG PlayerShip marker"),
-    ));
 
     commands.insert_resource(PlayerShipEntity(player_ship));
 
@@ -167,62 +189,38 @@ fn spawn_player_ship(
                 queue.extend(kids.iter().copied());
             }
         }
-        let count = to_reparent.len();
         for part in &to_reparent {
             world.entity_mut(player_ship).add_child(*part);
         }
-        // Verify the hierarchy actually took — log the parent we read back.
-        let mut actually_reparented = 0;
-        for part in &to_reparent {
-            if let Some(child_of) = world.get::<ChildOf>(*part)
-                && child_of.0 == player_ship
-            {
-                actually_reparented += 1;
-            }
-        }
-        info!(
-            "reparented {} ship parts under PlayerShip (verified {})",
-            count, actually_reparented
-        );
     });
 }
 
-/// Sync the [`PlayerShip`] root's translation to the physics ship state each
-/// frame, applying the same render-origin shift as celestial bodies.
+/// Sync the [`PlayerShip`] root's translation and orientation to the
+/// physics ship state each frame, applying the same render-origin shift
+/// as celestial bodies. Attitude is integrated by [`Simulation`] under
+/// player control; map view's billboard ship marker stays
+/// camera-aligned and is unaffected.
 fn update_player_ship_world_position(
     sim: Res<SimulationState>,
     origin: Res<RenderOrigin>,
-    view: Res<ViewMode>,
+    scale: Res<crate::coords::WorldScale>,
     mut query: Query<&mut Transform, With<PlayerShip>>,
-    mut frame: Local<u32>,
 ) {
     let Ok(mut transform) = query.single_mut() else {
         return;
     };
     transform.translation =
-        to_render_pos(sim.simulation.ship_state().position - origin.position);
-    *frame += 1;
-    // Log on view change + for ~5 frames afterward so we can see if origin
-    // catches up across frames.
-    if view.is_changed() || *frame % 60 == 1 {
-        info!(
-            "[f{}] {:?} PlayerShip.translation={:?} origin={:?} ship_pos={:?}",
-            *frame,
-            *view,
-            transform.translation,
-            origin.position,
-            sim.simulation.ship_state().position,
-        );
-    }
+        to_render_pos(sim.simulation.ship_state().position - origin.position, &scale);
+    transform.rotation = sim.simulation.attitude().orientation.as_quat();
 }
 
-/// React to [`ViewMode`] changes: switch the camera focus, show/hide the
-/// 3D ship, and swap the camera projection.
+/// React to [`ViewMode`] changes: switch the camera focus and snap it to
+/// the right anchor for each view. Projection no longer needs swapping —
+/// each camera carries its own fixed projection (see `spawn_camera`).
 fn sync_view_mode_changed(
     view: Res<ViewMode>,
     player_ship: Option<Res<PlayerShipEntity>>,
     mut focus: ResMut<CameraFocus>,
-    mut projection: Query<&mut Projection, With<crate::camera::OrbitCamera>>,
     bodies: Query<(Entity, &Name), With<crate::rendering::CelestialBody>>,
 ) {
     let Some(player_ship) = player_ship else {
@@ -231,30 +229,16 @@ fn sync_view_mode_changed(
 
     match *view {
         ViewMode::Ship => {
-            info!(
-                "entering ship view, focus target = {:?}, current dist = {}",
-                player_ship.0, focus.distance
-            );
             focus.target = Some(player_ship.0);
             focus.target_distance = SHIP_VIEW_INITIAL_DISTANCE_M;
             focus.distance = focus.distance.min(SHIP_VIEW_INITIAL_DISTANCE_M * 10.0);
-            if let Ok(mut proj) = projection.single_mut() {
-                *proj = Projection::Perspective(PerspectiveProjection {
-                    // Near clip in render units: 1 render unit = 1 000 km,
-                    // so 5e-7 = 50 cm — close enough to put the camera a
-                    // couple of metres off the hull without clipping.
-                    near: 5.0e-7,
-                    // Far clip at ~1e10 m (~0.07 AU). Distant bodies past
-                    // that will clip; acceptable MVP.
-                    far: 1.0e4,
-                    ..default()
-                });
-            }
+            // Default view: behind the ship, slight tilt above the horizon.
+            // Azimuth = π puts the camera at -forward, where `forward` is the
+            // gravity-frame's horizon-projected prograde — KSP's chase angle.
+            focus.azimuth = std::f32::consts::PI;
+            focus.elevation = 0.15;
         }
         ViewMode::Map => {
-            if let Ok(mut proj) = projection.single_mut() {
-                *proj = Projection::Perspective(PerspectiveProjection::default());
-            }
             // Snap focus back to the homeworld so the map view isn't
             // centred on a point-sized ship.
             if let Some((entity, _)) = bodies.iter().find(|(_, n)| n.as_str() == "Thalos") {
@@ -411,10 +395,6 @@ fn rebuild_ship_visuals(
     parts: VisualQuery,
     stale: Query<(), With<PartVisual>>,
 ) {
-    let rebuild_count = parts.iter().count();
-    if rebuild_count > 0 {
-        info!("rebuild_ship_visuals: processing {} parts", rebuild_count);
-    }
     for (e, nodes, pod, dec, adapter, tank, engine, children, part_shader, has_part_mat) in
         parts.iter()
     {
@@ -534,6 +514,99 @@ fn update_ship_part_transforms(
                 queue.push_back(child);
             }
         }
+    }
+}
+
+/// Visual-AABB centre of all parts in the [`PlayerShip`]'s local frame.
+/// Recomputed every frame so the camera pivot tracks staging and design
+/// changes.
+///
+/// KSP uses true mass-weighted Centre of Mass, but that depends on each
+/// part carrying realistic mass — including fuel. We don't model wet mass
+/// yet, so a mass-weighted CoM on the current Apollo blueprint sits inside
+/// the command pod (84% of dry mass). The geometric AABB centre always
+/// frames the visible stack regardless of mass distribution; switch to a
+/// proper wet-mass CoM once fuel mass is on the parts.
+fn update_ship_camera_offset(
+    ships: Query<(Entity, &Children), With<PlayerShip>>,
+    parts: Query<
+        (
+            &Transform,
+            &AttachNodes,
+            Option<&CommandPod>,
+            Option<&Decoupler>,
+            Option<&Adapter>,
+            Option<&FuelTank>,
+            Option<&Engine>,
+        ),
+        With<Part>,
+    >,
+    mut offsets: Query<&mut CameraTargetOffset>,
+) {
+    for (ship_entity, children) in &ships {
+        // Per-axis AABB. Y bounds use each part's visual height (the mesh is
+        // offset by `-h/2` from the part transform, so it spans `[y-h, y]`).
+        // X/Z bounds approximate the silhouette via each part's outer radius.
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        let mut hits = 0;
+        for child in children.iter() {
+            let Ok((t, nodes, pod, dec, adapter, tank, engine)) = parts.get(child) else {
+                continue;
+            };
+            let Some((height, radius)) =
+                visual_extent(nodes, pod, dec, adapter, tank, engine)
+            else {
+                continue;
+            };
+            let lo = Vec3::new(
+                t.translation.x - radius,
+                t.translation.y - height,
+                t.translation.z - radius,
+            );
+            let hi = Vec3::new(
+                t.translation.x + radius,
+                t.translation.y,
+                t.translation.z + radius,
+            );
+            min = min.min(lo);
+            max = max.max(hi);
+            hits += 1;
+        }
+        let centre = if hits > 0 { (min + max) * 0.5 } else { Vec3::ZERO };
+        if let Ok(mut offset) = offsets.get_mut(ship_entity) {
+            offset.0 = centre;
+        }
+    }
+}
+
+/// Visual `(height, max_radius)` for a part — mirrors [`visual_spec`]'s mesh
+/// dimensions. Returns `None` for parts with no body mesh.
+fn visual_extent(
+    nodes: &AttachNodes,
+    pod: Option<&CommandPod>,
+    dec: Option<&Decoupler>,
+    adapter: Option<&Adapter>,
+    tank: Option<&FuelTank>,
+    engine: Option<&Engine>,
+) -> Option<(f32, f32)> {
+    if let Some(p) = pod {
+        Some((p.diameter * 0.9, p.diameter * 0.5))
+    } else if dec.is_some() {
+        let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
+        Some((0.2, d * 0.5))
+    } else if let Some(a) = adapter {
+        let top_d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
+        let bot_d = a.target_diameter;
+        let h = ((top_d + bot_d) * 0.5).max(0.4);
+        Some((h, top_d.max(bot_d) * 0.5))
+    } else if let Some(t) = tank {
+        let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
+        Some((t.length, d * 0.5))
+    } else if let Some(e) = engine {
+        Some((e.diameter * 0.9, e.diameter * 0.5))
+    } else {
+        None
     }
 }
 

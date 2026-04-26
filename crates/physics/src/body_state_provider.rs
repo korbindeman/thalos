@@ -26,6 +26,10 @@ pub trait BodyStateProvider: Send + Sync {
     fn time_span(&self) -> f64;
 
     /// Convenience wrapper that allocates a `Vec` for the result.
+    ///
+    /// Hot paths should call [`Self::query_into`] with a reused buffer
+    /// instead — every call to this method allocates fresh, which adds up
+    /// fast in the per-sample event-detection scans.
     fn query(&self, time: f64) -> BodyStates {
         let mut out = Vec::with_capacity(self.body_count());
         self.query_into(time, &mut out);

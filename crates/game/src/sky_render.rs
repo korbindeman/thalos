@@ -18,7 +18,8 @@ use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin}
 use bevy::prelude::*;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, CompareFunction, RenderPipelineDescriptor, ShaderType,
+    SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
 
@@ -103,10 +104,15 @@ impl Material for StarsMaterial {
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
 
-        // Stars are "at infinity" — never write depth. They sit on
-        // the far plane thanks to the shader forcing clip z = 0.
+        // Stars are "at infinity." The vertex shader emits clip.z = 0
+        // (reverse-Z far plane); `GreaterEqual` passes against the
+        // cleared depth buffer (also 0) so stars fill empty sky, but
+        // fails against any real body (whose NDC z is strictly > 0), so
+        // planets occlude stars without any magic offset. Never write
+        // depth — stars must not occlude one another or later geometry.
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.depth_write_enabled = false;
+            depth.depth_compare = CompareFunction::GreaterEqual;
         }
 
         Ok(())
@@ -271,8 +277,11 @@ impl Material for GalaxyMaterial {
             Mesh::ATTRIBUTE_COLOR.at_shader_location(4),
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
+        // See `StarsMaterial::specialize` — same reverse-Z far-plane
+        // treatment.
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.depth_write_enabled = false;
+            depth.depth_compare = CompareFunction::GreaterEqual;
         }
         Ok(())
     }
@@ -289,7 +298,7 @@ struct GalaxyMesh;
 fn update_galaxy_uniform(
     exposure: Res<CameraExposure>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    projections: Query<&Projection, With<crate::camera::OrbitCamera>>,
+    projections: Query<&Projection, With<crate::camera::ActiveCamera>>,
     handles: Query<&MeshMaterial3d<GalaxyMaterial>, With<GalaxyMesh>>,
     mut materials: ResMut<Assets<GalaxyMaterial>>,
 ) {
