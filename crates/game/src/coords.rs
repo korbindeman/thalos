@@ -52,12 +52,12 @@ pub fn both_view_layers() -> RenderLayers {
     RenderLayers::from_layers(&[MAP_LAYER, SHIP_LAYER])
 }
 
-/// Metres → render-units scale factor. Mutated on view change; read by
-/// every system that needs to place something in the scene.
+/// Metres → render-units scale factor for **map-view** systems
+/// (orbit trails, maneuver UI, body parent transforms). Always
+/// [`MAP_SCALE`]; the field is kept as a resource only so existing
+/// consumers don't all need to migrate to a `const` reference at once.
 ///
-/// **Deprecated:** systems should use [`MAP_SCALE`] / [`SHIP_SCALE`]
-/// directly along with their target render layer. This resource exists
-/// during the migration to per-view fixed-scale systems.
+/// Ship-view systems should use [`SHIP_SCALE`] directly.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct WorldScale(pub f64);
 
@@ -68,11 +68,6 @@ impl Default for WorldScale {
 }
 
 impl WorldScale {
-    /// Map view: 1 render unit = 1,000 km.
-    pub const MAP: f64 = MAP_SCALE;
-    /// Ship view: 1 render unit = 1 m.
-    pub const SHIP: f64 = SHIP_SCALE;
-
     #[inline]
     pub fn get(&self) -> f64 {
         self.0

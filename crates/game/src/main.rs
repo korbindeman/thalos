@@ -163,6 +163,14 @@ fn main() {
         )
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
+        // The dedicated UI camera in `view::spawn_ui_camera` owns the
+        // primary egui context; disable auto-attach so it doesn't bind
+        // to whichever scene camera spawns first and disappear when that
+        // camera goes inactive.
+        .insert_resource(bevy_egui::EguiGlobalSettings {
+            auto_create_primary_context: false,
+            ..default()
+        })
         .insert_resource({
             let mut simulation = Simulation::new(
                 ship_state,

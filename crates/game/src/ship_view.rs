@@ -31,7 +31,7 @@ use crate::fuel::ShipFuelParams;
 
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset};
-use crate::rendering::{PlayerShip, RenderOrigin, SimulationState, to_render_pos};
+use crate::rendering::{PlayerShip, RenderOrigin, SimulationState};
 use crate::view::{HideInMapView, ViewMode};
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
@@ -203,14 +203,15 @@ fn spawn_player_ship(
 fn update_player_ship_world_position(
     sim: Res<SimulationState>,
     origin: Res<RenderOrigin>,
-    scale: Res<crate::coords::WorldScale>,
     mut query: Query<&mut Transform, With<PlayerShip>>,
 ) {
     let Ok(mut transform) = query.single_mut() else {
         return;
     };
-    transform.translation =
-        to_render_pos(sim.simulation.ship_state().position - origin.position, &scale);
+    // PlayerShip lives only on SHIP_LAYER (HideInMapView), so it always
+    // renders at SHIP_SCALE regardless of the dynamic WorldScale resource.
+    let rel = sim.simulation.ship_state().position - origin.position;
+    transform.translation = (rel * crate::coords::SHIP_SCALE).as_vec3();
     transform.rotation = sim.simulation.attitude().orientation.as_quat();
 }
 

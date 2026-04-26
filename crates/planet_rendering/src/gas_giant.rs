@@ -233,8 +233,13 @@ impl GasGiantLayers {
     /// `AtmosphereParams` (scale heights, outer altitudes) into the
     /// render-unit space the shader works in. Pass the same factor the
     /// rest of the rendering pipeline uses.
+    ///
+    /// `rings` is the body-level ring system (now sibling to
+    /// `atmosphere`, not a child of it). When present, its inner/outer
+    /// radii feed the cloud-deck shadow term.
     pub fn from_params(
         atmos: &thalos_atmosphere_gen::AtmosphereParams,
+        rings: Option<&thalos_atmosphere_gen::RingSystem>,
         meters_per_render_unit: f32,
     ) -> Self {
         let mut layers = Self::default();
@@ -306,7 +311,7 @@ impl GasGiantLayers {
         }
 
         // ── Ring shadow cast onto the cloud deck ──────────────────────
-        if let Some(rings) = &atmos.rings {
+        if let Some(rings) = rings {
             let inv_m = 1.0 / meters_per_render_unit.max(1.0);
             layers.ring_shadow = Vec4::new(
                 rings.inner_radius_m * inv_m,

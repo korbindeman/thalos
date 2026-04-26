@@ -43,12 +43,16 @@ enum BodyMode {
     },
     GasGiant {
         layers: Box<GasGiantLayers>,
-        has_rings: bool,
-        ring_inner_m: f32,
-        ring_outer_m: f32,
-        ring_layers: Option<Box<RingLayers>>,
     },
     Star,
+}
+
+/// Ring system parameters held alongside [`BodyMode`] on
+/// [`EditedPlanet`]. Sibling, not nested, so any body can have a ring.
+struct EditorRings {
+    inner_radius_m: f32,
+    outer_radius_m: f32,
+    layers: Box<RingLayers>,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +70,7 @@ struct EditedPlanet {
     radius_m: f64,
     axial_tilt_rad: f32,
     mode: BodyMode,
+    rings: Option<EditorRings>,
     heliocentric_distance_m: f64,
     light_intensity: f32,
     terminator_wrap: f32,
@@ -107,6 +112,7 @@ struct ResolvedBody {
     radius_m: f64,
     axial_tilt_rad: f32,
     mode: BodyMode,
+    rings: Option<EditorRings>,
     heliocentric_distance_m: f64,
 }
 
@@ -117,25 +123,12 @@ fn build_params_for_body(
     let mode = if body.kind == BodyKind::Star {
         BodyMode::Star
     } else if let Some(atmos) = &body.atmosphere {
-        let layers = Box::new(GasGiantLayers::from_params(atmos, body.radius_m as f32 / RENDER_RADIUS));
-        let (has_rings, ring_inner_m, ring_outer_m, ring_layers) =
-            if let Some(rings) = &atmos.rings {
-                (
-                    true,
-                    rings.inner_radius_m,
-                    rings.outer_radius_m,
-                    Some(Box::new(RingLayers::from_system(rings))),
-                )
-            } else {
-                (false, 0.0, 0.0, None)
-            };
-        BodyMode::GasGiant {
-            layers,
-            has_rings,
-            ring_inner_m,
-            ring_outer_m,
-            ring_layers,
-        }
+        let layers = Box::new(GasGiantLayers::from_params(
+            atmos,
+            body.rings.as_ref(),
+            body.radius_m as f32 / RENDER_RADIUS,
+        ));
+        BodyMode::GasGiant { layers }
     } else if let Some(g) = &body.generator {
         BodyMode::Terrain {
             generator: g.clone(),
@@ -154,10 +147,17 @@ fn build_params_for_body(
         }
     };
 
+    let rings = body.rings.as_ref().map(|rings| EditorRings {
+        inner_radius_m: rings.inner_radius_m,
+        outer_radius_m: rings.outer_radius_m,
+        layers: Box::new(RingLayers::from_system(rings)),
+    });
+
     ResolvedBody {
         radius_m: body.radius_m,
         axial_tilt_rad: body.axial_tilt_rad as f32,
         mode,
+        rings,
         heliocentric_distance_m: heliocentric_sma(system, body),
     }
 }
@@ -448,13 +448,7 @@ fn spawn_preview(
                 .entity(parent)
                 .insert(PendingTerrainGen { task, mesh_entity });
         }
-        BodyMode::GasGiant {
-            layers,
-            has_rings,
-            ring_inner_m,
-            ring_outer_m,
-            ring_layers,
-        } => {
+        BodyMode::GasGiant { layers } => {
             let scene = scene_lighting_for(planet);
             let tilt = Quat::from_rotation_x(planet.axial_tilt_rad);
 
@@ -479,39 +473,6 @@ fn spawn_preview(
             commands
                 .entity(parent)
                 .insert(GasGiantMaterialHandle(mat_handle));
-
-            if *has_rings
-                && let Some(rl) = ring_layers
-            {
-                let meters_per_ru = planet.radius_m as f32 / RENDER_RADIUS;
-                let inner_ru = *ring_inner_m / meters_per_ru;
-                let outer_ru = *ring_outer_m / meters_per_ru;
-                let ring_mesh = meshes.add(build_ring_mesh(inner_ru, outer_ru, 128));
-
-                let ring_mat = ring_materials.add(RingMaterial {
-                    params: RingParams {
-                        planet_center_radius: Vec4::new(0.0, 0.0, 0.0, RENDER_RADIUS),
-                        inner_radius: inner_ru,
-                        outer_radius: outer_ru,
-                        scene: scene.clone(),
-                        ..default()
-                    },
-                    layers: *rl.clone(),
-                });
-
-                let ring_entity = commands
-                    .spawn((
-                        Mesh3d(ring_mesh),
-                        MeshMaterial3d(ring_mat.clone()),
-                        ChildOf(parent),
-                        PreviewRing,
-                    ))
-                    .id();
-
-                commands
-                    .entity(ring_entity)
-                    .insert(RingMaterialHandle(ring_mat));
-            }
         }
         BodyMode::Star => {
             let star_mesh = meshes.add(Sphere::new(RENDER_RADIUS).mesh().ico(5).unwrap());
@@ -526,6 +487,44 @@ fn spawn_preview(
                 ChildOf(parent),
             ));
         }
+    }
+
+    // Ring system — body-level, decoupled from `BodyMode`. Any preview
+    // body (terrain or gas giant) gets a ring annulus if `planet.rings`
+    // is set. The ring shadow uniform on `GasGiantMaterial` is fed
+    // separately at material build time; for terrain bodies the ring
+    // renders correctly but the body surface doesn't yet darken inside
+    // the annulus (see TODO in `spawn_bodies` / `planet_impostor.wgsl`).
+    if let Some(rings) = &planet.rings {
+        let scene = scene_lighting_for(planet);
+        let meters_per_ru = planet.radius_m as f32 / RENDER_RADIUS;
+        let inner_ru = rings.inner_radius_m / meters_per_ru;
+        let outer_ru = rings.outer_radius_m / meters_per_ru;
+        let ring_mesh = meshes.add(build_ring_mesh(inner_ru, outer_ru, 128));
+
+        let ring_mat = ring_materials.add(RingMaterial {
+            params: RingParams {
+                planet_center_radius: Vec4::new(0.0, 0.0, 0.0, RENDER_RADIUS),
+                inner_radius: inner_ru,
+                outer_radius: outer_ru,
+                scene,
+                ..default()
+            },
+            layers: *rings.layers.clone(),
+        });
+
+        let ring_entity = commands
+            .spawn((
+                Mesh3d(ring_mesh),
+                MeshMaterial3d(ring_mat.clone()),
+                ChildOf(parent),
+                PreviewRing,
+            ))
+            .id();
+
+        commands
+            .entity(ring_entity)
+            .insert(RingMaterialHandle(ring_mat));
     }
 }
 
@@ -717,6 +716,7 @@ fn editor_ui(
             planet.radius_m = resolved.radius_m;
             planet.axial_tilt_rad = resolved.axial_tilt_rad;
             planet.mode = resolved.mode;
+            planet.rings = resolved.rings;
             planet.heliocentric_distance_m = resolved.heliocentric_distance_m;
             planet.light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
             planet.selected_body = name;
@@ -841,14 +841,19 @@ fn apply_uniform_changes(
                 };
                 mat.params.scene = scene.clone();
             }
-            for handle in &ring_q {
-                let Some(mat) = ring_materials.get_mut(&handle.0) else {
-                    continue;
-                };
-                mat.params.scene = scene.clone();
-            }
         }
         BodyMode::Star => {}
+    }
+
+    // Ring scene lighting refresh runs regardless of body mode — rings
+    // are now sibling to `BodyMode`, not nested inside it.
+    if planet.rings.is_some() {
+        for handle in &ring_q {
+            let Some(mat) = ring_materials.get_mut(&handle.0) else {
+                continue;
+            };
+            mat.params.scene = scene.clone();
+        }
     }
 }
 
@@ -925,6 +930,7 @@ fn main() {
             radius_m: resolved.radius_m,
             axial_tilt_rad: resolved.axial_tilt_rad,
             mode: resolved.mode,
+            rings: resolved.rings,
             heliocentric_distance_m: resolved.heliocentric_distance_m,
             light_intensity,
             terminator_wrap: 0.2,

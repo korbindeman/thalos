@@ -382,6 +382,7 @@ mod tests {
             generator: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
+            rings: None,
         };
 
         let earth = BodyDefinition {
@@ -408,6 +409,7 @@ mod tests {
             generator: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
+            rings: None,
         };
 
         let mut name_to_id = HashMap::new();

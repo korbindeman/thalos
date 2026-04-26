@@ -28,14 +28,10 @@ const BLEND_LEAD_BASE: f64 = 60.0;
 /// Translucent duplicate of a celestial body at a future encounter position.
 #[derive(Component, Debug, Clone)]
 pub struct GhostBody {
-    /// Body position relative to parent at projection epoch.
+    /// SOI parent body — the live pin we anchor the ghost to.
+    pub parent_id: usize,
+    /// Body's offset from its parent at the projection epoch.
     pub relative_position: DVec3,
-    /// Leg-anchor body whose frame this ghost renders in.
-    pub leg_anchor_id: usize,
-    /// Body's absolute position at projection epoch (`r_body(t_enc)`).
-    pub body_position: DVec3,
-    /// Leg anchor's position at projection epoch (`r_anchor(t_enc)`).
-    pub leg_anchor_pos: DVec3,
     pub radius_m: f64,
     /// SOI entry epoch — drives handoff timing.
     pub encounter_epoch: f64,
@@ -66,10 +62,8 @@ pub(super) fn sync_ghost_bodies(
         if let Some(entity) = spec.entity {
             // Entity already exists — update in place.
             if let Ok((_, mut ghost)) = existing.get_mut(entity) {
+                ghost.parent_id = spec.parent_id;
                 ghost.relative_position = spec.relative_position;
-                ghost.body_position = spec.body_position;
-                ghost.leg_anchor_id = spec.leg_anchor_id;
-                ghost.leg_anchor_pos = spec.leg_anchor_pos;
                 ghost.encounter_epoch = spec.encounter_epoch;
                 ghost.phase = spec.phase;
             }
@@ -100,10 +94,8 @@ pub(super) fn sync_ghost_bodies(
                     NotShadowCaster,
                     NotShadowReceiver,
                     GhostBody {
+                        parent_id: spec.parent_id,
                         relative_position: spec.relative_position,
-                        leg_anchor_id: spec.leg_anchor_id,
-                        body_position: spec.body_position,
-                        leg_anchor_pos: spec.leg_anchor_pos,
                         radius_m: body_def.radius_m,
                         encounter_epoch: spec.encounter_epoch,
                         phase: GhostPhase::Active,
@@ -214,13 +206,13 @@ pub(super) fn update_ghost_transforms(
     };
 
     for (ghost, mut transform) in &mut query {
-        // Render the ghost using the same rule as trajectory samples in the
-        // leg it anchors. If the leg anchor itself has a ghost (e.g. the
-        // encounter body IS the leg anchor), `pin_for_body` returns that
-        // ghost's fixed world position so the mesh sits exactly where the
-        // trajectory curves.
-        let pin = view.pin_for_body(ghost.leg_anchor_id, body_states);
-        let sim_pos = ghost.body_position - ghost.leg_anchor_pos + pin;
+        // Anchor the ghost to its parent's live pin. `pin_for_body` returns
+        // the parent's heliocentric position when the parent has no ghost,
+        // or recursively walks the chain when it does — so e.g. a Mira
+        // ghost stays glued to current Thalos, and a Thalos+Mira double
+        // encounter composes Mira's offset onto Thalos's ghost.
+        let parent_pin = view.pin_for_body(ghost.parent_id, body_states);
+        let sim_pos = parent_pin + ghost.relative_position;
 
         transform.translation = ((sim_pos - origin.position) * scale.0).as_vec3();
         let body_radius_render = (ghost.radius_m * scale.0) as f32;

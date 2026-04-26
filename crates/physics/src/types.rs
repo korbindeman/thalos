@@ -1,7 +1,7 @@
 use glam::{DQuat, DVec3};
 use serde::Deserialize;
 use std::collections::HashMap;
-use thalos_atmosphere_gen::{AtmosphereParams, TerrestrialAtmosphere};
+use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
 use thalos_terrain_gen::GeneratorParams;
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
@@ -139,6 +139,12 @@ pub struct BodyDefinition {
     /// atmosphere shell composited over it (rim halo, limb shading).
     /// Mutually exclusive with `atmosphere` (the gas-giant schema).
     pub terrestrial_atmosphere: Option<TerrestrialAtmosphere>,
+    /// Optional ring system, independent of body type. A ring annulus
+    /// is rendered around any body that authors this — gas giants,
+    /// rocky bodies, dwarf planets, all alike. Note: cloud-deck
+    /// ring-shadow is wired only for gas-giant bodies; surfaces of
+    /// terrain-baked bodies don't yet receive a ring shadow.
+    pub rings: Option<RingSystem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

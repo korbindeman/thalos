@@ -25,10 +25,9 @@ use thalos_physics::{
 
 use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
-    AtmosphereBlock, CLOUD_BAND_COUNT, FilmGrain, GasGiantLayers, GasGiantMaterial,
-    GasGiantMaterialHandle, GasGiantParams, MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams,
-    PlanetMaterial, PlanetMaterialHandle, PlanetParams, RingLayers, RingMaterial,
-    RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_cloud_cover_image,
+    AtmosphereBlock, CLOUD_BAND_COUNT, FilmGrain, GasGiantLayers, GasGiantMaterial, GasGiantParams,
+    MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetParams, RingLayers,
+    RingMaterial, RingParams, SceneLighting, StarLight, bake_cloud_cover_image,
     bake_from_body_data, blank_cloud_cover_image, build_ring_mesh, equirect_to_cloud_cover_image,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, Pipeline};
@@ -39,6 +38,7 @@ fn terrain_cache_dir() -> std::path::PathBuf {
 
 use crate::SimStage;
 use crate::camera::{ActiveCamera, CameraFocus, OrbitCamera};
+use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::view::HideInShipView;
 // Re-export so existing `use crate::rendering::{WorldScale, RenderOrigin}` sites keep working.
 pub use crate::coords::{RenderOrigin, WorldScale, to_render_pos};
@@ -223,13 +223,53 @@ pub struct PlayerShip;
 #[derive(Component)]
 struct SunLight;
 
-/// Marker for the 3D sphere mesh child of a celestial body.
+/// Marker for the map-view mesh child of a celestial body. Inherits the
+/// parent's transform, which is updated at [`MAP_SCALE`](crate::coords::MAP_SCALE)
+/// each frame.
 #[derive(Component)]
 struct BodyMesh;
+
+/// Marker for the ship-view mesh child of a celestial body. Carries an
+/// absolute world transform (its local translation compensates for the
+/// parent's map-scale translation) so the body renders at
+/// [`SHIP_SCALE`](crate::coords::SHIP_SCALE) when the ship camera draws
+/// it. Updated each frame by `update_ship_body_meshes`.
+#[derive(Component)]
+struct ShipBodyMesh;
 
 /// Marker for the flat circle icon child of a celestial body.
 #[derive(Component)]
 struct BodyIcon;
+
+/// Pair of [`PlanetMaterial`] handles a procedural body owns: one baked
+/// at [`MAP_SCALE`](crate::coords::MAP_SCALE) for [`BodyMesh`] and one
+/// baked at [`SHIP_SCALE`](crate::coords::SHIP_SCALE) for [`ShipBodyMesh`].
+///
+/// Heavy assets (cubemaps, SSBOs) are shared via `Handle<…>`; only the
+/// scale-dependent uniforms (radius, atmosphere `rim_shape`, occluder
+/// positions in `params.scene`) differ between the two instances.
+#[derive(Component)]
+pub struct PlanetMaterials {
+    pub map: Handle<PlanetMaterial>,
+    pub ship: Handle<PlanetMaterial>,
+}
+
+/// Same idea as [`PlanetMaterials`] but for [`GasGiantMaterial`].
+#[derive(Component)]
+pub struct GasGiantMaterials {
+    pub map: Handle<GasGiantMaterial>,
+    pub ship: Handle<GasGiantMaterial>,
+}
+
+/// Per-ring-entity marker for the map-layer ring child. Carries its own
+/// [`RingMaterial`] handle so per-frame updates can find it.
+#[derive(Component)]
+struct MapRingMaterial(Handle<RingMaterial>);
+
+/// Per-ring-entity marker for the ship-layer ring child. Mirror of
+/// [`MapRingMaterial`] for the ship-scale instance.
+#[derive(Component)]
+struct ShipRingMaterial(Handle<RingMaterial>);
 
 /// In-flight terrain generation task for a procedural body.
 ///
@@ -243,9 +283,11 @@ struct PendingPlanetGeneration {
     task: Task<BodyData>,
     body_id: usize,
     render_radius: f32,
-    /// Child entity holding the placeholder mesh; gets swapped to the impostor
-    /// billboard when the task finishes.
+    /// Map-view child holding the placeholder mesh; gets swapped to the
+    /// impostor billboard when the task finishes.
     mesh_entity: Entity,
+    /// Ship-view child holding the placeholder mesh; mirrored swap.
+    ship_mesh_entity: Entity,
 }
 
 /// Shared meshes reused across every procedural planet, cached once at
@@ -315,11 +357,8 @@ impl Plugin for RenderingPlugin {
                     finalize_planet_generation,
                     cache_body_states,
                     update_render_origin.after(cache_body_states),
-                    update_body_render_radius,
-                    update_body_mesh_scale.after(update_body_render_radius),
-                    rebake_scale_dependent_materials
-                        .after(finalize_planet_generation),
                     update_body_positions.after(update_render_origin),
+                    update_ship_body_meshes.after(update_body_positions),
                     update_sun_light.after(cache_body_states),
                     update_camera_exposure.after(cache_body_states),
                     sync_film_grain_to_exposure.after(update_camera_exposure),
@@ -391,8 +430,8 @@ fn spawn_bodies(
     // Unit rectangle (corners at ±1) shared across all planet billboards.
     // The vertex shader scales it by params.radius each frame.
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
-    // Unit icosphere — Transform.scale on the body mesh child is driven
-    // by `update_body_render_radius` so we only bake geometry once.
+    // Unit icosphere — each `BodyMesh` / `ShipBodyMesh` child uses
+    // `Transform::scale` to size it for its layer.
     let unit_sphere_star = meshes.add(Sphere::new(1.0).mesh().ico(5).unwrap());
     let unit_sphere_body = meshes.add(Sphere::new(1.0).mesh().ico(4).unwrap());
     commands.insert_resource(SharedPlanetMeshes {
@@ -401,10 +440,15 @@ fn spawn_bodies(
 
     for body in bodies {
         let state = &initial_states[body.id];
-        let pos = to_render_pos(state.position, &scale);
+        // Both the parent transform and `body.render_radius` are anchored
+        // at MAP_SCALE: the body parent acts as the canonical map-side
+        // anchor, and ShipBodyMesh siblings carry a compensating local
+        // translation in `update_ship_body_meshes` so they sit at
+        // `phys * SHIP_SCALE` in world space.
+        let pos = (state.position * MAP_SCALE).as_vec3();
 
-        let radius_render = (body.radius_m * scale.0) as f32;
-        let render_radius = radius_render.max(0.005);
+        let render_radius = ((body.radius_m * MAP_SCALE) as f32).max(0.005);
+        let ship_render_radius = ((body.radius_m * SHIP_SCALE) as f32).max(0.005);
 
         let [r, g, b] = body.color;
         let base_color = Color::srgb(r, g, b);
@@ -426,7 +470,7 @@ fn spawn_bodies(
             ..default()
         });
 
-        if is_star {
+        let body_entity = if is_star {
             // Stars keep the simple emissive icosphere — no impostor needed.
             let star_material = std_materials.add(StandardMaterial {
                 base_color,
@@ -434,7 +478,7 @@ fn spawn_bodies(
                 ..default()
             });
 
-            commands
+            let body_entity = commands
                 .spawn((
                     Transform::from_translation(pos),
                     Visibility::Inherited,
@@ -446,26 +490,44 @@ fn spawn_bodies(
                     },
                     Name::new(body.name.clone()),
                 ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Mesh3d(unit_sphere_star.clone()),
-                        MeshMaterial3d(star_material),
-                        Transform::from_scale(Vec3::splat(render_radius)),
-                        NotShadowCaster,
-                        NotShadowReceiver,
-                        BodyMesh,
-                    ));
-                })
-                .with_child((
-                    Mesh3d(icon_mesh.clone()),
-                    MeshMaterial3d(icon_material),
-                    Transform::default(),
-                    Visibility::Hidden,
-                    BodyIcon,
-                    HideInShipView,
-                    NotShadowCaster,
-                    NotShadowReceiver,
-                ));
+                .id();
+
+            commands.spawn((
+                Mesh3d(unit_sphere_star.clone()),
+                MeshMaterial3d(star_material.clone()),
+                Transform::from_scale(Vec3::splat(render_radius)),
+                NotShadowCaster,
+                NotShadowReceiver,
+                BodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
+                ChildOf(body_entity),
+            ));
+            commands.spawn((
+                Mesh3d(unit_sphere_star.clone()),
+                MeshMaterial3d(star_material),
+                // Local transform updated each frame by
+                // `update_ship_body_meshes` to compensate for the
+                // parent's MAP_SCALE translation.
+                Transform::from_scale(Vec3::splat(ship_render_radius)),
+                NotShadowCaster,
+                NotShadowReceiver,
+                ShipBodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                ChildOf(body_entity),
+            ));
+            commands.spawn((
+                Mesh3d(icon_mesh.clone()),
+                MeshMaterial3d(icon_material),
+                Transform::default(),
+                Visibility::Hidden,
+                BodyIcon,
+                HideInShipView,
+                NotShadowCaster,
+                NotShadowReceiver,
+                ChildOf(body_entity),
+            ));
+
+            body_entity
         } else if let Some(gen_params) = &body.generator {
             // Procedural body: dispatch the terrain_gen pipeline to a background
             // task so startup isn't blocked. Meanwhile show a plain placeholder
@@ -561,9 +623,21 @@ fn spawn_bodies(
             let mesh_entity = commands
                 .spawn((
                     Mesh3d(unit_sphere_body.clone()),
-                    MeshMaterial3d(placeholder_mat),
+                    MeshMaterial3d(placeholder_mat.clone()),
                     Transform::from_scale(Vec3::splat(render_radius)),
                     BodyMesh,
+                    bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
+                    ChildOf(body_entity),
+                ))
+                .id();
+
+            let ship_mesh_entity = commands
+                .spawn((
+                    Mesh3d(unit_sphere_body.clone()),
+                    MeshMaterial3d(placeholder_mat),
+                    Transform::from_scale(Vec3::splat(ship_render_radius)),
+                    ShipBodyMesh,
+                    bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
                     ChildOf(body_entity),
                 ))
                 .id();
@@ -587,22 +661,40 @@ fn spawn_bodies(
                     body_id: body.id,
                     render_radius,
                     mesh_entity,
+                    ship_mesh_entity,
                 });
+
+            body_entity
         } else if let Some(atmos) = &body.atmosphere {
             // Gas / ice giant path. No terrain bake, no placeholder
             // swap: spawn the billboard + GasGiantMaterial directly.
             // Per-frame updates flow through `update_gas_giant_params`
             // exactly like `update_planet_light_dirs` does for baked
             // bodies.
-            let meters_per_render_unit = scale.meters_per_render_unit();
-            let layers = GasGiantLayers::from_params(atmos, meters_per_render_unit);
+            //
+            // Two material instances per body: one baked at MAP_SCALE
+            // for the map-layer billboard, one at SHIP_SCALE for the
+            // ship-layer billboard. The cloud-deck / haze layers are
+            // expressed in render units, so the meters-per-render-unit
+            // factor differs between the two.
+            let map_layers =
+                GasGiantLayers::from_params(atmos, body.rings.as_ref(), (1.0 / MAP_SCALE) as f32);
+            let ship_layers =
+                GasGiantLayers::from_params(atmos, body.rings.as_ref(), (1.0 / SHIP_SCALE) as f32);
 
-            let gas_material = gas_giant_materials.add(GasGiantMaterial {
+            let map_gas_material = gas_giant_materials.add(GasGiantMaterial {
                 params: GasGiantParams {
                     radius: render_radius,
                     ..default()
                 },
-                layers,
+                layers: map_layers,
+            });
+            let ship_gas_material = gas_giant_materials.add(GasGiantMaterial {
+                params: GasGiantParams {
+                    radius: ship_render_radius,
+                    ..default()
+                },
+                layers: ship_layers,
             });
 
             let body_entity = commands
@@ -621,12 +713,24 @@ fn spawn_bodies(
 
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),
-                MeshMaterial3d(gas_material.clone()),
+                MeshMaterial3d(map_gas_material.clone()),
                 BodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
                 // Billboard's local AABB is a flat 2×2 quad; the vertex
                 // shader re-orients it each frame. Disable frustum
                 // culling so Bevy doesn't hide it at angles where the
                 // flat AABB misses the view frustum.
+                NoFrustumCulling,
+                NotShadowCaster,
+                NotShadowReceiver,
+                ChildOf(body_entity),
+            ));
+
+            commands.spawn((
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(ship_gas_material.clone()),
+                ShipBodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
                 NoFrustumCulling,
                 NotShadowCaster,
                 NotShadowReceiver,
@@ -647,55 +751,12 @@ fn spawn_bodies(
 
             commands
                 .entity(body_entity)
-                .insert(GasGiantMaterialHandle(gas_material));
-
-            // ── Ring system ─────────────────────────────────────
-            //
-            // If the atmosphere authors a ring system, spawn a
-            // child entity carrying the annulus mesh and a
-            // dedicated `RingMaterial`. The ring child inherits
-            // the body's translation from the ECS hierarchy, then
-            // applies the body's axial tilt locally so the ring
-            // plane is aligned with the body equator. Per-frame
-            // updates flow through `update_ring_params`.
-            if let Some(rings) = &atmos.rings {
-                let inner_r = rings.inner_radius_m / meters_per_render_unit;
-                let outer_r = rings.outer_radius_m / meters_per_render_unit;
-                let ring_mesh = meshes.add(build_ring_mesh(inner_r, outer_r, 512));
-
-                let ring_layers = RingLayers::from_system(rings);
-                let ring_material = ring_materials.add(RingMaterial {
-                    params: RingParams {
-                        planet_center_radius: Vec4::new(pos.x, pos.y, pos.z, render_radius),
-                        inner_radius: inner_r,
-                        outer_radius: outer_r,
-                        ..default()
-                    },
-                    layers: ring_layers,
+                .insert(GasGiantMaterials {
+                    map: map_gas_material,
+                    ship: ship_gas_material,
                 });
 
-                // Ring child rotation is the INVERSE of the gas
-                // giant's `orientation = Rx(+tilt)`, because the
-                // cloud shader treats `orientation` as the
-                // world→body-local transform. That means the body's
-                // world-space equatorial plane normal is
-                // `Rx(-tilt) * (0,1,0)`, and the ring mesh — built
-                // with its geometric normal at +Y — needs `Rx(-tilt)`
-                // applied so it aligns with that world-space plane.
-                // If this is ever changed, update the ring-shadow
-                // test in `gas_giant.wgsl` to match — both sides
-                // must agree on the same plane.
-                let tilt = body.axial_tilt_rad as f32;
-                commands.spawn((
-                    Mesh3d(ring_mesh),
-                    MeshMaterial3d(ring_material.clone()),
-                    Transform::from_rotation(Quat::from_rotation_x(-tilt)),
-                    NotShadowCaster,
-                    NotShadowReceiver,
-                    ChildOf(body_entity),
-                    RingMaterialHandle(ring_material),
-                ));
-            }
+            body_entity
         } else {
             // Non-procedural body: plain icosphere with StandardMaterial.
             // No surface generator has been wired up for this body yet, so
@@ -708,7 +769,7 @@ fn spawn_bodies(
                 ..default()
             });
 
-            commands
+            let body_entity = commands
                 .spawn((
                     Transform::from_translation(pos),
                     Visibility::Inherited,
@@ -720,24 +781,144 @@ fn spawn_bodies(
                     },
                     Name::new(body.name.clone()),
                 ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Mesh3d(unit_sphere_body.clone()),
-                        MeshMaterial3d(sphere_material),
-                        Transform::from_scale(Vec3::splat(render_radius)),
-                        BodyMesh,
-                    ));
-                })
-                .with_child((
-                    Mesh3d(icon_mesh.clone()),
-                    MeshMaterial3d(icon_material),
-                    Transform::default(),
-                    Visibility::Hidden,
-                    BodyIcon,
-                    HideInShipView,
-                    NotShadowCaster,
-                    NotShadowReceiver,
-                ));
+                .id();
+
+            commands.spawn((
+                Mesh3d(unit_sphere_body.clone()),
+                MeshMaterial3d(sphere_material.clone()),
+                Transform::from_scale(Vec3::splat(render_radius)),
+                BodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
+                ChildOf(body_entity),
+            ));
+            commands.spawn((
+                Mesh3d(unit_sphere_body.clone()),
+                MeshMaterial3d(sphere_material),
+                Transform::from_scale(Vec3::splat(ship_render_radius)),
+                ShipBodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                ChildOf(body_entity),
+            ));
+            commands.spawn((
+                Mesh3d(icon_mesh.clone()),
+                MeshMaterial3d(icon_material),
+                Transform::default(),
+                Visibility::Hidden,
+                BodyIcon,
+                HideInShipView,
+                NotShadowCaster,
+                NotShadowReceiver,
+                ChildOf(body_entity),
+            ));
+
+            body_entity
+        };
+
+        // ── Ring system ─────────────────────────────────────────────
+        //
+        // Body-level: any body with `rings: Some(_)` gets a ring annulus,
+        // gas giant or rocky alike. Two ring children are spawned — a
+        // map-layer child baked at MAP_SCALE and a ship-layer child at
+        // SHIP_SCALE — each with its own `RingMaterial` instance because
+        // the per-frame uniforms (planet center, radii) differ between
+        // the two views. The ship-layer child carries [`ShipBodyMesh`]
+        // so `update_ship_body_meshes` translates it correctly each
+        // frame.
+        //
+        // Ring child rotation is `Rx(-tilt)`. For gas giants, the cloud
+        // shader treats `orientation = Rx(+tilt)` as world→body-local,
+        // so the body's world-space equatorial plane normal is
+        // `Rx(-tilt) * (0,1,0)` — the ring mesh (geometric normal +Y)
+        // therefore needs `Rx(-tilt)` to align. If the cloud shader's
+        // ring-shadow plane test in `gas_giant.wgsl` is changed, this
+        // rotation must move with it.
+        //
+        // TODO(unimplemented): ring-shadow on rocky-body surfaces.
+        // The gas-giant cloud-deck shader projects body points onto
+        // the ring plane and darkens accordingly; the terrain
+        // impostor shader (`planet_impostor.wgsl`) has no equivalent
+        // pass yet. So a rocky body with rings renders the rings
+        // themselves correctly (and the rings self-shadow against
+        // the body via `ring.wgsl`'s planet-shadow ray-cast), but
+        // the body's lit surface won't darken inside the ring
+        // annulus. Wiring this requires adding ring uniforms to
+        // `PlanetMaterial` and a matching shadow term to the
+        // impostor shader.
+        if let Some(rings) = &body.rings {
+            // The cloud-deck ring-shadow term is only wired into
+            // `GasGiantMaterial`, which is selected when a body has
+            // an atmosphere and no generator. Anything else
+            // (terrain-baked, plain placeholder, or star) renders the
+            // ring annulus correctly but won't darken the body's
+            // surface inside it. Discriminator must match the branch
+            // selection above — `atmosphere.is_some()` alone is not
+            // sufficient because a body with both `generator` and
+            // `atmosphere` would take the terrain branch first.
+            let renders_as_gas_giant = body.generator.is_none() && body.atmosphere.is_some();
+            if !renders_as_gas_giant {
+                warn!(
+                    "body '{}' has rings but ring-shadow on its surface is not yet implemented \
+                     (only gas-giant cloud decks receive a ring shadow today; \
+                     see TODO in spawn_bodies / planet_impostor.wgsl)",
+                    body.name
+                );
+            }
+
+            let map_mpru = (1.0 / MAP_SCALE) as f32;
+            let ship_mpru = (1.0 / SHIP_SCALE) as f32;
+            let map_inner = rings.inner_radius_m / map_mpru;
+            let map_outer = rings.outer_radius_m / map_mpru;
+            let ship_inner = rings.inner_radius_m / ship_mpru;
+            let ship_outer = rings.outer_radius_m / ship_mpru;
+
+            let map_ring_mesh = meshes.add(build_ring_mesh(map_inner, map_outer, 512));
+            let ship_ring_mesh = meshes.add(build_ring_mesh(ship_inner, ship_outer, 512));
+
+            let map_ring_material = ring_materials.add(RingMaterial {
+                params: RingParams {
+                    planet_center_radius: Vec4::new(pos.x, pos.y, pos.z, render_radius),
+                    inner_radius: map_inner,
+                    outer_radius: map_outer,
+                    ..default()
+                },
+                layers: RingLayers::from_system(rings),
+            });
+            let ship_ring_material = ring_materials.add(RingMaterial {
+                params: RingParams {
+                    planet_center_radius: Vec4::new(pos.x, pos.y, pos.z, ship_render_radius),
+                    inner_radius: ship_inner,
+                    outer_radius: ship_outer,
+                    ..default()
+                },
+                layers: RingLayers::from_system(rings),
+            });
+
+            let tilt = body.axial_tilt_rad as f32;
+            let tilt_rot = Transform::from_rotation(Quat::from_rotation_x(-tilt));
+
+            commands.spawn((
+                Mesh3d(map_ring_mesh),
+                MeshMaterial3d(map_ring_material.clone()),
+                tilt_rot,
+                BodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
+                NotShadowCaster,
+                NotShadowReceiver,
+                ChildOf(body_entity),
+                MapRingMaterial(map_ring_material),
+            ));
+
+            commands.spawn((
+                Mesh3d(ship_ring_mesh),
+                MeshMaterial3d(ship_ring_material.clone()),
+                tilt_rot,
+                ShipBodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                NotShadowCaster,
+                NotShadowReceiver,
+                ChildOf(body_entity),
+                ShipRingMaterial(ship_ring_material),
+            ));
         }
     }
 
@@ -811,7 +992,6 @@ fn finalize_planet_generation(
     mut commands: Commands,
     mut pending_q: Query<(Entity, &mut PendingPlanetGeneration)>,
     sim: Res<SimulationState>,
-    scale: Res<WorldScale>,
     shared: Res<SharedPlanetMeshes>,
     mut planet_materials: ResMut<Assets<PlanetMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -831,14 +1011,18 @@ fn finalize_planet_generation(
         let textures = bake_from_body_data(&baked, &mut images, &mut storage_buffers);
 
         let roughness = body_surface_roughness(body);
-        // Build the atmosphere uniform from the body's
-        // `terrestrial_atmosphere` block. Bodies without one get
-        // `AtmosphereBlock::default()`, which the shader treats as
-        // "no atmosphere" via its per-layer intensity gating.
-        let atmosphere = body
+        // Two atmosphere blocks: scale-dependent fields (`rim_shape.x`,
+        // `rim_shape.y`) are expressed in render units, so they differ
+        // between MAP_SCALE and SHIP_SCALE instances.
+        let map_atmosphere = body
             .terrestrial_atmosphere
             .as_ref()
-            .map(|a| AtmosphereBlock::from_terrestrial(a, scale.meters_per_render_unit()))
+            .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / MAP_SCALE) as f32))
+            .unwrap_or_default();
+        let ship_atmosphere = body
+            .terrestrial_atmosphere
+            .as_ref()
+            .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
             .unwrap_or_default();
 
         // Bake the cloud-cover cubemap when the body has a cloud layer.
@@ -889,9 +1073,12 @@ fn finalize_planet_generation(
         let coastline_warp_amp_radians = if has_ocean { 8.0e-4 } else { 0.0 };
         let coastline_jitter_amp_m = if has_ocean { 30.0 } else { 0.0 };
 
-        let mat_handle = planet_materials.add(PlanetMaterial {
+        let map_radius = pending.render_radius;
+        let ship_radius = ((body.radius_m * SHIP_SCALE) as f32).max(0.005);
+
+        let make_material = |radius: f32, atmosphere: AtmosphereBlock| PlanetMaterial {
             params: PlanetParams {
-                radius: pending.render_radius,
+                radius,
                 height_range,
                 terminator_wrap: roughness,
                 // Airless bodies leave `sea_level_m` at the default
@@ -902,28 +1089,41 @@ fn finalize_planet_generation(
                 coastline_seed,
                 ..default()
             },
-            albedo: textures.albedo,
-            height: textures.height,
-            detail,
-            material_cube: textures.material_cube,
-            craters: textures.craters,
-            cell_index: textures.cell_index,
-            feature_ids: textures.feature_ids,
-            materials: textures.materials,
+            albedo: textures.albedo.clone(),
+            height: textures.height.clone(),
+            detail: detail.clone(),
+            material_cube: textures.material_cube.clone(),
+            craters: textures.craters.clone(),
+            cell_index: textures.cell_index.clone(),
+            feature_ids: textures.feature_ids.clone(),
+            materials: textures.materials.clone(),
             atmosphere,
-            cloud_cover,
-        });
+            cloud_cover: cloud_cover.clone(),
+        };
+
+        let map_handle = planet_materials.add(make_material(map_radius, map_atmosphere));
+        let ship_handle = planet_materials.add(make_material(ship_radius, ship_atmosphere));
 
         let mesh_entity = pending.mesh_entity;
         commands
             .entity(mesh_entity)
             .insert((
                 Mesh3d(shared.billboard.clone()),
-                MeshMaterial3d(mat_handle.clone()),
+                MeshMaterial3d(map_handle.clone()),
                 // The billboard's local AABB is a flat 2×2 quad; the
                 // vertex shader re-orients it each frame. Disable
                 // frustum culling so Bevy doesn't hide it at angles
                 // where the flat AABB misses the view frustum.
+                NoFrustumCulling,
+            ))
+            .remove::<MeshMaterial3d<StandardMaterial>>();
+
+        let ship_mesh_entity = pending.ship_mesh_entity;
+        commands
+            .entity(ship_mesh_entity)
+            .insert((
+                Mesh3d(shared.billboard.clone()),
+                MeshMaterial3d(ship_handle.clone()),
                 NoFrustumCulling,
             ))
             .remove::<MeshMaterial3d<StandardMaterial>>();
@@ -935,7 +1135,10 @@ fn finalize_planet_generation(
             .is_some();
         let mut entity_cmds = commands.entity(entity);
         entity_cmds
-            .insert(PlanetMaterialHandle(mat_handle))
+            .insert(PlanetMaterials {
+                map: map_handle,
+                ship: ship_handle,
+            })
             .remove::<PendingPlanetGeneration>();
         if has_clouds {
             entity_cmds.insert(CloudBandState::default());
@@ -1051,33 +1254,36 @@ fn build_scene_lighting(
     scene
 }
 
-/// Collect eclipse-occluder candidates from every visible non-star body.
+/// Collect eclipse-occluder candidates from every visible non-star body
+/// at the given metres → render-units scale. Used twice per frame: once
+/// at [`MAP_SCALE`] for the map-layer impostor materials, once at
+/// [`SHIP_SCALE`] for the ship-layer ones.
 fn collect_occluders<'a>(
     states: &BodyStates,
     origin: &RenderOrigin,
-    scale: &WorldScale,
+    scale: f64,
     bodies: impl IntoIterator<Item = &'a CelestialBody>,
 ) -> Vec<(usize, Vec3, f32)> {
     let mut occluders: Vec<(usize, Vec3, f32)> = Vec::new();
     for body in bodies {
-        if body.is_star || body.render_radius < 0.001 {
+        if body.is_star || body.radius_m < 1.0 {
             continue;
         }
         let Some(state) = states.get(body.body_id) else {
             continue;
         };
-        let render_pos = to_render_pos(state.position - origin.position, scale);
-        occluders.push((body.body_id, render_pos, body.render_radius));
+        let render_pos = ((state.position - origin.position) * scale).as_vec3();
+        let render_radius = ((body.radius_m * scale) as f32).max(0.005);
+        occluders.push((body.body_id, render_pos, render_radius));
     }
     occluders
 }
 
 fn update_planet_light_dirs(
-    query: Query<(&CelestialBody, &PlanetMaterialHandle)>,
+    query: Query<(&CelestialBody, &PlanetMaterials)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
     cache: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
-    scale: Res<WorldScale>,
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
 ) {
@@ -1086,7 +1292,12 @@ fn update_planet_light_dirs(
     };
     let body_defs = sim.simulation.bodies();
     let gain = exposure.gain;
-    let occluders = collect_occluders(states, &origin, &scale, query.iter().map(|(b, _)| b));
+
+    // Compute occluder lists at both scales once per frame.
+    let body_iter = || query.iter().map(|(b, _)| b);
+    let map_occluders = collect_occluders(states, &origin, MAP_SCALE, body_iter());
+    let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, body_iter());
+
     // Cloud layer drift: wrap sim time at the body's equatorial cloud
     // period (`TAU / scroll_rate`) so the equator rotates seamlessly
     // across the wrap. Falls back to one sim-day when `scroll_rate` is
@@ -1095,51 +1306,62 @@ fn update_planet_light_dirs(
     // at a slow multi-day cadence.
     let sim_time = sim.simulation.sim_time();
 
-    for (body, handle) in &query {
-        let Some(mat) = materials.get_mut(&handle.0) else {
-            continue;
-        };
-        // Radius tracks [`WorldScale`] — rewrite every frame so the
-        // impostor billboard stays the right size after a view toggle.
-        mat.params.radius = body.render_radius;
-        let mut scene = build_scene_lighting(body.body_id, states, &occluders, gain);
-
-        // Planetshine: pick the orbital parent, skipping the star. The
-        // parent's Bond albedo × color is the effective reflected tint.
+    for (body, mats) in &query {
         let body_def = &body_defs[body.body_id];
-        if let Some(parent_id) = body_def.parent {
-            let parent_def = &body_defs[parent_id];
-            if !matches!(parent_def.kind, thalos_physics::types::BodyKind::Star) {
-                if let Some(parent_state) = states.get(parent_id) {
-                    let parent_render_pos = to_render_pos(parent_state.position - origin.position, &scale);
-                    let parent_radius = (parent_def.radius_m * scale.0) as f32;
-                    let tint = Vec3::new(
-                        parent_def.color[0],
-                        parent_def.color[1],
-                        parent_def.color[2],
-                    ) * parent_def.albedo;
-                    scene.planetshine_pos_radius = Vec4::new(
-                        parent_render_pos.x,
-                        parent_render_pos.y,
-                        parent_render_pos.z,
-                        parent_radius,
-                    );
-                    scene.planetshine_tint_flag = Vec4::new(tint.x, tint.y, tint.z, 1.0);
+        // Same scale-independent inputs feed both materials; only the
+        // scale-dependent fields (radius, occluders, planetshine pos)
+        // differ.
+        for (handle, occluders, scale) in [
+            (&mats.map, &map_occluders, MAP_SCALE),
+            (&mats.ship, &ship_occluders, SHIP_SCALE),
+        ] {
+            let Some(mat) = materials.get_mut(handle) else {
+                continue;
+            };
+            mat.params.radius = (body.radius_m * scale) as f32;
+            let mut scene = build_scene_lighting(body.body_id, states, occluders, gain);
+
+            // Planetshine: pick the orbital parent, skipping the star.
+            // The parent's Bond albedo × color is the effective
+            // reflected tint.
+            if let Some(parent_id) = body_def.parent {
+                let parent_def = &body_defs[parent_id];
+                if !matches!(parent_def.kind, thalos_physics::types::BodyKind::Star) {
+                    if let Some(parent_state) = states.get(parent_id) {
+                        let parent_render_pos =
+                            ((parent_state.position - origin.position) * scale).as_vec3();
+                        let parent_radius = (parent_def.radius_m * scale) as f32;
+                        let tint = Vec3::new(
+                            parent_def.color[0],
+                            parent_def.color[1],
+                            parent_def.color[2],
+                        ) * parent_def.albedo;
+                        scene.planetshine_pos_radius = Vec4::new(
+                            parent_render_pos.x,
+                            parent_render_pos.y,
+                            parent_render_pos.z,
+                            parent_radius,
+                        );
+                        scene.planetshine_tint_flag = Vec4::new(tint.x, tint.y, tint.z, 1.0);
+                    }
                 }
             }
-        }
 
-        mat.params.scene = scene;
-        // Drive the cloud layer's time uniform. Bodies without a cloud
-        // layer have `cloud_albedo_coverage.w = 0`, so the shader
-        // skips the layer entirely and this value is ignored.
-        let scroll = mat.atmosphere.cloud_dynamics.x.abs() as f64;
-        let period = if scroll > 1e-9 {
-            std::f64::consts::TAU / scroll
-        } else {
-            86_400.0
-        };
-        mat.atmosphere.cloud_dynamics.y = (sim_time - (sim_time / period).floor() * period) as f32;
+            mat.params.scene = scene;
+            // Drive the cloud layer's time uniform. Bodies without a
+            // cloud layer have `cloud_albedo_coverage.w = 0`, so the
+            // shader skips the layer entirely and this value is ignored.
+            // Scroll rate is scale-independent (rad/s on the unit
+            // sphere), so the period is the same for both materials.
+            let scroll = mat.atmosphere.cloud_dynamics.x.abs() as f64;
+            let period = if scroll > 1e-9 {
+                std::f64::consts::TAU / scroll
+            } else {
+                86_400.0
+            };
+            mat.atmosphere.cloud_dynamics.y =
+                (sim_time - (sim_time / period).floor() * period) as f32;
+        }
     }
 }
 
@@ -1156,11 +1378,7 @@ fn update_planet_light_dirs(
 /// `rotation_phase` post-orientation; for the impostor shader there is no
 /// such uniform, so spin must be baked into the single orientation quat.
 fn update_planet_orientations(
-    query: Query<(
-        &CelestialBody,
-        Option<&TidallyLocked>,
-        &PlanetMaterialHandle,
-    )>,
+    query: Query<(&CelestialBody, Option<&TidallyLocked>, &PlanetMaterials)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
     cache: Res<FrameBodyStates>,
     sim: Res<SimulationState>,
@@ -1171,11 +1389,7 @@ fn update_planet_orientations(
     let body_defs = sim.simulation.bodies();
     let sim_time = sim.simulation.sim_time();
 
-    for (body, lock, handle) in &query {
-        let Some(mat) = materials.get_mut(&handle.0) else {
-            continue;
-        };
-
+    for (body, lock, mats) in &query {
         let q = if let Some(lock) = lock {
             let Some(body_state) = states.get(body.body_id) else {
                 continue;
@@ -1209,7 +1423,13 @@ fn update_planet_orientations(
             Quat::from_rotation_y(phase) * Quat::from_rotation_x(tilt)
         };
 
-        mat.params.orientation = Vec4::new(q.x, q.y, q.z, q.w);
+        // Orientation is scale-independent — same value for both materials.
+        let q4 = Vec4::new(q.x, q.y, q.z, q.w);
+        for handle in [&mats.map, &mats.ship] {
+            if let Some(mat) = materials.get_mut(handle) {
+                mat.params.orientation = q4;
+            }
+        }
     }
 }
 
@@ -1224,12 +1444,11 @@ fn update_planet_orientations(
 /// Keeping this in its own system lets the scheduler parallelise with
 /// the terrestrial path — the two queries are disjoint.
 fn update_gas_giant_params(
-    query: Query<(&CelestialBody, &GasGiantMaterialHandle)>,
+    query: Query<(&CelestialBody, &GasGiantMaterials)>,
     all_bodies: Query<&CelestialBody>,
     mut materials: ResMut<Assets<GasGiantMaterial>>,
     cache: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
-    scale: Res<WorldScale>,
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
 ) {
@@ -1239,39 +1458,44 @@ fn update_gas_giant_params(
     let body_defs = sim.simulation.bodies();
     let sim_time = sim.simulation.sim_time();
     let gain = exposure.gain;
-    let occluders = collect_occluders(states, &origin, &scale, all_bodies.iter());
+    let map_occluders = collect_occluders(states, &origin, MAP_SCALE, all_bodies.iter());
+    let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, all_bodies.iter());
 
     // Raw sim seconds — the gas-giant shader uses this for differential
     // rotation scroll, edge-wave phase, and edge vortex chain epoch
     // hashing. Modulo a day-scale period so the f32 stays precise.
     let time_mod = (sim_time % 86_400.0) as f32;
 
-    for (body, handle) in &query {
-        let Some(mat) = materials.get_mut(&handle.0) else {
-            continue;
-        };
-
-        // Radius can change if something later rescales the render unit;
-        // rewrite every frame to stay in sync.
-        mat.params.radius = body.render_radius;
-        mat.params.elapsed_time = time_mod;
-        mat.params.scene = build_scene_lighting(body.body_id, states, &occluders, gain);
+    for (body, mats) in &query {
+        let body_def = &body_defs[body.body_id];
 
         // Rotation phase: advance bands at the body's real rotation
         // rate. sim_time is seconds, rotation_period_s is seconds, so
         // the modulo drops the large integer part before conversion
         // to f32 and keeps precision high at long run times.
-        let body_def = &body_defs[body.body_id];
         let period = body_def.rotation_period_s.max(1.0);
         let phase = ((sim_time % period) / period) as f32 * std::f32::consts::TAU;
-        mat.params.rotation_phase = phase;
 
         // Orientation: axial tilt around the X axis. Gas giants aren't
         // tidally locked, so rotation is already folded into the band
         // phase above; the quaternion here only carries the tilt.
         let tilt = body_def.axial_tilt_rad as f32;
         let q = Quat::from_rotation_x(tilt);
-        mat.params.orientation = Vec4::new(q.x, q.y, q.z, q.w);
+        let orientation = Vec4::new(q.x, q.y, q.z, q.w);
+
+        for (handle, occluders, scale) in [
+            (&mats.map, &map_occluders, MAP_SCALE),
+            (&mats.ship, &ship_occluders, SHIP_SCALE),
+        ] {
+            let Some(mat) = materials.get_mut(handle) else {
+                continue;
+            };
+            mat.params.radius = (body.radius_m * scale) as f32;
+            mat.params.elapsed_time = time_mod;
+            mat.params.scene = build_scene_lighting(body.body_id, states, occluders, gain);
+            mat.params.rotation_phase = phase;
+            mat.params.orientation = orientation;
+        }
     }
 }
 
@@ -1289,11 +1513,11 @@ fn update_gas_giant_params(
 /// camera exposure gain, matching `update_gas_giant_params` so the
 /// ring and disk stay photometrically consistent.
 fn update_ring_params(
-    ring_query: Query<(&ChildOf, &RingMaterialHandle)>,
+    map_rings: Query<(&ChildOf, &MapRingMaterial)>,
+    ship_rings: Query<(&ChildOf, &ShipRingMaterial)>,
     body_query: Query<&CelestialBody>,
     mut materials: ResMut<Assets<RingMaterial>>,
     origin: Res<RenderOrigin>,
-    scale: Res<WorldScale>,
     cache: Res<FrameBodyStates>,
     exposure: Res<CameraExposure>,
 ) {
@@ -1301,33 +1525,72 @@ fn update_ring_params(
         return;
     };
     let gain = exposure.gain;
-    let occluders = collect_occluders(states, &origin, &scale, body_query.iter());
+    let map_occluders = collect_occluders(states, &origin, MAP_SCALE, body_query.iter());
+    let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, body_query.iter());
 
-    for (parent, handle) in &ring_query {
-        let Ok(body) = body_query.get(parent.0) else {
-            continue;
-        };
-        let Some(mat) = materials.get_mut(&handle.0) else {
-            continue;
-        };
-
-        let body_pos_m = states
-            .get(body.body_id)
-            .map(|s| s.position)
-            .unwrap_or_default();
-
-        // Planet center in the render frame — same transform
-        // `update_body_positions` uses, so the shadow ray tests the
-        // right sphere regardless of the rolling render origin.
-        let center_render = to_render_pos(body_pos_m - origin.position, &scale);
-        mat.params.planet_center_radius = Vec4::new(
-            center_render.x,
-            center_render.y,
-            center_render.z,
-            body.render_radius,
+    for (parent, handle) in &map_rings {
+        write_ring_params(
+            &body_query,
+            states,
+            &mut materials,
+            handle.0.clone(),
+            parent.0,
+            &origin,
+            MAP_SCALE,
+            &map_occluders,
+            gain,
         );
-        mat.params.scene = build_scene_lighting(body.body_id, states, &occluders, gain);
     }
+    for (parent, handle) in &ship_rings {
+        write_ring_params(
+            &body_query,
+            states,
+            &mut materials,
+            handle.0.clone(),
+            parent.0,
+            &origin,
+            SHIP_SCALE,
+            &ship_occluders,
+            gain,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_ring_params(
+    body_query: &Query<&CelestialBody>,
+    states: &BodyStates,
+    materials: &mut Assets<RingMaterial>,
+    handle: Handle<RingMaterial>,
+    parent: Entity,
+    origin: &RenderOrigin,
+    scale: f64,
+    occluders: &[(usize, Vec3, f32)],
+    gain: f32,
+) {
+    let Ok(body) = body_query.get(parent) else {
+        return;
+    };
+    let Some(mat) = materials.get_mut(&handle) else {
+        return;
+    };
+
+    let body_pos_m = states
+        .get(body.body_id)
+        .map(|s| s.position)
+        .unwrap_or_default();
+
+    // Planet center in the render frame — same transform the matching
+    // body mesh uses, so the shadow ray tests the right sphere
+    // regardless of the rolling render origin.
+    let center_render = ((body_pos_m - origin.position) * scale).as_vec3();
+    mat.params.planet_center_radius = Vec4::new(
+        center_render.x,
+        center_render.y,
+        center_render.z,
+        (body.radius_m * scale) as f32,
+    );
+    mat.params.scene = build_scene_lighting(body.body_id, states, occluders, gain);
 }
 
 // ---------------------------------------------------------------------------
@@ -1422,120 +1685,18 @@ pub fn update_render_origin(
         .unwrap_or(bevy::math::DVec3::ZERO);
 }
 
-/// Keep [`CelestialBody::render_radius`] in sync with the current
-/// [`WorldScale`]. Computed fresh every frame so `update_planet_light_dirs`,
-/// `update_gas_giant_params`, etc. see the right value after a view
-/// switch without needing per-frame scale awareness of their own.
-fn update_body_render_radius(
-    scale: Res<WorldScale>,
-    mut query: Query<&mut CelestialBody>,
-) {
-    for mut body in &mut query {
-        let radius_render = (body.radius_m * scale.0) as f32;
-        body.render_radius = radius_render.max(0.005);
-    }
-}
-
-/// Rebake every material/mesh that hard-bakes `meters_per_render_unit`
-/// into its data. Runs only on [`WorldScale`] change (e.g. when the user
-/// toggles map ↔ ship view), so the cost is paid once per toggle rather
-/// than every frame.
+/// Drive each [`CelestialBody`] parent's translation at [`MAP_SCALE`].
 ///
-/// Covers:
-/// - [`PlanetMaterial::atmosphere`] — scale-height and extinction params
-///   are expressed in render units.
-/// - [`GasGiantMaterial::layers`] — cloud-deck / haze / ring scatter
-///   geometry is in render units.
-/// - Ring mesh + [`RingMaterial`] inner/outer radii — the mesh geometry
-///   itself is sized in render units.
-fn rebake_scale_dependent_materials(
-    scale: Res<WorldScale>,
-    sim: Res<SimulationState>,
-    planet_query: Query<(&CelestialBody, &PlanetMaterialHandle)>,
-    gas_query: Query<(&CelestialBody, &GasGiantMaterialHandle)>,
-    ring_query: Query<(&ChildOf, &RingMaterialHandle, &Mesh3d)>,
-    body_query: Query<&CelestialBody>,
-    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
-    mut gas_materials: ResMut<Assets<GasGiantMaterial>>,
-    mut ring_materials: ResMut<Assets<RingMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    if !scale.is_changed() {
-        return;
-    }
-    let mpru = scale.meters_per_render_unit();
-    let bodies = &sim.system.bodies;
-
-    for (cb, handle) in &planet_query {
-        let Some(body) = bodies.get(cb.body_id) else {
-            continue;
-        };
-        let Some(mat) = planet_materials.get_mut(&handle.0) else {
-            continue;
-        };
-        mat.atmosphere = body
-            .terrestrial_atmosphere
-            .as_ref()
-            .map(|a| AtmosphereBlock::from_terrestrial(a, mpru))
-            .unwrap_or_default();
-    }
-
-    for (cb, handle) in &gas_query {
-        let Some(body) = bodies.get(cb.body_id) else {
-            continue;
-        };
-        let Some(atmos) = body.atmosphere.as_ref() else {
-            continue;
-        };
-        let Some(mat) = gas_materials.get_mut(&handle.0) else {
-            continue;
-        };
-        mat.layers = GasGiantLayers::from_params(atmos, mpru);
-    }
-
-    for (parent, handle, mesh3d) in &ring_query {
-        let Ok(cb) = body_query.get(parent.0) else {
-            continue;
-        };
-        let Some(body) = bodies.get(cb.body_id) else {
-            continue;
-        };
-        let Some(rings) = body.atmosphere.as_ref().and_then(|a| a.rings.as_ref()) else {
-            continue;
-        };
-        let inner_r = rings.inner_radius_m / mpru;
-        let outer_r = rings.outer_radius_m / mpru;
-        if let Some(mesh) = meshes.get_mut(&mesh3d.0) {
-            *mesh = build_ring_mesh(inner_r, outer_r, 512);
-        }
-        if let Some(mat) = ring_materials.get_mut(&handle.0) {
-            mat.params.inner_radius = inner_r;
-            mat.params.outer_radius = outer_r;
-        }
-    }
-}
-
-/// Keep each body's `BodyMesh` child Transform.scale equal to the
-/// parent's `render_radius`. Unit-sphere meshes rely on this so star
-/// and placeholder-sphere bodies stay the right size when
-/// [`WorldScale`] changes.
-fn update_body_mesh_scale(
-    bodies: Query<(&CelestialBody, &Children)>,
-    mut meshes: Query<&mut Transform, With<BodyMesh>>,
-) {
-    for (body, children) in &bodies {
-        for child in children.iter() {
-            if let Ok(mut t) = meshes.get_mut(child) {
-                t.scale = Vec3::splat(body.render_radius);
-            }
-        }
-    }
-}
-
+/// The parent acts as the canonical map-side anchor: its [`BodyMesh`]
+/// and [`BodyIcon`] children inherit it directly, while
+/// [`ShipBodyMesh`] siblings carry a compensating local translation
+/// (see [`update_ship_body_meshes`]) so they sit at `phys * SHIP_SCALE`
+/// in world space. Locking the parent at MAP_SCALE means both views
+/// have a stable, view-independent representation regardless of which
+/// camera is active.
 fn update_body_positions(
     cache: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
-    scale: Res<WorldScale>,
     mut query: Query<(&CelestialBody, &mut Transform)>,
 ) {
     let Some(ref states) = cache.states else {
@@ -1544,8 +1705,43 @@ fn update_body_positions(
 
     for (body, mut transform) in &mut query {
         if let Some(state) = states.get(body.body_id) {
-            transform.translation = to_render_pos(state.position - origin.position, &scale);
+            transform.translation = ((state.position - origin.position) * MAP_SCALE).as_vec3();
         }
+    }
+}
+
+/// Per-frame: rewrite each [`ShipBodyMesh`]'s LOCAL translation so its
+/// world position lands at `(phys_pos - origin) * SHIP_SCALE` regardless
+/// of what scale the parent's translation is computed at.
+///
+/// Parent translation is `(phys_pos - origin) * MAP_SCALE` (driven by
+/// [`update_body_positions`]). For the ship-view sibling we want world
+/// = `(phys_pos - origin) * SHIP_SCALE`, so the local translation that
+/// achieves that is `(phys_pos - origin) * (SHIP_SCALE - MAP_SCALE)`.
+///
+/// Scale and rotation are not touched — those are set once at spawn
+/// time (sphere placeholder uses `radius_m * SHIP_SCALE`; rings use
+/// `Vec3::ONE` because the ring mesh is built at SHIP_SCALE radii;
+/// post-swap impostor billboards ignore the model scale because the
+/// vertex shader sizes the quad from `params.radius` directly).
+fn update_ship_body_meshes(
+    cache: Res<FrameBodyStates>,
+    origin: Res<RenderOrigin>,
+    parents: Query<&CelestialBody>,
+    mut ship_meshes: Query<(&ChildOf, &mut Transform), With<ShipBodyMesh>>,
+) {
+    let Some(ref states) = cache.states else {
+        return;
+    };
+    for (parent_link, mut tf) in &mut ship_meshes {
+        let Ok(body) = parents.get(parent_link.0) else {
+            continue;
+        };
+        let Some(state) = states.get(body.body_id) else {
+            continue;
+        };
+        let rel = state.position - origin.position;
+        tf.translation = (rel * (SHIP_SCALE - MAP_SCALE)).as_vec3();
     }
 }
 
@@ -2174,21 +2370,22 @@ fn convert_reference_clouds_when_ready(
 
 fn patch_reference_cloud_covers(
     clouds: Res<ReferenceClouds>,
-    targets: Query<(&PlanetMaterialHandle, &ReferenceCloudTarget)>,
+    targets: Query<(&PlanetMaterials, &ReferenceCloudTarget)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
 ) {
-    for (handle, target) in &targets {
+    for (mats, target) in &targets {
         let Some(entry) = clouds.entries.get(&target.body_name) else {
             continue;
         };
         let Some(cube) = entry.cube.as_ref() else {
             continue;
         };
-        let Some(mat) = materials.get_mut(&handle.0) else {
-            continue;
-        };
-        if mat.cloud_cover != *cube {
-            mat.cloud_cover = cube.clone();
+        for handle in [&mats.map, &mats.ship] {
+            if let Some(mat) = materials.get_mut(handle) {
+                if mat.cloud_cover != *cube {
+                    mat.cloud_cover = cube.clone();
+                }
+            }
         }
     }
 }
@@ -2219,7 +2416,7 @@ struct LastCloudBandUpdate(Option<f64>);
 fn update_cloud_bands(
     mut last_time: ResMut<LastCloudBandUpdate>,
     sim: Res<SimulationState>,
-    mut query: Query<(&PlanetMaterialHandle, &mut CloudBandState)>,
+    mut query: Query<(&PlanetMaterials, &mut CloudBandState)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
 ) {
     let now = sim.simulation.sim_time();
@@ -2229,12 +2426,15 @@ fn update_cloud_bands(
         return;
     }
 
-    for (handle, mut state) in &mut query {
-        let Some(mat) = materials.get_mut(&handle.0) else {
+    for (mats, mut state) in &mut query {
+        // Scroll rate and differential coefficient are scale-independent
+        // (rad/s on the unit sphere) — read once from the map material,
+        // advance the per-band phase, then mirror the result to both.
+        let Some(map_mat) = materials.get(&mats.map) else {
             continue;
         };
-        let scroll = mat.atmosphere.cloud_dynamics.x as f64;
-        let diff = mat.atmosphere.cloud_shape.w.clamp(0.0, 1.0) as f64;
+        let scroll = map_mat.atmosphere.cloud_dynamics.x as f64;
+        let diff = map_mat.atmosphere.cloud_shape.w.clamp(0.0, 1.0) as f64;
         if scroll.abs() < 1e-12 {
             continue;
         }
@@ -2250,13 +2450,18 @@ fn update_cloud_bands(
         }
 
         let p = &state.phases;
-        mat.atmosphere.cloud_bands_a =
-            Vec4::new(p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32);
-        mat.atmosphere.cloud_bands_b =
-            Vec4::new(p[4] as f32, p[5] as f32, p[6] as f32, p[7] as f32);
-        mat.atmosphere.cloud_bands_c =
-            Vec4::new(p[8] as f32, p[9] as f32, p[10] as f32, p[11] as f32);
-        mat.atmosphere.cloud_bands_d =
-            Vec4::new(p[12] as f32, p[13] as f32, p[14] as f32, p[15] as f32);
+        let bands_a = Vec4::new(p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32);
+        let bands_b = Vec4::new(p[4] as f32, p[5] as f32, p[6] as f32, p[7] as f32);
+        let bands_c = Vec4::new(p[8] as f32, p[9] as f32, p[10] as f32, p[11] as f32);
+        let bands_d = Vec4::new(p[12] as f32, p[13] as f32, p[14] as f32, p[15] as f32);
+        for handle in [&mats.map, &mats.ship] {
+            let Some(mat) = materials.get_mut(handle) else {
+                continue;
+            };
+            mat.atmosphere.cloud_bands_a = bands_a;
+            mat.atmosphere.cloud_bands_b = bands_b;
+            mat.atmosphere.cloud_bands_c = bands_c;
+            mat.atmosphere.cloud_bands_d = bands_d;
+        }
     }
 }

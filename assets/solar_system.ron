@@ -1121,10 +1121,8 @@
             )),
         ),
         // Temporary placeholder — bright pink, Pluto-sized, ringed.
-        // Uses the gas-giant atmosphere path because the renderer
-        // only spawns rings when `atmosphere: Some(_)` is present
-        // and `generator` is None. Cloud-deck palette is flat
-        // hot-pink so the disk reads as a uniform ball.
+        // Flat hot-pink cloud deck reads as a uniform ball; rings now
+        // hang off the body itself, independent of the atmosphere.
         (
             name: "Roselle",
             kind: Planet,
@@ -1155,17 +1153,17 @@
                     ],
                     band_frequency: 1.0,
                 ),
-                rings: Some((
-                    inner_radius_m: 1782000.0,
-                    outer_radius_m: 2970000.0,
-                    seed: 99002,
-                    palette: [
-                        (r: 0.00, color: (1.00, 0.60, 0.80), opacity: 0.30),
-                        (r: 0.30, color: (1.00, 0.45, 0.75), opacity: 0.90),
-                        (r: 0.60, color: (1.00, 0.55, 0.80), opacity: 0.75),
-                        (r: 1.00, color: (1.00, 0.70, 0.85), opacity: 0.35),
-                    ],
-                )),
+            )),
+            rings: Some((
+                inner_radius_m: 1782000.0,
+                outer_radius_m: 2970000.0,
+                seed: 99002,
+                palette: [
+                    (r: 0.00, color: (1.00, 0.60, 0.80), opacity: 0.30),
+                    (r: 0.30, color: (1.00, 0.45, 0.75), opacity: 0.90),
+                    (r: 0.60, color: (1.00, 0.55, 0.80), opacity: 0.75),
+                    (r: 1.00, color: (1.00, 0.70, 0.85), opacity: 0.35),
+                ],
             )),
         ),
         (
@@ -1344,34 +1342,34 @@
                     blue:   0.42,
                     strength: 0.90,
                 )),
-                // Saturn-style ring system. Inner edge roughly at
-                // 1.25 R, outer at 2.3 R — matches Saturn's B/A
-                // ring footprint. Cassini division lives around
-                // r=0.42 of the radial span; the profile also
-                // authors a dim C ring and a bright B ring core.
-                rings: Some((
-                    inner_radius_m:  55750000.0,
-                    outer_radius_m: 102580000.0,
-                    seed: 20101,
-                    opacity: 1.00,
-                    ringlet_noise: 0.55,
-                    ringlet_octaves: 7,
-                    palette: [
-                        // Inner edge — translucent C-ring: dusky grey.
-                        (r: 0.00, color: (0.32, 0.28, 0.24), opacity: 0.18),
-                        (r: 0.18, color: (0.48, 0.42, 0.34), opacity: 0.40),
-                        // Bright B-ring core — creamy gold.
-                        (r: 0.30, color: (0.92, 0.82, 0.62), opacity: 0.95),
-                        (r: 0.40, color: (1.00, 0.90, 0.68), opacity: 0.98),
-                        // Cassini division — authored as a dark gap.
-                        (r: 0.46, color: (0.18, 0.16, 0.14), opacity: 0.10),
-                        // A-ring — warm tan.
-                        (r: 0.55, color: (0.80, 0.68, 0.48), opacity: 0.82),
-                        (r: 0.80, color: (0.74, 0.62, 0.44), opacity: 0.70),
-                        // Outer edge — feathered F-ring stand-in.
-                        (r: 1.00, color: (0.55, 0.48, 0.38), opacity: 0.25),
-                    ],
-                )),
+            )),
+            // Saturn-style ring system. Inner edge roughly at
+            // 1.25 R, outer at 2.3 R — matches Saturn's B/A
+            // ring footprint. Cassini division lives around
+            // r=0.42 of the radial span; the profile also
+            // authors a dim C ring and a bright B ring core.
+            rings: Some((
+                inner_radius_m:  55750000.0,
+                outer_radius_m: 102580000.0,
+                seed: 20101,
+                opacity: 1.00,
+                ringlet_noise: 0.55,
+                ringlet_octaves: 7,
+                palette: [
+                    // Inner edge — translucent C-ring: dusky grey.
+                    (r: 0.00, color: (0.32, 0.28, 0.24), opacity: 0.18),
+                    (r: 0.18, color: (0.48, 0.42, 0.34), opacity: 0.40),
+                    // Bright B-ring core — creamy gold.
+                    (r: 0.30, color: (0.92, 0.82, 0.62), opacity: 0.95),
+                    (r: 0.40, color: (1.00, 0.90, 0.68), opacity: 0.98),
+                    // Cassini division — authored as a dark gap.
+                    (r: 0.46, color: (0.18, 0.16, 0.14), opacity: 0.10),
+                    // A-ring — warm tan.
+                    (r: 0.55, color: (0.80, 0.68, 0.48), opacity: 0.82),
+                    (r: 0.80, color: (0.74, 0.62, 0.44), opacity: 0.70),
+                    // Outer edge — feathered F-ring stand-in.
+                    (r: 1.00, color: (0.55, 0.48, 0.38), opacity: 0.25),
+                ],
             )),
         ),
         (
@@ -2086,21 +2084,21 @@
                     blue:   0.40,
                     strength: 0.85,
                 )),
-                rings: Some((
-                    inner_radius_m:  92000000.0,
-                    outer_radius_m: 130000000.0,
-                    seed: 70101,
-                    opacity: 0.25,
-                    ringlet_noise: 0.30,
-                    ringlet_octaves: 5,
-                    palette: [
-                        (r: 0.00, color: (0.40, 0.36, 0.30), opacity: 0.08),
-                        (r: 0.25, color: (0.52, 0.46, 0.38), opacity: 0.18),
-                        (r: 0.50, color: (0.58, 0.50, 0.40), opacity: 0.22),
-                        (r: 0.75, color: (0.48, 0.42, 0.34), opacity: 0.15),
-                        (r: 1.00, color: (0.38, 0.34, 0.28), opacity: 0.06),
-                    ],
-                )),
+            )),
+            rings: Some((
+                inner_radius_m:  92000000.0,
+                outer_radius_m: 130000000.0,
+                seed: 70101,
+                opacity: 0.25,
+                ringlet_noise: 0.30,
+                ringlet_octaves: 5,
+                palette: [
+                    (r: 0.00, color: (0.40, 0.36, 0.30), opacity: 0.08),
+                    (r: 0.25, color: (0.52, 0.46, 0.38), opacity: 0.18),
+                    (r: 0.50, color: (0.58, 0.50, 0.40), opacity: 0.22),
+                    (r: 0.75, color: (0.48, 0.42, 0.34), opacity: 0.15),
+                    (r: 1.00, color: (0.38, 0.34, 0.28), opacity: 0.06),
+                ],
             )),
         ),
         (
@@ -2286,24 +2284,24 @@
                     blue:   0.42,
                     strength: 0.88,
                 )),
-                rings: Some((
-                    inner_radius_m:  68000000.0,
-                    outer_radius_m: 140000000.0,
-                    seed: 80101,
-                    opacity: 1.00,
-                    ringlet_noise: 0.60,
-                    ringlet_octaves: 7,
-                    palette: [
-                        (r: 0.00, color: (0.60, 0.62, 0.68), opacity: 0.30),
-                        (r: 0.12, color: (0.82, 0.84, 0.88), opacity: 0.75),
-                        (r: 0.28, color: (0.92, 0.92, 0.94), opacity: 0.98),
-                        (r: 0.38, color: (0.96, 0.94, 0.88), opacity: 0.95),
-                        (r: 0.44, color: (0.14, 0.14, 0.16), opacity: 0.05),
-                        (r: 0.52, color: (0.88, 0.86, 0.82), opacity: 0.90),
-                        (r: 0.75, color: (0.78, 0.80, 0.84), opacity: 0.72),
-                        (r: 1.00, color: (0.58, 0.60, 0.66), opacity: 0.20),
-                    ],
-                )),
+            )),
+            rings: Some((
+                inner_radius_m:  68000000.0,
+                outer_radius_m: 140000000.0,
+                seed: 80101,
+                opacity: 1.00,
+                ringlet_noise: 0.60,
+                ringlet_octaves: 7,
+                palette: [
+                    (r: 0.00, color: (0.60, 0.62, 0.68), opacity: 0.30),
+                    (r: 0.12, color: (0.82, 0.84, 0.88), opacity: 0.75),
+                    (r: 0.28, color: (0.92, 0.92, 0.94), opacity: 0.98),
+                    (r: 0.38, color: (0.96, 0.94, 0.88), opacity: 0.95),
+                    (r: 0.44, color: (0.14, 0.14, 0.16), opacity: 0.05),
+                    (r: 0.52, color: (0.88, 0.86, 0.82), opacity: 0.90),
+                    (r: 0.75, color: (0.78, 0.80, 0.84), opacity: 0.72),
+                    (r: 1.00, color: (0.58, 0.60, 0.66), opacity: 0.20),
+                ],
             )),
         ),
         (
@@ -2409,7 +2407,6 @@
                     blue:   0.44,
                     strength: 0.80,
                 )),
-                rings: None,
             )),
         ),
         (
@@ -2493,7 +2490,6 @@
                     blue:   0.42,
                     strength: 0.78,
                 )),
-                rings: None,
             )),
         ),
 

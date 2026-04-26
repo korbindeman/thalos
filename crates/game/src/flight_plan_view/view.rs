@@ -29,18 +29,14 @@ pub enum GhostPhase {
 pub struct GhostSpec {
     /// Physics body ID.
     pub body_id: BodyId,
-    /// Body's absolute position at the projection epoch.
-    pub body_position: DVec3,
-    /// `body_position - parent_position` at the projection epoch.
+    /// SOI parent body. The ghost is anchored to this body's *current*
+    /// world position so it stays near its parent regardless of how far
+    /// the parent moves between now and the projection epoch.
+    pub parent_id: BodyId,
+    /// `body(t_enc) − parent(t_enc)` — body's offset from its parent at
+    /// the projection epoch. Combined with the parent's live pin at render
+    /// time this places the ghost at `parent_now + relative`.
     pub relative_position: DVec3,
-    /// Leg-anchor body whose frame the encounter's trajectory renders in.
-    /// The ghost must render in the same frame so its mesh stays coincident
-    /// with the trajectory's depiction of the encounter geometry.
-    pub leg_anchor_id: BodyId,
-    /// Leg anchor's position at the projection epoch. Combined with the live
-    /// anchor position at render time this transforms the ghost from
-    /// sample-time frame to render frame — same rule as trajectory samples.
-    pub leg_anchor_pos: DVec3,
     /// SOI entry time — used for lifecycle/handoff timing.
     pub encounter_epoch: f64,
     /// ECS entity (filled after spawn, preserved across rebuilds).
@@ -68,25 +64,31 @@ impl FlightPlanView {
 
     /// World-space pin for a leg whose anchor is `body_id`.
     ///
-    /// If the body has an active ghost, returns `r_body(t_enc)` — the
-    /// ghost's fixed world position — so the leg's trajectory (and the
-    /// ghost mesh, rendered with the same rule) both curve around that
-    /// point. During blending the pin lerps toward the body's current
-    /// position so handoff to the live body is smooth.
+    /// If the body has an active ghost, returns `parent_pin + relative` —
+    /// the body's projected offset from its parent applied to the parent's
+    /// *current* pin. This anchors the ghost (and any leg pinned to it)
+    /// to the parent's live position rather than the body's heliocentric
+    /// future position, so e.g. a Mira encounter stays near current
+    /// Thalos instead of drifting along Thalos's heliocentric path.
     ///
-    /// Falls back to the body's current heliocentric position so legs
-    /// around real bodies (e.g. a live orbit around Thalos) render at
-    /// the body's actual location.
+    /// The lookup recurses through `parent_id`, so chained encounters
+    /// (Thalos ghost → Mira ghost) compose correctly.
+    ///
+    /// During blending the pin lerps toward the body's current position
+    /// so handoff to the live body is smooth. Falls back to the body's
+    /// current heliocentric position when no ghost exists.
     pub fn pin_for_body(&self, body_id: BodyId, body_states: &[BodyState]) -> DVec3 {
         if let Some(ghost) = self.ghost_for_body(body_id) {
+            let parent_pin = self.pin_for_body(ghost.parent_id, body_states);
+            let ghost_pin = parent_pin + ghost.relative_position;
             match ghost.phase {
-                GhostPhase::Active => return ghost.body_position,
+                GhostPhase::Active => return ghost_pin,
                 GhostPhase::Blending { progress } => {
                     if let Some(real_state) = body_states.get(body_id) {
                         let t = progress.clamp(0.0, 1.0) as f64;
-                        return ghost.body_position * (1.0 - t) + real_state.position * t;
+                        return ghost_pin * (1.0 - t) + real_state.position * t;
                     }
-                    return ghost.body_position;
+                    return ghost_pin;
                 }
                 GhostPhase::Retired => {}
             }
@@ -96,46 +98,6 @@ impl FlightPlanView {
             .map(|bs| bs.position)
             .unwrap_or(DVec3::ZERO)
     }
-}
-
-/// Resolve the leg-anchor body and its position at the given epoch.
-///
-/// Each leg's coast segment locks every sample to a single anchor body
-/// (§7.2 leg-anchor lock). Ghosts anchored to that leg must render in
-/// the same body's frame or their sphere floats off the trajectory.
-///
-/// When `prefer_body` is supplied (the encounter body), we prefer any leg
-/// whose anchor equals that body — for an SOI capture this is the capture
-/// leg itself, which is where the trajectory actually wraps around the
-/// ghost. Without this preference the ghost would render in the approach
-/// leg's anchor frame (usually heliocentric) and float off by the approach
-/// anchor's displacement between sample time and now.
-fn leg_anchor_at(
-    flight_plan: &thalos_physics::trajectory::FlightPlan,
-    leg_index: usize,
-    epoch: f64,
-    ephemeris: &dyn thalos_physics::body_state_provider::BodyStateProvider,
-    prefer_body: Option<BodyId>,
-) -> (BodyId, DVec3) {
-    let leg_anchor = |idx: usize| -> Option<BodyId> {
-        let leg = flight_plan.legs().get(idx)?;
-        leg.coast_segment
-            .samples
-            .first()
-            .or_else(|| leg.burn_segment.as_ref().and_then(|b| b.samples.first()))
-            .map(|s| s.anchor_body)
-    };
-
-    let anchor_id = prefer_body
-        .and_then(|body| {
-            (0..flight_plan.legs().len())
-                .find(|i| leg_anchor(*i) == Some(body))
-                .and_then(leg_anchor)
-        })
-        .or_else(|| leg_anchor(leg_index))
-        .unwrap_or(0);
-    let pos = ephemeris.query_body(anchor_id, epoch).position;
-    (anchor_id, pos)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,20 +154,10 @@ pub(super) fn rebuild_flight_plan_view(
         let parent_id = body_def.parent.unwrap_or(0);
         let parent_state = ephemeris.query_body(parent_id, projection_epoch);
 
-        let (leg_anchor_id, leg_anchor_pos) = leg_anchor_at(
-            flight_plan,
-            enc.leg_index,
-            projection_epoch,
-            ephemeris,
-            Some(body_id),
-        );
-
         new_specs.push(GhostSpec {
             body_id,
-            body_position: body_state.position,
+            parent_id,
             relative_position: body_state.position - parent_state.position,
-            leg_anchor_id,
-            leg_anchor_pos,
             encounter_epoch: enc.entry_epoch,
             entity: None,
             phase: GhostPhase::Active,
@@ -224,20 +176,10 @@ pub(super) fn rebuild_flight_plan_view(
         if body_def.kind != BodyKind::Star {
             let parent_id = body_def.parent.unwrap_or(0);
             let parent_state = ephemeris.query_body(parent_id, ca.epoch);
-            let leg_index = flight_plan.leg_at_time(ca.epoch).unwrap_or(0);
-            let (leg_anchor_id, leg_anchor_pos) = leg_anchor_at(
-                flight_plan,
-                leg_index,
-                ca.epoch,
-                ephemeris,
-                Some(target_id),
-            );
             new_specs.push(GhostSpec {
                 body_id: target_id,
-                body_position: ca.body_state.position,
+                parent_id,
                 relative_position: ca.body_state.position - parent_state.position,
-                leg_anchor_id,
-                leg_anchor_pos,
                 encounter_epoch: ca.epoch,
                 entity: None,
                 phase: GhostPhase::Active,

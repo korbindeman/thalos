@@ -1224,6 +1224,7 @@ mod tests {
             generator: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
+            rings: None,
         };
         let earth = BodyDefinition {
             id: 1,
@@ -1249,6 +1250,7 @@ mod tests {
             generator: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
+            rings: None,
         };
         let mut name_to_id = HashMap::new();
         name_to_id.insert("Sun".into(), 0);
@@ -1522,6 +1524,7 @@ mod tests {
             generator: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
+            rings: None,
         }];
         bodies[0].id = 0;
         let mut name_to_id = HashMap::new();

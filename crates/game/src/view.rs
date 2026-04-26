@@ -15,7 +15,7 @@
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
+use bevy_egui::{EguiContexts, PrimaryEguiContext};
 
 use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
 use crate::coords::{MAP_LAYER, SHIP_LAYER};
@@ -48,10 +48,11 @@ impl Plugin for ViewPlugin {
             .init_resource::<crate::coords::WorldScale>()
             .add_observer(attach_map_layer_for_hide_in_ship)
             .add_observer(attach_ship_layer_for_hide_in_map)
+            .add_systems(Startup, spawn_ui_camera)
             .add_systems(Update, toggle_view_input)
             .add_systems(
                 Update,
-                (sync_world_scale_to_view, apply_active_camera)
+                apply_active_camera
                     .after(toggle_view_input)
                     .after(crate::SimStage::Sync)
                     .before(crate::SimStage::Camera),
@@ -60,26 +61,40 @@ impl Plugin for ViewPlugin {
     }
 }
 
-/// Keep [`WorldScale`](crate::coords::WorldScale) in sync with the
-/// current view: map → `1e-6`, ship → `1.0`.
+/// Layer index reserved for the UI overlay camera. No game entity is
+/// placed on this layer, so the camera's 3D main pass renders nothing.
+/// We use a real (but empty) layer rather than `RenderLayers::none()`
+/// because the latter short-circuits the camera's render graph and
+/// takes the egui sub-graph node down with it.
+const UI_LAYER: usize = 31;
+
+/// Dedicated overlay camera that owns the primary egui context.
 ///
-/// Used only by body-rendering systems that still share entities across
-/// both views. Per-view systems should read [`crate::coords::MAP_SCALE`]
-/// or [`crate::coords::SHIP_SCALE`] directly.
-fn sync_world_scale_to_view(
-    view: Res<ViewMode>,
-    mut scale: ResMut<crate::coords::WorldScale>,
-) {
-    if !view.is_changed() {
-        return;
-    }
-    let new_scale = match *view {
-        ViewMode::Map => crate::coords::MAP_SCALE,
-        ViewMode::Ship => crate::coords::SHIP_SCALE,
-    };
-    if (scale.0 - new_scale).abs() > f64::EPSILON {
-        scale.0 = new_scale;
-    }
+/// `bevy_egui` skips inactive cameras when extracting render output, so
+/// pinning the egui context to either [`MapCamera`] or [`ShipCamera`]
+/// would make the UI vanish whenever the other view is active. This
+/// camera is always active and sits above the scene cameras via a
+/// higher `order` so the egui pass composites over whichever scene
+/// camera is currently rendering. The alpha-blended output mode mirrors
+/// `bevy_egui`'s `split_screen` example — without it, the camera's
+/// transparent intermediate texture would overwrite the scene cameras'
+/// output instead of compositing over it.
+fn spawn_ui_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            order: 10,
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            output_mode: bevy::camera::CameraOutputMode::Write {
+                blend_state: Some(bevy::render::render_resource::BlendState::ALPHA_BLENDING),
+                clear_color: ClearColorConfig::None,
+            },
+            ..default()
+        },
+        RenderLayers::layer(UI_LAYER),
+        PrimaryEguiContext,
+        Name::new("UiCamera"),
+    ));
 }
 
 /// On insertion of [`HideInShipView`], attach `RenderLayers(MAP_LAYER)`
@@ -156,16 +171,23 @@ fn propagate_view_render_layers(
 
 /// Flip [`ActiveCamera`] + `Camera::is_active` to track the current
 /// [`ViewMode`]. Replaces the per-frame visibility-flip mechanism.
+///
+/// Filtered to scene cameras only — the UI overlay camera in
+/// [`spawn_ui_camera`] must stay active across both views, otherwise
+/// `bevy_egui` skips extracting its render output and the UI vanishes.
 fn apply_active_camera(
     view: Res<ViewMode>,
     mut commands: Commands,
-    mut cameras: Query<(
-        Entity,
-        &mut Camera,
-        Option<&MapCamera>,
-        Option<&ShipCamera>,
-        Has<ActiveCamera>,
-    )>,
+    mut cameras: Query<
+        (
+            Entity,
+            &mut Camera,
+            Option<&MapCamera>,
+            Option<&ShipCamera>,
+            Has<ActiveCamera>,
+        ),
+        Or<(With<MapCamera>, With<ShipCamera>)>,
+    >,
 ) {
     if !view.is_changed() {
         return;

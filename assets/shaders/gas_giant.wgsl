@@ -1080,6 +1080,16 @@ fn fragment(in: VertexOutput) -> FragOutput {
 
             // ── Ring shadow on the cloud deck ────────────────────
             //
+            // Note: this is the gas-giant cloud-deck side of ring
+            // shadowing. Rings are now a body-level property and any
+            // body can have them, but the rocky-body counterpart in
+            // `planet_impostor.wgsl` is not yet implemented — a
+            // terrain body with rings will render the rings, but
+            // its surface won't darken inside the annulus. To wire
+            // that up, mirror this projection logic against the
+            // baked impostor's surface point and feed the
+            // inner/outer radii via new uniforms on PlanetMaterial.
+            //
             // When a ring system is present, project the surface
             // point toward the sun in body-local space and test
             // whether the projection crosses the ring plane inside

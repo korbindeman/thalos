@@ -11,8 +11,7 @@
 //!
 //! - [`AtmosphereParams`] — gas / ice giants. The cloud deck IS the
 //!   visible disk; there is no solid surface. Rich schema: cloud palette,
-//!   zonal banding, haze, rim halo, Rayleigh blue gaps, limb darkening,
-//!   ring system.
+//!   zonal banding, haze, rim halo, Rayleigh blue gaps, limb darkening.
 //! - [`TerrestrialAtmosphere`] — terrestrial bodies with a thin gas
 //!   shell over a baked solid surface. Much sparser schema: rim halo +
 //!   limb shading + optional limb darkening. Built to composite over
@@ -108,9 +107,6 @@ pub struct AtmosphereParams {
     #[serde(default)]
     pub limb_darkening: Option<LimbDarkening>,
 
-    /// Optional Saturn-style ring system.
-    #[serde(default)]
-    pub rings: Option<RingSystem>,
     // Storms and aurora come later. They are not listed here yet so the
     // schema is conservative: adding them will be an additive change,
     // with `#[serde(default)]` preserving backward compatibility.
@@ -368,11 +364,15 @@ pub struct LimbDarkening {
 
 /// Saturn-style ring system.
 ///
-/// Rings are rendered as a flat annulus aligned with the body's
-/// equatorial plane (axial tilt inherited from the physical block).
-/// The radial profile is a mix of authored palette stops and a
-/// procedural density field. Planet shadow on rings and ring shadow
-/// on the planet are both wired through the shaders.
+/// Rings are a body-level property (sibling of `atmosphere`,
+/// `generator`, `terrestrial_atmosphere`) — any body can have them,
+/// not just gas giants. Rendered as a flat annulus aligned with the
+/// body's equatorial plane (axial tilt inherited from the physical
+/// block). The radial profile is a mix of authored palette stops and
+/// a procedural density field. Planet-shadow on rings is implemented
+/// for every body; ring-shadow on the body itself is currently only
+/// wired into the gas-giant cloud-deck shader (see
+/// `gas_giant.wgsl` — terrain-impostor counterpart is a TODO).
 #[derive(Debug, Clone, Deserialize)]
 pub struct RingSystem {
     /// Inner edge radius, in meters from body center.
