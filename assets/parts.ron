@@ -1,0 +1,75 @@
+// Thalos parts catalog.
+//
+// Map keys are stable IDs (assigned once, never changed). `display_name`
+// is the mutable, user-facing label — rename freely without touching saves.
+// Saved ship blueprints reference parts by these IDs.
+//
+// Parametric parts (decouplers, adapters, tanks) define recipes:
+//   - dry_mass scales from `wall_mass_per_m2` × surface area
+//   - tank capacity scales from `*_l_per_m3` × tank volume
+//
+// Reactant ratios are mass fractions and must sum to 1.0 per engine.
+
+(
+    parts: {
+        "argos": Pod((
+            display_name: "Argos",
+            diameter: 2.5,
+            dry_mass: 2720.0,
+            reaction_wheel_torque: 15000.0,
+            base_electricity_kwh: 2.5,
+        )),
+        "hyperion": Pod((
+            display_name: "Hyperion",
+            diameter: 4.0,
+            dry_mass: 5800.0,
+            reaction_wheel_torque: 40000.0,
+            base_electricity_kwh: 4.0,
+        )),
+        "zephyr": Engine((
+            display_name: "Zephyr",
+            diameter: 2.5,
+            thrust: 500000.0,
+            isp: 355.0,
+            dry_mass: 450.0,
+            reactants: [
+                (resource: Methane, mass_fraction: 0.21739131),
+                (resource: Lox,     mass_fraction: 0.78260869),
+            ],
+            power_draw_kw: 0.0,
+        )),
+        "boreas": Engine((
+            display_name: "Boreas",
+            diameter: 4.0,
+            thrust: 1800000.0,
+            isp: 380.0,
+            dry_mass: 1800.0,
+            reactants: [
+                (resource: Methane, mass_fraction: 0.21739131),
+                (resource: Lox,     mass_fraction: 0.78260869),
+            ],
+            power_draw_kw: 0.0,
+        )),
+        "decoupler_std": Decoupler((
+            display_name: "Decoupler",
+            mass_per_diameter: 25.0,
+            ejection_impulse_per_diameter: 100.0,
+        )),
+        "adapter_std": Adapter((
+            display_name: "Adapter",
+            wall_mass_per_m2: 14.0,
+        )),
+        "tank_methalox": Tank((
+            display_name: "Methalox Tank",
+            wall_mass_per_m2: 12.0,
+            // 429 L/m³ CH4 + 571 L/m³ LOX → 1000 L/m³ total at stoichiometric
+            // O/F ≈ 3.6 mass ratio (Raptor-class). Volume utilization 100%.
+            methane_l_per_m3: 429.0,
+            lox_l_per_m3: 571.0,
+            reactants: [
+                (resource: Methane, mass_fraction: 0.21739131),
+                (resource: Lox,     mass_fraction: 0.78260869),
+            ],
+        )),
+    },
+)

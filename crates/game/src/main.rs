@@ -1,3 +1,5 @@
+mod autopilot;
+mod body_tree_panel;
 mod bridge;
 mod camera;
 mod coords;
@@ -25,12 +27,14 @@ use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, WindowMode};
 use thalos_physics::{
     body_state_provider::BodyStateProvider,
+    gravity_mode::GravityMode,
     parsing::load_solar_system,
-    patched_conics::PatchedConics,
     simulation::{Simulation, SimulationConfig},
     types::{AttitudeState, StateVector},
 };
 
+use autopilot::BurnAutopilotPlugin;
+use body_tree_panel::BodyTreePanelPlugin;
 use bridge::BridgePlugin;
 use camera::CameraPlugin;
 use engine::EnginePlugin;
@@ -92,14 +96,20 @@ fn main() {
     println!("  Bodies:           {}", system.bodies.len());
 
     // ------------------------------------------------------------------
-    // 3. Build the runtime patched-conics provider.
+    // 3. Build the gravity model.
+    //
+    //    The mode is the savegame-pinned strategy that picks both the body
+    //    motion source and the ship propagator. Hardcoded here until save
+    //    files exist to deserialize it from.
     // ------------------------------------------------------------------
+    let gravity_mode = GravityMode::PatchedConics;
     println!(
-        "  Using patched-conics runtime body states ({:.0}-year span).",
+        "  Gravity mode:    {:?} ({:.0}-year span).",
+        gravity_mode,
         RUNTIME_TIME_SPAN / 3.156e7,
     );
-    let ephemeris: Arc<dyn BodyStateProvider> =
-        Arc::new(PatchedConics::new(&system, RUNTIME_TIME_SPAN));
+    let gravity_impls = gravity_mode.build(&system, RUNTIME_TIME_SPAN);
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::clone(&gravity_impls.body_state);
 
     // ------------------------------------------------------------------
     // 4. Resolve the ship's absolute initial state.
@@ -174,7 +184,7 @@ fn main() {
         .insert_resource({
             let mut simulation = Simulation::new(
                 ship_state,
-                Arc::clone(&ephemeris),
+                gravity_impls,
                 system.bodies.clone(),
                 SimulationConfig::default(),
             );
@@ -215,9 +225,11 @@ fn main() {
         .add_plugins(FlightPlanViewPlugin)
         .add_plugins(ManeuverPlugin)
         .add_plugins(NavigationPlugin)
+        .add_plugins(BurnAutopilotPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
+        .add_plugins(BodyTreePanelPlugin)
         .run();
 }

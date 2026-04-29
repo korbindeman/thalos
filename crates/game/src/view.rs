@@ -201,9 +201,13 @@ fn apply_active_camera(
             camera.is_active = should_be_active;
         }
         if should_be_active && !active {
-            commands.entity(entity).insert(ActiveCamera);
+            commands
+                .entity(entity)
+                .insert((ActiveCamera, IsDefaultUiCamera));
         } else if !should_be_active && active {
-            commands.entity(entity).remove::<ActiveCamera>();
+            commands
+                .entity(entity)
+                .remove::<(ActiveCamera, IsDefaultUiCamera)>();
         }
     }
 }

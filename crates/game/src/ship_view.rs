@@ -23,15 +23,15 @@ use thalos_ship_rendering::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
 };
 use thalos_shipyard::{
-    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part, PartMaterial,
-    Ship, ShipBlueprint, ShipyardPlugin,
+    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part, PartCatalog,
+    PartMaterial, Ship, ShipBlueprint, ShipyardPlugin,
 };
 
 use crate::fuel::ShipFuelParams;
 
 use crate::SimStage;
-use crate::camera::{CameraFocus, CameraTargetOffset};
-use crate::rendering::{PlayerShip, RenderOrigin, SimulationState};
+use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
+use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, RenderOrigin, SimulationState};
 use crate::view::{HideInMapView, ViewMode};
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
@@ -47,7 +47,19 @@ pub struct ShipViewPlugin;
 
 impl Plugin for ShipViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(ShipyardPlugin)
+        let catalog = match PartCatalog::load_from_path("assets/parts.ron") {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to load parts catalog from assets/parts.ron: {e}");
+                // Continue with an empty catalog so the rest of the app
+                // can still come up; spawn_player_ship will log and skip.
+                PartCatalog {
+                    parts: Default::default(),
+                }
+            }
+        };
+        app.insert_resource(catalog)
+            .add_plugins(ShipyardPlugin)
             .add_plugins(ShipRenderingPlugin)
             .add_systems(Startup, spawn_player_ship)
             .add_systems(
@@ -87,6 +99,7 @@ fn spawn_player_ship(
     view: Res<ViewMode>,
     mut sim: ResMut<SimulationState>,
     mut fuel_params: ResMut<ShipFuelParams>,
+    catalog: Res<PartCatalog>,
 ) {
     let ron_path = PathBuf::from("ships/apollo.ron");
     let text = match std::fs::read_to_string(&ron_path) {
@@ -110,7 +123,13 @@ fn spawn_player_ship(
     // the fuel-drain system knows how fast to deplete tanks. v1 computes
     // these once at spawn — no staging or in-flight design changes to
     // react to yet.
-    let stats = blueprint.stats();
+    let stats = match blueprint.stats(&catalog) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to compute ship stats: {e}");
+            return;
+        }
+    };
     sim.simulation.set_ship_params(ShipParameters {
         moment_of_inertia: stats.moment_of_inertia_kg_m2,
         max_torque: DVec3::splat(stats.max_reaction_torque_n_m),
@@ -135,7 +154,13 @@ fn spawn_player_ship(
         stats.current_acceleration(),
     );
 
-    let ship_entity = blueprint.spawn(&mut commands);
+    let ship_entity = match blueprint.spawn(&mut commands, &catalog) {
+        Ok(e) => e,
+        Err(err) => {
+            error!("Failed to spawn ship blueprint: {err}");
+            return;
+        }
+    };
     info!(
         "spawned ship blueprint '{}' with {} parts",
         blueprint.name,
@@ -221,8 +246,10 @@ fn update_player_ship_world_position(
 fn sync_view_mode_changed(
     view: Res<ViewMode>,
     player_ship: Option<Res<PlayerShipEntity>>,
+    sim: Res<SimulationState>,
+    body_states: Res<FrameBodyStates>,
     mut focus: ResMut<CameraFocus>,
-    bodies: Query<(Entity, &Name), With<crate::rendering::CelestialBody>>,
+    bodies: Query<(Entity, &CelestialBody)>,
 ) {
     let Some(player_ship) = player_ship else {
         return;
@@ -240,9 +267,15 @@ fn sync_view_mode_changed(
             focus.elevation = 0.15;
         }
         ViewMode::Map => {
-            // Snap focus back to the homeworld so the map view isn't
-            // centred on a point-sized ship.
-            if let Some((entity, _)) = bodies.iter().find(|(_, n)| n.as_str() == "Thalos") {
+            // Focus the body whose SOI currently contains the ship — the
+            // same anchor the propagator uses. Falls back silently if the
+            // body-state cache hasn't populated yet (first frame).
+            let Some(states) = body_states.states.as_deref() else {
+                return;
+            };
+            let ship_pos = sim.simulation.ship_state().position;
+            let soi_id = find_reference_body(ship_pos, sim.simulation.bodies(), states);
+            if let Some((entity, _)) = bodies.iter().find(|(_, b)| b.body_id == soi_id) {
                 focus.target = Some(entity);
                 focus.target_distance = 2.0e7;
                 focus.distance = focus.distance.max(2.0e7);

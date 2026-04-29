@@ -19,6 +19,7 @@
 //! and "where it will be" can never numerically diverge.
 
 pub mod body_state_provider;
+pub mod gravity_mode;
 pub mod maneuver;
 pub mod orbital_math;
 pub mod parsing;

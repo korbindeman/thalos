@@ -12,13 +12,19 @@ use bevy::prelude::*;
 
 pub mod attach;
 pub mod blueprint;
+pub mod catalog;
 pub mod part;
+pub mod recompute;
 pub mod resource;
 pub mod sizing;
 pub mod stats;
 
 pub use attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
-pub use blueprint::{Connection, PartBlueprint, PartData, ShipBlueprint};
+pub use blueprint::{Connection, PartBlueprint, PartParams, ShipBlueprint};
+pub use catalog::{
+    AdapterSpec, CatalogEntry, CatalogError, CatalogId, CatalogRef, DecouplerSpec, EngineSpec,
+    PartCatalog, PodSpec, TankSpec,
+};
 pub use part::{
     Adapter, CommandPod, Decoupler, Engine, EngineThrust, EngineValidationError, FuelTank,
     MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel, Shroudable, ShroudProvider,
@@ -30,6 +36,17 @@ pub struct ShipyardPlugin;
 
 impl Plugin for ShipyardPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, sizing::propagate_node_sizes);
+        app.add_systems(
+            Update,
+            (
+                sizing::propagate_node_sizes,
+                // Catalog-driven mass + capacity recompute. Run after
+                // sizing so a parent-diameter propagation that mutates
+                // a child's `diameter` lands in the same frame.
+                recompute::recompute_decoupler_state.after(sizing::propagate_node_sizes),
+                recompute::recompute_adapter_state.after(sizing::propagate_node_sizes),
+                recompute::recompute_tank_state.after(sizing::propagate_node_sizes),
+            ),
+        );
     }
 }

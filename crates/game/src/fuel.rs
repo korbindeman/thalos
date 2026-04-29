@@ -7,24 +7,21 @@
 //! state in [`PartResources`]:
 //!
 //! 1. Sample keyboard (Shift/Ctrl/Z/X, KSP convention) into
-//!    [`ThrottleState::commanded`].
-//! 2. Drain reactant pools across all tanks proportional to the
-//!    engine mass-flow at that throttle (or at full throttle while a
-//!    scheduled maneuver burn is firing — auto burns must drain too,
-//!    otherwise auto execution is "free" and inconsistent with manual
-//!    control).
-//! 3. Cap the throttle to 0 when any required reactant runs out and
+//!    [`ThrottleState::commanded`]. The burn-execution autopilot
+//!    (`crates/game/src/autopilot.rs`) writes the same field while
+//!    flying a scheduled maneuver — programmatic and manual control
+//!    share the throttle surface.
+//! 2. Cap the throttle to 0 when any required reactant runs out and
 //!    push the gated value into the simulation via
-//!    [`Simulation::set_throttle`].
-//! 4. Reconcile tank pools to whatever mass the simulation actually
+//!    [`Simulation::set_throttle`]. Engine fires only at 1× warp;
+//!    every other warp level forces the gated throttle to 0.
+//! 3. Reconcile tank pools to whatever mass the simulation actually
 //!    burned last frame. The simulation is the **single source of
 //!    truth** for ship mass — its propagator integrates burn duration,
 //!    SOI clipping, and dry-mass cutoff exactly. We read back the mass
 //!    delta and drain tank pools by that amount, split across the
 //!    engine's reactant fractions, so the per-tank UI matches the
-//!    physics regardless of warp rate or short burns inside a long
-//!    warp tick. This avoids the high-warp over-drain that a naive
-//!    `mass_flow · real_dt · warp` would produce.
+//!    physics regardless of short burns inside the frame.
 //!
 //! Mass flow + reactant fractions + dry mass live in [`ShipFuelParams`],
 //! populated once at ship spawn from [`ShipStats`]. v1 has no staging,
@@ -77,20 +74,31 @@ impl Plugin for FuelPlugin {
             .add_systems(
                 Update,
                 (
-                    handle_throttle_input,
+                    // Sample the keyboard early so the burn-execution
+                    // autopilot in `crates/game/src/autopilot.rs` can
+                    // run between this and `handle_attitude_controls`,
+                    // overriding `ThrottleState::commanded` for the
+                    // upcoming gate step. Detached from the
+                    // reconcile/gate chain because it has no data
+                    // dependency on attitude.
+                    handle_throttle_input
+                        .in_set(SimStage::Physics)
+                        .before(crate::bridge::handle_attitude_controls),
                     // Reconcile first: at this point the simulation's
                     // `ship_mass_kg` reflects the previous frame's step,
                     // so any burn that fired during that step is now
                     // accounted for in the sim mass. Subtract the delta
                     // from the tanks before we gate the upcoming throttle
                     // so the gate sees the post-drain availability.
-                    reconcile_tanks_from_sim_drain,
-                    gate_throttle_on_fuel_availability,
-                )
-                    .chain()
-                    .in_set(SimStage::Physics)
-                    .after(crate::bridge::handle_attitude_controls)
-                    .before(crate::bridge::advance_simulation),
+                    (
+                        reconcile_tanks_from_sim_drain,
+                        gate_throttle_on_fuel_availability,
+                    )
+                        .chain()
+                        .in_set(SimStage::Physics)
+                        .after(crate::bridge::handle_attitude_controls)
+                        .before(crate::bridge::advance_simulation),
+                ),
             );
     }
 }
@@ -107,7 +115,7 @@ const THROTTLE_RAMP_RATE: f64 = 0.5;
 /// burn ends. Held as a [`Local`] so it's per-system and survives
 /// across frames.
 #[derive(Default)]
-struct PredictionRefresh {
+pub struct PredictionRefresh {
     prev_effective: f64,
 }
 
@@ -152,7 +160,7 @@ fn finish_with_throttle(
 /// - `X` snaps to zero
 /// - `Shift` (held) ramps up
 /// - `Ctrl` (held) ramps down
-fn handle_throttle_input(
+pub fn handle_throttle_input(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut throttle: ResMut<ThrottleState>,
@@ -249,47 +257,29 @@ fn reconcile_tanks_from_sim_drain(
 /// `ship_mass_kg` during its step, and [`reconcile_tanks_from_sim_drain`]
 /// drains the tanks by that delta on the next frame.
 ///
-/// Whether the engine is firing this frame depends on three signals:
-/// - `auto_maneuver_active` — a scheduled burn is integrating now;
-///   throttle is full regardless of player input
-/// - `warp != 1×` without an active burn — engine off
-/// - otherwise — manual throttle from [`ThrottleState::commanded`]
-fn gate_throttle_on_fuel_availability(
+/// Engine fires only at 1× warp. Any other warp level (including
+/// pause) gates the throttle to 0; the burn-execution autopilot is
+/// responsible for stepping warp down to 1× before opening the
+/// throttle on a scheduled maneuver.
+pub fn gate_throttle_on_fuel_availability(
     time: Res<Time>,
     fuel_params: Res<ShipFuelParams>,
     mut sim: ResMut<SimulationState>,
     mut throttle: ResMut<ThrottleState>,
     tanks: Query<&PartResources, With<FuelTank>>,
-    // Throttle history + per-burn refresh cadence — used to dirty the
-    // prediction on engine-cut and tick it during the burn so the
-    // trail stays visibly in sync without rebuilding every frame.
     mut refresh: Local<PredictionRefresh>,
-    // Sticky flag so the "auto-burn fuel-out" warning fires once per
-    // starved auto burn, not every frame of the starved burn.
-    mut warned_starved_auto: Local<bool>,
 ) {
     let warp = sim.simulation.warp.speed();
     let real_dt = time.delta_secs_f64();
-    let auto_active = sim.simulation.auto_maneuver_active();
 
-    if !auto_active {
-        *warned_starved_auto = false;
-    }
-
-    // Pick the throttle and the time interval we're checking against.
-    // `drain_dt` is the worst-case fuel commitment over the upcoming
-    // sim step — for an auto burn at high warp that's the full warp
-    // tick; the simulation's own dry-mass cutoff handles the case where
-    // the burn finishes earlier inside the tick.
-    let (throttle_in_use, drain_dt) = if auto_active {
-        (1.0, real_dt * warp)
-    } else if (warp - 1.0).abs() < f64::EPSILON {
-        (throttle.commanded, real_dt)
-    } else {
-        // Warp > 1× without an active burn → engine off entirely.
+    if (warp - 1.0).abs() > f64::EPSILON {
+        // Any warp level other than 1× → engine off entirely.
         finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh);
         return;
-    };
+    }
+
+    let throttle_in_use = throttle.commanded;
+    let drain_dt = real_dt;
 
     if throttle_in_use <= 0.0
         || drain_dt <= 0.0
@@ -328,20 +318,5 @@ fn gate_throttle_on_fuel_availability(
         }
     }
     let throttle_effective = (throttle_in_use * feasibility).max(0.0);
-
-    // The auto-burn integrator inside `Simulation` doesn't read
-    // `ControlInput.throttle`. With the dry-mass floor wired through,
-    // it cuts thrust cleanly once the burn drains the simulation's
-    // internal `ship_mass_kg` to `dry_mass_kg`, so a missized maneuver
-    // delivers less than its requested Δv but doesn't run away. Warn
-    // once per starved burn so the player knows the maneuver was
-    // truncated rather than completed.
-    if auto_active && feasibility < 1.0 && !*warned_starved_auto {
-        warn!(
-            "[fuel] auto-maneuver burn ran out of propellant — engine cut off mid-burn, requested Δv not fully delivered"
-        );
-        *warned_starved_auto = true;
-    }
-
     finish_with_throttle(throttle_effective, &mut throttle, &mut sim, &mut refresh);
 }

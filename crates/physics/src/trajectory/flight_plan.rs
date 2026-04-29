@@ -30,6 +30,7 @@ pub use super::propagation::ScheduledBurn;
 use super::propagation::{PredictionConfig, PropagationBudget, PropagationContext, propagate_segment};
 use crate::body_state_provider::BodyStateProvider;
 use crate::maneuver::{ManeuverSequence, burn_duration};
+use crate::ship_propagator::ShipPropagator;
 use crate::types::{BodyDefinition, BodyId, StateVector};
 use glam::DVec3;
 
@@ -39,8 +40,11 @@ pub struct PredictionRequest {
     pub ship_state: StateVector,
     pub sim_time: f64,
     pub maneuvers: ManeuverSequence,
-    pub active_burns: Vec<ScheduledBurn>,
     pub ephemeris: Arc<dyn BodyStateProvider>,
+    /// Same propagator the live simulation is stepping with. Cloned (`Arc`)
+    /// from [`crate::simulation::Simulation`] when the request is built so
+    /// prediction and live ship motion route through one instance.
+    pub propagator: Arc<dyn ShipPropagator>,
     pub bodies: Vec<BodyDefinition>,
     pub prediction_config: PredictionConfig,
     /// Total engine thrust in newtons.
@@ -292,8 +296,8 @@ pub fn propagate_flight_plan(
         ship_state: initial_state,
         sim_time: start_time,
         maneuvers,
-        active_burns,
         ephemeris,
+        propagator,
         bodies,
         prediction_config,
         ship_thrust_n,
@@ -322,6 +326,7 @@ pub fn propagate_flight_plan(
         ephemeris: ephemeris.as_ref(),
         bodies,
         prediction_config,
+        propagator: propagator.as_ref(),
     };
 
     let mut legs: Vec<Leg> = Vec::new();
@@ -361,65 +366,105 @@ pub fn propagate_flight_plan(
     let mut state = initial_state;
     let mut time = start_time;
 
-    // Carry-over `active_burns` from the live sim (a burn that's already in
-    // progress when prediction starts). These belong to leg 0.
-    let carried_burns: Vec<ScheduledBurn> = active_burns.clone();
+    // Burns are centered on the node time: a node at `t` with computed
+    // duration `d` runs across `[t − d/2, t + d/2]`. Two consequences for
+    // the leg structure:
+    //
+    // * Leg `i` (for `i ≥ 1`) starts at `node[i−1].time − d_{i−1}/2`,
+    //   integrates that burn, then coasts until the next leg's burn
+    //   starts.
+    // * Leg `i` therefore ends at `node[i].time − d_i/2`. Computing
+    //   `d_i` requires the ship mass at the start of node `i`'s burn,
+    //   which is the running mass after leg `i`'s burn has drained — so
+    //   we pre-compute this leg's burn duration from the entry mass,
+    //   subtract its drain to estimate the next-burn anchor mass, and
+    //   use that to size `d_i`. Exact: the running coast doesn't change
+    //   mass, so the post-this-burn mass is also the next-burn anchor.
+    //
+    // Clamp: when a node sits closer to `sim_time` than half its own
+    // duration, `node.time − d/2 < time` and the unclamped formula
+    // would integrate a burn whose mass anchor predates `time`. Clamp
+    // `start_time` to `time` (and the leg ends to `time` too) so the
+    // burn integrates forward from the current state and the rocket-
+    // equation mass at integration time matches `running_mass_kg`. The
+    // burn-execution autopilot applies the same clamp when deciding
+    // when to open the throttle, so prediction and live execution
+    // agree on the burn window.
 
     for leg_idx in 0..leg_count {
-        // Leg boundary: next node time or horizon.
-        let mut leg_end = if leg_idx < node_order.len() {
-            maneuvers.nodes[node_order[leg_idx]].time
+        // Duration of the burn that fires at the START of this leg
+        // (i.e. the burn for `node[leg_idx − 1]`). Zero for leg 0.
+        let this_leg_burn_duration: f64 = if leg_idx == 0 {
+            0.0
+        } else {
+            let prev_node = &maneuvers.nodes[node_order[leg_idx - 1]];
+            if prev_node.delta_v.length_squared() > 0.0 {
+                burn_duration(
+                    prev_node.delta_v.length(),
+                    ship_thrust_n,
+                    running_mass_kg,
+                    ship_mass_flow_kg_per_s,
+                    ship_dry_mass_kg,
+                )
+            } else {
+                0.0
+            }
+        };
+
+        // Mass after this leg's burn drain — the anchor for sizing the
+        // NEXT leg's burn (no drain during the coast that follows).
+        let mass_after_this_burn = (running_mass_kg
+            - ship_mass_flow_kg_per_s * this_leg_burn_duration)
+            .max(ship_dry_mass_kg);
+
+        // Where this leg's coast ends = where the NEXT leg's burn
+        // starts. For the last leg, run to the ephemeris horizon.
+        let leg_end = if leg_idx < node_order.len() {
+            let next_node = &maneuvers.nodes[node_order[leg_idx]];
+            let next_duration = if next_node.delta_v.length_squared() > 0.0 {
+                burn_duration(
+                    next_node.delta_v.length(),
+                    ship_thrust_n,
+                    mass_after_this_burn,
+                    ship_mass_flow_kg_per_s,
+                    ship_dry_mass_kg,
+                )
+            } else {
+                0.0
+            };
+            // Clamp at `time` so a near-now node that would otherwise
+            // produce `leg_end < time` doesn't crash the propagator.
+            (next_node.time - next_duration / 2.0).max(time)
         } else {
             ephemeris_end
         };
 
-        // Build the burn for this leg.
-        //
-        // Leg 0: use any `carried_burns` that are still active at `time`
-        //   (the live-sim in-progress burn). The carried burn already
-        //   carries its own `initial_mass_kg` set when it was scheduled.
-        // Leg i>0: synthesize a new burn from the node that starts leg i,
-        //   using the running mass at the leg start as the burn's anchor.
-        let scheduled_burn: Option<ScheduledBurn> = if leg_idx == 0 {
-            carried_burns
-                .iter()
-                .copied()
-                .find(|b| b.start_time <= time && b.start_time + b.duration > time)
-                .inspect(|b| {
-                    // If a queued node falls inside this active burn, extend
-                    // the leg so the burn completes before the next leg starts.
-                    let burn_end = b.start_time + b.duration;
-                    if burn_end > leg_end {
-                        leg_end = burn_end;
-                    }
-                })
-        } else {
+        let scheduled_burn: Option<ScheduledBurn> = if this_leg_burn_duration > 0.0 {
             let prev_node = &maneuvers.nodes[node_order[leg_idx - 1]];
-            let duration = burn_duration(
-                prev_node.delta_v.length(),
-                ship_thrust_n,
-                running_mass_kg,
-                ship_mass_flow_kg_per_s,
-                ship_dry_mass_kg,
-            );
-            if duration > 0.0 && prev_node.delta_v.length_squared() > 0.0 {
-                Some(ScheduledBurn {
-                    delta_v_local: prev_node.delta_v,
-                    reference_body: prev_node.reference_body,
-                    thrust_n: ship_thrust_n,
-                    initial_mass_kg: running_mass_kg,
-                    mass_flow_kg_per_s: ship_mass_flow_kg_per_s,
-                    dry_mass_kg: ship_dry_mass_kg,
-                    start_time: prev_node.time,
-                    duration,
-                })
-            } else {
-                None
-            }
+            // Clamp burn start to the leg's entry time. With centered
+            // burns this is the natural value (= `prev_node.time − d/2`)
+            // unless the node sits inside the past half-window — in
+            // which case the live autopilot would also start the burn
+            // immediately, with its own delivered-Δv tracking handling
+            // the asymmetric loss.
+            let raw_start = prev_node.time - this_leg_burn_duration / 2.0;
+            let clamped_start = raw_start.max(time);
+            Some(ScheduledBurn {
+                delta_v_local: prev_node.delta_v,
+                reference_body: prev_node.reference_body,
+                thrust_n: ship_thrust_n,
+                initial_mass_kg: running_mass_kg,
+                mass_flow_kg_per_s: ship_mass_flow_kg_per_s,
+                dry_mass_kg: ship_dry_mass_kg,
+                start_time: clamped_start,
+                duration: this_leg_burn_duration,
+            })
+        } else {
+            None
         };
 
         let applied_delta_v: Option<DVec3> = if leg_idx == 0 {
-            scheduled_burn.as_ref().map(|b| b.delta_v_local)
+            None
         } else {
             Some(maneuvers.nodes[node_order[leg_idx - 1]].delta_v)
         };
@@ -436,12 +481,10 @@ pub fn propagate_flight_plan(
                 state = last;
             }
             if let Some(t) = seg.end_time() {
-                // Drain mass for the duration of thrust within this segment.
-                // For leg-0 carried burns the burn started before `start_time`
-                // (already accounted for in `request.ship_mass_kg`); for
-                // leg-i>0 burns the burn starts at `leg_start_time`. Either
-                // way the segment integrates thrust across [leg_start_time, t]
-                // so `t - leg_start_time` is the active-burn duration here.
+                // The burn segment integrates thrust across
+                // `[leg_start_time, t]` (after start-time clamping —
+                // the burn always begins at the leg's entry time), so
+                // `t − leg_start_time` is the active-burn duration.
                 let burn_dt = (t - leg_start_time).max(0.0);
                 running_mass_kg = (running_mass_kg
                     - ship_mass_flow_kg_per_s * burn_dt)
@@ -539,21 +582,38 @@ pub fn propagate_flight_plan(
     // sample is in that moon's SOI, so that leg renders in the moon's
     // frame and pins to the ghost, which is exactly the encounter UX
     // described in §6.
-    let relock_samples = |samples: &mut [crate::types::TrajectorySample]| {
-        let Some(first) = samples.first() else {
-            return;
-        };
-        let anchor = first.anchor_body;
+    let relock_samples_to = |samples: &mut [crate::types::TrajectorySample], anchor: BodyId| {
         for sample in samples.iter_mut() {
             sample.anchor_body = anchor;
             sample.ref_pos = ephemeris.query_body(anchor, sample.time).position;
         }
     };
+    let relock_samples_to_first = |samples: &mut [crate::types::TrajectorySample]| {
+        let Some(first) = samples.first() else {
+            return;
+        };
+        let anchor = first.anchor_body;
+        relock_samples_to(samples, anchor);
+    };
     for leg in legs.iter_mut() {
-        if let Some(burn) = leg.burn_segment.as_mut() {
-            relock_samples(&mut burn.samples);
+        // The leg's first sample is the burn's first when a burn exists,
+        // otherwise the coast's first. Both burn and coast get relocked
+        // to that single anchor so the whole leg renders in one frame —
+        // matching the comment above. Per-segment relock would split a
+        // burn-crosses-SOI leg across two frames at burn-end, which
+        // shows up as a visible bridge gap in the rendered trajectory.
+        let leg_anchor = leg
+            .burn_segment
+            .as_ref()
+            .and_then(|s| s.samples.first())
+            .or_else(|| leg.coast_segment.samples.first())
+            .map(|s| s.anchor_body);
+        if let Some(anchor) = leg_anchor {
+            if let Some(burn) = leg.burn_segment.as_mut() {
+                relock_samples_to(&mut burn.samples, anchor);
+            }
+            relock_samples_to(&mut leg.coast_segment.samples, anchor);
         }
-        relock_samples(&mut leg.coast_segment.samples);
     }
     // Build the flat segments cache from the post-relock legs in one pass.
     // Event detection (which needs the *pre-relock* per-sample anchors to
@@ -567,7 +627,7 @@ pub fn propagate_flight_plan(
         segments.push(leg.coast_segment.clone());
     }
     if let Some(base) = baseline.as_mut() {
-        relock_samples(&mut base.samples);
+        relock_samples_to_first(&mut base.samples);
     }
 
     let encounters = aggregate_encounters(

@@ -1,75 +1,22 @@
+// Apollo-class transfer stage: 4 m Hyperion pod, 4 m × 4 m methalox tank,
+// Boreas vacuum engine. Catalog-referenced — all stats live in
+// `assets/parts.ron`. This file only stores per-instance parametric data
+// (tank dimensions) and resource amounts; resource entries are omitted
+// so each pool spawns full at its catalog-derived capacity.
+
 (
     name: "apollo",
     root: 0,
     parts: [
+        (catalog_id: "hyperion"),
         (
-            data: (
-                kind: "CommandPod",
-                model: "Mk1-3",
-                diameter: 2.5,
-                dry_mass: 2720.0,
-                reaction_wheel_torque: 15000.0,
-            ),
-            resources: {
-                Electricity: (
-                    capacity: 2.5,
-                    amount: 2.5,
-                ),
-            },
+            catalog_id: "tank_methalox",
+            params: Tank(diameter: 4.0, length: 4.0),
         ),
-        (
-            data: (
-                kind: "FuelTank",
-                diameter: 2.5,
-                length: 3.0,
-                dry_mass: 250.0,
-            ),
-            resources: {
-                Methane: (
-                    capacity: 3000.0,
-                    amount: 3000.0,
-                ),
-                Lox: (
-                    capacity: 3996.0,
-                    amount: 3996.0,
-                ),
-            },
-        ),
-        (
-            data: (
-                kind: "Engine",
-                model: "Poodle",
-                diameter: 2.5,
-                thrust: 250000.0,
-                isp: 350.0,
-                dry_mass: 250.0,
-                reactants: [
-                    (
-                        resource: Methane,
-                        mass_fraction: 0.21739131,
-                    ),
-                    (
-                        resource: Lox,
-                        mass_fraction: 0.7826087,
-                    ),
-                ],
-                power_draw_kw: 0.0,
-            ),
-            resources: {},
-        ),
+        (catalog_id: "boreas"),
     ],
     connections: [
-        (
-            parent: 0,
-            parent_node: "bottom",
-            child: 1,
-            child_node: "top",
-        ),
-        (
-            parent: 1,
-            parent_node: "bottom",
-            child: 2,
-            child_node: "top",
-        ),
+        (parent: 0, parent_node: "bottom", child: 1, child_node: "top"),
+        (parent: 1, parent_node: "bottom", child: 2, child_node: "top"),
     ],
 )

@@ -1,5 +1,5 @@
-//! Propagation that produces [`NumericSegment`]s using the
-//! [`KeplerianPropagator`].
+//! Propagation that produces [`NumericSegment`]s using whichever
+//! [`ShipPropagator`] the caller supplies.
 //!
 //! A "segment" in the old N-body world was one integrator run terminating on
 //! a handful of conditions. With analytical Kepler propagation, each call to
@@ -8,12 +8,14 @@
 //! propagator across SOI transitions inside a single leg so the caller
 //! ([`super::flight_plan`]) still sees one [`NumericSegment`] per sub-leg
 //! (burn vs. coast) regardless of how many SOI boundaries the ship crosses.
+//!
+//! The propagator is supplied by the caller via [`PropagationContext`] —
+//! the same `Arc<dyn ShipPropagator>` the live [`crate::simulation::Simulation`]
+//! is stepping with, so live and predicted motion cannot diverge.
 
 use super::numeric::NumericSegment;
 use crate::body_state_provider::BodyStateProvider;
-use crate::ship_propagator::{
-    BurnParams, BurnRequest, CoastRequest, KeplerianPropagator, SegmentTerminator, ShipPropagator,
-};
+use crate::ship_propagator::{BurnParams, BurnRequest, CoastRequest, SegmentTerminator, ShipPropagator};
 use crate::types::{BodyDefinition, BodyId, StateVector, TrajectorySample};
 use glam::DVec3;
 
@@ -23,7 +25,10 @@ pub struct PredictionConfig {
     /// Hint for samples per coast segment per SOI span. More samples = smoother
     /// rendered curve at some memory cost. Default 128.
     pub coast_samples_per_segment: usize,
-    /// RK4 substep for burn segments, seconds. Default 1.0.
+    /// **Deprecated, no effect.** Burn substep now lives on the propagator
+    /// itself ([`crate::ship_propagator::KeplerianPropagator::burn_substep_s`])
+    /// since prediction borrows the live simulation's propagator instead of
+    /// constructing its own. Slated for removal in a follow-up cleanup.
     pub burn_substep_s: f64,
     /// Hard cap on SOI transitions within a single propagate_segment call.
     /// Guards pathological inputs; in practice we see 0-3 crossings per leg.
@@ -60,6 +65,10 @@ pub(super) struct PropagationContext<'a> {
     pub ephemeris: &'a dyn BodyStateProvider,
     pub bodies: &'a [BodyDefinition],
     pub prediction_config: &'a PredictionConfig,
+    /// Same instance the live [`crate::simulation::Simulation`] is stepping
+    /// with — borrowed here so prediction and live propagation cannot
+    /// numerically diverge.
+    pub propagator: &'a dyn ShipPropagator,
 }
 
 /// Finite-duration maneuver burn. Turned into a [`BurnParams`] at propagation
@@ -110,10 +119,7 @@ pub(super) fn propagate_segment(
     ctx: &PropagationContext,
     stop_on_stable_orbit: bool,
 ) -> NumericSegment {
-    let propagator = KeplerianPropagator {
-        burn_substep_s: ctx.prediction_config.burn_substep_s,
-        ..KeplerianPropagator::default()
-    };
+    let propagator = ctx.propagator;
 
     let mut samples: Vec<TrajectorySample> = Vec::new();
     let mut state = initial_state;

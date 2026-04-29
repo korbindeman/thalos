@@ -137,8 +137,11 @@ fn navigation_panel(
         _ => {}
     }
 
+    let avail = ctx.available_rect();
+    let initial_pos = egui::pos2(avail.right() - 140.0, avail.center().y - 130.0);
+
     egui::Window::new("Navigation")
-        .anchor(egui::Align2::RIGHT_CENTER, egui::vec2(-8.0, 0.0))
+        .default_pos(initial_pos)
         .resizable(false)
         .show(ctx, |ui| {
             ui.set_min_width(110.0);
@@ -182,8 +185,9 @@ fn mode_button(
 /// PD controller settling time, seconds. ω_n = π/T gives a quarter-period
 /// of T/2 — the ship reaches the target attitude in ~T seconds when it
 /// starts within the linear-torque regime, longer when the controller
-/// saturates against `max_torque`.
-const AUTOPILOT_SETTLE_S: f64 = 2.0;
+/// saturates against `max_torque`. Read by the burn-execution autopilot
+/// in [`crate::autopilot`] to size its lead time before a maneuver.
+pub(crate) const AUTOPILOT_SETTLE_S: f64 = 2.0;
 
 /// Body-frame "nose" axis for ship pointing. Apollo-style stacks have
 /// their long axis along body Y, with the command pod at +Y; flipping

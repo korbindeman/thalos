@@ -52,6 +52,7 @@ impl Plugin for FlightPlanViewPlugin {
                 )
                     .chain()
                     .after(crate::rendering::cache_body_states)
+                    .after(crate::rendering::update_render_frame)
                     .in_set(crate::SimStage::Sync),
             );
     }

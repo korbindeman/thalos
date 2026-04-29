@@ -192,7 +192,19 @@ fn compute_marker_specs(
         };
 
         let leg_anchor_pos = ephemeris.query_body(leg_anchor_id, event.epoch).position;
-        let pin = flight_plan_view.pin_for_body(leg_anchor_id, body_states);
+        // The marker's pin needs to match the leg's pin so the marker
+        // sits on the rendered trajectory line. Use the leg's first
+        // sample's time so multi-encounter dispatch picks the right
+        // ghost — `event.epoch` (where the apsis was detected) might
+        // sit past a later encounter on the same leg.
+        let leg_first_time = leg
+            .burn_segment
+            .as_ref()
+            .and_then(|s| s.samples.first())
+            .or_else(|| leg.coast_segment.samples.first())
+            .map(|s| s.time)
+            .unwrap_or(event.epoch);
+        let pin = flight_plan_view.pin_for_body(leg_anchor_id, leg_first_time, body_states);
         let world_pos = render_pos(event.craft_state.position, leg_anchor_pos, pin, origin, scale);
 
         specs.push(MarkerSpec {

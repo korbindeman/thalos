@@ -6,6 +6,7 @@ mod material;
 pub mod post_stack;
 mod rings;
 pub mod shader_types;
+mod solid_planet;
 mod texture;
 
 pub use bake::{
@@ -27,6 +28,7 @@ pub use rings::{
     ring_plane_normal,
 };
 pub use shader_types::{GpuCellRange, GpuCrater, GpuMaterial};
+pub use solid_planet::{SolidPlanetMaterial, SolidPlanetParams};
 pub use texture::PlanetTextures;
 
 use bevy::prelude::*;
@@ -47,6 +49,7 @@ impl Plugin for PlanetRenderingPlugin {
             MaterialPlugin::<PlanetMaterial>::default(),
             MaterialPlugin::<GasGiantMaterial>::default(),
             MaterialPlugin::<RingMaterial>::default(),
+            MaterialPlugin::<SolidPlanetMaterial>::default(),
             film_grain::FilmGrainPlugin,
         ));
     }

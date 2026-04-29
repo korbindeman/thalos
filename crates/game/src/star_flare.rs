@@ -14,6 +14,7 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::window::PrimaryWindow;
 
+use crate::camera::ActiveCamera;
 use crate::rendering::CelestialBody;
 
 pub struct LensFlarePlugin;
@@ -260,7 +261,7 @@ fn spawn_lens_flare_ghosts(
 }
 
 fn update_lens_flare(
-    cameras: Query<(&Camera, &GlobalTransform)>,
+    cameras: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
     bodies: Query<(&GlobalTransform, &CelestialBody)>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut tex_ghosts: Query<

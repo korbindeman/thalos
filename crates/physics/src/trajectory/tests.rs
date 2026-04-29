@@ -16,6 +16,7 @@ use super::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_pl
 use crate::body_state_provider::BodyStateProvider;
 use crate::maneuver::{ManeuverNode, ManeuverSequence};
 use crate::patched_conics::PatchedConics;
+use crate::ship_propagator::KeplerianPropagator;
 use crate::types::{
     BodyDefinition, BodyKind, G, OrbitalElements, ShipDefinition, SolarSystemDefinition,
     StateVector, TrajectorySample,
@@ -72,8 +73,8 @@ fn propagate_trajectory_with_target(
         ship_state: initial_state,
         sim_time: start_time,
         maneuvers: maneuvers.clone(),
-        active_burns: Vec::new(),
         ephemeris,
+        propagator: Arc::new(KeplerianPropagator::default()),
         bodies: bodies.to_vec(),
         prediction_config: config.clone(),
         ship_thrust_n,

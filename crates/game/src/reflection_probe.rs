@@ -380,14 +380,3 @@ fn write_rgba16f(out: &mut [u8], color: Vec3) {
     }
 }
 
-// Extension trait: glam's `Vec3::normalize_or` is `normalize_or_zero`
-// only; define a version that returns a fallback for when length≈0.
-trait NormalizeOr {
-    fn normalize_or(self, fallback: Vec3) -> Vec3;
-}
-
-impl NormalizeOr for Vec3 {
-    fn normalize_or(self, fallback: Vec3) -> Vec3 {
-        self.try_normalize().unwrap_or(fallback)
-    }
-}

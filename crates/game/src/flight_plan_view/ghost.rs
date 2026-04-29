@@ -1,7 +1,7 @@
 //! Ghost body ECS entities: spawn, update, lifecycle, and camera handoff.
 //!
 //! Ghost bodies are translucent spheres at future encounter positions. They
-//! are managed via diff against [`GhostSpec`]s in [`FlightPlanView`] — matched
+//! are managed via diff against [`Ghost`]s in [`FlightPlanView`] — matched
 //! by `(body_id, ~epoch)` so entities persist across repredictions without
 //! despawn/respawn churn.
 
@@ -28,6 +28,8 @@ const BLEND_LEAD_BASE: f64 = 60.0;
 /// Translucent duplicate of a celestial body at a future encounter position.
 #[derive(Component, Debug, Clone)]
 pub struct GhostBody {
+    /// The body this ghost represents.
+    pub body_id: usize,
     /// SOI parent body — the live pin we anchor the ghost to.
     pub parent_id: usize,
     /// Body's offset from its parent at the projection epoch.
@@ -53,23 +55,23 @@ pub(super) fn sync_ghost_bodies(
 ) {
     let Some(sim) = sim else { return };
 
-    for spec in view.ghost_specs.iter_mut() {
-        if spec.phase == GhostPhase::Retired {
-            // Retired specs with entities get despawned below.
+    for ghost in view.ghosts_mut().iter_mut() {
+        if ghost.phase == GhostPhase::Retired {
+            // Retired ghosts with entities get despawned below.
             continue;
         }
 
-        if let Some(entity) = spec.entity {
+        if let Some(entity) = ghost.entity {
             // Entity already exists — update in place.
-            if let Ok((_, mut ghost)) = existing.get_mut(entity) {
-                ghost.parent_id = spec.parent_id;
-                ghost.relative_position = spec.relative_position;
-                ghost.encounter_epoch = spec.encounter_epoch;
-                ghost.phase = spec.phase;
+            if let Ok((_, mut comp)) = existing.get_mut(entity) {
+                comp.parent_id = ghost.parent_id;
+                comp.relative_position = ghost.relative_position;
+                comp.encounter_epoch = ghost.encounter_epoch;
+                comp.phase = ghost.phase;
             }
         } else {
             // Need to spawn a new ghost entity.
-            let Some(body_def) = sim.system.bodies.get(spec.body_id) else {
+            let Some(body_def) = sim.system.bodies.get(ghost.body_id) else {
                 continue;
             };
             let render_radius = (body_def.radius_m * scale.0) as f32;
@@ -94,10 +96,11 @@ pub(super) fn sync_ghost_bodies(
                     NotShadowCaster,
                     NotShadowReceiver,
                     GhostBody {
-                        parent_id: spec.parent_id,
-                        relative_position: spec.relative_position,
+                        body_id: ghost.body_id,
+                        parent_id: ghost.parent_id,
+                        relative_position: ghost.relative_position,
                         radius_m: body_def.radius_m,
-                        encounter_epoch: spec.encounter_epoch,
+                        encounter_epoch: ghost.encounter_epoch,
                         phase: GhostPhase::Active,
                     },
                     HideInPhotoMode,
@@ -105,24 +108,23 @@ pub(super) fn sync_ghost_bodies(
                     Name::new(format!("Ghost: {}", body_def.name)),
                 ))
                 .id();
-            spec.entity = Some(entity);
+            ghost.entity = Some(entity);
         }
     }
 
     // Despawn retired ghosts.
     let retired_entities: Vec<Entity> = view
-        .ghost_specs
+        .ghosts()
         .iter()
-        .filter(|s| s.phase == GhostPhase::Retired && s.entity.is_some())
-        .filter_map(|s| s.entity)
+        .filter(|g| g.phase == GhostPhase::Retired && g.entity.is_some())
+        .filter_map(|g| g.entity)
         .collect();
     for entity in &retired_entities {
         commands.entity(*entity).despawn();
     }
 
-    // Remove retired specs from the list.
-    view.ghost_specs
-        .retain(|s| s.phase != GhostPhase::Retired);
+    // Remove retired ghosts from the list.
+    view.ghosts_mut().retain(|g| g.phase != GhostPhase::Retired);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +133,7 @@ pub(super) fn sync_ghost_bodies(
 
 pub(super) fn update_ghost_lifecycle(
     sim: Option<Res<SimulationState>>,
+    origin: Res<RenderOrigin>,
     mut view: ResMut<FlightPlanView>,
     mut focus: ResMut<CameraFocus>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -143,22 +146,22 @@ pub(super) fn update_ghost_lifecycle(
 
     let blend_lead_time = BLEND_LEAD_BASE.max(warp_speed * 2.0);
 
-    for spec in view.ghost_specs.iter_mut() {
-        let Some(entity) = spec.entity else { continue };
+    for ghost in view.ghosts_mut().iter_mut() {
+        let Some(entity) = ghost.entity else { continue };
 
-        let time_to_encounter = spec.encounter_epoch - sim_time;
+        let time_to_encounter = ghost.encounter_epoch - sim_time;
 
         // Transition Active → Blending when sim time approaches encounter.
         if time_to_encounter <= blend_lead_time && time_to_encounter > 0.0 {
             let progress =
                 ((blend_lead_time - time_to_encounter) / blend_lead_time).clamp(0.0, 1.0) as f32;
-            spec.phase = GhostPhase::Blending { progress };
+            ghost.phase = GhostPhase::Blending { progress };
         } else if time_to_encounter <= 0.0 {
-            spec.phase = GhostPhase::Retired;
+            ghost.phase = GhostPhase::Retired;
         }
 
         // Update material alpha during blend.
-        if let GhostPhase::Blending { progress } = spec.phase
+        if let GhostPhase::Blending { progress } = ghost.phase
             && let Ok((_, mat_handle, _)) = ghosts.get_mut(entity)
             && let Some(mat) = materials.get_mut(&mat_handle.0)
         {
@@ -167,20 +170,13 @@ pub(super) fn update_ghost_lifecycle(
         }
 
         // Camera handoff: if focused on this ghost and it's retired, transfer
-        // to the real body with smooth offset.
-        if spec.phase == GhostPhase::Retired
+        // to the real body with a smooth physics-space origin lerp.
+        if ghost.phase == GhostPhase::Retired
             && focus.target == Some(entity)
-            && let Some((real_entity, _, real_tf)) =
-                celestials.iter().find(|(_, cb, _)| cb.body_id == spec.body_id)
+            && let Some((real_entity, _, _)) =
+                celestials.iter().find(|(_, cb, _)| cb.body_id == ghost.body_id)
         {
-            let ghost_pos = ghosts
-                .get(entity)
-                .map(|(_, _, tf)| tf.translation)
-                .unwrap_or(Vec3::ZERO);
-            let old_pos = ghost_pos + focus.focus_offset;
-            let new_pos = real_tf.translation;
-            focus.focus_offset = old_pos - new_pos;
-            focus.target = Some(real_entity);
+            focus.focus_on(real_entity, origin.position);
         }
     }
 }
@@ -194,7 +190,7 @@ pub(super) fn update_ghost_transforms(
     focus: Res<CameraFocus>,
     scale: Res<WorldScale>,
     cache: Res<FrameBodyStates>,
-    view: Res<super::view::FlightPlanView>,
+    view: Res<FlightPlanView>,
     mut query: Query<(&GhostBody, &mut Transform)>,
 ) {
     let cam_dist_render = (focus.distance * scale.0) as f32;
@@ -205,17 +201,22 @@ pub(super) fn update_ghost_transforms(
         None => return,
     };
 
-    for (ghost, mut transform) in &mut query {
-        // Anchor the ghost to its parent's live pin. `pin_for_body` returns
-        // the parent's heliocentric position when the parent has no ghost,
-        // or recursively walks the chain when it does — so e.g. a Mira
-        // ghost stays glued to current Thalos, and a Thalos+Mira double
-        // encounter composes Mira's offset onto Thalos's ghost.
-        let parent_pin = view.pin_for_body(ghost.parent_id, body_states);
-        let sim_pos = parent_pin + ghost.relative_position;
+    for (ghost_comp, mut transform) in &mut query {
+        // Anchor the ghost to its parent's pin recursively. The parent
+        // recursion grounds out at the focus body (rule 1 in
+        // pin_for_body), so a Mira ghost composes its offset onto
+        // current Thalos when the camera focus is Thalos.
+        //
+        // We pass `encounter_epoch` as the sample time so multi-encounter
+        // dispatch resolves the parent ghost active at this body's
+        // encounter moment, matching the trajectory pin's recursion
+        // entry point exactly.
+        let parent_pin =
+            view.pin_for_body(ghost_comp.parent_id, ghost_comp.encounter_epoch, body_states);
+        let sim_pos = parent_pin + ghost_comp.relative_position;
 
         transform.translation = ((sim_pos - origin.position) * scale.0).as_vec3();
-        let body_radius_render = (ghost.radius_m * scale.0) as f32;
+        let body_radius_render = (ghost_comp.radius_m * scale.0) as f32;
         let radius = body_radius_render.max(min_radius);
         transform.scale = Vec3::splat(radius);
     }

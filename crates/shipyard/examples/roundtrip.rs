@@ -1,95 +1,50 @@
-//! Builds a small methalox ship blueprint, serializes to RON, deserializes,
-//! spawns into a headless Bevy world, runs one update (propagating node
-//! sizes), and asserts the parametric parts adopted the right diameters.
-//! Also prints aggregated `ShipStats` so the numbers are easy to eyeball.
+//! Builds a small Argos+Zephyr methalox ship from the parts catalog,
+//! serializes to RON, deserializes, spawns into a headless Bevy world,
+//! runs one update (propagating node sizes), and asserts the parametric
+//! parts adopted the right diameters. Also prints aggregated `ShipStats`
+//! so the numbers are easy to eyeball.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
-use thalos_shipyard::Resource as ShipResource;
 use thalos_shipyard::*;
 
-fn methalox_reactants() -> Vec<ReactantRatio> {
-    vec![
-        ReactantRatio {
-            resource: ShipResource::Methane,
-            mass_fraction: 1.0 / 4.6,
-        },
-        ReactantRatio {
-            resource: ShipResource::Lox,
-            mass_fraction: 3.6 / 4.6,
-        },
-    ]
-}
-
-fn single_pool(resource: ShipResource, amount: f32) -> HashMap<ShipResource, ResourcePool> {
-    let mut m = HashMap::new();
-    m.insert(
-        resource,
-        ResourcePool {
-            capacity: amount,
-            amount,
-        },
-    );
-    m
-}
-
 fn main() {
-    let pod = PartData::CommandPod {
-        model: "Mk1".into(),
-        diameter: 1.25,
-        dry_mass: 840.0,
-        reaction_wheel_torque: 5_000.0,
-    };
+    let catalog =
+        PartCatalog::load_from_path("assets/parts.ron").expect("load assets/parts.ron");
+
     let blueprint = ShipBlueprint {
         name: "TestRocket".into(),
         root: 0,
         parts: vec![
             PartBlueprint {
-                resources: blueprint::default_resources_for(&pod),
-                data: pod,
+                catalog_id: "argos".into(),
+                params: PartParams::None,
+                resources: HashMap::new(),
             },
             PartBlueprint {
-                data: PartData::Decoupler {
-                    diameter: 1.25,
-                    ejection_impulse: 250.0,
-                    dry_mass: 50.0,
+                catalog_id: "decoupler_std".into(),
+                params: PartParams::Decoupler { diameter: 2.5 },
+                resources: HashMap::new(),
+            },
+            PartBlueprint {
+                catalog_id: "adapter_std".into(),
+                params: PartParams::Adapter {
+                    diameter: 2.5,
+                    target_diameter: 4.0,
                 },
                 resources: HashMap::new(),
             },
             PartBlueprint {
-                data: PartData::Adapter {
-                    diameter: 1.25,
-                    target_diameter: 2.5,
-                    dry_mass: 100.0,
+                catalog_id: "tank_methalox".into(),
+                params: PartParams::Tank {
+                    diameter: 4.0,
+                    length: 4.0,
                 },
                 resources: HashMap::new(),
             },
             PartBlueprint {
-                data: PartData::FuelTank {
-                    diameter: 2.5,
-                    length: 4.0,
-                    dry_mass: 1000.0,
-                },
-                resources: single_pool(ShipResource::Methane, 8_000.0),
-            },
-            PartBlueprint {
-                data: PartData::FuelTank {
-                    diameter: 2.5,
-                    length: 4.0,
-                    dry_mass: 1200.0,
-                },
-                resources: single_pool(ShipResource::Lox, 10_800.0),
-            },
-            PartBlueprint {
-                data: PartData::Engine {
-                    model: "Raptor-2".into(),
-                    diameter: 2.5,
-                    thrust: 2_300_000.0,
-                    isp: 330.0,
-                    dry_mass: 1500.0,
-                    reactants: methalox_reactants(),
-                    power_draw_kw: 0.0,
-                },
+                catalog_id: "boreas".into(),
+                params: PartParams::None,
                 resources: HashMap::new(),
             },
         ],
@@ -118,12 +73,6 @@ fn main() {
                 child: 4,
                 child_node: "top".into(),
             },
-            Connection {
-                parent: 4,
-                parent_node: "bottom".into(),
-                child: 5,
-                child_node: "top".into(),
-            },
         ],
     };
 
@@ -133,7 +82,7 @@ fn main() {
     let reloaded = ShipBlueprint::from_ron(&ron).expect("deserialize");
     assert_eq!(reloaded.parts.len(), blueprint.parts.len());
 
-    let stats = reloaded.stats();
+    let stats = reloaded.stats(&catalog).expect("stats");
     println!("--- ship stats ---");
     println!("  dry mass:     {:.0} kg", stats.dry_mass_kg);
     println!("  propellant:   {:.0} kg", stats.propellant_mass_kg);
@@ -148,11 +97,7 @@ fn main() {
     println!("  Δv capacity:  {:.0} m/s", stats.delta_v_capacity());
     println!("  reactant mix:");
     for (res, frac) in &stats.reactant_fractions {
-        println!(
-            "    {}: {:.1}%",
-            res.display_name(),
-            frac * 100.0,
-        );
+        println!("    {}: {:.1}%", res.display_name(), frac * 100.0);
     }
     println!("  resources on board:");
     let mut res_list: Vec<_> = stats.resources.iter().collect();
@@ -171,33 +116,38 @@ fn main() {
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins).add_plugins(ShipyardPlugin);
+    app.insert_resource(catalog.clone());
 
-    app.world_mut()
-        .commands()
-        .queue(move |world: &mut World| {
-            let mut commands = world.commands();
-            reloaded.spawn(&mut commands);
-        });
+    app.world_mut().commands().queue(move |world: &mut World| {
+        let cat = world.resource::<PartCatalog>().clone();
+        let mut commands = world.commands();
+        reloaded.spawn(&mut commands, &cat).expect("spawn");
+    });
 
     app.update();
 
     let world = app.world_mut();
-    let mut q = world.query::<(&AttachNodes, Option<&Decoupler>, Option<&FuelTank>, Option<&Adapter>)>();
+    let mut q = world.query::<(
+        &AttachNodes,
+        Option<&Decoupler>,
+        Option<&FuelTank>,
+        Option<&Adapter>,
+    )>();
     for (nodes, dec, tank, adapter) in q.iter(world) {
         if dec.is_some() {
-            assert_eq!(nodes.get("top").unwrap().diameter, 1.25);
-            assert_eq!(nodes.get("bottom").unwrap().diameter, 1.25);
-            println!("decoupler sized to 1.25 OK");
-        }
-        if adapter.is_some() {
-            assert_eq!(nodes.get("top").unwrap().diameter, 1.25);
-            assert_eq!(nodes.get("bottom").unwrap().diameter, 2.5);
-            println!("adapter 1.25 -> 2.5 OK");
-        }
-        if tank.is_some() {
             assert_eq!(nodes.get("top").unwrap().diameter, 2.5);
             assert_eq!(nodes.get("bottom").unwrap().diameter, 2.5);
-            println!("tank sized to 2.5 OK");
+            println!("decoupler sized to 2.5 OK");
+        }
+        if adapter.is_some() {
+            assert_eq!(nodes.get("top").unwrap().diameter, 2.5);
+            assert_eq!(nodes.get("bottom").unwrap().diameter, 4.0);
+            println!("adapter 2.5 -> 4.0 OK");
+        }
+        if tank.is_some() {
+            assert_eq!(nodes.get("top").unwrap().diameter, 4.0);
+            assert_eq!(nodes.get("bottom").unwrap().diameter, 4.0);
+            println!("tank sized to 4.0 OK");
         }
     }
 

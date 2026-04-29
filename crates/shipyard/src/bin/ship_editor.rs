@@ -39,30 +39,23 @@ use thalos_celestial::generate::{DefaultGenParams, generate_default};
 use thalos_ship_rendering::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
 };
+use thalos_shipyard::blueprint::default_params_for;
 use thalos_shipyard::sizing::propagate_node_sizes;
-use thalos_shipyard::Resource as ShipResource;
 use thalos_shipyard::*;
 
 const SHIPS_DIR: &str = "ships";
+const CATALOG_PATH: &str = "assets/parts.ron";
 
 /// Radial segment count for cylindrical/frustum part meshes. Bevy's
 /// default is 32, which leaves a visibly faceted silhouette at editor
 /// zoom levels. Cost is negligible at the part counts we render.
 const PART_RESOLUTION: u32 = 128;
 
-/// Methalox reactant mix at O/F ≈ 3.6 (Raptor-ish).
-fn methalox_reactants() -> Vec<ReactantRatio> {
-    vec![
-        ReactantRatio {
-            resource: ShipResource::Methane,
-            mass_fraction: 1.0 / 4.6,
-        },
-        ReactantRatio {
-            resource: ShipResource::Lox,
-            mass_fraction: 3.6 / 4.6,
-        },
-    ]
-}
+/// Cursor-distance threshold (in pixels) separating a click from a
+/// drag. Used by deselect-on-empty-click and by orbit-while-pending so
+/// the click/drag boundary is consistent — strict-less is "click",
+/// `>=` is "drag".
+const CLICK_THRESHOLD_PX: f32 = 4.0;
 
 fn sanitize_name(name: &str) -> String {
     let s: String = name
@@ -81,6 +74,18 @@ fn sanitize_name(name: &str) -> String {
 
 fn ship_path(name: &str) -> PathBuf {
     PathBuf::from(SHIPS_DIR).join(format!("{}.ron", sanitize_name(name)))
+}
+
+/// Stable ordering for the palette: pods, then engines, then parametric
+/// parts. Within each kind we sort by display name in the caller.
+fn kind_order(entry: &CatalogEntry) -> u8 {
+    match entry {
+        CatalogEntry::Pod(_) => 0,
+        CatalogEntry::Engine(_) => 1,
+        CatalogEntry::Decoupler(_) => 2,
+        CatalogEntry::Adapter(_) => 3,
+        CatalogEntry::Tank(_) => 4,
+    }
 }
 
 fn list_ships() -> Vec<String> {
@@ -103,6 +108,14 @@ fn list_ships() -> Vec<String> {
 }
 
 fn main() {
+    let catalog = match PartCatalog::load_from_path(CATALOG_PATH) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to load parts catalog from {CATALOG_PATH}: {e}");
+            std::process::exit(1);
+        }
+    };
+
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -120,6 +133,7 @@ fn main() {
                     ..default()
                 }),
         )
+        .insert_resource(catalog)
         .add_plugins(EguiPlugin::default())
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(MeshPickingPlugin)
@@ -167,13 +181,22 @@ fn main() {
 // Resources / components
 // ---------------------------------------------------------------------------
 
+/// A part the user has armed in the palette but not yet placed. Held by
+/// [`EditorState::pending`] until the user clicks an attach node or
+/// drops it on an empty canvas as the new root.
+#[derive(Clone, Debug)]
+struct PendingPart {
+    catalog_id: CatalogId,
+    params: PartParams,
+}
+
 #[derive(Resource, Default)]
 struct EditorState {
     ship_root: Option<Entity>,
     ship_entity: Option<Entity>,
     ship_name: String,
     selected: Option<Entity>,
-    pending: Option<PartData>,
+    pending: Option<PendingPart>,
     place_at: Option<(Entity, String)>,
     delete_selected: bool,
     set_as_root: bool,
@@ -286,7 +309,7 @@ fn setup(
             emissive: LinearRgba::rgb(0.1, 0.6, 0.9),
             ..default()
         }),
-        node_mesh: meshes.add(Sphere::new(0.25).mesh()),
+        node_mesh: meshes.add(Sphere::new(0.5).mesh()),
         resize_arrow_mesh: meshes.add(Cone::new(0.3, 0.8).mesh()),
         resize_arrow_material: mats.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.75, 0.2),
@@ -932,7 +955,7 @@ fn update_tank_resize_drag(
     mut drag: ResMut<TankResizeDrag>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut tanks: Query<&mut FuelTank>,
+    mut tanks: Query<(&mut FuelTank, &AttachNodes)>,
 ) {
     let Some(state) = drag.active.as_ref() else {
         return;
@@ -955,15 +978,17 @@ fn update_tank_resize_drag(
     // losing fine control.
     const SNAP_GRID: f32 = 0.5;
     const SNAP_THRESHOLD: f32 = 0.06;
+    const MAX_LENGTH_OVER_DIAMETER: f32 = 8.0;
     let nearest = (raw_length / SNAP_GRID).round() * SNAP_GRID;
     let length = if (raw_length - nearest).abs() < SNAP_THRESHOLD {
         nearest
     } else {
         raw_length
     };
-    let new_length = length.clamp(0.5, 12.0);
 
-    if let Ok(mut tank) = tanks.get_mut(state.tank) {
+    if let Ok((mut tank, nodes)) = tanks.get_mut(state.tank) {
+        let diameter = nodes.get("top").map(|n| n.diameter).unwrap_or(tank.diameter);
+        let new_length = length.clamp(0.5, MAX_LENGTH_OVER_DIAMETER * diameter);
         if (tank.length - new_length).abs() > f32::EPSILON {
             tank.length = new_length;
         }
@@ -982,8 +1007,6 @@ fn deselect_on_empty_click(
     mut state: ResMut<EditorState>,
     mut contexts: EguiContexts,
 ) {
-    const CLICK_THRESHOLD_PX: f32 = 4.0;
-
     let Ok(window) = windows.single() else {
         return;
     };
@@ -1155,6 +1178,9 @@ fn orbit_camera(
     resize_drag: Res<TankResizeDrag>,
     hover_map: Res<HoverMap>,
     arrows: Query<(), With<TankResizeArrow>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut press_cursor: Local<Option<Vec2>>,
+    mut orbit_active: Local<bool>,
 ) {
     let pointer_over_egui = contexts
         .ctx_mut()
@@ -1187,16 +1213,37 @@ fn orbit_camera(
 
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
-    // While a part is pending, suppress orbit so a press→release on a pin
-    // stays hovered on that pin and picking actually fires a Click. Any
-    // camera rotation between press and release breaks hover and drops the
-    // event into the window fallback entity. Also suppress while the
-    // pointer is over a resize arrow (or actively dragging one) so the
-    // camera doesn't twitch between mouse-down and DragStart firing.
+    // Click/drag arbitration for LMB: we want a press→release on a pin to
+    // fire `Pointer<Click>`, which Bevy's picking only emits when the same
+    // entity is hovered at press and at release. Rotating the camera mid-
+    // press moves the world under the cursor and breaks that. So while a
+    // part is pending we hold orbit until the cursor has moved past
+    // CLICK_THRESHOLD_PX from the press location; once over, we stay in
+    // orbit mode for the remainder of the press. With no pending part
+    // there's no click target to protect, so orbit is unconditional.
+    let cursor = windows.single().ok().and_then(|w| w.cursor_position());
+    if mouse.just_pressed(MouseButton::Left) {
+        *press_cursor = cursor;
+        *orbit_active = false;
+    }
+    if mouse.just_released(MouseButton::Left) {
+        *press_cursor = None;
+        *orbit_active = false;
+    }
+    if !*orbit_active
+        && let (Some(press), Some(current)) = (*press_cursor, cursor)
+        && (current - press).length() >= CLICK_THRESHOLD_PX
+    {
+        *orbit_active = true;
+    }
+
+    // Also suppress while the pointer is over a resize arrow (or actively
+    // dragging one) so the camera doesn't twitch between mouse-down and
+    // DragStart firing.
     let orbit_allowed = !pointer_over_egui
-        && state.pending.is_none()
         && resize_drag.active.is_none()
-        && !pointer_on_arrow;
+        && !pointer_on_arrow
+        && (state.pending.is_none() || *orbit_active);
 
     for (mut t, mut orbit) in cam.iter_mut() {
         if orbit_allowed && mouse.pressed(MouseButton::Left) {
@@ -1235,12 +1282,11 @@ type CollectQuery<'w, 's> = Query<
     's,
     (
         Entity,
+        &'static CatalogRef,
         &'static PartResources,
-        Option<&'static CommandPod>,
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
-        Option<&'static Engine>,
     ),
 >;
 
@@ -1276,48 +1322,36 @@ fn collect_blueprint(
 
     let mut part_blueprints = Vec::with_capacity(ordered.len());
     for e in &ordered {
-        let (_, res, pod, dec, adapter, tank, engine) = parts.get(*e).ok()?;
-        let data = if let Some(p) = pod {
-            PartData::CommandPod {
-                model: p.model.clone(),
-                diameter: p.diameter,
-                dry_mass: p.dry_mass,
-                reaction_wheel_torque: p.reaction_wheel_torque,
-            }
-        } else if let Some(d) = dec {
-            PartData::Decoupler {
+        let (_, cat_ref, res, dec, adapter, tank) = parts.get(*e).ok()?;
+        let params = if let Some(d) = dec {
+            PartParams::Decoupler {
                 diameter: d.diameter,
-                ejection_impulse: d.ejection_impulse,
-                dry_mass: d.dry_mass,
             }
         } else if let Some(a) = adapter {
-            PartData::Adapter {
+            PartParams::Adapter {
                 diameter: a.diameter,
                 target_diameter: a.target_diameter,
-                dry_mass: a.dry_mass,
             }
         } else if let Some(t) = tank {
-            PartData::FuelTank {
+            PartParams::Tank {
                 diameter: t.diameter,
                 length: t.length,
-                dry_mass: t.dry_mass,
-            }
-        } else if let Some(en) = engine {
-            PartData::Engine {
-                model: en.model.clone(),
-                diameter: en.diameter,
-                thrust: en.thrust,
-                isp: en.isp,
-                dry_mass: en.dry_mass,
-                reactants: en.reactants.clone(),
-                power_draw_kw: en.power_draw_kw,
             }
         } else {
-            return None;
+            // Pods and engines carry no per-instance params.
+            PartParams::None
         };
+        // Persist amounts only — capacities are recomputed from the
+        // catalog at load time.
+        let resources: HashMap<thalos_shipyard::Resource, f32> = res
+            .pools
+            .iter()
+            .map(|(r, p)| (*r, p.amount))
+            .collect();
         part_blueprints.push(PartBlueprint {
-            data,
-            resources: res.pools.clone(),
+            catalog_id: cat_ref.id.clone(),
+            params,
+            resources,
         });
     }
 
@@ -1353,6 +1387,7 @@ fn process_commands(
     attachments: Query<(Entity, &Attachment)>,
     all_parts: Query<Entity, With<Part>>,
     all_ships: Query<Entity, With<Ship>>,
+    catalog: Res<PartCatalog>,
 ) {
     // ---- Save ---------------------------------------------------------
     if state.save_requested {
@@ -1401,8 +1436,16 @@ fn process_commands(
 
                     let path_disp = path.display().to_string();
                     commands.queue(move |world: &mut World| {
+                        let catalog = world.resource::<PartCatalog>().clone();
                         let mut cmds = world.commands();
-                        let ship_entity = bp.spawn(&mut cmds);
+                        let ship_entity = match bp.spawn(&mut cmds, &catalog) {
+                            Ok(e) => e,
+                            Err(err) => {
+                                let mut st = world.resource_mut::<EditorState>();
+                                st.status = format!("Spawn failed: {err}");
+                                return;
+                            }
+                        };
                         world.flush();
                         let (root, name) = world
                             .get::<Ship>(ship_entity)
@@ -1528,32 +1571,50 @@ fn process_commands(
         let Some(pending) = state.pending.take() else {
             return;
         };
-        let resources = blueprint::default_resources_for(&pending);
-        let child = ShipBlueprint::spawn_part(&mut commands, &pending, resources);
-        commands.entity(child).insert(Attachment {
-            parent,
-            parent_node: node,
-            my_node: "top".into(),
-        });
-        state.selected = Some(child);
-        state.status = "Placed part".into();
+        match ShipBlueprint::spawn_part(
+            &mut commands,
+            &catalog,
+            &pending.catalog_id,
+            pending.params,
+            HashMap::new(),
+        ) {
+            Ok(child) => {
+                commands.entity(child).insert(Attachment {
+                    parent,
+                    parent_node: node,
+                    my_node: "top".into(),
+                });
+                state.selected = Some(child);
+                state.status = "Placed part".into();
+            }
+            Err(e) => state.status = format!("Spawn failed: {e}"),
+        }
     }
 
     // ---- Auto-place pending as root on empty canvas ------------------
     if state.ship_root.is_none() && state.pending.is_some() {
         let pending = state.pending.take().unwrap();
-        let resources = blueprint::default_resources_for(&pending);
-        let part = ShipBlueprint::spawn_part(&mut commands, &pending, resources);
-        let ship = commands
-            .spawn(Ship {
-                name: state.ship_name.clone(),
-                root: part,
-            })
-            .id();
-        state.ship_root = Some(part);
-        state.ship_entity = Some(ship);
-        state.selected = Some(part);
-        state.status = "Placed root".into();
+        match ShipBlueprint::spawn_part(
+            &mut commands,
+            &catalog,
+            &pending.catalog_id,
+            pending.params,
+            HashMap::new(),
+        ) {
+            Ok(part) => {
+                let ship = commands
+                    .spawn(Ship {
+                        name: state.ship_name.clone(),
+                        root: part,
+                    })
+                    .id();
+                state.ship_root = Some(part);
+                state.ship_entity = Some(ship);
+                state.selected = Some(part);
+                state.status = "Placed root".into();
+            }
+            Err(e) => state.status = format!("Spawn failed: {e}"),
+        }
     }
 }
 
@@ -1582,6 +1643,7 @@ fn editor_ui(
     mut parts: InspectorQuery,
     mut ships: Query<&mut Ship>,
     attachments: Query<(Entity, &Attachment)>,
+    catalog: Res<PartCatalog>,
     mut sky: ResMut<SkyBackdropEnabled>,
     mut clear_color: ResMut<ClearColor>,
     diagnostics: Res<DiagnosticsStore>,
@@ -1602,64 +1664,17 @@ fn editor_ui(
             ui.label(format!("FPS: {:.0}", fps));
             ui.separator();
             ui.heading("Parts");
-            if ui.button("Command Pod (1.25m)").clicked() {
-                state.pending = Some(PartData::CommandPod {
-                    model: "Mk1".into(),
-                    diameter: 1.25,
-                    dry_mass: 840.0,
-                    reaction_wheel_torque: 5_000.0,
-                });
-            }
-            if ui.button("Command Pod (2.5m)").clicked() {
-                state.pending = Some(PartData::CommandPod {
-                    model: "Mk1-3".into(),
-                    diameter: 2.5,
-                    dry_mass: 2720.0,
-                    reaction_wheel_torque: 15_000.0,
-                });
-            }
-            if ui.button("Decoupler").clicked() {
-                state.pending = Some(PartData::Decoupler {
-                    diameter: 1.25,
-                    ejection_impulse: 250.0,
-                    dry_mass: 50.0,
-                });
-            }
-            if ui.button("Adapter").clicked() {
-                state.pending = Some(PartData::Adapter {
-                    diameter: 1.25,
-                    target_diameter: 2.5,
-                    dry_mass: 100.0,
-                });
-            }
-            if ui.button("Fuel Tank").clicked() {
-                state.pending = Some(PartData::FuelTank {
-                    diameter: 1.25,
-                    length: 1.0,
-                    dry_mass: 250.0,
-                });
-            }
-            if ui.button("Engine (2.5m)").clicked() {
-                state.pending = Some(PartData::Engine {
-                    model: "Poodle".into(),
-                    diameter: 2.5,
-                    thrust: 250_000.0,
-                    isp: 350.0,
-                    dry_mass: 250.0,
-                    reactants: methalox_reactants(),
-                    power_draw_kw: 0.0,
-                });
-            }
-            if ui.button("Engine (1.25m)").clicked() {
-                state.pending = Some(PartData::Engine {
-                    model: "LV-909".into(),
-                    diameter: 1.25,
-                    thrust: 60_000.0,
-                    isp: 345.0,
-                    dry_mass: 50.0,
-                    reactants: methalox_reactants(),
-                    power_draw_kw: 0.0,
-                });
+            // Sort by kind, then by display name, so palette ordering is
+            // stable across runs (HashMap iteration is not).
+            let mut entries: Vec<(&CatalogId, &CatalogEntry)> = catalog.parts.iter().collect();
+            entries.sort_by_key(|(_, e)| (kind_order(e), e.display_name().to_string()));
+            for (id, entry) in entries {
+                if ui.button(entry.display_name()).clicked() {
+                    state.pending = Some(PendingPart {
+                        catalog_id: id.clone(),
+                        params: default_params_for(entry),
+                    });
+                }
             }
 
             ui.separator();
@@ -1759,11 +1774,12 @@ fn editor_ui(
                 } else {
                     ui.label(format!("Diameter: {:.2}m (from parent)", d.diameter));
                 }
-                ui.add(
-                    egui::Slider::new(&mut d.ejection_impulse, 0.0..=2000.0)
-                        .text("Ejection impulse"),
-                );
-                ui.label(format!("Dry mass: {:.0} kg (fixed)", d.dry_mass));
+                // Ejection impulse and dry mass are catalog-derived from
+                // diameter (`ejection_impulse_per_diameter`, `mass_per_diameter`).
+                // Editing them here would just be overwritten by
+                // `recompute::recompute_decoupler_state`.
+                ui.label(format!("Ejection impulse: {:.0} N·s", d.ejection_impulse));
+                ui.label(format!("Dry mass: {:.0} kg", d.dry_mass));
             } else if let Some(a) = adapter.as_deref_mut() {
                 ui.label("Kind: Adapter");
                 if is_root {
@@ -1774,7 +1790,10 @@ fn editor_ui(
                 ui.add(
                     egui::Slider::new(&mut a.target_diameter, 0.3..=6.0).text("Target diameter"),
                 );
-                ui.label(format!("Dry mass: {:.0} kg (fixed)", a.dry_mass));
+                // dry_mass scales with frustum surface area via the
+                // catalog's `wall_mass_per_m2`; recomputed by
+                // `recompute::recompute_adapter_state` on every change.
+                ui.label(format!("Dry mass: {:.0} kg", a.dry_mass));
             } else if let Some(t) = tank.as_deref_mut() {
                 ui.label("Kind: Fuel Tank");
                 if is_root {
@@ -1782,8 +1801,13 @@ fn editor_ui(
                 } else {
                     ui.label(format!("Diameter: {:.2}m (from parent)", t.diameter));
                 }
-                ui.add(egui::Slider::new(&mut t.length, 0.5..=12.0).text("Length"));
-                ui.label(format!("Dry mass: {:.0} kg (fixed)", t.dry_mass));
+                let effective_d = nodes.get("top").map(|n| n.diameter).unwrap_or(t.diameter);
+                let max_length = 8.0 * effective_d;
+                ui.add(egui::Slider::new(&mut t.length, 0.5..=max_length).text("Length"));
+                // dry_mass and pool capacities scale with cylinder
+                // geometry via the catalog; recomputed by
+                // `recompute::recompute_tank_state` on every change.
+                ui.label(format!("Dry mass: {:.0} kg", t.dry_mass));
             } else if let Some(e) = engine.as_deref_mut() {
                 ui.label("Kind: Engine (vacuum)");
                 ui.label(format!("Model: {}", e.model));

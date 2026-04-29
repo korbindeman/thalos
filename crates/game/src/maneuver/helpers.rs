@@ -69,9 +69,9 @@ pub(super) fn node_world_pos_and_frame(
             .map(|(i, _)| i)?;
 
         let _ = system;
-        let pin_for = |id| flight_plan_view.pin_for_body(id, body_states);
         let sample = &seg.samples[idx];
-        let world_pos = sample_render_pos(sample, pin_for, origin, scale);
+        let pin = flight_plan_view.pin_for_body(sample.anchor_body, sample.time, body_states);
+        let world_pos = sample_render_pos(sample, pin, origin, scale);
 
         let ref_state = ephemeris.query_body(sample.anchor_body, sample.time);
         let frame = orbital_frame_mat3(
@@ -299,13 +299,15 @@ pub(super) fn closest_trail_point_on_leg(
     let mut best: Option<ClosestTrailPoint> = None;
 
     let _ = (system, ephemeris);
-    let pin_for = |id| flight_plan_view.pin_for_body(id, body_states);
     for coast in coasts {
-        if coast.samples.is_empty() {
+        let Some(first) = coast.samples.first() else {
             continue;
-        }
+        };
+        // Per-leg relock makes all samples in a coast share an anchor,
+        // so the pin is constant across the segment — compute once.
+        let pin = flight_plan_view.pin_for_body(first.anchor_body, first.time, body_states);
         for sample in coast.samples.iter() {
-            let world_pos = sample_render_pos(sample, &pin_for, origin, scale);
+            let world_pos = sample_render_pos(sample, pin, origin, scale);
             let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok()
             else {
                 continue;
@@ -341,10 +343,13 @@ pub(super) fn closest_trail_point(
     let mut best: Option<ClosestTrailPoint> = None;
 
     let _ = (system, ephemeris);
-    let pin_for = |id| flight_plan_view.pin_for_body(id, body_states);
     for seg in prediction.segments.iter() {
+        let Some(first) = seg.samples.first() else {
+            continue;
+        };
+        let pin = flight_plan_view.pin_for_body(first.anchor_body, first.time, body_states);
         for sample in seg.samples.iter() {
-            let world_pos = sample_render_pos(sample, &pin_for, origin, scale);
+            let world_pos = sample_render_pos(sample, pin, origin, scale);
             let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
                 continue;
             };

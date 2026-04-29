@@ -11,13 +11,10 @@ use std::sync::Arc;
 use glam::{DQuat, DVec3};
 
 use crate::body_state_provider::BodyStateProvider;
+use crate::gravity_mode::GravityImpls;
 use crate::maneuver::{ManeuverSequence, burn_duration};
-use crate::ship_propagator::{
-    BurnRequest, CoastRequest, KeplerianPropagator, SegmentTerminator, ShipPropagator,
-};
-use crate::trajectory::{
-    FlightPlan, PredictionConfig, PredictionRequest, ScheduledBurn, propagate_flight_plan,
-};
+use crate::ship_propagator::{CoastRequest, SegmentTerminator, ShipPropagator};
+use crate::trajectory::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_plan};
 use crate::types::{
     AttitudeState, BodyDefinition, BodyId, BodyKind, ControlInput, ShipParameters, StateVector,
 };
@@ -214,27 +211,35 @@ pub struct Simulation {
 
     ephemeris: Arc<dyn BodyStateProvider>,
     bodies: Vec<BodyDefinition>,
-    /// Current ship mass at `sim_time`. Decreases as fuel burns — both
-    /// during manual throttle (per-frame impulse) and across auto-burn
-    /// segments (decremented by `mass_flow_kg_per_s · segment_duration`).
-    /// Floored at `ship_params.dry_mass_kg` — once propellant exhausts,
-    /// thrust gates off cleanly and mass stops decreasing.
+    /// Current ship mass at `sim_time`. Decreases as fuel burns via
+    /// per-frame impulse in [`Self::apply_live_thrust`]. Floored at
+    /// `ship_params.dry_mass_kg` — once propellant exhausts, thrust
+    /// gates off cleanly and mass stops decreasing.
     ship_mass_kg: f64,
     maneuvers: ManeuverSequence,
-    active_burns: Vec<ScheduledBurn>,
     consumed_node_ids: Vec<u64>,
     target_body: Option<BodyId>,
+
+    /// Lifetime cumulative magnitude of Δv applied through
+    /// [`Self::apply_live_thrust`], in m/s. Sums `|throttle · F/m · dt|`
+    /// over every frame the engine fires. Read by the burn-execution
+    /// autopilot (see `crates/game/src/autopilot.rs`) to detect when a
+    /// finite burn has delivered its planned Δv — magnitude rather than
+    /// projection because magnitude tracks the same scalar that fuel
+    /// exhaustion clamps, so a propellant-starved burn stops
+    /// accumulating without special-casing.
+    delivered_dv: f64,
 
     attitude: AttitudeState,
     ship_params: ShipParameters,
     control: ControlInput,
 
-    /// When `true`, scheduled maneuver nodes auto-fire as their start
-    /// time arrives (drained into `active_burns` and integrated by the
-    /// propagator). When `false`, nodes sit in `maneuvers` as planning
-    /// aids and the player must execute them manually via the
-    /// throttle. Burns already in flight when the toggle flips off
-    /// finish — no mid-burn cancellation.
+    /// When `true`, the burn-execution autopilot in
+    /// `crates/game/src/autopilot.rs` is allowed to drop warp, point
+    /// the ship, and open the throttle to fly upcoming maneuver nodes.
+    /// When `false`, nodes sit in `maneuvers` as planning aids and the
+    /// player must execute them manually. The flag is read by the
+    /// autopilot system; the simulation itself does not consume nodes.
     auto_maneuvers_enabled: bool,
 
     pub warp: WarpController,
@@ -247,16 +252,21 @@ impl Simulation {
     /// values are pushed in by the game crate at ship spawn via
     /// [`Self::set_ship_params`] and [`Self::set_ship_mass`] once the
     /// blueprint has been loaded.
+    ///
+    /// `impls` is produced by [`crate::gravity_mode::GravityMode::build`] —
+    /// the construction site (today: `main.rs`; eventually: the savegame
+    /// loader) picks the gravity model and hands the resulting trait
+    /// objects in.
     pub fn new(
         ship_state: StateVector,
-        ephemeris: Arc<dyn BodyStateProvider>,
+        impls: GravityImpls,
         bodies: Vec<BodyDefinition>,
         config: SimulationConfig,
     ) -> Self {
-        let propagator: Arc<dyn ShipPropagator> = Arc::new(KeplerianPropagator {
-            burn_substep_s: config.prediction_config.burn_substep_s,
-            ..KeplerianPropagator::default()
-        });
+        let GravityImpls {
+            body_state: ephemeris,
+            ship_propagator: propagator,
+        } = impls;
 
         let ship_params = ShipParameters::default();
         Self {
@@ -269,9 +279,9 @@ impl Simulation {
             bodies,
             ship_mass_kg: ship_params.dry_mass_kg,
             maneuvers: ManeuverSequence::new(),
-            active_burns: Vec::new(),
             consumed_node_ids: Vec::new(),
             target_body: None,
+            delivered_dv: 0.0,
             attitude: AttitudeState::default(),
             ship_params,
             control: ControlInput::default(),
@@ -286,11 +296,15 @@ impl Simulation {
 
     /// Advance the simulation by `real_dt` seconds of wall-clock time.
     ///
-    /// Stepping is event-driven: at each iteration we find the nearest
-    /// upcoming boundary (burn start/end, frame target), propagate exactly
-    /// to it with the appropriate coast or burn segment, and repeat. The
-    /// analytical propagator has no substep cost for coast segments, so
-    /// long warp ticks complete in a single call.
+    /// Two parts in order: (1) at 1× warp only, advance attitude and
+    /// apply any live engine thrust as a per-frame impulse on velocity;
+    /// (2) propagate the ship's coast across the warp-scaled time
+    /// interval, breaking on SOI transitions until the cap is reached
+    /// or the target time is hit. Maneuver execution is owned by the
+    /// burn-execution autopilot in the game crate — it points the
+    /// ship, drives the throttle, and consumes nodes through
+    /// [`Self::consume_maneuver_node`] — so this function never reads
+    /// the maneuver list or schedules burns of its own.
     pub fn step(&mut self, real_dt: f64) {
         let _span = tracing::info_span!("Simulation::step").entered();
         let real_delta = real_dt.min(self.max_real_delta);
@@ -301,12 +315,11 @@ impl Simulation {
         self.integrate_attitude(real_delta);
 
         // Live engine thrust. Treated as a single per-frame impulse on
-        // velocity, not a propagator burn segment — at 1× warp the
-        // 16 ms frame window is small enough that impulse-then-coast
-        // is numerically equivalent to RK4 with body-frame thrust to
-        // well below noise. Skipped when an auto-maneuver burn owns
-        // the engine, so manual throttle and scheduled burns can't
-        // double up on the same engine.
+        // velocity — at 1× warp the 16 ms frame window is small enough
+        // that impulse-then-coast is numerically equivalent to RK4 with
+        // body-frame thrust to well below noise. The autopilot keeps
+        // warp at 1× while a burn is in flight, so this is the only
+        // thrust path.
         self.apply_live_thrust(real_delta);
 
         let warp_speed = self.warp.speed();
@@ -323,9 +336,6 @@ impl Simulation {
                 break;
             }
 
-            // Drain any nodes whose time has arrived into `active_burns`.
-            self.drain_due_nodes();
-
             let soi_body = self.propagator.soi_body_of(
                 self.ship_state.position,
                 self.sim_time,
@@ -333,81 +343,23 @@ impl Simulation {
                 &self.bodies,
             );
 
-            // Is a burn active right now?
-            let active_burn = self
-                .active_burns
-                .iter()
-                .find(|b| {
-                    b.start_time <= self.sim_time && b.start_time + b.duration > self.sim_time
-                })
-                .copied();
-
-            // Segment boundary: the soonest of target, next scheduled burn,
-            // or next scheduled node. Burns clip at their own end.
-            let segment_target = if let Some(b) = active_burn {
-                target_time.min(b.start_time + b.duration)
-            } else {
-                let next_node = self
-                    .maneuvers
-                    .nodes
-                    .first()
-                    .map(|n| n.time)
-                    .unwrap_or(f64::INFINITY);
-                let next_burn = self
-                    .active_burns
-                    .iter()
-                    .filter(|b| b.start_time > self.sim_time)
-                    .map(|b| b.start_time)
-                    .fold(f64::INFINITY, f64::min);
-                target_time.min(next_node).min(next_burn)
-            };
-
-            if segment_target <= self.sim_time {
-                break;
-            }
-
-            let segment_start_time = self.sim_time;
-            let result = if let Some(b) = active_burn {
-                self.propagator.burn_segment(BurnRequest {
-                    state: self.ship_state,
-                    time: self.sim_time,
-                    soi_body,
-                    target_time: segment_target,
-                    burn: b.to_burn_params(),
-                    ephemeris: self.ephemeris.as_ref(),
-                    bodies: &self.bodies,
-                })
-            } else {
-                self.propagator.coast_segment(CoastRequest {
-                    state: self.ship_state,
-                    time: self.sim_time,
-                    soi_body,
-                    target_time: segment_target,
-                    stop_on_stable_orbit: false,
-                    // Enough samples to catch SOI crossings reliably at
-                    // typical warp rates without paying for big allocations
-                    // on every step. Samples are discarded immediately —
-                    // only the end state matters for live stepping.
-                    sample_count_hint: 32,
-                    ephemeris: self.ephemeris.as_ref(),
-                    bodies: &self.bodies,
-                })
-            };
+            let result = self.propagator.coast_segment(CoastRequest {
+                state: self.ship_state,
+                time: self.sim_time,
+                soi_body,
+                target_time,
+                stop_on_stable_orbit: false,
+                // Enough samples to catch SOI crossings reliably at
+                // typical warp rates without paying for big allocations
+                // on every step. Samples are discarded immediately —
+                // only the end state matters for live stepping.
+                sample_count_hint: 32,
+                ephemeris: self.ephemeris.as_ref(),
+                bodies: &self.bodies,
+            });
 
             self.ship_state = result.end_state;
             self.sim_time = result.end_time;
-
-            // Drain mass for the duration of any auto-burn we just integrated.
-            // SOI-interrupted burns work naturally: each segment reports its
-            // actual end time, and the burn's `initial_mass_kg` is fixed at
-            // drain time so the next segment's integrator picks up correctly
-            // from the original anchor.
-            if active_burn.is_some() {
-                let dt = (result.end_time - segment_start_time).max(0.0);
-                let drained = self.ship_params.mass_flow_kg_per_s * dt;
-                self.ship_mass_kg =
-                    (self.ship_mass_kg - drained).max(self.ship_params.dry_mass_kg);
-            }
 
             match result.terminator {
                 SegmentTerminator::Collision { .. } => {
@@ -418,76 +370,12 @@ impl Simulation {
                 SegmentTerminator::SoiEnter { .. } | SegmentTerminator::SoiExit { .. } => {
                     transitions += 1;
                 }
-                SegmentTerminator::BurnEnd { .. } => {
-                    self.retire_completed_burns();
-                    transitions += 1;
-                }
                 SegmentTerminator::Horizon | SegmentTerminator::StableOrbit => {}
+                SegmentTerminator::BurnEnd { .. } => {
+                    // Coast segments don't fire BurnEnd; defensive only.
+                    break;
+                }
             }
-        }
-
-        self.retire_completed_burns();
-    }
-
-    /// Drain maneuver nodes whose start time has arrived into `active_burns`.
-    /// Keeps `active_burns` sorted by start time is not required — callers
-    /// iterate all of them each step.
-    ///
-    /// No-op when [`Self::set_auto_maneuvers_enabled`] is `false`: nodes
-    /// remain in `maneuvers` as planning aids, and the player is
-    /// expected to fire the engine manually. Re-enabling the toggle
-    /// will then drain any nodes whose times have already passed —
-    /// they fire immediately at the next step. Caller's responsibility
-    /// to manage that case (typically: clear stale nodes before
-    /// re-enabling).
-    fn drain_due_nodes(&mut self) {
-        if !self.auto_maneuvers_enabled {
-            return;
-        }
-        // Note: when a single step blows past several due nodes (e.g. high
-        // warp), the second+ nodes here capture the same `ship_mass_kg`
-        // anchor as the first — i.e. the second burn integrates as if the
-        // first hadn't drained any mass. v1 limitation; documented here so
-        // a future deferred-intent / staging pass can address it together
-        // with overlapping-burn semantics.
-        while let Some(node) = self.maneuvers.nodes.first() {
-            if node.time > self.sim_time {
-                break;
-            }
-            let node = self.maneuvers.nodes.remove(0);
-            if let Some(id) = node.id {
-                self.consumed_node_ids.push(id);
-            }
-            self.prediction_state.mark_dirty();
-
-            let duration = burn_duration(
-                node.delta_v.length(),
-                self.ship_params.thrust_n,
-                self.ship_mass_kg,
-                self.ship_params.mass_flow_kg_per_s,
-                self.ship_params.dry_mass_kg,
-            );
-            if duration > 0.0 && node.delta_v.length_squared() > 0.0 {
-                self.active_burns.push(ScheduledBurn {
-                    delta_v_local: node.delta_v,
-                    reference_body: node.reference_body,
-                    thrust_n: self.ship_params.thrust_n,
-                    initial_mass_kg: self.ship_mass_kg,
-                    mass_flow_kg_per_s: self.ship_params.mass_flow_kg_per_s,
-                    dry_mass_kg: self.ship_params.dry_mass_kg,
-                    start_time: node.time,
-                    duration,
-                });
-            }
-        }
-    }
-
-    fn retire_completed_burns(&mut self) {
-        let before = self.active_burns.len();
-        self.active_burns
-            .retain(|b| b.start_time + b.duration > self.sim_time);
-        if self.active_burns.len() != before {
-            self.prediction_state.mark_dirty();
         }
     }
 
@@ -631,26 +519,26 @@ impl Simulation {
         }
     }
 
-    /// True when a scheduled maneuver burn is currently being
-    /// integrated this sim instant. Bridge reads this to gate fuel
-    /// drain (auto burn drains at full throttle; manual throttle
-    /// drains at its own value).
-    pub fn auto_maneuver_active(&self) -> bool {
-        let t = self.sim_time;
-        self.active_burns
-            .iter()
-            .any(|b| b.start_time <= t && b.start_time + b.duration > t)
-    }
-
-    /// Apply manual engine thrust as a single impulse on velocity.
-    /// Skipped at any warp other than 1× (mirrors attitude integration)
-    /// and skipped while a scheduled maneuver burn is firing — the auto
-    /// burn already owns the engine and double-thrusting would silently
-    /// double the acceleration.
+    /// Apply engine thrust as a single impulse on velocity. Manual
+    /// throttle and the burn-execution autopilot both feed in through
+    /// the same path — both end up writing `control.throttle` and
+    /// reading the ship's current attitude.
+    ///
+    /// Skipped at any warp other than 1× (mirrors attitude integration).
+    /// The autopilot is responsible for ensuring 1× warp before opening
+    /// the throttle on a scheduled burn.
     ///
     /// **Body-frame nose convention**: `+Y_body` points out the nose,
     /// shared with the autopilot in `crates/game/src/navigation.rs`.
     /// Flipping this convention requires updating both call sites.
+    ///
+    /// Accumulates `|throttle · F/m · dt|` into [`Self::delivered_dv`]
+    /// every frame the engine fires, so the burn-execution autopilot can
+    /// detect when a planned-Δv has been delivered and close the
+    /// throttle. Magnitude (not projection onto a planned axis) means
+    /// the same scalar drops to zero when the dry-mass clamp cuts
+    /// thrust — fuel exhaustion stops the accumulator without any
+    /// special case.
     ///
     /// Does *not* mark the prediction dirty — that would rebuild the
     /// flight plan every frame of a multi-second burn (expensive). The
@@ -662,9 +550,6 @@ impl Simulation {
             return;
         }
         if real_dt <= 0.0 || self.control.throttle <= 0.0 {
-            return;
-        }
-        if self.auto_maneuver_active() {
             return;
         }
         if self.ship_params.thrust_n <= 0.0 {
@@ -681,8 +566,9 @@ impl Simulation {
         let throttle = self.control.throttle.clamp(0.0, 1.0);
         let nose_world = self.attitude.orientation * DVec3::Y;
         let accel_mag = self.ship_params.thrust_n / self.ship_mass_kg;
-        let dv = throttle * accel_mag * real_dt * nose_world;
-        self.ship_state.velocity += dv;
+        let dv_mag = throttle * accel_mag * real_dt;
+        self.ship_state.velocity += dv_mag * nose_world;
+        self.delivered_dv += dv_mag;
         // Drain mass at the gated throttle the bridge has already applied
         // (which matches what `crates/game/src/fuel.rs` is draining from
         // the tanks this same frame, so sim mass and tank mass stay in
@@ -729,6 +615,36 @@ impl Simulation {
         std::mem::take(&mut self.consumed_node_ids)
     }
 
+    /// Remove the maneuver node with the given `id` from the schedule
+    /// and queue its id for the bridge to retire on the UI side. Used
+    /// by the burn-execution autopilot at burn start, before the live
+    /// thrust on this node begins.
+    ///
+    /// Does *not* dirty the prediction. The cached flight plan was
+    /// built showing this node firing as planned; if we dirtied here
+    /// it would recompute mid-burn and show a "no upcoming burn"
+    /// trajectory while the ship is mid-thrust. The throttle-falling-
+    /// edge dirty in `crates/game/src/fuel.rs` handles the post-burn
+    /// rebuild once the engine cuts.
+    ///
+    /// Returns `true` if a node was found and removed.
+    pub fn consume_maneuver_node(&mut self, id: u64) -> bool {
+        let Some(idx) = self.maneuvers.nodes.iter().position(|n| n.id == Some(id)) else {
+            return false;
+        };
+        self.maneuvers.nodes.remove(idx);
+        self.consumed_node_ids.push(id);
+        true
+    }
+
+    /// Lifetime cumulative magnitude of Δv applied through
+    /// [`Self::apply_live_thrust`], in m/s. The autopilot reads this
+    /// at burn-start (anchor) and each subsequent frame to compute
+    /// "Δv delivered since burn start = current − anchor".
+    pub fn delivered_dv(&self) -> f64 {
+        self.delivered_dv
+    }
+
     // -- Target body --------------------------------------------------------
 
     pub fn target_body(&self) -> Option<BodyId> {
@@ -757,8 +673,8 @@ impl Simulation {
             ship_state: self.ship_state,
             sim_time: self.sim_time,
             maneuvers: self.maneuvers.clone(),
-            active_burns: self.active_burns.clone(),
             ephemeris: Arc::clone(&self.ephemeris),
+            propagator: Arc::clone(&self.propagator),
             bodies: self.bodies.clone(),
             prediction_config: self.prediction_state.config().clone(),
             ship_thrust_n: self.ship_params.thrust_n,

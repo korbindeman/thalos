@@ -1,16 +1,22 @@
 //! Trajectory line rendering for the predicted ship path.
 //!
-//! Every sample is drawn through [`sample_render_pos`], which applies the
-//! gravity-weighted barycenter rule from `docs/orbital_mechanics.md` §7.2:
-//! `render_pos = (sample.pos − ref(sample.t)) + ref(now)` where
-//! `ref = Σ wᵢ · rᵢ` uses the sample's cached top-K body weights. This
-//! collapses to anchor-relative rendering when a single body dominates
-//! and smoothly transitions through Hill-sphere regions — one continuous
-//! rule, no run splitting, no bridge lines.
+//! Each leg has a single anchor body (set by the per-leg relock in
+//! [`thalos_physics::trajectory::propagate_flight_plan`]), so we
+//! compute the rendering pin once per leg via
+//! [`FlightPlanView::pin_for_body`] and reuse it for every sample in
+//! that leg. `sample_render_pos` then applies the standard
+//! `(sample.pos − sample.ref_pos) + pin − origin` formula.
+//!
+//! This means the trajectory is drawn in a per-leg "frozen anchor"
+//! frame: every sample in a Mira-anchored leg is shown as if Mira sat
+//! at `pin` for the whole leg, even though the ship is physically
+//! moving past Mira's actual heliocentric trajectory. That's the price
+//! patched-conics visualisation pays for legibility — see the
+//! [`super::view`] module docstring for the full story.
 
 use bevy::prelude::*;
 use thalos_physics::trajectory::NumericSegment;
-use thalos_physics::types::{SolarSystemDefinition, TrajectorySample};
+use thalos_physics::types::{BodyId, SolarSystemDefinition, TrajectorySample};
 
 use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
 use crate::rendering::{FrameBodyStates, SimulationState};
@@ -37,32 +43,41 @@ pub(super) fn render_trajectory(
         return;
     };
 
-    let pin_for = |body_id| view.pin_for_body(body_id, body_states);
     let mut prev_end_pos: Option<Vec3> = None;
 
     for (leg_idx, leg) in prediction.legs().iter().enumerate() {
         let is_ghost_leg = leg_idx > 0;
 
         if let Some(burn) = &leg.burn_segment {
+            // Per-segment relock: burn and coast within one leg can
+            // carry distinct anchors, so each gets its own pin.
+            let burn_pin = segment_pin(burn, &view, body_states);
+
+            // Bridge gizmo from the previous segment's last point to
+            // this burn's first sample. Frames may differ across
+            // segments so the bridge can't always meet exactly, but a
+            // thin line preserves the visual continuity of the
+            // planned path.
             if let (Some(prev), Some(first)) = (prev_end_pos, burn.samples.first()) {
-                let first_pos = sample_render_pos(first, &pin_for, &origin, &scale);
+                let first_pos = sample_render_pos(first, burn_pin, &origin, &scale);
                 let color = ghost_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), is_ghost_leg);
                 gizmos.line(prev, first_pos, color);
             }
-            render_burn_segment(burn, &pin_for, &origin, &scale, &mut gizmos);
+            render_burn_segment(burn, burn_pin, &origin, &scale, &mut gizmos);
             if let Some(last) = burn.samples.last() {
-                prev_end_pos = Some(sample_render_pos(last, &pin_for, &origin, &scale));
+                prev_end_pos = Some(sample_render_pos(last, burn_pin, &origin, &scale));
             }
         }
 
+        let coast_pin = segment_pin(&leg.coast_segment, &view, body_states);
         if let (Some(prev), Some(first)) = (prev_end_pos, leg.coast_segment.samples.first()) {
-            let first_pos = sample_render_pos(first, &pin_for, &origin, &scale);
+            let first_pos = sample_render_pos(first, coast_pin, &origin, &scale);
             let color = ghost_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), is_ghost_leg);
             gizmos.line(prev, first_pos, color);
         }
         prev_end_pos = render_segment(
             &leg.coast_segment,
-            &pin_for,
+            coast_pin,
             is_ghost_leg,
             &sim.system,
             &origin,
@@ -71,12 +86,36 @@ pub(super) fn render_trajectory(
         );
     }
 
-    // Baseline: original trajectory without maneuvers (dimmed).
+    // Baseline: original trajectory without maneuvers. Pinned to its
+    // own first-sample anchor at its first-sample time, which means a
+    // maneuver that shifts an active-plan encounter doesn't drag the
+    // baseline along — they have independent ghost lookups.
     if let Some(baseline) = &prediction.baseline
         && !baseline.samples.is_empty()
     {
-        render_segment(baseline, &pin_for, true, &sim.system, &origin, &scale, &mut gizmos);
+        let pin = segment_pin(baseline, &view, body_states);
+        render_segment(baseline, pin, true, &sim.system, &origin, &scale, &mut gizmos);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pin computation
+// ---------------------------------------------------------------------------
+
+/// Pin in physics-space metres for a relocked segment. The relock
+/// guarantees every sample in the segment shares the first sample's
+/// anchor, so reading the first sample is sufficient — burn and coast
+/// each get their own pin even when they belong to the same leg.
+fn segment_pin(
+    segment: &NumericSegment,
+    view: &FlightPlanView,
+    body_states: &[thalos_physics::types::BodyState],
+) -> bevy::math::DVec3 {
+    segment
+        .samples
+        .first()
+        .map(|s| view.pin_for_body(s.anchor_body, s.time, body_states))
+        .unwrap_or(bevy::math::DVec3::ZERO)
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +124,7 @@ pub(super) fn render_trajectory(
 
 fn render_burn_segment(
     segment: &NumericSegment,
-    pin_for: &impl Fn(usize) -> bevy::math::DVec3,
+    pin: bevy::math::DVec3,
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
@@ -97,13 +136,13 @@ fn render_burn_segment(
     let points = segment
         .samples
         .iter()
-        .map(|s| sample_render_pos(s, pin_for, origin, scale));
+        .map(|s| sample_render_pos(s, pin, origin, scale));
     gizmos.linestrip(points, burn_color);
 }
 
 fn render_segment(
     segment: &NumericSegment,
-    pin_for: &impl Fn(usize) -> bevy::math::DVec3,
+    pin: bevy::math::DVec3,
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
@@ -115,15 +154,15 @@ fn render_segment(
     }
 
     if segment.is_stable_orbit {
-        return render_stable_orbit_segment(segment, pin_for, is_ghost, system, origin, scale, gizmos);
+        return render_stable_orbit_segment(segment, pin, is_ghost, system, origin, scale, gizmos);
     }
 
-    render_open_samples(&segment.samples, pin_for, is_ghost, system, origin, scale, gizmos)
+    render_open_samples(&segment.samples, pin, is_ghost, system, origin, scale, gizmos)
 }
 
 fn render_open_samples(
     samples: &[TrajectorySample],
-    pin_for: &impl Fn(usize) -> bevy::math::DVec3,
+    pin: bevy::math::DVec3,
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
@@ -144,20 +183,20 @@ fn render_open_samples(
         let alpha_a = 0.3 + 0.7 * (1.0 - progress_a);
         let alpha_b = 0.3 + 0.7 * (1.0 - progress_b);
 
-        let p_a = sample_render_pos(a, pin_for, origin, scale);
-        let p_b = sample_render_pos(b, pin_for, origin, scale);
+        let p_a = sample_render_pos(a, pin, origin, scale);
+        let p_b = sample_render_pos(b, pin, origin, scale);
 
         let color_a = ghost_adjust(line_color(a, b, system, alpha_a), is_ghost);
         let color_b = ghost_adjust(line_color(b, a, system, alpha_b), is_ghost);
         gizmos.line_gradient(p_a, p_b, color_a, color_b);
     }
 
-    Some(sample_render_pos(&samples[total - 1], pin_for, origin, scale))
+    Some(sample_render_pos(&samples[total - 1], pin, origin, scale))
 }
 
 fn render_stable_orbit_segment(
     segment: &NumericSegment,
-    pin_for: &impl Fn(usize) -> bevy::math::DVec3,
+    pin: bevy::math::DVec3,
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
@@ -172,7 +211,7 @@ fn render_stable_orbit_segment(
     if loop_start > 0 {
         render_open_samples(
             &segment.samples[..=loop_start],
-            pin_for,
+            pin,
             is_ghost,
             system,
             origin,
@@ -183,7 +222,7 @@ fn render_stable_orbit_segment(
 
     render_stable_orbit(
         &segment.samples[loop_start..],
-        pin_for,
+        pin,
         is_ghost,
         system,
         origin,
@@ -194,7 +233,7 @@ fn render_stable_orbit_segment(
 
 fn render_stable_orbit(
     samples: &[TrajectorySample],
-    pin_for: &impl Fn(usize) -> bevy::math::DVec3,
+    pin: bevy::math::DVec3,
     is_ghost: bool,
     system: &SolarSystemDefinition,
     origin: &RenderOrigin,
@@ -220,10 +259,10 @@ fn render_stable_orbit(
     gizmos.linestrip(
         samples
             .iter()
-            .map(|s| sample_render_pos(s, pin_for, origin, scale)),
+            .map(|s| sample_render_pos(s, pin, origin, scale)),
         color,
     );
-    Some(sample_render_pos(samples.last()?, pin_for, origin, scale))
+    Some(sample_render_pos(samples.last()?, pin, origin, scale))
 }
 
 // ---------------------------------------------------------------------------
@@ -250,10 +289,10 @@ fn line_color(
     system: &SolarSystemDefinition,
     alpha: f32,
 ) -> Color {
-    // Under patched conics each sample has a single anchor body. When two
-    // consecutive samples land in different SOIs (i.e. we just crossed a
-    // Hill-sphere boundary), interpolate half-and-half between the two body
-    // colours so the line reads as a soft handoff rather than a hard cut.
+    // Per-leg anchor relock makes the in-leg anchor uniform, but the
+    // cross-segment guard here is harmless and stays useful if a future
+    // anchor mode (e.g. weighted barycenter) emits varying anchors
+    // within a single leg.
     let [r0, g0, b0] = body_color(this.anchor_body, system);
     if this.anchor_body == other.anchor_body {
         return Color::srgba(r0, g0, b0, alpha);
@@ -267,7 +306,7 @@ fn line_color(
     )
 }
 
-fn body_color(id: usize, system: &SolarSystemDefinition) -> [f32; 3] {
+fn body_color(id: BodyId, system: &SolarSystemDefinition) -> [f32; 3] {
     system
         .bodies
         .get(id)

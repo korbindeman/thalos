@@ -18,7 +18,6 @@
 //! a time and bake the corresponding scale as a const so there is no
 //! cross-frame inconsistency.
 
-use bevy::camera::visibility::RenderLayers;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics::types::{BodyId, TrajectorySample};
@@ -35,23 +34,6 @@ pub const MAP_LAYER: usize = 1;
 /// Render layer for ship-view entities (metre-scale).
 pub const SHIP_LAYER: usize = 2;
 
-/// `RenderLayers` containing only the map layer.
-pub fn map_layer() -> RenderLayers {
-    RenderLayers::layer(MAP_LAYER)
-}
-
-/// `RenderLayers` containing only the ship layer.
-pub fn ship_layer() -> RenderLayers {
-    RenderLayers::layer(SHIP_LAYER)
-}
-
-/// `RenderLayers` containing both view layers, for entities (sky, lens
-/// flare) that should appear in both views regardless of which camera
-/// is active.
-pub fn both_view_layers() -> RenderLayers {
-    RenderLayers::from_layers(&[MAP_LAYER, SHIP_LAYER])
-}
-
 /// Metres → render-units scale factor for **map-view** systems
 /// (orbit trails, maneuver UI, body parent transforms). Always
 /// [`MAP_SCALE`]; the field is kept as a resource only so existing
@@ -67,20 +49,6 @@ impl Default for WorldScale {
     }
 }
 
-impl WorldScale {
-    #[inline]
-    pub fn get(&self) -> f64 {
-        self.0
-    }
-
-    /// Metres-per-render-unit — used by shaders that bake world-unit
-    /// params (atmosphere scale heights, ring radii).
-    #[inline]
-    pub fn meters_per_render_unit(&self) -> f32 {
-        (1.0 / self.0) as f32
-    }
-}
-
 /// The physics-space position (metres, f64) that maps to the render-space
 /// origin. Updated every frame to the camera focus body's (or player
 /// ship's) position so that objects near the camera always have small
@@ -88,6 +56,35 @@ impl WorldScale {
 #[derive(Resource, Default)]
 pub struct RenderOrigin {
     pub position: DVec3,
+}
+
+/// The body whose frame the trajectory and ghost system are conceptually
+/// drawn in. Distinct from [`RenderOrigin`] so that camera-following
+/// ("origin tracks ship") is decoupled from frame semantics ("trajectory
+/// is in Mira's frame while ship is in Mira's SOI").
+///
+/// Resolution rules:
+/// - Camera target is a celestial body → `focus_body = body.id`
+/// - Camera target is a ghost body → `focus_body = ghost.body_id`
+/// - Camera target is the player ship → `focus_body = ship's current SOI body`
+/// - No camera target → `focus_body = 0` (the star)
+///
+/// Consumers:
+/// - `FlightPlanView::rebuild` reads this to suppress focus-body ghosts
+///   (so the focus body sits at the trajectory's center, not at a
+///   parent-anchored projection).
+/// - `FlightPlanView::pin_for_body` returns the focus body's current
+///   heliocentric position when asked for it, grounding ghost
+///   parent-chain recursion at the focus.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct RenderFrame {
+    pub focus_body: BodyId,
+}
+
+impl Default for RenderFrame {
+    fn default() -> Self {
+        Self { focus_body: 0 }
+    }
 }
 
 /// Convert a physics DVec3 (metres, f64) to a Bevy Vec3 (render units,
@@ -101,7 +98,7 @@ pub fn to_render_pos(v: DVec3, scale: &WorldScale) -> Vec3 {
 /// locking:
 ///
 /// ```text
-///   render_pos = ((sample.pos − sample.ref_pos) + pin(anchor) − origin) · scale
+///   render_pos = ((sample.pos − sample.ref_pos) + pin − origin) · scale
 /// ```
 ///
 /// `sample.ref_pos` is the anchor body's position at sample time; `pin`
@@ -109,14 +106,18 @@ pub fn to_render_pos(v: DVec3, scale: &WorldScale) -> Vec3 {
 /// anchor body's current position, or the anchor's ghost position when
 /// a ghost exists (see `FlightPlanView::pin_for_body`). This keeps the
 /// encounter's trajectory and its ghost mesh coincident in world space.
+///
+/// `pin` is constant within a leg (samples within a leg share an
+/// anchor after the per-leg relock in `propagate_flight_plan`), so
+/// callers compute it once per leg/segment and pass the same value
+/// for every sample in that leg.
 #[inline]
 pub fn sample_render_pos(
     sample: &TrajectorySample,
-    pin_for: impl Fn(BodyId) -> DVec3,
+    pin: DVec3,
     origin: &RenderOrigin,
     scale: &WorldScale,
 ) -> Vec3 {
-    let pin = pin_for(sample.anchor_body);
     let rel = sample.position - sample.ref_pos;
     ((rel + pin - origin.position) * scale.0).as_vec3()
 }

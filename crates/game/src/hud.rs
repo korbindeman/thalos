@@ -3,7 +3,6 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
-use thalos_physics::body_state_provider::BodyStateProvider;
 use thalos_physics::orbital_math::cartesian_to_elements;
 use thalos_physics::types::StateVector;
 use thalos_shipyard::{FuelTank, PartResources, Resource};
@@ -25,7 +24,7 @@ impl Plugin for HudPlugin {
     }
 }
 
-fn time_control_panel(
+pub fn time_control_panel(
     mut contexts: EguiContexts,
     mut sim: ResMut<SimulationState>,
     focus: Res<CameraFocus>,

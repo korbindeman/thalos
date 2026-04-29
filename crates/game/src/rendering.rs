@@ -17,6 +17,7 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PrimaryWindow;
+use bevy_egui::EguiContexts;
 use thalos_physics::{
     body_state_provider::BodyStateProvider,
     simulation::Simulation,
@@ -27,8 +28,9 @@ use bevy::render::storage::ShaderStorageBuffer;
 use thalos_planet_rendering::{
     AtmosphereBlock, CLOUD_BAND_COUNT, FilmGrain, GasGiantLayers, GasGiantMaterial, GasGiantParams,
     MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams, PlanetMaterial, PlanetParams, RingLayers,
-    RingMaterial, RingParams, SceneLighting, StarLight, bake_cloud_cover_image,
-    bake_from_body_data, blank_cloud_cover_image, build_ring_mesh, equirect_to_cloud_cover_image,
+    RingMaterial, RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams, StarLight,
+    bake_cloud_cover_image, bake_from_body_data, blank_cloud_cover_image, build_ring_mesh,
+    equirect_to_cloud_cover_image,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, Pipeline};
 
@@ -41,7 +43,7 @@ use crate::camera::{ActiveCamera, CameraFocus, OrbitCamera};
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::view::HideInShipView;
 // Re-export so existing `use crate::rendering::{WorldScale, RenderOrigin}` sites keep working.
-pub use crate::coords::{RenderOrigin, WorldScale, to_render_pos};
+pub use crate::coords::{RenderFrame, RenderOrigin, WorldScale, to_render_pos};
 
 /// Radius of screen-stable body icon markers as a fraction of camera distance
 /// (in render units). Bodies whose rendered sphere is smaller than this get
@@ -254,6 +256,14 @@ pub struct PlanetMaterials {
     pub ship: Handle<PlanetMaterial>,
 }
 
+/// Same idea as [`PlanetMaterials`] but for [`SolidPlanetMaterial`] —
+/// the placeholder used by bodies that don't have a terrain pipeline.
+#[derive(Component)]
+pub struct SolidPlanetMaterials {
+    pub map: Handle<SolidPlanetMaterial>,
+    pub ship: Handle<SolidPlanetMaterial>,
+}
+
 /// Same idea as [`PlanetMaterials`] but for [`GasGiantMaterial`].
 #[derive(Component)]
 pub struct GasGiantMaterials {
@@ -314,6 +324,11 @@ struct OrbitLine {
     points: Vec<Vec3>,
     color: Color,
     parent_id: usize,
+    /// Max distance from the parent across all sample points, in
+    /// render units. Used to compare the orbit's screen-space size
+    /// against the parent body's visible billboard so child orbits
+    /// can be hidden once they converge with the parent's icon.
+    max_radius: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +351,7 @@ impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
+            .insert_resource(RenderFrame::default())
             .insert_resource(FrameBodyStates::default())
             .insert_resource(CameraExposure::default())
             .init_resource::<ReferenceClouds>()
@@ -357,6 +373,7 @@ impl Plugin for RenderingPlugin {
                     finalize_planet_generation,
                     cache_body_states,
                     update_render_origin.after(cache_body_states),
+                    update_render_frame.after(cache_body_states),
                     update_body_positions.after(update_render_origin),
                     update_ship_body_meshes.after(update_body_positions),
                     update_sun_light.after(cache_body_states),
@@ -370,6 +387,9 @@ impl Plugin for RenderingPlugin {
                         .after(cache_body_states)
                         .after(finalize_planet_generation),
                     update_gas_giant_params
+                        .after(cache_body_states)
+                        .after(update_camera_exposure),
+                    update_solid_planet_params
                         .after(cache_body_states)
                         .after(update_camera_exposure),
                     update_ring_params
@@ -419,6 +439,7 @@ fn spawn_bodies(
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut gas_giant_materials: ResMut<Assets<GasGiantMaterial>>,
     mut ring_materials: ResMut<Assets<RingMaterial>>,
+    mut solid_planet_materials: ResMut<Assets<SolidPlanetMaterial>>,
     sim: Res<SimulationState>,
     scale: Res<WorldScale>,
 ) {
@@ -463,9 +484,9 @@ fn spawn_bodies(
             unlit: true,
             double_sided: true,
             alpha_mode: AlphaMode::Blend,
-            // Modest positive bias: wins vs trajectory gizmos at the same
-            // body-center depth, but small enough that planet impostors
-            // (and other opaque surfaces in front) still occlude the icon.
+            // Sort tiebreak among Transparent3d items at the same
+            // body-center depth. Note this only affects sort order, not
+            // the actual fragment depth.
             depth_bias: 10.0,
             ..default()
         });
@@ -758,15 +779,34 @@ fn spawn_bodies(
 
             body_entity
         } else {
-            // Non-procedural body: plain icosphere with StandardMaterial.
-            // No surface generator has been wired up for this body yet, so
-            // it shows as a solid-color ball matching the RON `physical`
-            // block — exactly the pre-migration behavior.
-            let sphere_material = std_materials.add(StandardMaterial {
-                base_color: Color::srgb(r * body.albedo, g * body.albedo, b * body.albedo),
-                perceptual_roughness: 0.9,
-                metallic: 0.0,
-                ..default()
+            // Non-procedural body: solid-color billboard impostor. Same
+            // camera-facing-quad architecture as the procedural impostor
+            // and gas giant paths, so close approaches don't clip the
+            // body against the camera near plane. Renders as a single
+            // linear-RGB albedo derived from the RON `physical.color *
+            // physical.albedo` (sRGB → linear so brightness matches the
+            // old StandardMaterial path).
+            let albedo_linear = Color::srgb(r, g, b).to_linear();
+            let albedo = Vec4::new(
+                albedo_linear.red * body.albedo,
+                albedo_linear.green * body.albedo,
+                albedo_linear.blue * body.albedo,
+                0.0,
+            );
+
+            let map_mat = solid_planet_materials.add(SolidPlanetMaterial {
+                params: SolidPlanetParams {
+                    radius: render_radius,
+                    albedo,
+                    scene: SceneLighting::default(),
+                },
+            });
+            let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
+                params: SolidPlanetParams {
+                    radius: ship_render_radius,
+                    albedo,
+                    scene: SceneLighting::default(),
+                },
             });
 
             let body_entity = commands
@@ -784,19 +824,23 @@ fn spawn_bodies(
                 .id();
 
             commands.spawn((
-                Mesh3d(unit_sphere_body.clone()),
-                MeshMaterial3d(sphere_material.clone()),
-                Transform::from_scale(Vec3::splat(render_radius)),
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(map_mat.clone()),
                 BodyMesh,
                 bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
+                NoFrustumCulling,
+                NotShadowCaster,
+                NotShadowReceiver,
                 ChildOf(body_entity),
             ));
             commands.spawn((
-                Mesh3d(unit_sphere_body.clone()),
-                MeshMaterial3d(sphere_material),
-                Transform::from_scale(Vec3::splat(ship_render_radius)),
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(ship_mat.clone()),
                 ShipBodyMesh,
                 bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                NoFrustumCulling,
+                NotShadowCaster,
+                NotShadowReceiver,
                 ChildOf(body_entity),
             ));
             commands.spawn((
@@ -810,6 +854,11 @@ fn spawn_bodies(
                 NotShadowReceiver,
                 ChildOf(body_entity),
             ));
+
+            commands.entity(body_entity).insert(SolidPlanetMaterials {
+                map: map_mat,
+                ship: ship_mat,
+            });
 
             body_entity
         };
@@ -1366,6 +1415,74 @@ fn update_planet_light_dirs(
 }
 
 // ---------------------------------------------------------------------------
+// Per-frame: solid-color placeholder lighting
+// ---------------------------------------------------------------------------
+
+/// Push lighting state into every [`SolidPlanetMaterial`] each frame.
+///
+/// Mirrors [`update_planet_light_dirs`] for placeholder bodies (no terrain
+/// pipeline yet): same scene-lighting build, same planetshine logic for
+/// moons. The placeholder has no orientation, atmosphere, or cloud state,
+/// so the work stops at `params.scene`.
+fn update_solid_planet_params(
+    query: Query<(&CelestialBody, &SolidPlanetMaterials)>,
+    mut materials: ResMut<Assets<SolidPlanetMaterial>>,
+    cache: Res<FrameBodyStates>,
+    origin: Res<RenderOrigin>,
+    sim: Res<SimulationState>,
+    exposure: Res<CameraExposure>,
+) {
+    let Some(ref states) = cache.states else {
+        return;
+    };
+    let body_defs = sim.simulation.bodies();
+    let gain = exposure.gain;
+
+    let body_iter = || query.iter().map(|(b, _)| b);
+    let map_occluders = collect_occluders(states, &origin, MAP_SCALE, body_iter());
+    let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, body_iter());
+
+    for (body, mats) in &query {
+        let body_def = &body_defs[body.body_id];
+        for (handle, occluders, scale) in [
+            (&mats.map, &map_occluders, MAP_SCALE),
+            (&mats.ship, &ship_occluders, SHIP_SCALE),
+        ] {
+            let Some(mat) = materials.get_mut(handle) else {
+                continue;
+            };
+            mat.params.radius = ((body.radius_m * scale) as f32).max(0.005);
+            let mut scene = build_scene_lighting(body.body_id, states, occluders, gain);
+
+            if let Some(parent_id) = body_def.parent {
+                let parent_def = &body_defs[parent_id];
+                if !matches!(parent_def.kind, thalos_physics::types::BodyKind::Star)
+                    && let Some(parent_state) = states.get(parent_id)
+                {
+                    let parent_render_pos =
+                        ((parent_state.position - origin.position) * scale).as_vec3();
+                    let parent_radius = (parent_def.radius_m * scale) as f32;
+                    let tint = Vec3::new(
+                        parent_def.color[0],
+                        parent_def.color[1],
+                        parent_def.color[2],
+                    ) * parent_def.albedo;
+                    scene.planetshine_pos_radius = Vec4::new(
+                        parent_render_pos.x,
+                        parent_render_pos.y,
+                        parent_render_pos.z,
+                        parent_radius,
+                    );
+                    scene.planetshine_tint_flag = Vec4::new(tint.x, tint.y, tint.z, 1.0);
+                }
+            }
+
+            mat.params.scene = scene;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-frame: planet orientations (tidal lock + spin)
 // ---------------------------------------------------------------------------
 
@@ -1634,10 +1751,21 @@ fn recompute_orbit_trails(
                 srgb_to_linear(b) * 0.4,
                 0.6,
             );
+            let points: Vec<Vec3> = trail
+                .points
+                .iter()
+                .map(|p| to_render_pos(*p, &scale))
+                .collect();
+            let max_radius = points
+                .iter()
+                .map(|p| p.length())
+                .reduce(f32::max)
+                .unwrap_or(0.0);
             Some(OrbitLine {
-                points: trail.points.iter().map(|p| to_render_pos(*p, &scale)).collect(),
+                points,
                 color: orbit_color,
                 parent_id: trail.parent_id,
+                max_radius,
             })
         })
         .collect();
@@ -1659,6 +1787,17 @@ fn recompute_orbit_trails(
 /// 1000 render units (~1,000,000 km from origin) is ~120 m, which quantizes
 /// per-frame motion into visible steps. A zero-threshold tracking origin
 /// keeps render-space coordinates small and full-precision.
+///
+/// While a focus transition is active (`focus.transition_origin_start`
+/// is `Some`), the origin interpolates in f64 from the captured
+/// starting position to the new focus target's current position over
+/// [`FOCUS_TRANSITION_DURATION_S`](crate::camera::FOCUS_TRANSITION_DURATION_S).
+/// Doing the lerp here in physics space — rather than as a
+/// render-space `focus_offset` applied to the camera — keeps both the
+/// camera and its target near render-space `(0, 0, 0)` throughout
+/// the switch, avoiding the f32 cancellation in `looking_at` that
+/// otherwise shows up as scene-wide jitter when transitioning between
+/// distant bodies.
 pub fn update_render_origin(
     cache: Res<FrameBodyStates>,
     focus: Res<CameraFocus>,
@@ -1671,7 +1810,7 @@ pub fn update_render_origin(
         return;
     };
 
-    origin.position = focus
+    let target_position = focus
         .target
         .and_then(|e| {
             if let Ok(body) = bodies.get(e) {
@@ -1683,6 +1822,65 @@ pub fn update_render_origin(
             }
         })
         .unwrap_or(bevy::math::DVec3::ZERO);
+
+    origin.position = match focus.transition_origin_start {
+        Some(start) => {
+            let progress = crate::camera::focus_transition_progress(&focus);
+            start.lerp(target_position, progress)
+        }
+        None => target_position,
+    };
+}
+
+/// Resolve [`RenderFrame::focus_body`] — the body whose frame the
+/// trajectory and ghost system are conceptually drawn in.
+///
+/// - Camera target is a celestial body → that body
+/// - Camera target is a ghost → the body the ghost represents
+/// - Camera target is the player ship → ship's current SOI body
+///   (so a Mira-orbiting ship gets a Mira-relative trajectory view)
+/// - No target → body 0 (the star)
+///
+/// Distinct from [`update_render_origin`] because origin tracks the
+/// camera pivot (ship for ship-focus) while the frame tracks the
+/// physical SOI parent. They differ when the camera follows the ship
+/// — a deliberate decoupling so the trajectory's *shape* reads in the
+/// SOI body's frame even while the camera tracks the ship.
+pub fn update_render_frame(
+    cache: Res<FrameBodyStates>,
+    focus: Res<CameraFocus>,
+    bodies: Query<&CelestialBody>,
+    ghosts: Query<&crate::flight_plan_view::GhostBody>,
+    ships: Query<(), With<PlayerShip>>,
+    sim: Res<SimulationState>,
+    mut frame: ResMut<RenderFrame>,
+) {
+    let Some(ref states) = cache.states else {
+        return;
+    };
+
+    frame.focus_body = focus
+        .target
+        .and_then(|e| {
+            if let Ok(body) = bodies.get(e) {
+                Some(body.body_id)
+            } else if let Ok(ghost) = ghosts.get(e) {
+                // Camera is following a ghost — the body it represents
+                // is the natural frame.
+                Some(ghost.body_id)
+            } else if ships.get(e).is_ok() {
+                // Ship focus: use the ship's current SOI body so the
+                // trajectory reads in that body's frame. KSP-style.
+                Some(crate::camera::find_reference_body(
+                    sim.simulation.ship_state().position,
+                    sim.simulation.bodies(),
+                    states,
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
 }
 
 /// Drive each [`CelestialBody`] parent's translation at [`MAP_SCALE`].
@@ -1837,8 +2035,9 @@ fn draw_orbits(
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
     focus: Res<CameraFocus>,
-    bodies: Query<&CelestialBody>,
+    bodies: Query<(&CelestialBody, &Transform)>,
     sim: Option<Res<SimulationState>>,
+    camera_query: Query<&Transform, (With<ActiveCamera>, With<OrbitCamera>)>,
 ) {
     let Some(orbit_lines) = orbit_lines else {
         return;
@@ -1854,7 +2053,7 @@ fn draw_orbits(
     let focus_body_id = focus
         .target
         .and_then(|e| bodies.get(e).ok())
-        .map(|b| b.body_id);
+        .map(|(b, _)| b.body_id);
     let focus_parent_id = focus_body_id.and_then(|id| sim.simulation.bodies()[id].parent);
 
     // Determine the camera focus position in metres.
@@ -1865,8 +2064,48 @@ fn draw_orbits(
 
     let cam_dist = focus.distance;
 
+    // Per-body visible billboard radius in render units. For non-stars
+    // this is the larger of the impostor's render radius and the
+    // icon's render-space radius (`cam_dist * MARKER_RADIUS`, i.e. a
+    // constant on-screen size). Stars never render as an icon, so we
+    // use their render radius unconditionally.
+    //
+    // We hide a child's orbit once its ring is smaller than the
+    // parent's visible billboard — at that point the orbit ellipse
+    // visually merges into the parent, regardless of camera distance,
+    // and tuning gizmo `depth_bias` can't disentangle them. Tying the
+    // cull to *visible billboard* size (rather than icon-mode alone)
+    // means the rule kicks in smoothly across the icon→impostor
+    // crossfade, instead of popping moon orbits in/out at the
+    // threshold where the parent's icon disappears.
+    let parent_visual_radius: Vec<f32> = if let Ok(cam_tf) = camera_query.single() {
+        let cam_pos = cam_tf.translation;
+        let mut radii = vec![0.0f32; sim.simulation.bodies().len()];
+        for (body, body_tf) in bodies.iter() {
+            let visual_radius = if body.is_star {
+                body.render_radius
+            } else {
+                let body_cam_dist = (body_tf.translation - cam_pos).length().max(1.0);
+                let icon_radius = body_cam_dist * MARKER_RADIUS;
+                body.render_radius.max(icon_radius)
+            };
+            radii[body.body_id] = visual_radius;
+        }
+        radii
+    } else {
+        Vec::new()
+    };
+
     for (i, line) in orbit_lines.lines.iter().enumerate() {
         let Some(line) = line else { continue };
+
+        let parent_visual = parent_visual_radius
+            .get(line.parent_id)
+            .copied()
+            .unwrap_or(0.0);
+        if line.max_radius < parent_visual {
+            continue;
+        }
 
         let parent_pos_m = states
             .get(line.parent_id)
@@ -2117,6 +2356,7 @@ fn focus_camera_on_homeworld(
 /// icons because we test the parent entity's transform, not the mesh child.
 fn double_click_focus_system(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mut contexts: EguiContexts,
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), (With<ActiveCamera>, With<OrbitCamera>)>,
@@ -2127,6 +2367,7 @@ fn double_click_focus_system(
     >,
     sim: Res<SimulationState>,
     scale: Res<WorldScale>,
+    origin: Res<RenderOrigin>,
     mut focus: ResMut<CameraFocus>,
     mut last_click: ResMut<LastClick>,
 ) {
@@ -2137,6 +2378,15 @@ fn double_click_focus_system(
         .and_then(|e| bodies.get(e).ok())
         .map(|(_, _, t)| t.translation);
     if !mouse_buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // Skip clicks consumed by egui — otherwise clicking a button or
+    // dragging a window would also pick a body behind it.
+    if contexts
+        .ctx_mut()
+        .map(|ctx| ctx.wants_pointer_input())
+        .unwrap_or(false)
+    {
         return;
     }
 
@@ -2258,33 +2508,7 @@ fn double_click_focus_system(
         return;
     };
 
-    // Compute smooth transition offset.
-    let old_pos = focus
-        .target
-        .and_then(|e| {
-            bodies
-                .get(e)
-                .map(|(_, _, t)| t.translation)
-                .ok()
-                .or_else(|| ghosts.get(e).map(|(_, _, t)| t.translation).ok())
-        })
-        .unwrap_or(Vec3::ZERO)
-        + focus.focus_offset;
-
-    let new_pos = bodies
-        .get(target_entity)
-        .map(|(_, _, t)| t.translation)
-        .ok()
-        .or_else(|| {
-            ghosts
-                .get(target_entity)
-                .map(|(_, _, t)| t.translation)
-                .ok()
-        })
-        .unwrap_or(Vec3::ZERO);
-
-    focus.focus_offset = old_pos - new_pos;
-    focus.target = Some(target_entity);
+    focus.focus_on(target_entity, origin.position);
 }
 
 // ---------------------------------------------------------------------------

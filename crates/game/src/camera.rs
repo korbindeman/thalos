@@ -1,5 +1,6 @@
 use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 use thalos_physics::types::{BodyDefinition, BodyState};
@@ -28,7 +29,7 @@ impl Plugin for CameraPlugin {
                     ship_camera_mode_input,
                     camera_input_system,
                     camera_zoom_interpolation_system,
-                    camera_focus_offset_decay_system,
+                    camera_focus_transition_system,
                     camera_transform_system,
                 )
                     .chain()
@@ -128,10 +129,35 @@ pub struct CameraFocus {
     pub elevation: f32,
     /// Minimum distance in metres — set to the focused body's surface radius.
     pub min_distance: f64,
-    /// Render-space offset from the true target position, used to smoothly
-    /// interpolate the camera's look-at point when switching focus targets.
-    /// Set to `old_pos - new_pos` on switch, then decayed to zero each frame.
-    pub focus_offset: Vec3,
+    /// Physics-space (heliocentric, metres, f64) position the
+    /// [`RenderOrigin`](crate::coords::RenderOrigin) sat at when the
+    /// current focus transition began. While `Some`, the origin
+    /// interpolates in f64 from this point to the new focus target's
+    /// physics position over [`FOCUS_TRANSITION_DURATION_S`]. `None`
+    /// when no transition is active — origin tracks the focus target
+    /// directly.
+    ///
+    /// Stored in physics space (rather than as a render-space `Vec3`
+    /// offset) so the camera never sits at large render-unit
+    /// coordinates mid-switch — at MAP_SCALE the old visual position
+    /// of a distant body can be 1e6+ RU, which collapses
+    /// `looking_at`'s `(target − camera).normalize()` to f32 ulp
+    /// noise. With the origin interpolating in f64, both the camera
+    /// and its target stay near render-space (0,0,0) throughout.
+    pub transition_origin_start: Option<DVec3>,
+    /// Azimuth at the moment the current transition began. The renderer
+    /// reads `azimuth` interpolated from this value toward the field's
+    /// current value across the transition, so a focus pick that also
+    /// retargets the camera (e.g. body-tree pick → Sun-side aim) pans
+    /// smoothly instead of snapping. Only valid while `transition_origin_start`
+    /// is `Some`.
+    pub transition_azimuth_start: f32,
+    /// Elevation at the moment the current transition began. See
+    /// [`Self::transition_azimuth_start`] for the rationale.
+    pub transition_elevation_start: f32,
+    /// Seconds elapsed since the current transition began. Reset on each
+    /// focus switch.
+    pub transition_elapsed_s: f64,
 }
 
 impl Default for CameraFocus {
@@ -143,9 +169,105 @@ impl Default for CameraFocus {
             azimuth: 0.0,
             elevation: 0.3, // slight downward tilt so the horizon is visible
             min_distance: DISTANCE_MIN_DEFAULT,
-            focus_offset: Vec3::ZERO,
+            transition_origin_start: None,
+            transition_azimuth_start: 0.0,
+            transition_elevation_start: 0.0,
+            transition_elapsed_s: 0.0,
         }
     }
+}
+
+impl CameraFocus {
+    /// Begin a smooth transition to `target`. `current_origin` is the
+    /// physics-space position the [`RenderOrigin`](crate::coords::RenderOrigin)
+    /// sits at right now (typically the previous focus body's heliocentric
+    /// position, possibly already mid-interpolation if the user retargets
+    /// during a transition). The origin will interpolate in f64 from this
+    /// point to the new target's physics position over
+    /// [`FOCUS_TRANSITION_DURATION_S`] seconds regardless of distance, so
+    /// the camera never sits at large render-unit coordinates during the
+    /// switch.
+    ///
+    /// Preserves the current zoom (`target_distance`). Callers that want
+    /// to also frame the new body to a comparable on-screen size should
+    /// follow up with [`Self::frame_for_radius`].
+    pub fn focus_on(&mut self, target: Entity, current_origin: DVec3) {
+        // Capture *effective* (mid-transition) az/el so a retarget while
+        // a transition is already in flight continues smoothly from where
+        // the camera currently appears, not from the previous target's
+        // stored values.
+        let start_az = self.effective_azimuth();
+        let start_el = self.effective_elevation();
+        self.transition_origin_start = Some(current_origin);
+        self.transition_azimuth_start = start_az;
+        self.transition_elevation_start = start_el;
+        self.transition_elapsed_s = 0.0;
+        self.target = Some(target);
+    }
+
+    /// Set `target_distance` to a body-sized framing distance — bodies
+    /// sharing a radius land at the same zoom, so on-screen size stays
+    /// comparable across the system. Body-tree picks call this; passive
+    /// refocus events (double-click, ghost retirement) do not, so they
+    /// preserve whatever zoom the user had.
+    pub fn frame_for_radius(&mut self, radius_m: f64) {
+        self.target_distance = (radius_m * FOCUS_FRAMING_RADII).max(DISTANCE_MIN_DEFAULT);
+    }
+
+    /// Set [`azimuth`](Self::azimuth) and [`elevation`](Self::elevation)
+    /// so the camera-to-target offset points along `world_dir` — i.e. the
+    /// camera ends up sitting at `target + world_dir * distance`. Used to
+    /// place the camera on the lit side of a body (Sun-direction) when the
+    /// user picks it from the body tree.
+    ///
+    /// Only meaningful in map view, where the camera basis is the world
+    /// axes. Ship view uses a gravity-aligned basis that this helper
+    /// doesn't translate to.
+    pub fn aim_from(&mut self, world_dir: Vec3) {
+        let dir = world_dir.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            return;
+        }
+        self.elevation = dir.y.asin();
+        self.azimuth = dir.x.atan2(dir.z);
+    }
+
+    /// Azimuth as it appears this frame. While a focus transition is
+    /// active, lerps from [`Self::transition_azimuth_start`] toward
+    /// [`Self::azimuth`] using the same eased curve as the origin lerp;
+    /// otherwise returns [`Self::azimuth`] directly. Shortest-arc wrapped
+    /// so a 350°→10° transition pans 20° forward, not 340° back.
+    pub fn effective_azimuth(&self) -> f32 {
+        if self.transition_origin_start.is_none() {
+            return self.azimuth;
+        }
+        let t = focus_transition_progress(self) as f32;
+        let delta = wrap_pi(self.azimuth - self.transition_azimuth_start);
+        self.transition_azimuth_start + delta * t
+    }
+
+    /// Elevation as it appears this frame — see [`Self::effective_azimuth`].
+    /// No wrap needed: elevation is clamped to ±89°.
+    pub fn effective_elevation(&self) -> f32 {
+        if self.transition_origin_start.is_none() {
+            return self.elevation;
+        }
+        let t = focus_transition_progress(self) as f32;
+        self.transition_elevation_start
+            + (self.elevation - self.transition_elevation_start) * t
+    }
+}
+
+/// Wrap `angle` to `(-π, π]` for shortest-arc azimuth interpolation.
+fn wrap_pi(angle: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let mut a = angle % TAU;
+    if a > PI {
+        a -= TAU;
+    } else if a < -PI {
+        a += TAU;
+    }
+    a
 }
 
 const DISTANCE_MIN_DEFAULT: f64 = 1e5; // 100 km
@@ -155,6 +277,14 @@ const SURFACE_MARGIN: f64 = 3.0;
 /// Closest the camera may zoom to the player ship in ship view (metres).
 /// Small enough to put the camera a few metres off the hull.
 const SHIP_MIN_DISTANCE_M: f64 = 5.0;
+/// Duration of a focus-switch transition, regardless of distance between
+/// bodies. Tuned for snappy-but-not-jarring camera handoff.
+pub const FOCUS_TRANSITION_DURATION_S: f64 = 0.8;
+/// Multiple of body radius used as the framing distance when switching
+/// focus. ~10× gives an establishing-shot view — body clearly visible in
+/// frame without dominating it. Must stay above [`SURFACE_MARGIN`] so
+/// `camera_min_distance_system` doesn't clamp the framing back up.
+const FOCUS_FRAMING_RADII: f64 = 10.0;
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -185,7 +315,7 @@ fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         Transform::from_xyz(0.0, 0.0, 5e6).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     if map_active {
-        map_cam.insert(ActiveCamera);
+        map_cam.insert((ActiveCamera, IsDefaultUiCamera));
     }
 
     let mut ship_cam = commands.spawn((
@@ -213,7 +343,7 @@ fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         Transform::from_xyz(0.0, 0.0, 5e6).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     if !map_active {
-        ship_cam.insert(ActiveCamera);
+        ship_cam.insert((ActiveCamera, IsDefaultUiCamera));
     }
 }
 
@@ -244,8 +374,13 @@ fn ship_camera_mode_input(
 ///
 /// - Left-button drag  → rotate (azimuth / elevation)
 /// - Scroll wheel      → sets `target_distance` (actual zoom is interpolated by `camera_zoom_interpolation_system`)
+///
+/// Suppressed while egui is consuming pointer input — without this guard,
+/// dragging an egui window would simultaneously rotate the camera, and
+/// scrolling over a window would zoom both.
 pub fn camera_input_system(
     block: Res<BlockCameraInput>,
+    mut contexts: EguiContexts,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut scroll_events: MessageReader<MouseWheel>,
@@ -256,9 +391,15 @@ pub fn camera_input_system(
     const ZOOM_FACTOR_MAX: f64 = 0.01; // interplanetary scale
     const ELEVATION_MAX: f32 = 89.0_f32.to_radians();
 
+    let egui_wants_pointer = contexts
+        .ctx_mut()
+        .map(|ctx| ctx.wants_pointer_input())
+        .unwrap_or(false);
+
     // --- Rotation -----------------------------------------------------------
-    // Suppressed while a maneuver element is hovered or being dragged.
-    if mouse_buttons.pressed(MouseButton::Left) && !block.0 {
+    // Suppressed while a maneuver element is hovered or being dragged, or
+    // while egui is handling the pointer (e.g. dragging a panel).
+    if mouse_buttons.pressed(MouseButton::Left) && !block.0 && !egui_wants_pointer {
         let delta = mouse_motion.delta;
         if delta != Vec2::ZERO {
             focus.azimuth += delta.x * ROTATION_SENSITIVITY;
@@ -276,7 +417,12 @@ pub fn camera_input_system(
     let t = ((log_cur - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
     let zoom_factor = ZOOM_FACTOR_MIN + (ZOOM_FACTOR_MAX - ZOOM_FACTOR_MIN) * t;
 
+    // Drain scroll events even when blocked so they don't carry into the
+    // next frame and cause a delayed zoom after the cursor leaves egui.
     for event in scroll_events.read() {
+        if egui_wants_pointer {
+            continue;
+        }
         let raw = event.y as f64;
         let ticks = match event.unit {
             MouseScrollUnit::Line => raw * 25.0,
@@ -332,23 +478,40 @@ fn camera_min_distance_system(
     }
 }
 
-/// Smoothly decays `focus_offset` toward zero so the camera glides to the new
-/// target after a focus switch.
-fn camera_focus_offset_decay_system(time: Res<Time>, mut focus: ResMut<CameraFocus>) {
-    const TRANSITION_SPEED: f64 = 6.0; // higher = faster snap
-
-    if focus.focus_offset == Vec3::ZERO {
+/// Advances the focus-transition timer and clears
+/// [`CameraFocus::transition_origin_start`] when the transition is
+/// complete. The origin's actual interpolation is driven by
+/// `update_render_origin` in `rendering.rs`, which reads this timer
+/// each frame — keeping the lerp in physics space (DVec3) rather than
+/// re-deriving a render-space `focus_offset` here, so the camera
+/// never sits at large render-unit coordinates during the switch.
+///
+/// Fixed duration (rather than an exponential decay) means near and
+/// distant focus switches feel equally responsive: a Sun↔Acheron jump
+/// completes in the same 0.8 s as a Moon↔Earth jump.
+fn camera_focus_transition_system(time: Res<Time>, mut focus: ResMut<CameraFocus>) {
+    if focus.transition_origin_start.is_none() {
         return;
     }
 
-    let dt = time.delta_secs_f64();
-    let t = (1.0 - (-TRANSITION_SPEED * dt).exp()) as f32;
-    focus.focus_offset *= 1.0 - t;
-
-    // Snap to zero when close enough to avoid perpetual micro-drift.
-    if focus.focus_offset.length_squared() < 1e-12 {
-        focus.focus_offset = Vec3::ZERO;
+    focus.transition_elapsed_s += time.delta_secs_f64();
+    if focus.transition_elapsed_s >= FOCUS_TRANSITION_DURATION_S {
+        focus.transition_origin_start = None;
+        focus.transition_elapsed_s = 0.0;
     }
+}
+
+/// Eased progress of the active focus transition in `[0.0, 1.0]`.
+/// Returns `1.0` when no transition is active so `update_render_origin`
+/// lerps directly to the focus target. Ease-out cubic — most of the
+/// visual movement lands in the first ~30 % of the duration, the last
+/// fraction settles gently.
+pub fn focus_transition_progress(focus: &CameraFocus) -> f64 {
+    if focus.transition_origin_start.is_none() {
+        return 1.0;
+    }
+    let t = (focus.transition_elapsed_s / FOCUS_TRANSITION_DURATION_S).clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
 /// Computes the camera [`Transform`] from [`CameraFocus`] and the target's world position.
@@ -384,18 +547,32 @@ pub fn camera_transform_system(
         ViewMode::Ship => crate::coords::SHIP_SCALE,
     };
 
-    // Resolve the target's pivot in world space. If the target carries a
-    // `CameraTargetOffset` (e.g. the player ship's CoM), apply it through the
-    // entity's rotation so the pivot tracks the entity's orientation.
-    let target_pos: Vec3 = focus
-        .target
-        .and_then(|entity| target_query.get(entity).ok())
-        .map(|(t, offset)| {
-            let local = offset.copied().unwrap_or_default().0;
-            t.translation + t.rotation * local
-        })
-        .unwrap_or(Vec3::ZERO)
-        + focus.focus_offset;
+    // Resolve the target's pivot in world space.
+    //
+    // - When a focus transition is active, `RenderOrigin` is mid-lerp
+    //   between the old and new focus positions in physics space. The
+    //   camera follows that moving origin, which sits at `Vec3::ZERO`
+    //   in render space by definition; bodies (including the focus
+    //   target) slide past as the origin sweeps. We deliberately
+    //   ignore the focus entity's transform here so the camera never
+    //   anchors to its non-zero render-space position mid-switch —
+    //   that's exactly the failure mode the structural fix prevents.
+    // - When settled, the focus entity's transform sits at the
+    //   render-space origin (origin tracks it directly), so we read
+    //   it normally and apply any per-target pivot offset (e.g. the
+    //   player ship's mass-weighted CoM).
+    let target_pos: Vec3 = if focus.transition_origin_start.is_some() {
+        Vec3::ZERO
+    } else {
+        focus
+            .target
+            .and_then(|entity| target_query.get(entity).ok())
+            .map(|(t, offset)| {
+                let local = offset.copied().unwrap_or_default().0;
+                t.translation + t.rotation * local
+            })
+            .unwrap_or(Vec3::ZERO)
+    };
 
     // Pick a local basis. In ship view we derive it from the ship's gravity
     // frame so the planet stays "down" as the ship orbits. Otherwise fall
@@ -422,11 +599,13 @@ pub fn camera_transform_system(
     };
 
     let distance = (focus.distance * scale) as f32;
-    let cos_el = focus.elevation.cos();
+    let azimuth = focus.effective_azimuth();
+    let elevation = focus.effective_elevation();
+    let cos_el = elevation.cos();
     let local = Vec3::new(
-        cos_el * focus.azimuth.sin(),
-        focus.elevation.sin(),
-        cos_el * focus.azimuth.cos(),
+        cos_el * azimuth.sin(),
+        elevation.sin(),
+        cos_el * azimuth.cos(),
     );
     let offset =
         (basis.right * local.x + basis.up * local.y + basis.forward * local.z) * distance;
@@ -502,7 +681,7 @@ fn ship_camera_basis(
 /// Find the body whose sphere of influence contains `ship_pos` and is
 /// smallest among such bodies — the same rule the patched-conics propagator
 /// uses to pick an anchor. The star (infinite SOI) is the fallback.
-fn find_reference_body(
+pub(crate) fn find_reference_body(
     ship_pos: bevy::math::DVec3,
     bodies: &[BodyDefinition],
     states: &[BodyState],
