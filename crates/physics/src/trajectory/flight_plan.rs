@@ -27,11 +27,14 @@ use super::events::{
 };
 use super::numeric::NumericSegment;
 pub use super::propagation::ScheduledBurn;
-use super::propagation::{PredictionConfig, PropagationBudget, PropagationContext, propagate_segment};
+use super::propagation::{
+    PredictionConfig, PropagationBudget, PropagationContext, propagate_segment,
+};
 use crate::body_state_provider::BodyStateProvider;
 use crate::maneuver::{ManeuverSequence, burn_duration};
+use crate::orbital_math::propagate_kepler;
 use crate::ship_propagator::ShipPropagator;
-use crate::types::{BodyDefinition, BodyId, StateVector};
+use crate::types::{BodyDefinition, BodyId, StateVector, TrajectorySample};
 use glam::DVec3;
 
 /// Immutable inputs for trajectory prediction.
@@ -103,7 +106,9 @@ impl Leg {
 
     /// Iterate burn (if present) then coast.
     pub fn segments(&self) -> impl Iterator<Item = &NumericSegment> {
-        self.burn_segment.iter().chain(std::iter::once(&self.coast_segment))
+        self.burn_segment
+            .iter()
+            .chain(std::iter::once(&self.coast_segment))
     }
 
     /// Last state covered by the leg, or None if both sub-segments are empty.
@@ -232,6 +237,97 @@ impl FlightPlan {
     pub fn encounter_with(&self, body: BodyId) -> Option<&Encounter> {
         self.encounters.iter().find(|e| e.body == body)
     }
+
+    /// State at `time` on the trajectory the ship would follow if the burn
+    /// scheduled at `time` were not applied.
+    ///
+    /// Burns are centered on `node.time` (`[t − d/2, t + d/2]`), so for a
+    /// finite burn the burn segment owns `t` and `Trajectory::state_at`
+    /// returns a partially-thrusted state — wrong for any consumer that
+    /// wants the unperturbed orbit (maneuver-marker rendering, sensitivity
+    /// scaling, drag-frame computation). This walks the legs to find the
+    /// pre-burn coast and analytically extends it to `time` under the SOI
+    /// body's gravity. Impulsive burns are a no-op (coast already covers
+    /// `t`).
+    ///
+    /// Returns `None` if the gap between the previous coast's end and
+    /// `time` exceeds the burn's own duration — the symptom of an SOI
+    /// transition cutting the coast short, where the anchor body of the
+    /// last sample may no longer be the SOI for `time` and analytical
+    /// extrapolation would be wrong.
+    pub fn pre_burn_state_at(
+        &self,
+        time: f64,
+        ephemeris: &dyn BodyStateProvider,
+        bodies: &[BodyDefinition],
+    ) -> Option<TrajectorySample> {
+        // Coast directly contains `time`: impulsive-burn case, or `time`
+        // is between bursts. Sample directly.
+        for leg in &self.legs {
+            let coast = &leg.coast_segment;
+            let (Some(s), Some(e)) = (coast.start_time(), coast.end_time()) else {
+                continue;
+            };
+            if time >= s - 1e-6 && time <= e + 1e-6 {
+                let state = coast.state_at(time)?;
+                let anchor = coast.samples.last()?.anchor_body;
+                let body_state = ephemeris.query_body(anchor, time);
+                return Some(TrajectorySample {
+                    time,
+                    position: state.position,
+                    velocity: state.velocity,
+                    anchor_body: anchor,
+                    ref_pos: body_state.position,
+                });
+            }
+        }
+
+        // `time` lives inside a burn — Kepler-extrapolate from the
+        // previous leg's coast end under that leg's SOI body.
+        for (i, leg) in self.legs.iter().enumerate() {
+            let Some(burn) = &leg.burn_segment else {
+                continue;
+            };
+            let (bs, be) = burn.epoch_range();
+            if time < bs - 1e-6 || time > be + 1e-6 {
+                continue;
+            }
+
+            let pre_burn_leg = i.checked_sub(1).and_then(|p| self.legs.get(p))?;
+            let last_sample = pre_burn_leg.coast_segment.samples.last()?;
+
+            let dt = time - last_sample.time;
+            let burn_dur = (be - bs).max(0.0);
+            if dt < -1e-6 || dt > burn_dur + 1e-3 {
+                return None;
+            }
+
+            let anchor = last_sample.anchor_body;
+            let body = bodies.get(anchor)?;
+            if body.gm <= 0.0 {
+                return None;
+            }
+
+            let body_state_last = ephemeris.query_body(anchor, last_sample.time);
+            let body_state_now = ephemeris.query_body(anchor, time);
+
+            let rel = StateVector {
+                position: last_sample.position - body_state_last.position,
+                velocity: last_sample.velocity - body_state_last.velocity,
+            };
+            let advanced = propagate_kepler(rel, body.gm, dt);
+
+            return Some(TrajectorySample {
+                time,
+                position: advanced.position + body_state_now.position,
+                velocity: advanced.velocity + body_state_now.velocity,
+                anchor_body: anchor,
+                ref_pos: body_state_now.position,
+            });
+        }
+
+        None
+    }
 }
 
 impl Trajectory for FlightPlan {
@@ -315,11 +411,8 @@ pub fn propagate_flight_plan(
     let mut running_mass_kg = *ship_mass_kg;
     let target_body = *target_body;
 
-    let _span = tracing::info_span!(
-        "propagate_flight_plan",
-        nodes = maneuvers.nodes.len(),
-    )
-    .entered();
+    let _span =
+        tracing::info_span!("propagate_flight_plan", nodes = maneuvers.nodes.len(),).entered();
 
     let _ = target_body; // retained on PredictionRequest for UI; unused here
     let ctx = PropagationContext {
@@ -486,9 +579,8 @@ pub fn propagate_flight_plan(
                 // the burn always begins at the leg's entry time), so
                 // `t − leg_start_time` is the active-burn duration.
                 let burn_dt = (t - leg_start_time).max(0.0);
-                running_mass_kg = (running_mass_kg
-                    - ship_mass_flow_kg_per_s * burn_dt)
-                    .max(ship_dry_mass_kg);
+                running_mass_kg =
+                    (running_mass_kg - ship_mass_flow_kg_per_s * burn_dt).max(ship_dry_mass_kg);
                 time = t;
             }
             Some(seg)
@@ -550,18 +642,36 @@ pub fn propagate_flight_plan(
             break;
         }
 
-        // Derive the next leg's initial state by interpolating the
-        // completed leg at the exact node time. This structurally
-        // guarantees each leg starts where the previous one ends —
-        // no drift from floating-point accumulation in (state, time).
+        // Derive the next leg's initial (state, time) pair from the
+        // completed leg. They MUST stay aligned: the next leg's burn is
+        // integrated from this state at this time, so any mismatch shows
+        // up as a translated post-burn trajectory.
+        //
+        // For impulsive burns (d = 0) the previous coast covers the
+        // node exactly; `state_at(node_time)` interpolates and we
+        // advance time to the node.
+        //
+        // For finite burns (d > 0) the previous coast ends at
+        // `node_time − d/2`; `state_at` returns None. We must then
+        // anchor *both* state and time to the coast's actual end —
+        // setting time to `node_time` while state is still at
+        // `node_time − d/2` desyncs the integrator (it would treat the
+        // pre-burn position as living at `node_time`, which displaces
+        // every downstream sample by the body's heliocentric motion
+        // across `d/2`). The clamp on the next leg's `burn.start_time`
+        // then naturally produces a burn centered on the node time.
         if leg_idx < node_order.len() {
             let node_time = maneuvers.nodes[node_order[leg_idx]].time;
             let built_leg = legs.last().unwrap();
-            state = built_leg
-                .state_at(node_time)
-                .or_else(|| built_leg.last_state())
-                .unwrap_or(state);
-            time = node_time;
+            if let Some(s) = built_leg.state_at(node_time) {
+                state = s;
+                time = node_time;
+            } else if let (Some(s), Some(end_t)) =
+                (built_leg.last_state(), built_leg.leg_end_time())
+            {
+                state = s;
+                time = end_t;
+            }
         }
     }
 
@@ -654,4 +764,3 @@ pub fn propagate_flight_plan(
         baseline,
     }
 }
-

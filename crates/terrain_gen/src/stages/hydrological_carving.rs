@@ -268,12 +268,7 @@ impl Stage for HydrologicalCarving {
 /// queue with every ocean vertex, then pop the lowest open vertex and
 /// force every unprocessed neighbor to elevation ≥ popped_elevation +
 /// epsilon before pushing it back on the queue. One pass, O(V log V).
-fn pit_fill(
-    sphere: &Icosphere,
-    elevations: &mut [f32],
-    sea_level: f32,
-    epsilon_m: f32,
-) {
+fn pit_fill(sphere: &Icosphere, elevations: &mut [f32], sea_level: f32, epsilon_m: f32) {
     let n = sphere.vertices.len();
     let mut processed = vec![false; n];
     // BinaryHeap is a max-heap; we use `Reverse` to get a min-heap, and
@@ -404,8 +399,7 @@ fn erode_and_deposit(
 
         // Slope (dimensionless) to downstream neighbor.
         let dh = (elevations[vi_idx] - elevations[ds_idx]).max(0.0);
-        let dist_m =
-            (sphere.vertices[vi_idx] - sphere.vertices[ds_idx]).length() * radius_m;
+        let dist_m = (sphere.vertices[vi_idx] - sphere.vertices[ds_idx]).length() * radius_m;
         let slope = if dist_m > 0.0 { dh / dist_m } else { 0.0 };
 
         let area = accumulation[vi_idx];
@@ -601,10 +595,9 @@ fn paint_hydrology_debug_albedo(
                             // by accumulation so larger rivers read as
                             // darker than small tributaries.
                             let smooth = k * k * (3.0 - 2.0 * k);
-                            let accum_factor = ((accumulation[vi].ln()
-                                - river_threshold_m2.max(1.0).ln())
-                                / 2.0)
-                                .clamp(0.3, 1.0);
+                            let accum_factor =
+                                ((accumulation[vi].ln() - river_threshold_m2.max(1.0).ln()) / 2.0)
+                                    .clamp(0.3, 1.0);
                             river_intensity = river_intensity.max(smooth * accum_factor);
                         }
                     }

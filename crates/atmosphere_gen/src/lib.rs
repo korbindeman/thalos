@@ -106,7 +106,6 @@ pub struct AtmosphereParams {
     /// round the disk and add chromatic limb colour for free.
     #[serde(default)]
     pub limb_darkening: Option<LimbDarkening>,
-
     // Storms and aurora come later. They are not listed here yet so the
     // schema is conservative: adding them will be an additive change,
     // with `#[serde(default)]` preserving backward compatibility.

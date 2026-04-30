@@ -42,7 +42,10 @@ impl Spectrum {
     /// Evaluate the spectrum at a given wavelength, in nm.
     pub fn evaluate(&self, wavelength_nm: f32) -> f32 {
         match self {
-            Spectrum::Blackbody { temperature_k, scale } => {
+            Spectrum::Blackbody {
+                temperature_k,
+                scale,
+            } => {
                 let lambda_m = (wavelength_nm as f64) * 1e-9;
                 let t = *temperature_k as f64;
                 // B(λ, T) = (2hc² / λ⁵) · 1 / (exp(hc / (λkT)) - 1)
@@ -62,7 +65,10 @@ impl Spectrum {
                 let ratio = wavelength_nm / reference_wavelength_nm.max(1e-6);
                 scale * ratio.powf(-alpha)
             }
-            Spectrum::Tabulated { wavelengths_nm, flux } => {
+            Spectrum::Tabulated {
+                wavelengths_nm,
+                flux,
+            } => {
                 if wavelengths_nm.is_empty() {
                     return 0.0;
                 }
@@ -75,7 +81,8 @@ impl Spectrum {
                 // Binary search for the interval.
                 let idx = wavelengths_nm
                     .binary_search_by(|p| {
-                        p.partial_cmp(&wavelength_nm).unwrap_or(std::cmp::Ordering::Equal)
+                        p.partial_cmp(&wavelength_nm)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap_or_else(|i| i);
                 let i1 = idx.min(wavelengths_nm.len() - 1).max(1);
@@ -150,7 +157,11 @@ pub mod passbands {
             wavelengths_nm.push(w);
             response.push(r);
         }
-        Passband { name, wavelengths_nm, response }
+        Passband {
+            name,
+            wavelengths_nm,
+            response,
+        }
     }
 
     pub fn visible_red() -> Passband {
@@ -174,8 +185,14 @@ mod tests {
 
     #[test]
     fn blackbody_hotter_is_bluer() {
-        let hot = Spectrum::Blackbody { temperature_k: 30_000.0, scale: 1.0 };
-        let cool = Spectrum::Blackbody { temperature_k: 3_000.0, scale: 1.0 };
+        let hot = Spectrum::Blackbody {
+            temperature_k: 30_000.0,
+            scale: 1.0,
+        };
+        let cool = Spectrum::Blackbody {
+            temperature_k: 3_000.0,
+            scale: 1.0,
+        };
         let red = passbands::visible_red();
         let blue = passbands::visible_blue();
         let hot_ratio = blue.integrate(&hot) / red.integrate(&hot);
@@ -188,7 +205,10 @@ mod tests {
 
     #[test]
     fn sun_like_has_finite_flux() {
-        let sun = Spectrum::Blackbody { temperature_k: 5_778.0, scale: 1.0 };
+        let sun = Spectrum::Blackbody {
+            temperature_k: 5_778.0,
+            scale: 1.0,
+        };
         for band in passbands::visible_rgb() {
             let f = band.integrate(&sun);
             assert!(f.is_finite() && f > 0.0, "band {} = {f}", band.name);

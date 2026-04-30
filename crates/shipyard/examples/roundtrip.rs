@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use thalos_shipyard::*;
 
 fn main() {
-    let catalog =
-        PartCatalog::load_from_path("assets/parts.ron").expect("load assets/parts.ron");
+    let catalog = PartCatalog::load_from_path("assets/parts.ron").expect("load assets/parts.ron");
 
     let blueprint = ShipBlueprint {
         name: "TestRocket".into(),

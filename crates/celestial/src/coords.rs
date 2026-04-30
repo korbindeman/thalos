@@ -59,12 +59,9 @@ pub fn galactic_pole() -> UnitVector3 {
     // ~ equivalent to ICRS galactic pole (ra=192.86°, dec=27.13°), kept
     // in-universe as a stylistic choice rather than any claim about
     // Thalos's actual home galaxy.
-    EquatorialCoord::new(
-        192.859_5f32.to_radians(),
-        27.128_2f32.to_radians(),
-    )
-    .to_unit()
-    .normalize()
+    EquatorialCoord::new(192.859_5f32.to_radians(), 27.128_2f32.to_radians())
+        .to_unit()
+        .normalize()
 }
 
 #[cfg(test)]

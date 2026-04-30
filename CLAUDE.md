@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-just game                 # cargo run -p thalos_game --features dev
-just editor               # cargo run -p thalos_planet_editor --features dev
+just game                 # cargo run -p thalos_game
+just editor               # cargo run -p thalos_planet_editor
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics -p thalos_terrain_gen
@@ -116,8 +116,16 @@ Key modules:
 
 ### Game crate (`crates/game/`)
 
-- `bridge` — The core adapter. Calls `Simulation::step()` each frame, manages async prediction worker thread, syncs maneuver edits, handles warp controls.
-- `rendering` / `trajectory_rendering` — Reads body positions from `PatchedConics` and trajectory samples from prediction. Cone width is derived from perturbation ratio directly.
+- `bridge` — The core adapter. Calls `Simulation::step()` each frame, recomputes trajectory prediction *synchronously* on the main thread when the cached plan is dirty/stale, syncs maneuver edits, handles warp controls. (Single early-terminating `propagate_flight_plan` pass keeps the typical rebuild well under a frame; running in-line means an edit on frame N produces the fresh trajectory on frame N.)
+- `rendering/` — Module owning every system that turns simulation state into rendered geometry. Submodules:
+  - `types` — shared resources (`SimulationState`, `FrameBodyStates`, `CameraExposure`) and components (`CelestialBody`, `PlayerShip`, material handles, etc.).
+  - `spawn` — startup system that creates one entity tree per body (impostor mesh + ship-layer mesh + icon + rings).
+  - `generation` — polls the in-flight `BodyData` async tasks, bakes the result into a `PlanetMaterial`, and handles reference-cloud (TEMP) loading.
+  - `lighting` — `CameraExposure`, `SceneLighting` population, planet/solid material light updates, sun-light direction.
+  - `transforms` — render-origin floating frame, body/ship transform sync, planet orientation (tidal lock + spin).
+  - `materials` — per-frame parameter updates for gas-giant, ring, and cloud-band animation.
+  - `trails` — orbit-line periodic recompute + gizmo draw with focus/sibling fade.
+  - `body_lod` — screen-space LOD: icon ↔ impostor crossfade, moon-merge fade, double-click-to-focus picking, homeworld focus.
 - `ghost_bodies` — Renders ghost planet positions during time warp preview.
 - `sky_render` — Renders procedural sky from `thalos_celestial` catalog (stars, galaxies as GPU meshes).
 - `maneuver/` — Maneuver node placement/editing UI. Delta-v handles in local reference frame.

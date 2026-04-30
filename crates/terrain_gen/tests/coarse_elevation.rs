@@ -134,7 +134,8 @@ fn coarse_elevation_is_deterministic() {
         let first = elevations[0];
         let last = *elevations.last().unwrap();
         let hash: u64 = elevations.iter().fold(0u64, |a, e| {
-            a.wrapping_mul(0x100000001b3).wrapping_add(e.to_bits() as u64)
+            a.wrapping_mul(0x100000001b3)
+                .wrapping_add(e.to_bits() as u64)
         });
         (first.to_bits(), last.to_bits(), hash)
     };

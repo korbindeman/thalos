@@ -9,10 +9,10 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use crate::camera::CameraFocus;
+use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::coords::{RenderOrigin, WorldScale};
 use crate::photo_mode::HideInPhotoMode;
-use crate::rendering::{CelestialBody, FrameBodyStates, SimulationState};
+use crate::rendering::{FrameBodyStates, SimulationState};
 use crate::view::HideInShipView;
 
 use super::view::{FlightPlanView, GhostPhase};
@@ -34,6 +34,8 @@ pub struct GhostBody {
     pub parent_id: usize,
     /// Body's offset from its parent at the projection epoch.
     pub relative_position: DVec3,
+    /// Epoch used for the parent-relative projection position.
+    pub projection_epoch: f64,
     pub radius_m: f64,
     /// SOI entry epoch — drives handoff timing.
     pub encounter_epoch: f64,
@@ -66,6 +68,7 @@ pub(super) fn sync_ghost_bodies(
             if let Ok((_, mut comp)) = existing.get_mut(entity) {
                 comp.parent_id = ghost.parent_id;
                 comp.relative_position = ghost.relative_position;
+                comp.projection_epoch = ghost.projection_epoch;
                 comp.encounter_epoch = ghost.encounter_epoch;
                 comp.phase = ghost.phase;
             }
@@ -91,14 +94,15 @@ pub(super) fn sync_ghost_bodies(
                 .spawn((
                     Mesh3d(mesh),
                     MeshMaterial3d(material),
-                    Transform::from_translation(Vec3::ZERO)
-                        .with_scale(Vec3::splat(render_radius)),
+                    Transform::from_translation(Vec3::ZERO).with_scale(Vec3::splat(render_radius)),
+                    Visibility::Hidden,
                     NotShadowCaster,
                     NotShadowReceiver,
                     GhostBody {
                         body_id: ghost.body_id,
                         parent_id: ghost.parent_id,
                         relative_position: ghost.relative_position,
+                        projection_epoch: ghost.projection_epoch,
                         radius_m: body_def.radius_m,
                         encounter_epoch: ghost.encounter_epoch,
                         phase: GhostPhase::Active,
@@ -137,7 +141,6 @@ pub(super) fn update_ghost_lifecycle(
     mut view: ResMut<FlightPlanView>,
     mut focus: ResMut<CameraFocus>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    celestials: Query<(Entity, &CelestialBody, &Transform)>,
     mut ghosts: Query<(&GhostBody, &MeshMaterial3d<StandardMaterial>, &Transform)>,
 ) {
     let Some(sim) = sim else { return };
@@ -171,12 +174,8 @@ pub(super) fn update_ghost_lifecycle(
 
         // Camera handoff: if focused on this ghost and it's retired, transfer
         // to the real body with a smooth physics-space origin lerp.
-        if ghost.phase == GhostPhase::Retired
-            && focus.target == Some(entity)
-            && let Some((real_entity, _, _)) =
-                celestials.iter().find(|(_, cb, _)| cb.body_id == ghost.body_id)
-        {
-            focus.focus_on(real_entity, origin.position);
+        if ghost.phase == GhostPhase::Retired && focus.target == CameraFocusTarget::Ghost(entity) {
+            focus.focus_on_body(ghost.body_id, origin.position);
         }
     }
 }
@@ -191,7 +190,7 @@ pub(super) fn update_ghost_transforms(
     scale: Res<WorldScale>,
     cache: Res<FrameBodyStates>,
     view: Res<FlightPlanView>,
-    mut query: Query<(&GhostBody, &mut Transform)>,
+    mut query: Query<(Entity, &GhostBody, &mut Transform, &mut Visibility)>,
 ) {
     let cam_dist_render = (focus.distance * scale.0) as f32;
     let min_radius = cam_dist_render * 0.008;
@@ -201,19 +200,31 @@ pub(super) fn update_ghost_transforms(
         None => return,
     };
 
-    for (ghost_comp, mut transform) in &mut query {
-        // Anchor the ghost to its parent's pin recursively. The parent
-        // recursion grounds out at the focus body (rule 1 in
-        // pin_for_body), so a Mira ghost composes its offset onto
-        // current Thalos when the camera focus is Thalos.
-        //
-        // We pass `encounter_epoch` as the sample time so multi-encounter
-        // dispatch resolves the parent ghost active at this body's
-        // encounter moment, matching the trajectory pin's recursion
-        // entry point exactly.
-        let parent_pin =
-            view.pin_for_body(ghost_comp.parent_id, ghost_comp.encounter_epoch, body_states);
-        let sim_pos = parent_pin + ghost_comp.relative_position;
+    for (entity, ghost_comp, mut transform, mut visibility) in &mut query {
+        let target_visibility = match focus.target {
+            CameraFocusTarget::Ghost(focused) if focused != entity => Visibility::Hidden,
+            _ => Visibility::Inherited,
+        };
+        if *visibility != target_visibility {
+            *visibility = target_visibility;
+        }
+
+        // Use the canonical ghost pin when the view still owns this
+        // entity, so mesh placement, trajectory overlays, and blend
+        // handoff all resolve through one path.
+        let sim_pos = view
+            .ghosts()
+            .iter()
+            .find(|ghost| ghost.entity == Some(entity))
+            .map(|ghost| view.pin_for_ghost(ghost, body_states))
+            .unwrap_or_else(|| {
+                let parent_pin = view.pin_for_body(
+                    ghost_comp.parent_id,
+                    ghost_comp.projection_epoch,
+                    body_states,
+                );
+                parent_pin + ghost_comp.relative_position
+            });
 
         transform.translation = ((sim_pos - origin.position) * scale.0).as_vec3();
         let body_radius_render = (ghost_comp.radius_m * scale.0) as f32;

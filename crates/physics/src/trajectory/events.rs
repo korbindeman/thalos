@@ -280,10 +280,14 @@ pub(super) fn aggregate_encounters(
             continue;
         }
 
-        // Look ahead for a matching SoiExit of the same body.
+        // Look ahead for the exit that returns from this entry body to
+        // its parent frame. `TrajectoryEvent::body` stores the new frame
+        // after a transition, so a Mira exit is recorded as `SoiExit`
+        // with body = Thalos.
+        let exit_body = bodies.get(entry.body).and_then(|body| body.parent);
         let exit = events[idx + 1..]
             .iter()
-            .find(|e| e.body == entry.body && e.kind == TrajectoryEventKind::SoiExit);
+            .find(|e| e.kind == TrajectoryEventKind::SoiExit && Some(e.body) == exit_body);
 
         let window_end = exit.map(|e| e.epoch).unwrap_or(f64::INFINITY);
 
@@ -346,9 +350,7 @@ pub(super) fn aggregate_encounters(
 
         let capture = if impacted {
             CaptureStatus::Impact
-        } else if body_radius > 0.0
-            && periapsis_altitude < body_radius * GRAZE_ALTITUDE_FRACTION
-        {
+        } else if body_radius > 0.0 && periapsis_altitude < body_radius * GRAZE_ALTITUDE_FRACTION {
             CaptureStatus::Graze {
                 altitude: periapsis_altitude,
             }
@@ -585,4 +587,171 @@ pub fn closest_approach(
         craft_state,
         body_state: body_state(ephemeris, target, best_t),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::DVec3;
+
+    use super::*;
+    use crate::types::{BodyKind, BodyState, BodyStates};
+
+    struct StaticProvider {
+        states: BodyStates,
+    }
+
+    impl BodyStateProvider for StaticProvider {
+        fn query_into(&self, _time: f64, out: &mut BodyStates) {
+            out.clear();
+            out.extend_from_slice(&self.states);
+        }
+
+        fn query_body(&self, body_id: BodyId, _time: f64) -> BodyState {
+            self.states[body_id]
+        }
+
+        fn body_count(&self) -> usize {
+            self.states.len()
+        }
+
+        fn time_span(&self) -> f64 {
+            1_000.0
+        }
+    }
+
+    fn body(id: BodyId, parent: Option<BodyId>, kind: BodyKind) -> BodyDefinition {
+        BodyDefinition {
+            id,
+            name: format!("body-{id}"),
+            kind,
+            parent,
+            mass_kg: 1.0,
+            radius_m: 1.0,
+            color: [1.0, 1.0, 1.0],
+            albedo: 0.0,
+            rotation_period_s: 0.0,
+            axial_tilt_rad: 0.0,
+            gm: 1.0,
+            soi_radius_m: if parent.is_some() {
+                100.0
+            } else {
+                f64::INFINITY
+            },
+            orbital_elements: None,
+            generator: None,
+            atmosphere: None,
+            terrestrial_atmosphere: None,
+            rings: None,
+        }
+    }
+
+    fn state(position: DVec3) -> StateVector {
+        StateVector {
+            position,
+            velocity: DVec3::X,
+        }
+    }
+
+    fn sample(time: f64, position: DVec3, anchor_body: BodyId) -> TrajectorySample {
+        TrajectorySample {
+            time,
+            position,
+            velocity: DVec3::X,
+            anchor_body,
+            ref_pos: DVec3::ZERO,
+        }
+    }
+
+    #[test]
+    fn nested_soi_entries_match_parent_frame_exits() {
+        let bodies = vec![
+            body(0, None, BodyKind::Star),
+            body(1, Some(0), BodyKind::Planet),
+            body(2, Some(1), BodyKind::Moon),
+        ];
+        let ephemeris = StaticProvider {
+            states: vec![
+                BodyState {
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    mass_kg: 1.0,
+                },
+                BodyState {
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    mass_kg: 1.0,
+                },
+                BodyState {
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    mass_kg: 1.0,
+                },
+            ],
+        };
+        let events = vec![
+            TrajectoryEvent {
+                id: 0,
+                body: 1,
+                epoch: 1.0,
+                kind: TrajectoryEventKind::SoiEntry,
+                craft_state: state(DVec3::new(10.0, 0.0, 0.0)),
+                body_state: state(DVec3::ZERO),
+                leg_index: 0,
+            },
+            TrajectoryEvent {
+                id: 1,
+                body: 2,
+                epoch: 10.0,
+                kind: TrajectoryEventKind::SoiEntry,
+                craft_state: state(DVec3::new(3.0, 0.0, 0.0)),
+                body_state: state(DVec3::ZERO),
+                leg_index: 0,
+            },
+            TrajectoryEvent {
+                id: 2,
+                body: 1,
+                epoch: 30.0,
+                kind: TrajectoryEventKind::SoiExit,
+                craft_state: state(DVec3::new(4.0, 0.0, 0.0)),
+                body_state: state(DVec3::ZERO),
+                leg_index: 0,
+            },
+            TrajectoryEvent {
+                id: 3,
+                body: 0,
+                epoch: 60.0,
+                kind: TrajectoryEventKind::SoiExit,
+                craft_state: state(DVec3::new(20.0, 0.0, 0.0)),
+                body_state: state(DVec3::ZERO),
+                leg_index: 0,
+            },
+        ];
+        let segments = vec![NumericSegment {
+            samples: vec![
+                sample(5.0, DVec3::new(10.0, 0.0, 0.0), 1),
+                sample(20.0, DVec3::new(2.0, 0.0, 0.0), 2),
+                sample(40.0, DVec3::new(12.0, 0.0, 0.0), 1),
+                sample(55.0, DVec3::new(18.0, 0.0, 0.0), 1),
+            ],
+            is_stable_orbit: false,
+            stable_orbit_start_index: None,
+            collision_body: None,
+        }];
+
+        let mut next_id = 10;
+        let encounters =
+            aggregate_encounters(&events, &segments, &bodies, &ephemeris, &mut next_id);
+
+        let planet = encounters
+            .iter()
+            .find(|encounter| encounter.body == 1)
+            .expect("planet encounter should be aggregated");
+        let moon = encounters
+            .iter()
+            .find(|encounter| encounter.body == 2)
+            .expect("moon encounter should be aggregated");
+
+        assert_eq!(planet.exit_epoch, Some(60.0));
+        assert_eq!(moon.exit_epoch, Some(30.0));
+    }
 }

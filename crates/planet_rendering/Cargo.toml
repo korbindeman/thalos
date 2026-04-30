@@ -10,6 +10,3 @@ thalos_cloud_gen = { path = "../cloud_gen" }
 bevy = { version = "0.18", features = ["wayland"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
-
-[features]
-dev = ["bevy/dynamic_linking"]

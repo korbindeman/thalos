@@ -38,11 +38,7 @@ fn feature_point(ix: i32, iy: i32, iz: i32, seed: u32) -> Vec3 {
     let h2 = pcg(h1);
     let h3 = pcg(h2);
     let norm = 1.0 / u32::MAX as f32;
-    Vec3::new(
-        h1 as f32 * norm,
-        h2 as f32 * norm,
-        h3 as f32 * norm,
-    )
+    Vec3::new(h1 as f32 * norm, h2 as f32 * norm, h3 as f32 * norm)
 }
 
 // ---------------------------------------------------------------------------
@@ -238,8 +234,20 @@ mod tests {
             let a = worley_3d_tileable(p, 4, seed);
             let b = worley_3d_tileable(p + Vec3::X, 4, seed);
             let c = worley_3d_tileable(p + Vec3::new(0.0, 1.0, -2.0), 4, seed);
-            assert!((a - b).abs() < 1e-5, "X-tile mismatch at {:?}: {} vs {}", p, a, b);
-            assert!((a - c).abs() < 1e-5, "YZ-tile mismatch at {:?}: {} vs {}", p, a, c);
+            assert!(
+                (a - b).abs() < 1e-5,
+                "X-tile mismatch at {:?}: {} vs {}",
+                p,
+                a,
+                b
+            );
+            assert!(
+                (a - c).abs() < 1e-5,
+                "YZ-tile mismatch at {:?}: {} vs {}",
+                p,
+                a,
+                c
+            );
         }
     }
 
@@ -304,8 +312,20 @@ mod tests {
             let a = vol.sample(p);
             let b = vol.sample(p + Vec3::new(1.0, 0.0, 0.0));
             let c = vol.sample(p + Vec3::new(0.0, -2.0, 5.0));
-            assert!((a - b).abs() < 1e-5, "wrap(X) mismatch at {:?}: {} vs {}", p, a, b);
-            assert!((a - c).abs() < 1e-5, "wrap(YZ) mismatch at {:?}: {} vs {}", p, a, c);
+            assert!(
+                (a - b).abs() < 1e-5,
+                "wrap(X) mismatch at {:?}: {} vs {}",
+                p,
+                a,
+                b
+            );
+            assert!(
+                (a - c).abs() < 1e-5,
+                "wrap(YZ) mismatch at {:?}: {} vs {}",
+                p,
+                a,
+                c
+            );
         }
     }
 

@@ -50,10 +50,22 @@ use crate::rendering::SimulationState;
 /// CPU write cost (each refresh touches 6 × 256² = ~400k texels).
 const PROBE_SIZE: u32 = 256;
 
-/// Seconds between cubemap refreshes. Set low enough that orbital
-/// angular motion is invisible between updates, high enough that the
-/// CPU cost is negligible.
-const REFRESH_INTERVAL: f32 = 0.25;
+/// Seconds between cubemap refreshes. The painted content is "vaguely
+/// lit hemisphere with a sun disc" — geometric, not detailed — so
+/// reflection content changes slowly even at 1× warp. Low rates here
+/// matter because each refresh marks the cubemap asset changed, which
+/// re-triggers Bevy's diffuse+specular IBL prefilter convolution
+/// (`prepare_generated_environment_map_bind_groups`) — that prefilter
+/// is the dominant cost downstream of the CPU paint.
+const REFRESH_INTERVAL: f32 = 5.0;
+
+/// Below these thresholds the env hasn't moved enough for a re-paint to
+/// produce a visibly different cubemap, so we skip the `images.get_mut`
+/// (which would mark the asset changed and re-trigger the IBL prefilter).
+/// 0.9999 ≈ 0.81° angular drift on a unit direction; 1e-4 on `planet_cos`
+/// ≈ a fraction of a percent change in the planet's angular radius.
+const ENV_DIR_DOT_MIN: f32 = 0.9999;
+const ENV_COS_EPS: f32 = 1.0e-4;
 
 /// Environment map intensity multiplier handed to
 /// [`GeneratedEnvironmentMapLight`]. 1.0 matches scene luminance;
@@ -70,10 +82,7 @@ impl Plugin for ReflectionProbePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ProbeRefreshTimer>()
             .add_systems(Startup, setup_probe)
-            .add_systems(
-                Update,
-                (attach_env_map_to_main_camera, refresh_cubemap),
-            );
+            .add_systems(Update, (attach_env_map_to_main_camera, refresh_cubemap));
     }
 }
 
@@ -90,6 +99,10 @@ struct ReflectionProbe {
 struct ProbeRefreshTimer {
     elapsed: f32,
     first_fill_done: bool,
+    /// Last `EnvParams` the cubemap was painted from. Used by the
+    /// change-detection gate to skip painting when the env hasn't
+    /// shifted enough to produce a visibly different cubemap.
+    last_painted: Option<EnvParams>,
 }
 
 impl Default for ProbeRefreshTimer {
@@ -97,6 +110,7 @@ impl Default for ProbeRefreshTimer {
         Self {
             elapsed: REFRESH_INTERVAL, // force an update on frame 1
             first_fill_done: false,
+            last_painted: None,
         }
     }
 }
@@ -149,6 +163,14 @@ fn attach_env_map_to_main_camera(
 /// Rewrite the cubemap pixels from the current ship-relative sun /
 /// planet directions. Marks the asset changed so Bevy re-uploads and
 /// `GeneratedEnvironmentMapLight` re-filters.
+///
+/// Two gates suppress the work:
+/// 1. Time-based: only consider painting every `REFRESH_INTERVAL` seconds.
+/// 2. Change-detection: even when the timer fires, skip the actual
+///    `images.get_mut` if the env hasn't moved beyond
+///    `ENV_DIR_DOT_MIN` / `ENV_COS_EPS` since the last paint. The
+///    `get_mut` is the asset-changed trigger; not calling it skips the
+///    downstream IBL prefilter pass entirely.
 fn refresh_cubemap(
     time: Res<Time>,
     mut timer: ResMut<ProbeRefreshTimer>,
@@ -165,10 +187,6 @@ fn refresh_cubemap(
     timer.elapsed = 0.0;
     timer.first_fill_done = true;
 
-    let Some(image) = images.get_mut(&probe.cubemap) else {
-        return;
-    };
-
     // Derive scene directions from the current sim state. When sim
     // isn't available yet (early frames) fall back to sensible
     // defaults so we still paint *something* — a static gradient is
@@ -178,9 +196,30 @@ fn refresh_cubemap(
         .map(derive_environment)
         .unwrap_or_else(default_environment);
 
+    if let Some(last) = timer.last_painted
+        && !env_changed_meaningfully(&last, &env)
+    {
+        return;
+    }
+
+    let Some(image) = images.get_mut(&probe.cubemap) else {
+        return;
+    };
+
     paint_cubemap(image, &env);
+    timer.last_painted = Some(env);
 }
 
+/// `true` when at least one of the env params has shifted enough that
+/// re-painting will produce a visibly different cubemap. Used as the
+/// asset-changed gate in [`refresh_cubemap`].
+fn env_changed_meaningfully(last: &EnvParams, new: &EnvParams) -> bool {
+    last.sun_dir.dot(new.sun_dir) < ENV_DIR_DOT_MIN
+        || last.planet_dir.dot(new.planet_dir) < ENV_DIR_DOT_MIN
+        || (last.planet_cos - new.planet_cos).abs() > ENV_COS_EPS
+}
+
+#[derive(Clone, Copy)]
 struct EnvParams {
     /// Unit vector from ship toward sun, in world space.
     sun_dir: Vec3,
@@ -328,9 +367,8 @@ fn sample_environment(env: &EnvParams, dir: Vec3) -> Vec3 {
     let planet_dot = dir.dot(env.planet_dir);
     if planet_dot > env.planet_cos {
         let point_on_planet = dir - env.planet_dir * planet_dot;
-        let normal = -(env.planet_dir - point_on_planet * (1.0 - env.planet_cos)).normalize_or(
-            -env.planet_dir,
-        );
+        let normal = -(env.planet_dir - point_on_planet * (1.0 - env.planet_cos))
+            .normalize_or(-env.planet_dir);
         let lit = env.sun_dir.dot(normal).max(0.0);
         // Soft limb gradient + Lambert term. The 0.15 floor keeps the
         // night side visible as a slightly-bluish disc rather than a
@@ -379,4 +417,3 @@ fn write_rgba16f(out: &mut [u8], color: Vec3) {
         out[i * 2 + 1] = ((h >> 8) & 0xff) as u8;
     }
 }
-

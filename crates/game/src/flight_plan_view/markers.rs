@@ -17,17 +17,15 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics::body_state_provider::BodyStateProvider;
 use thalos_physics::trajectory::{EncounterId, FlightPlan, TrajectoryEventKind};
-use thalos_physics::types::BodyState;
+use thalos_physics::types::{BodyState, SolarSystemDefinition};
 
-use crate::camera::{ActiveCamera, CameraFocus};
+use crate::camera::ActiveCamera;
 use crate::coords::{RenderOrigin, WorldScale};
 use crate::photo_mode::HideInPhotoMode;
-use crate::rendering::{FrameBodyStates, SimulationState};
+use crate::rendering::{FrameBodyStates, SimulationState, screen_marker_radius};
 use crate::view::HideInShipView;
 
 use super::FlightPlanView;
-
-const MARKER_RADIUS: f32 = 0.006;
 
 // ---------------------------------------------------------------------------
 // Public marker kind
@@ -152,12 +150,17 @@ struct MarkerSpec {
 fn compute_marker_specs(
     flight_plan: &FlightPlan,
     ephemeris: &dyn BodyStateProvider,
+    system: &SolarSystemDefinition,
     flight_plan_view: &FlightPlanView,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
 ) -> Vec<MarkerSpec> {
     let mut specs = Vec::new();
+    if flight_plan_view.focused_ghost().is_some() {
+        return specs;
+    }
+
     // Multi-revolution legs (fast moon orbit, long heliocentric horizon) emit
     // a Pe + Ap pair per revolution. Keep only the first of each kind per
     // (kind, body, leg) — events arrive in time order so `insert` returns
@@ -169,6 +172,9 @@ fn compute_marker_specs(
             continue;
         };
         if !seen.insert((kind, event.body, event.leg_index)) {
+            continue;
+        }
+        if flight_plan_view.epoch_hidden_in_focus(flight_plan, system, event.epoch) {
             continue;
         }
 
@@ -205,7 +211,13 @@ fn compute_marker_specs(
             .map(|s| s.time)
             .unwrap_or(event.epoch);
         let pin = flight_plan_view.pin_for_body(leg_anchor_id, leg_first_time, body_states);
-        let world_pos = render_pos(event.craft_state.position, leg_anchor_pos, pin, origin, scale);
+        let world_pos = render_pos(
+            event.craft_state.position,
+            leg_anchor_pos,
+            pin,
+            origin,
+            scale,
+        );
 
         specs.push(MarkerSpec {
             kind,
@@ -251,12 +263,20 @@ pub(super) fn manage_trajectory_markers(
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
     flight_plan_view: Res<FlightPlanView>,
-    focus: Res<CameraFocus>,
-    camera_q: Query<&Transform, (With<ActiveCamera>, With<crate::camera::OrbitCamera>, Without<TrajectoryMarker>)>,
+    camera_q: Query<
+        &Transform,
+        (
+            With<ActiveCamera>,
+            With<crate::camera::OrbitCamera>,
+            Without<TrajectoryMarker>,
+        ),
+    >,
     mut markers: Query<(Entity, &TrajectoryMarker, &mut Transform, &mut Visibility)>,
     mut last_version: Local<Option<u64>>,
 ) {
-    let Some(assets) = assets.as_deref() else { return };
+    let Some(assets) = assets.as_deref() else {
+        return;
+    };
     let Some(sim) = sim.as_deref() else { return };
     let Some(flight_plan) = sim.simulation.prediction() else {
         return;
@@ -265,16 +285,17 @@ pub(super) fn manage_trajectory_markers(
         return;
     };
 
-    let cam_dist = (focus.distance * scale.0) as f32;
-    let cam_rot = camera_q
-        .single()
-        .map(|t| t.rotation)
-        .unwrap_or(Quat::IDENTITY);
+    let Ok(cam_tf) = camera_q.single() else {
+        return;
+    };
+    let cam_rot = cam_tf.rotation;
+    let cam_pos = cam_tf.translation;
 
     let version = sim.simulation.prediction_version();
     let specs = compute_marker_specs(
         flight_plan,
         sim.ephemeris.as_ref(),
+        &sim.system,
         &flight_plan_view,
         states,
         &origin,
@@ -289,22 +310,29 @@ pub(super) fn manage_trajectory_markers(
             commands.entity(entity).despawn();
         }
         for spec in &specs {
-            spawn_marker(&mut commands, assets, spec, cam_rot, cam_dist);
+            spawn_marker(&mut commands, assets, spec, cam_rot, cam_pos);
         }
         *last_version = Some(version);
         return;
     }
 
     // Same prediction: update transforms in-place, keyed by event_id.
-    let mut by_id: std::collections::HashMap<EncounterId, &MarkerSpec> = specs
-        .iter()
-        .map(|s| (s.event_id, s))
-        .collect();
+    let mut by_id: std::collections::HashMap<EncounterId, &MarkerSpec> =
+        specs.iter().map(|s| (s.event_id, s)).collect();
     for (_, marker, mut tf, mut vis) in &mut markers {
         if let Some(spec) = by_id.remove(&marker.event_id) {
             *vis = Visibility::Inherited;
-            *tf = billboard_transform(spec.world_pos, cam_rot, cam_dist * MARKER_RADIUS);
+            *tf = billboard_transform(
+                spec.world_pos,
+                cam_rot,
+                screen_marker_radius(spec.world_pos, cam_pos),
+            );
+        } else {
+            *vis = Visibility::Hidden;
         }
+    }
+    for spec in by_id.values() {
+        spawn_marker(&mut commands, assets, spec, cam_rot, cam_pos);
     }
 }
 
@@ -313,12 +341,16 @@ fn spawn_marker(
     assets: &TrajectoryMarkerAssets,
     spec: &MarkerSpec,
     cam_rot: Quat,
-    cam_dist: f32,
+    cam_pos: Vec3,
 ) {
     commands.spawn((
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material(spec.kind, spec.is_ghost)),
-        billboard_transform(spec.world_pos, cam_rot, cam_dist * MARKER_RADIUS),
+        billboard_transform(
+            spec.world_pos,
+            cam_rot,
+            screen_marker_radius(spec.world_pos, cam_pos),
+        ),
         TrajectoryMarker {
             event_id: spec.event_id,
         },

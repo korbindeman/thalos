@@ -1,4 +1,4 @@
-//! Ship-orientation mode widget and autopilot.
+//! Ship-orientation mode widget and attitude autopilot.
 //!
 //! [`NavigationState`] holds the player's current orientation request.
 //! The widget toggles modes via the side panel; [`compute_attitude_control`]
@@ -15,8 +15,11 @@ use thalos_physics::simulation::Simulation;
 use thalos_physics::trajectory::Trajectory;
 use thalos_physics::types::ControlInput;
 
-use crate::maneuver::ManeuverPlan;
+use crate::autopilot::{Autopilot, AutopilotBurnSchedule, AutopilotState};
+use crate::controls::ControlLocks;
+use crate::maneuver::{GameNode, ManeuverPlan};
 use crate::photo_mode::not_in_photo_mode;
+use crate::rendering::SimulationState;
 use crate::target::TargetBody;
 
 /// Discrete ship-orientation modes the player can request.
@@ -63,60 +66,35 @@ impl NavigationMode {
     }
 }
 
-/// Currently requested orientation mode + scheduled-burn policy.
+/// Currently requested orientation mode.
 ///
 /// `mode` selects the autopilot's pointing target (`None` = free
-/// flight). `auto_maneuvers` controls whether scheduled
-/// [`crate::maneuver`] nodes auto-fire at their start time. With
-/// auto off, nodes remain in the plan as visual planning aids and
-/// the player executes them manually via the throttle.
-#[derive(Resource, Debug)]
+/// flight). Scheduled burn execution is owned by
+/// [`crate::autopilot::Autopilot`], not by the maneuver/navigation
+/// UI state.
+#[derive(Resource, Debug, Default)]
 pub struct NavigationState {
     pub mode: Option<NavigationMode>,
-    pub auto_maneuvers: bool,
-}
-
-impl Default for NavigationState {
-    fn default() -> Self {
-        Self {
-            mode: None,
-            auto_maneuvers: true,
-        }
-    }
 }
 
 pub struct NavigationPlugin;
 
 impl Plugin for NavigationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NavigationState>()
-            .add_systems(
-                bevy_egui::EguiPrimaryContextPass,
-                navigation_panel.run_if(not_in_photo_mode),
-            )
-            .add_systems(
-                Update,
-                sync_auto_maneuvers
-                    .in_set(crate::SimStage::Physics)
-                    .before(crate::bridge::advance_simulation),
-            );
+        app.init_resource::<NavigationState>().add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            navigation_panel.run_if(not_in_photo_mode),
+        );
     }
-}
-
-/// Push the navigation panel's auto-maneuvers toggle into the
-/// physics simulation each frame. The simulation's setter is a no-op
-/// when the value is unchanged, so this stays cheap.
-fn sync_auto_maneuvers(
-    nav: Res<NavigationState>,
-    mut sim: ResMut<crate::rendering::SimulationState>,
-) {
-    sim.simulation
-        .set_auto_maneuvers_enabled(nav.auto_maneuvers);
 }
 
 fn navigation_panel(
     mut contexts: EguiContexts,
     mut nav: ResMut<NavigationState>,
+    mut autopilot: ResMut<Autopilot>,
+    burn_schedule: Res<AutopilotBurnSchedule>,
+    locks: Res<ControlLocks>,
+    sim: Res<SimulationState>,
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
 ) {
@@ -124,6 +102,11 @@ fn navigation_panel(
 
     let has_target = target.target.is_some();
     let has_node = !plan.nodes.is_empty();
+    // Mode buttons go read-only when the navigation_mode lock is set —
+    // the autopilot (or any future locker) is asserting a programmatic
+    // pointing target and a click would be ignored until control is
+    // released.
+    let modes_enabled = !locks.navigation_mode;
 
     // Drop the selected mode if the precondition that justified it is gone
     // (target deselected, last maneuver node deleted).
@@ -144,25 +127,109 @@ fn navigation_panel(
         .default_pos(initial_pos)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.set_min_width(110.0);
-            ui.checkbox(&mut nav.auto_maneuvers, "Auto Maneuvers");
+            ui.set_min_width(140.0);
+            // Checkbox stays interactive at all times — this is the
+            // only override path while the autopilot is locked on.
+            ui.checkbox(&mut autopilot.enabled, "Autopilot");
+            autopilot_status(ui, &autopilot, &burn_schedule, &sim);
             ui.separator();
-            mode_button(ui, &mut nav.mode, NavigationMode::Stability, true);
-            ui.separator();
-            mode_button(ui, &mut nav.mode, NavigationMode::Prograde, true);
-            mode_button(ui, &mut nav.mode, NavigationMode::Retrograde, true);
-            ui.separator();
-            mode_button(ui, &mut nav.mode, NavigationMode::Normal, true);
-            mode_button(ui, &mut nav.mode, NavigationMode::AntiNormal, true);
-            ui.separator();
-            mode_button(ui, &mut nav.mode, NavigationMode::RadialIn, true);
-            mode_button(ui, &mut nav.mode, NavigationMode::RadialOut, true);
-            ui.separator();
-            mode_button(ui, &mut nav.mode, NavigationMode::Target, has_target);
-            mode_button(ui, &mut nav.mode, NavigationMode::AntiTarget, has_target);
-            ui.separator();
-            mode_button(ui, &mut nav.mode, NavigationMode::ManeuverNode, has_node);
+            ui.add_enabled_ui(modes_enabled, |ui| {
+                mode_button(ui, &mut nav.mode, NavigationMode::Stability, true);
+                ui.separator();
+                mode_button(ui, &mut nav.mode, NavigationMode::Prograde, true);
+                mode_button(ui, &mut nav.mode, NavigationMode::Retrograde, true);
+                ui.separator();
+                mode_button(ui, &mut nav.mode, NavigationMode::Normal, true);
+                mode_button(ui, &mut nav.mode, NavigationMode::AntiNormal, true);
+                ui.separator();
+                mode_button(ui, &mut nav.mode, NavigationMode::RadialIn, true);
+                mode_button(ui, &mut nav.mode, NavigationMode::RadialOut, true);
+                ui.separator();
+                mode_button(ui, &mut nav.mode, NavigationMode::Target, has_target);
+                mode_button(ui, &mut nav.mode, NavigationMode::AntiTarget, has_target);
+                ui.separator();
+                mode_button(ui, &mut nav.mode, NavigationMode::ManeuverNode, has_node);
+            });
         });
+}
+
+/// Render the autopilot's live status under the autopilot checkbox.
+///
+/// - `Idle`: collapses to nothing.
+/// - `Armed`: subtle gray "armed · T-XXs" — no lockout, just a hint
+///   the autopilot is waiting in the wings.
+/// - `Engaging`: yellow "ENGAGING · burn in T-XXs" — controls are
+///   locked, warp is being ramped, attitude is being settled.
+/// - `Burn`: bold red banner with delivered vs. planned Δv and a
+///   progress bar so the player can't miss that the engine is firing.
+fn autopilot_status(
+    ui: &mut egui::Ui,
+    autopilot: &Autopilot,
+    burn_schedule: &AutopilotBurnSchedule,
+    sim: &SimulationState,
+) {
+    let countdown_to_burn = |state: AutopilotState| -> Option<f64> {
+        let directive_id = match state {
+            AutopilotState::Armed { directive_id }
+            | AutopilotState::Engaging { directive_id, .. }
+            | AutopilotState::Burn { directive_id, .. } => directive_id,
+            AutopilotState::Idle => return None,
+        };
+        let directive = burn_schedule.next().filter(|d| d.id == directive_id)?;
+        let now = sim.simulation.sim_time();
+        let burn_start = directive.center_time - directive.duration_s / 2.0;
+        Some(burn_start - now)
+    };
+
+    match autopilot.state() {
+        AutopilotState::Idle => {}
+        state @ AutopilotState::Armed { .. } => {
+            let Some(t_minus) = countdown_to_burn(state) else {
+                return;
+            };
+            ui.add_space(4.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(170, 170, 170),
+                format!("armed \u{00B7} T{:+.0}s", t_minus),
+            );
+        }
+        state @ AutopilotState::Engaging { .. } => {
+            let Some(t_minus) = countdown_to_burn(state) else {
+                return;
+            };
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("ENGAGING")
+                    .color(egui::Color32::from_rgb(255, 200, 60))
+                    .strong(),
+            );
+            ui.label(format!("burn in T{:+.0}s", t_minus));
+        }
+        AutopilotState::Burn {
+            planned_dv,
+            anchor_delivered_dv,
+            ..
+        } => {
+            let delivered = (sim.simulation.delivered_dv() - anchor_delivered_dv).max(0.0);
+            let progress = if planned_dv > 0.0 {
+                (delivered / planned_dv).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            };
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("\u{25CF} BURNING")
+                    .color(egui::Color32::from_rgb(255, 80, 80))
+                    .strong()
+                    .size(16.0),
+            );
+            ui.label(format!(
+                "\u{0394}v {:.1} / {:.1} m/s",
+                delivered, planned_dv
+            ));
+            ui.add(egui::ProgressBar::new(progress).desired_width(130.0));
+        }
+    }
 }
 
 fn mode_button(
@@ -185,7 +252,7 @@ fn mode_button(
 /// PD controller settling time, seconds. ω_n = π/T gives a quarter-period
 /// of T/2 — the ship reaches the target attitude in ~T seconds when it
 /// starts within the linear-torque regime, longer when the controller
-/// saturates against `max_torque`. Read by the burn-execution autopilot
+/// saturates against `max_torque`. Read by the scheduled-burn autopilot
 /// in [`crate::autopilot`] to size its lead time before a maneuver.
 pub(crate) const AUTOPILOT_SETTLE_S: f64 = 2.0;
 
@@ -198,16 +265,16 @@ pub(crate) const SHIP_NOSE_BODY: DVec3 = DVec3::Y;
 /// [`Simulation::set_control`]. Priority order:
 ///
 /// 1. **Player keyboard input** (any of W/A/S/D/Q/E pressed) overrides
-///    everything; the autopilot bypasses so the player can recover from
-///    a misbehaving target without first toggling the mode off.
-/// 2. **Stability** mode → re-uses the integrator's SAS rate damper
+///    navigation modes. Callers pass zero player torque while a
+///    programmatic lock owns attitude.
+/// 2. **Autopilot target** → direct scheduled-burn pointing target
+///    supplied by [`crate::autopilot`].
+/// 3. **Stability** mode → re-uses the integrator's SAS rate damper
 ///    (zero command, `sas_enabled: true`).
-/// 3. **Directional modes** (Prograde/Retrograde/Normal/AntiNormal/
+/// 4. **Directional modes** (Prograde/Retrograde/Normal/AntiNormal/
 ///    Radial/Target/AntiTarget/ManeuverNode) → run the PD autopilot
-///    against the per-mode target direction. SAS is disabled while the
-///    autopilot drives — the controller has its own derivative term
-///    and SAS would fight it.
-/// 4. **Free flight** (no mode active, no player input) → either zero
+///    against the per-mode target direction.
+/// 5. **Free flight** (no mode active, no player input) → either zero
 ///    torque or SAS damping per the T-key toggle state.
 ///
 /// `target_unreachable` means the target was set but the world target
@@ -218,6 +285,7 @@ pub(crate) const SHIP_NOSE_BODY: DVec3 = DVec3::Y;
 pub fn compute_attitude_control(
     player_torque: DVec3,
     nav_mode: Option<NavigationMode>,
+    autopilot_target: Option<DVec3>,
     target: &TargetBody,
     plan: &ManeuverPlan,
     sim: &Simulation,
@@ -234,6 +302,14 @@ pub fn compute_attitude_control(
         return ControlInput {
             torque_command: player_torque,
             sas_enabled: false,
+            ..base
+        };
+    }
+
+    if let Some(target_dir) = autopilot_target {
+        return ControlInput {
+            torque_command: autopilot_command(target_dir, sim),
+            sas_enabled: true,
             ..base
         };
     }
@@ -296,7 +372,11 @@ fn compute_target_direction(
             let body_state = sim.ephemeris().query_body(body, time);
             let rel_vel = ship.velocity - body_state.velocity;
             let dir = safe_normalize(rel_vel)?;
-            Some(if mode == NavigationMode::Prograde { dir } else { -dir })
+            Some(if mode == NavigationMode::Prograde {
+                dir
+            } else {
+                -dir
+            })
         }
 
         NavigationMode::Normal | NavigationMode::AntiNormal => {
@@ -308,7 +388,11 @@ fn compute_target_direction(
                 body_state.position,
                 body_state.velocity,
             );
-            Some(if mode == NavigationMode::Normal { normal } else { -normal })
+            Some(if mode == NavigationMode::Normal {
+                normal
+            } else {
+                -normal
+            })
         }
 
         NavigationMode::RadialIn | NavigationMode::RadialOut => {
@@ -333,31 +417,46 @@ fn compute_target_direction(
             })
         }
 
-        NavigationMode::ManeuverNode => {
-            // Pointing for a maneuver requires the ship and reference
-            // body states *at burn time* — using "now" gets the wrong
-            // PRN frame for any non-instant burn. Use the cached
-            // prediction; when it's missing (right after a node edit)
-            // fall back to *both* states at current time so the PRN
-            // frame stays internally consistent rather than mixing
-            // ship-now with body-future.
-            let next = plan.nodes.first()?;
-            let (ship_pos, ship_vel, frame_time) =
-                match sim.prediction().and_then(|p| p.state_at(next.time)) {
-                    Some(s) => (s.position, s.velocity, next.time),
-                    None => (ship.position, ship.velocity, time),
-                };
-            let body_state = sim.ephemeris().query_body(next.reference_body, frame_time);
-            let dv_world = delta_v_to_world(
-                next.delta_v,
-                ship_vel,
-                ship_pos,
-                body_state.position,
-                body_state.velocity,
-            );
-            safe_normalize(dv_world)
-        }
+        NavigationMode::ManeuverNode => maneuver_burn_direction(sim, plan),
     }
+}
+
+/// World-frame unit vector pointing along the next maneuver node's Δv.
+/// Returns `None` when no node exists or the burn direction is
+/// degenerate.
+///
+/// Pointing for a maneuver requires the ship and reference body states
+/// *at burn time* — using "now" gets the wrong PRN frame for any
+/// non-instant burn. Uses the cached prediction; when it's missing
+/// (right after a node edit) falls back to *both* states at current
+/// time so the PRN frame stays internally consistent rather than
+/// mixing ship-now with body-future.
+///
+/// Shared by [`compute_target_direction`] (driving the
+/// [`NavigationMode::ManeuverNode`] pointing target) and the burn-
+/// directive publisher's direction calculation.
+pub(crate) fn maneuver_burn_direction(sim: &Simulation, plan: &ManeuverPlan) -> Option<DVec3> {
+    maneuver_node_burn_direction(sim, plan.nodes.first()?)
+}
+
+/// World-frame unit vector pointing along a maneuver node's Δv.
+pub(crate) fn maneuver_node_burn_direction(sim: &Simulation, node: &GameNode) -> Option<DVec3> {
+    let ship = sim.ship_state();
+    let time = sim.sim_time();
+    let (ship_pos, ship_vel, frame_time) =
+        match sim.prediction().and_then(|p| p.state_at(node.time)) {
+            Some(s) => (s.position, s.velocity, node.time),
+            None => (ship.position, ship.velocity, time),
+        };
+    let body_state = sim.ephemeris().query_body(node.reference_body, frame_time);
+    let dv_world = delta_v_to_world(
+        node.delta_v,
+        ship_vel,
+        ship_pos,
+        body_state.position,
+        body_state.velocity,
+    );
+    safe_normalize(dv_world)
 }
 
 /// PD controller mapping (target direction, current attitude, ship

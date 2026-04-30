@@ -93,13 +93,7 @@ impl GradientWarp {
 /// Bulk-sample `out[i] = f(Vec3(xs[i], ys[i], zs[i]))`. Mirrors the per-face
 /// sampling pattern the stages use with fastnoise2's `gen_position_array_3d`.
 #[inline]
-pub fn bulk_sample<F: Fn(Vec3) -> f32>(
-    out: &mut [f32],
-    xs: &[f32],
-    ys: &[f32],
-    zs: &[f32],
-    f: F,
-) {
+pub fn bulk_sample<F: Fn(Vec3) -> f32>(out: &mut [f32], xs: &[f32], ys: &[f32], zs: &[f32], f: F) {
     for i in 0..out.len() {
         out[i] = f(Vec3::new(xs[i], ys[i], zs[i]));
     }

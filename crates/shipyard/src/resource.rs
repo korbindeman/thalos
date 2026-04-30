@@ -25,8 +25,8 @@ impl Resource {
     /// contributes to wet mass.
     pub fn density_kg_per_unit(self) -> f64 {
         match self {
-            Resource::Methane => 0.422,    // LCH4 at ≈112 K
-            Resource::Lox => 1.141,        // LOX at ≈90 K
+            Resource::Methane => 0.422, // LCH4 at ≈112 K
+            Resource::Lox => 1.141,     // LOX at ≈90 K
             Resource::Electricity => 0.0,
         }
     }

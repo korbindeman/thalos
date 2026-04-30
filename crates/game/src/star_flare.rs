@@ -6,6 +6,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Extent3d,
@@ -15,7 +16,9 @@ use bevy::shader::ShaderRef;
 use bevy::window::PrimaryWindow;
 
 use crate::camera::ActiveCamera;
-use crate::rendering::CelestialBody;
+use crate::coords::{MAP_SCALE, SHIP_SCALE};
+use crate::rendering::{CelestialBody, FrameBodyStates, RenderOrigin};
+use crate::view::ViewMode;
 
 pub struct LensFlarePlugin;
 
@@ -155,7 +158,6 @@ const GHOSTS: &[(f32, f32, Color, GhostShape)] = &[
         Color::srgba(1.00, 0.65, 0.58, 0.11),
         GhostShape::Iris,
     ),
-
     // --- Anti-flare cluster (past screen center) -------------------------
     // Pale steel-blue wash.
     (
@@ -262,10 +264,18 @@ fn spawn_lens_flare_ghosts(
 
 fn update_lens_flare(
     cameras: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
-    bodies: Query<(&GlobalTransform, &CelestialBody)>,
+    bodies: Query<&CelestialBody>,
+    body_states: Res<FrameBodyStates>,
+    origin: Res<RenderOrigin>,
+    view: Res<ViewMode>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut tex_ghosts: Query<
-        (&LensFlareGhost, &mut Node, &MaterialNode<LensFlareMaterial>),
+        (
+            &LensFlareGhost,
+            &mut Node,
+            &MaterialNode<LensFlareMaterial>,
+            &mut Visibility,
+        ),
         Without<HaloShape>,
     >,
     mut halo_ghosts: Query<(
@@ -273,31 +283,65 @@ fn update_lens_flare(
         &HaloShape,
         &mut Node,
         &MaterialNode<LensFlareHaloMaterial>,
+        &mut Visibility,
     )>,
     mut tex_materials: ResMut<Assets<LensFlareMaterial>>,
     mut halo_materials: ResMut<Assets<LensFlareHaloMaterial>>,
+    mut was_visible: Local<bool>,
 ) {
-    let hide = |tex_ghosts: &mut Query<
-        (&LensFlareGhost, &mut Node, &MaterialNode<LensFlareMaterial>),
+    // Toggle ghost visibility on transition only. Writing `Visibility`
+    // marks change detection regardless of equality, so the explicit
+    // != check matters — without it, every hidden frame would still
+    // re-mark the ghost as changed and force the UI material pipeline
+    // to re-prepare it.
+    let set_hidden = |tex_ghosts: &mut Query<
+        (
+            &LensFlareGhost,
+            &mut Node,
+            &MaterialNode<LensFlareMaterial>,
+            &mut Visibility,
+        ),
         Without<HaloShape>,
     >,
-                halo_ghosts: &mut Query<(
+                      halo_ghosts: &mut Query<(
         &LensFlareGhost,
         &HaloShape,
         &mut Node,
         &MaterialNode<LensFlareHaloMaterial>,
-    )>,
-                tex_mats: &mut Assets<LensFlareMaterial>,
-                halo_mats: &mut Assets<LensFlareHaloMaterial>| {
-        for (_, _, handle) in tex_ghosts.iter() {
-            if let Some(m) = tex_mats.get_mut(&handle.0) {
-                m.tint = LinearRgba::NONE;
+        &mut Visibility,
+    )>| {
+        for (_, _, _, mut vis) in tex_ghosts.iter_mut() {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
             }
         }
-        for (_, _, _, handle) in halo_ghosts.iter() {
-            if let Some(m) = halo_mats.get_mut(&handle.0) {
-                m.tint = LinearRgba::NONE;
+        for (_, _, _, _, mut vis) in halo_ghosts.iter_mut() {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
             }
+        }
+    };
+
+    let hide_now = |tex_ghosts: &mut Query<
+        (
+            &LensFlareGhost,
+            &mut Node,
+            &MaterialNode<LensFlareMaterial>,
+            &mut Visibility,
+        ),
+        Without<HaloShape>,
+    >,
+                    halo_ghosts: &mut Query<(
+        &LensFlareGhost,
+        &HaloShape,
+        &mut Node,
+        &MaterialNode<LensFlareHaloMaterial>,
+        &mut Visibility,
+    )>,
+                    was_visible: &mut bool| {
+        if *was_visible {
+            set_hidden(tex_ghosts, halo_ghosts);
+            *was_visible = false;
         }
     };
 
@@ -307,51 +351,59 @@ fn update_lens_flare(
     let Ok(window) = windows.single() else {
         return;
     };
-
-    let cam_pos = cam_tf.translation();
-    let sun_world = bodies
-        .iter()
-        .find(|(_, body)| body.is_star)
-        .map(|(tf, _)| tf.translation());
-    let Some(sun_world) = sun_world else {
-        hide(
-            &mut tex_ghosts,
-            &mut halo_ghosts,
-            &mut tex_materials,
-            &mut halo_materials,
-        );
+    let Some(states) = body_states.states.as_deref() else {
+        hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
         return;
     };
 
-    // --- Occlusion: ray camera→sun vs every non-star sphere ---------------
-    let to_sun = sun_world - cam_pos;
+    // Geometry happens in physics space (DVec3, metres). The camera and
+    // CelestialBody parent transforms live in different render scales
+    // depending on the active view (SHIP_SCALE = 1.0 vs MAP_SCALE = 1e-6),
+    // so doing the math in render space mixes magnitudes and breaks
+    // occlusion for nearby bodies.
+    let scale = match *view {
+        ViewMode::Map => MAP_SCALE,
+        ViewMode::Ship => SHIP_SCALE,
+    };
+    let cam_phys = origin.position + cam_tf.translation().as_dvec3() / scale;
+
+    let Some(sun) = bodies.iter().find(|b| b.is_star) else {
+        hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
+        return;
+    };
+    let Some(sun_state) = states.get(sun.body_id) else {
+        hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
+        return;
+    };
+    let sun_phys = sun_state.position;
+
+    // --- Occlusion: ray camera→sun vs every non-star sphere, in physics space.
+    let to_sun = sun_phys - cam_phys;
     let sun_dist = to_sun.length();
     if sun_dist < 1e-6 {
-        hide(
-            &mut tex_ghosts,
-            &mut halo_ghosts,
-            &mut tex_materials,
-            &mut halo_materials,
-        );
+        hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
         return;
     }
-    let ray_dir = to_sun / sun_dist;
+    let ray_dir: DVec3 = to_sun / sun_dist;
 
     let mut occlusion = 1.0_f32;
-    for (body_tf, body) in bodies.iter() {
+    for body in bodies.iter() {
         if body.is_star {
             continue;
         }
-        let body_pos = body_tf.translation();
-        let to_body = body_pos - cam_pos;
+        let Some(body_state) = states.get(body.body_id) else {
+            continue;
+        };
+        let body_phys = body_state.position;
+        let to_body = body_phys - cam_phys;
         let t = to_body.dot(ray_dir);
         if t <= 0.0 || t >= sun_dist {
             continue;
         }
-        let closest = cam_pos + ray_dir * t;
-        let miss = (body_pos - closest).length();
-        let radius = body.render_radius;
-        let soft = ((miss - radius) / (radius * 0.4)).clamp(0.0, 1.0);
+        let closest = cam_phys + ray_dir * t;
+        let miss = (body_phys - closest).length();
+        let radius = body.radius_m;
+        let soft = (((miss - radius) / (radius * 0.4)).clamp(0.0, 1.0)) as f32;
         occlusion = occlusion.min(soft);
         if occlusion <= 0.0 {
             break;
@@ -359,15 +411,13 @@ fn update_lens_flare(
     }
 
     // --- On-screen projection --------------------------------------------
+    // Use the sun's render-space position at the active scale so the
+    // projection matches what the camera actually sees.
+    let sun_world = ((sun_phys - origin.position) * scale).as_vec3();
     let sun_screen = match camera.world_to_viewport(cam_tf, sun_world) {
         Ok(p) => p,
         Err(_) => {
-            hide(
-                &mut tex_ghosts,
-                &mut halo_ghosts,
-                &mut tex_materials,
-                &mut halo_materials,
-            );
+            hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
             return;
         }
     };
@@ -400,13 +450,25 @@ fn update_lens_flare(
     let global_intensity = occlusion * on_screen * center_fade;
 
     if global_intensity <= 0.0 {
-        hide(
-            &mut tex_ghosts,
-            &mut halo_ghosts,
-            &mut tex_materials,
-            &mut halo_materials,
-        );
+        hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
         return;
+    }
+
+    // Transition hidden → visible: re-show ghosts. Same equality guard
+    // as `set_hidden` so we don't re-mark `Visibility` changed every
+    // frame the flare is on.
+    if !*was_visible {
+        for (_, _, _, mut vis) in tex_ghosts.iter_mut() {
+            if *vis != Visibility::Inherited {
+                *vis = Visibility::Inherited;
+            }
+        }
+        for (_, _, _, _, mut vis) in halo_ghosts.iter_mut() {
+            if *vis != Visibility::Inherited {
+                *vis = Visibility::Inherited;
+            }
+        }
+        *was_visible = true;
     }
 
     let tint_for = |ghost: &LensFlareGhost| -> LinearRgba {
@@ -420,7 +482,7 @@ fn update_lens_flare(
     };
 
     // Textured ghosts (iris, starburst).
-    for (ghost, mut node, handle) in &mut tex_ghosts {
+    for (ghost, mut node, handle, _) in &mut tex_ghosts {
         let pos = sun_screen + to_center * ghost.axis_t;
         node.left = Val::Px(pos.x - ghost.size_px * 0.5);
         node.top = Val::Px(pos.y - ghost.size_px * 0.5);
@@ -431,7 +493,7 @@ fn update_lens_flare(
 
     // Halo (analytic crescent ring) — orients its bright arc toward
     // screen center each frame via axis_dir.
-    for (ghost, halo, mut node, handle) in &mut halo_ghosts {
+    for (ghost, halo, mut node, handle, _) in &mut halo_ghosts {
         let pos = sun_screen + to_center * ghost.axis_t;
         node.left = Val::Px(pos.x - ghost.size_px * 0.5);
         node.top = Val::Px(pos.y - ghost.size_px * 0.5);

@@ -1365,6 +1365,17 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // perpendicular dropped from the sphere center onto the ray — a
     // reasonable stand-in for the silhouette depth for rim-only
     // fragments.
+    //
+    // NOTE: the planet_impostor.wgsl fix (write `frag_depth = 0` on
+    // its miss path so stars/galaxies aren't occluded) is NOT applied
+    // here. The gas giant material is `AlphaMode::Opaque` and renders
+    // in the opaque phase; writing 0 (reverse-Z far plane) here would
+    // let any opaque object behind the rim halo overwrite the halo's
+    // colour via the standard opaque depth-test, which is worse than
+    // the current galaxy occlusion. Properly fixing the gas giant
+    // rim-halo compositing requires moving the halo to a transparent
+    // pass — see `gas_giant.rs`'s specialize comment about the ring
+    // ordering constraint that keeps it Opaque today.
     if cloud_opacity <= 0.0 {
         let closest_point = cam_pos + ray_dir * max(-half_b, 0.0);
         let clip = view.clip_from_world * vec4(closest_point, 1.0);

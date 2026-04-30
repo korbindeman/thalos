@@ -239,4 +239,3 @@ fn toggle_view_input(
         ViewMode::Ship => ViewMode::Map,
     };
 }
-

@@ -7,9 +7,9 @@
 //! state in [`PartResources`]:
 //!
 //! 1. Sample keyboard (Shift/Ctrl/Z/X, KSP convention) into
-//!    [`ThrottleState::commanded`]. The burn-execution autopilot
+//!    [`ThrottleState::commanded`]. The scheduled-burn autopilot
 //!    (`crates/game/src/autopilot.rs`) writes the same field while
-//!    flying a scheduled maneuver — programmatic and manual control
+//!    flying a scheduled directive — programmatic and manual control
 //!    share the throttle surface.
 //! 2. Cap the throttle to 0 when any required reactant runs out and
 //!    push the gated value into the simulation via
@@ -33,6 +33,8 @@ use bevy::prelude::*;
 use thalos_shipyard::{FuelTank, PartResources, Resource};
 
 use crate::SimStage;
+use crate::autopilot::Autopilot;
+use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
 
 /// Engine + ship-mass constants the throttle/drain/mass-push systems
@@ -74,7 +76,7 @@ impl Plugin for FuelPlugin {
             .add_systems(
                 Update,
                 (
-                    // Sample the keyboard early so the burn-execution
+                    // Sample the keyboard early so the scheduled-burn
                     // autopilot in `crates/game/src/autopilot.rs` can
                     // run between this and `handle_attitude_controls`,
                     // overriding `ThrottleState::commanded` for the
@@ -119,35 +121,40 @@ pub struct PredictionRefresh {
     prev_effective: f64,
 }
 
+/// Decide whether the throttle edge should invalidate the cached
+/// prediction. Manual thrust keeps the live trail responsive; scheduled
+/// maneuver burns hold their already-planned trajectory steady until
+/// the engine cuts.
+fn should_mark_prediction_dirty(
+    active: bool,
+    cut_edge: bool,
+    hold_during_scheduled_burn: bool,
+) -> bool {
+    cut_edge || (active && !hold_during_scheduled_burn)
+}
+
 /// Push the effective throttle into both the bridge state resource
-/// and the simulation, and dirty the prediction every frame the
-/// engine fires (plus once on the engine-cut edge to catch the
-/// final post-burn state).
+/// and the simulation, and dirty the prediction for manual thrust
+/// updates or the final engine-cut edge after a scheduled burn.
 ///
 /// `apply_live_thrust` in the simulation deliberately doesn't dirty
 /// at all; this fn owns the policy so the bridge can tune it
-/// without touching physics.
-///
-/// Per-frame dirtying matches KSP's live-trail behaviour. CLAUDE.md
-/// notes the prediction is designed to run in-line each frame —
-/// `propagate_flight_plan` terminates early (stable orbit, fade
-/// horizon) so the typical pass is sub-frame even at 60 Hz. If a
-/// future scenario makes the recompute too expensive (deep encounter
-/// chains, dense plans), the right knob is a short-horizon "live
-/// preview" prediction variant, not throttling the dirty edge here —
-/// that just trades smoothness for choppiness.
+/// without touching physics. Per-frame dirtying for scheduled burns
+/// would rebuild the node trajectory from the mid-burn live ship state,
+/// making the target orbit visibly drift while the maneuver executes.
 fn finish_with_throttle(
     effective: f64,
     throttle: &mut ThrottleState,
     sim: &mut SimulationState,
     refresh: &mut PredictionRefresh,
+    hold_during_scheduled_burn: bool,
 ) {
     throttle.effective = effective;
     sim.simulation.set_throttle(effective);
 
     let active = effective > 0.0;
     let cut_edge = refresh.prev_effective > 0.0 && !active;
-    if active || cut_edge {
+    if should_mark_prediction_dirty(active, cut_edge, hold_during_scheduled_burn) {
         sim.simulation.prediction_state.mark_dirty();
     }
 
@@ -160,11 +167,21 @@ fn finish_with_throttle(
 /// - `X` snaps to zero
 /// - `Shift` (held) ramps up
 /// - `Ctrl` (held) ramps down
+///
+/// Gated by [`ControlLocks::throttle`] — when set, player input is
+/// dropped because some programmatic system (today the scheduled-burn
+/// autopilot) owns the throttle. See [`crate::controls`] for who
+/// publishes the locks.
 pub fn handle_throttle_input(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    locks: Res<ControlLocks>,
     mut throttle: ResMut<ThrottleState>,
 ) {
+    if locks.throttle {
+        return;
+    }
+
     if keys.just_pressed(KeyCode::KeyZ) {
         throttle.commanded = 1.0;
         return;
@@ -258,12 +275,13 @@ fn reconcile_tanks_from_sim_drain(
 /// drains the tanks by that delta on the next frame.
 ///
 /// Engine fires only at 1× warp. Any other warp level (including
-/// pause) gates the throttle to 0; the burn-execution autopilot is
+/// pause) gates the throttle to 0; the scheduled-burn autopilot is
 /// responsible for stepping warp down to 1× before opening the
 /// throttle on a scheduled maneuver.
 pub fn gate_throttle_on_fuel_availability(
     time: Res<Time>,
     fuel_params: Res<ShipFuelParams>,
+    autopilot: Res<Autopilot>,
     mut sim: ResMut<SimulationState>,
     mut throttle: ResMut<ThrottleState>,
     tanks: Query<&PartResources, With<FuelTank>>,
@@ -271,10 +289,11 @@ pub fn gate_throttle_on_fuel_availability(
 ) {
     let warp = sim.simulation.warp.speed();
     let real_dt = time.delta_secs_f64();
+    let hold_prediction = autopilot.is_burning();
 
     if (warp - 1.0).abs() > f64::EPSILON {
         // Any warp level other than 1× → engine off entirely.
-        finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh);
+        finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh, hold_prediction);
         return;
     }
 
@@ -286,7 +305,13 @@ pub fn gate_throttle_on_fuel_availability(
         || fuel_params.mass_flow_kg_per_s <= 0.0
         || fuel_params.reactant_fractions.is_empty()
     {
-        finish_with_throttle(throttle_in_use, &mut throttle, &mut sim, &mut refresh);
+        finish_with_throttle(
+            throttle_in_use,
+            &mut throttle,
+            &mut sim,
+            &mut refresh,
+            hold_prediction,
+        );
         return;
     }
 
@@ -318,5 +343,31 @@ pub fn gate_throttle_on_fuel_availability(
         }
     }
     let throttle_effective = (throttle_in_use * feasibility).max(0.0);
-    finish_with_throttle(throttle_effective, &mut throttle, &mut sim, &mut refresh);
+    finish_with_throttle(
+        throttle_effective,
+        &mut throttle,
+        &mut sim,
+        &mut refresh,
+        hold_prediction,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduled_burn_holds_prediction_while_thrusting() {
+        assert!(!should_mark_prediction_dirty(true, false, true));
+    }
+
+    #[test]
+    fn scheduled_burn_refreshes_on_engine_cut() {
+        assert!(should_mark_prediction_dirty(false, true, true));
+    }
+
+    #[test]
+    fn manual_burn_refreshes_while_thrusting() {
+        assert!(should_mark_prediction_dirty(true, false, false));
+    }
 }

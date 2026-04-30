@@ -58,32 +58,46 @@ pub struct RenderOrigin {
     pub position: DVec3,
 }
 
-/// The body whose frame the trajectory and ghost system are conceptually
-/// drawn in. Distinct from [`RenderOrigin`] so that camera-following
-/// ("origin tracks ship") is decoupled from frame semantics ("trajectory
-/// is in Mira's frame while ship is in Mira's SOI").
+/// A focused future encounter marker. Stored separately from
+/// [`RenderFrame::focus_body`] because a ghost is not the same frame as
+/// the real body at `sim_time`; it is a body frame pinned to a specific
+/// future epoch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderGhostFocus {
+    pub body_id: BodyId,
+    pub encounter_epoch: f64,
+}
+
+/// The body/frame the trajectory and ghost system are conceptually drawn
+/// in. Distinct from [`RenderOrigin`] so that camera-following ("origin
+/// tracks ship") is decoupled from frame semantics ("trajectory is in
+/// Mira's frame while ship is in Mira's SOI").
 ///
 /// Resolution rules:
 /// - Camera target is a celestial body → `focus_body = body.id`
-/// - Camera target is a ghost body → `focus_body = ghost.body_id`
+/// - Camera target is a ghost body → `focus_body = ghost.body_id`,
+///   `focus_ghost = Some(...)`
 /// - Camera target is the player ship → `focus_body = ship's current SOI body`
 /// - No camera target → `focus_body = 0` (the star)
 ///
 /// Consumers:
-/// - `FlightPlanView::rebuild` reads this to suppress focus-body ghosts
-///   (so the focus body sits at the trajectory's center, not at a
-///   parent-anchored projection).
-/// - `FlightPlanView::pin_for_body` returns the focus body's current
-///   heliocentric position when asked for it, grounding ghost
-///   parent-chain recursion at the focus.
-#[derive(Resource, Debug, Clone, Copy)]
+/// - `FlightPlanView::rebuild` reads this to preserve the selected
+///   ghost encounter context across prediction rebuilds.
+/// - `FlightPlanView::pin_for_body` uses it to decide whether the
+///   focused body should resolve to the real body at `sim_time` or a
+///   selected ghost at its future encounter epoch.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct RenderFrame {
     pub focus_body: BodyId,
+    pub focus_ghost: Option<RenderGhostFocus>,
 }
 
 impl Default for RenderFrame {
     fn default() -> Self {
-        Self { focus_body: 0 }
+        Self {
+            focus_body: 0,
+            focus_ghost: None,
+        }
     }
 }
 

@@ -9,8 +9,8 @@
 
 use thalos_terrain_gen::{
     BodyBuilder, CoarseElevation, Composition, CubemapFace, HydrologicalCarving,
-    MAT_ABYSSAL_SEABED, MAT_CONTINENTAL_REGOLITH, MAT_WEATHERED_GRANITE, Pipeline, SurfaceMaterials,
-    TectonicSkeleton,
+    MAT_ABYSSAL_SEABED, MAT_CONTINENTAL_REGOLITH, MAT_WEATHERED_GRANITE, Pipeline,
+    SurfaceMaterials, TectonicSkeleton,
 };
 
 fn thalos_composition() -> Composition {
@@ -205,7 +205,9 @@ fn surface_materials_is_deterministic() {
         let palette_hash: u64 = b.materials.iter().fold(0u64, |acc, m| {
             let mut h = acc;
             for c in &m.albedo {
-                h = h.wrapping_mul(0x100000001b3).wrapping_add(c.to_bits() as u64);
+                h = h
+                    .wrapping_mul(0x100000001b3)
+                    .wrapping_add(c.to_bits() as u64);
             }
             h.wrapping_mul(0x100000001b3)
                 .wrapping_add(m.roughness.to_bits() as u64)

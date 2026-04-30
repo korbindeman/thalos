@@ -51,7 +51,10 @@ fn tectonic_skeleton_produces_province_map() {
         .expect("per-vertex provinces should be populated");
 
     assert_eq!(vertex_provinces.len(), sphere.vertices.len());
-    assert!(!b.provinces.is_empty(), "province table should be non-empty");
+    assert!(
+        !b.provinces.is_empty(),
+        "province table should be non-empty"
+    );
     // Every vertex must be assigned to a real province.
     for &pid in &vertex_provinces {
         assert_ne!(pid, PROVINCE_NONE);

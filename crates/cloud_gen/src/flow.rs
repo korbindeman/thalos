@@ -124,7 +124,12 @@ mod tests {
             let radial = curl.dot(p).abs();
             // Tight tolerance — tangent-plane projection is exact up to
             // floating-point roundoff.
-            assert!(radial < 1e-4, "curl not tangent at {:?}: radial={}", p, radial);
+            assert!(
+                radial < 1e-4,
+                "curl not tangent at {:?}: radial={}",
+                p,
+                radial
+            );
         }
     }
 

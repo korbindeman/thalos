@@ -353,8 +353,7 @@ impl SurfaceMaterials {
         // Drainage-conditioned rules. `high_accumulation` ⇒ a river
         // reaches this vertex; combined with sediment/elevation it
         // splits depositional lowland from scoured upland.
-        let high_accumulation =
-            accumulation_m2.log10() >= self.floodplain_log10_accumulation_m2;
+        let high_accumulation = accumulation_m2.log10() >= self.floodplain_log10_accumulation_m2;
 
         if high_accumulation
             && sediment_m >= self.floodplain_min_sediment_m
@@ -503,11 +502,7 @@ fn palette() -> Vec<Material> {
 /// Uses decreasing-elevation topological order identical to Stage 3's
 /// `flow_accumulation`, so the result is deterministic under the same
 /// ordering rules.
-fn compute_iron_fraction(
-    elevations: &[f32],
-    downstream: &[u32],
-    iron_source: &[f32],
-) -> Vec<f32> {
+fn compute_iron_fraction(elevations: &[f32], downstream: &[u32], iron_source: &[f32]) -> Vec<f32> {
     let n = elevations.len();
 
     // Every vertex starts with its own unit "area flux" and its own
@@ -601,8 +596,9 @@ fn bake_materials_to_cubemap(
                         w[0] * elevations[i0] + w[1] * elevations[i1] + w[2] * elevations[i2];
                     let sediment_m =
                         w[0] * sediment[i0] + w[1] * sediment[i1] + w[2] * sediment[i2];
-                    let iron =
-                        w[0] * iron_fraction[i0] + w[1] * iron_fraction[i1] + w[2] * iron_fraction[i2];
+                    let iron = w[0] * iron_fraction[i0]
+                        + w[1] * iron_fraction[i1]
+                        + w[2] * iron_fraction[i2];
 
                     // Accumulation spans ~1 to 1e12 m². Interpolate
                     // in log space so the smooth ramp from "upland

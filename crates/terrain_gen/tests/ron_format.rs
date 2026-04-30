@@ -159,6 +159,9 @@ fn thalos_generator_ron_parses() {
     assert_eq!(parsed.pipeline.len(), 4);
     assert!(matches!(parsed.pipeline[0], StageDef::TectonicSkeleton(_)));
     assert!(matches!(parsed.pipeline[1], StageDef::CoarseElevation(_)));
-    assert!(matches!(parsed.pipeline[2], StageDef::HydrologicalCarving(_)));
+    assert!(matches!(
+        parsed.pipeline[2],
+        StageDef::HydrologicalCarving(_)
+    ));
     assert!(matches!(parsed.pipeline[3], StageDef::SurfaceMaterials(_)));
 }

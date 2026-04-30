@@ -29,10 +29,10 @@
 //! additive change to the shader and the uniform packing — no layout
 //! break for bodies already shipping.
 
+use bevy::math::UVec4;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
-use bevy::math::UVec4;
 use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
@@ -265,8 +265,7 @@ impl GasGiantLayers {
             atmos.cloud_deck.tint[2],
             atmos.cloud_deck.band_contrast,
         );
-        layers.band_shape_params =
-            Vec4::new(atmos.cloud_deck.band_sharpness, 0.0, 0.0, 0.0);
+        layers.band_shape_params = Vec4::new(atmos.cloud_deck.band_sharpness, 0.0, 0.0, 0.0);
 
         // ── Haze ──────────────────────────────────────────────────────
         if let Some(haze) = &atmos.haze {
@@ -362,7 +361,13 @@ impl GasGiantLayers {
 
         // ── Named vortices ────────────────────────────────────────────
         let n_vort = atmos.cloud_deck.named_vortices.len().min(MAX_VORTICES);
-        for (i, v) in atmos.cloud_deck.named_vortices.iter().take(n_vort).enumerate() {
+        for (i, v) in atmos
+            .cloud_deck
+            .named_vortices
+            .iter()
+            .take(n_vort)
+            .enumerate()
+        {
             layers.vortex_pos[i] = Vec4::new(v.lat.clamp(-1.0, 1.0), v.lon, v.radius, v.strength);
             layers.vortex_tint[i] = Vec4::new(v.tint[0], v.tint[1], v.tint[2], 0.0);
         }

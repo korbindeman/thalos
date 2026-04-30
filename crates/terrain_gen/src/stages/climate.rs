@@ -139,8 +139,8 @@ impl Stage for Climate {
 
                     // Temperature: equator-pole gradient + lapse.
                     let lat_factor = 1.0 - sin_lat.powf(self.lat_exponent);
-                    let sea_level_t = self.polar_temp_c
-                        + (self.equator_temp_c - self.polar_temp_c) * lat_factor;
+                    let sea_level_t =
+                        self.polar_temp_c + (self.equator_temp_c - self.polar_temp_c) * lat_factor;
                     let altitude_t = self.lapse_c_per_km * (h.max(0.0) / 1000.0);
                     *t_cell = sea_level_t - altitude_t;
 
@@ -248,8 +248,8 @@ fn prevailing_wind_tangent(dir: Vec3, abs_lat_rad: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::{Differentiate, Plates, Tectonics, Topography};
     use crate::stage::Pipeline;
+    use crate::stages::{Differentiate, Plates, Tectonics, Topography};
     use crate::types::Composition;
 
     fn earth_like_climate() -> Climate {
@@ -345,8 +345,14 @@ mod tests {
             equator_t > pole_t + 20.0,
             "expected strong gradient: equator={equator_t}°C pole={pole_t}°C",
         );
-        assert!((-40.0..=45.0).contains(&equator_t), "equator out of range: {equator_t}");
-        assert!((-60.0..=10.0).contains(&pole_t), "pole out of range: {pole_t}");
+        assert!(
+            (-40.0..=45.0).contains(&equator_t),
+            "equator out of range: {equator_t}"
+        );
+        assert!(
+            (-60.0..=10.0).contains(&pole_t),
+            "pole out of range: {pole_t}"
+        );
     }
 
     #[test]

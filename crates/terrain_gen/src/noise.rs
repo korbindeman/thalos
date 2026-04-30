@@ -181,8 +181,14 @@ mod tests {
             // Just exercise determinism and finiteness here; the
             // bit-exact value is the contract checked at parity time.
             let v = fbm3(x, y, z, seed, oct, p, l);
-            assert!(v.is_finite(), "fbm3 produced non-finite at {x},{y},{z}: {v}");
-            assert!(v >= -1.0 && v <= 1.0, "fbm3 out of range at {x},{y},{z}: {v}");
+            assert!(
+                v.is_finite(),
+                "fbm3 produced non-finite at {x},{y},{z}: {v}"
+            );
+            assert!(
+                v >= -1.0 && v <= 1.0,
+                "fbm3 out of range at {x},{y},{z}: {v}"
+            );
         }
     }
 }

@@ -889,7 +889,26 @@ fn sample_height_baked_auto_lod_m(dir: vec3<f32>) -> f32 {
 // continuous. Currently only consumed by the water-mask test —
 // that's where the iso-contour lives, and the only place the cost
 // of evaluating warp + jitter (4 fbm calls) is justified.
+//
+// Iso-contour cull: read the bare cubemap height first; when it sits
+// well clear of sea level, the canonical warp + jitter cannot push
+// the result across the smoothstep band at the call site, so skip
+// the four fbm evaluations and return the bare value. Authored
+// `coastline_jitter_amp_m` is ~30 m on water bodies; the warp arc is
+// ~5 km on a 6 Mm body — a band of `10 × jitter_amp + 100 m` covers
+// the worst plausible perturbation. Far from a coast (most of the
+// disk), this is the hot path. Airless bodies already short-circuit
+// inside `coastline_warp_dir` / `coastline_jitter_m`, so the explicit
+// cull below is a no-op for them.
 fn sample_height_m(dir: vec3<f32>) -> f32 {
+    let bare_stored = textureSampleLevel(height_tex, height_sampler, dir, 0.0).r;
+    let bare_m = (bare_stored - 0.5) * 2.0 * params.height_range;
+    let bare_above_sea = bare_m - params.sea_level_m;
+    let band = params.coastline_jitter_amp_m * 10.0 + 100.0;
+    if abs(bare_above_sea) > band {
+        return bare_m;
+    }
+
     let warped = coastline_warp_dir(dir);
     let stored = textureSampleLevel(height_tex, height_sampler, warped, 0.0).r;
     let baked_m = (stored - 0.5) * 2.0 * params.height_range;
@@ -1178,36 +1197,51 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let ray_dir  = normalize(in.world_position - cam_pos);
     let light = primary_light();
 
-    // Ray-sphere intersection.
+    // Body and halo are split into two pipelines — see PlanetMaterial
+    // and PlanetHaloMaterial in material.rs. The body pipeline writes
+    // depth and discards rim-halo (miss) fragments; the halo pipeline
+    // disables depth-write and discards body-hit fragments. Splitting
+    // them is the only way to give the halo a depth-test that doesn't
+    // occlude the celestial backdrop (stars/galaxies render at clip.z
+    // = 0 and would fail `0 >= halo_depth` if the halo wrote a real
+    // silhouette depth) while keeping the body's surface depth correct
+    // for opaque objects that sit beyond the halo. WGSL has no
+    // per-fragment depth-write toggle, so two pipelines is the answer.
+    //
+    // The shader-def `HALO_PASS` selects the halo pipeline; without
+    // it, the shader compiles as the body pipeline.
+
+    // Ray-sphere intersection against the body radius.
     let oc      = cam_pos - in.sphere_center;
     let half_b  = dot(oc, ray_dir);
     let c       = dot(oc, oc) - params.radius * params.radius;
     let disc    = half_b * half_b - c;
+    let t       = -half_b - sqrt(max(disc, 0.0));
+    // `disc < 0`     → ray never reaches the sphere.
+    // `t   < 0`      → sphere is entirely behind the camera (or the
+    //                  near intersection is behind it).
+    // Both are halo-only fragments; only the body pipeline cares about
+    // the distinction, and it discards either way.
+    let is_miss = disc < 0.0 || t < 0.0;
 
-    // Miss path: no solid-surface hit. Compute rim halo only.
-    if disc < 0.0 {
-        let rim = sample_rim_halo(cam_pos, ray_dir, in.sphere_center, light);
-        if rim.opacity <= 0.001 {
-            discard;
-        }
-        let color = rim.contribution * light.flux * (1.0 / (4.0 * PI));
-        let closest_point = cam_pos + ray_dir * max(-half_b, 0.0);
-        let clip = view.clip_from_world * vec4(closest_point, 1.0);
-        return FragOutput(vec4(color, rim.opacity), clip.z / clip.w);
+#ifdef HALO_PASS
+    if !is_miss {
+        discard;
     }
-    let t = -half_b - sqrt(max(disc, 0.0));
-    if t < 0.0 {
-        // Sphere is behind the camera — rim halo still matters if the
-        // shell itself extends toward the camera. Same treatment as
-        // the pure-miss branch.
-        let rim = sample_rim_halo(cam_pos, ray_dir, in.sphere_center, light);
-        if rim.opacity <= 0.001 {
-            discard;
-        }
-        let color = rim.contribution * light.flux * (1.0 / (4.0 * PI));
-        let closest_point = cam_pos + ray_dir * max(-half_b, 0.0);
-        let clip = view.clip_from_world * vec4(closest_point, 1.0);
-        return FragOutput(vec4(color, rim.opacity), clip.z / clip.w);
+    let rim = sample_rim_halo(cam_pos, ray_dir, in.sphere_center, light);
+    if rim.opacity <= 0.001 {
+        discard;
+    }
+    let color = rim.contribution * light.flux * (1.0 / (4.0 * PI));
+    // Closest-approach depth gives a sensible silhouette depth for
+    // halo fragments — used so opaque objects in front of the halo
+    // (and other halos sorted closer) depth-test correctly.
+    let closest_point = cam_pos + ray_dir * max(-half_b, 0.0);
+    let clip = view.clip_from_world * vec4(closest_point, 1.0);
+    return FragOutput(vec4(color, rim.opacity), clip.z / clip.w);
+#else
+    if is_miss {
+        discard;
     }
 
     let hit    = cam_pos + t * ray_dir;
@@ -1335,8 +1369,19 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // Apply all shadow terms to the sun contribution only. Planetshine uses
     // a different incident direction so these don't apply to it.
     sun_r = sun_r * crater_shadow;
+    // Self-shadow is a 20-tap cubemap ray march. The cast shadows it
+    // captures are long near the terminator and short under high sun,
+    // so fade the contribution to "no shadow" as the sun climbs above
+    // ~50° from local zenith — at that elevation cubemap features
+    // shorter than ~feature_height project a sub-pixel shadow that
+    // doesn't survive the lit-side BRDF anyway. Saves 20 cubemap reads
+    // per fragment on the bright cap of the disk.
     if geo_n_dot_l > 0.0 {
-        sun_r = sun_r * self_shadow(sample_dir, light_dir_local);
+        let shadow_strength = 1.0 - smoothstep(0.5, 0.7, geo_n_dot_l);
+        if shadow_strength > 0.001 {
+            let sh = self_shadow(sample_dir, light_dir_local);
+            sun_r = sun_r * mix(1.0, sh, shadow_strength);
+        }
     }
     sun_r = sun_r * eclipse_factor(params.scene, hit, sun_dir_ws);
 
@@ -1460,10 +1505,15 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // Shadow probe: offset the SURFACE direction toward the sun
     // (0.018 rad ≈ 100 km on a 6000 km body) then run the same
     // banded sampler. This reads "what cloud sits between this
-    // terrain pixel and the sun".
-    let shadow_offset = 0.018;
-    let shadow_dir_raw = normalize(sample_dir + light_dir_local * shadow_offset);
-    let shadow_cloud_density = sample_cloud_banded(shadow_dir_raw);
+    // terrain pixel and the sun". `composite_clouds` only consumes
+    // the result inside its `raw_ndl > -0.10` branch, so skip the
+    // cubemap fetch on night-side fragments — the value isn't read.
+    var shadow_cloud_density: f32 = 0.0;
+    if geo_n_dot_l > -0.10 {
+        let shadow_offset = 0.018;
+        let shadow_dir_raw = normalize(sample_dir + light_dir_local * shadow_offset);
+        shadow_cloud_density = sample_cloud_banded(shadow_dir_raw);
+    }
 
     lit = composite_clouds(
         lit,
@@ -1546,4 +1596,5 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let depth    = hit_clip.z / hit_clip.w;
 
     return FragOutput(vec4(lit, 1.0), depth);
+#endif
 }

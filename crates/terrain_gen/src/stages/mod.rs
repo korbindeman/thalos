@@ -23,10 +23,10 @@ pub use biomes::{BiomeRule, Biomes};
 pub use climate::Climate;
 pub use coarse_elevation::CoarseElevation;
 pub use cratering::Cratering;
-pub use hydrological_carving::HydrologicalCarving;
 pub use differentiate::{
     Differentiate, MAT_FRESH_EJECTA, MAT_HIGHLAND, MAT_MARE, MAT_MATURE_REGOLITH,
 };
+pub use hydrological_carving::HydrologicalCarving;
 pub use mare_flood::MareFlood;
 pub use megabasin::{BasinDef, Megabasin};
 pub use orogen_dla::OrogenDla;

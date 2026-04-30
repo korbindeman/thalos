@@ -1,3 +1,22 @@
 # Linker optimizations for faster compile times.
 # On macOS, the default linker is already fast. No custom linker needed.
 # On Linux, consider using mold or lld for faster linking.
+
+# Cranelift codegen backend for our crates (faster dev compiles).
+# Dependencies stay on LLVM so they can build at opt-level = 3.
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"
+
+[profile.dev.package."*"]
+codegen-backend = "llvm"
+
+# Hot deserialization path: bincode monomorphizes its decode trait for our
+# `BodyData` struct in this crate, so the generated code lives here. Under
+# Cranelift at opt-level=1 those loops run ~30× slower than LLVM, turning
+# a ~700ms cache load into a ~20s one. Force LLVM here to keep cache hits
+# fast in dev builds.
+[profile.dev.package.thalos_terrain_gen]
+codegen-backend = "llvm"

@@ -180,8 +180,7 @@ impl Stage for CoarseElevation {
             })
             .collect();
         let threshold = percentile(&mask_samples, self.target_ocean_fraction);
-        let mut is_continental: Vec<bool> =
-            mask_samples.iter().map(|&v| v >= threshold).collect();
+        let mut is_continental: Vec<bool> = mask_samples.iter().map(|&v| v >= threshold).collect();
 
         // Remove tiny land/ocean fragments. Connected-component
         // filter on the vertex graph: any region (land or ocean)
@@ -201,7 +200,8 @@ impl Stage for CoarseElevation {
         let rift_cap = ((self.rift_falloff_hops * 3.0) as u32).max(1);
         let active_cap = ((self
             .active_falloff_hops
-            .max(self.trench_offset_hops + self.trench_width_hops * 3.0)) as u32)
+            .max(self.trench_offset_hops + self.trench_width_hops * 3.0))
+            as u32)
             .max(1);
         let hotspot_cap = ((self.hotspot_falloff_hops * 3.0) as u32).max(1);
 
@@ -526,7 +526,15 @@ fn gaussian_hops(hops: f32, one_over_e_hops: f32) -> f32 {
 fn warped_fbm(pos: Vec3, seed: u64, params: &CoarseElevation) -> f32 {
     let warp_seed = splitmix64(seed ^ 0x9E37_79B9_7F4A_7C15) as u32;
     let freq = params.warp_frequency;
-    let wx = fbm3(pos.x * freq, pos.y * freq, pos.z * freq, warp_seed, 4, 0.5, 2.0);
+    let wx = fbm3(
+        pos.x * freq,
+        pos.y * freq,
+        pos.z * freq,
+        warp_seed,
+        4,
+        0.5,
+        2.0,
+    );
     let wy = fbm3(
         pos.x * freq + 17.31,
         pos.y * freq + 17.31,

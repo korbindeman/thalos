@@ -308,287 +308,283 @@ impl Stage for Topography {
             let h_out = height.face_data_mut(face);
 
             h_out.par_iter_mut().enumerate().for_each(|(idx, h_v)| {
-                    let y = (idx as u32) / res;
-                    let x = (idx as u32) % res;
-                    let u = (x as f32 + 0.5) * inv_res;
-                    let v = (y as f32 + 0.5) * inv_res;
-                    let dir = face_uv_to_dir(face, u, v);
+                let y = (idx as u32) / res;
+                let x = (idx as u32) % res;
+                let u = (x as f32 + 0.5) * inv_res;
+                let v = (y as f32 + 0.5) * inv_res;
+                let dir = face_uv_to_dir(face, u, v);
 
-                    // Nested domain warp (IQ-style recursive `f(p + s(p))`
-                    // where `s(p) = fbm(p + r(p))` and `r(p) = fbm(p +
-                    // q(p))` and `q(p) = fbm(p)`). Three levels:
-                    //   inner  — small amplitude, high frequency; perturbs
-                    //            the sampling point of the middle level
-                    //   middle — medium amplitude/frequency; perturbs the
-                    //            sampling point of the outer level
-                    //   outer  — large amplitude, low frequency; its
-                    //            output IS what perturbs `dir` below.
-                    // Nesting (as opposed to plain additive) is what gives
-                    // multi-scale fractal structure in the regional fbm
-                    // fields sampled through `warped_dir` below — peninsulas
-                    // at continent scale, bays inside, inlets inside those.
-                    // A level with amplitude 0 contributes nothing and the
-                    // next outer level samples at the un-warped sub-input.
-                    let q = if warp_amp_hi > 0.0 {
-                        Vec3::new(
-                            fbm3(
-                                dir.x * warp_freq_hi,
-                                dir.y * warp_freq_hi,
-                                dir.z * warp_freq_hi,
-                                warp_seed_xh,
-                                2,
-                                0.5,
-                                2.1,
-                            ),
-                            fbm3(
-                                dir.x * warp_freq_hi + 13.7,
-                                dir.y * warp_freq_hi,
-                                dir.z * warp_freq_hi,
-                                warp_seed_yh,
-                                2,
-                                0.5,
-                                2.1,
-                            ),
-                            fbm3(
-                                dir.x * warp_freq_hi,
-                                dir.y * warp_freq_hi + 23.1,
-                                dir.z * warp_freq_hi,
-                                warp_seed_zh,
-                                2,
-                                0.5,
-                                2.1,
-                            ),
-                        ) * warp_amp_hi
-                    } else {
-                        Vec3::ZERO
-                    };
-                    let sample_mid = dir + q;
-                    let r = if warp_amp_mid > 0.0 {
-                        Vec3::new(
-                            fbm3(
-                                sample_mid.x * warp_freq_mid,
-                                sample_mid.y * warp_freq_mid,
-                                sample_mid.z * warp_freq_mid,
-                                warp_seed_xm,
-                                3,
-                                0.55,
-                                2.1,
-                            ),
-                            fbm3(
-                                sample_mid.x * warp_freq_mid + 11.1,
-                                sample_mid.y * warp_freq_mid,
-                                sample_mid.z * warp_freq_mid,
-                                warp_seed_ym,
-                                3,
-                                0.55,
-                                2.1,
-                            ),
-                            fbm3(
-                                sample_mid.x * warp_freq_mid,
-                                sample_mid.y * warp_freq_mid + 19.4,
-                                sample_mid.z * warp_freq_mid,
-                                warp_seed_zm,
-                                3,
-                                0.55,
-                                2.1,
-                            ),
-                        ) * warp_amp_mid
-                    } else {
-                        Vec3::ZERO
-                    };
-                    let sample_outer = dir + r;
-                    let s = if warp_amp > 0.0 {
-                        Vec3::new(
-                            fbm3(
-                                sample_outer.x * warp_freq,
-                                sample_outer.y * warp_freq,
-                                sample_outer.z * warp_freq,
-                                warp_seed_x,
-                                3,
-                                0.55,
-                                2.1,
-                            ),
-                            fbm3(
-                                sample_outer.x * warp_freq + 17.3,
-                                sample_outer.y * warp_freq,
-                                sample_outer.z * warp_freq,
-                                warp_seed_y,
-                                3,
-                                0.55,
-                                2.1,
-                            ),
-                            fbm3(
-                                sample_outer.x * warp_freq,
-                                sample_outer.y * warp_freq + 29.7,
-                                sample_outer.z * warp_freq,
-                                warp_seed_z,
-                                3,
-                                0.55,
-                                2.1,
-                            ),
-                        ) * warp_amp
-                    } else {
-                        Vec3::ZERO
-                    };
-                    let warped_dir = if warp_amp > 0.0
-                        || warp_amp_mid > 0.0
-                        || warp_amp_hi > 0.0
-                    {
-                        (dir + s).normalize()
-                    } else {
-                        dir
-                    };
+                // Nested domain warp (IQ-style recursive `f(p + s(p))`
+                // where `s(p) = fbm(p + r(p))` and `r(p) = fbm(p +
+                // q(p))` and `q(p) = fbm(p)`). Three levels:
+                //   inner  — small amplitude, high frequency; perturbs
+                //            the sampling point of the middle level
+                //   middle — medium amplitude/frequency; perturbs the
+                //            sampling point of the outer level
+                //   outer  — large amplitude, low frequency; its
+                //            output IS what perturbs `dir` below.
+                // Nesting (as opposed to plain additive) is what gives
+                // multi-scale fractal structure in the regional fbm
+                // fields sampled through `warped_dir` below — peninsulas
+                // at continent scale, bays inside, inlets inside those.
+                // A level with amplitude 0 contributes nothing and the
+                // next outer level samples at the un-warped sub-input.
+                let q = if warp_amp_hi > 0.0 {
+                    Vec3::new(
+                        fbm3(
+                            dir.x * warp_freq_hi,
+                            dir.y * warp_freq_hi,
+                            dir.z * warp_freq_hi,
+                            warp_seed_xh,
+                            2,
+                            0.5,
+                            2.1,
+                        ),
+                        fbm3(
+                            dir.x * warp_freq_hi + 13.7,
+                            dir.y * warp_freq_hi,
+                            dir.z * warp_freq_hi,
+                            warp_seed_yh,
+                            2,
+                            0.5,
+                            2.1,
+                        ),
+                        fbm3(
+                            dir.x * warp_freq_hi,
+                            dir.y * warp_freq_hi + 23.1,
+                            dir.z * warp_freq_hi,
+                            warp_seed_zh,
+                            2,
+                            0.5,
+                            2.1,
+                        ),
+                    ) * warp_amp_hi
+                } else {
+                    Vec3::ZERO
+                };
+                let sample_mid = dir + q;
+                let r = if warp_amp_mid > 0.0 {
+                    Vec3::new(
+                        fbm3(
+                            sample_mid.x * warp_freq_mid,
+                            sample_mid.y * warp_freq_mid,
+                            sample_mid.z * warp_freq_mid,
+                            warp_seed_xm,
+                            3,
+                            0.55,
+                            2.1,
+                        ),
+                        fbm3(
+                            sample_mid.x * warp_freq_mid + 11.1,
+                            sample_mid.y * warp_freq_mid,
+                            sample_mid.z * warp_freq_mid,
+                            warp_seed_ym,
+                            3,
+                            0.55,
+                            2.1,
+                        ),
+                        fbm3(
+                            sample_mid.x * warp_freq_mid,
+                            sample_mid.y * warp_freq_mid + 19.4,
+                            sample_mid.z * warp_freq_mid,
+                            warp_seed_zm,
+                            3,
+                            0.55,
+                            2.1,
+                        ),
+                    ) * warp_amp_mid
+                } else {
+                    Vec3::ZERO
+                };
+                let sample_outer = dir + r;
+                let s = if warp_amp > 0.0 {
+                    Vec3::new(
+                        fbm3(
+                            sample_outer.x * warp_freq,
+                            sample_outer.y * warp_freq,
+                            sample_outer.z * warp_freq,
+                            warp_seed_x,
+                            3,
+                            0.55,
+                            2.1,
+                        ),
+                        fbm3(
+                            sample_outer.x * warp_freq + 17.3,
+                            sample_outer.y * warp_freq,
+                            sample_outer.z * warp_freq,
+                            warp_seed_y,
+                            3,
+                            0.55,
+                            2.1,
+                        ),
+                        fbm3(
+                            sample_outer.x * warp_freq,
+                            sample_outer.y * warp_freq + 29.7,
+                            sample_outer.z * warp_freq,
+                            warp_seed_z,
+                            3,
+                            0.55,
+                            2.1,
+                        ),
+                    ) * warp_amp
+                } else {
+                    Vec3::ZERO
+                };
+                let warped_dir = if warp_amp > 0.0 || warp_amp_mid > 0.0 || warp_amp_hi > 0.0 {
+                    (dir + s).normalize()
+                } else {
+                    dir
+                };
 
-                    // 1. Continentalness — kernel-weighted blend of every
-                    // plate's kind by angular distance from its centroid.
-                    //
-                    // Earlier this used `exp(−d/bandwidth)` which has a
-                    // SHARP peak (non-zero derivative) at d = 0 — i.e. at
-                    // each centroid. That spike combined additively with
-                    // the regional fbm to print bright polygon-shaped
-                    // hotspots in the height field, one per centroid.
-                    //
-                    // A gaussian kernel `exp(−d²/bandwidth²)` has the same
-                    // smooth-blend-across-the-planet behaviour but ZERO
-                    // derivative at the centroid, so the peak is flat and
-                    // the height field gets no centroid spike. Other
-                    // properties of the all-centroids weighted average are
-                    // preserved: continentalness varies smoothly across
-                    // the sphere (no plate-step discontinuities) and
-                    // adjacent cells at cube-face seams have nearly-
-                    // identical weights.
-                    //
-                    // `warped_dir` gives the blend the same nested-IQ
-                    // fractal warping as the regional fbm below, so
-                    // continent silhouettes remain crooked at multiple
-                    // scales.
-                    let inv_bw_sq = 1.0 / (bandwidth * bandwidth);
-                    let mut cont_sum = 0.0f32;
-                    let mut weight_sum = 0.0f32;
-                    for p in plates.iter() {
-                        let cos_angle = warped_dir.dot(p.centroid);
-                        let angular = (1.0 - cos_angle).max(0.0);
-                        let weight = (-(angular * angular) * inv_bw_sq).exp();
-                        let kind_val = if p.kind == PlateKind::Continental {
-                            1.0
-                        } else {
-                            0.0
-                        };
-                        cont_sum += kind_val * weight;
-                        weight_sum += weight;
-                    }
-                    let continentalness = cont_sum / weight_sum.max(1.0e-9);
-
-                    // 2. Isostatic baseline lerped by continentalness.
-                    // Purely continuous in `warped_dir`, so no face-seam
-                    // steps into the height cubemap.
-                    let base = oceanic_base
-                        + (continental_base - oceanic_base) * continentalness;
-
-                    // 3. Orogen bump — applied wherever tectonic intensity
-                    // is nonzero, regardless of plate kind. The intensity
-                    // field is already a per-cell continuous function
-                    // (distance-falloff from the nearest plate boundary),
-                    // so no discrete gate is needed. In practice this
-                    // means island arcs on oceanic-oceanic boundaries
-                    // still rise as ridges — physically reasonable.
-                    let intensity = oi[idx];
-                    let orogen_bump = if intensity > 0.0 {
-                        let age = oa[idx];
-                        let age_factor = (-age / age_scale_myr).exp();
-                        peak_orogen * intensity * age_factor
+                // 1. Continentalness — kernel-weighted blend of every
+                // plate's kind by angular distance from its centroid.
+                //
+                // Earlier this used `exp(−d/bandwidth)` which has a
+                // SHARP peak (non-zero derivative) at d = 0 — i.e. at
+                // each centroid. That spike combined additively with
+                // the regional fbm to print bright polygon-shaped
+                // hotspots in the height field, one per centroid.
+                //
+                // A gaussian kernel `exp(−d²/bandwidth²)` has the same
+                // smooth-blend-across-the-planet behaviour but ZERO
+                // derivative at the centroid, so the peak is flat and
+                // the height field gets no centroid spike. Other
+                // properties of the all-centroids weighted average are
+                // preserved: continentalness varies smoothly across
+                // the sphere (no plate-step discontinuities) and
+                // adjacent cells at cube-face seams have nearly-
+                // identical weights.
+                //
+                // `warped_dir` gives the blend the same nested-IQ
+                // fractal warping as the regional fbm below, so
+                // continent silhouettes remain crooked at multiple
+                // scales.
+                let inv_bw_sq = 1.0 / (bandwidth * bandwidth);
+                let mut cont_sum = 0.0f32;
+                let mut weight_sum = 0.0f32;
+                for p in plates.iter() {
+                    let cos_angle = warped_dir.dot(p.centroid);
+                    let angular = (1.0 - cos_angle).max(0.0);
+                    let weight = (-(angular * angular) * inv_bw_sq).exp();
+                    let kind_val = if p.kind == PlateKind::Continental {
+                        1.0
                     } else {
                         0.0
                     };
+                    cont_sum += kind_val * weight;
+                    weight_sum += weight;
+                }
+                let continentalness = cont_sum / weight_sum.max(1.0e-9);
 
-                    // 4. Roughness via fbm3. Uniform amplitude across the
-                    // sphere — gating on continentalness would re-introduce
-                    // a near-discrete jump at the plate boundary (the
-                    // bandwidth is narrow enough that the lerp shifts
-                    // roughness amplitude over a few texels, which reads
-                    // as a seam). Active-orogen cells still get a boost
-                    // from the `intensity * 2.0` factor, which is already
-                    // continuous from Tectonics.
-                    let roughness_amp = rough_amp * (1.0 + intensity * 2.0);
-                    // 7 octaves extends the FBM spectrum down to ~60 km
-                    // features at `noise_frequency = 4`, so mountain-scale
-                    // relief shows up in the shader's height-gradient
-                    // normal perturbation.
-                    let n = fbm3(
-                        dir.x * noise_freq,
-                        dir.y * noise_freq,
-                        dir.z * noise_freq,
-                        roughness_seed,
-                        7,
+                // 2. Isostatic baseline lerped by continentalness.
+                // Purely continuous in `warped_dir`, so no face-seam
+                // steps into the height cubemap.
+                let base = oceanic_base + (continental_base - oceanic_base) * continentalness;
+
+                // 3. Orogen bump — applied wherever tectonic intensity
+                // is nonzero, regardless of plate kind. The intensity
+                // field is already a per-cell continuous function
+                // (distance-falloff from the nearest plate boundary),
+                // so no discrete gate is needed. In practice this
+                // means island arcs on oceanic-oceanic boundaries
+                // still rise as ridges — physically reasonable.
+                let intensity = oi[idx];
+                let orogen_bump = if intensity > 0.0 {
+                    let age = oa[idx];
+                    let age_factor = (-age / age_scale_myr).exp();
+                    peak_orogen * intensity * age_factor
+                } else {
+                    0.0
+                };
+
+                // 4. Roughness via fbm3. Uniform amplitude across the
+                // sphere — gating on continentalness would re-introduce
+                // a near-discrete jump at the plate boundary (the
+                // bandwidth is narrow enough that the lerp shifts
+                // roughness amplitude over a few texels, which reads
+                // as a seam). Active-orogen cells still get a boost
+                // from the `intensity * 2.0` factor, which is already
+                // continuous from Tectonics.
+                let roughness_amp = rough_amp * (1.0 + intensity * 2.0);
+                // 7 octaves extends the FBM spectrum down to ~60 km
+                // features at `noise_frequency = 4`, so mountain-scale
+                // relief shows up in the shader's height-gradient
+                // normal perturbation.
+                let n = fbm3(
+                    dir.x * noise_freq,
+                    dir.y * noise_freq,
+                    dir.z * noise_freq,
+                    roughness_seed,
+                    7,
+                    0.55,
+                    2.1,
+                );
+                let rough = n * roughness_amp;
+
+                // 4. Multi-scale regional height field — three
+                // independent fbm bands (continent / regional / local)
+                // with decorrelated seeds. Sampled through `warped_dir`
+                // so the nested warp turns smooth fbm into IQ-style
+                // fractally-warped fbm — coastlines get peninsulas at
+                // continent scale, bays inside, inlets inside those,
+                // and the same warp structure informs the
+                // continentalness blend above so regional relief lines
+                // up with the warped plate-kind field rather than
+                // cutting across it.
+                let regional_lo = if regional_amp_lo > 0.0 {
+                    let p = fbm3(
+                        warped_dir.x * regional_freq_lo,
+                        warped_dir.y * regional_freq_lo,
+                        warped_dir.z * regional_freq_lo,
+                        regional_seed_lo,
+                        4,
                         0.55,
                         2.1,
                     );
-                    let rough = n * roughness_amp;
+                    p * regional_amp_lo
+                } else {
+                    0.0
+                };
+                let regional_mid = if regional_amp > 0.0 {
+                    let p = fbm3(
+                        warped_dir.x * regional_freq,
+                        warped_dir.y * regional_freq,
+                        warped_dir.z * regional_freq,
+                        regional_seed,
+                        4,
+                        0.55,
+                        2.1,
+                    );
+                    p * regional_amp
+                } else {
+                    0.0
+                };
+                let regional_hi = if regional_amp_hi > 0.0 {
+                    let p = fbm3(
+                        warped_dir.x * regional_freq_hi,
+                        warped_dir.y * regional_freq_hi,
+                        warped_dir.z * regional_freq_hi,
+                        regional_seed_hi,
+                        4,
+                        0.55,
+                        2.1,
+                    );
+                    p * regional_amp_hi
+                } else {
+                    0.0
+                };
+                let regional = regional_lo + regional_mid + regional_hi;
 
-                    // 4. Multi-scale regional height field — three
-                    // independent fbm bands (continent / regional / local)
-                    // with decorrelated seeds. Sampled through `warped_dir`
-                    // so the nested warp turns smooth fbm into IQ-style
-                    // fractally-warped fbm — coastlines get peninsulas at
-                    // continent scale, bays inside, inlets inside those,
-                    // and the same warp structure informs the
-                    // continentalness blend above so regional relief lines
-                    // up with the warped plate-kind field rather than
-                    // cutting across it.
-                    let regional_lo = if regional_amp_lo > 0.0 {
-                        let p = fbm3(
-                            warped_dir.x * regional_freq_lo,
-                            warped_dir.y * regional_freq_lo,
-                            warped_dir.z * regional_freq_lo,
-                            regional_seed_lo,
-                            4,
-                            0.55,
-                            2.1,
-                        );
-                        p * regional_amp_lo
-                    } else {
-                        0.0
-                    };
-                    let regional_mid = if regional_amp > 0.0 {
-                        let p = fbm3(
-                            warped_dir.x * regional_freq,
-                            warped_dir.y * regional_freq,
-                            warped_dir.z * regional_freq,
-                            regional_seed,
-                            4,
-                            0.55,
-                            2.1,
-                        );
-                        p * regional_amp
-                    } else {
-                        0.0
-                    };
-                    let regional_hi = if regional_amp_hi > 0.0 {
-                        let p = fbm3(
-                            warped_dir.x * regional_freq_hi,
-                            warped_dir.y * regional_freq_hi,
-                            warped_dir.z * regional_freq_hi,
-                            regional_seed_hi,
-                            4,
-                            0.55,
-                            2.1,
-                        );
-                        p * regional_amp_hi
-                    } else {
-                        0.0
-                    };
-                    let regional = regional_lo + regional_mid + regional_hi;
+                // Ridge crest / peak structure now comes from
+                // `orogen_intensity` itself — OrogenDla stamps
+                // depth-weighted ridge geometry into that field with
+                // its own falloff, so we no longer add a
+                // `boundary_distance_km`-driven crest here. Sampling
+                // the Voronoi distance would re-embed the polygon
+                // edges the DLA pass exists to escape.
 
-                    // Ridge crest / peak structure now comes from
-                    // `orogen_intensity` itself — OrogenDla stamps
-                    // depth-weighted ridge geometry into that field with
-                    // its own falloff, so we no longer add a
-                    // `boundary_distance_km`-driven crest here. Sampling
-                    // the Voronoi distance would re-embed the polygon
-                    // edges the DLA pass exists to escape.
-
-                    *h_v += base + orogen_bump + rough + regional;
-                });
+                *h_v += base + orogen_bump + rough + regional;
+            });
         }
 
         // Sea-level renormalization. Collect all heights, find the value at
@@ -661,4 +657,3 @@ impl Stage for Topography {
         }
     }
 }
-

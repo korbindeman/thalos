@@ -5,7 +5,7 @@ use crate::catalog::{
 };
 use crate::part::{
     Adapter, CommandPod, Decoupler, Engine, EngineThrust, FuelTank, Part, PartMaterial,
-    ReactionWheel, Shroudable, ShroudProvider,
+    ReactionWheel, ShroudProvider, Shroudable,
 };
 use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
@@ -106,9 +106,7 @@ impl ShipBlueprint {
             .collect();
 
         for (i, pb) in self.parts.iter().enumerate() {
-            let entry = catalog
-                .resolve(&pb.catalog_id)
-                .expect("validated above");
+            let entry = catalog.resolve(&pb.catalog_id).expect("validated above");
             let mut ec = commands.entity(ids[i]);
             insert_part(&mut ec, &pb.catalog_id, entry, &pb.params, &pb.resources);
         }

@@ -133,6 +133,24 @@ impl WarpController {
             self.level_index = 0;
         }
     }
+
+    /// Snap the warp level to the highest configured speed that does not
+    /// exceed `target_speed`. Used by the warp-to-event auto-warp to size
+    /// each frame's advance against the time remaining to a target event,
+    /// stepping up or down through the discrete levels in a single call.
+    ///
+    /// Falls back to the lowest level (typically pause) when no level
+    /// satisfies the cap. Callers that always want forward motion should
+    /// guard with a minimum themselves — the warp-to-event system does
+    /// this with `target_speed.max(1.0)`.
+    pub fn set_speed(&mut self, target_speed: f64) {
+        self.resume_index = None;
+        self.level_index = self
+            .levels
+            .iter()
+            .rposition(|&w| w <= target_speed)
+            .unwrap_or(0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +240,7 @@ pub struct Simulation {
 
     /// Lifetime cumulative magnitude of Δv applied through
     /// [`Self::apply_live_thrust`], in m/s. Sums `|throttle · F/m · dt|`
-    /// over every frame the engine fires. Read by the burn-execution
+    /// over every frame the engine fires. Read by the game-side
     /// autopilot (see `crates/game/src/autopilot.rs`) to detect when a
     /// finite burn has delivered its planned Δv — magnitude rather than
     /// projection because magnitude tracks the same scalar that fuel
@@ -233,14 +251,6 @@ pub struct Simulation {
     attitude: AttitudeState,
     ship_params: ShipParameters,
     control: ControlInput,
-
-    /// When `true`, the burn-execution autopilot in
-    /// `crates/game/src/autopilot.rs` is allowed to drop warp, point
-    /// the ship, and open the throttle to fly upcoming maneuver nodes.
-    /// When `false`, nodes sit in `maneuvers` as planning aids and the
-    /// player must execute them manually. The flag is read by the
-    /// autopilot system; the simulation itself does not consume nodes.
-    auto_maneuvers_enabled: bool,
 
     pub warp: WarpController,
     pub prediction_state: PredictionState,
@@ -285,7 +295,6 @@ impl Simulation {
             attitude: AttitudeState::default(),
             ship_params,
             control: ControlInput::default(),
-            auto_maneuvers_enabled: true,
             warp: WarpController::new(config.warp_levels),
             prediction_state: PredictionState::new(
                 config.prediction_config,
@@ -300,11 +309,11 @@ impl Simulation {
     /// apply any live engine thrust as a per-frame impulse on velocity;
     /// (2) propagate the ship's coast across the warp-scaled time
     /// interval, breaking on SOI transitions until the cap is reached
-    /// or the target time is hit. Maneuver execution is owned by the
-    /// burn-execution autopilot in the game crate — it points the
-    /// ship, drives the throttle, and consumes nodes through
-    /// [`Self::consume_maneuver_node`] — so this function never reads
-    /// the maneuver list or schedules burns of its own.
+    /// or the target time is hit. Scheduled burn execution is owned by
+    /// the game crate's autopilot layer — it points the ship, drives the
+    /// throttle, and lets producer-specific adapters retire completed
+    /// directives — so this function never reads the maneuver list or
+    /// schedules burns of its own.
     pub fn step(&mut self, real_dt: f64) {
         let _span = tracing::info_span!("Simulation::step").entered();
         let real_delta = real_dt.min(self.max_real_delta);
@@ -505,22 +514,8 @@ impl Simulation {
         &self.control
     }
 
-    pub fn auto_maneuvers_enabled(&self) -> bool {
-        self.auto_maneuvers_enabled
-    }
-
-    pub fn set_auto_maneuvers_enabled(&mut self, enabled: bool) {
-        if self.auto_maneuvers_enabled != enabled {
-            self.auto_maneuvers_enabled = enabled;
-            // The cached prediction was built assuming the prior auto
-            // policy — flipping it changes which scheduled burns fire,
-            // so the prediction must be rebuilt to stay coherent.
-            self.prediction_state.mark_dirty();
-        }
-    }
-
     /// Apply engine thrust as a single impulse on velocity. Manual
-    /// throttle and the burn-execution autopilot both feed in through
+    /// throttle and the game-side autopilot both feed in through
     /// the same path — both end up writing `control.throttle` and
     /// reading the ship's current attitude.
     ///
@@ -533,18 +528,17 @@ impl Simulation {
     /// Flipping this convention requires updating both call sites.
     ///
     /// Accumulates `|throttle · F/m · dt|` into [`Self::delivered_dv`]
-    /// every frame the engine fires, so the burn-execution autopilot can
+    /// every frame the engine fires, so the game-side autopilot can
     /// detect when a planned-Δv has been delivered and close the
     /// throttle. Magnitude (not projection onto a planned axis) means
     /// the same scalar drops to zero when the dry-mass clamp cuts
     /// thrust — fuel exhaustion stops the accumulator without any
     /// special case.
     ///
-    /// Does *not* mark the prediction dirty — that would rebuild the
-    /// flight plan every frame of a multi-second burn (expensive). The
-    /// bridge detects the throttle-falling edge and dirties once on
-    /// engine cut, letting the trail snap to reality without per-frame
-    /// rebuild churn during the burn.
+    /// Does *not* mark the prediction dirty. The game-side throttle
+    /// gate owns refresh policy: manual burns can request live trail
+    /// updates, while scheduled maneuver burns hold the precomputed
+    /// node path steady and refresh once the engine cuts.
     fn apply_live_thrust(&mut self, real_dt: f64) {
         if (self.warp.speed() - 1.0).abs() > f64::EPSILON {
             return;
@@ -583,6 +577,15 @@ impl Simulation {
         &self.ship_state
     }
 
+    /// Replace the ship's state vector wholesale and invalidate the
+    /// cached prediction. Intended for debug teleports — production code
+    /// paths advance the ship through [`Self::step`] so that live and
+    /// predicted trajectories stay numerically aligned.
+    pub fn set_ship_state(&mut self, state: StateVector) {
+        self.ship_state = state;
+        self.prediction_state.mark_dirty();
+    }
+
     pub fn sim_time(&self) -> f64 {
         self.sim_time
     }
@@ -617,8 +620,8 @@ impl Simulation {
 
     /// Remove the maneuver node with the given `id` from the schedule
     /// and queue its id for the bridge to retire on the UI side. Used
-    /// by the burn-execution autopilot at burn start, before the live
-    /// thrust on this node begins.
+    /// by game-side systems when a completed autopilot directive should
+    /// retire its source maneuver node.
     ///
     /// Does *not* dirty the prediction. The cached flight plan was
     /// built showing this node firing as planned; if we dirtied here
@@ -638,7 +641,7 @@ impl Simulation {
     }
 
     /// Lifetime cumulative magnitude of Δv applied through
-    /// [`Self::apply_live_thrust`], in m/s. The autopilot reads this
+    /// [`Self::apply_live_thrust`], in m/s. The game-side autopilot reads this
     /// at burn-start (anchor) and each subsequent frame to compute
     /// "Δv delivered since burn start = current − anchor".
     pub fn delivered_dv(&self) -> f64 {
@@ -723,5 +726,54 @@ impl Simulation {
 
     pub fn ephemeris(&self) -> &dyn BodyStateProvider {
         self.ephemeris.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctrl() -> WarpController {
+        WarpController::new(vec![0.0, 1.0, 10.0, 100.0, 1_000.0])
+    }
+
+    #[test]
+    fn set_speed_picks_highest_level_at_or_below_target() {
+        let mut w = ctrl();
+        w.set_speed(50.0);
+        assert_eq!(w.speed(), 10.0);
+        w.set_speed(99.999);
+        assert_eq!(w.speed(), 10.0);
+        w.set_speed(100.0);
+        assert_eq!(w.speed(), 100.0);
+        w.set_speed(1e9);
+        assert_eq!(w.speed(), 1_000.0);
+    }
+
+    #[test]
+    fn set_speed_below_lowest_falls_back_to_pause() {
+        let mut w = ctrl();
+        w.increase();
+        w.increase();
+        assert!(w.speed() > 0.0);
+        w.set_speed(-1.0);
+        assert_eq!(w.speed(), 0.0);
+    }
+
+    #[test]
+    fn set_speed_clears_resume_index() {
+        // Pause from 100× stashes that as the resume target. set_speed
+        // should wipe it, so the next pause→resume cycle defaults to 1×
+        // instead of resurrecting 100×.
+        let mut w = ctrl();
+        w.increase();
+        w.increase();
+        w.increase();
+        assert_eq!(w.speed(), 100.0);
+        w.toggle_pause();
+        assert_eq!(w.speed(), 0.0);
+        w.set_speed(0.0);
+        w.toggle_pause();
+        assert_eq!(w.speed(), 1.0);
     }
 }

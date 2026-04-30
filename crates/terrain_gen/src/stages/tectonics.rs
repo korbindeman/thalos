@@ -76,7 +76,13 @@ impl Stage for Tectonics {
         let mut boundaries: Vec<Boundary> = pairs
             .iter()
             .map(|pp| {
-                classify_boundary(pp, &plates, body_radius_m, self.active_boundary_fraction, &mut rng)
+                classify_boundary(
+                    pp,
+                    &plates,
+                    body_radius_m,
+                    self.active_boundary_fraction,
+                    &mut rng,
+                )
             })
             .collect();
 

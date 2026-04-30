@@ -19,11 +19,11 @@ use bevy::input::gestures::PinchGesture;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
+use bevy::picking::Pickable;
 use bevy::picking::events::{Click, DragEnd, DragStart, Pointer};
 use bevy::picking::hover::HoverMap;
 use bevy::picking::mesh_picking::ray_cast::RayCastVisibility;
 use bevy::picking::mesh_picking::{MeshPickingPlugin, MeshPickingSettings};
-use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
@@ -100,7 +100,9 @@ fn list_ships() -> Vec<String> {
             if p.extension().and_then(|s| s.to_str()) != Some("ron") {
                 return None;
             }
-            p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
         })
         .collect();
     out.sort();
@@ -348,7 +350,6 @@ fn setup(
         Transform::from_xyz(-6.0, 4.0, -4.0),
     ));
 
-
     state.ship_name = "New Ship".into();
     state.ship_list = list_ships();
     state.status = "Click a part to begin".into();
@@ -386,10 +387,7 @@ fn visual_spec(
             height: h,
         })
     } else if dec.is_some() {
-        let d = nodes
-            .get("top")
-            .map(|n| n.diameter)
-            .unwrap_or(1.0);
+        let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         let h = 0.2;
         Some(VisualSpec {
             mesh: Cylinder::new(d * 0.5, h)
@@ -852,7 +850,14 @@ fn spawn_tank_resize_arrow(
 fn update_tank_resize_arrow(
     state: Res<EditorState>,
     tanks: Query<(&FuelTank, &AttachNodes), Without<TankResizeArrow>>,
-    cameras: Query<&Transform, (With<OrbitCamera>, Without<TankResizeArrow>, Without<FuelTank>)>,
+    cameras: Query<
+        &Transform,
+        (
+            With<OrbitCamera>,
+            Without<TankResizeArrow>,
+            Without<FuelTank>,
+        ),
+    >,
     mut arrows: Query<(&TankResizeArrow, &mut Transform, &mut Visibility)>,
 ) {
     let Ok(cam_transform) = cameras.single() else {
@@ -882,8 +887,9 @@ fn update_tank_resize_arrow(
         // tank body. Parts never rotate in this editor, so world-space XZ
         // equals local-space XZ.
         let cam_right = cam_transform.right();
-        let right_xz =
-            Vec2::new(cam_right.x, cam_right.z).try_normalize().unwrap_or(Vec2::X);
+        let right_xz = Vec2::new(cam_right.x, cam_right.z)
+            .try_normalize()
+            .unwrap_or(Vec2::X);
         let radius = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
         let offset_r = radius + 0.55;
         transform.translation = Vec3::new(
@@ -987,7 +993,10 @@ fn update_tank_resize_drag(
     };
 
     if let Ok((mut tank, nodes)) = tanks.get_mut(state.tank) {
-        let diameter = nodes.get("top").map(|n| n.diameter).unwrap_or(tank.diameter);
+        let diameter = nodes
+            .get("top")
+            .map(|n| n.diameter)
+            .unwrap_or(tank.diameter);
         let new_length = length.clamp(0.5, MAX_LENGTH_OVER_DIAMETER * diameter);
         if (tank.length - new_length).abs() > f32::EPSILON {
             tank.length = new_length;
@@ -1075,10 +1084,7 @@ fn update_part_shader_highlight(
     state: Res<EditorState>,
     hover_map: Res<HoverMap>,
     mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
-    bodies: Query<
-        (Entity, &PartBody, &MeshMaterial3d<ShipPartMaterial>),
-        Without<ShroudBody>,
-    >,
+    bodies: Query<(Entity, &PartBody, &MeshMaterial3d<ShipPartMaterial>), Without<ShroudBody>>,
 ) {
     let hovered: HashSet<Entity> = hover_map
         .0
@@ -1253,8 +1259,7 @@ fn orbit_camera(
 
         if !pointer_over_egui && wheel_d.abs() > 0.0 {
             if shift {
-                orbit.distance =
-                    (orbit.distance * (1.0 - wheel_d * 0.05)).clamp(2.0, 200.0);
+                orbit.distance = (orbit.distance * (1.0 - wheel_d * 0.05)).clamp(2.0, 200.0);
             } else {
                 orbit.focus.y += wheel_d * orbit.distance * 0.015;
             }
@@ -1262,8 +1267,7 @@ fn orbit_camera(
 
         // Trackpad pinch zooms regardless of shift.
         if !pointer_over_egui && pinch_d.abs() > 0.0 {
-            orbit.distance =
-                (orbit.distance * (1.0 - pinch_d * 8.0)).clamp(2.0, 200.0);
+            orbit.distance = (orbit.distance * (1.0 - pinch_d * 8.0)).clamp(2.0, 200.0);
         }
 
         let rot = Quat::from_euler(EulerRot::YXZ, orbit.yaw, -orbit.pitch, 0.0);
@@ -1314,11 +1318,7 @@ fn collect_blueprint(
         }
     }
 
-    let idx: HashMap<Entity, usize> = ordered
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (*e, i))
-        .collect();
+    let idx: HashMap<Entity, usize> = ordered.iter().enumerate().map(|(i, e)| (*e, i)).collect();
 
     let mut part_blueprints = Vec::with_capacity(ordered.len());
     for e in &ordered {
@@ -1343,11 +1343,8 @@ fn collect_blueprint(
         };
         // Persist amounts only — capacities are recomputed from the
         // catalog at load time.
-        let resources: HashMap<thalos_shipyard::Resource, f32> = res
-            .pools
-            .iter()
-            .map(|(r, p)| (*r, p.amount))
-            .collect();
+        let resources: HashMap<thalos_shipyard::Resource, f32> =
+            res.pools.iter().map(|(r, p)| (*r, p.amount)).collect();
         part_blueprints.push(PartBlueprint {
             catalog_id: cat_ref.id.clone(),
             params,
@@ -1537,10 +1534,8 @@ fn process_commands(
         state.set_as_root = false;
         if let Some(sel) = state.selected {
             if Some(sel) != state.ship_root {
-                let att_map: HashMap<Entity, Attachment> = attachments
-                    .iter()
-                    .map(|(e, a)| (e, a.clone()))
-                    .collect();
+                let att_map: HashMap<Entity, Attachment> =
+                    attachments.iter().map(|(e, a)| (e, a.clone())).collect();
                 let mut chain: Vec<(Entity, Attachment)> = Vec::new();
                 let mut current = sel;
                 while let Some(att) = att_map.get(&current) {
@@ -1768,9 +1763,7 @@ fn editor_ui(
             } else if let Some(d) = dec.as_deref_mut() {
                 ui.label("Kind: Decoupler");
                 if is_root {
-                    ui.add(
-                        egui::Slider::new(&mut d.diameter, 0.3..=6.0).text("Diameter"),
-                    );
+                    ui.add(egui::Slider::new(&mut d.diameter, 0.3..=6.0).text("Diameter"));
                 } else {
                     ui.label(format!("Diameter: {:.2}m (from parent)", d.diameter));
                 }
@@ -1906,10 +1899,7 @@ fn editor_ui(
                             }
                         }
                         for (e, nid, d) in rows {
-                            if ui
-                                .button(format!("{e:?} / {nid} (Ø{d:.2}m)"))
-                                .clicked()
-                            {
+                            if ui.button(format!("{e:?} / {nid} (Ø{d:.2}m)")).clicked() {
                                 state.place_at = Some((e, nid));
                             }
                         }
@@ -1963,7 +1953,12 @@ struct StarsParams {
 
 impl Default for StarsParams {
     fn default() -> Self {
-        Self { pixel_radius: 4.0, brightness: 140.0, size_gamma: 0.50, _pad0: 0.0 }
+        Self {
+            pixel_radius: 4.0,
+            brightness: 140.0,
+            size_gamma: 0.50,
+            _pad0: 0.0,
+        }
     }
 }
 
@@ -1974,11 +1969,21 @@ struct StarsMaterial {
 }
 
 impl Material for StarsMaterial {
-    fn vertex_shader() -> ShaderRef { "shaders/stars.wgsl".into() }
-    fn fragment_shader() -> ShaderRef { "shaders/stars.wgsl".into() }
-    fn prepass_vertex_shader() -> ShaderRef { "shaders/stars_prepass.wgsl".into() }
-    fn prepass_fragment_shader() -> ShaderRef { "shaders/stars_prepass.wgsl".into() }
-    fn alpha_mode(&self) -> AlphaMode { AlphaMode::Add }
+    fn vertex_shader() -> ShaderRef {
+        "shaders/stars.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "shaders/stars.wgsl".into()
+    }
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/stars_prepass.wgsl".into()
+    }
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/stars_prepass.wgsl".into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Add
+    }
 
     fn specialize(
         _: &MaterialPipeline,
@@ -2025,11 +2030,21 @@ struct GalaxyMaterial {
 }
 
 impl Material for GalaxyMaterial {
-    fn vertex_shader() -> ShaderRef { "shaders/galaxy.wgsl".into() }
-    fn fragment_shader() -> ShaderRef { "shaders/galaxy.wgsl".into() }
-    fn prepass_vertex_shader() -> ShaderRef { "shaders/galaxy_prepass.wgsl".into() }
-    fn prepass_fragment_shader() -> ShaderRef { "shaders/galaxy_prepass.wgsl".into() }
-    fn alpha_mode(&self) -> AlphaMode { AlphaMode::Add }
+    fn vertex_shader() -> ShaderRef {
+        "shaders/galaxy.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "shaders/galaxy.wgsl".into()
+    }
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/galaxy_prepass.wgsl".into()
+    }
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/galaxy_prepass.wgsl".into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Add
+    }
 
     fn specialize(
         _: &MaterialPipeline,
@@ -2074,7 +2089,9 @@ fn spawn_sky_backdrop(
     commands.spawn((
         SkyBackdrop,
         Mesh3d(meshes.add(build_star_mesh(&universe))),
-        MeshMaterial3d(stars_materials.add(StarsMaterial { params: StarsParams::default() })),
+        MeshMaterial3d(stars_materials.add(StarsMaterial {
+            params: StarsParams::default(),
+        })),
         Transform::IDENTITY,
         Visibility::Hidden,
         NoFrustumCulling,
@@ -2083,7 +2100,9 @@ fn spawn_sky_backdrop(
     commands.spawn((
         SkyBackdrop,
         Mesh3d(meshes.add(build_galaxy_mesh(&universe))),
-        MeshMaterial3d(galaxy_materials.add(GalaxyMaterial { params: GalaxyParams::default() })),
+        MeshMaterial3d(galaxy_materials.add(GalaxyMaterial {
+            params: GalaxyParams::default(),
+        })),
         Transform::IDENTITY,
         Visibility::Hidden,
         NoFrustumCulling,
@@ -2094,7 +2113,11 @@ fn update_sky_visibility(
     enabled: Res<SkyBackdropEnabled>,
     mut q: Query<&mut Visibility, With<SkyBackdrop>>,
 ) {
-    let target = if enabled.0 { Visibility::Inherited } else { Visibility::Hidden };
+    let target = if enabled.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
     for mut v in q.iter_mut() {
         if *v != target {
             *v = target;
@@ -2109,8 +2132,12 @@ fn update_galaxy_uniform(
     mut materials: ResMut<Assets<GalaxyMaterial>>,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Ok(projection) = cameras.single() else { return };
-    let Projection::Perspective(p) = projection else { return };
+    let Ok(projection) = cameras.single() else {
+        return;
+    };
+    let Projection::Perspective(p) = projection else {
+        return;
+    };
     let px_per_rad = window.resolution.physical_height() as f32 / p.fov;
 
     for handle in &handles {
@@ -2127,8 +2154,7 @@ fn build_star_mesh(universe: &Universe) -> Mesh {
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
 
-    const CORNERS: [[f32; 2]; 4] =
-        [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+    const CORNERS: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
 
     for (i, star) in universe.stars.iter().enumerate() {
         let dir = star.position.normalize();
@@ -2143,7 +2169,10 @@ fn build_star_mesh(universe: &Universe) -> Mesh {
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -2160,8 +2189,7 @@ fn build_galaxy_mesh(universe: &Universe) -> Mesh {
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
 
-    const CORNERS: [[f32; 2]; 4] =
-        [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+    const CORNERS: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
 
     for (i, galaxy) in universe.galaxies.iter().enumerate() {
         let dir = galaxy.position.normalize();
@@ -2179,7 +2207,10 @@ fn build_galaxy_mesh(universe: &Universe) -> Mesh {
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
@@ -2424,10 +2455,7 @@ fn propagate_coupled_material(
     attachments: Query<(Entity, &Attachment)>,
     mut params: ParamSet<(
         Query<(Entity, &PartMaterial)>,
-        Query<
-            (Entity, &mut PartMaterial),
-            Or<(With<Decoupler>, With<Adapter>)>,
-        >,
+        Query<(Entity, &mut PartMaterial), Or<(With<Decoupler>, With<Adapter>)>>,
     )>,
 ) {
     // Build parent → bottom-attached-child entity map.

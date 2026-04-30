@@ -86,7 +86,11 @@ impl ShipStats {
     /// Acceleration at current wet mass and full throttle, m/s².
     pub fn current_acceleration(&self) -> f64 {
         let m = self.wet_mass_kg();
-        if m > 0.0 { self.total_thrust_n / m } else { 0.0 }
+        if m > 0.0 {
+            self.total_thrust_n / m
+        } else {
+            0.0
+        }
     }
 
     /// Exhaust velocity = Isp · g₀ (m/s).
@@ -261,11 +265,8 @@ impl ShipBlueprint {
                 m * (d.x * d.x + d.y * d.y),
             );
 
-            moment_of_inertia_kg_m2 += DVec3::new(
-                i_xz_self + par.x,
-                i_yy_self + par.y,
-                i_xz_self + par.z,
-            );
+            moment_of_inertia_kg_m2 +=
+                DVec3::new(i_xz_self + par.x, i_yy_self + par.y, i_xz_self + par.z);
         }
 
         Ok(ShipStats {
@@ -345,7 +346,8 @@ fn ship_geometry(blueprint: &ShipBlueprint, entries: &[&CatalogEntry]) -> Vec<Pa
                 && let Some(input_d) =
                     node_diameter(parent_entry, &parent_pb.params, parent_d, &c.parent_node)
             {
-                geo[c.child].diameter = effective_diameter_for(child_entry, &child_pb.params, input_d);
+                geo[c.child].diameter =
+                    effective_diameter_for(child_entry, &child_pb.params, input_d);
             }
 
             let parent_offset =
@@ -413,9 +415,7 @@ fn node_diameter(
 ) -> Option<f32> {
     match (entry, params) {
         (CatalogEntry::Pod(_), _) => (node == "bottom").then_some(effective_d),
-        (CatalogEntry::Engine(_), _) => {
-            (node == "top" || node == "bottom").then_some(effective_d)
-        }
+        (CatalogEntry::Engine(_), _) => (node == "top" || node == "bottom").then_some(effective_d),
         (CatalogEntry::Decoupler(_), _) | (CatalogEntry::Tank(_), _) => {
             (node == "top" || node == "bottom").then_some(effective_d)
         }
@@ -719,9 +719,6 @@ mod tests {
             }],
             connections: vec![],
         };
-        assert!(matches!(
-            bp.stats(&cat),
-            Err(CatalogError::UnknownId(_))
-        ));
+        assert!(matches!(bp.stats(&cat), Err(CatalogError::UnknownId(_))));
     }
 }

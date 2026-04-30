@@ -1,0 +1,26 @@
+   Compiling thalos_game v0.1.0 (/Users/korbin/dev/thalos/crates/game)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 5.85s
+     Running `target/debug/thalos_game`
+[2m2026-04-30T00:14:27.879346Z[0m [32m INFO[0m [2mbevy_diagnostic::system_information_diagnostics_plugin::internal[0m[2m:[0m SystemInfo { os: "macOS 26.2", kernel: "25.2.0", cpu: "Apple M2 Pro", core_count: "10", memory: "32.0 GiB" }
+[2m2026-04-30T00:14:27.880009Z[0m [32m INFO[0m [2mbevy_app::terminal_ctrl_c_handler[0m[2m:[0m Skipping installing `Ctrl+C` handler as one was already installed. Please call `TerminalCtrlCHandlerPlugin::gracefully_exit` in your own `Ctrl+C` handler if you want Bevy to gracefully exit on `Ctrl+C`.
+[2m2026-04-30T00:14:27.949611Z[0m [32m INFO[0m [2mbevy_render::renderer[0m[2m:[0m AdapterInfo { name: "Apple M2 Pro", vendor: 0, device: 0, device_type: IntegratedGpu, driver: "", driver_info: "", backend: Metal }
+[2m2026-04-30T00:14:28.097499Z[0m [32m INFO[0m [2mbevy_render::batching::gpu_preprocessing[0m[2m:[0m GPU preprocessing is fully supported on this device.
+[2m2026-04-30T00:14:28.098997Z[0m [33m WARN[0m [2mbevy_egui::render[0m[2m:[0m Bindless textures are not yet supported on metal. Disabling bindless mode. See https://github.com/bevyengine/bevy/issues/18149 for more information
+[2m2026-04-30T00:14:28.128685Z[0m [32m INFO[0m [2mbevy_winit::system[0m[2m:[0m Creating new window Thalos (0v0)
+[2m2026-04-30T00:14:28.378905Z[0m [32m INFO[0m [2mthalos_game::ship_view[0m[2m:[0m ship params: MOI = (215817, 100707, 215817) kg·m², max torque = 40000 N·m/axis, F = 1800000 N, m_dry = 8505 kg, m₀ = 50353 kg, ṁ = 483.02 kg/s, a₀ = 35.75 m/s²
+[2m2026-04-30T00:14:28.378978Z[0m [32m INFO[0m [2mthalos_game::ship_view[0m[2m:[0m spawned ship blueprint 'apollo' with 3 parts
+[2m2026-04-30T00:14:28.440445Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Selva
+[2m2026-04-30T00:14:28.653108Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Pelagos
+[2m2026-04-30T00:14:28.788361Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Carpo
+[2m2026-04-30T00:14:28.848086Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Ignis
+[2m2026-04-30T00:14:28.881827Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Maren
+[2m2026-04-30T00:14:28.920516Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Theron
+[2m2026-04-30T00:14:29.033078Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Nyx
+[2m2026-04-30T00:14:29.056065Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Thalos
+[2m2026-04-30T00:14:29.558444Z[0m [32m INFO[0m [2mthalos_game::rendering[0m[2m:[0m terrain cache hit: Mira
+[2m2026-04-30T00:14:31.895010Z[0m [32m INFO[0m [1madvance_simulation[0m[2m:[0m [2mthalos_game::bridge[0m[2m:[0m PERF Simulation::step over 120 frames: avg=2us max=26us
+[2m2026-04-30T00:14:33.939219Z[0m [32m INFO[0m [1madvance_simulation[0m[2m:[0m [2mthalos_game::bridge[0m[2m:[0m PERF Simulation::step over 120 frames: avg=2us max=13us
+[2m2026-04-30T00:14:36.026137Z[0m [32m INFO[0m [1madvance_simulation[0m[2m:[0m [2mthalos_game::bridge[0m[2m:[0m PERF Simulation::step over 120 frames: avg=2us max=13us
+[2m2026-04-30T00:14:38.094775Z[0m [32m INFO[0m [1madvance_simulation[0m[2m:[0m [2mthalos_game::bridge[0m[2m:[0m PERF Simulation::step over 120 frames: avg=2us max=6us
+[2m2026-04-30T00:14:40.167170Z[0m [32m INFO[0m [1madvance_simulation[0m[2m:[0m [2mthalos_game::bridge[0m[2m:[0m PERF Simulation::step over 120 frames: avg=2us max=13us
+[2m2026-04-30T00:14:42.272039Z[0m [32m INFO[0m [1madvance_simulation[0m[2m:[0m [2mthalos_game::bridge[0m[2m:[0m PERF Simulation::step over 120 frames: avg=2us max=7us

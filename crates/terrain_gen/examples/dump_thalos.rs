@@ -26,8 +26,7 @@ fn main() {
     // BodyDefinition field.
     let path = std::env::var("CARGO_MANIFEST_DIR").unwrap() + "/../../assets/solar_system.ron";
     let raw = fs::read_to_string(&path).expect("read solar_system.ron");
-    let gen_str = extract_generator_block(&raw, "Thalos")
-        .expect("find Thalos generator block");
+    let gen_str = extract_generator_block(&raw, "Thalos").expect("find Thalos generator block");
     // Re-prepend the `#![enable(implicit_some)]` directive that lives at
     // the top of solar_system.ron — it's a parser feature flag, not part
     // of the document's syntax tree, so extracting a sub-block strips it
@@ -55,11 +54,18 @@ fn main() {
     );
 
     let pipeline = thalos_terrain_gen::Pipeline::new(
-        params.pipeline.into_iter().map(|s| s.into_stage()).collect(),
+        params
+            .pipeline
+            .into_iter()
+            .map(|s| s.into_stage())
+            .collect(),
     );
     let t = std::time::Instant::now();
     pipeline.run(&mut builder);
-    eprintln!("baked Thalos at {RES}² in {:.2}s", t.elapsed().as_secs_f32());
+    eprintln!(
+        "baked Thalos at {RES}² in {:.2}s",
+        t.elapsed().as_secs_f32()
+    );
 
     // Snapshot intermediates BEFORE build() consumes them.
     let plate_map = builder.plates.clone().expect("plates");
@@ -75,10 +81,7 @@ fn main() {
         }
     }
     let abs_max = min_h.abs().max(max_h.abs()).max(1.0);
-    eprintln!(
-        "height range: {:.0} m to {:.0} m (sea = 0)",
-        min_h, max_h
-    );
+    eprintln!("height range: {:.0} m to {:.0} m (sea = 0)", min_h, max_h);
 
     write_gray_cross("/tmp/thalos_height.pgm", RES, |face, x, y| {
         let v = height_field.get(face, x, y);

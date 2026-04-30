@@ -7,11 +7,13 @@ use thalos_physics::orbital_math::cartesian_to_elements;
 use thalos_physics::types::StateVector;
 use thalos_shipyard::{FuelTank, PartResources, Resource};
 
-use crate::camera::{CameraFocus, ShipCameraMode};
+use crate::camera::{CameraFocus, CameraFocusTarget, ShipCameraMode};
+use crate::controls::ControlLocks;
 use crate::fuel::ThrottleState;
 use crate::photo_mode::not_in_photo_mode;
-use crate::rendering::{CelestialBody, SimulationState};
+use crate::rendering::{CelestialBody, PlayerShip, SimulationState};
 use crate::view::ViewMode;
+use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
 
 pub struct HudPlugin;
 
@@ -30,21 +32,35 @@ pub fn time_control_panel(
     focus: Res<CameraFocus>,
     view: Res<ViewMode>,
     cam_mode: Res<ShipCameraMode>,
+    locks: Res<ControlLocks>,
     bodies: Query<(&CelestialBody, &Name)>,
+    ship_name: Query<&Name, With<PlayerShip>>,
+    names: Query<&Name, Without<CelestialBody>>,
     diagnostics: Res<DiagnosticsStore>,
     throttle: Res<ThrottleState>,
     tanks: Query<&PartResources, With<FuelTank>>,
+    mut warp_to: ResMut<WarpToManeuver>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
     egui::TopBottomPanel::top("time_control").show(ctx, |ui| {
         ui.horizontal(|ui| {
             // Camera focus indicator.
-            let focus_name = focus
-                .target
-                .and_then(|entity| bodies.get(entity).ok())
-                .map(|(_, name)| name.as_str().to_string())
-                .unwrap_or_else(|| "\u{2014}".to_string());
+            let focus_name = match focus.target {
+                CameraFocusTarget::Body(body_id) => bodies
+                    .iter()
+                    .find(|(body, _)| body.body_id == body_id)
+                    .map(|(_, name)| name.as_str().to_string()),
+                CameraFocusTarget::Ship => ship_name
+                    .single()
+                    .ok()
+                    .map(|name| name.as_str().to_string()),
+                CameraFocusTarget::Ghost(entity) => {
+                    names.get(entity).ok().map(|name| name.as_str().to_string())
+                }
+                CameraFocusTarget::None => None,
+            }
+            .unwrap_or_else(|| "\u{2014}".to_string());
             ui.label(format!("Focus: {}", focus_name));
             if *view == ViewMode::Ship {
                 ui.separator();
@@ -52,14 +68,50 @@ pub fn time_control_panel(
             }
             ui.separator();
 
-            // Warp controls.
+            // Warp controls. Disabled per [`ControlLocks::warp`] —
+            // the same flag the keybinds in
+            // [`crate::bridge::handle_warp_controls`] read. Whichever
+            // programmatic system holds the lock (today: scheduled-burn
+            // autopilot during the lead-down) owns warp; UI tweaks
+            // would just get clobbered.
             ui.label("Warp:");
-            if ui.button("<").clicked() {
-                sim.simulation.warp.decrease();
-            }
-            ui.label(sim.simulation.warp.label());
-            if ui.button(">").clicked() {
-                sim.simulation.warp.increase();
+            ui.add_enabled_ui(!locks.warp, |ui| {
+                if ui.button("<").clicked() {
+                    sim.simulation.warp.decrease();
+                    warp_to.cancel();
+                }
+                ui.label(sim.simulation.warp.label());
+                if ui.button(">").clicked() {
+                    sim.simulation.warp.increase();
+                    warp_to.cancel();
+                }
+
+                // Warp-to-next-maneuver toggle. The label flips to a
+                // stop sign while engaged so the player has unambiguous
+                // on/off feedback without a separate indicator. The
+                // status string to the right — populated each tick by
+                // [`crate::warp_to_maneuver`] — shows the remaining
+                // time (e.g. "Maneuver in 1h 23m").
+                let label = if warp_to.active {
+                    "■"
+                } else {
+                    "→ Maneuver"
+                };
+                if ui.button(label).clicked() {
+                    if warp_to.active {
+                        warp_to.cancel();
+                    } else if find_next_maneuver(sim.simulation.sim_time(), &sim.simulation)
+                        .is_some()
+                    {
+                        warp_to.active = true;
+                    }
+                }
+            });
+            if let Some(target) = warp_to.current.as_ref() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(120, 200, 255),
+                    target.label(sim.simulation.sim_time()),
+                );
             }
 
             ui.separator();
@@ -84,9 +136,7 @@ pub fn time_control_panel(
             // Show "(cut)" when fuel limited the actual thrust below
             // commanded, so the player knows the engine is starving
             // even before a tank reads zero.
-            if throttle.commanded > 0.0
-                && throttle.effective + 1e-3 < throttle.commanded
-            {
+            if throttle.commanded > 0.0 && throttle.effective + 1e-3 < throttle.commanded {
                 ui.colored_label(egui::Color32::from_rgb(220, 110, 60), "(cut)");
             }
 

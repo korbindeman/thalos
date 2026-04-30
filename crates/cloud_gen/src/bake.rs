@@ -335,7 +335,12 @@ mod tests {
         let cube = bake_cloud_cover(&cfg);
         for face in CubemapFace::ALL {
             for &v in cube.face_data(face) {
-                assert!(v.is_finite(), "non-finite density on face {:?}: {}", face, v);
+                assert!(
+                    v.is_finite(),
+                    "non-finite density on face {:?}: {}",
+                    face,
+                    v
+                );
                 assert!(v >= 0.0, "negative density on face {:?}: {}", face, v);
                 assert!(v <= 2.0, "unreasonable density on face {:?}: {}", face, v);
             }
@@ -375,11 +380,8 @@ mod tests {
                     let u = (x as f32 + 0.5) / cfg.size as f32;
                     let v = (y as f32 + 0.5) / cfg.size as f32;
                     let home = face_uv_to_dir(face, u, v);
-                    let warped = Vec3::new(
-                        wx.get(face, x, y),
-                        wy.get(face, x, y),
-                        wz.get(face, x, y),
-                    );
+                    let warped =
+                        Vec3::new(wx.get(face, x, y), wy.get(face, x, y), wz.get(face, x, y));
                     let normalised = safe_normalize(warped, home);
                     total += (normalised - home).length() as f64;
                     count += 1;

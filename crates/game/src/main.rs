@@ -2,7 +2,9 @@ mod autopilot;
 mod body_tree_panel;
 mod bridge;
 mod camera;
+mod controls;
 mod coords;
+mod debug;
 mod engine;
 mod flight_plan_view;
 mod fuel;
@@ -17,6 +19,7 @@ mod sky_render;
 mod star_flare;
 mod target;
 mod view;
+mod warp_to_maneuver;
 
 use std::sync::Arc;
 
@@ -24,7 +27,7 @@ use bevy::asset::AssetPlugin;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, PresentMode, WindowMode};
+use bevy::window::{MonitorSelection, WindowMode};
 use thalos_physics::{
     body_state_provider::BodyStateProvider,
     gravity_mode::GravityMode,
@@ -33,10 +36,12 @@ use thalos_physics::{
     types::{AttitudeState, StateVector},
 };
 
-use autopilot::BurnAutopilotPlugin;
+use autopilot::AutopilotPlugin;
 use body_tree_panel::BodyTreePanelPlugin;
 use bridge::BridgePlugin;
 use camera::CameraPlugin;
+use controls::ControlLocksPlugin;
+use debug::DebugPlugin;
 use engine::EnginePlugin;
 use flight_plan_view::FlightPlanViewPlugin;
 use fuel::FuelPlugin;
@@ -49,6 +54,7 @@ use ship_view::ShipViewPlugin;
 use target::TargetPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
 use view::ViewPlugin;
+use warp_to_maneuver::WarpToManeuverPlugin;
 
 // ---------------------------------------------------------------------------
 // System ordering
@@ -160,7 +166,6 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Thalos".into(),
-                        present_mode: PresentMode::AutoNoVsync,
                         mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
                         ..default()
                     }),
@@ -225,11 +230,14 @@ fn main() {
         .add_plugins(FlightPlanViewPlugin)
         .add_plugins(ManeuverPlugin)
         .add_plugins(NavigationPlugin)
-        .add_plugins(BurnAutopilotPlugin)
+        .add_plugins(AutopilotPlugin)
+        .add_plugins(ControlLocksPlugin)
+        .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
         .add_plugins(BodyTreePanelPlugin)
+        .add_plugins(DebugPlugin)
         .run();
 }

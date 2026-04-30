@@ -166,10 +166,16 @@ impl std::fmt::Display for CatalogError {
         match self {
             CatalogError::UnknownId(id) => write!(f, "unknown catalog id: {id}"),
             CatalogError::KindMismatch { id, expected, got } => {
-                write!(f, "catalog kind mismatch for {id}: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "catalog kind mismatch for {id}: expected {expected}, got {got}"
+                )
             }
             CatalogError::ParamMismatch { id, kind } => {
-                write!(f, "blueprint params do not match catalog kind {kind} for id {id}")
+                write!(
+                    f,
+                    "blueprint params do not match catalog kind {kind} for id {id}"
+                )
             }
             CatalogError::Io { path, source } => {
                 write!(f, "failed to read catalog at {}: {source}", path.display())

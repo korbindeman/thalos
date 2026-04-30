@@ -4,11 +4,12 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::super::helpers::{
-    closest_node, closest_trail_point, closest_trail_point_on_leg, orbit_sensitivity_scale,
+    closest_node, closest_trail_point, closest_trail_point_on_orbit, orbit_sensitivity_scale,
+    orbital_frame_mat3, slide_search_segments,
 };
 use super::super::state::{
     ArrowHitbox, InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, NodeSlideSphere,
-    SELECT_THRESHOLD_PX, SelectedNode,
+    SELECT_THRESHOLD_PX, SelectedNode, SlidePreview,
 };
 use crate::camera::ActiveCamera;
 use crate::coords::{RenderOrigin, WorldScale};
@@ -29,10 +30,11 @@ pub(in crate::maneuver) fn maneuver_input(
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
     flight_plan_view: Res<FlightPlanView>,
-    plan: ResMut<ManeuverPlan>,
+    mut plan: ResMut<ManeuverPlan>,
     mut mode: ResMut<InteractionMode>,
     mut selected: ResMut<SelectedNode>,
     mut node_dv: ResMut<NodeDeltaV>,
+    mut slide_preview: ResMut<SlidePreview>,
     picking: (
         Res<HoverMap>,
         Query<Entity, Or<(With<ArrowHitbox>, With<NodeSlideSphere>)>>,
@@ -59,9 +61,7 @@ pub(in crate::maneuver) fn maneuver_input(
         }
     }
 
-    if keys.just_pressed(KeyCode::Escape)
-        && matches!(*mode, InteractionMode::PlacingNode { .. })
-    {
+    if keys.just_pressed(KeyCode::Escape) && matches!(*mode, InteractionMode::PlacingNode { .. }) {
         *mode = InteractionMode::Idle;
     }
 
@@ -178,19 +178,53 @@ pub(in crate::maneuver) fn maneuver_input(
                         .find(|n| n.id == sel_id)
                         .map(|n| n.time)
                         .unwrap_or(0.0);
-                    if let Some(closest) = closest_trail_point_on_leg(
-                        prediction,
-                        node_time,
-                        states,
-                        &origin,
-                        &scale,
-                        &sim.system,
-                        sim.ephemeris.as_ref(),
-                        &flight_plan_view,
-                        camera,
-                        cam_transform,
-                        cursor_pos,
-                    ) {
+                    let closest = if flight_plan_view.focused_ghost().is_some() {
+                        closest_trail_point(
+                            prediction,
+                            states,
+                            &origin,
+                            &scale,
+                            &sim.system,
+                            sim.ephemeris.as_ref(),
+                            &flight_plan_view,
+                            camera,
+                            cam_transform,
+                            cursor_pos,
+                        )
+                    } else {
+                        let coasts = slide_search_segments(&plan, prediction, sel_id);
+                        closest_trail_point_on_orbit(
+                            &coasts,
+                            prediction,
+                            node_time,
+                            states,
+                            &origin,
+                            &scale,
+                            &sim.system,
+                            &flight_plan_view,
+                            camera,
+                            cam_transform,
+                            cursor_pos,
+                        )
+                    };
+                    if let Some(closest) = closest {
+                        // The slide-rebuild throttle in `handle_maneuver_events`
+                        // can leave the cached prediction up to ~100 ms behind
+                        // `node.time`. Capture the marker pose straight from
+                        // the chosen sample so the rendered slide sphere stays
+                        // pinned to the orbit the user is dragging along, even
+                        // when sampling the (stale) prediction at the new time
+                        // would otherwise resolve onto a different leg.
+                        let body = sim.ephemeris.query_body(closest.anchor_body, closest.time);
+                        let frame = orbital_frame_mat3(
+                            closest.sample_position,
+                            closest.sample_velocity,
+                            body.position,
+                            body.velocity,
+                        );
+                        slide_preview.world_pos = Some(closest.world_pos);
+                        slide_preview.frame = Some(frame);
+
                         writer.write(ManeuverEvent::SlideNode {
                             id: sel_id,
                             new_time: closest.time,
@@ -199,7 +233,14 @@ pub(in crate::maneuver) fn maneuver_input(
                 }
                 return;
             } else {
+                // Fallback: mouse released without `slide_sphere_drag_end`
+                // having fired (e.g. picking entity despawned mid-drag). Mirror
+                // its cleanup so we don't leak preview state or skip the final
+                // rebuild.
                 *mode = InteractionMode::Idle;
+                plan.dirty = true;
+                slide_preview.world_pos = None;
+                slide_preview.frame = None;
             }
         }
 

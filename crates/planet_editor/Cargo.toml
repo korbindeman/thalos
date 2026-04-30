@@ -9,6 +9,3 @@ thalos_terrain_gen = { path = "../terrain_gen" }
 thalos_planet_rendering = { path = "../planet_rendering" }
 bevy = { version = "0.18", features = ["wayland"] }
 bevy_egui = "0.39"
-
-[features]
-dev = ["bevy/dynamic_linking", "thalos_planet_rendering/dev"]

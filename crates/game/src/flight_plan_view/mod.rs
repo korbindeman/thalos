@@ -4,13 +4,10 @@
 //! The physics crate produces a [`FlightPlan`] with legs, encounters, and
 //! segments. This module builds a game-side view on top of that:
 //!
-//! - **Ghost bodies** — translucent spheres at future encounter positions,
-//!   positioned at closest approach (or maneuver time if a node sits on the
-//!   encounter leg). Ghost bodies serve as the rendering anchor for their
-//!   encounter legs.
-//! - **Trajectory rendering** — continuous gizmo line through all legs, each
-//!   drawn relative to its SOI body. Future encounter legs pin to the ghost
-//!   body's transform.
+//! - **Ghost bodies** — translucent spheres at future SOI entry positions.
+//!   Ghost bodies serve as rendering pins for encounter-frame previews.
+//! - **Trajectory rendering** — continuous gizmo line through all legs, plus
+//!   local encounter-window overlays drawn relative to matching ghost bodies.
 //! - **Lifecycle** — ghosts spawn when encounters appear in the prediction,
 //!   persist stably across repredictions (diff-based, no churn), blend out
 //!   as the real body catches up, and hand off camera focus on retirement.
@@ -41,14 +38,10 @@ impl Plugin for FlightPlanViewPlugin {
                     ghost::update_ghost_lifecycle,
                     ghost::sync_ghost_bodies,
                     ghost::update_ghost_transforms,
-                    render::render_trajectory.run_if(
-                        crate::photo_mode::not_in_photo_mode
-                            .and(crate::view::in_map_view),
-                    ),
-                    markers::manage_trajectory_markers.run_if(
-                        crate::photo_mode::not_in_photo_mode
-                            .and(crate::view::in_map_view),
-                    ),
+                    render::render_trajectory
+                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                    markers::manage_trajectory_markers
+                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                 )
                     .chain()
                     .after(crate::rendering::cache_body_states)

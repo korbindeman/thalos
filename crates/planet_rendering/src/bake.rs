@@ -397,8 +397,7 @@ pub fn equirect_to_cloud_cover_image(source: &Image, resolution: u32) -> Image {
             let v = (y as f32 + 0.5) * inv;
             for x in 0..resolution {
                 let u = (x as f32 + 0.5) * inv;
-                let dir =
-                    thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
+                let dir = thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
                 // Equirectangular: longitude from atan2(x, z), latitude
                 // from asin(y). Maps to [0, 1] UV matching source image
                 // layout (longitude → x, latitude → y, north pole at top).

@@ -204,7 +204,8 @@ impl Stage for PaintBiomes {
         // paint means paying neighbour-lookup overhead per texel anyway,
         // and this keeps the paint loop readable. Slope is stored as
         // magnitude of height gradient (m rise per m of arc length).
-        let slope_field = compute_slope_cubemap(&builder.height_contributions.height, builder.radius_m);
+        let slope_field =
+            compute_slope_cubemap(&builder.height_contributions.height, builder.radius_m);
 
         let inv_res = 1.0 / res as f32;
         let texel_offset = KERNEL_OFFSET_TEXELS * inv_res;
@@ -307,11 +308,8 @@ impl Stage for PaintBiomes {
                         //        cleanly on top via the rock overlay.
                         if !is_ocean && let Some(io) = &iron_overlay {
                             let iron_f = iron_face[idx];
-                            let raw_cov = smoothstep(
-                                io.min_iron_fraction,
-                                io.max_iron_fraction,
-                                iron_f,
-                            );
+                            let raw_cov =
+                                smoothstep(io.min_iron_fraction, io.max_iron_fraction, iron_f);
                             let iron_cov = raw_cov
                                 * center_biome.iron_visibility.clamp(0.0, 1.0)
                                 * io.max_strength.clamp(0.0, 1.0);
@@ -488,10 +486,7 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// face-space finite differences with edge clamping; the ±1-texel
 /// discontinuity at face seams is acceptable because slope drives only
 /// soft multiplicative overlays (rock, AO), never hard iso-contours.
-fn compute_slope_cubemap(
-    height: &Cubemap<f32>,
-    body_radius_m: f32,
-) -> Cubemap<f32> {
+fn compute_slope_cubemap(height: &Cubemap<f32>, body_radius_m: f32) -> Cubemap<f32> {
     let res = height.resolution();
     let mut out = Cubemap::<f32>::new(res);
     // Average face pixel size at the cube-face centre. Corners are ~40 %

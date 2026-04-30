@@ -121,8 +121,7 @@ impl RingLayers {
                 stop.color[2],
                 stop.r.clamp(0.0, 1.0),
             );
-            layers.palette_opacity[i] =
-                Vec4::new(stop.opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0);
+            layers.palette_opacity[i] = Vec4::new(stop.opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0);
         }
         layers.stop_count = n as u32;
         layers.opacity = rings.opacity.clamp(0.0, 1.0);

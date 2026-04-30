@@ -24,9 +24,21 @@ pub(in crate::maneuver) fn sync_node_delta_v(
 }
 
 /// Handle maneuver events: place, adjust, slide, delete.
+///
+/// `SlideNode` events fire every frame during a drag (one per cursor sample),
+/// and each `dirty = true` flip drives a full flight-plan reprop in
+/// [`crate::bridge::update_prediction`]. On non-trivial plans that puts the
+/// rebuild on the critical path at 60 Hz and sliding feels laggy.
+///
+/// We always update `node.time` (so the visual marker tracks the cursor every
+/// frame) but only flip `plan.dirty` at most every [`SLIDE_REBUILD_THROTTLE_S`]
+/// seconds during a drag. The drag-end observer
+/// ([`super::observers::slide_sphere_drag_end`]) forces a final
+/// `dirty = true` so the trajectory always reflects the released position.
 pub(in crate::maneuver) fn handle_maneuver_events(
     mut events: bevy::ecs::message::MessageReader<ManeuverEvent>,
     mut plan: ResMut<ManeuverPlan>,
+    time: Res<Time>,
 ) {
     for event in events.read() {
         match event.clone() {
@@ -56,7 +68,11 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                 }
                 if let Some(node) = plan.nodes.iter_mut().find(|n| n.id == id) {
                     node.time = new_time;
-                    plan.dirty = true;
+                    let now = time.elapsed_secs_f64();
+                    if now - plan.last_slide_apply_secs >= SLIDE_REBUILD_THROTTLE_S {
+                        plan.dirty = true;
+                        plan.last_slide_apply_secs = now;
+                    }
                 }
             }
             ManeuverEvent::DeleteNode { id } => {
@@ -69,3 +85,10 @@ pub(in crate::maneuver) fn handle_maneuver_events(
         }
     }
 }
+
+/// Minimum interval between slide-driven flight-plan rebuilds (seconds).
+///
+/// 100 ms (10 Hz) keeps the live trajectory preview responsive without
+/// stalling the frame budget on plans where a single reprop costs tens of
+/// milliseconds.
+const SLIDE_REBUILD_THROTTLE_S: f64 = 0.1;

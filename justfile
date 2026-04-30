@@ -1,12 +1,12 @@
 # Thalos — orbital mechanics sandbox
 
-# Run the game (dev build with dynamic linking for fast iteration)
+# Run the game
 game:
-    cargo run -p thalos_game --features dev
+    cargo run -p thalos_game
 
 # Edit a planet's terrain (default: Mira). Usage: just edit auron
 edit body="":
-    cargo run -p thalos_planet_editor --features dev {{ if body != "" { "-- " + body } else { "" } }}
+    cargo run -p thalos_planet_editor {{ if body != "" { "-- " + body } else { "" } }}
 
 # Run the ship editor (shipyard crate)
 shipyard:

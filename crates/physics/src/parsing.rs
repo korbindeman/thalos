@@ -8,14 +8,13 @@
 
 use std::collections::HashMap;
 
-use glam::DVec3;
 use serde::Deserialize;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
 use thalos_terrain_gen::GeneratorParams;
 
+use crate::debug_orbits::debug_parking_orbit_relative_state;
 use crate::types::{
     BodyDefinition, BodyId, BodyKind, G, OrbitalElements, ShipDefinition, SolarSystemDefinition,
-    StateVector,
 };
 
 // ---------------------------------------------------------------------------
@@ -150,20 +149,14 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
         bodies[i].soi_radius_m = soi;
     }
 
-    // Build the ship state: 200 km altitude circular orbit around the homeworld.
+    // Debug spawn: park the ship in the same low orbit used by debug teleports.
     let homeworld = name_to_id
         .get(&file.homeworld)
         .map(|&id| &bodies[id])
         .ok_or_else(|| format!("homeworld '{}' not found", file.homeworld))?;
 
-    let orbit_radius = homeworld.radius_m + 200_000.0;
-    let orbital_speed = (homeworld.gm / orbit_radius).sqrt();
-
     let ship = ShipDefinition {
-        initial_state: StateVector {
-            position: DVec3::new(-orbit_radius, 0.0, 0.0),
-            velocity: DVec3::new(0.0, 0.0, -orbital_speed),
-        },
+        initial_state: debug_parking_orbit_relative_state(homeworld),
     };
 
     Ok(SolarSystemDefinition {

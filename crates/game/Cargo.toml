@@ -19,4 +19,3 @@ tracing = "0.1"
 # Tracy streams to a running Tracy client over localhost.
 profile-chrome = ["bevy/trace_chrome"]
 profile-tracy = ["bevy/trace_tracy"]
-dev = ["bevy/dynamic_linking", "thalos_planet_rendering/dev"]

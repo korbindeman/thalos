@@ -182,12 +182,13 @@ fn thalos_pipeline_is_deterministic() {
             .height_contributions
             .height
             .get(CubemapFace::PosX, 20, 20);
-        let plate = builder
-            .plates
-            .as_ref()
-            .unwrap()
-            .plate_id_cubemap
-            .get(CubemapFace::PosY, 10, 10);
+        let plate =
+            builder
+                .plates
+                .as_ref()
+                .unwrap()
+                .plate_id_cubemap
+                .get(CubemapFace::PosY, 10, 10);
         let biome = builder.biome_map.get(CubemapFace::NegZ, 30, 30);
         // Sum the whole heightfield so this test catches non-determinism
         // anywhere on the sphere, not just at the three sampled points. A

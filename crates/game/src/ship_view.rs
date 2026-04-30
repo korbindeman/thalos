@@ -15,6 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::math::DVec3;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
@@ -31,8 +32,10 @@ use crate::fuel::ShipFuelParams;
 
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
-use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, RenderOrigin, SimulationState};
-use crate::view::{HideInMapView, ViewMode};
+use crate::rendering::{
+    CelestialBody, FrameBodyStates, PlayerShip, RenderOrigin, ShipMarker, SimulationState,
+};
+use crate::view::{HideInMapView, HideInShipView, ViewMode};
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
 /// editor's value so the two look identical side-by-side.
@@ -89,17 +92,14 @@ pub(crate) struct PartVisual;
 #[derive(Component, Clone)]
 struct PartShaderHandle(Handle<ShipPartMaterial>);
 
-/// Resolved on startup so systems can target the player's ship without
-/// having to re-find it each frame.
-#[derive(Resource)]
-pub struct PlayerShipEntity(pub Entity);
-
 fn spawn_player_ship(
     mut commands: Commands,
     view: Res<ViewMode>,
     mut sim: ResMut<SimulationState>,
     mut fuel_params: ResMut<ShipFuelParams>,
     catalog: Res<PartCatalog>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let ron_path = PathBuf::from("ships/apollo.ron");
     let text = match std::fs::read_to_string(&ron_path) {
@@ -177,6 +177,12 @@ fn spawn_player_ship(
         ViewMode::Ship => Visibility::Inherited,
     };
 
+    // Default the instance name to the blueprint's authored name. Both
+    // the ship-view root and the map-view billboard carry the same name
+    // so UI surfaces (body tree, focus indicator, debug picker) display
+    // it consistently regardless of which entity is the focus target.
+    let ship_name = blueprint.name.clone();
+
     let player_ship = commands
         .spawn((
             PlayerShip,
@@ -187,11 +193,36 @@ fn spawn_player_ship(
             // every frame by `update_ship_camera_offset` so it tracks staging
             // and design changes.
             CameraTargetOffset::default(),
-            Name::new("PlayerShip"),
+            Name::new(ship_name.clone()),
         ))
         .id();
-
-    commands.insert_resource(PlayerShipEntity(player_ship));
+    // Map-view billboard for this ship. Position and scale are overwritten
+    // every frame by `update_ship_position` (in `rendering.rs`), so the
+    // initial transform is a placeholder. Material is unique per ship so
+    // future per-ship marker styling (colour-by-faction, IFF tags, etc.)
+    // doesn't bleed across instances.
+    let marker_icon = meshes.add(Circle::new(1.0));
+    let marker_material = std_materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        emissive: LinearRgba::WHITE * 2.0,
+        unlit: true,
+        double_sided: true,
+        // Push the ship marker in front of every planet/billboard so it
+        // never z-fights with a body that happens to share its depth.
+        depth_bias: 1.0e9,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(marker_icon),
+        MeshMaterial3d(marker_material),
+        Transform::IDENTITY,
+        ShipMarker,
+        HideInShipView,
+        NotShadowCaster,
+        NotShadowReceiver,
+        crate::photo_mode::HideInPhotoMode,
+        Name::new(ship_name),
+    ));
 
     // Reparent all parts owned by this ship into the PlayerShip hierarchy
     // so they inherit its scale + translation. Runs as a deferred command
@@ -245,19 +276,14 @@ fn update_player_ship_world_position(
 /// each camera carries its own fixed projection (see `spawn_camera`).
 fn sync_view_mode_changed(
     view: Res<ViewMode>,
-    player_ship: Option<Res<PlayerShipEntity>>,
     sim: Res<SimulationState>,
     body_states: Res<FrameBodyStates>,
     mut focus: ResMut<CameraFocus>,
-    bodies: Query<(Entity, &CelestialBody)>,
+    bodies: Query<&CelestialBody>,
 ) {
-    let Some(player_ship) = player_ship else {
-        return;
-    };
-
     match *view {
         ViewMode::Ship => {
-            focus.target = Some(player_ship.0);
+            focus.target = crate::camera::CameraFocusTarget::Ship;
             focus.target_distance = SHIP_VIEW_INITIAL_DISTANCE_M;
             focus.distance = focus.distance.min(SHIP_VIEW_INITIAL_DISTANCE_M * 10.0);
             // Default view: behind the ship, slight tilt above the horizon.
@@ -275,8 +301,8 @@ fn sync_view_mode_changed(
             };
             let ship_pos = sim.simulation.ship_state().position;
             let soi_id = find_reference_body(ship_pos, sim.simulation.bodies(), states);
-            if let Some((entity, _)) = bodies.iter().find(|(_, b)| b.body_id == soi_id) {
-                focus.target = Some(entity);
+            if bodies.iter().any(|b| b.body_id == soi_id) {
+                focus.target = crate::camera::CameraFocusTarget::Body(soi_id);
                 focus.target_distance = 2.0e7;
                 focus.distance = focus.distance.max(2.0e7);
             }
@@ -588,8 +614,7 @@ fn update_ship_camera_offset(
             let Ok((t, nodes, pod, dec, adapter, tank, engine)) = parts.get(child) else {
                 continue;
             };
-            let Some((height, radius)) =
-                visual_extent(nodes, pod, dec, adapter, tank, engine)
+            let Some((height, radius)) = visual_extent(nodes, pod, dec, adapter, tank, engine)
             else {
                 continue;
             };
@@ -607,7 +632,11 @@ fn update_ship_camera_offset(
             max = max.max(hi);
             hits += 1;
         }
-        let centre = if hits > 0 { (min + max) * 0.5 } else { Vec3::ZERO };
+        let centre = if hits > 0 {
+            (min + max) * 0.5
+        } else {
+            Vec3::ZERO
+        };
         if let Ok(mut offset) = offsets.get_mut(ship_entity) {
             offset.0 = centre;
         }

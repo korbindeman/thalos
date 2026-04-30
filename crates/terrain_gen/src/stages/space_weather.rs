@@ -266,8 +266,7 @@ impl Stage for SpaceWeather {
                             // tonal field rather than sharing one pattern.
                             let bs: u32 = (seed as u32)
                                 ^ 0x4E9F_1357
-                                ^ (biome_map.get(face, x, y) as u32)
-                                    .wrapping_mul(0xCE32_1A5D);
+                                ^ (biome_map.get(face, x, y) as u32).wrapping_mul(0xCE32_1A5D);
                             let n = fbm3(
                                 dir.x * TONAL_FREQ,
                                 dir.y * TONAL_FREQ,

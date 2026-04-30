@@ -7,9 +7,9 @@
 use crate::coords::UnitVector3;
 use crate::spectrum::{Passband, Spectrum};
 
-mod star;
 mod galaxy;
 mod nebula;
+mod star;
 
 pub use galaxy::Galaxy;
 pub use nebula::NebulaField;

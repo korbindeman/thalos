@@ -27,7 +27,7 @@ pub use catalog::{
 };
 pub use part::{
     Adapter, CommandPod, Decoupler, Engine, EngineThrust, EngineValidationError, FuelTank,
-    MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel, Shroudable, ShroudProvider,
+    MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel, ShroudProvider, Shroudable,
 };
 pub use resource::{PartResources, Resource, ResourcePool};
 pub use stats::{G0, ResourceTotals, ShipStats};

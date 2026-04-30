@@ -13,13 +13,15 @@ fn apply_targets(cnodes: &mut Mut<AttachNodes>, targets: &[NodeTarget]) {
     // Deref so we don't mark the component as changed.
     let needs_update = {
         let current = &**cnodes;
-        targets.iter().any(|(id, d, off)| match current.nodes.get(id) {
-            Some(n) => {
-                (n.diameter - *d).abs() > f32::EPSILON
-                    || n.offset.distance_squared(*off) > f32::EPSILON
-            }
-            None => false,
-        })
+        targets
+            .iter()
+            .any(|(id, d, off)| match current.nodes.get(id) {
+                Some(n) => {
+                    (n.diameter - *d).abs() > f32::EPSILON
+                        || n.offset.distance_squared(*off) > f32::EPSILON
+                }
+                None => false,
+            })
     };
     if !needs_update {
         return;
@@ -84,11 +86,7 @@ pub fn propagate_node_sizes(
                     } else if let Ok(tank) = tanks.get(*child) {
                         vec![
                             ("top".into(), input_d, Vec3::ZERO),
-                            (
-                                "bottom".into(),
-                                input_d,
-                                Vec3::new(0.0, -tank.length, 0.0),
-                            ),
+                            ("bottom".into(), input_d, Vec3::new(0.0, -tank.length, 0.0)),
                         ]
                     } else if let Ok(adapter) = adapters.get(*child) {
                         let bot_d = adapter.target_diameter;

@@ -28,10 +28,7 @@ impl Plugin for TargetPlugin {
 
 /// Forward the current `TargetBody` resource into the physics `Simulation`
 /// so trajectory prediction can bias its step size near the target.
-fn sync_target_to_simulation(
-    target: Res<TargetBody>,
-    sim: Option<ResMut<SimulationState>>,
-) {
+fn sync_target_to_simulation(target: Res<TargetBody>, sim: Option<ResMut<SimulationState>>) {
     let Some(mut sim) = sim else { return };
     if sim.simulation.target_body() != target.target {
         sim.simulation.set_target_body(target.target);

@@ -15,7 +15,9 @@
 
 use super::numeric::NumericSegment;
 use crate::body_state_provider::BodyStateProvider;
-use crate::ship_propagator::{BurnParams, BurnRequest, CoastRequest, SegmentTerminator, ShipPropagator};
+use crate::ship_propagator::{
+    BurnParams, BurnRequest, CoastRequest, SegmentTerminator, ShipPropagator,
+};
 use crate::types::{BodyDefinition, BodyId, StateVector, TrajectorySample};
 use glam::DVec3;
 
@@ -186,7 +188,22 @@ pub(super) fn propagate_segment(
 
         match result.terminator {
             SegmentTerminator::Horizon | SegmentTerminator::BurnEnd { .. } => {
-                break;
+                // Don't break unconditionally. The inner sub-segment can
+                // hit an *intermediate* target — e.g. a coast clipped at
+                // an upcoming burn's `start_time` returns Horizon at that
+                // time, not at `end_time`. The outer `while time <
+                // end_time` condition is the correct exit signal: when
+                // `time` actually reaches `end_time` we'll fall out
+                // naturally; when it reaches an intermediate target we
+                // continue the loop and the next iteration picks up the
+                // appropriate burn/coast for the new `time`. Without
+                // this, a 1e-13 s float gap between the leg's
+                // walking-time and the burn's centered start time
+                // produces a degenerate "coast → Horizon → break" where
+                // the burn never fires.
+                if time >= end_time {
+                    break;
+                }
             }
             SegmentTerminator::StableOrbit => {
                 is_stable_orbit = true;
@@ -211,4 +228,3 @@ pub(super) fn propagate_segment(
         collision_body,
     }
 }
-

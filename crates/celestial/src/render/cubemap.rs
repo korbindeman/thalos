@@ -136,7 +136,10 @@ pub fn bake_skybox(universe: &Universe, params: &BakeParams) -> HdrCubemap {
     // using the Sun is the same idea, adjusted to our taste, and it
     // keeps the brightest-star constant independent of PSF radius and
     // face resolution.
-    let reference = Spectrum::Blackbody { temperature_k: 5778.0, scale: 1.0 };
+    let reference = Spectrum::Blackbody {
+        temperature_k: 5778.0,
+        scale: 1.0,
+    };
     let reference_flux = bands[1].integrate(&reference).max(1e-30);
 
     let mut out = HdrCubemap::new(params.face_size);
@@ -205,7 +208,11 @@ fn project_star(
         bands[1].integrate(&star.spectrum) * k,
         bands[2].integrate(&star.spectrum) * k,
     ];
-    ProjectedStar { face, face_uv, flux_rgb }
+    ProjectedStar {
+        face,
+        face_uv,
+        flux_rgb,
+    }
 }
 
 #[cfg(test)]
@@ -234,7 +241,10 @@ mod tests {
         });
         let cubemap = bake_skybox(
             &universe,
-            &BakeParams { face_size: 128, ..Default::default() },
+            &BakeParams {
+                face_size: 128,
+                ..Default::default()
+            },
         );
         let total_lum: f32 = cubemap
             .faces

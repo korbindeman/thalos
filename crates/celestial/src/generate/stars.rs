@@ -30,8 +30,8 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::catalog::Universe;
 use crate::coords::{UnitVector3, uniform_sphere};
-use crate::spectrum::Spectrum;
 use crate::sources::Star;
+use crate::spectrum::Spectrum;
 
 #[derive(Debug, Clone)]
 pub struct StarGenParams {
@@ -75,19 +75,47 @@ struct SpectralBucket {
 
 const VISIBLE_SPECTRAL_BUCKETS: &[SpectralBucket] = &[
     // O: vanishingly rare but very bright
-    SpectralBucket { weight: 0.005, t_lo: 30_000.0, t_hi: 40_000.0 },
+    SpectralBucket {
+        weight: 0.005,
+        t_lo: 30_000.0,
+        t_hi: 40_000.0,
+    },
     // B: hot blue giants
-    SpectralBucket { weight: 0.10,  t_lo: 10_000.0, t_hi: 30_000.0 },
+    SpectralBucket {
+        weight: 0.10,
+        t_lo: 10_000.0,
+        t_hi: 30_000.0,
+    },
     // A: blue-white, lots of Vega-alikes among visible stars
-    SpectralBucket { weight: 0.22,  t_lo:  7_500.0, t_hi: 10_000.0 },
+    SpectralBucket {
+        weight: 0.22,
+        t_lo: 7_500.0,
+        t_hi: 10_000.0,
+    },
     // F: white
-    SpectralBucket { weight: 0.17,  t_lo:  6_000.0, t_hi:  7_500.0 },
+    SpectralBucket {
+        weight: 0.17,
+        t_lo: 6_000.0,
+        t_hi: 7_500.0,
+    },
     // G: yellow (Sun)
-    SpectralBucket { weight: 0.15,  t_lo:  5_200.0, t_hi:  6_000.0 },
+    SpectralBucket {
+        weight: 0.15,
+        t_lo: 5_200.0,
+        t_hi: 6_000.0,
+    },
     // K: orange
-    SpectralBucket { weight: 0.20,  t_lo:  3_700.0, t_hi:  5_200.0 },
+    SpectralBucket {
+        weight: 0.20,
+        t_lo: 3_700.0,
+        t_hi: 5_200.0,
+    },
     // M: red dwarfs and red giants — only local ones make the cutoff
-    SpectralBucket { weight: 0.16,  t_lo:  2_400.0, t_hi:  3_700.0 },
+    SpectralBucket {
+        weight: 0.16,
+        t_lo: 2_400.0,
+        t_hi: 3_700.0,
+    },
 ];
 
 fn sample_temperature(rng: &mut ChaCha8Rng) -> f32 {
@@ -128,8 +156,11 @@ pub fn populate(universe: &mut Universe, params: &StarGenParams) {
     let mut rng = ChaCha8Rng::seed_from_u64(params.seed);
 
     for _ in 0..params.count {
-        let apparent =
-            sample_apparent_magnitude(&mut rng, params.bright_magnitude_floor, params.faint_magnitude_limit);
+        let apparent = sample_apparent_magnitude(
+            &mut rng,
+            params.bright_magnitude_floor,
+            params.faint_magnitude_limit,
+        );
         let temperature_k = sample_temperature(&mut rng);
         let abs_mag = temperature_to_absolute_magnitude(temperature_k);
         // m - M = 5 log₁₀(d) - 5  →  d_pc = 10^((m-M+5)/5)

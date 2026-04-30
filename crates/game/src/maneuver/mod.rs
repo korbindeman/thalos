@@ -16,9 +16,9 @@ use render::{
     manage_arrow_handles, manage_node_markers, spawn_snap_indicator, update_arrow_transforms,
     update_snap_indicator,
 };
-use state::{ArrowHitbox, ArrowStretchState, NodeSlideSphere, SelectedNodeView};
+use state::{ArrowHitbox, ArrowStretchState, NodeSlideSphere, SelectedNodeView, SlidePreview};
 
-pub use state::{InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, SelectedNode};
+pub use state::{GameNode, InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, SelectedNode};
 
 /// Block camera rotation whenever a maneuver element is hovered or any
 /// non-Idle interaction mode is active.
@@ -37,6 +37,12 @@ fn update_camera_block(
 }
 
 /// Recomputes the cached world position and orbital frame for the selected node.
+///
+/// While [`InteractionMode::SlidingNode`] is active, the slide handler has
+/// already written a [`SlidePreview`] from the chosen sample on the orbit
+/// being dragged along — prefer it over re-sampling the (throttle-stale)
+/// prediction, which can otherwise snap the marker onto the wrong leg
+/// mid-drag.
 fn update_selected_node_view(
     selected: Res<SelectedNode>,
     plan: Res<ManeuverPlan>,
@@ -45,8 +51,18 @@ fn update_selected_node_view(
     origin: Res<crate::coords::RenderOrigin>,
     scale: Res<crate::coords::WorldScale>,
     flight_plan_view: Res<crate::flight_plan_view::FlightPlanView>,
+    mode: Res<InteractionMode>,
+    slide_preview: Res<SlidePreview>,
     mut selected_view: ResMut<SelectedNodeView>,
 ) {
+    if matches!(*mode, InteractionMode::SlidingNode)
+        && let (Some(world_pos), Some(frame)) = (slide_preview.world_pos, slide_preview.frame)
+    {
+        selected_view.world_pos = Some(world_pos);
+        selected_view.frame = Some(frame);
+        return;
+    }
+
     let Some(ref sim) = sim else {
         selected_view.world_pos = None;
         selected_view.frame = None;
@@ -94,6 +110,7 @@ impl Plugin for ManeuverPlugin {
             .init_resource::<NodeDeltaV>()
             .init_resource::<SelectedNode>()
             .init_resource::<SelectedNodeView>()
+            .init_resource::<SlidePreview>()
             .init_resource::<InteractionMode>()
             .init_resource::<ArrowStretchState>()
             .add_systems(Startup, spawn_snap_indicator)
@@ -107,28 +124,16 @@ impl Plugin for ManeuverPlugin {
                     update_selected_node_view.after(sync_node_delta_v),
                     manage_arrow_handles
                         .after(update_selected_node_view)
-                        .run_if(
-                            crate::photo_mode::not_in_photo_mode
-                                .and(crate::view::in_map_view),
-                        ),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                     update_arrow_transforms
                         .after(manage_arrow_handles)
-                        .run_if(
-                            crate::photo_mode::not_in_photo_mode
-                                .and(crate::view::in_map_view),
-                        ),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                     manage_node_markers
                         .after(update_selected_node_view)
-                        .run_if(
-                            crate::photo_mode::not_in_photo_mode
-                                .and(crate::view::in_map_view),
-                        ),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                     update_snap_indicator
                         .after(maneuver_input)
-                        .run_if(
-                            crate::photo_mode::not_in_photo_mode
-                                .and(crate::view::in_map_view),
-                        ),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                 )
                     .before(crate::SimStage::Physics),
             )
@@ -138,10 +143,8 @@ impl Plugin for ManeuverPlugin {
             .add_observer(slide_sphere_drag_end)
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
-                node_editor_panel.run_if(
-                    crate::photo_mode::not_in_photo_mode
-                        .and(crate::view::in_map_view),
-                ),
+                node_editor_panel
+                    .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
             );
     }
 }

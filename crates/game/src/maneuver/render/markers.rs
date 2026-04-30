@@ -4,14 +4,12 @@ use super::super::helpers::{node_world_position, overlay_marker_transform};
 use super::super::state::{
     InteractionMode, ManeuverPlan, NodeMarkerDisc, SelectedNode, SnapIndicator,
 };
-use crate::camera::{ActiveCamera, CameraFocus};
+use crate::camera::ActiveCamera;
 use crate::coords::{RenderOrigin, WorldScale};
 use crate::flight_plan_view::FlightPlanView;
 use crate::photo_mode::HideInPhotoMode;
-use crate::rendering::{FrameBodyStates, SimulationState};
+use crate::rendering::{FrameBodyStates, SimulationState, screen_marker_radius};
 use crate::view::HideInShipView;
-
-const MARKER_RADIUS: f32 = 0.006;
 
 /// Spawn the snap indicator (hidden by default).
 pub(in crate::maneuver) fn spawn_snap_indicator(
@@ -44,9 +42,14 @@ pub(in crate::maneuver) fn spawn_snap_indicator(
 /// Update snap indicator position/visibility.
 pub(in crate::maneuver) fn update_snap_indicator(
     mode: Res<InteractionMode>,
-    focus: Res<CameraFocus>,
-    scale: Res<WorldScale>,
-    camera_q: Query<&Transform, (With<ActiveCamera>, With<crate::camera::OrbitCamera>, Without<SnapIndicator>)>,
+    camera_q: Query<
+        &Transform,
+        (
+            With<ActiveCamera>,
+            With<crate::camera::OrbitCamera>,
+            Without<SnapIndicator>,
+        ),
+    >,
     mut indicators: Query<(&mut Transform, &mut Visibility), With<SnapIndicator>>,
 ) {
     let Ok((mut tf, mut vis)) = indicators.single_mut() else {
@@ -58,13 +61,16 @@ pub(in crate::maneuver) fn update_snap_indicator(
         ..
     } = *mode
     {
-        let cam_dist = (focus.distance * scale.0) as f32;
-        let cam_rot = camera_q
-            .single()
-            .map(|t| t.rotation)
-            .unwrap_or(Quat::IDENTITY);
+        let Ok(cam_tf) = camera_q.single() else {
+            *vis = Visibility::Hidden;
+            return;
+        };
         *vis = Visibility::Inherited;
-        *tf = overlay_marker_transform(pos, cam_rot, cam_dist * MARKER_RADIUS);
+        *tf = overlay_marker_transform(
+            pos,
+            cam_tf.rotation,
+            screen_marker_radius(pos, cam_tf.translation),
+        );
         return;
     }
     *vis = Visibility::Hidden;
@@ -81,16 +87,22 @@ pub(in crate::maneuver) fn manage_node_markers(
     body_states: Res<FrameBodyStates>,
     origin: Res<RenderOrigin>,
     flight_plan_view: Res<FlightPlanView>,
-    focus: Res<CameraFocus>,
     scale: Res<WorldScale>,
-    camera_q: Query<&Transform, (With<ActiveCamera>, With<crate::camera::OrbitCamera>, Without<NodeMarkerDisc>)>,
+    camera_q: Query<
+        &Transform,
+        (
+            With<ActiveCamera>,
+            With<crate::camera::OrbitCamera>,
+            Without<NodeMarkerDisc>,
+        ),
+    >,
     mut markers: Query<(Entity, &NodeMarkerDisc, &mut Transform, &mut Visibility)>,
 ) {
-    let cam_dist = (focus.distance * scale.0) as f32;
-    let cam_rot = camera_q
-        .single()
-        .map(|t| t.rotation)
-        .unwrap_or(Quat::IDENTITY);
+    let Ok(cam_tf) = camera_q.single() else {
+        return;
+    };
+    let cam_rot = cam_tf.rotation;
+    let cam_pos = cam_tf.translation;
 
     let prediction = sim.as_ref().and_then(|s| s.simulation.prediction());
     let states = body_states.states.as_deref();
@@ -118,7 +130,11 @@ pub(in crate::maneuver) fn manage_node_markers(
                 &flight_plan_view,
             ) {
                 *vis = Visibility::Inherited;
-                *tf = overlay_marker_transform(world_pos, cam_rot, cam_dist * MARKER_RADIUS);
+                *tf = overlay_marker_transform(
+                    world_pos,
+                    cam_rot,
+                    screen_marker_radius(world_pos, cam_pos),
+                );
                 continue;
             }
         }
@@ -148,7 +164,7 @@ pub(in crate::maneuver) fn manage_node_markers(
             ..default()
         });
 
-        let world_pos = prediction
+        let (world_pos, visibility) = prediction
             .zip(states)
             .zip(sim_ref)
             .and_then(|((pred, states), sim)| {
@@ -163,12 +179,14 @@ pub(in crate::maneuver) fn manage_node_markers(
                     &flight_plan_view,
                 )
             })
-            .unwrap_or(Vec3::ZERO);
+            .map(|pos| (pos, Visibility::Inherited))
+            .unwrap_or((Vec3::ZERO, Visibility::Hidden));
 
         commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(mat),
-            overlay_marker_transform(world_pos, cam_rot, cam_dist * MARKER_RADIUS),
+            overlay_marker_transform(world_pos, cam_rot, screen_marker_radius(world_pos, cam_pos)),
+            visibility,
             NodeMarkerDisc { node_id: node.id },
             HideInPhotoMode,
             HideInShipView,

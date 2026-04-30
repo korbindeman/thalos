@@ -217,12 +217,10 @@ impl Stage for MareFlood {
                 // embayment field (low freq) and a detail edge field
                 // (high freq). Output range ≈ [-1, 1].
                 let boundary_fbm_lo = SsFbm::new(ep_seed, 0.55, 4, 2.0);
-                let boundary_fbm_hi = SsFbm::new(ep_seed.wrapping_add(0x9E37_79B9u32 as i32), 0.5, 3, 2.0);
-                let boundary_warp = GradientWarp::new(
-                    ep_seed.wrapping_add(0x517C_C1B7u32 as i32),
-                    0.02,
-                    warp_freq,
-                );
+                let boundary_fbm_hi =
+                    SsFbm::new(ep_seed.wrapping_add(0x9E37_79B9u32 as i32), 0.5, 3, 2.0);
+                let boundary_warp =
+                    GradientWarp::new(ep_seed.wrapping_add(0x517C_C1B7u32 as i32), 0.02, warp_freq);
 
                 // Surface relief: small-amplitude simplex texture kept on
                 // the mare surface so it isn't perfectly flat.

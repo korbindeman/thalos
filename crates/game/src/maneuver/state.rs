@@ -23,6 +23,11 @@ pub struct ManeuverPlan {
     pub nodes: Vec<GameNode>,
     pub dirty: bool,
     next_id: u64,
+    /// Bevy elapsed-seconds reading at the most recent slide-driven
+    /// `dirty = true` flip. The slide handler reads this to throttle the
+    /// (expensive) flight-plan rebuild during a drag — see
+    /// [`super::interaction::handle_maneuver_events`].
+    pub(super) last_slide_apply_secs: f64,
 }
 
 impl ManeuverPlan {
@@ -51,6 +56,25 @@ pub struct SelectedNode {
 /// Recomputed each frame from the prediction.
 #[derive(Resource, Default)]
 pub(super) struct SelectedNodeView {
+    pub world_pos: Option<Vec3>,
+    pub frame: Option<Mat3>,
+}
+
+/// Live world position and orbital frame for a node currently being slid.
+///
+/// During a slide, [`ManeuverPlan::last_slide_apply_secs`] throttles flight-
+/// plan rebuilds to ~10 Hz, so the cached prediction can be up to 100 ms
+/// behind `node.time` for the dragged node. Sampling that prediction at the
+/// fresh `node.time` may land on the wrong leg (e.g. the post-burn coast
+/// instead of the unperturbed baseline) and snap the visual marker off the
+/// orbit the user is dragging along.
+///
+/// [`super::interaction::maneuver_input`] writes this resource directly from
+/// the chosen [`super::helpers::ClosestTrailPoint`], bypassing the stale
+/// prediction; [`super::update_selected_node_view`] then prefers it whenever
+/// [`InteractionMode::SlidingNode`] is active.
+#[derive(Resource, Default)]
+pub(super) struct SlidePreview {
     pub world_pos: Option<Vec3>,
     pub frame: Option<Mat3>,
 }

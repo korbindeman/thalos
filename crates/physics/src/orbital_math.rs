@@ -8,6 +8,19 @@ use glam::DVec3;
 
 use crate::types::{OrbitalElements, StateVector, orbital_elements_to_cartesian};
 
+/// Small eccentricity used for authored near-circular parking orbits.
+///
+/// The spawn/debug orbit is initialized at periapsis with a tiny speed boost
+/// over circular velocity so apsis markers remain well-defined without making
+/// the orbit visibly eccentric. At Thalos's 200 km parking orbit this yields
+/// an apoapsis about 5 km higher than periapsis.
+pub const NEAR_CIRCULAR_PARKING_ECCENTRICITY: f64 = 7.5e-4;
+
+/// Tangential periapsis speed for a near-circular parking orbit.
+pub fn near_circular_parking_speed(mu: f64, periapsis_radius_m: f64) -> f64 {
+    (mu / periapsis_radius_m).sqrt() * (1.0 + NEAR_CIRCULAR_PARKING_ECCENTRICITY).sqrt()
+}
+
 /// Osculating Keplerian elements of a state vector relative to a central
 /// body with gravitational parameter `mu`.
 ///
@@ -386,19 +399,15 @@ mod tests {
         };
         let sv = orbital_elements_to_cartesian(&els, SUN_GM);
         let back = cartesian_to_elements(sv, SUN_GM).unwrap();
-        assert!(approx_eq(back.semi_major_axis_m, els.semi_major_axis_m, 1e3));
+        assert!(approx_eq(
+            back.semi_major_axis_m,
+            els.semi_major_axis_m,
+            1e3
+        ));
         assert!(approx_eq(back.eccentricity, 0.4, 1e-6));
         assert!(approx_eq(back.inclination_rad, 0.2, 1e-6));
-        assert!(approx_eq(
-            back.periapsis_m,
-            1.5e11 * (1.0 - 0.4),
-            1e3
-        ));
-        assert!(approx_eq(
-            back.apoapsis_m,
-            1.5e11 * (1.0 + 0.4),
-            1e3
-        ));
+        assert!(approx_eq(back.periapsis_m, 1.5e11 * (1.0 - 0.4), 1e3));
+        assert!(approx_eq(back.apoapsis_m, 1.5e11 * (1.0 + 0.4), 1e3));
     }
 
     #[test]
@@ -416,6 +425,21 @@ mod tests {
         assert!(el.semi_major_axis_m < 0.0);
         assert!(el.periapsis_m > 0.0);
         assert!(el.apoapsis_m.is_infinite());
+    }
+
+    #[test]
+    fn near_circular_parking_speed_keeps_apoapsis_close() {
+        let periapsis = 3_386_000.0;
+        let speed = near_circular_parking_speed(EARTH_GM, periapsis);
+        let state = StateVector {
+            position: DVec3::new(periapsis, 0.0, 0.0),
+            velocity: DVec3::new(0.0, 0.0, speed),
+        };
+        let el = cartesian_to_elements(state, EARTH_GM).unwrap();
+
+        assert!((el.eccentricity - NEAR_CIRCULAR_PARKING_ECCENTRICITY).abs() < 1e-12);
+        assert!((el.periapsis_m - periapsis).abs() < 1e-6);
+        assert!((el.apoapsis_m - periapsis) < 5_200.0);
     }
 
     #[test]
@@ -494,7 +518,10 @@ mod tests {
         assert!(rel_err < 1e-8, "apoapsis distance: {r_end}, expected {ra}");
         // At apoapsis the radial velocity is zero — v is perpendicular to r.
         let radial = end.velocity.dot(end.position.normalize());
-        assert!(radial.abs() / vp < 1e-8, "radial velocity at apoapsis: {radial}");
+        assert!(
+            radial.abs() / vp < 1e-8,
+            "radial velocity at apoapsis: {radial}"
+        );
     }
 
     #[test]
@@ -511,7 +538,10 @@ mod tests {
         let l1 = ang_mom(end);
 
         assert!((e1 - e0).abs() / e0.abs() < 1e-10, "energy drift");
-        assert!((l1 - l0).length() / l0.length() < 1e-10, "angular momentum drift");
+        assert!(
+            (l1 - l0).length() / l0.length() < 1e-10,
+            "angular momentum drift"
+        );
     }
 
     #[test]
@@ -626,12 +656,13 @@ mod tests {
             let mut prev_angle = 0.0_f64;
             for i in 1..=8 {
                 state = propagate_kepler(state, EARTH_GM, dt);
-                let expected_nu = (direction_sign
-                    * (i as f64)
-                    * dt
-                    * (EARTH_GM / r.powi(3)).sqrt())
-                    .rem_euclid(std::f64::consts::TAU);
-                let actual_nu = state.position.z.atan2(state.position.x)
+                let expected_nu =
+                    (direction_sign * (i as f64) * dt * (EARTH_GM / r.powi(3)).sqrt())
+                        .rem_euclid(std::f64::consts::TAU);
+                let actual_nu = state
+                    .position
+                    .z
+                    .atan2(state.position.x)
                     .rem_euclid(std::f64::consts::TAU);
                 let err = {
                     let raw = (actual_nu - expected_nu).abs();

@@ -257,10 +257,7 @@ impl AtmosphereBlock {
     /// "skip this layer entirely." The `cloud_dynamics.y` (sim time)
     /// field is left at zero here; `update_planet_light_dirs` writes
     /// the current sim time every frame.
-    pub fn from_terrestrial(
-        atmos: &TerrestrialAtmosphere,
-        meters_per_render_unit: f32,
-    ) -> Self {
+    pub fn from_terrestrial(atmos: &TerrestrialAtmosphere, meters_per_render_unit: f32) -> Self {
         let mut out = Self::default();
         if let Some(rim) = &atmos.rim_halo {
             out.rim_color_intensity =
@@ -327,9 +324,10 @@ impl AtmosphereBlock {
     }
 }
 
-// Bind group layout (group 3, planet material). This is the contract both
-// the shader and `bake_from_body_data` must match. Phase-2 agents E + F
-// both consume it.
+// Bind group layout (group 3, planet material). `PlanetMaterial` and
+// `PlanetHaloMaterial` intentionally share this exact layout; only the
+// pipeline shader def / depth-write state differs. This is the contract both
+// the shader and `bake_from_body_data` must match.
 //
 // | Binding | Kind             | WGSL type                 | Source             |
 // |---------|------------------|---------------------------|--------------------|
@@ -418,15 +416,91 @@ impl Material for PlanetMaterial {
         "shaders/planet_impostor.wgsl".into()
     }
 
-    // Premultiplied because the fragment shader's miss path outputs
-    // `(rim.contribution, rim.opacity)` where `contribution = color *
-    // strength` and `opacity = strength`, i.e. the RGB is already
-    // premultiplied by alpha. With Opaque, the small dim premultiplied
-    // RGB overwrites whatever is behind (e.g. a gas giant) with
-    // near-black, producing a visible dark band at the shell. Premult
-    // compositing gives `src.rgb + dst * (1 - src.a)` — physically
-    // correct in-scatter over the background. Hit-path fragments output
-    // `(lit, 1.0)` which resolves to just `lit`, unchanged.
+    // Body pass only: the shader discards all miss/rim-halo fragments
+    // when `HALO_PASS` is absent. Surface hits output `alpha = 1`, so
+    // the material belongs in the opaque pass and should write depth
+    // like any other solid body.
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Opaque
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        // Kept explicit because this material used to be a premultiplied
+        // body+halo pass. The body pass must always populate depth so
+        // later transparent items (stars, galaxies, rings, halo pass)
+        // test correctly against the planet surface.
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = true;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct PlanetHaloMaterial {
+    #[uniform(0)]
+    pub params: PlanetParams,
+    #[texture(1, dimension = "cube")]
+    #[sampler(2)]
+    pub albedo: Handle<Image>,
+    #[texture(3, dimension = "cube")]
+    #[sampler(4)]
+    pub height: Handle<Image>,
+    #[uniform(5)]
+    pub detail: PlanetDetailParams,
+    #[texture(6, dimension = "2d_array", sample_type = "u_int")]
+    #[sampler(7, sampler_type = "non_filtering")]
+    pub material_cube: Handle<Image>,
+    #[storage(8, read_only)]
+    pub craters: Handle<ShaderStorageBuffer>,
+    #[storage(9, read_only)]
+    pub cell_index: Handle<ShaderStorageBuffer>,
+    #[storage(10, read_only)]
+    pub feature_ids: Handle<ShaderStorageBuffer>,
+    #[storage(11, read_only)]
+    pub materials: Handle<ShaderStorageBuffer>,
+    #[uniform(12)]
+    pub atmosphere: AtmosphereBlock,
+    #[texture(13, dimension = "cube")]
+    #[sampler(14)]
+    pub cloud_cover: Handle<Image>,
+}
+
+impl From<&PlanetMaterial> for PlanetHaloMaterial {
+    fn from(material: &PlanetMaterial) -> Self {
+        Self {
+            params: material.params.clone(),
+            albedo: material.albedo.clone(),
+            height: material.height.clone(),
+            detail: material.detail.clone(),
+            material_cube: material.material_cube.clone(),
+            craters: material.craters.clone(),
+            cell_index: material.cell_index.clone(),
+            feature_ids: material.feature_ids.clone(),
+            materials: material.materials.clone(),
+            atmosphere: material.atmosphere,
+            cloud_cover: material.cloud_cover.clone(),
+        }
+    }
+}
+
+impl Material for PlanetHaloMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/planet_impostor.wgsl".into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        "shaders/planet_impostor.wgsl".into()
+    }
+
+    // The halo shader returns premultiplied atmospheric in-scatter over
+    // whatever passed the depth test behind the rim.
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Premultiplied
     }
@@ -438,19 +512,14 @@ impl Material for PlanetMaterial {
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
-        // Bevy disables depth-write for Premultiplied by default (a
-        // transparent-phase standard). Re-enable it: the hit path outputs
-        // `α=1` and must occlude anything drawn later in the transparent
-        // phase (stars/galaxies are `AlphaMode::Add`, depth-test but don't
-        // write), otherwise the celestial backdrop leaks through the
-        // planet's silhouette. The halo miss-path pixels also write their
-        // closest-approach depth — a thin ring-shaped region where stars
-        // directly behind the shell get depth-culled instead of shining
-        // through. Acceptable because the shell is narrow (~5 % of radius)
-        // and star-through-atmosphere is a subtle cue anyway; revisit with
-        // a split halo-entity pass if it becomes visually objectionable.
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.push("HALO_PASS".into());
+        }
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = true;
+            // The rim must depth-test against opaque foreground objects,
+            // but it must not write depth: stars and galaxies draw at the
+            // reverse-Z far plane and should remain visible behind the halo.
+            depth.depth_write_enabled = false;
         }
         Ok(())
     }
@@ -460,3 +529,6 @@ impl Material for PlanetMaterial {
 /// can find and mutate the material without traversing children.
 #[derive(Component)]
 pub struct PlanetMaterialHandle(pub Handle<PlanetMaterial>);
+
+#[derive(Component)]
+pub struct PlanetHaloMaterialHandle(pub Handle<PlanetHaloMaterial>);

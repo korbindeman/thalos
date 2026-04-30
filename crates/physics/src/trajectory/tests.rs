@@ -114,7 +114,7 @@ fn make_single_star_system() -> SolarSystemDefinition {
         generator: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
-            rings: None,
+        rings: None,
     };
 
     let mut name_to_id = HashMap::new();
@@ -152,7 +152,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
         generator: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
-            rings: None,
+        rings: None,
     };
 
     let thalos_mass = 1.378e24;
@@ -180,7 +180,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
         generator: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
-            rings: None,
+        rings: None,
     };
 
     (sun, thalos, sun_mass)
@@ -322,7 +322,8 @@ fn burn_happens_at_node_position_not_ship_start() {
     assert!(
         cos_expected > 0.95,
         "burn should start at node position (+Z dir), got offset direction {:?} cos_to_+Z={}",
-        burn_start_offset, cos_expected,
+        burn_start_offset,
+        cos_expected,
     );
     assert!(
         cos_start < 0.2,
@@ -679,7 +680,7 @@ fn make_thalos_mira_system() -> SolarSystemDefinition {
         generator: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
-            rings: None,
+        rings: None,
     };
 
     let mut name_to_id = HashMap::new();
@@ -924,8 +925,7 @@ fn game_default_state_produces_stable_orbit() {
         Ok(s) => s,
         Err(_) => return, // loader unavailable in CI or path mismatch — skip
     };
-    let ephemeris: Arc<dyn BodyStateProvider> =
-        Arc::new(PatchedConics::new(&system, 3.156e9));
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 3.156e9));
 
     let homeworld_id = system.name_to_id["Thalos"];
     let homeworld_state = ephemeris.query_body(homeworld_id, 0.0);
@@ -946,21 +946,29 @@ fn game_default_state_produces_stable_orbit() {
     );
 
     // One leg, one segment, one full revolution.
-    assert_eq!(prediction.legs.len(), 1, "expected single leg (no maneuvers)");
+    assert_eq!(
+        prediction.legs.len(),
+        1,
+        "expected single leg (no maneuvers)"
+    );
     let leg = &prediction.legs[0];
     assert!(leg.burn_segment.is_none(), "no burn on an unmanoeuvred leg");
     assert!(
         leg.coast_segment.is_stable_orbit,
-        "ship's 200 km circular orbit must close as a stable orbit"
+        "ship's 200 km near-circular orbit must close as a stable orbit"
     );
     // Every sample must anchor to Thalos — the ship never exits its SOI.
     let samples = &leg.coast_segment.samples;
-    assert!(samples.len() >= 32, "expected dense sampling; got {}", samples.len());
+    assert!(
+        samples.len() >= 32,
+        "expected dense sampling; got {}",
+        samples.len()
+    );
     for s in samples {
         assert_eq!(s.anchor_body, homeworld_id, "sample escaped Thalos SOI");
     }
-    // Relative position to Thalos (current) should have near-constant radius
-    // (circular orbit). Check min vs max don't differ by more than 1%.
+    // Spawn orbit is intentionally e ≈ 0.01 (so apsis markers don't degenerate),
+    // giving (r_a - r_p)/r_p ≈ 2e ≈ 2%. 3% leaves headroom for sample placement.
     let thalos_now = ephemeris.query_body(homeworld_id, 0.0);
     let radii: Vec<f64> = samples
         .iter()
@@ -972,8 +980,8 @@ fn game_default_state_produces_stable_orbit() {
     let r_min = radii.iter().cloned().fold(f64::INFINITY, f64::min);
     let r_max = radii.iter().cloned().fold(0.0, f64::max);
     assert!(
-        (r_max - r_min) / r_min < 1e-3,
-        "circular orbit radii drift too much: min={r_min} max={r_max}"
+        (r_max - r_min) / r_min < 3e-2,
+        "near-circular orbit radii drift too much: min={r_min} max={r_max}"
     );
     let _ = thalos_now;
 }
@@ -1022,4 +1030,214 @@ fn closest_approach_scan_excludes_encountered_bodies() {
         );
         assert!(ca.distance > 0.0);
     }
+}
+
+#[test]
+fn pre_burn_state_at_node_is_invariant_to_delta_v() {
+    // The maneuver-marker renderer queries `pre_burn_state_at(node.time)` to
+    // anchor the marker to the unperturbed orbit. As the user drags a Δv
+    // handle the burn duration grows, but the position at `node.time` on the
+    // pre-burn trajectory must not move — otherwise the marker visually
+    // slides off the orbit.
+    let system = make_thalos_like_system();
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_gm = system.bodies[1].gm;
+    let orbit_radius = system.bodies[1].radius_m + 200_000.0;
+    let circular_speed = (thalos_gm / orbit_radius).sqrt();
+    let orbital_period = std::f64::consts::TAU * (orbit_radius.powi(3) / thalos_gm).sqrt();
+
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(orbit_radius, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, circular_speed),
+    };
+
+    let node_time = orbital_period * 0.25;
+
+    // Low-thrust ship so the burn duration grows visibly with Δv.
+    let low_thrust_accel = 0.5; // m/s² — burns of order tens of seconds.
+
+    let make_prediction = |dv_prograde: f64| -> FlightPlan {
+        let mut maneuvers = ManeuverSequence::new();
+        maneuvers.add(ManeuverNode {
+            id: None,
+            time: node_time,
+            delta_v: DVec3::new(dv_prograde, 0.0, 0.0),
+            reference_body: 1,
+        });
+        propagate_trajectory(
+            ship_state,
+            0.0,
+            &maneuvers,
+            Arc::clone(&ephemeris),
+            &system.bodies,
+            &PredictionConfig::default(),
+            low_thrust_accel,
+        )
+    };
+
+    let small = make_prediction(50.0);
+    let large = make_prediction(400.0);
+
+    // Confirm the burns actually have non-trivial duration so the test is
+    // exercising the finite-burn case, not the degenerate impulsive one.
+    let burn_dur = |fp: &FlightPlan| -> f64 {
+        let burn = fp.legs[1].burn_segment.as_ref().unwrap();
+        let (s, e) = (burn.start_time().unwrap(), burn.end_time().unwrap());
+        e - s
+    };
+    assert!(burn_dur(&large) > burn_dur(&small) + 30.0);
+
+    let small_sample = small
+        .pre_burn_state_at(node_time, ephemeris.as_ref(), &system.bodies)
+        .expect("pre-burn state for small Δv");
+    let large_sample = large
+        .pre_burn_state_at(node_time, ephemeris.as_ref(), &system.bodies)
+        .expect("pre-burn state for large Δv");
+
+    // Position and velocity at the node must be identical regardless of Δv:
+    // both are extrapolations of the same unperturbed orbit.
+    let dpos = (small_sample.position - large_sample.position).length();
+    let dvel = (small_sample.velocity - large_sample.velocity).length();
+    assert!(
+        dpos < 1.0,
+        "pre-burn position must be invariant to Δv (drift = {dpos} m)"
+    );
+    assert!(
+        dvel < 1.0e-3,
+        "pre-burn velocity must be invariant to Δv (drift = {dvel} m/s)"
+    );
+
+    // And the position must be on the unperturbed orbit at the expected
+    // quarter-period location (~+Z direction relative to Thalos), not the
+    // burn-midpoint position which would be displaced toward +X by the
+    // accumulated thrust.
+    let thalos_at_node = ephemeris.query_body(1, node_time).position;
+    let offset = (small_sample.position - thalos_at_node).normalize();
+    let cos_to_z = offset.dot(DVec3::new(0.0, 0.0, 1.0));
+    assert!(
+        cos_to_z > 0.99,
+        "pre-burn position must sit on the original circular orbit (cos(+Z) = {cos_to_z})"
+    );
+
+    // Sanity: the partially-thrusted state at node midpoint *does* differ
+    // (otherwise we wouldn't have had a bug). Confirm the non-trivial gap.
+    let burn_mid_state = large.state_at_via_trajectory(node_time);
+    let mid_offset = burn_mid_state.position - thalos_at_node;
+    let pre_burn_offset = small_sample.position - thalos_at_node;
+    let drift = (mid_offset - pre_burn_offset).length();
+    assert!(
+        drift > 1.0,
+        "burn-midpoint state should differ noticeably from pre-burn state ({drift} m)"
+    );
+}
+
+// Local helper to call the `Trajectory` trait's `state_at` without bringing
+// the trait into scope at the test level. (Tests above use named segments
+// and don't need this — it's just for the contrast assertion above.)
+impl FlightPlan {
+    fn state_at_via_trajectory(&self, time: f64) -> StateVector {
+        <Self as super::Trajectory>::state_at(self, time)
+            .expect("state at burn midpoint must exist")
+    }
+}
+
+#[test]
+fn finite_burn_starts_centered_on_node_time() {
+    // Burns are documented as centered on the node time:
+    // `[node.time − d/2, node.time + d/2]`. A regression earlier had the
+    // leg-to-leg state/time handoff desync — the next leg started at
+    // `node.time` with a state from `node.time − d/2`, which both shifted
+    // the burn window to `[node.time, node.time + d]` and contaminated
+    // every downstream sample's `ref_pos`. This test pins the structural
+    // contract directly: leg N's coast end and leg N+1's burn start
+    // agree in time and position.
+    let system = make_thalos_like_system();
+    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+
+    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_gm = system.bodies[1].gm;
+    let orbit_radius = system.bodies[1].radius_m + 200_000.0;
+    let circular_speed = (thalos_gm / orbit_radius).sqrt();
+    let orbital_period = std::f64::consts::TAU * (orbit_radius.powi(3) / thalos_gm).sqrt();
+
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(orbit_radius, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, circular_speed),
+    };
+
+    let node_time = orbital_period * 0.25;
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        id: None,
+        time: node_time,
+        delta_v: DVec3::new(60.0, 0.0, 0.0),
+        reference_body: 1,
+    });
+
+    // TEST_THRUST_ACCEL ≈ 1 m/s² → burn duration ≈ Δv seconds. A 60 s burn
+    // gives `d/2 = 30 s` of body heliocentric drift to amplify any
+    // state/time desync above the assertion thresholds without pushing the
+    // burn duration past the orbital window.
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &maneuvers,
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig::default(),
+        TEST_THRUST_ACCEL,
+    );
+
+    let leg_0 = &prediction.legs[0];
+    let leg_1 = &prediction.legs[1];
+    let burn = leg_1
+        .burn_segment
+        .as_ref()
+        .expect("leg 1 must have a burn for a non-zero Δv node");
+    let burn_first = *burn.samples.first().expect("burn has samples");
+    let burn_last = *burn.samples.last().expect("burn has samples");
+    let coast_last = leg_0
+        .coast_segment
+        .samples
+        .last()
+        .copied()
+        .expect("leg 0 coast has samples");
+
+    // Burn duration = end − start of the burn sub-segment.
+    let burn_duration_s = burn_last.time - burn_first.time;
+    assert!(
+        burn_duration_s > 1.0,
+        "test fixture must produce a non-trivial finite burn (got {burn_duration_s} s)"
+    );
+
+    // Centered-burn invariant: burn starts at node.time − d/2.
+    let expected_start = node_time - burn_duration_s / 2.0;
+    assert!(
+        (burn_first.time - expected_start).abs() < 1e-3,
+        "burn must start at node.time − d/2 (expected {expected_start}, got {})",
+        burn_first.time
+    );
+    let expected_end = node_time + burn_duration_s / 2.0;
+    assert!(
+        (burn_last.time - expected_end).abs() < 1e-3,
+        "burn must end at node.time + d/2 (expected {expected_end}, got {})",
+        burn_last.time
+    );
+
+    // State continuity: the burn's first sample must agree with the
+    // pre-burn coast's last sample in *time* and *position*. A floating-
+    // point gap of millimeters is fine; meters means a desync.
+    assert!(
+        (burn_first.time - coast_last.time).abs() < 1e-3,
+        "burn start time must equal coast end time (coast {}, burn {})",
+        coast_last.time,
+        burn_first.time
+    );
+    let pos_gap = (burn_first.position - coast_last.position).length();
+    assert!(
+        pos_gap < 1.0,
+        "burn must start at coast's last position (gap = {pos_gap} m)"
+    );
 }

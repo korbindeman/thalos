@@ -199,9 +199,7 @@ impl Stage for TectonicSkeleton {
         //    first N_active as ActiveMargin, next N_rift as
         //    RiftScar, rest as Suture. Shuffle deterministically.
         let mut all_pairs: Vec<(u32, u32)> = boundary_pairs.iter().copied().collect();
-        all_pairs.sort_by_key(|&(a, b)| {
-            splitmix64(((a as u64) << 32 | b as u64) ^ seed)
-        });
+        all_pairs.sort_by_key(|&(a, b)| splitmix64(((a as u64) << 32 | b as u64) ^ seed));
 
         let mut boundary_class: HashMap<(u32, u32), BoundaryClass> = HashMap::new();
         let mut idx = 0usize;
@@ -364,15 +362,15 @@ impl Stage for TectonicSkeleton {
                 let next = if step == 0 {
                     candidates[(rng.next_u64() as usize) % candidates.len()]
                 } else {
-                    let dir = (sphere.vertices[current] - sphere.vertices[prev])
-                        .normalize_or_zero();
+                    let dir =
+                        (sphere.vertices[current] - sphere.vertices[prev]).normalize_or_zero();
                     *candidates
                         .iter()
                         .max_by(|&&a, &&b| {
-                            let da = (sphere.vertices[a as usize] - sphere.vertices[current])
-                                .dot(dir);
-                            let db = (sphere.vertices[b as usize] - sphere.vertices[current])
-                                .dot(dir);
+                            let da =
+                                (sphere.vertices[a as usize] - sphere.vertices[current]).dot(dir);
+                            let db =
+                                (sphere.vertices[b as usize] - sphere.vertices[current]).dot(dir);
                             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                         })
                         .unwrap()
@@ -430,8 +428,8 @@ fn nearest_centroid_warped(
         2.0,
     );
     let amp = params.plate_warp_amplitude;
-    let warped = Vec3::new(dir.x + amp * wx, dir.y + amp * wy, dir.z + amp * wz)
-        .normalize_or_zero();
+    let warped =
+        Vec3::new(dir.x + amp * wx, dir.y + amp * wy, dir.z + amp * wz).normalize_or_zero();
 
     let mut best = 0u32;
     let mut best_dot = f32::MIN;

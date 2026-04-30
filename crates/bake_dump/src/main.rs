@@ -122,25 +122,29 @@ fn main() {
         .unwrap_or_else(|e| panic!("reading {:?}: {e}", args.solar_system));
     let system = load_solar_system(&source).expect("parsing solar_system.ron");
 
-    let targets: Vec<&thalos_physics::types::BodyDefinition> = if args.body_arg.eq_ignore_ascii_case("all") {
-        let mut v: Vec<_> = system
-            .bodies
-            .iter()
-            .filter(|b| b.generator.is_some())
-            .collect();
-        if v.is_empty() {
-            panic!("no bodies in '{}' have a generator block", args.solar_system.display());
-        }
-        v.sort_by(|a, b| a.name.cmp(&b.name));
-        v
-    } else {
-        let body = system
-            .bodies
-            .iter()
-            .find(|b| b.name.eq_ignore_ascii_case(&args.body_arg))
-            .unwrap_or_else(|| panic!("body '{}' not found", args.body_arg));
-        vec![body]
-    };
+    let targets: Vec<&thalos_physics::types::BodyDefinition> =
+        if args.body_arg.eq_ignore_ascii_case("all") {
+            let mut v: Vec<_> = system
+                .bodies
+                .iter()
+                .filter(|b| b.generator.is_some())
+                .collect();
+            if v.is_empty() {
+                panic!(
+                    "no bodies in '{}' have a generator block",
+                    args.solar_system.display()
+                );
+            }
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        } else {
+            let body = system
+                .bodies
+                .iter()
+                .find(|b| b.name.eq_ignore_ascii_case(&args.body_arg))
+                .unwrap_or_else(|| panic!("body '{}' not found", args.body_arg));
+            vec![body]
+        };
 
     let is_all = targets.len() > 1;
     for body in targets {
@@ -159,7 +163,13 @@ fn main() {
             (None, _) => PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name),
         };
 
-        bake_one(body, generator, args.up_to_stage, &out_dir, args.equirect_width);
+        bake_one(
+            body,
+            generator,
+            args.up_to_stage,
+            &out_dir,
+            args.equirect_width,
+        );
     }
 }
 
@@ -320,19 +330,13 @@ fn dump_info(body: &BodyData, stage_names: &[String], out: &Path) {
         }
     }
     if let Some(dg) = body.drainage_graph.as_ref() {
-        let max_accum = dg
-            .accumulation_m2
-            .iter()
-            .cloned()
-            .fold(0.0f32, f32::max);
+        let max_accum = dg.accumulation_m2.iter().cloned().fold(0.0f32, f32::max);
         s.push_str(&format!("drainage_max_accumulation_m2: {max_accum:.3e}\n"));
     }
     if let Some(sed) = body.vertex_sediment_m.as_ref() {
         let max_s = sed.iter().cloned().fold(0.0f32, f32::max);
         let total_s: f32 = sed.iter().sum();
-        s.push_str(&format!(
-            "sediment_m: peak={max_s:.1} total={total_s:.1}\n"
-        ));
+        s.push_str(&format!("sediment_m: peak={max_s:.1} total={total_s:.1}\n"));
         // Percentile thresholds — useful when tuning Stage 5's
         // floodplain sediment cutoff (what's the 80th percentile
         // sediment depth? etc.)
@@ -425,7 +429,8 @@ fn write_equirect<F: Fn(Vec3) -> [u8; 3] + Sync>(path: PathBuf, width: u32, shad
             img.put_pixel(x, y, Rgb([r, g, b]));
         }
     }
-    img.save(&path).unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
+    img.save(&path)
+        .unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
 }
 
 /// Cube-cross layout:
@@ -462,7 +467,8 @@ fn write_cross<F: Fn(Vec3) -> [u8; 3]>(path: PathBuf, face_res: u32, shade: F) {
         }
     }
 
-    img.save(&path).unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
+    img.save(&path)
+        .unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
 }
 
 /// Deterministic per-ID color for material/biome masks. ID 0 renders
@@ -472,6 +478,9 @@ fn hash_color(id: u32) -> [u8; 3] {
         return [60, 60, 60];
     }
     let h = thalos_terrain_gen::seeding::splitmix64(id as u64 ^ 0xD3ADBEEF);
-    [(h & 0xFF) as u8, ((h >> 8) & 0xFF) as u8, ((h >> 16) & 0xFF) as u8]
+    [
+        (h & 0xFF) as u8,
+        ((h >> 8) & 0xFF) as u8,
+        ((h >> 16) & 0xFF) as u8,
+    ]
 }
-

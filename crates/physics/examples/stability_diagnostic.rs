@@ -11,8 +11,8 @@ use thalos_physics::parsing::load_solar_system;
 use thalos_physics::types::{AU_TO_METERS, BodyDefinition, BodyKind};
 
 fn main() {
-    let ron_src = std::fs::read_to_string("../../assets/solar_system.ron")
-        .expect("run from workspace root");
+    let ron_src =
+        std::fs::read_to_string("../../assets/solar_system.ron").expect("run from workspace root");
     let system = load_solar_system(&ron_src).unwrap();
 
     let star = system

@@ -187,7 +187,10 @@ pub fn populate(universe: &mut Universe, params: &GalaxyGenParams) {
 
         universe.galaxies.push(Galaxy {
             position,
-            spectrum: Spectrum::Blackbody { temperature_k, scale: 1.0 },
+            spectrum: Spectrum::Blackbody {
+                temperature_k,
+                scale: 1.0,
+            },
             apparent_magnitude: apparent,
             effective_radius_rad,
             sersic_n,

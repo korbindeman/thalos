@@ -250,8 +250,7 @@ impl KeplerianPropagator {
                     && el.apoapsis_m < soi_radius
                     && el.periapsis_m > body_radius
                 {
-                    let period =
-                        std::f64::consts::TAU * (el.semi_major_axis_m.powi(3) / mu).sqrt();
+                    let period = std::f64::consts::TAU * (el.semi_major_axis_m.powi(3) / mu).sqrt();
                     let period_end = time + period;
                     if period_end < target_time {
                         target_time = period_end;
@@ -354,8 +353,8 @@ impl KeplerianPropagator {
                 .length()
                 .max((cur_state.velocity - cur_body.velocity).length());
             let path = rel_speed * (t - prev_t);
-            let needs_subdivide = alt_change > MAX_ALT_CHANGE_RATIO * min_alt
-                || path > MAX_PATH_RATIO * min_alt;
+            let needs_subdivide =
+                alt_change > MAX_ALT_CHANGE_RATIO * min_alt || path > MAX_PATH_RATIO * min_alt;
             if needs_subdivide && (t - prev_t) > MIN_STEP_S {
                 let mid = 0.5 * (prev_t + t);
                 work.push(t);
@@ -397,7 +396,15 @@ impl KeplerianPropagator {
             }
             if xings.collision
                 && let Some(t_cross) = refine_crossing(
-                    prev_t, t, soi_body, body_radius, rel0, mu, time, soi_body, ephemeris,
+                    prev_t,
+                    t,
+                    soi_body,
+                    body_radius,
+                    rel0,
+                    mu,
+                    time,
+                    soi_body,
+                    ephemeris,
                 )
             {
                 let cross_state = eval_at(t_cross);
@@ -482,29 +489,26 @@ impl KeplerianPropagator {
         // Linear refinement of a crossing at fraction `frac` into the current
         // substep, via a shortened RK4 step from (cur_state, cur_time).
         // Sub-second accuracy is fine at typical burn substeps.
-        let refine_burn_crossing = |cur_state: StateVector,
-                                    cur_time: f64,
-                                    h: f64,
-                                    frac: f64|
-         -> (f64, StateVector) {
-            let t_cross = cur_time + frac * h;
-            let (cross_state, _) =
-                rk4_burn_step(cur_state, cur_time, frac * h, soi_body, mu, &burn, ephemeris);
-            (t_cross, cross_state)
-        };
+        let refine_burn_crossing =
+            |cur_state: StateVector, cur_time: f64, h: f64, frac: f64| -> (f64, StateVector) {
+                let t_cross = cur_time + frac * h;
+                let (cross_state, _) = rk4_burn_step(
+                    cur_state,
+                    cur_time,
+                    frac * h,
+                    soi_body,
+                    mu,
+                    &burn,
+                    ephemeris,
+                );
+                (t_cross, cross_state)
+            };
 
         while cur_time < target_time {
             let h = self.burn_substep_s.min(target_time - cur_time);
 
-            let (next_state, _) = rk4_burn_step(
-                cur_state,
-                cur_time,
-                h,
-                soi_body,
-                mu,
-                &burn,
-                ephemeris,
-            );
+            let (next_state, _) =
+                rk4_burn_step(cur_state, cur_time, h, soi_body, mu, &burn, ephemeris);
             let next_time = cur_time + h;
 
             let xings = detect_step_crossings(
@@ -554,14 +558,18 @@ impl KeplerianPropagator {
                     0.5
                 }
             };
-            let crossed_inward = |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
-                let d = (state.position - ephemeris.query_body(target_body, t).position).length();
-                d <= target_distance
-            };
-            let crossed_outward = |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
-                let d = (state.position - ephemeris.query_body(target_body, t).position).length();
-                d >= target_distance
-            };
+            let crossed_inward =
+                |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
+                    let d =
+                        (state.position - ephemeris.query_body(target_body, t).position).length();
+                    d <= target_distance
+                };
+            let crossed_outward =
+                |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
+                    let d =
+                        (state.position - ephemeris.query_body(target_body, t).position).length();
+                    d >= target_distance
+                };
 
             // Resolve crossings in the same `exit > collision > enter`
             // order as `coast_segment_impl`; see the comment there for the
@@ -649,14 +657,12 @@ fn rk4_burn_step(
         // segment is not a concern here.
         let thrust = if tt >= burn.start_time && tt <= burn.end_time {
             let rb = ref_at(tt);
-            let dir =
-                delta_v_to_world(burn.delta_v_local, vel, pos, rb.position, rb.velocity);
+            let dir = delta_v_to_world(burn.delta_v_local, vel, pos, rb.position, rb.velocity);
             // Linear mass model: thrust cuts off cleanly once propellant
             // exhausts (`mass <= dry_mass_kg`), so an over-budget burn
             // coasts under gravity alone for the rest of the window
             // instead of diverging.
-            let mass = burn.initial_mass_kg
-                - burn.mass_flow_kg_per_s * (tt - burn.start_time);
+            let mass = burn.initial_mass_kg - burn.mass_flow_kg_per_s * (tt - burn.start_time);
             if dir.length_squared() > 0.0 && mass > burn.dry_mass_kg {
                 let accel_mag = burn.thrust_n / mass;
                 dir.normalize() * accel_mag
@@ -818,12 +824,7 @@ fn bisect_signs(t_lo: f64, t_hi: f64, f: &impl Fn(f64) -> f64, f_lo: f64) -> f64
 
 /// Golden-section search on [t_lo, t_hi]. `seek_min = true` finds the
 /// minimum; `false` finds the maximum.
-fn golden_section_extremum(
-    t_lo: f64,
-    t_hi: f64,
-    f: &impl Fn(f64) -> f64,
-    seek_min: bool,
-) -> f64 {
+fn golden_section_extremum(t_lo: f64, t_hi: f64, f: &impl Fn(f64) -> f64, seek_min: bool) -> f64 {
     const INV_PHI: f64 = 0.618_033_988_749_894_9; // 1/φ
     let mut a = t_lo;
     let mut b = t_hi;
@@ -975,13 +976,7 @@ fn hermite_cubic(p0: DVec3, v0: DVec3, p1: DVec3, v1: DVec3, h: f64, s: f64) -> 
 /// upstream keep altitude change bounded per step. Endpoints aren't included
 /// because callers already have `|q0|²` and `|q1|²`.
 #[inline]
-fn swept_dist_sq_extremes(
-    q0: DVec3,
-    qv0: DVec3,
-    q1: DVec3,
-    qv1: DVec3,
-    h: f64,
-) -> (f64, f64) {
+fn swept_dist_sq_extremes(q0: DVec3, qv0: DVec3, q1: DVec3, qv1: DVec3, h: f64) -> (f64, f64) {
     let mut min_sq = f64::INFINITY;
     let mut max_sq = 0.0_f64;
     for s in [0.25_f64, 0.5, 0.75] {
@@ -1012,7 +1007,11 @@ impl SegmentResult {
         let parent = bodies[from].parent.unwrap_or(from);
         Self {
             samples,
-            terminator: SegmentTerminator::SoiExit { from, to: parent, time: t_cross },
+            terminator: SegmentTerminator::SoiExit {
+                from,
+                to: parent,
+                time: t_cross,
+            },
             end_state,
             end_time: t_cross,
             end_soi_body: parent,
@@ -1027,7 +1026,10 @@ impl SegmentResult {
     ) -> Self {
         Self {
             samples,
-            terminator: SegmentTerminator::Collision { body, time: t_cross },
+            terminator: SegmentTerminator::Collision {
+                body,
+                time: t_cross,
+            },
             end_state,
             end_time: t_cross,
             end_soi_body: body,
@@ -1042,7 +1044,10 @@ impl SegmentResult {
     ) -> Self {
         Self {
             samples,
-            terminator: SegmentTerminator::SoiEnter { body: child, time: t_cross },
+            terminator: SegmentTerminator::SoiEnter {
+                body: child,
+                time: t_cross,
+            },
             end_state,
             end_time: t_cross,
             end_soi_body: child,
@@ -1197,7 +1202,9 @@ fn inv_lerp(a: f64, b: f64, target: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::patched_conics::PatchedConics;
-    use crate::types::{BodyDefinition, BodyKind, OrbitalElements, ShipDefinition, SolarSystemDefinition};
+    use crate::types::{
+        BodyDefinition, BodyKind, OrbitalElements, ShipDefinition, SolarSystemDefinition,
+    };
     use std::collections::HashMap;
 
     const SUN_GM: f64 = 1.327_124_4e20;
@@ -1441,7 +1448,11 @@ mod tests {
 
         // Neighbouring-sample spacing near periapsis vs near apoapsis.
         let spacing_at = |i: usize| -> f64 {
-            let prev = if i == 0 { result.samples.len() - 1 } else { i - 1 };
+            let prev = if i == 0 {
+                result.samples.len() - 1
+            } else {
+                i - 1
+            };
             (result.samples[i].position - result.samples[prev].position).length()
         };
         let peri_spacing = spacing_at(peri_idx);
@@ -1490,7 +1501,10 @@ mod tests {
             ephemeris: &pc,
             bodies: &system.bodies,
         });
-        assert!(matches!(result.terminator, SegmentTerminator::BurnEnd { .. }));
+        assert!(matches!(
+            result.terminator,
+            SegmentTerminator::BurnEnd { .. }
+        ));
         // Speed increased — orbit raised.
         let v0 = (state.velocity - earth.velocity).length();
         let v1 = (result.end_state.velocity - earth.velocity).length();
@@ -1580,10 +1594,16 @@ mod tests {
             ephemeris: &pc,
             bodies: &system.bodies,
         });
-        assert!(matches!(result.terminator, SegmentTerminator::BurnEnd { .. }));
+        assert!(matches!(
+            result.terminator,
+            SegmentTerminator::BurnEnd { .. }
+        ));
         let achieved_dv = (result.end_state.velocity - state.velocity).length();
         let err = (achieved_dv - target_dv).abs() / target_dv;
-        assert!(err < 1e-3, "Δv error {err} (got {achieved_dv}, target {target_dv})");
+        assert!(
+            err < 1e-3,
+            "Δv error {err} (got {achieved_dv}, target {target_dv})"
+        );
     }
 
     /// Multi-period prediction with periapsis below the surface: forces the

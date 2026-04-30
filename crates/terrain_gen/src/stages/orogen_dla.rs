@@ -24,12 +24,12 @@ use glam::Vec3;
 use rayon::prelude::*;
 use serde::Deserialize;
 
+use super::util::for_face_texels_in_cap;
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::{CubemapFace, face_uv_to_dir};
 use crate::icosphere::Icosphere;
 use crate::seeding::{Rng, splitmix64};
 use crate::stage::Stage;
-use super::util::for_face_texels_in_cap;
 use crate::types::BoundaryKind;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,12 +138,14 @@ impl Stage for OrogenDla {
             .boundaries
             .iter()
             .filter(|b| b.kind == BoundaryKind::Convergent && b.cumulative_orogeny > 0.0)
-            .map(|b| (
-                b.plates.0,
-                b.plates.1,
-                b.cumulative_orogeny,
-                b.establishment_age_myr,
-            ))
+            .map(|b| {
+                (
+                    b.plates.0,
+                    b.plates.1,
+                    b.cumulative_orogeny,
+                    b.establishment_age_myr,
+                )
+            })
             .collect();
 
         let pair_lookup: HashMap<(u16, u16), usize> = convergent_pairs
@@ -198,8 +200,7 @@ impl Stage for OrogenDla {
             .map(|bidx| {
                 let (plate_a, plate_b, cumulative, age_myr) = convergent_pairs[bidx];
                 let boundary_seed = splitmix64(
-                    seed
-                        ^ (plate_a as u64).wrapping_mul(0xABCD_1234_5678_9ABC)
+                    seed ^ (plate_a as u64).wrapping_mul(0xABCD_1234_5678_9ABC)
                         ^ (plate_b as u64).wrapping_mul(0xDEAD_BEEF_CAFE_1234),
                 );
                 run_boundary_dla(
@@ -253,8 +254,8 @@ impl Stage for OrogenDla {
                 let Some(parent_idx) = result.parents[vidx] else {
                     continue; // seed
                 };
-                let parent_cell = result.cluster[parent_idx as usize]
-                    .expect("parent must be a cluster cell");
+                let parent_cell =
+                    result.cluster[parent_idx as usize].expect("parent must be a cluster cell");
                 seed_has_child[parent_idx as usize] = true;
 
                 let a_pos = ico.vertices[parent_idx as usize];
@@ -619,10 +620,7 @@ fn run_boundary_dla(
         }
     }
     for &vidx in &seeds {
-        cluster[vidx as usize] = Some(ClusterCell {
-            age_myr,
-            depth: 1,
-        });
+        cluster[vidx as usize] = Some(ClusterCell { age_myr, depth: 1 });
         attached_order.push(vidx);
     }
 

@@ -2,8 +2,8 @@ use bevy::picking::prelude::{DragEnd, DragStart, Pointer};
 use bevy::prelude::*;
 
 use super::super::state::{
-    ArrowHandle, ArrowHitbox, BASE_ARROW_LEN, HITBOX_CAPSULE_RADIUS, InteractionMode,
-    NodeSlideSphere, SLIDE_SPHERE_RADIUS, SelectedNodeView,
+    ArrowHandle, ArrowHitbox, BASE_ARROW_LEN, HITBOX_CAPSULE_RADIUS, InteractionMode, ManeuverPlan,
+    NodeSlideSphere, SLIDE_SPHERE_RADIUS, SelectedNodeView, SlidePreview,
 };
 use crate::camera::{ActiveCamera, CameraFocus};
 use crate::coords::WorldScale;
@@ -81,14 +81,25 @@ pub(in crate::maneuver) fn slide_sphere_drag_start(
 }
 
 /// Stop sliding when the drag ends.
+///
+/// Force `plan.dirty = true` on release so the trajectory rebuilds against the
+/// final node time even if `handle_maneuver_events` throttled the most recent
+/// slide samples (see `SLIDE_REBUILD_THROTTLE_S`). Clear the [`SlidePreview`]
+/// so the next frame's `update_selected_node_view` falls back to sampling the
+/// freshly-rebuilt prediction.
 pub(in crate::maneuver) fn slide_sphere_drag_end(
     trigger: On<Pointer<DragEnd>>,
     spheres: Query<(), With<NodeSlideSphere>>,
     mut mode: ResMut<InteractionMode>,
+    mut plan: ResMut<ManeuverPlan>,
+    mut slide_preview: ResMut<SlidePreview>,
 ) {
     if spheres.get(trigger.event().entity).is_ok() {
         if matches!(*mode, InteractionMode::SlidingNode) {
             *mode = InteractionMode::Idle;
+            plan.dirty = true;
+            slide_preview.world_pos = None;
+            slide_preview.frame = None;
         }
     }
 }

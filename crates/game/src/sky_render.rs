@@ -11,12 +11,10 @@
 //! so no per-frame CPU work is needed.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{
-    Indices, Mesh, MeshVertexBufferLayoutRef, PrimitiveTopology,
-};
+use bevy::camera::visibility::NoFrustumCulling;
+use bevy::mesh::{Indices, Mesh, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::prelude::*;
-use bevy::camera::visibility::NoFrustumCulling;
 use bevy::render::render_resource::{
     AsBindGroup, CompareFunction, RenderPipelineDescriptor, ShaderType,
     SpecializedMeshPipelineError,
@@ -128,11 +126,7 @@ impl Plugin for SkyRenderPlugin {
             .add_systems(Startup, spawn_stars)
             .add_systems(
                 Update,
-                (
-                    update_stars_brightness,
-                    update_galaxy_uniform,
-                )
-                    .in_set(crate::SimStage::Sync),
+                (update_stars_brightness, update_galaxy_uniform).in_set(crate::SimStage::Sync),
             );
     }
 }
@@ -178,8 +172,9 @@ fn spawn_stars(
     let universe = generate_default(&DefaultGenParams::default());
 
     let stars_mesh = meshes.add(build_star_mesh(&universe));
-    let stars_material =
-        stars_materials.add(StarsMaterial { params: StarsParams::default() });
+    let stars_material = stars_materials.add(StarsMaterial {
+        params: StarsParams::default(),
+    });
     commands.spawn((
         StarsMesh,
         Mesh3d(stars_mesh),
@@ -189,8 +184,9 @@ fn spawn_stars(
     ));
 
     let galaxy_mesh = meshes.add(build_galaxy_mesh(&universe));
-    let galaxy_material =
-        galaxy_materials.add(GalaxyMaterial { params: GalaxyParams::default() });
+    let galaxy_material = galaxy_materials.add(GalaxyMaterial {
+        params: GalaxyParams::default(),
+    });
     commands.spawn((
         GalaxyMesh,
         Mesh3d(galaxy_mesh),
@@ -304,7 +300,9 @@ fn update_galaxy_uniform(
 ) {
     let Ok(window) = windows.single() else { return };
     let height_px = window.resolution.physical_height() as f32;
-    let Ok(projection) = projections.single() else { return };
+    let Ok(projection) = projections.single() else {
+        return;
+    };
     let vertical_fov = match projection {
         Projection::Perspective(p) => p.fov,
         _ => return,
@@ -340,12 +338,7 @@ fn build_galaxy_mesh(universe: &Universe) -> Mesh {
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
 
-    const CORNERS: [[f32; 2]; 4] = [
-        [-1.0, -1.0],
-        [1.0, -1.0],
-        [1.0, 1.0],
-        [-1.0, 1.0],
-    ];
+    const CORNERS: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
 
     for (i, galaxy) in universe.galaxies.iter().enumerate() {
         let dir = galaxy.position.normalize();
@@ -390,12 +383,7 @@ fn build_star_mesh(universe: &Universe) -> Mesh {
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
 
-    const CORNERS: [[f32; 2]; 4] = [
-        [-1.0, -1.0],
-        [1.0, -1.0],
-        [1.0, 1.0],
-        [-1.0, 1.0],
-    ];
+    const CORNERS: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
 
     for (i, star) in universe.stars.iter().enumerate() {
         let dir = star.position.normalize();

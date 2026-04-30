@@ -10,10 +10,10 @@ use bevy::window::PresentMode;
 use thalos_physics::parsing::load_solar_system;
 use thalos_physics::types::{BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
-    GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams,
-    PlanetDetailParams, PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin,
-    RingLayers, RingMaterial, RingMaterialHandle, RingParams,
-    SceneLighting, StarLight, bake_from_body_data, blank_cloud_cover_image, build_ring_mesh,
+    GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, PlanetDetailParams,
+    PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin, RingLayers,
+    RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_from_body_data,
+    blank_cloud_cover_image, build_ring_mesh,
 };
 use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
 
@@ -481,11 +481,7 @@ fn spawn_preview(
                 emissive: LinearRgba::new(1.0, 0.95, 0.8, 1.0) * 5000.0,
                 ..default()
             });
-            commands.spawn((
-                Mesh3d(star_mesh),
-                MeshMaterial3d(star_mat),
-                ChildOf(parent),
-            ));
+            commands.spawn((Mesh3d(star_mesh), MeshMaterial3d(star_mat), ChildOf(parent)));
         }
     }
 
@@ -540,12 +536,10 @@ fn spawn_preview_planet(
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
     commands.insert_resource(BillboardMesh(billboard_mesh));
 
-    let billboard = BillboardMesh(
-        meshes.add(Rectangle::new(
-            RENDER_RADIUS * 2.0 + 2.0,
-            RENDER_RADIUS * 2.0 + 2.0,
-        )),
-    );
+    let billboard = BillboardMesh(meshes.add(Rectangle::new(
+        RENDER_RADIUS * 2.0 + 2.0,
+        RENDER_RADIUS * 2.0 + 2.0,
+    )));
 
     spawn_preview(
         &mut commands,
@@ -585,9 +579,7 @@ fn finalize_terrain_bake(
         let scene = scene_lighting_for(&planet);
 
         let body_seed = body.detail_params.seed;
-        let coastline_seed = (body_seed as u32)
-            ^ ((body_seed >> 32) as u32)
-            ^ 0xC0A5_71_1Eu32;
+        let coastline_seed = (body_seed as u32) ^ ((body_seed >> 32) as u32) ^ 0xC0A5_71_1Eu32;
         let has_ocean = body.sea_level_m.is_some();
         let coastline_warp_amp_radians = if has_ocean { 8.0e-4 } else { 0.0 };
         let coastline_jitter_amp_m = if has_ocean { 30.0 } else { 0.0 };
@@ -758,12 +750,14 @@ fn editor_ui(
         let mut terrain_changed = false;
         let mut uniforms_changed = false;
 
-        if let BodyMode::Terrain { ref mut generator, .. } = planet.mode {
+        if let BodyMode::Terrain {
+            ref mut generator, ..
+        } = planet.mode
+        {
             ui.heading("Parameters");
-            terrain_changed |=
-                fires(&ui.add(
-                    bevy_egui::egui::Slider::new(&mut generator.seed, 0..=9999).text("Seed"),
-                ));
+            terrain_changed |= fires(
+                &ui.add(bevy_egui::egui::Slider::new(&mut generator.seed, 0..=9999).text("Seed")),
+            );
             ui.separator();
         }
 

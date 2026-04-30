@@ -3,11 +3,11 @@ use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
-use thalos_physics::types::{BodyDefinition, BodyState};
+use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::space_camera_post_stack;
 
 use crate::coords::{MAP_LAYER, SHIP_LAYER};
-use crate::rendering::{FrameBodyStates, SimulationState};
+use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, SimulationState};
 use crate::view::ViewMode;
 
 /// Plugin that registers the orbit camera systems and spawns the camera entity.
@@ -107,7 +107,22 @@ impl ShipCameraMode {
     }
 }
 
-/// The camera orbits around `target` (if Some) using spherical coordinates.
+/// Semantic camera focus shared across map and ship views.
+///
+/// This deliberately does not use body or ship ECS entities as the shared
+/// identity. Map-view proxies and ship-view real entities are different
+/// worlds; systems resolve this target into their own local entity/transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraFocusTarget {
+    #[default]
+    None,
+    Body(BodyId),
+    Ship,
+    /// Map-only transient focus for future encounter projections.
+    Ghost(Entity),
+}
+
+/// The camera orbits around `target` using spherical coordinates.
 ///
 /// Distance is in metres, stored as f64 to cover the full range from
 /// 100 km (low orbit) to ~67 AU without precision loss.
@@ -117,8 +132,8 @@ impl ShipCameraMode {
 /// `distance` interpolates toward it in log-space for scale-independent feel.
 #[derive(Resource)]
 pub struct CameraFocus {
-    /// Entity to orbit around. When None the camera sits at the world origin.
-    pub target: Option<Entity>,
+    /// Semantic target to orbit around.
+    pub target: CameraFocusTarget,
     /// Current radial distance from the target, in metres (interpolated each frame).
     pub distance: f64,
     /// Desired radial distance — scroll input drives this, `distance` chases it.
@@ -163,7 +178,7 @@ pub struct CameraFocus {
 impl Default for CameraFocus {
     fn default() -> Self {
         Self {
-            target: None,
+            target: CameraFocusTarget::None,
             distance: 5e11, // ~3.3 AU, sees inner system
             target_distance: 5e11,
             azimuth: 0.0,
@@ -191,7 +206,7 @@ impl CameraFocus {
     /// Preserves the current zoom (`target_distance`). Callers that want
     /// to also frame the new body to a comparable on-screen size should
     /// follow up with [`Self::frame_for_radius`].
-    pub fn focus_on(&mut self, target: Entity, current_origin: DVec3) {
+    pub fn focus_on(&mut self, target: CameraFocusTarget, current_origin: DVec3) {
         // Capture *effective* (mid-transition) az/el so a retarget while
         // a transition is already in flight continues smoothly from where
         // the camera currently appears, not from the previous target's
@@ -202,7 +217,15 @@ impl CameraFocus {
         self.transition_azimuth_start = start_az;
         self.transition_elevation_start = start_el;
         self.transition_elapsed_s = 0.0;
-        self.target = Some(target);
+        self.target = target;
+    }
+
+    pub fn focus_on_body(&mut self, body_id: BodyId, current_origin: DVec3) {
+        self.focus_on(CameraFocusTarget::Body(body_id), current_origin);
+    }
+
+    pub fn focus_on_ship(&mut self, current_origin: DVec3) {
+        self.focus_on(CameraFocusTarget::Ship, current_origin);
     }
 
     /// Set `target_distance` to a body-sized framing distance — bodies
@@ -253,8 +276,7 @@ impl CameraFocus {
             return self.elevation;
         }
         let t = focus_transition_progress(self) as f32;
-        self.transition_elevation_start
-            + (self.elevation - self.transition_elevation_start) * t
+        self.transition_elevation_start + (self.elevation - self.transition_elevation_start) * t
     }
 }
 
@@ -277,6 +299,10 @@ const SURFACE_MARGIN: f64 = 3.0;
 /// Closest the camera may zoom to the player ship in ship view (metres).
 /// Small enough to put the camera a few metres off the hull.
 const SHIP_MIN_DISTANCE_M: f64 = 5.0;
+/// Closest the map camera may zoom to the player ship (metres).
+/// The ship is represented as a screen-stable marker in map view, so the
+/// ship-view hull clamp is far too close for the orbit-scale camera.
+const SHIP_MAP_MIN_DISTANCE_M: f64 = DISTANCE_MIN_DEFAULT;
 /// Duration of a focus-switch transition, regardless of distance between
 /// bodies. Tuned for snappy-but-not-jarring camera handoff.
 pub const FOCUS_TRANSITION_DURATION_S: f64 = 0.8;
@@ -455,22 +481,25 @@ fn camera_zoom_interpolation_system(time: Res<Time>, mut focus: ResMut<CameraFoc
 /// cannot zoom inside the body's surface.
 fn camera_min_distance_system(
     mut focus: ResMut<CameraFocus>,
+    view: Res<ViewMode>,
     bodies: Query<&crate::rendering::CelestialBody>,
     ghosts: Query<&crate::flight_plan_view::GhostBody>,
-    ships: Query<(), With<crate::rendering::PlayerShip>>,
 ) {
-    let min = if let Some(target) = focus.target {
-        if let Ok(body) = bodies.get(target) {
-            (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT)
-        } else if let Ok(ghost) = ghosts.get(target) {
-            (ghost.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT)
-        } else if ships.get(target).is_ok() {
-            SHIP_MIN_DISTANCE_M
-        } else {
-            DISTANCE_MIN_DEFAULT
-        }
-    } else {
-        DISTANCE_MIN_DEFAULT
+    let min = match focus.target {
+        CameraFocusTarget::Body(body_id) => bodies
+            .iter()
+            .find(|body| body.body_id == body_id)
+            .map(|body| (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT))
+            .unwrap_or(DISTANCE_MIN_DEFAULT),
+        CameraFocusTarget::Ghost(entity) => ghosts
+            .get(entity)
+            .map(|ghost| (ghost.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT))
+            .unwrap_or(DISTANCE_MIN_DEFAULT),
+        CameraFocusTarget::Ship => match *view {
+            ViewMode::Map => SHIP_MAP_MIN_DISTANCE_M,
+            ViewMode::Ship => SHIP_MIN_DISTANCE_M,
+        },
+        CameraFocusTarget::None => DISTANCE_MIN_DEFAULT,
     };
     focus.min_distance = min;
     if focus.target_distance < min {
@@ -535,7 +564,18 @@ pub fn camera_transform_system(
     mode: Res<ShipCameraMode>,
     sim: Option<Res<SimulationState>>,
     body_states: Res<FrameBodyStates>,
-    target_query: Query<(&Transform, Option<&CameraTargetOffset>), Without<OrbitCamera>>,
+    body_targets: Query<(&CelestialBody, &Transform), Without<OrbitCamera>>,
+    ship_targets: Query<
+        (&Transform, Option<&CameraTargetOffset>),
+        (With<PlayerShip>, Without<OrbitCamera>),
+    >,
+    ghost_targets: Query<
+        &Transform,
+        (
+            With<crate::flight_plan_view::GhostBody>,
+            Without<OrbitCamera>,
+        ),
+    >,
     mut camera_query: Query<&mut Transform, (With<OrbitCamera>, With<ActiveCamera>)>,
 ) {
     let Ok(mut camera_transform) = camera_query.single_mut() else {
@@ -564,14 +604,32 @@ pub fn camera_transform_system(
     let target_pos: Vec3 = if focus.transition_origin_start.is_some() {
         Vec3::ZERO
     } else {
-        focus
-            .target
-            .and_then(|entity| target_query.get(entity).ok())
-            .map(|(t, offset)| {
-                let local = offset.copied().unwrap_or_default().0;
-                t.translation + t.rotation * local
-            })
-            .unwrap_or(Vec3::ZERO)
+        match focus.target {
+            CameraFocusTarget::Body(body_id) => body_targets
+                .iter()
+                .find(|(body, _)| body.body_id == body_id)
+                .map(|(_, t)| t.translation)
+                .unwrap_or(Vec3::ZERO),
+            CameraFocusTarget::Ship => {
+                if *view == ViewMode::Ship {
+                    ship_targets
+                        .single()
+                        .ok()
+                        .map(|(t, offset)| {
+                            let local = offset.copied().unwrap_or_default().0;
+                            t.translation + t.rotation * local
+                        })
+                        .unwrap_or(Vec3::ZERO)
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            CameraFocusTarget::Ghost(entity) => ghost_targets
+                .get(entity)
+                .map(|t| t.translation)
+                .unwrap_or(Vec3::ZERO),
+            CameraFocusTarget::None => Vec3::ZERO,
+        }
     };
 
     // Pick a local basis. In ship view we derive it from the ship's gravity
@@ -607,12 +665,10 @@ pub fn camera_transform_system(
         elevation.sin(),
         cos_el * azimuth.cos(),
     );
-    let offset =
-        (basis.right * local.x + basis.up * local.y + basis.forward * local.z) * distance;
+    let offset = (basis.right * local.x + basis.up * local.y + basis.forward * local.z) * distance;
 
     let camera_pos = target_pos + offset;
-    *camera_transform =
-        Transform::from_translation(camera_pos).looking_at(target_pos, basis.up);
+    *camera_transform = Transform::from_translation(camera_pos).looking_at(target_pos, basis.up);
 }
 
 /// Local camera basis. `right × up = forward` (right-handed), so at
