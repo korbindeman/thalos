@@ -3,6 +3,7 @@
 //! placement, and per-planet orientation (tidal lock + spin).
 
 use bevy::prelude::*;
+use thalos_physics::types::{BodyDefinition, BodyId};
 use thalos_planet_rendering::{PlanetHaloMaterial, PlanetMaterial};
 
 use super::screen_marker_radius;
@@ -193,13 +194,26 @@ pub(super) fn update_ship_position(
     sim: Res<SimulationState>,
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
+    view: Res<ViewMode>,
+    focus: Res<CameraFocus>,
+    photo_mode: Res<crate::photo_mode::PhotoMode>,
     camera_query: Query<&Transform, (With<ActiveCamera>, With<OrbitCamera>)>,
-    mut query: Query<&mut Transform, (With<ShipMarker>, Without<OrbitCamera>)>,
+    mut query: Query<(&mut Transform, &mut Visibility), (With<ShipMarker>, Without<OrbitCamera>)>,
 ) {
     let Ok(cam_tf) = camera_query.single() else {
         return;
     };
-    for mut transform in &mut query {
+    let ship_soi_body = sim.simulation.dominant_body();
+    let marker_visible = matches!(*view, ViewMode::Map)
+        && !photo_mode.active
+        && ship_marker_visible_in_focus(focus.target, ship_soi_body, sim.simulation.bodies());
+    let target_visibility = if marker_visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+
+    for (mut transform, mut visibility) in &mut query {
         transform.translation = to_render_pos(
             sim.simulation.ship_state().position - origin.position,
             &scale,
@@ -209,7 +223,53 @@ pub(super) fn update_ship_position(
             transform.translation,
             cam_tf.translation,
         ));
+        if *visibility != target_visibility {
+            *visibility = target_visibility;
+        }
     }
+}
+
+fn ship_marker_visible_in_focus(
+    focus_target: CameraFocusTarget,
+    ship_soi_body: BodyId,
+    bodies: &[BodyDefinition],
+) -> bool {
+    match focus_target {
+        CameraFocusTarget::Ship => true,
+        CameraFocusTarget::Body(body_id) => same_local_system(body_id, ship_soi_body, bodies),
+        CameraFocusTarget::Ghost(ghost_focus) => {
+            same_local_system(ghost_focus.body_id, ship_soi_body, bodies)
+        }
+        CameraFocusTarget::None => false,
+    }
+}
+
+fn same_local_system(a: BodyId, b: BodyId, bodies: &[BodyDefinition]) -> bool {
+    local_system_root(a, bodies) == local_system_root(b, bodies)
+}
+
+/// Return the top-level body that owns this local map context.
+///
+/// A planet owns its moon system; a moon resolves to that planet. The root
+/// star owns interplanetary space, so a ship in the star SOI remains visible
+/// only when viewing the root system.
+fn local_system_root(mut body_id: BodyId, bodies: &[BodyDefinition]) -> BodyId {
+    for _ in 0..bodies.len() {
+        let Some(body) = bodies.get(body_id) else {
+            return body_id;
+        };
+        let Some(parent_id) = body.parent else {
+            return body_id;
+        };
+        let Some(parent) = bodies.get(parent_id) else {
+            return body_id;
+        };
+        if parent.parent.is_none() {
+            return body_id;
+        }
+        body_id = parent_id;
+    }
+    body_id
 }
 
 /// Rewrite each baked planet's material `orientation` quaternion every frame.

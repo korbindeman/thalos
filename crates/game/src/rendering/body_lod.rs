@@ -243,7 +243,7 @@ pub(super) fn double_click_focus_system(
         Without<CelestialBody>,
     >,
     ship_marker: Query<
-        (Entity, &Transform),
+        (Entity, &Transform, &Visibility),
         (
             With<ShipMarker>,
             Without<CelestialBody>,
@@ -415,7 +415,9 @@ pub(super) fn double_click_focus_system(
     // as a billboard so it competes with body billboards by camera
     // distance (a body in front of the ship still wins). 12 px floor
     // mirrors the bodies' fallback hit so the small icon stays clickable.
-    if let Ok((_, ship_transform)) = ship_marker.single() {
+    if let Ok((_, ship_transform, ship_visibility)) = ship_marker.single()
+        && *ship_visibility != Visibility::Hidden
+    {
         let cam_dist = cam_world.distance(ship_transform.translation);
         if cam_dist > 0.0
             && let Ok(screen) = camera.world_to_viewport(cam_gt, ship_transform.translation)

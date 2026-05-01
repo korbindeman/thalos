@@ -207,20 +207,23 @@ fn spawn_player_ship(
         emissive: LinearRgba::WHITE * 2.0,
         unlit: true,
         double_sided: true,
-        // Push the ship marker in front of every planet/billboard so it
-        // never z-fights with a body that happens to share its depth.
-        depth_bias: 1.0e9,
+        alpha_mode: AlphaMode::Blend,
+        // Match body icon billboards: a small tie-breaker for same-depth
+        // transparent markers, without bypassing normal depth occlusion.
+        depth_bias: 10.0,
         ..default()
     });
     commands.spawn((
         Mesh3d(marker_icon),
         MeshMaterial3d(marker_material),
         Transform::IDENTITY,
+        // Updated every frame by `update_ship_position` based on view mode,
+        // photo mode, and the ship's current local system.
+        Visibility::Hidden,
         ShipMarker,
         HideInShipView,
         NotShadowCaster,
         NotShadowReceiver,
-        crate::photo_mode::HideInPhotoMode,
         Name::new(ship_name),
     ));
 

@@ -138,7 +138,9 @@ impl Plugin for RenderingPlugin {
                         .after(update_render_origin)
                         .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                     sync_body_icons.run_if(crate::view::in_map_view),
-                    double_click_focus_system.run_if(crate::view::in_map_view),
+                    double_click_focus_system
+                        .after(update_ship_position)
+                        .run_if(crate::view::in_map_view),
                     update_cloud_bands.after(finalize_planet_generation),
                 )
                     .in_set(SimStage::Sync),
