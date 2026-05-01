@@ -381,7 +381,7 @@ pub struct RingSystem {
     /// Per-ring authoring seed.
     pub seed: u64,
     /// Radial palette stops: signed linear position in [0, 1] where 0 =
-    /// inner edge and 1 = outer edge. Up to 8 stops. Stops carry both
+    /// inner edge and 1 = outer edge. Up to 16 stops. Stops carry both
     /// colour and opacity so authors can sculpt the Cassini division,
     /// Encke gap, translucent C ring, etc.
     pub palette: Vec<RingStop>,

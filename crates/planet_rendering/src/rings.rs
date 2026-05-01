@@ -8,7 +8,7 @@
 //!
 //! ## Features
 //!
-//! - Radial palette: up to 8 stops in [0, 1], each with RGB + opacity.
+//! - Radial palette: up to 16 stops in [0, 1], each with RGB + opacity.
 //! - Procedural multi-octave ringlet noise that breaks the smooth
 //!   palette into thousands of bright/dark ringlets without needing a
 //!   texture asset.
@@ -36,7 +36,7 @@ use crate::lighting::SceneLighting;
 
 /// Maximum number of radial palette stops the ring shader supports.
 /// Matches the WGSL `MAX_RING_STOPS` constant.
-pub const MAX_RING_STOPS: usize = 8;
+pub const MAX_RING_STOPS: usize = 16;
 
 /// Per-frame uniform: planet shadow geometry + shared scene lighting.
 #[derive(Clone, ShaderType)]

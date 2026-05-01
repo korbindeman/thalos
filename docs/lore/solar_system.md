@@ -369,12 +369,15 @@ more dangerous inner moons.
 | Mass | ~12 Earth masses |
 | Radius | 22,000 km |
 | Atmosphere | H2/He/CH4, deep blue-green |
-| Axial tilt | ~82 deg |
+| Ring system | Sparse set of thin icy rings |
+| Axial tilt | ~74 deg |
 
 Nereus is the system's only ice giant. Methane absorption gives it a deep
-blue-green disk, while its extreme axial tilt makes the planet roll around
+blue-green disk, while its high axial tilt makes the planet roll around
 Pyros and produces strange lighting, seasonal geometry, and a strong visual
-identity.
+identity. One slim bright inner ring anchors clustered, dimmer outer
+ringlets that catch light at high phase angles without turning the planet
+into a Saturn analogue.
 
 Missions to Nereus are deep-space operations: low solar power, long travel
 times, cold thermal design, and sparse rescue options.

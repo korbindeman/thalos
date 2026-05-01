@@ -39,6 +39,7 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 
 use crate::lighting::SceneLighting;
+use crate::rings::MAX_RING_STOPS;
 
 /// Maximum palette stops the shader supports. Ten covers Saturn's
 /// full north/south Cassini palette (nine authored stops + a reserve
@@ -173,8 +174,12 @@ pub struct GasGiantLayers {
 
     /// Ring shadow on the cloud deck.
     /// x = inner radius (render units), y = outer radius (render units),
-    /// z = ringlet noise amplitude, w = enabled flag (0 or 1).
+    /// z = ringlet noise amplitude, w = authored stop count.
     pub ring_shadow: Vec4,
+
+    /// Authored ring opacity stops for cloud-deck shadowing.
+    /// x = normalised radial position, y = opacity, zw = unused.
+    pub ring_shadow_stops: [Vec4; MAX_RING_STOPS],
 
     /// Analytic vortex locations: xy = (lat, lon), z = angular radius,
     /// w = swirl strength.
@@ -216,6 +221,7 @@ impl Default for GasGiantLayers {
             rayleigh_params: Vec4::new(4.0, 0.35, 0.0, 0.0),
             limb_exponents: Vec4::new(0.25, 0.32, 0.40, 0.0),
             ring_shadow: Vec4::ZERO,
+            ring_shadow_stops: [Vec4::ZERO; MAX_RING_STOPS],
             vortex_pos: [Vec4::ZERO; MAX_VORTICES],
             vortex_tint: [Vec4::ZERO; MAX_VORTICES],
             seed_lo: 0,
@@ -311,13 +317,24 @@ impl GasGiantLayers {
 
         // ── Ring shadow cast onto the cloud deck ──────────────────────
         if let Some(rings) = rings {
-            let inv_m = 1.0 / meters_per_render_unit.max(1.0);
-            layers.ring_shadow = Vec4::new(
-                rings.inner_radius_m * inv_m,
-                rings.outer_radius_m * inv_m,
-                rings.ringlet_noise.clamp(0.0, 1.0),
-                1.0,
-            );
+            let n = rings.palette.len().min(MAX_RING_STOPS);
+            if n > 0 {
+                let inv_m = 1.0 / meters_per_render_unit.max(1.0);
+                layers.ring_shadow = Vec4::new(
+                    rings.inner_radius_m * inv_m,
+                    rings.outer_radius_m * inv_m,
+                    rings.ringlet_noise.clamp(0.0, 1.0),
+                    n as f32,
+                );
+                for (i, stop) in rings.palette.iter().take(n).enumerate() {
+                    layers.ring_shadow_stops[i] = Vec4::new(
+                        stop.r.clamp(0.0, 1.0),
+                        (stop.opacity * rings.opacity).clamp(0.0, 1.0),
+                        0.0,
+                        0.0,
+                    );
+                }
+            }
         }
 
         // ── Limb lighting tweaks ──────────────────────────────────────

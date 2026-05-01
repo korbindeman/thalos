@@ -1905,7 +1905,7 @@
                 color: "#338CA6",
                 albedo: 0.30,
                 rotation_period_s: 57960.0,
-                axial_tilt_deg: 82.0,
+                axial_tilt_deg: 74.0,
             ),
             orbit: Some((
                 semi_major_axis_m: 1.7952e12,
@@ -1917,8 +1917,9 @@
             )),
             generator: None,
             // Ice giant: H2/He/CH4, deep blue-green from methane
-            // absorption. Subtle banding, no rings. Keeps the old
-            // Nereus render profile on the new distilled-system body.
+            // absorption. Subtle banding, plus sparse razor-thin icy
+            // rings. Keeps the old Nereus render profile on the new
+            // distilled-system body.
             atmosphere: Some((
                 seed: 90100,
                 cloud_deck: (
@@ -1977,6 +1978,32 @@
                     blue:   0.44,
                     strength: 0.80,
                 )),
+            )),
+            rings: Some((
+                inner_radius_m: 37800000.0,
+                outer_radius_m: 41100000.0,
+                seed: 100101,
+                opacity: 0.76,
+                ringlet_noise: 0.01,
+                ringlet_octaves: 3,
+                palette: [
+                    (r: 0.000, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.165, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.188, color: (0.82, 0.98, 0.96), opacity: 0.86),
+                    (r: 0.212, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.500, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.514, color: (0.56, 0.78, 0.84), opacity: 0.28),
+                    (r: 0.526, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.552, color: (0.50, 0.70, 0.78), opacity: 0.18),
+                    (r: 0.564, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.594, color: (0.46, 0.64, 0.74), opacity: 0.12),
+                    (r: 0.606, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.690, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.701, color: (0.42, 0.60, 0.70), opacity: 0.10),
+                    (r: 0.713, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                    (r: 0.728, color: (0.40, 0.56, 0.66), opacity: 0.08),
+                    (r: 0.740, color: (0.18, 0.34, 0.38), opacity: 0.00),
+                ],
             )),
         ),
         (

@@ -36,6 +36,7 @@
 // ── Uniforms ────────────────────────────────────────────────────────────────
 
 const MAX_PALETTE_STOPS: u32 = 10u;
+const MAX_RING_STOPS: u32 = 16u;
 const PROFILE_N: u32 = 16u;
 const MAX_VORTICES: u32 = 16u;
 const PI: f32 = 3.14159265;
@@ -88,8 +89,10 @@ struct GasGiantLayers {
     // xyz = per-channel Minnaert exponents (r, g, b), w = strength.
     limb_exponents:       vec4<f32>,
     // x = inner radius (render units), y = outer radius (render units),
-    // z = ringlet noise amp, w = enabled flag.
+    // z = ringlet noise amp, w = authored ring-stop count.
     ring_shadow:          vec4<f32>,
+    // x = normalised radial position, y = opacity.
+    ring_shadow_stops:    array<vec4<f32>, 16>,
     vortex_pos:           array<vec4<f32>, 16>,
     vortex_tint:          array<vec4<f32>, 16>,
     seed_lo:              u32,
@@ -439,6 +442,36 @@ fn palette_lookup(lat: f32) -> vec3<f32> {
         }
     }
     return layers.palette[last].xyz;
+}
+
+fn ring_shadow_opacity_lookup(u: f32) -> f32 {
+    let count = min(u32(layers.ring_shadow.w), MAX_RING_STOPS);
+    if count == 0u {
+        return 0.0;
+    }
+    if count == 1u {
+        return layers.ring_shadow_stops[0].y;
+    }
+
+    let last = count - 1u;
+    if u <= layers.ring_shadow_stops[0].x {
+        return layers.ring_shadow_stops[0].y;
+    }
+    if u >= layers.ring_shadow_stops[last].x {
+        return layers.ring_shadow_stops[last].y;
+    }
+
+    for (var i = 0u; i < last; i = i + 1u) {
+        let a = layers.ring_shadow_stops[i];
+        let b = layers.ring_shadow_stops[i + 1u];
+        if u >= a.x && u <= b.x {
+            let span = max(b.x - a.x, 1e-6);
+            let t = clamp((u - a.x) / span, 0.0, 1.0);
+            let ts = t * t * (3.0 - 2.0 * t);
+            return mix(a.y, b.y, ts);
+        }
+    }
+    return layers.ring_shadow_stops[last].y;
 }
 
 // Result of applying the named vortex pass: the body-local sample
@@ -1132,15 +1165,14 @@ fn fragment(in: VertexOutput) -> FragOutput {
                         let du = max(fwidth(u), 1e-6);
                         let rim = smoothstep(0.0, du, u)
                                 * smoothstep(0.0, du, 1.0 - u);
-                        // Cassini-style gap at u ≈ 0.42
-                        let gap = smoothstep(0.03, 0.0, abs(u - 0.42));
+                        let authored_opacity = ring_shadow_opacity_lookup(u);
                         let noise_amp = layers.ring_shadow.z;
                         let n_ring = fbm_2d(vec2<f32>(u * 80.0, 0.0), layers.seed_lo ^ 0x7A5u);
                         // Gate every contribution by `rim` so the
                         // whole shadow vanishes cleanly outside the
                         // annulus with no hard edge.
                         let dens = clamp(
-                            rim * (1.0 - gap * 0.9 + noise_amp * n_ring * 0.35),
+                            rim * authored_opacity * (1.0 + noise_amp * n_ring * 0.35),
                             0.0, 1.0,
                         );
                         ring_shadow_t = 1.0 - 0.85 * dens;

@@ -35,7 +35,7 @@
 #import bevy_pbr::mesh_functions::get_world_from_local
 #import thalos::lighting::{SceneLighting, eclipse_factor}
 
-const MAX_RING_STOPS: u32 = 8u;
+const MAX_RING_STOPS: u32 = 16u;
 const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
 
@@ -51,8 +51,8 @@ struct RingParams {
 }
 
 struct RingLayers {
-    palette_color:    array<vec4<f32>, 8>,
-    palette_opacity:  array<vec4<f32>, 8>,
+    palette_color:    array<vec4<f32>, 16>,
+    palette_opacity:  array<vec4<f32>, 16>,
     stop_count:       u32,
     opacity:          f32,
     ringlet_noise:    f32,

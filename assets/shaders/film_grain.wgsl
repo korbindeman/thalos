@@ -26,16 +26,12 @@ fn hash13(p: vec3<f32>) -> f32 {
     return fract((q.x + q.y) * q.z);
 }
 
-// Two hashes combined per channel, biased to zero. Each channel is seeded
-// independently so the grain carries per-pixel chroma jitter — reads like
-// digital camera shadow noise where grain is strong, stays monochrome-ish
-// where it's weak.
+// Two hashes combined and biased to zero. Keep the grain monochrome so
+// far, dim planets read as low-signal imagery rather than RGB sensor speckle.
 fn grain_rgb(uv: vec2<f32>, t: f32) -> vec3<f32> {
     let p = uv * 1024.0;
-    let r = hash13(vec3<f32>(p, t)) + hash13(vec3<f32>(p + 17.0, t + 3.7)) - 1.0;
-    let g = hash13(vec3<f32>(p + 41.0, t + 7.3)) + hash13(vec3<f32>(p + 53.0, t + 11.1)) - 1.0;
-    let b = hash13(vec3<f32>(p + 71.0, t + 13.9)) + hash13(vec3<f32>(p + 89.0, t + 17.5)) - 1.0;
-    return vec3<f32>(r, g, b);
+    let g = hash13(vec3<f32>(p, t)) + hash13(vec3<f32>(p + 17.0, t + 3.7)) - 1.0;
+    return vec3<f32>(g);
 }
 
 @fragment
