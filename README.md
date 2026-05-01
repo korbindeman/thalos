@@ -13,7 +13,7 @@ Prebuilt Windows and macOS builds are available from the [GitHub Releases page](
 Run the game:
 
 ```bash
-cargo run -p thalos_game
+cargo run -p thalos_game --release
 ```
 
 Run the ship editor:
