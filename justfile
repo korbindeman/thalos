@@ -16,6 +16,24 @@ shipyard:
 build:
     cargo build --workspace
 
+# Bump, commit, tag, and push a release. Usage: just release patch|minor|major|0.2.0
+release kind="patch":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/bump-version.sh "{{kind}}"
+    version="$(scripts/bump-version.sh --current)"
+    branch="$(git branch --show-current)"
+    if [[ -z "${branch}" ]]; then
+        echo "Cannot release from detached HEAD" >&2
+        exit 1
+    fi
+    git add Cargo.toml Cargo.lock
+    git commit -m "release v${version}"
+    git tag "v${version}"
+    git push origin "HEAD:${branch}"
+    git push origin "v${version}"
+    printf 'Published release tag v%s.\n' "${version}"
+
 # Run tests
 test:
     cargo test -p thalos_physics -p thalos_terrain_gen
