@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bevy::asset::AssetPlugin;
@@ -7,8 +8,9 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PresentMode;
+use bevy_egui::egui;
 use thalos_physics::parsing::load_solar_system;
-use thalos_physics::types::{BodyKind, SolarSystemDefinition};
+use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, PlanetDetailParams,
     PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin, RingLayers,
@@ -671,6 +673,120 @@ fn handle_body_switch(
 // Editor UI (egui)
 // ---------------------------------------------------------------------------
 
+fn render_body_tree_ui(
+    ui: &mut egui::Ui,
+    system: &SolarSystemDefinition,
+    selected_body: Option<BodyId>,
+) -> Option<BodyId> {
+    let mut children_of: HashMap<BodyId, Vec<&BodyDefinition>> = HashMap::new();
+    for body in &system.bodies {
+        if let Some(parent) = body.parent {
+            children_of.entry(parent).or_default().push(body);
+        }
+    }
+    // Stable order: the file's listing order.
+    for kids in children_of.values_mut() {
+        kids.sort_by_key(|b| b.id);
+    }
+
+    let root = system.bodies.iter().find(|b| b.parent.is_none())?;
+    let mut clicked: Option<BodyId> = None;
+
+    // Major tree: star and its non-minor descendants.
+    render_body_tree_row(ui, root, selected_body, &mut clicked, 0);
+    if let Some(kids) = children_of.get(&root.id) {
+        for child in kids.iter().filter(|b| !is_minor(b.kind)) {
+            render_body_subtree(ui, child, &children_of, selected_body, &mut clicked, 1);
+        }
+    }
+
+    // Minor bodies: collapsing group of dwarf planets / centaurs /
+    // comets that orbit the star, with their own descendants nested.
+    let minor: Vec<&BodyDefinition> = children_of
+        .get(&root.id)
+        .map(|kids| kids.iter().copied().filter(|b| is_minor(b.kind)).collect())
+        .unwrap_or_default();
+    if !minor.is_empty() {
+        ui.collapsing("Minor bodies", |ui| {
+            for body in minor {
+                render_body_subtree(ui, body, &children_of, selected_body, &mut clicked, 0);
+            }
+        });
+    }
+
+    clicked
+}
+
+fn is_minor(kind: BodyKind) -> bool {
+    matches!(
+        kind,
+        BodyKind::DwarfPlanet | BodyKind::Centaur | BodyKind::Comet
+    )
+}
+
+fn render_body_subtree(
+    ui: &mut egui::Ui,
+    body: &BodyDefinition,
+    children_of: &HashMap<BodyId, Vec<&BodyDefinition>>,
+    selected_body: Option<BodyId>,
+    clicked: &mut Option<BodyId>,
+    depth: u32,
+) {
+    render_body_tree_row(ui, body, selected_body, clicked, depth);
+    if let Some(kids) = children_of.get(&body.id) {
+        for child in kids {
+            render_body_subtree(ui, child, children_of, selected_body, clicked, depth + 1);
+        }
+    }
+}
+
+fn render_body_tree_row(
+    ui: &mut egui::Ui,
+    body: &BodyDefinition,
+    selected_body: Option<BodyId>,
+    clicked: &mut Option<BodyId>,
+    depth: u32,
+) {
+    let is_selected = selected_body == Some(body.id);
+
+    ui.horizontal(|ui| {
+        ui.add_space(depth as f32 * 14.0);
+
+        let [r, g, b] = body.color;
+        let dot_color = egui::Color32::from_rgb(
+            (r.clamp(0.0, 1.0) * 255.0) as u8,
+            (g.clamp(0.0, 1.0) * 255.0) as u8,
+            (b.clamp(0.0, 1.0) * 255.0) as u8,
+        );
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+        ui.add_space(4.0);
+
+        let label = ui.add(egui::Button::selectable(is_selected, &body.name).frame(false));
+        if label.clicked() {
+            *clicked = Some(body.id);
+        }
+    });
+}
+
+fn select_body(planet: &mut EditedPlanet, system: &SolarSystemDefinition, body_id: BodyId) {
+    let body = &system.bodies[body_id];
+    if planet.selected_body == body.name {
+        return;
+    }
+
+    let resolved = build_params_for_body(system, body);
+    planet.radius_m = resolved.radius_m;
+    planet.axial_tilt_rad = resolved.axial_tilt_rad;
+    planet.mode = resolved.mode;
+    planet.rings = resolved.rings;
+    planet.heliocentric_distance_m = resolved.heliocentric_distance_m;
+    planet.light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
+    planet.selected_body = body.name.clone();
+    planet.body_changed = true;
+    planet.uniforms_dirty = true;
+}
+
 fn editor_ui(
     mut contexts: bevy_egui::EguiContexts,
     mut planet: ResMut<EditedPlanet>,
@@ -679,124 +795,118 @@ fn editor_ui(
     status: Res<TerrainGenStatus>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    bevy_egui::egui::Window::new("Planet Editor").show(ctx, |ui| {
-        let fps = diagnostics
-            .get(&FrameTimeDiagnosticsPlugin::FPS)
-            .and_then(|d| d.smoothed())
-            .unwrap_or(0.0);
-        ui.label(format!("FPS: {:.0}", fps));
-        ui.separator();
 
-        // ---- Body picker ------------------------------------------------
-        let mut new_body: Option<String> = None;
-        bevy_egui::egui::ComboBox::from_label("Body")
-            .selected_text(&planet.selected_body)
-            .show_ui(ui, |ui| {
-                for b in &system.system.bodies {
-                    if ui
-                        .selectable_label(b.name == planet.selected_body, &b.name)
-                        .clicked()
-                    {
-                        new_body = Some(b.name.clone());
-                    }
-                }
-            });
-        if let Some(name) = new_body
-            && let Some(&id) = system.system.name_to_id.get(&name)
-        {
-            let resolved = build_params_for_body(&system.system, &system.system.bodies[id]);
-            planet.radius_m = resolved.radius_m;
-            planet.axial_tilt_rad = resolved.axial_tilt_rad;
-            planet.mode = resolved.mode;
-            planet.rings = resolved.rings;
-            planet.heliocentric_distance_m = resolved.heliocentric_distance_m;
-            planet.light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
-            planet.selected_body = name;
-            planet.body_changed = true;
-            planet.uniforms_dirty = true;
-        }
+    let selected_body_id = system.system.name_to_id.get(&planet.selected_body).copied();
+    let mut clicked_body = None;
+    let initial_pos = ctx.available_rect().left_top() + egui::vec2(8.0, 8.0);
+    egui::Window::new("Celestial bodies")
+        .default_pos(initial_pos)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.set_min_width(180.0);
+            clicked_body = render_body_tree_ui(ui, &system.system, selected_body_id);
+        });
+    if let Some(body_id) = clicked_body {
+        select_body(&mut planet, &system.system, body_id);
+    }
 
-        // ---- Terrain gen status ----------------------------------------
-        if matches!(planet.mode, BodyMode::Terrain { .. }) {
-            match (status.current_started, status.last_duration) {
-                (Some(started), _) => {
-                    let elapsed = started.elapsed().as_secs_f32();
-                    ui.label(format!("Generating terrain for {:.2}s…", elapsed));
-                }
-                (None, Some(d)) => {
-                    ui.label(format!("Last bake: {:.2}s", d.as_secs_f32()));
-                }
-                (None, None) => {}
-            }
-        }
-
-        ui.separator();
-
-        // ---- Read-only derived info ------------------------------------
-        ui.label(format!("Radius: {:.1} km", planet.radius_m / 1000.0));
-        ui.label(format!(
-            "Heliocentric: {:.3} AU",
-            planet.heliocentric_distance_m / AU_M
-        ));
-        ui.label(format!("Light intensity: {:.2}", planet.light_intensity));
-
-        ui.separator();
-
-        // ---- Editable fields --------------------------------
-        fn fires(r: &bevy_egui::egui::Response) -> bool {
-            r.drag_stopped() || (r.changed() && !r.dragged())
-        }
-
-        let mut terrain_changed = false;
-        let mut uniforms_changed = false;
-
-        if let BodyMode::Terrain {
-            ref mut generator, ..
-        } = planet.mode
-        {
-            ui.heading("Parameters");
-            terrain_changed |= fires(
-                &ui.add(bevy_egui::egui::Slider::new(&mut generator.seed, 0..=9999).text("Seed")),
-            );
+    let controls_pos = egui::pos2(
+        (ctx.available_rect().right() - 340.0).max(ctx.available_rect().left()),
+        ctx.available_rect().top() + 8.0,
+    );
+    egui::Window::new("Planet Editor")
+        .default_pos(controls_pos)
+        .show(ctx, |ui| {
+            let fps = diagnostics
+                .get(&FrameTimeDiagnosticsPlugin::FPS)
+                .and_then(|d| d.smoothed())
+                .unwrap_or(0.0);
+            ui.label(format!("FPS: {:.0}", fps));
+            ui.label(format!("Body: {}", planet.selected_body));
             ui.separator();
-        }
 
-        ui.heading("Shading");
-        uniforms_changed |= ui
-            .checkbox(&mut planet.full_bright, "Full bright")
-            .changed();
-        uniforms_changed |= fires(
-            &ui.add(
-                bevy_egui::egui::Slider::new(&mut planet.terminator_wrap, 0.0..=1.0)
-                    .text("Terminator wrap"),
-            ),
-        );
-        uniforms_changed |= fires(
-            &ui.add(
-                bevy_egui::egui::Slider::new(
-                    &mut planet.sun_azimuth,
-                    -std::f32::consts::PI..=std::f32::consts::PI,
-                )
-                .text("Sun azimuth"),
-            ),
-        );
-        uniforms_changed |= fires(
-            &ui.add(
-                bevy_egui::egui::Slider::new(
-                    &mut planet.sun_elevation,
-                    -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2,
-                )
-                .text("Sun elevation"),
-            ),
-        );
+            // ---- Terrain gen status ----------------------------------------
+            if matches!(planet.mode, BodyMode::Terrain { .. }) {
+                match (status.current_started, status.last_duration) {
+                    (Some(started), _) => {
+                        let elapsed = started.elapsed().as_secs_f32();
+                        ui.label(format!("Generating terrain for {:.2}s…", elapsed));
+                    }
+                    (None, Some(d)) => {
+                        ui.label(format!("Last bake: {:.2}s", d.as_secs_f32()));
+                    }
+                    (None, None) => {}
+                }
+            }
 
-        if terrain_changed {
-            planet.terrain_dirty = true;
-        }
-        if uniforms_changed {
-            planet.uniforms_dirty = true;
-        }
-    });
+            ui.separator();
+
+            // ---- Read-only derived info ------------------------------------
+            ui.label(format!("Radius: {:.1} km", planet.radius_m / 1000.0));
+            ui.label(format!(
+                "Heliocentric: {:.3} AU",
+                planet.heliocentric_distance_m / AU_M
+            ));
+            ui.label(format!("Light intensity: {:.2}", planet.light_intensity));
+
+            ui.separator();
+
+            // ---- Editable fields --------------------------------
+            fn fires(r: &bevy_egui::egui::Response) -> bool {
+                r.drag_stopped() || (r.changed() && !r.dragged())
+            }
+
+            let mut terrain_changed = false;
+            let mut uniforms_changed = false;
+
+            if let BodyMode::Terrain {
+                ref mut generator, ..
+            } = planet.mode
+            {
+                ui.heading("Parameters");
+                terrain_changed |=
+                    fires(&ui.add(
+                        bevy_egui::egui::Slider::new(&mut generator.seed, 0..=9999).text("Seed"),
+                    ));
+                ui.separator();
+            }
+
+            ui.heading("Shading");
+            uniforms_changed |= ui
+                .checkbox(&mut planet.full_bright, "Full bright")
+                .changed();
+            uniforms_changed |= fires(
+                &ui.add(
+                    bevy_egui::egui::Slider::new(&mut planet.terminator_wrap, 0.0..=1.0)
+                        .text("Terminator wrap"),
+                ),
+            );
+            uniforms_changed |= fires(
+                &ui.add(
+                    bevy_egui::egui::Slider::new(
+                        &mut planet.sun_azimuth,
+                        -std::f32::consts::PI..=std::f32::consts::PI,
+                    )
+                    .text("Sun azimuth"),
+                ),
+            );
+            uniforms_changed |= fires(
+                &ui.add(
+                    bevy_egui::egui::Slider::new(
+                        &mut planet.sun_elevation,
+                        -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2,
+                    )
+                    .text("Sun elevation"),
+                ),
+            );
+
+            if terrain_changed {
+                planet.terrain_dirty = true;
+            }
+            if uniforms_changed {
+                planet.uniforms_dirty = true;
+            }
+        });
 }
 
 /// Applies shader-uniform-only changes to the current material.

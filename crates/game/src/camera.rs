@@ -293,7 +293,10 @@ fn wrap_pi(angle: f32) -> f32 {
 }
 
 const DISTANCE_MIN_DEFAULT: f64 = 1e5; // 100 km
-const DISTANCE_MAX: f64 = 1e13; // ~67 AU
+const MAP_DISTANCE_MAX: f64 = 1e13; // ~67 AU
+/// Farthest the ship-view chase camera may pull back from the vessel.
+/// Map view handles orbital/system-scale framing; ship view stays local.
+const SHIP_VIEW_MAX_DISTANCE_M: f64 = 5_000.0;
 /// Camera stops at 3× the body's radius (comfortable viewing distance).
 const SURFACE_MARGIN: f64 = 3.0;
 /// Closest the camera may zoom to the player ship in ship view (metres).
@@ -311,6 +314,19 @@ pub const FOCUS_TRANSITION_DURATION_S: f64 = 0.8;
 /// frame without dominating it. Must stay above [`SURFACE_MARGIN`] so
 /// `camera_min_distance_system` doesn't clamp the framing back up.
 const FOCUS_FRAMING_RADII: f64 = 10.0;
+
+fn max_distance_for_view(view: ViewMode) -> f64 {
+    match view {
+        ViewMode::Map => MAP_DISTANCE_MAX,
+        ViewMode::Ship => SHIP_VIEW_MAX_DISTANCE_M,
+    }
+}
+
+fn distance_bounds_for_view(view: ViewMode, min_distance: f64) -> (f64, f64) {
+    let min = min_distance.max(f64::MIN_POSITIVE);
+    let max = max_distance_for_view(view).max(min);
+    (min, max)
+}
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -407,6 +423,7 @@ fn ship_camera_mode_input(
 pub fn camera_input_system(
     block: Res<BlockCameraInput>,
     mut contexts: EguiContexts,
+    view: Res<ViewMode>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut scroll_events: MessageReader<MouseWheel>,
@@ -437,10 +454,15 @@ pub fn camera_input_system(
     // --- Zoom ---------------------------------------------------------------
     // Zoom factor scales with distance: gentle near the surface, faster at
     // interplanetary range. We lerp in log-space between min and max distance.
-    let log_min = focus.min_distance.ln();
-    let log_max = DISTANCE_MAX.ln();
+    let (min_distance, max_distance) = distance_bounds_for_view(*view, focus.min_distance);
+    let log_min = min_distance.ln();
+    let log_max = max_distance.ln();
     let log_cur = focus.target_distance.ln();
-    let t = ((log_cur - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
+    let t = if log_max > log_min {
+        ((log_cur - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let zoom_factor = ZOOM_FACTOR_MIN + (ZOOM_FACTOR_MAX - ZOOM_FACTOR_MIN) * t;
 
     // Drain scroll events even when blocked so they don't carry into the
@@ -456,7 +478,7 @@ pub fn camera_input_system(
         };
         let multiplier = (1.0 - zoom_factor * ticks).max(0.01);
         focus.target_distance =
-            (focus.target_distance * multiplier).clamp(focus.min_distance, DISTANCE_MAX);
+            (focus.target_distance * multiplier).clamp(min_distance, max_distance);
     }
 }
 
@@ -465,7 +487,11 @@ pub fn camera_input_system(
 /// Log-space interpolation means the same lerp factor produces equal *proportional*
 /// change at every scale — zooming from 1 AU to 0.5 AU feels the same as
 /// zooming from 1000 km to 500 km.
-fn camera_zoom_interpolation_system(time: Res<Time>, mut focus: ResMut<CameraFocus>) {
+fn camera_zoom_interpolation_system(
+    time: Res<Time>,
+    view: Res<ViewMode>,
+    mut focus: ResMut<CameraFocus>,
+) {
     const SMOOTHING_SPEED: f64 = 10.0; // higher = snappier
 
     let dt = time.delta_secs_f64();
@@ -474,7 +500,8 @@ fn camera_zoom_interpolation_system(time: Res<Time>, mut focus: ResMut<CameraFoc
     let log_current = focus.distance.ln();
     let log_target = focus.target_distance.ln();
     let log_new = log_current + (log_target - log_current) * t;
-    focus.distance = log_new.exp().clamp(focus.min_distance, DISTANCE_MAX);
+    let (min_distance, max_distance) = distance_bounds_for_view(*view, focus.min_distance);
+    focus.distance = log_new.exp().clamp(min_distance, max_distance);
 }
 
 /// Updates `min_distance` based on the focused body's radius so the camera
@@ -503,9 +530,8 @@ fn camera_min_distance_system(
         CameraFocusTarget::None => DISTANCE_MIN_DEFAULT,
     };
     focus.min_distance = min;
-    if focus.target_distance < min {
-        focus.target_distance = min;
-    }
+    let (min_distance, max_distance) = distance_bounds_for_view(*view, min);
+    focus.target_distance = focus.target_distance.clamp(min_distance, max_distance);
 }
 
 /// Advances the focus-transition timer and clears
@@ -760,4 +786,25 @@ pub(crate) fn find_reference_body(
     // Fallback: the star (infinite SOI) is always a match, but be defensive
     // in case the body list is empty for any reason.
     best.map(|(id, _)| id).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ship_view_uses_local_zoom_cap() {
+        assert_eq!(
+            max_distance_for_view(ViewMode::Ship),
+            SHIP_VIEW_MAX_DISTANCE_M
+        );
+        assert!(max_distance_for_view(ViewMode::Ship) < max_distance_for_view(ViewMode::Map));
+    }
+
+    #[test]
+    fn distance_bounds_never_invert() {
+        let (min, max) = distance_bounds_for_view(ViewMode::Ship, DISTANCE_MIN_DEFAULT);
+        assert_eq!(min, DISTANCE_MIN_DEFAULT);
+        assert_eq!(max, DISTANCE_MIN_DEFAULT);
+    }
 }

@@ -5,9 +5,9 @@
 // Distances in meters, angles in degrees, time in seconds, mass in kg.
 // Hex colors are sRGB. Every field on every body is explicit — no defaults.
 //
-// `generator` block is the surface generator pipeline. Currently only Mira
-// has one. Other bodies will get their own pipelines as the surface
-// generator grows to cover them.
+// `generator` block is the surface generator pipeline for authored solid
+// bodies. Bodies without one render from their physical colour/atmosphere
+// until they get bespoke terrain work.
 
 (
     name: "Pyros System",
@@ -36,167 +36,6 @@
         // ─────────────────────────────────────────────
         // INNER SYSTEM
         // ─────────────────────────────────────────────
-        (
-            name: "Ignis",
-            kind: Planet,
-            parent: Some("Pyros"),
-            physical: (
-                mass_kg: 1.55e22,
-                radius_m: 813000.0,
-                color: "#D9591A",
-                albedo: 0.12,
-                rotation_period_s: 5184000.0,
-                axial_tilt_deg: 0.0,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 4.488e10,
-                eccentricity: 0.02,
-                inclination_deg: 5.8,
-                lon_ascending_node_deg: 0.0,
-                arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 47.0,
-            )),
-            generator: Some((
-                seed: 1100,
-                composition: (silicate: 0.28, iron: 0.70, ice: 0.0, volatiles: 0.02, hydrogen_helium: 0.0),
-                cubemap_resolution: 2048,
-                body_age_gyr: 4.6,
-                pipeline: [
-                    Differentiate(()),
-                    // Iron-rich Mercurian analog. Caloris-class giant basin
-                    // plus a scatter of older degraded basins. Slow rotator
-                    // with no strong tidal lock here, so basin placement is
-                    // random (no far-side bias like Mira).
-                    Megabasin((
-                        basins: [
-                            // 0: Caloris-class primary — dominant multi-ring
-                            // structure, ~47% of body radius.
-                            (center_dir: ( 0.55,  0.10,  0.83), radius_m: 380000.0, depth_m: 5200.0, ring_count: 4),
-                            // 1: older large basin, partially overprinted.
-                            (center_dir: (-0.70, -0.30, -0.65), radius_m: 240000.0, depth_m: 3800.0, ring_count: 3),
-                            // 2-5: degraded paleo-basins.
-                            (center_dir: ( 0.10,  0.78, -0.62), radius_m: 180000.0, depth_m: 2800.0, ring_count: 2),
-                            (center_dir: (-0.45,  0.55,  0.70), radius_m: 150000.0, depth_m: 2300.0, ring_count: 2),
-                            (center_dir: ( 0.30, -0.72,  0.62), radius_m: 120000.0, depth_m: 1800.0, ring_count: 1),
-                            (center_dir: (-0.85,  0.20,  0.49), radius_m: 100000.0, depth_m: 1500.0, ring_count: 1),
-                        ],
-                        hemispheric_lowering_m: 0.0,
-                    )),
-                    // Three-biome split modeled after Mercury:
-                    //   - heavily cratered iron-rich crust (dark, default),
-                    //   - intercrater plains (intermediate brightness, the
-                    //     volumetrically dominant Mercurian unit),
-                    //   - smooth plains (brighter volcanic infill around the
-                    //     Caloris-class basin and other low regions).
-                    // Rules are fbm fields so boundaries are fractal, not
-                    // disc cut-outs.
-                    Biomes((
-                        biomes: [
-                            // 0: smooth volcanic plains — brighter, slightly
-                            // warmer feldspathic/silicate veneer over iron.
-                            (
-                                name: "smooth_plains",
-                                albedo: 0.085,
-                                fresh_albedo: Some(0.17),
-                                tint: (1.05, 1.00, 0.94),
-                                tonal_amp: 0.22,
-                                roughness: 0.72,
-                            ),
-                            // 1: intercrater plains — intermediate, the
-                            // default Mercurian surface unit.
-                            (
-                                name: "intercrater_plains",
-                                albedo: 0.075,
-                                fresh_albedo: Some(0.14),
-                                tint: (1.02, 1.00, 0.97),
-                                tonal_amp: 0.24,
-                                roughness: 0.75,
-                            ),
-                            // 2: heavily cratered iron-rich crust — dark
-                            // oxidized iron-silicate, default catch-all.
-                            (
-                                name: "iron_crust",
-                                albedo: 0.065,
-                                fresh_albedo: Some(0.12),
-                                tint: (1.08, 0.98, 0.90),
-                                tonal_amp: 0.22,
-                                roughness: 0.78,
-                            ),
-                        ],
-                        rules: [
-                            Fbm(frequency: 2.6, threshold: 0.22, octaves: 4),
-                            Fbm(frequency: 1.8, threshold: 0.10, octaves: 4),
-                            Default,
-                        ],
-                    )),
-                    Cratering((
-                        // Per-steradian density matches Mira (~22k craters/sr
-                        // above ~3 texel widths). Max capped at 80 km —
-                        // anything larger is basin-class and lives in the
-                        // Megabasin stage.
-                        total_count: 280000,
-                        sfd_slope: 2.0,
-                        sfd_slope_small: None,
-                        sfd_break_radius_m: None,
-                        min_radius_m: 1500.0,
-                        max_radius_m: 80000.0,
-                        age_bias: 1.0,
-                        cubemap_bake_threshold_m: 1500.0,
-                        secondary_parent_radius_m: 40000.0,
-                        secondaries_per_parent: 18,
-                    )),
-                    // Smooth plains — Mercury-style effusive volcanic flood
-                    // infill pooling in basin interiors. Not as dark as
-                    // lunar mare (iron-rich crust is already dark), so the
-                    // mare albedo sits only slightly above the iron_crust
-                    // base. Wrinkle ridges on for that Mercurian character.
-                    MareFlood((
-                        target_count: 0,
-                        additional_crater_count: 18,
-                        fill_fraction: 0.60,
-                        near_side_bias: 0.0,
-                        boundary_noise_amplitude_m: 700.0,
-                        boundary_noise_freq: 9.0,
-                        episode_count: 2,
-                        wrinkle_ridges: true,
-                    )),
-                    // Lobate thrust scarps — Mercury's hallmark feature,
-                    // from >5 km global radius contraction as the iron core
-                    // cooled. Tall, long, and more numerous than on any
-                    // other body in the system.
-                    Scarps((
-                        count: 28,
-                        min_length_m: 120000.0,
-                        max_length_m: 420000.0,
-                        width_m: 6000.0,
-                        height_m: 1400.0,
-                        curvature: 0.12,
-                    )),
-                    Regolith((
-                        amplitude_m: 10.0,
-                        characteristic_wavelength_m: 130.0,
-                        crater_density_multiplier: 1.0,
-                        bake_d_min_m: 600.0,
-                        bake_scale: 1.0,
-                        density_modulation: 0.25,
-                        density_wavelength_m: 240000.0,
-                    )),
-                    SpaceWeather((
-                        // Biomes drive highland color — no grayscale override.
-                        mare_mature_albedo: 0.08,
-                        mare_fresh_albedo: 0.13,
-                        // Smooth plains weather slightly warmer than the
-                        // heavily cratered iron crust.
-                        mare_tint: (1.06, 1.00, 0.93),
-                        young_crater_age_threshold: 0.9,
-                        ray_age_threshold: 0.35,
-                        ray_extent_radii: 8.0,
-                        ray_count_per_crater: 12,
-                        ray_half_width: 0.055,
-                    )),
-                ],
-            )),
-        ),
         (
             name: "Ashara",
             kind: Planet,
@@ -250,7 +89,7 @@
                 seed: 1003,
                 // Iron-core Earth analog: ~70% iron by volume, thin silicate
                 // crust, residual volatiles as N₂/O₂ atmosphere + hydrosphere.
-                // Matches `docs/solar_system.md` §III composition.
+                // Matches `docs/lore/solar_system.md` composition.
                 composition: (silicate: 0.26, iron: 0.70, ice: 0.0, volatiles: 0.04, hydrogen_helium: 0.0),
                 cubemap_resolution: 2048,
                 body_age_gyr: 4.5,
@@ -1055,7 +894,7 @@
                         // Per-steradian density matches Mira above the
                         // same fraction-of-radius threshold (~3 texel
                         // widths at res 1024 → 650 m on a 190 km body).
-                        // Slope 2.0 unifies the SFD with Mira/Ignis so
+                        // Slope 2.0 unifies the SFD with Mira-style moons so
                         // visual size distribution is consistent.
                         total_count: 89000,
                         sfd_slope: 2.0,
@@ -1117,52 +956,6 @@
                         ray_count_per_crater: 12,
                         ray_half_width: 0.05,
                     )),
-                ],
-            )),
-        ),
-        // Temporary placeholder — bright pink, Pluto-sized, ringed.
-        // Flat hot-pink cloud deck reads as a uniform ball; rings now
-        // hang off the body itself, independent of the atmosphere.
-        (
-            name: "Roselle",
-            kind: Planet,
-            parent: Some("Pyros"),
-            physical: (
-                mass_kg: 1.303e22,
-                radius_m: 1188000.0,
-                color: "#FF69B4",
-                albedo: 0.50,
-                rotation_period_s: 86400.0,
-                axial_tilt_deg: 25.0,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 1.72788e11,
-                eccentricity: 0.05,
-                inclination_deg: 1.5,
-                lon_ascending_node_deg: 0.0,
-                arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 90.0,
-            )),
-            generator: None,
-            atmosphere: Some((
-                seed: 99001,
-                cloud_deck: (
-                    palette: [
-                        (lat: -1.00, color: (1.00, 0.41, 0.71)),
-                        (lat:  1.00, color: (1.00, 0.41, 0.71)),
-                    ],
-                    band_frequency: 1.0,
-                ),
-            )),
-            rings: Some((
-                inner_radius_m: 1782000.0,
-                outer_radius_m: 2970000.0,
-                seed: 99002,
-                palette: [
-                    (r: 0.00, color: (1.00, 0.60, 0.80), opacity: 0.30),
-                    (r: 0.30, color: (1.00, 0.45, 0.75), opacity: 0.90),
-                    (r: 0.60, color: (1.00, 0.55, 0.80), opacity: 0.75),
-                    (r: 1.00, color: (1.00, 0.70, 0.85), opacity: 0.35),
                 ],
             )),
         ),
@@ -1396,7 +1189,7 @@
             // continents proper. Tidal heating from Auron drives two
             // active margins and a handful of hotspot tracks — those
             // are the only things that reliably break the waterline.
-            // Matches `docs/solar_system.md §IV-a`.
+            // Matches `docs/lore/solar_system.md`.
             generator: Some((
                 seed: 1250,
                 // Iron-rich core (8000 kg/m³ density) with residual
@@ -1820,97 +1613,6 @@
             )),
         ),
         (
-            name: "Maren",
-            kind: Moon,
-            parent: Some("Auron"),
-            physical: (
-                mass_kg: 9.5e17,
-                radius_m: 75000.0,
-                color: "#5C5248",
-                albedo: 0.08,
-                rotation_period_s: 7776000.0,
-                axial_tilt_deg: 0.0,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 1.198296e9,
-                eccentricity: 0.12,
-                inclination_deg: 47.0,
-                lon_ascending_node_deg: 0.0,
-                arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 140.0,
-            )),
-            generator: Some((
-                seed: 1302,
-                composition: (silicate: 0.90, iron: 0.05, ice: 0.0, volatiles: 0.05, hydrogen_helium: 0.0),
-                cubemap_resolution: 512,
-                body_age_gyr: 4.5,
-                pipeline: [
-                    Differentiate(()),
-                    // Very small irregular moon — one dominant near-
-                    // disrupting impact scar. At 75 km, a single basin of
-                    // ~30 km covers almost half the visible hemisphere and
-                    // is the defining feature.
-                    Megabasin((
-                        basins: [
-                            (center_dir: ( 0.30,  0.25,  0.92), radius_m: 30000.0, depth_m: 1800.0, ring_count: 2),
-                            (center_dir: (-0.55, -0.30, -0.78), radius_m: 16000.0, depth_m: 800.0, ring_count: 1),
-                        ],
-                        hemispheric_lowering_m: 0.0,
-                    )),
-                    Biomes((
-                        biomes: [
-                            (
-                                name: "captured_regolith",
-                                albedo: 0.08,
-                                fresh_albedo: Some(0.17),
-                                tint: (1.02, 1.00, 0.97),
-                                tonal_amp: 0.28,
-                                roughness: 0.82,
-                            ),
-                        ],
-                    )),
-                    Cratering((
-                        // Smaller per-sr target than the 1024-res bodies
-                        // because Maren is res 512 — its smallest visible
-                        // crater is a larger fraction of body radius, so
-                        // the equivalent Mira-density slice has fewer
-                        // craters. Same physical justification, just a
-                        // coarser cutoff.
-                        total_count: 22000,
-                        sfd_slope: 2.0,
-                        sfd_slope_small: None,
-                        sfd_break_radius_m: None,
-                        min_radius_m: 475.0,
-                        max_radius_m: 6750.0,
-                        age_bias: 1.0,
-                        cubemap_bake_threshold_m: 475.0,
-                        secondary_parent_radius_m: 0.0,
-                        secondaries_per_parent: 0,
-                    )),
-                    Regolith((
-                        amplitude_m: 3.0,
-                        characteristic_wavelength_m: 50.0,
-                        crater_density_multiplier: 1.0,
-                        bake_d_min_m: 190.0,
-                        bake_scale: 1.0,
-                        density_modulation: 0.25,
-                        density_wavelength_m: 25000.0,
-                    )),
-                    SpaceWeather((
-                        highland_mature_albedo: 0.08,
-                        highland_fresh_albedo: 0.18,
-                        mare_mature_albedo: 0.04,
-                        mare_fresh_albedo: 0.07,
-                        young_crater_age_threshold: 0.8,
-                        ray_age_threshold: 0.15,
-                        ray_extent_radii: 8.0,
-                        ray_count_per_crater: 12,
-                        ray_half_width: 0.05,
-                    )),
-                ],
-            )),
-        ),
-        (
             name: "Vaelen",
             kind: Planet,
             parent: Some("Pyros"),
@@ -1923,8 +1625,8 @@
                 axial_tilt_deg: 14.0,
             ),
             orbit: Some((
-                semi_major_axis_m: 2.5432e11,
-                eccentricity: 0.20,
+                semi_major_axis_m: 2.58808e11,
+                eccentricity: 0.12,
                 inclination_deg: 4.3,
                 lon_ascending_node_deg: 0.0,
                 arg_periapsis_deg: 0.0,
@@ -1973,6 +1675,32 @@
                 lon_ascending_node_deg: 0.0,
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 220.0,
+            )),
+            generator: None,
+        ),
+
+        // ─────────────────────────────────────────────
+        // MAIN BELT
+        // ─────────────────────────────────────────────
+        (
+            name: "Ceryx",
+            kind: DwarfPlanet,
+            parent: Some("Pyros"),
+            physical: (
+                mass_kg: 9.7e20,
+                radius_m: 470000.0,
+                color: "#6E6258",
+                albedo: 0.09,
+                rotation_period_s: 32667.0,
+                axial_tilt_deg: 4.0,
+            ),
+            orbit: Some((
+                semi_major_axis_m: 4.0392e11,
+                eccentricity: 0.08,
+                inclination_deg: 10.6,
+                lon_ascending_node_deg: 80.0,
+                arg_periapsis_deg: 73.0,
+                true_anomaly_deg: 30.0,
             )),
             generator: None,
         ),
@@ -2102,28 +1830,6 @@
             )),
         ),
         (
-            name: "Glacis",
-            kind: Moon,
-            parent: Some("Teros"),
-            physical: (
-                mass_kg: 8.97e21,
-                radius_m: 780000.0,
-                color: "#D1D1E0",
-                albedo: 0.60,
-                rotation_period_s: 302400.0,
-                axial_tilt_deg: 0.1,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 6.70208e8,
-                eccentricity: 0.0,
-                inclination_deg: 0.5,
-                lon_ascending_node_deg: 0.0,
-                arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 210.0,
-            )),
-            generator: None,
-        ),
-        (
             name: "Pyrith",
             kind: Moon,
             parent: Some("Teros"),
@@ -2146,24 +1852,24 @@
             generator: None,
         ),
         (
-            name: "Lithos",
+            name: "Glacis",
             kind: Moon,
             parent: Some("Teros"),
             physical: (
-                mass_kg: 1.794e22,
-                radius_m: 1315000.0,
-                color: "#748CAA",
-                albedo: 0.15,
-                rotation_period_s: 618120.0,
-                axial_tilt_deg: 0.2,
+                mass_kg: 8.97e21,
+                radius_m: 780000.0,
+                color: "#D1D1E0",
+                albedo: 0.60,
+                rotation_period_s: 302400.0,
+                axial_tilt_deg: 0.1,
             ),
             orbit: Some((
-                semi_major_axis_m: 1.06964e9,
-                eccentricity: 0.001,
-                inclination_deg: 0.2,
+                semi_major_axis_m: 6.70208e8,
+                eccentricity: 0.0,
+                inclination_deg: 0.5,
                 lon_ascending_node_deg: 0.0,
                 arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 145.0,
+                true_anomaly_deg: 210.0,
             )),
             generator: None,
         ),
@@ -2190,165 +1896,29 @@
             generator: None,
         ),
         (
-            name: "Seraph",
-            kind: Planet,
-            parent: Some("Pyros"),
-            physical: (
-                mass_kg: 9.545e26,
-                radius_m: 60000000.0,
-                color: "#8C99BF",
-                albedo: 0.35,
-                rotation_period_s: 39960.0,
-                axial_tilt_deg: 26.7,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 1.2716e12,
-                eccentricity: 0.05,
-                inclination_deg: 2.2,
-                lon_ascending_node_deg: 0.0,
-                arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 163.0,
-            )),
-            generator: None,
-            // Second gas giant: muted blue-gold banding, spectacular
-            // bright icy rings — visual showpiece of outer system.
-            atmosphere: Some((
-                seed: 80100,
-                cloud_deck: (
-                    palette: [
-                        (lat: -1.00, color: (0.50, 0.54, 0.64)),
-                        (lat: -0.60, color: (0.62, 0.60, 0.50)),
-                        (lat: -0.30, color: (0.76, 0.72, 0.54)),
-                        (lat:  0.00, color: (0.68, 0.66, 0.58)),
-                        (lat:  0.30, color: (0.80, 0.74, 0.52)),
-                        (lat:  0.55, color: (0.60, 0.62, 0.56)),
-                        (lat:  0.80, color: (0.52, 0.58, 0.66)),
-                        (lat:  1.00, color: (0.46, 0.52, 0.68)),
-                    ],
-                    band_frequency: 14.0,
-                    band_warp: 0.15,
-                    turbulence: 0.04,
-                    band_contrast: 0.10,
-                    band_sharpness: 0.0,
-                    tint: (1.00, 1.00, 1.00),
-                    speed_profile: [
-                         0.04, -0.10,  0.18, -0.15,
-                         0.22, -0.18,  0.30,  0.70,
-                         0.80,  0.35, -0.22,  0.28,
-                        -0.18,  0.15, -0.10,  0.04,
-                    ],
-                    differential_rotation_rate: 0.0010,
-                    turbulence_profile: [
-                        0.35, 0.30, 0.22, 0.16,
-                        0.12,
-                        0.16, 0.22, 0.30, 0.35,
-                    ],
-                    edge_wave_amp: 0.18,
-                    curl_amp: 0.20,
-                    parallax_amp: 0.0,
-                    named_vortices: [],
-                    edge_vortex_chain: Some((
-                        base_radius: 0.015,
-                        strength: 0.7,
-                        lifetime_s: 80.0,
-                        slots_per_band: 14,
-                    )),
-                ),
-                haze: Some((
-                    tint: (0.82, 0.86, 0.94),
-                    thickness: 0.12,
-                    terminator_bias: 0.30,
-                )),
-                rim_halo: Some((
-                    color: (0.68, 0.78, 0.96),
-                    intensity: 0.32,
-                    scale_height_m: 42000.0,
-                    outer_altitude_m: 280000.0,
-                )),
-                limb: Some((
-                    terminator_warmth: (0.88, 0.80, 0.72),
-                    terminator_strength: 0.28,
-                    fresnel_color: (0.74, 0.84, 1.00),
-                    fresnel_strength: 0.32,
-                )),
-                rayleigh: Some((
-                    color: (0.58, 0.72, 0.92),
-                    strength: 0.20,
-                    haze_scale: 4.0,
-                    clearing_threshold: 0.25,
-                    latitude_bias: 0.3,
-                )),
-                limb_darkening: Some((
-                    red:    0.22,
-                    green:  0.30,
-                    blue:   0.42,
-                    strength: 0.88,
-                )),
-            )),
-            rings: Some((
-                inner_radius_m:  68000000.0,
-                outer_radius_m: 140000000.0,
-                seed: 80101,
-                opacity: 1.00,
-                ringlet_noise: 0.60,
-                ringlet_octaves: 7,
-                palette: [
-                    (r: 0.00, color: (0.60, 0.62, 0.68), opacity: 0.30),
-                    (r: 0.12, color: (0.82, 0.84, 0.88), opacity: 0.75),
-                    (r: 0.28, color: (0.92, 0.92, 0.94), opacity: 0.98),
-                    (r: 0.38, color: (0.96, 0.94, 0.88), opacity: 0.95),
-                    (r: 0.44, color: (0.14, 0.14, 0.16), opacity: 0.05),
-                    (r: 0.52, color: (0.88, 0.86, 0.82), opacity: 0.90),
-                    (r: 0.75, color: (0.78, 0.80, 0.84), opacity: 0.72),
-                    (r: 1.00, color: (0.58, 0.60, 0.66), opacity: 0.20),
-                ],
-            )),
-        ),
-        (
-            name: "Tethyn",
-            kind: Moon,
-            parent: Some("Seraph"),
-            physical: (
-                mass_kg: 1.794e22,
-                radius_m: 1288000.0,
-                color: "#B28C33",
-                albedo: 0.20,
-                rotation_period_s: 1377720.0,
-                axial_tilt_deg: 0.3,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 1.222232e9,
-                eccentricity: 0.029,
-                inclination_deg: 0.3,
-                lon_ascending_node_deg: 0.0,
-                arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 90.0,
-            )),
-            generator: None,
-        ),
-        (
             name: "Nereus",
             kind: Planet,
             parent: Some("Pyros"),
             physical: (
-                mass_kg: 1.018e26,
-                radius_m: 25000000.0,
+                mass_kg: 7.178e25,
+                radius_m: 22000000.0,
                 color: "#338CA6",
                 albedo: 0.30,
-                rotation_period_s: 61920.0,
-                axial_tilt_deg: 1.6,
+                rotation_period_s: 57960.0,
+                axial_tilt_deg: 82.0,
             ),
             orbit: Some((
-                semi_major_axis_m: 2.6928e12,
-                eccentricity: 0.03,
-                inclination_deg: 1.6,
+                semi_major_axis_m: 1.7952e12,
+                eccentricity: 0.04,
+                inclination_deg: 1.4,
                 lon_ascending_node_deg: 0.0,
                 arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 67.0,
+                true_anomaly_deg: 289.0,
             )),
             generator: None,
-            // Inner ice giant: H₂/He/CH₄, deep blue-green from methane
-            // absorption. Subtle banding, no rings.
+            // Ice giant: H2/He/CH4, deep blue-green from methane
+            // absorption. Subtle banding, no rings. Keeps the old
+            // Nereus render profile on the new distilled-system body.
             atmosphere: Some((
                 seed: 90100,
                 cloud_deck: (
@@ -2410,87 +1980,26 @@
             )),
         ),
         (
-            name: "Pallos",
-            kind: Planet,
-            parent: Some("Pyros"),
+            name: "Orias",
+            kind: Moon,
+            parent: Some("Nereus"),
             physical: (
-                mass_kg: 7.178e25,
-                radius_m: 22000000.0,
-                color: "#99CCD9",
-                albedo: 0.31,
-                rotation_period_s: 57960.0,
-                axial_tilt_deg: 82.0,
+                mass_kg: 7.9e21,
+                radius_m: 950000.0,
+                color: "#BFD6E0",
+                albedo: 0.42,
+                rotation_period_s: -2450000.0,
+                axial_tilt_deg: 0.0,
             ),
             orbit: Some((
-                semi_major_axis_m: 4.1888e12,
-                eccentricity: 0.04,
-                inclination_deg: 1.4,
-                lon_ascending_node_deg: 0.0,
-                arg_periapsis_deg: 0.0,
-                true_anomaly_deg: 289.0,
+                semi_major_axis_m: 9.0e8,
+                eccentricity: 0.02,
+                inclination_deg: 157.0,
+                lon_ascending_node_deg: 35.0,
+                arg_periapsis_deg: 120.0,
+                true_anomaly_deg: 45.0,
             )),
             generator: None,
-            // Outer ice giant: pale cyan, 82° axial tilt. Very subdued
-            // banding — slightly paler and greener than Nereus.
-            atmosphere: Some((
-                seed: 100100,
-                cloud_deck: (
-                    palette: [
-                        (lat: -1.00, color: (0.42, 0.58, 0.64)),
-                        (lat: -0.50, color: (0.48, 0.64, 0.70)),
-                        (lat:  0.00, color: (0.54, 0.70, 0.74)),
-                        (lat:  0.50, color: (0.50, 0.66, 0.72)),
-                        (lat:  1.00, color: (0.44, 0.60, 0.66)),
-                    ],
-                    band_frequency: 6.0,
-                    band_warp: 0.08,
-                    turbulence: 0.02,
-                    band_contrast: 0.04,
-                    band_sharpness: 0.0,
-                    tint: (1.00, 1.00, 1.00),
-                    speed_profile: [
-                         0.01, -0.04,  0.06, -0.05,
-                         0.08, -0.06,  0.10,  0.25,
-                         0.20,  0.10, -0.06,  0.08,
-                        -0.05,  0.04, -0.03,  0.01,
-                    ],
-                    differential_rotation_rate: 0.0004,
-                    turbulence_profile: [
-                        0.18, 0.15, 0.12, 0.10,
-                        0.08,
-                        0.10, 0.12, 0.15, 0.18,
-                    ],
-                    edge_wave_amp: 0.06,
-                    curl_amp: 0.08,
-                    parallax_amp: 0.0,
-                    named_vortices: [],
-                    edge_vortex_chain: None,
-                ),
-                haze: Some((
-                    tint: (0.72, 0.82, 0.86),
-                    thickness: 0.18,
-                    terminator_bias: 0.30,
-                )),
-                rim_halo: Some((
-                    color: (0.52, 0.72, 0.82),
-                    intensity: 0.25,
-                    scale_height_m: 26000.0,
-                    outer_altitude_m: 160000.0,
-                )),
-                limb: Some((
-                    terminator_warmth: (0.74, 0.76, 0.78),
-                    terminator_strength: 0.18,
-                    fresnel_color: (0.56, 0.74, 0.86),
-                    fresnel_strength: 0.28,
-                )),
-                rayleigh: None,
-                limb_darkening: Some((
-                    red:    0.26,
-                    green:  0.32,
-                    blue:   0.42,
-                    strength: 0.78,
-                )),
-            )),
         ),
 
         // ─────────────────────────────────────────────
@@ -2509,8 +2018,8 @@
                 axial_tilt_deg: 0.0,
             ),
             orbit: Some((
-                semi_major_axis_m: 6.2832e12,
-                eccentricity: 0.25,
+                semi_major_axis_m: 2.3523774754419053e12,
+                eccentricity: 0.18,
                 inclination_deg: 17.0,
                 lon_ascending_node_deg: 45.0,
                 arg_periapsis_deg: 110.0,
@@ -2687,78 +2196,12 @@
                 axial_tilt_deg: 0.0,
             ),
             orbit: Some((
-                semi_major_axis_m: 6.4328e12,
+                semi_major_axis_m: 3.5904e12,
                 eccentricity: 0.12,
                 inclination_deg: 28.0,
                 lon_ascending_node_deg: 120.0,
                 arg_periapsis_deg: 240.0,
                 true_anomaly_deg: 180.0,
-            )),
-            generator: None,
-        ),
-        (
-            name: "Acheron",
-            kind: DwarfPlanet,
-            parent: Some("Pyros"),
-            physical: (
-                mass_kg: 1.196e21,
-                radius_m: 450000.0,
-                color: "#991A26",
-                albedo: 0.05,
-                rotation_period_s: 37080.0,
-                axial_tilt_deg: 0.0,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 4.3384e13,
-                eccentricity: 0.73,
-                inclination_deg: 25.0,
-                lon_ascending_node_deg: 200.0,
-                arg_periapsis_deg: 310.0,
-                true_anomaly_deg: 0.0,
-            )),
-            generator: None,
-        ),
-        (
-            name: "Chiron",
-            kind: Centaur,
-            parent: Some("Pyros"),
-            physical: (
-                mass_kg: 4.0e18,
-                radius_m: 120000.0,
-                color: "#807368",
-                albedo: 0.08,
-                rotation_period_s: 21240.0,
-                axial_tilt_deg: 0.0,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 1.9448e12,
-                eccentricity: 0.35,
-                inclination_deg: 35.0,
-                lon_ascending_node_deg: 170.0,
-                arg_periapsis_deg: 50.0,
-                true_anomaly_deg: 200.0,
-            )),
-            generator: None,
-        ),
-        (
-            name: "Wanderer",
-            kind: Comet,
-            parent: Some("Pyros"),
-            physical: (
-                mass_kg: 2.2e14,
-                radius_m: 6000.0,
-                color: "#BFE0E5",
-                albedo: 0.04,
-                rotation_period_s: 111600.0,
-                axial_tilt_deg: 0.0,
-            ),
-            orbit: Some((
-                semi_major_axis_m: 2.5432e12,
-                eccentricity: 0.92,
-                inclination_deg: 22.0,
-                lon_ascending_node_deg: 65.0,
-                arg_periapsis_deg: 170.0,
-                true_anomaly_deg: 150.0,
             )),
             generator: None,
         ),
