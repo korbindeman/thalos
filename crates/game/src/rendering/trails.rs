@@ -10,7 +10,6 @@ use super::screen_marker_radius;
 use super::types::{CelestialBody, FrameBodyStates, SimulationState};
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{RenderOrigin, WorldScale, to_render_pos};
-use crate::flight_plan_view::GhostBody;
 
 /// Points sampled along each orbit for gizmo line drawing.
 const ORBIT_SAMPLES: usize = 256;
@@ -129,7 +128,6 @@ pub(super) fn draw_orbits(
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
     focus: Res<CameraFocus>,
-    ghosts: Query<&GhostBody>,
     bodies: Query<(&CelestialBody, &Transform)>,
     sim: Option<Res<SimulationState>>,
     camera_query: Query<&Transform, (With<ActiveCamera>, With<OrbitCamera>)>,
@@ -147,7 +145,7 @@ pub(super) fn draw_orbits(
     // Focus body id and its parent id, if any.
     let focus_body_id = match focus.target {
         CameraFocusTarget::Body(body_id) => Some(body_id),
-        CameraFocusTarget::Ghost(entity) => ghosts.get(entity).ok().map(|ghost| ghost.body_id),
+        CameraFocusTarget::Ghost(ghost_focus) => Some(ghost_focus.body_id),
         CameraFocusTarget::Ship => Some(crate::camera::find_reference_body(
             sim.simulation.ship_state().position,
             sim.simulation.bodies(),

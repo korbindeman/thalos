@@ -35,7 +35,6 @@ pub fn time_control_panel(
     locks: Res<ControlLocks>,
     bodies: Query<(&CelestialBody, &Name)>,
     ship_name: Query<&Name, With<PlayerShip>>,
-    names: Query<&Name, Without<CelestialBody>>,
     diagnostics: Res<DiagnosticsStore>,
     throttle: Res<ThrottleState>,
     tanks: Query<&PartResources, With<FuelTank>>,
@@ -55,9 +54,10 @@ pub fn time_control_panel(
                     .single()
                     .ok()
                     .map(|name| name.as_str().to_string()),
-                CameraFocusTarget::Ghost(entity) => {
-                    names.get(entity).ok().map(|name| name.as_str().to_string())
-                }
+                CameraFocusTarget::Ghost(ghost_focus) => bodies
+                    .iter()
+                    .find(|(body, _)| body.body_id == ghost_focus.body_id)
+                    .map(|(_, name)| format!("Ghost: {}", name.as_str())),
                 CameraFocusTarget::None => None,
             }
             .unwrap_or_else(|| "\u{2014}".to_string());

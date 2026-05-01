@@ -65,7 +65,19 @@ pub struct RenderOrigin {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderGhostFocus {
     pub body_id: BodyId,
+    pub parent_id: BodyId,
+    pub relative_position: DVec3,
+    pub projection_epoch: f64,
     pub encounter_epoch: f64,
+}
+
+pub const GHOST_FOCUS_EPOCH_TOLERANCE_S: f64 = 1.0;
+
+impl RenderGhostFocus {
+    pub fn matches(self, body_id: BodyId, encounter_epoch: f64) -> bool {
+        self.body_id == body_id
+            && (self.encounter_epoch - encounter_epoch).abs() <= GHOST_FOCUS_EPOCH_TOLERANCE_S
+    }
 }
 
 /// The body/frame the trajectory and ghost system are conceptually drawn

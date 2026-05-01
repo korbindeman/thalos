@@ -31,6 +31,7 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContextSettings, EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
@@ -57,23 +58,55 @@ const PART_RESOLUTION: u32 = 128;
 /// `>=` is "drag".
 const CLICK_THRESHOLD_PX: f32 = 4.0;
 
-fn sanitize_name(name: &str) -> String {
-    let s: String = name
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if s.is_empty() { "unnamed".into() } else { s }
+#[derive(Clone, Debug)]
+struct SavedShip {
+    slug: String,
+    name: String,
 }
 
-fn ship_path(name: &str) -> PathBuf {
-    PathBuf::from(SHIPS_DIR).join(format!("{}.ron", sanitize_name(name)))
+#[derive(Deserialize)]
+struct ShipFileHeader {
+    name: String,
+}
+
+fn schema_ship_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        "Unnamed".into()
+    } else {
+        name.into()
+    }
+}
+
+fn slugify_ship_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_separator = false;
+
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(c.to_ascii_lowercase());
+            pending_separator = false;
+        } else {
+            pending_separator = !slug.is_empty();
+        }
+    }
+
+    if slug.is_empty() {
+        "unnamed".into()
+    } else {
+        slug
+    }
+}
+
+fn ship_path_for_name(name: &str) -> PathBuf {
+    ship_path_for_slug(&slugify_ship_name(name))
+}
+
+fn ship_path_for_slug(slug: &str) -> PathBuf {
+    PathBuf::from(SHIPS_DIR).join(format!("{slug}.ron"))
 }
 
 /// Stable ordering for the palette: pods, then engines, then parametric
@@ -88,24 +121,36 @@ fn kind_order(entry: &CatalogEntry) -> u8 {
     }
 }
 
-fn list_ships() -> Vec<String> {
+fn ship_name_from_ron(text: &str) -> Option<String> {
+    ron::from_str::<ShipFileHeader>(text)
+        .ok()
+        .map(|header| schema_ship_name(&header.name))
+}
+
+fn list_ships() -> Vec<SavedShip> {
     let dir = PathBuf::from(SHIPS_DIR);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = entries
+    let mut out: Vec<SavedShip> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let p = e.path();
             if p.extension().and_then(|s| s.to_str()) != Some("ron") {
                 return None;
             }
-            p.file_stem()
+            let slug = p
+                .file_stem()
                 .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
+                .map(|s| s.to_string())?;
+            let name = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|text| ship_name_from_ron(&text))
+                .unwrap_or_else(|| slug.clone());
+            Some(SavedShip { slug, name })
         })
         .collect();
-    out.sort();
+    out.sort_by_key(|ship| (ship.name.to_ascii_lowercase(), ship.slug.clone()));
     out
 }
 
@@ -206,7 +251,7 @@ struct EditorState {
     load_target: Option<String>,
     delete_file: Option<String>,
     refresh_list: bool,
-    ship_list: Vec<String>,
+    ship_list: Vec<SavedShip>,
     status: String,
 }
 
@@ -1365,7 +1410,7 @@ fn collect_blueprint(
     }
 
     Some(ShipBlueprint {
-        name: ship.name.clone(),
+        name: schema_ship_name(&ship.name),
         root: 0,
         parts: part_blueprints,
         connections,
@@ -1394,7 +1439,7 @@ fn process_commands(
                 match collect_blueprint(ship, &parts_q, &attachments) {
                     Some(bp) => match bp.to_ron() {
                         Ok(text) => {
-                            let path = ship_path(&bp.name);
+                            let path = ship_path_for_name(&bp.name);
                             if let Err(e) = std::fs::create_dir_all(SHIPS_DIR) {
                                 state.status = format!("mkdir failed: {e}");
                             } else {
@@ -1416,8 +1461,8 @@ fn process_commands(
     }
 
     // ---- Load ---------------------------------------------------------
-    if let Some(name) = state.load_target.take() {
-        let path = ship_path(&name);
+    if let Some(slug) = state.load_target.take() {
+        let path = ship_path_for_slug(&slug);
         match std::fs::read_to_string(&path) {
             Ok(text) => match ShipBlueprint::from_ron(&text) {
                 Ok(bp) => {
@@ -1463,8 +1508,8 @@ fn process_commands(
     }
 
     // ---- Delete file --------------------------------------------------
-    if let Some(name) = state.delete_file.take() {
-        let path = ship_path(&name);
+    if let Some(slug) = state.delete_file.take() {
+        let path = ship_path_for_slug(&slug);
         match std::fs::remove_file(&path) {
             Ok(()) => {
                 state.status = format!("Deleted {}", path.display());
@@ -1699,15 +1744,16 @@ fn editor_ui(
             if ship_list.is_empty() {
                 ui.label("(none)");
             }
-            for name in ship_list {
+            for saved in ship_list {
                 ui.horizontal(|ui| {
                     if ui.button("Load").clicked() {
-                        state.load_target = Some(name.clone());
+                        state.load_target = Some(saved.slug.clone());
                     }
                     if ui.button("X").clicked() {
-                        state.delete_file = Some(name.clone());
+                        state.delete_file = Some(saved.slug.clone());
                     }
-                    ui.label(&name);
+                    ui.label(&saved.name)
+                        .on_hover_text(format!("{}.ron", saved.slug));
                 });
             }
 
@@ -2482,5 +2528,41 @@ fn propagate_coupled_material(
         if my_mat.kind != kind {
             my_mat.kind = kind;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugifies_ship_names_for_ron_filenames() {
+        assert_eq!(
+            slugify_ship_name("  Lunar Transfer Mk II  "),
+            "lunar-transfer-mk-ii"
+        );
+        assert_eq!(slugify_ship_name("A__B / C"), "a-b-c");
+        assert_eq!(slugify_ship_name("***"), "unnamed");
+    }
+
+    #[test]
+    fn reads_ship_name_from_schema_header() {
+        let text = r#"(
+            name: "Lunar Transfer Vehicle",
+            root: 0,
+            parts: [],
+            connections: [],
+        )"#;
+
+        assert_eq!(
+            ship_name_from_ron(text).as_deref(),
+            Some("Lunar Transfer Vehicle")
+        );
+    }
+
+    #[test]
+    fn schema_ship_names_are_trimmed_and_non_empty() {
+        assert_eq!(schema_ship_name("  Apollo  "), "Apollo");
+        assert_eq!(schema_ship_name("   "), "Unnamed");
     }
 }

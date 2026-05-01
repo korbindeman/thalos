@@ -465,7 +465,7 @@ fn render_ghost_encounter_windows(
             continue;
         }
 
-        let pin = view.pin_for_ghost(ghost, body_states);
+        let pin = view.pin_for_ghost_focus(focus_ghost, body_states);
         rendered = true;
 
         let soi_radius = system
@@ -474,30 +474,27 @@ fn render_ghost_encounter_windows(
             .map(|body| body.soi_radius_m)
             .unwrap_or(f64::INFINITY);
         let end = window.exit_epoch.unwrap_or(window.end_epoch);
-        let points = ghost_window_points(
-            prediction,
-            ghost,
-            ephemeris,
-            pin,
-            soi_radius,
-            window.start_epoch,
-            end,
-            origin,
-            scale,
-        );
-        if points.len() < 2 {
-            continue;
-        }
-
-        let total = points.len();
-        for k in 0..total.saturating_sub(1) {
-            let alpha_a = 0.9 - 0.45 * (k as f32 / total as f32);
-            let alpha_b = 0.9 - 0.45 * ((k + 1) as f32 / total as f32);
-            gizmos.line_gradient(
-                points[k].1,
-                points[k + 1].1,
-                encounter_color(ghost.body_id, system, alpha_a, 0.20),
-                encounter_color(ghost.body_id, system, alpha_b, 0.20),
+        let start = window.start_epoch;
+        for leg in prediction.legs() {
+            if let Some(burn) = &leg.burn_segment {
+                render_ghost_segment(
+                    burn, true, ghost, ephemeris, pin, soi_radius, start, end, system, origin,
+                    scale, gizmos,
+                );
+            }
+            render_ghost_segment(
+                &leg.coast_segment,
+                false,
+                ghost,
+                ephemeris,
+                pin,
+                soi_radius,
+                start,
+                end,
+                system,
+                origin,
+                scale,
+                gizmos,
             );
         }
 
@@ -577,11 +574,53 @@ fn draw_cross_marker(
 }
 
 fn is_focused_ghost(ghost: &Ghost, focus: RenderGhostFocus) -> bool {
-    ghost.body_id == focus.body_id && (ghost.encounter_epoch - focus.encounter_epoch).abs() <= 1.0
+    focus.matches(ghost.body_id, ghost.encounter_epoch)
 }
 
-fn ghost_window_points(
-    prediction: &FlightPlan,
+#[allow(clippy::too_many_arguments)]
+fn render_ghost_segment(
+    segment: &NumericSegment,
+    is_burn: bool,
+    ghost: &Ghost,
+    ephemeris: &dyn BodyStateProvider,
+    pin: DVec3,
+    soi_radius: f64,
+    start: f64,
+    end: f64,
+    system: &SolarSystemDefinition,
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    gizmos: &mut Gizmos,
+) -> bool {
+    let points = ghost_segment_points(
+        segment, ghost, ephemeris, pin, soi_radius, start, end, origin, scale,
+    );
+    if points.len() < 2 {
+        return false;
+    }
+
+    let total = points.len();
+    for k in 0..total.saturating_sub(1) {
+        let alpha_a = 0.9 - 0.45 * (k as f32 / total as f32);
+        let alpha_b = 0.9 - 0.45 * ((k + 1) as f32 / total as f32);
+        let color_a = if is_burn {
+            Color::srgba(1.0, 0.65, 0.1, alpha_a)
+        } else {
+            encounter_color(ghost.body_id, system, alpha_a, 0.20)
+        };
+        let color_b = if is_burn {
+            Color::srgba(1.0, 0.65, 0.1, alpha_b)
+        } else {
+            encounter_color(ghost.body_id, system, alpha_b, 0.20)
+        };
+        gizmos.line_gradient(points[k].1, points[k + 1].1, color_a, color_b);
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ghost_segment_points(
+    segment: &NumericSegment,
     ghost: &Ghost,
     ephemeris: &dyn BodyStateProvider,
     pin: DVec3,
@@ -593,15 +632,29 @@ fn ghost_window_points(
 ) -> Vec<(f64, Vec3)> {
     let mut points = Vec::new();
     let mut inside_started = false;
+    let (segment_start, segment_end) = segment.epoch_range();
+    let start = start.max(segment_start);
+    let end = end.min(segment_end);
 
     if end <= start {
         return points;
     }
 
-    const ENCOUNTER_SAMPLES: usize = 128;
-    for i in 0..=ENCOUNTER_SAMPLES {
-        let t = start + (end - start) * (i as f64 / ENCOUNTER_SAMPLES as f64);
-        let Some(state) = prediction.state_at(t) else {
+    let mut times = Vec::with_capacity(segment.samples.len() + 2);
+    times.push(start);
+    times.extend(
+        segment
+            .samples
+            .iter()
+            .map(|sample| sample.time)
+            .filter(|time| *time > start && *time < end),
+    );
+    times.push(end);
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+    for (i, t) in times.into_iter().enumerate() {
+        let Some(state) = segment.state_at(t) else {
             continue;
         };
         let sample = relative_render_point(

@@ -205,6 +205,11 @@ impl FlightPlanView {
         &mut self.ghosts
     }
 
+    pub(super) fn set_focused_ghost(&mut self, focus: RenderGhostFocus) {
+        self.focus_body = focus.body_id;
+        self.focus_ghost = Some(focus);
+    }
+
     /// Latest non-Retired ghost for `body_id` whose `encounter_epoch ≤
     /// sample_time + GHOST_EPOCH_TOLERANCE_S`. This is the ghost that
     /// pins a leg containing samples at `sample_time`.
@@ -253,6 +258,11 @@ impl FlightPlanView {
         }
     }
 
+    pub fn pin_for_ghost_focus(&self, focus: RenderGhostFocus, body_states: &[BodyState]) -> DVec3 {
+        self.pin_for_body(focus.parent_id, focus.projection_epoch, body_states)
+            + focus.relative_position
+    }
+
     /// World-space pin for a leg whose anchor is `body_id` at sample
     /// time `t`. See module docstring for resolution rules.
     pub fn pin_for_body(
@@ -267,9 +277,8 @@ impl FlightPlanView {
         if let Some(focus_ghost) = self.focus_ghost
             && focus_ghost.body_id == body_id
             && sample_time + GHOST_EPOCH_TOLERANCE_S >= focus_ghost.encounter_epoch
-            && let Some(ghost) = self.ghost_for_epoch(body_id, focus_ghost.encounter_epoch)
         {
-            return self.pin_for_ghost(ghost, body_states);
+            return self.pin_for_ghost_focus(focus_ghost, body_states);
         }
 
         // Rule 2: focus body grounds out at its current heliocentric

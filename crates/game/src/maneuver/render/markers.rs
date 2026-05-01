@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
-use super::super::helpers::{node_world_position, overlay_marker_transform};
+use super::super::helpers::{
+    node_world_position, overlay_marker_transform, trajectory_rail_points,
+};
 use super::super::state::{
     InteractionMode, ManeuverPlan, NodeMarkerDisc, SelectedNode, SnapIndicator,
 };
@@ -191,5 +193,57 @@ pub(in crate::maneuver) fn manage_node_markers(
             HideInPhotoMode,
             HideInShipView,
         ));
+    }
+}
+
+/// Draw the immutable source rail for the selected node.
+pub(in crate::maneuver) fn render_selected_node_rail(
+    plan: Res<ManeuverPlan>,
+    selected: Res<SelectedNode>,
+    sim: Option<Res<SimulationState>>,
+    body_states: Res<FrameBodyStates>,
+    origin: Res<RenderOrigin>,
+    scale: Res<WorldScale>,
+    flight_plan_view: Res<FlightPlanView>,
+    mut gizmos: Gizmos,
+) {
+    let Some(selected_id) = selected.id else {
+        return;
+    };
+    let Some(node) = plan.nodes.iter().find(|node| node.id == selected_id) else {
+        return;
+    };
+    let Some(rail) = node.rail.as_ref() else {
+        return;
+    };
+    let Some(sim) = sim.as_ref() else {
+        return;
+    };
+    let Some(states) = body_states.states.as_deref() else {
+        return;
+    };
+
+    let points = trajectory_rail_points(
+        rail,
+        states,
+        &origin,
+        &scale,
+        sim.ephemeris.as_ref(),
+        &flight_plan_view,
+    );
+    if points.len() < 2 {
+        return;
+    }
+
+    let total = points.len();
+    for (idx, pair) in points.windows(2).enumerate() {
+        let alpha_a = 0.65 - 0.25 * (idx as f32 / total as f32);
+        let alpha_b = 0.65 - 0.25 * ((idx + 1) as f32 / total as f32);
+        gizmos.line_gradient(
+            pair[0],
+            pair[1],
+            Color::srgba(1.0, 0.88, 0.22, alpha_a),
+            Color::srgba(1.0, 0.88, 0.22, alpha_b),
+        );
     }
 }

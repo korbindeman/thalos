@@ -3,9 +3,9 @@ use bevy::prelude::*;
 use thalos_physics::body_state_provider::BodyStateProvider;
 use thalos_physics::maneuver::{delta_v_to_world, orbital_frame};
 use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory};
-use thalos_physics::types::{BodyState, SolarSystemDefinition, TrajectorySample};
+use thalos_physics::types::{BodyId, BodyState, SolarSystemDefinition, TrajectorySample};
 
-use super::state::{GameNode, ManeuverPlan, NodeId};
+use super::state::{GameNode, ManeuverPlan, NodeId, RailFrame, TrajectoryRail};
 use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
 use crate::flight_plan_view::FlightPlanView;
 
@@ -21,6 +21,7 @@ pub(super) struct ClosestTrailPoint {
     /// prediction (which may be stale during throttled slides).
     pub sample_position: DVec3,
     pub sample_velocity: DVec3,
+    pub rail: Option<TrajectoryRail>,
 }
 
 /// Compute the prograde/normal/radial frame as a Mat3 from ship + body state.
@@ -53,9 +54,8 @@ pub(super) fn orbital_frame_mat3(
 /// sample whose time sits outside the current legs until the prediction is
 /// rebuilt one frame later.
 pub(super) fn node_world_pos_and_frame(
+    node: &GameNode,
     prediction: &FlightPlan,
-    time: f64,
-    reference_body: usize,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -63,6 +63,20 @@ pub(super) fn node_world_pos_and_frame(
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Option<(Vec3, Mat3)> {
+    if let Some(rail) = &node.rail {
+        return rail_world_pos_and_frame(
+            rail,
+            node.time,
+            body_states,
+            origin,
+            scale,
+            ephemeris,
+            flight_plan_view,
+        );
+    }
+
+    let time = node.time;
+    let reference_body = node.reference_body;
     if !node_visible_at_time(prediction, system, flight_plan_view, reference_body, time) {
         return None;
     }
@@ -129,6 +143,156 @@ fn baseline_sample_at(
     })
 }
 
+fn rail_world_pos_and_frame(
+    rail: &TrajectoryRail,
+    time: f64,
+    body_states: &[BodyState],
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    ephemeris: &dyn BodyStateProvider,
+    flight_plan_view: &FlightPlanView,
+) -> Option<(Vec3, Mat3)> {
+    let state = rail.state_at(time)?;
+    let world_pos = rail_world_position_for_state(
+        rail,
+        time,
+        state.position,
+        body_states,
+        origin,
+        scale,
+        ephemeris,
+        flight_plan_view,
+    )?;
+    let reference = ephemeris.query_body(rail.reference_body, time);
+    let frame = orbital_frame_mat3(
+        state.position,
+        state.velocity,
+        reference.position,
+        reference.velocity,
+    );
+    Some((world_pos, frame))
+}
+
+fn rail_visible(rail: &TrajectoryRail, flight_plan_view: &FlightPlanView) -> bool {
+    match rail.frame {
+        RailFrame::Body { .. } => flight_plan_view.focused_ghost().is_none(),
+        RailFrame::Ghost { body_id, .. } => flight_plan_view
+            .focused_ghost()
+            .is_some_and(|focus| focus.body_id == body_id),
+    }
+}
+
+fn rail_world_position_for_state(
+    rail: &TrajectoryRail,
+    time: f64,
+    position: DVec3,
+    body_states: &[BodyState],
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    ephemeris: &dyn BodyStateProvider,
+    flight_plan_view: &FlightPlanView,
+) -> Option<Vec3> {
+    if !rail_visible(rail, flight_plan_view) {
+        return None;
+    }
+
+    match rail.frame {
+        RailFrame::Body { body_id } => {
+            let body_state = ephemeris.query_body(body_id, time);
+            let sample = TrajectorySample {
+                time,
+                position,
+                velocity: DVec3::ZERO,
+                anchor_body: body_id,
+                ref_pos: body_state.position,
+            };
+            let pin = flight_plan_view.pin_for_body(body_id, time, body_states);
+            Some(sample_render_pos(&sample, pin, origin, scale))
+        }
+        RailFrame::Ghost {
+            body_id,
+            parent_id,
+            relative_position,
+            projection_epoch,
+            encounter_epoch,
+            soi_radius,
+        } => {
+            let pin = flight_plan_view
+                .focused_ghost()
+                .filter(|focus| focus.body_id == body_id)
+                .map(|focus| flight_plan_view.pin_for_ghost_focus(focus, body_states))
+                .unwrap_or_else(|| {
+                    flight_plan_view
+                        .ghosts()
+                        .iter()
+                        .find(|ghost| {
+                            ghost.body_id == body_id
+                                && (ghost.encounter_epoch - encounter_epoch).abs()
+                                    <= crate::coords::GHOST_FOCUS_EPOCH_TOLERANCE_S
+                        })
+                        .or_else(|| {
+                            flight_plan_view
+                                .focused_ghost_ref()
+                                .filter(|ghost| ghost.body_id == body_id)
+                        })
+                        .or_else(|| {
+                            flight_plan_view
+                                .ghosts()
+                                .iter()
+                                .filter(|ghost| ghost.body_id == body_id)
+                                .min_by(|a, b| {
+                                    let da = (a.encounter_epoch - encounter_epoch).abs();
+                                    let db = (b.encounter_epoch - encounter_epoch).abs();
+                                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                        })
+                        .map(|ghost| flight_plan_view.pin_for_ghost(ghost, body_states))
+                        .unwrap_or_else(|| {
+                            let parent_pin = flight_plan_view.pin_for_body(
+                                parent_id,
+                                projection_epoch,
+                                body_states,
+                            );
+                            parent_pin + relative_position
+                        })
+                });
+            Some(ghost_local_world_pos_at_pin(
+                time, position, body_id, pin, soi_radius, origin, scale, ephemeris,
+            ))
+        }
+    }
+}
+
+pub(super) fn trajectory_rail_points(
+    rail: &TrajectoryRail,
+    body_states: &[BodyState],
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    ephemeris: &dyn BodyStateProvider,
+    flight_plan_view: &FlightPlanView,
+) -> Vec<Vec3> {
+    if !rail_visible(rail, flight_plan_view) {
+        return Vec::new();
+    }
+
+    rail_candidate_times(rail)
+        .into_iter()
+        .filter_map(|time| {
+            let state = rail.state_at(time)?;
+            rail_world_position_for_state(
+                rail,
+                time,
+                state.position,
+                body_states,
+                origin,
+                scale,
+                ephemeris,
+                flight_plan_view,
+            )
+        })
+        .collect()
+}
+
 pub(super) fn node_world_position(
     node: &GameNode,
     prediction: &FlightPlan,
@@ -140,9 +304,8 @@ pub(super) fn node_world_position(
     flight_plan_view: &FlightPlanView,
 ) -> Option<Vec3> {
     node_world_pos_and_frame(
+        node,
         prediction,
-        node.time,
-        node.reference_body,
         body_states,
         origin,
         scale,
@@ -167,9 +330,8 @@ pub(super) fn selected_node_world_and_frame(
     let id = selected_id?;
     let node = plan.nodes.iter().find(|n| n.id == id)?;
     node_world_pos_and_frame(
+        node,
         prediction,
-        node.time,
-        node.reference_body,
         body_states,
         origin,
         scale,
@@ -340,6 +502,207 @@ pub(super) fn slide_search_segments<'a>(
     Vec::new()
 }
 
+fn body_rail_from_segment(segment: &NumericSegment) -> Option<TrajectoryRail> {
+    let first = segment.samples.first()?;
+    Some(TrajectoryRail {
+        frame: RailFrame::Body {
+            body_id: first.anchor_body,
+        },
+        reference_body: first.anchor_body,
+        samples: segment.samples.clone(),
+    })
+}
+
+fn rail_from_segment_interval(
+    segment: &NumericSegment,
+    frame: RailFrame,
+    reference_body: BodyId,
+    start: f64,
+    end: f64,
+    ephemeris: &dyn BodyStateProvider,
+) -> Option<TrajectoryRail> {
+    let (segment_start, segment_end) = segment.epoch_range();
+    let start = start.max(segment_start);
+    let end = end.min(segment_end);
+    if end <= start {
+        return None;
+    }
+
+    let mut times = Vec::with_capacity(segment.samples.len() + 2);
+    times.push(start);
+    times.extend(
+        segment
+            .samples
+            .iter()
+            .map(|sample| sample.time)
+            .filter(|time| *time > start && *time < end),
+    );
+    times.push(end);
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+    let mut samples = Vec::with_capacity(times.len());
+    for time in times {
+        let Some(state) = segment.state_at(time) else {
+            continue;
+        };
+        let reference = ephemeris.query_body(reference_body, time);
+        samples.push(TrajectorySample {
+            time,
+            position: state.position,
+            velocity: state.velocity,
+            anchor_body: reference_body,
+            ref_pos: reference.position,
+        });
+    }
+
+    if samples.len() < 2 {
+        return None;
+    }
+
+    Some(TrajectoryRail {
+        frame,
+        reference_body,
+        samples,
+    })
+}
+
+fn push_body_rail(runs: &mut Vec<TrajectoryRail>, samples: &mut Vec<TrajectorySample>) {
+    if samples.len() < 2 {
+        samples.clear();
+        return;
+    }
+
+    let body_id = samples[0].anchor_body;
+    runs.push(TrajectoryRail {
+        frame: RailFrame::Body { body_id },
+        reference_body: body_id,
+        samples: std::mem::take(samples),
+    });
+}
+
+fn visible_trajectory_rails(
+    prediction: &FlightPlan,
+    system: &SolarSystemDefinition,
+    ephemeris: &dyn BodyStateProvider,
+    flight_plan_view: &FlightPlanView,
+) -> Vec<TrajectoryRail> {
+    if flight_plan_view.focused_ghost().is_some() {
+        return focused_ghost_rails(prediction, system, ephemeris, flight_plan_view);
+    }
+
+    let mut rails = Vec::new();
+    for segment in prediction.segments.iter() {
+        let Some(first) = segment.samples.first() else {
+            continue;
+        };
+        let mut run = Vec::new();
+        for sample in &segment.samples {
+            let same_anchor = sample.anchor_body == first.anchor_body;
+            let visible = same_anchor
+                && !flight_plan_view.epoch_hidden_in_focus(prediction, system, sample.time);
+            if visible {
+                run.push(*sample);
+            } else {
+                push_body_rail(&mut rails, &mut run);
+            }
+        }
+        push_body_rail(&mut rails, &mut run);
+    }
+    rails
+}
+
+fn focused_ghost_rails(
+    prediction: &FlightPlan,
+    system: &SolarSystemDefinition,
+    ephemeris: &dyn BodyStateProvider,
+    flight_plan_view: &FlightPlanView,
+) -> Vec<TrajectoryRail> {
+    let Some(focus) = flight_plan_view.focused_ghost() else {
+        return Vec::new();
+    };
+    let Some(ghost) = flight_plan_view.focused_ghost_ref().or_else(|| {
+        flight_plan_view
+            .ghosts()
+            .iter()
+            .filter(|ghost| ghost.body_id == focus.body_id)
+            .min_by(|a, b| {
+                let da = (a.encounter_epoch - focus.encounter_epoch).abs();
+                let db = (b.encounter_epoch - focus.encounter_epoch).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }) else {
+        return Vec::new();
+    };
+    let Some(window) = ghost.trajectory_window else {
+        return Vec::new();
+    };
+    let end = window.exit_epoch.unwrap_or(window.end_epoch);
+    if end <= window.start_epoch {
+        return Vec::new();
+    }
+
+    let soi_radius = system
+        .bodies
+        .get(ghost.body_id)
+        .map(|body| body.soi_radius_m)
+        .unwrap_or(f64::INFINITY);
+    let frame = RailFrame::Ghost {
+        body_id: ghost.body_id,
+        parent_id: focus.parent_id,
+        relative_position: focus.relative_position,
+        projection_epoch: focus.projection_epoch,
+        encounter_epoch: focus.encounter_epoch,
+        soi_radius,
+    };
+
+    let mut rails = Vec::new();
+    for leg in prediction.legs() {
+        if let Some(burn) = &leg.burn_segment
+            && let Some(rail) = rail_from_segment_interval(
+                burn,
+                frame.clone(),
+                ghost.body_id,
+                window.start_epoch,
+                end,
+                ephemeris,
+            )
+        {
+            rails.push(rail);
+        }
+        if let Some(rail) = rail_from_segment_interval(
+            &leg.coast_segment,
+            frame.clone(),
+            ghost.body_id,
+            window.start_epoch,
+            end,
+            ephemeris,
+        ) {
+            rails.push(rail);
+        }
+    }
+    rails
+}
+
+fn rail_candidate_times(rail: &TrajectoryRail) -> Vec<f64> {
+    let Some((start, end)) = rail.epoch_range() else {
+        return Vec::new();
+    };
+    if end <= start {
+        return Vec::new();
+    }
+
+    let subdivisions = rail.samples.len().clamp(96, 512);
+    let mut times = Vec::with_capacity(rail.samples.len() + subdivisions + 1);
+    times.extend(rail.samples.iter().map(|sample| sample.time));
+    for i in 0..=subdivisions {
+        times.push(start + (end - start) * (i as f64 / subdivisions as f64));
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    times
+}
+
 /// Find the closest trail point along a single orbit.
 ///
 /// The search runs in screen space across all samples in `coasts`. A pure
@@ -360,6 +723,7 @@ pub(super) fn closest_trail_point_on_orbit(
     origin: &RenderOrigin,
     scale: &WorldScale,
     system: &SolarSystemDefinition,
+    ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
     camera: &Camera,
     cam_transform: &GlobalTransform,
@@ -383,19 +747,53 @@ pub(super) fn closest_trail_point_on_orbit(
     // Track the two screen-closest samples for the seam tiebreak below.
     let mut best_a: Option<ClosestTrailPoint> = None;
     let mut best_b: Option<ClosestTrailPoint> = None;
+    let focused_ghost = flight_plan_view.focused_ghost_ref();
+    let focused_ghost_pin = flight_plan_view
+        .focused_ghost()
+        .map(|focus| flight_plan_view.pin_for_ghost_focus(focus, body_states));
 
     for coast in coasts {
         let Some(first) = coast.samples.first() else {
             continue;
         };
+        let rail = body_rail_from_segment(coast);
         // Per-leg relock makes all samples in a coast share an anchor,
         // so the pin is constant across the segment — compute once.
         let pin = flight_plan_view.pin_for_body(first.anchor_body, first.time, body_states);
         for sample in &coast.samples {
-            if flight_plan_view.epoch_hidden_in_focus(prediction, system, sample.time) {
-                continue;
-            }
-            let world_pos = sample_render_pos(sample, pin, origin, scale);
+            let (world_pos, anchor_body) = if let Some(ghost) = focused_ghost {
+                if !flight_plan_view.focused_ghost_contains_epoch(sample.time) {
+                    continue;
+                }
+                let pin = focused_ghost_pin
+                    .unwrap_or_else(|| flight_plan_view.pin_for_ghost(ghost, body_states));
+                let soi_radius = system
+                    .bodies
+                    .get(ghost.body_id)
+                    .map(|body| body.soi_radius_m)
+                    .unwrap_or(f64::INFINITY);
+                (
+                    ghost_local_world_pos_at_pin(
+                        sample.time,
+                        sample.position,
+                        ghost.body_id,
+                        pin,
+                        soi_radius,
+                        origin,
+                        scale,
+                        ephemeris,
+                    ),
+                    ghost.body_id,
+                )
+            } else {
+                if flight_plan_view.epoch_hidden_in_focus(prediction, system, sample.time) {
+                    continue;
+                }
+                (
+                    sample_render_pos(sample, pin, origin, scale),
+                    sample.anchor_body,
+                )
+            };
             let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
                 continue;
             };
@@ -403,10 +801,11 @@ pub(super) fn closest_trail_point_on_orbit(
             let candidate = ClosestTrailPoint {
                 time: sample.time,
                 world_pos,
-                anchor_body: sample.anchor_body,
+                anchor_body,
                 screen_distance: d,
                 sample_position: sample.position,
                 sample_velocity: sample.velocity,
+                rail: rail.clone(),
             };
             match (&best_a, &best_b) {
                 (None, _) => best_a = Some(candidate),
@@ -440,6 +839,80 @@ pub(super) fn closest_trail_point_on_orbit(
     Some(a)
 }
 
+pub(super) fn closest_trail_point_on_rail(
+    rail: &TrajectoryRail,
+    prev_time: f64,
+    body_states: &[BodyState],
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    ephemeris: &dyn BodyStateProvider,
+    flight_plan_view: &FlightPlanView,
+    camera: &Camera,
+    cam_transform: &GlobalTransform,
+    cursor_pos: Vec2,
+) -> Option<ClosestTrailPoint> {
+    let (start, end) = rail.epoch_range()?;
+    let seam_time_threshold = (end - start) * 0.5;
+
+    let mut best_a: Option<ClosestTrailPoint> = None;
+    let mut best_b: Option<ClosestTrailPoint> = None;
+
+    for time in rail_candidate_times(rail) {
+        let Some(state) = rail.state_at(time) else {
+            continue;
+        };
+        let Some(world_pos) = rail_world_position_for_state(
+            rail,
+            time,
+            state.position,
+            body_states,
+            origin,
+            scale,
+            ephemeris,
+            flight_plan_view,
+        ) else {
+            continue;
+        };
+        let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
+            continue;
+        };
+        let d = (screen_pos - cursor_pos).length();
+        let candidate = ClosestTrailPoint {
+            time,
+            world_pos,
+            anchor_body: rail.reference_body,
+            screen_distance: d,
+            sample_position: state.position,
+            sample_velocity: state.velocity,
+            rail: Some(rail.clone()),
+        };
+        match (&best_a, &best_b) {
+            (None, _) => best_a = Some(candidate),
+            (Some(a), _) if d < a.screen_distance => {
+                best_b = best_a.take();
+                best_a = Some(candidate);
+            }
+            (Some(_), None) => best_b = Some(candidate),
+            (Some(_), Some(b)) if d < b.screen_distance => best_b = Some(candidate),
+            _ => {}
+        }
+    }
+
+    let a = best_a?;
+    let Some(b) = best_b else {
+        return Some(a);
+    };
+
+    const SEAM_DIST_PX: f32 = 8.0;
+    if (b.screen_distance - a.screen_distance) < SEAM_DIST_PX
+        && (a.time - b.time).abs() > seam_time_threshold
+        && (b.time - prev_time).abs() < (a.time - prev_time).abs()
+    {
+        return Some(b);
+    }
+    Some(a)
+}
+
 pub(super) fn closest_trail_point(
     prediction: &FlightPlan,
     body_states: &[BodyState],
@@ -454,13 +927,13 @@ pub(super) fn closest_trail_point(
 ) -> Option<ClosestTrailPoint> {
     let mut best: Option<ClosestTrailPoint> = None;
 
-    if flight_plan_view.focused_ghost().is_some() {
-        return closest_focused_ghost_trail_point(
-            prediction,
+    for rail in visible_trajectory_rails(prediction, system, ephemeris, flight_plan_view) {
+        update_best_on_rail(
+            &mut best,
+            Some(rail),
             body_states,
             origin,
             scale,
-            system,
             ephemeris,
             flight_plan_view,
             camera,
@@ -469,100 +942,84 @@ pub(super) fn closest_trail_point(
         );
     }
 
-    for seg in prediction.segments.iter() {
-        let Some(first) = seg.samples.first() else {
-            continue;
-        };
-        let pin = flight_plan_view.pin_for_body(first.anchor_body, first.time, body_states);
-        for sample in seg.samples.iter() {
-            if flight_plan_view.epoch_hidden_in_focus(prediction, system, sample.time) {
-                continue;
-            }
-            let world_pos = sample_render_pos(sample, pin, origin, scale);
-            let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
-                continue;
-            };
-            let d = (screen_pos - cursor_pos).length();
-            let is_better = best.as_ref().is_none_or(|b| d < b.screen_distance);
-            if is_better {
-                best = Some(ClosestTrailPoint {
-                    time: sample.time,
-                    world_pos,
-                    anchor_body: sample.anchor_body,
-                    screen_distance: d,
-                    sample_position: sample.position,
-                    sample_velocity: sample.velocity,
-                });
-            }
-        }
-    }
-
     best
 }
 
 #[allow(clippy::too_many_arguments)]
-fn closest_focused_ghost_trail_point(
-    prediction: &FlightPlan,
+fn update_best_on_rail(
+    best: &mut Option<ClosestTrailPoint>,
+    rail: Option<TrajectoryRail>,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
-    system: &SolarSystemDefinition,
     ephemeris: &dyn BodyStateProvider,
     flight_plan_view: &FlightPlanView,
     camera: &Camera,
     cam_transform: &GlobalTransform,
     cursor_pos: Vec2,
-) -> Option<ClosestTrailPoint> {
-    let ghost = flight_plan_view.focused_ghost_ref()?;
-    let window = ghost.trajectory_window?;
-    let end = window.exit_epoch.unwrap_or(window.end_epoch);
-    if end <= window.start_epoch {
-        return None;
-    }
+) {
+    let Some(rail) = rail else {
+        return;
+    };
 
-    let pin = flight_plan_view.pin_for_ghost(ghost, body_states);
-    let soi_radius = system
-        .bodies
-        .get(ghost.body_id)
-        .map(|body| body.soi_radius_m)
-        .unwrap_or(f64::INFINITY);
-
-    let mut best: Option<ClosestTrailPoint> = None;
-    const SAMPLES: usize = 256;
-    for i in 0..=SAMPLES {
-        let t = window.start_epoch + (end - window.start_epoch) * (i as f64 / SAMPLES as f64);
-        let Some(state) = prediction.state_at(t) else {
+    for time in rail_candidate_times(&rail) {
+        let Some(state) = rail.state_at(time) else {
             continue;
         };
-        let body = ephemeris.query_body(ghost.body_id, t);
-        let relative = state.position - body.position;
-        let display_relative =
-            if soi_radius.is_finite() && soi_radius > 0.0 && relative.length() > soi_radius {
-                relative
-                    .try_normalize()
-                    .map(|direction| direction * soi_radius)
-                    .unwrap_or(relative)
-            } else {
-                relative
-            };
-        let world_pos = ((display_relative + pin - origin.position) * scale.0).as_vec3();
+        let Some(world_pos) = rail_world_position_for_state(
+            &rail,
+            time,
+            state.position,
+            body_states,
+            origin,
+            scale,
+            ephemeris,
+            flight_plan_view,
+        ) else {
+            continue;
+        };
         let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
             continue;
         };
         let d = (screen_pos - cursor_pos).length();
         let is_better = best.as_ref().is_none_or(|b| d < b.screen_distance);
         if is_better {
-            best = Some(ClosestTrailPoint {
-                time: t,
+            *best = Some(ClosestTrailPoint {
+                time,
                 world_pos,
-                anchor_body: ghost.body_id,
+                anchor_body: rail.reference_body,
                 screen_distance: d,
                 sample_position: state.position,
                 sample_velocity: state.velocity,
+                rail: Some(rail.clone()),
             });
         }
     }
-    best
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ghost_local_world_pos_at_pin(
+    time: f64,
+    craft_position: DVec3,
+    body_id: usize,
+    pin: DVec3,
+    soi_radius: f64,
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    ephemeris: &dyn BodyStateProvider,
+) -> Vec3 {
+    let body = ephemeris.query_body(body_id, time);
+    let relative = craft_position - body.position;
+    let display_relative =
+        if soi_radius.is_finite() && soi_radius > 0.0 && relative.length() > soi_radius {
+            relative
+                .try_normalize()
+                .map(|direction| direction * soi_radius)
+                .unwrap_or(relative)
+        } else {
+            relative
+        };
+    ((display_relative + pin - origin.position) * scale.0).as_vec3()
 }
 
 pub(super) fn overlay_marker_transform(

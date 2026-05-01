@@ -190,7 +190,7 @@ fn autopilot_status(
             ui.add_space(4.0);
             ui.colored_label(
                 egui::Color32::from_rgb(170, 170, 170),
-                format!("armed \u{00B7} T{:+.0}s", t_minus),
+                format!("armed \u{00B7} {}", format_mission_time(t_minus)),
             );
         }
         state @ AutopilotState::Engaging { .. } => {
@@ -203,7 +203,7 @@ fn autopilot_status(
                     .color(egui::Color32::from_rgb(255, 200, 60))
                     .strong(),
             );
-            ui.label(format!("burn in T{:+.0}s", t_minus));
+            ui.label(format!("burn in {}", format_mission_time(t_minus)));
         }
         AutopilotState::Burn {
             planned_dv,
@@ -230,6 +230,12 @@ fn autopilot_status(
             ui.add(egui::ProgressBar::new(progress).desired_width(130.0));
         }
     }
+}
+
+fn format_mission_time(seconds_until_event: f64) -> String {
+    let rounded = seconds_until_event.round();
+    let marker = if rounded >= 0.0 { '-' } else { '+' };
+    format!("T{}{:.0}s", marker, rounded.abs())
 }
 
 fn mode_button(
@@ -443,11 +449,19 @@ pub(crate) fn maneuver_burn_direction(sim: &Simulation, plan: &ManeuverPlan) -> 
 pub(crate) fn maneuver_node_burn_direction(sim: &Simulation, node: &GameNode) -> Option<DVec3> {
     let ship = sim.ship_state();
     let time = sim.sim_time();
-    let (ship_pos, ship_vel, frame_time) =
-        match sim.prediction().and_then(|p| p.state_at(node.time)) {
-            Some(s) => (s.position, s.velocity, node.time),
-            None => (ship.position, ship.velocity, time),
-        };
+    let rail_state = node.rail.as_ref().and_then(|rail| rail.state_at(node.time));
+    let prediction_state = sim
+        .prediction()
+        .and_then(|p| p.pre_burn_state_at(node.time, sim.ephemeris(), sim.bodies()))
+        .map(|s| thalos_physics::types::StateVector {
+            position: s.position,
+            velocity: s.velocity,
+        })
+        .or_else(|| sim.prediction().and_then(|p| p.state_at(node.time)));
+    let (ship_pos, ship_vel, frame_time) = match rail_state.or(prediction_state) {
+        Some(s) => (s.position, s.velocity, node.time),
+        None => (ship.position, ship.velocity, time),
+    };
     let body_state = sim.ephemeris().query_body(node.reference_body, frame_time);
     let dv_world = delta_v_to_world(
         node.delta_v,
@@ -511,5 +525,17 @@ fn safe_normalize(v: DVec3) -> Option<DVec3> {
         None
     } else {
         Some(v.normalize())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_mission_time_uses_countdown_sign_convention() {
+        assert_eq!(format_mission_time(7.0), "T-7s");
+        assert_eq!(format_mission_time(0.4), "T-0s");
+        assert_eq!(format_mission_time(-7.0), "T+7s");
     }
 }

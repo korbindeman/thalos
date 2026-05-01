@@ -1,11 +1,11 @@
 // Apollo-class transfer stage: 4 m Hyperion pod, 4 m × 4 m methalox tank,
 // Boreas vacuum engine. Catalog-referenced — all stats live in
-// `assets/parts.ron`. This file only stores per-instance parametric data
-// (tank dimensions) and resource amounts; resource entries are omitted
-// so each pool spawns full at its catalog-derived capacity.
+// `assets/parts.ron`. This file stores the display name plus per-instance
+// parametric data (tank dimensions) and resource amounts; resource entries
+// are omitted so each pool spawns full at its catalog-derived capacity.
 
 (
-    name: "apollo",
+    name: "Apollo",
     root: 0,
     parts: [
         (catalog_id: "hyperion"),

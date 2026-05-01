@@ -48,7 +48,6 @@ pub(super) fn update_camera_exposure(
     cache: Res<FrameBodyStates>,
     focus: Res<CameraFocus>,
     bodies: Query<&CelestialBody>,
-    ghosts: Query<&crate::flight_plan_view::GhostBody>,
     sim: Res<SimulationState>,
     mut exposure: ResMut<CameraExposure>,
 ) {
@@ -64,10 +63,8 @@ pub(super) fn update_camera_exposure(
             .and_then(|body| states.get(body.body_id))
             .map(|s| (s.position - star_pos).length()),
         CameraFocusTarget::Ship => Some((sim.simulation.ship_state().position - star_pos).length()),
-        CameraFocusTarget::Ghost(entity) => ghosts
-            .get(entity)
-            .ok()
-            .and_then(|ghost| states.get(ghost.body_id))
+        CameraFocusTarget::Ghost(ghost_focus) => states
+            .get(ghost_focus.body_id)
             .map(|s| (s.position - star_pos).length()),
         CameraFocusTarget::None => None,
     }
@@ -372,7 +369,6 @@ pub(super) fn update_solid_planet_params(
 pub(super) fn update_sun_light(
     cache: Res<FrameBodyStates>,
     focus: Res<CameraFocus>,
-    ghosts: Query<&crate::flight_plan_view::GhostBody>,
     sim: Res<SimulationState>,
     mut light_query: Query<&mut Transform, With<SunLight>>,
 ) {
@@ -386,11 +382,9 @@ pub(super) fn update_sun_light(
     let focus_pos = match focus.target {
         CameraFocusTarget::Body(body_id) => states.get(body_id).map(|s| s.position),
         CameraFocusTarget::Ship => Some(sim.simulation.ship_state().position),
-        CameraFocusTarget::Ghost(entity) => ghosts
-            .get(entity)
-            .ok()
-            .and_then(|ghost| states.get(ghost.body_id))
-            .map(|s| s.position),
+        CameraFocusTarget::Ghost(ghost_focus) => {
+            states.get(ghost_focus.body_id).map(|s| s.position)
+        }
         CameraFocusTarget::None => None,
     }
     .unwrap_or(bevy::math::DVec3::ZERO);

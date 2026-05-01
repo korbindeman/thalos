@@ -12,7 +12,7 @@ use thalos_physics::types::BodyKind;
 use super::screen_marker_radius;
 use super::types::{BodyIcon, BodyMesh, CelestialBody, ShipMarker, SimulationState};
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
-use crate::coords::{RenderOrigin, WorldScale};
+use crate::coords::{RenderGhostFocus, RenderOrigin, WorldScale};
 use crate::flight_plan_view::GhostBody;
 
 /// Tracks the last left-click time and screen position for double-click detection.
@@ -101,7 +101,10 @@ pub(super) fn sync_body_icons(
             .iter()
             .find(|(_, body, _, _)| body.body_id == focus_body_id)
             .map(|(_, _, tf, _)| tf.translation),
-        CameraFocusTarget::Ghost(entity) => ghosts.get(entity).ok().map(|(_, tf)| tf.translation),
+        CameraFocusTarget::Ghost(ghost_focus) => ghosts
+            .iter()
+            .find(|(ghost, _)| ghost_focus.matches(ghost.body_id, ghost.encounter_epoch))
+            .map(|(_, tf)| tf.translation),
         _ => None,
     };
     let neighborhood_radius = (focus.distance * scale.0) as f32 * BILLBOARD_NEIGHBORHOOD;
@@ -261,9 +264,9 @@ pub(super) fn double_click_focus_system(
             .iter()
             .find(|(_, body, _)| body.body_id == focus_body_id)
             .map(|(_, _, t)| t.translation),
-        CameraFocusTarget::Ghost(entity) => ghosts
-            .get(entity)
-            .ok()
+        CameraFocusTarget::Ghost(ghost_focus) => ghosts
+            .iter()
+            .find(|(_, ghost, _, _)| ghost_focus.matches(ghost.body_id, ghost.encounter_epoch))
             .map(|(_, _, transform, _)| transform.translation),
         _ => None,
     };
@@ -382,7 +385,7 @@ pub(super) fn double_click_focus_system(
     }
 
     // Also check ghost bodies (translucent encounter previews).
-    for (entity, _ghost, transform, visibility) in &ghosts {
+    for (_, ghost, transform, visibility) in &ghosts {
         if *visibility == Visibility::Hidden {
             continue;
         }
@@ -395,7 +398,16 @@ pub(super) fn double_click_focus_system(
             continue;
         }
         if fallback_best.map(|(_, d)| dist_px < d).unwrap_or(true) {
-            fallback_best = Some((CameraFocusTarget::Ghost(entity), dist_px));
+            fallback_best = Some((
+                CameraFocusTarget::Ghost(RenderGhostFocus {
+                    body_id: ghost.body_id,
+                    parent_id: ghost.parent_id,
+                    relative_position: ghost.relative_position,
+                    projection_epoch: ghost.projection_epoch,
+                    encounter_epoch: ghost.encounter_epoch,
+                }),
+                dist_px,
+            ));
         }
     }
 

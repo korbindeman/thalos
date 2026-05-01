@@ -4,8 +4,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::super::helpers::{
-    closest_node, closest_trail_point, closest_trail_point_on_orbit, orbit_sensitivity_scale,
-    orbital_frame_mat3, slide_search_segments,
+    closest_node, closest_trail_point, closest_trail_point_on_orbit, closest_trail_point_on_rail,
+    orbit_sensitivity_scale, orbital_frame_mat3, slide_search_segments,
 };
 use super::super::state::{
     ArrowHitbox, InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, NodeSlideSphere,
@@ -57,6 +57,7 @@ pub(in crate::maneuver) fn maneuver_input(
                 snap_time: None,
                 snap_world_pos: None,
                 snap_anchor_body: None,
+                snap_rail: None,
             };
         }
     }
@@ -85,12 +86,14 @@ pub(in crate::maneuver) fn maneuver_input(
             snap_time,
             snap_world_pos,
             snap_anchor_body,
+            snap_rail,
             ..
         } = &mut *mode
         {
             *snap_time = None;
             *snap_world_pos = None;
             *snap_anchor_body = None;
+            *snap_rail = None;
         }
         return;
     };
@@ -178,35 +181,40 @@ pub(in crate::maneuver) fn maneuver_input(
                         .find(|n| n.id == sel_id)
                         .map(|n| n.time)
                         .unwrap_or(0.0);
-                    let closest = if flight_plan_view.focused_ghost().is_some() {
-                        closest_trail_point(
-                            prediction,
-                            states,
-                            &origin,
-                            &scale,
-                            &sim.system,
-                            sim.ephemeris.as_ref(),
-                            &flight_plan_view,
-                            camera,
-                            cam_transform,
-                            cursor_pos,
-                        )
-                    } else {
-                        let coasts = slide_search_segments(&plan, prediction, sel_id);
-                        closest_trail_point_on_orbit(
-                            &coasts,
-                            prediction,
-                            node_time,
-                            states,
-                            &origin,
-                            &scale,
-                            &sim.system,
-                            &flight_plan_view,
-                            camera,
-                            cam_transform,
-                            cursor_pos,
-                        )
-                    };
+                    let selected_node = plan.nodes.iter().find(|n| n.id == sel_id);
+                    let closest = selected_node
+                        .and_then(|node| node.rail.as_ref())
+                        .and_then(|rail| {
+                            closest_trail_point_on_rail(
+                                rail,
+                                node_time,
+                                states,
+                                &origin,
+                                &scale,
+                                sim.ephemeris.as_ref(),
+                                &flight_plan_view,
+                                camera,
+                                cam_transform,
+                                cursor_pos,
+                            )
+                        })
+                        .or_else(|| {
+                            let coasts = slide_search_segments(&plan, prediction, sel_id);
+                            closest_trail_point_on_orbit(
+                                &coasts,
+                                prediction,
+                                node_time,
+                                states,
+                                &origin,
+                                &scale,
+                                &sim.system,
+                                sim.ephemeris.as_ref(),
+                                &flight_plan_view,
+                                camera,
+                                cam_transform,
+                                cursor_pos,
+                            )
+                        });
                     if let Some(closest) = closest {
                         // The slide-rebuild throttle in `handle_maneuver_events`
                         // can leave the cached prediction up to ~100 ms behind
@@ -248,6 +256,7 @@ pub(in crate::maneuver) fn maneuver_input(
             snap_time,
             snap_world_pos,
             snap_anchor_body,
+            snap_rail,
         } => {
             let closest = closest_trail_point(
                 prediction,
@@ -264,12 +273,14 @@ pub(in crate::maneuver) fn maneuver_input(
             *snap_time = closest.as_ref().map(|p| p.time);
             *snap_world_pos = closest.as_ref().map(|p| p.world_pos);
             *snap_anchor_body = closest.as_ref().map(|p| p.anchor_body);
+            *snap_rail = closest.as_ref().and_then(|p| p.rail.clone());
 
             if mouse.just_pressed(MouseButton::Left) {
                 if let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_anchor_body) {
                     writer.write(ManeuverEvent::PlaceNode {
                         trail_time,
                         reference_body,
+                        rail: snap_rail.clone(),
                     });
                     *mode = InteractionMode::Idle;
                 }

@@ -6,7 +6,7 @@ use bevy_egui::EguiContexts;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::space_camera_post_stack;
 
-use crate::coords::{MAP_LAYER, SHIP_LAYER};
+use crate::coords::{MAP_LAYER, RenderGhostFocus, SHIP_LAYER};
 use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, SimulationState};
 use crate::view::ViewMode;
 
@@ -112,14 +112,14 @@ impl ShipCameraMode {
 /// This deliberately does not use body or ship ECS entities as the shared
 /// identity. Map-view proxies and ship-view real entities are different
 /// worlds; systems resolve this target into their own local entity/transform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CameraFocusTarget {
     #[default]
     None,
     Body(BodyId),
     Ship,
     /// Map-only transient focus for future encounter projections.
-    Ghost(Entity),
+    Ghost(RenderGhostFocus),
 }
 
 /// The camera orbits around `target` using spherical coordinates.
@@ -491,8 +491,9 @@ fn camera_min_distance_system(
             .find(|body| body.body_id == body_id)
             .map(|body| (body.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT))
             .unwrap_or(DISTANCE_MIN_DEFAULT),
-        CameraFocusTarget::Ghost(entity) => ghosts
-            .get(entity)
+        CameraFocusTarget::Ghost(ghost_focus) => ghosts
+            .iter()
+            .find(|ghost| ghost_focus.matches(ghost.body_id, ghost.encounter_epoch))
             .map(|ghost| (ghost.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT))
             .unwrap_or(DISTANCE_MIN_DEFAULT),
         CameraFocusTarget::Ship => match *view {
@@ -570,7 +571,7 @@ pub fn camera_transform_system(
         (With<PlayerShip>, Without<OrbitCamera>),
     >,
     ghost_targets: Query<
-        &Transform,
+        (&crate::flight_plan_view::GhostBody, &Transform),
         (
             With<crate::flight_plan_view::GhostBody>,
             Without<OrbitCamera>,
@@ -624,9 +625,10 @@ pub fn camera_transform_system(
                     Vec3::ZERO
                 }
             }
-            CameraFocusTarget::Ghost(entity) => ghost_targets
-                .get(entity)
-                .map(|t| t.translation)
+            CameraFocusTarget::Ghost(ghost_focus) => ghost_targets
+                .iter()
+                .find(|(ghost, _)| ghost_focus.matches(ghost.body_id, ghost.encounter_epoch))
+                .map(|(_, t)| t.translation)
                 .unwrap_or(Vec3::ZERO),
             CameraFocusTarget::None => Vec3::ZERO,
         }

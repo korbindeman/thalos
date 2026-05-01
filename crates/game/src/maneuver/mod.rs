@@ -13,8 +13,8 @@ use interaction::{
 };
 use panel::node_editor_panel;
 use render::{
-    manage_arrow_handles, manage_node_markers, spawn_snap_indicator, update_arrow_transforms,
-    update_snap_indicator,
+    manage_arrow_handles, manage_node_markers, render_selected_node_rail, spawn_snap_indicator,
+    update_arrow_transforms, update_snap_indicator,
 };
 use state::{ArrowHitbox, ArrowStretchState, NodeSlideSphere, SelectedNodeView, SlidePreview};
 
@@ -130,6 +130,9 @@ impl Plugin for ManeuverPlugin {
                         .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                     manage_node_markers
                         .after(update_selected_node_view)
+                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                    render_selected_node_rail
+                        .after(manage_node_markers)
                         .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                     update_snap_indicator
                         .after(maneuver_input)

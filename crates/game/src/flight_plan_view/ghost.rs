@@ -42,6 +42,32 @@ pub struct GhostBody {
     pub phase: GhostPhase,
 }
 
+fn refresh_semantic_ghost_focus(focus: &mut CameraFocus, view: &mut FlightPlanView) {
+    let CameraFocusTarget::Ghost(current) = focus.target else {
+        return;
+    };
+
+    let Some(best) = view
+        .ghosts()
+        .iter()
+        .filter(|ghost| ghost.phase != GhostPhase::Retired && ghost.body_id == current.body_id)
+        .min_by(|a, b| {
+            let da = (a.encounter_epoch - current.encounter_epoch).abs();
+            let db = (b.encounter_epoch - current.encounter_epoch).abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    else {
+        return;
+    };
+
+    let mut updated = current;
+    updated.encounter_epoch = best.encounter_epoch;
+    if focus.target != CameraFocusTarget::Ghost(updated) {
+        focus.target = CameraFocusTarget::Ghost(updated);
+    }
+    view.set_focused_ghost(updated);
+}
+
 // ---------------------------------------------------------------------------
 // Sync: diff specs vs entities
 // ---------------------------------------------------------------------------
@@ -54,6 +80,7 @@ pub(super) fn sync_ghost_bodies(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut existing: Query<(Entity, &mut GhostBody)>,
+    mut focus: ResMut<CameraFocus>,
 ) {
     let Some(sim) = sim else { return };
 
@@ -129,6 +156,8 @@ pub(super) fn sync_ghost_bodies(
 
     // Remove retired ghosts from the list.
     view.ghosts_mut().retain(|g| g.phase != GhostPhase::Retired);
+
+    refresh_semantic_ghost_focus(&mut focus, &mut view);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +203,14 @@ pub(super) fn update_ghost_lifecycle(
 
         // Camera handoff: if focused on this ghost and it's retired, transfer
         // to the real body with a smooth physics-space origin lerp.
-        if ghost.phase == GhostPhase::Retired && focus.target == CameraFocusTarget::Ghost(entity) {
+        if ghost.phase == GhostPhase::Retired
+            && time_to_encounter <= 0.0
+            && matches!(
+                focus.target,
+                CameraFocusTarget::Ghost(ghost_focus)
+                    if ghost_focus.matches(ghost.body_id, ghost.encounter_epoch)
+            )
+        {
             focus.focus_on_body(ghost.body_id, origin.position);
         }
     }
@@ -202,30 +238,40 @@ pub(super) fn update_ghost_transforms(
 
     for (entity, ghost_comp, mut transform, mut visibility) in &mut query {
         let target_visibility = match focus.target {
-            CameraFocusTarget::Ghost(focused) if focused != entity => Visibility::Hidden,
+            CameraFocusTarget::Ghost(focused)
+                if !focused.matches(ghost_comp.body_id, ghost_comp.encounter_epoch) =>
+            {
+                Visibility::Hidden
+            }
             _ => Visibility::Inherited,
         };
         if *visibility != target_visibility {
             *visibility = target_visibility;
         }
 
-        // Use the canonical ghost pin when the view still owns this
-        // entity, so mesh placement, trajectory overlays, and blend
-        // handoff all resolve through one path.
-        let sim_pos = view
-            .ghosts()
-            .iter()
-            .find(|ghost| ghost.entity == Some(entity))
-            .map(|ghost| view.pin_for_ghost(ghost, body_states))
-            .unwrap_or_else(|| {
-                let parent_pin = view.pin_for_body(
-                    ghost_comp.parent_id,
-                    ghost_comp.projection_epoch,
-                    body_states,
-                );
-                parent_pin + ghost_comp.relative_position
-            });
-
+        // Keep the actively focused ghost on the focus snapshot. Prediction
+        // rebuilds may retarget the matching encounter epoch, but focusing a
+        // ghost should not move the local frame under maneuver handles.
+        let sim_pos = match focus.target {
+            CameraFocusTarget::Ghost(focused)
+                if focused.matches(ghost_comp.body_id, ghost_comp.encounter_epoch) =>
+            {
+                view.pin_for_ghost_focus(focused, body_states)
+            }
+            _ => view
+                .ghosts()
+                .iter()
+                .find(|ghost| ghost.entity == Some(entity))
+                .map(|ghost| view.pin_for_ghost(ghost, body_states))
+                .unwrap_or_else(|| {
+                    let parent_pin = view.pin_for_body(
+                        ghost_comp.parent_id,
+                        ghost_comp.projection_epoch,
+                        body_states,
+                    );
+                    parent_pin + ghost_comp.relative_position
+                }),
+        };
         transform.translation = ((sim_pos - origin.position) * scale.0).as_vec3();
         let body_radius_render = (ghost_comp.radius_m * scale.0) as f32;
         let radius = body_radius_render.max(min_radius);

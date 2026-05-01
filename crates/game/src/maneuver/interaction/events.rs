@@ -38,6 +38,7 @@ pub(in crate::maneuver) fn sync_node_delta_v(
 pub(in crate::maneuver) fn handle_maneuver_events(
     mut events: bevy::ecs::message::MessageReader<ManeuverEvent>,
     mut plan: ResMut<ManeuverPlan>,
+    mut selected: ResMut<SelectedNode>,
     time: Res<Time>,
 ) {
     for event in events.read() {
@@ -45,6 +46,7 @@ pub(in crate::maneuver) fn handle_maneuver_events(
             ManeuverEvent::PlaceNode {
                 trail_time,
                 reference_body,
+                rail,
             } => {
                 let id = plan.next_node_id();
                 plan.nodes.push(GameNode {
@@ -52,7 +54,9 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                     time: trail_time,
                     delta_v: DVec3::ZERO,
                     reference_body,
+                    rail,
                 });
+                selected.id = Some(id);
                 plan.dirty = true;
             }
             ManeuverEvent::AdjustNode { id, delta_v } => {
@@ -76,8 +80,13 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                 }
             }
             ManeuverEvent::DeleteNode { id } => {
+                let Some(delete_time) = plan.nodes.iter().find(|n| n.id == id).map(|n| n.time)
+                else {
+                    continue;
+                };
                 let before = plan.nodes.len();
-                plan.nodes.retain(|n| n.id != id);
+                plan.nodes
+                    .retain(|n| n.time < delete_time - NODE_TIME_EPSILON_S);
                 if plan.nodes.len() != before {
                     plan.dirty = true;
                 }
@@ -92,3 +101,4 @@ pub(in crate::maneuver) fn handle_maneuver_events(
 /// stalling the frame budget on plans where a single reprop costs tens of
 /// milliseconds.
 const SLIDE_REBUILD_THROTTLE_S: f64 = 0.1;
+const NODE_TIME_EPSILON_S: f64 = 1e-6;

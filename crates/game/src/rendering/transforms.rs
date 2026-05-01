@@ -14,25 +14,23 @@ use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{
     MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, SHIP_SCALE, WorldScale, to_render_pos,
 };
-use crate::flight_plan_view::{FlightPlanView, GhostBody};
+use crate::flight_plan_view::FlightPlanView;
 use crate::view::ViewMode;
 
 fn ghost_position(
-    entity: Entity,
-    ghost: &GhostBody,
+    focus: RenderGhostFocus,
     view: Option<&FlightPlanView>,
     states: &[thalos_physics::types::BodyState],
 ) -> bevy::math::DVec3 {
-    if let Some(view) = view
-        && let Some(view_ghost) = view.ghosts().iter().find(|g| g.entity == Some(entity))
-    {
-        return view.pin_for_ghost(view_ghost, states);
+    if let Some(view) = view {
+        return view.pin_for_ghost_focus(focus, states);
     }
 
-    view.map(|view| view.pin_for_body(ghost.parent_id, ghost.projection_epoch, states))
-        .or_else(|| states.get(ghost.parent_id).map(|s| s.position))
+    states
+        .get(focus.parent_id)
+        .map(|s| s.position)
         .unwrap_or(bevy::math::DVec3::ZERO)
-        + ghost.relative_position
+        + focus.relative_position
 }
 
 /// Sets the render origin to the camera focus body's position so that nearby
@@ -56,7 +54,6 @@ fn ghost_position(
 pub fn update_render_origin(
     cache: Res<FrameBodyStates>,
     focus: Res<CameraFocus>,
-    ghosts: Query<&GhostBody>,
     flight_plan: Option<Res<FlightPlanView>>,
     sim: Res<SimulationState>,
     mut origin: ResMut<RenderOrigin>,
@@ -71,10 +68,9 @@ pub fn update_render_origin(
             .map(|s| s.position)
             .unwrap_or(bevy::math::DVec3::ZERO),
         CameraFocusTarget::Ship => sim.simulation.ship_state().position,
-        CameraFocusTarget::Ghost(entity) => ghosts
-            .get(entity)
-            .map(|ghost| ghost_position(entity, ghost, flight_plan.as_deref(), states))
-            .unwrap_or(bevy::math::DVec3::ZERO),
+        CameraFocusTarget::Ghost(ghost_focus) => {
+            ghost_position(ghost_focus, flight_plan.as_deref(), states)
+        }
         CameraFocusTarget::None => bevy::math::DVec3::ZERO,
     };
 
@@ -105,7 +101,6 @@ pub fn update_render_origin(
 pub fn update_render_frame(
     cache: Res<FrameBodyStates>,
     focus: Res<CameraFocus>,
-    ghosts: Query<&GhostBody>,
     sim: Res<SimulationState>,
     mut frame: ResMut<RenderFrame>,
 ) {
@@ -118,16 +113,10 @@ pub fn update_render_frame(
             focus_body: body_id,
             focus_ghost: None,
         },
-        CameraFocusTarget::Ghost(entity) => ghosts
-            .get(entity)
-            .map(|ghost| RenderFrame {
-                focus_body: ghost.body_id,
-                focus_ghost: Some(RenderGhostFocus {
-                    body_id: ghost.body_id,
-                    encounter_epoch: ghost.encounter_epoch,
-                }),
-            })
-            .unwrap_or_default(),
+        CameraFocusTarget::Ghost(ghost_focus) => RenderFrame {
+            focus_body: ghost_focus.body_id,
+            focus_ghost: Some(ghost_focus),
+        },
         CameraFocusTarget::Ship => RenderFrame {
             focus_body: crate::camera::find_reference_body(
                 sim.simulation.ship_state().position,
