@@ -48,11 +48,11 @@ impl Default for AttitudeState {
 /// the per-axis torque cap from all reaction-wheel-providing parts
 /// summed, in N·m.
 ///
-/// `thrust_n`, `mass_flow_kg_per_s`, and `dry_mass_kg` are constants for
-/// v1 (no staging). Current ship mass is tracked separately on
+/// `thrust_n`, `mass_flow_kg_per_s`, and `dry_mass_kg` are the current
+/// aggregate values for whatever ship configuration the game layer has
+/// made active. Current ship mass is tracked separately on
 /// [`crate::Simulation`] because it changes as fuel burns; once it
-/// reaches `dry_mass_kg` thrust cuts off cleanly (the propellant tanks
-/// are empty).
+/// reaches `dry_mass_kg` thrust cuts off cleanly.
 #[derive(Debug, Clone, Copy)]
 pub struct ShipParameters {
     pub moment_of_inertia: DVec3,

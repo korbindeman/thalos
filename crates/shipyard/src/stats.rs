@@ -23,7 +23,7 @@ use crate::catalog::{
     CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, tank_surface_area,
 };
 use crate::part::ReactantRatio;
-use crate::resource::Resource;
+use crate::resource::{PartResources, Resource};
 use bevy::math::Vec3;
 use glam::DVec3;
 use std::collections::{HashMap, VecDeque};
@@ -41,6 +41,140 @@ pub struct ResourceTotals {
     pub capacity: f64,
     /// Current mass contribution — 0 for non-mass-bearing resources.
     pub mass_kg: f64,
+}
+
+/// Environment used for a delta-v estimate.
+///
+/// Only vacuum is implemented today because engine definitions currently
+/// expose vacuum thrust/Isp. Atmospheric estimates can extend this enum
+/// with pressure/altitude/body context without changing UI call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaVEnvironment {
+    Vacuum,
+}
+
+/// Inputs consumed by the delta-v calculator.
+#[derive(Debug, Clone, Copy)]
+pub struct DeltaVInputs<'a> {
+    pub dry_mass_kg: f64,
+    pub wet_mass_kg: f64,
+    pub total_thrust_n: f64,
+    pub mass_flow_kg_per_s: f64,
+    pub power_draw_kw: f64,
+    pub reactant_fractions: &'a HashMap<Resource, f64>,
+    pub resources: &'a HashMap<Resource, ResourceTotals>,
+}
+
+/// Result of a delta-v estimate in a specific environment.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeltaVEstimate {
+    pub delta_v_m_per_s: f64,
+    pub burn_time_s: Option<f64>,
+    pub exhaust_velocity_m_per_s: f64,
+    pub initial_mass_kg: f64,
+    pub final_mass_kg: f64,
+    pub expelled_mass_kg: f64,
+}
+
+/// Aggregate all runtime resource pools into the same totals shape used
+/// by [`ShipStats`].
+pub fn aggregate_resource_totals<'a>(
+    resources: impl IntoIterator<Item = &'a PartResources>,
+) -> HashMap<Resource, ResourceTotals> {
+    let mut totals: HashMap<Resource, ResourceTotals> = HashMap::new();
+    for part in resources {
+        for (&resource, pool) in &part.pools {
+            let entry = totals.entry(resource).or_default();
+            entry.amount += pool.amount as f64;
+            entry.capacity += pool.capacity as f64;
+            entry.mass_kg += pool.mass_kg(resource);
+        }
+    }
+    totals
+}
+
+/// Estimate available delta-v for the supplied ship state.
+pub fn estimate_delta_v(
+    environment: DeltaVEnvironment,
+    inputs: DeltaVInputs<'_>,
+) -> DeltaVEstimate {
+    match environment {
+        DeltaVEnvironment::Vacuum => estimate_vacuum_delta_v(inputs),
+    }
+}
+
+fn estimate_vacuum_delta_v(inputs: DeltaVInputs<'_>) -> DeltaVEstimate {
+    let wet = inputs.wet_mass_kg.max(0.0);
+    let exhaust_velocity = if inputs.mass_flow_kg_per_s > 0.0 {
+        inputs.total_thrust_n / inputs.mass_flow_kg_per_s
+    } else {
+        0.0
+    };
+    let mut estimate = DeltaVEstimate {
+        exhaust_velocity_m_per_s: exhaust_velocity,
+        initial_mass_kg: wet,
+        final_mass_kg: wet,
+        ..Default::default()
+    };
+
+    if exhaust_velocity <= 0.0
+        || wet <= 0.0
+        || inputs.dry_mass_kg <= 0.0
+        || inputs.mass_flow_kg_per_s <= 0.0
+    {
+        return estimate;
+    }
+
+    let Some(burn_s) = burn_time_limit_s(inputs) else {
+        return estimate;
+    };
+    estimate.burn_time_s = Some(burn_s);
+
+    let raw_expelled = inputs.mass_flow_kg_per_s * burn_s;
+    if raw_expelled <= 0.0 {
+        return estimate;
+    }
+
+    let max_expelled = (wet - inputs.dry_mass_kg).max(0.0);
+    let expelled = raw_expelled.min(max_expelled);
+    let remaining = wet - expelled;
+    estimate.expelled_mass_kg = expelled;
+    estimate.final_mass_kg = remaining;
+
+    if remaining > 0.0 && remaining < wet {
+        estimate.delta_v_m_per_s = exhaust_velocity * (wet / remaining).ln();
+    }
+
+    estimate
+}
+
+fn burn_time_limit_s(inputs: DeltaVInputs<'_>) -> Option<f64> {
+    if inputs.mass_flow_kg_per_s <= 0.0 {
+        return None;
+    }
+
+    let mut limit = f64::INFINITY;
+
+    for (res, frac) in inputs.reactant_fractions {
+        if *frac <= 0.0 {
+            continue;
+        }
+        let rate_kg_per_s = inputs.mass_flow_kg_per_s * frac;
+        let available = inputs.resources.get(res).map(|r| r.mass_kg).unwrap_or(0.0);
+        limit = limit.min(available / rate_kg_per_s);
+    }
+
+    if inputs.power_draw_kw > 0.0 {
+        let stored_kwh = inputs
+            .resources
+            .get(&Resource::Electricity)
+            .map(|r| r.amount)
+            .unwrap_or(0.0);
+        let power_limit_s = stored_kwh / inputs.power_draw_kw * 3600.0;
+        limit = limit.min(power_limit_s);
+    }
+
+    if limit.is_finite() { Some(limit) } else { None }
 }
 
 /// Snapshot of a ship's mass, thrust, and propulsion characteristics.
@@ -98,63 +232,34 @@ impl ShipStats {
         self.combined_isp_s * G0
     }
 
+    /// Vacuum delta-v estimate from the current resource state.
+    pub fn vacuum_delta_v(&self) -> DeltaVEstimate {
+        estimate_delta_v(
+            DeltaVEnvironment::Vacuum,
+            DeltaVInputs {
+                dry_mass_kg: self.dry_mass_kg,
+                wet_mass_kg: self.wet_mass_kg(),
+                total_thrust_n: self.total_thrust_n,
+                mass_flow_kg_per_s: self.mass_flow_kg_per_s,
+                power_draw_kw: self.power_draw_kw,
+                reactant_fractions: &self.reactant_fractions,
+                resources: &self.resources,
+            },
+        )
+    }
+
     /// Burn time at full throttle before the bottleneck reactant or
     /// electricity runs out. Returns `None` when there is no thrust or
     /// no burnable propellant.
     pub fn burn_time_at_full_throttle_s(&self) -> Option<f64> {
-        if self.mass_flow_kg_per_s <= 0.0 {
-            return None;
-        }
-
-        let mut limit = f64::INFINITY;
-
-        for (res, frac) in &self.reactant_fractions {
-            if *frac <= 0.0 {
-                continue;
-            }
-            let rate_kg_per_s = self.mass_flow_kg_per_s * frac;
-            let available = self.resources.get(res).map(|r| r.mass_kg).unwrap_or(0.0);
-            limit = limit.min(available / rate_kg_per_s);
-        }
-
-        if self.power_draw_kw > 0.0 {
-            let stored_kwh = self
-                .resources
-                .get(&Resource::Electricity)
-                .map(|r| r.amount)
-                .unwrap_or(0.0);
-            // kWh / kW = hours → convert to seconds.
-            let power_limit_s = stored_kwh / self.power_draw_kw * 3600.0;
-            limit = limit.min(power_limit_s);
-        }
-
-        if limit.is_finite() { Some(limit) } else { None }
+        self.vacuum_delta_v().burn_time_s
     }
 
     /// Tsiolkovsky Δv available from current state, limited by the
     /// bottleneck reactant (and/or stored electricity if power-dependent).
     /// Returns 0 when any critical input is missing.
     pub fn delta_v_capacity(&self) -> f64 {
-        let wet = self.wet_mass_kg();
-        let ve = self.exhaust_velocity();
-        if ve <= 0.0 || wet <= 0.0 || self.dry_mass_kg <= 0.0 {
-            return 0.0;
-        }
-        let Some(burn_s) = self.burn_time_at_full_throttle_s() else {
-            return 0.0;
-        };
-        let raw_expelled = self.mass_flow_kg_per_s * burn_s;
-        if raw_expelled <= 0.0 {
-            return 0.0;
-        }
-        // Clamp against total propellant so float error on a perfectly
-        // balanced burn can't dip below dry mass.
-        let expelled = raw_expelled.min(self.propellant_mass_kg);
-        let remaining = wet - expelled;
-        if remaining <= 0.0 {
-            return 0.0;
-        }
-        ve * (wet / remaining).ln()
+        self.vacuum_delta_v().delta_v_m_per_s
     }
 }
 
@@ -655,6 +760,97 @@ mod tests {
             "expelled {expelled} should match propellant {}",
             s.propellant_mass_kg
         );
+    }
+
+    #[test]
+    fn balanced_stack_delta_v_matches_rocket_equation() {
+        let cat = catalog();
+        let bp = ShipBlueprint {
+            name: "stack".into(),
+            root: 0,
+            parts: vec![
+                PartBlueprint {
+                    catalog_id: "argos".into(),
+                    params: PartParams::None,
+                    resources: HashMap::new(),
+                },
+                PartBlueprint {
+                    catalog_id: "tank_methalox".into(),
+                    params: PartParams::Tank {
+                        diameter: 2.5,
+                        length: 4.0,
+                    },
+                    resources: HashMap::new(),
+                },
+                PartBlueprint {
+                    catalog_id: "zephyr".into(),
+                    params: PartParams::None,
+                    resources: HashMap::new(),
+                },
+            ],
+            connections: vec![
+                Connection {
+                    parent: 0,
+                    parent_node: "bottom".into(),
+                    child: 1,
+                    child_node: "top".into(),
+                },
+                Connection {
+                    parent: 1,
+                    parent_node: "bottom".into(),
+                    child: 2,
+                    child_node: "top".into(),
+                },
+            ],
+        };
+        let s = bp.stats(&cat).unwrap();
+        let expected = s.exhaust_velocity() * (s.wet_mass_kg() / s.dry_mass_kg).ln();
+        let got = s.vacuum_delta_v().delta_v_m_per_s;
+
+        assert!((got - expected).abs() / expected < 1e-3);
+        assert!((s.delta_v_capacity() - got).abs() < 1e-10);
+    }
+
+    #[test]
+    fn delta_v_is_limited_by_bottleneck_reactant() {
+        let reactant_fractions = HashMap::from([(Resource::Methane, 0.25), (Resource::Lox, 0.75)]);
+        let resources = HashMap::from([
+            (
+                Resource::Methane,
+                ResourceTotals {
+                    amount: 0.0,
+                    capacity: 0.0,
+                    mass_kg: 10.0,
+                },
+            ),
+            (
+                Resource::Lox,
+                ResourceTotals {
+                    amount: 0.0,
+                    capacity: 0.0,
+                    mass_kg: 300.0,
+                },
+            ),
+        ]);
+        let estimate = estimate_delta_v(
+            DeltaVEnvironment::Vacuum,
+            DeltaVInputs {
+                dry_mass_kg: 1_000.0,
+                wet_mass_kg: 1_310.0,
+                total_thrust_n: 3_000.0,
+                mass_flow_kg_per_s: 3.0,
+                power_draw_kw: 0.0,
+                reactant_fractions: &reactant_fractions,
+                resources: &resources,
+            },
+        );
+        let burn_s = 10.0 / (3.0 * 0.25);
+        let expelled = 3.0 * burn_s;
+        let expected = 1_000.0 * (1_310.0_f64 / (1_310.0 - expelled)).ln();
+
+        assert_eq!(estimate.burn_time_s, Some(burn_s));
+        assert!((estimate.expelled_mass_kg - expelled).abs() < 1e-10);
+        assert!((estimate.delta_v_m_per_s - expected).abs() < 1e-10);
     }
 
     #[test]

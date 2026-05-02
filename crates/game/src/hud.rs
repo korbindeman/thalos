@@ -1,15 +1,17 @@
-//! HUD overlay using egui — time controls, camera focus, throttle, fuel.
+//! HUD overlay using egui — time controls, camera focus, throttle, delta-v.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use thalos_physics::orbital_math::cartesian_to_elements;
 use thalos_physics::types::StateVector;
-use thalos_shipyard::{FuelTank, PartResources, Resource};
+use thalos_shipyard::{
+    DeltaVEnvironment, DeltaVInputs, PartResources, aggregate_resource_totals, estimate_delta_v,
+};
 
 use crate::camera::{CameraFocus, CameraFocusTarget, ShipCameraMode};
 use crate::controls::ControlLocks;
-use crate::fuel::ThrottleState;
+use crate::fuel::{ActivePropulsion, ThrottleState};
 use crate::photo_mode::not_in_photo_mode;
 use crate::rendering::{CelestialBody, PlayerShip, SimulationState};
 use crate::view::ViewMode;
@@ -37,7 +39,8 @@ pub fn time_control_panel(
     ship_name: Query<&Name, With<PlayerShip>>,
     diagnostics: Res<DiagnosticsStore>,
     throttle: Res<ThrottleState>,
-    tanks: Query<&PartResources, With<FuelTank>>,
+    active_propulsion: Res<ActivePropulsion>,
+    resources: Query<&PartResources>,
     mut warp_to: ResMut<WarpToManeuver>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -140,22 +143,24 @@ pub fn time_control_panel(
                 ui.colored_label(egui::Color32::from_rgb(220, 110, 60), "(cut)");
             }
 
-            // Per-resource fuel readout, summed across every tank.
-            // Each resource only shows when at least one tank holds it.
-            for res in [Resource::Methane, Resource::Lox] {
-                let (amount, capacity) = tanks
-                    .iter()
-                    .filter_map(|t| t.pools.get(&res).map(|p| (p.amount, p.capacity)))
-                    .fold((0.0_f32, 0.0_f32), |(a, c), (pa, pc)| (a + pa, c + pc));
-                if capacity > 0.0 {
-                    let pct = (amount / capacity) * 100.0;
-                    let label = format!("{}: {:>3.0}%", res.display_name(), pct);
-                    if pct < 10.0 {
-                        ui.colored_label(egui::Color32::from_rgb(220, 110, 60), label);
-                    } else {
-                        ui.label(label);
-                    }
-                }
+            let resource_totals = aggregate_resource_totals(resources.iter());
+            let delta_v = estimate_delta_v(
+                DeltaVEnvironment::Vacuum,
+                DeltaVInputs {
+                    dry_mass_kg: active_propulsion.dry_mass_kg,
+                    wet_mass_kg: active_propulsion.wet_mass_kg,
+                    total_thrust_n: active_propulsion.total_thrust_n,
+                    mass_flow_kg_per_s: active_propulsion.mass_flow_kg_per_s,
+                    power_draw_kw: active_propulsion.power_draw_kw,
+                    reactant_fractions: &active_propulsion.reactant_fractions,
+                    resources: &resource_totals,
+                },
+            );
+            let dv_label = format!("Vac Δv: {}", format_delta_v(delta_v.delta_v_m_per_s));
+            if active_propulsion.total_thrust_n > 0.0 && delta_v.delta_v_m_per_s <= 1.0 {
+                ui.colored_label(egui::Color32::from_rgb(220, 110, 60), dv_label);
+            } else {
+                ui.label(dv_label);
             }
 
             ui.separator();
@@ -209,5 +214,13 @@ fn format_altitude(meters: f64) -> String {
         format!("{:.1} Mm", meters / 1_000_000.0)
     } else {
         format!("{:.2} Gm", meters / 1_000_000_000.0)
+    }
+}
+
+fn format_delta_v(meters_per_second: f64) -> String {
+    if meters_per_second.abs() >= 9_999.5 {
+        format!("{:.2} km/s", meters_per_second / 1_000.0)
+    } else {
+        format!("{:.0} m/s", meters_per_second)
     }
 }

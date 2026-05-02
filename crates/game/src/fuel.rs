@@ -1,4 +1,4 @@
-//! Engine throttle input + per-frame fuel consumption.
+//! Engine activation, throttle input, and per-frame fuel consumption.
 //!
 //! The simulation knows nothing about reactant pools — its
 //! [`ControlInput::throttle`] is a 0..1 multiplier on `thrust_n / mass`,
@@ -20,39 +20,68 @@
 //!    truth** for ship mass — its propagator integrates burn duration,
 //!    SOI clipping, and dry-mass cutoff exactly. We read back the mass
 //!    delta and drain tank pools by that amount, split across the
-//!    engine's reactant fractions, so the per-tank UI matches the
+//!    engine set that actually fired, so the per-tank UI matches the
 //!    physics regardless of short burns inside the frame.
 //!
-//! Mass flow + reactant fractions + dry mass live in [`ShipFuelParams`],
-//! populated once at ship spawn from [`ShipStats`]. v1 has no staging,
-//! so they never change after spawn.
+//! Engine activation is not staging. It is the lower-level capability:
+//! enabled engines contribute to the scalar propulsion summary consumed
+//! by physics and prediction; disabled engines stay cold. A later
+//! staging system can mutate [`EngineActivation`] without changing the
+//! fuel or physics bridge.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bevy::prelude::*;
-use thalos_shipyard::{FuelTank, PartResources, Resource};
+use thalos_shipyard::{
+    Adapter, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelCrossfeed, FuelTank,
+    G0, Part, PartResources, Resource,
+};
 
 use crate::SimStage;
 use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
 
-/// Engine + ship-mass constants the throttle/drain/mass-push systems
-/// need each frame — derived from [`thalos_shipyard::ShipStats`] at
-/// spawn.
-#[derive(Resource, Debug, Clone, Default)]
-pub struct ShipFuelParams {
-    /// Sum of every part's `dry_mass`, kg. Combined with the running
-    /// tank totals to push the simulation's current `ship_mass_kg` each
-    /// frame.
-    pub dry_mass_kg: f64,
-    /// Total mass flow at full throttle across all engines, kg/s.
+/// Per-engine flow recipe for an enabled engine. Stored separately from
+/// [`Engine`] so the drain reconciliation can use the recipe that was in
+/// force during the previous physics step, even if activation changes
+/// before the next frame drains tanks.
+#[derive(Debug, Clone)]
+pub struct ActiveEngineFlow {
+    pub entity: Entity,
     pub mass_flow_kg_per_s: f64,
+    pub reactants: Vec<(Resource, f64)>,
+}
+
+/// Current scalar propulsion and mass state derived from the ECS ship.
+///
+/// This is rebuilt before each simulation step from the currently
+/// enabled engines and live resource pools. Physics still consumes a
+/// scalar aggregate for this pass; the ECS side owns which engines
+/// produced that aggregate and which tanks they can reach.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ActivePropulsion {
+    /// Sum of every current part's dry mass, kg.
+    pub dry_mass_kg: f64,
+    /// Dry mass plus all mass-bearing resources currently stored.
+    pub wet_mass_kg: f64,
+    /// Total thrust at full throttle across enabled engines, N.
+    pub total_thrust_n: f64,
+    /// Total mass flow at full throttle across enabled engines, kg/s.
+    pub mass_flow_kg_per_s: f64,
+    /// Summed electrical draw while all enabled engines fire, kW.
+    pub power_draw_kw: f64,
     /// What fraction of the total mass flow each reactant accounts
-    /// for. Sums to 1 when any engine is present; empty when no
-    /// engine is on the ship (in which case the drain system is a
-    /// no-op).
+    /// for across enabled engines. Sums to 1 when any enabled engine has
+    /// positive flow; empty otherwise.
     pub reactant_fractions: HashMap<Resource, f64>,
+    /// Enabled engines that currently contribute to propulsion.
+    pub engines: Vec<ActiveEngineFlow>,
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub(crate) struct LastBurnRecipe {
+    engines: Vec<ActiveEngineFlow>,
 }
 
 /// Player throttle state, persisted across frames so Shift/Ctrl can
@@ -71,7 +100,8 @@ pub struct FuelPlugin;
 
 impl Plugin for FuelPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ShipFuelParams>()
+        app.init_resource::<ActivePropulsion>()
+            .init_resource::<LastBurnRecipe>()
             .init_resource::<ThrottleState>()
             .add_systems(
                 Update,
@@ -94,6 +124,7 @@ impl Plugin for FuelPlugin {
                     // so the gate sees the post-drain availability.
                     (
                         reconcile_tanks_from_sim_drain,
+                        refresh_active_propulsion,
                         gate_throttle_on_fuel_availability,
                     )
                         .chain()
@@ -202,6 +233,286 @@ pub fn handle_throttle_input(
     }
 }
 
+type DryMassQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static CommandPod>,
+        Option<&'static Decoupler>,
+        Option<&'static Adapter>,
+        Option<&'static FuelTank>,
+        Option<&'static Engine>,
+    ),
+    With<Part>,
+>;
+
+fn part_dry_mass_kg(
+    pod: Option<&CommandPod>,
+    dec: Option<&Decoupler>,
+    adapter: Option<&Adapter>,
+    tank: Option<&FuelTank>,
+    engine: Option<&Engine>,
+) -> f64 {
+    if let Some(pod) = pod {
+        pod.dry_mass as f64
+    } else if let Some(dec) = dec {
+        dec.dry_mass as f64
+    } else if let Some(adapter) = adapter {
+        adapter.dry_mass as f64
+    } else if let Some(tank) = tank {
+        tank.dry_mass as f64
+    } else if let Some(engine) = engine {
+        engine.dry_mass as f64
+    } else {
+        0.0
+    }
+}
+
+fn propulsion_config_changed(prev: &ActivePropulsion, next: &ActivePropulsion) -> bool {
+    const EPS: f64 = 1e-6;
+    (prev.total_thrust_n - next.total_thrust_n).abs() > EPS
+        || (prev.mass_flow_kg_per_s - next.mass_flow_kg_per_s).abs() > EPS
+        || (prev.power_draw_kw - next.power_draw_kw).abs() > EPS
+        || (prev.dry_mass_kg - next.dry_mass_kg).abs() > EPS
+        || prev.engines.len() != next.engines.len()
+        || prev
+            .engines
+            .iter()
+            .zip(&next.engines)
+            .any(|(a, b)| a.entity != b.entity)
+}
+
+/// Rebuild the active propulsion summary from enabled engines and live
+/// resource pools, then push the scalar fields into physics. This keeps
+/// the existing propagator contract intact while letting gameplay decide
+/// which engines currently exist from the craft's perspective.
+fn refresh_active_propulsion(
+    mut sim: ResMut<SimulationState>,
+    mut active: ResMut<ActivePropulsion>,
+    engines: Query<(Entity, &Engine, Option<&EngineActivation>)>,
+    parts: DryMassQuery,
+    resources: Query<&PartResources>,
+) {
+    let dry_mass_kg: f64 = parts
+        .iter()
+        .map(|(pod, dec, adapter, tank, engine)| part_dry_mass_kg(pod, dec, adapter, tank, engine))
+        .sum();
+
+    let resource_mass_kg: f64 = resources
+        .iter()
+        .flat_map(|part| part.pools.iter())
+        .map(|(&res, pool)| pool.mass_kg(res))
+        .sum();
+
+    let mut total_thrust_n = 0.0_f64;
+    let mut mass_flow_kg_per_s = 0.0_f64;
+    let mut power_draw_kw = 0.0_f64;
+    let mut per_resource_mdot: HashMap<Resource, f64> = HashMap::new();
+    let mut active_engines = Vec::new();
+
+    for (entity, engine, activation) in engines.iter() {
+        if !activation.map(|a| a.enabled).unwrap_or(true) {
+            continue;
+        }
+        if engine.thrust <= 0.0 || engine.isp <= 0.0 {
+            continue;
+        }
+
+        let thrust_n = engine.thrust as f64;
+        let mdot = thrust_n / (engine.isp as f64 * G0);
+
+        let reactants: Vec<(Resource, f64)> = engine
+            .reactants
+            .iter()
+            .filter(|r| r.mass_fraction > 0.0)
+            .map(|r| {
+                let frac = r.mass_fraction as f64;
+                *per_resource_mdot.entry(r.resource).or_insert(0.0) += mdot * frac;
+                (r.resource, frac)
+            })
+            .collect();
+        if reactants.is_empty() {
+            continue;
+        }
+
+        total_thrust_n += thrust_n;
+        mass_flow_kg_per_s += mdot;
+        power_draw_kw += engine.power_draw_kw as f64;
+
+        active_engines.push(ActiveEngineFlow {
+            entity,
+            mass_flow_kg_per_s: mdot,
+            reactants,
+        });
+    }
+
+    let reactant_fractions = if mass_flow_kg_per_s > 0.0 {
+        per_resource_mdot
+            .into_iter()
+            .map(|(res, mdot)| (res, mdot / mass_flow_kg_per_s))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    let next = ActivePropulsion {
+        dry_mass_kg,
+        wet_mass_kg: dry_mass_kg + resource_mass_kg,
+        total_thrust_n,
+        mass_flow_kg_per_s,
+        power_draw_kw,
+        reactant_fractions,
+        engines: active_engines,
+    };
+    let changed = propulsion_config_changed(&active, &next);
+    *active = next;
+
+    let mut params = *sim.simulation.ship_params();
+    params.thrust_n = active.total_thrust_n;
+    params.mass_flow_kg_per_s = active.mass_flow_kg_per_s;
+    params.dry_mass_kg = active.dry_mass_kg;
+    sim.simulation.set_ship_params(params);
+    sim.simulation.set_ship_mass(active.wet_mass_kg);
+
+    if changed {
+        sim.simulation.prediction_state.mark_dirty();
+    }
+}
+
+fn crossfeed_enabled(entity: Entity, crossfeeds: &Query<&FuelCrossfeed>) -> bool {
+    crossfeeds.get(entity).map(|c| c.enabled).unwrap_or(true)
+}
+
+fn crossfeed_components(
+    attachments: &Query<(Entity, &Attachment)>,
+    crossfeeds: &Query<&FuelCrossfeed>,
+) -> HashMap<Entity, usize> {
+    let mut adjacency: HashMap<Entity, Vec<Entity>> = HashMap::new();
+
+    for (child, attachment) in attachments.iter() {
+        let parent = attachment.parent;
+        adjacency.entry(child).or_default();
+        adjacency.entry(parent).or_default();
+        if crossfeed_enabled(child, crossfeeds) && crossfeed_enabled(parent, crossfeeds) {
+            adjacency.entry(child).or_default().push(parent);
+            adjacency.entry(parent).or_default().push(child);
+        }
+    }
+
+    let mut component_by_entity = HashMap::new();
+    let mut next_component = 0usize;
+    for &start in adjacency.keys() {
+        if component_by_entity.contains_key(&start) {
+            continue;
+        }
+
+        let component = next_component;
+        next_component += 1;
+
+        let mut queue = VecDeque::from([start]);
+        component_by_entity.insert(start, component);
+        while let Some(entity) = queue.pop_front() {
+            let Some(neighbors) = adjacency.get(&entity) else {
+                continue;
+            };
+            for &neighbor in neighbors {
+                if component_by_entity.contains_key(&neighbor) {
+                    continue;
+                }
+                component_by_entity.insert(neighbor, component);
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    component_by_entity
+}
+
+fn component_for(entity: Entity, components: &HashMap<Entity, usize>) -> usize {
+    components
+        .get(&entity)
+        .copied()
+        .unwrap_or_else(|| 1_000_000 + entity.index_u32() as usize)
+}
+
+fn resource_mass_by_component(
+    tanks: &Query<(Entity, &PartResources)>,
+    components: &HashMap<Entity, usize>,
+) -> HashMap<(usize, Resource), f64> {
+    let mut available = HashMap::new();
+    for (entity, tank) in tanks.iter() {
+        let component = component_for(entity, components);
+        for (&res, pool) in &tank.pools {
+            *available.entry((component, res)).or_insert(0.0) += pool.mass_kg(res);
+        }
+    }
+    available
+}
+
+fn engine_resource_requests(
+    engines: &[ActiveEngineFlow],
+    components: &HashMap<Entity, usize>,
+    mass_scale: f64,
+) -> HashMap<(usize, Resource), f64> {
+    let mut requests = HashMap::new();
+    if mass_scale <= 0.0 {
+        return requests;
+    }
+    for engine in engines {
+        let component = component_for(engine.entity, components);
+        for &(res, frac) in &engine.reactants {
+            if frac <= 0.0 {
+                continue;
+            }
+            let req = engine.mass_flow_kg_per_s * frac * mass_scale;
+            *requests.entry((component, res)).or_insert(0.0) += req;
+        }
+    }
+    requests
+}
+
+fn drain_resource_from_component(
+    tanks: &mut Query<(Entity, &mut PartResources)>,
+    components: &HashMap<Entity, usize>,
+    target_component: usize,
+    resource: Resource,
+    drain_kg: f64,
+) {
+    if drain_kg <= 0.0 {
+        return;
+    }
+    let density = resource.density_kg_per_unit();
+    if density <= 0.0 {
+        return;
+    }
+
+    let available_kg: f64 = tanks
+        .iter_mut()
+        .filter(|(entity, _)| component_for(*entity, components) == target_component)
+        .filter_map(|(_, tank)| tank.pools.get(&resource).map(|p| p.mass_kg(resource)))
+        .sum();
+    if available_kg <= 0.0 {
+        return;
+    }
+
+    let drain_kg = drain_kg.min(available_kg);
+    for (entity, mut tank) in tanks.iter_mut() {
+        if component_for(entity, components) != target_component {
+            continue;
+        }
+        let Some(pool) = tank.pools.get_mut(&resource) else {
+            continue;
+        };
+        let pool_mass = pool.mass_kg(resource);
+        if pool_mass <= 0.0 {
+            continue;
+        }
+        let take_kg = drain_kg * (pool_mass / available_kg);
+        let take_units = take_kg / density;
+        pool.amount = ((pool.amount as f64 - take_units).max(0.0)) as f32;
+    }
+}
+
 /// Drain tank reactant pools by however much mass the simulation burned
 /// since this system last ran. The simulation's `ship_mass_kg` is the
 /// authoritative record of "current ship mass" — it integrates short
@@ -209,63 +520,46 @@ pub fn handle_throttle_input(
 /// `mass_flow · real_dt · warp` overdrains the tanks. Reading the sim's
 /// actual delta avoids that whole class of bug.
 ///
-/// Drain is split across [`ShipFuelParams::reactant_fractions`] and
-/// distributed inside each resource's pools by tank capacity (so
-/// already-empty tanks don't pin the whole engine).
+/// Drain follows the same crossfeed graph as throttle gating. Each
+/// engine's mass-flow share drains only tanks in the component reachable
+/// from that engine through [`FuelCrossfeed`] parts.
 ///
 /// First-call behaviour: records the spawn-time ship mass and skips
 /// drain. Without this, the very first frame would treat the ship's
 /// entire propellant load as a one-frame burn.
 fn reconcile_tanks_from_sim_drain(
     sim: Res<SimulationState>,
-    fuel_params: Res<ShipFuelParams>,
-    mut tanks: Query<&mut PartResources, With<FuelTank>>,
+    last_burn: Res<LastBurnRecipe>,
+    mut tanks: Query<(Entity, &mut PartResources)>,
+    attachments: Query<(Entity, &Attachment)>,
+    crossfeeds: Query<&FuelCrossfeed>,
     mut prev_sim_mass: Local<Option<f64>>,
 ) {
     let current = sim.simulation.ship_mass_kg();
     let Some(prev) = *prev_sim_mass else {
-        // First run after spawn — no drain yet, just take the baseline.
         *prev_sim_mass = Some(current);
         return;
     };
     *prev_sim_mass = Some(current);
 
     let drained_total_kg = (prev - current).max(0.0);
-    if drained_total_kg <= 0.0 || fuel_params.reactant_fractions.is_empty() {
+    if drained_total_kg <= 0.0 || last_burn.engines.is_empty() {
         return;
     }
 
-    for (&res, &frac) in &fuel_params.reactant_fractions {
-        if frac <= 0.0 {
-            continue;
-        }
-        let drain_kg = drained_total_kg * frac;
-        if drain_kg <= 0.0 {
-            continue;
-        }
+    let total_mdot: f64 = last_burn.engines.iter().map(|e| e.mass_flow_kg_per_s).sum();
+    if total_mdot <= 0.0 {
+        return;
+    }
 
-        let total_capacity_kg: f64 = tanks
-            .iter()
-            .filter_map(|t| t.pools.get(&res).map(|p| p.capacity_mass_kg(res)))
-            .sum();
-        if total_capacity_kg <= 0.0 {
-            continue;
-        }
-
-        let density = res.density_kg_per_unit();
-        if density <= 0.0 {
-            continue;
-        }
-
-        for mut tank in tanks.iter_mut() {
-            let Some(pool) = tank.pools.get_mut(&res) else {
-                continue;
-            };
-            let weight = pool.capacity_mass_kg(res) / total_capacity_kg;
-            let take_kg = drain_kg * weight;
-            let take_units = take_kg / density;
-            pool.amount = ((pool.amount as f64 - take_units).max(0.0)) as f32;
-        }
+    let components = crossfeed_components(&attachments, &crossfeeds);
+    let requests = engine_resource_requests(
+        &last_burn.engines,
+        &components,
+        drained_total_kg / total_mdot,
+    );
+    for ((component, resource), drain_kg) in requests {
+        drain_resource_from_component(&mut tanks, &components, component, resource, drain_kg);
     }
 }
 
@@ -280,11 +574,14 @@ fn reconcile_tanks_from_sim_drain(
 /// throttle on a scheduled maneuver.
 pub fn gate_throttle_on_fuel_availability(
     time: Res<Time>,
-    fuel_params: Res<ShipFuelParams>,
+    active: Res<ActivePropulsion>,
     autopilot: Res<Autopilot>,
     mut sim: ResMut<SimulationState>,
     mut throttle: ResMut<ThrottleState>,
-    tanks: Query<&PartResources, With<FuelTank>>,
+    tanks: Query<(Entity, &PartResources)>,
+    attachments: Query<(Entity, &Attachment)>,
+    crossfeeds: Query<&FuelCrossfeed>,
+    mut last_burn: ResMut<LastBurnRecipe>,
     mut refresh: Local<PredictionRefresh>,
 ) {
     let warp = sim.simulation.warp.speed();
@@ -292,7 +589,7 @@ pub fn gate_throttle_on_fuel_availability(
     let hold_prediction = autopilot.is_burning();
 
     if (warp - 1.0).abs() > f64::EPSILON {
-        // Any warp level other than 1× → engine off entirely.
+        last_burn.engines.clear();
         finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh, hold_prediction);
         return;
     }
@@ -302,9 +599,10 @@ pub fn gate_throttle_on_fuel_availability(
 
     if throttle_in_use <= 0.0
         || drain_dt <= 0.0
-        || fuel_params.mass_flow_kg_per_s <= 0.0
-        || fuel_params.reactant_fractions.is_empty()
+        || active.mass_flow_kg_per_s <= 0.0
+        || active.reactant_fractions.is_empty()
     {
+        last_burn.engines.clear();
         finish_with_throttle(
             throttle_in_use,
             &mut throttle,
@@ -315,34 +613,29 @@ pub fn gate_throttle_on_fuel_availability(
         return;
     }
 
-    let requested_total_kg = throttle_in_use * fuel_params.mass_flow_kg_per_s * drain_dt;
+    let components = crossfeed_components(&attachments, &crossfeeds);
+    let available = resource_mass_by_component(&tanks, &components);
+    let requests =
+        engine_resource_requests(&active.engines, &components, throttle_in_use * drain_dt);
 
-    // Sum each reactant's available mass across every tank that holds
-    // some, so a depleted tank in a multi-tank ship doesn't pin the
-    // whole engine.
-    let mut available_per_res: HashMap<Resource, f64> = HashMap::new();
-    for tank in tanks.iter() {
-        for (&res, pool) in &tank.pools {
-            *available_per_res.entry(res).or_insert(0.0) += pool.mass_kg(res);
-        }
-    }
-
-    // Cap throttle to the bottleneck reactant's availability ratio.
     let mut feasibility = 1.0_f64;
-    for (&res, &frac) in &fuel_params.reactant_fractions {
-        if frac <= 0.0 {
-            continue;
-        }
-        let req = requested_total_kg * frac;
+    for (&key, &req) in &requests {
         if req <= 0.0 {
             continue;
         }
-        let avail = available_per_res.get(&res).copied().unwrap_or(0.0);
+        let avail = available.get(&key).copied().unwrap_or(0.0);
         if req > avail {
             feasibility = feasibility.min(avail / req);
         }
     }
+
     let throttle_effective = (throttle_in_use * feasibility).max(0.0);
+    if throttle_effective > 0.0 {
+        last_burn.engines = active.engines.clone();
+    } else {
+        last_burn.engines.clear();
+    }
+
     finish_with_throttle(
         throttle_effective,
         &mut throttle,
@@ -355,6 +648,7 @@ pub fn gate_throttle_on_fuel_availability(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::prelude::World;
 
     #[test]
     fn scheduled_burn_holds_prediction_while_thrusting() {
@@ -369,5 +663,22 @@ mod tests {
     #[test]
     fn manual_burn_refreshes_while_thrusting() {
         assert!(should_mark_prediction_dirty(true, false, false));
+    }
+
+    #[test]
+    fn engine_resource_requests_split_by_reactant_fraction() {
+        let mut world = World::new();
+        let engine = world.spawn_empty().id();
+        let components = HashMap::from([(engine, 7usize)]);
+        let engines = vec![ActiveEngineFlow {
+            entity: engine,
+            mass_flow_kg_per_s: 10.0,
+            reactants: vec![(Resource::Methane, 0.25), (Resource::Lox, 0.75)],
+        }];
+
+        let requests = engine_resource_requests(&engines, &components, 2.0);
+
+        assert_eq!(requests.get(&(7, Resource::Methane)).copied(), Some(5.0));
+        assert_eq!(requests.get(&(7, Resource::Lox)).copied(), Some(15.0));
     }
 }

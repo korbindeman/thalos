@@ -28,6 +28,7 @@
         )),
         "zephyr": Engine((
             display_name: "Zephyr",
+            optimized_for: Atmosphere,
             diameter: 2.5,
             thrust: 500000.0,
             isp: 355.0,
@@ -40,6 +41,7 @@
         )),
         "boreas": Engine((
             display_name: "Boreas",
+            optimized_for: Vacuum,
             diameter: 4.0,
             thrust: 1800000.0,
             isp: 380.0,

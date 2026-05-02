@@ -5,28 +5,33 @@ use std::collections::HashMap;
 /// Canonical resources the ship system understands.
 ///
 /// Each variant carries its own physical properties (density, units) via
-/// methods — a pool that claims to hold [`Resource::Lox`] always uses
-/// LOX's density, period. This keeps blueprints honest; a fuel tank
-/// cannot drift from the physics model by declaring its own density.
+/// methods. This keeps blueprints honest; a fuel tank cannot drift from
+/// the physics model by declaring its own density.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Resource {
     /// Liquid methane (CH4), fuel. Stored cryogenic.
     Methane,
     /// Liquid oxygen (O2), oxidizer. Stored cryogenic.
     Lox,
+    /// Liquid hydrogen (H2), high-performance nuclear-thermal propellant.
+    Hydrogen,
     /// Electric charge. Not mass-bearing (for ship dynamics).
     Electricity,
 }
 
 impl Resource {
+    /// Stored resources that contribute mass and can appear in fuel UI.
+    pub const MASS_BEARING: [Resource; 3] = [Resource::Methane, Resource::Lox, Resource::Hydrogen];
+
     /// Density in kg per native unit. For fluids (`Methane`, `Lox`) the
     /// native unit is litre (kg/L ≡ g/cm³). [`Resource::Electricity`] is
     /// dimensionally power × time, not matter, so returns 0 — it never
     /// contributes to wet mass.
     pub fn density_kg_per_unit(self) -> f64 {
         match self {
-            Resource::Methane => 0.422, // LCH4 at ≈112 K
-            Resource::Lox => 1.141,     // LOX at ≈90 K
+            Resource::Methane => 0.422,    // LCH4 at ≈112 K
+            Resource::Lox => 1.141,        // LOX at ≈90 K
+            Resource::Hydrogen => 0.07085, // LH2 at ≈20 K
             Resource::Electricity => 0.0,
         }
     }
@@ -39,7 +44,7 @@ impl Resource {
     /// Label for the native unit of `amount` / `capacity`.
     pub fn unit_label(self) -> &'static str {
         match self {
-            Resource::Methane | Resource::Lox => "L",
+            Resource::Methane | Resource::Lox | Resource::Hydrogen => "L",
             Resource::Electricity => "kWh",
         }
     }
@@ -49,6 +54,7 @@ impl Resource {
         match self {
             Resource::Methane => "Methane",
             Resource::Lox => "LOX",
+            Resource::Hydrogen => "LH2",
             Resource::Electricity => "Electricity",
         }
     }

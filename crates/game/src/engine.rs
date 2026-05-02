@@ -3,13 +3,12 @@
 //! Two systems live here:
 //!
 //! 1. [`update_engine_thrust`] writes the gated effective throttle into
-//!    each [`Engine`]'s [`EngineThrust`] component as `engine.thrust *
-//!    throttle.effective` newtons. v1 has no per-engine throttling, so
-//!    every engine on the ship reads the same throttle. This is the
-//!    plumbing future visual effects (particles, plumes, light) will
-//!    consume — anyone wanting to know "how hard is this engine
-//!    firing" reads `EngineThrust.current_n` instead of rederiving it
-//!    from `ThrottleState` + ship config.
+//!    each enabled [`Engine`]'s [`EngineThrust`] component as
+//!    `engine.thrust * throttle.effective` newtons. Disabled engines are
+//!    forced to zero. This is the plumbing future visual effects
+//!    (particles, plumes, light) will consume — anyone wanting to know
+//!    "how hard is this engine firing" reads `EngineThrust.current_n`
+//!    instead of rederiving it from `ThrottleState` + ship config.
 //!
 //! 2. [`update_engine_tint`] is the *temporary* visual: it lerps each
 //!    engine's [`StandardMaterial`] base color from neutral gray to
@@ -18,7 +17,7 @@
 //!    plumbing in (1) stays.
 
 use bevy::prelude::*;
-use thalos_shipyard::{Engine, EngineThrust};
+use thalos_shipyard::{Engine, EngineActivation, EngineThrust};
 
 use crate::SimStage;
 use crate::fuel::ThrottleState;
@@ -58,11 +57,16 @@ impl Plugin for EnginePlugin {
 /// and write it back to each engine's [`EngineThrust`] component.
 fn update_engine_thrust(
     throttle: Res<ThrottleState>,
-    mut engines: Query<(&Engine, &mut EngineThrust)>,
+    mut engines: Query<(&Engine, Option<&EngineActivation>, &mut EngineThrust)>,
 ) {
     let throttle_eff = throttle.effective.clamp(0.0, 1.0) as f32;
-    for (engine, mut thrust) in engines.iter_mut() {
-        thrust.current_n = engine.thrust * throttle_eff;
+    for (engine, activation, mut thrust) in engines.iter_mut() {
+        let enabled = activation.map(|a| a.enabled).unwrap_or(true);
+        thrust.current_n = if enabled {
+            engine.thrust * throttle_eff
+        } else {
+            0.0
+        };
     }
 }
 

@@ -109,8 +109,8 @@ fn ship_path_for_slug(slug: &str) -> PathBuf {
     PathBuf::from(SHIPS_DIR).join(format!("{slug}.ron"))
 }
 
-/// Stable ordering for the palette: pods, then engines, then parametric
-/// parts. Within each kind we sort by display name in the caller.
+/// Stable ordering inside each palette category. Within each kind we sort
+/// by display name in the caller.
 fn kind_order(entry: &CatalogEntry) -> u8 {
     match entry {
         CatalogEntry::Pod(_) => 0,
@@ -119,6 +119,85 @@ fn kind_order(entry: &CatalogEntry) -> u8 {
         CatalogEntry::Adapter(_) => 3,
         CatalogEntry::Tank(_) => 4,
     }
+}
+
+fn palette_category_order(entry: &CatalogEntry) -> u8 {
+    match entry {
+        CatalogEntry::Pod(_) => 0,
+        CatalogEntry::Engine(_) => 1,
+        CatalogEntry::Tank(_) => 2,
+        CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) => 3,
+    }
+}
+
+fn palette_category_label(entry: &CatalogEntry) -> &'static str {
+    match entry {
+        CatalogEntry::Pod(_) => "Command Pods",
+        CatalogEntry::Engine(_) => "Engines",
+        CatalogEntry::Tank(_) => "Propellant Tanks",
+        CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) => "Structure",
+    }
+}
+
+fn meters_label(value: f32) -> String {
+    format!("{value:.1} m")
+}
+
+fn palette_part_summary(entry: &CatalogEntry) -> String {
+    match entry {
+        CatalogEntry::Pod(p) => {
+            format!(
+                "Diameter {} · {:.1} t dry",
+                meters_label(p.diameter),
+                p.dry_mass / 1000.0
+            )
+        }
+        CatalogEntry::Engine(e) => {
+            format!(
+                "{} · Diameter {} · {:.0} kN · {:.0} s",
+                e.optimized_for.label(),
+                meters_label(e.diameter),
+                e.thrust / 1000.0,
+                e.isp
+            )
+        }
+        CatalogEntry::Decoupler(_) => match default_params_for(entry) {
+            PartParams::Decoupler { diameter } => {
+                format!("Default diameter {} · staging", meters_label(diameter))
+            }
+            _ => "Parametric diameter".into(),
+        },
+        CatalogEntry::Adapter(_) => match default_params_for(entry) {
+            PartParams::Adapter {
+                diameter,
+                target_diameter,
+            } => format!(
+                "Default {} to {} diameter",
+                meters_label(diameter),
+                meters_label(target_diameter)
+            ),
+            _ => "Parametric diameter".into(),
+        },
+        CatalogEntry::Tank(_) => match default_params_for(entry) {
+            PartParams::Tank { diameter, length } => format!(
+                "Default diameter {} · length {}",
+                meters_label(diameter),
+                meters_label(length)
+            ),
+            _ => "Parametric diameter".into(),
+        },
+    }
+}
+
+fn palette_part_button(ui: &mut egui::Ui, entry: &CatalogEntry) -> bool {
+    let label = format!("{}\n{}", entry.display_name(), palette_part_summary(entry));
+    ui.add(
+        egui::Button::new(label)
+            .wrap()
+            .min_size(egui::vec2(ui.available_width(), 38.0)),
+    )
+    .on_hover_text(entry.kind_name())
+    .clicked()
 }
 
 fn ship_name_from_ron(text: &str) -> Option<String> {
@@ -1667,6 +1746,7 @@ type InspectorQuery<'w, 's> = Query<
     's,
     (
         Entity,
+        &'static CatalogRef,
         &'static AttachNodes,
         Option<&'static mut CommandPod>,
         Option<&'static mut Decoupler>,
@@ -1677,10 +1757,73 @@ type InspectorQuery<'w, 's> = Query<
     ),
 >;
 
+fn draw_ship_stats(ui: &mut egui::Ui, stats: &ShipStats) {
+    let vacuum = stats.vacuum_delta_v();
+    ui.label(format!(
+        "Vacuum Δv: {}",
+        format_delta_v(vacuum.delta_v_m_per_s)
+    ));
+    ui.label(format!("Wet mass: {}", format_mass_kg(stats.wet_mass_kg())));
+    ui.label(format!("Dry mass: {}", format_mass_kg(stats.dry_mass_kg)));
+    ui.label(format!(
+        "Propellant: {}",
+        format_mass_kg(stats.propellant_mass_kg)
+    ));
+    ui.label(format!("Thrust: {}", format_thrust(stats.total_thrust_n)));
+    if stats.wet_mass_kg() > 0.0 && stats.total_thrust_n > 0.0 {
+        ui.label(format!("TWR: {:.2}", stats.current_acceleration() / G0));
+    }
+    if let Some(burn_s) = vacuum.burn_time_s {
+        ui.label(format!("Full burn: {}", format_duration_s(burn_s)));
+    }
+}
+
+fn format_delta_v(meters_per_second: f64) -> String {
+    if meters_per_second.abs() >= 9_999.5 {
+        format!("{:.2} km/s", meters_per_second / 1_000.0)
+    } else {
+        format!("{:.0} m/s", meters_per_second)
+    }
+}
+
+fn format_mass_kg(kg: f64) -> String {
+    if kg.abs() >= 999_500.0 {
+        format!("{:.2} kt", kg / 1_000_000.0)
+    } else if kg.abs() >= 9_999.5 {
+        format!("{:.1} t", kg / 1_000.0)
+    } else {
+        format!("{:.0} kg", kg)
+    }
+}
+
+fn format_thrust(newtons: f64) -> String {
+    if newtons.abs() >= 999_500.0 {
+        format!("{:.2} MN", newtons / 1_000_000.0)
+    } else if newtons.abs() >= 999.5 {
+        format!("{:.1} kN", newtons / 1_000.0)
+    } else {
+        format!("{:.0} N", newtons)
+    }
+}
+
+fn format_duration_s(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{:.0}s", seconds)
+    } else if seconds < 3600.0 {
+        let minutes = (seconds / 60.0).floor();
+        let secs = seconds - minutes * 60.0;
+        format!("{minutes:.0}m {secs:.0}s")
+    } else {
+        let hours = (seconds / 3600.0).floor();
+        let minutes = ((seconds - hours * 3600.0) / 60.0).floor();
+        format!("{hours:.0}h {minutes:.0}m")
+    }
+}
+
 fn editor_ui(
     mut contexts: EguiContexts,
     mut state: ResMut<EditorState>,
-    mut parts: InspectorQuery,
+    mut part_queries: ParamSet<(InspectorQuery, CollectQuery)>,
     mut ships: Query<&mut Ship>,
     attachments: Query<(Entity, &Attachment)>,
     catalog: Res<PartCatalog>,
@@ -1693,6 +1836,20 @@ fn editor_ui(
     };
     let ctx = ctx.clone();
 
+    let ship_stats = {
+        let collect_parts = part_queries.p1();
+        state
+            .ship_root
+            .and_then(|root| {
+                let ship = Ship {
+                    name: String::new(),
+                    root,
+                };
+                collect_blueprint(&ship, &collect_parts, &attachments)
+            })
+            .map(|bp| bp.stats(&catalog))
+    };
+
     // -------- Left palette --------
     egui::SidePanel::left("palette")
         .default_width(180.0)
@@ -1704,12 +1861,28 @@ fn editor_ui(
             ui.label(format!("FPS: {:.0}", fps));
             ui.separator();
             ui.heading("Parts");
-            // Sort by kind, then by display name, so palette ordering is
+            // Sort by category/kind/display name so palette ordering is
             // stable across runs (HashMap iteration is not).
             let mut entries: Vec<(&CatalogId, &CatalogEntry)> = catalog.parts.iter().collect();
-            entries.sort_by_key(|(_, e)| (kind_order(e), e.display_name().to_string()));
+            entries.sort_by_key(|(_, e)| {
+                (
+                    palette_category_order(e),
+                    kind_order(e),
+                    e.display_name().to_string(),
+                )
+            });
+            let mut current_category = None;
             for (id, entry) in entries {
-                if ui.button(entry.display_name()).clicked() {
+                let category = palette_category_label(entry);
+                if current_category != Some(category) {
+                    if current_category.is_some() {
+                        ui.add_space(6.0);
+                    }
+                    ui.label(egui::RichText::new(category).strong());
+                    current_category = Some(category);
+                }
+
+                if palette_part_button(ui, entry) {
                     state.pending = Some(PendingPart {
                         catalog_id: id.clone(),
                         params: default_params_for(entry),
@@ -1736,6 +1909,18 @@ fn editor_ui(
             });
             if ui.button("Refresh list").clicked() {
                 state.refresh_list = true;
+            }
+
+            ui.separator();
+            ui.heading("Ship stats");
+            match &ship_stats {
+                Some(Ok(stats)) => draw_ship_stats(ui, stats),
+                Some(Err(e)) => {
+                    ui.colored_label(egui::Color32::from_rgb(220, 110, 60), format!("{e}"));
+                }
+                None => {
+                    ui.label("(no ship)");
+                }
             }
 
             ui.separator();
@@ -1792,8 +1977,18 @@ fn editor_ui(
                 ui.label("(no selection)");
                 return;
             };
-            let Ok((entity, nodes, mut pod, mut dec, mut adapter, mut tank, mut engine, mut res)) =
-                parts.get_mut(sel)
+            let mut parts = part_queries.p0();
+            let Ok((
+                entity,
+                catalog_ref,
+                nodes,
+                mut pod,
+                mut dec,
+                mut adapter,
+                mut tank,
+                mut engine,
+                mut res,
+            )) = parts.get_mut(sel)
             else {
                 ui.label("(invalid selection)");
                 return;
@@ -1848,7 +2043,15 @@ fn editor_ui(
                 // `recompute::recompute_tank_state` on every change.
                 ui.label(format!("Dry mass: {:.0} kg", t.dry_mass));
             } else if let Some(e) = engine.as_deref_mut() {
-                ui.label("Kind: Engine (vacuum)");
+                let optimized_for = catalog
+                    .resolve(&catalog_ref.id)
+                    .ok()
+                    .and_then(|entry| match entry {
+                        CatalogEntry::Engine(spec) => Some(spec.optimized_for.label()),
+                        _ => None,
+                    })
+                    .unwrap_or("Unknown");
+                ui.label(format!("Kind: Engine ({optimized_for})"));
                 ui.label(format!("Model: {}", e.model));
                 ui.label(format!("Diameter: {:.2}m (fixed)", e.diameter));
                 ui.label(format!("Thrust: {:.1} kN (fixed)", e.thrust / 1000.0));
@@ -1934,7 +2137,8 @@ fn editor_ui(
                             .map(|(_, a)| (a.parent, a.parent_node.clone()))
                             .collect();
                         let mut rows: Vec<(Entity, String, f32)> = Vec::new();
-                        for (e, nodes, _, _, _, _, _, _) in parts.iter() {
+                        let parts = part_queries.p0();
+                        for (e, _, nodes, _, _, _, _, _, _) in parts.iter() {
                             for (nid, node) in &nodes.nodes {
                                 if occupied.contains(&(e, nid.clone())) {
                                     continue;

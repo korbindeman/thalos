@@ -54,12 +54,32 @@ pub struct PodSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineSpec {
     pub display_name: String,
+    #[serde(default)]
+    pub optimized_for: EngineOptimization,
     pub diameter: f32,
     pub thrust: f32,
     pub isp: f32,
     pub dry_mass: f32,
     pub reactants: Vec<ReactantRatio>,
     pub power_draw_kw: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EngineOptimization {
+    Atmosphere,
+    Vacuum,
+    #[default]
+    Balanced,
+}
+
+impl EngineOptimization {
+    pub fn label(self) -> &'static str {
+        match self {
+            EngineOptimization::Atmosphere => "Atmosphere",
+            EngineOptimization::Vacuum => "Vacuum",
+            EngineOptimization::Balanced => "Balanced",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +254,11 @@ mod tests {
         assert!(cat.resolve("adapter_std").is_ok());
         assert!(cat.resolve("decoupler_std").is_ok());
         assert!(cat.resolve("nope").is_err());
+
+        let CatalogEntry::Engine(zephyr) = cat.resolve("zephyr").unwrap() else {
+            panic!("zephyr should be an engine");
+        };
+        assert_eq!(zephyr.optimized_for, EngineOptimization::Atmosphere);
     }
 
     #[test]
