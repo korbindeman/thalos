@@ -1,0 +1,22 @@
+[package]
+name = "bevy_erosion_filter"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "GPU-friendly per-fragment erosion filter for Bevy, ported from Rune Skovbo Johansen's Shadertoy."
+repository = "https://github.com/korbindeman/bevy_erosion_filter"
+keywords = ["bevy", "terrain", "erosion", "noise", "procedural"]
+categories = ["game-development", "graphics", "rendering"]
+
+[dependencies]
+bevy = { version = "0.18", default-features = false, features = ["bevy_render", "bevy_asset"] }
+glam = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+bevy = { version = "0.18", features = ["wayland"] }
+bevy_egui = "0.39"
+
+[[example]]
+name = "plane_demo"
+path = "examples/plane_demo.rs"
