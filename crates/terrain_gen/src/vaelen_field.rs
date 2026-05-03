@@ -10,7 +10,7 @@ use crate::feature_compiler::{ColdDesertProjectionConfig, FeatureSeed};
 use crate::noise::fbm3;
 use crate::seeding::sub_seed;
 use crate::surface_field::{
-    mix3, scale_visibility, smoothstep, SurfaceField, SurfaceFieldSample, SurfaceMaterialMix,
+    SurfaceField, SurfaceFieldSample, SurfaceMaterialMix, mix3, scale_visibility, smoothstep,
 };
 use crate::types::Material;
 
@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn paleo_ocean_coverage_stays_planet_scale_and_dunes_are_localized() {
-        use crate::cubemap::{face_uv_to_dir, CubemapFace};
+        use crate::cubemap::{CubemapFace, face_uv_to_dir};
 
         let field = test_field();
         let root_seed = field.root_seed;

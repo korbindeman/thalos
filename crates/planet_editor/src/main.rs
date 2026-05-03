@@ -1534,8 +1534,7 @@ fn main() {
             .map(|p| p.join("assets"))
             .unwrap_or_else(|| "assets".into());
 
-        load_solar_system_from_dir(&assets_dir)
-            .expect("load solar system from disk")
+        load_solar_system_from_dir(&assets_dir).expect("load solar system from disk")
     };
 
     let find_body = |name: &str| {

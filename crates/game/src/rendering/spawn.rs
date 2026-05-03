@@ -618,4 +618,3 @@ pub(super) fn spawn_bodies(
         ..default()
     });
 }
-

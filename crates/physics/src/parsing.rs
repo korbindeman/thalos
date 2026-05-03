@@ -279,8 +279,8 @@ mod tests {
         let mut details = HashMap::new();
         details.insert("Mira".to_string(), mira_details);
 
-        let system = load_solar_system_with_bodies(system_source, &details)
-            .expect("parse solar_system.ron");
+        let system =
+            load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
         let mira = system.body_by_name("Mira").expect("Mira exists");
 
         match &mira.terrain {
@@ -299,8 +299,8 @@ mod tests {
         let mut details = HashMap::new();
         details.insert("Vaelen".to_string(), vaelen_details);
 
-        let system = load_solar_system_with_bodies(system_source, &details)
-            .expect("parse solar_system.ron");
+        let system =
+            load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
         let vaelen = system.body_by_name("Vaelen").expect("Vaelen exists");
 
         match &vaelen.terrain {
@@ -325,8 +325,8 @@ mod tests {
         details.insert("Theron".to_string(), theron_details);
         details.insert("Nyx".to_string(), nyx_details);
 
-        let system = load_solar_system_with_bodies(system_source, &details)
-            .expect("parse solar_system.ron");
+        let system =
+            load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
 
         for name in ["Selva", "Carpo", "Theron", "Nyx"] {
             let body = system.body_by_name(name).expect("body exists");
@@ -351,8 +351,8 @@ mod tests {
         details.insert("Thalos".to_string(), thalos_details);
         details.insert("Pelagos".to_string(), pelagos_details);
 
-        let system = load_solar_system_with_bodies(system_source, &details)
-            .expect("parse solar_system.ron");
+        let system =
+            load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
 
         for name in ["Thalos", "Pelagos"] {
             let body = system.body_by_name(name).expect("body exists");

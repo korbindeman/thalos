@@ -13,7 +13,7 @@ use super::types::{
 };
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{
-    to_render_pos, RenderFrame, RenderGhostFocus, RenderOrigin, WorldScale, MAP_SCALE, SHIP_SCALE,
+    MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, SHIP_SCALE, WorldScale, to_render_pos,
 };
 use crate::flight_plan_view::FlightPlanView;
 use crate::view::ViewMode;
