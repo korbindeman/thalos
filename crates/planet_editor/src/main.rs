@@ -276,7 +276,6 @@ fn spawn_camera(mut commands: Commands) {
         Camera3d::default(),
         thalos_planet_rendering::space_camera_post_stack(),
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        Msaa::Off,
         EditorCamera,
     ));
 }
