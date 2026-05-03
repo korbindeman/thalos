@@ -4,8 +4,8 @@ use crate::catalog::{
     tank_surface_area, tank_volume,
 };
 use crate::part::{
-    Adapter, CommandPod, Decoupler, Engine, EngineThrust, FuelTank, Part, PartMaterial,
-    ReactionWheel, ShroudProvider, Shroudable,
+    Adapter, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust, FuelCrossfeed,
+    FuelTank, Part, PartMaterial, ReactionWheel, ShroudProvider, Shroudable,
 };
 use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
@@ -181,6 +181,7 @@ fn insert_part(
                 ReactionWheel {
                     max_torque: p.reaction_wheel_torque,
                 },
+                FuelCrossfeed::default(),
             ));
         }
         (CatalogEntry::Engine(e), _) => {
@@ -194,6 +195,8 @@ fn insert_part(
                     reactants: e.reactants.clone(),
                     power_draw_kw: e.power_draw_kw,
                 },
+                EngineActivation::default(),
+                FuelCrossfeed::default(),
                 Shroudable,
                 EngineThrust::default(),
             ));
@@ -207,6 +210,7 @@ fn insert_part(
                     ejection_impulse,
                     dry_mass,
                 },
+                FuelCrossfeed { enabled: false },
                 ShroudProvider,
                 PartMaterial::default(),
             ));
@@ -225,6 +229,7 @@ fn insert_part(
                     target_diameter: *target_diameter,
                     dry_mass,
                 },
+                FuelCrossfeed::default(),
                 PartMaterial::default(),
             ));
         }
@@ -236,6 +241,7 @@ fn insert_part(
                     length: *length,
                     dry_mass,
                 },
+                FuelCrossfeed::default(),
                 PartMaterial::default(),
             ));
         }

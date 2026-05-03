@@ -161,9 +161,10 @@ struct PlanetDetail {
 //                  rather than re-deriving from d/d_sc).
 //   rim_height_m:  rim uplift height in meters.
 //   age_gyr:       formation age for maturity shading.
-//   material_id:   index into `materials` — reserved for a future rim
-//                  material override. The material cube is currently the
-//                  primary source for surface material.
+//   material_id:   reserved for future SSBO crater material overrides. The
+//                  shader currently does not branch on it — the rim albedo
+//                  delta is expressed via `crater_albedo_delta` against the
+//                  primary diffuse cube.
 struct Crater {
     center:       vec3<f32>,
     radius_m:     f32,
@@ -178,34 +179,17 @@ struct CellRange {
     count: u32,
 }
 
-struct Material {
-    albedo:    vec3<f32>,
-    roughness: f32,
-}
-
 @group(3) @binding(0)  var<uniform> params:          PlanetParams;
 @group(3) @binding(1)  var          albedo_tex:      texture_cube<f32>;
 @group(3) @binding(2)  var          albedo_sampler:  sampler;
 @group(3) @binding(3)  var          height_tex:      texture_cube<f32>;
 @group(3) @binding(4)  var          height_sampler:  sampler;
 @group(3) @binding(5)  var<uniform> detail:          PlanetDetail;
-// NOTE: binding 6 is a `texture_2d_array<u32>` with 6 layers, NOT a
-// `texture_cube<u32>`. WGSL/naga has no `textureLoad` overload for cube
-// textures, and integer-format textures cannot be filtered (so
-// `textureSample` is not an option either). A 2D array with one layer per
-// cubemap face is the idiomatic way to expose an R8Uint "cube" to a fragment
-// shader, and `textureLoad(tex, xy, layer, lod)` maps cleanly onto it.
-//
-// Agent F: upload the material cubemap as an R8Uint 2D array, 6 layers, in
-// the canonical PosX, NegX, PosY, NegY, PosZ, NegZ order that `CubemapFace`
-// already uses. The sampler at binding 7 is still required by the bind group
-// layout contract but is unused — declare it as a non-filtering sampler.
-@group(3) @binding(6)  var          material_cube:   texture_2d_array<u32>;
-@group(3) @binding(7)  var          material_sampler: sampler;
+@group(3) @binding(6)  var          roughness_tex:   texture_cube<f32>;
+@group(3) @binding(7)  var          roughness_sampler: sampler;
 @group(3) @binding(8)  var<storage, read> craters:     array<Crater>;
 @group(3) @binding(9)  var<storage, read> cell_index:  array<CellRange>;
 @group(3) @binding(10) var<storage, read> feature_ids: array<u32>;
-@group(3) @binding(11) var<storage, read> materials:   array<Material>;
 // Optional atmosphere layer — see `thalos::atmosphere`. For bodies with
 // no atmosphere (Mira, Ignis, …) every layer's intensity scalar is zero
 // and the atmosphere path is effectively skipped.
@@ -468,11 +452,10 @@ fn apply_ssbo_crater(
 
     let diameter_m = 2.0 * crater.radius_m;
     let diameter_px = diameter_m / max(pixel_size_m, 1e-6);
-    // Fade window 0.5 – 8 px so sub-pixel features still contribute
-    // statistically to surface shading — real-Moon density comes from the
-    // *population* of barely-resolved craters, not just those big enough to
-    // cast individual shadows.
-    let weight = smoothstep(0.5, 8.0, diameter_px);
+    // Fade window 1.5 – 10 px. Sub-pixel craters get fully culled at far
+    // zooms (otherwise a population of barely-resolved features adds
+    // shimmery noise to the disk); intermediate sizes ramp in smoothly.
+    let weight = smoothstep(1.5, 10.0, diameter_px);
     if weight <= 0.0 {
         return;
     }
@@ -605,11 +588,11 @@ fn iterate_ssbo_craters(
     }
 
     // Whole-layer LOD cull. Every SSBO crater has `diameter < 2*bake_threshold`,
-    // and `apply_ssbo_crater` fades in with `smoothstep(0.5, 8.0, diameter_px)`.
-    // If even the largest possible crater is below 0.5 px, no crater in the
+    // and `apply_ssbo_crater` fades in with `smoothstep(1.5, 10.0, diameter_px)`.
+    // If even the largest possible crater is below 1.5 px, no crater in the
     // layer can contribute — skip the 27-cell iteration entirely.
     let max_diameter_m = 2.0 * detail.cubemap_bake_threshold_m;
-    if max_diameter_m < 0.5 * pixel_size_m {
+    if max_diameter_m < 1.5 * pixel_size_m {
         return accum;
     }
 
@@ -682,10 +665,13 @@ fn regional_albedo_mod(p: vec3<f32>) -> f32 {
 
 // ── Normal perturbation from height cubemap ────────────────────────────────
 //
-// Finite-difference normals derived from the height cubemap.  Samples 4
-// neighbors offset by a small angle in the tangent plane.  No pre-baked
-// slope texture needed — this automatically reflects whichever frequency
-// bands are stored in the cubemap.
+// Finite-difference normals derived from the filterable height cubemap.
+// Per-fragment evaluation gives full f32 precision for the gradient — the
+// pre-baked normal cube in `BodyData` exists for future ground LOD use, but
+// the impostor reconstructs normals here so the shading retains the
+// continuous depth that 8-bit object-space encoding can't preserve at
+// shallow slope angles (where the terminator and crater rim transitions
+// live).
 
 fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
     let res = f32(textureDimensions(height_tex).x);
@@ -693,12 +679,10 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
         return n;
     }
 
-    // Build a continuous orthonormal tangent frame on the sphere.
-    // Duff et al. 2017 ("Building an Orthonormal Basis, Revisited") — branchless,
-    // continuous everywhere except n.z = -1. A `select` on |n.y| > 0.99 (the
-    // previous approach) flips the tangent ~90° at latitude ±82°, which swaps
-    // which axis the finite-difference gradient reads from and bisects any
-    // feature spanning that latitude.
+    // Branchless orthonormal tangent frame on the sphere (Duff et al. 2017,
+    // "Building an Orthonormal Basis, Revisited"). Continuous everywhere
+    // except n.z = -1; a `select` on |n.y| > 0.99 would flip the tangent
+    // ~90° at latitude ±82° and bisect features that cross it.
     let s = select(-1.0, 1.0, n.z >= 0.0);
     let a = -1.0 / (s + n.z);
     let b = n.x * n.y * a;
@@ -708,25 +692,16 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
     // Offset ~1.5 texels on the cubemap.
     let offset = 1.5 / res;
 
-    // Sample the canonical surface height (baked cubemap + fbm jitter)
-    // at four neighbours. Auto-LOD on the cubemap part keeps far
-    // bodies' normals stable (preserves the original mip-blur on the
-    // baked height); the fbm contribution rides on top so all three
-    // consumers — water mask, self-shadow, normals — agree on the
-    // perturbed surface even though the cubemap LOD selection
-    // differs between them.
     let h_e = sample_height_baked_auto_lod_m(n + tangent * offset);
     let h_w = sample_height_baked_auto_lod_m(n - tangent * offset);
     let h_n = sample_height_baked_auto_lod_m(n + bitangent * offset);
     let h_s = sample_height_baked_auto_lod_m(n - bitangent * offset);
 
-    // Convert texel offset to world-space distance on the body surface.
     let ds = detail.body_radius_m * offset * 2.0;
     if ds < 1e-6 {
         return n;
     }
 
-    // h_* are already in meters; central-difference slope is m / m.
     let dh_dt = (h_e - h_w) / ds;
     let dh_db = (h_n - h_s) / ds;
 
@@ -746,73 +721,6 @@ fn rotate_quat(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
 
 fn conjugate_quat(q: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(-q.xyz, q.w);
-}
-
-// ── Material cubemap lookup ────────────────────────────────────────────────
-//
-// The material cube is exposed as a 6-layer `texture_2d_array<u32>` so that
-// `textureLoad` (nearest-neighbor, integer payload) works. We translate a
-// unit direction to (face, x, y) ourselves — the face layout matches
-// `terrain_gen::cubemap::dir_to_face_uv`:
-//
-//   layer 0: +X    layer 1: -X    layer 2: +Y
-//   layer 3: -Y    layer 4: +Z    layer 5: -Z
-//
-// with u ranging right, v ranging down within each face.
-fn sample_material_id(dir: vec3<f32>) -> u32 {
-    let ax = abs(dir.x);
-    let ay = abs(dir.y);
-    let az = abs(dir.z);
-
-    var face: i32;
-    var sc: f32;
-    var tc: f32;
-    var ma: f32;
-
-    if ax >= ay && ax >= az {
-        ma = ax;
-        if dir.x > 0.0 {
-            face = 0;
-            sc = -dir.z;
-            tc = -dir.y;
-        } else {
-            face = 1;
-            sc = dir.z;
-            tc = -dir.y;
-        }
-    } else if ay >= az {
-        ma = ay;
-        if dir.y > 0.0 {
-            face = 2;
-            sc = dir.x;
-            tc = dir.z;
-        } else {
-            face = 3;
-            sc = dir.x;
-            tc = -dir.z;
-        }
-    } else {
-        ma = az;
-        if dir.z > 0.0 {
-            face = 4;
-            sc = dir.x;
-            tc = -dir.y;
-        } else {
-            face = 5;
-            sc = -dir.x;
-            tc = -dir.y;
-        }
-    }
-
-    let u = 0.5 * (sc / ma + 1.0);
-    let v = 0.5 * (tc / ma + 1.0);
-
-    let dims = textureDimensions(material_cube);
-    let res = i32(dims.x);
-    let x = clamp(i32(u * f32(res)), 0, res - 1);
-    let y = clamp(i32(v * f32(res)), 0, res - 1);
-
-    return textureLoad(material_cube, vec2<i32>(x, y), face, 0).r;
 }
 
 // ── Self-shadow raymarch ───────────────────────────────────────────────────
@@ -963,8 +871,14 @@ fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
 // Returns a reflectance factor that multiplies incoming flux × albedo to
 // get reflected radiance. Parameters are tuned for lunar-type regolith.
 //
+// `roughness` (0..1) modulates the opposition surge width — smoother
+// surfaces have a sharper, narrower surge (h smaller); rougher surfaces
+// have a broader, more diffuse surge (h larger). Physical interpretation:
+// shadow-hiding requires a coherent opposition direction; macroscopic
+// roughness spreads that out angularly.
+//
 // Inputs are all in the same space; handedness doesn't matter.
-fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32) -> f32 {
+fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32, roughness: f32) -> f32 {
     let mu0 = max(n_dot_l, 0.0);
     let mu  = max(n_dot_v, 0.0);
     if mu0 <= 0.0 || mu <= 0.0 { return 0.0; }
@@ -978,9 +892,11 @@ fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32) -> f32 {
     let g  = acos(cp);
 
     // Shadow-hiding opposition effect: B(g) = B0 / (1 + tan(g/2)/h).
-    // Matches the Moon's ~40% surge at α=0 with h ≈ 0.06 (~3.4°).
+    // h tuned to lunar regolith (~3.4°) at roughness 0.85; widened or
+    // narrowed by surface roughness so e.g. a smooth icy patch keeps a
+    // sharper opposition spike than a rubble field.
     let B0: f32 = 1.0;
-    let h:  f32 = 0.06;
+    let h = mix(0.04, 0.10, clamp(roughness, 0.0, 1.0));
     let B_g = B0 / (1.0 + tan(g * 0.5) / h);
 
     // Single-particle phase function: Henyey-Greenstein with asymmetry
@@ -1252,38 +1168,20 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // cubemaps, SSBO craters, and shader-synthesized features were baked in).
     let sample_dir = rotate_quat(params.orientation, normal);
 
-    // ── Layer 1a: material cube → primary albedo/roughness ─────────────────
-    let mat_id = sample_material_id(sample_dir);
-    let mat_count = arrayLength(&materials);
-    var mat_albedo = vec3<f32>(0.5);
-    var mat_roughness = 1.0;
-    if mat_count > 0u {
-        let idx = min(mat_id, mat_count - 1u);
-        let m = materials[idx];
-        mat_albedo = m.albedo;
-        mat_roughness = m.roughness;
-    }
-
-    // Keep the RGBA8 albedo cube as a tint fallback.  The material palette is
-    // the primary source, but the baked albedo still carries any per-texel
-    // variation a stage painted (splotches, basin rays, etc.).
-    let baked_tint = textureSample(albedo_tex, albedo_sampler, sample_dir).rgb;
+    // ── Layer 1a: filterable diffuse + roughness ──────────────────────────
+    // Both cubes are bilinearly filtered and carry the field's continuous
+    // per-texel values directly — no discrete material-id indirection, so
+    // biome boundaries don't read as polygonal regions.
     let regional = clamp(regional_albedo_mod(sample_dir), 0.7, 1.3);
-    // Multiplicative tint composition.
-    //   baked_tint = 0.5 → tint_mult = 1.0  (legacy neutral, identical to old formula)
-    //   baked_tint = 0.0 → tint_mult = 0.0  (was 0.5 × mat under old `mix(1, …, 0.5)`)
-    //   baked_tint = 1.0 → tint_mult = 2.0  (was 1.5 × mat — gains chromatic headroom)
-    // The full 0..2 range lets stages that bake real chromatic colours into
-    // the albedo cube (PaintBiomes) drive the surface colour through the
-    // FILTERABLE texture path, which the discrete material-id lookup can
-    // never do — biome polygons go away because the GPU's bilinear filter
-    // smooths boundary transitions automatically.
-    let tint_mod = baked_tint * 2.0;
-    let baked_albedo = mat_albedo * tint_mod * regional;
+    let baked_albedo = textureSample(albedo_tex, albedo_sampler, sample_dir).rgb * regional;
+    let surface_roughness = textureSample(roughness_tex, roughness_sampler, sample_dir).r;
 
     // ── Layer 1b: height-derived normal perturbation ─────────────────────
-    // Kept in body-local space until after the SSBO/synthesis crater
-    // gradients are combined, then rotated back to world space for lighting.
+    // Per-fragment finite-difference of the filterable height cube. f32
+    // precision in the gradient preserves shallow slope angles that an
+    // 8-bit baked normal cube would crush — terminator depth and crater
+    // rim transitions read continuously here. Body-local until after the
+    // SSBO crater gradients combine, then rotated to world space.
     var shading_normal = perturb_normal_from_height(sample_dir);
 
     // ── Pixel size in meters ────────────────────────────────────────────
@@ -1348,7 +1246,6 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // across the bake threshold.
     let crater_mod = clamp(crater_albedo_mod, -0.65, 1.20);
     let albedo = baked_albedo * (1.0 + fresh_boost + crater_mod);
-    // mat_roughness: reserved for a future BRDF upgrade; Lambertian for now.
 
     // ── Lighting: Hapke BRDF + planetshine ────────────────────────────────
     //
@@ -1364,7 +1261,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let sun_n_dot_l_raw = dot(shading_normal, sun_dir_ws);
     let sun_n_dot_l = min(sun_n_dot_l_raw, geo_n_dot_l + headroom);
     let cos_phase_sun = dot(view_dir, sun_dir_ws);
-    var sun_r = hapke_brdf(max(sun_n_dot_l, 0.0), n_dot_v, cos_phase_sun);
+    var sun_r = hapke_brdf(max(sun_n_dot_l, 0.0), n_dot_v, cos_phase_sun, surface_roughness);
 
     // Apply all shadow terms to the sun contribution only. Planetshine uses
     // a different incident direction so these don't apply to it.
@@ -1397,7 +1294,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
     if shine.enabled {
         let shine_n_dot_l = dot(shading_normal, shine.dir);
         let shine_cos_phase = dot(view_dir, shine.dir);
-        let shine_r = hapke_brdf(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase);
+        let shine_r = hapke_brdf(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase, surface_roughness);
         shine_rgb = shine.tint * shine_r * shine.flux;
     }
 

@@ -628,7 +628,6 @@ mod tests {
             mass_kg: 1.0,
             radius_m: 1.0,
             color: [1.0, 1.0, 1.0],
-            albedo: 0.0,
             rotation_period_s: 0.0,
             axial_tilt_rad: 0.0,
             gm: 1.0,
@@ -638,7 +637,7 @@ mod tests {
                 f64::INFINITY
             },
             orbital_elements: None,
-            generator: None,
+            terrain: thalos_terrain_gen::TerrainConfig::None,
             atmosphere: None,
             terrestrial_atmosphere: None,
             rings: None,

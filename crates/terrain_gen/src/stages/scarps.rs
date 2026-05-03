@@ -50,9 +50,6 @@ impl Stage for Scarps {
     fn name(&self) -> &str {
         "scarps"
     }
-    fn dependencies(&self) -> &[&str] {
-        &["cratering"]
-    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         if self.count == 0 || self.height_m == 0.0 {

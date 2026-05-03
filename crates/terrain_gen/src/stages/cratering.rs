@@ -225,6 +225,12 @@ pub struct Cratering {
     /// Crater count per chain segment. Real catenae range 5–30. Default 10.
     #[serde(default = "default_chain_segment_count")]
     pub chain_segment_count: u32,
+    /// Number of mid-sized craters to force into a young/fresh age bracket.
+    /// Regular crater populations use this to guarantee some crisp landmarks;
+    /// old authored archive cohorts set it to 0 so their large craters stay
+    /// ancient and degraded.
+    #[serde(default = "default_forced_young_count")]
+    pub forced_young_count: u32,
 }
 
 fn default_age_bias() -> f64 {
@@ -245,13 +251,13 @@ fn default_chain_count() -> u32 {
 fn default_chain_segment_count() -> u32 {
     10
 }
+fn default_forced_young_count() -> u32 {
+    16
+}
 
 impl Stage for Cratering {
     fn name(&self) -> &str {
         "cratering"
-    }
-    fn dependencies(&self) -> &[&str] {
-        &["differentiate"]
     }
 
     fn apply(&self, builder: &mut BodyBuilder) {
@@ -391,7 +397,7 @@ impl Stage for Cratering {
         // roughly 13 km – 78 km radius. Ages are forced into
         // [0, 0.08 * body_age] (≈ 0–0.36 Gyr on a 4.5 Gyr body) so freshness
         // stays > 0.5 even at the upper end of the bracket.
-        const YOUNG_COUNT: usize = 16;
+        let young_count = self.forced_young_count as usize;
         let young_min_r = body_radius * 0.015;
         let young_max_r = body_radius * 0.09;
         let mut candidate_indices: Vec<usize> = craters
@@ -405,7 +411,7 @@ impl Stage for Cratering {
         // without replacement so no candidate is refreshed twice. Pulling
         // with replacement (old behavior) could pick the same crater
         // multiple times, wasting the fresh-crater budget.
-        let picks = YOUNG_COUNT.min(candidate_indices.len());
+        let picks = young_count.min(candidate_indices.len());
         for k in 0..picks {
             let span = candidate_indices.len() - k;
             let j = k + (rng.next_f64() * span as f64) as usize;
@@ -705,7 +711,7 @@ impl Stage for Cratering {
                 });
         }
 
-        builder.craters = craters;
+        builder.craters.extend(craters);
         // Publish the threshold to BodyData so the sampler and shader can
         // skip baked craters during Layer 2 iteration (otherwise their
         // contribution is counted twice — once from the cubemap texel, once

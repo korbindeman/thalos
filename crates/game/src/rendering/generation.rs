@@ -1,9 +1,4 @@
-//! Polling and finalization of in-flight terrain generation, plus the
-//! reference-cloud (TEMP) scaffold that lets specific bodies use a
-//! hand-picked equirect photo cube instead of the procedural Wedekind
-//! cloud bake.
-
-use std::collections::HashMap;
+//! Polling and finalization of in-flight terrain generation.
 
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
@@ -13,13 +8,12 @@ use bevy::tasks::{block_on, poll_once};
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
     AtmosphereBlock, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial, PlanetParams,
-    bake_cloud_cover_image, bake_from_body_data, blank_cloud_cover_image,
-    equirect_to_cloud_cover_image,
+    ReferenceClouds, bake_from_body_data, cloud_cover_image_for_body,
 };
 
 use super::types::{
-    BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetMaterials, SharedPlanetMeshes,
-    ShipBodyMesh, SimulationState,
+    BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetMaterials, PlanetshineTints,
+    SharedPlanetMeshes, ShipBodyMesh, SimulationState,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 
@@ -63,6 +57,7 @@ pub(super) fn finalize_planet_generation(
     mut images: ResMut<Assets<Image>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     reference_clouds: Res<ReferenceClouds>,
+    mut planetshine: ResMut<PlanetshineTints>,
 ) {
     for (entity, mut pending) in &mut pending_q {
         let _span = tracing::info_span!("finalize_planet_generation").entered();
@@ -74,6 +69,9 @@ pub(super) fn finalize_planet_generation(
         let detail =
             PlanetDetailParams::from_body(&baked.detail_params, baked.cubemap_bake_threshold_m);
         let height_range = baked.height_range;
+        planetshine
+            .by_body
+            .insert(pending.body_id, baked.mean_albedo);
         let textures = bake_from_body_data(&baked, &mut images, &mut storage_buffers);
 
         let roughness = body_surface_roughness(body);
@@ -91,33 +89,13 @@ pub(super) fn finalize_planet_generation(
             .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
             .unwrap_or_default();
 
-        // Bake the cloud-cover cubemap when the body has a cloud layer.
-        // Bodies without clouds get a 1×1 blank fallback; the shader
-        // gates its cloud path on `cloud_albedo_coverage.w > 0` so the
-        // blank cube is effectively free.
-        //
-        // TEMP: bodies listed in `REFERENCE_CLOUD_IMAGES` use a hand-
-        // picked photo cube instead of the procedural Wedekind bake.
-        // If the async image decode hasn't finished yet, fall back to
-        // blank; `patch_reference_cloud_covers` will swap the real cube
-        // in once it's ready.
-        let uses_reference_cloud = reference_cloud_path(&body.name).is_some();
-        let cloud_cover = if uses_reference_cloud {
-            reference_clouds
-                .entries
-                .get(&body.name)
-                .and_then(|e| e.cube.clone())
-                .unwrap_or_else(|| blank_cloud_cover_image(&mut images))
-        } else {
-            body.terrestrial_atmosphere
-                .as_ref()
-                .and_then(|a| a.clouds.as_ref())
-                .map(|c| {
-                    let _span = tracing::info_span!("bake_cloud_cover").entered();
-                    bake_cloud_cover_image(c.seed, &mut images)
-                })
-                .unwrap_or_else(|| blank_cloud_cover_image(&mut images))
-        };
+        let cloud_seed = body
+            .terrestrial_atmosphere
+            .as_ref()
+            .and_then(|a| a.clouds.as_ref())
+            .map(|c| c.seed);
+        let (cloud_cover, uses_reference_cloud) =
+            cloud_cover_image_for_body(&body.name, cloud_seed, &reference_clouds, &mut images);
 
         // Canonical high-frequency terrain bands — only enable on bodies
         // with a sea level; airless bodies skip the per-fragment fbm to
@@ -130,7 +108,7 @@ pub(super) fn finalize_planet_generation(
         // magic so the coastline fields decorrelate from bake-time fbm
         // fields that share the body seed.
         let body_seed = baked.detail_params.seed;
-        let coastline_seed = (body_seed as u32) ^ ((body_seed >> 32) as u32) ^ 0xC0A5_71_1Eu32;
+        let coastline_seed = (body_seed as u32) ^ ((body_seed >> 32) as u32) ^ 0xC0A5_711E_u32;
         let has_ocean = baked.sea_level_m.is_some();
         // ~1 texel of arc on a 2048² cube = 2π/(4·2048) ≈ 7.7e-4 rad. 8e-4
         // is one texel of fbm-amplitude headroom; the design point.
@@ -156,11 +134,10 @@ pub(super) fn finalize_planet_generation(
             albedo: textures.albedo.clone(),
             height: textures.height.clone(),
             detail: detail.clone(),
-            material_cube: textures.material_cube.clone(),
+            roughness: textures.roughness.clone(),
             craters: textures.craters.clone(),
             cell_index: textures.cell_index.clone(),
             feature_ids: textures.feature_ids.clone(),
-            materials: textures.materials.clone(),
             atmosphere,
             cloud_cover: cloud_cover.clone(),
         };
@@ -245,85 +222,9 @@ pub(super) fn finalize_planet_generation(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reference cloud textures (TEMP)
-//
-// Per-body mapping from body name to an equirectangular source image in
-// `assets/`. Each source is loaded at startup, projected equirectangular
-// → cubemap once Bevy's async decode finishes, then swapped into the
-// body's material by `patch_reference_cloud_covers` (handles the case
-// where the body materialises before its cube is ready).
-//
-// This is a scaffold used to give specific bodies a hand-picked weather
-// look while the procedural Wedekind cloud pipeline is being redesigned.
-// Bodies not listed here fall through to the procedural bake.
-// ---------------------------------------------------------------------------
-
-const REFERENCE_CLOUD_IMAGES: &[(&str, &str)] = &[
-    ("Thalos", "australia_clouds_8k.jpg"),
-    ("Pelagos", "storm_clouds_8k.jpg"),
-];
-const REFERENCE_CLOUD_CUBE_RES: u32 = 512;
-
-fn reference_cloud_path(body_name: &str) -> Option<&'static str> {
-    REFERENCE_CLOUD_IMAGES
-        .iter()
-        .find(|(name, _)| *name == body_name)
-        .map(|(_, path)| *path)
-}
-
-#[derive(Default)]
-pub struct ReferenceCloudEntry {
-    source: Option<Handle<Image>>,
-    pub cube: Option<Handle<Image>>,
-}
-
-#[derive(Resource, Default)]
-pub struct ReferenceClouds {
-    // Keyed by body name (matching `REFERENCE_CLOUD_IMAGES`).
-    entries: HashMap<String, ReferenceCloudEntry>,
-}
-
 #[derive(Component)]
 pub(super) struct ReferenceCloudTarget {
     pub(super) body_name: String,
-}
-
-pub(super) fn load_reference_cloud_sources(
-    asset_server: Res<AssetServer>,
-    mut clouds: ResMut<ReferenceClouds>,
-) {
-    for (body_name, path) in REFERENCE_CLOUD_IMAGES {
-        clouds.entries.insert(
-            (*body_name).to_string(),
-            ReferenceCloudEntry {
-                source: Some(asset_server.load(*path)),
-                cube: None,
-            },
-        );
-    }
-}
-
-pub(super) fn convert_reference_clouds_when_ready(
-    mut clouds: ResMut<ReferenceClouds>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    for entry in clouds.entries.values_mut() {
-        if entry.cube.is_some() {
-            continue;
-        }
-        let Some(source_handle) = entry.source.clone() else {
-            continue;
-        };
-        let Some(source) = images.get(&source_handle) else {
-            continue;
-        };
-        let _span = tracing::info_span!("equirect_to_cloud_cover").entered();
-        let cube_image = equirect_to_cloud_cover_image(source, REFERENCE_CLOUD_CUBE_RES);
-        entry.cube = Some(images.add(cube_image));
-        // Drop the source handle so bevy can free the 128 MB 8k decode.
-        entry.source = None;
-    }
 }
 
 pub(super) fn patch_reference_cloud_covers(
@@ -333,22 +234,19 @@ pub(super) fn patch_reference_cloud_covers(
     mut halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
 ) {
     for (mats, target) in &targets {
-        let Some(entry) = clouds.entries.get(&target.body_name) else {
-            continue;
-        };
-        let Some(cube) = entry.cube.as_ref() else {
+        let Some(cube) = clouds.cube(&target.body_name) else {
             continue;
         };
         for handle in [&mats.map, &mats.ship] {
             if let Some(mat) = materials.get_mut(handle)
-                && mat.cloud_cover != *cube
+                && mat.cloud_cover != cube
             {
                 mat.cloud_cover = cube.clone();
             }
         }
         for handle in [&mats.map_halo, &mats.ship_halo] {
             if let Some(mat) = halo_materials.get_mut(handle)
-                && mat.cloud_cover != *cube
+                && mat.cloud_cover != cube
             {
                 mat.cloud_cover = cube.clone();
             }

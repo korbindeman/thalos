@@ -4,6 +4,7 @@ mod gas_giant;
 pub mod lighting;
 mod material;
 pub mod post_stack;
+mod reference_clouds;
 mod rings;
 pub mod shader_types;
 mod solid_planet;
@@ -24,11 +25,15 @@ pub use material::{
     PlanetParams,
 };
 pub use post_stack::space_camera_post_stack;
+pub use reference_clouds::{
+    ReferenceClouds, cloud_cover_image_for_body, convert_reference_clouds_when_ready,
+    load_reference_cloud_sources, reference_cloud_path,
+};
 pub use rings::{
     MAX_RING_STOPS, RingLayers, RingMaterial, RingMaterialHandle, RingParams, build_ring_mesh,
     ring_plane_normal,
 };
-pub use shader_types::{GpuCellRange, GpuCrater, GpuMaterial};
+pub use shader_types::{GpuCellRange, GpuCrater};
 pub use solid_planet::{SolidPlanetMaterial, SolidPlanetParams};
 pub use texture::PlanetTextures;
 

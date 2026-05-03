@@ -2,7 +2,7 @@ use glam::{DQuat, DVec3};
 use serde::Deserialize;
 use std::collections::HashMap;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
-use thalos_terrain_gen::GeneratorParams;
+use thalos_terrain_gen::TerrainConfig;
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
@@ -48,11 +48,11 @@ impl Default for AttitudeState {
 /// the per-axis torque cap from all reaction-wheel-providing parts
 /// summed, in N·m.
 ///
-/// `thrust_n`, `mass_flow_kg_per_s`, and `dry_mass_kg` are constants for
-/// v1 (no staging). Current ship mass is tracked separately on
+/// `thrust_n`, `mass_flow_kg_per_s`, and `dry_mass_kg` are the current
+/// aggregate values for whatever ship configuration the game layer has
+/// made active. Current ship mass is tracked separately on
 /// [`crate::Simulation`] because it changes as fuel burns; once it
-/// reaches `dry_mass_kg` thrust cuts off cleanly (the propellant tanks
-/// are empty).
+/// reaches `dry_mass_kg` thrust cuts off cleanly.
 #[derive(Debug, Clone, Copy)]
 pub struct ShipParameters {
     pub moment_of_inertia: DVec3,
@@ -117,8 +117,10 @@ pub struct BodyDefinition {
     pub parent: Option<BodyId>,
     pub mass_kg: f64,
     pub radius_m: f64,
+    /// sRGB hex color, used for UI icons and fallback rendering only.
+    /// Real shading is driven by terrain/atmosphere definitions, not
+    /// this field.
     pub color: [f32; 3],
-    pub albedo: f32,
     pub rotation_period_s: f64,
     pub axial_tilt_rad: f64,
     pub gm: f64, // G * mass, precomputed
@@ -127,14 +129,14 @@ pub struct BodyDefinition {
     /// so any point in the system falls inside it as a fallback anchor.
     pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
-    pub generator: Option<GeneratorParams>,
+    pub terrain: TerrainConfig,
     /// Gas / ice giant atmosphere definition. A body with
-    /// `atmosphere: Some(_)` and no `generator` is rendered as a gas
+    /// `atmosphere: Some(_)` and no `terrain` is rendered as a gas
     /// giant (optically thick all the way down, no solid surface).
     /// Mutually exclusive with `terrestrial_atmosphere` — a body has at
     /// most one atmosphere schema attached.
     pub atmosphere: Option<AtmosphereParams>,
-    /// Thin atmosphere over a solid surface. Paired with `generator`:
+    /// Thin atmosphere over a solid surface. Paired with `terrain`:
     /// a body with both set renders the baked impostor with an
     /// atmosphere shell composited over it (rim halo, limb shading).
     /// Mutually exclusive with `atmosphere` (the gas-giant schema).

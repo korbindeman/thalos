@@ -337,29 +337,32 @@ impl AtmosphereBlock {
 // | 3       | texture cube     | texture_cube<f32>         | `height` cube      |
 // | 4       | sampler          | sampler                   | `height` sampler   |
 // | 5       | uniform          | PlanetDetailParams        | `detail` field     |
-// | 6       | texture 2d array | texture_2d_array<u32>     | `material_cubemap` |
-// | 7       | sampler (non-flt)| sampler (unused for load) | `material` sampler |
-//
-// Binding 6 is a 2D array with 6 layers, NOT a cube. WGSL has no
-// `textureLoad` overload for `texture_cube<u32>`, so the shader reads this
-// as `texture_2d_array<u32>` and does its own direction → (face, x, y)
-// lookup. Face order matches `CubemapFace::ALL`.
+// | 6       | texture cube     | texture_cube<f32>         | `roughness` cube   |
+// | 7       | sampler          | sampler                   | `roughness` sampler|
 // | 8       | storage (read)   | array<Crater>             | `craters_buffer`   |
 // | 9       | storage (read)   | array<CellRange>          | `cell_index_buf`   |
 // | 10      | storage (read)   | array<u32>                | `feature_ids_buf`  |
-// | 11      | storage (read)   | array<Material>           | `materials_buffer` |
+// | 12      | uniform          | AtmosphereBlock           | `atmosphere` field |
+// | 13      | texture cube     | texture_cube<f32>         | `cloud_cover` cube |
+// | 14      | sampler          | sampler                   | `cloud_cover` sampler |
 //
-// Storage buffers (8-11) use std430 layout. Struct definitions for
-// `Crater`, `CellRange`, `Material` are mirrored in the shader and must
-// stay in sync with `shader_types.rs` (produced by Phase 2F).
+// Storage buffers (8-10) use std430 layout. Struct definitions for
+// `Crater`, `CellRange` are mirrored in the shader and must stay in sync
+// with `shader_types.rs`.
 //
 // A `CellRange` is `{ start: u32, count: u32 }`. For each ico cell the
 // shader looks up its range, then reads `count` crater indices from
 // `feature_ids_buf` starting at `start`, each of which is an index into
 // `craters_buffer`.
-// | 12      | uniform          | AtmosphereBlock           | `atmosphere` field |
-// | 13      | texture cube     | texture_cube<f32>         | `cloud_cover` cube |
-// | 14      | sampler          | sampler                   | `cloud_cover` sampler |
+//
+// Note: surface normals are reconstructed per-fragment in the shader via
+// finite-differencing the filterable height cube
+// (`perturb_normal_from_height` in `planet_impostor.wgsl`). 8-bit object-
+// space normal encoding crushed the shallow slope gradients that drive
+// terminator depth and crater rim transitions, so the baked
+// `normal_cubemap` in `BodyData` is reserved for future ground LOD
+// consumers where chunked geometry can't cheaply finite-difference at
+// runtime.
 //
 // Binding 12 is the per-body atmosphere uniform. Zero-initialised means
 // "no atmosphere" — the shader gates every layer on its own intensity
@@ -385,18 +388,15 @@ pub struct PlanetMaterial {
     pub height: Handle<Image>,
     #[uniform(5)]
     pub detail: PlanetDetailParams,
-    // ------- Phase 2F: material + feature SSBOs ---------------------------
-    #[texture(6, dimension = "2d_array", sample_type = "u_int")]
-    #[sampler(7, sampler_type = "non_filtering")]
-    pub material_cube: Handle<Image>,
+    #[texture(6, dimension = "cube")]
+    #[sampler(7)]
+    pub roughness: Handle<Image>,
     #[storage(8, read_only)]
     pub craters: Handle<ShaderStorageBuffer>,
     #[storage(9, read_only)]
     pub cell_index: Handle<ShaderStorageBuffer>,
     #[storage(10, read_only)]
     pub feature_ids: Handle<ShaderStorageBuffer>,
-    #[storage(11, read_only)]
-    pub materials: Handle<ShaderStorageBuffer>,
     #[uniform(12)]
     pub atmosphere: AtmosphereBlock,
     // Cloud-cover cubemap (R8Unorm). Produced by
@@ -454,17 +454,15 @@ pub struct PlanetHaloMaterial {
     pub height: Handle<Image>,
     #[uniform(5)]
     pub detail: PlanetDetailParams,
-    #[texture(6, dimension = "2d_array", sample_type = "u_int")]
-    #[sampler(7, sampler_type = "non_filtering")]
-    pub material_cube: Handle<Image>,
+    #[texture(6, dimension = "cube")]
+    #[sampler(7)]
+    pub roughness: Handle<Image>,
     #[storage(8, read_only)]
     pub craters: Handle<ShaderStorageBuffer>,
     #[storage(9, read_only)]
     pub cell_index: Handle<ShaderStorageBuffer>,
     #[storage(10, read_only)]
     pub feature_ids: Handle<ShaderStorageBuffer>,
-    #[storage(11, read_only)]
-    pub materials: Handle<ShaderStorageBuffer>,
     #[uniform(12)]
     pub atmosphere: AtmosphereBlock,
     #[texture(13, dimension = "cube")]
@@ -479,11 +477,10 @@ impl From<&PlanetMaterial> for PlanetHaloMaterial {
             albedo: material.albedo.clone(),
             height: material.height.clone(),
             detail: material.detail.clone(),
-            material_cube: material.material_cube.clone(),
+            roughness: material.roughness.clone(),
             craters: material.craters.clone(),
             cell_index: material.cell_index.clone(),
             feature_ids: material.feature_ids.clone(),
-            materials: material.materials.clone(),
             atmosphere: material.atmosphere,
             cloud_cover: material.cloud_cover.clone(),
         }

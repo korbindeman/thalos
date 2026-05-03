@@ -22,15 +22,19 @@ pub mod stats;
 pub use attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
 pub use blueprint::{Connection, PartBlueprint, PartParams, ShipBlueprint};
 pub use catalog::{
-    AdapterSpec, CatalogEntry, CatalogError, CatalogId, CatalogRef, DecouplerSpec, EngineSpec,
-    PartCatalog, PodSpec, TankSpec,
+    AdapterSpec, CatalogEntry, CatalogError, CatalogId, CatalogRef, DecouplerSpec,
+    EngineOptimization, EngineSpec, PartCatalog, PodSpec, TankSpec,
 };
 pub use part::{
-    Adapter, CommandPod, Decoupler, Engine, EngineThrust, EngineValidationError, FuelTank,
-    MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel, ShroudProvider, Shroudable,
+    Adapter, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust, EngineValidationError,
+    FuelCrossfeed, FuelTank, MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel,
+    ShroudProvider, Shroudable,
 };
 pub use resource::{PartResources, Resource, ResourcePool};
-pub use stats::{G0, ResourceTotals, ShipStats};
+pub use stats::{
+    DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals, ShipStats,
+    aggregate_resource_totals, estimate_delta_v,
+};
 
 pub struct ShipyardPlugin;
 

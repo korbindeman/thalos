@@ -39,9 +39,6 @@ impl Stage for Differentiate {
     fn name(&self) -> &str {
         "differentiate"
     }
-    fn dependencies(&self) -> &[&str] {
-        &[]
-    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let comp = &builder.composition;

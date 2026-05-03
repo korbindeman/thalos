@@ -15,12 +15,14 @@ use thalos_planet_rendering::{
     GasGiantLayers, GasGiantMaterial, GasGiantParams, RingLayers, RingMaterial, RingParams,
     SceneLighting, SolidPlanetMaterial, SolidPlanetParams, build_ring_mesh,
 };
-use thalos_terrain_gen::{BodyBuilder, Pipeline};
+use thalos_terrain_gen::{
+    TerrainCompileContext, TerrainCompileOptions, TerrainConfig, compile_terrain_config,
+};
 
 use super::types::{
     BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, PendingPlanetGeneration,
-    SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials,
-    SunLight, TidallyLocked,
+    PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial, SimulationState,
+    SolidPlanetMaterials, SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::view::HideInShipView;
@@ -46,6 +48,7 @@ pub(super) fn spawn_bodies(
     mut ring_materials: ResMut<Assets<RingMaterial>>,
     mut solid_planet_materials: ResMut<Assets<SolidPlanetMaterial>>,
     sim: Res<SimulationState>,
+    mut planetshine: ResMut<PlanetshineTints>,
 ) {
     let bodies = &sim.system.bodies;
     let initial_states = sim.ephemeris.query(0.0);
@@ -153,19 +156,14 @@ pub(super) fn spawn_bodies(
             ));
 
             body_entity
-        } else if let Some(gen_params) = &body.generator {
+        } else if body.terrain.is_some() {
             // Procedural body: dispatch the terrain_gen pipeline to a background
             // task so startup isn't blocked. Meanwhile show a plain placeholder
             // sphere; `finalize_planet_generation` swaps in the impostor
             // billboard with a baked `PlanetMaterial` once the task completes.
-            let mut gen_params = gen_params.clone();
-            gen_params.scale_crater_count(DEV_CRATER_SCALE);
-
+            let terrain = body.terrain.clone();
             let radius_m = body.radius_m as f32;
-            let seed = gen_params.seed;
-            let composition = gen_params.composition;
-            let cubemap_resolution = gen_params.cubemap_resolution;
-            let body_age_gyr = gen_params.body_age_gyr;
+            let gravity_m_s2 = (body.gm / (body.radius_m * body.radius_m)) as f32;
             // Tidally-locked moons get their local +Z axis as the parent
             // direction, matching the editor.
             let tidal_axis = matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z);
@@ -174,34 +172,27 @@ pub(super) fn spawn_bodies(
 
             let task = AsyncComputeTaskPool::get().spawn(async move {
                 let cache_dir = terrain_cache_dir();
-                let key = thalos_terrain_gen::cache::cache_key(
-                    &gen_params,
+                let context = TerrainCompileContext {
+                    body_name: body_name.clone(),
                     radius_m,
+                    gravity_m_s2,
+                    rotation_hours: None,
+                    obliquity_deg: Some(axial_tilt_rad.to_degrees()),
                     tidal_axis,
                     axial_tilt_rad,
-                );
+                };
+                let options = TerrainCompileOptions {
+                    crater_count_scale: DEV_CRATER_SCALE,
+                };
+                let key = thalos_terrain_gen::cache::terrain_cache_key(&terrain, &context, options);
                 let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
                 if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
                     info!("terrain cache hit: {body_name}");
                     return data;
                 }
                 info!("terrain cache miss, baking: {body_name}");
-                let mut builder = BodyBuilder::new(
-                    radius_m,
-                    seed,
-                    composition,
-                    cubemap_resolution,
-                    body_age_gyr,
-                    tidal_axis,
-                    axial_tilt_rad,
-                );
-                let stages = gen_params
-                    .pipeline
-                    .into_iter()
-                    .map(|s| s.into_stage())
-                    .collect::<Vec<_>>();
-                Pipeline::new(stages).run(&mut builder);
-                let data = builder.build();
+                let data = compile_terrain_config(&terrain, &context, options)
+                    .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
                 match thalos_terrain_gen::cache::store(&path, key, &data) {
                     Ok(()) => info!("terrain cache wrote: {body_name}"),
                     Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
@@ -213,7 +204,7 @@ pub(super) fn spawn_bodies(
             // so the body is visible immediately at roughly the right size and
             // colour while the terrain pipeline runs in the background.
             let placeholder_mat = std_materials.add(StandardMaterial {
-                base_color: Color::srgb(r * body.albedo, g * body.albedo, b * body.albedo),
+                base_color: Color::srgb(r, g, b),
                 perceptual_roughness: 0.9,
                 metallic: 0.0,
                 ..default()
@@ -302,6 +293,23 @@ pub(super) fn spawn_bodies(
             // ship-layer billboard. The cloud-deck / haze layers are
             // expressed in render units, so the meters-per-render-unit
             // factor differs between the two.
+            // Average the cloud-deck palette as the gas-giant planetshine
+            // tint. Palette colours are already linear-RGB.
+            let palette = &atmos.cloud_deck.palette;
+            let mean_cloud = if palette.is_empty() {
+                [0.5, 0.5, 0.5]
+            } else {
+                let mut sum = [0.0f32; 3];
+                for stop in palette {
+                    sum[0] += stop.color[0];
+                    sum[1] += stop.color[1];
+                    sum[2] += stop.color[2];
+                }
+                let n = palette.len() as f32;
+                [sum[0] / n, sum[1] / n, sum[2] / n]
+            };
+            planetshine.by_body.insert(body.id, mean_cloud);
+
             let map_layers =
                 GasGiantLayers::from_params(atmos, body.rings.as_ref(), (1.0 / MAP_SCALE) as f32);
             let ship_layers =
@@ -385,14 +393,12 @@ pub(super) fn spawn_bodies(
             // camera-facing-quad architecture as the procedural impostor
             // and gas giant paths, so close approaches don't clip the
             // body against the camera near plane. Renders as a single
-            // linear-RGB albedo derived from the RON `physical.color *
-            // physical.albedo` (sRGB → linear so brightness matches the
-            // old StandardMaterial path).
+            // linear-RGB color (sRGB → linear for pipeline compatibility).
             let albedo_linear = Color::srgb(r, g, b).to_linear();
             let albedo = Vec4::new(
-                albedo_linear.red * body.albedo,
-                albedo_linear.green * body.albedo,
-                albedo_linear.blue * body.albedo,
+                albedo_linear.red,
+                albedo_linear.green,
+                albedo_linear.blue,
                 0.0,
             );
 
@@ -498,14 +504,15 @@ pub(super) fn spawn_bodies(
         if let Some(rings) = &body.rings {
             // The cloud-deck ring-shadow term is only wired into
             // `GasGiantMaterial`, which is selected when a body has
-            // an atmosphere and no generator. Anything else
+            // an atmosphere and no terrain. Anything else
             // (terrain-baked, plain placeholder, or star) renders the
             // ring annulus correctly but won't darken the body's
             // surface inside it. Discriminator must match the branch
             // selection above — `atmosphere.is_some()` alone is not
-            // sufficient because a body with both `generator` and
+            // sufficient because a body with both `terrain` and
             // `atmosphere` would take the terrain branch first.
-            let renders_as_gas_giant = body.generator.is_none() && body.atmosphere.is_some();
+            let renders_as_gas_giant =
+                matches!(&body.terrain, TerrainConfig::None) && body.atmosphere.is_some();
             if !renders_as_gas_giant {
                 warn!(
                     "body '{}' has rings but ring-shadow on its surface is not yet implemented \
@@ -611,3 +618,4 @@ pub(super) fn spawn_bodies(
         ..default()
     });
 }
+

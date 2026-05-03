@@ -1,6 +1,7 @@
 /target
+/stage-bakes
 Cargo.lock
-assets/ephemeris.bin
-assets/ephemeris_work/
 .DS_Store
 .thalos_dumps/
+.claude/
+.codex/

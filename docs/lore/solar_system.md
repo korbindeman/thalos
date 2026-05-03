@@ -194,12 +194,17 @@ later milestone.
 | Surface gravity | 0.54 g |
 | Escape velocity | 5.0 km/s |
 | Delta-v to low orbit | ~4.2 km/s |
-| Atmosphere | ~0.4 atm, N2/CO2/H2O |
+| Atmosphere | ~1.4 atm, N2/CO2/H2O with blue aerosol haze |
 | Hydrosphere | ~85 percent ocean |
 
 Pelagos is the most biologically important body outside Thalos. Stellar
 insolation and tidal heating from Auron sustain a cold ocean world with
 volcanic island arcs, hydrothermal circulation, and complex marine life.
+Its atmosphere is thick, humid, and optically deep without becoming
+Titan-like: a nitrogen-dominated blue shell with CO2 greenhouse warming,
+water clouds, sea-salt and sulfate aerosols, and trace organic haze. Sunlight
+still reaches the volcanic shelves where photosynthetic ecosystems are
+dense, but the sky and orbital limb read softer and milkier than Thalos.
 
 It is harder than Vaelen in the ways that matter: moon-system targeting,
 entry control, ocean-world landing constraints, weather, and a meaningful

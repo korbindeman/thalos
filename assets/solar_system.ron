@@ -3,20 +3,17 @@
 //
 // Format: see crates/physics/src/parsing.rs (`SolarSystemFile`).
 // Distances in meters, angles in degrees, time in seconds, mass in kg.
-// Hex colors are sRGB. Every field on every body is explicit — no defaults.
+// Hex colors are sRGB (folded from earlier albedo multipliers).
+// Every field on every body is explicit — no defaults.
 //
-// `generator` block is the surface generator pipeline for authored solid
-// bodies. Bodies without one render from their physical colour/atmosphere
-// until they get bespoke terrain work.
+// Terrain, atmosphere, rings definitions moved to assets/bodies/<lowercase_name>.ron
+// Convention: loader looks for per-body files and skips loading if absent.
 
 (
     name: "Pyros System",
     epoch: "J2000.0",
     homeworld: "Thalos",
     bodies: [
-        // ─────────────────────────────────────────────
-        // STAR
-        // ─────────────────────────────────────────────
         (
             name: "Pyros",
             kind: Star,
@@ -25,17 +22,11 @@
                 mass_kg: 1.989e30,
                 radius_m: 696000000.0,
                 color: "#FFE54D",
-                albedo: 1.0,
                 rotation_period_s: 2192832.0,
                 axial_tilt_deg: 0.0,
             ),
             orbit: None,
-            generator: None,
         ),
-
-        // ─────────────────────────────────────────────
-        // INNER SYSTEM
-        // ─────────────────────────────────────────────
         (
             name: "Ashara",
             kind: Planet,
@@ -43,8 +34,7 @@
             physical: (
                 mass_kg: 2.628e24,
                 radius_m: 4035000.0,
-                color: "#D1C774",
-                albedo: 0.65,
+                color: "#ACA45F",
                 rotation_period_s: -15552000.0,
                 axial_tilt_deg: 177.0,
             ),
@@ -56,7 +46,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 192.0,
             )),
-            generator: None,
         ),
         (
             name: "Thalos",
@@ -65,8 +54,7 @@
             physical: (
                 mass_kg: 1.378e24,
                 radius_m: 3186000.0,
-                color: "#3373E5",
-                albedo: 0.35,
+                color: "#1C458F",
                 rotation_period_s: 76680.0,
                 axial_tilt_deg: 23.0,
             ),
@@ -78,583 +66,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 0.0,
             )),
-            // Thalos terrain pipeline (in rebuild).
-            //
-            // Target spec: `docs/thalos_terrain_pipeline.md`. Six stages,
-            // icosphere-canonical, cubemap is a derived render output.
-            //
-            // Status: Stage 1 (TectonicSkeleton) only. Old stages cleared
-            // pending the full rebuild.
-            generator: Some((
-                seed: 1003,
-                // Iron-core Earth analog: ~70% iron by volume, thin silicate
-                // crust, residual volatiles as N₂/O₂ atmosphere + hydrosphere.
-                // Matches `docs/lore/solar_system.md` composition.
-                composition: (silicate: 0.26, iron: 0.70, ice: 0.0, volatiles: 0.04, hydrogen_helium: 0.0),
-                cubemap_resolution: 2048,
-                body_age_gyr: 4.5,
-                pipeline: [
-                    // Stage 1 — Tectonic Skeleton. Typed province map that
-                    // every subsequent stage cascades from. Low-resolution
-                    // icosphere (level 6 ≈ 40 k verts, ~55 km cells on
-                    // Thalos). Debug albedo paint is on while Stage 2+
-                    // don't exist yet.
-                    TectonicSkeleton((
-                        // Level 8 icosphere → ~655 k vertices, ~14 km
-                        // per hop on Thalos. Resolution where mesh
-                        // topology stops visibly leaking into rivers
-                        // and coastlines.
-                        subdivision_level: 8,
-                        // 20 cratons → each ~500 km radius, matching
-                        // Archean craton scale.
-                        n_cratons: 20,
-                        // Noise-warped Voronoi: domain-warps each
-                        // vertex before plate assignment, so plate
-                        // boundaries become fractal at the warp's
-                        // spatial frequency. Continents are decided
-                        // *independently* by Stage 2's noise mask —
-                        // plates here only drive tectonic features
-                        // (sutures / rifts / active margins /
-                        // hotspots), which can land on continent or
-                        // ocean without aligning to coastlines.
-                        plate_warp_amplitude: 0.4,
-                        plate_warp_frequency: 3.0,
-                        plate_warp_octaves: 5,
-                        n_active_margins: 1,
-                        n_rift_scars: 2,
-                        n_hotspot_tracks: 4,
-                        // 12 hops ≈ 170 km on level 8 — Hawaii-scale,
-                        // not a 560 km ridge. Only the youngest few
-                        // vertices read above water after Stage 2/3
-                        // process the track.
-                        hotspot_track_length: 12,
-                        lloyd_iterations: 3,
-                        // Stage 2 paints its own elevation-relief debug
-                        // albedo. Turning Stage 1's off keeps the final
-                        // bake showing the elevation field, not the flat
-                        // province skeleton.
-                        debug_paint_albedo: false,
-                    )),
-                    // Stage 2 — Coarse Elevation. Continental mask
-                    // comes from warped fBm noise thresholded to the
-                    // target ocean fraction — *independent of the
-                    // plate partition*. Plate boundaries drive
-                    // tectonic features (sutures, rifts, active
-                    // margins, hotspots) that land on continent or
-                    // ocean without aligning to coastlines. Matches
-                    // Earth: Pacific plate has no continent; Eurasia
-                    // carries Europe + Asia; Mid-Atlantic Ridge runs
-                    // underwater.
-                    CoarseElevation((
-                        // Continent mask — warped fBm, thresholded to
-                        // hit 65 % ocean by percentile, then
-                        // connected-component-filtered to remove
-                        // tiny land/ocean fragments.
-                        target_ocean_fraction: 0.65,
-                        // 6 octaves × 0.55 persistence × freq 2.0 is
-                        // the standard fBm "continent profile" — gives
-                        // a handful of continent-scale features plus
-                        // rich fractal coastline detail at the scales
-                        // the mask is designed to show. Fragmentation
-                        // from marginal threshold-crossings is cleaned
-                        // up after the fact by the component filter.
-                        continent_noise_frequency: 2.0,
-                        continent_noise_octaves: 6,
-                        continent_noise_persistence: 0.55,
-                        continent_warp_amplitude: 0.45,
-                        continent_warp_frequency: 2.2,
-                        // Anisotropic stretch: compress the N-S axis
-                        // before noise sampling so features read
-                        // wider E-W. 1.5 is Earth-ish (Eurasia-wide
-                        // but not striped); >2 starts looking
-                        // banded.
-                        horizontal_stretch: 1.5,
-                        // Quadratic latitude bias `bias·(0.5 - sin²lat)`
-                        // added to the mask. Positive pulls land
-                        // toward mid/low latitudes. 0.2 is gentle
-                        // enough not to carve a hard belt.
-                        mid_latitude_bias: 0.2,
-                        // Drop land components smaller than 0.3 % of
-                        // the sphere (~Madagascar scale) — kills
-                        // noise-fragment islands while preserving
-                        // real island arcs. Ocean fill disabled:
-                        // interior seas are realistic and filling
-                        // them drops sea level to hold the 65 %
-                        // target, which drowns continental interior.
-                        min_land_fraction: 0.003,
-                        min_ocean_fraction: 0.0,
-                        // Earth-relative baseline elevations:
-                        // +500 m continent / -3500 m ocean floor.
-                        // Gives a 4 km bias gap; with noise at
-                        // 1500 m (half-gap − 500 m buffer) the
-                        // distributions stay separate, no coastline
-                        // speckle. After erosion, sea level settles
-                        // ~−1500 m and continents sit ≈500–3500 m
-                        // above sea level — matches Earth's
-                        // hypsometric profile.
-                        continental_bias_m: 500.0,
-                        oceanic_bias_m: -3500.0,
-                        // Suture: ~85 km mountain-belt half-width
-                        // (Himalayas / Urals scale). Previous values
-                        // were 4× too wide, causing 3σ uplift discs
-                        // to blanket ~70 % of the planet and push
-                        // sea level into collapse.
-                        suture_height_m: 1500.0,
-                        suture_falloff_hops: 6.0,
-                        suture_age_decay_myr: 800.0,
-                        rift_depth_m: 800.0,
-                        rift_falloff_hops: 3.0,
-                        // Active margin: Andes-scale arc + offshore
-                        // trench. 4 hops ≈ 56 km (narrower than
-                        // Andes' 100 km but matches sharp-relief
-                        // spec). Trench peak 10 hops offshore ≈ 140
-                        // km.
-                        active_uplift_m: 3500.0,
-                        active_trench_m: 3500.0,
-                        active_falloff_hops: 4.0,
-                        trench_offset_hops: 10.0,
-                        trench_width_hops: 3.0,
-                        // Seamounts as point-like bumps (1.5-hop tight
-                        // Gaussian) rather than a continuous ridge.
-                        // Paired with shorter track length below,
-                        // renders as Hawaii-style isolated island
-                        // chain (just a couple above water) rather
-                        // than a visible linear ridge in the ocean.
-                        hotspot_height_m: 800.0,
-                        hotspot_falloff_hops: 1.5,
-                        // 1500 m noise, inside the 2000 m half-gap
-                        // with 500 m buffer. Gives visible
-                        // elevation variation inside continents and
-                        // oceans without letting ocean noise push
-                        // above sea level as speckle islands.
-                        noise_amplitude_m: 1500.0,
-                        noise_frequency: 2.5,
-                        noise_octaves: 7,
-                        noise_persistence: 0.62,
-                        // Doubled warp amplitude (0.30 vs 0.15) — domain
-                        // warp displaces each sample point by ~30% of
-                        // the unit-sphere radius in each axis before
-                        // fbm is evaluated. That's enough distortion
-                        // that the noise structure bends the
-                        // continentalness-derived coastline into
-                        // peninsulas, bays, and detached island arcs
-                        // instead of gently-lumpy blobs.
-                        // Strong domain warp: displaces sample position
-                        // by ~45 % of the unit sphere radius before fbm
-                        // evaluation. Enough distortion that the
-                        // continentalness-derived coastline bends into
-                        // complex peninsulas and detached fragments,
-                        // burying the underlying craton Voronoi shape.
-                        warp_amplitude: 0.45,
-                        warp_frequency: 3.0,
-                        // Stage 3 repaints the albedo on top of this;
-                        // we still want Stage 2's bake in place in case
-                        // Stage 3 is truncated via `--up-to-stage`.
-                        debug_paint_albedo: true,
-                    )),
-                    // Stage 3 — Hydrological Carving. The character-
-                    // defining stage: water carves the Stage 2
-                    // heightfield into dendritic valleys, sediment
-                    // fills lowlands, and sea level is set last to hit
-                    // the 65% ocean target. Drainage graph and sediment
-                    // map persist to BodyData for later stages and
-                    // gameplay.
-                    HydrologicalCarving((
-                        // 100 iterations of stream-power erosion —
-                        // enough to carve visible valleys into all but
-                        // the flattest lowlands without pounding the
-                        // continents into flatness.
-                        erosion_iterations: 100,
-                        erosion_k: 2.0e-4,
-                        stream_power_m: 0.5,
-                        stream_power_n: 1.0,
-                        max_erosion_per_iter_m: 50.0,
-                        deposition_rate: 0.08,
-                        pit_fill_epsilon_m: 0.001,
-                        // Spec: Thalos is 65% ocean.
-                        target_ocean_fraction: 0.65,
-                        // Only show trunk rivers — at level 8 every
-                        // headwater is resolved, but capillaries are
-                        // sub-pixel at orbital view.
-                        river_accumulation_threshold_m2: 2.0e11,
-                        // ~2.5 km half-width — visible as thin lines
-                        // from orbital view without dominating. Real
-                        // equivalent: Amazon / Mississippi reading
-                        // from ISS altitude.
-                        river_half_width_rad: 0.0008,
-                        // Stage 5 paints the material map over the top;
-                        // leaving Stage 3's hypsometric paint off so the
-                        // final bake shows the material assignments.
-                        debug_paint_albedo: false,
-                    )),
-                    // Stage 5 — Surface Materials. Assigns a material
-                    // ID to every vertex based on history: province
-                    // kind + age, drainage accumulation, sediment
-                    // thickness, and upstream iron provenance. The
-                    // "Thalos is rust" read comes from Stage 3's
-                    // drainage routing iron-rich sediment (eroded
-                    // arc volcanics from ActiveMargin + HotspotTrack
-                    // provinces) to lowland floodplains and beaches.
-                    SurfaceMaterials((
-                        // Narrow coastal band: 200 m below sea level.
-                        // Stage 3's continental-shelf deposition
-                        // elevates the inner seabed fast, so a wider
-                        // band fills nearly half the ocean. 200 m
-                        // keeps the shelf reading as a visible ring
-                        // along coasts rather than overtaking the
-                        // abyssal plains.
-                        shelf_depth_m: 200.0,
-                        // log10(5·10⁹ m²) ≈ 9.7 — catches mid-sized
-                        // rivers, not just continental-trunk mains.
-                        // At level 8 (~655 k verts, ~2·10⁸ m² per
-                        // cell) this is a catchment of ~25 cells,
-                        // about where dendritic tributaries start
-                        // showing visible accumulation in Stage 3.
-                        floodplain_log10_accumulation_m2: 9.7,
-                        // 0.5 m sediment — Stage 3's sediment is
-                        // heavily skewed (median 0, 90th pct ~1 m,
-                        // peak ~2 km). 0.5 m captures "visible
-                        // deposition" without requiring the vertex
-                        // to be a sink.
-                        floodplain_min_sediment_m: 0.5,
-                        // Below 1500 m above sea level: lowland /
-                        // foothill reading. Floodplains up to this
-                        // height cover a broad belt of continental
-                        // interior at Thalos's post-erosion profile.
-                        floodplain_max_elevation_m: 1500.0,
-                        // Above 2500 m with <0.3 m sediment = scoured
-                        // upland. Rare at Thalos's mature profile;
-                        // only the peaks in Suture belts and the
-                        // live ActiveMargin arc qualify.
-                        bare_rock_min_elevation_m: 2500.0,
-                        bare_rock_max_sediment_m: 0.3,
-                        // Stable terrain can carry up to 5 m of
-                        // weathered blanket and still read as
-                        // "Craton at surface." Above that it's
-                        // regolith — transported-sediment drape,
-                        // not in-place weathering. Combined with
-                        // the sediment distribution this keeps
-                        // most craton interiors in granite/BIF
-                        // rather than generic regolith.
-                        ancient_stable_max_sediment_m: 5.0,
-                        // ActiveMargin + HotspotTrack vertices with
-                        // age ≤ 30 Myr still carry fresh basalt
-                        // signatures. Older than that and even
-                        // the rare live provinces read as
-                        // weathered volcanic soils in the
-                        // downstream-rule pass.
-                        fresh_volcanic_max_age_myr: 30.0,
-                        // Source weights. Active arcs are the
-                        // strongest iron emitters per unit area,
-                        // hotspots the most concentrated, Suture
-                        // belts weakest. Suture is a fallback
-                        // stand-in for ArcRemnant (which
-                        // TectonicSkeleton doesn't emit yet); keep
-                        // it below the "active" tier so 51 sutures
-                        // don't swamp the drainage network.
-                        iron_source_active_margin: 1.0,
-                        iron_source_hotspot_track: 1.0,
-                        iron_source_suture: 0.15,
-                        // Floodplain iron cutoff ≈ 5 % catchment-
-                        // averaged iron source. Previous 1 %
-                        // painted rust on every trunk river; 10 %
-                        // eliminated it almost entirely (61 texels).
-                        // 5 % catches floodplains that are genuinely
-                        // downstream of an iron source — active
-                        // margins clear it easily, suture-dominated
-                        // catchments clear it if the upstream is
-                        // >33 % suture.
-                        iron_fraction_threshold: 0.05,
-                        // BIF: an old Suture is iron-bearing even
-                        // without supercatchment downstream —
-                        // being part of the belt itself counts.
-                        // Pair with the suture source weight so a
-                        // suture vertex in a suture-dominated
-                        // catchment clears it.
-                        iron_fraction_bif_threshold: 0.04,
-                        // PaintBiomes paints the final albedo using
-                        // the climate-driven biome palette. Material
-                        // IDs from this stage still drive per-texel
-                        // roughness; we just don't bake their flat
-                        // colours.
-                        debug_paint_albedo: false,
-                    )),
-                    // Stage 6 — Climate. Earth-like annual-mean
-                    // temperature + precipitation derived from
-                    // latitude, altitude, and upwind-traced
-                    // continentality / orographic effects. Tuned to
-                    // Thalos's slightly-thinner atmosphere and smaller
-                    // radius: equator a touch cooler than Earth, polar
-                    // gradient a touch sharper. Drives the Whittaker-
-                    // style biome rules below.
-                    Climate((
-                        equator_temp_c: 28.0,
-                        polar_temp_c: -15.0,
-                        // 1.6 keeps mid-latitudes temperate and pushes
-                        // the cold drop into the polar circle —
-                        // without it the gradient runs through 0 °C
-                        // at ~50° latitude and tundra eats the
-                        // continents.
-                        lat_exponent: 1.6,
-                        lapse_c_per_km: 6.5,
-                        // Earth-like zonal precipitation profile with
-                        // a sharper subtropical-high desert band
-                        // (10–30° latitude). Bands: ITCZ → subtropical
-                        // highs → mid-latitude westerlies → polar
-                        // deserts.
-                        zonal_precip_mm: (2400.0, 1800.0, 350.0, 600.0, 1200.0, 1100.0, 800.0, 400.0, 200.0),
-                        // 12 steps × 0.025 rad ≈ 0.3 rad ≈ 950 km
-                        // trace. At Thalos's 1:2 scale (radius 3186
-                        // km), continents are smaller than Earth's, so
-                        // a wider step (0.05 rad ≈ 160 km/step on a
-                        // 1:1 body, but only 80 km/step here in
-                        // surface terms) ran the upwind ray off
-                        // continents in 2-3 steps and continentality
-                        // never bit. A finer step keeps the trace
-                        // inside continental interiors long enough to
-                        // dry them out.
-                        upwind_steps: 12,
-                        step_arc_rad: 0.025,
-                        // Aggressive decay: 0.85^12 ≈ 0.14, so the
-                        // deepest continental interior receives only
-                        // ~14 % of the zonal moisture even before
-                        // mountain shadowing. With 0.90 the same
-                        // figure was 0.28 — twice as wet, so deserts
-                        // never formed away from subtropical bands.
-                        continentality_decay: 0.85,
-                        orographic_gain_per_km: 0.5,
-                        rain_shadow_per_km: 0.4,
-                        // 0.30 fbm jitter (was 0.15) — breaks the
-                        // visible east-west banding that arises when
-                        // precipitation tracks the zonal profile too
-                        // cleanly.
-                        precip_noise_amp: 0.30,
-                        precip_noise_frequency: 3.0,
-                    )),
-                    // Stage 7 — Biomes. Whittaker-style climate
-                    // partition. Order matters (first-match-wins) so
-                    // tundra / taiga / desert eat their corners of
-                    // the (T, P) plane before temperate / grassland
-                    // catch the broad middle. Per-biome
-                    // `iron_visibility` controls how much the
-                    // PaintBiomes IronOverlay shows through: closed-
-                    // canopy biomes hide rust, exposed-ground biomes
-                    // show it.
-                    Biomes((
-                        biomes: [
-                            // 0 — tundra. High latitude, treeless
-                            // mineral soil and lichen. Iron-rich
-                            // catchments stain visibly through the
-                            // sparse cover.
-                            (name: "tundra", albedo: 0.34, tint: (1.00, 1.05, 0.95), tonal_amp: 0.20, roughness: 0.78, iron_visibility: 0.65),
-                            // 1 — taiga (boreal forest). Dark conifer
-                            // canopy hides almost all substrate.
-                            (name: "taiga", albedo: 0.15, tint: (0.78, 1.06, 0.62), tonal_amp: 0.22, roughness: 0.72, iron_visibility: 0.10),
-                            // 2 — cold steppe / cold desert. Sparse
-                            // grass over mineral soil; iron shows
-                            // through.
-                            (name: "cold_steppe", albedo: 0.32, tint: (1.05, 1.00, 0.78), tonal_amp: 0.22, roughness: 0.78, iron_visibility: 0.60),
-                            // 3 — hot desert. Bare regolith, fully
-                            // exposed; rust paints through at full
-                            // strength on iron-rich catchments.
-                            (name: "hot_desert", albedo: 0.42, tint: (1.18, 1.00, 0.62), tonal_amp: 0.18, roughness: 0.82, iron_visibility: 1.00),
-                            // 4 — tropical rainforest. Saturated
-                            // green; deep canopy hides everything
-                            // below.
-                            (name: "tropical_rainforest", albedo: 0.18, tint: (0.62, 1.10, 0.42), tonal_amp: 0.16, roughness: 0.65, iron_visibility: 0.05),
-                            // 5 — tropical savanna / dry forest. Tan-
-                            // green mosaic with seasonal grass cover;
-                            // moderate iron exposure.
-                            (name: "tropical_savanna", albedo: 0.30, tint: (1.10, 1.05, 0.55), tonal_amp: 0.22, roughness: 0.75, iron_visibility: 0.55),
-                            // 6 — temperate forest. Mid-green deciduous
-                            // / mixed canopy. Mostly closed.
-                            (name: "temperate_forest", albedo: 0.20, tint: (0.78, 1.05, 0.55), tonal_amp: 0.20, roughness: 0.70, iron_visibility: 0.15),
-                            // 7 — grassland / prairie. Yellow-green
-                            // continuous grass; partial soil exposure.
-                            (name: "grassland", albedo: 0.28, tint: (1.02, 1.10, 0.60), tonal_amp: 0.22, roughness: 0.75, iron_visibility: 0.50),
-                            // 8 — semiarid steppe. Default catch-all:
-                            // pale dry sparse vegetation, mineral soil
-                            // visible.
-                            (name: "semiarid_steppe", albedo: 0.36, tint: (1.10, 1.00, 0.72), tonal_amp: 0.20, roughness: 0.78, iron_visibility: 0.80),
-                        ],
-                        rules: [
-                            TempPrecip(max_temp_c: -3.0, jitter_amp: 0.22, jitter_frequency: 3.0),
-                            TempPrecip(max_temp_c: 5.0, min_precip_mm: 350.0, jitter_amp: 0.22, jitter_frequency: 3.0),
-                            TempPrecip(max_temp_c: 5.0, jitter_amp: 0.22, jitter_frequency: 3.0),
-                            TempPrecip(min_temp_c: 15.0, max_precip_mm: 400.0, jitter_amp: 0.12, jitter_frequency: 3.5),
-                            TempPrecip(min_temp_c: 22.0, min_precip_mm: 1800.0, jitter_amp: 0.22, jitter_frequency: 3.0),
-                            TempPrecip(min_temp_c: 20.0, jitter_amp: 0.22, jitter_frequency: 3.0),
-                            TempPrecip(min_precip_mm: 700.0, jitter_amp: 0.22, jitter_frequency: 3.0),
-                            TempPrecip(min_precip_mm: 250.0, jitter_amp: 0.22, jitter_frequency: 3.0),
-                            Default,
-                        ],
-                    )),
-                    // Stage 8 — PaintBiomes. Continuous overlays on
-                    // top of the biome base palette: iron staining
-                    // (downstream of mafic provinces, gated by per-
-                    // biome ground exposure), bare-rock outcrops
-                    // (steep slopes, high altitude), snow/ice cover
-                    // (temperature-driven), slope-AO darkening.
-                    PaintBiomes((
-                        // Iron oxide rust paints through exposed-ground
-                        // biomes (deserts, tundra, steppe) where the
-                        // upstream catchment routed mafic-derived
-                        // sediment to the cell. min/max bracket the
-                        // SurfaceMaterials threshold (0.05) so staining
-                        // ramps up across the same iron_fraction range
-                        // the classifier flags as iron-rich.
-                        iron_overlay: (
-                            // After SurfaceMaterials' dilation+blur,
-                            // peaks of the iron_fraction field stay
-                            // close to their original (0.05–0.5)
-                            // range — dilation preserves max values
-                            // and only the soft fade-out band drops.
-                            // Threshold sits just above the
-                            // classifier cutoff (0.05) so the same
-                            // catchments the classifier flags get
-                            // visible staining.
-                            min_iron_fraction: 0.04,
-                            max_iron_fraction: 0.22,
-                            // Cap at 0.55 strength so iron-rich
-                            // regions read as warm reddish biome,
-                            // not pure rust paint. Biome character
-                            // (sand colour, grass tint) bleeds
-                            // through at full saturation.
-                            max_strength: 0.55,
-                            // Warm earth-rust, less saturated than
-                            // the previous Mars-orange — reads as
-                            // iron-stained soil rather than safety-
-                            // cone paint.
-                            color: (0.50, 0.32, 0.22),
-                            tonal_amp: 0.22,
-                            tonal_frequency: 9.0,
-                        ),
-                        // Bare rock above 3 km or on steep slopes.
-                        // Cool gray basalt / weathered granite — sits
-                        // visibly cooler than the surrounding biomes
-                        // so peaks read as snow-shoulders even before
-                        // snow_overlay paints them white.
-                        rock_overlay: (
-                            slope_start: 0.20,
-                            slope_full: 0.55,
-                            height_boost_from_m: 3000.0,
-                            height_boost_per_km: 0.30,
-                            color: (0.52, 0.50, 0.50),
-                            tonal_amp: 0.12,
-                            tonal_frequency: 14.0,
-                        ),
-                        // Snow/ice on land. Coverage by temperature
-                        // (jittered) so equatorial peaks can carry
-                        // glaciers and warm polar land can stay bare.
-                        // Sea ice is a shader-side concern.
-                        snow_overlay: (
-                            // Coverage ramp: starts at 0 °C, full at
-                            // -12 °C. Earlier values (full at -8 °C)
-                            // turned every continent's mid-latitude
-                            // interior into a polar cap. With the
-                            // current Climate config, this leaves
-                            // snow concentrated above ~50° latitude
-                            // and on alpine peaks.
-                            temp_none_c: 0.0,
-                            temp_full_c: -12.0,
-                            jitter_amp_c: 4.0,
-                            jitter_frequency: 3.0,
-                            land_color: (0.92, 0.93, 0.96),
-                            tonal_amp: 0.04,
-                        ),
-                        // Slope-AO darkens steep terrain so mountain
-                        // relief reads from orbit even when the sun
-                        // angle hides detailed normals.
-                        slope_ao: (
-                            slope_start: 0.18,
-                            slope_full: 0.55,
-                            max_darken: 0.30,
-                        ),
-                    )),
-                ],
-            )),
-            // Thin N₂/O₂ atmosphere (~0.85 atm). Rim halo + limb
-            // shading compose the "blue halo + chromatic limb" read
-            // that distinguishes a living planet from an airless
-            // twin at impostor distance. Clouds/storms are a
-            // separate layer (see docs/gen/thalos_processes.md
-            // §Atmosphere/Clouds).
-            terrestrial_atmosphere: Some((
-                // Pale blue rim glow. Scale height tuned to Earth's
-                // ~8.4 km × 0.85 atm ≈ 7 km at 1 AU insolation;
-                // outer shell cuts off around 80 km, above which
-                // column density is negligible.
-                rim_halo: Some((
-                    color: (0.45, 0.65, 0.95),
-                    intensity: 0.30,
-                    scale_height_m: 7000.0,
-                    outer_altitude_m: 80000.0,
-                )),
-                // Disabled: `rayleigh` below produces the terminator
-                // reddening and lit-limb Rayleigh band as an emergent
-                // physical effect. Keeping an additive `terminator_warmth`
-                // on top double-counts and pushes the sunset band
-                // orange-saturated. Left as `None` rather than removed so
-                // the slot stays available for artistic tint overrides.
-                limb: None,
-                // Terrestrial limb darkening is weak — the scattering
-                // column isn't long enough to drive strong chromatic
-                // darkening. Disabled for the first pass.
-                limb_darkening: None,
-                // Per-wavelength Rayleigh scattering. `vertical_optical_depth`
-                // is at zenith: blue has ~6× more optical depth than red,
-                // so the sun's column reddens strongly at low elevation.
-                // These are Earth-like sea-level values; Thalos's
-                // atmosphere is a bit thinner but the qualitative
-                // behaviour (sunset ring, blue daylight haze, red-lit
-                // terrain at the terminator) reads the same.
-                //
-                // `strength: 1.0` is physical; values above push the
-                // effect into artistic territory (over-saturated
-                // sunsets). Values below attenuate.
-                rayleigh: Some((
-                    vertical_optical_depth: (0.046, 0.108, 0.264),
-                    strength: 1.0,
-                )),
-                // Cloud cover. Shader-synthesised weather field —
-                // domain-warped fBm for cyclonic curves, zonal
-                // banding (ITCZ / subtropical dry / mid-latitude
-                // storm track), Beer-Lambert opacity so edges fade
-                // instead of cliff into binary cloud/no-cloud.
-                //
-                // `coverage` is the *base* fraction before latitude
-                // weighting. The ITCZ bumps it to ~1.45× at the
-                // equator and the storm track to ~1.35× near 50°
-                // latitude; the subtropical lobes drop it to ~0.6×.
-                // Tune `coverage` to set the overall wetness of the
-                // planet without reshaping the circulation profile.
-                clouds: Some((
-                    // Sparse coverage: roughly 25% of pixels carry
-                    // cloud, leaving 75% fully clear. Apollo imagery
-                    // shows large cloud-free swathes between bands;
-                    // anything higher washes the planet out.
-                    coverage: 0.25,
-                    // Density ramp width, NOT a smoothstep half-width
-                    // any more. The density rises from 0 at the cloud
-                    // threshold to 1.0 `softness` above it, so this
-                    // controls how much of each cloud reads as a
-                    // thin, semi-transparent margin versus a dense
-                    // fully-opaque core. 0.15 keeps a visible soft
-                    // fringe around every structure.
-                    softness: 0.15,
-                    frequency: 2.8,
-                    octaves: 10,
-                    // Off-white with a faint cool tint. Pure-white
-                    // clouds read as pasted-on paint at orbital
-                    // scale; real cumulus tops reflect ~72–78%
-                    // broadband with a slight Rayleigh-blue bias
-                    // from the atmospheric column above them.
-                    albedo: (0.74, 0.76, 0.80),
-                    scroll_rate: 2.0e-5,
-                    differential_rotation: 0.40,
-                    seed: 7142,
-                )),
-            )),
         ),
         (
             name: "Mira",
@@ -663,8 +74,7 @@
             physical: (
                 mass_kg: 1.374e22,
                 radius_m: 869000.0,
-                color: "#A6A09A",
-                albedo: 0.12,
+                color: "#3C3A37",
                 rotation_period_s: 1373760.0,
                 axial_tilt_deg: 1.2,
             ),
@@ -676,132 +86,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 135.0,
             )),
-            generator: Some((
-                seed: 1004,
-                composition: (silicate: 0.93, iron: 0.05, ice: 0.0, volatiles: 0.02, hydrogen_helium: 0.0),
-                cubemap_resolution: 2048,
-                body_age_gyr: 4.5,
-                pipeline: [
-                    Differentiate(()),
-                    // Megabasin: farside-biased large basins (like SPA on the
-                    // Moon's farside). +Z = near-side (tidal axis), so -Z
-                    // biases centers to the far hemisphere we render.
-                    Megabasin((
-                        basins: [
-                            // Basin-class features (100–520 km radius) live
-                            // here, not in Cratering — the cookie-cut SFD
-                            // stamps hard circles and overlapping them reads
-                            // as pasted discs. Megabasin supplies multi-
-                            // ring structure, noise-warped rims, and the
-                            // `basin_albedo_field` soft ejecta sculpture.
-                            (center_dir: (-0.15, -0.25, -0.96), radius_m: 520000.0, depth_m: 7200.0, ring_count: 4),
-                            (center_dir: ( 0.68,  0.10, -0.73), radius_m: 310000.0, depth_m: 5400.0, ring_count: 3),
-                            (center_dir: (-0.55,  0.35, -0.76), radius_m: 260000.0, depth_m: 4800.0, ring_count: 3),
-                            (center_dir: ( 0.12,  0.62, -0.78), radius_m: 200000.0, depth_m: 3800.0, ring_count: 2),
-                            (center_dir: (-0.40, -0.55, -0.73), radius_m: 170000.0, depth_m: 3100.0, ring_count: 2),
-                            (center_dir: ( 0.28, -0.60, -0.75), radius_m: 140000.0, depth_m: 2700.0, ring_count: 2),
-                            (center_dir: (-0.72, -0.10, -0.69), radius_m: 120000.0, depth_m: 2300.0, ring_count: 2),
-                            (center_dir: ( 0.45,  0.45, -0.77), radius_m: 105000.0, depth_m: 2000.0, ring_count: 1),
-                            (center_dir: (-0.05,  0.30, -0.95), radius_m:  95000.0, depth_m: 1800.0, ring_count: 1),
-                        ],
-                        hemispheric_lowering_m: 0.0,
-                    )),
-                    // Biomes: no NearBasin rule — basin darkening comes from
-                    // the Megabasin stage's `basin_albedo_field`, which has
-                    // noise-warped fractal boundaries and Imbrium-style
-                    // radial ejecta streaks. Hard biome-disc boundaries are
-                    // the wrong tool for megabasin-scale features.
-                    Biomes((
-                        biomes: [
-                            // 0: KREEP-ish — slightly warmer, subtly darker.
-                            (
-                                name: "kreep",
-                                albedo: 0.122,
-                                fresh_albedo: Some(0.25),
-                                tint: (1.04, 1.01, 0.96),
-                                tonal_amp: 0.22,
-                                roughness: 0.82,
-                            ),
-                            // 1: impact-melt veneer — neutral slightly darker.
-                            (
-                                name: "impact_melt",
-                                albedo: 0.118,
-                                fresh_albedo: Some(0.23),
-                                tint: (1.00, 0.995, 0.99),
-                                tonal_amp: 0.22,
-                                roughness: 0.78,
-                            ),
-                            // 2: anorthositic feldspar — cool-white dominant
-                            // farside surface. Default catch-all.
-                            (
-                                name: "anorthosite",
-                                albedo: 0.140,
-                                fresh_albedo: Some(0.29),
-                                tint: (0.98, 0.99, 1.03),
-                                tonal_amp: 0.22,
-                                roughness: 0.85,
-                            ),
-                        ],
-                        rules: [
-                            Fbm(frequency: 3.7, threshold: 0.18, octaves: 4),
-                            Fbm(frequency: 2.1, threshold: 0.22, octaves: 4),
-                            Default,
-                        ],
-                    )),
-                    Cratering((
-                        // Max radius capped at 80 km — anything larger is
-                        // basin-class and lives in the Megabasin stage. The
-                        // cookie-cut SFD bake produces circular rims that
-                        // stack visibly when features overlap, which reads
-                        // as pasted discs above ~100 km.
-                        total_count: 280000,
-                        sfd_slope: 2.0,
-                        sfd_slope_small: None,
-                        sfd_break_radius_m: None,
-                        min_radius_m: 1500.0,
-                        max_radius_m: 80000.0,
-                        age_bias: 1.0,
-                        cubemap_bake_threshold_m: 1500.0,
-                        secondary_parent_radius_m: 40000.0,
-                        secondaries_per_parent: 18,
-                    )),
-                    Regolith((
-                        // Shader hash params (sub-`bake_d_min_m`).
-                        amplitude_m: 8.0,
-                        characteristic_wavelength_m: 120.0,
-                        crater_density_multiplier: 1.0,
-                        // Voronoi bake band: 600 m → 3000 m diameter
-                        // (matches `2 × cubemap_bake_threshold_m`). Fills
-                        // the gap between explicit baked craters with
-                        // multi-octave crater shapes instead of fbm.
-                        bake_d_min_m: 600.0,
-                        bake_scale: 1.0,
-                        density_modulation: 0.25,
-                        density_wavelength_m: 250000.0,
-                    )),
-                    // Lobate thrust scarps from global cooling contraction.
-                    // Tidally-locked moons sustain a stable stress field, so
-                    // these are physically motivated. Subtle on the height
-                    // field but read strongly at terminator lighting.
-                    Scarps((
-                        count: 12,
-                        min_length_m: 80000.0,
-                        max_length_m: 220000.0,
-                        width_m: 4500.0,
-                        height_m: 220.0,
-                        curvature: 0.10,
-                    )),
-                    SpaceWeather((
-                        mare_mature_albedo: 0.05,
-                        mare_fresh_albedo: 0.08,
-                        young_crater_age_threshold: 0.9,
-                        ray_age_threshold: 0.40,
-                        ray_extent_radii: 9.0,
-                        ray_count_per_crater: 14,
-                        ray_half_width: 0.055,
-                    )),
-                ],
-            )),
         ),
         (
             name: "Selva",
@@ -812,8 +96,7 @@
                 radius_m: 190000.0,
                 // Olivine-rich silicate — pallasite/forsterite analog.
                 // Warm muted green from mantle-derived olivine + pyroxene.
-                color: "#A8B088",
-                albedo: 0.25,
+                color: "#585D46",
                 rotation_period_s: 1123200.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -825,139 +108,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 210.0,
             )),
-            generator: Some((
-                seed: 1200,
-                composition: (silicate: 0.92, iron: 0.05, ice: 0.0, volatiles: 0.03, hydrogen_helium: 0.0),
-                cubemap_resolution: 1024,
-                body_age_gyr: 4.0,
-                pipeline: [
-                    Differentiate(()),
-                    // Ancient mantle-exposing giant impact + two smaller
-                    // paleo-basins. The dominant 85 km basin is the event
-                    // that exposed olivine-rich mantle material and drives
-                    // Selva's distinct mineralogy. Megabasin supplies the
-                    // heavy fbm-warped rim contours, multi-ring structure,
-                    // and ejecta sculpture that Cratering's sine-harmonic
-                    // warp doesn't reach at this scale.
-                    //
-                    // Near-side (+Z) bias is mild — Selva has weak tidal
-                    // locking and basin placement is essentially random,
-                    // so centers are scattered instead of farside-biased.
-                    Megabasin((
-                        basins: [
-                            // 0: primary — giant impact, multi-ring.
-                            (center_dir: ( 0.35, -0.20,  0.92), radius_m: 85000.0, depth_m: 4200.0, ring_count: 3),
-                            // 1: older large basin, partially overprinted.
-                            (center_dir: (-0.62,  0.45, -0.65), radius_m: 52000.0, depth_m: 2400.0, ring_count: 2),
-                            // 2: ancient, degraded.
-                            (center_dir: ( 0.18,  0.78, -0.60), radius_m: 38000.0, depth_m: 1600.0, ring_count: 1),
-                        ],
-                        hemispheric_lowering_m: 0.0,
-                    )),
-                    // Olivine-rich silicate body — differentiated crust
-                    // exposed by an ancient giant impact. Unlike Mira's
-                    // neutral-gray anorthositic highlands, Selva's surface
-                    // is dominated by forsterite/pyroxene and reads as a
-                    // distinctly green-tinged body (Minmus-adjacent but
-                    // physically motivated by mineralogy).
-                    //
-                    // Single highland biome. Hard multi-biome boundaries
-                    // read as cut-out discs on a small airless body; real
-                    // regional color variation is better delivered by the
-                    // per-biome `tonal_amp` low-freq fbm field. Mare plains
-                    // carry their own chromatic tint via MareFlood →
-                    // SpaceWeather::mare_tint, and their boundaries are
-                    // topography-warped (noise-fuzzed flood fronts) rather
-                    // than biome-painted, so they blend softly into the
-                    // olivine highlands.
-                    Biomes((
-                        biomes: [
-                            (
-                                name: "olivine_regolith",
-                                albedo: 0.34,
-                                fresh_albedo: Some(0.52),
-                                // Aggressive green ratio — g:r ≈ 2.3,
-                                // g:b ≈ 2.7. Real olivine regolith is
-                                // less saturated, but sRGB + distant
-                                // lighting eats most of the chroma and
-                                // a mild tint reads as "faintly gray".
-                                tint: (0.58, 1.32, 0.48),
-                                // High tonal amp → strong soft brightness
-                                // variation across the surface without
-                                // any hard patch boundaries.
-                                tonal_amp: 0.32,
-                                roughness: 0.78,
-                            ),
-                        ],
-                    )),
-                    Cratering((
-                        // Per-steradian density matches Mira above the
-                        // same fraction-of-radius threshold (~3 texel
-                        // widths at res 1024 → 650 m on a 190 km body).
-                        // Slope 2.0 unifies the SFD with Mira-style moons so
-                        // visual size distribution is consistent.
-                        total_count: 89000,
-                        sfd_slope: 2.0,
-                        sfd_slope_small: None,
-                        sfd_break_radius_m: None,
-                        min_radius_m: 650.0,
-                        max_radius_m: 17500.0,
-                        age_bias: 1.0,
-                        cubemap_bake_threshold_m: 650.0,
-                        secondary_parent_radius_m: 0.0,
-                        secondaries_per_parent: 0,
-                    )),
-                    // Paleo-volcanic flood plains. Selva had a short
-                    // radiogenic heating phase in its first ~500 Myr; the
-                    // largest impact basins on the slightly warmer "near"
-                    // hemisphere pooled olivine-rich melt. Now cold and
-                    // re-cratered, these read as smooth low-relief
-                    // embayments with irregular noise-warped boundaries —
-                    // Mercury's smooth plains, not lunar mare darkness.
-                    MareFlood((
-                        target_count: 0,
-                        // More plains than a lunar-style sparse flood —
-                        // Minmus-adjacent smooth-plain prominence so the
-                        // distinct flood-plain color reads strongly.
-                        additional_crater_count: 14,
-                        fill_fraction: 0.70,
-                        near_side_bias: 0.3,
-                        boundary_noise_amplitude_m: 500.0,
-                        boundary_noise_freq: 10.0,
-                        episode_count: 3,
-                        wrinkle_ridges: true,
-                    )),
-                    Regolith((
-                        // Sub-texel detail continuity — matches Mira's
-                        // shader-hash + Voronoi bake band approach.
-                        amplitude_m: 6.0,
-                        characteristic_wavelength_m: 90.0,
-                        crater_density_multiplier: 1.0,
-                        bake_d_min_m: 260.0,
-                        bake_scale: 1.0,
-                        density_modulation: 0.25,
-                        density_wavelength_m: 60000.0,
-                    )),
-                    SpaceWeather((
-                        // Let biome palette drive highland color
-                        // (olivine/pyroxene) — no grayscale override.
-                        // Flood plains weather to a distinct pale olivine
-                        // green, appreciably cooler and brighter than
-                        // Mira's mare. `mare_tint` chromatic shift is
-                        // multiplied over the grayscale mare albedo.
-                        mare_mature_albedo: 0.28,
-                        mare_fresh_albedo: 0.44,
-                        // Flood plains: cooler pale green, distinctly
-                        // separable from the warmer olivine highlands.
-                        mare_tint: (0.52, 1.38, 0.55),
-                        young_crater_age_threshold: 0.8,
-                        ray_age_threshold: 0.15,
-                        ray_extent_radii: 8.0,
-                        ray_count_per_crater: 12,
-                        ray_half_width: 0.05,
-                    )),
-                ],
-            )),
         ),
         (
             name: "Auron",
@@ -966,8 +116,7 @@
             physical: (
                 mass_kg: 2.394e26,
                 radius_m: 44600000.0,
-                color: "#D9BF74",
-                albedo: 0.50,
+                color: "#9F8C53",
                 rotation_period_s: 36720.0,
                 axial_tilt_deg: 7.0,
             ),
@@ -979,191 +128,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 248.0,
             )),
-            generator: None,
-            // Sub-Saturn, H₂/He atmosphere. Saturation-forward palette
-            // tuned against Cassini true-colour plates: deep ochre
-            // belts, bright cream zones, blue-grey north polar cap.
-            // No grey tint multiplier — all chromatic variation lives
-            // in the palette so the disk reads saturated at any
-            // exposure.
-            atmosphere: Some((
-                seed: 20100,
-                cloud_deck: (
-                    // Saturn-style cloud deck with the full Cassini
-                    // palette: warm ochre south, bright gold-cream
-                    // equatorial zone, cooling to a pale blue-grey
-                    // north polar cap. Stops are tuned to give
-                    // zone/belt pairs strong chromatic contrast on
-                    // top of the luminance swing.
-                    // Continuous smooth latitude gradient — Saturn
-                    // reference (Cassini true-colour plate). Jets
-                    // modulate luminance only, so this is authored
-                    // as a base colour ramp with no alternation.
-                    // South dusky ochre → equator warm cream → cool
-                    // olive-khaki temperate → pale haze blue polar.
-                    // Hue progression is monotonic and shallow so
-                    // the jets read as brightness variation on a
-                    // single gradient instead of stripes of
-                    // different colours.
-                    // Sampled from Saturn Cassini latitude strip.
-                    // South pole warm gold → equator bright cream →
-                    // north pole cool sage-grey. Chromatic wander is
-                    // monotone along latitude (no hue reversal), which
-                    // keeps the staircase quantization reading as a
-                    // single continuous gradient broken into plateaus.
-                    palette: [
-                        (lat: -1.00, color: (0.58, 0.62, 0.44)),
-                        (lat: -0.55, color: (0.82, 0.64, 0.38)),
-                        (lat: -0.10, color: (0.94, 0.84, 0.50)),
-                        (lat:  0.20, color: (0.78, 0.68, 0.40)),
-                        (lat:  0.60, color: (0.70, 0.60, 0.44)),
-                        (lat:  1.00, color: (0.52, 0.58, 0.64)),
-                    ],
-                    // ~32 jets pole-to-pole. The hue gradient is now
-                    // smooth (not a hue staircase), so the only cost
-                    // of more bands is more visible step edges from
-                    // the per-band luminance modulation. Saturn shows
-                    // many narrow jets at cruise scale.
-                    band_frequency: 16.0,
-                    band_warp: 0.20,
-                    // Low turbulence — gates streak, detail, and
-                    // palette jitter amplitudes. Saturn reference has
-                    // very subdued high-freq contrast.
-                    turbulence: 0.05,
-                    // Per-band luminance step amplitude. Now drives an
-                    // alternating ± multiplier indexed by band id, so
-                    // adjacent jets read as a Saturn belt/zone pair.
-                    // 0.05 = ±5% luminance — visible crisp edges that
-                    // don't overpower the smooth hue gradient.
-                    band_contrast: 0.05,
-                    // No longer in use by the shader — kept for the
-                    // serde schema. Edge crispness is now a hard step
-                    // from the per-band luminance modulation.
-                    band_sharpness: 0.0,
-                    // No grey/cool tint multiplier — the palette
-                    // carries all the chromatic information.
-                    tint: (1.00, 1.00, 1.00),
-                    // Saturn-style zonal wind profile: strong eastward
-                    // equatorial superrotation flanked by alternating
-                    // prograde/retrograde jets at mid latitudes, quiet
-                    // poles. 16 stops so each jet at band_frequency=10
-                    // gets its own signed speed and adjacent bands
-                    // visibly counter-drift. Rate kept low so the noise
-                    // field doesn't smear within a play session — a few
-                    // minutes for clear differential motion, ~45 min
-                    // before high-shear bands start to look ugly.
-                    speed_profile: [
-                         0.05, -0.15,  0.25, -0.20,
-                         0.30, -0.25,  0.40,  0.85,
-                         1.00,  0.45, -0.30,  0.35,
-                        -0.25,  0.20, -0.15,  0.05,
-                    ],
-                    differential_rotation_rate: 0.0012,
-                    // Gentle pole turbulence, quiet equator — the
-                    // old 1.0-at-poles profile made the high-latitude
-                    // cloud bands rip apart into blobs.
-                    turbulence_profile: [
-                        0.45, 0.40, 0.30, 0.22,
-                        0.15,
-                        0.22, 0.30, 0.40, 0.45,
-                    ],
-                    edge_wave_amp: 0.25,
-                    curl_amp: 0.30,
-                    // Two-layer parallax removed from shader; kept at
-                    // zero for authoring-format compatibility.
-                    parallax_amp: 0.0,
-                    // No single large storm — the edge vortex chain
-                    // now carries all the small eddies that populate
-                    // the band boundaries.
-                    named_vortices: [],
-                    edge_vortex_chain: Some((
-                        // Small angular radius = fine eddies
-                        // compared to band width. With ~20 slots per
-                        // band this gives a populated boundary
-                        // without the eddies overlapping.
-                        base_radius: 0.020,
-                        strength: 0.9,
-                        lifetime_s: 90.0,
-                        slots_per_band: 20,
-                    )),
-                ),
-                haze: Some((
-                    tint: (0.78, 0.88, 0.92),
-                    thickness: 0.10,
-                    terminator_bias: 0.25,
-                )),
-                rim_halo: Some((
-                    color: (0.62, 0.86, 0.96),
-                    intensity: 0.35,
-                    scale_height_m: 45000.0,
-                    // Backlit-only shell. 180 km outer extent gives a
-                    // thin Cassini-style crescent when the sun is
-                    // behind Auron relative to the camera; lit-side
-                    // external halo is no longer produced by the
-                    // shader, so this value controls crescent width
-                    // only.
-                    outer_altitude_m: 180000.0,
-                )),
-                limb: Some((
-                    terminator_warmth: (0.92, 0.78, 0.70),
-                    terminator_strength: 0.35,
-                    fresnel_color: (0.72, 0.88, 1.00),
-                    // Stand-in for the spectral shift at Saturn's
-                    // lit limb (upper-atmosphere Rayleigh dominant,
-                    // not deep-cloud chromophore). 0.60 puts a clear
-                    // cool tint on the edge without washing the
-                    // palette — internal to the disk, no external
-                    // glow.
-                    fresnel_strength: 0.60,
-                )),
-                // Rayleigh blue-gap layer is disabled until a real
-                // bake pipeline produces a high-frequency haze
-                // density channel. The per-fragment fBm version
-                // aliased into continent-sized blobs rather than the
-                // narrow clearings Cassini shows, so the blue in
-                // Auron's disk is now carried entirely by the
-                // palette's polar stops.
-                rayleigh: None,
-                // Per-channel Minnaert limb darkening. Red darkens
-                // slowest, blue fastest — reproduces the wavelength
-                // trend in Cassini photometry. Strength 0.9 keeps
-                // the effect strong but leaves a small floor so the
-                // silhouette doesn't go pitch-black.
-                limb_darkening: Some((
-                    red:    0.22,
-                    green:  0.30,
-                    blue:   0.42,
-                    strength: 0.90,
-                )),
-            )),
-            // Saturn-style ring system. Inner edge roughly at
-            // 1.25 R, outer at 2.3 R — matches Saturn's B/A
-            // ring footprint. Cassini division lives around
-            // r=0.42 of the radial span; the profile also
-            // authors a dim C ring and a bright B ring core.
-            rings: Some((
-                inner_radius_m:  55750000.0,
-                outer_radius_m: 102580000.0,
-                seed: 20101,
-                opacity: 1.00,
-                ringlet_noise: 0.55,
-                ringlet_octaves: 7,
-                palette: [
-                    // Inner edge — translucent C-ring: dusky grey.
-                    (r: 0.00, color: (0.32, 0.28, 0.24), opacity: 0.18),
-                    (r: 0.18, color: (0.48, 0.42, 0.34), opacity: 0.40),
-                    // Bright B-ring core — creamy gold.
-                    (r: 0.30, color: (0.92, 0.82, 0.62), opacity: 0.95),
-                    (r: 0.40, color: (1.00, 0.90, 0.68), opacity: 0.98),
-                    // Cassini division — authored as a dark gap.
-                    (r: 0.46, color: (0.18, 0.16, 0.14), opacity: 0.10),
-                    // A-ring — warm tan.
-                    (r: 0.55, color: (0.80, 0.68, 0.48), opacity: 0.82),
-                    (r: 0.80, color: (0.74, 0.62, 0.44), opacity: 0.70),
-                    // Outer edge — feathered F-ring stand-in.
-                    (r: 1.00, color: (0.55, 0.48, 0.38), opacity: 0.25),
-                ],
-            )),
         ),
         (
             name: "Pelagos",
@@ -1172,8 +136,7 @@
             physical: (
                 mass_kg: 4.362e23,
                 radius_m: 2350000.0,
-                color: "#267D8C",
-                albedo: 0.20,
+                color: "#0D3941",
                 rotation_period_s: 535680.0,
                 axial_tilt_deg: 0.5,
             ),
@@ -1185,252 +148,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 72.0,
             )),
-            // Ocean moon. 85% ocean cover, volcanic island arcs, no
-            // continents proper. Tidal heating from Auron drives two
-            // active margins and a handful of hotspot tracks — those
-            // are the only things that reliably break the waterline.
-            // Matches `docs/lore/solar_system.md`.
-            generator: Some((
-                seed: 1250,
-                // Iron-rich core (8000 kg/m³ density) with residual
-                // silicate mantle and thick hydrosphere + N₂/H₂O
-                // atmosphere as the volatile budget.
-                composition: (silicate: 0.20, iron: 0.70, ice: 0.05, volatiles: 0.05, hydrogen_helium: 0.0),
-                cubemap_resolution: 1024,
-                body_age_gyr: 4.5,
-                pipeline: [
-                    // Stage 1 — Tectonic Skeleton. Plate partition
-                    // supplies the scaffold the active margins and
-                    // hotspot tracks attach to. Pelagos has no
-                    // continents, so the plates themselves don't read
-                    // visually — their boundaries do, through tidal-
-                    // heated arcs.
-                    TectonicSkeleton((
-                        // Level 7 ≈ 164 k vertices, ~20 km per hop on
-                        // a 2350 km body. One level below Thalos —
-                        // the island arcs read at ~100 km scales so
-                        // 20 km resolution is adequate and keeps the
-                        // pipeline fast while the rest of the body
-                        // design settles.
-                        subdivision_level: 7,
-                        // 10 plates — small-world plate count. More
-                        // than needed for tectonic drama, tuned so
-                        // active-margin and hotspot placement has
-                        // several distinct boundary tracks to pick
-                        // from.
-                        n_cratons: 10,
-                        plate_warp_amplitude: 0.4,
-                        plate_warp_frequency: 3.0,
-                        plate_warp_octaves: 5,
-                        // Two active margins — Pelagos is tidally
-                        // heated by Auron, which drives more
-                        // persistent active volcanism than a
-                        // thermally-isolated body this size would
-                        // have.
-                        n_active_margins: 2,
-                        // One rift scar for the sake of variety;
-                        // doesn't read as a continental feature
-                        // since there are no continents to rift.
-                        n_rift_scars: 1,
-                        // Six hotspot tracks — these ARE the visible
-                        // island arc chains above water. More than
-                        // Thalos because the arcs are the planet's
-                        // whole above-water story.
-                        n_hotspot_tracks: 6,
-                        // 10 hops ≈ 200 km at level 7 — Hawaii-
-                        // Emperor scale island chain. Each track
-                        // contributes a few islands above water plus
-                        // submerged seamount trail.
-                        hotspot_track_length: 10,
-                        lloyd_iterations: 3,
-                        debug_paint_albedo: false,
-                    )),
-                    // Stage 2 — Coarse Elevation. Continental mask
-                    // still comes from warped fBm thresholded at 15 %
-                    // land, but the continental bias is tuned low so
-                    // the "continents" read as shallow shelves with
-                    // small island exposures rather than proper
-                    // landmasses. Hotspots are tall enough (1500 m) to
-                    // reliably pop above the waterline regardless of
-                    // whether they land on the shelf or in open ocean.
-                    CoarseElevation((
-                        // 0.92 → ~8 % land. The spec's "85 % ocean"
-                        // number produces ~30 % of the visible disk
-                        // as land after hemisphere concentration,
-                        // which reads as continents rather than
-                        // "volcanic island arcs, no continents". 8 %
-                        // global keeps a meaningful amount of land
-                        // to form arcs without the continental read.
-                        target_ocean_fraction: 0.92,
-                        // Higher base frequency than Thalos (3.0 vs
-                        // 2.0) — Thalos's 2.0 produces ~5 continent-
-                        // scale patches, which on a body that's
-                        // supposed to have no continents reads
-                        // exactly wrong. 3.0 splits the land into
-                        // roughly 10–15 smaller clusters, closer to
-                        // archipelago scale.
-                        continent_noise_frequency: 3.0,
-                        continent_noise_octaves: 6,
-                        continent_noise_persistence: 0.55,
-                        continent_warp_amplitude: 0.45,
-                        continent_warp_frequency: 2.2,
-                        // Isotropic — no Earth-style E-W elongation
-                        // bias. Ocean-world island clusters should
-                        // read as blobs, not belts.
-                        horizontal_stretch: 1.0,
-                        // No latitude bias — tidal heating + ocean
-                        // thermal inertia flattens the pole/equator
-                        // gradient that drives Thalos's mid-lat
-                        // preference.
-                        mid_latitude_bias: 0.0,
-                        // Keep small archipelagos (~0.05 % of sphere
-                        // ≈ 35 000 km² ≈ Iceland-scale). Smaller than
-                        // Thalos's 0.3 % filter because island arcs
-                        // *are* the land.
-                        min_land_fraction: 0.0005,
-                        min_ocean_fraction: 0.0,
-                        // Low shelf bias: +200 m on the continental
-                        // side, −3000 m on oceanic. 200 m above
-                        // sea level puts most of the "continental"
-                        // surface as shallow shelf just above water,
-                        // with noise-driven peaks rising as islands.
-                        // Ocean floor at 3 km below sea level —
-                        // shallower than Thalos's 3.5 km; spreading
-                        // ridges on a tidally-heated moon would lift
-                        // the average seafloor.
-                        continental_bias_m: 200.0,
-                        oceanic_bias_m: -3000.0,
-                        // Modest suture relief — no major orogenies
-                        // on a body with no sustained continent-
-                        // continent collisions.
-                        suture_height_m: 800.0,
-                        suture_falloff_hops: 5.0,
-                        suture_age_decay_myr: 800.0,
-                        rift_depth_m: 600.0,
-                        rift_falloff_hops: 3.0,
-                        // Active margin: volcanic arc uplift + deep
-                        // offshore trench. 2.5 km uplift → visible
-                        // arc above water; 3 km trench sits 8 hops
-                        // offshore.
-                        active_uplift_m: 2500.0,
-                        active_trench_m: 3000.0,
-                        active_falloff_hops: 3.0,
-                        trench_offset_hops: 8.0,
-                        trench_width_hops: 3.0,
-                        // 1500 m seamounts — with the +200 m
-                        // continental bias or against the -3000 m
-                        // ocean floor, a 1500 m bump plants a cone
-                        // that reaches 1300 m ABOVE sea level on
-                        // shelves and sits 1500 m below on deep
-                        // ocean floor (seamounts). Tight falloff
-                        // (1.5 hops) keeps them as isolated island
-                        // points, not ridges.
-                        hotspot_height_m: 1500.0,
-                        hotspot_falloff_hops: 1.5,
-                        // 1000 m noise — half the 2000 m gap
-                        // between continental/oceanic bias, plenty
-                        // of seafloor texture without pushing ocean
-                        // noise above sea level.
-                        noise_amplitude_m: 1000.0,
-                        noise_frequency: 2.5,
-                        noise_octaves: 7,
-                        noise_persistence: 0.62,
-                        warp_amplitude: 0.45,
-                        warp_frequency: 3.0,
-                        // Stage 3 repaints; leaving off to avoid
-                        // wasted bake work.
-                        debug_paint_albedo: false,
-                    )),
-                    // Stage 3 — Hydrological Carving. Fewer erosion
-                    // iterations than Thalos: island arcs are small
-                    // and young relative to continental cratons;
-                    // there's not much topography to pound flat. The
-                    // stage still runs to fix the sea level cleanly
-                    // at the 85 % percentile and produce a drainage
-                    // graph for the islands that do exist.
-                    HydrologicalCarving((
-                        erosion_iterations: 40,
-                        erosion_k: 2.0e-4,
-                        stream_power_m: 0.5,
-                        stream_power_n: 1.0,
-                        max_erosion_per_iter_m: 50.0,
-                        deposition_rate: 0.08,
-                        pit_fill_epsilon_m: 0.001,
-                        target_ocean_fraction: 0.92,
-                        // Islands have small catchments — drop the
-                        // river threshold so any meaningful island
-                        // drainage still shows up as a ribbon.
-                        river_accumulation_threshold_m2: 5.0e10,
-                        river_half_width_rad: 0.0008,
-                        // No SurfaceMaterials stage yet — leave the
-                        // hypsometric debug paint on so the final
-                        // bake shows the sea level and bathymetry
-                        // readably. Swap off once materials land.
-                        debug_paint_albedo: true,
-                    )),
-                ],
-            )),
-            // N₂-dominant atmosphere at ~0.4 atm with CO₂/H₂O. Thinner
-            // than Thalos's 0.85 atm, but lower gravity (0.54 g) lifts
-            // the scale height — column height reads taller than a
-            // naive pressure ratio would suggest. Clouds are a humid
-            // ocean world's most distinctive read from orbit: high
-            // coverage, fine-grained convective structure.
-            terrestrial_atmosphere: Some((
-                // Cool blue rim, slightly dimmer than Thalos's. N₂
-                // Rayleigh still dominates the tint. Scale height
-                // 10 km = Earth's 8.4 km × (0.4 atm / 0.85 atm) ÷
-                // (0.54 g / 0.91 g) ≈ 10 km when the lower gravity
-                // raises the column. Outer shell out to 120 km for
-                // smoothed rim falloff.
-                rim_halo: Some((
-                    color: (0.45, 0.65, 0.95),
-                    intensity: 0.18,
-                    scale_height_m: 10000.0,
-                    outer_altitude_m: 120000.0,
-                )),
-                limb: None,
-                limb_darkening: None,
-                // Rayleigh optical depth scales with column depth,
-                // roughly 0.47 × Thalos at 0.4 atm / 0.85 atm. Produces
-                // visibly softer sunsets and a paler blue haze than
-                // Thalos — consistent with a thinner atmosphere.
-                rayleigh: Some((
-                    vertical_optical_depth: (0.022, 0.051, 0.124),
-                    strength: 1.0,
-                )),
-                // Humid ocean moon. Coverage 0.30 — modestly wetter
-                // than Thalos's 0.25, since 85 % ocean cover and tidal
-                // heating sustain more evaporation and convection.
-                // Raw Worley fBm peaks around 0.8 and the shader's
-                // `cov_scale = 2·coverage` gate means much higher than
-                // 0.30 pushes the disk into near-solid overcast.
-                //
-                // NOTE: `frequency`, `octaves`, `softness` have no
-                // effect on the current render — the cloud cube is
-                // baked with fixed Wedekind defaults (seed-only
-                // variation), and the haze layer that would read
-                // those fields is currently disabled in the shader.
-                // They're kept for schema parity with Thalos / so
-                // they're already populated when the haze layer and
-                // per-body bake params return.
-                clouds: Some((
-                    coverage: 0.30,
-                    softness: 0.18,
-                    frequency: 3.5,
-                    octaves: 10,
-                    // Pale blue-cool cloud albedo. Slightly cooler
-                    // than Thalos's off-white — thinner atmosphere
-                    // gives less orange twilight reflection bias.
-                    albedo: (0.78, 0.80, 0.84),
-                    // Pelagos rotates every 6.2 days (~7× slower
-                    // than Thalos); weather systems drift more
-                    // slowly relative to the surface.
-                    scroll_rate: 1.5e-5,
-                    differential_rotation: 0.40,
-                    seed: 7143,
-                )),
-            )),
         ),
         (
             name: "Carpo",
@@ -1439,8 +156,7 @@
             physical: (
                 mass_kg: 1.5e19,
                 radius_m: 180000.0,
-                color: "#8C7A5E",
-                albedo: 0.15,
+                color: "#383023",
                 rotation_period_s: 6048000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -1452,76 +168,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 310.0,
             )),
-            generator: Some((
-                seed: 1300,
-                composition: (silicate: 0.90, iron: 0.05, ice: 0.0, volatiles: 0.05, hydrogen_helium: 0.0),
-                cubemap_resolution: 1024,
-                body_age_gyr: 4.5,
-                pipeline: [
-                    Differentiate(()),
-                    // Captured asteroid — small silicate body battered by
-                    // the full age of the system. Two prominent paleo-
-                    // basins up to ~1/3 body radius: captures of this size
-                    // routinely carry a dominant impact scar (Mathilde,
-                    // Lutetia, Vesta analog). No tidal lock; basin centers
-                    // are essentially random.
-                    Megabasin((
-                        basins: [
-                            // 0: dominant large impact, partially degraded.
-                            (center_dir: ( 0.42, -0.15,  0.90), radius_m: 62000.0, depth_m: 3200.0, ring_count: 2),
-                            // 1: older smaller basin on the opposite hemisphere.
-                            (center_dir: (-0.55,  0.48, -0.68), radius_m: 34000.0, depth_m: 1600.0, ring_count: 1),
-                            // 2: ancient, nearly erased.
-                            (center_dir: ( 0.20,  0.82,  0.53), radius_m: 22000.0, depth_m: 900.0, ring_count: 1),
-                        ],
-                        hemispheric_lowering_m: 0.0,
-                    )),
-                    Biomes((
-                        biomes: [
-                            (
-                                name: "captured_regolith",
-                                albedo: 0.13,
-                                fresh_albedo: Some(0.26),
-                                tint: (1.02, 1.00, 0.97),
-                                tonal_amp: 0.26,
-                                roughness: 0.80,
-                            ),
-                        ],
-                    )),
-                    Cratering((
-                        total_count: 89000,
-                        sfd_slope: 2.0,
-                        sfd_slope_small: None,
-                        sfd_break_radius_m: None,
-                        min_radius_m: 600.0,
-                        max_radius_m: 16200.0,
-                        age_bias: 1.0,
-                        cubemap_bake_threshold_m: 600.0,
-                        secondary_parent_radius_m: 0.0,
-                        secondaries_per_parent: 0,
-                    )),
-                    Regolith((
-                        amplitude_m: 5.0,
-                        characteristic_wavelength_m: 80.0,
-                        crater_density_multiplier: 1.0,
-                        bake_d_min_m: 240.0,
-                        bake_scale: 1.0,
-                        density_modulation: 0.25,
-                        density_wavelength_m: 55000.0,
-                    )),
-                    SpaceWeather((
-                        highland_mature_albedo: 0.13,
-                        highland_fresh_albedo: 0.24,
-                        mare_mature_albedo: 0.06,
-                        mare_fresh_albedo: 0.09,
-                        young_crater_age_threshold: 0.8,
-                        ray_age_threshold: 0.15,
-                        ray_extent_radii: 8.0,
-                        ray_count_per_crater: 12,
-                        ray_half_width: 0.05,
-                    )),
-                ],
-            )),
         ),
         (
             name: "Theron",
@@ -1530,8 +176,7 @@
             physical: (
                 mass_kg: 3.9e18,
                 radius_m: 120000.0,
-                color: "#2E2A26",
-                albedo: 0.05,
+                color: "#050403",
                 rotation_period_s: 9936000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -1543,74 +188,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 55.0,
             )),
-            generator: Some((
-                seed: 1301,
-                composition: (silicate: 0.85, iron: 0.05, ice: 0.0, volatiles: 0.10, hydrogen_helium: 0.0),
-                cubemap_resolution: 1024,
-                body_age_gyr: 4.5,
-                pipeline: [
-                    Differentiate(()),
-                    // Dark C-type captured on a retrograde inclined orbit.
-                    // One huge disrupting impact scar dominates — typical
-                    // of small carbonaceous bodies whose tensile strength
-                    // barely survives the largest cratering event.
-                    Megabasin((
-                        basins: [
-                            // 0: hemispheric near-disruption impact.
-                            (center_dir: (-0.25,  0.10,  0.96), radius_m: 48000.0, depth_m: 2600.0, ring_count: 2),
-                            // 1: older secondary basin.
-                            (center_dir: ( 0.68, -0.40, -0.62), radius_m: 24000.0, depth_m: 1100.0, ring_count: 1),
-                        ],
-                        hemispheric_lowering_m: 0.0,
-                    )),
-                    Biomes((
-                        biomes: [
-                            (
-                                name: "dark_carbonaceous",
-                                albedo: 0.05,
-                                fresh_albedo: Some(0.11),
-                                // Very slight red/warm cast — C-type
-                                // spectra are neutral-to-slightly-red.
-                                tint: (1.03, 1.00, 0.96),
-                                tonal_amp: 0.28,
-                                roughness: 0.82,
-                            ),
-                        ],
-                    )),
-                    Cratering((
-                        total_count: 89000,
-                        sfd_slope: 2.0,
-                        sfd_slope_small: None,
-                        sfd_break_radius_m: None,
-                        min_radius_m: 400.0,
-                        max_radius_m: 10800.0,
-                        age_bias: 1.0,
-                        cubemap_bake_threshold_m: 400.0,
-                        secondary_parent_radius_m: 0.0,
-                        secondaries_per_parent: 0,
-                    )),
-                    Regolith((
-                        amplitude_m: 4.0,
-                        characteristic_wavelength_m: 70.0,
-                        crater_density_multiplier: 1.0,
-                        bake_d_min_m: 160.0,
-                        bake_scale: 1.0,
-                        density_modulation: 0.25,
-                        density_wavelength_m: 40000.0,
-                    )),
-                    SpaceWeather((
-                        highland_mature_albedo: 0.05,
-                        highland_fresh_albedo: 0.12,
-                        mare_mature_albedo: 0.03,
-                        mare_fresh_albedo: 0.06,
-                        young_crater_age_threshold: 0.8,
-                        ray_age_threshold: 0.15,
-                        ray_extent_radii: 8.0,
-                        ray_count_per_crater: 12,
-                        ray_half_width: 0.05,
-                    )),
-                ],
-            )),
         ),
         (
             name: "Vaelen",
@@ -1619,10 +196,9 @@
             physical: (
                 mass_kg: 3.946e22,
                 radius_m: 1130000.0,
-                color: "#BF6640",
-                albedo: 0.17,
+                color: "#59210E",
                 rotation_period_s: 88920.0,
-                axial_tilt_deg: 14.0,
+                axial_tilt_deg: 18.0,
             ),
             orbit: Some((
                 semi_major_axis_m: 2.58808e11,
@@ -1632,7 +208,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 118.0,
             )),
-            generator: None,
         ),
         (
             name: "Kael",
@@ -1641,8 +216,7 @@
             physical: (
                 mass_kg: 7.3e13,
                 radius_m: 14000.0,
-                color: "#8C7060",
-                albedo: 0.15,
+                color: "#382B24",
                 rotation_period_s: 92520.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -1654,7 +228,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 80.0,
             )),
-            generator: None,
         ),
         (
             name: "Xxirt",
@@ -1663,8 +236,7 @@
             physical: (
                 mass_kg: 1.7e13,
                 radius_m: 8000.0,
-                color: "#7A6E66",
-                albedo: 0.15,
+                color: "#302A27",
                 rotation_period_s: 576000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -1676,12 +248,7 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 220.0,
             )),
-            generator: None,
         ),
-
-        // ─────────────────────────────────────────────
-        // MAIN BELT
-        // ─────────────────────────────────────────────
         (
             name: "Ceryx",
             kind: DwarfPlanet,
@@ -1689,8 +256,7 @@
             physical: (
                 mass_kg: 9.7e20,
                 radius_m: 470000.0,
-                color: "#6E6258",
-                albedo: 0.09,
+                color: "#1F1B17",
                 rotation_period_s: 32667.0,
                 axial_tilt_deg: 4.0,
             ),
@@ -1702,12 +268,7 @@
                 arg_periapsis_deg: 73.0,
                 true_anomaly_deg: 30.0,
             )),
-            generator: None,
         ),
-
-        // ─────────────────────────────────────────────
-        // OUTER SYSTEM
-        // ─────────────────────────────────────────────
         (
             name: "Teros",
             kind: Planet,
@@ -1715,8 +276,7 @@
             physical: (
                 mass_kg: 2.279e27,
                 radius_m: 74000000.0,
-                color: "#BF8C4C",
-                albedo: 0.47,
+                color: "#886234",
                 rotation_period_s: 35640.0,
                 axial_tilt_deg: 3.1,
             ),
@@ -1728,106 +288,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 315.0,
             )),
-            generator: None,
-            // Jupiter analogue: ammonia cloud bands, ochre/white/tan,
-            // persistent storm systems, faint dusty rings.
-            atmosphere: Some((
-                seed: 70100,
-                cloud_deck: (
-                    // Jupiter true-colour palette. Alternating
-                    // bright cream zones and rich rust belts at the
-                    // latitudes of NEB/SEB/NTB/STB, framed by dusky
-                    // polar hoods. Hue alternation carries the
-                    // belt/zone contrast; the luminance step adds
-                    // fine sub-band texture on top.
-                    palette: [
-                        (lat: -1.00, color: (0.62, 0.50, 0.40)),
-                        (lat: -0.72, color: (0.62, 0.36, 0.18)),
-                        (lat: -0.45, color: (1.00, 0.92, 0.72)),
-                        (lat: -0.18, color: (0.64, 0.38, 0.16)),
-                        (lat:  0.00, color: (1.00, 0.94, 0.78)),
-                        (lat:  0.18, color: (0.64, 0.38, 0.16)),
-                        (lat:  0.45, color: (1.00, 0.90, 0.68)),
-                        (lat:  0.72, color: (0.64, 0.40, 0.20)),
-                        (lat:  1.00, color: (0.60, 0.48, 0.38)),
-                    ],
-                    band_frequency: 10.0,
-                    band_warp: 0.40,
-                    turbulence: 0.17,
-                    band_contrast: 0.18,
-                    band_sharpness: 0.70,
-                    tint: (1.00, 1.00, 1.00),
-                    speed_profile: [
-                         0.10, -0.20,  0.35, -0.30,
-                         0.50, -0.40,  0.60,  1.00,
-                         0.90,  0.50, -0.35,  0.45,
-                        -0.30,  0.25, -0.20,  0.08,
-                    ],
-                    differential_rotation_rate: 0.0018,
-                    turbulence_profile: [
-                        0.55, 0.50, 0.40, 0.30,
-                        0.20,
-                        0.30, 0.40, 0.50, 0.55,
-                    ],
-                    edge_wave_amp: 0.35,
-                    curl_amp: 0.40,
-                    parallax_amp: 0.0,
-                    named_vortices: [
-                        (
-                            lat: -0.22,
-                            lon: 1.40,
-                            radius: 0.08,
-                            strength: 1.8,
-                            tint: (0.82, 0.42, 0.28),
-                        ),
-                    ],
-                    edge_vortex_chain: Some((
-                        base_radius: 0.018,
-                        strength: 1.1,
-                        lifetime_s: 120.0,
-                        slots_per_band: 16,
-                    )),
-                ),
-                haze: Some((
-                    tint: (0.88, 0.82, 0.74),
-                    thickness: 0.08,
-                    terminator_bias: 0.30,
-                )),
-                rim_halo: Some((
-                    color: (0.70, 0.78, 0.90),
-                    intensity: 0.30,
-                    scale_height_m: 50000.0,
-                    outer_altitude_m: 350000.0,
-                )),
-                limb: Some((
-                    terminator_warmth: (0.94, 0.76, 0.62),
-                    terminator_strength: 0.30,
-                    fresnel_color: (0.68, 0.80, 0.94),
-                    fresnel_strength: 0.30,
-                )),
-                rayleigh: None,
-                limb_darkening: Some((
-                    red:    0.20,
-                    green:  0.28,
-                    blue:   0.40,
-                    strength: 0.85,
-                )),
-            )),
-            rings: Some((
-                inner_radius_m:  92000000.0,
-                outer_radius_m: 130000000.0,
-                seed: 70101,
-                opacity: 0.25,
-                ringlet_noise: 0.30,
-                ringlet_octaves: 5,
-                palette: [
-                    (r: 0.00, color: (0.40, 0.36, 0.30), opacity: 0.08),
-                    (r: 0.25, color: (0.52, 0.46, 0.38), opacity: 0.18),
-                    (r: 0.50, color: (0.58, 0.50, 0.40), opacity: 0.22),
-                    (r: 0.75, color: (0.48, 0.42, 0.34), opacity: 0.15),
-                    (r: 1.00, color: (0.38, 0.34, 0.28), opacity: 0.06),
-                ],
-            )),
         ),
         (
             name: "Pyrith",
@@ -1836,8 +296,7 @@
             physical: (
                 mass_kg: 1.138e22,
                 radius_m: 910000.0,
-                color: "#E6B233",
-                albedo: 0.40,
+                color: "#99751E",
                 rotation_period_s: 153000.0,
                 axial_tilt_deg: 0.04,
             ),
@@ -1849,7 +308,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 30.0,
             )),
-            generator: None,
         ),
         (
             name: "Glacis",
@@ -1858,8 +316,7 @@
             physical: (
                 mass_kg: 8.97e21,
                 radius_m: 780000.0,
-                color: "#D1D1E0",
-                albedo: 0.60,
+                color: "#A6A6B2",
                 rotation_period_s: 302400.0,
                 axial_tilt_deg: 0.1,
             ),
@@ -1871,7 +328,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 210.0,
             )),
-            generator: None,
         ),
         (
             name: "Calyx",
@@ -1880,8 +336,7 @@
             physical: (
                 mass_kg: 1.374e22,
                 radius_m: 1205000.0,
-                color: "#66594D",
-                albedo: 0.10,
+                color: "#1E1915",
                 rotation_period_s: 1441800.0,
                 axial_tilt_deg: 0.3,
             ),
@@ -1893,7 +348,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 280.0,
             )),
-            generator: None,
         ),
         (
             name: "Nereus",
@@ -1902,8 +356,7 @@
             physical: (
                 mass_kg: 7.178e25,
                 radius_m: 22000000.0,
-                color: "#338CA6",
-                albedo: 0.30,
+                color: "#194F5F",
                 rotation_period_s: 57960.0,
                 axial_tilt_deg: 74.0,
             ),
@@ -1915,96 +368,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 289.0,
             )),
-            generator: None,
-            // Ice giant: H2/He/CH4, deep blue-green from methane
-            // absorption. Subtle banding, plus sparse razor-thin icy
-            // rings. Keeps the old Nereus render profile on the new
-            // distilled-system body.
-            atmosphere: Some((
-                seed: 90100,
-                cloud_deck: (
-                    palette: [
-                        (lat: -1.00, color: (0.14, 0.30, 0.42)),
-                        (lat: -0.50, color: (0.18, 0.38, 0.50)),
-                        (lat:  0.00, color: (0.22, 0.44, 0.56)),
-                        (lat:  0.50, color: (0.18, 0.36, 0.48)),
-                        (lat:  1.00, color: (0.12, 0.28, 0.40)),
-                    ],
-                    band_frequency: 8.0,
-                    band_warp: 0.10,
-                    turbulence: 0.03,
-                    band_contrast: 0.06,
-                    band_sharpness: 0.0,
-                    tint: (1.00, 1.00, 1.00),
-                    speed_profile: [
-                         0.02, -0.06,  0.10, -0.08,
-                         0.14, -0.10,  0.18,  0.40,
-                         0.35,  0.16, -0.10,  0.12,
-                        -0.08,  0.06, -0.04,  0.02,
-                    ],
-                    differential_rotation_rate: 0.0006,
-                    turbulence_profile: [
-                        0.25, 0.20, 0.15, 0.12,
-                        0.10,
-                        0.12, 0.15, 0.20, 0.25,
-                    ],
-                    edge_wave_amp: 0.10,
-                    curl_amp: 0.12,
-                    parallax_amp: 0.0,
-                    named_vortices: [],
-                    edge_vortex_chain: None,
-                ),
-                haze: Some((
-                    tint: (0.60, 0.76, 0.88),
-                    thickness: 0.15,
-                    terminator_bias: 0.35,
-                )),
-                rim_halo: Some((
-                    color: (0.42, 0.64, 0.86),
-                    intensity: 0.28,
-                    scale_height_m: 28000.0,
-                    outer_altitude_m: 180000.0,
-                )),
-                limb: Some((
-                    terminator_warmth: (0.70, 0.72, 0.76),
-                    terminator_strength: 0.20,
-                    fresnel_color: (0.50, 0.70, 0.92),
-                    fresnel_strength: 0.30,
-                )),
-                rayleigh: None,
-                limb_darkening: Some((
-                    red:    0.28,
-                    green:  0.34,
-                    blue:   0.44,
-                    strength: 0.80,
-                )),
-            )),
-            rings: Some((
-                inner_radius_m: 37800000.0,
-                outer_radius_m: 41100000.0,
-                seed: 100101,
-                opacity: 0.76,
-                ringlet_noise: 0.01,
-                ringlet_octaves: 3,
-                palette: [
-                    (r: 0.000, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.165, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.188, color: (0.82, 0.98, 0.96), opacity: 0.86),
-                    (r: 0.212, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.500, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.514, color: (0.56, 0.78, 0.84), opacity: 0.28),
-                    (r: 0.526, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.552, color: (0.50, 0.70, 0.78), opacity: 0.18),
-                    (r: 0.564, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.594, color: (0.46, 0.64, 0.74), opacity: 0.12),
-                    (r: 0.606, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.690, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.701, color: (0.42, 0.60, 0.70), opacity: 0.10),
-                    (r: 0.713, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                    (r: 0.728, color: (0.40, 0.56, 0.66), opacity: 0.08),
-                    (r: 0.740, color: (0.18, 0.34, 0.38), opacity: 0.00),
-                ],
-            )),
         ),
         (
             name: "Orias",
@@ -2013,8 +376,7 @@
             physical: (
                 mass_kg: 7.9e21,
                 radius_m: 950000.0,
-                color: "#BFD6E0",
-                albedo: 0.42,
+                color: "#819198",
                 rotation_period_s: -2450000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -2026,12 +388,7 @@
                 arg_periapsis_deg: 120.0,
                 true_anomaly_deg: 45.0,
             )),
-            generator: None,
         ),
-
-        // ─────────────────────────────────────────────
-        // NAMED SMALL BODIES
-        // ─────────────────────────────────────────────
         (
             name: "Erebos",
             kind: DwarfPlanet,
@@ -2039,8 +396,7 @@
             physical: (
                 mass_kg: 1.315e22,
                 radius_m: 600000.0,
-                color: "#B2724D",
-                albedo: 0.08,
+                color: "#351F12",
                 rotation_period_s: 552960.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -2052,7 +408,6 @@
                 arg_periapsis_deg: 110.0,
                 true_anomaly_deg: 55.0,
             )),
-            generator: None,
         ),
         (
             name: "Nyx",
@@ -2061,8 +416,7 @@
             physical: (
                 mass_kg: 5.2e19,
                 radius_m: 240000.0,
-                color: "#996659",
-                albedo: 0.10,
+                color: "#321E19",
                 rotation_period_s: 552960.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -2074,141 +428,6 @@
                 arg_periapsis_deg: 0.0,
                 true_anomaly_deg: 0.0,
             )),
-            generator: Some((
-                seed: 1400,
-                composition: (silicate: 0.38, iron: 0.0, ice: 0.60, volatiles: 0.02, hydrogen_helium: 0.0),
-                cubemap_resolution: 1024,
-                body_age_gyr: 4.6,
-                pipeline: [
-                    Differentiate(()),
-                    // Dirty-ice moon of Erebos — tidally locked close-in
-                    // satellite. +Z = near-side. Large ancient impact on
-                    // the leading hemisphere plus scattered smaller basins.
-                    // Ice is much weaker than silicate, so basins are
-                    // shallower (depth/radius ratio) and relax over time.
-                    Megabasin((
-                        basins: [
-                            // 0: leading-hemisphere primary.
-                            (center_dir: ( 0.85,  0.10,  0.52), radius_m: 130000.0, depth_m: 3200.0, ring_count: 3),
-                            // 1: far-side older basin.
-                            (center_dir: (-0.40,  0.35, -0.85), radius_m: 80000.0, depth_m: 2000.0, ring_count: 2),
-                            // 2: degraded near-polar basin.
-                            (center_dir: ( 0.05,  0.88,  0.47), radius_m: 55000.0, depth_m: 1400.0, ring_count: 2),
-                            // 3-4: small overprinted scars.
-                            (center_dir: (-0.62, -0.55,  0.56), radius_m: 38000.0, depth_m: 900.0, ring_count: 1),
-                            (center_dir: ( 0.30, -0.80, -0.52), radius_m: 30000.0, depth_m: 700.0, ring_count: 1),
-                        ],
-                        hemispheric_lowering_m: 0.0,
-                    )),
-                    // Dirty-ice surface: three units reflecting how airless
-                    // icy regoliths actually look:
-                    //   - clean exposed ice (fresh tectonic ridges, bright),
-                    //   - dirty regolith (silicate dust lag over old ice),
-                    //   - cryo mantle (darker, volatile-rich patches).
-                    // Fbm rules give fractal boundaries instead of discs.
-                    Biomes((
-                        biomes: [
-                            // 0: clean water ice — exposed ridges, fracture
-                            // scarps, bright cool-white with a faint blue cast.
-                            (
-                                name: "clean_ice",
-                                albedo: 0.62,
-                                fresh_albedo: Some(0.88),
-                                tint: (0.97, 1.00, 1.05),
-                                tonal_amp: 0.18,
-                                roughness: 0.55,
-                            ),
-                            // 1: cryo mantle — darker volatile-rich unit,
-                            // slightly reddish from organics/tholins.
-                            (
-                                name: "cryo_mantle",
-                                albedo: 0.28,
-                                fresh_albedo: Some(0.48),
-                                tint: (1.06, 1.00, 0.93),
-                                tonal_amp: 0.26,
-                                roughness: 0.70,
-                            ),
-                            // 2: dirty regolith — default catch-all, silicate
-                            // dust lag over old ice.
-                            (
-                                name: "dirty_ice",
-                                albedo: 0.42,
-                                fresh_albedo: Some(0.66),
-                                tint: (1.01, 1.00, 0.98),
-                                tonal_amp: 0.22,
-                                roughness: 0.62,
-                            ),
-                        ],
-                        rules: [
-                            Fbm(frequency: 3.2, threshold: 0.24, octaves: 4),
-                            Fbm(frequency: 2.0, threshold: 0.20, octaves: 4),
-                            Default,
-                        ],
-                    )),
-                    Cratering((
-                        total_count: 89000,
-                        sfd_slope: 2.0,
-                        sfd_slope_small: None,
-                        sfd_break_radius_m: None,
-                        min_radius_m: 750.0,
-                        max_radius_m: 22000.0,
-                        age_bias: 1.0,
-                        cubemap_bake_threshold_m: 750.0,
-                        secondary_parent_radius_m: 0.0,
-                        secondaries_per_parent: 0,
-                    )),
-                    // Cryovolcanic flood plains — Nyx sits deep in Erebos's
-                    // gravity well so tidal heating briefly melted near-
-                    // surface ice, flooding low regions with cryolava
-                    // (brine slush) that refroze into smooth plains. Much
-                    // darker than surrounding clean/dirty ice; wrinkle
-                    // ridges on for Europa/Ganymede-adjacent character.
-                    MareFlood((
-                        target_count: 0,
-                        additional_crater_count: 10,
-                        fill_fraction: 0.55,
-                        near_side_bias: 0.35,
-                        boundary_noise_amplitude_m: 450.0,
-                        boundary_noise_freq: 12.0,
-                        episode_count: 2,
-                        wrinkle_ridges: true,
-                    )),
-                    // Thermal-contraction scarps from the ice shell cooling
-                    // and freezing inward after the tidal heating episode.
-                    // Lower and shorter than Mercury's — ice can't sustain
-                    // the same elastic stress.
-                    Scarps((
-                        count: 16,
-                        min_length_m: 30000.0,
-                        max_length_m: 90000.0,
-                        width_m: 2500.0,
-                        height_m: 180.0,
-                        curvature: 0.08,
-                    )),
-                    Regolith((
-                        amplitude_m: 4.5,
-                        characteristic_wavelength_m: 85.0,
-                        crater_density_multiplier: 1.0,
-                        bake_d_min_m: 300.0,
-                        bake_scale: 1.0,
-                        density_modulation: 0.25,
-                        density_wavelength_m: 70000.0,
-                    )),
-                    SpaceWeather((
-                        // Biomes drive highland color — no grayscale override.
-                        mare_mature_albedo: 0.24,
-                        mare_fresh_albedo: 0.42,
-                        // Cryolava plains weather slightly warm/brown from
-                        // organics concentrated at the refreezing front.
-                        mare_tint: (1.08, 1.00, 0.88),
-                        young_crater_age_threshold: 0.85,
-                        ray_age_threshold: 0.30,
-                        ray_extent_radii: 10.0,
-                        ray_count_per_crater: 14,
-                        ray_half_width: 0.055,
-                    )),
-                ],
-            )),
         ),
         (
             name: "Vorra",
@@ -2217,8 +436,7 @@
             physical: (
                 mass_kg: 4.185e21,
                 radius_m: 600000.0,
-                color: "#E6EBEF",
-                albedo: 0.70,
+                color: "#C4C9CC",
                 rotation_period_s: 14040.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -2230,7 +448,6 @@
                 arg_periapsis_deg: 240.0,
                 true_anomaly_deg: 180.0,
             )),
-            generator: None,
         ),
     ],
 )

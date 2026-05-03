@@ -12,6 +12,7 @@ members = [
     "crates/ship_rendering",
     "crates/shipyard",
     "crates/bake_dump",
+    "crates/erosion_filter",
 ]
 
 [workspace.package]

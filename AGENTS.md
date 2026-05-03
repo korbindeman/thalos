@@ -12,7 +12,7 @@ just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics -p thalos_terrain_gen
 just clippy               # cargo clippy --workspace
 just trace                # cargo run --release -p thalos_game --features profile-tracy
-just bake Thalos          # headless terrain bake → PNGs in target/stage-bakes/Thalos/
+just bake Thalos          # headless terrain bake → PNGs in stage-bakes/Thalos/
 just bake thalos          # body name is case-insensitive
 just bake all             # bake every body with a generator block
 just bake Thalos stage=1  # run only the first N stages of the body's pipeline
@@ -25,25 +25,21 @@ cargo test -p thalos_physics -- test_name
 
 `just bake <body> [stage=N]` runs a body's terrain pipeline headlessly
 (no Bevy, no window) and writes cubemap layers as PNGs to
-`target/stage-bakes/<body>/`. Body name matching is case-insensitive;
+`stage-bakes/<body>/`. Body name matching is case-insensitive;
 pass `all` to bake every body with a generator block. This is Codex's
 primary visual-feedback loop for terrain pipeline work — Codex can
 `Read` the PNGs directly as images to inspect stage output without
 anyone launching the editor.
 
 **Outputs** (overwrites each run):
-- `albedo-equirect.png` / `albedo-cross.png` — baked albedo cubemap in a
-  2:1 lat/lon projection and a 4:3 cube-cross layout.
-- `height-equirect.png` / `height-cross.png` — grayscale height
+- `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection.
+- `height-equirect.png` — grayscale height
   normalized to the body's encoded ± range (range reported in
   `info.txt`).
-- `material-equirect.png` / `material-cross.png` — per-material-ID
-  hashed colors.
+- `material-equirect.png` — per-material-ID hashed colors.
 - `info.txt` — range, resolution, stage list, province/feature counts.
 
-Use the equirect for a globe-at-a-glance read. Use the cross when
-hunting face-seam defects — misaligned features across face edges jump
-out in that layout.
+Use the equirect for a globe-at-a-glance read.
 
 **Partial runs:** `stage=N` truncates the body's `pipeline:` list to the
 first N entries, so you can inspect each stage in isolation without

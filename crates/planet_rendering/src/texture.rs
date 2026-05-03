@@ -7,12 +7,14 @@ use bevy::render::storage::ShaderStorageBuffer;
 /// material's fields.
 pub struct PlanetTextures {
     // --- Layer 1: baked cubemaps ------------------------------------------
-    /// sRGB albedo cubemap (Rgba8UnormSrgb).
+    /// sRGB albedo cubemap (Rgba8UnormSrgb). Primary surface color — the
+    /// shader samples it directly.
     pub albedo: Handle<Image>,
     /// R16Unorm displacement cubemap.
     pub height: Handle<Image>,
-    /// R8Uint material-id cubemap.  Each texel indexes `materials`.
-    pub material_cube: Handle<Image>,
+    /// R8Unorm roughness cubemap. Per-texel microsurface response, sampled
+    /// bilinearly by the shader for the PBR lighting term.
+    pub roughness: Handle<Image>,
 
     // --- Layer 2: feature SSBOs -------------------------------------------
     /// `array<Crater>` — mid-frequency discrete craters.
@@ -22,6 +24,4 @@ pub struct PlanetTextures {
     pub cell_index: Handle<ShaderStorageBuffer>,
     /// `array<u32>` — concatenated crater indices referenced by cells.
     pub feature_ids: Handle<ShaderStorageBuffer>,
-    /// `array<Material>` — material palette indexed by `material_id`.
-    pub materials: Handle<ShaderStorageBuffer>,
 }

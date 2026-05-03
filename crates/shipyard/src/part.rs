@@ -48,6 +48,22 @@ pub struct ReactionWheel {
     pub max_torque: f32,
 }
 
+/// Runtime engine activation gate. Disabled engines do not contribute
+/// thrust, mass flow, fuel demand, burn-duration estimates, or plume
+/// state. This is deliberately independent of staging: a later staging
+/// system can mutate this component, but manual toggles, failures, and
+/// editor test fire controls can use the same surface.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct EngineActivation {
+    pub enabled: bool,
+}
+
+impl Default for EngineActivation {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Per-engine runtime thrust output, N. Updated each frame by the game
 /// crate from the gated effective throttle. Stays at zero while the
 /// engine isn't firing. Plumbing for visual feedback (current temporary
@@ -58,6 +74,21 @@ pub struct ReactionWheel {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct EngineThrust {
     pub current_n: f32,
+}
+
+/// Fuel crossfeed capability for the attach graph. When disabled, fuel
+/// routing does not traverse through this part. Decouplers default to
+/// `enabled = false`; ordinary structural parts, tanks, pods, and engines
+/// default to `enabled = true`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct FuelCrossfeed {
+    pub enabled: bool,
+}
+
+impl Default for FuelCrossfeed {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Parametric in radius: `diameter` drives this part's `top` node when it

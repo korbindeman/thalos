@@ -28,8 +28,6 @@ use thalos_shipyard::{
     PartMaterial, Ship, ShipBlueprint, ShipyardPlugin,
 };
 
-use crate::fuel::ShipFuelParams;
-
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
 use crate::rendering::{
@@ -96,7 +94,6 @@ fn spawn_player_ship(
     mut commands: Commands,
     view: Res<ViewMode>,
     mut sim: ResMut<SimulationState>,
-    mut fuel_params: ResMut<ShipFuelParams>,
     catalog: Res<PartCatalog>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
@@ -117,12 +114,10 @@ fn spawn_player_ship(
         }
     };
 
-    // Push the ship's MOI + reaction-wheel torque + propulsion stats into
-    // the physics simulation so attitude integration and the rocket-equation
-    // burn model know what we're flying. Also populate `ShipFuelParams` so
-    // the fuel-drain system knows how fast to deplete tanks. v1 computes
-    // these once at spawn — no staging or in-flight design changes to
-    // react to yet.
+    // Push spawn-time MOI + reaction-wheel torque into the physics
+    // simulation so attitude integration knows what we're flying. Active
+    // thrust, mass flow, dry mass, and wet mass are refreshed each frame
+    // by `fuel.rs` from enabled engines and live tank state.
     let stats = match blueprint.stats(&catalog) {
         Ok(s) => s,
         Err(e) => {
@@ -133,25 +128,19 @@ fn spawn_player_ship(
     sim.simulation.set_ship_params(ShipParameters {
         moment_of_inertia: stats.moment_of_inertia_kg_m2,
         max_torque: DVec3::splat(stats.max_reaction_torque_n_m),
-        thrust_n: stats.total_thrust_n,
-        mass_flow_kg_per_s: stats.mass_flow_kg_per_s,
+        thrust_n: 0.0,
+        mass_flow_kg_per_s: 0.0,
         dry_mass_kg: stats.dry_mass_kg,
     });
     sim.simulation.set_ship_mass(stats.wet_mass_kg());
-    fuel_params.dry_mass_kg = stats.dry_mass_kg;
-    fuel_params.mass_flow_kg_per_s = stats.mass_flow_kg_per_s;
-    fuel_params.reactant_fractions = stats.reactant_fractions.clone();
     info!(
-        "ship params: MOI = ({:.0}, {:.0}, {:.0}) kg·m², max torque = {:.0} N·m/axis, F = {:.0} N, m_dry = {:.0} kg, m₀ = {:.0} kg, ṁ = {:.2} kg/s, a₀ = {:.2} m/s²",
+        "ship params: MOI = ({:.0}, {:.0}, {:.0}) kg·m², max torque = {:.0} N·m/axis, m_dry = {:.0} kg, m₀ = {:.0} kg",
         stats.moment_of_inertia_kg_m2.x,
         stats.moment_of_inertia_kg_m2.y,
         stats.moment_of_inertia_kg_m2.z,
         stats.max_reaction_torque_n_m,
-        stats.total_thrust_n,
         stats.dry_mass_kg,
         stats.wet_mass_kg(),
-        stats.mass_flow_kg_per_s,
-        stats.current_acceleration(),
     );
 
     let ship_entity = match blueprint.spawn(&mut commands, &catalog) {

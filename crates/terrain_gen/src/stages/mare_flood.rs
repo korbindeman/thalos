@@ -89,9 +89,6 @@ impl Stage for MareFlood {
     fn name(&self) -> &str {
         "mare_flood"
     }
-    fn dependencies(&self) -> &[&str] {
-        &["cratering"]
-    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let body_radius = builder.radius_m;

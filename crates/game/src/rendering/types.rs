@@ -4,6 +4,7 @@
 //! their respective modules; this file holds only types touched by more
 //! than one rendering concern.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -40,23 +41,32 @@ pub struct FrameBodyStates {
     pub time: f64,
 }
 
+/// Linear-RGB tint to use as a body's planetshine emission. Populated when
+/// the body's surface info first becomes known: at bake completion for
+/// terrain bodies (from `BodyData::mean_albedo`), at spawn for gas giants
+/// (from cloud albedo). Bodies without an entry contribute no planetshine
+/// to their moons.
+#[derive(Resource, Default)]
+pub struct PlanetshineTints {
+    pub by_body: HashMap<usize, [f32; 3]>,
+}
+
 /// Camera exposure model. Acts as the semantic "sensor" of the game camera:
 /// it owns how focus distance maps to display brightness and how much grain
 /// is added in consequence. Every system that cares about "how much flux
 /// does the shader see" or "how much noise should the post stack add" reads
 /// this resource rather than recomputing from focus distance.
 ///
-/// Soft sqrt compensation: outer-system focus pulls distant bodies out of
-/// black without fully erasing the distance cue. Concretely, the display
-/// flux at the focus body scales as `LIGHT_AT_1AU * (1 AU / focus_d)^0.5`,
-/// so Thalos focus lands at 10, Nyx focus at ~1.5, Acheron (perihelion
-/// 78 AU) at ~1.1. Inverse-sqrt instead of inverse-square keeps the feeling
-/// that deep space is dim while staying legible.
+/// Linear-in-distance compensation: outer-system focus pulls distant bodies
+/// out of black without erasing the distance cue. Concretely, the display
+/// flux at the focus body scales as `LIGHT_AT_1AU * (1 AU / focus_d)`,
+/// so a body at 40 AU remains roughly 40x dimmer than the same body at
+/// 1 AU even when focused.
 ///
 /// The gain applied to each body's raw inverse-square flux in the impostor
-/// shader is `exposure.gain = (focus_d / 1 AU)^1.5`. Combined with the raw
+/// shader is `exposure.gain = focus_d / 1 AU`. Combined with the raw
 /// `(AU/body_d)^2` falloff baked into `update_planet_light_dirs`, this
-/// yields the display flux above.
+/// yields the focus-relative display flux above.
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct CameraExposure {
     /// Camera focus body's distance from the star, in meters.

@@ -14,6 +14,7 @@ mod navigation;
 mod photo_mode;
 mod reflection_probe;
 mod rendering;
+mod screenshot;
 mod ship_view;
 mod sky_render;
 mod star_flare;
@@ -31,7 +32,7 @@ use bevy::window::{MonitorSelection, WindowMode};
 use thalos_physics::{
     body_state_provider::BodyStateProvider,
     gravity_mode::GravityMode,
-    parsing::load_solar_system,
+    parsing::load_solar_system_from_dir,
     simulation::{Simulation, SimulationConfig},
     types::{AttitudeState, StateVector},
 };
@@ -50,6 +51,7 @@ use maneuver::ManeuverPlugin;
 use navigation::NavigationPlugin;
 use photo_mode::PhotoModePlugin;
 use rendering::{RenderingPlugin, SimulationState};
+use screenshot::ScreenshotPlugin;
 use ship_view::ShipViewPlugin;
 use target::TargetPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
@@ -85,12 +87,10 @@ const RUNTIME_TIME_SPAN: f64 = 3.156e11;
 
 fn main() {
     // ------------------------------------------------------------------
-    // 1. Load the solar system definition from the RON asset file.
+    // 1. Load the solar system definition from the RON asset files.
     // ------------------------------------------------------------------
-    let ron_source = std::fs::read_to_string("assets/solar_system.ron")
-        .expect("Could not read assets/solar_system.ron — run from the workspace root");
-
-    let system = load_solar_system(&ron_source).expect("Failed to parse solar_system.ron");
+    let system = load_solar_system_from_dir(std::path::Path::new("assets"))
+        .expect("Failed to load solar system from assets/");
 
     // ------------------------------------------------------------------
     // 2. Print a startup banner.
@@ -235,6 +235,7 @@ fn main() {
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PhotoModePlugin)
+        .add_plugins(ScreenshotPlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
         .add_plugins(BodyTreePanelPlugin)

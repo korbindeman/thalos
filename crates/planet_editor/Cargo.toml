@@ -7,5 +7,6 @@ edition.workspace = true
 thalos_physics = { path = "../physics" }
 thalos_terrain_gen = { path = "../terrain_gen" }
 thalos_planet_rendering = { path = "../planet_rendering" }
-bevy = { version = "0.18", features = ["wayland"] }
+thalos_celestial = { path = "../celestial" }
+bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 bevy_egui = "0.39"

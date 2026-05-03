@@ -2,22 +2,37 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bevy::asset::AssetPlugin;
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PresentMode;
 use bevy_egui::egui;
-use thalos_physics::parsing::load_solar_system;
+use thalos_physics::body_state_provider::BodyStateProvider;
+use thalos_physics::parsing::load_solar_system_from_dir;
+use thalos_physics::patched_conics::PatchedConics;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
-    GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, PlanetDetailParams,
-    PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin, RingLayers,
-    RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_from_body_data,
-    blank_cloud_cover_image, build_ring_mesh,
+    AtmosphereBlock, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle,
+    GasGiantParams, PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle,
+    PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin, ReferenceClouds,
+    RingLayers, RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight,
+    bake_from_body_data, build_ring_mesh, cloud_cover_image_for_body,
+    convert_reference_clouds_when_ready, load_reference_cloud_sources,
 };
-use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline};
+use thalos_terrain_gen::{
+    AirlessImpactProjectionConfig, AuthoredFeatureConfig, BodyData, ColdDesertProjectionConfig,
+    FeatureId, FeatureManifest, FeatureProjectionConfig, FeatureSeed, FeatureSeedStream,
+    OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+    compile_terrain_config, plan_initial_compilation, sub_seed,
+};
+
+mod sky_backdrop;
+
+use sky_backdrop::SkyBackdropPlugin;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -40,7 +55,7 @@ const SOLAR_SYSTEM_RON: &str = include_str!(concat!(
 
 enum BodyMode {
     Terrain {
-        generator: GeneratorParams,
+        terrain: TerrainConfig,
         tidal_axis: Option<Vec3>,
     },
     GasGiant {
@@ -57,6 +72,11 @@ struct EditorRings {
     layers: Box<RingLayers>,
 }
 
+struct EditorAtmosphere {
+    block: AtmosphereBlock,
+    cloud_seed: Option<u64>,
+}
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -70,15 +90,18 @@ struct SystemData {
 struct EditedPlanet {
     selected_body: String,
     radius_m: f64,
+    gravity_m_s2: f32,
     axial_tilt_rad: f32,
     mode: BodyMode,
     rings: Option<EditorRings>,
+    atmosphere: Option<EditorAtmosphere>,
+    atmosphere_enabled: bool,
     heliocentric_distance_m: f64,
     light_intensity: f32,
-    terminator_wrap: f32,
     sun_azimuth: f32,
-    sun_elevation: f32,
+    sun_orbital_elevation: f32,
     full_bright: bool,
+    ambient_light: bool,
     terrain_dirty: bool,
     uniforms_dirty: bool,
     /// Body was switched — need to tear down and respawn the preview mesh.
@@ -112,10 +135,13 @@ fn sun_direction(azimuth: f32, elevation: f32) -> Vec3 {
 
 struct ResolvedBody {
     radius_m: f64,
+    gravity_m_s2: f32,
     axial_tilt_rad: f32,
     mode: BodyMode,
     rings: Option<EditorRings>,
+    atmosphere: Option<EditorAtmosphere>,
     heliocentric_distance_m: f64,
+    sun_orbital_elevation: f32,
 }
 
 fn build_params_for_body(
@@ -131,20 +157,14 @@ fn build_params_for_body(
             body.radius_m as f32 / RENDER_RADIUS,
         ));
         BodyMode::GasGiant { layers }
-    } else if let Some(g) = &body.generator {
+    } else if body.terrain.is_some() {
         BodyMode::Terrain {
-            generator: g.clone(),
+            terrain: body.terrain.clone(),
             tidal_axis: matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z),
         }
     } else {
         BodyMode::Terrain {
-            generator: GeneratorParams {
-                seed: 0,
-                composition: thalos_terrain_gen::Composition::new(1.0, 0.0, 0.0, 0.0, 0.0),
-                cubemap_resolution: 64,
-                body_age_gyr: 4.5,
-                pipeline: Vec::new(),
-            },
+            terrain: placeholder_terrain_config(),
             tidal_axis: matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z),
         }
     };
@@ -154,14 +174,34 @@ fn build_params_for_body(
         outer_radius_m: rings.outer_radius_m,
         layers: Box::new(RingLayers::from_system(rings)),
     });
+    let atmosphere = body.terrestrial_atmosphere.as_ref().map(|atmos| {
+        let meters_per_render_unit = body.radius_m as f32 / RENDER_RADIUS;
+        EditorAtmosphere {
+            block: AtmosphereBlock::from_terrestrial(atmos, meters_per_render_unit),
+            cloud_seed: atmos.clouds.as_ref().map(|clouds| clouds.seed),
+        }
+    });
 
     ResolvedBody {
         radius_m: body.radius_m,
+        gravity_m_s2: (body.gm / (body.radius_m * body.radius_m)) as f32,
         axial_tilt_rad: body.axial_tilt_rad as f32,
         mode,
         rings,
+        atmosphere,
         heliocentric_distance_m: heliocentric_sma(system, body),
+        sun_orbital_elevation: orbital_sun_elevation(system, body),
     }
+}
+
+fn placeholder_terrain_config() -> TerrainConfig {
+    TerrainConfig::Ocean(OceanTerrainConfig {
+        seed: 0,
+        cubemap_resolution: 64,
+        seabed_albedo: [0.02, 0.05, 0.10],
+        water_roughness: 0.04,
+        sea_level_m: 1.0,
+    })
 }
 
 fn heliocentric_sma(
@@ -193,11 +233,39 @@ fn light_intensity_at(distance_m: f64) -> f32 {
     LIGHT_AT_1AU * (ratio * ratio) as f32
 }
 
+fn orbital_sun_elevation(
+    system: &SolarSystemDefinition,
+    body: &thalos_physics::types::BodyDefinition,
+) -> f32 {
+    if body.kind == BodyKind::Star {
+        return 0.0;
+    }
+
+    let Some(star_id) = system.bodies.iter().position(|b| b.kind == BodyKind::Star) else {
+        return 0.0;
+    };
+
+    let ephemeris = PatchedConics::new(system, 1.0);
+    let body_state = ephemeris.query_body(body.id, 0.0);
+    let star_state = ephemeris.query_body(star_id, 0.0);
+    let to_sun = star_state.position - body_state.position;
+    let distance = to_sun.length();
+    if distance <= f64::EPSILON {
+        return 0.0;
+    }
+
+    (to_sun.y / distance).clamp(-1.0, 1.0).asin() as f32
+}
+
 fn lighting_for(planet: &EditedPlanet) -> (f32, f32, f32) {
     (
         planet.light_intensity,
-        AMBIENT_INTENSITY,
-        planet.terminator_wrap,
+        if planet.ambient_light {
+            AMBIENT_INTENSITY
+        } else {
+            0.0
+        },
+        0.0,
     )
 }
 
@@ -205,15 +273,40 @@ fn lighting_for(planet: &EditedPlanet) -> (f32, f32, f32) {
 /// occluders, no planetshine — editor scenes are one body at a time.
 fn scene_lighting_for(planet: &EditedPlanet) -> SceneLighting {
     let (light_intensity, ambient_intensity, _wrap) = lighting_for(planet);
-    let dir = sun_direction(planet.sun_azimuth, planet.sun_elevation);
-    let mut scene = SceneLighting::default();
-    scene.ambient_intensity = ambient_intensity;
-    scene.star_count = 1;
+    let dir = sun_direction(planet.sun_azimuth, planet.sun_orbital_elevation);
+    let mut scene = SceneLighting {
+        ambient_intensity,
+        star_count: 1,
+        ..default()
+    };
     scene.stars[0] = StarLight {
         dir_flux: Vec4::new(dir.x, dir.y, dir.z, light_intensity),
         color: Vec4::new(1.0, 1.0, 1.0, 0.0),
     };
     scene
+}
+
+fn active_atmosphere(planet: &EditedPlanet) -> AtmosphereBlock {
+    if !planet.atmosphere_enabled {
+        return AtmosphereBlock::default();
+    }
+    planet
+        .atmosphere
+        .as_ref()
+        .map(|atmos| atmos.block)
+        .unwrap_or_default()
+}
+
+fn cloud_cover_for(
+    planet: &EditedPlanet,
+    reference_clouds: &ReferenceClouds,
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
+    let cloud_seed = planet
+        .atmosphere
+        .as_ref()
+        .and_then(|atmos| atmos.cloud_seed);
+    cloud_cover_image_for_body(&planet.selected_body, cloud_seed, reference_clouds, images).0
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +318,19 @@ struct PreviewPlanet;
 
 #[derive(Component)]
 struct PreviewRing;
+
+#[derive(Component)]
+struct PreviewAtmosphereHalo;
+
+#[derive(Component, Default)]
+struct PreviewCloudBandState {
+    phases: [f64; CLOUD_BAND_COUNT],
+}
+
+#[derive(Resource, Default)]
+struct PreviewAtmosphereClock {
+    elapsed_s: f64,
+}
 
 // ---------------------------------------------------------------------------
 // Camera
@@ -355,40 +461,39 @@ fn terrain_cache_dir() -> std::path::PathBuf {
 }
 
 fn dispatch_terrain_bake(
-    generator: &GeneratorParams,
+    terrain: &TerrainConfig,
     radius_m: f64,
+    gravity_m_s2: f32,
     tidal_axis: Option<Vec3>,
     axial_tilt_rad: f32,
     body_name: String,
 ) -> Task<BodyData> {
     let radius_m = radius_m as f32;
-    let mut g = generator.clone();
-    g.scale_crater_count(DEV_CRATER_SCALE);
+    let terrain = terrain.clone();
     AsyncComputeTaskPool::get().spawn(async move {
         let cache_dir = terrain_cache_dir();
-        let key = thalos_terrain_gen::cache::cache_key(&g, radius_m, tidal_axis, axial_tilt_rad);
-        let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
-        if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
-            info!("terrain cache hit: {body_name}");
-            return data;
-        }
-        info!("terrain cache miss, baking: {body_name}");
-        let mut builder = BodyBuilder::new(
+        let route = terrain.route_label();
+        let context = TerrainCompileContext {
+            body_name: body_name.clone(),
             radius_m,
-            g.seed,
-            g.composition,
-            g.cubemap_resolution,
-            g.body_age_gyr,
+            gravity_m_s2,
+            rotation_hours: None,
+            obliquity_deg: Some(axial_tilt_rad.to_degrees()),
             tidal_axis,
             axial_tilt_rad,
-        );
-        let stages = g
-            .pipeline
-            .into_iter()
-            .map(|s| s.into_stage())
-            .collect::<Vec<_>>();
-        Pipeline::new(stages).run(&mut builder);
-        let data = builder.build();
+        };
+        let options = TerrainCompileOptions {
+            crater_count_scale: DEV_CRATER_SCALE,
+        };
+        let key = thalos_terrain_gen::cache::terrain_cache_key(&terrain, &context, options);
+        let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
+        if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
+            info!("terrain cache hit: {body_name} via {route}");
+            return data;
+        }
+        info!("terrain cache miss, baking {body_name} via {route}");
+        let data = compile_terrain_config(&terrain, &context, options)
+            .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
         match thalos_terrain_gen::cache::store(&path, key, &data) {
             Ok(()) => info!("terrain cache wrote: {body_name}"),
             Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
@@ -419,7 +524,7 @@ fn spawn_preview(
 
     match &planet.mode {
         BodyMode::Terrain {
-            generator,
+            terrain,
             tidal_axis,
         } => {
             let placeholder_mesh = meshes.add(Sphere::new(RENDER_RADIUS).mesh().ico(4).unwrap());
@@ -439,8 +544,9 @@ fn spawn_preview(
                 .id();
 
             let task = dispatch_terrain_bake(
-                generator,
+                terrain,
                 planet.radius_m,
+                planet.gravity_m_s2,
                 *tidal_axis,
                 planet.axial_tilt_rad,
                 planet.selected_body.clone(),
@@ -562,11 +668,15 @@ fn finalize_terrain_bake(
     mut commands: Commands,
     mut pending_q: Query<(Entity, &mut PendingTerrainGen), With<PreviewPlanet>>,
     mut planet_materials: ResMut<Assets<PlanetMaterial>>,
+    mut planet_halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut status: ResMut<TerrainGenStatus>,
     billboard: Res<BillboardMesh>,
     planet: Res<EditedPlanet>,
+    reference_clouds: Res<ReferenceClouds>,
+    children_q: Query<&Children>,
+    halo_q: Query<Entity, With<PreviewAtmosphereHalo>>,
 ) {
     for (entity, mut pending) in &mut pending_q {
         let Some(body) = block_on(poll_once(&mut pending.task)) else {
@@ -581,12 +691,14 @@ fn finalize_terrain_bake(
         let scene = scene_lighting_for(&planet);
 
         let body_seed = body.detail_params.seed;
-        let coastline_seed = (body_seed as u32) ^ ((body_seed >> 32) as u32) ^ 0xC0A5_71_1Eu32;
+        let coastline_seed = (body_seed as u32) ^ ((body_seed >> 32) as u32) ^ 0xC0A5_711E_u32;
         let has_ocean = body.sea_level_m.is_some();
         let coastline_warp_amp_radians = if has_ocean { 8.0e-4 } else { 0.0 };
         let coastline_jitter_amp_m = if has_ocean { 30.0 } else { 0.0 };
+        let atmosphere = active_atmosphere(&planet);
+        let cloud_cover = cloud_cover_for(&planet, &reference_clouds, &mut images);
 
-        let mat_handle = planet_materials.add(PlanetMaterial {
+        let planet_material = PlanetMaterial {
             params: PlanetParams {
                 radius: RENDER_RADIUS,
                 height_range,
@@ -602,14 +714,15 @@ fn finalize_terrain_bake(
             albedo: textures.albedo,
             height: textures.height,
             detail,
-            material_cube: textures.material_cube,
+            roughness: textures.roughness,
             craters: textures.craters,
             cell_index: textures.cell_index,
             feature_ids: textures.feature_ids,
-            materials: textures.materials,
-            atmosphere: default(),
-            cloud_cover: blank_cloud_cover_image(&mut images),
-        });
+            atmosphere,
+            cloud_cover,
+        };
+        let halo_handle = planet_halo_materials.add(PlanetHaloMaterial::from(&planet_material));
+        let mat_handle = planet_materials.add(planet_material);
 
         let mesh_entity = pending.mesh_entity;
         commands
@@ -617,13 +730,52 @@ fn finalize_terrain_bake(
             .insert((
                 Mesh3d(billboard.0.clone()),
                 MeshMaterial3d(mat_handle.clone()),
+                NoFrustumCulling,
             ))
             .remove::<MeshMaterial3d<StandardMaterial>>();
+
+        if planet.atmosphere.is_some() {
+            let existing_halo = children_q
+                .get(entity)
+                .ok()
+                .and_then(|children| children.iter().find(|child| halo_q.get(*child).is_ok()));
+            if let Some(halo_entity) = existing_halo {
+                commands.entity(halo_entity).insert((
+                    Mesh3d(billboard.0.clone()),
+                    MeshMaterial3d(halo_handle.clone()),
+                    NoFrustumCulling,
+                ));
+            } else {
+                commands.spawn((
+                    Mesh3d(billboard.0.clone()),
+                    MeshMaterial3d(halo_handle.clone()),
+                    ChildOf(entity),
+                    PreviewAtmosphereHalo,
+                    NoFrustumCulling,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                    Name::new(format!("{} Atmosphere Halo", planet.selected_body)),
+                ));
+            }
+        }
 
         commands
             .entity(entity)
             .insert(PlanetMaterialHandle(mat_handle))
+            .insert(PlanetHaloMaterialHandle(halo_handle))
             .remove::<PendingTerrainGen>();
+        if planet
+            .atmosphere
+            .as_ref()
+            .and_then(|atmos| atmos.cloud_seed)
+            .is_some()
+        {
+            commands
+                .entity(entity)
+                .insert(PreviewCloudBandState::default());
+        } else {
+            commands.entity(entity).remove::<PreviewCloudBandState>();
+        }
 
         if let Some(started) = status.current_started.take() {
             status.last_duration = Some(started.elapsed());
@@ -777,14 +929,213 @@ fn select_body(planet: &mut EditedPlanet, system: &SolarSystemDefinition, body_i
 
     let resolved = build_params_for_body(system, body);
     planet.radius_m = resolved.radius_m;
+    planet.gravity_m_s2 = resolved.gravity_m_s2;
     planet.axial_tilt_rad = resolved.axial_tilt_rad;
     planet.mode = resolved.mode;
     planet.rings = resolved.rings;
+    planet.atmosphere = resolved.atmosphere;
     planet.heliocentric_distance_m = resolved.heliocentric_distance_m;
     planet.light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
+    planet.sun_orbital_elevation = resolved.sun_orbital_elevation;
     planet.selected_body = body.name.clone();
     planet.body_changed = true;
     planet.uniforms_dirty = true;
+}
+
+fn fires(r: &egui::Response) -> bool {
+    r.drag_stopped() || (r.changed() && !r.dragged())
+}
+
+fn draw_airless_projection_controls(
+    ui: &mut egui::Ui,
+    projection: &mut AirlessImpactProjectionConfig,
+) -> bool {
+    let mut changed = false;
+    ui.collapsing("Projection", |ui| {
+        changed |= fires(&ui.add(
+            egui::Slider::new(&mut projection.base_crater_count, 0..=500_000).text("Base craters"),
+        ));
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(&mut projection.min_crater_radius_m, 100.0..=5_000.0)
+                    .text("Min crater m"),
+            ),
+        );
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(&mut projection.max_crater_radius_m, 10_000.0..=180_000.0)
+                    .text("Max crater m"),
+            ),
+        );
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(&mut projection.cubemap_bake_threshold_m, 250.0..=5_000.0)
+                    .text("Bake threshold m"),
+            ),
+        );
+        changed |= fires(&ui.add(
+            egui::Slider::new(&mut projection.mare_fill_fraction, 0.0..=1.0).text("Mare fill"),
+        ));
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(
+                    &mut projection.mare_boundary_noise_amplitude_m,
+                    0.0..=2_500.0,
+                )
+                .text("Mare edge noise m"),
+            ),
+        );
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(&mut projection.regolith_bake_d_min_m, 100.0..=2_000.0)
+                    .text("Regolith bake min m"),
+            ),
+        );
+    });
+    changed
+}
+
+fn draw_cold_desert_projection_controls(
+    ui: &mut egui::Ui,
+    projection: &mut ColdDesertProjectionConfig,
+) -> bool {
+    let mut changed = false;
+    ui.collapsing("Projection", |ui| {
+        changed |= fires(&ui.add(
+            egui::Slider::new(&mut projection.relief_scale_m, 0.25..=2.0).text("Relief scale"),
+        ));
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(&mut projection.volcanic_dark_strength, 0.0..=2.0)
+                    .text("Dark regions"),
+            ),
+        );
+        changed |= fires(&ui.add(
+            egui::Slider::new(&mut projection.pale_basin_strength, 0.0..=2.0).text("Pale basins"),
+        ));
+        changed |=
+            fires(&ui.add(
+                egui::Slider::new(&mut projection.channel_strength, 0.0..=2.0).text("Channels"),
+            ));
+        changed |= fires(
+            &ui.add(egui::Slider::new(&mut projection.dune_strength, 0.0..=2.0).text("Dunes")),
+        );
+        changed |= fires(&ui.add(
+            egui::Slider::new(&mut projection.base_crater_count, 0..=100_000).text("Base craters"),
+        ));
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(&mut projection.max_crater_radius_m, 5_000.0..=90_000.0)
+                    .text("Max crater m"),
+            ),
+        );
+    });
+    changed
+}
+
+fn draw_projection_controls(ui: &mut egui::Ui, projection: &mut FeatureProjectionConfig) -> bool {
+    match projection {
+        FeatureProjectionConfig::Auto => {
+            ui.label("Projection: Auto");
+            false
+        }
+        FeatureProjectionConfig::AirlessImpact(config) => {
+            draw_airless_projection_controls(ui, config)
+        }
+        FeatureProjectionConfig::ColdDesert(config) => {
+            draw_cold_desert_projection_controls(ui, config)
+        }
+    }
+}
+
+fn reroll_authored_seed(
+    root_seed: u64,
+    id: &FeatureId,
+    seed: &mut Option<FeatureSeed>,
+    stream: FeatureSeedStream,
+) {
+    let current = seed.unwrap_or_else(|| FeatureSeed::derive(root_seed, id));
+    *seed = Some(current.rerolled(stream, "planet_editor"));
+}
+
+fn draw_authored_feature_controls(
+    ui: &mut egui::Ui,
+    root_seed: u64,
+    authored_features: &mut [AuthoredFeatureConfig],
+) -> bool {
+    let mut changed = false;
+    ui.collapsing("Authored Features", |ui| {
+        for feature in authored_features {
+            match feature {
+                AuthoredFeatureConfig::Megabasin(config) => {
+                    let id = config.id.clone();
+                    ui.horizontal(|ui| {
+                        ui.label(id.as_str());
+                        if ui.small_button("Shape").clicked() {
+                            reroll_authored_seed(
+                                root_seed,
+                                &id,
+                                &mut config.seed,
+                                FeatureSeedStream::Shape,
+                            );
+                            changed = true;
+                        }
+                        if ui.small_button("Detail").clicked() {
+                            reroll_authored_seed(
+                                root_seed,
+                                &id,
+                                &mut config.seed,
+                                FeatureSeedStream::Detail,
+                            );
+                            changed = true;
+                        }
+                    });
+                }
+            }
+        }
+    });
+    changed
+}
+
+fn draw_feature_manifest(ui: &mut egui::Ui, manifest: &FeatureManifest) {
+    ui.collapsing("Feature Manifest", |ui| {
+        ui.label(format!("{} features", manifest.features.len()));
+        let root_children = manifest
+            .get(&manifest.root)
+            .map(|root| root.children.clone())
+            .unwrap_or_default();
+        for child_id in root_children {
+            draw_feature_manifest_node(ui, manifest, &child_id);
+        }
+    });
+}
+
+fn draw_feature_manifest_node(ui: &mut egui::Ui, manifest: &FeatureManifest, id: &FeatureId) {
+    let Some(feature) = manifest.get(id) else {
+        return;
+    };
+    let label = if feature.scale_range_m.max_m.is_finite() {
+        format!(
+            "{} · {:?} · {:.1}-{:.1} km",
+            feature.id,
+            feature.kind,
+            feature.scale_range_m.min_m / 1_000.0,
+            feature.scale_range_m.max_m / 1_000.0
+        )
+    } else {
+        format!("{} · {:?} · global", feature.id, feature.kind)
+    };
+
+    if feature.children.is_empty() {
+        ui.label(label);
+    } else {
+        let children = feature.children.clone();
+        ui.collapsing(label, |ui| {
+            for child_id in children {
+                draw_feature_manifest_node(ui, manifest, &child_id);
+            }
+        });
+    }
 }
 
 fn editor_ui(
@@ -851,36 +1202,85 @@ fn editor_ui(
 
             ui.separator();
 
-            // ---- Editable fields --------------------------------
-            fn fires(r: &bevy_egui::egui::Response) -> bool {
-                r.drag_stopped() || (r.changed() && !r.dragged())
-            }
-
             let mut terrain_changed = false;
             let mut uniforms_changed = false;
+            let body_name = planet.selected_body.clone();
+            let radius_m = planet.radius_m as f32;
+            let gravity_m_s2 = planet.gravity_m_s2;
+            let axial_tilt_rad = planet.axial_tilt_rad;
 
             if let BodyMode::Terrain {
-                ref mut generator, ..
+                ref mut terrain,
+                tidal_axis,
             } = planet.mode
             {
                 ui.heading("Parameters");
-                terrain_changed |=
-                    fires(&ui.add(
-                        bevy_egui::egui::Slider::new(&mut generator.seed, 0..=9999).text("Seed"),
-                    ));
+                ui.label(format!("Terrain: {}", terrain.route_label()));
+                match terrain {
+                    TerrainConfig::Feature(config) => {
+                        ui.horizontal(|ui| {
+                            terrain_changed |= fires(
+                                &ui.add(egui::Slider::new(&mut config.seed, 0..=9999).text("Seed")),
+                            );
+                            if ui.button("Reroll World").clicked() {
+                                config.seed = sub_seed(config.seed, "planet_editor:world_seed");
+                                terrain_changed = true;
+                            }
+                        });
+                        terrain_changed |= draw_projection_controls(ui, &mut config.projection);
+                        terrain_changed |= draw_authored_feature_controls(
+                            ui,
+                            config.seed,
+                            &mut config.authored_features,
+                        );
+
+                        let compile_context = TerrainCompileContext {
+                            body_name: body_name.clone(),
+                            radius_m,
+                            gravity_m_s2,
+                            rotation_hours: None,
+                            obliquity_deg: Some(axial_tilt_rad.to_degrees()),
+                            tidal_axis,
+                            axial_tilt_rad,
+                        };
+                        let spec = config.to_planet_spec(&compile_context);
+                        let plan = plan_initial_compilation(&spec);
+                        draw_feature_manifest(ui, &plan.manifest);
+                    }
+                    TerrainConfig::Ocean(ocean) => {
+                        terrain_changed |= fires(
+                            &ui.add(egui::Slider::new(&mut ocean.seed, 0..=9999).text("Seed")),
+                        );
+                        terrain_changed |= fires(
+                            &ui.add(
+                                egui::Slider::new(&mut ocean.sea_level_m, 0.0..=10.0)
+                                    .text("Sea level (m)"),
+                            ),
+                        );
+                        terrain_changed |= fires(
+                            &ui.add(
+                                egui::Slider::new(&mut ocean.water_roughness, 0.0..=0.3)
+                                    .text("Water roughness"),
+                            ),
+                        );
+                    }
+                    TerrainConfig::None => {}
+                }
                 ui.separator();
             }
 
             ui.heading("Shading");
+            if planet.atmosphere.is_some() {
+                uniforms_changed |= ui
+                    .checkbox(&mut planet.atmosphere_enabled, "Atmosphere")
+                    .changed();
+            }
             uniforms_changed |= ui
                 .checkbox(&mut planet.full_bright, "Full bright")
                 .changed();
-            uniforms_changed |= fires(
-                &ui.add(
-                    bevy_egui::egui::Slider::new(&mut planet.terminator_wrap, 0.0..=1.0)
-                        .text("Terminator wrap"),
-                ),
-            );
+            uniforms_changed |= ui
+                .checkbox(&mut planet.ambient_light, "Ambient light")
+                .changed();
             uniforms_changed |= fires(
                 &ui.add(
                     bevy_egui::egui::Slider::new(
@@ -888,15 +1288,6 @@ fn editor_ui(
                         -std::f32::consts::PI..=std::f32::consts::PI,
                     )
                     .text("Sun azimuth"),
-                ),
-            );
-            uniforms_changed |= fires(
-                &ui.add(
-                    bevy_egui::egui::Slider::new(
-                        &mut planet.sun_elevation,
-                        -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2,
-                    )
-                    .text("Sun elevation"),
                 ),
             );
 
@@ -910,12 +1301,15 @@ fn editor_ui(
 }
 
 /// Applies shader-uniform-only changes to the current material.
+#[allow(clippy::too_many_arguments)]
 fn apply_uniform_changes(
     mut planet: ResMut<EditedPlanet>,
     terrain_q: Query<&PlanetMaterialHandle, With<PreviewPlanet>>,
+    halo_q: Query<&PlanetHaloMaterialHandle, With<PreviewPlanet>>,
     gas_q: Query<&GasGiantMaterialHandle, With<PreviewPlanet>>,
     ring_q: Query<&RingMaterialHandle, With<PreviewRing>>,
     mut planet_materials: ResMut<Assets<PlanetMaterial>>,
+    mut planet_halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
     mut gas_materials: ResMut<Assets<GasGiantMaterial>>,
     mut ring_materials: ResMut<Assets<RingMaterial>>,
 ) {
@@ -926,6 +1320,7 @@ fn apply_uniform_changes(
 
     let (_, _, wrap) = lighting_for(&planet);
     let scene = scene_lighting_for(&planet);
+    let atmosphere = active_atmosphere(&planet);
 
     match &planet.mode {
         BodyMode::Terrain { .. } => {
@@ -936,6 +1331,16 @@ fn apply_uniform_changes(
                 mat.params.terminator_wrap = wrap;
                 mat.params.fullbright = if planet.full_bright { 1.0 } else { 0.0 };
                 mat.params.scene = scene.clone();
+                mat.atmosphere = atmosphere;
+            }
+            for handle in &halo_q {
+                let Some(mat) = planet_halo_materials.get_mut(&handle.0) else {
+                    continue;
+                };
+                mat.params.terminator_wrap = wrap;
+                mat.params.fullbright = if planet.full_bright { 1.0 } else { 0.0 };
+                mat.params.scene = scene.clone();
+                mat.atmosphere = atmosphere;
             }
         }
         BodyMode::GasGiant { .. } => {
@@ -961,6 +1366,113 @@ fn apply_uniform_changes(
     }
 }
 
+fn patch_preview_reference_cloud_cover(
+    clouds: Res<ReferenceClouds>,
+    planet: Res<EditedPlanet>,
+    terrain_q: Query<
+        (&PlanetMaterialHandle, Option<&PlanetHaloMaterialHandle>),
+        With<PreviewPlanet>,
+    >,
+    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
+    mut planet_halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
+) {
+    if planet.atmosphere.is_none() {
+        return;
+    }
+    let Some(cube) = clouds.cube(&planet.selected_body) else {
+        return;
+    };
+
+    for (body_handle, halo_handle) in &terrain_q {
+        if let Some(mat) = planet_materials.get_mut(&body_handle.0)
+            && mat.cloud_cover != cube
+        {
+            mat.cloud_cover = cube.clone();
+        }
+        if let Some(halo_handle) = halo_handle
+            && let Some(mat) = planet_halo_materials.get_mut(&halo_handle.0)
+            && mat.cloud_cover != cube
+        {
+            mat.cloud_cover = cube.clone();
+        }
+    }
+}
+
+fn write_cloud_animation(
+    atmosphere: &mut AtmosphereBlock,
+    elapsed_s: f64,
+    bands: Option<(Vec4, Vec4, Vec4, Vec4)>,
+) {
+    atmosphere.cloud_dynamics.y = elapsed_s as f32;
+    if let Some((bands_a, bands_b, bands_c, bands_d)) = bands {
+        atmosphere.cloud_bands_a = bands_a;
+        atmosphere.cloud_bands_b = bands_b;
+        atmosphere.cloud_bands_c = bands_c;
+        atmosphere.cloud_bands_d = bands_d;
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_preview_atmosphere(
+    mut clock: ResMut<PreviewAtmosphereClock>,
+    time: Res<Time>,
+    planet: Res<EditedPlanet>,
+    mut query: Query<
+        (
+            &PlanetMaterialHandle,
+            Option<&PlanetHaloMaterialHandle>,
+            Option<&mut PreviewCloudBandState>,
+        ),
+        With<PreviewPlanet>,
+    >,
+    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
+    mut planet_halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
+) {
+    clock.elapsed_s += time.delta_secs() as f64;
+    if !planet.atmosphere_enabled {
+        return;
+    }
+
+    for (handle, halo_handle, cloud_state) in &mut query {
+        let Some(mat) = planet_materials.get(&handle.0) else {
+            continue;
+        };
+        let scroll = mat.atmosphere.cloud_dynamics.x as f64;
+        let diff = mat.atmosphere.cloud_shape.w.clamp(0.0, 1.0) as f64;
+        let bands = if scroll.abs() >= 1e-12 {
+            cloud_state.map(|mut state| {
+                let dt = time.delta_secs() as f64;
+                for i in 0..CLOUD_BAND_COUNT {
+                    let sin2 = i as f64 / (CLOUD_BAND_COUNT - 1) as f64;
+                    let lat_factor = 1.0 - diff * sin2;
+                    let omega = scroll * lat_factor;
+                    state.phases[i] =
+                        (state.phases[i] + omega * dt).rem_euclid(std::f64::consts::TAU);
+                }
+
+                let p = &state.phases;
+                (
+                    Vec4::new(p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32),
+                    Vec4::new(p[4] as f32, p[5] as f32, p[6] as f32, p[7] as f32),
+                    Vec4::new(p[8] as f32, p[9] as f32, p[10] as f32, p[11] as f32),
+                    Vec4::new(p[12] as f32, p[13] as f32, p[14] as f32, p[15] as f32),
+                )
+            })
+        } else {
+            None
+        };
+
+        if let Some(mat) = planet_materials.get_mut(&handle.0) {
+            write_cloud_animation(&mut mat.atmosphere, clock.elapsed_s, bands);
+        }
+        if let Some(halo_handle) = halo_handle
+            && let Some(mat) = planet_halo_materials.get_mut(&halo_handle.0)
+        {
+            write_cloud_animation(&mut mat.atmosphere, clock.elapsed_s, bands);
+        }
+    }
+}
+
 fn dispatch_rebake(
     mut commands: Commands,
     mut planet: ResMut<EditedPlanet>,
@@ -971,7 +1483,7 @@ fn dispatch_rebake(
         return;
     }
     let BodyMode::Terrain {
-        ref generator,
+        ref terrain,
         tidal_axis,
     } = planet.mode
     else {
@@ -984,14 +1496,16 @@ fn dispatch_rebake(
     let Some(mesh_entity) = children.iter().next() else {
         return;
     };
-    let generator = generator.clone();
+    let terrain = terrain.clone();
     let radius_m = planet.radius_m;
+    let gravity_m_s2 = planet.gravity_m_s2;
     let axial_tilt_rad = planet.axial_tilt_rad;
     planet.terrain_dirty = false;
 
     let task = dispatch_terrain_bake(
-        &generator,
+        &terrain,
         radius_m,
+        gravity_m_s2,
         tidal_axis,
         axial_tilt_rad,
         planet.selected_body.clone(),
@@ -1010,7 +1524,19 @@ fn main() {
     let body_arg = std::env::args().nth(1);
     let preferred = body_arg.as_deref().unwrap_or(DEFAULT_BODY_NAME);
 
-    let system = load_solar_system(SOLAR_SYSTEM_RON).expect("parse solar_system.ron");
+    // Load from disk to include per-body detail files
+    let system = {
+        use std::path::Path;
+
+        let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("assets"))
+            .unwrap_or_else(|| "assets".into());
+
+        load_solar_system_from_dir(&assets_dir)
+            .expect("load solar system from disk")
+    };
 
     let find_body = |name: &str| {
         system
@@ -1027,26 +1553,31 @@ fn main() {
     let light_intensity = light_intensity_at(resolved.heliocentric_distance_m);
 
     App::new()
-        .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
+        .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(SystemData { system })
         .insert_resource(EditedPlanet {
             selected_body,
             radius_m: resolved.radius_m,
+            gravity_m_s2: resolved.gravity_m_s2,
             axial_tilt_rad: resolved.axial_tilt_rad,
             mode: resolved.mode,
             rings: resolved.rings,
+            atmosphere: resolved.atmosphere,
+            atmosphere_enabled: true,
             heliocentric_distance_m: resolved.heliocentric_distance_m,
             light_intensity,
-            terminator_wrap: 0.2,
             sun_azimuth: 0.0,
-            sun_elevation: 0.0,
+            sun_orbital_elevation: resolved.sun_orbital_elevation,
             full_bright: false,
+            ambient_light: false,
             terrain_dirty: false,
             uniforms_dirty: false,
             body_changed: false,
         })
         .init_resource::<OrbitCamera>()
         .init_resource::<TerrainGenStatus>()
+        .init_resource::<PreviewAtmosphereClock>()
+        .init_resource::<ReferenceClouds>()
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -1065,11 +1596,20 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_plugins(PlanetRenderingPlugin)
-        .add_systems(Startup, (spawn_camera, spawn_preview_planet))
+        .add_plugins(SkyBackdropPlugin)
+        .add_systems(
+            Startup,
+            (
+                load_reference_cloud_sources,
+                spawn_camera,
+                spawn_preview_planet,
+            ),
+        )
         .add_systems(bevy_egui::EguiPrimaryContextPass, editor_ui)
         .add_systems(
             Update,
             (
+                convert_reference_clouds_when_ready,
                 camera_input,
                 camera_zoom_smoothing.after(camera_input),
                 camera_apply_transform.after(camera_zoom_smoothing),
@@ -1077,6 +1617,12 @@ fn main() {
                 handle_body_switch,
                 dispatch_rebake.after(handle_body_switch),
                 finalize_terrain_bake.after(dispatch_rebake),
+                patch_preview_reference_cloud_cover
+                    .after(convert_reference_clouds_when_ready)
+                    .after(finalize_terrain_bake),
+                update_preview_atmosphere
+                    .after(apply_uniform_changes)
+                    .after(finalize_terrain_bake),
             ),
         )
         .run();

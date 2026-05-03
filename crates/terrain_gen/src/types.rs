@@ -200,7 +200,7 @@ pub type BiomeId = u8;
 /// Biomes stage registers a palette of these and paints `BodyBuilder::biome_map`
 /// with biome ids; downstream stages can later read the map to vary their
 /// behavior per region (crater density, weathering rate, base albedo).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BiomeParams {
     pub name: String,
     /// Base linear albedo for mature (fully space-weathered) surface.
