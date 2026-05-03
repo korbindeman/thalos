@@ -1,13 +1,26 @@
-# Simulation architecture - target design
+# Simulation
 
-This document describes the target simulation architecture for Thalos:
-orbital mechanics, local rigidbody gameplay, time warp, map rendering,
-and the boundaries between them.
+The unified spec for Thalos's simulation: orbital mechanics, local
+rigidbody gameplay, time warp, map rendering, and the boundaries
+between them. This describes the **target** architecture; today's
+implementation is the patched-conics + `KeplerianPropagator` core.
+See [ROADMAP.md](ROADMAP.md) for the milestone-by-milestone path.
 
 The design intentionally separates "truth" from presentation. The map
 is a scaled analytical view. The real-space scene is a local gameplay
 view. Neither is allowed to become the only authoritative simulation
 state.
+
+## Roadmap mapping
+
+This doc's "Implementation plan" phases map to roadmap milestones:
+
+| Roadmap milestone | Implementation phases |
+|---|---|
+| **M1** — canonical state + big_space + map decoupling | Phase 1 (canonical state and authority shell), Phase 2 (decouple map view), Phase 3 (real-space scene with big_space) |
+| **M5** — Avian local bubble + landing handoffs | Phase 4 (Avian local bubble), Phase 5 (part-level local physics), Phase 6.5 (navigation contexts), Phase 7 (full handoff integration), Phase 8 (retire old coupling) |
+| **M6** — aero regime + warp force integration | Phase 6 (warp force integration); aero regime details in this doc's *Force and torque model* §|
+| **M7** — N-body ephemeris (deferred) | `RealisticPolicyV1` + ephemeris baker (Phase 6) |
 
 ## Goals
 

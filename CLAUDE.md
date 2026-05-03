@@ -193,8 +193,19 @@ assets/solar_system.ron
 
 ### Documentation (`docs/`)
 
-- `lore/solar_system.md` — per-body reference with scale philosophy (hybrid 1:1/1:2/1:3 scale rationale) and formation scenario.
-- `terrain_feature_compiler.md` — design doc for the feature-first terrain compiler (`Feature` route).
-- `terrestrial_pipeline_research.md` — design notes for the future terrestrial pipeline that will replace the `Ocean` placeholder on Thalos/Pelagos.
+`ROADMAP.md` is the entry point: engineering milestones, current status, dependency graph. Each major system has a unified spec doc.
+
+- `ROADMAP.md` — top-level roadmap. Phase 1 (M1-M4) = architectural + rendering; Phase 2 (M5-M6) = gameplay; M7-M8 deferred.
+- `simulation.md` — simulation architecture (orbital mechanics, authority, time warp, map decoupling, big_space, Avian local bubble). Target design.
+- `terrain.md` — terrain generation (feature compiler) + ground LOD rendering (forked `bevy_terrain` + `TileProvider`). Includes v2 backlog from terrestrial-pipeline research.
+- `atmosphere.md` — gas giants, rocky-atmosphere Bruneton scattering, ocean rendering, IBL/reflection probe.
 - `celestial.md` — celestial sphere design: source model, spectrum, generation, rendering pipeline.
-- `simulation_architecture.md` — physics simulation architecture overview.
+- `lore/solar_system.md` — per-body reference with scale philosophy (hybrid 1:1/1:2/1:3 scale rationale) and formation scenario.
+- `lore/civilization.md` — civilization, narrative progression phases, resource economy.
+
+Standalone references (kept as-is, not consolidated):
+
+- `gen/terrestrial_pipeline_research.md` — academic + industry survey for the terrestrial pipeline. Source for the v2 backlog in `terrain.md`.
+- `gen/planet_aesthetics.md` — visual target field guide.
+- `gen/dunes.md` — dune-field generator algorithm.
+- `gen/vaelen_processes.md` — per-body process notes for Vaelen.
