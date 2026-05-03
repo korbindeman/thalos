@@ -24,9 +24,11 @@ use thalos_planet_rendering::{
     convert_reference_clouds_when_ready, load_reference_cloud_sources,
 };
 use thalos_terrain_gen::{
-    AirlessImpactProjectionConfig, AuthoredFeatureConfig, BodyData, ColdDesertProjectionConfig,
-    FeatureId, FeatureManifest, FeatureProjectionConfig, FeatureSeed, FeatureSeedStream,
-    OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+    AirlessImpactProjectionConfig, AtmosphereSpec, AuthoredFeatureConfig, BodyArchetype, BodyData,
+    ColdDesertProjectionConfig, CompositionClass, FeatureId, FeatureLock, FeatureManifest,
+    FeatureParamValue, FeatureProjectionConfig, FeatureSeed, FeatureSeedStream,
+    FeatureTerrainConfig, HydrosphereSpec, IceInventory, MegabasinFeatureConfig,
+    OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig, TerrainIntent,
     compile_terrain_config, plan_initial_compilation, sub_seed,
 };
 
@@ -43,6 +45,13 @@ const AMBIENT_INTENSITY: f32 = 0.05;
 const AU_M: f64 = 1.496e11;
 const DEFAULT_BODY_NAME: &str = "Mira";
 const RENDER_RADIUS: f32 = 1.5;
+
+/// Live-edit rebakes wait this long after the last edit before kicking off,
+/// so a slider drag doesn't queue dozens of throwaway bakes.
+const REBAKE_DEBOUNCE_MS: u128 = 150;
+/// Cubemap resolution used for live preview rebakes. Macro composition reads
+/// fine at this size; full-resolution bakes are explicit via the UI button.
+const PREVIEW_CUBEMAP_RESOLUTION: u32 = 256;
 
 const SOLAR_SYSTEM_RON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -77,6 +86,29 @@ struct EditorAtmosphere {
     cloud_seed: Option<u64>,
 }
 
+/// Active sketching tool. `Inspect` is the default — clicks on the planet
+/// pick features instead of placing. The other variants enter placement mode:
+/// the next planet click appends an authored feature of the matching kind.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum ToolMode {
+    #[default]
+    Inspect,
+    AddMegabasin,
+}
+
+impl ToolMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Inspect => "Inspect",
+            Self::AddMegabasin => "+ Megabasin",
+        }
+    }
+
+    fn placing(self) -> bool {
+        !matches!(self, Self::Inspect)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -106,6 +138,21 @@ struct EditedPlanet {
     uniforms_dirty: bool,
     /// Body was switched — need to tear down and respawn the preview mesh.
     body_changed: bool,
+    /// Wall-clock time of the most recent terrain-affecting edit. Drives the
+    /// debounced preview rebake so a slider drag doesn't spawn throwaway tasks.
+    last_edit: Option<Instant>,
+    /// Set by the "Bake full res" button. Bypasses debounce and the preview
+    /// resolution override, then resets after dispatch.
+    full_bake_requested: bool,
+    /// Whether the last (or in-flight) bake was a low-res preview, for status
+    /// display.
+    last_bake_was_preview: bool,
+    /// Currently-selected manifest feature (None = nothing selected). Drives
+    /// the per-feature inspector panel.
+    selected_feature_id: Option<FeatureId>,
+    /// Active sketching tool. While `placing()`, planet clicks add features
+    /// and the orbit camera ignores left-button drag.
+    tool: ToolMode,
 }
 
 #[derive(Resource, Default)]
@@ -382,7 +429,6 @@ fn spawn_camera(mut commands: Commands) {
         Camera3d::default(),
         thalos_planet_rendering::space_camera_post_stack(),
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        Msaa::Off,
         EditorCamera,
     ));
 }
@@ -393,6 +439,7 @@ fn camera_input(
     scroll: Res<AccumulatedMouseScroll>,
     mut orbit: ResMut<OrbitCamera>,
     mut egui_ctx: bevy_egui::EguiContexts,
+    planet: Res<EditedPlanet>,
 ) {
     if egui_ctx
         .ctx_mut()
@@ -404,7 +451,9 @@ fn camera_input(
     const ROTATE_SENSITIVITY: f32 = 0.005;
     const ZOOM_SENSITIVITY: f32 = 0.04;
 
-    if mouse.pressed(MouseButton::Left) {
+    // While a placement tool is active, left-click is reserved for adding
+    // features — don't also rotate the camera. Scroll-zoom stays usable.
+    if mouse.pressed(MouseButton::Left) && !planet.tool.placing() {
         let delta = motion.delta;
         orbit.azimuth += delta.x * ROTATE_SENSITIVITY;
         orbit.elevation = (orbit.elevation - delta.y * ROTATE_SENSITIVITY)
@@ -467,9 +516,17 @@ fn dispatch_terrain_bake(
     tidal_axis: Option<Vec3>,
     axial_tilt_rad: f32,
     body_name: String,
+    cubemap_resolution_override: Option<u32>,
 ) -> Task<BodyData> {
     let radius_m = radius_m as f32;
-    let terrain = terrain.clone();
+    let mut terrain = terrain.clone();
+    if let Some(res) = cubemap_resolution_override {
+        match &mut terrain {
+            TerrainConfig::Feature(c) => c.cubemap_resolution = res,
+            TerrainConfig::Ocean(c) => c.cubemap_resolution = res,
+            TerrainConfig::None => {}
+        }
+    }
     AsyncComputeTaskPool::get().spawn(async move {
         let cache_dir = terrain_cache_dir();
         let route = terrain.route_label();
@@ -550,6 +607,7 @@ fn spawn_preview(
                 *tidal_axis,
                 planet.axial_tilt_rad,
                 planet.selected_body.clone(),
+                None,
             );
             status.current_started = Some(Instant::now());
             commands
@@ -940,6 +998,12 @@ fn select_body(planet: &mut EditedPlanet, system: &SolarSystemDefinition, body_i
     planet.selected_body = body.name.clone();
     planet.body_changed = true;
     planet.uniforms_dirty = true;
+    planet.terrain_dirty = false;
+    planet.last_edit = None;
+    planet.full_bake_requested = false;
+    planet.last_bake_was_preview = false;
+    planet.selected_feature_id = None;
+    planet.tool = ToolMode::default();
 }
 
 fn fires(r: &egui::Response) -> bool {
@@ -1033,6 +1097,209 @@ fn draw_cold_desert_projection_controls(
     changed
 }
 
+fn draw_spec_controls(ui: &mut egui::Ui, config: &mut FeatureTerrainConfig) -> bool {
+    let mut changed = false;
+    ui.collapsing("Spec", |ui| {
+        let prev_arch = config.archetype;
+        egui::ComboBox::from_label("Archetype")
+            .selected_text(format!("{:?}", config.archetype))
+            .show_ui(ui, |ui| {
+                for arch in [
+                    BodyArchetype::AirlessImpactMoon,
+                    BodyArchetype::ColdDesertFormerlyWet,
+                    BodyArchetype::AgingOceanicHomeworld,
+                    BodyArchetype::GenericTerrestrial,
+                ] {
+                    ui.selectable_value(&mut config.archetype, arch, format!("{arch:?}"));
+                }
+            });
+        if config.archetype != prev_arch {
+            changed = true;
+        }
+
+        let prev_comp = config.composition;
+        egui::ComboBox::from_label("Composition")
+            .selected_text(format!("{:?}", config.composition))
+            .show_ui(ui, |ui| {
+                for comp in [
+                    CompositionClass::SilicateDominated,
+                    CompositionClass::BasalticSilicate,
+                    CompositionClass::IronRichSilicate,
+                    CompositionClass::IcySilicate,
+                ] {
+                    ui.selectable_value(&mut config.composition, comp, format!("{comp:?}"));
+                }
+            });
+        if config.composition != prev_comp {
+            changed = true;
+        }
+
+        changed |= fires(
+            &ui.add(egui::Slider::new(&mut config.body_age_gyr, 0.5..=12.0).text("Age (Gyr)")),
+        );
+
+        ui.collapsing("Environment", |ui| {
+            changed |= fires(
+                &ui.add(
+                    egui::Slider::new(&mut config.environment.stellar_flux_earth, 0.0..=3.0)
+                        .text("Stellar flux (Earth)"),
+                ),
+            );
+            changed |= draw_atmosphere(ui, &mut config.environment.atmosphere);
+            changed |= draw_hydrosphere(ui, &mut config.environment.hydrosphere);
+
+            let prev_ice = config.environment.ice_inventory;
+            egui::ComboBox::from_label("Ice inventory")
+                .selected_text(format!("{:?}", config.environment.ice_inventory))
+                .show_ui(ui, |ui| {
+                    for ice in [
+                        IceInventory::None,
+                        IceInventory::Trace,
+                        IceInventory::Moderate,
+                        IceInventory::High,
+                    ] {
+                        ui.selectable_value(
+                            &mut config.environment.ice_inventory,
+                            ice,
+                            format!("{ice:?}"),
+                        );
+                    }
+                });
+            if config.environment.ice_inventory != prev_ice {
+                changed = true;
+            }
+        });
+
+        ui.collapsing("Intent", |ui| {
+            for intent in [
+                TerrainIntent::ReadAsMoon,
+                TerrainIntent::DistinctNearSideFace,
+                TerrainIntent::DifferentFarSide,
+                TerrainIntent::FirstLandingWorld,
+                TerrainIntent::ReadAsFirstInterplanetarySurfaceWorld,
+                TerrainIntent::ForgivingLandingTerrain,
+                TerrainIntent::VisibleAncientWaterStory,
+                TerrainIntent::RustDustAndEvaporites,
+                TerrainIntent::HomeworldIdentity,
+            ] {
+                let mut on = config.intent.contains(&intent);
+                if ui.checkbox(&mut on, format!("{intent:?}")).changed() {
+                    if on {
+                        config.intent.push(intent);
+                    } else {
+                        config.intent.retain(|i| *i != intent);
+                    }
+                    changed = true;
+                }
+            }
+        });
+    });
+    changed
+}
+
+/// Atmosphere variant selector + payload editor. Switching variants preserves
+/// the current pressure_bar across variants that carry one.
+fn draw_atmosphere(ui: &mut egui::Ui, atmos: &mut AtmosphereSpec) -> bool {
+    let mut changed = false;
+    let cur_disc = std::mem::discriminant(atmos);
+    let pressure = match *atmos {
+        AtmosphereSpec::None => 0.01,
+        AtmosphereSpec::ThinCo2 { pressure_bar }
+        | AtmosphereSpec::Breathable { pressure_bar }
+        | AtmosphereSpec::Other { pressure_bar } => pressure_bar,
+    };
+    egui::ComboBox::from_label("Atmosphere")
+        .selected_text(atmosphere_label(atmos))
+        .show_ui(ui, |ui| {
+            for candidate in [
+                AtmosphereSpec::None,
+                AtmosphereSpec::ThinCo2 {
+                    pressure_bar: pressure,
+                },
+                AtmosphereSpec::Breathable {
+                    pressure_bar: pressure,
+                },
+                AtmosphereSpec::Other {
+                    pressure_bar: pressure,
+                },
+            ] {
+                let selected = std::mem::discriminant(&candidate) == cur_disc;
+                if ui
+                    .selectable_label(selected, atmosphere_label(&candidate))
+                    .clicked()
+                    && !selected
+                {
+                    *atmos = candidate;
+                    changed = true;
+                }
+            }
+        });
+    if let AtmosphereSpec::ThinCo2 { pressure_bar }
+    | AtmosphereSpec::Breathable { pressure_bar }
+    | AtmosphereSpec::Other { pressure_bar } = atmos
+    {
+        changed |= fires(
+            &ui.add(
+                egui::Slider::new(pressure_bar, 0.001..=10.0)
+                    .logarithmic(true)
+                    .text("Pressure (bar)"),
+            ),
+        );
+    }
+    changed
+}
+
+fn atmosphere_label(a: &AtmosphereSpec) -> &'static str {
+    match a {
+        AtmosphereSpec::None => "None",
+        AtmosphereSpec::ThinCo2 { .. } => "ThinCo2",
+        AtmosphereSpec::Breathable { .. } => "Breathable",
+        AtmosphereSpec::Other { .. } => "Other",
+    }
+}
+
+fn draw_hydrosphere(ui: &mut egui::Ui, hydro: &mut HydrosphereSpec) -> bool {
+    let mut changed = false;
+    let cur_disc = std::mem::discriminant(hydro);
+    let fraction = match *hydro {
+        HydrosphereSpec::OceanFraction(f) => f,
+        _ => 0.7,
+    };
+    egui::ComboBox::from_label("Hydrosphere")
+        .selected_text(hydrosphere_label(hydro))
+        .show_ui(ui, |ui| {
+            for candidate in [
+                HydrosphereSpec::None,
+                HydrosphereSpec::Trace,
+                HydrosphereSpec::AncientLost,
+                HydrosphereSpec::OceanFraction(fraction),
+            ] {
+                let selected = std::mem::discriminant(&candidate) == cur_disc;
+                if ui
+                    .selectable_label(selected, hydrosphere_label(&candidate))
+                    .clicked()
+                    && !selected
+                {
+                    *hydro = candidate;
+                    changed = true;
+                }
+            }
+        });
+    if let HydrosphereSpec::OceanFraction(f) = hydro {
+        changed |= fires(&ui.add(egui::Slider::new(f, 0.0..=1.0).text("Ocean fraction")));
+    }
+    changed
+}
+
+fn hydrosphere_label(h: &HydrosphereSpec) -> &'static str {
+    match h {
+        HydrosphereSpec::None => "None",
+        HydrosphereSpec::Trace => "Trace",
+        HydrosphereSpec::AncientLost => "AncientLost",
+        HydrosphereSpec::OceanFraction(_) => "OceanFraction",
+    }
+}
+
 fn draw_projection_controls(ui: &mut egui::Ui, projection: &mut FeatureProjectionConfig) -> bool {
     match projection {
         FeatureProjectionConfig::Auto => {
@@ -1058,84 +1325,287 @@ fn reroll_authored_seed(
     *seed = Some(current.rerolled(stream, "planet_editor"));
 }
 
-fn draw_authored_feature_controls(
+/// Draw the manifest as a flat indented selectable list. Returns the feature
+/// id newly clicked this frame, if any. Tree depth is small (≤3) so flat
+/// rendering with manual indentation is more usable than nested collapsibles.
+fn draw_feature_manifest(
     ui: &mut egui::Ui,
-    root_seed: u64,
-    authored_features: &mut [AuthoredFeatureConfig],
-) -> bool {
-    let mut changed = false;
-    ui.collapsing("Authored Features", |ui| {
-        for feature in authored_features {
-            match feature {
-                AuthoredFeatureConfig::Megabasin(config) => {
-                    let id = config.id.clone();
-                    ui.horizontal(|ui| {
-                        ui.label(id.as_str());
-                        if ui.small_button("Shape").clicked() {
-                            reroll_authored_seed(
-                                root_seed,
-                                &id,
-                                &mut config.seed,
-                                FeatureSeedStream::Shape,
-                            );
-                            changed = true;
-                        }
-                        if ui.small_button("Detail").clicked() {
-                            reroll_authored_seed(
-                                root_seed,
-                                &id,
-                                &mut config.seed,
-                                FeatureSeedStream::Detail,
-                            );
-                            changed = true;
-                        }
-                    });
-                }
-            }
-        }
-    });
-    changed
-}
-
-fn draw_feature_manifest(ui: &mut egui::Ui, manifest: &FeatureManifest) {
+    manifest: &FeatureManifest,
+    selected: Option<&FeatureId>,
+) -> Option<FeatureId> {
+    let mut clicked = None;
     ui.collapsing("Feature Manifest", |ui| {
         ui.label(format!("{} features", manifest.features.len()));
         let root_children = manifest
             .get(&manifest.root)
             .map(|root| root.children.clone())
             .unwrap_or_default();
-        for child_id in root_children {
-            draw_feature_manifest_node(ui, manifest, &child_id);
+        for child_id in &root_children {
+            walk_manifest_flat(ui, manifest, child_id, selected, &mut clicked, 0);
         }
     });
+    clicked
 }
 
-fn draw_feature_manifest_node(ui: &mut egui::Ui, manifest: &FeatureManifest, id: &FeatureId) {
+fn walk_manifest_flat(
+    ui: &mut egui::Ui,
+    manifest: &FeatureManifest,
+    id: &FeatureId,
+    selected: Option<&FeatureId>,
+    clicked: &mut Option<FeatureId>,
+    depth: usize,
+) {
     let Some(feature) = manifest.get(id) else {
         return;
     };
-    let label = if feature.scale_range_m.max_m.is_finite() {
+    let indent: String = std::iter::repeat_n("  ", depth).collect();
+    let scale = if feature.scale_range_m.max_m.is_finite() {
         format!(
-            "{} · {:?} · {:.1}-{:.1} km",
-            feature.id,
-            feature.kind,
+            " · {:.1}-{:.1} km",
             feature.scale_range_m.min_m / 1_000.0,
             feature.scale_range_m.max_m / 1_000.0
         )
     } else {
-        format!("{} · {:?} · global", feature.id, feature.kind)
+        " · global".to_string()
+    };
+    let label = format!("{indent}{} · {:?}{scale}", feature.id, feature.kind);
+    let is_selected = selected == Some(id);
+    if ui.selectable_label(is_selected, label).clicked() {
+        *clicked = Some(id.clone());
+    }
+    let children = feature.children.clone();
+    for child_id in &children {
+        walk_manifest_flat(ui, manifest, child_id, selected, clicked, depth + 1);
+    }
+}
+
+/// Inspector panel for the selected manifest feature. Editable for authored
+/// features (matched by id against `authored`); read-only for generated ones.
+/// Sets `delete` to the feature id the user asked to remove, if any.
+fn draw_selected_inspector(
+    ui: &mut egui::Ui,
+    selected_id: &FeatureId,
+    manifest: &FeatureManifest,
+    root_seed: u64,
+    authored: &mut [AuthoredFeatureConfig],
+    delete: &mut Option<FeatureId>,
+) -> bool {
+    let mut changed = false;
+    let Some(feature) = manifest.get(selected_id) else {
+        ui.label(format!("(missing feature: {selected_id})"));
+        return false;
     };
 
-    if feature.children.is_empty() {
-        ui.label(label);
+    ui.heading(feature.id.as_str());
+    ui.label(format!("Kind: {:?}", feature.kind));
+    ui.label(format!("Era: {:?}", feature.era));
+    if feature.scale_range_m.max_m.is_finite() {
+        ui.label(format!(
+            "Scale: {:.1}-{:.1} km",
+            feature.scale_range_m.min_m / 1_000.0,
+            feature.scale_range_m.max_m / 1_000.0
+        ));
     } else {
-        let children = feature.children.clone();
-        ui.collapsing(label, |ui| {
-            for child_id in children {
-                draw_feature_manifest_node(ui, manifest, &child_id);
-            }
-        });
+        ui.label("Scale: global");
     }
+
+    let authored_index = authored.iter().position(|a| match a {
+        AuthoredFeatureConfig::Megabasin(c) => &c.id == selected_id,
+    });
+
+    if let Some(idx) = authored_index {
+        ui.separator();
+        ui.label("(authored)");
+        match &mut authored[idx] {
+            AuthoredFeatureConfig::Megabasin(config) => {
+                changed |= fires(
+                    &ui.add(
+                        egui::Slider::new(&mut config.radius_km, 50.0..=2000.0).text("Radius (km)"),
+                    ),
+                );
+                changed |= fires(
+                    &ui.add(
+                        egui::Slider::new(&mut config.depth_km, 0.5..=20.0).text("Depth (km)"),
+                    ),
+                );
+
+                let mut has_rings = config.ring_count.is_some();
+                let mut ring_count = config.ring_count.unwrap_or(2);
+                if ui.checkbox(&mut has_rings, "Concentric rings").changed() {
+                    config.ring_count = if has_rings { Some(ring_count) } else { None };
+                    changed = true;
+                }
+                if has_rings
+                    && fires(&ui.add(egui::Slider::new(&mut ring_count, 1..=4).text("Ring count")))
+                {
+                    config.ring_count = Some(ring_count);
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label("Reroll seed:");
+                ui.horizontal(|ui| {
+                    for (label, stream) in [
+                        ("Placement", FeatureSeedStream::Placement),
+                        ("Shape", FeatureSeedStream::Shape),
+                        ("Detail", FeatureSeedStream::Detail),
+                        ("Children", FeatureSeedStream::Children),
+                    ] {
+                        if ui.small_button(label).clicked() {
+                            reroll_authored_seed(root_seed, &config.id, &mut config.seed, stream);
+                            changed = true;
+                        }
+                    }
+                });
+
+                let prev_lock = config.lock;
+                egui::ComboBox::from_label("Lock")
+                    .selected_text(format!("{:?}", config.lock))
+                    .show_ui(ui, |ui| {
+                        for lock in [
+                            FeatureLock::Unlocked,
+                            FeatureLock::Placement,
+                            FeatureLock::Shape,
+                            FeatureLock::Detail,
+                            FeatureLock::ShapeAndPlacement,
+                            FeatureLock::Full,
+                        ] {
+                            ui.selectable_value(&mut config.lock, lock, format!("{lock:?}"));
+                        }
+                    });
+                if config.lock != prev_lock {
+                    changed = true;
+                }
+
+                ui.separator();
+                if ui.button("Delete").clicked() {
+                    *delete = Some(config.id.clone());
+                    changed = true;
+                }
+            }
+        }
+    } else {
+        ui.label("(generated)");
+        for param in &feature.params {
+            let line = match &param.value {
+                FeatureParamValue::Number(n) => format!("{}: {n:.3}", param.key),
+                FeatureParamValue::Text(t) => format!("{}: {t}", param.key),
+                FeatureParamValue::Bool(b) => format!("{}: {b}", param.key),
+                FeatureParamValue::Direction(_) => format!("{}: <direction>", param.key),
+            };
+            ui.label(line);
+        }
+        ui.separator();
+        ui.add_enabled(false, egui::Button::new("Promote (TODO)"));
+    }
+
+    changed
+}
+
+/// Generate a new authored-feature id like `user.megabasin.7` by scanning
+/// existing authored features for the highest numeric suffix on `prefix`.
+fn next_authored_id(authored: &[AuthoredFeatureConfig], prefix: &str) -> String {
+    let mut max_n: u32 = 0;
+    for a in authored {
+        let id = match a {
+            AuthoredFeatureConfig::Megabasin(c) => c.id.as_str(),
+        };
+        if let Some(rest) = id.strip_prefix(prefix)
+            && let Ok(n) = rest.parse::<u32>()
+        {
+            max_n = max_n.max(n);
+        }
+    }
+    format!("{prefix}{}", max_n + 1)
+}
+
+/// Ray-vs-sphere intersection (sphere centered at origin). Returns the
+/// surface direction (unit) of the nearer hit, or `None` if the ray misses
+/// or the sphere is behind the origin.
+fn ray_vs_sphere(origin: Vec3, dir: Vec3, radius: f32) -> Option<Vec3> {
+    let b = origin.dot(dir);
+    let c = origin.length_squared() - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = -b - disc.sqrt();
+    if t < 0.0 {
+        return None;
+    }
+    Some((origin + dir * t).normalize())
+}
+
+/// Convert a left-click on the 3D view into a new authored feature on the
+/// planet surface. Inert when no placement tool is active or when the cursor
+/// is over an egui panel.
+fn pick_planet_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<EditorCamera>>,
+    mut planet: ResMut<EditedPlanet>,
+    mut egui_ctx: bevy_egui::EguiContexts,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if !planet.tool.placing() {
+        return;
+    }
+    if egui_ctx
+        .ctx_mut()
+        .is_ok_and(|ctx| ctx.wants_pointer_input())
+    {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, cam_transform)) = cameras.single() else {
+        return;
+    };
+    let Ok(ray) = camera.viewport_to_world(cam_transform, cursor) else {
+        return;
+    };
+    let Some(direction) = ray_vs_sphere(ray.origin, *ray.direction, RENDER_RADIUS) else {
+        return;
+    };
+
+    let tool = planet.tool;
+    let new_id = match tool {
+        ToolMode::Inspect => return,
+        ToolMode::AddMegabasin => {
+            let BodyMode::Terrain { ref mut terrain, .. } = planet.mode else {
+                return;
+            };
+            let TerrainConfig::Feature(config) = terrain else {
+                return;
+            };
+            let id_str = next_authored_id(&config.authored_features, "user.megabasin.");
+            let new_id = FeatureId::new(id_str);
+            config
+                .authored_features
+                .push(AuthoredFeatureConfig::Megabasin(MegabasinFeatureConfig {
+                    id: new_id.clone(),
+                    parent: None,
+                    center_dir: direction,
+                    radius_km: 250.0,
+                    depth_km: 5.0,
+                    ring_count: None,
+                    seed: None,
+                    lock: FeatureLock::Placement,
+                }));
+            new_id
+        }
+    };
+
+    planet.selected_feature_id = Some(new_id);
+    planet.terrain_dirty = true;
+    planet.last_edit = Some(Instant::now());
 }
 
 fn editor_ui(
@@ -1165,9 +1635,13 @@ fn editor_ui(
         (ctx.available_rect().right() - 340.0).max(ctx.available_rect().left()),
         ctx.available_rect().top() + 8.0,
     );
+    let max_panel_height = (ctx.available_rect().height() - 32.0).max(200.0);
     egui::Window::new("Planet Editor")
         .default_pos(controls_pos)
+        .default_width(340.0)
+        .max_height(max_panel_height)
         .show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             let fps = diagnostics
                 .get(&FrameTimeDiagnosticsPlugin::FPS)
                 .and_then(|d| d.smoothed())
@@ -1178,16 +1652,40 @@ fn editor_ui(
 
             // ---- Terrain gen status ----------------------------------------
             if matches!(planet.mode, BodyMode::Terrain { .. }) {
+                let mode_label = if planet.last_bake_was_preview {
+                    format!("preview {PREVIEW_CUBEMAP_RESOLUTION}²")
+                } else {
+                    "full".to_string()
+                };
                 match (status.current_started, status.last_duration) {
                     (Some(started), _) => {
                         let elapsed = started.elapsed().as_secs_f32();
-                        ui.label(format!("Generating terrain for {:.2}s…", elapsed));
+                        ui.label(format!("Generating ({mode_label}) for {elapsed:.2}s…"));
                     }
                     (None, Some(d)) => {
-                        ui.label(format!("Last bake: {:.2}s", d.as_secs_f32()));
+                        ui.label(format!("Last bake ({mode_label}): {:.2}s", d.as_secs_f32()));
                     }
                     (None, None) => {}
                 }
+                ui.horizontal(|ui| {
+                    let busy = status.current_started.is_some();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Bake full res"))
+                        .clicked()
+                    {
+                        planet.full_bake_requested = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Tool:");
+                    for tool in [ToolMode::Inspect, ToolMode::AddMegabasin] {
+                        let selected = planet.tool == tool;
+                        if ui.selectable_label(selected, tool.label()).clicked() {
+                            planet.tool = if selected { ToolMode::Inspect } else { tool };
+                        }
+                    }
+                });
             }
 
             ui.separator();
@@ -1208,6 +1706,8 @@ fn editor_ui(
             let radius_m = planet.radius_m as f32;
             let gravity_m_s2 = planet.gravity_m_s2;
             let axial_tilt_rad = planet.axial_tilt_rad;
+            let mut selected_id = planet.selected_feature_id.clone();
+            let mut delete_request: Option<FeatureId> = None;
 
             if let BodyMode::Terrain {
                 ref mut terrain,
@@ -1227,12 +1727,8 @@ fn editor_ui(
                                 terrain_changed = true;
                             }
                         });
+                        terrain_changed |= draw_spec_controls(ui, config);
                         terrain_changed |= draw_projection_controls(ui, &mut config.projection);
-                        terrain_changed |= draw_authored_feature_controls(
-                            ui,
-                            config.seed,
-                            &mut config.authored_features,
-                        );
 
                         let compile_context = TerrainCompileContext {
                             body_name: body_name.clone(),
@@ -1245,7 +1741,30 @@ fn editor_ui(
                         };
                         let spec = config.to_planet_spec(&compile_context);
                         let plan = plan_initial_compilation(&spec);
-                        draw_feature_manifest(ui, &plan.manifest);
+                        if let Some(c) =
+                            draw_feature_manifest(ui, &plan.manifest, selected_id.as_ref())
+                        {
+                            selected_id = Some(c);
+                        }
+                        if let Some(sel) = selected_id.clone() {
+                            ui.separator();
+                            ui.heading("Selected");
+                            terrain_changed |= draw_selected_inspector(
+                                ui,
+                                &sel,
+                                &plan.manifest,
+                                config.seed,
+                                &mut config.authored_features,
+                                &mut delete_request,
+                            );
+                            if let Some(del_id) = delete_request.clone() {
+                                config.authored_features.retain(|a| match a {
+                                    AuthoredFeatureConfig::Megabasin(c) => c.id != del_id,
+                                });
+                                selected_id = None;
+                                terrain_changed = true;
+                            }
+                        }
                     }
                     TerrainConfig::Ocean(ocean) => {
                         terrain_changed |= fires(
@@ -1293,10 +1812,13 @@ fn editor_ui(
 
             if terrain_changed {
                 planet.terrain_dirty = true;
+                planet.last_edit = Some(Instant::now());
             }
             if uniforms_changed {
                 planet.uniforms_dirty = true;
             }
+            planet.selected_feature_id = selected_id;
+            });
         });
 }
 
@@ -1478,8 +2000,23 @@ fn dispatch_rebake(
     mut planet: ResMut<EditedPlanet>,
     mut status: ResMut<TerrainGenStatus>,
     preview_q: Query<(Entity, &Children), With<PreviewPlanet>>,
+    pending_q: Query<&PendingTerrainGen, With<PreviewPlanet>>,
 ) {
-    if !planet.terrain_dirty {
+    let full_bake = planet.full_bake_requested;
+    if !full_bake && !planet.terrain_dirty {
+        return;
+    }
+    // Debounce live edits so a slider drag doesn't queue throwaway tasks.
+    // The full-res button bypasses this so a deliberate request fires now.
+    if !full_bake
+        && let Some(last) = planet.last_edit
+        && last.elapsed().as_millis() < REBAKE_DEBOUNCE_MS
+    {
+        return;
+    }
+    // One bake at a time. The dirty flag stays set so we'll retry once the
+    // current task finalizes.
+    if !pending_q.is_empty() {
         return;
     }
     let BodyMode::Terrain {
@@ -1488,6 +2025,7 @@ fn dispatch_rebake(
     } = planet.mode
     else {
         planet.terrain_dirty = false;
+        planet.full_bake_requested = false;
         return;
     };
     let Ok((entity, children)) = preview_q.single() else {
@@ -1500,7 +2038,10 @@ fn dispatch_rebake(
     let radius_m = planet.radius_m;
     let gravity_m_s2 = planet.gravity_m_s2;
     let axial_tilt_rad = planet.axial_tilt_rad;
+    let resolution_override = (!full_bake).then_some(PREVIEW_CUBEMAP_RESOLUTION);
     planet.terrain_dirty = false;
+    planet.full_bake_requested = false;
+    planet.last_bake_was_preview = !full_bake;
 
     let task = dispatch_terrain_bake(
         &terrain,
@@ -1509,6 +2050,7 @@ fn dispatch_rebake(
         tidal_axis,
         axial_tilt_rad,
         planet.selected_body.clone(),
+        resolution_override,
     );
     status.current_started = Some(Instant::now());
     commands
@@ -1534,8 +2076,7 @@ fn main() {
             .map(|p| p.join("assets"))
             .unwrap_or_else(|| "assets".into());
 
-        load_solar_system_from_dir(&assets_dir)
-            .expect("load solar system from disk")
+        load_solar_system_from_dir(&assets_dir).expect("load solar system from disk")
     };
 
     let find_body = |name: &str| {
@@ -1573,6 +2114,11 @@ fn main() {
             terrain_dirty: false,
             uniforms_dirty: false,
             body_changed: false,
+            last_edit: None,
+            full_bake_requested: false,
+            last_bake_was_preview: false,
+            selected_feature_id: None,
+            tool: ToolMode::default(),
         })
         .init_resource::<OrbitCamera>()
         .init_resource::<TerrainGenStatus>()
@@ -1613,9 +2159,12 @@ fn main() {
                 camera_input,
                 camera_zoom_smoothing.after(camera_input),
                 camera_apply_transform.after(camera_zoom_smoothing),
+                pick_planet_click.after(camera_input),
                 apply_uniform_changes,
                 handle_body_switch,
-                dispatch_rebake.after(handle_body_switch),
+                dispatch_rebake
+                    .after(handle_body_switch)
+                    .after(pick_planet_click),
                 finalize_terrain_bake.after(dispatch_rebake),
                 patch_preview_reference_cloud_cover
                     .after(convert_reference_clouds_when_ready)
