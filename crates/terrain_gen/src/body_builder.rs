@@ -51,6 +51,16 @@ pub struct BodyBuilder {
     /// Finalized into `BodyData::material_cubemap` without any transformation
     /// — stages see the same buffer the GPU will see.
     pub material_cubemap: Cubemap<u8>,
+    /// Per-texel surface roughness (0..1, encoded R8Unorm). Default ~0.85
+    /// at construction; written by `bake_surface_field_into_builder` (or any
+    /// future stage). Consumed by the impostor shader for the PBR microsurface
+    /// term.
+    pub roughness_cubemap: Cubemap<u8>,
+    /// Per-texel object-space normal (RGBA8, alpha unused). Default per-texel
+    /// outward direction so flat-sphere impostors look correct without a
+    /// `SurfaceField` bake; overwritten by the bake routine when present.
+    /// Encoding: `(n * 0.5 + 0.5) * 255`. Stored linear, sample as `Rgba8Unorm`.
+    pub normal_cubemap: Cubemap<[u8; 4]>,
     /// Cutoff below which craters stay SSBO-only; at-or-above, Cratering
     /// rasterizes into the cubemap. Written by the Cratering stage from its
     /// own parameter; the sampler and shader read it from BodyData to avoid
@@ -195,6 +205,19 @@ impl BodyBuilder {
                 }
                 mat
             },
+            roughness_cubemap: {
+                // 0.85 is "moderately rough" — fits regolith / dry rock /
+                // sand. Bodies with a SurfaceField bake overwrite per texel.
+                let default = crate::surface_field::quantize_unit_to_u8(0.85);
+                let mut r = Cubemap::<u8>::new(resolution);
+                for face in crate::cubemap::CubemapFace::ALL {
+                    for v in r.face_data_mut(face) {
+                        *v = default;
+                    }
+                }
+                r
+            },
+            normal_cubemap: crate::surface_field::default_normal_cubemap(resolution),
             // Defaults to +∞ so "nothing gets baked, everything goes to SSBO"
             // until a Cratering stage runs and sets its real value.
             cubemap_bake_threshold_m: f32::INFINITY,
@@ -266,6 +289,8 @@ impl BodyBuilder {
             height_range,
             albedo_cubemap,
             material_cubemap: self.material_cubemap,
+            roughness_cubemap: self.roughness_cubemap,
+            normal_cubemap: self.normal_cubemap,
             craters: self.craters,
             volcanoes: self.volcanoes,
             channels: self.channels,

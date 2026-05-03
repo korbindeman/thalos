@@ -3,7 +3,8 @@
 
 use glam::Vec3;
 use thalos_terrain_gen::{
-    BodyBuilder, Composition, Differentiate, Pipeline, cache,
+    BodyBuilder, Composition, Differentiate, Pipeline, TerrainCompileContext,
+    TerrainCompileOptions, TerrainConfig, cache,
     generator::{GeneratorParams, StageDef},
 };
 
@@ -81,4 +82,37 @@ fn cache_roundtrip_preserves_cubemaps() {
     assert!(cache::load(&path, key ^ 0xDEAD).is_none());
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn terrain_cache_key_tracks_compile_inputs() {
+    let terrain = TerrainConfig::LegacyPipeline(tiny_params());
+    let mut context = TerrainCompileContext {
+        body_name: "TestBody".to_string(),
+        radius_m: 100_000.0,
+        gravity_m_s2: 1.5,
+        rotation_hours: None,
+        obliquity_deg: Some(5.0),
+        tidal_axis: Some(Vec3::Z),
+        axial_tilt_rad: 0.1,
+    };
+
+    let dev_options = TerrainCompileOptions {
+        crater_count_scale: 0.1,
+    };
+    let release_options = TerrainCompileOptions {
+        crater_count_scale: 1.0,
+    };
+
+    let base = cache::terrain_cache_key(&terrain, &context, dev_options);
+    assert_ne!(
+        base,
+        cache::terrain_cache_key(&terrain, &context, release_options)
+    );
+
+    context.gravity_m_s2 = 2.0;
+    assert_ne!(
+        base,
+        cache::terrain_cache_key(&terrain, &context, dev_options)
+    );
 }

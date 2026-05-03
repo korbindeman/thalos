@@ -96,6 +96,7 @@ fn thalos_pipeline() -> Pipeline {
                     tint: [0.35, 0.55, 1.10],
                     tonal_amp: 0.12,
                     roughness: 0.05,
+                    iron_visibility: 0.0,
                 },
                 BiomeParams {
                     name: "continent".to_string(),
@@ -104,6 +105,7 @@ fn thalos_pipeline() -> Pipeline {
                     tint: [1.05, 0.95, 0.75],
                     tonal_amp: 0.30,
                     roughness: 0.85,
+                    iron_visibility: 1.0,
                 },
             ],
             rules: vec![

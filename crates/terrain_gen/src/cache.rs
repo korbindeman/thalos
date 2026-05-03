@@ -4,11 +4,10 @@
 //! module persists a finished `BodyData` blob and loads it on subsequent
 //! runs when the inputs are unchanged.
 //!
-//! Cache validity is decided by key only: the key hashes every input the
-//! pipeline reads (`GeneratorParams` plus the builder-level fields
-//! `radius_m`, `tidal_axis`, `axial_tilt_rad`). Changes to stage *code*
-//! are NOT detected — wipe the cache directory when stage semantics
-//! change (`just clear-terrain-cache`).
+//! Cache validity is decided by key only: the key hashes generation inputs plus
+//! a build-time signature of the terrain_gen source tree. In development, code
+//! edits automatically move bakes to a new cache key while unchanged inputs can
+//! still reuse cached `BodyData`.
 
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -20,9 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::body_data::BodyData;
 use crate::generator::GeneratorParams;
+use crate::terrain_config::{TerrainCompileContext, TerrainCompileOptions, TerrainConfig};
 
 const FORMAT_MAGIC: &[u8; 8] = b"THLSBD01";
+const CACHE_KEY_VERSION: u32 = 2;
 const ZSTD_LEVEL: i32 = 3;
+const SOURCE_HASH: &str = env!("THALOS_TERRAIN_GEN_SOURCE_HASH");
 
 /// Deterministic hash of the inputs that produce a given `BodyData`.
 ///
@@ -36,20 +38,68 @@ pub fn cache_key(
     tidal_axis: Option<Vec3>,
     axial_tilt_rad: f32,
 ) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!("{params:?}").hash(&mut h);
+    cache_key_from_source(&format!("{params:?}"), radius_m, tidal_axis, axial_tilt_rad)
+}
+
+pub fn terrain_cache_key(
+    terrain: &TerrainConfig,
+    context: &TerrainCompileContext,
+    options: TerrainCompileOptions,
+) -> u64 {
+    let mut h = cache_hasher();
+    format!("{terrain:?}").hash(&mut h);
+    context.body_name.hash(&mut h);
+    context.radius_m.to_bits().hash(&mut h);
+    context.gravity_m_s2.to_bits().hash(&mut h);
+    hash_optional_f32(&mut h, context.rotation_hours);
+    hash_optional_f32(&mut h, context.obliquity_deg);
+    context.axial_tilt_rad.to_bits().hash(&mut h);
+    hash_optional_vec3(&mut h, context.tidal_axis);
+    options.crater_count_scale.to_bits().hash(&mut h);
+    h.finish()
+}
+
+pub fn cache_key_from_source(
+    source: &str,
+    radius_m: f32,
+    tidal_axis: Option<Vec3>,
+    axial_tilt_rad: f32,
+) -> u64 {
+    let mut h = cache_hasher();
+    source.hash(&mut h);
     radius_m.to_bits().hash(&mut h);
     axial_tilt_rad.to_bits().hash(&mut h);
-    match tidal_axis {
-        None => 0u8.hash(&mut h),
-        Some(v) => {
-            1u8.hash(&mut h);
-            v.x.to_bits().hash(&mut h);
-            v.y.to_bits().hash(&mut h);
-            v.z.to_bits().hash(&mut h);
+    hash_optional_vec3(&mut h, tidal_axis);
+    h.finish()
+}
+
+fn cache_hasher() -> std::collections::hash_map::DefaultHasher {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    CACHE_KEY_VERSION.hash(&mut h);
+    SOURCE_HASH.hash(&mut h);
+    h
+}
+
+fn hash_optional_f32(h: &mut impl Hasher, value: Option<f32>) {
+    match value {
+        None => 0u8.hash(h),
+        Some(value) => {
+            1u8.hash(h);
+            value.to_bits().hash(h);
         }
     }
-    h.finish()
+}
+
+fn hash_optional_vec3(h: &mut impl Hasher, value: Option<Vec3>) {
+    match value {
+        None => 0u8.hash(h),
+        Some(v) => {
+            1u8.hash(h);
+            v.x.to_bits().hash(h);
+            v.y.to_bits().hash(h);
+            v.z.to_bits().hash(h);
+        }
+    }
 }
 
 /// Cache file path: `<dir>/<sanitized body>-<hex key>.bin`.

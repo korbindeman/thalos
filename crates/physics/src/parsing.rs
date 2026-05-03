@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
-use thalos_terrain_gen::GeneratorParams;
+use thalos_terrain_gen::{GeneratorParams, TerrainConfig};
 
 use crate::debug_orbits::debug_parking_orbit_relative_state;
 use crate::types::{
@@ -31,8 +31,8 @@ pub struct SolarSystemFile {
 }
 
 /// One body in the file. `parent` references another body by name. Bodies
-/// without orbital elements are root-frame (the star). Bodies without a
-/// `generator` block don't run the surface generator yet.
+/// without orbital elements are root-frame (the star). Bodies may use either
+/// the new feature terrain block or the legacy generator block.
 #[derive(Debug, Deserialize)]
 pub struct BodyFile {
     pub name: String,
@@ -40,7 +40,10 @@ pub struct BodyFile {
     pub parent: Option<String>,
     pub physical: PhysicalParams,
     pub orbit: Option<OrbitFile>,
+    #[serde(default)]
     pub generator: Option<GeneratorParams>,
+    #[serde(default)]
+    pub terrain: Option<TerrainConfig>,
     #[serde(default)]
     pub atmosphere: Option<AtmosphereParams>,
     #[serde(default)]
@@ -106,6 +109,11 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             true_anomaly_rad: o.true_anomaly_deg.to_radians(),
         });
 
+        let terrain = b.terrain.unwrap_or_else(|| match &b.generator {
+            Some(generator) => TerrainConfig::LegacyPipeline(generator.clone()),
+            None => TerrainConfig::None,
+        });
+
         bodies.push(BodyDefinition {
             id,
             name: b.name,
@@ -120,6 +128,7 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             gm: G * b.physical.mass_kg,
             soi_radius_m: 0.0, // filled below once all bodies exist
             orbital_elements,
+            terrain,
             generator: b.generator,
             atmosphere: b.atmosphere,
             terrestrial_atmosphere: b.terrestrial_atmosphere,
@@ -173,4 +182,68 @@ fn parse_hex_color(hex: &str) -> [f32; 3] {
     let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255) as f32 / 255.0;
     let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255) as f32 / 255.0;
     [r, g, b]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use thalos_terrain_gen::{BodyArchetype, TerrainConfig};
+
+    #[test]
+    fn mira_uses_feature_terrain_when_loaded_from_asset() {
+        let source = include_str!("../../../assets/solar_system.ron");
+        let system = load_solar_system(source).expect("parse solar_system.ron");
+        let mira = system.body_by_name("Mira").expect("Mira exists");
+
+        match &mira.terrain {
+            TerrainConfig::Feature(config) => {
+                assert_eq!(config.archetype, BodyArchetype::AirlessImpactMoon);
+            }
+            other => panic!("Mira should use feature terrain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vaelen_uses_feature_terrain_when_loaded_from_asset() {
+        let source = include_str!("../../../assets/solar_system.ron");
+        let system = load_solar_system(source).expect("parse solar_system.ron");
+        let vaelen = system.body_by_name("Vaelen").expect("Vaelen exists");
+
+        match &vaelen.terrain {
+            TerrainConfig::Feature(config) => {
+                assert_eq!(config.archetype, BodyArchetype::ColdDesertFormerlyWet);
+            }
+            other => panic!("Vaelen should use feature terrain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrated_airless_bodies_use_feature_terrain() {
+        let source = include_str!("../../../assets/solar_system.ron");
+        let system = load_solar_system(source).expect("parse solar_system.ron");
+
+        for name in ["Selva", "Carpo", "Theron", "Nyx"] {
+            let body = system.body_by_name(name).expect("body exists");
+            assert!(
+                body.generator.is_none(),
+                "{name} should not retain a legacy generator block"
+            );
+            match &body.terrain {
+                TerrainConfig::Feature(config) => {
+                    assert_eq!(config.archetype, BodyArchetype::AirlessImpactMoon);
+                }
+                other => {
+                    panic!("{name} should use AirlessImpactMoon feature terrain, got {other:?}")
+                }
+            }
+        }
+
+        let legacy: Vec<_> = system
+            .bodies
+            .iter()
+            .filter(|body| matches!(body.terrain, TerrainConfig::LegacyPipeline(_)))
+            .map(|body| body.name.as_str())
+            .collect();
+        assert_eq!(legacy, vec!["Thalos", "Pelagos"]);
+    }
 }

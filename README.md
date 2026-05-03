@@ -49,6 +49,7 @@ Controls:
 - `\` reset time warp to 1x
 - `M` toggle map view
 - `V` cycle ship camera mode
+- `F12` save a screenshot to `~/Desktop/thalos`
 - Left drag rotates the camera
 - Scroll zooms the camera
 - Double-click a body or ship marker to focus it

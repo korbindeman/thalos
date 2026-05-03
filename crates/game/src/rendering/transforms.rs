@@ -3,7 +3,7 @@
 //! placement, and per-planet orientation (tidal lock + spin).
 
 use bevy::prelude::*;
-use thalos_physics::types::{BodyDefinition, BodyId};
+use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::{PlanetHaloMaterial, PlanetMaterial};
 
 use super::screen_marker_radius;
@@ -13,7 +13,7 @@ use super::types::{
 };
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{
-    MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, SHIP_SCALE, WorldScale, to_render_pos,
+    to_render_pos, RenderFrame, RenderGhostFocus, RenderOrigin, WorldScale, MAP_SCALE, SHIP_SCALE,
 };
 use crate::flight_plan_view::FlightPlanView;
 use crate::view::ViewMode;
@@ -272,14 +272,52 @@ fn local_system_root(mut body_id: BodyId, bodies: &[BodyDefinition]) -> BodyId {
     body_id
 }
 
+fn tangent_axis(seed: Vec3, normal: Vec3) -> Option<Vec3> {
+    let tangent = seed - normal * seed.dot(normal);
+    (tangent.length_squared() > 1.0e-8).then(|| tangent.normalize())
+}
+
+fn tidal_lock_orientation(body_state: &BodyState, parent_state: &BodyState) -> Option<Quat> {
+    let to_parent = parent_state.position - body_state.position;
+    let len = to_parent.length();
+    if len < 1.0 {
+        return None;
+    }
+
+    let z_world = (to_parent / len).as_vec3();
+
+    // `keplerian_basis` uses XZ as the zero-inclination orbital plane and
+    // +Y as ecliptic north. For a prograde zero-inclination orbit,
+    // r x v points along -Y, so negate it to keep body-local +Y aligned
+    // with the terrain generator's north convention.
+    let rel_pos = body_state.position - parent_state.position;
+    let rel_vel = body_state.velocity - parent_state.velocity;
+    let angular_momentum = rel_pos.cross(rel_vel);
+    let y_seed = if angular_momentum.length_squared() > f64::EPSILON {
+        (-angular_momentum.normalize()).as_vec3()
+    } else {
+        Vec3::Y
+    };
+
+    let y_world = tangent_axis(y_seed, z_world)
+        .or_else(|| tangent_axis(Vec3::Y, z_world))
+        .or_else(|| tangent_axis(Vec3::X, z_world))?;
+    let x_world = y_world.cross(z_world).normalize();
+    let y_world = z_world.cross(x_world).normalize();
+
+    let body_to_world = Mat3::from_cols(x_world, y_world, z_world);
+    Some(Quat::from_mat3(&body_to_world).inverse().normalize())
+}
+
 /// Rewrite each baked planet's material `orientation` quaternion every frame.
 ///
 /// Tidally-locked bodies point their baked +Z axis at the parent (mare /
-/// tidal asymmetry baked into `BodyBuilder::tidal_axis`). Free-spinning
-/// bodies compose `Ry(phase) * Rx(tilt)` so the surface spins under a tilted
-/// axis — this mirrors the gas-giant pipeline, where the shader applies
-/// `rotation_phase` post-orientation; for the impostor shader there is no
-/// such uniform, so spin must be baked into the single orientation quat.
+/// tidal asymmetry baked into `BodyBuilder::tidal_axis`) while their local
+/// +Y stays tied to the orbit plane. Free-spinning bodies compose
+/// `Ry(phase) * Rx(tilt)` so the surface spins under a tilted axis — this
+/// mirrors the gas-giant pipeline, where the shader applies `rotation_phase`
+/// post-orientation; for the impostor shader there is no such uniform, so
+/// spin must be baked into the single orientation quat.
 pub(super) fn update_planet_orientations(
     query: Query<(&CelestialBody, Option<&TidallyLocked>, &PlanetMaterials)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
@@ -307,17 +345,10 @@ pub(super) fn update_planet_orientations(
             let Some(parent_state) = states.get(lock.parent_id) else {
                 continue;
             };
-            let offset = parent_state.position - body_state.position;
-            let len = offset.length();
-            if len < 1.0 {
+            let Some(q) = tidal_lock_orientation(body_state, parent_state) else {
                 continue;
-            }
-            let dir = (offset / len).as_vec3();
-            // `from_rotation_arc` produces the shortest rotation that maps
-            // `dir` onto +Z. glam's impl handles the antiparallel case with a
-            // stable fallback axis, so there's no degenerate pole for the
-            // moon's orbit.
-            Quat::from_rotation_arc(dir, Vec3::Z)
+            };
+            q
         } else {
             let body_def = &body_defs[body.body_id];
             let period = body_def.rotation_period_s;
@@ -349,5 +380,77 @@ pub(super) fn update_planet_orientations(
                 mat.params.orientation = q4;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::DVec3;
+
+    fn body_state(position: DVec3, velocity: DVec3) -> BodyState {
+        BodyState {
+            position,
+            velocity,
+            mass_kg: 1.0,
+        }
+    }
+
+    fn assert_vec3_near(actual: Vec3, expected: Vec3) {
+        let err = (actual - expected).length();
+        assert!(
+            err < 1.0e-5,
+            "expected {expected:?}, got {actual:?}, err {err}"
+        );
+    }
+
+    fn assert_axes_close(a: Quat, b: Quat, max_angle_rad: f32) {
+        let a = a.inverse();
+        let b = b.inverse();
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let da = a * axis;
+            let db = b * axis;
+            let angle = da.dot(db).clamp(-1.0, 1.0).acos();
+            assert!(
+                angle < max_angle_rad,
+                "axis {axis:?} changed by {angle} rad, expected < {max_angle_rad}"
+            );
+        }
+    }
+
+    #[test]
+    fn tidal_lock_faces_parent_and_preserves_orbital_north() {
+        let parent = body_state(DVec3::ZERO, DVec3::ZERO);
+        let body = body_state(DVec3::X, DVec3::Z);
+
+        let orientation = tidal_lock_orientation(&body, &parent).unwrap();
+
+        assert_vec3_near(orientation * Vec3::NEG_X, Vec3::Z);
+        assert_vec3_near(orientation * Vec3::Y, Vec3::Y);
+    }
+
+    #[test]
+    fn tidal_lock_orientation_stays_continuous_at_antiparallel_arc() {
+        fn circular_state(theta: f64) -> BodyState {
+            body_state(
+                DVec3::new(theta.cos(), 0.0, theta.sin()),
+                DVec3::new(-theta.sin(), 0.0, theta.cos()),
+            )
+        }
+
+        let parent = body_state(DVec3::ZERO, DVec3::ZERO);
+        let epsilon = 1.0e-4;
+        let before = tidal_lock_orientation(
+            &circular_state(std::f64::consts::FRAC_PI_2 - epsilon),
+            &parent,
+        )
+        .unwrap();
+        let after = tidal_lock_orientation(
+            &circular_state(std::f64::consts::FRAC_PI_2 + epsilon),
+            &parent,
+        )
+        .unwrap();
+
+        assert_axes_close(before, after, 1.0e-3);
     }
 }

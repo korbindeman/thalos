@@ -1,15 +1,16 @@
 //! Bake a [`thalos_terrain_gen::BodyData`] into GPU resources.
 //!
 //! Three layers are produced:
-//! - **Cubemaps** (layer 1, always): height (`R16Unorm`), albedo (`Rgba8UnormSrgb`),
-//!   and material-id (`R8Uint`).
-//! - **Feature SSBOs** (layer 2): craters, cell index, feature ids, materials.
+//! - **Cubemaps** (layer 1, always): albedo (`Rgba8UnormSrgb`), height
+//!   (`R16Unorm`), roughness (`R8Unorm`). Normals are reconstructed per-
+//!   fragment in the impostor shader from the height cube; the bake's
+//!   `normal_cubemap` lives in `BodyData` for future ground LOD use.
+//! - **Feature SSBOs** (layer 2): craters, cell index, feature ids.
 //! - **Detail noise params** (layer 3) travel separately via `PlanetDetailParams`.
 //!
 //! See `crates/terrain_gen/src/sample.rs` for the full LOD contract.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
@@ -21,7 +22,7 @@ use thalos_terrain_gen::BodyData;
 use thalos_terrain_gen::Cubemap;
 use thalos_terrain_gen::cubemap::CubemapFace;
 
-use crate::shader_types::{GpuCellRange, GpuCrater, GpuMaterial};
+use crate::shader_types::{GpuCellRange, GpuCrater};
 use crate::texture::PlanetTextures;
 
 // Cubemap resolution for baked cloud cover. 256² is ~1.5 MB at R8Unorm
@@ -126,8 +127,9 @@ fn build_ssbo_cell_table(
 /// Bake `BodyData` into the full set of GPU resources consumed by
 /// [`crate::PlanetMaterial`].
 ///
-/// This uploads the three cubemap layers and the four feature storage
-/// buffers. All handles are bundled into a single [`PlanetTextures`].
+/// Uploads the four cubemap layers (albedo, height, roughness, normal) and
+/// the three feature storage buffers (craters, cell index, feature ids).
+/// All handles are bundled into a single [`PlanetTextures`].
 pub fn bake_from_body_data(
     body: &BodyData,
     images: &mut Assets<Image>,
@@ -148,18 +150,19 @@ pub fn bake_from_body_data(
         2,
         images,
     );
-    // Material cubemap is uploaded as a 2D array with 6 layers, NOT a cube
-    // view. WGSL/naga has no `textureLoad` overload for `texture_cube<u32>`,
-    // so the shader reads it as `texture_2d_array<u32>` — see the comment at
-    // the top of `planet_impostor.wgsl` near `sample_material_id`. The face
-    // order matches `CubemapFace::ALL`.
-    let material_cube = create_2d_array_image(
-        &body.material_cubemap,
-        body.material_cubemap.resolution(),
-        TextureFormat::R8Uint,
+    let roughness = create_cubemap_image(
+        &body.roughness_cubemap,
+        body.roughness_cubemap.resolution(),
+        TextureFormat::R8Unorm,
         1,
         images,
     );
+    // Note: `body.normal_cubemap` is intentionally NOT uploaded to the
+    // impostor's bind group. 8-bit object-space encoding crushes shallow
+    // slope angles (terminator depth, crater rim falloff), so the shader
+    // reconstructs normals per-fragment via `perturb_normal_from_height`.
+    // The baked normal cube remains in `BodyData` for future ground LOD
+    // consumers where per-fragment height finite differencing isn't free.
 
     // --- Layer 2: feature SSBOs --------------------------------------------
     let craters: Vec<GpuCrater> = body
@@ -188,44 +191,17 @@ pub fn bake_from_body_data(
         seed_hi,
     );
 
-    // Neutral fallback when the pipeline produced no material palette
-    // (e.g. Thalos — the baked albedo cube is the sole colour source).
-    // `create_storage_buffer_from_slice` pads an empty slice with one
-    // zero-initialized element to keep the binding valid, but the shader
-    // reads `materials[0]` unconditionally whenever `arrayLength(&materials)`
-    // is nonzero, and a zeroed material has `albedo = vec3(0)` — which
-    // zeros out `baked_albedo = mat_albedo * tint_mod * regional` and
-    // turns the surface black. A neutral (0.5, 1.0) entry collapses the
-    // formula to `baked_tint * regional`, matching the intent of the
-    // `baked_tint = 0.5 → neutral` design at `planet_impostor.wgsl:1011`.
-    let materials: Vec<GpuMaterial> = if body.materials.is_empty() {
-        vec![GpuMaterial {
-            albedo: Vec3::splat(0.5),
-            roughness: 1.0,
-        }]
-    } else {
-        body.materials
-            .iter()
-            .map(|m| GpuMaterial {
-                albedo: Vec3::from(m.albedo),
-                roughness: m.roughness,
-            })
-            .collect()
-    };
-
     let craters_handle = create_storage_buffer_from_slice(&craters, storage_buffers);
     let cell_index_handle = create_storage_buffer_from_slice(&cell_index, storage_buffers);
     let feature_ids_handle = create_storage_buffer_from_slice(&feature_ids, storage_buffers);
-    let materials_handle = create_storage_buffer_from_slice(&materials, storage_buffers);
 
     PlanetTextures {
         albedo,
         height,
-        material_cube,
+        roughness,
         craters: craters_handle,
         cell_index: cell_index_handle,
         feature_ids: feature_ids_handle,
-        materials: materials_handle,
     }
 }
 
@@ -282,53 +258,6 @@ fn create_cubemap_image<T: Copy + Default>(
     images.add(cubemap_image(cubemap, resolution, format, bytes_per_texel))
 }
 
-/// Nearest-neighbor, non-filtering sampler for integer textures. The layout
-/// `#[sampler(7, sampler_type = "non_filtering")]` on `PlanetMaterial`
-/// requires the actual sampler to also be non-filtering — wgpu enforces this
-/// at bind-group creation time.
-fn non_filtering_sampler() -> ImageSampler {
-    ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::ClampToEdge,
-        address_mode_v: ImageAddressMode::ClampToEdge,
-        address_mode_w: ImageAddressMode::ClampToEdge,
-        mag_filter: ImageFilterMode::Nearest,
-        min_filter: ImageFilterMode::Nearest,
-        mipmap_filter: ImageFilterMode::Nearest,
-        ..default()
-    })
-}
-
-/// Create a Bevy `Image` from a `Cubemap<T>` with a 2D array view descriptor.
-/// Same data layout as `create_cubemap_image` but no cube-dimension view — the
-/// shader reads it as `texture_2d_array<T>` and does its own face lookup.
-/// Uses a nearest-neighbor sampler since integer textures can't be filtered.
-fn create_2d_array_image<T: Copy + Default>(
-    cubemap: &thalos_terrain_gen::Cubemap<T>,
-    resolution: u32,
-    format: TextureFormat,
-    bytes_per_texel: usize,
-    images: &mut Assets<Image>,
-) -> Handle<Image> {
-    let data = cubemap_to_bytes(cubemap, resolution, bytes_per_texel);
-    let mut image = Image::new(
-        Extent3d {
-            width: resolution,
-            height: resolution,
-            depth_or_array_layers: 6,
-        },
-        TextureDimension::D2,
-        data,
-        format,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::D2Array),
-        ..default()
-    });
-    image.sampler = non_filtering_sampler();
-    images.add(image)
-}
-
 // ---------------------------------------------------------------------------
 // Cloud cover bake
 // ---------------------------------------------------------------------------
@@ -374,6 +303,20 @@ pub fn bake_cloud_cover_image(seed: u64, images: &mut Assets<Image>) -> Handle<I
 /// default JPG loader produces. Other formats panic rather than silently
 /// miscolour.
 pub fn equirect_to_cloud_cover_image(source: &Image, resolution: u32) -> Image {
+    equirect_to_cloud_cover_image_with_rotation(source, resolution, Quat::IDENTITY)
+}
+
+/// Project an equirectangular 2D image into cloud-cover cubemap density,
+/// applying `source_from_output_rotation` before sampling the source image.
+///
+/// The rotation maps each output cubemap direction into the source image's
+/// direction space. For example, a rotation that maps output +Y to source +X
+/// makes the source image's front-center longitude appear at the north pole.
+pub(crate) fn equirect_to_cloud_cover_image_with_rotation(
+    source: &Image,
+    resolution: u32,
+    source_from_output_rotation: Quat,
+) -> Image {
     let fmt = source.texture_descriptor.format;
     assert!(
         matches!(
@@ -397,7 +340,8 @@ pub fn equirect_to_cloud_cover_image(source: &Image, resolution: u32) -> Image {
             let v = (y as f32 + 0.5) * inv;
             for x in 0..resolution {
                 let u = (x as f32 + 0.5) * inv;
-                let dir = thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
+                let dir = source_from_output_rotation
+                    * thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
                 // Equirectangular: longitude from atan2(x, z), latitude
                 // from asin(y). Maps to [0, 1] UV matching source image
                 // layout (longitude → x, latitude → y, north pole at top).

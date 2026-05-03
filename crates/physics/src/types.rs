@@ -2,7 +2,7 @@ use glam::{DQuat, DVec3};
 use serde::Deserialize;
 use std::collections::HashMap;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
-use thalos_terrain_gen::GeneratorParams;
+use thalos_terrain_gen::{GeneratorParams, TerrainConfig};
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
@@ -127,14 +127,15 @@ pub struct BodyDefinition {
     /// so any point in the system falls inside it as a fallback anchor.
     pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
+    pub terrain: TerrainConfig,
     pub generator: Option<GeneratorParams>,
     /// Gas / ice giant atmosphere definition. A body with
-    /// `atmosphere: Some(_)` and no `generator` is rendered as a gas
+    /// `atmosphere: Some(_)` and no `terrain` is rendered as a gas
     /// giant (optically thick all the way down, no solid surface).
     /// Mutually exclusive with `terrestrial_atmosphere` — a body has at
     /// most one atmosphere schema attached.
     pub atmosphere: Option<AtmosphereParams>,
-    /// Thin atmosphere over a solid surface. Paired with `generator`:
+    /// Thin atmosphere over a solid surface. Paired with `terrain`:
     /// a body with both set renders the baked impostor with an
     /// atmosphere shell composited over it (rim halo, limb shading).
     /// Mutually exclusive with `atmosphere` (the gas-giant schema).

@@ -1,5 +1,5 @@
 use glam::Vec3;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::body_builder::BodyBuilder;
 use crate::cubemap::{CubemapFace, face_uv_to_dir};
@@ -13,7 +13,7 @@ use crate::types::BiomeParams;
 /// Multiple rules can coexist; they are evaluated per-texel in the order
 /// declared and the first matching rule wins. A final catch-all (default)
 /// biome should always be listed so every texel receives an id.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BiomeRule {
     /// Catch-all. Always matches. Put at the end of the list.
     Default,

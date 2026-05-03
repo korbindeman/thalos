@@ -21,6 +21,11 @@ pub struct BasinDef {
     /// Number of concentric inner-ring ridges for multi-ring basins.
     /// Rings are placed at √2 sub-multiples of `radius_m` (Pike & Spudis 1987).
     pub ring_count: u32,
+    /// Optional stable feature seed. Legacy stage pipelines leave this unset
+    /// and derive per-basin seeds from stage order; the feature compiler sets
+    /// it so individual authored basins can reroll without disturbing siblings.
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 /// Places the largest-scale impact basins and applies hemispheric asymmetry.
@@ -84,8 +89,9 @@ impl Stage for Megabasin {
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let basin_seed =
-                    splitmix64(seed.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15)));
+                let basin_seed = b.seed.unwrap_or_else(|| {
+                    splitmix64(seed.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15)))
+                });
                 let mut rng = Rng::new(basin_seed);
                 let center = b.center_dir.normalize();
                 // Build tangent frame at basin center for azimuth measurement.
@@ -404,6 +410,7 @@ mod tests {
                 radius_m: 300_000.0,
                 depth_m: 6_000.0,
                 ring_count: 4,
+                seed: None,
             },
             seed: 1234,
             center: Vec3::Z,

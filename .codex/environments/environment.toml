@@ -14,3 +14,8 @@ command = "just game"
 name = "Shipyard"
 icon = "tool"
 command = "just shipyard"
+
+[[actions]]
+name = "Planet editor"
+icon = "tool"
+command = "just edit"

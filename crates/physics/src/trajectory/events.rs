@@ -638,6 +638,7 @@ mod tests {
                 f64::INFINITY
             },
             orbital_elements: None,
+            terrain: thalos_terrain_gen::TerrainConfig::None,
             generator: None,
             atmosphere: None,
             terrestrial_atmosphere: None,

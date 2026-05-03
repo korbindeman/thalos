@@ -35,6 +35,15 @@ pub struct BodyData {
     /// Stages write this directly (MareFlood marks flooded regions with
     /// MAT_MARE; everything else stays at the initial MAT_HIGHLAND).
     pub material_cubemap: Cubemap<u8>,
+    /// Per-texel surface roughness (R8Unorm; `roughness = byte / 255.0`).
+    /// Consumed by the impostor shader for PBR microsurface response.
+    pub roughness_cubemap: Cubemap<u8>,
+    /// Per-texel object-space normal (RGBA8, linear; alpha unused).
+    /// Decoding: `n = (texel.rgb * 2.0 - 1.0)`. Sample as `Rgba8Unorm`,
+    /// not sRGB. Already includes height-derived bumps + any anisotropic
+    /// perturbation the field provided, so the shader does not need to
+    /// finite-difference the height cube at runtime.
+    pub normal_cubemap: Cubemap<[u8; 4]>,
 
     /// Mid-frequency discrete features.
     pub craters: Vec<Crater>,

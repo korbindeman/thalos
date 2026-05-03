@@ -56,22 +56,6 @@ pub struct GpuCellRange {
     pub count: u32,
 }
 
-/// A material palette entry.
-///
-/// WGSL layout (std430):
-/// ```wgsl
-/// struct Material {
-///     albedo: vec3<f32>,   // offset 0,  size 12
-///     roughness: f32,      // offset 12, size 4
-/// }; // total 16 bytes, align 16
-/// ```
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct GpuMaterial {
-    pub albedo: Vec3,
-    pub roughness: f32,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,7 +64,6 @@ mod tests {
     fn struct_sizes_match_wgsl_std430() {
         assert_eq!(std::mem::size_of::<GpuCrater>(), 32);
         assert_eq!(std::mem::size_of::<GpuCellRange>(), 8);
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 16);
     }
 
     #[test]
@@ -92,6 +75,5 @@ mod tests {
         // writes raw Pod bytes and the shader reads std430.
         assert_eq!(std::mem::align_of::<GpuCrater>(), 4);
         assert_eq!(std::mem::align_of::<GpuCellRange>(), 4);
-        assert_eq!(std::mem::align_of::<GpuMaterial>(), 4);
     }
 }

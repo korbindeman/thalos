@@ -33,10 +33,7 @@ fn sync_target_to_simulation(target: Res<TargetBody>, sim: Option<ResMut<Simulat
     }
 }
 
-fn clear_target_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut target: ResMut<TargetBody>,
-) {
+fn clear_target_input(keys: Res<ButtonInput<KeyCode>>, mut target: ResMut<TargetBody>) {
     if keys.just_pressed(KeyCode::Escape) && target.target.is_some() {
         target.target = None;
         target.set_changed();

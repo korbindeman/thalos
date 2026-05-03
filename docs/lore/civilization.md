@@ -149,7 +149,7 @@ First interplanetary probes, then crewed missions. The sub-Saturn system is the 
 
 #### Phase 3: The ocean moon
 
-The narrative climax of the early game. Reaching the ocean moon, establishing a research station with biosecurity protocols, and the first dive. The descent through chaotic surface waves into the clear shallow water. The moment the volcanic rock reveals itself as a living reef: encrusted filter-feeders, segmented swimmers, armored grazers. An alien ecosystem, Cambrian in complexity, thriving under the light of a foreign star filtered through blue-green water.
+The narrative climax of the early game. Reaching the ocean moon, establishing a research station with biosecurity protocols, and the first dive. The descent through thick blue haze and chaotic surface waves into the clear shallow water. The moment the volcanic rock reveals itself as a living reef: encrusted filter-feeders, segmented swimmers, armored grazers. An alien ecosystem, Cambrian in complexity, thriving under the light of a foreign star filtered through blue-green water.
 
 Life in the shallows is dense: photosynthesis drives the ecosystem, and the volcanic island shelves are where sunlight, nutrients, and substrate combine. Deeper water is sparser, trending toward chemosynthetic vent communities in the abyssal zones.
 

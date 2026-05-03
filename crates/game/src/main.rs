@@ -14,6 +14,7 @@ mod navigation;
 mod photo_mode;
 mod reflection_probe;
 mod rendering;
+mod screenshot;
 mod ship_view;
 mod sky_render;
 mod star_flare;
@@ -50,6 +51,7 @@ use maneuver::ManeuverPlugin;
 use navigation::NavigationPlugin;
 use photo_mode::PhotoModePlugin;
 use rendering::{RenderingPlugin, SimulationState};
+use screenshot::ScreenshotPlugin;
 use ship_view::ShipViewPlugin;
 use target::TargetPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
@@ -235,6 +237,7 @@ fn main() {
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PhotoModePlugin)
+        .add_plugins(ScreenshotPlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
         .add_plugins(BodyTreePanelPlugin)

@@ -3,24 +3,36 @@
 //! Returns a bundle of components to attach alongside `Camera3d` on any camera
 //! that renders planets from vacuum. Keeps both binaries visually consistent.
 
-use bevy::anti_alias::contrast_adaptive_sharpening::ContrastAdaptiveSharpening;
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::anti_alias::{
+    contrast_adaptive_sharpening::ContrastAdaptiveSharpening,
+    smaa::{Smaa, SmaaPreset},
+};
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::post_process::effect_stack::ChromaticAberration;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection, Hdr, Msaa};
 
 use crate::film_grain::FilmGrain;
 
 /// Components to attach to a `Camera3d` entity for the space post stack:
 /// HDR + TonyMcMapface tonemap, subtle bloom, auto exposure metered against
-/// the lit planet face (voids ignored), CAS sharpening, mild chromatic
-/// aberration.
+/// the lit planet face (voids ignored), conservative color grading, SMAA,
+/// CAS sharpening, mild chromatic aberration, and exposure-driven film grain.
 pub fn space_camera_post_stack() -> impl Bundle {
     (
+        // The game renders many shader impostors, thin line overlays, and UI
+        // composites. Prefer a stable post AA pass over MSAA or TAA until the
+        // depth/motion-vector story is explicit across those passes.
+        Msaa::Off,
+        Smaa {
+            preset: SmaaPreset::High,
+        },
         Hdr,
         Tonemapping::TonyMcMapface,
+        DebandDither::Enabled,
+        space_camera_color_grading(),
         Bloom {
             intensity: 0.35,
             low_frequency_boost: 0.0,
@@ -60,4 +72,23 @@ pub fn space_camera_post_stack() -> impl Bundle {
         },
         FilmGrain::default(),
     )
+}
+
+fn space_camera_color_grading() -> ColorGrading {
+    ColorGrading {
+        global: ColorGradingGlobal {
+            // Stay close to Bevy's neutral defaults. Larger section changes
+            // visibly band planet terminators after tonemapping.
+            post_saturation: 0.995,
+            ..default()
+        },
+        // Keep the shadow enrichment that helps Thalos read, but make it
+        // small enough that low-gradient terminators do not posterize.
+        shadows: ColorGradingSection {
+            contrast: 1.012,
+            ..default()
+        },
+        midtones: ColorGradingSection::default(),
+        highlights: ColorGradingSection::default(),
+    }
 }

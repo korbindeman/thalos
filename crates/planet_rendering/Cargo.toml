@@ -7,6 +7,6 @@ edition.workspace = true
 thalos_terrain_gen = { path = "../terrain_gen" }
 thalos_atmosphere_gen = { path = "../atmosphere_gen" }
 thalos_cloud_gen = { path = "../cloud_gen" }
-bevy = { version = "0.18", features = ["wayland"] }
+bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"

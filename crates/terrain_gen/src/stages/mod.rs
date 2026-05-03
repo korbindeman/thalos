@@ -18,6 +18,7 @@ mod tectonic_skeleton;
 mod tectonics;
 mod topography;
 mod util;
+mod vaelen_impacts;
 
 pub use biomes::{BiomeRule, Biomes};
 pub use climate::Climate;
@@ -43,3 +44,4 @@ pub use surface_materials::{
 pub use tectonic_skeleton::TectonicSkeleton;
 pub use tectonics::Tectonics;
 pub use topography::Topography;
+pub use vaelen_impacts::VaelenImpactColor;

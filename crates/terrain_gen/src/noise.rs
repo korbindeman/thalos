@@ -19,6 +19,8 @@
 //!
 //! Fade: Perlin's quintic `6t⁵ − 15t⁴ + 10t³`.
 
+use glam::Vec3;
+
 /// One step of a u32 PCG mixer. The constants are PCG-XSH-RR's `multiplier`
 /// and `increment`; the post-state shift / xor / final multiplier are from
 /// Jarzynski's GPU-friendly variant.
@@ -59,6 +61,18 @@ pub fn fade(t: f32) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
+/// Derivative of [`fade`], `30t²(t − 1)²`.
+#[inline]
+pub fn fade_derivative(t: f32) -> f32 {
+    30.0 * t * t * (t - 1.0) * (t - 1.0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoiseDerivative3 {
+    pub value: f32,
+    pub derivative: Vec3,
+}
+
 /// 3D value noise at a point, seeded. Returns a value in roughly `[-1, 1]`.
 pub fn value_noise_3d(x: f32, y: f32, z: f32, seed: u32) -> f32 {
     let xi = x.floor() as i32;
@@ -86,6 +100,62 @@ pub fn value_noise_3d(x: f32, y: f32, z: f32, seed: u32) -> f32 {
     let y1 = x01 + (x11 - x01) * fy;
 
     y0 + (y1 - y0) * fz
+}
+
+/// 3D value noise and analytic derivatives with respect to `x`, `y`, `z`.
+///
+/// This follows Inigo Quilez's value-noise derivative expansion, using the
+/// same quintic fade as [`value_noise_3d`]. The lattice values are already in
+/// `[-1, 1)`, so no final `-1 + 2 * value` remap is required here.
+pub fn value_noise_3d_derivative(x: f32, y: f32, z: f32, seed: u32) -> NoiseDerivative3 {
+    let xi = x.floor() as i32;
+    let yi = y.floor() as i32;
+    let zi = z.floor() as i32;
+
+    let wx = x - xi as f32;
+    let wy = y - yi as f32;
+    let wz = z - zi as f32;
+
+    let ux = fade(wx);
+    let uy = fade(wy);
+    let uz = fade(wz);
+    let dux = fade_derivative(wx);
+    let duy = fade_derivative(wy);
+    let duz = fade_derivative(wz);
+
+    let a = hash3(xi, yi, zi, seed);
+    let b = hash3(xi + 1, yi, zi, seed);
+    let c = hash3(xi, yi + 1, zi, seed);
+    let d = hash3(xi + 1, yi + 1, zi, seed);
+    let e = hash3(xi, yi, zi + 1, seed);
+    let f = hash3(xi + 1, yi, zi + 1, seed);
+    let g = hash3(xi, yi + 1, zi + 1, seed);
+    let h = hash3(xi + 1, yi + 1, zi + 1, seed);
+
+    let k0 = a;
+    let k1 = b - a;
+    let k2 = c - a;
+    let k3 = e - a;
+    let k4 = a - b - c + d;
+    let k5 = a - c - e + g;
+    let k6 = a - b - e + f;
+    let k7 = -a + b + c - d + e - f - g + h;
+
+    let value = k0
+        + k1 * ux
+        + k2 * uy
+        + k3 * uz
+        + k4 * ux * uy
+        + k5 * uy * uz
+        + k6 * uz * ux
+        + k7 * ux * uy * uz;
+    let derivative = Vec3::new(
+        (k1 + k4 * uy + k6 * uz + k7 * uy * uz) * dux,
+        (k2 + k5 * uz + k4 * ux + k7 * uz * ux) * duy,
+        (k3 + k6 * ux + k5 * uy + k7 * ux * uy) * duz,
+    );
+
+    NoiseDerivative3 { value, derivative }
 }
 
 /// Fractal Brownian motion stacker over [`value_noise_3d`].
@@ -159,6 +229,35 @@ mod tests {
         let a = fbm3(1.0, 2.0, 3.0, 0, 4, 0.5, 2.0);
         let b = fbm3(1.0, 2.0, 3.0, 1, 4, 0.5, 2.0);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn quintic_derivative_is_zero_at_lattice_edges() {
+        assert_eq!(fade_derivative(0.0), 0.0);
+        assert_eq!(fade_derivative(1.0), 0.0);
+    }
+
+    #[test]
+    fn value_noise_derivative_matches_finite_difference() {
+        let p = Vec3::new(1.37, -2.41, 4.83);
+        let seed = 91;
+        let analytic = value_noise_3d_derivative(p.x, p.y, p.z, seed);
+        let eps = 0.001;
+        let finite = Vec3::new(
+            (value_noise_3d(p.x + eps, p.y, p.z, seed) - value_noise_3d(p.x - eps, p.y, p.z, seed))
+                / (2.0 * eps),
+            (value_noise_3d(p.x, p.y + eps, p.z, seed) - value_noise_3d(p.x, p.y - eps, p.z, seed))
+                / (2.0 * eps),
+            (value_noise_3d(p.x, p.y, p.z + eps, seed) - value_noise_3d(p.x, p.y, p.z - eps, seed))
+                / (2.0 * eps),
+        );
+
+        assert!(
+            analytic.derivative.distance(finite) < 0.01,
+            "analytic {:?}, finite {:?}",
+            analytic.derivative,
+            finite
+        );
     }
 
     /// Pinned reference values. The WGSL port at

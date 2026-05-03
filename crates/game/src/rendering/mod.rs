@@ -18,11 +18,7 @@ mod transforms;
 mod types;
 
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
-pub use generation::ReferenceClouds;
-use generation::{
-    convert_reference_clouds_when_ready, finalize_planet_generation, load_reference_cloud_sources,
-    patch_reference_cloud_covers,
-};
+use generation::{finalize_planet_generation, patch_reference_cloud_covers};
 use lighting::{
     sync_film_grain_to_exposure, update_camera_exposure, update_planet_light_dirs,
     update_solid_planet_params, update_sun_light,
@@ -42,6 +38,8 @@ pub use types::{
 };
 
 use bevy::prelude::*;
+pub use thalos_planet_rendering::ReferenceClouds;
+use thalos_planet_rendering::{convert_reference_clouds_when_ready, load_reference_cloud_sources};
 
 use crate::SimStage;
 // Re-export so existing `use crate::rendering::{RenderFrame, RenderOrigin}` sites keep working.

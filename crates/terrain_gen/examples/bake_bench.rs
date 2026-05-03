@@ -36,12 +36,14 @@ fn main() {
                     radius_m: 320_000.0,
                     depth_m: 7_500.0,
                     ring_count: 4,
+                    seed: None,
                 },
                 BasinDef {
                     center_dir: Vec3::new(-0.35, -0.30, 0.85).normalize(),
                     radius_m: 220_000.0,
                     depth_m: 5_200.0,
                     ring_count: 3,
+                    seed: None,
                 },
             ],
             hemispheric_lowering_m: 2_000.0,
@@ -60,6 +62,7 @@ fn main() {
             saturation_fraction: 0.05,
             chain_count: 3,
             chain_segment_count: 10,
+            forced_young_count: 16,
         }),
         Box::new(MareFlood {
             target_count: 5,

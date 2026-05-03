@@ -52,7 +52,7 @@ trace:
 clear-terrain-cache:
     rm -rf target/terrain_cache
 
-# Headless terrain bake + PNG dump. Writes to `target/stage-bakes/<body>/`.
+# Headless terrain bake + PNG dump. Writes to `stage-bakes/<body>/`.
 # Body name is case-insensitive; pass `all` to bake every body with a
 # generator block. Pass `stage=N` to run only the first N stages.
 #

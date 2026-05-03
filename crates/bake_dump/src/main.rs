@@ -1,16 +1,15 @@
 //! `bake_dump` — headless terrain bake + PNG exporter.
 //!
-//! Runs a body's terrain pipeline (optionally up to a specific stage) and
-//! writes the resulting cubemaps as PNG images in two layouts:
+//! Runs a body's terrain compiler (optionally up to a legacy stage) and
+//! writes the resulting cubemaps as equirectangular PNG images:
 //!
 //! - **Equirectangular** (2:1 lat/lon): a "map of the globe" view for
 //!   reading at a glance.
-//! - **Cube cross** (4:3): the 6 faces laid out in a T; for spotting
-//!   seam defects across face boundaries.
 //!
-//! Three layers are dumped per bake: albedo, height (grayscale,
+//! Three core layers are dumped per bake: albedo, height (grayscale,
 //! normalized to the body's ± range), and material ID (deterministic
-//! per-ID colors).
+//! per-ID colors). Feature cold-desert bodies also emit biome/suture maps so
+//! process regions can be evaluated before albedo hides the structure.
 //!
 //! Usage:
 //!
@@ -21,12 +20,12 @@
 //!                                              [--equirect-width W]
 //!
 //! Body name matching is case-insensitive. Pass `all` to bake every
-//! body in the solar system that has a generator block.
+//! body in the solar system that has terrain.
 //!
 //! Defaults:
 //!
 //!   --solar-system    assets/solar_system.ron
-//!   --out             target/stage-bakes/<body>/
+//!   --out             stage-bakes/<body>/
 //!   --equirect-width  2048
 //!
 //! `--up-to-stage N` keeps only the first N stages of the generator's
@@ -40,7 +39,11 @@ use glam::Vec3;
 use image::{ImageBuffer, Rgb, RgbImage};
 use thalos_physics::parsing::load_solar_system;
 use thalos_terrain_gen::cubemap::{CubemapFace, dir_to_face_uv};
-use thalos_terrain_gen::{BodyBuilder, BodyData, GeneratorParams, Pipeline, StageDef};
+use thalos_terrain_gen::{
+    BodyArchetype, BodyBuilder, BodyData, FeatureId, FeatureProjectionConfig, GeneratorParams,
+    Pipeline, StageDef, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+    VaelenColdDesertField, compile_terrain_config, generate_initial_manifest,
+};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -54,13 +57,17 @@ struct Args {
     out_dir: Option<PathBuf>,
     solar_system: PathBuf,
     equirect_width: u32,
+    /// Emit debug-only dumps (biome / suture / material-id) alongside the
+    /// production PBR set. Off by default — production bakes ship only the
+    /// four cubemaps the impostor consumes.
+    debug: bool,
 }
 
 fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.is_empty() || raw.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "usage: bake_dump <body_name|all> [--up-to-stage N] [--out DIR] [--solar-system PATH] [--equirect-width W]"
+            "usage: bake_dump <body_name|all> [--up-to-stage N] [--out DIR] [--solar-system PATH] [--equirect-width W] [--debug]"
         );
         std::process::exit(if raw.is_empty() { 1 } else { 0 });
     }
@@ -70,6 +77,7 @@ fn parse_args() -> Args {
     let mut out_dir: Option<PathBuf> = None;
     let mut solar_system: PathBuf = PathBuf::from("assets/solar_system.ron");
     let mut equirect_width: u32 = 2048;
+    let mut debug = false;
 
     let mut i = 0;
     while i < raw.len() {
@@ -91,6 +99,7 @@ fn parse_args() -> Args {
                 i += 1;
                 equirect_width = raw[i].parse().expect("--equirect-width needs an integer");
             }
+            "--debug" => debug = true,
             s if s.starts_with("--") => panic!("unknown flag: {s}"),
             s if body_name.is_none() => body_name = Some(s.to_string()),
             s => panic!("unexpected positional arg: {s}"),
@@ -106,10 +115,11 @@ fn parse_args() -> Args {
         out_dir,
         solar_system,
         equirect_width,
+        debug,
     }
 }
 
-const DEFAULT_OUT_ROOT: &str = "target/stage-bakes";
+const DEFAULT_OUT_ROOT: &str = "stage-bakes";
 
 // ---------------------------------------------------------------------------
 // main
@@ -127,11 +137,11 @@ fn main() {
             let mut v: Vec<_> = system
                 .bodies
                 .iter()
-                .filter(|b| b.generator.is_some())
+                .filter(|b| b.terrain.is_some())
                 .collect();
             if v.is_empty() {
                 panic!(
-                    "no bodies in '{}' have a generator block",
+                    "no bodies in '{}' have terrain",
                     args.solar_system.display()
                 );
             }
@@ -148,41 +158,30 @@ fn main() {
 
     let is_all = targets.len() > 1;
     for body in targets {
-        let generator = body
-            .generator
-            .as_ref()
-            .unwrap_or_else(|| panic!("body '{}' has no generator block", body.name))
-            .clone();
-
         let out_dir = match (&args.out_dir, is_all) {
             // Explicit --out with a single body: use it directly.
             (Some(p), false) => p.clone(),
             // Explicit --out with `all`: treat as parent, subdirs per body.
             (Some(p), true) => p.join(&body.name),
-            // Default: target/stage-bakes/<body>.
+            // Default: stage-bakes/<body>.
             (None, _) => PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name),
         };
 
-        bake_one(
-            body,
-            generator,
-            args.up_to_stage,
-            &out_dir,
-            args.equirect_width,
-        );
+        bake_one(body, args.up_to_stage, &out_dir, args.equirect_width, args.debug);
     }
 }
 
 fn bake_one(
     body: &thalos_physics::types::BodyDefinition,
-    generator: GeneratorParams,
     up_to_stage: Option<usize>,
     out_dir: &Path,
     equirect_width: u32,
+    debug: bool,
 ) {
-    let (body_data, stage_names) = run_pipeline(generator, body.radius_m as f32, up_to_stage);
+    let (body_data, stage_names) = run_terrain(body, up_to_stage);
 
     fs::create_dir_all(out_dir).expect("creating out dir");
+    remove_legacy_outputs(out_dir, debug);
 
     println!(
         "{}: baked {} stages ({} provinces, {} craters) → {}",
@@ -193,8 +192,53 @@ fn bake_one(
         out_dir.display(),
     );
 
-    dump_all(&body_data, out_dir, equirect_width);
+    dump_pbr_set(&body_data, out_dir, equirect_width);
+    if debug {
+        dump_debug_set(&body_data, body, out_dir, equirect_width);
+    }
     dump_info(&body_data, &stage_names, out_dir);
+}
+
+fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompileContext {
+    TerrainCompileContext {
+        body_name: body.name.clone(),
+        radius_m: body.radius_m as f32,
+        gravity_m_s2: (body.gm / (body.radius_m * body.radius_m)) as f32,
+        rotation_hours: None,
+        obliquity_deg: Some((body.axial_tilt_rad as f32).to_degrees()),
+        tidal_axis: matches!(body.kind, thalos_physics::types::BodyKind::Moon).then_some(Vec3::Z),
+        axial_tilt_rad: body.axial_tilt_rad as f32,
+    }
+}
+
+fn run_terrain(
+    body: &thalos_physics::types::BodyDefinition,
+    up_to_stage: Option<usize>,
+) -> (BodyData, Vec<String>) {
+    match &body.terrain {
+        TerrainConfig::LegacyPipeline(generator) => {
+            run_pipeline(generator.clone(), body.radius_m as f32, up_to_stage)
+        }
+        TerrainConfig::Feature(_) => {
+            if up_to_stage.is_some() {
+                eprintln!(
+                    "warning: stage=N is ignored for feature terrain on {}",
+                    body.name
+                );
+            }
+            let context = terrain_context(body);
+            let data = compile_terrain_config(
+                &body.terrain,
+                &context,
+                TerrainCompileOptions {
+                    crater_count_scale: 1.0,
+                },
+            )
+            .unwrap_or_else(|e| panic!("feature terrain compile failed for {}: {e}", body.name));
+            (data, vec!["FeatureCompiler".to_string()])
+        }
+        TerrainConfig::None => panic!("body '{}' has no terrain", body.name),
+    }
 }
 
 fn run_pipeline(
@@ -259,8 +303,9 @@ fn stage_name(def: &StageDef) -> &'static str {
 // Dump
 // ---------------------------------------------------------------------------
 
-fn dump_all(body: &BodyData, out: &Path, equirect_w: u32) {
-    // Albedo: sRGB RGBA8 cubemap, alpha dropped.
+/// Production PBR set: albedo, height, roughness, normal. The four cubemaps
+/// the impostor shader actually consumes.
+fn dump_pbr_set(body: &BodyData, out: &Path, equirect_w: u32) {
     let albedo_shade = |dir: Vec3| -> [u8; 3] {
         let (face, u, v) = dir_to_face_uv(dir);
         let (x, y) = uv_to_texel(u, v, body.albedo_cubemap.resolution());
@@ -268,11 +313,6 @@ fn dump_all(body: &BodyData, out: &Path, equirect_w: u32) {
         [px[0], px[1], px[2]]
     };
     write_equirect(out.join("albedo-equirect.png"), equirect_w, albedo_shade);
-    write_cross(
-        out.join("albedo-cross.png"),
-        body.albedo_cubemap.resolution(),
-        albedo_shade,
-    );
 
     // Height: u16 quantized around 0, decoded to meters via height_range.
     let range = body.height_range;
@@ -280,20 +320,40 @@ fn dump_all(body: &BodyData, out: &Path, equirect_w: u32) {
         let (face, u, v) = dir_to_face_uv(dir);
         let (x, y) = uv_to_texel(u, v, body.height_cubemap.resolution());
         let raw = body.height_cubemap.get(face, x, y);
-        // Decode to [-1, 1]*range, remap to [0, 1] grayscale.
         let normalized = (raw as f32 / 65535.0).clamp(0.0, 1.0);
         let luma = (normalized * 255.0) as u8;
-        let _ = range; // keep it around for info.txt
+        let _ = range; // kept around for info.txt
         [luma, luma, luma]
     };
     write_equirect(out.join("height-equirect.png"), equirect_w, height_shade);
-    write_cross(
-        out.join("height-cross.png"),
-        body.height_cubemap.resolution(),
-        height_shade,
-    );
 
-    // Material: u8 ID cubemap, hash ID → color.
+    let rough_shade = |dir: Vec3| -> [u8; 3] {
+        let (face, u, v) = dir_to_face_uv(dir);
+        let (x, y) = uv_to_texel(u, v, body.roughness_cubemap.resolution());
+        let r = body.roughness_cubemap.get(face, x, y);
+        [r, r, r]
+    };
+    write_equirect(out.join("roughness-equirect.png"), equirect_w, rough_shade);
+
+    // Object-space normal cube. +X/+Y/+Z face centers should read distinctly
+    // red/green/blue in a healthy bake.
+    let normal_shade = |dir: Vec3| -> [u8; 3] {
+        let (face, u, v) = dir_to_face_uv(dir);
+        let (x, y) = uv_to_texel(u, v, body.normal_cubemap.resolution());
+        let n = body.normal_cubemap.get(face, x, y);
+        [n[0], n[1], n[2]]
+    };
+    write_equirect(out.join("normal-equirect.png"), equirect_w, normal_shade);
+}
+
+/// Debug-only set: material-id, biome, suture. Useful for diagnosing the
+/// generation pipeline; not part of the production rendering path.
+fn dump_debug_set(
+    body: &BodyData,
+    body_def: &thalos_physics::types::BodyDefinition,
+    out: &Path,
+    equirect_w: u32,
+) {
     let mat_shade = |dir: Vec3| -> [u8; 3] {
         let (face, u, v) = dir_to_face_uv(dir);
         let (x, y) = uv_to_texel(u, v, body.material_cubemap.resolution());
@@ -301,11 +361,65 @@ fn dump_all(body: &BodyData, out: &Path, equirect_w: u32) {
         hash_color(id as u32)
     };
     write_equirect(out.join("material-equirect.png"), equirect_w, mat_shade);
-    write_cross(
-        out.join("material-cross.png"),
-        body.material_cubemap.resolution(),
-        mat_shade,
-    );
+
+    let Some(field) = vaelen_biome_field(body_def) else {
+        return;
+    };
+    let biome_shade = |dir: Vec3| -> [u8; 3] { field.sample_biomes(dir).debug_color_srgb() };
+    write_equirect(out.join("biome-equirect.png"), equirect_w, biome_shade);
+
+    let suture_shade = |dir: Vec3| -> [u8; 3] { field.sample_suture_debug(dir).debug_color_srgb() };
+    write_equirect(out.join("suture-equirect.png"), equirect_w, suture_shade);
+}
+
+fn vaelen_biome_field(
+    body: &thalos_physics::types::BodyDefinition,
+) -> Option<VaelenColdDesertField> {
+    let TerrainConfig::Feature(feature) = &body.terrain else {
+        return None;
+    };
+    if feature.archetype != BodyArchetype::ColdDesertFormerlyWet {
+        return None;
+    }
+
+    let context = terrain_context(body);
+    let spec = feature.to_planet_spec(&context);
+    let manifest = generate_initial_manifest(&spec);
+    let crust_id = FeatureId::new(format!("{}.crustal_provinces", spec.body_id));
+    let crust = manifest.get(&crust_id)?;
+    let projection = match &feature.projection {
+        FeatureProjectionConfig::ColdDesert(config) => config.clone(),
+        FeatureProjectionConfig::Auto | FeatureProjectionConfig::AirlessImpact(_) => {
+            Default::default()
+        }
+    };
+
+    Some(VaelenColdDesertField::new(crust.seed, projection))
+}
+
+fn remove_legacy_outputs(out: &Path, debug: bool) {
+    let mut targets: Vec<&str> = vec![
+        "domain-equirect.png",
+        "albedo-cross.png",
+        "height-cross.png",
+        "material-cross.png",
+    ];
+    if !debug {
+        // Debug-only outputs from a previous run shouldn't linger when the
+        // current bake didn't request them.
+        targets.extend([
+            "material-equirect.png",
+            "biome-equirect.png",
+            "suture-equirect.png",
+        ]);
+    }
+    for name in targets {
+        match fs::remove_file(out.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("removing stale bake output {name:?}: {e}"),
+        }
+    }
 }
 
 fn dump_info(body: &BodyData, stage_names: &[String], out: &Path) {
@@ -429,44 +543,6 @@ fn write_equirect<F: Fn(Vec3) -> [u8; 3] + Sync>(path: PathBuf, width: u32, shad
             img.put_pixel(x, y, Rgb([r, g, b]));
         }
     }
-    img.save(&path)
-        .unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
-}
-
-/// Cube-cross layout:
-/// ```text
-///          [+Y]
-///   [-X][+Z][+X][-Z]
-///          [-Y]
-/// ```
-/// Output dimensions: `4n × 3n` where `n` is face resolution. Empty cells
-/// are filled with mid-grey so the outline is visible.
-fn write_cross<F: Fn(Vec3) -> [u8; 3]>(path: PathBuf, face_res: u32, shade: F) {
-    let n = face_res;
-    let mut img: RgbImage = ImageBuffer::from_pixel(4 * n, 3 * n, Rgb([30, 30, 30]));
-
-    // Map: (col, row) → face orientation. Each cell shows that face.
-    let cells: [(u32, u32, CubemapFace); 6] = [
-        (1, 0, CubemapFace::PosY),
-        (0, 1, CubemapFace::NegX),
-        (1, 1, CubemapFace::PosZ),
-        (2, 1, CubemapFace::PosX),
-        (3, 1, CubemapFace::NegZ),
-        (1, 2, CubemapFace::NegY),
-    ];
-
-    for (col, row, face) in cells {
-        for py in 0..n {
-            let v = (py as f32 + 0.5) / n as f32;
-            for px in 0..n {
-                let u = (px as f32 + 0.5) / n as f32;
-                let dir = thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
-                let [r, g, b] = shade(dir);
-                img.put_pixel(col * n + px, row * n + py, Rgb([r, g, b]));
-            }
-        }
-    }
-
     img.save(&path)
         .unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
 }
