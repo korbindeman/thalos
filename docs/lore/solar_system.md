@@ -375,14 +375,13 @@ more dangerous inner moons.
 | Radius | 22,000 km |
 | Atmosphere | H2/He/CH4, deep blue-green |
 | Ring system | Sparse set of thin icy rings |
-| Axial tilt | ~74 deg |
+| Axial tilt | ~18 deg |
 
 Nereus is the system's only ice giant. Methane absorption gives it a deep
-blue-green disk, while its high axial tilt makes the planet roll around
-Pyros and produces strange lighting, seasonal geometry, and a strong visual
-identity. One slim bright inner ring anchors clustered, dimmer outer
-ringlets that catch light at high phase angles without turning the planet
-into a Saturn analogue.
+blue-green disk, while its moderate axial tilt keeps the ring plane readable
+without making the planet roll around Pyros. One slim bright inner ring
+anchors clustered, dimmer outer ringlets that catch light at high phase
+angles without turning the planet into a Saturn analogue.
 
 Missions to Nereus are deep-space operations: low solar power, long travel
 times, cold thermal design, and sparse rescue options.
@@ -398,8 +397,8 @@ times, cold thermal design, and sparse rescue options.
 | Surface | Icy crust, nitrogen frost, cryovolcanic scars |
 
 Orias gives Nereus a local objective. It is a captured moon on an awkward
-orbit, useful as both a science target and a navigation test in the tilted
-outer system.
+orbit, useful as both a science target and a navigation test in the outer
+system.
 
 ## VIII. Erebos
 
@@ -464,7 +463,7 @@ icy-frontier achievement. Vorra is the weird precision mission after that.
 | Mars analogue | Vaelen, Kael, Xxirt | First practical interplanetary surface campaign. |
 | Belt | Ceryx | Midgame resources, depots, logistics. |
 | Outer giant | Teros, Pyrith, Glacis, Calyx | Radiation, outer science, moon-system mastery. |
-| Ice giant | Nereus, Orias | Deep-space operations and tilted-planet geometry. |
+| Ice giant | Nereus, Orias | Deep-space operations and ice-giant moon geometry. |
 | Icy frontier | Erebos, Nyx | Late-game binary-world achievement. |
 | Advanced optional | Vorra | Survey-gated precision challenge. |
 

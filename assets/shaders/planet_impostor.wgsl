@@ -103,6 +103,10 @@ struct PlanetParams {
     // bodies set this to a large negative sentinel so the threshold is
     // never crossed.
     sea_level_m:     f32,
+    // xyz = linear-RGB apparent deep-water colour. w = minimum optical depth
+    // used by water shading, in meters. The minimum matters for flat ocean
+    // placeholders whose mask depth is only 1 m by convention.
+    water_color_depth: vec4<f32>,
     // Canonical high-frequency terrain bands. The impostor applies a
     // domain warp (perturbs the cubemap sample direction) AND adds a
     // height-jitter fbm — both defined in
@@ -930,10 +934,10 @@ fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32, roughness: f32) -> f32
 //   - Smith G with the UE4 Schlick-k remap.
 //   - Schlick Fresnel with F0 = 0.02 (water's normal-incidence reflectance
 //     at 550 nm). Drives the darker-near-nadir / brighter-at-limb signature.
-//   - Subsurface diffuse: shallow water shows the seabed through a clear
-//     column; deeper water replaces it with the absorption-tinted column
-//     colour over a 30 m e-folding scale. Below ~150 m the seabed is
-//     fully obscured.
+//   - Subsurface diffuse: water owns its colour below sea level. The terrain
+//     albedo under the ocean is intentionally hidden; water colour comes from
+//     an optical column that absorbs red fastest and keeps flat-ocean bodies
+//     from looking like one-meter-deep shelf water.
 //   - Grazing-angle reflection tinted by Rayleigh β so the limb reads
 //     as "reflecting sky", not a white sun disk on vacuum.
 //
@@ -976,6 +980,21 @@ fn water_brdf(
     return diffuse + vec3<f32>(specular);
 }
 
+fn water_column_color(depth_m: f32, n_dot_v: f32) -> vec3<f32> {
+    let base = max(params.water_color_depth.xyz, vec3<f32>(0.0));
+    let min_depth_m = max(params.water_color_depth.w, 1.0);
+    let path_m = max(depth_m, min_depth_m) / max(n_dot_v, 0.18);
+
+    // Clear water removes red quickly, green more slowly, and blue slowest.
+    // The small volume-scatter term keeps deep water blue instead of merely
+    // black, but caps far below the old shallow-column turquoise.
+    let absorption = exp(-vec3<f32>(0.018, 0.010, 0.004) * path_m);
+    let scatter_t = 1.0 - exp(-path_m / 180.0);
+    let deep_scatter = vec3<f32>(0.002, 0.018, 0.060) * scatter_t;
+    let apparent = base * absorption + deep_scatter;
+    return clamp(apparent, vec3<f32>(0.0), vec3<f32>(0.08, 0.14, 0.20));
+}
+
 fn shade_water(
     n: vec3<f32>,
     v: vec3<f32>,
@@ -984,7 +1003,6 @@ fn shade_water(
     sun_flux: f32,
     ambient: f32,
     sky_tint: vec3<f32>,
-    seabed: vec3<f32>,
     hit: vec3<f32>,
 ) -> vec3<f32> {
     let f0 = 0.02;
@@ -1001,21 +1019,11 @@ fn shade_water(
 
     let n_dot_v = max(dot(n, v), 0.0);
 
-    // Subsurface colour: blend seabed visibility with absorbed water
-    // column. Shallow water shows the baked seabed (so dark-side coastal
-    // shelves stay visible at the same ambient brightness as the land);
-    // deep water replaces it with the column colour.
-    let shallow = vec3<f32>(0.10, 0.35, 0.42);
-    let deep = vec3<f32>(0.005, 0.02, 0.06);
-    let column = mix(shallow, deep, 1.0 - exp(-max(depth_m, 0.0) / 200.0));
-    let seabed_visibility = exp(-max(depth_m, 0.0) / 30.0);
-    let subsurface = mix(column, seabed, seabed_visibility);
-
     let f_nv = f0 + (1.0 - f0) * pow(max(1.0 - n_dot_v, 0.0), 5.0);
+    let subsurface = water_column_color(depth_m, n_dot_v);
 
-    // Ambient: Fresnel-modulated sky reflection + subsurface diffuse,
-    // both on the same `ambient` scale so dark-side water sits at the
-    // same brightness as the dark-side seabed it replaces.
+    // Ambient: Fresnel-modulated sky reflection + subsurface diffuse, both on
+    // the same `ambient` scale.
     var lit = (f_nv * sky_tint + (1.0 - f_nv) * subsurface) * ambient;
 
     // Direct star.
@@ -1317,10 +1325,10 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // ── Water shading branch ────────────────────────────────────────────
     //
     // Where the filtered height sits below sea level (encoded midpoint at
-    // 0 m in `sample_height_m`), overlay a Cook-Torrance water BRDF on
-    // top of the Hapke-shaded seabed. The smoothstep gives a soft
-    // coastline at the height cube's bilinear-filter scale — no separate
-    // coastline mask needed.
+    // 0 m in `sample_height_m`), replace terrain lighting with a
+    // Cook-Torrance water BRDF. The smoothstep gives a soft coastline at
+    // the height cube's bilinear-filter scale — no separate coastline mask
+    // needed.
     let height_above_sea_m = sample_height_m(sample_dir) - params.sea_level_m;
     let water_depth_m = -height_above_sea_m;
     let water_t = smoothstep(-1.0, 1.0, water_depth_m);
@@ -1338,7 +1346,6 @@ fn fragment(in: VertexOutput) -> FragOutput {
             sun_flux,
             params.scene.ambient_intensity,
             sky_tint,
-            albedo,
             hit,
         );
         lit = mix(lit, water_lit, water_t);

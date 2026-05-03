@@ -20,9 +20,9 @@ pub use gas_giant::{
 };
 pub use lighting::{MAX_STARS, SceneLighting, StarLight};
 pub use material::{
-    AtmosphereBlock, CLOUD_BAND_COUNT, MAX_ECLIPSE_OCCLUDERS, PlanetDetailParams,
-    PlanetHaloMaterial, PlanetHaloMaterialHandle, PlanetMaterial, PlanetMaterialHandle,
-    PlanetParams,
+    AtmosphereBlock, CLOUD_BAND_COUNT, MAX_ECLIPSE_OCCLUDERS, PlanetCoastlineParams,
+    PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle, PlanetMaterial,
+    PlanetMaterialHandle, PlanetParams, PlanetWaterParams,
 };
 pub use post_stack::space_camera_post_stack;
 pub use reference_clouds::{

@@ -7,8 +7,9 @@ use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{block_on, poll_once};
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
-    AtmosphereBlock, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial, PlanetParams,
-    ReferenceClouds, bake_from_body_data, cloud_cover_image_for_body,
+    AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
+    PlanetParams, PlanetWaterParams, ReferenceClouds, bake_from_body_data,
+    cloud_cover_image_for_body,
 };
 
 use super::types::{
@@ -97,23 +98,8 @@ pub(super) fn finalize_planet_generation(
         let (cloud_cover, uses_reference_cloud) =
             cloud_cover_image_for_body(&body.name, cloud_seed, &reference_clouds, &mut images);
 
-        // Canonical high-frequency terrain bands — only enable on bodies
-        // with a sea level; airless bodies skip the per-fragment fbm to
-        // keep the shader cheap. The warp displaces the cubemap sample
-        // direction by ~1 texel of arc on the sphere, breaking the
-        // texel-grid staircase visible from orbit. The jitter adds
-        // sub-texel surface detail on close approach.
-        //
-        // Seed folds the body seed's high+low halves and xors a per-band
-        // magic so the coastline fields decorrelate from bake-time fbm
-        // fields that share the body seed.
-        let body_seed = baked.detail_params.seed;
-        let coastline_seed = (body_seed as u32) ^ ((body_seed >> 32) as u32) ^ 0xC0A5_711E_u32;
-        let has_ocean = baked.sea_level_m.is_some();
-        // ~1 texel of arc on a 2048² cube = 2π/(4·2048) ≈ 7.7e-4 rad. 8e-4
-        // is one texel of fbm-amplitude headroom; the design point.
-        let coastline_warp_amp_radians = if has_ocean { 8.0e-4 } else { 0.0 };
-        let coastline_jitter_amp_m = if has_ocean { 30.0 } else { 0.0 };
+        let coastline = PlanetCoastlineParams::from_body_data(&baked);
+        let water = PlanetWaterParams::from_body_data(&baked);
 
         let map_radius = pending.render_radius;
         let ship_radius = ((body.radius_m * SHIP_SCALE) as f32).max(0.005);
@@ -126,9 +112,10 @@ pub(super) fn finalize_planet_generation(
                 // Airless bodies leave `sea_level_m` at the default
                 // sentinel; the shader's water BRDF never fires for them.
                 sea_level_m: baked.sea_level_m.unwrap_or(-1.0e9),
-                coastline_warp_amp_radians,
-                coastline_jitter_amp_m,
-                coastline_seed,
+                water_color_depth: water.color_depth,
+                coastline_warp_amp_radians: coastline.warp_amp_radians,
+                coastline_jitter_amp_m: coastline.jitter_amp_m,
+                coastline_seed: coastline.seed,
                 ..default()
             },
             albedo: textures.albedo.clone(),

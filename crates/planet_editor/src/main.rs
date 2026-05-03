@@ -17,11 +17,11 @@ use thalos_physics::patched_conics::PatchedConics;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
     AtmosphereBlock, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle,
-    GasGiantParams, PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle,
-    PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin, ReferenceClouds,
-    RingLayers, RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight,
-    bake_from_body_data, build_ring_mesh, cloud_cover_image_for_body,
-    convert_reference_clouds_when_ready, load_reference_cloud_sources,
+    GasGiantParams, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial,
+    PlanetHaloMaterialHandle, PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetWaterParams,
+    PlanetRenderingPlugin, ReferenceClouds, RingLayers, RingMaterial, RingMaterialHandle,
+    RingParams, SceneLighting, StarLight, bake_from_body_data, build_ring_mesh,
+    cloud_cover_image_for_body, convert_reference_clouds_when_ready, load_reference_cloud_sources,
 };
 use thalos_terrain_gen::{
     AirlessImpactProjectionConfig, AtmosphereSpec, AuthoredFeatureConfig, BodyArchetype, BodyData,
@@ -748,11 +748,8 @@ fn finalize_terrain_bake(
         let (_, _, wrap) = lighting_for(&planet);
         let scene = scene_lighting_for(&planet);
 
-        let body_seed = body.detail_params.seed;
-        let coastline_seed = (body_seed as u32) ^ ((body_seed >> 32) as u32) ^ 0xC0A5_711E_u32;
-        let has_ocean = body.sea_level_m.is_some();
-        let coastline_warp_amp_radians = if has_ocean { 8.0e-4 } else { 0.0 };
-        let coastline_jitter_amp_m = if has_ocean { 30.0 } else { 0.0 };
+        let coastline = PlanetCoastlineParams::from_body_data(&body);
+        let water = PlanetWaterParams::from_body_data(&body);
         let atmosphere = active_atmosphere(&planet);
         let cloud_cover = cloud_cover_for(&planet, &reference_clouds, &mut images);
 
@@ -764,9 +761,10 @@ fn finalize_terrain_bake(
                 fullbright: if planet.full_bright { 1.0 } else { 0.0 },
                 scene,
                 sea_level_m: body.sea_level_m.unwrap_or(-1.0e9),
-                coastline_warp_amp_radians,
-                coastline_jitter_amp_m,
-                coastline_seed,
+                water_color_depth: water.color_depth,
+                coastline_warp_amp_radians: coastline.warp_amp_radians,
+                coastline_jitter_amp_m: coastline.jitter_amp_m,
+                coastline_seed: coastline.seed,
                 ..default()
             },
             albedo: textures.albedo,

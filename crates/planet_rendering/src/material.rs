@@ -7,6 +7,7 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 use thalos_atmosphere_gen::TerrestrialAtmosphere;
+use thalos_terrain_gen::BodyData;
 
 use crate::lighting::SceneLighting;
 
@@ -43,6 +44,10 @@ pub struct PlanetParams {
     /// sea_level_m`. Set to a large negative sentinel for airless bodies
     /// so no fragment ever crosses the threshold.
     pub sea_level_m: f32,
+    /// Apparent deep-water color and minimum optical depth. xyz is linear RGB;
+    /// w is the minimum water-column depth used for shading, in meters. This
+    /// keeps flat ocean placeholders from rendering as 1 m-deep shelf water.
+    pub water_color_depth: Vec4,
     /// Amplitude (in radians of arc on the unit sphere) of the canonical
     /// high-frequency *domain warp* applied before the impostor reads
     /// the baked height cubemap. The cubemap-texel staircase visible
@@ -84,6 +89,136 @@ pub struct PlanetParams {
     pub coastline_seed: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PlanetWaterParams {
+    pub color_depth: Vec4,
+}
+
+impl PlanetWaterParams {
+    pub fn from_body_data(body: &BodyData) -> Self {
+        if body.sea_level_m.is_some() {
+            Self {
+                color_depth: Vec4::new(
+                    body.mean_albedo[0],
+                    body.mean_albedo[1],
+                    body.mean_albedo[2],
+                    120.0,
+                ),
+            }
+        } else {
+            Self {
+                color_depth: Vec4::new(0.012, 0.040, 0.090, 120.0),
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlanetCoastlineParams {
+    pub warp_amp_radians: f32,
+    pub jitter_amp_m: f32,
+    pub seed: u32,
+}
+
+impl PlanetCoastlineParams {
+    pub fn from_body_data(body: &BodyData) -> Self {
+        let seed = (body.detail_params.seed as u32)
+            ^ ((body.detail_params.seed >> 32) as u32)
+            ^ 0xC0A5_711E_u32;
+
+        let has_ocean = body.sea_level_m.is_some();
+        let flat_ocean_placeholder = has_ocean
+            && body.materials.is_empty()
+            && body.craters.is_empty()
+            && body.volcanoes.is_empty()
+            && body.channels.is_empty();
+
+        if has_ocean && !flat_ocean_placeholder {
+            Self {
+                // ~1 texel of arc on a 2048² cube = 2π/(4·2048) ≈ 7.7e-4 rad.
+                warp_amp_radians: 8.0e-4,
+                jitter_amp_m: 30.0,
+                seed,
+            }
+        } else {
+            Self {
+                warp_amp_radians: 0.0,
+                jitter_amp_m: 0.0,
+                seed,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use thalos_terrain_gen::{
+        OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+        compile_terrain_config,
+    };
+
+    #[test]
+    fn flat_ocean_placeholder_has_no_coastline_height_jitter() {
+        let terrain = TerrainConfig::Ocean(OceanTerrainConfig {
+            seed: 1003,
+            cubemap_resolution: 16,
+            seabed_albedo: [0.02, 0.05, 0.10],
+            water_roughness: 0.04,
+            sea_level_m: 1.0,
+        });
+        let body = compile_terrain_config(
+            &terrain,
+            &TerrainCompileContext {
+                body_name: "Thalos".to_string(),
+                radius_m: 6_000_000.0,
+                gravity_m_s2: 9.81,
+                rotation_hours: None,
+                obliquity_deg: None,
+                tidal_axis: None,
+                axial_tilt_rad: 0.0,
+            },
+            TerrainCompileOptions::default(),
+        )
+        .expect("ocean terrain should compile");
+
+        let coastline = PlanetCoastlineParams::from_body_data(&body);
+        assert_eq!(coastline.warp_amp_radians, 0.0);
+        assert_eq!(coastline.jitter_amp_m, 0.0);
+    }
+
+    #[test]
+    fn ocean_water_color_uses_uniform_body_tint() {
+        let terrain = TerrainConfig::Ocean(OceanTerrainConfig {
+            seed: 1003,
+            cubemap_resolution: 16,
+            seabed_albedo: [0.02, 0.05, 0.10],
+            water_roughness: 0.04,
+            sea_level_m: 1.0,
+        });
+        let body = compile_terrain_config(
+            &terrain,
+            &TerrainCompileContext {
+                body_name: "Thalos".to_string(),
+                radius_m: 6_000_000.0,
+                gravity_m_s2: 9.81,
+                rotation_hours: None,
+                obliquity_deg: None,
+                tidal_axis: None,
+                axial_tilt_rad: 0.0,
+            },
+            TerrainCompileOptions::default(),
+        )
+        .expect("ocean terrain should compile");
+
+        let water = PlanetWaterParams::from_body_data(&body);
+        assert!((water.color_depth.x - 0.02).abs() < 0.002);
+        assert!((water.color_depth.y - 0.05).abs() < 0.002);
+        assert!((water.color_depth.z - 0.10).abs() < 0.002);
+        assert_eq!(water.color_depth.w, 120.0);
+    }
+}
+
 impl Default for PlanetParams {
     fn default() -> Self {
         Self {
@@ -97,6 +232,7 @@ impl Default for PlanetParams {
             // default, and the shader's `sample_height_m(dir) < sea_level_m`
             // test never fires.
             sea_level_m: -1.0e9,
+            water_color_depth: Vec4::new(0.012, 0.040, 0.090, 120.0),
             // Defaults are 0 so airless / preview bodies pay zero
             // cost. Bodies with a sea level should set warp_amp to
             // ~8e-4 rad (≈1 texel on Thalos) and jitter_amp_m to

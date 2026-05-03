@@ -198,7 +198,7 @@
                 radius_m: 1130000.0,
                 color: "#59210E",
                 rotation_period_s: 88920.0,
-                axial_tilt_deg: 18.0,
+                axial_tilt_deg: 14.0,
             ),
             orbit: Some((
                 semi_major_axis_m: 2.58808e11,
@@ -358,7 +358,7 @@
                 radius_m: 22000000.0,
                 color: "#194F5F",
                 rotation_period_s: 57960.0,
-                axial_tilt_deg: 74.0,
+                axial_tilt_deg: 18.0,
             ),
             orbit: Some((
                 semi_major_axis_m: 1.7952e12,
