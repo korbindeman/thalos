@@ -74,9 +74,6 @@ impl Stage for Megabasin {
     fn name(&self) -> &str {
         "megabasin"
     }
-    fn dependencies(&self) -> &[&str] {
-        &["differentiate"]
-    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let body_radius = builder.radius_m;

@@ -2691,8 +2691,6 @@ mod tests {
         assert_eq!(body.height_cubemap.resolution(), 64);
         assert!(body.height_range.is_finite());
         assert!(body.height_range > 0.0);
-        assert!(body.drainage_graph.is_none());
-        assert!(body.provinces.is_empty());
         assert!(!body.craters.is_empty());
         assert!(
             body.craters

@@ -2,7 +2,7 @@ use glam::{DQuat, DVec3};
 use serde::Deserialize;
 use std::collections::HashMap;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
-use thalos_terrain_gen::{GeneratorParams, TerrainConfig};
+use thalos_terrain_gen::TerrainConfig;
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
@@ -117,8 +117,10 @@ pub struct BodyDefinition {
     pub parent: Option<BodyId>,
     pub mass_kg: f64,
     pub radius_m: f64,
+    /// sRGB hex color, used for UI icons and fallback rendering only.
+    /// Real shading is driven by terrain/atmosphere definitions, not
+    /// this field.
     pub color: [f32; 3],
-    pub albedo: f32,
     pub rotation_period_s: f64,
     pub axial_tilt_rad: f64,
     pub gm: f64, // G * mass, precomputed
@@ -128,7 +130,6 @@ pub struct BodyDefinition {
     pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
     pub terrain: TerrainConfig,
-    pub generator: Option<GeneratorParams>,
     /// Gas / ice giant atmosphere definition. A body with
     /// `atmosphere: Some(_)` and no `terrain` is rendered as a gas
     /// giant (optically thick all the way down, no solid surface).

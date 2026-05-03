@@ -10,8 +10,8 @@ use thalos_planet_rendering::{
 };
 
 use super::types::{
-    CameraExposure, CelestialBody, FrameBodyStates, PlanetMaterials, SimulationState,
-    SolidPlanetMaterials, SunLight,
+    CameraExposure, CelestialBody, FrameBodyStates, PlanetMaterials, PlanetshineTints,
+    SimulationState, SolidPlanetMaterials, SunLight,
 };
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::coords::{MAP_SCALE, RenderOrigin, SHIP_SCALE};
@@ -183,6 +183,7 @@ pub(super) fn update_planet_light_dirs(
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
     view: Res<ViewMode>,
+    planetshine: Res<PlanetshineTints>,
 ) {
     let Some(ref states) = cache.states else {
         return;
@@ -235,28 +236,25 @@ pub(super) fn update_planet_light_dirs(
             let mut scene = build_scene_lighting(body.body_id, states, occluders, gain);
 
             // Planetshine: pick the orbital parent, skipping the star.
-            // The parent's Bond albedo × color is the effective
-            // reflected tint.
+            // The parent's mean albedo (from its baked surface, or its
+            // cloud palette for gas giants) drives the tint. Bodies the
+            // resource hasn't been populated for contribute no shine.
             if let Some(parent_id) = body_def.parent {
                 let parent_def = &body_defs[parent_id];
                 if !matches!(parent_def.kind, thalos_physics::types::BodyKind::Star)
                     && let Some(parent_state) = states.get(parent_id)
+                    && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {
                     let parent_render_pos =
                         ((parent_state.position - origin.position) * scale).as_vec3();
                     let parent_radius = (parent_def.radius_m * scale) as f32;
-                    let tint = Vec3::new(
-                        parent_def.color[0],
-                        parent_def.color[1],
-                        parent_def.color[2],
-                    ) * parent_def.albedo;
                     scene.planetshine_pos_radius = Vec4::new(
                         parent_render_pos.x,
                         parent_render_pos.y,
                         parent_render_pos.z,
                         parent_radius,
                     );
-                    scene.planetshine_tint_flag = Vec4::new(tint.x, tint.y, tint.z, 1.0);
+                    scene.planetshine_tint_flag = Vec4::new(tint[0], tint[1], tint[2], 1.0);
                 }
             }
 
@@ -305,6 +303,7 @@ pub(super) fn update_solid_planet_params(
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
     view: Res<ViewMode>,
+    planetshine: Res<PlanetshineTints>,
 ) {
     let Some(ref states) = cache.states else {
         return;
@@ -341,22 +340,18 @@ pub(super) fn update_solid_planet_params(
                 let parent_def = &body_defs[parent_id];
                 if !matches!(parent_def.kind, thalos_physics::types::BodyKind::Star)
                     && let Some(parent_state) = states.get(parent_id)
+                    && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {
                     let parent_render_pos =
                         ((parent_state.position - origin.position) * scale).as_vec3();
                     let parent_radius = (parent_def.radius_m * scale) as f32;
-                    let tint = Vec3::new(
-                        parent_def.color[0],
-                        parent_def.color[1],
-                        parent_def.color[2],
-                    ) * parent_def.albedo;
                     scene.planetshine_pos_radius = Vec4::new(
                         parent_render_pos.x,
                         parent_render_pos.y,
                         parent_render_pos.z,
                         parent_radius,
                     );
-                    scene.planetshine_tint_flag = Vec4::new(tint.x, tint.y, tint.z, 1.0);
+                    scene.planetshine_tint_flag = Vec4::new(tint[0], tint[1], tint[2], 1.0);
                 }
             }
 

@@ -30,10 +30,6 @@ impl Stage for VaelenImpactColor {
         "vaelen_impact_color"
     }
 
-    fn dependencies(&self) -> &[&str] {
-        &["cratering"]
-    }
-
     fn apply(&self, builder: &mut BodyBuilder) {
         let radius_m = builder.radius_m;
         let res = builder.cubemap_resolution;

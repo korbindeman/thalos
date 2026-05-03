@@ -80,9 +80,6 @@ impl Stage for Regolith {
     fn name(&self) -> &str {
         "regolith"
     }
-    fn dependencies(&self) -> &[&str] {
-        &["cratering"]
-    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         // ── Detail-noise params for the realtime shader ────────────────

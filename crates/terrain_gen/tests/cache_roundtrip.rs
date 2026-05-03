@@ -1,20 +1,31 @@
-//! Round-trip test for the `cache` module: build a small `BodyData`,
+//! Round-trip test for the `cache` module: compile a tiny ocean body,
 //! store it, load it, and confirm the key+payload survive.
 
 use glam::Vec3;
 use thalos_terrain_gen::{
-    BodyBuilder, Composition, Differentiate, Pipeline, TerrainCompileContext,
-    TerrainCompileOptions, TerrainConfig, cache,
-    generator::{GeneratorParams, StageDef},
+    OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig, cache,
+    compile_terrain_config,
 };
 
-fn tiny_params() -> GeneratorParams {
-    GeneratorParams {
+fn tiny_terrain() -> TerrainConfig {
+    TerrainConfig::Ocean(OceanTerrainConfig {
         seed: 1234,
-        composition: Composition::new(0.85, 0.10, 0.0, 0.05, 0.0),
         cubemap_resolution: 16,
-        body_age_gyr: 4.0,
-        pipeline: vec![StageDef::Differentiate(Differentiate)],
+        seabed_albedo: [0.02, 0.05, 0.10],
+        water_roughness: 0.04,
+        sea_level_m: 1.0,
+    })
+}
+
+fn tiny_context() -> TerrainCompileContext {
+    TerrainCompileContext {
+        body_name: "TestBody".to_string(),
+        radius_m: 100_000.0,
+        gravity_m_s2: 1.5,
+        rotation_hours: None,
+        obliquity_deg: Some(5.0),
+        tidal_axis: Some(Vec3::Z),
+        axial_tilt_rad: 0.1,
     }
 }
 
@@ -23,37 +34,17 @@ fn cache_roundtrip_preserves_cubemaps() {
     let tmp = std::env::temp_dir().join("thalos_terrain_gen_cache_roundtrip");
     let _ = std::fs::remove_dir_all(&tmp);
 
-    let params = tiny_params();
-    let radius_m = 100_000.0f32;
-    let tidal = Some(Vec3::Z);
-    let tilt = 0.1;
+    let terrain = tiny_terrain();
+    let context = tiny_context();
+    let options = TerrainCompileOptions::default();
 
-    // Build a BodyData using the same two stages.
-    let mut builder = BodyBuilder::new(
-        radius_m,
-        params.seed,
-        params.composition,
-        params.cubemap_resolution,
-        params.body_age_gyr,
-        tidal,
-        tilt,
-    );
-    let stages = params
-        .pipeline
-        .clone()
-        .into_iter()
-        .map(|s| s.into_stage())
-        .collect::<Vec<_>>();
-    Pipeline::new(stages).run(&mut builder);
-    let original = builder.build();
-
-    let key = cache::cache_key(&params, radius_m, tidal, tilt);
+    let original = compile_terrain_config(&terrain, &context, options).expect("compile");
+    let key = cache::terrain_cache_key(&terrain, &context, options);
     let path = cache::cache_path(&tmp, "TestBody", key);
 
     cache::store(&path, key, &original).expect("store");
     let loaded = cache::load(&path, key).expect("load");
 
-    // Compare cubemap bytes.
     assert_eq!(
         loaded.height_cubemap.resolution(),
         original.height_cubemap.resolution()
@@ -77,8 +68,8 @@ fn cache_roundtrip_preserves_cubemaps() {
     }
     assert_eq!(loaded.radius_m, original.radius_m);
     assert_eq!(loaded.height_range, original.height_range);
+    assert_eq!(loaded.sea_level_m, original.sea_level_m);
 
-    // Wrong key → miss.
     assert!(cache::load(&path, key ^ 0xDEAD).is_none());
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -86,16 +77,8 @@ fn cache_roundtrip_preserves_cubemaps() {
 
 #[test]
 fn terrain_cache_key_tracks_compile_inputs() {
-    let terrain = TerrainConfig::LegacyPipeline(tiny_params());
-    let mut context = TerrainCompileContext {
-        body_name: "TestBody".to_string(),
-        radius_m: 100_000.0,
-        gravity_m_s2: 1.5,
-        rotation_hours: None,
-        obliquity_deg: Some(5.0),
-        tidal_axis: Some(Vec3::Z),
-        axial_tilt_rad: 0.1,
-    };
+    let terrain = tiny_terrain();
+    let mut context = tiny_context();
 
     let dev_options = TerrainCompileOptions {
         crater_count_scale: 0.1,

@@ -12,8 +12,8 @@ use thalos_planet_rendering::{
 };
 
 use super::types::{
-    BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetMaterials, SharedPlanetMeshes,
-    ShipBodyMesh, SimulationState,
+    BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetMaterials, PlanetshineTints,
+    SharedPlanetMeshes, ShipBodyMesh, SimulationState,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 
@@ -57,6 +57,7 @@ pub(super) fn finalize_planet_generation(
     mut images: ResMut<Assets<Image>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     reference_clouds: Res<ReferenceClouds>,
+    mut planetshine: ResMut<PlanetshineTints>,
 ) {
     for (entity, mut pending) in &mut pending_q {
         let _span = tracing::info_span!("finalize_planet_generation").entered();
@@ -68,6 +69,9 @@ pub(super) fn finalize_planet_generation(
         let detail =
             PlanetDetailParams::from_body(&baked.detail_params, baked.cubemap_bake_threshold_m);
         let height_range = baked.height_range;
+        planetshine
+            .by_body
+            .insert(pending.body_id, baked.mean_albedo);
         let textures = bake_from_body_data(&baked, &mut images, &mut storage_buffers);
 
         let roughness = body_surface_roughness(body);

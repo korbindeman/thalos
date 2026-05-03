@@ -12,7 +12,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PresentMode;
 use bevy_egui::egui;
 use thalos_physics::body_state_provider::BodyStateProvider;
-use thalos_physics::parsing::load_solar_system;
+use thalos_physics::parsing::load_solar_system_from_dir;
 use thalos_physics::patched_conics::PatchedConics;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
@@ -26,7 +26,7 @@ use thalos_planet_rendering::{
 use thalos_terrain_gen::{
     AirlessImpactProjectionConfig, AuthoredFeatureConfig, BodyData, ColdDesertProjectionConfig,
     FeatureId, FeatureManifest, FeatureProjectionConfig, FeatureSeed, FeatureSeedStream,
-    GeneratorParams, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+    OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
     compile_terrain_config, plan_initial_compilation, sub_seed,
 };
 
@@ -195,12 +195,12 @@ fn build_params_for_body(
 }
 
 fn placeholder_terrain_config() -> TerrainConfig {
-    TerrainConfig::LegacyPipeline(GeneratorParams {
+    TerrainConfig::Ocean(OceanTerrainConfig {
         seed: 0,
-        composition: thalos_terrain_gen::Composition::new(1.0, 0.0, 0.0, 0.0, 0.0),
         cubemap_resolution: 64,
-        body_age_gyr: 4.5,
-        pipeline: Vec::new(),
+        seabed_albedo: [0.02, 0.05, 0.10],
+        water_roughness: 0.04,
+        sea_level_m: 1.0,
     })
 }
 
@@ -1247,9 +1247,21 @@ fn editor_ui(
                         let plan = plan_initial_compilation(&spec);
                         draw_feature_manifest(ui, &plan.manifest);
                     }
-                    TerrainConfig::LegacyPipeline(generator) => {
+                    TerrainConfig::Ocean(ocean) => {
                         terrain_changed |= fires(
-                            &ui.add(egui::Slider::new(&mut generator.seed, 0..=9999).text("Seed")),
+                            &ui.add(egui::Slider::new(&mut ocean.seed, 0..=9999).text("Seed")),
+                        );
+                        terrain_changed |= fires(
+                            &ui.add(
+                                egui::Slider::new(&mut ocean.sea_level_m, 0.0..=10.0)
+                                    .text("Sea level (m)"),
+                            ),
+                        );
+                        terrain_changed |= fires(
+                            &ui.add(
+                                egui::Slider::new(&mut ocean.water_roughness, 0.0..=0.3)
+                                    .text("Water roughness"),
+                            ),
                         );
                     }
                     TerrainConfig::None => {}
@@ -1512,7 +1524,19 @@ fn main() {
     let body_arg = std::env::args().nth(1);
     let preferred = body_arg.as_deref().unwrap_or(DEFAULT_BODY_NAME);
 
-    let system = load_solar_system(SOLAR_SYSTEM_RON).expect("parse solar_system.ron");
+    // Load from disk to include per-body detail files
+    let system = {
+        use std::path::Path;
+
+        let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("assets"))
+            .unwrap_or_else(|| "assets".into());
+
+        load_solar_system_from_dir(&assets_dir)
+            .expect("load solar system from disk")
+    };
 
     let find_body = |name: &str| {
         system

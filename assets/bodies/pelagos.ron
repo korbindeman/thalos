@@ -1,0 +1,34 @@
+#![enable(implicit_some)]
+(
+    terrain: Ocean((
+        seed: 1250,
+        cubemap_resolution: 64,
+        seabed_albedo: (0.02, 0.06, 0.09),
+        water_roughness: 0.04,
+        sea_level_m: 1.0,
+    )),
+    terrestrial_atmosphere: Some((
+        rim_halo: Some((
+            color: (0.42, 0.66, 0.98),
+            intensity: 0.42,
+            scale_height_m: 15500.0,
+            outer_altitude_m: 180000.0,
+        )),
+        limb: None,
+        limb_darkening: None,
+        rayleigh: Some((
+            vertical_optical_depth: (0.110, 0.255, 0.620),
+            strength: 0.95,
+        )),
+        clouds: Some((
+            coverage: 0.30,
+            softness: 0.18,
+            frequency: 3.5,
+            octaves: 10,
+            albedo: (0.78, 0.80, 0.84),
+            scroll_rate: 1.5e-5,
+            differential_rotation: 0.40,
+            seed: 7143,
+        )),
+    )),
+)

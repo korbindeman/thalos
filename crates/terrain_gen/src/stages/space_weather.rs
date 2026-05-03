@@ -113,9 +113,6 @@ impl Stage for SpaceWeather {
     fn name(&self) -> &str {
         "space_weather"
     }
-    fn dependencies(&self) -> &[&str] {
-        &["cratering"]
-    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let res = builder.cubemap_resolution;

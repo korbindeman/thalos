@@ -4,6 +4,7 @@
 //! their respective modules; this file holds only types touched by more
 //! than one rendering concern.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -38,6 +39,16 @@ pub struct SimulationState {
 pub struct FrameBodyStates {
     pub states: Option<BodyStates>,
     pub time: f64,
+}
+
+/// Linear-RGB tint to use as a body's planetshine emission. Populated when
+/// the body's surface info first becomes known: at bake completion for
+/// terrain bodies (from `BodyData::mean_albedo`), at spawn for gas giants
+/// (from cloud albedo). Bodies without an entry contribute no planetshine
+/// to their moons.
+#[derive(Resource, Default)]
+pub struct PlanetshineTints {
+    pub by_body: HashMap<usize, [f32; 3]>,
 }
 
 /// Camera exposure model. Acts as the semantic "sensor" of the game camera:

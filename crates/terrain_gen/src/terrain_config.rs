@@ -5,21 +5,22 @@ use serde::Deserialize;
 
 use crate::body_builder::BodyBuilder;
 use crate::body_data::BodyData;
+use crate::cubemap::CubemapFace;
 use crate::feature_compiler::{
     AtmosphereSpec, AuthoredFeatureSpec, BodyArchetype, CompositionClass, FeatureCompileError,
     FeatureCompileOptions, FeatureFootprint, FeatureId, FeatureKind, FeatureLock, FeatureParam,
     FeatureProjectionConfig, FeatureSeed, HydrosphereSpec, IceInventory, PlanetPhysicalSpec,
     PlanetTerrainSpec, ScaleRangeM, TerrainIntent, compile_initial_body_data,
 };
-use crate::generator::GeneratorParams;
-use crate::stage::Pipeline;
+use crate::surface_field::quantize_unit_to_u8;
+use crate::types::Composition;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub enum TerrainConfig {
     #[default]
     None,
     Feature(FeatureTerrainConfig),
-    LegacyPipeline(GeneratorParams),
+    Ocean(OceanTerrainConfig),
 }
 
 impl TerrainConfig {
@@ -31,7 +32,7 @@ impl TerrainConfig {
         match self {
             Self::None => "None".to_string(),
             Self::Feature(config) => format!("Feature({:?})", config.archetype),
-            Self::LegacyPipeline(_) => "LegacyPipeline".to_string(),
+            Self::Ocean(_) => "Ocean".to_string(),
         }
     }
 }
@@ -49,6 +50,24 @@ pub struct FeatureTerrainConfig {
     pub projection: FeatureProjectionConfig,
     #[serde(default)]
     pub authored_features: Vec<AuthoredFeatureConfig>,
+}
+
+/// Flat-water placeholder. The compiled `BodyData` has zero height
+/// everywhere and `sea_level_m` set to a small positive value, so the
+/// impostor's water BRDF fires for the entire surface.
+#[derive(Clone, Debug, Deserialize)]
+pub struct OceanTerrainConfig {
+    pub seed: u64,
+    pub cubemap_resolution: u32,
+    /// sRGB linear seabed albedo. Only visible through shallow water; deep
+    /// water is dominated by the shader's absorption tint.
+    pub seabed_albedo: [f32; 3],
+    /// Water surface roughness for the impostor PBR term. 0.04 ≈ flat
+    /// open ocean; raise to introduce wave-scale microsurface.
+    pub water_roughness: f32,
+    /// Sea level above the (flat) heightfield. Any positive value works;
+    /// 1.0 m is the convention.
+    pub sea_level_m: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -145,27 +164,43 @@ pub fn compile_terrain_config(
             )
             .map_err(Into::into)
         }
-        TerrainConfig::LegacyPipeline(generator) => {
-            let mut generator = generator.clone();
-            generator.scale_crater_count(options.crater_count_scale);
-            let mut builder = BodyBuilder::new(
-                context.radius_m,
-                generator.seed,
-                generator.composition,
-                generator.cubemap_resolution,
-                generator.body_age_gyr,
-                context.tidal_axis,
-                context.axial_tilt_rad,
-            );
-            let stages = generator
-                .pipeline
-                .into_iter()
-                .map(|s| s.into_stage())
-                .collect::<Vec<_>>();
-            Pipeline::new(stages).run(&mut builder);
-            Ok(builder.build())
+        TerrainConfig::Ocean(config) => Ok(compile_ocean(config, context)),
+    }
+}
+
+fn compile_ocean(config: &OceanTerrainConfig, context: &TerrainCompileContext) -> BodyData {
+    let mut builder = BodyBuilder::new(
+        context.radius_m,
+        config.seed,
+        // Composition is irrelevant for a flat-ocean placeholder — no
+        // stage reads it. Pick a neutral value.
+        Composition::new(1.0, 0.0, 0.0, 0.0, 0.0),
+        config.cubemap_resolution,
+        4.5,
+        context.tidal_axis,
+        context.axial_tilt_rad,
+    );
+
+    // Seabed albedo: linear RGB written into every accumulator texel with
+    // alpha = 1 so `finalize_albedo` divides through cleanly and converts
+    // to sRGB. Only visible through shallow water; deep water is dominated
+    // by the impostor's absorption tint.
+    let [r, g, b] = config.seabed_albedo;
+    for face in CubemapFace::ALL {
+        for v in builder.albedo_contributions.albedo.face_data_mut(face) {
+            *v = [r, g, b, 1.0];
         }
     }
+
+    let roughness_texel = quantize_unit_to_u8(config.water_roughness.clamp(0.0, 1.0));
+    for face in CubemapFace::ALL {
+        for v in builder.roughness_cubemap.face_data_mut(face) {
+            *v = roughness_texel;
+        }
+    }
+
+    builder.sea_level_m = Some(config.sea_level_m);
+    builder.build()
 }
 
 impl FeatureTerrainConfig {

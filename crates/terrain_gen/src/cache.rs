@@ -18,28 +18,12 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::body_data::BodyData;
-use crate::generator::GeneratorParams;
 use crate::terrain_config::{TerrainCompileContext, TerrainCompileOptions, TerrainConfig};
 
 const FORMAT_MAGIC: &[u8; 8] = b"THLSBD01";
 const CACHE_KEY_VERSION: u32 = 2;
 const ZSTD_LEVEL: i32 = 3;
 const SOURCE_HASH: &str = env!("THALOS_TERRAIN_GEN_SOURCE_HASH");
-
-/// Deterministic hash of the inputs that produce a given `BodyData`.
-///
-/// Uses `Debug` formatting of `GeneratorParams` to cover all stage
-/// params without requiring `Hash`/`Serialize` derives across every
-/// stage struct. `Debug` output from `derive(Debug)` is stable in
-/// practice; a mismatch just misses the cache.
-pub fn cache_key(
-    params: &GeneratorParams,
-    radius_m: f32,
-    tidal_axis: Option<Vec3>,
-    axial_tilt_rad: f32,
-) -> u64 {
-    cache_key_from_source(&format!("{params:?}"), radius_m, tidal_axis, axial_tilt_rad)
-}
 
 pub fn terrain_cache_key(
     terrain: &TerrainConfig,
@@ -56,20 +40,6 @@ pub fn terrain_cache_key(
     context.axial_tilt_rad.to_bits().hash(&mut h);
     hash_optional_vec3(&mut h, context.tidal_axis);
     options.crater_count_scale.to_bits().hash(&mut h);
-    h.finish()
-}
-
-pub fn cache_key_from_source(
-    source: &str,
-    radius_m: f32,
-    tidal_axis: Option<Vec3>,
-    axial_tilt_rad: f32,
-) -> u64 {
-    let mut h = cache_hasher();
-    source.hash(&mut h);
-    radius_m.to_bits().hash(&mut h);
-    axial_tilt_rad.to_bits().hash(&mut h);
-    hash_optional_vec3(&mut h, tidal_axis);
     h.finish()
 }
 

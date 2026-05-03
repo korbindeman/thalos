@@ -185,23 +185,38 @@ FeatureManifest
   -> BodyData cubemaps + analytic buffers
 ```
 
-`SurfaceField` is the render-agnostic contract. It returns height, linear
-albedo, roughness, and a weighted material mix for a direction on the unit
-sphere. The existing impostor projection still collapses the material mix to a
-dominant material ID because `BodyData` has only one material byte today; that
-collapse is a compatibility adapter, not the long-term source model.
+`SurfaceField` is the render-agnostic contract. For a direction on the unit
+sphere it returns height, linear albedo, roughness, a body-local normal
+contribution (`normal_local`), and a continuous top-N material weight mix.
+Material weights stay continuous through the entire pipeline — there is no
+discrete dominant-ID lookup in the rendering path anymore.
 
-Initial impostor contract:
+Impostor contract (consumed directly by `planet_impostor.wgsl`):
 
-- `height_cubemap`: low/mid-frequency elevation used for normals and masks.
-- `albedo_cubemap`: orbital-scale color.
-- `material_cubemap`: semantic material palette index.
-- `feature_buffers`: compact meso-scale analytic buffers.
-- `feature_index`: spatial lookup for analytic buffers.
-- `materials`: palette consumed by renderers and sampling.
+- `albedo_cubemap` (`Rgba8UnormSrgb`): primary surface color, sampled bilinearly.
+  No discrete material indirection — biome boundaries blend continuously.
+- `height_cubemap` (`R16Unorm`): elevation used for per-fragment normals via
+  `perturb_normal_from_height` (finite-difference at fragment time, full f32
+  precision) and the self-shadow ray march.
+- `roughness_cubemap` (`R8Unorm`): per-texel microsurface response, wired into
+  the Hapke BRDF's opposition surge width.
+- `feature_buffers` + `feature_index`: SSBO craters and the spatial hash that
+  walks them. Crater LOD fades sub-pixel features at far zoom.
+
+Also baked into `BodyData` but reserved for non-impostor consumers:
+
+- `material_cubemap` (R8Uint dominant ID): used internally by stages
+  (`PaintBiomes`, `MareFlood`, `SpaceWeather`) and by the CPU `sample()` path.
+  Not bound to the impostor's GPU bind group.
+- `normal_cubemap` (`Rgba8Unorm` object-space): reserved for ground LOD where
+  chunked geometry can't cheaply finite-difference height at runtime. 8-bit
+  encoding crushes shallow slope angles, so the impostor reconstructs normals
+  from the height cube at fragment time instead.
+- `materials` palette: still authored by stages for CPU sampling and for
+  ground-LOD detail-texture blending; no longer uploaded as a GPU storage buffer.
 
 Silhouette displacement is intentionally out of scope for the first projection.
-Good albedo, normals, material masks, and compact meso features are enough for
+Good albedo, normals, roughness, and compact meso features are enough for
 Mira and Vaelen to read from orbit.
 
 ## Example Bodies
@@ -296,15 +311,12 @@ terrain: Feature((
 ))
 ```
 
-During migration, legacy bodies are normalized as
-`terrain: LegacyPipeline(...)` by the loader when they still author the old
-`generator` block.
-
 ## Current Implementation Status
 
-The first compatibility projection exists for `AirlessImpactMoon`, and Mira in
-`assets/solar_system.ron` now uses `terrain: Feature(...)`. A
+`AirlessImpactMoon` and `ColdDesertFormerlyWet` are wired up: a
 `PlanetTerrainSpec` is expanded into a `FeatureManifest`, then compiled into the
 existing `BodyData` contract using the current bake primitives. This keeps the
 flat impostor renderer working while moving source-of-truth terrain identity and
-seeding into the feature compiler.
+seeding into the feature compiler. `AgingOceanicHomeworld` and
+`GenericTerrestrial` are not yet implemented — Thalos and Pelagos render via the
+flat-water `TerrainConfig::Ocean` placeholder until the terrestrial pipeline lands.

@@ -259,9 +259,6 @@ impl Stage for Cratering {
     fn name(&self) -> &str {
         "cratering"
     }
-    fn dependencies(&self) -> &[&str] {
-        &["differentiate"]
-    }
 
     fn apply(&self, builder: &mut BodyBuilder) {
         let mut rng = Rng::new(builder.stage_seed());

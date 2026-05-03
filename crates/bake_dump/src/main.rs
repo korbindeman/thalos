@@ -1,7 +1,7 @@
 //! `bake_dump` — headless terrain bake + PNG exporter.
 //!
-//! Runs a body's terrain compiler (optionally up to a legacy stage) and
-//! writes the resulting cubemaps as equirectangular PNG images:
+//! Runs a body's terrain compiler and writes the resulting cubemaps as
+//! equirectangular PNG images:
 //!
 //! - **Equirectangular** (2:1 lat/lon): a "map of the globe" view for
 //!   reading at a glance.
@@ -14,7 +14,6 @@
 //! Usage:
 //!
 //!   cargo run --release -p thalos_bake_dump -- <body_name|all>
-//!                                              [--up-to-stage N]
 //!                                              [--out <dir>]
 //!                                              [--solar-system <path>]
 //!                                              [--equirect-width W]
@@ -27,22 +26,18 @@
 //!   --solar-system    assets/solar_system.ron
 //!   --out             stage-bakes/<body>/
 //!   --equirect-width  2048
-//!
-//! `--up-to-stage N` keeps only the first N stages of the generator's
-//! pipeline (1-indexed). Use this to inspect output after each stage
-//! individually while iterating.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::Vec3;
 use image::{ImageBuffer, Rgb, RgbImage};
-use thalos_physics::parsing::load_solar_system;
+use thalos_physics::parsing::load_solar_system_from_dir;
 use thalos_terrain_gen::cubemap::{CubemapFace, dir_to_face_uv};
 use thalos_terrain_gen::{
-    BodyArchetype, BodyBuilder, BodyData, FeatureId, FeatureProjectionConfig, GeneratorParams,
-    Pipeline, StageDef, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
-    VaelenColdDesertField, compile_terrain_config, generate_initial_manifest,
+    BodyArchetype, BodyData, FeatureId, FeatureProjectionConfig, TerrainCompileContext,
+    TerrainCompileOptions, TerrainConfig, VaelenColdDesertField, compile_terrain_config,
+    generate_initial_manifest,
 };
 
 // ---------------------------------------------------------------------------
@@ -52,7 +47,6 @@ use thalos_terrain_gen::{
 struct Args {
     /// Raw body name from the CLI (possibly `all`, mixed case).
     body_arg: String,
-    up_to_stage: Option<usize>,
     /// Explicit `--out DIR`; when absent, defaults are derived per body.
     out_dir: Option<PathBuf>,
     solar_system: PathBuf,
@@ -67,13 +61,12 @@ fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.is_empty() || raw.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "usage: bake_dump <body_name|all> [--up-to-stage N] [--out DIR] [--solar-system PATH] [--equirect-width W] [--debug]"
+            "usage: bake_dump <body_name|all> [--out DIR] [--solar-system PATH] [--equirect-width W] [--debug]"
         );
         std::process::exit(if raw.is_empty() { 1 } else { 0 });
     }
 
     let mut body_name: Option<String> = None;
-    let mut up_to_stage: Option<usize> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut solar_system: PathBuf = PathBuf::from("assets/solar_system.ron");
     let mut equirect_width: u32 = 2048;
@@ -83,10 +76,6 @@ fn parse_args() -> Args {
     while i < raw.len() {
         let a = &raw[i];
         match a.as_str() {
-            "--up-to-stage" => {
-                i += 1;
-                up_to_stage = Some(raw[i].parse().expect("--up-to-stage needs an integer"));
-            }
             "--out" => {
                 i += 1;
                 out_dir = Some(PathBuf::from(&raw[i]));
@@ -111,7 +100,6 @@ fn parse_args() -> Args {
 
     Args {
         body_arg,
-        up_to_stage,
         out_dir,
         solar_system,
         equirect_width,
@@ -128,9 +116,11 @@ const DEFAULT_OUT_ROOT: &str = "stage-bakes";
 fn main() {
     let args = parse_args();
 
-    let source = fs::read_to_string(&args.solar_system)
-        .unwrap_or_else(|e| panic!("reading {:?}: {e}", args.solar_system));
-    let system = load_solar_system(&source).expect("parsing solar_system.ron");
+    // Load from the assets directory containing the solar system file
+    let root_path = std::path::Path::new(&args.solar_system)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("assets"));
+    let system = load_solar_system_from_dir(root_path).expect("parsing solar system");
 
     let targets: Vec<&thalos_physics::types::BodyDefinition> =
         if args.body_arg.eq_ignore_ascii_case("all") {
@@ -167,27 +157,25 @@ fn main() {
             (None, _) => PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name),
         };
 
-        bake_one(body, args.up_to_stage, &out_dir, args.equirect_width, args.debug);
+        bake_one(body, &out_dir, args.equirect_width, args.debug);
     }
 }
 
 fn bake_one(
     body: &thalos_physics::types::BodyDefinition,
-    up_to_stage: Option<usize>,
     out_dir: &Path,
     equirect_width: u32,
     debug: bool,
 ) {
-    let (body_data, stage_names) = run_terrain(body, up_to_stage);
+    let (body_data, route) = run_terrain(body);
 
     fs::create_dir_all(out_dir).expect("creating out dir");
     remove_legacy_outputs(out_dir, debug);
 
     println!(
-        "{}: baked {} stages ({} provinces, {} craters) → {}",
+        "{}: baked via {} ({} craters) → {}",
         body.name,
-        stage_names.len(),
-        body_data.provinces.len(),
+        route,
         body_data.craters.len(),
         out_dir.display(),
     );
@@ -196,7 +184,7 @@ fn bake_one(
     if debug {
         dump_debug_set(&body_data, body, out_dir, equirect_width);
     }
-    dump_info(&body_data, &stage_names, out_dir);
+    dump_info(&body_data, &route, out_dir);
 }
 
 fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompileContext {
@@ -211,92 +199,18 @@ fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompi
     }
 }
 
-fn run_terrain(
-    body: &thalos_physics::types::BodyDefinition,
-    up_to_stage: Option<usize>,
-) -> (BodyData, Vec<String>) {
-    match &body.terrain {
-        TerrainConfig::LegacyPipeline(generator) => {
-            run_pipeline(generator.clone(), body.radius_m as f32, up_to_stage)
-        }
-        TerrainConfig::Feature(_) => {
-            if up_to_stage.is_some() {
-                eprintln!(
-                    "warning: stage=N is ignored for feature terrain on {}",
-                    body.name
-                );
-            }
-            let context = terrain_context(body);
-            let data = compile_terrain_config(
-                &body.terrain,
-                &context,
-                TerrainCompileOptions {
-                    crater_count_scale: 1.0,
-                },
-            )
-            .unwrap_or_else(|e| panic!("feature terrain compile failed for {}: {e}", body.name));
-            (data, vec!["FeatureCompiler".to_string()])
-        }
-        TerrainConfig::None => panic!("body '{}' has no terrain", body.name),
-    }
-}
-
-fn run_pipeline(
-    mut generator: GeneratorParams,
-    radius_m: f32,
-    up_to_stage: Option<usize>,
-) -> (BodyData, Vec<String>) {
-    if let Some(n) = up_to_stage {
-        generator.pipeline.truncate(n);
-    }
-
-    let mut builder = BodyBuilder::new(
-        radius_m,
-        generator.seed,
-        generator.composition,
-        generator.cubemap_resolution,
-        generator.body_age_gyr,
-        None,
-        0.0,
-    );
-
-    let stage_names: Vec<String> = generator
-        .pipeline
-        .iter()
-        .map(|s| stage_name(s).to_string())
-        .collect();
-
-    let stages: Vec<Box<dyn thalos_terrain_gen::Stage>> = generator
-        .pipeline
-        .into_iter()
-        .map(|s| s.into_stage())
-        .collect();
-    Pipeline::new(stages).run(&mut builder);
-
-    (builder.build(), stage_names)
-}
-
-fn stage_name(def: &StageDef) -> &'static str {
-    match def {
-        StageDef::Differentiate(_) => "Differentiate",
-        StageDef::Biomes(_) => "Biomes",
-        StageDef::Climate(_) => "Climate",
-        StageDef::CoarseElevation(_) => "CoarseElevation",
-        StageDef::HydrologicalCarving(_) => "HydrologicalCarving",
-        StageDef::Megabasin(_) => "Megabasin",
-        StageDef::Cratering(_) => "Cratering",
-        StageDef::MareFlood(_) => "MareFlood",
-        StageDef::OrogenDla(_) => "OrogenDla",
-        StageDef::PaintBiomes(_) => "PaintBiomes",
-        StageDef::Plates(_) => "Plates",
-        StageDef::Regolith(_) => "Regolith",
-        StageDef::Scarps(_) => "Scarps",
-        StageDef::SpaceWeather(_) => "SpaceWeather",
-        StageDef::SurfaceMaterials(_) => "SurfaceMaterials",
-        StageDef::TectonicSkeleton(_) => "TectonicSkeleton",
-        StageDef::Tectonics(_) => "Tectonics",
-        StageDef::Topography(_) => "Topography",
-    }
+fn run_terrain(body: &thalos_physics::types::BodyDefinition) -> (BodyData, String) {
+    let route = body.terrain.route_label();
+    let context = terrain_context(body);
+    let data = compile_terrain_config(
+        &body.terrain,
+        &context,
+        TerrainCompileOptions {
+            crater_count_scale: 1.0,
+        },
+    )
+    .unwrap_or_else(|e| panic!("terrain compile failed for {}: {e}", body.name));
+    (data, route)
 }
 
 // ---------------------------------------------------------------------------
@@ -314,29 +228,27 @@ fn dump_pbr_set(body: &BodyData, out: &Path, equirect_w: u32) {
     };
     write_equirect(out.join("albedo-equirect.png"), equirect_w, albedo_shade);
 
-    // Height: u16 quantized around 0, decoded to meters via height_range.
-    let range = body.height_range;
     let height_shade = |dir: Vec3| -> [u8; 3] {
         let (face, u, v) = dir_to_face_uv(dir);
         let (x, y) = uv_to_texel(u, v, body.height_cubemap.resolution());
         let raw = body.height_cubemap.get(face, x, y);
-        let normalized = (raw as f32 / 65535.0).clamp(0.0, 1.0);
-        let luma = (normalized * 255.0) as u8;
-        let _ = range; // kept around for info.txt
-        [luma, luma, luma]
+        let g = (raw / 257) as u8;
+        [g, g, g]
     };
     write_equirect(out.join("height-equirect.png"), equirect_w, height_shade);
 
-    let rough_shade = |dir: Vec3| -> [u8; 3] {
+    let roughness_shade = |dir: Vec3| -> [u8; 3] {
         let (face, u, v) = dir_to_face_uv(dir);
         let (x, y) = uv_to_texel(u, v, body.roughness_cubemap.resolution());
-        let r = body.roughness_cubemap.get(face, x, y);
-        [r, r, r]
+        let g = body.roughness_cubemap.get(face, x, y);
+        [g, g, g]
     };
-    write_equirect(out.join("roughness-equirect.png"), equirect_w, rough_shade);
+    write_equirect(
+        out.join("roughness-equirect.png"),
+        equirect_w,
+        roughness_shade,
+    );
 
-    // Object-space normal cube. +X/+Y/+Z face centers should read distinctly
-    // red/green/blue in a healthy bake.
     let normal_shade = |dir: Vec3| -> [u8; 3] {
         let (face, u, v) = dir_to_face_uv(dir);
         let (x, y) = uv_to_texel(u, v, body.normal_cubemap.resolution());
@@ -346,8 +258,8 @@ fn dump_pbr_set(body: &BodyData, out: &Path, equirect_w: u32) {
     write_equirect(out.join("normal-equirect.png"), equirect_w, normal_shade);
 }
 
-/// Debug-only set: material-id, biome, suture. Useful for diagnosing the
-/// generation pipeline; not part of the production rendering path.
+/// Debug overlays — material-id, biome, suture maps. Useful when iterating on
+/// generation; not part of the production rendering path.
 fn dump_debug_set(
     body: &BodyData,
     body_def: &thalos_physics::types::BodyDefinition,
@@ -422,7 +334,7 @@ fn remove_legacy_outputs(out: &Path, debug: bool) {
     }
 }
 
-fn dump_info(body: &BodyData, stage_names: &[String], out: &Path) {
+fn dump_info(body: &BodyData, route: &str, out: &Path) {
     let mut s = String::new();
     s.push_str(&format!("radius_m:    {}\n", body.radius_m));
     s.push_str(&format!("height_range_m: {}\n", body.height_range));
@@ -430,49 +342,10 @@ fn dump_info(body: &BodyData, stage_names: &[String], out: &Path) {
         "cubemap_resolution: {}\n",
         body.albedo_cubemap.resolution()
     ));
-    if let Some(ev) = body.vertex_elevations_m.as_ref() {
-        let min_e = ev.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_e = ev.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        s.push_str(&format!("vertex_elevation_m: [{min_e:.1}, {max_e:.1}]\n"));
-    }
     if let Some(sl) = body.sea_level_m {
         s.push_str(&format!("sea_level_m: {sl:.1}\n"));
-        if let Some(ev) = body.vertex_elevations_m.as_ref() {
-            let below = ev.iter().filter(|&&e| e <= sl).count();
-            let frac = below as f32 / ev.len() as f32;
-            s.push_str(&format!("ocean_vertex_fraction: {frac:.3}\n"));
-        }
     }
-    if let Some(dg) = body.drainage_graph.as_ref() {
-        let max_accum = dg.accumulation_m2.iter().cloned().fold(0.0f32, f32::max);
-        s.push_str(&format!("drainage_max_accumulation_m2: {max_accum:.3e}\n"));
-    }
-    if let Some(sed) = body.vertex_sediment_m.as_ref() {
-        let max_s = sed.iter().cloned().fold(0.0f32, f32::max);
-        let total_s: f32 = sed.iter().sum();
-        s.push_str(&format!("sediment_m: peak={max_s:.1} total={total_s:.1}\n"));
-        // Percentile thresholds — useful when tuning Stage 5's
-        // floodplain sediment cutoff (what's the 80th percentile
-        // sediment depth? etc.)
-        let mut sorted: Vec<f32> = sed.iter().copied().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let pct = |p: f32| -> f32 {
-            let idx = ((sorted.len() as f32) * p) as usize;
-            sorted[idx.min(sorted.len().saturating_sub(1))]
-        };
-        s.push_str(&format!(
-            "sediment_pct: 50%={:.2}  80%={:.2}  90%={:.2}  99%={:.2}\n",
-            pct(0.50),
-            pct(0.80),
-            pct(0.90),
-            pct(0.99),
-        ));
-    }
-    s.push_str(&format!("stages ({}):\n", stage_names.len()));
-    for (i, name) in stage_names.iter().enumerate() {
-        s.push_str(&format!("  {:2}. {}\n", i + 1, name));
-    }
-    s.push_str(&format!("provinces:   {}\n", body.provinces.len()));
+    s.push_str(&format!("route:       {route}\n"));
     s.push_str(&format!("craters:     {}\n", body.craters.len()));
     s.push_str(&format!("volcanoes:   {}\n", body.volcanoes.len()));
     s.push_str(&format!("channels:    {}\n", body.channels.len()));
@@ -501,16 +374,6 @@ fn dump_info(body: &BodyData, stage_names: &[String], out: &Path) {
                 "  {:2}  albedo=({:.2},{:.2},{:.2})  r={:.2}  texels={:>9}  {:5.1}%\n",
                 i, m.albedo[0], m.albedo[1], m.albedo[2], m.roughness, n, pct,
             ));
-        }
-    }
-    if !body.provinces.is_empty() {
-        s.push_str("province kinds:\n");
-        let mut counts: std::collections::BTreeMap<String, u32> = Default::default();
-        for p in &body.provinces {
-            *counts.entry(format!("{:?}", p.kind)).or_insert(0) += 1;
-        }
-        for (k, n) in counts {
-            s.push_str(&format!("  {k}: {n}\n"));
         }
     }
     fs::write(out.join("info.txt"), s).expect("writing info.txt");

@@ -14,8 +14,7 @@ just clippy               # cargo clippy --workspace
 just trace                # cargo run --release -p thalos_game --features profile-tracy
 just bake Thalos          # headless terrain bake → PNGs in stage-bakes/Thalos/
 just bake thalos          # body name is case-insensitive
-just bake all             # bake every body with a generator block
-just bake Thalos stage=1  # run only the first N stages of the body's pipeline
+just bake all             # bake every body with a terrain block
 
 # Run a single test
 cargo test -p thalos_physics -- test_name
@@ -23,34 +22,26 @@ cargo test -p thalos_physics -- test_name
 
 ## Headless terrain bake (`bake_dump`)
 
-`just bake <body> [stage=N]` runs a body's terrain pipeline headlessly
-(no Bevy, no window) and writes cubemap layers as PNGs to
-`stage-bakes/<body>/`. Body name matching is case-insensitive;
-pass `all` to bake every body with a generator block. This is Claude's
-primary visual-feedback loop for terrain pipeline work — Claude can
-`Read` the PNGs directly as images to inspect stage output without
-anyone launching the editor.
+`just bake <body>` runs a body's terrain compiler headlessly (no Bevy,
+no window) and writes cubemap layers as PNGs to `stage-bakes/<body>/`.
+Body name matching is case-insensitive; pass `all` to bake every body
+with a terrain block. This is Claude's primary visual-feedback loop for
+terrain work — Claude can `Read` the PNGs directly as images to inspect
+output without anyone launching the editor.
 
 **Outputs** (overwrites each run):
 - `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection.
-- `height-equirect.png` — grayscale height
-  normalized to the body's encoded ± range (range reported in
-  `info.txt`).
-- `material-equirect.png` — per-material-ID hashed colors.
-- `info.txt` — range, resolution, stage list, province/feature counts.
+- `height-equirect.png` — grayscale height normalized to the body's
+  encoded ± range (range reported in `info.txt`).
+- `roughness-equirect.png` — grayscale roughness (R8Unorm).
+- `normal-equirect.png` — object-space normal map (RGBA8).
+- `info.txt` — range, resolution, route (Feature/Ocean/None), feature counts.
 
 Use the equirect for a globe-at-a-glance read.
 
-**Partial runs:** `stage=N` truncates the body's `pipeline:` list to the
-first N entries, so you can inspect each stage in isolation without
-editing the RON. Iterate a stage by re-running the bake after each code
-change.
-
-**Workflow:** after touching a stage, run `just bake <body> stage=<n>`,
+**Workflow:** after touching the compiler, run `just bake <body>`,
 then `Read` the equirect PNG to check the result. Use this proactively
-— it's faster than the editor and doesn't need a display. The tool is
-the authoritative way to verify terrain pipeline output short of
-rendering in the editor.
+— it's faster than the editor and doesn't need a display.
 
 ## Profiling
 
@@ -90,7 +81,7 @@ Thalos is an orbital mechanics sandbox game in Rust (edition 2024, Bevy 0.18, gl
 - **`thalos_planet_editor`** — interactive planet editor tool
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
 
-Core separation: physics, terrain_gen, atmosphere_gen, and celestial are pure Rust libraries; game, planet_rendering, planet_editor, and shipyard are Bevy consumers. `crates/planet_gen/` exists but is NOT in the workspace — older spec-faithful approach, kept for reference.
+Core separation: physics, terrain_gen, atmosphere_gen, and celestial are pure Rust libraries; game, planet_rendering, planet_editor, and shipyard are Bevy consumers.
 
 ### Physics crate (`crates/physics/`)
 
@@ -133,10 +124,11 @@ Systems run in `SimStage` order: Physics → Sync → Camera, ensuring determini
 
 Cubemap-based procedural surface generation. No Bevy dependency.
 
+- `TerrainConfig` — top-level enum: `None`, `Feature(FeatureTerrainConfig)` for archetype-driven bodies (Mira, Vaelen, etc.), `Ocean(OceanTerrainConfig)` for flat-water placeholders (Thalos, Pelagos).
+- `compile_terrain_config(...)` — single entry point. Dispatches to `feature_compiler::compile_initial_body_data` for `Feature`, or builds a flat `BodyData` directly for `Ocean`.
 - `BodyBuilder` — mutable build-time state. Stages mutate this (height/albedo accumulators, craters, volcanoes, channels, materials, detail noise params).
-- `BodyData` — immutable GPU-facing output baked from `BodyBuilder`. Holds `Cubemap<u16>` height, `Cubemap<[u8; 4]>` albedo, `IcoBuckets` spatial index.
-- `Stage` trait — `name()`, `dependencies()`, `apply(&mut BodyBuilder)`. Each stage is a pure transform.
-- `Pipeline` — validates dependency ordering at construction; runs stages in order with deterministic per-stage seeding via `sub_seed()`.
+- `BodyData` — immutable GPU-facing output baked from `BodyBuilder`. Holds `Cubemap<u16>` height, `Cubemap<[u8; 4]>` albedo, `IcoBuckets` spatial index, optional `sea_level_m`.
+- `Stage` trait — `name()`, `apply(&mut BodyBuilder)`. Each stage is a pure transform; the feature compiler invokes them directly.
 - `sample()` / `SurfaceSample` — single sampling contract for reading finished surface data.
 
 ### Celestial crate (`crates/celestial/`)
@@ -169,7 +161,7 @@ Thin Bevy rendering layer. No generation logic.
 
 ### Planet editor (`crates/planet_editor/`)
 
-Standalone Bevy binary for interactive planet preview. Loads `solar_system.ron`, selects a body, runs terrain pipeline, renders with `PlanetMaterial` via billboard mesh. Uses `bevy_egui` for UI.
+Standalone Bevy binary for interactive planet preview. Loads `solar_system.ron`, selects a body, runs `compile_terrain_config`, renders with `PlanetMaterial` via billboard mesh. Uses `bevy_egui` for UI.
 
 ### Data flow
 
@@ -188,7 +180,7 @@ assets/solar_system.ron
 - **`BodyStateProvider` is the abstraction boundary.** Body positions are always queried through this trait. `PatchedConics` is the current impl; a precomputed ephemeris could replace it without touching simulation or rendering.
 - **Physics crate has no Bevy.** All physics logic must remain in `thalos_physics`. `thalos_game` is only presentation and input.
 - **`TrajectorySample` carries its own metadata.** `anchor_body` + `ref_pos` travel with each sample so the renderer can pin to its parent body without a per-sample ephemeris query.
-- **Terrain gen stages are pure transforms.** Each `Stage` reads/writes `BodyBuilder` only. Pipeline handles seeding and ordering. No ambient state.
+- **Terrain gen stages are pure transforms.** Each `Stage` reads/writes `BodyBuilder` only. The feature compiler is the only caller; it sets `stage_seed` before each `apply()`. No ambient state.
 
 ### Assets
 
@@ -201,8 +193,8 @@ assets/solar_system.ron
 
 ### Documentation (`docs/`)
 
-- `solar_system.md` — per-body reference with scale philosophy (hybrid 1:1/1:2/1:3 scale rationale) and formation scenario.
-- `surface_generator_design.md` — architecture design doc for the 3-layer terrain representation, BodyData/BodyBuilder contract, sampling contract.
+- `lore/solar_system.md` — per-body reference with scale philosophy (hybrid 1:1/1:2/1:3 scale rationale) and formation scenario.
+- `terrain_feature_compiler.md` — design doc for the feature-first terrain compiler (`Feature` route).
+- `terrestrial_pipeline_research.md` — design notes for the future terrestrial pipeline that will replace the `Ocean` placeholder on Thalos/Pelagos.
 - `celestial.md` — celestial sphere design: source model, spectrum, generation, rendering pipeline.
-- `new_physics.md` — future N-body ephemeris proposal (currently using patched conics).
-- `gen/mira_processes.md` — stage-by-stage pipeline recipe for Mira.
+- `simulation_architecture.md` — physics simulation architecture overview.

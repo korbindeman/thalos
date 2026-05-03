@@ -91,8 +91,7 @@ surface.
 
 ## First Vertical Slice
 
-The first compiler slice intentionally avoids the old `TectonicSkeleton` and
-`CoarseElevation` stages. It evaluates `VaelenColdDesertField` over cubemap
+The first compiler slice evaluates `VaelenColdDesertField` over cubemap
 directions, then projects the samples into `BodyData` for the current impostor:
 
 - continuous fractal macro height

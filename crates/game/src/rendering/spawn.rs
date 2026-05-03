@@ -21,8 +21,8 @@ use thalos_terrain_gen::{
 
 use super::types::{
     BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, PendingPlanetGeneration,
-    SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials,
-    SunLight, TidallyLocked,
+    PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial, SimulationState,
+    SolidPlanetMaterials, SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::view::HideInShipView;
@@ -48,6 +48,7 @@ pub(super) fn spawn_bodies(
     mut ring_materials: ResMut<Assets<RingMaterial>>,
     mut solid_planet_materials: ResMut<Assets<SolidPlanetMaterial>>,
     sim: Res<SimulationState>,
+    mut planetshine: ResMut<PlanetshineTints>,
 ) {
     let bodies = &sim.system.bodies;
     let initial_states = sim.ephemeris.query(0.0);
@@ -203,7 +204,7 @@ pub(super) fn spawn_bodies(
             // so the body is visible immediately at roughly the right size and
             // colour while the terrain pipeline runs in the background.
             let placeholder_mat = std_materials.add(StandardMaterial {
-                base_color: Color::srgb(r * body.albedo, g * body.albedo, b * body.albedo),
+                base_color: Color::srgb(r, g, b),
                 perceptual_roughness: 0.9,
                 metallic: 0.0,
                 ..default()
@@ -292,6 +293,23 @@ pub(super) fn spawn_bodies(
             // ship-layer billboard. The cloud-deck / haze layers are
             // expressed in render units, so the meters-per-render-unit
             // factor differs between the two.
+            // Average the cloud-deck palette as the gas-giant planetshine
+            // tint. Palette colours are already linear-RGB.
+            let palette = &atmos.cloud_deck.palette;
+            let mean_cloud = if palette.is_empty() {
+                [0.5, 0.5, 0.5]
+            } else {
+                let mut sum = [0.0f32; 3];
+                for stop in palette {
+                    sum[0] += stop.color[0];
+                    sum[1] += stop.color[1];
+                    sum[2] += stop.color[2];
+                }
+                let n = palette.len() as f32;
+                [sum[0] / n, sum[1] / n, sum[2] / n]
+            };
+            planetshine.by_body.insert(body.id, mean_cloud);
+
             let map_layers =
                 GasGiantLayers::from_params(atmos, body.rings.as_ref(), (1.0 / MAP_SCALE) as f32);
             let ship_layers =
@@ -375,14 +393,12 @@ pub(super) fn spawn_bodies(
             // camera-facing-quad architecture as the procedural impostor
             // and gas giant paths, so close approaches don't clip the
             // body against the camera near plane. Renders as a single
-            // linear-RGB albedo derived from the RON `physical.color *
-            // physical.albedo` (sRGB → linear so brightness matches the
-            // old StandardMaterial path).
+            // linear-RGB color (sRGB → linear for pipeline compatibility).
             let albedo_linear = Color::srgb(r, g, b).to_linear();
             let albedo = Vec4::new(
-                albedo_linear.red * body.albedo,
-                albedo_linear.green * body.albedo,
-                albedo_linear.blue * body.albedo,
+                albedo_linear.red,
+                albedo_linear.green,
+                albedo_linear.blue,
                 0.0,
             );
 
@@ -602,3 +618,4 @@ pub(super) fn spawn_bodies(
         ..default()
     });
 }
+

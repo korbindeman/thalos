@@ -1,16 +1,18 @@
 //! RON loader for the solar system definition.
 //!
-//! The file format is `assets/solar_system.ron`. Every body specifies every
-//! field — there are no defaults — so missing fields fail at parse time.
+//! The file format is `assets/solar_system.ron` for the main system structure,
+//! with per-body detail files at `assets/bodies/<lowercase_name>.ron` for
+//! terrain, atmosphere, and rings definitions.
 //!
 //! Angles in the file are in degrees (human-readable); the loader converts
 //! to radians at parse time. Distances are in meters.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Deserialize;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
-use thalos_terrain_gen::{GeneratorParams, TerrainConfig};
+use thalos_terrain_gen::TerrainConfig;
 
 use crate::debug_orbits::debug_parking_orbit_relative_state;
 use crate::types::{
@@ -30,9 +32,22 @@ pub struct SolarSystemFile {
     pub bodies: Vec<BodyFile>,
 }
 
+/// Per-body detail file containing terrain, atmosphere, rings.
+/// All fields are optional — bodies without these blocks will have None fields.
+#[derive(Debug, Deserialize, Default)]
+pub struct BodyDetailsFile {
+    #[serde(default)]
+    pub terrain: Option<TerrainConfig>,
+    #[serde(default)]
+    pub atmosphere: Option<AtmosphereParams>,
+    #[serde(default)]
+    pub terrestrial_atmosphere: Option<TerrestrialAtmosphere>,
+    #[serde(default)]
+    pub rings: Option<RingSystem>,
+}
+
 /// One body in the file. `parent` references another body by name. Bodies
-/// without orbital elements are root-frame (the star). Bodies may use either
-/// the new feature terrain block or the legacy generator block.
+/// without orbital elements are root-frame (the star).
 #[derive(Debug, Deserialize)]
 pub struct BodyFile {
     pub name: String,
@@ -40,8 +55,6 @@ pub struct BodyFile {
     pub parent: Option<String>,
     pub physical: PhysicalParams,
     pub orbit: Option<OrbitFile>,
-    #[serde(default)]
-    pub generator: Option<GeneratorParams>,
     #[serde(default)]
     pub terrain: Option<TerrainConfig>,
     #[serde(default)]
@@ -57,7 +70,6 @@ pub struct PhysicalParams {
     pub mass_kg: f64,
     pub radius_m: f64,
     pub color: String,
-    pub albedo: f32,
     pub rotation_period_s: f64,
     pub axial_tilt_deg: f64,
 }
@@ -77,11 +89,86 @@ pub struct OrbitFile {
 // Loader
 // ---------------------------------------------------------------------------
 
-/// Parse the RON solar system definition file.
+/// Parse the RON solar system definition file (with no per-body details).
+/// For the standard runtime usage, prefer [`load_solar_system_from_dir`] which
+/// loads per-body files. This function is useful for tests that embed data.
 pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> {
     let file: SolarSystemFile =
         ron::from_str(source).map_err(|e| format!("RON parse error: {e}"))?;
+    load_solar_system_impl(&file)
+}
 
+/// Load the solar system from `root/solar_system.ron` and per-body files at
+/// `root/bodies/<lowercase_name>.ron`. Calls the in-memory loader
+/// internally after loading and collating the per-body files.
+pub fn load_solar_system_from_dir(root: &Path) -> Result<SolarSystemDefinition, String> {
+    let system_path = root.join("solar_system.ron");
+    let system_source = std::fs::read_to_string(&system_path)
+        .map_err(|e| format!("Could not read {}: {}", system_path.display(), e))?;
+
+    // Parse the main file first to get body names
+    let file: SolarSystemFile = ron::from_str(&system_source)
+        .map_err(|e| format!("RON parse error in solar_system.ron: {e}"))?;
+
+    let bodies_dir = root.join("bodies");
+    let mut body_details: HashMap<String, String> = HashMap::new();
+
+    // Load per-body files for all bodies
+    for body in &file.bodies {
+        let details_path = bodies_dir.join(format!("{}.ron", body.name.to_lowercase()));
+        if details_path.exists() {
+            let details_source = std::fs::read_to_string(&details_path)
+                .map_err(|e| format!("Could not read {}: {}", details_path.display(), e))?;
+            body_details.insert(body.name.clone(), details_source);
+        }
+    }
+
+    // Convert owned Strings to borrowed &str for the loader
+    let body_details_refs: HashMap<String, &str> = body_details
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str()))
+        .collect();
+
+    load_solar_system_with_bodies(&system_source, &body_details_refs)
+}
+
+/// Parse solar system from in-memory sources: the main system definition and
+/// a map of body names to their detail file contents. Used for testing and
+/// for the path-based loader.
+pub fn load_solar_system_with_bodies(
+    system_source: &str,
+    body_details: &HashMap<String, &str>,
+) -> Result<SolarSystemDefinition, String> {
+    let mut file: SolarSystemFile =
+        ron::from_str(system_source).map_err(|e| format!("RON parse error: {e}"))?;
+
+    // Merge per-body details into the system file
+    for body in &mut file.bodies {
+        if let Some(details_source) = body_details.get(&body.name) {
+            let details: BodyDetailsFile = ron::from_str(details_source)
+                .map_err(|e| format!("RON parse error in {}.ron: {e}", body.name))?;
+            // Only override if the detail file provides the field
+            if details.terrain.is_some() {
+                body.terrain = details.terrain;
+            }
+            if details.atmosphere.is_some() {
+                body.atmosphere = details.atmosphere;
+            }
+            if details.terrestrial_atmosphere.is_some() {
+                body.terrestrial_atmosphere = details.terrestrial_atmosphere;
+            }
+            if details.rings.is_some() {
+                body.rings = details.rings;
+            }
+        }
+    }
+
+    // Now run the core loading logic on the merged file
+    load_solar_system_impl(&file)
+}
+
+/// Core implementation that takes a parsed file and produces the final definition.
+fn load_solar_system_impl(file: &SolarSystemFile) -> Result<SolarSystemDefinition, String> {
     // First pass: assign IDs.
     let mut name_to_id: HashMap<String, BodyId> = HashMap::with_capacity(file.bodies.len());
     for (i, b) in file.bodies.iter().enumerate() {
@@ -92,7 +179,7 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
 
     // Second pass: build BodyDefinitions, resolving parent names to IDs.
     let mut bodies = Vec::with_capacity(file.bodies.len());
-    for (id, b) in file.bodies.into_iter().enumerate() {
+    for (id, b) in file.bodies.iter().enumerate() {
         let parent = match &b.parent {
             Some(name) => Some(*name_to_id.get(name).ok_or_else(|| {
                 format!("body '{}' references unknown parent '{}'", b.name, name)
@@ -100,7 +187,7 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             None => None,
         };
 
-        let orbital_elements = b.orbit.map(|o| OrbitalElements {
+        let orbital_elements = b.orbit.as_ref().map(|o| OrbitalElements {
             semi_major_axis_m: o.semi_major_axis_m,
             eccentricity: o.eccentricity,
             inclination_rad: o.inclination_deg.to_radians(),
@@ -109,30 +196,25 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
             true_anomaly_rad: o.true_anomaly_deg.to_radians(),
         });
 
-        let terrain = b.terrain.unwrap_or_else(|| match &b.generator {
-            Some(generator) => TerrainConfig::LegacyPipeline(generator.clone()),
-            None => TerrainConfig::None,
-        });
+        let terrain = b.terrain.clone().unwrap_or(TerrainConfig::None);
 
         bodies.push(BodyDefinition {
             id,
-            name: b.name,
+            name: b.name.clone(),
             kind: b.kind,
             parent,
             mass_kg: b.physical.mass_kg,
             radius_m: b.physical.radius_m,
             color: parse_hex_color(&b.physical.color),
-            albedo: b.physical.albedo,
             rotation_period_s: b.physical.rotation_period_s,
             axial_tilt_rad: b.physical.axial_tilt_deg.to_radians(),
             gm: G * b.physical.mass_kg,
             soi_radius_m: 0.0, // filled below once all bodies exist
             orbital_elements,
             terrain,
-            generator: b.generator,
-            atmosphere: b.atmosphere,
-            terrestrial_atmosphere: b.terrestrial_atmosphere,
-            rings: b.rings,
+            atmosphere: b.atmosphere.clone(),
+            terrestrial_atmosphere: b.terrestrial_atmosphere.clone(),
+            rings: b.rings.clone(),
         });
     }
 
@@ -169,7 +251,7 @@ pub fn load_solar_system(source: &str) -> Result<SolarSystemDefinition, String> 
     };
 
     Ok(SolarSystemDefinition {
-        name: file.name,
+        name: file.name.clone(),
         bodies,
         ship,
         name_to_id,
@@ -191,8 +273,14 @@ mod tests {
 
     #[test]
     fn mira_uses_feature_terrain_when_loaded_from_asset() {
-        let source = include_str!("../../../assets/solar_system.ron");
-        let system = load_solar_system(source).expect("parse solar_system.ron");
+        let system_source = include_str!("../../../assets/solar_system.ron");
+        let mira_details = include_str!("../../../assets/bodies/mira.ron");
+
+        let mut details = HashMap::new();
+        details.insert("Mira".to_string(), mira_details);
+
+        let system = load_solar_system_with_bodies(system_source, &details)
+            .expect("parse solar_system.ron");
         let mira = system.body_by_name("Mira").expect("Mira exists");
 
         match &mira.terrain {
@@ -205,8 +293,14 @@ mod tests {
 
     #[test]
     fn vaelen_uses_feature_terrain_when_loaded_from_asset() {
-        let source = include_str!("../../../assets/solar_system.ron");
-        let system = load_solar_system(source).expect("parse solar_system.ron");
+        let system_source = include_str!("../../../assets/solar_system.ron");
+        let vaelen_details = include_str!("../../../assets/bodies/vaelen.ron");
+
+        let mut details = HashMap::new();
+        details.insert("Vaelen".to_string(), vaelen_details);
+
+        let system = load_solar_system_with_bodies(system_source, &details)
+            .expect("parse solar_system.ron");
         let vaelen = system.body_by_name("Vaelen").expect("Vaelen exists");
 
         match &vaelen.terrain {
@@ -218,16 +312,24 @@ mod tests {
     }
 
     #[test]
-    fn migrated_airless_bodies_use_feature_terrain() {
-        let source = include_str!("../../../assets/solar_system.ron");
-        let system = load_solar_system(source).expect("parse solar_system.ron");
+    fn airless_bodies_use_feature_terrain() {
+        let system_source = include_str!("../../../assets/solar_system.ron");
+        let selva_details = include_str!("../../../assets/bodies/selva.ron");
+        let carpo_details = include_str!("../../../assets/bodies/carpo.ron");
+        let theron_details = include_str!("../../../assets/bodies/theron.ron");
+        let nyx_details = include_str!("../../../assets/bodies/nyx.ron");
+
+        let mut details = HashMap::new();
+        details.insert("Selva".to_string(), selva_details);
+        details.insert("Carpo".to_string(), carpo_details);
+        details.insert("Theron".to_string(), theron_details);
+        details.insert("Nyx".to_string(), nyx_details);
+
+        let system = load_solar_system_with_bodies(system_source, &details)
+            .expect("parse solar_system.ron");
 
         for name in ["Selva", "Carpo", "Theron", "Nyx"] {
             let body = system.body_by_name(name).expect("body exists");
-            assert!(
-                body.generator.is_none(),
-                "{name} should not retain a legacy generator block"
-            );
             match &body.terrain {
                 TerrainConfig::Feature(config) => {
                     assert_eq!(config.archetype, BodyArchetype::AirlessImpactMoon);
@@ -237,13 +339,28 @@ mod tests {
                 }
             }
         }
+    }
 
-        let legacy: Vec<_> = system
-            .bodies
-            .iter()
-            .filter(|body| matches!(body.terrain, TerrainConfig::LegacyPipeline(_)))
-            .map(|body| body.name.as_str())
-            .collect();
-        assert_eq!(legacy, vec!["Thalos", "Pelagos"]);
+    #[test]
+    fn ocean_bodies_use_ocean_terrain() {
+        let system_source = include_str!("../../../assets/solar_system.ron");
+        let thalos_details = include_str!("../../../assets/bodies/thalos.ron");
+        let pelagos_details = include_str!("../../../assets/bodies/pelagos.ron");
+
+        let mut details = HashMap::new();
+        details.insert("Thalos".to_string(), thalos_details);
+        details.insert("Pelagos".to_string(), pelagos_details);
+
+        let system = load_solar_system_with_bodies(system_source, &details)
+            .expect("parse solar_system.ron");
+
+        for name in ["Thalos", "Pelagos"] {
+            let body = system.body_by_name(name).expect("body exists");
+            assert!(
+                matches!(body.terrain, TerrainConfig::Ocean(_)),
+                "{name} should use Ocean terrain, got {:?}",
+                body.terrain
+            );
+        }
     }
 }

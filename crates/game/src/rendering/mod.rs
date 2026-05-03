@@ -34,7 +34,8 @@ use transforms::{
 };
 pub use transforms::{update_render_frame, update_render_origin};
 pub use types::{
-    CameraExposure, CelestialBody, FrameBodyStates, PlayerShip, ShipMarker, SimulationState,
+    CameraExposure, CelestialBody, FrameBodyStates, PlanetshineTints, PlayerShip, ShipMarker,
+    SimulationState,
 };
 
 use bevy::prelude::*;
@@ -81,6 +82,7 @@ impl Plugin for RenderingPlugin {
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())
             .insert_resource(FrameBodyStates::default())
+            .insert_resource(PlanetshineTints::default())
             .insert_resource(CameraExposure::default())
             .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()

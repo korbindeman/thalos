@@ -1,0 +1,53 @@
+#![enable(implicit_some)]
+(
+    terrain: Feature((
+        seed: 1004,
+        cubemap_resolution: 2048,
+        body_age_gyr: 4.5,
+        archetype: AirlessImpactMoon,
+        composition: SilicateDominated,
+        environment: (
+            stellar_flux_earth: 1.0,
+            atmosphere: None,
+            hydrosphere: None,
+            ice_inventory: None,
+        ),
+        intent: [
+            ReadAsMoon,
+            DistinctNearSideFace,
+            DifferentFarSide,
+            FirstLandingWorld,
+        ],
+        projection: AirlessImpact((
+            base_crater_count: 280000,
+            min_crater_radius_m: 1500.0,
+            max_crater_radius_m: 80000.0,
+            cubemap_bake_threshold_m: 1500.0,
+            secondary_parent_radius_m: 40000.0,
+            secondaries_per_parent: 18,
+            mare_fill_fraction: 0.72,
+            mare_boundary_noise_amplitude_m: 700.0,
+            mare_boundary_noise_freq: 4.0,
+            regolith_bake_d_min_m: 600.0,
+            regolith_density_wavelength_m: 250000.0,
+            highland_mature_albedo: 0.12,
+            highland_fresh_albedo: 0.28,
+        )),
+        authored_features: [
+            Megabasin((
+                id: "mira.near_side_megabasin_a",
+                center_dir: (1.0, 0.12, 0.24),
+                radius_km: 250.0,
+                depth_km: 6.0,
+                lock: Placement,
+            )),
+            Megabasin((
+                id: "mira.near_side_megabasin_b",
+                center_dir: (1.0, -0.28, -0.18),
+                radius_km: 180.0,
+                depth_km: 4.0,
+                lock: Placement,
+            )),
+        ],
+    )),
+)

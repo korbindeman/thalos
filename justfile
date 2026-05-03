@@ -54,13 +54,11 @@ clear-terrain-cache:
 
 # Headless terrain bake + PNG dump. Writes to `stage-bakes/<body>/`.
 # Body name is case-insensitive; pass `all` to bake every body with a
-# generator block. Pass `stage=N` to run only the first N stages.
+# terrain block.
 #
 # Examples:
 #   just bake Thalos
 #   just bake thalos
 #   just bake all
-#   just bake Mira stage=3
-bake body stage="":
-    cargo run --release -p thalos_bake_dump -- {{body}} \
-        {{ if stage != "" { "--up-to-stage " + stage } else { "" } }}
+bake body:
+    cargo run --release -p thalos_bake_dump -- {{body}}
