@@ -10,6 +10,7 @@ mod flight_plan_view;
 mod fuel;
 mod hud;
 mod maneuver;
+mod map_view;
 mod navigation;
 mod photo_mode;
 mod reflection_probe;
@@ -29,8 +30,10 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, WindowMode};
+use big_space::prelude::BigSpaceDefaultPlugins;
 use thalos_physics::{
-    body_state_provider::BodyStateProvider,
+    body_trajectory_provider::BodyTrajectoryProvider,
+    canonical::{Epoch, WorldPhysicsConfig},
     gravity_mode::GravityMode,
     parsing::load_solar_system_from_dir,
     simulation::{Simulation, SimulationConfig},
@@ -48,6 +51,7 @@ use flight_plan_view::FlightPlanViewPlugin;
 use fuel::FuelPlugin;
 use hud::HudPlugin;
 use maneuver::ManeuverPlugin;
+use map_view::MapViewPlugin;
 use navigation::NavigationPlugin;
 use photo_mode::PhotoModePlugin;
 use rendering::{RenderingPlugin, SimulationState};
@@ -108,6 +112,10 @@ fn main() {
     //    motion source and the ship propagator. Hardcoded here until save
     //    files exist to deserialize it from.
     // ------------------------------------------------------------------
+    let world_config = WorldPhysicsConfig::classic();
+    world_config
+        .validate_supported()
+        .expect("Realistic world preset is deferred until M7");
     let gravity_mode = GravityMode::PatchedConics;
     println!(
         "  Gravity mode:    {:?} ({:.0}-year span).",
@@ -115,7 +123,7 @@ fn main() {
         RUNTIME_TIME_SPAN / 3.156e7,
     );
     let gravity_impls = gravity_mode.build(&system, RUNTIME_TIME_SPAN);
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::clone(&gravity_impls.body_state);
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::clone(&gravity_impls.body_trajectory);
 
     // ------------------------------------------------------------------
     // 4. Resolve the ship's absolute initial state.
@@ -138,7 +146,7 @@ fn main() {
                 .expect("No non-star body found to use as homeworld fallback")
         });
 
-    let homeworld_state = ephemeris.query_body(homeworld_id, 0.0);
+    let homeworld_state = ephemeris.state(homeworld_id, Epoch::ZERO);
     let rel = system.ship.initial_state;
     let ship_state = StateVector {
         position: homeworld_state.position + rel.position,
@@ -163,6 +171,8 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
         .add_plugins(
             DefaultPlugins
+                .build()
+                .disable::<bevy::transform::TransformPlugin>()
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Thalos".into(),
@@ -176,6 +186,7 @@ fn main() {
                     ..default()
                 }),
         )
+        .add_plugins(BigSpaceDefaultPlugins)
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         // The dedicated UI camera in `view::spawn_ui_camera` owns the
@@ -205,6 +216,7 @@ fn main() {
                 simulation,
                 system,
                 ephemeris,
+                world_config,
             }
         })
         .add_plugins(bevy::prelude::MeshPickingPlugin)
@@ -223,6 +235,7 @@ fn main() {
         .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
+        .add_plugins(MapViewPlugin)
         .add_plugins(BridgePlugin)
         .add_plugins(FuelPlugin)
         .add_plugins(EnginePlugin)

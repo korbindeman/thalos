@@ -17,6 +17,13 @@ Working today:
   (`KeplerianPropagator`) used for both live stepping and prediction.
 - Maneuver nodes with synchronous in-frame trajectory rebuild.
 - Time warp with ghost-body preview.
+- Canonical `CraftState` + `AuthorityMode` shell; `Simulation` owns one
+  canonical craft and one authority book (`OnRails`/`WarpIntegrated`
+  exercised; other variants reserved for M5).
+- Map view decoupled: `MapSnapshot` + `MapProjection` are the only
+  inputs to map rendering, ghost bodies, and maneuver UI.
+- Real-space scene under a single `BigSpace` root; ship camera carries
+  `FloatingOrigin`, bodies are placed via `Grid::translation_to_grid`.
 - Feature-compiler v1: `AirlessImpactMoon` (Mira) and
   `ColdDesertFormerlyWet` (Vaelen).
 - Flat impostor planet renderer (`planet_impostor.wgsl`) with baked
@@ -31,8 +38,10 @@ Hard limits today:
 - Thalos and Pelagos render via the flat-water `Ocean` placeholder.
 - No surface LOD — you cannot meaningfully descend below orbit.
 - No rocky-atmosphere scattering.
-- No `big_space`, no Avian local bubble, no canonical-state model.
-  Map view shares transforms with the real-space scene.
+- No Avian local bubble; authority handoffs to `LocalRigidBody` /
+  `BodyFixed` / `Docked` are reserved for M5.
+- `WorldPreset::Realistic` (N-body ephemeris backend) is unwired and
+  rejected by `validate_supported` — deferred to M7.
 
 ## Phase 1 — Architectural & Rendering
 
@@ -41,13 +50,16 @@ every body, with the renderer telling a coherent visual story from
 orbit down to surface scale. The player isn't yet landing; the world
 is being built.
 
-### M1 — Canonical state + big_space + map decoupling
+### M1 — Canonical state + big_space + map decoupling ✅
 
 Every craft has one canonical `f64` state and one authority mode. The
-map view becomes a presentation client of trajectory snapshots rather
-than the active scene. The real-space scene runs under a `BigSpace`
+map view is a presentation client of trajectory snapshots rather than
+the active scene. The real-space scene runs under a `BigSpace`
 hierarchy with the camera as floating origin.
 
+- **Status:** Done. Phases 1-3 of the simulation spec are implemented
+  (`crates/physics/src/canonical.rs`, `crates/game/src/map_view.rs`,
+  `crates/game/src/rendering/real_space.rs`).
 - **Spec:** [simulation.md](simulation.md), Implementation Phases 1-3.
 - **Gates:** M3 needs the big_space hierarchy. M5 needs the authority
   model.

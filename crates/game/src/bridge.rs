@@ -19,7 +19,6 @@ use thalos_physics::maneuver::ManeuverNode;
 use crate::SimStage;
 use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
-use crate::fuel::ThrottleState;
 use crate::maneuver::ManeuverPlan;
 use crate::navigation::{NavigationState, compute_attitude_control};
 use crate::rendering::SimulationState;
@@ -69,66 +68,14 @@ pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
     }
 }
 
-fn hold_prediction_for_scheduled_burn(autopilot: &Autopilot, throttle: &ThrottleState) -> bool {
-    autopilot.is_burning() && throttle.effective > 0.0
-}
-
-fn update_prediction(
-    autopilot: Res<Autopilot>,
-    throttle: Res<ThrottleState>,
-    mut sim: ResMut<SimulationState>,
-) {
+fn update_prediction(mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("update_prediction").entered();
-
-    if hold_prediction_for_scheduled_burn(&autopilot, &throttle) {
-        return;
-    }
 
     if !sim.simulation.prediction_needs_refresh() {
         return;
     }
 
     sim.simulation.recompute_prediction();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::autopilot::{AutopilotDirectiveId, AutopilotState};
-
-    #[test]
-    fn scheduled_burn_with_effective_throttle_holds_prediction() {
-        let mut autopilot = Autopilot::default();
-        autopilot.state = AutopilotState::Burn {
-            directive_id: AutopilotDirectiveId::new("test", 1),
-            direction: DVec3::Y,
-            planned_dv: 10.0,
-            anchor_delivered_dv: 0.0,
-        };
-        let throttle = ThrottleState {
-            commanded: 1.0,
-            effective: 1.0,
-        };
-
-        assert!(hold_prediction_for_scheduled_burn(&autopilot, &throttle));
-    }
-
-    #[test]
-    fn scheduled_burn_without_effective_throttle_can_refresh() {
-        let mut autopilot = Autopilot::default();
-        autopilot.state = AutopilotState::Burn {
-            directive_id: AutopilotDirectiveId::new("test", 1),
-            direction: DVec3::Y,
-            planned_dv: 10.0,
-            anchor_delivered_dv: 0.0,
-        };
-        let throttle = ThrottleState {
-            commanded: 1.0,
-            effective: 0.0,
-        };
-
-        assert!(!hold_prediction_for_scheduled_burn(&autopilot, &throttle));
-    }
 }
 
 /// Sample player attitude input + active navigation mode and push the

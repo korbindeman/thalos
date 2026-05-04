@@ -1,5 +1,5 @@
 use glam::{DQuat, DVec3};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
 use thalos_terrain_gen::TerrainConfig;
@@ -13,7 +13,7 @@ pub const AU_TO_METERS: f64 = 1.496e11;
 pub type BodyId = usize;
 
 /// Position + velocity in heliocentric inertial frame.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StateVector {
     pub position: DVec3,
     pub velocity: DVec3,
@@ -25,7 +25,7 @@ pub struct StateVector {
 /// `orientation` is the body→world quaternion; `angular_velocity` is
 /// expressed in the **body frame** (rad/s) — convention `Iω̇ = τ` plays
 /// out cleanly when both `ω` and `τ` are in body coordinates.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AttitudeState {
     pub orientation: DQuat,
     pub angular_velocity: DVec3,
@@ -171,12 +171,19 @@ pub struct OrbitalElements {
     pub true_anomaly_rad: f64,
 }
 
-/// A timestamped state for a body — used in ephemeris samples.
-#[derive(Debug, Clone, Copy)]
+/// A timestamped state for a body evaluated from the active body trajectory
+/// provider.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyState {
+    pub id: BodyId,
+    pub epoch: crate::canonical::Epoch,
     pub position: DVec3,
     pub velocity: DVec3,
+    pub orientation: DQuat,
+    pub angular_velocity: DVec3,
     pub mass_kg: f64,
+    pub gm: f64,
+    pub radius_m: f64,
 }
 
 /// Snapshot of all body states at a given time.

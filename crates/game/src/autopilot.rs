@@ -204,13 +204,6 @@ impl Autopilot {
         )
     }
 
-    /// `true` only while a scheduled burn is actively being executed.
-    /// The flight-plan view uses this to hold the precomputed trajectory
-    /// steady while thrust is being applied.
-    pub(crate) fn is_burning(&self) -> bool {
-        matches!(self.state, AutopilotState::Burn { .. })
-    }
-
     /// Direct world-frame attitude target while the autopilot owns
     /// pointing. This bypasses `NavigationMode::ManeuverNode` so the
     /// executor can fly any directive producer, not only maneuver nodes.
@@ -253,10 +246,21 @@ pub enum AutopilotState {
     },
 }
 
+/// Emitted when a generic burn directive starts.
+///
+/// Producer adapters decide whether the id belongs to them. The
+/// maneuver adapter uses this to remove the executing node from future
+/// flight-plan input.
+#[derive(Debug, Clone, Copy, Message)]
+pub struct AutopilotBurnStarted {
+    pub id: AutopilotDirectiveId,
+}
+
 /// Emitted when a generic burn directive completes.
 ///
 /// Producer adapters decide whether the id belongs to them. The
-/// maneuver adapter uses this to retire the corresponding maneuver node.
+/// maneuver adapter treats this as an idempotent cleanup fallback; the
+/// executing node is normally retired on [`AutopilotBurnStarted`].
 #[derive(Debug, Clone, Copy, Message)]
 pub struct AutopilotBurnCompleted {
     pub id: AutopilotDirectiveId,
@@ -268,6 +272,7 @@ impl Plugin for AutopilotPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Autopilot>()
             .init_resource::<AutopilotBurnSchedule>()
+            .add_message::<AutopilotBurnStarted>()
             .add_message::<AutopilotBurnCompleted>()
             .add_systems(
                 Update,
@@ -287,9 +292,16 @@ impl Plugin for AutopilotPlugin {
             )
             .add_systems(
                 Update,
-                consume_completed_maneuver_directives
+                consume_started_maneuver_directives
                     .in_set(SimStage::Physics)
                     .after(autopilot_system)
+                    .before(crate::bridge::advance_simulation),
+            )
+            .add_systems(
+                Update,
+                consume_completed_maneuver_directives
+                    .in_set(SimStage::Physics)
+                    .after(consume_started_maneuver_directives)
                     .before(crate::bridge::advance_simulation),
             );
     }
@@ -377,12 +389,26 @@ pub(crate) fn publish_maneuver_autopilot_directive(
     });
 }
 
-/// Retire maneuver nodes whose generic autopilot directive completed.
+/// Retire maneuver nodes whose generic autopilot directive started.
 ///
 /// This is the output adapter corresponding to
 /// [`publish_maneuver_autopilot_directive`]. The core autopilot emits an
 /// opaque directive id; this adapter recognizes the maneuver namespace
 /// and reconciles the physics/UI maneuver schedule.
+pub(crate) fn consume_started_maneuver_directives(
+    mut started: MessageReader<AutopilotBurnStarted>,
+    mut sim: ResMut<SimulationState>,
+) {
+    for event in started.read() {
+        if event.id.namespace() != MANEUVER_DIRECTIVE_NAMESPACE {
+            continue;
+        }
+        sim.simulation.consume_maneuver_node(event.id.local_id());
+    }
+}
+
+/// Idempotent cleanup for maneuver directives that complete after their
+/// source node has already been removed at burn start.
 pub(crate) fn consume_completed_maneuver_directives(
     mut completed: MessageReader<AutopilotBurnCompleted>,
     mut sim: ResMut<SimulationState>,
@@ -467,6 +493,7 @@ pub(crate) fn autopilot_system(
     mut sim: ResMut<SimulationState>,
     mut throttle: ResMut<ThrottleState>,
     schedule: Res<AutopilotBurnSchedule>,
+    mut started: MessageWriter<AutopilotBurnStarted>,
     mut completed: MessageWriter<AutopilotBurnCompleted>,
 ) {
     if !autopilot.enabled {
@@ -574,6 +601,7 @@ pub(crate) fn autopilot_system(
                 return;
             }
 
+            started.write(AutopilotBurnStarted { id: directive_id });
             autopilot.state = AutopilotState::Burn {
                 directive_id,
                 direction: directive.direction,

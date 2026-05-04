@@ -10,6 +10,8 @@ use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::tasks::AsyncComputeTaskPool;
+use big_space::prelude::Grid;
+use thalos_physics::canonical::Epoch;
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
     GasGiantLayers, GasGiantMaterial, GasGiantParams, RingLayers, RingMaterial, RingParams,
@@ -19,10 +21,11 @@ use thalos_terrain_gen::{
     TerrainCompileContext, TerrainCompileOptions, TerrainConfig, compile_terrain_config,
 };
 
+use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::types::{
     BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, PendingPlanetGeneration,
-    PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial, SimulationState,
-    SolidPlanetMaterials, SunLight, TidallyLocked,
+    PlanetshineTints, RealSpaceBody, SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial,
+    SimulationState, SolidPlanetMaterials, SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::view::HideInShipView;
@@ -48,10 +51,11 @@ pub(super) fn spawn_bodies(
     mut ring_materials: ResMut<Assets<RingMaterial>>,
     mut solid_planet_materials: ResMut<Assets<SolidPlanetMaterial>>,
     sim: Res<SimulationState>,
+    real_root: Res<RealSpaceRoot>,
     mut planetshine: ResMut<PlanetshineTints>,
 ) {
     let bodies = &sim.system.bodies;
-    let initial_states = sim.ephemeris.query(0.0);
+    let initial_states = sim.ephemeris.states(Epoch::ZERO);
 
     // Shared meshes.
     let icon_mesh = meshes.add(Circle::new(1.0));
@@ -68,11 +72,21 @@ pub(super) fn spawn_bodies(
 
     for body in bodies {
         let state = &initial_states[body.id];
-        // Both the parent transform and `body.render_radius` are anchored
-        // at MAP_SCALE: the body parent acts as the canonical map-side
-        // anchor, and ShipBodyMesh siblings carry a compensating local
-        // translation in `update_ship_body_meshes` so they sit at
-        // `phys * SHIP_SCALE` in world space.
+        let real_grid = real_space_grid();
+        let (real_cell, real_offset) = real_grid.translation_to_grid(state.position);
+        let real_body_entity = commands
+            .spawn((
+                Transform::from_translation(real_offset),
+                real_cell,
+                Grid::new(super::real_space::REAL_SPACE_CELL_SIZE_M, 0.0),
+                Visibility::Inherited,
+                RealSpaceBody { body_id: body.id },
+                Name::new(format!("{} Real Space", body.name)),
+                ChildOf(real_root.entity),
+            ))
+            .id();
+        // Map-side bodies stay under normal Bevy transforms. Ship-layer
+        // body meshes are children of the matching real-space BigSpace grid.
         let pos = (state.position * MAP_SCALE).as_vec3();
 
         let render_radius = ((body.radius_m * MAP_SCALE) as f32).max(0.005);
@@ -133,15 +147,12 @@ pub(super) fn spawn_bodies(
             commands.spawn((
                 Mesh3d(unit_sphere_star.clone()),
                 MeshMaterial3d(star_material),
-                // Local transform updated each frame by
-                // `update_ship_body_meshes` to compensate for the
-                // parent's MAP_SCALE translation.
                 Transform::from_scale(Vec3::splat(ship_render_radius)),
                 NotShadowCaster,
                 NotShadowReceiver,
                 ShipBodyMesh,
                 bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
-                ChildOf(body_entity),
+                ChildOf(real_body_entity),
             ));
             commands.spawn((
                 Mesh3d(icon_mesh.clone()),
@@ -254,7 +265,7 @@ pub(super) fn spawn_bodies(
                     Transform::from_scale(Vec3::splat(ship_render_radius)),
                     ShipBodyMesh,
                     bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
-                    ChildOf(body_entity),
+                    ChildOf(real_body_entity),
                 ))
                 .id();
 
@@ -278,6 +289,7 @@ pub(super) fn spawn_bodies(
                     render_radius,
                     mesh_entity,
                     ship_mesh_entity,
+                    ship_parent_entity: real_body_entity,
                 });
 
             body_entity
@@ -367,7 +379,7 @@ pub(super) fn spawn_bodies(
                 NoFrustumCulling,
                 NotShadowCaster,
                 NotShadowReceiver,
-                ChildOf(body_entity),
+                ChildOf(real_body_entity),
             ));
 
             commands.spawn((
@@ -449,7 +461,7 @@ pub(super) fn spawn_bodies(
                 NoFrustumCulling,
                 NotShadowCaster,
                 NotShadowReceiver,
-                ChildOf(body_entity),
+                ChildOf(real_body_entity),
             ));
             commands.spawn((
                 Mesh3d(icon_mesh.clone()),
@@ -475,12 +487,10 @@ pub(super) fn spawn_bodies(
         //
         // Body-level: any body with `rings: Some(_)` gets a ring annulus,
         // gas giant or rocky alike. Two ring children are spawned — a
-        // map-layer child baked at MAP_SCALE and a ship-layer child at
-        // SHIP_SCALE — each with its own `RingMaterial` instance because
-        // the per-frame uniforms (planet center, radii) differ between
-        // the two views. The ship-layer child carries [`ShipBodyMesh`]
-        // so `update_ship_body_meshes` translates it correctly each
-        // frame.
+        // map-layer child baked at MAP_SCALE and a ship-layer child under
+        // the real-space body grid at SHIP_SCALE — each with its own
+        // `RingMaterial` instance because the per-frame uniforms (planet
+        // center, radii) differ between the two views.
         //
         // Ring child rotation is `Rx(-tilt)`. For gas giants, the cloud
         // shader treats `orientation = Rx(+tilt)` as world→body-local,
@@ -574,7 +584,7 @@ pub(super) fn spawn_bodies(
                 bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
                 NotShadowCaster,
                 NotShadowReceiver,
-                ChildOf(body_entity),
+                ChildOf(real_body_entity),
                 ShipRingMaterial(ship_ring_material),
             ));
         }

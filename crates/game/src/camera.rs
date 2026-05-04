@@ -3,6 +3,7 @@ use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
+use big_space::prelude::CellCoord;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::space_camera_post_stack;
 
@@ -332,7 +333,7 @@ fn distance_bounds_for_view(view: ViewMode, min_distance: f64) -> (f64, f64) {
 // Startup
 // ---------------------------------------------------------------------------
 
-fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
+pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
     let map_active = matches!(*view, ViewMode::Map);
 
     let mut map_cam = commands.spawn((
@@ -593,7 +594,7 @@ pub fn camera_transform_system(
     body_states: Res<FrameBodyStates>,
     body_targets: Query<(&CelestialBody, &Transform), Without<OrbitCamera>>,
     ship_targets: Query<
-        (&Transform, Option<&CameraTargetOffset>),
+        (&Transform, Option<&CameraTargetOffset>, Option<&CellCoord>),
         (With<PlayerShip>, Without<OrbitCamera>),
     >,
     ghost_targets: Query<
@@ -603,9 +604,12 @@ pub fn camera_transform_system(
             Without<OrbitCamera>,
         ),
     >,
-    mut camera_query: Query<&mut Transform, (With<OrbitCamera>, With<ActiveCamera>)>,
+    mut camera_query: Query<
+        (&mut Transform, Option<&mut CellCoord>),
+        (With<OrbitCamera>, With<ActiveCamera>),
+    >,
 ) {
-    let Ok(mut camera_transform) = camera_query.single_mut() else {
+    let Ok((mut camera_transform, camera_cell)) = camera_query.single_mut() else {
         return;
     };
 
@@ -628,6 +632,7 @@ pub fn camera_transform_system(
     //   render-space origin (origin tracks it directly), so we read
     //   it normally and apply any per-target pivot offset (e.g. the
     //   player ship's mass-weighted CoM).
+    let mut target_cell: Option<CellCoord> = None;
     let target_pos: Vec3 = if focus.transition_origin_start.is_some() {
         Vec3::ZERO
     } else {
@@ -642,7 +647,8 @@ pub fn camera_transform_system(
                     ship_targets
                         .single()
                         .ok()
-                        .map(|(t, offset)| {
+                        .map(|(t, offset, cell)| {
+                            target_cell = cell.copied();
                             let local = offset.copied().unwrap_or_default().0;
                             t.translation + t.rotation * local
                         })
@@ -696,6 +702,11 @@ pub fn camera_transform_system(
     let offset = (basis.right * local.x + basis.up * local.y + basis.forward * local.z) * distance;
 
     let camera_pos = target_pos + offset;
+    if *view == ViewMode::Ship
+        && let (Some(mut camera_cell), Some(target_cell)) = (camera_cell, target_cell)
+    {
+        *camera_cell = target_cell;
+    }
     *camera_transform = Transform::from_translation(camera_pos).looking_at(target_pos, basis.up);
 }
 

@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use super::FlightPlan;
 use super::Trajectory;
 use super::numeric::NumericSegment;
-use crate::body_state_provider::BodyStateProvider;
+use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::orbital_math::cartesian_to_elements;
 use crate::types::{BodyDefinition, BodyId, StateVector, TrajectorySample};
 
@@ -151,13 +151,37 @@ pub struct ClosestApproach {
 pub(super) fn detect_segment_events(
     segment: &NumericSegment,
     bodies: &[BodyDefinition],
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     starting_id: &mut EncounterId,
     leg_index: usize,
 ) -> Vec<TrajectoryEvent> {
     let mut events = Vec::new();
     if segment.samples.len() < 2 {
         return events;
+    }
+
+    if let Some([first, second]) = segment.samples.get(0..2)
+        && first.anchor_body == second.anchor_body
+    {
+        let body_id = first.anchor_body;
+        let rv_first = radial_velocity(first, ephemeris, body_id, first.time);
+        let rv_second = radial_velocity(second, ephemeris, body_id, second.time);
+        if rv_first.abs() <= APSIS_ZERO_EPS
+            && let Some(kind) = endpoint_apsis_kind(rv_second)
+        {
+            events.push(TrajectoryEvent {
+                id: next_id(starting_id),
+                body: body_id,
+                epoch: first.time,
+                kind,
+                craft_state: StateVector {
+                    position: first.position,
+                    velocity: first.velocity,
+                },
+                body_state: body_state(ephemeris, body_id, first.time),
+                leg_index,
+            });
+        }
     }
 
     for pair in segment.samples.windows(2) {
@@ -198,7 +222,7 @@ pub(super) fn detect_segment_events(
                     let Some(state) = segment.state_at(t) else {
                         return 0.0;
                     };
-                    let bs = ephemeris.query_body(body_id, t);
+                    let bs = ephemeris.state(body_id, crate::canonical::Epoch(t));
                     let r = state.position - bs.position;
                     let v = state.velocity - bs.velocity;
                     r.dot(v)
@@ -237,7 +261,7 @@ pub(super) fn detect_segment_events(
             let Some(state) = segment.state_at(t) else {
                 return 0.0;
             };
-            let bs = ephemeris.query_body(hit_id, t);
+            let bs = ephemeris.state(hit_id, crate::canonical::Epoch(t));
             (state.position - bs.position).length() - body_radius
         });
         if let Some(craft) = segment.state_at(epoch) {
@@ -256,6 +280,18 @@ pub(super) fn detect_segment_events(
     events
 }
 
+const APSIS_ZERO_EPS: f64 = 1.0;
+
+fn endpoint_apsis_kind(next_radial_velocity: f64) -> Option<TrajectoryEventKind> {
+    if next_radial_velocity > APSIS_ZERO_EPS {
+        Some(TrajectoryEventKind::Periapsis)
+    } else if next_radial_velocity < -APSIS_ZERO_EPS {
+        Some(TrajectoryEventKind::Apoapsis)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encounter aggregation
 // ---------------------------------------------------------------------------
@@ -270,7 +306,7 @@ pub(super) fn aggregate_encounters(
     events: &[TrajectoryEvent],
     segments: &[NumericSegment],
     bodies: &[BodyDefinition],
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     starting_id: &mut EncounterId,
 ) -> Vec<Encounter> {
     let mut out = Vec::new();
@@ -300,7 +336,7 @@ pub(super) fn aggregate_encounters(
                 if sample.time < entry.epoch || sample.time > window_end {
                     continue;
                 }
-                let bs = ephemeris.query_body(entry.body, sample.time);
+                let bs = ephemeris.state(entry.body, crate::canonical::Epoch(sample.time));
                 let d_sq = (sample.position - bs.position).length_squared();
                 if best.map(|(d, _, _)| d_sq < d * d).unwrap_or(true) {
                     best = Some((
@@ -395,7 +431,7 @@ pub(super) fn aggregate_encounters(
 pub(super) fn scan_closest_approaches(
     segments: &[NumericSegment],
     bodies: &[BodyDefinition],
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     exclude: &HashSet<BodyId>,
 ) -> Vec<ClosestApproach> {
     use crate::types::BodyKind;
@@ -406,7 +442,7 @@ pub(super) fn scan_closest_approaches(
 
     for seg in segments {
         for sample in &seg.samples {
-            ephemeris.query_into(sample.time, &mut body_buf);
+            ephemeris.states_into(crate::canonical::Epoch(sample.time), &mut body_buf);
             for body_def in bodies {
                 if body_def.kind == BodyKind::Star {
                     continue;
@@ -465,8 +501,8 @@ fn is_child_of(bodies: &[BodyDefinition], child: BodyId, parent: BodyId) -> bool
 }
 
 /// Body state at `time`, lifted to a craft-shaped `StateVector`.
-fn body_state(ephemeris: &dyn BodyStateProvider, body: BodyId, time: f64) -> StateVector {
-    let bs = ephemeris.query_body(body, time);
+fn body_state(ephemeris: &dyn BodyTrajectoryProvider, body: BodyId, time: f64) -> StateVector {
+    let bs = ephemeris.state(body, crate::canonical::Epoch(time));
     StateVector {
         position: bs.position,
         velocity: bs.velocity,
@@ -475,11 +511,11 @@ fn body_state(ephemeris: &dyn BodyStateProvider, body: BodyId, time: f64) -> Sta
 
 fn radial_velocity(
     sample: &TrajectorySample,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     body_id: BodyId,
     time: f64,
 ) -> f64 {
-    let bs = ephemeris.query_body(body_id, time);
+    let bs = ephemeris.state(body_id, crate::canonical::Epoch(time));
     let r = sample.position - bs.position;
     let v = sample.velocity - bs.velocity;
     r.dot(v)
@@ -524,7 +560,7 @@ fn bisect_zero(mut lo: f64, mut hi: f64, mut f: impl FnMut(f64) -> f64) -> f64 {
 pub fn closest_approach(
     plan: &FlightPlan,
     target: BodyId,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
 ) -> Option<ClosestApproach> {
     let (start, end) = plan.epoch_range();
     if end <= start {
@@ -533,7 +569,7 @@ pub fn closest_approach(
 
     let distance_at = |t: f64| -> Option<f64> {
         let craft = plan.state_at(t)?;
-        let bs = ephemeris.query_body(target, t);
+        let bs = ephemeris.state(target, crate::canonical::Epoch(t));
         Some((craft.position - bs.position).length())
     };
 
@@ -591,22 +627,23 @@ pub fn closest_approach(
 
 #[cfg(test)]
 mod tests {
-    use glam::DVec3;
+    use glam::{DQuat, DVec3};
 
     use super::*;
+    use crate::canonical::Epoch;
     use crate::types::{BodyKind, BodyState, BodyStates};
 
     struct StaticProvider {
         states: BodyStates,
     }
 
-    impl BodyStateProvider for StaticProvider {
-        fn query_into(&self, _time: f64, out: &mut BodyStates) {
+    impl BodyTrajectoryProvider for StaticProvider {
+        fn states_into(&self, _epoch: Epoch, out: &mut BodyStates) {
             out.clear();
             out.extend_from_slice(&self.states);
         }
 
-        fn query_body(&self, body_id: BodyId, _time: f64) -> BodyState {
+        fn state(&self, body_id: BodyId, _epoch: Epoch) -> BodyState {
             self.states[body_id]
         }
 
@@ -651,6 +688,20 @@ mod tests {
         }
     }
 
+    fn body_state(id: BodyId, position: DVec3) -> BodyState {
+        BodyState {
+            id,
+            epoch: Epoch::ZERO,
+            position,
+            velocity: DVec3::ZERO,
+            orientation: DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+            mass_kg: 1.0,
+            gm: 1.0,
+            radius_m: 1.0,
+        }
+    }
+
     fn sample(time: f64, position: DVec3, anchor_body: BodyId) -> TrajectorySample {
         TrajectorySample {
             time,
@@ -670,21 +721,9 @@ mod tests {
         ];
         let ephemeris = StaticProvider {
             states: vec![
-                BodyState {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                    mass_kg: 1.0,
-                },
-                BodyState {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                    mass_kg: 1.0,
-                },
-                BodyState {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                    mass_kg: 1.0,
-                },
+                body_state(0, DVec3::ZERO),
+                body_state(1, DVec3::ZERO),
+                body_state(2, DVec3::ZERO),
             ],
         };
         let events = vec![

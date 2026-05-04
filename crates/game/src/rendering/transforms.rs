@@ -8,14 +8,14 @@ use thalos_planet_rendering::{PlanetHaloMaterial, PlanetMaterial};
 
 use super::screen_marker_radius;
 use super::types::{
-    CelestialBody, FrameBodyStates, PlanetMaterials, ShipBodyMesh, ShipMarker, SimulationState,
-    TidallyLocked,
+    CelestialBody, FrameBodyStates, PlanetMaterials, ShipMarker, SimulationState, TidallyLocked,
 };
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{
-    MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, SHIP_SCALE, WorldScale, to_render_pos,
+    MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, WorldScale, to_render_pos,
 };
 use crate::flight_plan_view::FlightPlanView;
+use crate::map_view::{LinearMapProjection, MapProjection, MapSnapshot};
 use crate::view::ViewMode;
 
 fn ghost_position(
@@ -133,65 +133,29 @@ pub fn update_render_frame(
 /// Drive each [`CelestialBody`] parent's translation at [`MAP_SCALE`].
 ///
 /// The parent acts as the canonical map-side anchor: its [`BodyMesh`]
-/// and [`BodyIcon`] children inherit it directly, while
-/// [`ShipBodyMesh`] siblings carry a compensating local translation
-/// (see [`update_ship_body_meshes`]) so they sit at `phys * SHIP_SCALE`
-/// in world space. Locking the parent at MAP_SCALE means both views
-/// have a stable, view-independent representation regardless of which
-/// camera is active.
+/// and [`BodyIcon`] children inherit it directly. Ship-layer meshes live
+/// under the matching BigSpace body grid instead, so map projection and
+/// real-space placement stay independent.
 pub(super) fn update_body_positions(
-    cache: Res<FrameBodyStates>,
+    snapshot: Res<MapSnapshot>,
     origin: Res<RenderOrigin>,
     mut query: Query<(&CelestialBody, &mut Transform)>,
 ) {
-    let Some(ref states) = cache.states else {
+    if snapshot.body_states.is_empty() {
         return;
-    };
+    }
+    let projection = LinearMapProjection;
+    let ctx = snapshot.context(&origin, &WorldScale(MAP_SCALE), 0);
 
     for (body, mut transform) in &mut query {
-        if let Some(state) = states.get(body.body_id) {
-            transform.translation = ((state.position - origin.position) * MAP_SCALE).as_vec3();
+        if let Some(state) = snapshot.body_states.get(body.body_id) {
+            transform.translation = projection.project_body(state, &ctx);
         }
     }
 }
 
-/// Per-frame: rewrite each [`ShipBodyMesh`]'s LOCAL translation so its
-/// world position lands at `(phys_pos - origin) * SHIP_SCALE` regardless
-/// of what scale the parent's translation is computed at.
-///
-/// Parent translation is `(phys_pos - origin) * MAP_SCALE` (driven by
-/// [`update_body_positions`]). For the ship-view sibling we want world
-/// = `(phys_pos - origin) * SHIP_SCALE`, so the local translation that
-/// achieves that is `(phys_pos - origin) * (SHIP_SCALE - MAP_SCALE)`.
-///
-/// Scale and rotation are not touched — those are set once at spawn
-/// time (sphere placeholder uses `radius_m * SHIP_SCALE`; rings use
-/// `Vec3::ONE` because the ring mesh is built at SHIP_SCALE radii;
-/// post-swap impostor billboards ignore the model scale because the
-/// vertex shader sizes the quad from `params.radius` directly).
-pub(super) fn update_ship_body_meshes(
-    cache: Res<FrameBodyStates>,
-    origin: Res<RenderOrigin>,
-    parents: Query<&CelestialBody>,
-    mut ship_meshes: Query<(&ChildOf, &mut Transform), With<ShipBodyMesh>>,
-) {
-    let Some(ref states) = cache.states else {
-        return;
-    };
-    for (parent_link, mut tf) in &mut ship_meshes {
-        let Ok(body) = parents.get(parent_link.0) else {
-            continue;
-        };
-        let Some(state) = states.get(body.body_id) else {
-            continue;
-        };
-        let rel = state.position - origin.position;
-        tf.translation = (rel * (SHIP_SCALE - MAP_SCALE)).as_vec3();
-    }
-}
-
 pub(super) fn update_ship_position(
-    sim: Res<SimulationState>,
+    snapshot: Res<MapSnapshot>,
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
     view: Res<ViewMode>,
@@ -203,10 +167,17 @@ pub(super) fn update_ship_position(
     let Ok(cam_tf) = camera_query.single() else {
         return;
     };
-    let ship_soi_body = sim.simulation.dominant_body();
+    let Some(craft) = snapshot.crafts.first() else {
+        return;
+    };
+    let ship_soi_body = crate::camera::find_reference_body(
+        craft.translation.position,
+        &snapshot.body_defs,
+        &snapshot.body_states,
+    );
     let marker_visible = matches!(*view, ViewMode::Map)
         && !photo_mode.active
-        && ship_marker_visible_in_focus(focus.target, ship_soi_body, sim.simulation.bodies());
+        && ship_marker_visible_in_focus(focus.target, ship_soi_body, &snapshot.body_defs);
     let target_visibility = if marker_visible {
         Visibility::Inherited
     } else {
@@ -214,10 +185,7 @@ pub(super) fn update_ship_position(
     };
 
     for (mut transform, mut visibility) in &mut query {
-        transform.translation = to_render_pos(
-            sim.simulation.ship_state().position - origin.position,
-            &scale,
-        );
+        transform.translation = to_render_pos(craft.translation.position - origin.position, &scale);
         transform.rotation = cam_tf.rotation;
         transform.scale = Vec3::splat(screen_marker_radius(
             transform.translation,
@@ -387,12 +355,19 @@ pub(super) fn update_planet_orientations(
 mod tests {
     use super::*;
     use bevy::math::DVec3;
+    use thalos_physics::canonical::Epoch;
 
     fn body_state(position: DVec3, velocity: DVec3) -> BodyState {
         BodyState {
+            id: 0,
+            epoch: Epoch::ZERO,
             position,
             velocity,
+            orientation: bevy::math::DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
             mass_kg: 1.0,
+            gm: 1.0,
+            radius_m: 1.0,
         }
     }
 

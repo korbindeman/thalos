@@ -87,16 +87,17 @@ Core separation: physics, terrain_gen, atmosphere_gen, and celestial are pure Ru
 
 Two trait abstractions draw the boundaries:
 
-- `BodyStateProvider` (`body_state_provider.rs`) — answers "where is body `i` at time `t`?" Implemented by `PatchedConics`; could be swapped for a baked ephemeris.
+- `BodyTrajectoryProvider` (`body_trajectory_provider.rs`) — answers "where is body `i` at epoch `t`?" Implemented by `PatchedConics`; could be swapped for a baked ephemeris.
 - `ShipPropagator` (`ship_propagator.rs`) — propagates the ship across one segment of coast or burn. Implemented by `KeplerianPropagator`: analytical Kepler coast under a single SOI body + RK4 finite-burn. SOI transitions are detected per substep and refined by bisection (coast) or shortened RK4 (burn).
 
 Key modules:
 
+- `canonical` — world preset/config, `Epoch`, `CraftState`, and `AuthorityMode`. `Simulation` owns exactly one canonical craft state and authority mode for the player craft; `WorldPreset::Classic` is the only wired preset for now.
 - `types` — `StateVector`, `BodyDefinition`, `TrajectorySample` (each sample carries `anchor_body` + `ref_pos` so the renderer can draw without a per-sample ephemeris query).
 - `orbital_math` — Cartesian↔Keplerian conversions, Kepler-equation solvers (elliptic + hyperbolic), `propagate_kepler`. Pure math, well-tested.
-- `patched_conics` — `BodyStateProvider` impl using analytical Keplerian orbits. Bodies form a parent-child tree; queries walk the lineage and sum each ancestor's motion.
+- `patched_conics` — `BodyTrajectoryProvider` impl using analytical Keplerian orbits. Bodies form a parent-child tree; queries walk the lineage and sum each ancestor's motion.
 - `ship_propagator` — `ShipPropagator` trait + `KeplerianPropagator` impl. Coast and burn segments terminate on the first of: target time, SOI exit, collision, SOI enter, burn end, or stable-orbit closure. Resolution order at boundaries: `exit > collision > enter`.
-- `simulation` — Central `Simulation` struct: owns ship state, attitude, warp, `KeplerianPropagator` instance, `ManeuverSequence`. `step()` is called each frame and consumes maneuver nodes as their start time arrives.
+- `simulation` — Central `Simulation` struct: owns canonical craft state, authority bookkeeping, warp, `KeplerianPropagator` instance, and `ManeuverSequence`. `step()` is called each frame and consumes maneuver nodes as their start time arrives.
 - `trajectory` — Flight-plan prediction. `propagate_flight_plan` runs the same `ShipPropagator` across the maneuver sequence, producing `Leg`s of `(burn?, coast)` `NumericSegment`s. Includes event detection (SOI / apsis / impact), encounter aggregation, closest-approach scans.
 - `maneuver` — `ManeuverNode`: time, delta-v in local prograde/normal/radial frame, reference body. Plus the frame-conversion helpers.
 - `parsing` — Loads `assets/solar_system.ron` into `SolarSystemDefinition`.
@@ -104,12 +105,14 @@ Key modules:
 ### Game crate (`crates/game/`)
 
 - `bridge` — The core adapter. Calls `Simulation::step()` each frame, recomputes trajectory prediction *synchronously* on the main thread when the cached plan is dirty/stale, syncs maneuver edits, handles warp controls. (Single early-terminating `propagate_flight_plan` pass keeps the typical rebuild well under a frame; running in-line means an edit on frame N produces the fresh trajectory on frame N.)
+- `map_view` — snapshot/projection boundary for map rendering. It copies `CraftState`, body states, and `FlightPlan` into `MapSnapshot`; map systems consume the snapshot and never mutate canonical simulation state.
 - `rendering/` — Module owning every system that turns simulation state into rendered geometry. Submodules:
   - `types` — shared resources (`SimulationState`, `FrameBodyStates`, `CameraExposure`) and components (`CelestialBody`, `PlayerShip`, material handles, etc.).
-  - `spawn` — startup system that creates one entity tree per body (impostor mesh + ship-layer mesh + icon + rings).
+  - `real_space` — BigSpace root and per-body real-space grids. The ship camera carries `FloatingOrigin`; UI and map entities stay outside the BigSpace hierarchy.
+  - `spawn` — startup system that creates map-side body entities plus real-space body grids with ship-layer meshes/rings.
   - `generation` — polls the in-flight `BodyData` async tasks, bakes the result into a `PlanetMaterial`, and handles reference-cloud (TEMP) loading.
   - `lighting` — `CameraExposure`, `SceneLighting` population, planet/solid material light updates, sun-light direction.
-  - `transforms` — render-origin floating frame, body/ship transform sync, planet orientation (tidal lock + spin).
+  - `transforms` — map snapshot projection, body/ship transform sync, planet orientation (tidal lock + spin).
   - `materials` — per-frame parameter updates for gas-giant, ring, and cloud-band animation.
   - `trails` — orbit-line periodic recompute + gizmo draw with focus/sibling fade.
   - `body_lod` — screen-space LOD: icon ↔ impostor crossfade, moon-merge fade, double-click-to-focus picking, homeworld focus.
@@ -169,16 +172,20 @@ Standalone Bevy binary for interactive planet preview. Loads `solar_system.ron`,
 assets/solar_system.ron
   → [parsing] SolarSystemDefinition
   → [PatchedConics] body positions at any time t
-  → [Simulation::step] per frame → live ship state, consumes ManeuverNodes
-  → [propagate_flight_plan] background → FlightPlan (legs of burn?+coast NumericSegments)
-  → [bridge] → rendering, maneuver UI, collision warnings
+  → [Simulation::step] per frame → canonical CraftState + authority, consumes ManeuverNodes
+  → [propagate_flight_plan] synchronous prediction → FlightPlan (legs of burn?+coast NumericSegments)
+  → [map_view] MapSnapshot → map rendering, maneuver UI, collision warnings
+  → [rendering::real_space] BigSpace grids → ship-view body/camera transforms
 ```
 
 ### Design invariants
 
 - **One propagator everywhere.** Live stepping and prediction route through the same `ShipPropagator` (today, `KeplerianPropagator`). Never split them or numerical divergence appears between "where ship is" and "where it will be."
-- **`BodyStateProvider` is the abstraction boundary.** Body positions are always queried through this trait. `PatchedConics` is the current impl; a precomputed ephemeris could replace it without touching simulation or rendering.
+- **One craft state, one authority.** Each craft has one `CraftState` and one `AuthorityMode`; presentation code reads snapshots or accessors, not parallel transform-owned state.
+- **`BodyTrajectoryProvider` is the abstraction boundary.** Body positions are always queried through this trait. `PatchedConics` is the current impl; a precomputed ephemeris could replace it without touching simulation or rendering.
 - **Physics crate has no Bevy.** All physics logic must remain in `thalos_physics`. `thalos_game` is only presentation and input.
+- **Map view is decoupled.** Map systems read `MapSnapshot`, projected body states, and trajectories. They do not share or mutate real-space rendering entities.
+- **Real-space rendering lives under BigSpace.** One BigSpace root uses 1 km cells in the system frame; per-body grids are positioned with `Grid::translation_to_grid`, and the active ship camera owns `FloatingOrigin`.
 - **`TrajectorySample` carries its own metadata.** `anchor_body` + `ref_pos` travel with each sample so the renderer can pin to its parent body without a per-sample ephemeris query.
 - **Terrain gen stages are pure transforms.** Each `Stage` reads/writes `BodyBuilder` only. The feature compiler is the only caller; it sets `stage_seed` before each `apply()`. No ambient state.
 

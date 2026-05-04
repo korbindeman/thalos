@@ -38,7 +38,6 @@ use thalos_shipyard::{
 };
 
 use crate::SimStage;
-use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
 
@@ -152,40 +151,32 @@ pub struct PredictionRefresh {
     prev_effective: f64,
 }
 
-/// Decide whether the throttle edge should invalidate the cached
-/// prediction. Manual thrust keeps the live trail responsive; scheduled
-/// maneuver burns hold their already-planned trajectory steady until
-/// the engine cuts.
-fn should_mark_prediction_dirty(
-    active: bool,
-    cut_edge: bool,
-    hold_during_scheduled_burn: bool,
-) -> bool {
-    cut_edge || (active && !hold_during_scheduled_burn)
+/// Decide whether physical thrust should invalidate the cached
+/// prediction. The caller passes only propulsion state; which system
+/// commanded the throttle is irrelevant here.
+fn should_mark_prediction_dirty(active: bool, cut_edge: bool) -> bool {
+    active || cut_edge
 }
 
 /// Push the effective throttle into both the bridge state resource
-/// and the simulation, and dirty the prediction for manual thrust
-/// updates or the final engine-cut edge after a scheduled burn.
+/// and the simulation, and dirty the prediction whenever thrust is
+/// active or has just cut off.
 ///
 /// `apply_live_thrust` in the simulation deliberately doesn't dirty
-/// at all; this fn owns the policy so the bridge can tune it
-/// without touching physics. Per-frame dirtying for scheduled burns
-/// would rebuild the node trajectory from the mid-burn live ship state,
-/// making the target orbit visibly drift while the maneuver executes.
+/// at all; this fn owns the policy so physics stays independent of
+/// who or what commanded the ship.
 fn finish_with_throttle(
     effective: f64,
     throttle: &mut ThrottleState,
     sim: &mut SimulationState,
     refresh: &mut PredictionRefresh,
-    hold_during_scheduled_burn: bool,
 ) {
     throttle.effective = effective;
     sim.simulation.set_throttle(effective);
 
     let active = effective > 0.0;
     let cut_edge = refresh.prev_effective > 0.0 && !active;
-    if should_mark_prediction_dirty(active, cut_edge, hold_during_scheduled_burn) {
+    if should_mark_prediction_dirty(active, cut_edge) {
         sim.simulation.prediction_state.mark_dirty();
     }
 
@@ -575,7 +566,6 @@ fn reconcile_tanks_from_sim_drain(
 pub fn gate_throttle_on_fuel_availability(
     time: Res<Time>,
     active: Res<ActivePropulsion>,
-    autopilot: Res<Autopilot>,
     mut sim: ResMut<SimulationState>,
     mut throttle: ResMut<ThrottleState>,
     tanks: Query<(Entity, &PartResources)>,
@@ -586,11 +576,10 @@ pub fn gate_throttle_on_fuel_availability(
 ) {
     let warp = sim.simulation.warp.speed();
     let real_dt = time.delta_secs_f64();
-    let hold_prediction = autopilot.is_burning();
 
     if (warp - 1.0).abs() > f64::EPSILON {
         last_burn.engines.clear();
-        finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh, hold_prediction);
+        finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh);
         return;
     }
 
@@ -603,13 +592,7 @@ pub fn gate_throttle_on_fuel_availability(
         || active.reactant_fractions.is_empty()
     {
         last_burn.engines.clear();
-        finish_with_throttle(
-            throttle_in_use,
-            &mut throttle,
-            &mut sim,
-            &mut refresh,
-            hold_prediction,
-        );
+        finish_with_throttle(throttle_in_use, &mut throttle, &mut sim, &mut refresh);
         return;
     }
 
@@ -636,13 +619,7 @@ pub fn gate_throttle_on_fuel_availability(
         last_burn.engines.clear();
     }
 
-    finish_with_throttle(
-        throttle_effective,
-        &mut throttle,
-        &mut sim,
-        &mut refresh,
-        hold_prediction,
-    );
+    finish_with_throttle(throttle_effective, &mut throttle, &mut sim, &mut refresh);
 }
 
 #[cfg(test)]
@@ -651,18 +628,18 @@ mod tests {
     use bevy::prelude::World;
 
     #[test]
-    fn scheduled_burn_holds_prediction_while_thrusting() {
-        assert!(!should_mark_prediction_dirty(true, false, true));
+    fn active_thrust_marks_prediction_dirty() {
+        assert!(should_mark_prediction_dirty(true, false));
     }
 
     #[test]
-    fn scheduled_burn_refreshes_on_engine_cut() {
-        assert!(should_mark_prediction_dirty(false, true, true));
+    fn engine_cut_marks_prediction_dirty() {
+        assert!(should_mark_prediction_dirty(false, true));
     }
 
     #[test]
-    fn manual_burn_refreshes_while_thrusting() {
-        assert!(should_mark_prediction_dirty(true, false, false));
+    fn idle_throttle_does_not_dirty_prediction() {
+        assert!(!should_mark_prediction_dirty(false, false));
     }
 
     #[test]

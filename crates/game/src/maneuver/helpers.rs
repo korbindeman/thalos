@@ -1,6 +1,6 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::body_state_provider::BodyStateProvider;
+use thalos_physics::body_trajectory_provider::BodyTrajectoryProvider;
 use thalos_physics::maneuver::{delta_v_to_world, orbital_frame};
 use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory};
 use thalos_physics::types::{BodyId, BodyState, SolarSystemDefinition, TrajectorySample};
@@ -14,7 +14,7 @@ pub(super) struct ClosestTrailPoint {
     pub world_pos: Vec3,
     pub anchor_body: usize,
     pub screen_distance: f32,
-    /// Ship state at this sample, in `BodyStateProvider` (heliocentric)
+    /// Ship state at this sample, in `BodyTrajectoryProvider` (heliocentric)
     /// coordinates — i.e. the sample's stored `position` / `velocity`.
     /// Carried out of the search so the slide handler can compute the
     /// orbital frame for the slide preview without re-sampling the
@@ -60,7 +60,7 @@ pub(super) fn node_world_pos_and_frame(
     origin: &RenderOrigin,
     scale: &WorldScale,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Option<(Vec3, Mat3)> {
     if let Some(rail) = &node.rail {
@@ -85,7 +85,10 @@ pub(super) fn node_world_pos_and_frame(
         .pre_burn_state_at(time, ephemeris, &system.bodies)
         .or_else(|| baseline_sample_at(prediction, time, ephemeris))?;
 
-    let ref_state = ephemeris.query_body(reference_body, sample.time);
+    let ref_state = ephemeris.state(
+        reference_body,
+        thalos_physics::canonical::Epoch(sample.time),
+    );
     let render_sample = TrajectorySample {
         anchor_body: reference_body,
         ref_pos: ref_state.position,
@@ -116,14 +119,14 @@ fn node_visible_at_time(
             && flight_plan_view.focused_ghost_contains_epoch(time);
     }
 
-    !flight_plan_view.epoch_hidden_in_focus(prediction, system, time)
+    !flight_plan_view.epoch_hidden_in_focus(prediction, &system.bodies, time)
 }
 
 /// Build a sample on the baseline (unperturbed) orbit at `time`.
 fn baseline_sample_at(
     prediction: &FlightPlan,
     time: f64,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
 ) -> Option<thalos_physics::types::TrajectorySample> {
     let baseline = prediction.baseline.as_ref()?;
     let first = baseline.samples.first()?;
@@ -133,7 +136,7 @@ fn baseline_sample_at(
     }
     let state = baseline.state_at(time)?;
     let anchor = last.anchor_body;
-    let body_state = ephemeris.query_body(anchor, time);
+    let body_state = ephemeris.state(anchor, thalos_physics::canonical::Epoch(time));
     Some(thalos_physics::types::TrajectorySample {
         time,
         position: state.position,
@@ -149,7 +152,7 @@ fn rail_world_pos_and_frame(
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Option<(Vec3, Mat3)> {
     let state = rail.state_at(time)?;
@@ -163,7 +166,7 @@ fn rail_world_pos_and_frame(
         ephemeris,
         flight_plan_view,
     )?;
-    let reference = ephemeris.query_body(rail.reference_body, time);
+    let reference = ephemeris.state(rail.reference_body, thalos_physics::canonical::Epoch(time));
     let frame = orbital_frame_mat3(
         state.position,
         state.velocity,
@@ -189,7 +192,7 @@ fn rail_world_position_for_state(
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Option<Vec3> {
     if !rail_visible(rail, flight_plan_view) {
@@ -198,7 +201,7 @@ fn rail_world_position_for_state(
 
     match rail.frame {
         RailFrame::Body { body_id } => {
-            let body_state = ephemeris.query_body(body_id, time);
+            let body_state = ephemeris.state(body_id, thalos_physics::canonical::Epoch(time));
             let sample = TrajectorySample {
                 time,
                 position,
@@ -268,7 +271,7 @@ pub(super) fn trajectory_rail_points(
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Vec<Vec3> {
     if !rail_visible(rail, flight_plan_view) {
@@ -300,7 +303,7 @@ pub(super) fn node_world_position(
     origin: &RenderOrigin,
     scale: &WorldScale,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Option<Vec3> {
     node_world_pos_and_frame(
@@ -324,7 +327,7 @@ pub(super) fn selected_node_world_and_frame(
     origin: &RenderOrigin,
     scale: &WorldScale,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Option<(Vec3, Mat3)> {
     let id = selected_id?;
@@ -362,7 +365,7 @@ pub(super) fn orbit_sensitivity_scale(
     node_time: f64,
     node_delta_v: DVec3,
     reference_body: usize,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     system: &SolarSystemDefinition,
 ) -> Option<f64> {
     const A_REF: f64 = 1.0e7;
@@ -377,7 +380,7 @@ pub(super) fn orbit_sensitivity_scale(
     if body.gm <= 0.0 {
         return None;
     }
-    let body_state = ephemeris.query_body(reference_body, node_time);
+    let body_state = ephemeris.state(reference_body, thalos_physics::canonical::Epoch(node_time));
 
     let dv_world = delta_v_to_world(
         node_delta_v,
@@ -409,7 +412,7 @@ pub(super) fn closest_node(
     origin: &RenderOrigin,
     scale: &WorldScale,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
     camera: &Camera,
     cam_transform: &GlobalTransform,
@@ -519,7 +522,7 @@ fn rail_from_segment_interval(
     reference_body: BodyId,
     start: f64,
     end: f64,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
 ) -> Option<TrajectoryRail> {
     let (segment_start, segment_end) = segment.epoch_range();
     let start = start.max(segment_start);
@@ -546,7 +549,7 @@ fn rail_from_segment_interval(
         let Some(state) = segment.state_at(time) else {
             continue;
         };
-        let reference = ephemeris.query_body(reference_body, time);
+        let reference = ephemeris.state(reference_body, thalos_physics::canonical::Epoch(time));
         samples.push(TrajectorySample {
             time,
             position: state.position,
@@ -584,7 +587,7 @@ fn push_body_rail(runs: &mut Vec<TrajectoryRail>, samples: &mut Vec<TrajectorySa
 fn visible_trajectory_rails(
     prediction: &FlightPlan,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Vec<TrajectoryRail> {
     if flight_plan_view.focused_ghost().is_some() {
@@ -600,7 +603,7 @@ fn visible_trajectory_rails(
         for sample in &segment.samples {
             let same_anchor = sample.anchor_body == first.anchor_body;
             let visible = same_anchor
-                && !flight_plan_view.epoch_hidden_in_focus(prediction, system, sample.time);
+                && !flight_plan_view.epoch_hidden_in_focus(prediction, &system.bodies, sample.time);
             if visible {
                 run.push(*sample);
             } else {
@@ -615,7 +618,7 @@ fn visible_trajectory_rails(
 fn focused_ghost_rails(
     prediction: &FlightPlan,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Vec<TrajectoryRail> {
     let Some(focus) = flight_plan_view.focused_ghost() else {
@@ -723,7 +726,7 @@ pub(super) fn closest_trail_point_on_orbit(
     origin: &RenderOrigin,
     scale: &WorldScale,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
     camera: &Camera,
     cam_transform: &GlobalTransform,
@@ -786,7 +789,7 @@ pub(super) fn closest_trail_point_on_orbit(
                     ghost.body_id,
                 )
             } else {
-                if flight_plan_view.epoch_hidden_in_focus(prediction, system, sample.time) {
+                if flight_plan_view.epoch_hidden_in_focus(prediction, &system.bodies, sample.time) {
                     continue;
                 }
                 (
@@ -845,7 +848,7 @@ pub(super) fn closest_trail_point_on_rail(
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
     camera: &Camera,
     cam_transform: &GlobalTransform,
@@ -919,7 +922,7 @@ pub(super) fn closest_trail_point(
     origin: &RenderOrigin,
     scale: &WorldScale,
     system: &SolarSystemDefinition,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
     camera: &Camera,
     cam_transform: &GlobalTransform,
@@ -952,7 +955,7 @@ fn update_best_on_rail(
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
     camera: &Camera,
     cam_transform: &GlobalTransform,
@@ -1006,9 +1009,9 @@ fn ghost_local_world_pos_at_pin(
     soi_radius: f64,
     origin: &RenderOrigin,
     scale: &WorldScale,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
 ) -> Vec3 {
-    let body = ephemeris.query_body(body_id, time);
+    let body = ephemeris.state(body_id, thalos_physics::canonical::Epoch(time));
     let relative = craft_position - body.position;
     let display_relative =
         if soi_radius.is_finite() && soi_radius > 0.0 && relative.length() > soi_radius {

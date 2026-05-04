@@ -3,7 +3,8 @@
 //
 // Format: see crates/physics/src/parsing.rs (`SolarSystemFile`).
 // Distances in meters, angles in degrees, time in seconds, mass in kg.
-// Hex colors are sRGB (folded from earlier albedo multipliers).
+// Hex colors are sRGB display/fallback colors. Terrain/atmosphere assets carry
+// physical reflectance; do not fold albedo into these display colors.
 // Every field on every body is explicit — no defaults.
 //
 // Terrain, atmosphere, rings definitions moved to assets/bodies/<lowercase_name>.ron
@@ -34,7 +35,7 @@
             physical: (
                 mass_kg: 2.628e24,
                 radius_m: 4035000.0,
-                color: "#ACA45F",
+                color: "#D1C774",
                 rotation_period_s: -15552000.0,
                 axial_tilt_deg: 177.0,
             ),
@@ -54,7 +55,7 @@
             physical: (
                 mass_kg: 1.378e24,
                 radius_m: 3186000.0,
-                color: "#1C458F",
+                color: "#3373E5",
                 rotation_period_s: 76680.0,
                 axial_tilt_deg: 23.0,
             ),
@@ -74,7 +75,7 @@
             physical: (
                 mass_kg: 1.374e22,
                 radius_m: 869000.0,
-                color: "#3C3A37",
+                color: "#A6A09A",
                 rotation_period_s: 1373760.0,
                 axial_tilt_deg: 1.2,
             ),
@@ -96,7 +97,7 @@
                 radius_m: 190000.0,
                 // Olivine-rich silicate — pallasite/forsterite analog.
                 // Warm muted green from mantle-derived olivine + pyroxene.
-                color: "#585D46",
+                color: "#A8B088",
                 rotation_period_s: 1123200.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -116,7 +117,7 @@
             physical: (
                 mass_kg: 2.394e26,
                 radius_m: 44600000.0,
-                color: "#9F8C53",
+                color: "#D9BF74",
                 rotation_period_s: 36720.0,
                 axial_tilt_deg: 7.0,
             ),
@@ -136,7 +137,7 @@
             physical: (
                 mass_kg: 4.362e23,
                 radius_m: 2350000.0,
-                color: "#0D3941",
+                color: "#267D8C",
                 rotation_period_s: 535680.0,
                 axial_tilt_deg: 0.5,
             ),
@@ -156,7 +157,7 @@
             physical: (
                 mass_kg: 1.5e19,
                 radius_m: 180000.0,
-                color: "#383023",
+                color: "#8C7A5E",
                 rotation_period_s: 6048000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -176,7 +177,7 @@
             physical: (
                 mass_kg: 3.9e18,
                 radius_m: 120000.0,
-                color: "#050403",
+                color: "#2E2A26",
                 rotation_period_s: 9936000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -196,7 +197,7 @@
             physical: (
                 mass_kg: 3.946e22,
                 radius_m: 1130000.0,
-                color: "#59210E",
+                color: "#C9542D",
                 rotation_period_s: 88920.0,
                 axial_tilt_deg: 14.0,
             ),
@@ -216,7 +217,7 @@
             physical: (
                 mass_kg: 7.3e13,
                 radius_m: 14000.0,
-                color: "#382B24",
+                color: "#8C7060",
                 rotation_period_s: 92520.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -236,7 +237,7 @@
             physical: (
                 mass_kg: 1.7e13,
                 radius_m: 8000.0,
-                color: "#302A27",
+                color: "#7A6E66",
                 rotation_period_s: 576000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -256,7 +257,7 @@
             physical: (
                 mass_kg: 9.7e20,
                 radius_m: 470000.0,
-                color: "#1F1B17",
+                color: "#6E6258",
                 rotation_period_s: 32667.0,
                 axial_tilt_deg: 4.0,
             ),
@@ -276,7 +277,7 @@
             physical: (
                 mass_kg: 2.279e27,
                 radius_m: 74000000.0,
-                color: "#886234",
+                color: "#BF8C4C",
                 rotation_period_s: 35640.0,
                 axial_tilt_deg: 3.1,
             ),
@@ -296,7 +297,7 @@
             physical: (
                 mass_kg: 1.138e22,
                 radius_m: 910000.0,
-                color: "#99751E",
+                color: "#E6B233",
                 rotation_period_s: 153000.0,
                 axial_tilt_deg: 0.04,
             ),
@@ -316,7 +317,7 @@
             physical: (
                 mass_kg: 8.97e21,
                 radius_m: 780000.0,
-                color: "#A6A6B2",
+                color: "#D1D1E0",
                 rotation_period_s: 302400.0,
                 axial_tilt_deg: 0.1,
             ),
@@ -336,7 +337,7 @@
             physical: (
                 mass_kg: 1.374e22,
                 radius_m: 1205000.0,
-                color: "#1E1915",
+                color: "#66594D",
                 rotation_period_s: 1441800.0,
                 axial_tilt_deg: 0.3,
             ),
@@ -356,7 +357,7 @@
             physical: (
                 mass_kg: 7.178e25,
                 radius_m: 22000000.0,
-                color: "#194F5F",
+                color: "#338CA6",
                 rotation_period_s: 57960.0,
                 axial_tilt_deg: 18.0,
             ),
@@ -376,7 +377,7 @@
             physical: (
                 mass_kg: 7.9e21,
                 radius_m: 950000.0,
-                color: "#819198",
+                color: "#BFD6E0",
                 rotation_period_s: -2450000.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -396,7 +397,7 @@
             physical: (
                 mass_kg: 1.315e22,
                 radius_m: 600000.0,
-                color: "#351F12",
+                color: "#B2724D",
                 rotation_period_s: 552960.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -416,7 +417,7 @@
             physical: (
                 mass_kg: 5.2e19,
                 radius_m: 240000.0,
-                color: "#321E19",
+                color: "#996659",
                 rotation_period_s: 552960.0,
                 axial_tilt_deg: 0.0,
             ),
@@ -436,7 +437,7 @@
             physical: (
                 mass_kg: 4.185e21,
                 radius_m: 600000.0,
-                color: "#C4C9CC",
+                color: "#E6EBEF",
                 rotation_period_s: 14040.0,
                 axial_tilt_deg: 0.0,
             ),

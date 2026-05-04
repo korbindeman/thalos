@@ -14,6 +14,7 @@ use thalos_physics::types::{BodyDefinition, BodyId, BodyKind};
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::debug::{DebugMode, low_orbit_state};
 use crate::hud::time_control_panel;
+use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::photo_mode::not_in_photo_mode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
 use crate::view::in_map_view;
@@ -49,6 +50,8 @@ fn body_tree_panel(
     origin: Res<RenderOrigin>,
     mut focus: ResMut<CameraFocus>,
     debug: Res<DebugMode>,
+    mut plan: ResMut<ManeuverPlan>,
+    mut selected: ResMut<SelectedNode>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -190,10 +193,22 @@ fn body_tree_panel(
         && let Some(body_id) = cmd_clicked
     {
         let sim_time = sim.simulation.sim_time();
-        let body_state = sim.ephemeris.query_body(body_id, sim_time);
+        let body_state = sim
+            .ephemeris
+            .state(body_id, thalos_physics::canonical::Epoch(sim_time));
         let (state, attitude) = low_orbit_state(&sim.system.bodies[body_id], &body_state);
         sim.simulation.set_ship_state(state);
         sim.simulation.set_attitude(attitude);
+
+        // The pre-teleport flight plan is meaningless once the ship jumps
+        // to a new orbit — the next bridge sync pushes the empty plan
+        // into physics, which dirties prediction and rebuilds from the
+        // teleported state.
+        if !plan.nodes.is_empty() {
+            plan.nodes.clear();
+            plan.dirty = true;
+        }
+        selected.id = None;
     }
 }
 

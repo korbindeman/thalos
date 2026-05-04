@@ -1,7 +1,8 @@
 //! Shared coordinate-system helpers for the game crate.
 //!
 //! Physics uses heliocentric inertial (ecliptic XZ, Y up), metres, f64.
-//! Rendering uses origin-relative scaled coordinates, render units, f32.
+//! Map rendering uses origin-relative scaled coordinates, render units, f32.
+//! Ship-view bodies and the player ship use BigSpace cells in metres.
 //!
 //! Map and ship view live on **separate render layers**, each with a
 //! fixed compile-time scale:
@@ -10,9 +11,8 @@
 //!   = 1,000 km. Keeps solar-system distances inside f32 range at the
 //!   cost of making metre-sized objects microscopic.
 //! - **Ship view** ([`SHIP_LAYER`], [`SHIP_SCALE`] = 1.0): 1 render unit
-//!   = 1 m. Ship parts and nearby bodies render at physical size; distant
-//!   bodies sit far out in world space but Bevy's reverse-Z depth handles
-//!   the range.
+//!   = 1 m. Ship parts and nearby bodies render at physical size inside
+//!   BigSpace cells.
 //!
 //! Each view owns its own camera; transform systems target one layer at
 //! a time and bake the corresponding scale as a const so there is no
@@ -49,10 +49,9 @@ impl Default for WorldScale {
     }
 }
 
-/// The physics-space position (metres, f64) that maps to the render-space
-/// origin. Updated every frame to the camera focus body's (or player
-/// ship's) position so that objects near the camera always have small
-/// render-space coordinates, preserving f32 precision.
+/// The physics-space position (metres, f64) that maps to the map render-space
+/// origin. Updated every frame to the camera focus body's (or player ship's)
+/// position so map-view objects near the camera have small f32 coordinates.
 #[derive(Resource, Default)]
 pub struct RenderOrigin {
     pub position: DVec3,

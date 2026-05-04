@@ -180,7 +180,7 @@ pub(super) fn finalize_planet_generation(
             NoFrustumCulling,
             NotShadowCaster,
             NotShadowReceiver,
-            ChildOf(entity),
+            ChildOf(pending.ship_parent_entity),
             Name::new(format!("{} Halo (Ship)", body.name)),
         ));
 

@@ -375,7 +375,9 @@ fn compute_target_direction(
 
         NavigationMode::Prograde | NavigationMode::Retrograde => {
             let body = sim.dominant_body();
-            let body_state = sim.ephemeris().query_body(body, time);
+            let body_state = sim
+                .ephemeris()
+                .state(body, thalos_physics::canonical::Epoch(time));
             let rel_vel = ship.velocity - body_state.velocity;
             let dir = safe_normalize(rel_vel)?;
             Some(if mode == NavigationMode::Prograde {
@@ -387,7 +389,9 @@ fn compute_target_direction(
 
         NavigationMode::Normal | NavigationMode::AntiNormal => {
             let body = sim.dominant_body();
-            let body_state = sim.ephemeris().query_body(body, time);
+            let body_state = sim
+                .ephemeris()
+                .state(body, thalos_physics::canonical::Epoch(time));
             let [_, normal, _] = orbital_frame(
                 ship.position,
                 ship.velocity,
@@ -403,7 +407,9 @@ fn compute_target_direction(
 
         NavigationMode::RadialIn | NavigationMode::RadialOut => {
             let body = sim.dominant_body();
-            let body_state = sim.ephemeris().query_body(body, time);
+            let body_state = sim
+                .ephemeris()
+                .state(body, thalos_physics::canonical::Epoch(time));
             let radial_out = safe_normalize(ship.position - body_state.position)?;
             Some(if mode == NavigationMode::RadialOut {
                 radial_out
@@ -414,7 +420,9 @@ fn compute_target_direction(
 
         NavigationMode::Target | NavigationMode::AntiTarget => {
             let target_id = target.target?;
-            let target_state = sim.ephemeris().query_body(target_id, time);
+            let target_state = sim
+                .ephemeris()
+                .state(target_id, thalos_physics::canonical::Epoch(time));
             let to_target = safe_normalize(target_state.position - ship.position)?;
             Some(if mode == NavigationMode::Target {
                 to_target
@@ -462,7 +470,10 @@ pub(crate) fn maneuver_node_burn_direction(sim: &Simulation, node: &GameNode) ->
         Some(s) => (s.position, s.velocity, node.time),
         None => (ship.position, ship.velocity, time),
     };
-    let body_state = sim.ephemeris().query_body(node.reference_body, frame_time);
+    let body_state = sim.ephemeris().state(
+        node.reference_body,
+        thalos_physics::canonical::Epoch(frame_time),
+    );
     let dv_world = delta_v_to_world(
         node.delta_v,
         ship_vel,

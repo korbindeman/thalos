@@ -13,7 +13,7 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use super::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_plan};
-use crate::body_state_provider::BodyStateProvider;
+use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::maneuver::{ManeuverNode, ManeuverSequence};
 use crate::patched_conics::PatchedConics;
 use crate::ship_propagator::KeplerianPropagator;
@@ -33,7 +33,7 @@ fn propagate_trajectory(
     initial_state: StateVector,
     start_time: f64,
     maneuvers: &ManeuverSequence,
-    ephemeris: Arc<dyn BodyStateProvider>,
+    ephemeris: Arc<dyn BodyTrajectoryProvider>,
     bodies: &[BodyDefinition],
     config: &PredictionConfig,
     ship_thrust_acceleration: f64,
@@ -55,7 +55,7 @@ fn propagate_trajectory_with_target(
     initial_state: StateVector,
     start_time: f64,
     maneuvers: &ManeuverSequence,
-    ephemeris: Arc<dyn BodyStateProvider>,
+    ephemeris: Arc<dyn BodyTrajectoryProvider>,
     bodies: &[BodyDefinition],
     config: &PredictionConfig,
     ship_thrust_acceleration: f64,
@@ -206,7 +206,7 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
 #[test]
 fn maneuver_is_integrated_as_finite_burn() {
     let system = make_single_star_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1_000.0));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1_000.0));
 
     let mut maneuvers = ManeuverSequence::new();
     maneuvers.add(ManeuverNode {
@@ -261,9 +261,9 @@ fn maneuver_is_integrated_as_finite_burn() {
 #[test]
 fn burn_happens_at_node_position_not_ship_start() {
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();
@@ -307,7 +307,9 @@ fn burn_happens_at_node_position_not_ship_start() {
         .as_ref()
         .expect("leg 1 should have a burn");
     let first = burn_seg.samples.first().expect("burn has samples");
-    let thalos_at_node = ephemeris.query_body(1, node_time).position;
+    let thalos_at_node = ephemeris
+        .state(1, crate::canonical::Epoch(node_time))
+        .position;
     let start_offset = (ship_state.position - thalos_state_0.position).normalize();
     let burn_start_offset = (first.position - thalos_at_node).normalize();
 
@@ -333,7 +335,7 @@ fn burn_happens_at_node_position_not_ship_start() {
     let mut max_r = 0.0_f64;
     let mut apo_offset = DVec3::ZERO;
     for s in &burn_leg.coast_segment.samples {
-        let th = ephemeris.query_body(1, s.time).position;
+        let th = ephemeris.state(1, crate::canonical::Epoch(s.time)).position;
         let rel = s.position - th;
         let r = rel.length();
         if r > max_r {
@@ -358,9 +360,9 @@ fn burn_happens_at_node_position_not_ship_start() {
 #[test]
 fn prograde_burn_raises_apoapsis_around_thalos() {
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();
@@ -387,6 +389,14 @@ fn prograde_burn_raises_apoapsis_around_thalos() {
         &PredictionConfig::default(),
         TEST_THRUST_ACCEL,
     );
+    eprintln!(
+        "events: {:?}",
+        prediction
+            .events
+            .iter()
+            .map(|e| (e.kind, e.epoch))
+            .collect::<Vec<_>>()
+    );
 
     let mut max_r = 0.0_f64;
     let mut min_r = f64::INFINITY;
@@ -397,7 +407,7 @@ fn prograde_burn_raises_apoapsis_around_thalos() {
         }
         burn_leg_samples += seg.samples.len();
         for s in &seg.samples {
-            let thalos_pos = ephemeris.query_body(1, s.time).position;
+            let thalos_pos = ephemeris.state(1, crate::canonical::Epoch(s.time)).position;
             let r = (s.position - thalos_pos).length();
             if r > max_r {
                 max_r = r;
@@ -424,9 +434,9 @@ fn large_prograde_burn_escapes_without_collision() {
     // Regression for the "curls in and collides" bug. Long burn must track
     // the rotating orbital frame, not stay frozen at burn start.
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e8));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1.0e8));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();
@@ -467,7 +477,7 @@ fn large_prograde_burn_escapes_without_collision() {
             continue;
         }
         for s in &seg.samples {
-            let thalos_pos = ephemeris.query_body(1, s.time).position;
+            let thalos_pos = ephemeris.state(1, crate::canonical::Epoch(s.time)).position;
             let r = (s.position - thalos_pos).length();
             max_r = max_r.max(r);
             min_r = min_r.min(r);
@@ -487,9 +497,9 @@ fn large_prograde_burn_escapes_without_collision() {
 #[test]
 fn stable_orbit_detected_after_prograde_burn() {
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();
@@ -535,9 +545,9 @@ fn stable_orbit_detected_after_prograde_burn() {
 #[test]
 fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 2.0e7));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 2.0e7));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();
@@ -591,9 +601,9 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
 #[test]
 fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 2.0e7));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 2.0e7));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();
@@ -626,7 +636,9 @@ fn delayed_prograde_burn_after_stable_orbit_still_changes_future_path() {
     let mut max_r = 0.0_f64;
     for seg in prediction.segments.iter().skip(1) {
         for sample in &seg.samples {
-            let thalos_pos = ephemeris.query_body(1, sample.time).position;
+            let thalos_pos = ephemeris
+                .state(1, crate::canonical::Epoch(sample.time))
+                .position;
             let r = (sample.position - thalos_pos).length();
             max_r = max_r.max(r);
             post_node_samples += 1;
@@ -721,9 +733,9 @@ fn moon_encounter_preserves_bounded_energy() {
     let thalos_gm = system.bodies[1].gm;
     let mira_gm = system.bodies[2].gm;
     // Propagate long enough for the transfer orbit to reach Mira.
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     // Ship starts on a Hohmann-ish transfer from low Thalos orbit toward
     // Mira's orbital distance.
     let r_park = system.bodies[1].radius_m + 200_000.0; // 200 km altitude
@@ -778,7 +790,7 @@ fn moon_encounter_preserves_bounded_energy() {
 
     // Check final sample's energy is within the physically bounded range.
     let last = samples.last().unwrap();
-    let thalos_last = ephemeris.query_body(1, last.time);
+    let thalos_last = ephemeris.state(1, crate::canonical::Epoch(last.time));
     let e_final = specific_energy_around_thalos(
         last.position,
         last.velocity,
@@ -804,9 +816,9 @@ fn no_false_stable_orbit_across_soi_transition() {
     let system = make_thalos_mira_system();
     let thalos_gm = system.bodies[1].gm;
     let mira_sma = 1.91488e8;
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
 
     // Ship on a transfer toward Mira's orbit.
     let r_park = system.bodies[1].radius_m + 200_000.0;
@@ -866,8 +878,8 @@ fn encounter_enrichment_reports_flyby_for_hyperbolic_pass() {
     let system = make_thalos_mira_system();
     let mira_sma = 1.91488e8;
     let thalos_gm = system.bodies[1].gm;
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
 
     let r_park = system.bodies[1].radius_m + 200_000.0;
     let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
@@ -916,15 +928,16 @@ fn encounter_enrichment_reports_flyby_for_hyperbolic_pass() {
 /// the surface must terminate in exactly one `StableOrbit` closure.
 #[test]
 fn game_default_state_produces_stable_orbit() {
-    use crate::parsing::load_solar_system;
-    let system = match load_solar_system("../../assets/solar_system.ron") {
+    use crate::parsing::load_solar_system_from_dir;
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    let system = match load_solar_system_from_dir(&assets) {
         Ok(s) => s,
         Err(_) => return, // loader unavailable in CI or path mismatch — skip
     };
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 3.156e9));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 3.156e9));
 
     let homeworld_id = system.name_to_id["Thalos"];
-    let homeworld_state = ephemeris.query_body(homeworld_id, 0.0);
+    let homeworld_state = ephemeris.state(homeworld_id, crate::canonical::Epoch(0.0));
     let rel = system.ship.initial_state;
     let ship_state = StateVector {
         position: homeworld_state.position + rel.position,
@@ -940,7 +953,6 @@ fn game_default_state_produces_stable_orbit() {
         &PredictionConfig::default(),
         TEST_THRUST_ACCEL,
     );
-
     // One leg, one segment, one full revolution.
     assert_eq!(
         prediction.legs.len(),
@@ -965,11 +977,11 @@ fn game_default_state_produces_stable_orbit() {
     }
     // Spawn orbit is intentionally e ≈ 0.01 (so apsis markers don't degenerate),
     // giving (r_a - r_p)/r_p ≈ 2e ≈ 2%. 3% leaves headroom for sample placement.
-    let thalos_now = ephemeris.query_body(homeworld_id, 0.0);
+    let thalos_now = ephemeris.state(homeworld_id, crate::canonical::Epoch(0.0));
     let radii: Vec<f64> = samples
         .iter()
         .map(|s| {
-            let thalos_t = ephemeris.query_body(homeworld_id, s.time);
+            let thalos_t = ephemeris.state(homeworld_id, crate::canonical::Epoch(s.time));
             (s.position - thalos_t.position).length()
         })
         .collect();
@@ -990,8 +1002,8 @@ fn closest_approach_scan_excludes_encountered_bodies() {
     let system = make_thalos_mira_system();
     let mira_sma = 1.91488e8;
     let thalos_gm = system.bodies[1].gm;
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 5.0e6));
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
 
     let r_park = system.bodies[1].radius_m + 200_000.0;
     let v_transfer = (thalos_gm * (2.0 / r_park - 2.0 / (r_park + mira_sma))).sqrt();
@@ -1036,9 +1048,9 @@ fn pre_burn_state_at_node_is_invariant_to_delta_v() {
     // pre-burn trajectory must not move — otherwise the marker visually
     // slides off the orbit.
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();
@@ -1109,7 +1121,9 @@ fn pre_burn_state_at_node_is_invariant_to_delta_v() {
     // quarter-period location (~+Z direction relative to Thalos), not the
     // burn-midpoint position which would be displaced toward +X by the
     // accumulated thrust.
-    let thalos_at_node = ephemeris.query_body(1, node_time).position;
+    let thalos_at_node = ephemeris
+        .state(1, crate::canonical::Epoch(node_time))
+        .position;
     let offset = (small_sample.position - thalos_at_node).normalize();
     let cos_to_z = offset.dot(DVec3::new(0.0, 0.0, 1.0));
     assert!(
@@ -1150,9 +1164,9 @@ fn finite_burn_starts_centered_on_node_time() {
     // contract directly: leg N's coast end and leg N+1's burn start
     // agree in time and position.
     let system = make_thalos_like_system();
-    let ephemeris: Arc<dyn BodyStateProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
 
-    let thalos_state_0 = ephemeris.query_body(1, 0.0);
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
     let thalos_gm = system.bodies[1].gm;
     let orbit_radius = system.bodies[1].radius_m + 200_000.0;
     let circular_speed = (thalos_gm / orbit_radius).sqrt();

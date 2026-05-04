@@ -223,7 +223,10 @@ pub(in crate::maneuver) fn maneuver_input(
                         // pinned to the orbit the user is dragging along, even
                         // when sampling the (stale) prediction at the new time
                         // would otherwise resolve onto a different leg.
-                        let body = sim.ephemeris.query_body(closest.anchor_body, closest.time);
+                        let body = sim.ephemeris.state(
+                            closest.anchor_body,
+                            thalos_physics::canonical::Epoch(closest.time),
+                        );
                         let frame = orbital_frame_mat3(
                             closest.sample_position,
                             closest.sample_velocity,

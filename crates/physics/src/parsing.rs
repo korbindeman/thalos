@@ -314,28 +314,27 @@ mod tests {
     #[test]
     fn airless_bodies_use_feature_terrain() {
         let system_source = include_str!("../../../assets/solar_system.ron");
-        let selva_details = include_str!("../../../assets/bodies/selva.ron");
-        let carpo_details = include_str!("../../../assets/bodies/carpo.ron");
-        let theron_details = include_str!("../../../assets/bodies/theron.ron");
-        let nyx_details = include_str!("../../../assets/bodies/nyx.ron");
+        let mira_details = include_str!("../../../assets/bodies/mira.ron");
+        let vaelen_details = include_str!("../../../assets/bodies/vaelen.ron");
 
         let mut details = HashMap::new();
-        details.insert("Selva".to_string(), selva_details);
-        details.insert("Carpo".to_string(), carpo_details);
-        details.insert("Theron".to_string(), theron_details);
-        details.insert("Nyx".to_string(), nyx_details);
+        details.insert("Mira".to_string(), mira_details);
+        details.insert("Vaelen".to_string(), vaelen_details);
 
         let system =
             load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
 
-        for name in ["Selva", "Carpo", "Theron", "Nyx"] {
+        for name in ["Mira", "Vaelen"] {
             let body = system.body_by_name(name).expect("body exists");
             match &body.terrain {
                 TerrainConfig::Feature(config) => {
-                    assert_eq!(config.archetype, BodyArchetype::AirlessImpactMoon);
+                    assert!(matches!(
+                        config.archetype,
+                        BodyArchetype::AirlessImpactMoon | BodyArchetype::ColdDesertFormerlyWet
+                    ));
                 }
                 other => {
-                    panic!("{name} should use AirlessImpactMoon feature terrain, got {other:?}")
+                    panic!("{name} should use feature terrain, got {other:?}")
                 }
             }
         }

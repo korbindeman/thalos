@@ -12,6 +12,7 @@ thalos_shipyard = { path = "../shipyard" }
 thalos_ship_rendering = { path = "../ship_rendering" }
 bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 bevy_egui = "0.39"
+big_space = { version = "0.12", features = ["i64"] }
 tracing = "0.1"
 
 [features]

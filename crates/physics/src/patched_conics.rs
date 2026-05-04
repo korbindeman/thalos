@@ -1,8 +1,9 @@
 use std::f64::consts::TAU;
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
-use crate::body_state_provider::BodyStateProvider;
+use crate::body_trajectory_provider::BodyTrajectoryProvider;
+use crate::canonical::Epoch;
 use crate::orbital_math::{eccentric_from_true_elliptic, solve_kepler_elliptic};
 use crate::types::{
     BodyId, BodyState, BodyStates, OrbitalElements, SolarSystemDefinition, StateVector,
@@ -39,6 +40,10 @@ enum BodyMotion {
 struct PatchedConicBody {
     parent_id: Option<BodyId>,
     mass_kg: f64,
+    gm: f64,
+    radius_m: f64,
+    rotation_period_s: f64,
+    axial_tilt_rad: f64,
     motion: BodyMotion,
 }
 
@@ -88,6 +93,10 @@ impl PatchedConics {
                 PatchedConicBody {
                     parent_id: body.parent,
                     mass_kg: body.mass_kg,
+                    gm: body.gm,
+                    radius_m: body.radius_m,
+                    rotation_period_s: body.rotation_period_s,
+                    axial_tilt_rad: body.axial_tilt_rad,
                     motion,
                 }
             })
@@ -111,51 +120,49 @@ impl PatchedConics {
     }
 }
 
-impl BodyStateProvider for PatchedConics {
-    fn query_into(&self, time: f64, out: &mut BodyStates) {
-        let t = self.clamp_time(time);
+impl BodyTrajectoryProvider for PatchedConics {
+    fn states_into(&self, epoch: Epoch, out: &mut BodyStates) {
+        let t = self.clamp_time(epoch.0);
         if out.len() != self.bodies.len() {
             out.resize(
                 self.bodies.len(),
-                BodyState {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                    mass_kg: 0.0,
-                },
+                make_body_state(0, Epoch(t), DVec3::ZERO, DVec3::ZERO, &self.bodies[0]),
             );
         }
 
         for &body_id in &self.eval_order {
             let body = self.bodies[body_id];
             out[body_id] = match body.motion {
-                BodyMotion::Static => BodyState {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                    mass_kg: body.mass_kg,
-                },
+                BodyMotion::Static => {
+                    make_body_state(body_id, Epoch(t), DVec3::ZERO, DVec3::ZERO, &body)
+                }
                 BodyMotion::FixedRelative(fixed) => {
                     let parent = out[fixed.parent_id];
-                    BodyState {
-                        position: parent.position + fixed.state.position,
-                        velocity: parent.velocity + fixed.state.velocity,
-                        mass_kg: body.mass_kg,
-                    }
+                    make_body_state(
+                        body_id,
+                        Epoch(t),
+                        parent.position + fixed.state.position,
+                        parent.velocity + fixed.state.velocity,
+                        &body,
+                    )
                 }
                 BodyMotion::Keplerian(orbit) => {
                     let parent = out[orbit.parent_id];
                     let relative = keplerian_relative_state(&orbit, t);
-                    BodyState {
-                        position: parent.position + relative.position,
-                        velocity: parent.velocity + relative.velocity,
-                        mass_kg: body.mass_kg,
-                    }
+                    make_body_state(
+                        body_id,
+                        Epoch(t),
+                        parent.position + relative.position,
+                        parent.velocity + relative.velocity,
+                        &body,
+                    )
                 }
             };
         }
     }
 
-    fn query_body(&self, body_id: BodyId, time: f64) -> BodyState {
-        let t = self.clamp_time(time);
+    fn state(&self, body_id: BodyId, epoch: Epoch) -> BodyState {
+        let t = self.clamp_time(epoch.0);
 
         // Walk the lineage from leaf to root, then sum motions root-first so
         // each ancestor's frame anchors the next.
@@ -183,11 +190,7 @@ impl BodyStateProvider for PatchedConics {
             }
         }
 
-        BodyState {
-            position,
-            velocity,
-            mass_kg: self.bodies[body_id].mass_kg,
-        }
+        make_body_state(body_id, Epoch(t), position, velocity, &self.bodies[body_id])
     }
 
     fn body_count(&self) -> usize {
@@ -207,7 +210,7 @@ impl BodyStateProvider for PatchedConics {
                 orbit.period_s
             }
             // Fall through to the sampling-based default impl on the trait.
-            _ => BodyStateProvider::detect_period(self, body_id, parent_id, start_time),
+            _ => BodyTrajectoryProvider::detect_period(self, body_id, parent_id, start_time),
         }
     }
 
@@ -248,8 +251,36 @@ impl BodyStateProvider for PatchedConics {
                 vec![fixed.state.position; num_samples.saturating_add(1).max(1)]
             }
             // Fall through to the sampling-based default impl on the trait.
-            _ => BodyStateProvider::body_orbit_trail(self, body_id, parent_id, t0, num_samples),
+            _ => {
+                BodyTrajectoryProvider::body_orbit_trail(self, body_id, parent_id, t0, num_samples)
+            }
         }
+    }
+}
+
+fn make_body_state(
+    id: BodyId,
+    epoch: Epoch,
+    position: DVec3,
+    velocity: DVec3,
+    body: &PatchedConicBody,
+) -> BodyState {
+    let spin = if body.rotation_period_s.abs() > 1.0 {
+        std::f64::consts::TAU / body.rotation_period_s
+    } else {
+        0.0
+    };
+    let phase = spin * epoch.0;
+    BodyState {
+        id,
+        epoch,
+        position,
+        velocity,
+        orientation: DQuat::from_rotation_y(phase) * DQuat::from_rotation_x(body.axial_tilt_rad),
+        angular_velocity: DVec3::Y * spin,
+        mass_kg: body.mass_kg,
+        gm: body.gm,
+        radius_m: body.radius_m,
     }
 }
 
@@ -428,12 +459,12 @@ mod tests {
     }
 
     #[test]
-    fn query_body_matches_query_into() {
+    fn state_matches_states_into() {
         let system = make_two_body_system();
         let provider = PatchedConics::new(&system, 2.0 * JULIAN_YEAR);
         let mut all_states = Vec::new();
-        provider.query_into(0.25 * JULIAN_YEAR, &mut all_states);
-        let earth = provider.query_body(1, 0.25 * JULIAN_YEAR);
+        provider.states_into(crate::canonical::Epoch(0.25 * JULIAN_YEAR), &mut all_states);
+        let earth = provider.state(1, crate::canonical::Epoch(0.25 * JULIAN_YEAR));
 
         assert!((earth.position - all_states[1].position).length() < 1e-6);
         assert!((earth.velocity - all_states[1].velocity).length() < 1e-9);

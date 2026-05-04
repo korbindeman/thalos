@@ -4,7 +4,7 @@
 //! between subsystems and let alternate implementations slot in without
 //! touching call sites:
 //!
-//! - [`body_state_provider::BodyStateProvider`] — anything that can answer
+//! - [`body_trajectory_provider::BodyTrajectoryProvider`] — anything that can answer
 //!   "where is body `i` at time `t`?". Today's only impl is
 //!   [`patched_conics::PatchedConics`] (analytic Kepler chains); a baked
 //!   ephemeris could replace it.
@@ -18,7 +18,8 @@
 //! build the predicted [`trajectory::FlightPlan`] — so "where the ship is"
 //! and "where it will be" can never numerically diverge.
 
-pub mod body_state_provider;
+pub mod body_trajectory_provider;
+pub mod canonical;
 pub mod debug_orbits;
 pub mod gravity_mode;
 pub mod maneuver;

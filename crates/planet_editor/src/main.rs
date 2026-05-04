@@ -11,7 +11,8 @@ use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PresentMode;
 use bevy_egui::egui;
-use thalos_physics::body_state_provider::BodyStateProvider;
+use thalos_physics::body_trajectory_provider::BodyTrajectoryProvider;
+use thalos_physics::canonical::Epoch;
 use thalos_physics::parsing::load_solar_system_from_dir;
 use thalos_physics::patched_conics::PatchedConics;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
@@ -293,8 +294,8 @@ fn orbital_sun_elevation(
     };
 
     let ephemeris = PatchedConics::new(system, 1.0);
-    let body_state = ephemeris.query_body(body.id, 0.0);
-    let star_state = ephemeris.query_body(star_id, 0.0);
+    let body_state = ephemeris.state(body.id, Epoch::ZERO);
+    let star_state = ephemeris.state(star_id, Epoch::ZERO);
     let to_sun = star_state.position - body_state.position;
     let distance = to_sun.length();
     if distance <= f64::EPSILON {

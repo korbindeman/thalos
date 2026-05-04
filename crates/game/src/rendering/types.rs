@@ -10,7 +10,8 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use bevy::tasks::Task;
 use thalos_physics::{
-    body_state_provider::BodyStateProvider,
+    body_trajectory_provider::BodyTrajectoryProvider,
+    canonical::WorldPhysicsConfig,
     simulation::Simulation,
     types::{BodyStates, SolarSystemDefinition},
 };
@@ -29,7 +30,9 @@ use thalos_terrain_gen::BodyData;
 pub struct SimulationState {
     pub simulation: Simulation,
     pub system: SolarSystemDefinition,
-    pub ephemeris: Arc<dyn BodyStateProvider>,
+    pub ephemeris: Arc<dyn BodyTrajectoryProvider>,
+    #[allow(dead_code)]
+    pub world_config: WorldPhysicsConfig,
 }
 
 /// Per-frame cache of all body states at the current sim time. Populated once
@@ -131,11 +134,9 @@ pub(super) struct SunLight;
 #[derive(Component)]
 pub(super) struct BodyMesh;
 
-/// Marker for the ship-view mesh child of a celestial body. Carries an
-/// absolute world transform (its local translation compensates for the
-/// parent's map-scale translation) so the body renders at
-/// [`SHIP_SCALE`](crate::coords::SHIP_SCALE) when the ship camera draws
-/// it. Updated each frame by `update_ship_body_meshes`.
+/// Marker for the ship-view mesh child of a celestial body. These meshes
+/// live under the body's real-space BigSpace grid and use local
+/// [`SHIP_SCALE`](crate::coords::SHIP_SCALE) sizing.
 #[derive(Component)]
 pub(super) struct ShipBodyMesh;
 
@@ -201,6 +202,13 @@ pub(super) struct PendingPlanetGeneration {
     pub(super) mesh_entity: Entity,
     /// Ship-view child holding the placeholder mesh; mirrored swap.
     pub(super) ship_mesh_entity: Entity,
+    /// Real-space parent for ship-layer children.
+    pub(super) ship_parent_entity: Entity,
+}
+
+#[derive(Component)]
+pub struct RealSpaceBody {
+    pub body_id: usize,
 }
 
 /// Per-body cloud-rotation state. Advanced by `update_cloud_bands` each

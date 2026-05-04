@@ -2,6 +2,7 @@ use std::f64::consts::TAU;
 
 use glam::DVec3;
 
+use crate::canonical::Epoch;
 use crate::types::{BodyId, BodyState, BodyStates};
 
 /// Shared interface for deterministic body-state sources.
@@ -9,15 +10,15 @@ use crate::types::{BodyId, BodyState, BodyStates};
 /// Runtime systems use this trait so they can switch between patched conics,
 /// precomputed ephemerides, or future N-body sources without changing call
 /// sites.
-pub trait BodyStateProvider: Send + Sync {
-    /// Fill `out` with all body states at `time`.
+pub trait BodyTrajectoryProvider: Send + Sync {
+    /// Fill `out` with all body states at `epoch`.
     ///
     /// Implementations should reuse `out` when possible to avoid per-query
     /// allocations on hot paths.
-    fn query_into(&self, time: f64, out: &mut BodyStates);
+    fn states_into(&self, epoch: Epoch, out: &mut BodyStates);
 
-    /// Return the state of one body at `time`.
-    fn query_body(&self, body_id: BodyId, time: f64) -> BodyState;
+    /// Return the state of one body at `epoch`.
+    fn state(&self, body_id: BodyId, epoch: Epoch) -> BodyState;
 
     /// Number of bodies exposed by this provider.
     fn body_count(&self) -> usize;
@@ -27,12 +28,12 @@ pub trait BodyStateProvider: Send + Sync {
 
     /// Convenience wrapper that allocates a `Vec` for the result.
     ///
-    /// Hot paths should call [`Self::query_into`] with a reused buffer
+    /// Hot paths should call [`Self::states_into`] with a reused buffer
     /// instead — every call to this method allocates fresh, which adds up
     /// fast in the per-sample event-detection scans.
-    fn query(&self, time: f64) -> BodyStates {
+    fn states(&self, epoch: Epoch) -> BodyStates {
         let mut out = Vec::with_capacity(self.body_count());
-        self.query_into(time, &mut out);
+        self.states_into(epoch, &mut out);
         out
     }
 
@@ -41,15 +42,15 @@ pub trait BodyStateProvider: Send + Sync {
     /// The default implementation samples queries and works for any provider.
     fn detect_period(&self, body_id: BodyId, parent_id: BodyId, start_time: f64) -> f64 {
         let rel_pos_at = |t: f64| -> DVec3 {
-            let body_state = self.query_body(body_id, t);
-            let parent_state = self.query_body(parent_id, t);
+            let body_state = self.state(body_id, Epoch(t));
+            let parent_state = self.state(parent_id, Epoch(t));
             body_state.position - parent_state.position
         };
 
         let start_pos = rel_pos_at(start_time);
         let start_vel = {
-            let body_vel = self.query_body(body_id, start_time).velocity;
-            let parent_vel = self.query_body(parent_id, start_time).velocity;
+            let body_vel = self.state(body_id, Epoch(start_time)).velocity;
+            let parent_vel = self.state(parent_id, Epoch(start_time)).velocity;
             body_vel - parent_vel
         };
         let remaining = (self.time_span() - start_time).max(0.0);
@@ -119,8 +120,8 @@ pub trait BodyStateProvider: Send + Sync {
         num_samples: usize,
     ) -> Vec<DVec3> {
         if num_samples == 0 {
-            let body_state = self.query_body(body_id, start_time);
-            let parent_state = self.query_body(parent_id, start_time);
+            let body_state = self.state(body_id, Epoch(start_time));
+            let parent_state = self.state(parent_id, Epoch(start_time));
             return vec![body_state.position - parent_state.position];
         }
 
@@ -131,8 +132,8 @@ pub trait BodyStateProvider: Send + Sync {
         (0..=num_samples)
             .map(|i| {
                 let t = start_time + (i as f64 / num_samples as f64) * span;
-                let body_state = self.query_body(body_id, t);
-                let parent_state = self.query_body(parent_id, t);
+                let body_state = self.state(body_id, Epoch(t));
+                let parent_state = self.state(parent_id, Epoch(t));
                 body_state.position - parent_state.position
             })
             .collect()

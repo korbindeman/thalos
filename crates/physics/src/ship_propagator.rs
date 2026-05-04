@@ -30,7 +30,7 @@
 
 use glam::DVec3;
 
-use crate::body_state_provider::BodyStateProvider;
+use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::maneuver::delta_v_to_world;
 use crate::orbital_math::{
     cartesian_to_elements, eccentric_from_true_elliptic, hyperbolic_from_true, propagate_kepler,
@@ -117,7 +117,7 @@ pub struct CoastRequest<'a> {
     /// Hint for how many samples to generate. Actual count may be clipped by
     /// `min_coast_samples` and rounded.
     pub sample_count_hint: usize,
-    pub ephemeris: &'a dyn BodyStateProvider,
+    pub ephemeris: &'a dyn BodyTrajectoryProvider,
     pub bodies: &'a [BodyDefinition],
 }
 
@@ -130,7 +130,7 @@ pub struct BurnRequest<'a> {
     /// Usually `burn.end_time.min(leg_end)` — whichever fires first.
     pub target_time: f64,
     pub burn: BurnParams,
-    pub ephemeris: &'a dyn BodyStateProvider,
+    pub ephemeris: &'a dyn BodyTrajectoryProvider,
     pub bodies: &'a [BodyDefinition],
 }
 
@@ -153,7 +153,7 @@ pub trait ShipPropagator: Send + Sync {
         &self,
         position: DVec3,
         time: f64,
-        ephemeris: &dyn BodyStateProvider,
+        ephemeris: &dyn BodyTrajectoryProvider,
         bodies: &[BodyDefinition],
     ) -> BodyId;
 }
@@ -201,7 +201,7 @@ impl ShipPropagator for KeplerianPropagator {
         &self,
         position: DVec3,
         time: f64,
-        ephemeris: &dyn BodyStateProvider,
+        ephemeris: &dyn BodyTrajectoryProvider,
         bodies: &[BodyDefinition],
     ) -> BodyId {
         innermost_soi_body(position, time, ephemeris, bodies)
@@ -225,7 +225,7 @@ impl KeplerianPropagator {
             bodies,
         } = req;
 
-        let body_t0 = ephemeris.query_body(soi_body, time);
+        let body_t0 = ephemeris.state(soi_body, crate::canonical::Epoch(time));
         let mu = body_t0.mass_kg * G;
 
         // Relative state in the SOI body's frame.
@@ -288,7 +288,7 @@ impl KeplerianPropagator {
 
         // Helper: evaluate the ship's heliocentric state at sim time `t`.
         let eval_at = |t: f64| -> StateVector {
-            let body_t = ephemeris.query_body(soi_body, t);
+            let body_t = ephemeris.state(soi_body, crate::canonical::Epoch(t));
             let rel_t = propagate_kepler(rel0, mu, t - time);
             StateVector {
                 position: body_t.position + rel_t.position,
@@ -343,8 +343,8 @@ impl KeplerianPropagator {
         while let Some(t) = work.pop() {
             let cur_state = eval_at(t);
 
-            let prev_body = ephemeris.query_body(soi_body, prev_t);
-            let cur_body = ephemeris.query_body(soi_body, t);
+            let prev_body = ephemeris.state(soi_body, crate::canonical::Epoch(prev_t));
+            let cur_body = ephemeris.state(soi_body, crate::canonical::Epoch(t));
             let prev_alt = (prev_state.position - prev_body.position).length();
             let cur_alt = (cur_state.position - cur_body.position).length();
             let min_alt = prev_alt.min(cur_alt);
@@ -478,7 +478,9 @@ impl KeplerianPropagator {
         // SOI body mass cached for this segment. Patched conics: during a
         // burn the ship still feels only the SOI body's gravity; the thrust
         // adds on top.
-        let body_mass = ephemeris.query_body(soi_body, time).mass_kg;
+        let body_mass = ephemeris
+            .state(soi_body, crate::canonical::Epoch(time))
+            .mass_kg;
         let mu = body_mass * G;
         let soi_radius = bodies[soi_body].soi_radius_m;
         let body_radius = bodies[soi_body].radius_m;
@@ -534,10 +536,14 @@ impl KeplerianPropagator {
             // cross the threshold (Hermite false positive).
             let pick_inward_frac = |target_body: BodyId, target_distance: f64| -> f64 {
                 let prev_d = (cur_state.position
-                    - ephemeris.query_body(target_body, cur_time).position)
+                    - ephemeris
+                        .state(target_body, crate::canonical::Epoch(cur_time))
+                        .position)
                     .length();
                 let next_d = (next_state.position
-                    - ephemeris.query_body(target_body, next_time).position)
+                    - ephemeris
+                        .state(target_body, crate::canonical::Epoch(next_time))
+                        .position)
                     .length();
                 if prev_d > target_distance && next_d <= target_distance {
                     inv_lerp(prev_d, next_d, target_distance)
@@ -547,10 +553,14 @@ impl KeplerianPropagator {
             };
             let pick_outward_frac = |target_body: BodyId, target_distance: f64| -> f64 {
                 let prev_d = (cur_state.position
-                    - ephemeris.query_body(target_body, cur_time).position)
+                    - ephemeris
+                        .state(target_body, crate::canonical::Epoch(cur_time))
+                        .position)
                     .length();
                 let next_d = (next_state.position
-                    - ephemeris.query_body(target_body, next_time).position)
+                    - ephemeris
+                        .state(target_body, crate::canonical::Epoch(next_time))
+                        .position)
                     .length();
                 if prev_d < target_distance && next_d >= target_distance {
                     inv_lerp(prev_d, next_d, target_distance)
@@ -560,14 +570,20 @@ impl KeplerianPropagator {
             };
             let crossed_inward =
                 |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
-                    let d =
-                        (state.position - ephemeris.query_body(target_body, t).position).length();
+                    let d = (state.position
+                        - ephemeris
+                            .state(target_body, crate::canonical::Epoch(t))
+                            .position)
+                        .length();
                     d <= target_distance
                 };
             let crossed_outward =
                 |state: StateVector, t: f64, target_body: BodyId, target_distance: f64| -> bool {
-                    let d =
-                        (state.position - ephemeris.query_body(target_body, t).position).length();
+                    let d = (state.position
+                        - ephemeris
+                            .state(target_body, crate::canonical::Epoch(t))
+                            .position)
+                        .length();
                     d >= target_distance
                 };
 
@@ -634,10 +650,12 @@ fn rk4_burn_step(
     soi_body: BodyId,
     mu: f64,
     burn: &BurnParams,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
 ) -> (StateVector, DVec3) {
-    let body_at = |tt: f64| -> BodyState { ephemeris.query_body(soi_body, tt) };
-    let ref_at = |tt: f64| -> BodyState { ephemeris.query_body(burn.reference_body, tt) };
+    let body_at = |tt: f64| -> BodyState { ephemeris.state(soi_body, crate::canonical::Epoch(tt)) };
+    let ref_at = |tt: f64| -> BodyState {
+        ephemeris.state(burn.reference_body, crate::canonical::Epoch(tt))
+    };
 
     let accel = |pos: DVec3, vel: DVec3, tt: f64| -> DVec3 {
         let body = body_at(tt);
@@ -713,12 +731,12 @@ fn rk4_burn_step(
 pub fn innermost_soi_body(
     position: DVec3,
     time: f64,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     bodies: &[BodyDefinition],
 ) -> BodyId {
     let mut best: Option<(BodyId, f64)> = None;
     for (id, def) in bodies.iter().enumerate() {
-        let body = ephemeris.query_body(id, time);
+        let body = ephemeris.state(id, crate::canonical::Epoch(time));
         let d = (position - body.position).length();
         if d <= def.soi_radius_m {
             let smaller = best.map(|(_, r)| def.soi_radius_m < r).unwrap_or(true);
@@ -771,13 +789,13 @@ fn refine_crossing(
     mu: f64,
     time0: f64,
     soi_body: BodyId,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
 ) -> Option<f64> {
     let f = |t: f64| -> f64 {
         let rel = propagate_kepler(rel0, mu, t - time0);
-        let soi_bs = ephemeris.query_body(soi_body, t);
+        let soi_bs = ephemeris.state(soi_body, crate::canonical::Epoch(t));
         let ship_pos = soi_bs.position + rel.position;
-        let target = ephemeris.query_body(target_body, t);
+        let target = ephemeris.state(target_body, crate::canonical::Epoch(t));
         (ship_pos - target.position).length() - target_distance
     };
     let f_lo = f(t_lo);
@@ -900,14 +918,14 @@ fn detect_step_crossings(
     soi_radius: f64,
     body_radius: f64,
     threat_bodies: &[BodyId],
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
     bodies: &[BodyDefinition],
 ) -> StepCrossings {
     let mut out = StepCrossings::default();
     let h = next_t - prev_t;
 
-    let prev_soi_bs = ephemeris.query_body(soi_body, prev_t);
-    let next_soi_bs = ephemeris.query_body(soi_body, next_t);
+    let prev_soi_bs = ephemeris.state(soi_body, crate::canonical::Epoch(prev_t));
+    let next_soi_bs = ephemeris.state(soi_body, crate::canonical::Epoch(next_t));
     let q0 = prev_state.position - prev_soi_bs.position;
     let q1 = next_state.position - next_soi_bs.position;
     let qv0 = prev_state.velocity - prev_soi_bs.velocity;
@@ -937,8 +955,8 @@ fn detect_step_crossings(
             continue;
         }
         let r_sq = child_soi * child_soi;
-        let prev_child = ephemeris.query_body(child, prev_t);
-        let next_child = ephemeris.query_body(child, next_t);
+        let prev_child = ephemeris.state(child, crate::canonical::Epoch(prev_t));
+        let next_child = ephemeris.state(child, crate::canonical::Epoch(next_t));
         let cq0 = prev_state.position - prev_child.position;
         let cq1 = next_state.position - next_child.position;
         let cqv0 = prev_state.velocity - prev_child.velocity;
@@ -1172,9 +1190,11 @@ fn build_sample(
     time: f64,
     state: StateVector,
     soi_body: BodyId,
-    ephemeris: &dyn BodyStateProvider,
+    ephemeris: &dyn BodyTrajectoryProvider,
 ) -> TrajectorySample {
-    let ref_pos = ephemeris.query_body(soi_body, time).position;
+    let ref_pos = ephemeris
+        .state(soi_body, crate::canonical::Epoch(time))
+        .position;
     TrajectorySample {
         time,
         position: state.position,
@@ -1278,7 +1298,7 @@ mod tests {
     #[test]
     fn soi_body_of_finds_earth_from_leo() {
         let (system, pc) = sun_earth_system();
-        let earth = pc.query_body(1, 0.0);
+        let earth = pc.state(1, crate::canonical::Epoch(0.0));
         let leo = earth.position + DVec3::new(7.0e6, 0.0, 0.0);
         let propagator = KeplerianPropagator::default();
         let id = propagator.soi_body_of(leo, 0.0, &pc, &system.bodies);
@@ -1297,7 +1317,7 @@ mod tests {
     #[test]
     fn coast_circular_orbit_closes_after_period() {
         let (system, pc) = sun_earth_system();
-        let earth = pc.query_body(1, 0.0);
+        let earth = pc.state(1, crate::canonical::Epoch(0.0));
         let r = 7.0e6;
         let v = (EARTH_GM / r).sqrt();
         let state = StateVector {
@@ -1321,7 +1341,7 @@ mod tests {
         assert!((result.end_time - period).abs() / period < 1e-3);
         // Closure must be checked in Earth's frame — Earth itself has moved
         // along its heliocentric orbit during that period.
-        let earth_end = pc.query_body(1, result.end_time);
+        let earth_end = pc.state(1, crate::canonical::Epoch(result.end_time));
         let rel_end = result.end_state.position - earth_end.position;
         let rel_start = state.position - earth.position;
         let pos_err = (rel_end - rel_start).length() / r;
@@ -1331,7 +1351,7 @@ mod tests {
     #[test]
     fn coast_collision_detected() {
         let (system, pc) = sun_earth_system();
-        let earth = pc.query_body(1, 0.0);
+        let earth = pc.state(1, crate::canonical::Epoch(0.0));
         // Highly-eccentric orbit whose periapsis lies inside Earth: starts
         // at 1e7 m with 50% of circular speed → periapsis ≈ r/7 ≈ 1.4e6 m
         // (well below the 6.37e6 m surface). Tangential (non-radial) so the
@@ -1363,7 +1383,7 @@ mod tests {
     #[test]
     fn coast_hyperbolic_exits_soi() {
         let (system, pc) = sun_earth_system();
-        let earth = pc.query_body(1, 0.0);
+        let earth = pc.state(1, crate::canonical::Epoch(0.0));
         let r = 7.0e6;
         let v_circ = (EARTH_GM / r).sqrt();
         let state = StateVector {
@@ -1397,7 +1417,7 @@ mod tests {
         // verify by checking that the minimum sample-to-sample distance
         // occurs near periapsis, not on the apoapsis arm.
         let (system, pc) = sun_earth_system();
-        let earth = pc.query_body(1, 0.0);
+        let earth = pc.state(1, crate::canonical::Epoch(0.0));
         // Periapsis 8e6 m (comfortably above Earth surface), apoapsis 7.2e7
         // → e = (ra − rp) / (ra + rp) = 0.8. a = (ra + rp)/2 = 4e7.
         let a = 4.0e7;
@@ -1427,7 +1447,7 @@ mod tests {
             .samples
             .iter()
             .map(|s| {
-                let body = pc.query_body(1, s.time);
+                let body = pc.state(1, crate::canonical::Epoch(s.time));
                 (s.position - body.position).length()
             })
             .collect();
@@ -1470,7 +1490,7 @@ mod tests {
     #[test]
     fn burn_raises_orbit() {
         let (system, pc) = sun_earth_system();
-        let earth = pc.query_body(1, 0.0);
+        let earth = pc.state(1, crate::canonical::Epoch(0.0));
         let r = 7.0e6;
         let v = (EARTH_GM / r).sqrt();
         let state = StateVector {
@@ -1610,7 +1630,7 @@ mod tests {
     #[test]
     fn coast_collision_detected_on_multi_period_horizon() {
         let (system, pc) = sun_earth_system();
-        let earth = pc.query_body(1, 0.0);
+        let earth = pc.state(1, crate::canonical::Epoch(0.0));
 
         // Highly eccentric orbit. Periapsis 3e6 m (well inside the 6.37e6 m
         // surface), apoapsis 5e7 m → e ≈ 0.887.

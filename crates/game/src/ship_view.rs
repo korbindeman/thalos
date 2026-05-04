@@ -19,6 +19,7 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::math::DVec3;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
+use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics::types::ShipParameters;
 use thalos_ship_rendering::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
@@ -30,9 +31,7 @@ use thalos_shipyard::{
 
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
-use crate::rendering::{
-    CelestialBody, FrameBodyStates, PlayerShip, RenderOrigin, ShipMarker, SimulationState,
-};
+use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, ShipMarker, SimulationState};
 use crate::view::{HideInMapView, HideInShipView, ViewMode};
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
@@ -90,7 +89,7 @@ pub(crate) struct PartVisual;
 #[derive(Component, Clone)]
 struct PartShaderHandle(Handle<ShipPartMaterial>);
 
-fn spawn_player_ship(
+pub(crate) fn spawn_player_ship(
     mut commands: Commands,
     view: Res<ViewMode>,
     mut sim: ResMut<SimulationState>,
@@ -243,23 +242,24 @@ fn spawn_player_ship(
     });
 }
 
-/// Sync the [`PlayerShip`] root's translation and orientation to the
-/// physics ship state each frame, applying the same render-origin shift
-/// as celestial bodies. Attitude is integrated by [`Simulation`] under
-/// player control; map view's billboard ship marker stays
-/// camera-aligned and is unaffected.
+/// Sync the [`PlayerShip`] root's cell, local translation, and orientation
+/// to the canonical physics craft state each frame. Attitude is integrated
+/// by [`Simulation`] under player control; map view's billboard ship marker
+/// stays camera-aligned and is unaffected.
 fn update_player_ship_world_position(
     sim: Res<SimulationState>,
-    origin: Res<RenderOrigin>,
-    mut query: Query<&mut Transform, With<PlayerShip>>,
+    grid: Query<&Grid, With<BigSpace>>,
+    mut query: Query<(&mut CellCoord, &mut Transform), With<PlayerShip>>,
 ) {
-    let Ok(mut transform) = query.single_mut() else {
+    let Ok(root_grid) = grid.single() else {
         return;
     };
-    // PlayerShip lives only on SHIP_LAYER (HideInMapView), so it always
-    // renders at SHIP_SCALE regardless of the dynamic WorldScale resource.
-    let rel = sim.simulation.ship_state().position - origin.position;
-    transform.translation = (rel * crate::coords::SHIP_SCALE).as_vec3();
+    let Ok((mut cell, mut transform)) = query.single_mut() else {
+        return;
+    };
+    let (next_cell, local) = root_grid.translation_to_grid(sim.simulation.ship_state().position);
+    *cell = next_cell;
+    transform.translation = local;
     transform.rotation = sim.simulation.attitude().orientation.as_quat();
 }
 

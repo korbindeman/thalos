@@ -3,15 +3,18 @@
 //! # Coordinate system
 //! The physics simulation uses a heliocentric inertial frame with the ecliptic
 //! as the XZ plane (Y up). All positions from the ephemeris are in metres.
-//! We apply the current [`WorldScale`] to convert metres to render units so Bevy's f32
-//! transforms don't lose precision on solar-system distances.
+//! Map-view systems apply the current [`WorldScale`] to convert metres to
+//! render units. Ship-view body grids and the player ship live under BigSpace
+//! so Bevy transforms stay local to 1 km cells.
 //!
-//! 1 render unit = 1 / WorldScale metres. Map view uses 1e-6 (1 unit = 1000 km); ship view uses 1.0 (1 unit = 1 m).
+//! 1 render unit = 1 / WorldScale metres. Map view uses 1e-6 (1 unit = 1000 km);
+//! ship-view meshes use 1.0 (1 unit = 1 m) inside BigSpace cells.
 
 mod body_lod;
 mod generation;
 mod lighting;
 mod materials;
+pub(crate) mod real_space;
 mod spawn;
 mod trails;
 mod transforms;
@@ -26,12 +29,13 @@ use lighting::{
 use materials::{
     LastCloudBandUpdate, update_cloud_bands, update_gas_giant_params, update_ring_params,
 };
+use real_space::{
+    attach_player_ship_to_big_space, attach_ship_camera_to_big_space, setup_big_space,
+    update_real_space_body_positions,
+};
 use spawn::spawn_bodies;
 use trails::{draw_orbits, recompute_orbit_trails};
-use transforms::{
-    update_body_positions, update_planet_orientations, update_ship_body_meshes,
-    update_ship_position,
-};
+use transforms::{update_body_positions, update_planet_orientations, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
 pub use types::{
     CameraExposure, CelestialBody, FrameBodyStates, PlanetshineTints, PlayerShip, ShipMarker,
@@ -39,6 +43,7 @@ pub use types::{
 };
 
 use bevy::prelude::*;
+use thalos_physics::canonical::Epoch;
 pub use thalos_planet_rendering::ReferenceClouds;
 use thalos_planet_rendering::{convert_reference_clouds_when_ready, load_reference_cloud_sources};
 
@@ -65,10 +70,10 @@ pub fn cache_body_states(sim: Res<SimulationState>, mut cache: ResMut<FrameBodyS
         return;
     }
     if let Some(states) = cache.states.as_mut() {
-        sim.ephemeris.query_into(t, states);
+        sim.ephemeris.states_into(Epoch(t), states);
     } else {
         let mut states = Vec::with_capacity(sim.ephemeris.body_count());
-        sim.ephemeris.query_into(t, &mut states);
+        sim.ephemeris.states_into(Epoch(t), &mut states);
         cache.states = Some(states);
     }
     cache.time = t;
@@ -90,7 +95,14 @@ impl Plugin for RenderingPlugin {
                 Startup,
                 (
                     configure_gizmos,
-                    spawn_bodies,
+                    setup_big_space,
+                    spawn_bodies.after(setup_big_space),
+                    attach_ship_camera_to_big_space
+                        .after(setup_big_space)
+                        .after(crate::camera::spawn_camera),
+                    attach_player_ship_to_big_space
+                        .after(setup_big_space)
+                        .after(crate::ship_view::spawn_player_ship),
                     focus_camera_on_homeworld.after(spawn_bodies),
                     load_reference_cloud_sources,
                 ),
@@ -104,8 +116,10 @@ impl Plugin for RenderingPlugin {
                     cache_body_states,
                     update_render_origin.after(cache_body_states),
                     update_render_frame.after(cache_body_states),
-                    update_body_positions.after(update_render_origin),
-                    update_ship_body_meshes.after(update_body_positions),
+                    update_body_positions
+                        .after(update_render_origin)
+                        .after(crate::map_view::update_map_snapshot),
+                    update_real_space_body_positions.after(cache_body_states),
                     update_sun_light.after(cache_body_states),
                     update_camera_exposure.after(cache_body_states),
                     sync_film_grain_to_exposure.after(update_camera_exposure),

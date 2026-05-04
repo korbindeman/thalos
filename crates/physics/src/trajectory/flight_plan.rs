@@ -30,7 +30,7 @@ pub use super::propagation::ScheduledBurn;
 use super::propagation::{
     PredictionConfig, PropagationBudget, PropagationContext, propagate_segment,
 };
-use crate::body_state_provider::BodyStateProvider;
+use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::maneuver::{ManeuverSequence, burn_duration};
 use crate::orbital_math::propagate_kepler;
 use crate::ship_propagator::ShipPropagator;
@@ -43,7 +43,7 @@ pub struct PredictionRequest {
     pub ship_state: StateVector,
     pub sim_time: f64,
     pub maneuvers: ManeuverSequence,
-    pub ephemeris: Arc<dyn BodyStateProvider>,
+    pub ephemeris: Arc<dyn BodyTrajectoryProvider>,
     /// Same propagator the live simulation is stepping with. Cloned (`Arc`)
     /// from [`crate::simulation::Simulation`] when the request is built so
     /// prediction and live ship motion route through one instance.
@@ -228,7 +228,7 @@ impl FlightPlan {
     pub fn closest_approach_to(
         &self,
         target: BodyId,
-        ephemeris: &dyn BodyStateProvider,
+        ephemeris: &dyn BodyTrajectoryProvider,
     ) -> Option<ClosestApproach> {
         super::events::closest_approach(self, target, ephemeris)
     }
@@ -258,7 +258,7 @@ impl FlightPlan {
     pub fn pre_burn_state_at(
         &self,
         time: f64,
-        ephemeris: &dyn BodyStateProvider,
+        ephemeris: &dyn BodyTrajectoryProvider,
         bodies: &[BodyDefinition],
     ) -> Option<TrajectorySample> {
         // Coast directly contains `time`: impulsive-burn case, or `time`
@@ -271,7 +271,7 @@ impl FlightPlan {
             if time >= s - 1e-6 && time <= e + 1e-6 {
                 let state = coast.state_at(time)?;
                 let anchor = coast.samples.last()?.anchor_body;
-                let body_state = ephemeris.query_body(anchor, time);
+                let body_state = ephemeris.state(anchor, crate::canonical::Epoch(time));
                 return Some(TrajectorySample {
                     time,
                     position: state.position,
@@ -308,8 +308,9 @@ impl FlightPlan {
                 return None;
             }
 
-            let body_state_last = ephemeris.query_body(anchor, last_sample.time);
-            let body_state_now = ephemeris.query_body(anchor, time);
+            let body_state_last =
+                ephemeris.state(anchor, crate::canonical::Epoch(last_sample.time));
+            let body_state_now = ephemeris.state(anchor, crate::canonical::Epoch(time));
 
             let rel = StateVector {
                 position: last_sample.position - body_state_last.position,
@@ -695,7 +696,9 @@ pub fn propagate_flight_plan(
     let relock_samples_to = |samples: &mut [crate::types::TrajectorySample], anchor: BodyId| {
         for sample in samples.iter_mut() {
             sample.anchor_body = anchor;
-            sample.ref_pos = ephemeris.query_body(anchor, sample.time).position;
+            sample.ref_pos = ephemeris
+                .state(anchor, crate::canonical::Epoch(sample.time))
+                .position;
         }
     };
     let relock_samples_to_first = |samples: &mut [crate::types::TrajectorySample]| {

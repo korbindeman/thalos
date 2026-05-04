@@ -14,7 +14,7 @@
 //! is stepping with, so live and predicted motion cannot diverge.
 
 use super::numeric::NumericSegment;
-use crate::body_state_provider::BodyStateProvider;
+use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::ship_propagator::{
     BurnParams, BurnRequest, CoastRequest, SegmentTerminator, ShipPropagator,
 };
@@ -64,7 +64,7 @@ impl PropagationBudget {
 
 /// Shared inputs for one propagation call.
 pub(super) struct PropagationContext<'a> {
-    pub ephemeris: &'a dyn BodyStateProvider,
+    pub ephemeris: &'a dyn BodyTrajectoryProvider,
     pub bodies: &'a [BodyDefinition],
     pub prediction_config: &'a PredictionConfig,
     /// Same instance the live [`crate::simulation::Simulation`] is stepping

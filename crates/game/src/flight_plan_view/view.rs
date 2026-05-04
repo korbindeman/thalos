@@ -37,11 +37,10 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics::trajectory::{FlightPlan, Trajectory};
-use thalos_physics::types::{BodyId, BodyKind, BodyState, SolarSystemDefinition};
+use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, BodyState};
 
 use crate::coords::{RenderFrame, RenderGhostFocus};
-use crate::rendering::SimulationState;
-use crate::target::TargetBody;
+use crate::map_view::MapSnapshot;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -72,7 +71,6 @@ pub enum GhostPhase {
 pub struct TrajectoryWindow {
     pub start_epoch: f64,
     pub end_epoch: f64,
-    pub closest_epoch: Option<f64>,
     pub exit_epoch: Option<f64>,
 }
 
@@ -133,10 +131,6 @@ impl FlightPlanView {
         self.focus_ghost
     }
 
-    pub fn focus_body(&self) -> BodyId {
-        self.focus_body
-    }
-
     pub fn focused_ghost_ref(&self) -> Option<&Ghost> {
         let focus_ghost = self.focus_ghost?;
         self.ghost_for_epoch(focus_ghost.body_id, focus_ghost.encounter_epoch)
@@ -153,7 +147,7 @@ impl FlightPlanView {
             && epoch <= window.end_epoch + GHOST_EPOCH_TOLERANCE_S
     }
 
-    pub fn body_hidden_in_focus(&self, body_id: BodyId, system: &SolarSystemDefinition) -> bool {
+    pub fn body_hidden_in_focus(&self, body_id: BodyId, system: &[BodyDefinition]) -> bool {
         self.focus_ghost.is_none()
             && body_id != self.focus_body
             && is_descendant_of(body_id, self.focus_body, system)
@@ -162,7 +156,7 @@ impl FlightPlanView {
     pub fn epoch_hidden_in_focus(
         &self,
         flight_plan: &FlightPlan,
-        system: &SolarSystemDefinition,
+        system: &[BodyDefinition],
         epoch: f64,
     ) -> bool {
         if self.focus_ghost.is_some() {
@@ -178,7 +172,7 @@ impl FlightPlanView {
     pub fn interval_hidden_in_focus(
         &self,
         flight_plan: &FlightPlan,
-        system: &SolarSystemDefinition,
+        system: &[BodyDefinition],
         start_epoch: f64,
         end_epoch: f64,
     ) -> bool {
@@ -304,13 +298,9 @@ impl FlightPlanView {
     }
 }
 
-fn is_descendant_of(
-    mut body_id: BodyId,
-    ancestor_id: BodyId,
-    system: &SolarSystemDefinition,
-) -> bool {
-    for _ in 0..system.bodies.len() {
-        let Some(parent) = system.bodies.get(body_id).and_then(|body| body.parent) else {
+fn is_descendant_of(mut body_id: BodyId, ancestor_id: BodyId, system: &[BodyDefinition]) -> bool {
+    for _ in 0..system.len() {
+        let Some(parent) = system.get(body_id).and_then(|body| body.parent) else {
             return false;
         };
         if parent == ancestor_id {
@@ -326,29 +316,26 @@ fn is_descendant_of(
 // ---------------------------------------------------------------------------
 
 pub(super) fn rebuild_flight_plan_view(
-    sim: Option<Res<SimulationState>>,
-    target: Res<TargetBody>,
+    snapshot: Res<MapSnapshot>,
     frame: Res<RenderFrame>,
     mut view: ResMut<FlightPlanView>,
 ) {
-    let Some(sim) = sim else { return };
-    let Some(flight_plan) = sim.simulation.prediction() else {
+    let Some(flight_plan) = snapshot.flight_plan.as_ref() else {
         return;
     };
 
-    let version = sim.simulation.prediction_version();
-    let target_changed = view.last_target != target.target;
+    let version = snapshot.prediction_version;
+    let target_changed = view.last_target != snapshot.target_body;
     let focus_changed = view.last_frame != Some(*frame);
     if view.version == version && !target_changed && !focus_changed {
         return;
     }
     view.version = version;
-    view.last_target = target.target;
+    view.last_target = snapshot.target_body;
     view.last_frame = Some(*frame);
     view.focus_body = frame.focus_body;
     view.focus_ghost = frame.focus_ghost;
 
-    let ephemeris = sim.ephemeris.as_ref();
     let (_, plan_end) = flight_plan.epoch_range();
 
     let mut new_ghosts: Vec<Ghost> = Vec::new();
@@ -357,7 +344,7 @@ pub(super) fn rebuild_flight_plan_view(
     // contexts, so they remain distinct even when the real body is focused.
     for enc in flight_plan.encounters() {
         let body_id = enc.body;
-        let Some(body_def) = sim.system.bodies.get(body_id) else {
+        let Some(body_def) = snapshot.body_defs.get(body_id) else {
             continue;
         };
         if body_def.kind == BodyKind::Star {
@@ -369,9 +356,13 @@ pub(super) fn rebuild_flight_plan_view(
         // is the handle for reasoning about the encounter frame, so pin it
         // near the center of the hidden SOI window.
         let projection_epoch = enc.closest_epoch;
-        let body_state = ephemeris.query_body(body_id, projection_epoch);
+        let body_state = snapshot
+            .body_state_at(body_id, projection_epoch)
+            .unwrap_or_else(|| flight_plan_body_state(flight_plan, body_id, projection_epoch));
         let parent_id = body_def.parent.unwrap_or(0);
-        let parent_state = ephemeris.query_body(parent_id, projection_epoch);
+        let parent_state = snapshot
+            .body_state_at(parent_id, projection_epoch)
+            .unwrap_or_else(|| flight_plan_body_state(flight_plan, parent_id, projection_epoch));
 
         new_ghosts.push(Ghost {
             body_id,
@@ -384,7 +375,6 @@ pub(super) fn rebuild_flight_plan_view(
             trajectory_window: Some(TrajectoryWindow {
                 start_epoch: enc.entry_epoch,
                 end_epoch: enc.exit_epoch.unwrap_or(plan_end).max(enc.entry_epoch),
-                closest_epoch: Some(enc.closest_epoch),
                 exit_epoch: enc.exit_epoch,
             }),
         });
@@ -393,14 +383,19 @@ pub(super) fn rebuild_flight_plan_view(
     // Target body closest-approach ghost — visual marker for "this is
     // where my target will be at closest pass" when no SOI encounter
     // covers it.
-    if let Some(target_id) = target.target
+    if let Some(target_id) = snapshot.target_body
         && !new_ghosts.iter().any(|g| g.body_id == target_id)
-        && let Some(ca) = flight_plan.closest_approach_to(target_id, ephemeris)
-        && let Some(body_def) = sim.system.bodies.get(target_id)
+        && let Some(ca) = flight_plan
+            .approaches()
+            .iter()
+            .find(|approach| approach.body == target_id)
+        && let Some(body_def) = snapshot.body_defs.get(target_id)
         && body_def.kind != BodyKind::Star
     {
         let parent_id = body_def.parent.unwrap_or(0);
-        let parent_state = ephemeris.query_body(parent_id, ca.epoch);
+        let parent_state = snapshot
+            .body_state_at(parent_id, ca.epoch)
+            .unwrap_or_else(|| flight_plan_body_state(flight_plan, parent_id, ca.epoch));
         new_ghosts.push(Ghost {
             body_id: target_id,
             parent_id,
@@ -414,6 +409,35 @@ pub(super) fn rebuild_flight_plan_view(
     }
 
     reconcile_entities(&mut view.ghosts, new_ghosts);
+}
+
+fn flight_plan_body_state(flight_plan: &FlightPlan, body_id: BodyId, epoch: f64) -> BodyState {
+    flight_plan
+        .approaches()
+        .iter()
+        .find(|approach| approach.body == body_id && (approach.epoch - epoch).abs() <= 1.0)
+        .map(|approach| BodyState {
+            id: body_id,
+            epoch: thalos_physics::canonical::Epoch(epoch),
+            position: approach.body_state.position,
+            velocity: approach.body_state.velocity,
+            orientation: bevy::math::DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+            mass_kg: 0.0,
+            gm: 0.0,
+            radius_m: 0.0,
+        })
+        .unwrap_or(BodyState {
+            id: body_id,
+            epoch: thalos_physics::canonical::Epoch(epoch),
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            orientation: bevy::math::DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+            mass_kg: 0.0,
+            gm: 0.0,
+            radius_m: 0.0,
+        })
 }
 
 /// Pair each new ghost with the closest existing ghost of the same body,

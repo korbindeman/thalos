@@ -13,15 +13,18 @@
 //! path around the matching ghost pin. This keeps a future SOI's local
 //! trajectory visible even when the current patched-conics leg is still
 //! locked to a departure-frame anchor.
+//!
+//! Discrete events (SOI entry/exit, closest approach, apsis) are
+//! rendered as pickable mesh markers by `markers.rs`, not here. This
+//! module only emits the continuous trajectory lines.
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::body_state_provider::BodyStateProvider;
-use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory, TrajectoryEventKind};
-use thalos_physics::types::{BodyId, SolarSystemDefinition, TrajectorySample};
+use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory};
+use thalos_physics::types::{BodyDefinition, BodyId, TrajectorySample};
 
 use crate::coords::{RenderGhostFocus, RenderOrigin, WorldScale, sample_render_pos};
-use crate::rendering::{FrameBodyStates, SimulationState};
+use crate::map_view::MapSnapshot;
 
 use super::view::{FlightPlanView, Ghost, GhostPhase};
 
@@ -30,28 +33,27 @@ use super::view::{FlightPlanView, Ghost, GhostPhase};
 // ---------------------------------------------------------------------------
 
 pub(super) fn render_trajectory(
-    sim: Option<Res<SimulationState>>,
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
-    cache: Res<FrameBodyStates>,
+    snapshot: Res<MapSnapshot>,
     view: Res<FlightPlanView>,
     mut gizmos: Gizmos,
 ) {
-    let Some(sim) = sim else { return };
-    let Some(prediction) = sim.simulation.prediction() else {
+    let Some(prediction) = snapshot.flight_plan.as_ref() else {
         return;
     };
-    let Some(ref body_states) = cache.states else {
+    if snapshot.body_states.is_empty() {
         return;
-    };
+    }
+    let body_states = snapshot.body_states.as_slice();
 
     let focused_ghost = view.focused_ghost();
     if focused_ghost.is_some()
         && render_ghost_encounter_windows(
             prediction,
             &view,
-            sim.ephemeris.as_ref(),
-            &sim.system,
+            &snapshot,
+            &snapshot.body_defs,
             body_states,
             &origin,
             &scale,
@@ -88,15 +90,15 @@ pub(super) fn render_trajectory(
                 burn_pin,
                 prediction,
                 &view,
-                &sim.system,
+                &snapshot.body_defs,
                 &origin,
                 &scale,
                 &mut gizmos,
             );
-            if let Some(last) = burn.samples.last() {
-                if let Some(anchor) = burn_anchor {
-                    prev_end = Some((sample_render_pos(last, burn_pin, &origin, &scale), anchor));
-                }
+            if let Some(last) = burn.samples.last()
+                && let Some(anchor) = burn_anchor
+            {
+                prev_end = Some((sample_render_pos(last, burn_pin, &origin, &scale), anchor));
             }
         }
 
@@ -116,7 +118,7 @@ pub(super) fn render_trajectory(
             is_ghost_leg,
             prediction,
             &view,
-            &sim.system,
+            &snapshot.body_defs,
             &origin,
             &scale,
             &mut gizmos,
@@ -138,7 +140,7 @@ pub(super) fn render_trajectory(
             true,
             prediction,
             &view,
-            &sim.system,
+            &snapshot.body_defs,
             &origin,
             &scale,
             &mut gizmos,
@@ -148,19 +150,8 @@ pub(super) fn render_trajectory(
     let _ = render_ghost_encounter_windows(
         prediction,
         &view,
-        sim.ephemeris.as_ref(),
-        &sim.system,
-        body_states,
-        &origin,
-        &scale,
-        &mut gizmos,
-    );
-
-    render_focus_soi_transition_markers(
-        prediction,
-        &view,
-        sim.ephemeris.as_ref(),
-        &sim.system,
+        &snapshot,
+        &snapshot.body_defs,
         body_states,
         &origin,
         &scale,
@@ -180,12 +171,12 @@ fn segment_pin(
     segment: &NumericSegment,
     view: &FlightPlanView,
     body_states: &[thalos_physics::types::BodyState],
-) -> bevy::math::DVec3 {
+) -> DVec3 {
     segment
         .samples
         .first()
         .map(|s| view.pin_for_body(s.anchor_body, s.time, body_states))
-        .unwrap_or(bevy::math::DVec3::ZERO)
+        .unwrap_or(DVec3::ZERO)
 }
 
 fn segment_anchor(segment: &NumericSegment) -> Option<BodyId> {
@@ -198,10 +189,10 @@ fn segment_anchor(segment: &NumericSegment) -> Option<BodyId> {
 
 fn render_burn_segment(
     segment: &NumericSegment,
-    pin: bevy::math::DVec3,
+    pin: DVec3,
     prediction: &FlightPlan,
     view: &FlightPlanView,
-    system: &SolarSystemDefinition,
+    system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
@@ -226,11 +217,11 @@ fn render_burn_segment(
 
 fn render_segment(
     segment: &NumericSegment,
-    pin: bevy::math::DVec3,
+    pin: DVec3,
     is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
-    system: &SolarSystemDefinition,
+    system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
@@ -260,11 +251,11 @@ fn render_segment(
 
 fn render_open_samples(
     samples: &[TrajectorySample],
-    pin: bevy::math::DVec3,
+    pin: DVec3,
     is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
-    system: &SolarSystemDefinition,
+    system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
@@ -299,11 +290,11 @@ fn render_open_samples(
 
 fn render_stable_orbit_segment(
     segment: &NumericSegment,
-    pin: bevy::math::DVec3,
+    pin: DVec3,
     is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
-    system: &SolarSystemDefinition,
+    system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
@@ -342,11 +333,11 @@ fn render_stable_orbit_segment(
 
 fn render_stable_orbit(
     samples: &[TrajectorySample],
-    pin: bevy::math::DVec3,
+    pin: DVec3,
     is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
-    system: &SolarSystemDefinition,
+    system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
@@ -357,7 +348,6 @@ fn render_stable_orbit(
 
     let anchor = samples[0].anchor_body;
     let [r, g, b] = system
-        .bodies
         .get(anchor)
         .map(|bd| bd.color)
         .unwrap_or([1.0, 1.0, 1.0]);
@@ -379,68 +369,14 @@ fn render_stable_orbit(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Ghost encounter windows
 // ---------------------------------------------------------------------------
-
-fn render_focus_soi_transition_markers(
-    prediction: &FlightPlan,
-    view: &FlightPlanView,
-    ephemeris: &dyn BodyStateProvider,
-    system: &SolarSystemDefinition,
-    body_states: &[thalos_physics::types::BodyState],
-    origin: &RenderOrigin,
-    scale: &WorldScale,
-    gizmos: &mut Gizmos,
-) {
-    if view.focused_ghost().is_some() {
-        return;
-    }
-
-    let focus_body = view.focus_body();
-    let bodies = &system.bodies;
-    let Some(focus_def) = system.bodies.get(focus_body) else {
-        return;
-    };
-    let focus_parent = focus_def.parent;
-
-    let pin = view.pin_for_body(focus_body, prediction.epoch_range().0, body_states);
-    let marker_radius = transition_marker_radius(focus_def);
-
-    for event in prediction.events() {
-        let marker_color = match event.kind {
-            // Leaving the focused body's SOI for its parent.
-            TrajectoryEventKind::SoiExit if Some(event.body) == focus_parent => {
-                Color::srgba(1.0, 0.48, 0.20, 1.0)
-            }
-            // Entering the focused body's SOI from its parent.
-            TrajectoryEventKind::SoiEntry if event.body == focus_body => {
-                Color::srgba(0.30, 0.85, 1.0, 1.0)
-            }
-            // Entering a child body's SOI while still viewing the parent.
-            TrajectoryEventKind::SoiEntry
-                if bodies.get(event.body).and_then(|body| body.parent) == Some(focus_body) =>
-            {
-                Color::srgba(0.30, 0.85, 1.0, 1.0)
-            }
-            // Exiting a child body's SOI back into the focused body.
-            TrajectoryEventKind::SoiExit if event.body == focus_body => {
-                Color::srgba(1.0, 0.48, 0.20, 1.0)
-            }
-            _ => continue,
-        };
-
-        let focus_state = ephemeris.query_body(focus_body, event.epoch);
-        let relative = event.craft_state.position - focus_state.position;
-        let center = relative + pin;
-        draw_cross_marker(center, marker_radius, marker_color, origin, scale, gizmos);
-    }
-}
 
 fn render_ghost_encounter_windows(
     prediction: &FlightPlan,
     view: &FlightPlanView,
-    ephemeris: &dyn BodyStateProvider,
-    system: &SolarSystemDefinition,
+    snapshot: &MapSnapshot,
+    system: &[BodyDefinition],
     body_states: &[thalos_physics::types::BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -466,10 +402,7 @@ fn render_ghost_encounter_windows(
         }
 
         let pin = view.pin_for_ghost_focus(focus_ghost, body_states);
-        rendered = true;
-
         let soi_radius = system
-            .bodies
             .get(ghost.body_id)
             .map(|body| body.soi_radius_m)
             .unwrap_or(f64::INFINITY);
@@ -477,16 +410,16 @@ fn render_ghost_encounter_windows(
         let start = window.start_epoch;
         for leg in prediction.legs() {
             if let Some(burn) = &leg.burn_segment {
-                render_ghost_segment(
-                    burn, true, ghost, ephemeris, pin, soi_radius, start, end, system, origin,
+                rendered |= render_ghost_segment(
+                    burn, true, ghost, snapshot, pin, soi_radius, start, end, system, origin,
                     scale, gizmos,
                 );
             }
-            render_ghost_segment(
+            rendered |= render_ghost_segment(
                 &leg.coast_segment,
                 false,
                 ghost,
-                ephemeris,
+                snapshot,
                 pin,
                 soi_radius,
                 start,
@@ -497,80 +430,8 @@ fn render_ghost_encounter_windows(
                 gizmos,
             );
         }
-
-        draw_window_marker(
-            prediction,
-            ghost,
-            ephemeris,
-            pin,
-            window.start_epoch,
-            soi_radius,
-            true,
-            system,
-            origin,
-            scale,
-            gizmos,
-            Color::srgba(0.35, 0.85, 1.0, 0.95),
-        );
-        if let Some(closest_epoch) = window.closest_epoch {
-            draw_window_marker(
-                prediction,
-                ghost,
-                ephemeris,
-                pin,
-                closest_epoch,
-                soi_radius,
-                false,
-                system,
-                origin,
-                scale,
-                gizmos,
-                Color::srgba(1.0, 0.88, 0.25, 1.0),
-            );
-        }
-        if let Some(exit_epoch) = window.exit_epoch {
-            draw_window_marker(
-                prediction,
-                ghost,
-                ephemeris,
-                pin,
-                exit_epoch,
-                soi_radius,
-                true,
-                system,
-                origin,
-                scale,
-                gizmos,
-                Color::srgba(1.0, 0.45, 0.25, 0.9),
-            );
-        }
     }
     rendered
-}
-
-fn transition_marker_radius(body: &thalos_physics::types::BodyDefinition) -> f64 {
-    if body.soi_radius_m.is_finite() && body.soi_radius_m > body.radius_m {
-        let min = body.radius_m * 2.0;
-        let max = (body.soi_radius_m * 0.04).max(min);
-        (body.soi_radius_m * 0.012).clamp(min, max)
-    } else {
-        body.radius_m.max(1.0) * 4.0
-    }
-}
-
-fn draw_cross_marker(
-    center: DVec3,
-    radius: f64,
-    color: Color,
-    origin: &RenderOrigin,
-    scale: &WorldScale,
-    gizmos: &mut Gizmos,
-) {
-    for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
-        let a = ((center - axis * radius - origin.position) * scale.0).as_vec3();
-        let b = ((center + axis * radius - origin.position) * scale.0).as_vec3();
-        gizmos.line(a, b, color);
-    }
 }
 
 fn is_focused_ghost(ghost: &Ghost, focus: RenderGhostFocus) -> bool {
@@ -582,18 +443,18 @@ fn render_ghost_segment(
     segment: &NumericSegment,
     is_burn: bool,
     ghost: &Ghost,
-    ephemeris: &dyn BodyStateProvider,
+    snapshot: &MapSnapshot,
     pin: DVec3,
     soi_radius: f64,
     start: f64,
     end: f64,
-    system: &SolarSystemDefinition,
+    system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
 ) -> bool {
     let points = ghost_segment_points(
-        segment, ghost, ephemeris, pin, soi_radius, start, end, origin, scale,
+        segment, ghost, snapshot, pin, soi_radius, start, end, origin, scale,
     );
     if points.len() < 2 {
         return false;
@@ -622,7 +483,7 @@ fn render_ghost_segment(
 fn ghost_segment_points(
     segment: &NumericSegment,
     ghost: &Ghost,
-    ephemeris: &dyn BodyStateProvider,
+    snapshot: &MapSnapshot,
     pin: DVec3,
     soi_radius: f64,
     start: f64,
@@ -657,16 +518,18 @@ fn ghost_segment_points(
         let Some(state) = segment.state_at(t) else {
             continue;
         };
-        let sample = relative_render_point(
+        let Some(sample) = relative_render_point(
             t,
             state.position,
             ghost.body_id,
-            ephemeris,
+            snapshot,
             pin,
             soi_radius,
             origin,
             scale,
-        );
+        ) else {
+            continue;
+        };
 
         if sample.inside {
             points.push((t, sample.position));
@@ -694,13 +557,13 @@ fn relative_render_point(
     time: f64,
     craft_position: DVec3,
     body_id: BodyId,
-    ephemeris: &dyn BodyStateProvider,
+    snapshot: &MapSnapshot,
     pin: DVec3,
     soi_radius: f64,
     origin: &RenderOrigin,
     scale: &WorldScale,
-) -> RelativeRenderPoint {
-    let body_state = ephemeris.query_body(body_id, time);
+) -> Option<RelativeRenderPoint> {
+    let body_state = snapshot.body_state_at(body_id, time)?;
     let relative = craft_position - body_state.position;
     let inside = !soi_radius.is_finite() || relative.length() <= soi_radius * 1.000_001;
     let display_relative = if inside || !soi_radius.is_finite() || soi_radius <= 0.0 {
@@ -711,52 +574,17 @@ fn relative_render_point(
             .map(|direction| direction * soi_radius)
             .unwrap_or(relative)
     };
-    RelativeRenderPoint {
+    Some(RelativeRenderPoint {
         position: ((display_relative + pin - origin.position) * scale.0).as_vec3(),
         inside,
-    }
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_window_marker(
-    prediction: &FlightPlan,
-    ghost: &Ghost,
-    ephemeris: &dyn BodyStateProvider,
-    pin: DVec3,
-    epoch: f64,
-    soi_radius: f64,
-    clamp_to_soi_boundary: bool,
-    system: &SolarSystemDefinition,
-    origin: &RenderOrigin,
-    scale: &WorldScale,
-    gizmos: &mut Gizmos,
-    color: Color,
-) {
-    let Some(state) = prediction.state_at(epoch) else {
-        return;
-    };
-    let body_state = ephemeris.query_body(ghost.body_id, epoch);
-    let mut relative = state.position - body_state.position;
-    if soi_radius.is_finite() && relative.length() > soi_radius * 1.000_001 {
-        if !clamp_to_soi_boundary {
-            return;
-        }
-        relative = relative
-            .try_normalize()
-            .map(|direction| direction * soi_radius)
-            .unwrap_or(relative);
-    }
-    let center = relative + pin;
+// ---------------------------------------------------------------------------
+// Color helpers
+// ---------------------------------------------------------------------------
 
-    let marker_radius = system
-        .bodies
-        .get(ghost.body_id)
-        .map(transition_marker_radius)
-        .unwrap_or(1.0);
-    draw_cross_marker(center, marker_radius, color, origin, scale, gizmos);
-}
-
-fn encounter_color(body_id: BodyId, system: &SolarSystemDefinition, alpha: f32, mix: f32) -> Color {
+fn encounter_color(body_id: BodyId, system: &[BodyDefinition], alpha: f32, mix: f32) -> Color {
     let [r, g, b] = body_color(body_id, system);
     Color::srgba(
         r + (1.0 - r) * mix,
@@ -783,7 +611,7 @@ fn ghost_adjust(color: Color, is_ghost: bool) -> Color {
 fn line_color(
     this: &TrajectorySample,
     other: &TrajectorySample,
-    system: &SolarSystemDefinition,
+    system: &[BodyDefinition],
     alpha: f32,
 ) -> Color {
     // Per-leg anchor relock makes the in-leg anchor uniform, but the
@@ -798,10 +626,6 @@ fn line_color(
     Color::srgba(0.5 * (r0 + r1), 0.5 * (g0 + g1), 0.5 * (b0 + b1), alpha)
 }
 
-fn body_color(id: BodyId, system: &SolarSystemDefinition) -> [f32; 3] {
-    system
-        .bodies
-        .get(id)
-        .map(|bd| bd.color)
-        .unwrap_or([1.0, 1.0, 1.0])
+fn body_color(id: BodyId, system: &[BodyDefinition]) -> [f32; 3] {
+    system.get(id).map(|bd| bd.color).unwrap_or([1.0, 1.0, 1.0])
 }

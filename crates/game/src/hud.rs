@@ -170,10 +170,10 @@ pub fn time_control_panel(
             let ship = sim.simulation.ship_state();
             let anchor_id = sim.simulation.dominant_body();
             let body = &sim.simulation.bodies()[anchor_id];
-            let body_state = sim
-                .simulation
-                .ephemeris()
-                .query_body(anchor_id, sim.simulation.sim_time());
+            let body_state = sim.simulation.ephemeris().state(
+                anchor_id,
+                thalos_physics::canonical::Epoch(sim.simulation.sim_time()),
+            );
             let rel = StateVector {
                 position: ship.position - body_state.position,
                 velocity: ship.velocity - body_state.velocity,

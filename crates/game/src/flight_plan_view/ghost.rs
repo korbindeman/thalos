@@ -11,8 +11,8 @@ use bevy::prelude::*;
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::coords::{RenderOrigin, WorldScale};
+use crate::map_view::MapSnapshot;
 use crate::photo_mode::HideInPhotoMode;
-use crate::rendering::{FrameBodyStates, SimulationState};
 use crate::view::HideInShipView;
 
 use super::view::{FlightPlanView, GhostPhase};
@@ -74,7 +74,7 @@ fn refresh_semantic_ghost_focus(focus: &mut CameraFocus, view: &mut FlightPlanVi
 
 pub(super) fn sync_ghost_bodies(
     mut commands: Commands,
-    sim: Option<Res<SimulationState>>,
+    snapshot: Res<MapSnapshot>,
     scale: Res<WorldScale>,
     mut view: ResMut<FlightPlanView>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -82,8 +82,6 @@ pub(super) fn sync_ghost_bodies(
     mut existing: Query<(Entity, &mut GhostBody)>,
     mut focus: ResMut<CameraFocus>,
 ) {
-    let Some(sim) = sim else { return };
-
     for ghost in view.ghosts_mut().iter_mut() {
         if ghost.phase == GhostPhase::Retired {
             // Retired ghosts with entities get despawned below.
@@ -101,7 +99,7 @@ pub(super) fn sync_ghost_bodies(
             }
         } else {
             // Need to spawn a new ghost entity.
-            let Some(body_def) = sim.system.bodies.get(ghost.body_id) else {
+            let Some(body_def) = snapshot.body_defs.get(ghost.body_id) else {
                 continue;
             };
             let render_radius = (body_def.radius_m * scale.0) as f32;
@@ -165,16 +163,15 @@ pub(super) fn sync_ghost_bodies(
 // ---------------------------------------------------------------------------
 
 pub(super) fn update_ghost_lifecycle(
-    sim: Option<Res<SimulationState>>,
+    snapshot: Res<MapSnapshot>,
     origin: Res<RenderOrigin>,
     mut view: ResMut<FlightPlanView>,
     mut focus: ResMut<CameraFocus>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut ghosts: Query<(&GhostBody, &MeshMaterial3d<StandardMaterial>, &Transform)>,
 ) {
-    let Some(sim) = sim else { return };
-    let sim_time = sim.simulation.sim_time();
-    let warp_speed = sim.simulation.warp.speed().max(1.0);
+    let sim_time = snapshot.epoch.0;
+    let warp_speed = snapshot.warp_speed.max(1.0);
 
     let blend_lead_time = BLEND_LEAD_BASE.max(warp_speed * 2.0);
 
@@ -224,17 +221,17 @@ pub(super) fn update_ghost_transforms(
     origin: Res<RenderOrigin>,
     focus: Res<CameraFocus>,
     scale: Res<WorldScale>,
-    cache: Res<FrameBodyStates>,
+    snapshot: Res<MapSnapshot>,
     view: Res<FlightPlanView>,
     mut query: Query<(Entity, &GhostBody, &mut Transform, &mut Visibility)>,
 ) {
     let cam_dist_render = (focus.distance * scale.0) as f32;
     let min_radius = cam_dist_render * 0.008;
 
-    let body_states = match &cache.states {
-        Some(s) => s.as_slice(),
-        None => return,
-    };
+    if snapshot.body_states.is_empty() {
+        return;
+    }
+    let body_states = snapshot.body_states.as_slice();
 
     for (entity, ghost_comp, mut transform, mut visibility) in &mut query {
         let target_visibility = match focus.target {
