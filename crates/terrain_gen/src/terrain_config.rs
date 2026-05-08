@@ -5,12 +5,13 @@ use serde::Deserialize;
 
 use crate::body_builder::BodyBuilder;
 use crate::body_data::BodyData;
+use crate::cold_desert_field::ColdDesertStyle;
 use crate::cubemap::CubemapFace;
 use crate::feature_compiler::{
-    compile_initial_body_data, AtmosphereSpec, AuthoredFeatureSpec, BodyArchetype,
-    CompositionClass, FeatureCompileError, FeatureCompileOptions, FeatureFootprint, FeatureId,
-    FeatureKind, FeatureLock, FeatureParam, FeatureProjectionConfig, FeatureSeed, HydrosphereSpec,
-    IceInventory, PlanetPhysicalSpec, PlanetTerrainSpec, ScaleRangeM, TerrainIntent,
+    AtmosphereSpec, AuthoredFeatureSpec, BodyArchetype, CompositionClass, FeatureCompileError,
+    FeatureCompileOptions, FeatureFootprint, FeatureId, FeatureKind, FeatureLock, FeatureParam,
+    FeatureProjectionConfig, FeatureSeed, HydrosphereSpec, IceInventory, PlanetPhysicalSpec,
+    PlanetTerrainSpec, ScaleRangeM, TerrainIntent, compile_initial_body_data,
 };
 use crate::surface_field::quantize_unit_to_u8;
 use crate::types::{Composition, IceCapSpec};
@@ -52,6 +53,10 @@ pub struct FeatureTerrainConfig {
     /// dynamic descriptors and are not baked into static terrain cubemaps.
     #[serde(default)]
     pub ice_caps: Vec<IceCapSpec>,
+    /// Optional style override for cold-desert archetypes. Omitted means the
+    /// default cold-desert preset.
+    #[serde(default)]
+    pub cold_desert_style: Option<ColdDesertStyle>,
     #[serde(default)]
     pub authored_features: Vec<AuthoredFeatureConfig>,
 }
@@ -168,6 +173,7 @@ pub fn compile_terrain_config(
                         .unwrap_or(feature.cubemap_resolution),
                     crater_count_scale: options.crater_count_scale,
                     projection: feature.projection.clone(),
+                    cold_desert_style: feature.cold_desert_style.clone().unwrap_or_default(),
                 },
             )
             .map_err(Into::into)

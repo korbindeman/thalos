@@ -10,21 +10,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::body_builder::BodyBuilder;
 use crate::body_data::BodyData;
+use crate::cold_desert_field::{ColdDesertField, ColdDesertStyle};
 use crate::height_generator::{
     ColdDesertBiomeHeightGenerators, HeightGenerator, HeightGeneratorStack, IqDerivativeFbmHeight,
 };
 use crate::seeding::sub_seed;
 use crate::stage::Stage;
 use crate::stages::{
-    BasinDef, BiomeReliefColor, BiomeRule, Biomes, Cratering, Differentiate, DuneSeas, Erosion,
-    MareFlood as MareFloodStage, Megabasin, Regolith, Scarps, SpaceWeather, VaelenImpactColor,
+    BasinDef, BiomeReliefColor, BiomeRule, Biomes, Cratering, Differentiate, DuneSeaCoverageMask,
+    DuneSeas, Erosion, ImpactColorOverprint, MareFlood as MareFloodStage, Megabasin, Regolith,
+    Scarps, SpaceWeather,
 };
 use crate::surface_field::bake_surface_field_into_builder;
 use crate::types::{BiomeParams, Composition, DynamicSurfaceFeature, IceCapSpec, Volcano};
-use crate::vaelen_field::{
-    vaelen_relief_palettes, VaelenColdDesertField, VAELEN_MAT_DARK_BASALT,
-    VAELEN_SHIELD_VOLCANO_HEIGHT_M, VAELEN_SHIELD_VOLCANO_RADIUS_M,
-};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -681,16 +679,18 @@ fn oceanic_homeworld_biomes(ocean_fraction: f32) -> Vec<TerrainBiomeSpec> {
 
 fn generic_terrestrial_biomes(spec: &PlanetTerrainSpec) -> Vec<TerrainBiomeSpec> {
     let relief = spec.physical.gravity_m_s2.recip().clamp(0.05, 0.5) * 1_800.0;
-    vec![TerrainBiomeSpec::new(
-        "biome.basaltic_highland",
-        TerrainBiomeRole::HighlandRegolith,
-        SurfaceMaterialClass::BasalticHighland,
-        [0.30, 0.25, 0.22],
-        0.82,
-    )
-    .with_height(fbm_height(relief, 3.0, 8))
-    .with_feature_budget(FeatureBudget::new(FeatureKind::CrustalProvince, 8, 0.7))
-    .with_feature_budget(FeatureBudget::new(FeatureKind::ImpactBasinArchive, 4, 0.5))]
+    vec![
+        TerrainBiomeSpec::new(
+            "biome.basaltic_highland",
+            TerrainBiomeRole::HighlandRegolith,
+            SurfaceMaterialClass::BasalticHighland,
+            [0.30, 0.25, 0.22],
+            0.82,
+        )
+        .with_height(fbm_height(relief, 3.0, 8))
+        .with_feature_budget(FeatureBudget::new(FeatureKind::CrustalProvince, 8, 0.7))
+        .with_feature_budget(FeatureBudget::new(FeatureKind::ImpactBasinArchive, 4, 0.5)),
+    ]
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -975,6 +975,7 @@ pub struct FeatureCompileOptions {
     /// Multiplies expensive generated populations for iteration bakes.
     pub crater_count_scale: f32,
     pub projection: FeatureProjectionConfig,
+    pub cold_desert_style: ColdDesertStyle,
 }
 
 impl Default for FeatureCompileOptions {
@@ -983,6 +984,7 @@ impl Default for FeatureCompileOptions {
             cubemap_resolution: 0,
             crater_count_scale: 1.0,
             projection: FeatureProjectionConfig::Auto,
+            cold_desert_style: ColdDesertStyle::default(),
         }
     }
 }
@@ -1172,7 +1174,7 @@ fn default_airless_max_crater_radius_m() -> f32 {
 }
 
 fn default_airless_crater_age_bias() -> f64 {
-    1.0
+    2.6
 }
 
 fn default_airless_cubemap_bake_threshold_m() -> f32 {
@@ -1200,7 +1202,7 @@ fn default_airless_chain_segment_count() -> u32 {
 }
 
 fn default_airless_forced_young_count() -> u32 {
-    16
+    5
 }
 
 fn default_airless_mare_target_count() -> u32 {
@@ -1323,6 +1325,12 @@ pub struct ColdDesertProjectionConfig {
     pub dune_strength: f32,
     #[serde(default = "default_cold_desert_base_crater_count")]
     pub base_crater_count: u32,
+    #[serde(default = "default_cold_desert_crater_age_bias")]
+    pub crater_age_bias: f64,
+    #[serde(default = "default_cold_desert_archive_crater_age_bias")]
+    pub archive_crater_age_bias: f64,
+    #[serde(default = "default_cold_desert_forced_young_count")]
+    pub forced_young_count: u32,
     #[serde(default = "default_cold_desert_min_crater_radius_m")]
     pub min_crater_radius_m: f32,
     #[serde(default = "default_cold_desert_max_crater_radius_m")]
@@ -1341,6 +1349,9 @@ impl Default for ColdDesertProjectionConfig {
             channel_strength: default_cold_desert_channel_strength(),
             dune_strength: default_cold_desert_dune_strength(),
             base_crater_count: default_cold_desert_base_crater_count(),
+            crater_age_bias: default_cold_desert_crater_age_bias(),
+            archive_crater_age_bias: default_cold_desert_archive_crater_age_bias(),
+            forced_young_count: default_cold_desert_forced_young_count(),
             min_crater_radius_m: default_cold_desert_min_crater_radius_m(),
             max_crater_radius_m: default_cold_desert_max_crater_radius_m(),
             cubemap_bake_threshold_m: default_cold_desert_cubemap_bake_threshold_m(),
@@ -1370,6 +1381,18 @@ fn default_cold_desert_dune_strength() -> f32 {
 
 fn default_cold_desert_base_crater_count() -> u32 {
     90_000
+}
+
+fn default_cold_desert_crater_age_bias() -> f64 {
+    3.2
+}
+
+fn default_cold_desert_archive_crater_age_bias() -> f64 {
+    4.2
+}
+
+fn default_cold_desert_forced_young_count() -> u32 {
+    2
 }
 
 fn default_cold_desert_min_crater_radius_m() -> f32 {
@@ -1446,7 +1469,9 @@ pub fn generate_initial_manifest(spec: &PlanetTerrainSpec) -> FeatureManifest {
     let mut manifest = FeatureManifest::new(spec.body_id.clone(), spec.root_seed);
     match spec.archetype {
         BodyArchetype::AirlessImpactMoon => add_mira_style_features(&mut manifest, spec),
-        BodyArchetype::ColdDesertFormerlyWet => add_vaelen_style_features(&mut manifest, spec),
+        BodyArchetype::ColdDesertFormerlyWet => {
+            add_cold_desert_formerly_wet_features(&mut manifest, spec)
+        }
         BodyArchetype::AgingOceanicHomeworld => add_homeworld_style_features(&mut manifest, spec),
         BodyArchetype::GenericTerrestrial => add_generic_terrestrial_features(&mut manifest, spec),
     }
@@ -1564,6 +1589,7 @@ fn compile_airless_impact_moon(
         cubemap_resolution,
         crater_count_scale,
         projection,
+        cold_desert_style: _,
     } = options;
     let projection = projection.airless_impact();
     let body_id = &manifest.root;
@@ -1743,6 +1769,7 @@ fn compile_cold_desert_formerly_wet(
         cubemap_resolution,
         crater_count_scale,
         projection,
+        cold_desert_style,
     } = options;
     let body_id = &manifest.root;
     let global_crust = manifest
@@ -1763,23 +1790,26 @@ fn compile_cold_desert_formerly_wet(
         spec.physical.obliquity_deg.unwrap_or(0.0).to_radians(),
     );
 
-    builder.materials = VaelenColdDesertField::material_palette();
-    builder.biome_palettes = vaelen_relief_palettes();
-    let field = VaelenColdDesertField::new(global_crust.seed, projection.clone());
+    let style = cold_desert_style;
+    builder.materials = style.material_palette();
+    builder.biome_palettes = style.relief_palettes();
+    let field = ColdDesertField::with_style(global_crust.seed, projection.clone(), style.clone());
     bake_surface_field_into_builder(&mut builder, &field);
-    builder.volcanoes.push(Volcano {
-        center: VaelenColdDesertField::shield_volcano_center_dir(),
-        radius_m: VAELEN_SHIELD_VOLCANO_RADIUS_M,
-        height_m: VAELEN_SHIELD_VOLCANO_HEIGHT_M,
-        material_id: VAELEN_MAT_DARK_BASALT as u32,
-    });
+    if let Some(shield) = style.shield_volcano {
+        builder.volcanoes.push(Volcano {
+            center: shield.center_dir,
+            radius_m: shield.radius_m,
+            height_m: shield.height_m,
+            material_id: shield.material_id,
+        });
+    }
 
     let basins = megabasin_defs_from_manifest(manifest)?;
     if !basins.is_empty() {
-        // Vaelen's ancient basins should read as buried terrain memory, not
-        // clean radial megabasin stamps. Keep the authored definitions for
+        // Ancient cold-desert basins should read as buried terrain memory,
+        // not clean radial megabasin stamps. Keep the authored definitions for
         // subtle downstream albedo overprint, but leave relief to the crater
-        // archive until the cold-desert basin model grows a non-radial pass.
+        // archive until the basin model grows a non-radial pass.
         builder.megabasins = basins;
     }
 
@@ -1803,7 +1833,7 @@ fn compile_cold_desert_formerly_wet(
                     sfd_break_radius_m: None,
                     min_radius_m: large_archive.scale_range_m.min_m as f64,
                     max_radius_m: large_archive.scale_range_m.max_m as f64,
-                    age_bias: 2.6,
+                    age_bias: projection.archive_crater_age_bias,
                     cubemap_bake_threshold_m: projection.cubemap_bake_threshold_m,
                     secondary_parent_radius_m: large_archive.scale_range_m.max_m * 0.45,
                     secondaries_per_parent: 3,
@@ -1823,7 +1853,7 @@ fn compile_cold_desert_formerly_wet(
     apply_projection_stage(
         &mut builder,
         sub_seed(spec.root_seed, "feature_projection:erosion"),
-        Erosion::vaelen_default(),
+        Erosion::cold_desert_default(),
     );
 
     let total_count = scaled_count(
@@ -1847,22 +1877,23 @@ fn compile_cold_desert_formerly_wet(
                 .scale_range_m
                 .max_m
                 .min(projection.max_crater_radius_m) as f64,
-            age_bias: 1.95,
+            age_bias: projection.crater_age_bias,
             cubemap_bake_threshold_m: projection.cubemap_bake_threshold_m,
             secondary_parent_radius_m: projection.max_crater_radius_m * 0.55,
             secondaries_per_parent: 6,
             saturation_fraction: 0.045,
             chain_count: 1,
             chain_segment_count: 7,
-            forced_young_count: 8,
+            forced_young_count: projection.forced_young_count,
         },
     );
 
     apply_projection_stage(
         &mut builder,
-        sub_seed(spec.root_seed, "feature_projection:vaelen_impact_color"),
-        VaelenImpactColor {
+        sub_seed(spec.root_seed, "feature_projection:impact_color_overprint"),
+        ImpactColorOverprint {
             crater_min_radius_m: projection.cubemap_bake_threshold_m.max(3_000.0),
+            palette: style.impact_palette,
         },
     );
 
@@ -1872,130 +1903,25 @@ fn compile_cold_desert_formerly_wet(
         BiomeReliefColor::default(),
     );
 
-    // Aeolian dune seas. Hand-anchored to lore-appropriate spots inside the
-    // ColdDesertFormerlyWet dune basin, per `docs/gen/vaelen_processes.md`
-    // ("dune seas pool against rougher old terrain"). Run after the biome
-    // color grade so active sand leaves visible albedo variation on the lit
-    // side instead of being flattened by the final palette pass.
-    let dune_regions = vaelen_dune_regions(spec.physical.radius_m, spec.root_seed);
+    // Aeolian dune seas. Preset anchors live in the cold-desert style so other
+    // bodies can replace them without changing the compiler path. Run after
+    // the biome color grade so active sand leaves visible albedo variation.
+    let dune_regions = style.dune_regions(spec.physical.radius_m, spec.root_seed);
+    let dune_mask_field = field.clone();
     apply_projection_stage(
         &mut builder,
         sub_seed(spec.root_seed, "feature_projection:dune_seas"),
         DuneSeas {
             regions: dune_regions,
+            coverage_mask: Some(DuneSeaCoverageMask::from_fn(move |dir| {
+                dune_mask_field.sample_dune_basin_mask(dir).fill
+            })),
         },
     );
 
     register_dynamic_surface_features(spec, &mut builder);
 
     Ok(builder.build())
-}
-
-/// Hand-anchored Vaelen dune-sea regions. A broad basin sheet covers the
-/// hemisphere-scale dune lowland, with smaller lobes adding wind variation.
-/// Visual tuning is iterated via `just bake Vaelen`; orbital read is the
-/// contract.
-fn vaelen_dune_regions(radius_m: f32, root_seed: u64) -> Vec<crate::types::DuneSea> {
-    use crate::types::DuneSea;
-
-    // Tangent-frame helper: project an axis vector onto the tangent plane
-    // at `center` and normalize. Used to keep the wind tangent to the
-    // sphere even when authored as a 3-D direction.
-    fn tangent(center: Vec3, axis: Vec3) -> Vec3 {
-        let projected = axis - center * axis.dot(center);
-        projected.try_normalize().unwrap_or_else(|| {
-            // Fallback: pick an arbitrary tangent if the authored axis is
-            // (nearly) collinear with the center.
-            let up = if center.x.abs() < 0.9 {
-                Vec3::X
-            } else {
-                Vec3::Y
-            };
-            up.cross(center).normalize()
-        })
-    }
-
-    // Basin sheet — the orbital-scale sand sea. The region is intentionally
-    // large; it tracks the half-planet lowland authored in `vaelen_field`.
-    let center_sheet = Vec3::new(0.00, -0.08, 1.0).normalize();
-    let basin_sheet = DuneSea {
-        center: center_sheet,
-        radius_rad: 0.86,
-        feather_rad: 0.20,
-        axis_tangent: tangent(center_sheet, Vec3::new(0.88, -0.42, 0.0)),
-        lambda_draa_m: 68_000.0,
-        amplitude_draa_m: 230.0,
-        lambda_dune_m: 220.0,
-        amplitude_dune_m: 9.0,
-        alpha_skew: 0.84,
-        albedo_crest_lin: [0.90, 0.58, 0.22],
-        crest_strength: 0.32,
-        // Cross-wind warp amplitude in unit-sphere coords. Vaelen wants
-        // broad, sinuous barchanoid bodies rather than tight parallel bars.
-        warp_amp_unit: 0.82 * 68_000.0 / radius_m.max(1.0),
-        warp_freq: 2.1,
-        seed: sub_seed(root_seed, "vaelen.dune_sea.basin_sheet"),
-    };
-
-    // Western gulf — sinuous draa bands pool against the rougher wall.
-    let center_west = Vec3::new(-0.36, -0.04, 0.93).normalize();
-    let west_gulf = DuneSea {
-        center: center_west,
-        radius_rad: 0.40,
-        feather_rad: 0.12,
-        axis_tangent: tangent(center_west, Vec3::new(0.70, -0.64, 0.0)),
-        lambda_draa_m: 52_000.0,
-        amplitude_draa_m: 195.0,
-        lambda_dune_m: 190.0,
-        amplitude_dune_m: 8.2,
-        alpha_skew: 0.83,
-        albedo_crest_lin: [0.88, 0.52, 0.18],
-        crest_strength: 0.30,
-        warp_amp_unit: 0.82 * 52_000.0 / radius_m.max(1.0),
-        warp_freq: 2.7,
-        seed: sub_seed(root_seed, "vaelen.dune_sea.west_gulf"),
-    };
-
-    // Eastern embayment — smaller and rotated, so the basin does not read as
-    // one mechanically repeated wave field.
-    let center_east = Vec3::new(0.40, 0.10, 0.91).normalize();
-    let east_embayment = DuneSea {
-        center: center_east,
-        radius_rad: 0.36,
-        feather_rad: 0.11,
-        axis_tangent: tangent(center_east, Vec3::new(0.86, -0.36, 0.0)),
-        lambda_draa_m: 44_000.0,
-        amplitude_draa_m: 180.0,
-        lambda_dune_m: 170.0,
-        amplitude_dune_m: 7.8,
-        alpha_skew: 0.84,
-        albedo_crest_lin: [0.87, 0.50, 0.17],
-        crest_strength: 0.30,
-        warp_amp_unit: 0.82 * 44_000.0 / radius_m.max(1.0),
-        warp_freq: 3.0,
-        seed: sub_seed(root_seed, "vaelen.dune_sea.east_embayment"),
-    };
-
-    // Active core — keeps the highest-contrast ridges in the basin interior.
-    let center_core = Vec3::new(0.08, -0.22, 0.97).normalize();
-    let active_core = DuneSea {
-        center: center_core,
-        radius_rad: 0.26,
-        feather_rad: 0.09,
-        axis_tangent: tangent(center_core, Vec3::new(0.92, -0.30, 0.0)),
-        lambda_draa_m: 34_000.0,
-        amplitude_draa_m: 210.0,
-        lambda_dune_m: 150.0,
-        amplitude_dune_m: 8.5,
-        alpha_skew: 0.82,
-        albedo_crest_lin: [0.95, 0.62, 0.23],
-        crest_strength: 0.36,
-        warp_amp_unit: 0.78 * 34_000.0 / radius_m.max(1.0),
-        warp_freq: 3.6,
-        seed: sub_seed(root_seed, "vaelen.dune_sea.active_core"),
-    };
-
-    vec![basin_sheet, west_gulf, east_embayment, active_core]
 }
 
 fn apply_projection_stage<S: Stage>(builder: &mut BodyBuilder, seed: u64, stage: S) {
@@ -2297,7 +2223,7 @@ fn add_mira_basin_children(
     );
 }
 
-fn add_vaelen_style_features(manifest: &mut FeatureManifest, spec: &PlanetTerrainSpec) {
+fn add_cold_desert_formerly_wet_features(manifest: &mut FeatureManifest, spec: &PlanetTerrainSpec) {
     let root = manifest.root.clone();
     let radius = spec.physical.radius_m;
 
@@ -2327,7 +2253,7 @@ fn add_vaelen_style_features(manifest: &mut FeatureManifest, spec: &PlanetTerrai
     let lowlands = add_child(
         manifest,
         &root,
-        "northern_sedimentary_lowlands",
+        "sedimentary_lowlands",
         FeatureKind::SedimentaryLowlands,
         TerrainEra::FluvialEpoch,
         FeatureFootprint::Hemisphere {
@@ -2363,60 +2289,6 @@ fn add_vaelen_style_features(manifest: &mut FeatureManifest, spec: &PlanetTerrai
         ScaleRangeM::new(10_000.0, 400_000.0),
         vec![FeatureParam::number("retention", 0.54)],
         FeatureLock::Unlocked,
-    );
-    add_child(
-        manifest,
-        &basins,
-        "southern_pale_megabasin",
-        FeatureKind::Megabasin,
-        TerrainEra::HeavyBombardment,
-        FeatureFootprint::Circle {
-            center: Vec3::new(-0.28, -0.74, 0.61).normalize(),
-            angular_radius_rad: km_to_angle(360.0, radius),
-        },
-        ScaleRangeM::new(60_000.0, 720_000.0),
-        vec![
-            FeatureParam::number("radius_km", 360.0),
-            FeatureParam::number("depth_km", 3.8),
-            FeatureParam::boolean("authored_landmark", true),
-        ],
-        FeatureLock::Placement,
-    );
-    add_child(
-        manifest,
-        &basins,
-        "western_dark_basin",
-        FeatureKind::Megabasin,
-        TerrainEra::HeavyBombardment,
-        FeatureFootprint::Circle {
-            center: Vec3::new(-0.92, -0.10, -0.38).normalize(),
-            angular_radius_rad: km_to_angle(245.0, radius),
-        },
-        ScaleRangeM::new(50_000.0, 490_000.0),
-        vec![
-            FeatureParam::number("radius_km", 245.0),
-            FeatureParam::number("depth_km", 3.2),
-            FeatureParam::boolean("authored_landmark", true),
-        ],
-        FeatureLock::Placement,
-    );
-    add_child(
-        manifest,
-        &basins,
-        "northeast_buried_basin",
-        FeatureKind::Megabasin,
-        TerrainEra::HeavyBombardment,
-        FeatureFootprint::Circle {
-            center: Vec3::new(0.66, 0.31, -0.68).normalize(),
-            angular_radius_rad: km_to_angle(285.0, radius),
-        },
-        ScaleRangeM::new(55_000.0, 570_000.0),
-        vec![
-            FeatureParam::number("radius_km", 285.0),
-            FeatureParam::number("depth_km", 3.4),
-            FeatureParam::boolean("authored_landmark", true),
-        ],
-        FeatureLock::Placement,
     );
     add_child(
         manifest,

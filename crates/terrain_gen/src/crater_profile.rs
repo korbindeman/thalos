@@ -499,6 +499,12 @@ pub(crate) fn crater_profile(
 //      Below the threshold, no relaxation. Above it, linear in excess
 //      diameter × age.
 //
+// 3. Landscape infill / mantling:
+//      The game art direction wants most craters to read as already filled
+//      and weathered, even on bodies without mare flooding. This is a broad
+//      age term independent of crater size: wind-blown sand on Vaelen,
+//      regolith gardening on Mira, and general mass wasting elsewhere.
+//
 // C_DIFF = 14.5 calibrated so a 300 m crater at 3 Ga retains ~7% of depth,
 // while a 10 km crater retains ~99.8% (Fassett & Thomson 2014 Fig. 4).
 // D_RELAX_THRESHOLD = 30 km (simple→complex transition, where relaxation
@@ -513,6 +519,11 @@ const D_RELAX_THRESHOLD_M: f32 = 30_000.0;
 const D_RELAX_REF_M: f32 = 100_000.0;
 const RELAX_TAU_GYR: f32 = 3.0;
 
+const INFILL_START_GYR: f32 = 0.35;
+const INFILL_FULL_GYR: f32 = 3.8;
+const OLD_CRATER_INFILL_RETENTION: f32 = 0.38;
+const OLD_CRATER_SOFTNESS_FLOOR: f32 = 0.68;
+
 /// Morphology softening factor ∈ [0, 1]. Independent of `degradation_factor`:
 ///
 /// - `degradation_factor` shrinks crater amplitude (depth, rim height).
@@ -521,14 +532,16 @@ const RELAX_TAU_GYR: f32 = 3.0;
 ///
 /// Same diffusion kinetics (`κ ≈ 5.5 m²/Myr`) but with a separate constant
 /// chosen so visible softening kicks in well before total depth erasure.
-/// At default tuning, a 5 km crater at 3 Gyr is ~70% softened (clearly
-/// degraded) while a 30 km crater at the same age is barely affected
-/// (~3%) — matches the observed Pohn & Offield class spread.
+/// A broad age floor then makes old, large craters become softened landscape
+/// memory instead of crisp stamps.
 pub(crate) fn degradation_softness(radius_m: f32, age_gyr: f32) -> f32 {
     let d_m = radius_m * 2.0;
     let k = KAPPA_M2_PER_MYR * age_gyr * 1000.0;
     const C_SOFT: f32 = 7270.0;
-    (1.0 - (-C_SOFT * k / (d_m * d_m)).exp()).clamp(0.0, 1.0)
+    let diffusion_softness = 1.0 - (-C_SOFT * k / (d_m * d_m)).exp();
+    let age_softness =
+        smoothstep_range(INFILL_START_GYR, INFILL_FULL_GYR, age_gyr) * OLD_CRATER_SOFTNESS_FLOOR;
+    diffusion_softness.max(age_softness).clamp(0.0, 1.0)
 }
 
 pub(crate) fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
@@ -544,5 +557,9 @@ pub(crate) fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
         (-excess * (age_gyr / RELAX_TAU_GYR)).exp()
     };
 
-    (diffusion * relaxation).max(MIN_RETENTION)
+    let infill = 1.0
+        - smoothstep_range(INFILL_START_GYR, INFILL_FULL_GYR, age_gyr)
+            * (1.0 - OLD_CRATER_INFILL_RETENTION);
+
+    (diffusion * relaxation * infill).max(MIN_RETENTION)
 }

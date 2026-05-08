@@ -160,10 +160,57 @@ impl Channel {
 }
 
 /// A surface material, indexed by `material_id` on features.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Material {
     pub albedo: [f32; 3],
     pub roughness: f32,
+}
+
+/// Palette used by impact color overprint stages on dusty/sedimentary bodies.
+///
+/// The crater relief is still owned by `Cratering`; these colors only add
+/// albedo memory for resolved craters and ancient basins.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct ImpactColorPalette {
+    pub basin_sediment_low: [f32; 3],
+    pub basin_sediment_high: [f32; 3],
+    pub basin_evaporite: [f32; 3],
+    pub basin_wall: [f32; 3],
+    pub basin_rim: [f32; 3],
+    pub basin_ejecta: [f32; 3],
+    pub crater_floor_dark: [f32; 3],
+    pub crater_pale_fill: [f32; 3],
+    pub crater_inner_shadow: [f32; 3],
+    pub crater_wall: [f32; 3],
+    pub crater_rim: [f32; 3],
+    pub crater_outer_rim: [f32; 3],
+    pub crater_ejecta: [f32; 3],
+}
+
+impl ImpactColorPalette {
+    pub const fn vaelen_desert() -> Self {
+        Self {
+            basin_sediment_low: [0.56, 0.40, 0.24],
+            basin_sediment_high: [0.70, 0.60, 0.42],
+            basin_evaporite: [0.79, 0.70, 0.52],
+            basin_wall: [0.27, 0.15, 0.10],
+            basin_rim: [0.60, 0.34, 0.18],
+            basin_ejecta: [0.50, 0.28, 0.16],
+            crater_floor_dark: [0.17, 0.09, 0.065],
+            crater_pale_fill: [0.63, 0.50, 0.34],
+            crater_inner_shadow: [0.13, 0.07, 0.055],
+            crater_wall: [0.25, 0.13, 0.085],
+            crater_rim: [0.74, 0.43, 0.22],
+            crater_outer_rim: [0.58, 0.31, 0.15],
+            crater_ejecta: [0.62, 0.35, 0.18],
+        }
+    }
+}
+
+impl Default for ImpactColorPalette {
+    fn default() -> Self {
+        Self::vaelen_desert()
+    }
 }
 
 /// Data-driven polar ice veneer parameters for a seasonal surface overlay.

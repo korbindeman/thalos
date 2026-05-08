@@ -16,6 +16,7 @@
 //! cubemap.
 
 use glam::Vec3;
+use std::sync::Arc;
 
 use crate::aeolian::{asym_ridge, region_weight};
 use crate::body_builder::BodyBuilder;
@@ -27,10 +28,30 @@ use crate::stages::util::for_face_texels_in_cap_rows;
 use crate::surface_field::{mix3, smoothstep};
 use crate::types::DuneSea;
 
+pub struct DuneSeaCoverageMask {
+    weight_fn: Arc<dyn Fn(Vec3) -> f32 + Send + Sync>,
+}
+
+impl DuneSeaCoverageMask {
+    pub fn from_fn<F>(weight_fn: F) -> Self
+    where
+        F: Fn(Vec3) -> f32 + Send + Sync + 'static,
+    {
+        Self {
+            weight_fn: Arc::new(weight_fn),
+        }
+    }
+
+    fn weight(&self, dir: Vec3) -> f32 {
+        (self.weight_fn)(dir)
+    }
+}
+
 /// Bake stage that paints draa-scale dune ridges + crest tint into a body
 /// from one or more hand-anchored `DuneSea` regions.
 pub struct DuneSeas {
     pub regions: Vec<DuneSea>,
+    pub coverage_mask: Option<DuneSeaCoverageMask>,
 }
 
 impl Stage for DuneSeas {
@@ -67,7 +88,12 @@ impl Stage for DuneSeas {
             for (region_idx, region) in regions.iter().enumerate() {
                 let region_seed =
                     sub_seed(stage_seed ^ region.seed, &format!("region:{region_idx}"));
-                let outer_rad = region.influence_radius_rad();
+                let basin_bound_sheet = self.coverage_mask.is_some() && region.radius_rad >= 0.80;
+                let outer_rad = if basin_bound_sheet {
+                    std::f32::consts::PI
+                } else {
+                    region.influence_radius_rad()
+                };
                 if outer_rad <= 0.0 {
                     continue;
                 }
@@ -101,6 +127,10 @@ impl Stage for DuneSeas {
                             region.radius_rad,
                             region.feather_rad,
                         );
+                        let weight = match (&self.coverage_mask, basin_bound_sheet) {
+                            (Some(mask), true) => mask.weight(dir),
+                            _ => weight,
+                        };
                         if weight <= 0.0 {
                             return;
                         }
@@ -128,10 +158,12 @@ impl Stage for DuneSeas {
                         let along = tangent_disp.dot(region.axis_tangent.normalize_or_zero());
                         let cross_m = tangent_disp.dot(cross_unit) * body_radius_m;
                         let along_m = along * body_radius_m;
+                        let sheet_fill = smoothstep(0.30, 0.72, region.radius_rad);
                         let (sheet_body, sheet_crest, sand_sheet) = layered_dune_sheet(
                             cross_m,
                             along_m,
                             region.lambda_draa_m,
+                            sheet_fill,
                             sub_seed(region_seed, "draa_layered_sheet") as u32,
                         );
                         let (anchor_body, anchor_crest) = barchanoid_dune_field(
@@ -182,8 +214,8 @@ impl Stage for DuneSeas {
                         let crest = (sheet_crest * 0.88 + anchor_crest * 0.03 + ridge_net * 0.08)
                             .clamp(0.0, 1.0);
 
-                        let relief =
-                            (body * 1.08 + crest * 0.46 + sand_sheet * 0.12) * (0.54 + lobe * 0.82);
+                        let relief = (body * 1.08 + crest * 0.46 + sand_sheet * 0.12)
+                            * (0.54 + lobe * 0.82 + sheet_fill * 0.22).clamp(0.0, 1.48);
                         let h_delta = region.amplitude_draa_m * relief * weight;
                         let idx = (y as usize) * res_usize + x as usize;
                         height_slice[idx] += h_delta;
@@ -192,11 +224,11 @@ impl Stage for DuneSeas {
                         // can run after the biome color pass. Interdune
                         // areas are darker/rustier, while crests pull toward
                         // the active-sand color.
-                        let tint_profile =
-                            (sand_sheet * 0.86 + body * 0.58 + crest * 0.20) * (0.64 + lobe * 0.52);
+                        let tint_profile = (sand_sheet * 0.50 + body * 0.66 + crest * 0.48)
+                            * (0.64 + lobe * 0.52 + sheet_fill * 0.18);
                         let tint_strength =
-                            (region.crest_strength.max(0.0) * 2.65 * tint_profile * weight)
-                                .clamp(0.0, 0.68);
+                            (region.crest_strength.max(0.0) * 3.05 * tint_profile * weight)
+                                .clamp(0.0, 0.74);
                         if tint_strength > 0.0 {
                             let cur = albedo_slice[idx];
                             let alpha = cur[3].max(1.0e-5);
@@ -209,7 +241,7 @@ impl Stage for DuneSeas {
                             let dune_color = mix3(
                                 interdune,
                                 region.albedo_crest_lin,
-                                (crest * 0.22 + body * 0.30 + sand_sheet * 0.30 + lobe * 0.12)
+                                (crest * 0.46 + body * 0.30 + sand_sheet * 0.14 + lobe * 0.10)
                                     .clamp(0.0, 1.0),
                             );
                             let graded = mix3(base, dune_color, tint_strength);
@@ -293,12 +325,18 @@ fn barchanoid_dune_field(
     (body.clamp(0.0, 1.0), crest.clamp(0.0, 1.0))
 }
 
-fn layered_dune_sheet(cross_m: f32, along_m: f32, lambda_m: f32, seed: u32) -> (f32, f32, f32) {
+fn layered_dune_sheet(
+    cross_m: f32,
+    along_m: f32,
+    lambda_m: f32,
+    sheet_fill: f32,
+    seed: u32,
+) -> (f32, f32, f32) {
     let lambda = lambda_m.max(1.0);
     let u = cross_m / lambda;
     let v = along_m / lambda;
 
-    let sand_sheet = smoothstep(
+    let raw_sand_sheet = smoothstep(
         -0.42,
         0.46,
         fbm2(
@@ -318,9 +356,12 @@ fn layered_dune_sheet(cross_m: f32, along_m: f32, lambda_m: f32, seed: u32) -> (
                 2.1,
             ) * 0.26,
     );
-    if sand_sheet <= 0.001 {
-        return (0.0, 0.0, 0.0);
-    }
+    // Broad basin sheets should read like sand pushed all the way to a
+    // confining wall. Keep a low supply floor for large regions while
+    // leaving small active lobes free to break into islands.
+    let sheet_fill = sheet_fill.clamp(0.0, 1.0);
+    let sand_floor = sheet_fill * 0.46;
+    let sand_sheet = (raw_sand_sheet + (1.0 - raw_sand_sheet) * sand_floor).clamp(0.0, 1.0);
 
     let wavelength_jitter = (1.0
         + fbm2(
@@ -348,7 +389,7 @@ fn layered_dune_sheet(cross_m: f32, along_m: f32, lambda_m: f32, seed: u32) -> (
             0.52,
             2.1,
         ) * 0.34;
-    let train_mask = smoothstep(
+    let raw_train_mask = smoothstep(
         -0.22,
         0.50,
         fbm2(
@@ -369,6 +410,8 @@ fn layered_dune_sheet(cross_m: f32, along_m: f32, lambda_m: f32, seed: u32) -> (
             ) * 0.34
             + sand_sheet * 0.28,
     );
+    let train_floor = sheet_fill * 0.38;
+    let train_mask = (raw_train_mask + (1.0 - raw_train_mask) * train_floor).clamp(0.0, 1.0);
 
     let phase = u / wavelength_jitter
         + warp
@@ -389,7 +432,7 @@ fn layered_dune_sheet(cross_m: f32, along_m: f32, lambda_m: f32, seed: u32) -> (
             2.0,
         ) * 0.16;
     let ridge = asym_ridge(phase, 0.84);
-    let break_mask = smoothstep(
+    let raw_break_mask = smoothstep(
         -0.18,
         0.54,
         fbm2(
@@ -409,10 +452,16 @@ fn layered_dune_sheet(cross_m: f32, along_m: f32, lambda_m: f32, seed: u32) -> (
                 2.1,
             ) * 0.20,
     );
+    let break_floor = sheet_fill * 0.28;
+    let break_mask = (raw_break_mask + (1.0 - raw_break_mask) * break_floor).clamp(0.0, 1.0);
 
-    let body = smoothstep(0.22, 0.88, ridge) * sand_sheet * train_mask * (0.42 + break_mask * 0.72)
-        + sand_sheet * train_mask * 0.26;
-    let crest = smoothstep(0.70, 0.975, ridge) * sand_sheet * train_mask * break_mask * 0.76;
+    let body = smoothstep(0.18, 0.84, ridge) * sand_sheet * train_mask * (0.50 + break_mask * 0.68)
+        + sand_sheet * train_mask * (0.18 + sheet_fill * 0.08);
+    let crest = smoothstep(0.62, 0.965, ridge)
+        * sand_sheet
+        * train_mask
+        * (0.32 + break_mask * 0.68)
+        * 0.84;
 
     (body.clamp(0.0, 1.0), crest.clamp(0.0, 1.0), sand_sheet)
 }

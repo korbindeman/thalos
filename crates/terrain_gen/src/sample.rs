@@ -305,7 +305,6 @@ fn crater_profile_at(crater: &Crater, dir: Vec3, body_radius_m: f32) -> Option<f
 // cannot afford Pike morphometry per cell, and explicit craters don't need
 // to match this simpler family because they're above the detail threshold.
 
-const FRESH_AGE_GYR: f32 = 0.1;
 const SIMPLE_DEPTH_RATIO: f32 = 0.2;
 const SIMPLE_RIM_RATIO: f32 = 0.04;
 const SIMPLE_INTERIOR_EXPONENT: f32 = 2.5;
@@ -495,8 +494,10 @@ fn visit_detail_cell(
     } else {
         SIMPLE_DEPTH_RATIO
     };
-    let depth = diameter_m * depth_ratio;
-    let rim = diameter_m * SIMPLE_RIM_RATIO;
+    let age_gyr = u_age * params.body_age_gyr;
+    let degradation = degradation_factor(radius_m, age_gyr);
+    let depth = diameter_m * depth_ratio * degradation;
+    let rim = diameter_m * SIMPLE_RIM_RATIO * degradation;
 
     let (h_m, dh_dr) = if d_over_dsc >= 1.0 {
         detail_complex_profile(r, depth, rim)
@@ -504,13 +505,6 @@ fn visit_detail_cell(
         detail_simple_profile(r, depth, rim)
     };
     let h_total = h_m + rim_irregular * rim;
-
-    // Age blend: young craters (age < FRESH_AGE_GYR) retain their crisp
-    // maturity; mature craters are tuned down. This doesn't affect height
-    // directly in our CPU sampler (we only track height + gradient) but
-    // we compute it so the structure stays symmetric with the shader.
-    let _age_gyr = u_age * params.body_age_gyr;
-    let _ = FRESH_AGE_GYR;
 
     *height_acc += h_total * lod_weight;
 

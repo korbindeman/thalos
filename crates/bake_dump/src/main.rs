@@ -35,11 +35,11 @@ use std::process::{Child, Command};
 use glam::Vec3;
 use image::{ImageBuffer, Rgb, RgbImage};
 use thalos_physics::parsing::load_solar_system_from_dir;
-use thalos_terrain_gen::cubemap::{dir_to_face_uv, CubemapFace};
+use thalos_terrain_gen::cubemap::{CubemapFace, dir_to_face_uv};
 use thalos_terrain_gen::{
-    compile_terrain_config, generate_initial_manifest, BodyArchetype, BodyData,
-    DynamicSurfaceFeature, FeatureId, FeatureProjectionConfig, TerrainCompileContext,
-    TerrainCompileOptions, TerrainConfig, VaelenColdDesertField,
+    BodyArchetype, BodyData, ColdDesertField, DynamicSurfaceFeature, FeatureId,
+    FeatureProjectionConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+    compile_terrain_config, generate_initial_manifest,
 };
 
 // ---------------------------------------------------------------------------
@@ -380,19 +380,19 @@ fn dump_debug_set(
     };
     write_equirect(out.join("material-equirect.png"), equirect_w, mat_shade);
 
-    let Some(field) = vaelen_biome_field(body_def) else {
+    let Some(field) = cold_desert_biome_field(body_def) else {
         return;
     };
-    let biome_shade = |dir: Vec3| -> [u8; 3] { field.sample_biomes(dir).debug_color_srgb() };
+    let biome_shade = |dir: Vec3| -> [u8; 3] { field.debug_biome_color_srgb(dir) };
     write_equirect(out.join("biome-equirect.png"), equirect_w, biome_shade);
 
     let suture_shade = |dir: Vec3| -> [u8; 3] { field.sample_suture_debug(dir).debug_color_srgb() };
     write_equirect(out.join("suture-equirect.png"), equirect_w, suture_shade);
 }
 
-fn vaelen_biome_field(
+fn cold_desert_biome_field(
     body: &thalos_physics::types::BodyDefinition,
-) -> Option<VaelenColdDesertField> {
+) -> Option<ColdDesertField> {
     let TerrainConfig::Feature(feature) = &body.terrain else {
         return None;
     };
@@ -412,7 +412,11 @@ fn vaelen_biome_field(
         }
     };
 
-    Some(VaelenColdDesertField::new(crust.seed, projection))
+    Some(ColdDesertField::with_style(
+        crust.seed,
+        projection,
+        feature.cold_desert_style.clone().unwrap_or_default(),
+    ))
 }
 
 fn remove_legacy_outputs(out: &Path, debug: bool) {

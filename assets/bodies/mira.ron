@@ -20,6 +20,8 @@
         ],
         projection: AirlessImpact((
             base_crater_count: 280000,
+            crater_age_bias: 2.6,
+            forced_young_count: 5,
             min_crater_radius_m: 1500.0,
             max_crater_radius_m: 80000.0,
             cubemap_bake_threshold_m: 1500.0,

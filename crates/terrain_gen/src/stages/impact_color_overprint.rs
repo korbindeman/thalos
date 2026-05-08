@@ -9,25 +9,27 @@ use crate::noise::fbm3;
 use crate::seeding::splitmix64;
 use crate::stage::Stage;
 use crate::surface_field::{mix3, smoothstep};
-use crate::types::Crater;
+use crate::types::{Crater, ImpactColorPalette};
 
-/// Vaelen-specific color/provenance overprint for resolved impacts.
+/// Cold-desert color/provenance overprint for resolved impacts.
 ///
 /// `Cratering` owns the relief. This stage only adds soft albedo memory: no
 /// material-id rewrites, so impacts do not turn into categorical paint masks.
 #[derive(Debug, Clone, Deserialize)]
-pub struct VaelenImpactColor {
+pub struct ImpactColorOverprint {
     /// Minimum crater radius that gets a baked albedo signature.
     ///
     /// Craters below this remain height/SSBO detail. Craters at and above this
     /// are large enough to be resolved in the cubemap, so they need color
     /// structure or they disappear under high sun.
     pub crater_min_radius_m: f32,
+    #[serde(default)]
+    pub palette: ImpactColorPalette,
 }
 
-impl Stage for VaelenImpactColor {
+impl Stage for ImpactColorOverprint {
     fn name(&self) -> &str {
-        "vaelen_impact_color"
+        "impact_color_overprint"
     }
 
     fn apply(&self, builder: &mut BodyBuilder) {
@@ -85,7 +87,7 @@ impl Stage for VaelenImpactColor {
                                 let idx = (local_y * res + x) as usize;
                                 let color = &mut albedo_strip[idx];
                                 let mut rgb = [color[0], color[1], color[2]];
-                                mark.apply(dir, angular_dist, radius_m, &mut rgb);
+                                mark.apply(dir, angular_dist, radius_m, &self.palette, &mut rgb);
                                 color[0] = rgb[0].clamp(0.02, 0.92);
                                 color[1] = rgb[1].clamp(0.02, 0.92);
                                 color[2] = rgb[2].clamp(0.02, 0.92);
@@ -119,10 +121,17 @@ impl ImpactMark {
         }
     }
 
-    fn apply(&self, dir: Vec3, angular_dist: f32, body_radius_m: f32, albedo: &mut [f32; 3]) {
+    fn apply(
+        &self,
+        dir: Vec3,
+        angular_dist: f32,
+        body_radius_m: f32,
+        palette: &ImpactColorPalette,
+        albedo: &mut [f32; 3],
+    ) {
         match self {
-            Self::Basin(mark) => mark.apply(dir, angular_dist, body_radius_m, albedo),
-            Self::Crater(mark) => mark.apply(dir, angular_dist, body_radius_m, albedo),
+            Self::Basin(mark) => mark.apply(dir, angular_dist, body_radius_m, palette, albedo),
+            Self::Crater(mark) => mark.apply(dir, angular_dist, body_radius_m, palette, albedo),
         }
     }
 }
@@ -150,7 +159,14 @@ impl BasinMark {
         }
     }
 
-    fn apply(&self, dir: Vec3, angular_dist: f32, body_radius_m: f32, albedo: &mut [f32; 3]) {
+    fn apply(
+        &self,
+        dir: Vec3,
+        angular_dist: f32,
+        body_radius_m: f32,
+        palette: &ImpactColorPalette,
+        albedo: &mut [f32; 3],
+    ) {
         let t_raw = angular_dist * body_radius_m / self.radius_m.max(1.0);
         if t_raw > 2.65 {
             return;
@@ -191,21 +207,25 @@ impl BasinMark {
         };
 
         if floor_w > 0.01 {
-            let sediment = mix3([0.56, 0.40, 0.24], [0.70, 0.60, 0.42], inner_floor_w * 0.45);
+            let sediment = mix3(
+                palette.basin_sediment_low,
+                palette.basin_sediment_high,
+                inner_floor_w * 0.45,
+            );
             *albedo = mix3(*albedo, sediment, floor_w * 0.16);
         }
         if inner_floor_w > 0.01 && self.evaporite_bias > 0.35 {
             let evap = inner_floor_w * (0.06 + 0.10 * self.evaporite_bias);
-            *albedo = mix3(*albedo, [0.79, 0.70, 0.52], evap);
+            *albedo = mix3(*albedo, palette.basin_evaporite, evap);
         }
         if wall_w > 0.01 {
-            *albedo = mix3(*albedo, [0.27, 0.15, 0.10], wall_w * 0.08);
+            *albedo = mix3(*albedo, palette.basin_wall, wall_w * 0.08);
         }
         if rim_w > 0.01 {
-            *albedo = mix3(*albedo, [0.60, 0.34, 0.18], rim_w * 0.10);
+            *albedo = mix3(*albedo, palette.basin_rim, rim_w * 0.10);
         }
         if ejecta_w > 0.01 {
-            *albedo = mix3(*albedo, [0.50, 0.28, 0.16], ejecta_w * 0.07);
+            *albedo = mix3(*albedo, palette.basin_ejecta, ejecta_w * 0.07);
         }
     }
 }
@@ -225,7 +245,7 @@ impl CraterMark {
         let center = crater.center.normalize();
         let seed = center_seed(center);
         let (tangent, bitangent) = tangent_frame(center);
-        let age_fill = smoothstep(1.2, 4.0, crater.age_gyr);
+        let age_fill = smoothstep(0.45, 2.6, crater.age_gyr);
         Self {
             center,
             radius_m: crater.radius_m,
@@ -233,11 +253,18 @@ impl CraterMark {
             seed: seed as u32,
             tangent,
             bitangent,
-            pale_fill: age_fill * unit_from_seed(seed, 21),
+            pale_fill: age_fill * (0.55 + 0.45 * unit_from_seed(seed, 21)),
         }
     }
 
-    fn apply(&self, dir: Vec3, angular_dist: f32, body_radius_m: f32, albedo: &mut [f32; 3]) {
+    fn apply(
+        &self,
+        dir: Vec3,
+        angular_dist: f32,
+        body_radius_m: f32,
+        palette: &ImpactColorPalette,
+        albedo: &mut [f32; 3],
+    ) {
         let t_raw = angular_dist * body_radius_m / self.radius_m.max(1.0);
         if t_raw > 2.75 {
             return;
@@ -254,7 +281,7 @@ impl CraterMark {
         let age_soft = smoothstep(0.4, 3.8, self.age_gyr);
         let freshness = 1.0 - age_soft;
         let resolved = smoothstep(3_000.0, 16_000.0, self.radius_m);
-        let contrast = 0.68 + freshness * 0.32 + resolved * 0.22;
+        let contrast = 0.10 + resolved * 0.08 + freshness * 0.82;
         let ejecta_w = if t_raw > 1.0 {
             let fade = smoothstep(2.75, 1.0, t_raw);
             let streak = 0.35
@@ -268,47 +295,53 @@ impl CraterMark {
         };
 
         if floor_w > 0.01 {
-            let dark_floor = floor_w * (0.20 - self.pale_fill * 0.05) * contrast;
-            *albedo = mix3(*albedo, [0.17, 0.09, 0.065], dark_floor);
+            let dark_floor = floor_w * (0.16 - self.pale_fill * 0.09).max(0.035) * contrast;
+            *albedo = mix3(*albedo, palette.crater_floor_dark, dark_floor);
 
-            let pale_w = inner_floor_w * self.pale_fill * 0.16;
+            let pale_w = inner_floor_w * self.pale_fill * (0.18 + age_soft * 0.14);
             if pale_w > 0.01 {
-                *albedo = mix3(*albedo, [0.63, 0.50, 0.34], pale_w);
+                *albedo = mix3(*albedo, palette.crater_pale_fill, pale_w);
             }
         }
         if inner_wall_shadow_w > 0.01 {
             *albedo = mix3(
                 *albedo,
-                [0.13, 0.07, 0.055],
+                palette.crater_inner_shadow,
                 inner_wall_shadow_w * 0.16 * contrast,
             );
         }
         if wall_w > 0.01 {
             *albedo = mix3(
                 *albedo,
-                [0.25, 0.13, 0.085],
-                wall_w * (0.11 + age_soft * 0.05) * contrast,
+                palette.crater_wall,
+                wall_w * (0.10 + freshness * 0.05) * contrast,
             );
         }
         if rim_w > 0.01 {
             *albedo = mix3(
                 *albedo,
-                [0.74, 0.43, 0.22],
-                rim_w * (0.20 + freshness * 0.06) * contrast,
+                palette.crater_rim,
+                rim_w * (0.12 + freshness * 0.12) * contrast,
             );
         }
         if outer_rim_w > 0.01 {
-            *albedo = mix3(*albedo, [0.58, 0.31, 0.15], outer_rim_w * 0.10 * contrast);
+            *albedo = mix3(
+                *albedo,
+                palette.crater_outer_rim,
+                outer_rim_w * 0.10 * contrast,
+            );
         }
         if ejecta_w > 0.01 {
             *albedo = mix3(
                 *albedo,
-                [0.62, 0.35, 0.18],
+                palette.crater_ejecta,
                 ejecta_w * (0.10 + freshness * 0.05) * contrast,
             );
         }
     }
 }
+
+pub type VaelenImpactColor = ImpactColorOverprint;
 
 fn tangent_frame(center: Vec3) -> (Vec3, Vec3) {
     let up = if center.y.abs() < 0.9 {

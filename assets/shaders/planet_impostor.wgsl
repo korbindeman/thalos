@@ -363,9 +363,35 @@ const COMPLEX_PEAK_HEIGHT_FRAC: f32 = 0.15;
 const COMPLEX_PEAK_BASE_FRAC: f32   = 0.15;
 const COMPLEX_MIN_DEPTH_RATIO: f32  = 0.05;
 
+const CRATER_KAPPA_M2_PER_MYR: f32 = 5.5;
+const CRATER_C_DIFF: f32 = 14.5;
+const CRATER_MIN_RETENTION: f32 = 0.03;
+const CRATER_D_RELAX_THRESHOLD_M: f32 = 30000.0;
+const CRATER_D_RELAX_REF_M: f32 = 100000.0;
+const CRATER_RELAX_TAU_GYR: f32 = 3.0;
+const CRATER_INFILL_START_GYR: f32 = 0.35;
+const CRATER_INFILL_FULL_GYR: f32 = 3.8;
+const CRATER_OLD_INFILL_RETENTION: f32 = 0.38;
+
 fn complex_depth_ratio(d_over_dsc: f32) -> f32 {
     let t = exp(-max(d_over_dsc - 1.0, 0.0) / 3.0);
     return COMPLEX_MIN_DEPTH_RATIO + (SIMPLE_DEPTH_RATIO - COMPLEX_MIN_DEPTH_RATIO) * t;
+}
+
+fn crater_degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
+    let d_m = radius_m * 2.0;
+    let k = CRATER_KAPPA_M2_PER_MYR * age_gyr * 1000.0;
+    let diffusion = exp(-CRATER_C_DIFF * k / max(d_m * d_m, 1.0));
+
+    var relaxation = 1.0;
+    if d_m > CRATER_D_RELAX_THRESHOLD_M {
+        let excess = (d_m - CRATER_D_RELAX_THRESHOLD_M) / CRATER_D_RELAX_REF_M;
+        relaxation = exp(-excess * (age_gyr / CRATER_RELAX_TAU_GYR));
+    }
+
+    let infill_age = smoothstep(CRATER_INFILL_START_GYR, CRATER_INFILL_FULL_GYR, age_gyr);
+    let infill = 1.0 - infill_age * (1.0 - CRATER_OLD_INFILL_RETENTION);
+    return max(diffusion * relaxation * infill, CRATER_MIN_RETENTION);
 }
 
 fn simple_profile(r: f32, depth: f32, rim: f32) -> vec2<f32> {
@@ -463,11 +489,11 @@ struct CraterAccum {
 // Per-crater albedo signature used by the SSBO layer. Returns a
 // signed scalar that should be folded into `albedo_mod`. `t` is the radial
 // distance from the crater center in units of crater radius. `freshness`
-// is in [0,1] (1 = pristine, 0 = mature) — older craters keep about half
-// of the contrast a fresh crater has, matching the Pass 1.5 CPU path in
+// is in [0,1] (1 = pristine, 0 = mature) — older craters keep only muted
+// contrast, matching the Pass 1.5 CPU path in
 // `space_weather.rs`.
 fn crater_albedo_delta(t: f32, freshness: f32) -> f32 {
-    let strength = 0.55 + 0.45 * freshness;
+    let strength = 0.22 + 0.78 * freshness;
     var delta: f32 = 0.0;
     if t < 0.55 {
         delta = delta - 0.85 * (1.0 - t / 0.55);
@@ -528,11 +554,12 @@ fn apply_ssbo_crater(
     let proj = center - cos_theta * p_unit;
     let proj_len2 = dot(proj, proj);
 
-    // Morphology branch: d/d_sc decides simple vs complex profile. The baker
-    // gave us `depth_m` and `rim_height_m` already; we feed them in directly
-    // rather than re-deriving from ratios.
-    let depth = crater.depth_m;
-    let rim = crater.rim_height_m;
+    // Morphology branch: d/d_sc decides simple vs complex profile. The stored
+    // depth/rim are pristine dimensions; apply the same age degradation used
+    // by the bake and CPU sample paths before evaluating the SSBO crater.
+    let degradation = crater_degradation_factor(crater.radius_m, crater.age_gyr);
+    let depth = crater.depth_m * degradation;
+    let rim = crater.rim_height_m * degradation;
     let d_over_dsc = diameter_m / max(detail.d_sc_m, 1.0);
 
     var hd: vec2<f32>;
@@ -604,7 +631,7 @@ fn apply_ssbo_crater(
                     if t_near > 0.0 { t_hit = t_near; }
                 }
                 if t_hit > 0.0 {
-                    let delta_h = crater.rim_height_m - h_m;
+                    let delta_h = rim - h_m;
                     let lhs = delta_h * cos_sun;
                     let rhs = t_hit * crater.radius_m * sin_sun;
                     if lhs > rhs {

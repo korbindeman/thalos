@@ -195,12 +195,9 @@ impl Stage for SpaceWeather {
         let young_threshold = self.young_crater_age_threshold;
 
         // Per-crater albedo signature for ALL baked craters (not just young).
-        // Real lunar craters retain visible color contrast for billions of
-        // years: brighter rim/upper wall (continually micro-exposed bedrock),
-        // darker floor (impact melt + dust pond), brighter ejecta apron.
-        // PERSISTENCE_FLOOR controls how much of the fresh contrast ancient
-        // craters retain.
-        const PERSISTENCE_FLOOR: f32 = 0.55;
+        // Old craters retain only muted material memory; the visible contrast
+        // should be dominated by the sparse genuinely fresh population.
+        const PERSISTENCE_FLOOR: f32 = 0.22;
         // Weights for the radial zones. Floor darkening reads strongly, rim
         // crest is the primary visible feature.
         const FLOOR_MAX: f32 = 0.85;

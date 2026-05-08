@@ -111,10 +111,10 @@ fn default_slope_scale() -> f32 {
 }
 
 impl Erosion {
-    /// Tuning starting point for Vaelen (`ColdDesertFormerlyWet`,
-    /// R≈1130 km, default ~2048² faces, ~0.87 km/texel). Iterate from
-    /// `just bake vaelen` and read `height-equirect.png`.
-    pub fn vaelen_default() -> Self {
+    /// Tuning starting point for cold, formerly wet desert bodies. The preset
+    /// is currently validated against Vaelen (`ColdDesertFormerlyWet`,
+    /// R≈1130 km, default ~2048² faces, ~0.87 km/texel).
+    pub fn cold_desert_default() -> Self {
         Self {
             scale_m: 30_000.0,
             strength: 0.04,
@@ -124,6 +124,10 @@ impl Erosion {
             mean_amp_m: 2_000.0,
             slope_scale: 0.3,
         }
+    }
+
+    pub fn vaelen_default() -> Self {
+        Self::cold_desert_default()
     }
 
     fn to_filter_params(&self) -> ErosionFilterParams {

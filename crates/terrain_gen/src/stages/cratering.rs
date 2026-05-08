@@ -194,9 +194,9 @@ pub struct Cratering {
     pub max_radius_m: f64,
     /// Controls the age distribution skew toward older craters: age =
     /// body_age × (1 − u^age_bias). Larger values bias more strongly
-    /// toward old. Lunar surfaces want ~2.0 (roughly half ancient,
-    /// half distributed through later time), not 4.0 (which degrades
-    /// small craters out of the visible population).
+    /// toward old. Most bodies should read as old surfaces with only a
+    /// sparse fresh crater budget; use lower values only for deliberately
+    /// young resurfaced terrain.
     #[serde(default = "default_age_bias")]
     pub age_bias: f64,
     pub cubemap_bake_threshold_m: f32,
@@ -234,7 +234,7 @@ pub struct Cratering {
 }
 
 fn default_age_bias() -> f64 {
-    2.0
+    2.8
 }
 fn default_secondary_parent_threshold() -> f32 {
     50_000.0
@@ -252,7 +252,7 @@ fn default_chain_segment_count() -> u32 {
     10
 }
 fn default_forced_young_count() -> u32 {
-    16
+    6
 }
 
 impl Stage for Cratering {
@@ -445,10 +445,12 @@ impl Stage for Cratering {
                 // Random direction in tangent plane.
                 let phi = rng.next_f64() as f32 * std::f32::consts::TAU;
                 let dir = tangent * phi.cos() + bitangent * phi.sin();
-                // Chain age — chains are typically young (the impactor's
-                // disruption was a single recent event) so they're
-                // morphologically fresh and stand out.
-                let chain_age = (body_age_gyr as f64 * rng.next_f64() * 0.15) as f32;
+                // Chain age — each chain is one event, but not necessarily
+                // recent. Bias with the same age distribution as primaries
+                // so catenae usually read as softened terrain memory instead
+                // of guaranteed fresh scars.
+                let chain_u = rng.next_f64();
+                let chain_age = (body_age_gyr as f64 * (1.0 - chain_u.powf(age_bias))) as f32;
                 // Pick a single base radius per chain so all members read
                 // as siblings; jitter ±25% per crater for variety.
                 let base_r = chain_min_r + rng.next_f64() as f32 * (chain_max_r - chain_min_r);
