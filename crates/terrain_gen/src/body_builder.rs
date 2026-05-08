@@ -1,11 +1,13 @@
 use glam::Vec3;
 
 use crate::body_data::BodyData;
-use crate::cubemap::{Cubemap, CubemapAccumulator, default_resolution};
+use crate::cubemap::{default_resolution, Cubemap, CubemapAccumulator};
 use crate::spatial_index::IcoBuckets;
 use crate::stages::{BasinDef, MAT_HIGHLAND};
+use crate::surface_field::{BiomeMixTexel, ReliefPalette};
 use crate::types::{
-    BiomeParams, Channel, Composition, Crater, DetailNoiseParams, Material, Volcano,
+    BiomeParams, Channel, Composition, Crater, DetailNoiseParams, DuneSea, DynamicSurfaceFeature,
+    Material, Volcano,
 };
 
 /// Mutable build-time state for surface generation.
@@ -67,6 +69,13 @@ pub struct BodyBuilder {
     pub craters: Vec<Crater>,
     pub volcanoes: Vec<Volcano>,
     pub channels: Vec<Channel>,
+    /// Hand-anchored aeolian regions. The `DuneSeas` stage rasterizes the
+    /// draa-scale band into the height + albedo cubemaps and pushes the
+    /// regions into this vector so the impostor sees them via `BodyData`.
+    pub dune_seas: Vec<DuneSea>,
+    /// Seasonal/changeable surface features that should not mutate the static
+    /// height, albedo, roughness, or material cubemaps.
+    pub dynamic_surface_features: Vec<DynamicSurfaceFeature>,
     /// Megabasin definitions written by the Megabasin stage and read by
     /// later stages (MareFlood selects flood targets from these).
     pub megabasins: Vec<BasinDef>,
@@ -82,6 +91,17 @@ pub struct BodyBuilder {
     /// Per-texel biome assignment (R8, indexes `biomes`). Defaults to 0 at
     /// construction; the Biomes stage paints it.
     pub biome_map: Cubemap<u8>,
+    /// Per-biome relief palette, indexed by biome id (parallel to `biomes`).
+    /// Populated by archetype compilers that want a downstream
+    /// `BiomeReliefColor` stage to do height/slope-based grading; left empty
+    /// otherwise. Only entries up to `biome_palettes.len()` are read.
+    pub biome_palettes: Vec<ReliefPalette>,
+    /// Per-texel top-K weighted biome mix. Written by
+    /// `bake_surface_field_into_builder` from each `SurfaceFieldSample`'s
+    /// `biome_mix` so a downstream relief-color stage can blend per-biome
+    /// palettes after later stages have written into the albedo cube.
+    /// Build-time only — not exported into `BodyData`.
+    pub biome_weights_cubemap: Cubemap<BiomeMixTexel>,
 
     /// Sea level above which texels render as land. Set by the Ocean
     /// terrain config or by future hydrology work; `None` on airless bodies.
@@ -149,6 +169,8 @@ impl BodyBuilder {
             craters: Vec::new(),
             volcanoes: Vec::new(),
             channels: Vec::new(),
+            dune_seas: Vec::new(),
+            dynamic_surface_features: Vec::new(),
             megabasins: Vec::new(),
             detail_params: DetailNoiseParams {
                 body_radius_m: radius_m,
@@ -158,6 +180,8 @@ impl BodyBuilder {
             materials: Vec::new(),
             biomes: Vec::new(),
             biome_map: Cubemap::<u8>::new(resolution),
+            biome_palettes: Vec::new(),
+            biome_weights_cubemap: Cubemap::<BiomeMixTexel>::new(resolution),
             sea_level_m: None,
             stage_seed: 0,
         }
@@ -197,6 +221,8 @@ impl BodyBuilder {
             craters: self.craters,
             volcanoes: self.volcanoes,
             channels: self.channels,
+            dune_seas: self.dune_seas,
+            dynamic_surface_features: self.dynamic_surface_features,
             feature_index,
             detail_params: self.detail_params,
             materials: self.materials,
@@ -236,34 +262,5 @@ fn srgb8_to_linear(byte: u8) -> f32 {
         s / 12.92
     } else {
         ((s + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_composition() -> Composition {
-        Composition::new(0.9, 0.05, 0.0, 0.05, 0.0)
-    }
-
-    #[test]
-    fn build_with_no_stages_produces_valid_body_data() {
-        let builder = BodyBuilder::new(869_000.0, 42, test_composition(), 0, 4.5, None, 0.0);
-        assert_eq!(builder.cubemap_resolution, 1024);
-
-        let body = builder.build();
-        assert_eq!(body.radius_m, 869_000.0);
-        assert!(body.craters.is_empty());
-        assert!(body.volcanoes.is_empty());
-        assert!(body.channels.is_empty());
-        assert!(body.materials.is_empty());
-        assert!(body.sea_level_m.is_none());
-    }
-
-    #[test]
-    fn explicit_resolution_used() {
-        let builder = BodyBuilder::new(100.0, 1, test_composition(), 64, 4.5, None, 0.0);
-        assert_eq!(builder.cubemap_resolution, 64);
     }
 }

@@ -46,7 +46,6 @@ pub(in crate::maneuver) fn handle_maneuver_events(
             ManeuverEvent::PlaceNode {
                 trail_time,
                 reference_body,
-                rail,
             } => {
                 let id = plan.next_node_id();
                 plan.nodes.push(GameNode {
@@ -54,7 +53,6 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                     time: trail_time,
                     delta_v: DVec3::ZERO,
                     reference_body,
-                    rail,
                 });
                 selected.id = Some(id);
                 plan.dirty = true;

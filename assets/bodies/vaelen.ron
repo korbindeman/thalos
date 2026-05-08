@@ -29,6 +29,21 @@
             max_crater_radius_m: 90000.0,
             cubemap_bake_threshold_m: 1200.0,
         )),
+        ice_caps: [
+            (
+                edge_latitude_deg: 62.0,
+                solid_latitude_deg: 63.4,
+                edge_noise_deg: 5.0,
+                edge_sharpness: 0.96,
+                noise_frequency: 2.8,
+                max_thickness_m: 140.0,
+                albedo_linear: (0.90, 0.94, 0.96),
+                dust_albedo_linear: (0.58, 0.56, 0.50),
+                albedo_strength: 0.90,
+                roughness: 0.44,
+                roughness_strength: 0.90,
+            ),
+        ],
         authored_features: [],
     )),
     terrestrial_atmosphere: Some((

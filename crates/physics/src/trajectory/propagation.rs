@@ -129,6 +129,7 @@ pub(super) fn propagate_segment(
     let mut collision_body: Option<BodyId> = None;
     let mut is_stable_orbit = false;
     let mut stable_orbit_start_index: Option<usize> = None;
+    let mut stable_orbit_loop_end_index: Option<usize> = None;
     let mut transitions = 0usize;
 
     while time < end_time {
@@ -177,10 +178,27 @@ pub(super) fn propagate_segment(
 
         // Concatenate samples. Every call after the first overlaps the
         // previous terminator sample, so drop the leading duplicate.
-        if samples.is_empty() {
-            samples.extend(result.samples);
-        } else {
+        let dropped_leading = !samples.is_empty();
+        let prefix_len = samples.len();
+        if dropped_leading {
             samples.extend(result.samples.into_iter().skip(1));
+        } else {
+            samples.extend(result.samples);
+        }
+
+        // Carry stable-orbit metadata across the concatenation. With
+        // `extends_past_loop`, [`KeplerianPropagator::coast_segment_impl`]
+        // returns `Horizon` plus `is_stable_orbit = true` and a
+        // `stable_orbit_loop_end_index` into its own samples vec; we
+        // remap that index into the accumulated `samples` so downstream
+        // consumers can locate the closed-loop section.
+        if result.is_stable_orbit {
+            is_stable_orbit = true;
+            stable_orbit_start_index = Some(prefix_len);
+            stable_orbit_loop_end_index = result.stable_orbit_loop_end_index.map(|idx| {
+                let adjusted = idx.saturating_sub(if dropped_leading { 1 } else { 0 });
+                prefix_len + adjusted
+            });
         }
 
         state = result.end_state;
@@ -225,6 +243,7 @@ pub(super) fn propagate_segment(
         samples,
         is_stable_orbit,
         stable_orbit_start_index,
+        stable_orbit_loop_end_index,
         collision_body,
     }
 }

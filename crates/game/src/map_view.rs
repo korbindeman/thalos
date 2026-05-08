@@ -1,7 +1,7 @@
 use bevy::math::{DVec3, Vec2, Vec3};
 use bevy::prelude::*;
 use thalos_physics::canonical::{CraftState, Epoch};
-use thalos_physics::trajectory::{Encounter, FlightPlan, Trajectory};
+use thalos_physics::trajectory::{Encounter, FlightPlan, Trajectory, TrajectoryBranchStack};
 use thalos_physics::types::{BodyDefinition, BodyId, BodyState, BodyStates};
 
 use crate::coords::{RenderOrigin, WorldScale};
@@ -59,6 +59,7 @@ pub struct MapSnapshot {
     pub body_defs: Vec<BodyDefinition>,
     pub crafts: Vec<CraftState>,
     pub flight_plan: Option<FlightPlan>,
+    pub branch_stack: Option<TrajectoryBranchStack>,
     pub prediction_version: u64,
     pub target_body: Option<BodyId>,
     pub projected_body_states: Vec<ProjectedBodyState>,
@@ -116,6 +117,7 @@ pub fn update_map_snapshot(
     snapshot.crafts.clear();
     snapshot.crafts.push(sim.simulation.craft_state().clone());
     snapshot.flight_plan = sim.simulation.prediction().cloned();
+    snapshot.branch_stack = sim.simulation.trajectory_branches().cloned();
     snapshot.prediction_version = sim.simulation.prediction_version();
     snapshot.target_body = target.target;
     snapshot.warp_speed = sim.simulation.warp.speed();

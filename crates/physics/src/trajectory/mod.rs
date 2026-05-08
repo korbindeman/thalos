@@ -31,7 +31,10 @@ pub use events::{
     CaptureStatus, ClosestApproach, Encounter, EncounterId, EncounterKind, TrajectoryEvent,
     TrajectoryEventKind, closest_approach,
 };
-pub use flight_plan::{FlightPlan, Leg, PredictionRequest, ScheduledBurn, propagate_flight_plan};
+pub use flight_plan::{
+    BranchKind, FlightPlan, Leg, MEANINGFUL_DELTA_V_MPS, PredictionRequest, ScheduledBurn,
+    TrajectoryBranch, TrajectoryBranchStack, propagate_branch_stack, propagate_flight_plan,
+};
 pub use numeric::NumericSegment;
 pub use propagation::{PredictionConfig, PropagationBudget};
 

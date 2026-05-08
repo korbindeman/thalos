@@ -5,7 +5,8 @@
 //!   (`R16Unorm`), roughness (`R8Unorm`). Normals are reconstructed per-
 //!   fragment in the impostor shader from the height cube; the bake's
 //!   `normal_cubemap` lives in `BodyData` for future ground LOD use.
-//! - **Feature SSBOs** (layer 2): craters, cell index, feature ids.
+//! - **Feature SSBOs** (layer 2): craters, cell index, feature ids,
+//!   radial volcanic features.
 //! - **Detail noise params** (layer 3) travel separately via `PlanetDetailParams`.
 //!
 //! See `crates/terrain_gen/src/sample.rs` for the full LOD contract.
@@ -18,11 +19,11 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderStorageBuffer;
 
 use thalos_cloud_gen::{CloudBakeConfig, bake_cloud_cover};
-use thalos_terrain_gen::BodyData;
 use thalos_terrain_gen::Cubemap;
 use thalos_terrain_gen::cubemap::CubemapFace;
+use thalos_terrain_gen::{BodyData, DynamicSurfaceFeature};
 
-use crate::shader_types::{GpuCellRange, GpuCrater};
+use crate::shader_types::{GpuCellRange, GpuCrater, GpuIceCap, GpuRadialFeature};
 use crate::texture::PlanetTextures;
 
 // Cubemap resolution for baked cloud cover. 256² is ~1.5 MB at R8Unorm
@@ -124,11 +125,36 @@ fn build_ssbo_cell_table(
     (cell_index, feature_ids)
 }
 
+fn radial_frame(center: Vec3) -> (Vec3, Vec3) {
+    let up = if center.y.abs() < 0.95 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let east = up.cross(center).normalize_or_zero();
+    let north = center.cross(east).normalize_or_zero();
+    (east, north)
+}
+
+fn volcano_seed(base_seed: u64, index: usize) -> u32 {
+    feature_seed(base_seed, index)
+}
+
+fn feature_seed(base_seed: u64, index: usize) -> u32 {
+    let mut x = base_seed ^ ((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    (x as u32) ^ ((x >> 32) as u32)
+}
+
 /// Bake `BodyData` into the full set of GPU resources consumed by
 /// [`crate::PlanetMaterial`].
 ///
-/// Uploads the four cubemap layers (albedo, height, roughness, normal) and
-/// the three feature storage buffers (craters, cell index, feature ids).
+/// Uploads the cubemap layers (albedo, height, roughness) and the feature
+/// storage buffers (craters, cell index, feature ids, radial features).
 /// All handles are bundled into a single [`PlanetTextures`].
 pub fn bake_from_body_data(
     body: &BodyData,
@@ -194,6 +220,67 @@ pub fn bake_from_body_data(
     let craters_handle = create_storage_buffer_from_slice(&craters, storage_buffers);
     let cell_index_handle = create_storage_buffer_from_slice(&cell_index, storage_buffers);
     let feature_ids_handle = create_storage_buffer_from_slice(&feature_ids, storage_buffers);
+    let radial_features: Vec<GpuRadialFeature> = body
+        .volcanoes
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let center = v.center.normalize_or_zero();
+            let (east, north) = radial_frame(center);
+            GpuRadialFeature {
+                center,
+                radius_m: v.radius_m,
+                east,
+                height_m: v.height_m,
+                north,
+                erosion_scale_m: (v.radius_m / 7.0).clamp(8_000.0, 64_000.0),
+                seed: volcano_seed(body.detail_params.seed, i),
+                material_id: v.material_id,
+                _pad0: 0,
+                _pad1: 0,
+            }
+        })
+        .collect();
+    let radial_features_handle =
+        create_storage_buffer_from_slice(&radial_features, storage_buffers);
+    let ice_caps: Vec<GpuIceCap> = body
+        .dynamic_surface_features
+        .iter()
+        .enumerate()
+        .filter_map(|(i, feature)| match feature {
+            DynamicSurfaceFeature::SeasonalIceCap(cap) => {
+                let mut flags = 0u32;
+                if cap.north {
+                    flags |= 1;
+                }
+                if cap.south {
+                    flags |= 2;
+                }
+                let axis = cap.axis.try_normalize().unwrap_or(Vec3::Y);
+                Some(GpuIceCap {
+                    axis,
+                    flags,
+                    albedo_linear: Vec3::from_array(cap.albedo_linear),
+                    edge_latitude_deg: cap.edge_latitude_deg,
+                    dust_albedo_linear: Vec3::from_array(cap.dust_albedo_linear),
+                    solid_latitude_deg: cap.solid_latitude_deg,
+                    edge_noise_deg: cap.edge_noise_deg,
+                    edge_sharpness: cap.edge_sharpness,
+                    noise_frequency: cap.noise_frequency,
+                    max_thickness_m: cap.max_thickness_m,
+                    albedo_strength: cap.albedo_strength,
+                    roughness: cap.roughness,
+                    roughness_strength: cap.roughness_strength,
+                    obliquity_response: cap.obliquity_response,
+                    seed: feature_seed(body.detail_params.seed ^ 0x1CE_CAFE5_EA50_0001, i),
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
+                })
+            }
+        })
+        .collect();
+    let ice_caps_handle = create_storage_buffer_from_slice(&ice_caps, storage_buffers);
 
     PlanetTextures {
         albedo,
@@ -202,6 +289,8 @@ pub fn bake_from_body_data(
         craters: craters_handle,
         cell_index: cell_index_handle,
         feature_ids: feature_ids_handle,
+        radial_features: radial_features_handle,
+        ice_caps: ice_caps_handle,
     }
 }
 

@@ -25,6 +25,16 @@ pub struct NumericSegment {
     pub is_stable_orbit: bool,
     /// First sample belonging to the closed-loop portion of a stable orbit.
     pub stable_orbit_start_index: Option<usize>,
+    /// Exclusive end of the closed-loop section. When `Some(k)`, samples in
+    /// `samples[k..]` are sparse out-of-loop extensions: the segment was a
+    /// stable orbit but the leg ran past one period (e.g. a maneuver node
+    /// scheduled many revolutions in the future), and rather than emit
+    /// hundreds of redundant per-period samples we keep one dense period
+    /// for rendering plus a single analytical sample at the leg's end so
+    /// `state_at(target_time)` still returns the correct state. Renderer
+    /// and event scans skip pairs that span this boundary because Hermite
+    /// across the multi-period chord is not the actual trajectory.
+    pub stable_orbit_loop_end_index: Option<usize>,
     /// Body ID if the ship dropped below a body's surface during this leg.
     pub collision_body: Option<BodyId>,
 }
@@ -189,6 +199,7 @@ mod tests {
             ],
             is_stable_orbit: false,
             stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
             collision_body: None,
         };
         let mid = seg.state_at(5.0).unwrap();
@@ -204,6 +215,7 @@ mod tests {
             samples: vec![a, b],
             is_stable_orbit: false,
             stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
             collision_body: None,
         };
         let s0 = seg.state_at(0.0).unwrap();
@@ -223,6 +235,7 @@ mod tests {
             ],
             is_stable_orbit: false,
             stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
             collision_body: None,
         };
         assert!(seg.state_at(-0.1).is_none());

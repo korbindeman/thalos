@@ -799,6 +799,7 @@ mod tests {
             ],
             is_stable_orbit: false,
             stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
             collision_body: None,
         }
     }
@@ -838,7 +839,6 @@ mod tests {
             }],
             encounters: Vec::new(),
             approaches: Vec::new(),
-            baseline: None,
         }
     }
 
@@ -854,6 +854,7 @@ mod tests {
             ],
             is_stable_orbit: false,
             stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
             collision_body: None,
         };
         let coast = NumericSegment {
@@ -871,6 +872,7 @@ mod tests {
             ],
             is_stable_orbit: false,
             stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
             collision_body: None,
         };
         FlightPlan {
@@ -893,7 +895,6 @@ mod tests {
             events: Vec::new(),
             encounters: Vec::new(),
             approaches: Vec::new(),
-            baseline: None,
         }
     }
 

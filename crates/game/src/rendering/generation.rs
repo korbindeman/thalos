@@ -125,8 +125,10 @@ pub(super) fn finalize_planet_generation(
             craters: textures.craters.clone(),
             cell_index: textures.cell_index.clone(),
             feature_ids: textures.feature_ids.clone(),
+            radial_features: textures.radial_features.clone(),
             atmosphere,
             cloud_cover: cloud_cover.clone(),
+            ice_caps: textures.ice_caps.clone(),
         };
 
         let map_material = make_material(map_radius, map_atmosphere);

@@ -194,6 +194,7 @@ pub(super) fn spawn_bodies(
                 };
                 let options = TerrainCompileOptions {
                     crater_count_scale: DEV_CRATER_SCALE,
+                    cubemap_resolution_override: None,
                 };
                 let key = thalos_terrain_gen::cache::terrain_cache_key(&terrain, &context, options);
                 let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);

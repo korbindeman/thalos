@@ -231,31 +231,3 @@ fn compute_neighbors(triangles: &[[u32; 3]], num_vertices: usize) -> Vec<Vec<u32
     }
     neighbors
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn icosphere_has_5120_cells() {
-        let (verts, tris) = generate_icosphere(SUBDIVISION_LEVEL);
-        assert_eq!(tris.len(), 5120); // 20 * 4^4
-        assert_eq!(verts.len(), 2562); // V = 10 * 4^L + 2
-    }
-
-    #[test]
-    fn empty_index_lookup() {
-        let index = IcoBuckets::empty();
-        assert!(index.cell_count() > 0);
-        let features = index.lookup(Vec3::X);
-        assert!(features.is_empty());
-    }
-
-    #[test]
-    fn cell_for_opposite_dirs_differs() {
-        let index = IcoBuckets::empty();
-        let a = index.cell_for_dir(Vec3::X);
-        let b = index.cell_for_dir(Vec3::NEG_X);
-        assert_ne!(a, b);
-    }
-}

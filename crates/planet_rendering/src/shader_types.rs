@@ -56,6 +56,127 @@ pub struct GpuCellRange {
     pub count: u32,
 }
 
+/// A hand-anchored aeolian dune-sea region as seen by the impostor's
+/// per-fragment dune synthesis. Only the *runtime* parameters live here;
+/// bake-time-only fields (`lambda_draa_m`, `amplitude_draa_m`) stay in
+/// the CPU `DuneSea` and are consumed by the dune bake stage.
+///
+/// WGSL layout (std430), `align 16` due to `vec3<f32>`:
+/// ```wgsl
+/// struct DuneSea {
+///     center:            vec3<f32>,  // offset 0,  size 12
+///     radius_rad:        f32,        // offset 12, size 4
+///     axis_tangent:      vec3<f32>,  // offset 16, size 12
+///     feather_rad:       f32,        // offset 28, size 4
+///     lambda_dune_m:     f32,        // offset 32
+///     amplitude_dune_m:  f32,        // offset 36
+///     alpha_skew:        f32,        // offset 40
+///     crest_strength:    f32,        // offset 44
+///     albedo_crest_lin:  vec3<f32>,  // offset 48, size 12 (16-aligned ✓)
+///     seed:              u32,        // offset 60, size 4
+/// };                                  // total 64 bytes (multiple of 16)
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuDuneSea {
+    pub center: Vec3,
+    pub radius_rad: f32,
+    pub axis_tangent: Vec3,
+    pub feather_rad: f32,
+    pub lambda_dune_m: f32,
+    pub amplitude_dune_m: f32,
+    pub alpha_skew: f32,
+    pub crest_strength: f32,
+    pub albedo_crest_lin: Vec3,
+    pub seed: u32,
+}
+
+/// Seasonal polar ice cap overlay. This is intentionally not part of the
+/// baked terrain cubemaps; the impostor shader applies it as a runtime surface
+/// layer over static terrain.
+///
+/// WGSL layout (std430):
+/// ```wgsl
+/// struct IceCap {
+///     axis:                 vec3<f32>, // offset 0,  size 12
+///     flags:                u32,       // offset 12, size 4
+///     albedo_linear:        vec3<f32>, // offset 16, size 12
+///     edge_latitude_deg:    f32,       // offset 28, size 4
+///     dust_albedo_linear:   vec3<f32>, // offset 32, size 12
+///     solid_latitude_deg:   f32,       // offset 44, size 4
+///     edge_noise_deg:       f32,       // offset 48, size 4
+///     edge_sharpness:       f32,       // offset 52, size 4
+///     noise_frequency:      f32,       // offset 56, size 4
+///     max_thickness_m:      f32,       // offset 60, size 4
+///     albedo_strength:      f32,       // offset 64, size 4
+///     roughness:            f32,       // offset 68, size 4
+///     roughness_strength:   f32,       // offset 72, size 4
+///     obliquity_response:   f32,       // offset 76, size 4
+///     seed:                 u32,       // offset 80, size 4
+///     _pad0:                u32,       // offset 84, size 4
+///     _pad1:                u32,       // offset 88, size 4
+///     _pad2:                u32,       // offset 92, size 4
+/// };                                   // total 96 bytes
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuIceCap {
+    pub axis: Vec3,
+    pub flags: u32,
+    pub albedo_linear: Vec3,
+    pub edge_latitude_deg: f32,
+    pub dust_albedo_linear: Vec3,
+    pub solid_latitude_deg: f32,
+    pub edge_noise_deg: f32,
+    pub edge_sharpness: f32,
+    pub noise_frequency: f32,
+    pub max_thickness_m: f32,
+    pub albedo_strength: f32,
+    pub roughness: f32,
+    pub roughness_strength: f32,
+    pub obliquity_response: f32,
+    pub seed: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
+}
+
+/// A radial volcanic feature for impostor-side erosion/color synthesis.
+///
+/// The broad shape is already baked into the cubemaps. This descriptor carries
+/// the local frame and tuning needed to add feature-local gully normals,
+/// exposed-material color, and roughness modulation in the shader.
+///
+/// WGSL layout (std430):
+/// ```wgsl
+/// struct RadialFeature {
+///     center:          vec3<f32>, // offset 0,  size 12
+///     radius_m:        f32,       // offset 12, size 4
+///     east:            vec3<f32>, // offset 16, size 12
+///     height_m:        f32,       // offset 28, size 4
+///     north:           vec3<f32>, // offset 32, size 12
+///     erosion_scale_m: f32,       // offset 44, size 4
+///     seed:            u32,       // offset 48, size 4
+///     material_id:     u32,       // offset 52, size 4
+///     _pad0:           u32,       // offset 56, size 4
+///     _pad1:           u32,       // offset 60, size 4
+/// };                              // total 64 bytes
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuRadialFeature {
+    pub center: Vec3,
+    pub radius_m: f32,
+    pub east: Vec3,
+    pub height_m: f32,
+    pub north: Vec3,
+    pub erosion_scale_m: f32,
+    pub seed: u32,
+    pub material_id: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +185,9 @@ mod tests {
     fn struct_sizes_match_wgsl_std430() {
         assert_eq!(std::mem::size_of::<GpuCrater>(), 32);
         assert_eq!(std::mem::size_of::<GpuCellRange>(), 8);
+        assert_eq!(std::mem::size_of::<GpuDuneSea>(), 64);
+        assert_eq!(std::mem::size_of::<GpuIceCap>(), 96);
+        assert_eq!(std::mem::size_of::<GpuRadialFeature>(), 64);
     }
 
     #[test]
@@ -75,5 +199,111 @@ mod tests {
         // writes raw Pod bytes and the shader reads std430.
         assert_eq!(std::mem::align_of::<GpuCrater>(), 4);
         assert_eq!(std::mem::align_of::<GpuCellRange>(), 4);
+        assert_eq!(std::mem::align_of::<GpuDuneSea>(), 4);
+        assert_eq!(std::mem::align_of::<GpuIceCap>(), 4);
+        assert_eq!(std::mem::align_of::<GpuRadialFeature>(), 4);
+    }
+
+    #[test]
+    fn dune_sea_field_offsets_match_wgsl_std430() {
+        // std430 places vec3<f32> at multiples of 16. Field byte offsets
+        // here mirror the WGSL declaration; mismatching them silently
+        // shifts data when the SSBO is read.
+        let z = GpuDuneSea {
+            center: Vec3::ZERO,
+            radius_rad: 0.0,
+            axis_tangent: Vec3::ZERO,
+            feather_rad: 0.0,
+            lambda_dune_m: 0.0,
+            amplitude_dune_m: 0.0,
+            alpha_skew: 0.0,
+            crest_strength: 0.0,
+            albedo_crest_lin: Vec3::ZERO,
+            seed: 0,
+        };
+        let base = (&z as *const GpuDuneSea) as usize;
+        let off = |p: usize| p - base;
+        assert_eq!(off((&z.center as *const Vec3) as usize), 0);
+        assert_eq!(off((&z.radius_rad as *const f32) as usize), 12);
+        assert_eq!(off((&z.axis_tangent as *const Vec3) as usize), 16);
+        assert_eq!(off((&z.feather_rad as *const f32) as usize), 28);
+        assert_eq!(off((&z.lambda_dune_m as *const f32) as usize), 32);
+        assert_eq!(off((&z.amplitude_dune_m as *const f32) as usize), 36);
+        assert_eq!(off((&z.alpha_skew as *const f32) as usize), 40);
+        assert_eq!(off((&z.crest_strength as *const f32) as usize), 44);
+        assert_eq!(off((&z.albedo_crest_lin as *const Vec3) as usize), 48);
+        assert_eq!(off((&z.seed as *const u32) as usize), 60);
+    }
+
+    #[test]
+    fn ice_cap_field_offsets_match_wgsl_std430() {
+        let z = GpuIceCap {
+            axis: Vec3::ZERO,
+            flags: 0,
+            albedo_linear: Vec3::ZERO,
+            edge_latitude_deg: 0.0,
+            dust_albedo_linear: Vec3::ZERO,
+            solid_latitude_deg: 0.0,
+            edge_noise_deg: 0.0,
+            edge_sharpness: 0.0,
+            noise_frequency: 0.0,
+            max_thickness_m: 0.0,
+            albedo_strength: 0.0,
+            roughness: 0.0,
+            roughness_strength: 0.0,
+            obliquity_response: 0.0,
+            seed: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        let base = (&z as *const GpuIceCap) as usize;
+        let off = |p: usize| p - base;
+        assert_eq!(off((&z.axis as *const Vec3) as usize), 0);
+        assert_eq!(off((&z.flags as *const u32) as usize), 12);
+        assert_eq!(off((&z.albedo_linear as *const Vec3) as usize), 16);
+        assert_eq!(off((&z.edge_latitude_deg as *const f32) as usize), 28);
+        assert_eq!(off((&z.dust_albedo_linear as *const Vec3) as usize), 32);
+        assert_eq!(off((&z.solid_latitude_deg as *const f32) as usize), 44);
+        assert_eq!(off((&z.edge_noise_deg as *const f32) as usize), 48);
+        assert_eq!(off((&z.edge_sharpness as *const f32) as usize), 52);
+        assert_eq!(off((&z.noise_frequency as *const f32) as usize), 56);
+        assert_eq!(off((&z.max_thickness_m as *const f32) as usize), 60);
+        assert_eq!(off((&z.albedo_strength as *const f32) as usize), 64);
+        assert_eq!(off((&z.roughness as *const f32) as usize), 68);
+        assert_eq!(off((&z.roughness_strength as *const f32) as usize), 72);
+        assert_eq!(off((&z.obliquity_response as *const f32) as usize), 76);
+        assert_eq!(off((&z.seed as *const u32) as usize), 80);
+        assert_eq!(off((&z._pad0 as *const u32) as usize), 84);
+        assert_eq!(off((&z._pad1 as *const u32) as usize), 88);
+        assert_eq!(off((&z._pad2 as *const u32) as usize), 92);
+    }
+
+    #[test]
+    fn radial_feature_field_offsets_match_wgsl_std430() {
+        let z = GpuRadialFeature {
+            center: Vec3::ZERO,
+            radius_m: 0.0,
+            east: Vec3::ZERO,
+            height_m: 0.0,
+            north: Vec3::ZERO,
+            erosion_scale_m: 0.0,
+            seed: 0,
+            material_id: 0,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let base = (&z as *const GpuRadialFeature) as usize;
+        let off = |p: usize| p - base;
+        assert_eq!(off((&z.center as *const Vec3) as usize), 0);
+        assert_eq!(off((&z.radius_m as *const f32) as usize), 12);
+        assert_eq!(off((&z.east as *const Vec3) as usize), 16);
+        assert_eq!(off((&z.height_m as *const f32) as usize), 28);
+        assert_eq!(off((&z.north as *const Vec3) as usize), 32);
+        assert_eq!(off((&z.erosion_scale_m as *const f32) as usize), 44);
+        assert_eq!(off((&z.seed as *const u32) as usize), 48);
+        assert_eq!(off((&z.material_id as *const u32) as usize), 52);
+        assert_eq!(off((&z._pad0 as *const u32) as usize), 56);
+        assert_eq!(off((&z._pad1 as *const u32) as usize), 60);
     }
 }

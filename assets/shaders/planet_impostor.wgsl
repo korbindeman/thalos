@@ -19,6 +19,9 @@
 //      crater's contribution is faded in by a screen-space smoothstep so it
 //      never pops during zoom.
 //
+//   3. Dynamic surface overlays — seasonal ice cap descriptors are rendered
+//      on top of the baked terrain as a static visual layer for now.
+//
 // Sub-500 m craters are intentionally not rendered in the impostor — the
 // statistical shader-hash layer was dropped.
 //
@@ -46,6 +49,10 @@
 #import bevy_pbr::mesh_functions::get_world_from_local
 #import thalos::lighting::{SceneLighting, StarLight, PlanetShineSample, eclipse_factor, planetshine_sample}
 #import thalos::noise::fbm3
+#import bevy_erosion_filter::erosion::{
+    ErosionFilterParams,
+    erosion_filter,
+}
 #import thalos::atmosphere::{
     AtmosphereBlock,
     RimHit,
@@ -183,6 +190,46 @@ struct CellRange {
     count: u32,
 }
 
+// RadialFeature: feature-local shader detail for broad radial landmarks such
+// as shield volcanoes. The cubemaps already carry the macro relief; this
+// buffer adds sub-cubemap erosion color, roughness, and normal detail.
+struct RadialFeature {
+    center:          vec3<f32>,
+    radius_m:        f32,
+    east:            vec3<f32>,
+    height_m:        f32,
+    north:           vec3<f32>,
+    erosion_scale_m: f32,
+    seed:            u32,
+    material_id:     u32,
+    _pad0:           u32,
+    _pad1:           u32,
+}
+
+// IceCap: seasonal/dynamic surface overlay. This is deliberately not baked
+// into the terrain cubemaps; it is rendered here as a static visual layer for
+// now.
+struct IceCap {
+    axis:                 vec3<f32>,
+    flags:                u32,
+    albedo_linear:        vec3<f32>,
+    edge_latitude_deg:    f32,
+    dust_albedo_linear:   vec3<f32>,
+    solid_latitude_deg:   f32,
+    edge_noise_deg:       f32,
+    edge_sharpness:       f32,
+    noise_frequency:      f32,
+    max_thickness_m:      f32,
+    albedo_strength:      f32,
+    roughness:            f32,
+    roughness_strength:   f32,
+    obliquity_response:   f32,
+    seed:                 u32,
+    _pad0:                u32,
+    _pad1:                u32,
+    _pad2:                u32,
+}
+
 @group(3) @binding(0)  var<uniform> params:          PlanetParams;
 @group(3) @binding(1)  var          albedo_tex:      texture_cube<f32>;
 @group(3) @binding(2)  var          albedo_sampler:  sampler;
@@ -194,6 +241,7 @@ struct CellRange {
 @group(3) @binding(8)  var<storage, read> craters:     array<Crater>;
 @group(3) @binding(9)  var<storage, read> cell_index:  array<CellRange>;
 @group(3) @binding(10) var<storage, read> feature_ids: array<u32>;
+@group(3) @binding(11) var<storage, read> radial_features: array<RadialFeature>;
 // Optional atmosphere layer — see `thalos::atmosphere`. For bodies with
 // no atmosphere (Mira, Ignis, …) every layer's intensity scalar is zero
 // and the atmosphere path is effectively skipped.
@@ -204,6 +252,7 @@ struct CellRange {
 // so those bodies pay just the branch cost.
 @group(3) @binding(13) var          cloud_cover_tex: texture_cube<f32>;
 @group(3) @binding(14) var          cloud_cover_sampler: sampler;
+@group(3) @binding(15) var<storage, read> ice_caps:    array<IceCap>;
 
 // ── Vertex stage ─────────────────────────────────────────────────────────────
 
@@ -665,6 +714,415 @@ fn regional_albedo_mod(p: vec3<f32>) -> f32 {
         * sin(p.y * 4.7 + phase.z + 0.5)
         * sin(p.z * 5.9 + phase.x + 1.7);
     return 1.0 + 0.12 * low + 0.06 * mid;
+}
+
+// ── Dynamic ice-cap overlay ────────────────────────────────────────────────
+
+struct IceOverlay {
+    coverage: f32,
+    albedo: vec3<f32>,
+    albedo_strength: f32,
+    roughness: f32,
+    roughness_strength: f32,
+}
+
+struct IceCapMasks {
+    coverage: f32,
+    interior: f32,
+    dirty_fringe: f32,
+    detached_frost: f32,
+    edge_band: f32,
+    troughs: f32,
+}
+
+fn ice_cap_texture(dir: vec3<f32>, cap: IceCap) -> f32 {
+    let broad = fbm3(
+        dir * 2.7,
+        cap.seed,
+        4u,
+        0.55,
+        2.01,
+    );
+    let mottle = fbm3(
+        dir * 13.0,
+        cap.seed ^ 0x51F16E23u,
+        3u,
+        0.52,
+        2.04,
+    );
+    return clamp(0.5 + broad * 0.34 + mottle * 0.16, 0.0, 1.0);
+}
+
+fn empty_ice_cap_masks() -> IceCapMasks {
+    return IceCapMasks(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+fn combine_ice_cap_masks(a: IceCapMasks, b: IceCapMasks) -> IceCapMasks {
+    return IceCapMasks(
+        max(a.coverage, b.coverage),
+        max(a.interior, b.interior),
+        max(a.dirty_fringe, b.dirty_fringe),
+        max(a.detached_frost, b.detached_frost),
+        max(a.edge_band, b.edge_band),
+        max(a.troughs, b.troughs),
+    );
+}
+
+fn ice_pole_masks(
+    dir: vec3<f32>,
+    cap: IceCap,
+    pole_latitude_deg: f32,
+    edge_latitude: f32,
+    solid_latitude: f32,
+    lace: f32,
+    seed: u32,
+) -> IceCapMasks {
+    let sharpness = clamp(cap.edge_sharpness, 0.0, 1.0);
+    let transition_deg = max(mix(1.25, 0.32, sharpness), 0.25);
+    let solid_span_deg = max(solid_latitude - edge_latitude, transition_deg + 0.35);
+    let signed_edge_distance = pole_latitude_deg + lace - edge_latitude;
+
+    let coverage = smoothstep(0.0, transition_deg, signed_edge_distance);
+    let interior = smoothstep(transition_deg, solid_span_deg, signed_edge_distance);
+
+    let outside_distance = max(-signed_edge_distance, 0.0);
+    let fringe_width_deg = max(1.2, cap.edge_noise_deg * 0.55 + 0.4);
+    let dirty_fringe =
+        (1.0 - coverage) * (1.0 - smoothstep(0.0, fringe_width_deg, outside_distance));
+
+    let patch_shell = smoothstep(0.25, 0.9, outside_distance)
+        * (1.0 - smoothstep(fringe_width_deg, fringe_width_deg + 1.2, outside_distance));
+    let patch_noise = 0.5 + 0.5 * fbm3(
+        dir * max(cap.noise_frequency, 0.001) * 10.5,
+        seed ^ 0xD17C0DEu,
+        4u,
+        0.58,
+        2.11,
+    );
+    let detached_frost = patch_shell * smoothstep(0.66, 0.86, patch_noise);
+
+    let edge_width_deg = max(0.75, cap.edge_noise_deg * 0.26);
+    let edge_band = 1.0 - smoothstep(0.0, edge_width_deg, abs(signed_edge_distance));
+
+    let trough_noise = 0.5 + 0.5 * fbm3(
+        dir * max(cap.noise_frequency, 0.001) * 3.2,
+        seed ^ 0x7A10F205u,
+        4u,
+        0.52,
+        2.03,
+    );
+    let troughs = coverage * smoothstep(0.70, 0.88, trough_noise) * (0.35 + 0.35 * edge_band);
+
+    return IceCapMasks(
+        coverage,
+        interior,
+        dirty_fringe,
+        detached_frost,
+        edge_band,
+        troughs,
+    );
+}
+
+fn ice_cap_masks(dir: vec3<f32>, cap: IceCap) -> IceCapMasks {
+    if cap.flags == 0u || cap.max_thickness_m <= 0.0 {
+        return empty_ice_cap_masks();
+    }
+
+    let axis = normalize(cap.axis);
+    let sample_lat_deg = asin(clamp(dot(dir, axis), -1.0, 1.0)) * (180.0 / PI);
+    let freq = max(cap.noise_frequency, 0.001);
+    let edge_noise = fbm3(dir * freq, cap.seed ^ 0xA71C3E55u, 4u, 0.55, 2.03);
+    let scallop_noise = fbm3(dir * freq * 5.8, cap.seed ^ 0x8CEB7A91u, 3u, 0.56, 2.07);
+    let lace_noise = fbm3(dir * freq * 11.0, cap.seed ^ 0xC1CEB47Du, 3u, 0.52, 2.07);
+
+    let scallop_strength = 0.25 + 0.35 * clamp(cap.edge_sharpness, 0.0, 1.0);
+    let edge_offset = edge_noise * cap.edge_noise_deg + scallop_noise * cap.edge_noise_deg * scallop_strength;
+    let edge_latitude = clamp(cap.edge_latitude_deg + edge_offset, 0.0, 89.5);
+    let solid_latitude = clamp(
+        max(cap.solid_latitude_deg + edge_noise * cap.edge_noise_deg * 0.18, edge_latitude + 0.6),
+        edge_latitude + 0.6,
+        90.0,
+    );
+    let lace = lace_noise * cap.edge_noise_deg * 0.20;
+
+    var masks = empty_ice_cap_masks();
+    if (cap.flags & 1u) != 0u {
+        masks = combine_ice_cap_masks(
+            masks,
+            ice_pole_masks(dir, cap, sample_lat_deg, edge_latitude, solid_latitude, lace, cap.seed),
+        );
+    }
+    if (cap.flags & 2u) != 0u {
+        masks = combine_ice_cap_masks(
+            masks,
+            ice_pole_masks(
+                dir,
+                cap,
+                -sample_lat_deg,
+                edge_latitude,
+                solid_latitude,
+                -lace,
+                cap.seed ^ 0x5A17C4A7u,
+            ),
+        );
+    }
+
+    return masks;
+}
+
+fn sample_ice_caps(dir: vec3<f32>) -> IceOverlay {
+    var out = IceOverlay(
+        0.0,
+        vec3<f32>(0.0),
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    let count = arrayLength(&ice_caps);
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let cap = ice_caps[i];
+        let masks = ice_cap_masks(dir, cap);
+        let sparse_ice = max(masks.detached_frost * 0.68, masks.dirty_fringe * 0.34);
+        let coverage = max(masks.coverage, sparse_ice);
+        if coverage <= out.coverage {
+            continue;
+        }
+
+        let texture = ice_cap_texture(dir, cap);
+        let dirty_edge = clamp(
+            masks.edge_band * 0.58 + masks.dirty_fringe * 0.70 + masks.troughs * 0.55,
+            0.0,
+            1.0,
+        );
+        let clean_ice = clamp(
+            0.74 + texture * 0.16 + masks.interior * 0.20 - dirty_edge * 0.24,
+            0.0,
+            1.0,
+        );
+        let frost_color = mix(cap.dust_albedo_linear, cap.albedo_linear, clean_ice);
+        let dirty_color = mix(cap.dust_albedo_linear, frost_color, 0.32 + texture * 0.26);
+        let dirty_mix = clamp(
+            masks.dirty_fringe * 0.85 + masks.edge_band * 0.45 + masks.troughs * 0.55,
+            0.0,
+            1.0,
+        );
+        out.coverage = coverage;
+        out.albedo = mix(frost_color, dirty_color, dirty_mix);
+        out.albedo_strength = cap.albedo_strength;
+        out.roughness = cap.roughness;
+        out.roughness_strength = cap.roughness_strength;
+    }
+
+    return out;
+}
+
+// ── Radial feature erosion/color detail ────────────────────────────────────
+
+struct RadialAccum {
+    grad_tangent: vec3<f32>,
+    dark_mix: f32,
+    warm_mix: f32,
+    roughness_delta: f32,
+}
+
+fn radial_feature_params(feature: RadialFeature) -> ErosionFilterParams {
+    return ErosionFilterParams(
+        feature.erosion_scale_m,
+        0.018,
+        0.55,
+        1.7,
+        vec4<f32>(0.1, 0.0, 0.1, 2.0),
+        vec4<f32>(1.25, 1.25, 2.8, 1.5) * 0.22,
+        vec2<f32>(0.45, 0.95),
+        0.7,
+        0.5,
+        4,
+        2.0,
+        0.5,
+    );
+}
+
+fn radial_seed_offset(seed: u32) -> vec2<f32> {
+    let lo = f32(seed & 0xFFFFu) * (1.0 / 65535.0);
+    let hi = f32((seed >> 16u) & 0xFFFFu) * (1.0 / 65535.0);
+    return vec2<f32>(lo * 9137.0 + 173.0, hi * 7193.0 + 421.0);
+}
+
+fn radial_seed_phase(seed: u32, shift: u32) -> f32 {
+    let bits = (seed >> shift) & 0xFFu;
+    return f32(bits) * (TAU / 255.0);
+}
+
+fn radial_angular_lobe(theta: f32, center: f32, half_width: f32) -> f32 {
+    let delta = fract((theta - center + PI) / TAU) * TAU - PI;
+    return 1.0 - smoothstep(0.0, half_width, abs(delta));
+}
+
+fn radial_boundary_scale(local_m: vec2<f32>, rx: f32, ry: f32, seed: u32) -> f32 {
+    let ux = local_m.x / rx;
+    let uy = local_m.y / ry;
+    let theta = atan2(uy, ux);
+    let s = sin(theta);
+    let c = cos(theta);
+    let phase_a = radial_seed_phase(pcg(seed ^ 0x56A3C9B5u), 0u);
+    let phase_b = radial_seed_phase(pcg(seed ^ 0xA511E9B3u), 8u);
+    let phase_c = radial_seed_phase(pcg(seed ^ 0x3198F52Fu), 16u);
+    let phase_d = radial_seed_phase(pcg(seed ^ 0xC73D5B91u), 24u);
+    let low_lobes =
+        sin(theta * 2.0 + phase_a) * 0.145 +
+        sin(theta * 3.0 + phase_b) * 0.120 +
+        sin(theta * 5.0 + phase_c) * 0.085 +
+        sin(theta * 8.0 + phase_d) * 0.052;
+    let directed_lobes =
+        radial_angular_lobe(theta, phase_a + 0.70, 0.52) * 0.20 +
+        radial_angular_lobe(theta, phase_b + 1.25, 0.38) * 0.14 -
+        radial_angular_lobe(theta, phase_c + 0.45, 0.46) * 0.17 -
+        radial_angular_lobe(theta, phase_d + 2.10, 0.34) * 0.12;
+    let broad = fbm3(
+        vec3<f32>(c * 1.45, s * 1.45, 0.37),
+        pcg(seed ^ 0x8E2C4F15u),
+        4u,
+        0.56,
+        2.03,
+    ) * 0.160;
+    let scallop = fbm3(
+        vec3<f32>(ux * 5.8 + c * 0.85, uy * 5.8 + s * 0.85, 1.19),
+        pcg(seed ^ 0xD4129C7Du),
+        3u,
+        0.52,
+        2.08,
+    ) * 0.105;
+    return clamp(1.0 + low_lobes + directed_lobes + broad + scallop, 0.58, 1.58);
+}
+
+fn radial_profile_radius(local_m: vec2<f32>, rx: f32, ry: f32, seed: u32) -> f32 {
+    let raw_r = sqrt((local_m.x / rx) * (local_m.x / rx) + (local_m.y / ry) * (local_m.y / ry));
+    let edge_scale = radial_boundary_scale(local_m, rx, ry, seed);
+    let edge_weight = smoothstep(0.32, 0.92, raw_r);
+    return raw_r / max(1.0 + (edge_scale - 1.0) * edge_weight, 0.55);
+}
+
+fn radial_dome_height_and_slope(local_m: vec2<f32>, rx: f32, ry: f32, height_m: f32, seed: u32) -> vec3<f32> {
+    let raw_r = sqrt((local_m.x / rx) * (local_m.x / rx) + (local_m.y / ry) * (local_m.y / ry));
+    let r = radial_profile_radius(local_m, rx, ry, seed);
+    if r >= 1.0 {
+        return vec3<f32>(0.0);
+    }
+
+    let p = 1.72;
+    let q = 1.18;
+    let inner = max(1.0 - pow(r, p), 0.0);
+    let profile = pow(inner, q);
+    let h = profile * height_m;
+    if r < 1e-5 || inner <= 1e-5 {
+        return vec3<f32>(h, 0.0, 0.0);
+    }
+
+    let dprofile_dr = -q * p * pow(r, p - 1.0) * pow(inner, q - 1.0);
+    let dh_dr = dprofile_dr * height_m;
+    let edge_scale = radial_boundary_scale(local_m, rx, ry, seed);
+    let edge_weight = smoothstep(0.32, 0.92, raw_r);
+    let profile_scale = 1.0 + (edge_scale - 1.0) * edge_weight;
+    let r_safe = max(raw_r, 1e-5);
+    let dr_dx = local_m.x / (rx * rx * r_safe * profile_scale);
+    let dr_dy = local_m.y / (ry * ry * r_safe * profile_scale);
+    return vec3<f32>(h, dh_dr * dr_dx, dh_dr * dr_dy);
+}
+
+fn apply_radial_feature(
+    accum: ptr<function, RadialAccum>,
+    p_unit: vec3<f32>,
+    feature: RadialFeature,
+    pixel_size_m: f32,
+) {
+    if feature.radius_m <= 0.0 || feature.height_m <= 0.0 || feature.erosion_scale_m <= 0.0 {
+        return;
+    }
+
+    let center = normalize(feature.center);
+    let cos_center = clamp(dot(p_unit, center), -0.999999, 0.999999);
+    let local_m = vec2<f32>(
+        atan2(dot(p_unit, feature.east), cos_center),
+        atan2(dot(p_unit, feature.north), cos_center),
+    ) * detail.body_radius_m;
+
+    let rx = feature.radius_m * 1.06;
+    let ry = feature.radius_m * 0.94;
+    let r = radial_profile_radius(local_m, rx, ry, feature.seed);
+    if r > 1.22 {
+        return;
+    }
+
+    let apron_mask = 1.0 - smoothstep(0.90, 1.18, r);
+    let flank_mask = smoothstep(0.18, 0.36, r) * (1.0 - smoothstep(0.54, 1.12, r));
+    let caldera_suppression = 1.0 - smoothstep(0.055, 0.17, r);
+    let erodible = flank_mask * (1.0 - caldera_suppression);
+    let basal_scarp = exp(-pow((r - 1.0) / 0.052, 2.0)) * (1.0 - smoothstep(0.84, 1.16, r));
+    let caldera_rim = exp(-pow((r - 0.142) / 0.028, 2.0));
+
+    let scale_px = feature.erosion_scale_m / max(pixel_size_m, 1.0);
+    let color_lod = smoothstep(0.45, 1.75, scale_px);
+    let normal_lod = smoothstep(1.8, 6.0, scale_px);
+    if color_lod <= 0.0 && normal_lod <= 0.0 {
+        return;
+    }
+
+    let base = radial_dome_height_and_slope(local_m, rx, ry, feature.height_m, feature.seed);
+    let erosion = erosion_filter(
+        local_m + radial_seed_offset(feature.seed),
+        base,
+        clamp(base.x / max(feature.height_m * 0.55, 1.0), -1.0, 1.0),
+        radial_feature_params(feature),
+    );
+
+    let magnitude = max(erosion.magnitude, 1e-5);
+    let erosion_delta = clamp(erosion.delta.x / magnitude, -1.0, 1.0);
+    let crease = smoothstep(0.15, 0.85, -erosion.ridge_map) * erodible;
+    let ridge = smoothstep(0.30, 0.95, erosion.ridge_map) * erodible;
+    let incision = clamp((0.5 - erosion_delta) * 0.70 + crease * 0.45, 0.0, 1.0);
+
+    let flow_phase = atan2(local_m.y / max(ry, 1.0), local_m.x / max(rx, 1.0));
+    let lava_lobes =
+        (sin(flow_phase * 17.0 + f32(feature.seed & 255u) * 0.017) * 0.5 + 0.5)
+        * apron_mask
+        * smoothstep(0.24, 0.96, r);
+
+    let dark = color_lod * apron_mask * clamp(
+        incision * 0.34 + basal_scarp * 0.34 + caldera_rim * 0.32 + lava_lobes * 0.10,
+        0.0,
+        0.68,
+    );
+    let warm = color_lod * apron_mask * clamp(
+        ridge * 0.18 + (1.0 - incision) * lava_lobes * 0.06,
+        0.0,
+        0.24,
+    );
+
+    let grad_vec = feature.east * erosion.delta.y + feature.north * erosion.delta.z;
+    let grad_tangent = grad_vec - dot(grad_vec, p_unit) * p_unit;
+    (*accum).grad_tangent = (*accum).grad_tangent + grad_tangent * erodible * normal_lod * 0.72;
+    (*accum).dark_mix = max((*accum).dark_mix, dark);
+    (*accum).warm_mix = max((*accum).warm_mix, warm);
+    (*accum).roughness_delta = max(
+        (*accum).roughness_delta,
+        color_lod * apron_mask * (incision * 0.050 + ridge * 0.020 + basal_scarp * 0.030),
+    );
+}
+
+fn iterate_radial_features(p_unit: vec3<f32>, pixel_size_m: f32) -> RadialAccum {
+    var accum: RadialAccum;
+    accum.grad_tangent = vec3<f32>(0.0);
+    accum.dark_mix = 0.0;
+    accum.warm_mix = 0.0;
+    accum.roughness_delta = 0.0;
+
+    let count = arrayLength(&radial_features);
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        apply_radial_feature(&accum, p_unit, radial_features[i], pixel_size_m);
+    }
+
+    return accum;
 }
 
 // ── Normal perturbation from height cubemap ────────────────────────────────
@@ -1181,8 +1639,8 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // per-texel values directly — no discrete material-id indirection, so
     // biome boundaries don't read as polygonal regions.
     let regional = clamp(regional_albedo_mod(sample_dir), 0.7, 1.3);
-    let baked_albedo = textureSample(albedo_tex, albedo_sampler, sample_dir).rgb * regional;
-    let surface_roughness = textureSample(roughness_tex, roughness_sampler, sample_dir).r;
+    var baked_albedo = textureSample(albedo_tex, albedo_sampler, sample_dir).rgb * regional;
+    var surface_roughness = textureSample(roughness_tex, roughness_sampler, sample_dir).r;
 
     // ── Layer 1b: height-derived normal perturbation ─────────────────────
     // Per-fragment finite-difference of the filterable height cube. f32
@@ -1195,6 +1653,15 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // ── Pixel size in meters ────────────────────────────────────────────
     // Carried from the vertex stage; see vertex() for the derivation.
     let pixel_size_m = in.pixel_size_m;
+
+    // Feature-local radial erosion detail. This is intentionally independent
+    // of `sample_height_m`: at impostor distances the signal should read
+    // mostly as exposed material/roughness and normal detail, not true
+    // silhouette displacement.
+    let radial = iterate_radial_features(sample_dir, pixel_size_m);
+    baked_albedo = mix(baked_albedo, vec3<f32>(0.16, 0.085, 0.055), radial.dark_mix);
+    baked_albedo = mix(baked_albedo, vec3<f32>(0.64, 0.29, 0.105), radial.warm_mix);
+    surface_roughness = clamp(surface_roughness + radial.roughness_delta, 0.45, 0.98);
 
     // Primary star — single-star path today. Multi-star support lives in
     // `params.scene.stars[0..star_count]` and the lighting helpers; the
@@ -1237,8 +1704,9 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // built around `sample_dir`), so the projection and subtraction happen
     // in body-local space; we rotate the final shading normal to world
     // space afterwards.
-    if length(ssbo_grad) > 0.0 {
-        let grad_tangent = ssbo_grad - dot(ssbo_grad, sample_dir) * sample_dir;
+    let feature_grad = ssbo_grad + radial.grad_tangent;
+    if length(feature_grad) > 0.0 {
+        let grad_tangent = feature_grad - dot(feature_grad, sample_dir) * sample_dir;
         shading_normal = normalize(shading_normal - grad_tangent);
     }
     // Transform the fully-perturbed shading normal from body-local to world
@@ -1253,7 +1721,19 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // 1.5 strength so cubemap-baked and SSBO craters look consistent
     // across the bake threshold.
     let crater_mod = clamp(crater_albedo_mod, -0.65, 1.20);
-    let albedo = baked_albedo * (1.0 + fresh_boost + crater_mod);
+    var albedo = baked_albedo * (1.0 + fresh_boost + crater_mod);
+
+    // Seasonal ice caps are dynamic surface state, not baked terrain. Render
+    // them as a static overlay for now: they cover the final terrain albedo
+    // and microsurface roughness while leaving the immutable height cube
+    // untouched.
+    let ice_overlay = sample_ice_caps(sample_dir);
+    if ice_overlay.coverage > 0.001 {
+        let ice_albedo_t = clamp(ice_overlay.coverage * ice_overlay.albedo_strength, 0.0, 1.0);
+        albedo = mix(albedo, ice_overlay.albedo, ice_albedo_t);
+        let ice_roughness_t = clamp(ice_overlay.coverage * ice_overlay.roughness_strength, 0.0, 1.0);
+        surface_roughness = mix(surface_roughness, ice_overlay.roughness, ice_roughness_t);
+    }
 
     // ── Lighting: Hapke BRDF + planetshine ────────────────────────────────
     //
@@ -1331,7 +1811,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // needed.
     let height_above_sea_m = sample_height_m(sample_dir) - params.sea_level_m;
     let water_depth_m = -height_above_sea_m;
-    let water_t = smoothstep(-1.0, 1.0, water_depth_m);
+    let water_t = smoothstep(-1.0, 1.0, water_depth_m) * (1.0 - ice_overlay.coverage);
     if water_t > 0.0 {
         // Sky tint for grazing-angle reflection. Rayleigh τ carries the
         // per-channel atmosphere tint cue (blue > green > red on Earth-

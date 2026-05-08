@@ -102,6 +102,17 @@ pub struct SegmentResult {
     /// The SOI body the ship is in at `end_time`. Differs from the caller's
     /// input when the segment terminated in an SOI transition.
     pub end_soi_body: BodyId,
+    /// True when the propagated path is a closed orbit around `end_soi_body`.
+    /// Independent of [`SegmentTerminator::StableOrbit`]: a multi-period
+    /// stable coast for an intermediate leg returns `Horizon` (it reaches the
+    /// requested target) but still flags the orbit as stable so the renderer
+    /// can draw it as a closed loop.
+    pub is_stable_orbit: bool,
+    /// Exclusive end of the closed-loop section of `samples`. `Some(k)` means
+    /// `samples[..k]` cover one full revolution and `samples[k..]` are sparse
+    /// extensions (typically a single analytical sample at the leg's
+    /// `target_time`). `None` means the entire `samples` vec is the loop.
+    pub stable_orbit_loop_end_index: Option<usize>,
 }
 
 /// Inputs to a coast propagation.
@@ -236,29 +247,36 @@ impl KeplerianPropagator {
 
         // Stable-orbit detection: a bound orbit whose apoapsis fits inside the
         // SOI and whose periapsis clears the surface can be visualised as a
-        // closed loop over exactly one period.
+        // closed loop over exactly one period. We always detect the closure;
+        // the `stop_on_stable_orbit` flag only controls whether the segment
+        // truncates at the period (final-leg coast) or extends a single
+        // analytical sample past the loop to the requested `target_time`
+        // (intermediate-leg coast — without this, sampling 50 revolutions
+        // uniformly in time produces a polygonal mess at ~2 samples/period).
+        let original_target_time = target_time;
         let mut is_stable_orbit = false;
-        if stop_on_stable_orbit && mu > 0.0 {
-            if let Some(el) = cartesian_to_elements(rel0, mu) {
-                let body_radius = bodies.get(soi_body).map(|b| b.radius_m).unwrap_or(0.0);
-                let soi_radius = bodies
-                    .get(soi_body)
-                    .map(|b| b.soi_radius_m)
-                    .unwrap_or(f64::INFINITY);
-                if el.eccentricity < 1.0
-                    && el.semi_major_axis_m.is_finite()
-                    && el.apoapsis_m < soi_radius
-                    && el.periapsis_m > body_radius
-                {
-                    let period = std::f64::consts::TAU * (el.semi_major_axis_m.powi(3) / mu).sqrt();
-                    let period_end = time + period;
-                    if period_end < target_time {
-                        target_time = period_end;
-                        is_stable_orbit = true;
-                    }
+        if mu > 0.0
+            && let Some(el) = cartesian_to_elements(rel0, mu)
+        {
+            let body_radius = bodies.get(soi_body).map(|b| b.radius_m).unwrap_or(0.0);
+            let soi_radius = bodies
+                .get(soi_body)
+                .map(|b| b.soi_radius_m)
+                .unwrap_or(f64::INFINITY);
+            if el.eccentricity < 1.0
+                && el.semi_major_axis_m.is_finite()
+                && el.apoapsis_m < soi_radius
+                && el.periapsis_m > body_radius
+            {
+                let period = std::f64::consts::TAU * (el.semi_major_axis_m.powi(3) / mu).sqrt();
+                let period_end = time + period;
+                if period_end < target_time {
+                    target_time = period_end;
+                    is_stable_orbit = true;
                 }
             }
         }
+        let extends_past_loop = is_stable_orbit && !stop_on_stable_orbit;
 
         if target_time <= time {
             // Degenerate: zero-length segment. Emit a single sample at t0.
@@ -269,6 +287,8 @@ impl KeplerianPropagator {
                 end_state: state,
                 end_time: time,
                 end_soi_body: soi_body,
+                is_stable_orbit: false,
+                stable_orbit_loop_end_index: None,
             };
         }
 
@@ -427,6 +447,31 @@ impl KeplerianPropagator {
             prev_state = cur_state;
         }
 
+        // For an intermediate-leg coast on a stable orbit, the loop above
+        // has covered exactly one period; append a single analytical
+        // sample at the leg's original target so `state_at(target_time)`
+        // returns the correct state and the leg chain stays continuous,
+        // without densely re-sampling identical periods.
+        if extends_past_loop && original_target_time > target_time {
+            let loop_end_index = samples.len();
+            let straggler_state = eval_at(original_target_time);
+            samples.push(build_sample(
+                original_target_time,
+                straggler_state,
+                soi_body,
+                ephemeris,
+            ));
+            return SegmentResult {
+                samples,
+                terminator: SegmentTerminator::Horizon,
+                end_state: straggler_state,
+                end_time: original_target_time,
+                end_soi_body: soi_body,
+                is_stable_orbit: true,
+                stable_orbit_loop_end_index: Some(loop_end_index),
+            };
+        }
+
         let end_state = prev_state;
         let end_time = target_time;
         SegmentResult {
@@ -439,6 +484,8 @@ impl KeplerianPropagator {
             end_state,
             end_time,
             end_soi_body: soi_body,
+            is_stable_orbit,
+            stable_orbit_loop_end_index: None,
         }
     }
 }
@@ -469,6 +516,8 @@ impl KeplerianPropagator {
                 end_state: state,
                 end_time: time,
                 end_soi_body: soi_body,
+                is_stable_orbit: false,
+                stable_orbit_loop_end_index: None,
             };
         }
 
@@ -633,6 +682,8 @@ impl KeplerianPropagator {
             end_state: cur_state,
             end_time: cur_time,
             end_soi_body: soi_body,
+            is_stable_orbit: false,
+            stable_orbit_loop_end_index: None,
         }
     }
 }
@@ -1033,6 +1084,8 @@ impl SegmentResult {
             end_state,
             end_time: t_cross,
             end_soi_body: parent,
+            is_stable_orbit: false,
+            stable_orbit_loop_end_index: None,
         }
     }
 
@@ -1051,6 +1104,8 @@ impl SegmentResult {
             end_state,
             end_time: t_cross,
             end_soi_body: body,
+            is_stable_orbit: false,
+            stable_orbit_loop_end_index: None,
         }
     }
 
@@ -1069,6 +1124,8 @@ impl SegmentResult {
             end_state,
             end_time: t_cross,
             end_soi_body: child,
+            is_stable_orbit: false,
+            stable_orbit_loop_end_index: None,
         }
     }
 }

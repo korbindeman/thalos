@@ -1,7 +1,9 @@
 //! Vaelen cold-desert continuous surface field.
 
-use glam::Vec3;
+use bevy_erosion_filter::cpu::{ErosionFilterParams, erosion_filter};
+use glam::{Vec2, Vec3};
 
+use crate::aeolian::asym_ridge;
 use crate::biome_mask::{
     BiomeMaskContext, BiomeMaskExpr, BiomeMaskPlan, BiomeMaskRule, BiomeMaskSeedStream,
     BiomeMaskSeeds, BiomeMaskWeights,
@@ -10,7 +12,8 @@ use crate::feature_compiler::{ColdDesertProjectionConfig, FeatureSeed};
 use crate::noise::fbm3;
 use crate::seeding::sub_seed;
 use crate::surface_field::{
-    SurfaceField, SurfaceFieldSample, SurfaceMaterialMix, mix3, scale_visibility, smoothstep,
+    BiomeMix, ReliefPalette, SurfaceField, SurfaceFieldSample, SurfaceMaterialMix, mix3,
+    scale_visibility, smoothstep,
 };
 use crate::types::Material;
 
@@ -19,7 +22,11 @@ pub const VAELEN_MAT_DARK_BASALT: u8 = 1;
 pub const VAELEN_MAT_PALE_SEDIMENT: u8 = 2;
 pub const VAELEN_MAT_DUNE_SAND: u8 = 3;
 pub const VAELEN_MAT_EVAPORITE: u8 = 4;
-pub const VAELEN_BIOME_COUNT: usize = 5;
+pub const VAELEN_BIOME_COUNT: usize = 8;
+pub const VAELEN_SHIELD_VOLCANO_RADIUS_M: f32 = 390_000.0;
+pub const VAELEN_SHIELD_VOLCANO_HEIGHT_M: f32 = 7_200.0;
+
+const VAELEN_SHIELD_VOLCANO_RADIUS_RAD: f32 = 0.345;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VaelenBiome {
@@ -28,15 +35,27 @@ pub enum VaelenBiome {
     PaleEvaporiteBasin,
     DarkVolcanicProvince,
     RuggedBadlands,
+    /// Bright oxide-stained uplands. Lives on highland_ridges; distinct from
+    /// the muted RustDustPlain in saturation and altitude bias.
+    OxideHighland,
+    /// Pale frost+dust mantle on high-latitude regions. Lobed by fbm so the
+    /// boundary doesn't read as a circular cap from orbit.
+    PolarVeneer,
+    /// Gray ash mantle around the dark volcanic provinces — dust-fall
+    /// transition between rust plain and basalt.
+    AshMantle,
 }
 
 impl VaelenBiome {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; VAELEN_BIOME_COUNT] = [
         Self::RustDustPlain,
         Self::DuneBasin,
         Self::PaleEvaporiteBasin,
         Self::DarkVolcanicProvince,
         Self::RuggedBadlands,
+        Self::OxideHighland,
+        Self::PolarVeneer,
+        Self::AshMantle,
     ];
 
     pub fn label(self) -> &'static str {
@@ -46,6 +65,9 @@ impl VaelenBiome {
             Self::PaleEvaporiteBasin => "pale_evaporite_basin",
             Self::DarkVolcanicProvince => "dark_volcanic_province",
             Self::RuggedBadlands => "rugged_badlands",
+            Self::OxideHighland => "oxide_highland",
+            Self::PolarVeneer => "polar_veneer",
+            Self::AshMantle => "ash_mantle",
         }
     }
 
@@ -56,16 +78,22 @@ impl VaelenBiome {
             Self::PaleEvaporiteBasin => [221, 198, 143],
             Self::DarkVolcanicProvince => [62, 58, 55],
             Self::RuggedBadlands => [124, 83, 66],
+            Self::OxideHighland => [220, 102, 36],
+            Self::PolarVeneer => [206, 192, 174],
+            Self::AshMantle => [120, 109, 98],
         }
     }
 
-    fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
             Self::RustDustPlain => 0,
             Self::DuneBasin => 1,
             Self::PaleEvaporiteBasin => 2,
             Self::DarkVolcanicProvince => 3,
             Self::RuggedBadlands => 4,
+            Self::OxideHighland => 5,
+            Self::PolarVeneer => 6,
+            Self::AshMantle => 7,
         }
     }
 
@@ -75,6 +103,9 @@ impl VaelenBiome {
             2 => Self::PaleEvaporiteBasin,
             3 => Self::DarkVolcanicProvince,
             4 => Self::RuggedBadlands,
+            5 => Self::OxideHighland,
+            6 => Self::PolarVeneer,
+            7 => Self::AshMantle,
             _ => Self::RustDustPlain,
         }
     }
@@ -87,6 +118,9 @@ pub struct VaelenBiomeWeights {
     pub pale_evaporite_basin: f32,
     pub dark_volcanic_province: f32,
     pub rugged_badlands: f32,
+    pub oxide_highland: f32,
+    pub polar_veneer: f32,
+    pub ash_mantle: f32,
 }
 
 impl VaelenBiomeWeights {
@@ -97,6 +131,9 @@ impl VaelenBiomeWeights {
             pale_evaporite_basin: weights.weights[VaelenBiome::PaleEvaporiteBasin.index()],
             dark_volcanic_province: weights.weights[VaelenBiome::DarkVolcanicProvince.index()],
             rugged_badlands: weights.weights[VaelenBiome::RuggedBadlands.index()],
+            oxide_highland: weights.weights[VaelenBiome::OxideHighland.index()],
+            polar_veneer: weights.weights[VaelenBiome::PolarVeneer.index()],
+            ash_mantle: weights.weights[VaelenBiome::AshMantle.index()],
         }
     }
 
@@ -107,6 +144,9 @@ impl VaelenBiomeWeights {
             self.pale_evaporite_basin,
             self.dark_volcanic_province,
             self.rugged_badlands,
+            self.oxide_highland,
+            self.polar_veneer,
+            self.ash_mantle,
         ];
         let index = BiomeMaskWeights { weights }.dominant_index();
         VaelenBiome::from_index(index)
@@ -119,6 +159,9 @@ impl VaelenBiomeWeights {
             VaelenBiome::PaleEvaporiteBasin => self.pale_evaporite_basin,
             VaelenBiome::DarkVolcanicProvince => self.dark_volcanic_province,
             VaelenBiome::RuggedBadlands => self.rugged_badlands,
+            VaelenBiome::OxideHighland => self.oxide_highland,
+            VaelenBiome::PolarVeneer => self.polar_veneer,
+            VaelenBiome::AshMantle => self.ash_mantle,
         }
     }
 
@@ -208,6 +251,10 @@ impl VaelenColdDesertField {
             },
         ]
     }
+
+    pub fn shield_volcano_center_dir() -> Vec3 {
+        shield_volcano_center_dir()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -289,7 +336,9 @@ fn sample_vaelen_cold_desert(
         lowland_bias,
         biome_plan,
     );
+    let shield = shield_volcano_sample(dir, root_seed, sample_scale_m);
     let dune_contact = dune_basin_contact(dir, root_seed, lowland_bias, highland_ridges);
+    let basin_dune_fill = (dune_contact.paleo_lowland * projection.dune_strength).clamp(0.0, 1.0);
     let basin_sediment = lowland_sediment_coherence(
         dir,
         root_seed,
@@ -325,6 +374,7 @@ fn sample_vaelen_cold_desert(
     height_m += dune_contact.strandline * 115.0 * relief;
     height_m += dune_contact.interior_highs * 700.0 * relief;
     height_m += dune_contact.floor_undulation * 180.0 * relief;
+    height_m += shield.height_m * relief;
 
     let dust_tone = fbm_dir(dir, root_seed.detail, "dust_tone", 0.85, 4, 0.54) * 0.030
         + fbm_dir(dir, root_seed.detail, "oxide_swells", 1.8, 3, 0.52) * 0.016;
@@ -389,15 +439,23 @@ fn sample_vaelen_cold_desert(
     let mut dune_score = 0.0;
 
     let dark_belt = biomes.dark_volcanic_province * projection.volcanic_dark_strength;
-    if dark_belt > 0.05 {
+    let dark_belt_albedo = dark_belt * (1.0 - shield.apron * 0.62);
+    if dark_belt_albedo > 0.05 {
         dark_score = dark_belt.clamp(0.0, 1.0);
         let dark_color = mix3(
             [0.19, 0.095, 0.065],
             [0.12, 0.060, 0.048],
             smoothstep(0.50, 0.95, dark_belt),
         );
-        albedo = mix3(albedo, dark_color, dark_belt.clamp(0.0, 0.54));
-        height_m -= dark_belt * 260.0 * relief;
+        albedo = mix3(albedo, dark_color, dark_belt_albedo.clamp(0.0, 0.54));
+        height_m -= dark_belt_albedo * 260.0 * relief;
+    }
+
+    if shield.apron > 0.01 {
+        let flank_color = shield_volcano_albedo(shield);
+        albedo = mix3(albedo, flank_color, (shield.apron * 0.70).clamp(0.0, 0.76));
+        dark_score = dark_score
+            .max(shield.apron * 0.40 + shield.basal_scarp * 0.38 + shield.caldera_rim * 0.36);
     }
 
     let pale_center_a = Vec3::new(-0.34, -0.22, 0.91).normalize();
@@ -414,11 +472,13 @@ fn sample_vaelen_cold_desert(
             + lowland_bias * 0.24
             + basin_sediment * 0.14
             + biomes.pale_evaporite_basin * 0.58
+            - basin_dune_fill * 0.54
             - dark_belt * 0.18,
     );
     let sediment_w = (pale_coherence * 0.56 + biomes.pale_evaporite_basin * 0.62).clamp(0.0, 1.0)
         * projection.pale_basin_strength
-        * 0.78;
+        * 0.78
+        * (1.0 - basin_dune_fill * 0.92).clamp(0.0, 1.0);
     if sediment_w > 0.04 {
         let evap_a = cap_mask(dir, pale_center_a, 0.10, 0.36);
         let evap_b = cap_mask(dir, pale_center_b, 0.08, 0.28);
@@ -465,6 +525,34 @@ fn sample_vaelen_cold_desert(
         [0.33, 0.18, 0.11],
         (basin_mottle * 0.75).clamp(0.0, 0.72),
     );
+    if basin_dune_fill > 0.01 {
+        let dune_floor_variation = fbm_dir(
+            dir,
+            root_seed.detail,
+            "paleo_lowland_dune_fill_tone",
+            5.8,
+            4,
+            0.54,
+        ) * 0.58
+            + fbm_dir(
+                dir,
+                root_seed.detail,
+                "paleo_lowland_dune_fill_grain",
+                18.0,
+                3,
+                0.52,
+            ) * 0.24;
+        let dune_floor_color = mix3(
+            [0.50, 0.215, 0.074],
+            [0.69, 0.36, 0.125],
+            smoothstep(-0.30, 0.58, dune_floor_variation),
+        );
+        albedo = mix3(
+            albedo,
+            dune_floor_color,
+            (basin_dune_fill * 0.82).clamp(0.0, 0.92),
+        );
+    }
 
     let basin_margin = (sediment_w * (1.0 - sediment_w) * 3.2).clamp(0.0, 1.0);
     let channel_signal = ridge(fbm_dir(dir, root_seed.shape, "channels", 4.7, 4, 0.50)).powf(7.0)
@@ -504,19 +592,72 @@ fn sample_vaelen_cold_desert(
         let north = dune_center.cross(east).normalize();
         let wind_x = dir.dot(east);
         let wind_y = dir.dot(north);
-        let dune_visibility = scale_visibility(sample_scale_m, 18_000.0);
-        let phase = wind_x * 92.0
-            + wind_y * 21.0
-            + fbm_dir(dir, root_seed.detail, "dune_warp", 8.0, 3, 0.5) * 5.0;
-        let wave = ((phase.sin() * 0.5 + 0.5).powf(2.8)) * dune_visibility;
-        height_m += dune_mask * (wave * 70.0 + texture_n * 24.0) * relief;
+        let dune_visibility = scale_visibility(sample_scale_m, 90_000.0);
+        let cross_warp = fbm_dir(dir, root_seed.detail, "dune_cross_warp_broad", 2.1, 4, 0.56)
+            * 0.095
+            + fbm_dir(dir, root_seed.detail, "dune_cross_warp_lace", 7.4, 3, 0.52) * 0.040;
+        let along_warp =
+            fbm_dir(dir, root_seed.detail, "dune_along_warp_broad", 2.7, 3, 0.54) * 0.040;
+        let u = wind_x + wind_y * 0.14 + cross_warp;
+        let v = wind_y - wind_x * 0.08 + along_warp;
+        let dune_lobe_noise = fbm_dir(dir, root_seed.children, "dune_lobe_bodies", 2.2, 4, 0.56)
+            * 0.78
+            + fbm_dir(dir, root_seed.detail, "dune_lobe_edges", 6.4, 3, 0.52) * 0.30
+            + dune_contact.floor_undulation * 0.26
+            - dune_contact.interior_highs * 0.22;
+        let lobe = smoothstep(
+            -0.18,
+            0.56,
+            dune_lobe_noise + dune_contact.dune_plate * 0.12,
+        );
+        let lobe = lobe * lobe;
+        let wavelength_jitter = (1.0
+            + fbm_dir(
+                dir,
+                root_seed.detail,
+                "dune_wavelength_jitter",
+                2.6,
+                3,
+                0.53,
+            ) * 0.24)
+            .clamp(0.72, 1.42);
+        let phase = (u * 5.8 + v * 0.9) / wavelength_jitter
+            + fbm_dir(
+                dir,
+                root_seed.detail,
+                "dune_phase_broad_drift",
+                2.4,
+                4,
+                0.55,
+            ) * 1.20
+            + fbm_dir(dir, root_seed.detail, "dune_phase_lace", 8.5, 3, 0.50) * 0.42;
+        let (primary_body, primary_crest) = dune_body_profile(phase, 0.84);
+        let dune_body = (primary_body * (0.16 + lobe * 1.05)).clamp(0.0, 1.0) * dune_visibility;
+        let dune_crest = (primary_crest * (0.34 + lobe * 0.76)).clamp(0.0, 1.0) * dune_visibility;
+        height_m += dune_mask * (dune_body * 34.0 + dune_crest * 14.0 + texture_n * 2.0) * relief;
+        let sand_polish = fbm_dir(dir, root_seed.detail, "dune_sand_polish", 18.0, 2, 0.50);
+        let dune_tone = (lobe * 0.46 + dune_body * 0.36 + dune_crest * 0.18 + sand_polish * 0.08)
+            .clamp(0.0, 1.0);
         albedo = mix3(
             albedo,
-            mix3([0.54, 0.24, 0.085], [0.70, 0.34, 0.12], wave),
-            dune_mask.clamp(0.0, 0.38),
+            mix3([0.46, 0.20, 0.070], [0.76, 0.44, 0.16], dune_tone),
+            (dune_mask * (0.08 + lobe * 0.16 + dune_body * 0.08 + dune_crest * 0.04))
+                .clamp(0.0, 0.30),
         );
-        dune_score = dune_mask * 0.65;
+        dune_score = dune_mask
+            * (0.36 + lobe * 0.28 + dune_body * 0.24 + dune_crest * 0.14).clamp(0.0, 0.86);
     }
+
+    let relief_slope_signal = (dune_contact.suture_crest * 0.86
+        + dune_contact.mountain_web * 0.54
+        + dune_contact.shoreline_scarp * 0.42
+        + dune_contact.shelf_break * 0.18
+        + channels * 0.34
+        + shield.slope * 18.0 * shield.apron
+        + shield.basal_scarp * 0.62
+        + shield.caldera_rim * 0.45)
+        .clamp(0.0, 1.0);
+    albedo = vaelen_relief_albedo_grade(albedo, height_m, relief_slope_signal);
 
     let dust_mottle =
         fbm_dir(dir, root_seed.detail, "dust_mottle", 12.0, 2, 0.55) * 0.024 * texture_visibility;
@@ -528,15 +669,61 @@ fn sample_vaelen_cold_desert(
         (albedo[1] + dust_mottle * 0.62).clamp(0.03, 0.92),
         (albedo[2] + dust_mottle * 0.38).clamp(0.03, 0.92),
     ];
+
+    let relief_ridge_signal = (highland_ridges.powf(1.8) * 0.34
+        + dune_contact.suture_crest * 0.52
+        + dune_contact.mountain_web * 0.40
+        + dune_contact.strandline * 0.16
+        + shield.ridge * 0.46
+        + shield.caldera_rim * 0.38)
+        .clamp(0.0, 1.0);
+    let relief_hollow_signal = (dune_contact.paleo_lowland * 0.24
+        + basin_mottle * 0.28
+        + channels * 0.62
+        + shield.caldera_floor * 0.44
+        + (1.0 - basin_sediment) * dune_contact.dune_plate * 0.12)
+        .clamp(0.0, 1.0);
+    let palette_variation = fbm_dir(dir, root_seed.detail, "relief_palette_broad", 1.75, 4, 0.55)
+        * 0.62
+        + fbm_dir(
+            dir,
+            root_seed.detail,
+            "relief_palette_mottle",
+            10.5,
+            3,
+            0.52,
+        ) * 0.30
+        + texture_n * 0.18
+        + fine_n * 0.10;
+    let palette_albedo = vaelen_biome_relief_albedo(
+        biomes,
+        height_m,
+        relief_slope_signal,
+        relief_ridge_signal,
+        relief_hollow_signal,
+        palette_variation,
+    );
+    let palette_strength = (0.34
+        + relief_slope_signal * 0.14
+        + relief_ridge_signal * 0.08
+        + relief_hollow_signal * 0.06
+        + biomes.dark_volcanic_province * 0.10
+        + biomes.pale_evaporite_basin * 0.08
+        + biomes.dune_basin * 0.08
+        + basin_dune_fill * 0.10)
+        .clamp(0.30, 0.58);
+    albedo = mix3(albedo, palette_albedo, palette_strength);
     albedo = vaelen_rust_saturation_grade(albedo);
 
     // The renderer currently treats the dominant material id as the primary
     // palette lookup. Keep Vaelen's dominant material conservative so broad
     // process masks do not become hard categorical paint regions; the
     // filterable albedo cube carries most orbital color variation.
-    let rust_score =
-        (0.26 + biomes.rust_dust_plain * 0.78 - evaporite_score * 0.08 - dune_score * 0.08)
-            .max(0.08);
+    let rust_score = (0.26 + biomes.rust_dust_plain * 0.78
+        - evaporite_score * 0.08
+        - dune_score * 0.08
+        - basin_dune_fill * 0.22)
+        .max(0.08);
     let material_mix = SurfaceMaterialMix::from_weighted([
         (VAELEN_MAT_RUST_DUST, rust_score),
         (
@@ -544,26 +731,72 @@ fn sample_vaelen_cold_desert(
             biomes.dark_volcanic_province * 0.88
                 + dark_score * 0.20
                 + dune_contact.suture_crest * 1.12
-                + dune_contact.mountain_web * 0.62,
+                + dune_contact.mountain_web * 0.62
+                + shield.apron * 1.12
+                + shield.basal_scarp * 1.34
+                + shield.dark_flows * 0.58,
         ),
         (
             VAELEN_MAT_PALE_SEDIMENT,
-            biomes.pale_evaporite_basin * 0.74
+            (biomes.pale_evaporite_basin * 0.74
                 + sediment_score * 0.20
-                + basin_sediment * (1.0 - dune_contact.dune_plate) * 0.12,
+                + basin_sediment * (1.0 - basin_dune_fill) * 0.12)
+                * (1.0 - basin_dune_fill * 0.95).clamp(0.0, 1.0),
         ),
         (
             VAELEN_MAT_DUNE_SAND,
-            dune_contact.dune_plate * 1.62 + dune_score * 0.34 + dune_contact.dune_toe * 0.10,
+            basin_dune_fill * 1.74
+                + dune_contact.dune_plate * 0.58
+                + dune_score * 0.34
+                + dune_contact.dune_toe * 0.10,
         ),
         (VAELEN_MAT_EVAPORITE, evaporite_score * 0.55),
     ]);
-    let roughness = 0.86 + dune_score * 0.04 - evaporite_score * 0.12 - dark_score * 0.08;
+    let roughness = 0.86 + dune_score * 0.04
+        - evaporite_score * 0.12
+        - dark_score * 0.08
+        - shield.eroded_flanks * 0.025
+        + shield.caldera_floor * 0.025;
+
+    // Persist the full biome weights so the generic BiomeReliefColor stage
+    // can blend per-biome palettes after later stages have written into the
+    // albedo cube. Several biomes get boosted on physical signals
+    // (dune fill, shield flanks, sediment coherence) so the post-pass picks
+    // up the right palette where features have actually landed.
+    let biome_mix = BiomeMix::from_weighted([
+        (
+            VaelenBiome::RustDustPlain.index() as u8,
+            biomes.rust_dust_plain,
+        ),
+        (
+            VaelenBiome::DuneBasin.index() as u8,
+            biomes.dune_basin + basin_dune_fill * 1.20 + dune_score * 0.40,
+        ),
+        (
+            VaelenBiome::PaleEvaporiteBasin.index() as u8,
+            biomes.pale_evaporite_basin + sediment_score * 0.30,
+        ),
+        (
+            VaelenBiome::DarkVolcanicProvince.index() as u8,
+            biomes.dark_volcanic_province + shield.apron * 0.60 + shield.basal_scarp * 0.80,
+        ),
+        (
+            VaelenBiome::RuggedBadlands.index() as u8,
+            biomes.rugged_badlands,
+        ),
+        (
+            VaelenBiome::OxideHighland.index() as u8,
+            biomes.oxide_highland,
+        ),
+        (VaelenBiome::PolarVeneer.index() as u8, biomes.polar_veneer),
+        (VaelenBiome::AshMantle.index() as u8, biomes.ash_mantle),
+    ]);
 
     SurfaceFieldSample::new(
         height_m,
         albedo,
         material_mix,
+        biome_mix,
         roughness.clamp(0.55, 0.96),
         dir,
     )
@@ -576,6 +809,10 @@ fn sample_biome_height_generators(
     generators: &crate::height_generator::ColdDesertBiomeHeightGenerators,
 ) -> f32 {
     let seed = root_seed.shape;
+    // OxideHighland/PolarVeneer/AshMantle reuse existing height shapes —
+    // they are color-driven biomes, so the per-biome contribution is
+    // sampled from existing generators with a unique salt to keep the field
+    // deterministic without inventing new amplitude/frequency profiles.
     biomes.rust_dust_plain
         * generators
             .rust_dust_plain
@@ -600,14 +837,194 @@ fn sample_biome_height_generators(
             * generators
                 .rugged_badlands
                 .sample_height_m(dir, seed, "height:rugged_badlands")
+        + biomes.oxide_highland
+            * generators
+                .rust_dust_plain
+                .sample_height_m(dir, seed, "height:oxide_highland")
+        + biomes.polar_veneer
+            * generators
+                .pale_evaporite_basin
+                .sample_height_m(dir, seed, "height:polar_veneer")
+        + biomes.ash_mantle
+            * generators
+                .dark_volcanic_province
+                .sample_height_m(dir, seed, "height:ash_mantle")
 }
 
 fn vaelen_rust_saturation_grade(albedo: [f32; 3]) -> [f32; 3] {
     [
-        (albedo[0] * 1.16 + 0.018).clamp(0.03, 0.92),
-        (albedo[1] * 0.70 + albedo[0] * 0.020).clamp(0.03, 0.92),
-        (albedo[2] * 0.48 + albedo[1] * 0.012).clamp(0.03, 0.92),
+        (albedo[0] * 1.035 + 0.006).clamp(0.025, 0.94),
+        (albedo[1] * 0.94 + albedo[0] * 0.018).clamp(0.025, 0.94),
+        (albedo[2] * 0.86 + albedo[1] * 0.020).clamp(0.020, 0.94),
     ]
+}
+
+fn vaelen_relief_albedo_grade(albedo: [f32; 3], height_m: f32, slope_signal: f32) -> [f32; 3] {
+    let low_floor = smoothstep(-350.0, -1_800.0, height_m);
+    let high_dust = smoothstep(900.0, 5_600.0, height_m);
+    let steep = smoothstep(0.22, 0.72, slope_signal);
+
+    let mut color = albedo;
+    color = mix3(color, [0.58, 0.34, 0.17], high_dust * 0.13);
+    color = mix3(color, [0.66, 0.47, 0.27], low_floor * 0.07);
+    color = mix3(color, [0.18, 0.11, 0.075], steep * 0.24);
+    color = mix3(color, [0.48, 0.22, 0.11], high_dust * (1.0 - steep) * 0.08);
+    color
+}
+
+/// Per-biome relief palettes for Vaelen, indexed by `VaelenBiome::index()`.
+/// The compile path copies this into `BodyBuilder::biome_palettes` so the
+/// generic `BiomeReliefColor` stage can blend palettes from the baked
+/// biome-weights cubemap.
+pub fn vaelen_relief_palettes() -> Vec<ReliefPalette> {
+    VaelenBiome::ALL
+        .iter()
+        .map(|biome| vaelen_relief_palette_for_biome(*biome))
+        .collect()
+}
+
+fn vaelen_biome_relief_albedo(
+    biomes: VaelenBiomeWeights,
+    height_m: f32,
+    slope_signal: f32,
+    ridge_signal: f32,
+    hollow_signal: f32,
+    variation: f32,
+) -> [f32; 3] {
+    let mut color = [0.0; 3];
+    let mut total = 0.0;
+    for biome in VaelenBiome::ALL {
+        let weight = biomes.weight_for(biome).max(0.0);
+        if weight <= 0.0 {
+            continue;
+        }
+
+        let sample = vaelen_relief_palette_for_biome(biome).evaluate(
+            height_m,
+            slope_signal,
+            ridge_signal,
+            hollow_signal,
+            variation,
+        );
+        color[0] += sample[0] * weight;
+        color[1] += sample[1] * weight;
+        color[2] += sample[2] * weight;
+        total += weight;
+    }
+
+    if total <= 1.0e-5 {
+        return vaelen_relief_palette_for_biome(VaelenBiome::RustDustPlain).evaluate(
+            height_m,
+            slope_signal,
+            ridge_signal,
+            hollow_signal,
+            variation,
+        );
+    }
+
+    [color[0] / total, color[1] / total, color[2] / total]
+}
+
+fn vaelen_relief_palette_for_biome(biome: VaelenBiome) -> ReliefPalette {
+    match biome {
+        VaelenBiome::RustDustPlain => ReliefPalette {
+            low: [0.32, 0.145, 0.072],
+            mid: [0.47, 0.225, 0.105],
+            high: [0.64, 0.40, 0.205],
+            steep: [0.18, 0.105, 0.074],
+            ridge: [0.72, 0.54, 0.335],
+            hollow: [0.245, 0.128, 0.082],
+        },
+        VaelenBiome::DuneBasin => ReliefPalette {
+            low: [0.43, 0.19, 0.066],
+            mid: [0.62, 0.32, 0.105],
+            high: [0.80, 0.55, 0.245],
+            steep: [0.28, 0.135, 0.074],
+            ridge: [0.86, 0.69, 0.38],
+            hollow: [0.36, 0.17, 0.072],
+        },
+        VaelenBiome::PaleEvaporiteBasin => ReliefPalette {
+            low: [0.53, 0.37, 0.225],
+            mid: [0.68, 0.53, 0.335],
+            high: [0.84, 0.75, 0.55],
+            steep: [0.32, 0.23, 0.16],
+            ridge: [0.92, 0.84, 0.64],
+            hollow: [0.45, 0.30, 0.20],
+        },
+        VaelenBiome::DarkVolcanicProvince => ReliefPalette {
+            low: [0.052, 0.047, 0.043],
+            mid: [0.105, 0.078, 0.060],
+            high: [0.22, 0.155, 0.105],
+            steep: [0.033, 0.031, 0.029],
+            ridge: [0.36, 0.27, 0.18],
+            hollow: [0.044, 0.036, 0.032],
+        },
+        VaelenBiome::RuggedBadlands => ReliefPalette {
+            low: [0.235, 0.145, 0.105],
+            mid: [0.40, 0.24, 0.15],
+            high: [0.60, 0.42, 0.27],
+            steep: [0.13, 0.088, 0.068],
+            ridge: [0.74, 0.58, 0.39],
+            hollow: [0.20, 0.12, 0.088],
+        },
+        // Strongly oxidized highlands — brighter, more saturated than the
+        // rust dust plain. Reads as orange-red continents from orbit.
+        VaelenBiome::OxideHighland => ReliefPalette {
+            low: [0.42, 0.20, 0.085],
+            mid: [0.62, 0.30, 0.105],
+            high: [0.82, 0.46, 0.165],
+            steep: [0.22, 0.115, 0.075],
+            ridge: [0.92, 0.62, 0.26],
+            hollow: [0.32, 0.16, 0.085],
+        },
+        // Pale frost+dust mantle. Warmer than evaporite (more dust, less
+        // salt), so trends tan/cream rather than white.
+        VaelenBiome::PolarVeneer => ReliefPalette {
+            low: [0.62, 0.55, 0.46],
+            mid: [0.78, 0.72, 0.62],
+            high: [0.90, 0.86, 0.78],
+            steep: [0.34, 0.28, 0.22],
+            ridge: [0.94, 0.90, 0.82],
+            hollow: [0.50, 0.43, 0.35],
+        },
+        // Gray ash, transition zone around the dark volcanic provinces.
+        // Slightly warm so it reads as ash-on-rust, not lunar-grey.
+        VaelenBiome::AshMantle => ReliefPalette {
+            low: [0.18, 0.155, 0.135],
+            mid: [0.30, 0.265, 0.235],
+            high: [0.46, 0.40, 0.345],
+            steep: [0.105, 0.092, 0.082],
+            ridge: [0.56, 0.48, 0.40],
+            hollow: [0.16, 0.135, 0.115],
+        },
+    }
+}
+
+fn shield_volcano_albedo(shield: ShieldVolcanoSample) -> [f32; 3] {
+    let occlusion = (shield.erosion_delta + 0.5).clamp(0.0, 1.0);
+    let cliff = smoothstep(0.018, 0.052, shield.slope) * shield.apron;
+    let high = shield.dome.clamp(0.0, 1.0);
+
+    let mut color = mix3([0.39, 0.145, 0.065], [0.56, 0.24, 0.095], high);
+    color = mix3(color, [0.65, 0.36, 0.16], high * (1.0 - cliff) * 0.24);
+    color = mix3(color, [0.17, 0.095, 0.062], cliff.clamp(0.0, 0.72));
+    color = mix3(
+        color,
+        [0.24, 0.115, 0.070],
+        (1.0 - occlusion) * shield.eroded_flanks * 0.72,
+    );
+    color = mix3(color, [0.67, 0.31, 0.105], shield.ridge * 0.24);
+    color = mix3(color, [0.16, 0.090, 0.060], shield.crease * 0.34);
+    color = mix3(
+        color,
+        [0.105, 0.070, 0.055],
+        (shield.basal_scarp * 0.62 + shield.caldera_rim * 0.72).clamp(0.0, 0.86),
+    );
+    mix3(
+        color,
+        [0.20, 0.125, 0.085],
+        (shield.caldera_floor * 0.58).clamp(0.0, 0.64),
+    )
 }
 
 fn lowland_sediment_coherence(
@@ -654,7 +1071,14 @@ fn cold_desert_biome_mask_plan(
     use BiomeMaskSeedStream::{Detail, Placement, Shape};
 
     let dune_score = E::product(vec![
-        E::signal("dune_plate"),
+        E::clamp(
+            0.0,
+            1.0,
+            E::sum(vec![
+                (1.0, E::signal("dune_plate")),
+                (0.95, E::signal("paleo_lowland")),
+            ]),
+        ),
         E::constant(projection.dune_strength),
     ]);
     let dark_lat_warp = E::sum(vec![
@@ -713,7 +1137,7 @@ fn cold_desert_biome_mask_plan(
                 (0.22, E::signal("paleo_lowland")),
                 (0.10, E::fbm(Placement, "biome_pale_lowlands", 1.4, 4, 0.56)),
                 (-0.16, E::signal("dark_score")),
-                (-0.10, E::signal("dune_score")),
+                (-0.82, E::signal("dune_score")),
             ]),
         ),
         E::constant(projection.pale_basin_strength),
@@ -742,13 +1166,96 @@ fn cold_desert_biome_mask_plan(
         E::sum(vec![(0.58, E::constant(1.0)), (0.42, rugged_texture)]),
     ]);
 
+    // Polar veneer: high latitude band, lobed by fbm so the boundary is
+    // fractal rather than a circular cap. `dir_y` is the body-frame
+    // y-component, i.e. sin(latitude) in the bake frame. Threshold is loose
+    // enough that polar zones extend visibly inward from the poles, with
+    // the fbm warp breaking the edge so it never reads as a clean band.
+    let polar_score = E::product(vec![
+        E::smoothstep(
+            0.20,
+            0.74,
+            E::sum(vec![
+                (1.0, E::abs(E::signal("dir_y"))),
+                (0.18, E::fbm(Placement, "biome_polar_warp", 1.4, 3, 0.55)),
+                (0.10, E::fbm(Detail, "biome_polar_lace", 4.5, 3, 0.50)),
+                (-0.30, E::signal("dune_score")),
+                (-0.20, E::signal("dark_score")),
+            ]),
+        ),
+        E::sum(vec![
+            (0.86, E::constant(1.0)),
+            (0.34, E::fbm(Shape, "biome_polar_continuity", 1.8, 3, 0.55)),
+        ]),
+    ]);
+
+    // Oxide highland: bright orange highlands picking up where the macro
+    // signal is strongly positive AND highland_ridges ridge-bias is firing.
+    // Distinct enough from rust dust plain that the planet shows red/orange
+    // vs. reddish-brown bands at orbital scale. Threshold lowered so oxide
+    // territory is meaningful at orbital read.
+    let oxide_seed = E::smoothstep(
+        -0.22,
+        0.62,
+        E::sum(vec![
+            (1.0, E::signal("highland_ridges")),
+            (0.40, E::signal("macro")),
+            (0.24, E::signal("regional")),
+            (
+                0.26,
+                E::fbm(Placement, "biome_oxide_provinces", 1.10, 4, 0.55),
+            ),
+            (-0.62, E::signal("paleo_lowland")),
+            (-0.34, E::signal("dune_score")),
+            (-0.22, E::signal("pale_score")),
+            (-0.18, E::signal("dark_score")),
+            (-0.40, E::signal("polar_score")),
+        ]),
+    );
+    let oxide_texture = E::smoothstep(
+        -0.10,
+        0.55,
+        E::fbm(Detail, "biome_oxide_mottle", 5.6, 3, 0.52),
+    );
+    let oxide_score = E::product(vec![
+        oxide_seed,
+        E::sum(vec![(0.92, E::constant(1.0)), (0.38, oxide_texture)]),
+    ]);
+
+    // Ash mantle: dust-fall transition zone around the dark volcanic
+    // provinces. Picks up where dark_score is non-zero but not dominant.
+    // Reads as gray fringe between rust plain and basalt. Lower threshold
+    // so the ash zone extends well beyond the basalt cores.
+    let ash_score = E::product(vec![
+        E::smoothstep(
+            0.02,
+            0.38,
+            E::sum(vec![
+                (1.0, E::signal("dark_score")),
+                (
+                    0.42,
+                    E::fbm(Placement, "biome_ash_continuity", 1.45, 4, 0.54),
+                ),
+                (-0.22, E::signal("dune_score")),
+                (-0.10, E::signal("pale_score")),
+            ]),
+        ),
+        E::sum(vec![
+            (0.62, E::constant(1.0)),
+            (0.42, E::fbm(Detail, "biome_ash_mottle", 4.2, 3, 0.50)),
+        ]),
+    ]);
+
+    // Rust dust plain becomes a thinner default — base weight lowered and
+    // new biome scores subtract from it. The fallback (last position) only
+    // fires when every other score is near zero.
     let rust_score = E::clamp(
-        0.10,
+        0.06,
         f32::INFINITY,
         E::sum(vec![
-            (0.36, E::constant(1.0)),
+            (0.20, E::constant(1.0)),
             (
-                0.34,
+                0.24,
                 E::smoothstep(
                     -0.22,
                     0.68,
@@ -758,10 +1265,13 @@ fn cold_desert_biome_mask_plan(
                     ]),
                 ),
             ),
-            (-0.18, E::signal("dune_score")),
+            (-0.28, E::signal("dune_score")),
             (-0.10, E::signal("paleo_lowland")),
             (-0.16, E::signal("pale_score")),
             (-0.08, E::signal("dark_score")),
+            (-0.34, E::signal("oxide_score")),
+            (-0.30, E::signal("polar_score")),
+            (-0.26, E::signal("ash_score")),
         ]),
     );
 
@@ -792,6 +1302,17 @@ fn cold_desert_biome_mask_plan(
                 Some("pale_score"),
                 pale_score,
             ),
+            BiomeMaskRule::new(
+                VaelenBiome::PolarVeneer.index(),
+                Some("polar_score"),
+                polar_score,
+            ),
+            BiomeMaskRule::new(
+                VaelenBiome::OxideHighland.index(),
+                Some("oxide_score"),
+                oxide_score,
+            ),
+            BiomeMaskRule::new(VaelenBiome::AshMantle.index(), Some("ash_score"), ash_score),
             BiomeMaskRule::new(VaelenBiome::RuggedBadlands.index(), None, rugged_score),
             BiomeMaskRule::new(VaelenBiome::RustDustPlain.index(), None, rust_score),
         ],
@@ -853,6 +1374,242 @@ fn vaelen_biome_weights(
         .with_signal("dune_plate", dune_contact.dune_plate);
 
     VaelenBiomeWeights::from_mask(biome_plan.sample(&mut context))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ShieldVolcanoSample {
+    apron: f32,
+    dome: f32,
+    basal_scarp: f32,
+    caldera_floor: f32,
+    caldera_rim: f32,
+    eroded_flanks: f32,
+    crease: f32,
+    ridge: f32,
+    slope: f32,
+    erosion_delta: f32,
+    dark_flows: f32,
+    height_m: f32,
+}
+
+fn shield_volcano_center_dir() -> Vec3 {
+    Vec3::new(0.74, 0.55, -0.38).normalize()
+}
+
+fn shield_volcano_frame() -> (Vec3, Vec3, Vec3) {
+    let center = shield_volcano_center_dir();
+    let east = Vec3::Y.cross(center).normalize();
+    let north = center.cross(east).normalize();
+    (center, east, north)
+}
+
+fn shield_volcano_sample(
+    dir: Vec3,
+    root_seed: FeatureSeed,
+    sample_scale_m: f32,
+) -> ShieldVolcanoSample {
+    let (center, east, north) = shield_volcano_frame();
+    let z = dir.dot(center).clamp(-0.999_999, 0.999_999);
+    let local_x = dir.dot(east).atan2(z);
+    let local_y = dir.dot(north).atan2(z);
+    let body_radius_m = VAELEN_SHIELD_VOLCANO_RADIUS_M / VAELEN_SHIELD_VOLCANO_RADIUS_RAD;
+    let x_m = local_x * body_radius_m;
+    let y_m = local_y * body_radius_m;
+    let rx = VAELEN_SHIELD_VOLCANO_RADIUS_M * 1.06;
+    let ry = VAELEN_SHIELD_VOLCANO_RADIUS_M * 0.94;
+    let r = shield_volcano_profile_radius(x_m, y_m, rx, ry, root_seed);
+
+    if r > 1.22 {
+        return ShieldVolcanoSample::default();
+    }
+
+    let apron = smoothstep(1.18, 0.90, r);
+    let r_clamped = r.clamp(0.0, 1.0);
+    let dome_base = (1.0 - r_clamped.powf(1.72)).max(0.0).powf(1.18);
+    let dome = dome_base * smoothstep(1.03, 0.12, r);
+    let basal_scarp = band_mask(r, 1.0, 0.048).powf(0.70) * smoothstep(1.16, 0.84, r);
+    let outer_moat = band_mask(r, 1.105, 0.095) * smoothstep(1.23, 0.94, r);
+
+    let caldera_floor = smoothstep(0.140, 0.070, r);
+    let caldera_rim = band_mask(r, 0.142, 0.026).powf(0.62);
+
+    let (dome_height, dh_dx, dh_dy) = shield_dome_height_and_slope(x_m, y_m, rx, ry, root_seed);
+    let flank_band = smoothstep(0.18, 0.36, r) * smoothstep(1.12, 0.54, r);
+    let erosion_visibility = scale_visibility(sample_scale_m, 42_000.0);
+    let erosion = if flank_band > 0.0 && erosion_visibility > 0.0 {
+        let p = Vec2::new(x_m, y_m) + shield_erosion_offset(root_seed);
+        let base = Vec3::new(dome_height, dh_dx, dh_dy);
+        let params = shield_erosion_params();
+        erosion_filter(p, base, (dome_height / 3_800.0).clamp(-1.0, 1.0), &params)
+    } else {
+        bevy_erosion_filter::cpu::ErosionFilterResult {
+            delta: Vec3::ZERO,
+            magnitude: 0.0,
+            ridge_map: 0.0,
+            debug: 0.0,
+        }
+    };
+    let erosion_height_m = erosion.delta.x * flank_band * erosion_visibility * 0.62;
+    let erosion_delta = if erosion.magnitude > 1.0e-5 {
+        (erosion.delta.x / erosion.magnitude).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let ridge_unit = (erosion.ridge_map * 0.5 + 0.5).clamp(0.0, 1.0);
+    let crease = ((1.0 - (ridge_unit / 0.30).clamp(0.0, 1.0)) * 1.5).clamp(0.0, 1.0)
+        * flank_band
+        * erosion_visibility;
+    let ridge = smoothstep(0.58, 0.95, ridge_unit) * flank_band * erosion_visibility;
+    let eroded_flanks = (erosion.ridge_map.abs() * 0.42 + erosion.delta.x.abs() * 0.0012)
+        .clamp(0.0, 1.0)
+        * flank_band
+        * erosion_visibility;
+    let dark_flows =
+        (eroded_flanks * 0.48 + basal_scarp * 0.34 + caldera_rim * 0.56 + caldera_floor * 0.22)
+            .clamp(0.0, 1.0);
+
+    let height_m = dome_height + basal_scarp * 760.0 - outer_moat * 210.0 - caldera_floor * 1_380.0
+        + caldera_rim * 760.0
+        + erosion_height_m;
+    let slope = Vec2::new(dh_dx, dh_dy).length();
+
+    ShieldVolcanoSample {
+        apron,
+        dome,
+        basal_scarp,
+        caldera_floor,
+        caldera_rim,
+        eroded_flanks,
+        crease,
+        ridge,
+        slope,
+        erosion_delta,
+        dark_flows,
+        height_m,
+    }
+}
+
+fn shield_dome_height_and_slope(
+    x_m: f32,
+    y_m: f32,
+    rx: f32,
+    ry: f32,
+    root_seed: FeatureSeed,
+) -> (f32, f32, f32) {
+    let raw_r = ((x_m / rx).powi(2) + (y_m / ry).powi(2)).sqrt();
+    let r = shield_volcano_profile_radius(x_m, y_m, rx, ry, root_seed);
+    if !(0.0..1.0).contains(&r) {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let p = 1.72;
+    let q = 1.18;
+    let inner = (1.0 - r.powf(p)).max(0.0);
+    let profile = inner.powf(q);
+    let height = profile * VAELEN_SHIELD_VOLCANO_HEIGHT_M;
+    if r < 1.0e-5 || inner <= 1.0e-5 {
+        return (height, 0.0, 0.0);
+    }
+
+    let dprofile_dr = -q * p * r.powf(p - 1.0) * inner.powf(q - 1.0);
+    let dh_dr = dprofile_dr * VAELEN_SHIELD_VOLCANO_HEIGHT_M;
+    let edge_scale = shield_volcano_boundary_scale(x_m, y_m, rx, ry, root_seed);
+    let edge_weight = smoothstep(0.32, 0.92, raw_r);
+    let profile_scale = 1.0 + (edge_scale - 1.0) * edge_weight;
+    let raw_r = raw_r.max(1.0e-5);
+    let dr_dx = x_m / (rx * rx * raw_r * profile_scale);
+    let dr_dy = y_m / (ry * ry * raw_r * profile_scale);
+    (height, dh_dr * dr_dx, dh_dr * dr_dy)
+}
+
+fn shield_volcano_profile_radius(
+    x_m: f32,
+    y_m: f32,
+    rx: f32,
+    ry: f32,
+    root_seed: FeatureSeed,
+) -> f32 {
+    let raw_r = ((x_m / rx).powi(2) + (y_m / ry).powi(2)).sqrt();
+    let edge_scale = shield_volcano_boundary_scale(x_m, y_m, rx, ry, root_seed);
+    let edge_weight = smoothstep(0.32, 0.92, raw_r);
+    raw_r / (1.0 + (edge_scale - 1.0) * edge_weight).max(0.55)
+}
+
+fn shield_volcano_boundary_scale(
+    x_m: f32,
+    y_m: f32,
+    rx: f32,
+    ry: f32,
+    root_seed: FeatureSeed,
+) -> f32 {
+    let ux = x_m / rx;
+    let uy = y_m / ry;
+    let theta = uy.atan2(ux);
+    let (sin_t, cos_t) = theta.sin_cos();
+    let lobe_seed = seed32(root_seed.placement, "shield_volcano_boundary_lobes");
+    let phase_a = seed_phase(lobe_seed, 0);
+    let phase_b = seed_phase(lobe_seed, 8);
+    let phase_c = seed_phase(lobe_seed, 16);
+    let phase_d = seed_phase(lobe_seed, 24);
+    let low_lobes = (theta * 2.0 + phase_a).sin() * 0.145
+        + (theta * 3.0 + phase_b).sin() * 0.120
+        + (theta * 5.0 + phase_c).sin() * 0.085
+        + (theta * 8.0 + phase_d).sin() * 0.052;
+    let directed_lobes = angular_lobe(theta, phase_a + 0.70, 0.52) * 0.20
+        + angular_lobe(theta, phase_b + 1.25, 0.38) * 0.14
+        - angular_lobe(theta, phase_c + 0.45, 0.46) * 0.17
+        - angular_lobe(theta, phase_d + 2.10, 0.34) * 0.12;
+    let broad = fbm3(
+        cos_t * 1.45,
+        sin_t * 1.45,
+        0.37,
+        seed32(root_seed.placement, "shield_volcano_boundary_broad"),
+        4,
+        0.56,
+        2.03,
+    ) * 0.160;
+    let scallop = fbm3(
+        ux * 5.8 + cos_t * 0.85,
+        uy * 5.8 + sin_t * 0.85,
+        1.19,
+        seed32(root_seed.detail, "shield_volcano_boundary_scallop"),
+        3,
+        0.52,
+        2.08,
+    ) * 0.105;
+
+    (1.0 + low_lobes + directed_lobes + broad + scallop).clamp(0.58, 1.58)
+}
+
+fn angular_lobe(theta: f32, center: f32, half_width: f32) -> f32 {
+    let delta = (theta - center + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI;
+    smoothstep(half_width, 0.0, delta.abs())
+}
+
+fn seed_phase(seed: u32, shift: u32) -> f32 {
+    let bits = (seed >> shift) & 0xff;
+    bits as f32 / 255.0 * std::f32::consts::TAU
+}
+
+fn shield_erosion_params() -> ErosionFilterParams {
+    let defaults = ErosionFilterParams::default();
+    ErosionFilterParams {
+        scale: 42_000.0,
+        strength: 0.014,
+        gully_weight: 0.34,
+        octaves: 4,
+        onset: defaults.onset * 0.22,
+        assumed_slope: Vec2::new(0.45, 0.95),
+        ..defaults
+    }
+}
+
+fn shield_erosion_offset(root_seed: FeatureSeed) -> Vec2 {
+    let seed = seed32(root_seed.detail, "shield_volcano_erosion_offset");
+    let sx = (seed & 0xffff) as f32;
+    let sy = (seed >> 16) as f32;
+    Vec2::new(sx * 17.0, sy * 17.0)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -950,7 +1707,7 @@ fn dune_basin_shape_dir(
 }
 
 fn central_dune_plate_field(dir: Vec3, root_seed: FeatureSeed) -> f32 {
-    let (_, east, north) = dune_basin_frame();
+    let (basin_center, east, north) = dune_basin_frame();
     let raw_x = dir.dot(east);
     let raw_y = dir.dot(north);
     let side_bias = smoothstep(0.44, 0.86, raw_x.abs());
@@ -959,18 +1716,37 @@ fn central_dune_plate_field(dir: Vec3, root_seed: FeatureSeed) -> f32 {
 
     let local_x = shape_dir.dot(east);
     let local_y = shape_dir.dot(north);
+    let local_z = shape_dir.dot(basin_center);
     let core = basin_geodesic_ellipse_signed(shape_dir, 0.10, -0.18, 0.34, 0.22);
     let west_spill = basin_geodesic_ellipse_signed(shape_dir, -0.18, -0.22, 0.28, 0.15);
     let east_spill = basin_geodesic_ellipse_signed(shape_dir, 0.33, -0.16, 0.34, 0.18);
     let south_spill = basin_geodesic_ellipse_signed(shape_dir, 0.07, -0.36, 0.34, 0.13);
     let northwest_spill = basin_geodesic_ellipse_signed(shape_dir, -0.09, 0.02, 0.24, 0.12);
+    let basin_sheet = local_z - 0.24
+        + fbm_dir(
+            dir,
+            root_seed.placement,
+            "active_dune_plate_hemisphere_sheet",
+            0.95,
+            4,
+            0.56,
+        ) * 0.220
+        + fbm_dir(
+            dir,
+            root_seed.detail,
+            "active_dune_plate_hemisphere_lace",
+            4.8,
+            3,
+            0.52,
+        ) * 0.060;
     let north_bite = basin_geodesic_ellipse_signed(shape_dir, 0.02, 0.17, 0.36, 0.14);
     let west_bite = basin_geodesic_ellipse_signed(shape_dir, -0.36, -0.12, 0.16, 0.18);
     let east_bite = basin_geodesic_ellipse_signed(shape_dir, 0.52, -0.25, 0.14, 0.17);
     let south_bite = basin_geodesic_ellipse_signed(shape_dir, -0.14, -0.47, 0.20, 0.14);
     let southeast_bite = basin_geodesic_ellipse_signed(shape_dir, 0.30, -0.43, 0.16, 0.13);
 
-    let mut field = soft_max(core, west_spill, 0.08);
+    let mut field = soft_max(core, basin_sheet, 0.16);
+    field = soft_max(field, west_spill, 0.08);
     field = soft_max(field, east_spill, 0.07);
     field = soft_max(field, south_spill, 0.06);
     field = soft_max(field, northwest_spill, 0.05);
@@ -1105,6 +1881,23 @@ fn dune_basin_field(
     let northeast_sea = basin_geodesic_ellipse_signed(shape_dir, 0.35, 0.25, 0.40, 0.27);
     let east_embayment = basin_geodesic_ellipse_signed(shape_dir, 0.52, -0.09, 0.30, 0.22);
     let southeast_bay = basin_geodesic_ellipse_signed(shape_dir, 0.44, -0.40, 0.32, 0.20);
+    let hemisphere_breakup = fbm_dir(
+        dir,
+        root_seed.placement,
+        "paleo_ocean_hemisphere_floor",
+        0.92,
+        4,
+        0.56,
+    ) * 0.430
+        + fbm_dir(
+            dir,
+            root_seed.detail,
+            "paleo_ocean_hemisphere_floor_lace",
+            3.8,
+            3,
+            0.52,
+        ) * 0.120;
+    let hemisphere_floor = z - 0.22 + hemisphere_breakup;
     let mut paleo_ocean = soft_max(main_floor, west_gulf, 0.13);
     paleo_ocean = soft_max(paleo_ocean, northwest_bay, 0.08);
     paleo_ocean = soft_max(paleo_ocean, southwest_bay, 0.09);
@@ -1112,6 +1905,7 @@ fn dune_basin_field(
     paleo_ocean = soft_max(paleo_ocean, northeast_sea, 0.10);
     paleo_ocean = soft_max(paleo_ocean, east_embayment, 0.08);
     paleo_ocean = soft_max(paleo_ocean, southeast_bay, 0.07);
+    paleo_ocean = soft_max(paleo_ocean, hemisphere_floor, 0.18);
 
     let axial_suture = (1.0 - ((y_shape + x_shape * 0.34 + 0.03).abs() / 0.18)).clamp(-1.0, 1.0);
     let axial_extent = smoothstep(0.82, 0.35, x_shape.abs());
@@ -1166,23 +1960,30 @@ fn dune_basin_field(
     paleo_ocean -= smoothstep(-0.09, 0.28, south_arc_mid) * 0.22;
     paleo_ocean -= smoothstep(-0.08, 0.25, south_arc_east) * 0.16;
 
-    let far_side_warp = fbm_dir(
+    // Continent mask. The basin's near/far split was previously a smoothstep
+    // on raw `z` with low-amplitude warp — that produced a sharp meridian
+    // contour because every iso-z is a circle of latitude in the basin frame.
+    // Here we let multi-octave 3D fbm dominate the smoothstep argument so the
+    // boundary is a topology-free fractal coastline. `z` still biases the
+    // basin toward the near hemisphere; the noise breaks the iso-contour into
+    // bays, peninsulas, and outlier highland patches.
+    let continent_warp = fbm_dir(
         dir,
         root_seed.placement,
-        "paleo_ocean_far_side_warp",
-        2.4,
-        4,
-        0.54,
-    ) * 0.16
+        "paleo_ocean_continent_mask",
+        1.15,
+        5,
+        0.55,
+    ) * 0.85
         + fbm_dir(
             dir,
             root_seed.detail,
-            "paleo_ocean_far_side_chop",
-            9.5,
+            "paleo_ocean_continent_lace",
+            4.5,
             3,
             0.52,
-        ) * 0.045;
-    let far_side_penalty = smoothstep(-0.08, -0.56, z + far_side_warp)
+        ) * 0.20;
+    let far_side_penalty = smoothstep(-0.05, -0.95, z + continent_warp)
         * (1.52
             + ridge(fbm_dir(
                 dir,
@@ -1234,7 +2035,7 @@ fn dune_basin_field(
             4,
             0.55,
         )
-        * 0.230;
+        * 0.310;
     let side_wall_bend = side_bias
         * ((y_shape * 9.5
             + fbm_dir(
@@ -1246,7 +2047,7 @@ fn dune_basin_field(
                 0.52,
             ) * 4.0)
             .sin()
-            * 0.070
+            * 0.115
             + fbm_dir(
                 dir,
                 root_seed.placement,
@@ -1254,7 +2055,7 @@ fn dune_basin_field(
                 1.6,
                 4,
                 0.55,
-            ) * 0.105);
+            ) * 0.160);
     let polar_fray = smoothstep(0.34, 0.66, y_shape.abs())
         * (fbm_dir(
             dir,
@@ -1302,7 +2103,7 @@ fn dune_basin_field(
         + side_fray
         + lowland_bias * 0.040
         - highland_ridges * 0.050
-        + 0.105
+        + 0.050
 }
 
 fn dune_basin_contact(
@@ -1486,6 +2287,13 @@ fn ridge(v: f32) -> f32 {
     1.0 - v.abs().clamp(0.0, 1.0)
 }
 
+fn dune_body_profile(phase: f32, alpha: f32) -> (f32, f32) {
+    let profile = asym_ridge(phase, alpha);
+    let body = smoothstep(0.06, 0.90, profile);
+    let crest = smoothstep(0.70, 0.98, profile);
+    (body, crest)
+}
+
 fn band_mask(v: f32, center: f32, half_width: f32) -> f32 {
     (1.0 - ((v - center).abs() / half_width.max(1.0e-5))).clamp(0.0, 1.0)
 }
@@ -1501,454 +2309,4 @@ fn ellipse_signed(x: f32, y: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> f32 {
 fn soft_max(a: f32, b: f32, k: f32) -> f32 {
     let h = (0.5 + 0.5 * (b - a) / k.max(1.0e-5)).clamp(0.0, 1.0);
     a * (1.0 - h) + b * h + k * h * (1.0 - h)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_field() -> VaelenColdDesertField {
-        let id = crate::FeatureId::from("vaelen.crustal_provinces");
-        VaelenColdDesertField::new(
-            FeatureSeed::derive(1007, &id),
-            ColdDesertProjectionConfig::default(),
-        )
-    }
-
-    fn dir_from_basin_xy(x: f32, y: f32) -> Vec3 {
-        let (center, east, north) = dune_basin_frame();
-        let z = (1.0 - x * x - y * y).max(0.0).sqrt();
-        (center * z + east * x + north * y).normalize()
-    }
-
-    fn equirect_dir(x: u32, y: u32, width: u32, height: u32) -> Vec3 {
-        let lat = (0.5 - (y as f32 + 0.5) / height as f32) * std::f32::consts::PI;
-        let (sl, cl) = lat.sin_cos();
-        let lon = ((x as f32 + 0.5) / width as f32 - 0.5) * std::f32::consts::TAU;
-        let (sln, cln) = lon.sin_cos();
-        Vec3::new(cl * sln, sl, cl * cln)
-    }
-
-    fn contact_at_xy(field: &VaelenColdDesertField, x: f32, y: f32) -> DuneBasinContact {
-        let dir = dir_from_basin_xy(x, y);
-        let root_seed = field.root_seed;
-        let macro_n = fbm_dir(dir, root_seed.shape, "macro", 1.15, 5, 0.55);
-        let regional_n = fbm_dir(dir, root_seed.shape, "regional", 2.7, 4, 0.55);
-        let highland_ridges = ridge(fbm_dir(
-            dir,
-            root_seed.shape,
-            "highland_ridge",
-            5.4,
-            4,
-            0.52,
-        ));
-        let lowland_bias = smoothstep(0.72, -0.20, macro_n + regional_n * 0.35);
-        dune_basin_contact(dir, root_seed, lowland_bias, highland_ridges)
-    }
-
-    #[test]
-    fn vaelen_field_samples_sane_orbital_values() {
-        let field = test_field();
-        let sample = field.sample(Vec3::new(0.3, 0.4, 0.86).normalize(), 1_000.0);
-
-        assert!(sample.height_m.is_finite());
-        assert!(sample.height_m.abs() < 10_000.0);
-        assert!(sample.albedo_linear.iter().all(|channel| *channel > 0.0));
-        assert!(sample.roughness >= 0.55);
-    }
-
-    #[test]
-    fn paleo_ocean_coverage_stays_planet_scale_and_dunes_are_localized() {
-        use crate::cubemap::{CubemapFace, face_uv_to_dir};
-
-        let field = test_field();
-        let root_seed = field.root_seed;
-        let res = 48;
-        let mut lowland_texels = 0usize;
-        let mut active_dune_texels = 0usize;
-        let mut dune_texels = 0usize;
-        for face in CubemapFace::ALL {
-            for y in 0..res {
-                for x in 0..res {
-                    let u = (x as f32 + 0.5) / res as f32;
-                    let v = (y as f32 + 0.5) / res as f32;
-                    let dir = face_uv_to_dir(face, u, v);
-                    let macro_n = fbm_dir(dir, root_seed.shape, "macro", 1.15, 5, 0.55);
-                    let regional_n = fbm_dir(dir, root_seed.shape, "regional", 2.7, 4, 0.55);
-                    let highland_ridges = ridge(fbm_dir(
-                        dir,
-                        root_seed.shape,
-                        "highland_ridge",
-                        5.4,
-                        4,
-                        0.52,
-                    ));
-                    let lowland_bias = smoothstep(0.72, -0.20, macro_n + regional_n * 0.35);
-                    let contact = dune_basin_contact(dir, root_seed, lowland_bias, highland_ridges);
-                    if contact.paleo_lowland > 0.5 {
-                        lowland_texels += 1;
-                    }
-                    if contact.dune_plate > 0.5 {
-                        active_dune_texels += 1;
-                    }
-
-                    let sample = field.sample(dir, 1_000.0);
-                    if sample.material_mix.dominant_material_id() == VAELEN_MAT_DUNE_SAND {
-                        dune_texels += 1;
-                    }
-                }
-            }
-        }
-
-        let total = (CubemapFace::ALL.len() * res * res) as f32;
-        let lowland_coverage = lowland_texels as f32 / total;
-        let active_dune_coverage = active_dune_texels as f32 / total;
-        let dune_coverage = dune_texels as f32 / total;
-        assert!(
-            (0.16..=0.30).contains(&lowland_coverage),
-            "paleo-ocean lowland should be planet-scale, got {lowland_coverage:.3}"
-        );
-        assert!(
-            (0.02..=0.18).contains(&active_dune_coverage),
-            "active dunes should be a localized basin subset, got {active_dune_coverage:.3}"
-        );
-        assert!(
-            active_dune_coverage < lowland_coverage * 0.80,
-            "active dunes should not cover every paleo-lowland: lowland={lowland_coverage:.3}, active={active_dune_coverage:.3}"
-        );
-        assert!(
-            dune_coverage <= lowland_coverage * 0.95,
-            "dominant dune material should stay inside the localized low basin: lowland={lowland_coverage:.3}, dunes={dune_coverage:.3}"
-        );
-    }
-
-    #[test]
-    fn paleo_ocean_outline_is_not_a_round_stamp() {
-        let field = test_field();
-        let root_seed = field.root_seed;
-        let mut radii = Vec::new();
-
-        for i in 0..40 {
-            let theta = i as f32 / 40.0 * std::f32::consts::TAU;
-            let (sin_t, cos_t) = theta.sin_cos();
-            let mut lo = 0.02;
-            let mut hi = 1.05;
-            let center = dir_from_basin_xy(0.0, 0.0);
-            let macro_n = fbm_dir(center, root_seed.shape, "macro", 1.15, 5, 0.55);
-            let regional_n = fbm_dir(center, root_seed.shape, "regional", 2.7, 4, 0.55);
-            let highland_ridges = ridge(fbm_dir(
-                center,
-                root_seed.shape,
-                "highland_ridge",
-                5.4,
-                4,
-                0.52,
-            ));
-            let lowland_bias = smoothstep(0.72, -0.20, macro_n + regional_n * 0.35);
-            if dune_basin_contact(center, root_seed, lowland_bias, highland_ridges).signed <= 0.0 {
-                continue;
-            }
-
-            let edge = dir_from_basin_xy(hi * cos_t, hi * sin_t);
-            let macro_n = fbm_dir(edge, root_seed.shape, "macro", 1.15, 5, 0.55);
-            let regional_n = fbm_dir(edge, root_seed.shape, "regional", 2.7, 4, 0.55);
-            let highland_ridges = ridge(fbm_dir(
-                edge,
-                root_seed.shape,
-                "highland_ridge",
-                5.4,
-                4,
-                0.52,
-            ));
-            let lowland_bias = smoothstep(0.72, -0.20, macro_n + regional_n * 0.35);
-            if dune_basin_contact(edge, root_seed, lowland_bias, highland_ridges).signed > 0.0 {
-                continue;
-            }
-
-            for _ in 0..18 {
-                let mid = (lo + hi) * 0.5;
-                let dir = dir_from_basin_xy(mid * cos_t, mid * sin_t);
-                let macro_n = fbm_dir(dir, root_seed.shape, "macro", 1.15, 5, 0.55);
-                let regional_n = fbm_dir(dir, root_seed.shape, "regional", 2.7, 4, 0.55);
-                let highland_ridges = ridge(fbm_dir(
-                    dir,
-                    root_seed.shape,
-                    "highland_ridge",
-                    5.4,
-                    4,
-                    0.52,
-                ));
-                let lowland_bias = smoothstep(0.72, -0.20, macro_n + regional_n * 0.35);
-                if dune_basin_contact(dir, root_seed, lowland_bias, highland_ridges).signed > 0.0 {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            radii.push((lo + hi) * 0.5);
-        }
-
-        assert!(radii.len() >= 28, "too few closed shoreline rays");
-        let min_r = radii.iter().copied().fold(f32::INFINITY, f32::min);
-        let max_r = radii.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        assert!(
-            max_r / min_r > 1.45,
-            "paleo-ocean outline should have tectonic-scale lobes, min={min_r:.3}, max={max_r:.3}"
-        );
-    }
-
-    #[test]
-    fn paleo_ocean_side_margins_are_not_straight_cuts() {
-        let field = test_field();
-        let mut west_edges = Vec::new();
-        let mut east_edges = Vec::new();
-
-        for i in 0..34 {
-            let y = -0.56 + i as f32 * 0.034;
-
-            let mut last_inside = false;
-            let mut west_edge = None;
-            for xi in 0..80 {
-                let x = -1.02 + xi as f32 * 0.018;
-                if x * x + y * y > 0.995 {
-                    continue;
-                }
-                let inside = contact_at_xy(&field, x, y).signed > 0.0;
-                if inside && !last_inside {
-                    west_edge = Some(x);
-                    break;
-                }
-                last_inside = inside;
-            }
-            if let Some(x) = west_edge {
-                west_edges.push(x);
-            }
-
-            let mut last_inside = false;
-            let mut east_edge = None;
-            for xi in 0..80 {
-                let x = 1.02 - xi as f32 * 0.018;
-                if x * x + y * y > 0.995 {
-                    continue;
-                }
-                let inside = contact_at_xy(&field, x, y).signed > 0.0;
-                if inside && !last_inside {
-                    east_edge = Some(x);
-                    break;
-                }
-                last_inside = inside;
-            }
-            if let Some(x) = east_edge {
-                east_edges.push(x);
-            }
-        }
-
-        assert!(west_edges.len() > 18, "not enough west margin samples");
-        assert!(east_edges.len() > 18, "not enough east margin samples");
-        let west_range = west_edges.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-            - west_edges.iter().copied().fold(f32::INFINITY, f32::min);
-        let east_range = east_edges.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-            - east_edges.iter().copied().fold(f32::INFINITY, f32::min);
-        assert!(
-            west_range > 0.16,
-            "west paleo-ocean margin still reads too straight, x-range={west_range:.3}"
-        );
-        assert!(
-            east_range > 0.14,
-            "east paleo-ocean margin still reads too straight, x-range={east_range:.3}"
-        );
-    }
-
-    #[test]
-    fn paleo_ocean_floor_has_shelves_and_interior_highs() {
-        let field = test_field();
-        let mut quiet_floor_sum = 0.0f32;
-        let mut quiet_floor_count = 0usize;
-        let mut horst = (0.0f32, Vec3::Z, f32::NEG_INFINITY);
-        let mut shelf = (0.0f32, Vec3::Z, f32::NEG_INFINITY);
-        let mut strandline = 0.0f32;
-
-        for yi in 0..56 {
-            let y = -0.66 + yi as f32 * 0.024;
-            for xi in 0..68 {
-                let x = -0.82 + xi as f32 * 0.024;
-                if x * x + y * y > 0.98 {
-                    continue;
-                }
-
-                let dir = dir_from_basin_xy(x, y);
-                let contact = contact_at_xy(&field, x, y);
-                if contact.paleo_lowland < 0.75 {
-                    continue;
-                }
-
-                let height = field.sample(dir, 1_000.0).height_m;
-                if contact.interior_highs > horst.0 {
-                    horst = (contact.interior_highs, dir, height);
-                }
-                if contact.shelf_break > shelf.0 {
-                    shelf = (contact.shelf_break, dir, height);
-                }
-                strandline = strandline.max(contact.strandline);
-
-                if contact.interior_highs < 0.05
-                    && contact.shelf_break < 0.05
-                    && contact.strandline < 0.05
-                    && contact.shoreline_scarp < 0.05
-                {
-                    quiet_floor_sum += height;
-                    quiet_floor_count += 1;
-                }
-            }
-        }
-
-        assert!(
-            quiet_floor_count > 40,
-            "not enough quiet paleo-ocean floor samples"
-        );
-        let quiet_floor_h = quiet_floor_sum / quiet_floor_count as f32;
-        assert!(horst.0 > 0.55, "weak interior high mask: {:.3}", horst.0);
-        assert!(shelf.0 > 0.50, "weak shelf break mask: {:.3}", shelf.0);
-        assert!(
-            strandline > 0.35,
-            "fossil strandline mask should create visible benches, got {strandline:.3}"
-        );
-        assert!(
-            horst.2 > quiet_floor_h + 180.0,
-            "interior highs should rise above quiet floor: horst={:.1}, quiet={:.1}",
-            horst.2,
-            quiet_floor_h
-        );
-        assert!(
-            shelf.0 * 330.0 > 160.0,
-            "shelf breaks should add a strong local relief contribution, mask={:.3}",
-            shelf.0
-        );
-    }
-
-    #[test]
-    fn suture_crest_is_a_real_height_peak() {
-        let field = test_field();
-        let root_seed = field.root_seed;
-
-        let mut crest = (0.0f32, Vec3::Z, f32::NEG_INFINITY);
-        let mut dune = (f32::NEG_INFINITY, Vec3::Z);
-        let mut highland = (f32::INFINITY, Vec3::Z);
-        for i in 0..180 {
-            let x = 0.20 + i as f32 * 0.006;
-            let dir = dir_from_basin_xy(x, 0.02);
-            let macro_n = fbm_dir(dir, root_seed.shape, "macro", 1.15, 5, 0.55);
-            let regional_n = fbm_dir(dir, root_seed.shape, "regional", 2.7, 4, 0.55);
-            let highland_ridges = ridge(fbm_dir(
-                dir,
-                root_seed.shape,
-                "highland_ridge",
-                5.4,
-                4,
-                0.52,
-            ));
-            let lowland_bias = smoothstep(0.72, -0.20, macro_n + regional_n * 0.35);
-            let contact = dune_basin_contact(dir, root_seed, lowland_bias, highland_ridges);
-
-            if contact.suture_crest > crest.0 {
-                crest = (
-                    contact.suture_crest,
-                    dir,
-                    field.sample(dir, 1_000.0).height_m,
-                );
-            }
-            if contact.signed > dune.0 {
-                dune = (contact.signed, dir);
-            }
-            if contact.signed < highland.0 {
-                highland = (contact.signed, dir);
-            }
-        }
-
-        let dune_h = field.sample(dune.1, 1_000.0).height_m;
-        let highland_h = field.sample(highland.1, 1_000.0).height_m;
-        assert!(crest.0 > 0.65, "weak suture crest mask: {:.3}", crest.0);
-        assert!(
-            crest.2 > dune_h + 850.0,
-            "suture crest should tower over the dune plate: crest={:.1}, dune={:.1}",
-            crest.2,
-            dune_h
-        );
-        assert!(
-            crest.2 > highland_h + 350.0,
-            "suture crest should peak above the highland plate: crest={:.1}, highland={:.1}",
-            crest.2,
-            highland_h
-        );
-    }
-
-    #[test]
-    fn dune_material_is_clipped_to_low_plate() {
-        let field = test_field();
-        let dune = field.sample(dir_from_basin_xy(0.0, 0.0), 1_000.0);
-        let highland = field.sample(dir_from_basin_xy(0.99, 0.0), 1_000.0);
-
-        assert!(
-            dune.material_mix.weight_for(VAELEN_MAT_DUNE_SAND) > 0.55,
-            "basin interior should be mostly dune sand"
-        );
-        assert!(
-            highland.material_mix.weight_for(VAELEN_MAT_DUNE_SAND) < 0.04,
-            "highland side should not carry dune paint"
-        );
-    }
-
-    #[test]
-    fn mountain_web_stays_on_highland_side_near_suture() {
-        let field = test_field();
-        let root_seed = field.root_seed;
-        let width = 96;
-        let height = 48;
-        let mut highland_web = 0.0f32;
-        let mut dune_web = 0.0f32;
-        let mut far_crest = 0.0f32;
-        let mut far_web = 0.0f32;
-
-        for y in 0..height {
-            for x in 0..width {
-                let dir = equirect_dir(x, y, width, height);
-                let macro_n = fbm_dir(dir, root_seed.shape, "macro", 1.15, 5, 0.55);
-                let regional_n = fbm_dir(dir, root_seed.shape, "regional", 2.7, 4, 0.55);
-                let highland_ridges = ridge(fbm_dir(
-                    dir,
-                    root_seed.shape,
-                    "highland_ridge",
-                    5.4,
-                    4,
-                    0.52,
-                ));
-                let lowland_bias = smoothstep(0.72, -0.20, macro_n + regional_n * 0.35);
-                let contact = dune_basin_contact(dir, root_seed, lowland_bias, highland_ridges);
-
-                if contact.signed < 0.0 {
-                    highland_web += contact.mountain_web;
-                } else {
-                    dune_web += contact.mountain_web;
-                }
-
-                if contact.signed.abs() > 0.28 {
-                    far_crest = far_crest.max(contact.suture_crest);
-                    far_web = far_web.max(contact.mountain_web);
-                }
-            }
-        }
-
-        assert!(
-            highland_web > dune_web * 8.0,
-            "mountain web should mostly live on the highland side"
-        );
-        assert!(
-            far_crest < 0.02,
-            "suture crest should be confined to the boundary, got far mask {far_crest:.3}"
-        );
-        assert!(
-            far_web < 0.08,
-            "mountain web should decay away from the boundary, got far mask {far_web:.3}"
-        );
-    }
 }

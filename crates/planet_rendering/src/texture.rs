@@ -24,4 +24,9 @@ pub struct PlanetTextures {
     pub cell_index: Handle<ShaderStorageBuffer>,
     /// `array<u32>` — concatenated crater indices referenced by cells.
     pub feature_ids: Handle<ShaderStorageBuffer>,
+    /// `array<RadialFeature>` — feature-local radial volcano detail.
+    pub radial_features: Handle<ShaderStorageBuffer>,
+    /// `array<IceCap>` — dynamic seasonal cap overlays rendered by the
+    /// impostor shader over static terrain.
+    pub ice_caps: Handle<ShaderStorageBuffer>,
 }

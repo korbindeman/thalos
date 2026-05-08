@@ -381,7 +381,7 @@ Current migration shape:
 FeatureManifest
   -> SurfaceField::sample(dir, sample_scale_m)
   -> bake_surface_field_into_builder()
-  -> BodyData cubemaps + analytic buffers
+  -> BodyData cubemaps + analytic buffers + dynamic overlay descriptors
 ```
 
 `SurfaceField` is the render-agnostic contract. For a direction on
@@ -430,10 +430,66 @@ Also baked into `BodyData` but reserved for non-impostor consumers:
 - `materials` palette: still authored by stages for CPU sampling and
   for ground-LOD detail-texture blending; no longer uploaded as a GPU
   storage buffer.
+- `dynamic_surface_features`: runtime overlay descriptors that are
+  deliberately excluded from static cubemap bakes. Seasonal polar ice
+  caps live here; their coverage, albedo, roughness, and thickness are
+  renderer/runtime state, not immutable terrain identity.
 
 Silhouette displacement is intentionally out of scope for the first
 projection. Good albedo, normals, roughness, and compact meso
 features are enough for Mira and Vaelen to read from orbit.
+
+### Cross-renderer feature projection contract
+
+The impostor and the ground terrain renderer are two projections of
+the same generated surface. Feature-specific shader logic is allowed,
+but it must be a renderer projection of generator-owned feature data,
+not an independent terrain system.
+
+Every feature kind that needs visible detail below the cubemap scale
+must declare a projection policy:
+
+- **Baked fields:** what goes into the impostor cubemaps and ground
+  tile attachments: height, albedo, roughness, normal, splat/material.
+- **Analytic impostor data:** optional compact descriptors uploaded to
+  the impostor shader when cubemap resolution is too coarse for the
+  feature to read from orbit.
+- **Ground tile data:** how `PipelineTileProvider` samples the same
+  feature through `SurfaceField::sample()` into tile attachments.
+- **Fragment detail:** optional shader-side detail for frequencies
+  below tile resolution, driven by generator-authored descriptors or
+  material parameters.
+- **LOD ownership:** explicit bake/analytic/detail thresholds and
+  overlap fades, in meters or screen-space pixels.
+- **Mirror requirement:** if a profile is evaluated on both CPU and
+  GPU, the descriptor fields, shape function, albedo/roughness response,
+  and fade windows must match. The crater contract in
+  `crates/terrain_gen/src/sample.rs` is the reference pattern.
+
+WGSL modules may be feature-specific - for example crater, linear
+feature, radial feature, or material-detail evaluators - but those
+modules must consume projection data emitted by the compiler. They must
+not infer geology from body name, local shader constants, or unrelated
+noise fields.
+
+Typical projection policies:
+
+| Feature kind | Impostor projection | Ground projection |
+|---|---|---|
+| Craters | Large craters bake into cubemaps; mid-size craters use compact SSBO descriptors; sub-resolution craters use generator-authored statistical params or are omitted. | `SurfaceField` evaluates the same crater profiles into tiles; terrain fragments may reuse the crater/detail evaluator only for sub-tile normal or albedo detail. |
+| Dune seas | Broad sand region, roughness, and macro relief bake into cubemaps; analytic impostor data is optional and only for kilometer-scale ridges that blur badly. | Tile provider evaluates wind-aligned dune bands, slip faces, and sand material weights from the dune population; fragment ripples come from material detail params. |
+| Seasonal ice caps | Not baked into height, albedo, roughness, or material cubemaps. The compiler carries cap descriptors in `dynamic_surface_features`; the impostor shader currently renders them as a static albedo/roughness overlay. | Tile provider/runtime applies seasonal ice as a surface state layer over the static terrain sample; later climate simulation can vary coverage without rebuilding terrain. |
+| Channels and dry riverbeds | Main incision, sediment color, and roughness bake into cubemaps; sharp banks or levees may use a generic linear-feature buffer. | Tile provider evaluates signed distance to the channel network, banks, terraces, bed material, and exposed strata from the same descriptors. |
+| Rifts and grabens | Regional scarps and troughs usually bake into height/roughness; analytic linear buffers are reserved for sharp fault edges that need orbital crispness. | Tile provider evaluates the exact fault profile, talus, floor material, and secondary cracks. |
+| Shield volcanoes | Shield shape, caldera, lava-flow color, and roughness bake into cubemaps; optional radial descriptors preserve caldera rims or large lobes. | Tile provider evaluates radial height profile, caldera depression, flank channels, lava-flow splats, and volcanic material detail. |
+| Coastlines and oceans | Shoreline height, shelf color, wet/dry roughness, and beach or cliff masks are generated fields that bake into cubemaps. | Tile provider samples the same shore fields for shelves, beaches, cliffs, deltas, and wet material masks. Shader-side shoreline warp/jitter is migration debt unless represented as generator-authored detail parameters. |
+| Layered substrate and material detail | Orbit sees the palette result baked into albedo/roughness, plus any distant asset or vegetation tint the terrain needs to read correctly. | Tiles and fragment shaders use splat/material attachments plus generator-authored triplanar/detail params so close-up material color agrees with the orbital view. |
+
+The handoff invariant is simple: at any camera altitude where both
+renderers can show a feature, they must show the same feature shape
+with compatible height, normal, color, roughness, and material response.
+Transitions should refine or fade detail in; they should never replace
+one terrain interpretation with another.
 
 ### Example bodies
 
@@ -546,10 +602,11 @@ changes.
 compiled into the existing `BodyData` contract using the current
 bake primitives. This keeps the flat impostor renderer working while
 moving source-of-truth terrain identity and seeding into the feature
-compiler. `AgingOceanicHomeworld` and `GenericTerrestrial` are not
-yet implemented — Thalos and Pelagos render via the flat-water
-`TerrainConfig::Ocean` placeholder until the terrestrial pipeline
-lands (M2).
+compiler. Configured polar caps are now carried as dynamic surface
+features rather than projected into the static bake. `AgingOceanicHomeworld`
+and `GenericTerrestrial` are not yet implemented — Thalos and Pelagos
+render via the flat-water `TerrainConfig::Ocean` placeholder until the
+terrestrial pipeline lands (M2).
 
 ### M2 — Terrain pipeline revamp
 
@@ -966,9 +1023,11 @@ and `GenericTerrestrial` look right.
 7. **Fusion archetypes as parameter-space points.** No special
    branches for "tidally locked" or "active hydrocarbon cycle"; a
    single archetype-bias function over the parameter cube.
-8. **`bake_lod_cutoff` per feature.** Codify the bake-vs-analytic
-   heuristic so the impostor reads compact baked data and ground LOD
-   evaluates the live `SurfaceField`.
+8. **Projection policy per feature.** Codify `bake_lod_cutoff` plus
+   analytic-buffer and fragment-detail thresholds for each feature
+   kind. Craters are the reference pattern: impostor, CPU sampler, and
+   ground LOD must agree on descriptor layout, profile semantics, and
+   fade windows.
 
 ---
 
@@ -984,15 +1043,20 @@ Carried from both source docs; remain undecided.
 3. **CPU vs GPU synthesis split.** This affects the provider
    interface (does it hand back CPU buffers or GPU textures already
    on the device?). Worth resolving before M3 stage 3.
-4. **Surface-scale detail beyond tile resolution.** At highest LOD,
+4. **CPU/GPU evaluator mirroring.** For analytic features used by
+   both impostor and terrain fragment shaders, do we maintain
+   handwritten Rust/WGSL mirrors with tests, generate WGSL from shared
+   profile definitions, or restrict GPU evaluators to simple descriptor
+   families?
+5. **Surface-scale detail beyond tile resolution.** At highest LOD,
    even cm-scale features outrun synthesized tile resolution. Likely
    solved via shader-side detail textures and triplanar mapping,
    parameterized by splat masks.
-5. **Body-to-body LOD handoff.** Camera transitioning from
+6. **Body-to-body LOD handoff.** Camera transitioning from
    interplanetary to surface scale of a target body — what's the
    seamless handoff? Probably a separate "approach" mode that
    progressively refines the target body's tile residency.
-6. **Shadow casting from terrain.** Cascaded shadow maps with
+7. **Shadow casting from terrain.** Cascaded shadow maps with
    terrain-LOD-aware cascades is the likely answer. Bevy 0.18's
    atmospheric scattering improvements may help frame this.
 

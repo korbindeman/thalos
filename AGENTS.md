@@ -9,7 +9,7 @@ just game                 # cargo run -p thalos_game
 just editor               # cargo run -p thalos_planet_editor
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
-just test                 # cargo test -p thalos_physics -p thalos_terrain_gen
+just test                 # cargo test -p thalos_physics
 just clippy               # cargo clippy --workspace
 just trace                # cargo run --release -p thalos_game --features profile-tracy
 just bake Thalos          # headless terrain bake → PNGs in stage-bakes/Thalos/
@@ -19,6 +19,15 @@ just bake all             # bake every body with a terrain block
 # Run a single test
 cargo test -p thalos_physics -- test_name
 ```
+
+## Planet generation iteration
+
+Planet generation is currently in an iterative development phase. Do not
+add or run planet/terrain generation tests for now, including per-body
+generation tests. This applies anywhere a test compiles or validates
+generated planet data, even outside `thalos_terrain_gen`; these tests
+slow down the visual iteration loop. Use the headless terrain bake
+workflow below for feedback instead.
 
 ## Headless terrain bake (`bake_dump`)
 

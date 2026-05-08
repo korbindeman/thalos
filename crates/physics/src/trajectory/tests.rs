@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use glam::DVec3;
 
-use super::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_plan};
+use super::{
+    BranchKind, FlightPlan, PredictionConfig, PredictionRequest, TrajectoryBranchStack,
+    propagate_branch_stack, propagate_flight_plan,
+};
 use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::maneuver::{ManeuverNode, ManeuverSequence};
 use crate::patched_conics::PatchedConics;
@@ -84,6 +87,36 @@ fn propagate_trajectory_with_target(
         target_body,
     };
     propagate_flight_plan(&request, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_branch_stack_for_test(
+    initial_state: StateVector,
+    start_time: f64,
+    maneuvers: &ManeuverSequence,
+    ephemeris: Arc<dyn BodyTrajectoryProvider>,
+    bodies: &[BodyDefinition],
+    config: &PredictionConfig,
+    ship_thrust_acceleration: f64,
+    ship_mass_flow_kg_per_s: f64,
+    ship_dry_mass_kg: f64,
+) -> TrajectoryBranchStack {
+    let ship_mass_kg = 1.0e6;
+    let request = PredictionRequest {
+        ship_state: initial_state,
+        sim_time: start_time,
+        maneuvers: maneuvers.clone(),
+        ephemeris,
+        propagator: Arc::new(KeplerianPropagator::default()),
+        bodies: bodies.to_vec(),
+        prediction_config: config.clone(),
+        ship_thrust_n: ship_thrust_acceleration * ship_mass_kg,
+        ship_mass_kg,
+        ship_mass_flow_kg_per_s,
+        ship_dry_mass_kg,
+        target_body: None,
+    };
+    propagate_branch_stack(&request, None)
 }
 
 const AU: f64 = 1.496e11;
@@ -201,6 +234,164 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
         },
         name_to_id,
     }
+}
+
+fn thalos_low_orbit_fixture() -> (
+    SolarSystemDefinition,
+    Arc<dyn BodyTrajectoryProvider>,
+    StateVector,
+    f64,
+) {
+    let system = make_thalos_like_system();
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 1.0e7));
+
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
+    let thalos_gm = system.bodies[1].gm;
+    let orbit_radius = system.bodies[1].radius_m + 200_000.0;
+    let circular_speed = (thalos_gm / orbit_radius).sqrt();
+    let orbital_period = std::f64::consts::TAU * (orbit_radius.powi(3) / thalos_gm).sqrt();
+
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(orbit_radius, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, circular_speed),
+    };
+
+    (system, ephemeris, ship_state, orbital_period)
+}
+
+#[test]
+fn zero_delta_v_node_does_not_create_projected_branch() {
+    let (system, ephemeris, ship_state, orbital_period) = thalos_low_orbit_fixture();
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        id: Some(10),
+        time: orbital_period * 0.25,
+        delta_v: DVec3::ZERO,
+        reference_body: 1,
+    });
+
+    let stack = propagate_branch_stack_for_test(
+        ship_state,
+        0.0,
+        &maneuvers,
+        ephemeris,
+        &system.bodies,
+        &PredictionConfig::default(),
+        TEST_THRUST_ACCEL,
+        1.0e-6,
+        1.0,
+    );
+
+    assert_eq!(stack.actual.kind, BranchKind::Actual);
+    assert!(stack.branches.is_empty());
+    assert_eq!(stack.active_plan.legs.len(), 2);
+}
+
+#[test]
+fn nonzero_maneuver_prefixes_create_layered_projected_branches() {
+    let (system, ephemeris, ship_state, orbital_period) = thalos_low_orbit_fixture();
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        id: Some(10),
+        time: orbital_period * 0.20,
+        delta_v: DVec3::new(50.0, 0.0, 0.0),
+        reference_body: 1,
+    });
+    maneuvers.add(ManeuverNode {
+        id: Some(20),
+        time: orbital_period * 0.45,
+        delta_v: DVec3::new(40.0, 0.0, 0.0),
+        reference_body: 1,
+    });
+
+    let stack = propagate_branch_stack_for_test(
+        ship_state,
+        0.0,
+        &maneuvers,
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig::default(),
+        TEST_THRUST_ACCEL,
+        1.0e-6,
+        1.0,
+    );
+
+    assert_eq!(stack.branches.len(), 2);
+    assert!(
+        stack
+            .branches
+            .iter()
+            .all(|b| b.kind == BranchKind::Projected)
+    );
+    assert_eq!(stack.branches[0].prefix_len, 1);
+    assert_eq!(stack.branches[0].source_node_id, Some(10));
+    assert_eq!(stack.branches[1].prefix_len, 2);
+    assert_eq!(stack.branches[1].source_node_id, Some(20));
+}
+
+#[test]
+fn projected_branch_fork_time_matches_finite_burn_start() {
+    let (system, ephemeris, ship_state, orbital_period) = thalos_low_orbit_fixture();
+    let node_time = orbital_period * 0.25;
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        id: Some(10),
+        time: node_time,
+        delta_v: DVec3::new(60.0, 0.0, 0.0),
+        reference_body: 1,
+    });
+
+    let stack = propagate_branch_stack_for_test(
+        ship_state,
+        0.0,
+        &maneuvers,
+        ephemeris,
+        &system.bodies,
+        &PredictionConfig::default(),
+        TEST_THRUST_ACCEL,
+        1.0e-6,
+        1.0,
+    );
+
+    let branch = stack.branches.first().expect("nonzero node creates branch");
+    let burn_start = branch.plan.legs[branch.prefix_len]
+        .burn_segment
+        .as_ref()
+        .and_then(|burn| burn.start_time())
+        .expect("finite burn segment");
+    assert!(burn_start < node_time);
+    assert!(
+        (branch.fork_time - burn_start).abs() < 1.0e-6,
+        "fork_time {} must match burn_start {}",
+        branch.fork_time,
+        burn_start
+    );
+}
+
+#[test]
+fn unavailable_thrust_suppresses_non_diverging_projected_branch() {
+    let (system, ephemeris, ship_state, orbital_period) = thalos_low_orbit_fixture();
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        id: Some(10),
+        time: orbital_period * 0.25,
+        delta_v: DVec3::new(60.0, 0.0, 0.0),
+        reference_body: 1,
+    });
+
+    let stack = propagate_branch_stack_for_test(
+        ship_state,
+        0.0,
+        &maneuvers,
+        ephemeris,
+        &system.bodies,
+        &PredictionConfig::default(),
+        0.0,
+        1.0e-6,
+        1.0,
+    );
+
+    assert!(stack.branches.is_empty());
 }
 
 #[test]
@@ -595,6 +786,99 @@ fn zero_delta_v_node_after_stable_orbit_still_builds_post_node_leg() {
             .flat_map(|seg| seg.samples.iter())
             .any(|sample| sample.time > node_time),
         "expected propagated samples after the maneuver node",
+    );
+}
+
+#[test]
+fn multi_period_pre_node_coast_renders_as_closed_loop_not_polygon() {
+    // Regression: when a maneuver node is scheduled many revolutions in
+    // the future, the pre-node coast covers N orbital periods. With
+    // uniform-time sampling that yields ~128/N samples per period, which
+    // visualises as a polygonal mess in the renderer. The propagator
+    // should detect the closed orbit, sample one full period densely, and
+    // append a single analytical sample at the leg's `target_time` so
+    // both the chain (`state_at(node_time)`) and the renderer
+    // (`stable_orbit_loop_end_index`) get what they need without
+    // densely re-sampling redundant periods.
+    let system = make_thalos_like_system();
+    let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::new(PatchedConics::new(&system, 2.0e7));
+
+    let thalos_state_0 = ephemeris.state(1, crate::canonical::Epoch(0.0));
+    let thalos_gm = system.bodies[1].gm;
+    let orbit_radius = system.bodies[1].radius_m + 200_000.0;
+    let circular_speed = (thalos_gm / orbit_radius).sqrt();
+    let orbital_period = std::f64::consts::TAU * (orbit_radius.powi(3) / thalos_gm).sqrt();
+
+    let ship_state = StateVector {
+        position: thalos_state_0.position + DVec3::new(orbit_radius, 0.0, 0.0),
+        velocity: thalos_state_0.velocity + DVec3::new(0.0, 0.0, circular_speed),
+    };
+
+    // Schedule the node 50 periods out — well beyond any plausible
+    // single-period coverage.
+    let periods = 50.0;
+    let node_time = orbital_period * periods;
+    let mut maneuvers = ManeuverSequence::new();
+    maneuvers.add(ManeuverNode {
+        id: None,
+        time: node_time,
+        delta_v: DVec3::ZERO,
+        reference_body: 1,
+    });
+
+    let prediction = propagate_trajectory(
+        ship_state,
+        0.0,
+        &maneuvers,
+        Arc::clone(&ephemeris),
+        &system.bodies,
+        &PredictionConfig::default(),
+        TEST_THRUST_ACCEL,
+    );
+
+    let coast = &prediction.legs[0].coast_segment;
+    assert!(
+        coast.is_stable_orbit,
+        "pre-node coast on a bound orbit should be flagged stable",
+    );
+
+    let loop_end = coast
+        .stable_orbit_loop_end_index
+        .expect("multi-period stable coast must mark its loop end");
+    assert!(
+        loop_end < coast.samples.len(),
+        "loop end ({loop_end}) must leave room for the trailing analytical sample (samples = {})",
+        coast.samples.len(),
+    );
+
+    // The closed-loop slice must cover a full period within tolerance,
+    // not just a chord.
+    let first = &coast.samples[0];
+    let last_loop = &coast.samples[loop_end - 1];
+    let loop_span = last_loop.time - first.time;
+    assert!(
+        (loop_span - orbital_period).abs() < orbital_period * 0.05,
+        "closed-loop slice should span ~1 period: span={loop_span} period={orbital_period}",
+    );
+
+    // Trailing sample must land at the leg boundary so `state_at(node_time)`
+    // continues to round-trip correctly.
+    let trailing = coast.samples.last().expect("at least one sample");
+    assert!(
+        (trailing.time - node_time).abs() <= 1e-3,
+        "trailing sample should sit at the maneuver boundary: t={} node_time={}",
+        trailing.time,
+        node_time,
+    );
+
+    // Density check: the dense pre-loop slice carries the bulk of the
+    // samples; without the fix the whole leg would be ~128 samples
+    // smeared across 50 periods (≈ 2.5/period).
+    let in_loop = loop_end;
+    let samples_per_period = in_loop as f64;
+    assert!(
+        samples_per_period >= 32.0,
+        "expected dense single-period sampling, got {samples_per_period} samples in the loop",
     );
 }
 

@@ -40,6 +40,13 @@ pub fn terrain_cache_key(
     context.axial_tilt_rad.to_bits().hash(&mut h);
     hash_optional_vec3(&mut h, context.tidal_axis);
     options.crater_count_scale.to_bits().hash(&mut h);
+    match options.cubemap_resolution_override {
+        None => 0u8.hash(&mut h),
+        Some(resolution) => {
+            1u8.hash(&mut h);
+            resolution.hash(&mut h);
+        }
+    }
     h.finish()
 }
 

@@ -25,19 +25,21 @@
 //!
 //!   --solar-system    assets/solar_system.ron
 //!   --out             stage-bakes/<body>/
-//!   --equirect-width  2048
+//!   --cubemap-resolution 512
+//!   --equirect-width     512
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 
 use glam::Vec3;
 use image::{ImageBuffer, Rgb, RgbImage};
 use thalos_physics::parsing::load_solar_system_from_dir;
-use thalos_terrain_gen::cubemap::{CubemapFace, dir_to_face_uv};
+use thalos_terrain_gen::cubemap::{dir_to_face_uv, CubemapFace};
 use thalos_terrain_gen::{
-    BodyArchetype, BodyData, FeatureId, FeatureProjectionConfig, TerrainCompileContext,
-    TerrainCompileOptions, TerrainConfig, VaelenColdDesertField, compile_terrain_config,
-    generate_initial_manifest,
+    compile_terrain_config, generate_initial_manifest, BodyArchetype, BodyData,
+    DynamicSurfaceFeature, FeatureId, FeatureProjectionConfig, TerrainCompileContext,
+    TerrainCompileOptions, TerrainConfig, VaelenColdDesertField,
 };
 
 // ---------------------------------------------------------------------------
@@ -50,6 +52,7 @@ struct Args {
     /// Explicit `--out DIR`; when absent, defaults are derived per body.
     out_dir: Option<PathBuf>,
     solar_system: PathBuf,
+    cubemap_resolution: u32,
     equirect_width: u32,
     /// Emit debug-only dumps (biome / suture / material-id) alongside the
     /// production PBR set. Off by default — production bakes ship only the
@@ -57,11 +60,18 @@ struct Args {
     debug: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CacheStatus {
+    Hit,
+    Stored,
+    StoreFailed,
+}
+
 fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.is_empty() || raw.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "usage: bake_dump <body_name|all> [--out DIR] [--solar-system PATH] [--equirect-width W] [--debug]"
+            "usage: bake_dump <body_name|all> [--out DIR] [--solar-system PATH] [--cubemap-resolution N] [--equirect-width W] [--debug]"
         );
         std::process::exit(if raw.is_empty() { 1 } else { 0 });
     }
@@ -69,7 +79,8 @@ fn parse_args() -> Args {
     let mut body_name: Option<String> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut solar_system: PathBuf = PathBuf::from("assets/solar_system.ron");
-    let mut equirect_width: u32 = 2048;
+    let mut cubemap_resolution: u32 = 512;
+    let mut equirect_width: u32 = 512;
     let mut debug = false;
 
     let mut i = 0;
@@ -83,6 +94,12 @@ fn parse_args() -> Args {
             "--solar-system" => {
                 i += 1;
                 solar_system = PathBuf::from(&raw[i]);
+            }
+            "--cubemap-resolution" => {
+                i += 1;
+                cubemap_resolution = raw[i]
+                    .parse()
+                    .expect("--cubemap-resolution needs an integer");
             }
             "--equirect-width" => {
                 i += 1;
@@ -102,6 +119,7 @@ fn parse_args() -> Args {
         body_arg,
         out_dir,
         solar_system,
+        cubemap_resolution,
         equirect_width,
         debug,
     }
@@ -147,35 +165,95 @@ fn main() {
         };
 
     let is_all = targets.len() > 1;
-    for body in targets {
-        let out_dir = match (&args.out_dir, is_all) {
-            // Explicit --out with a single body: use it directly.
-            (Some(p), false) => p.clone(),
-            // Explicit --out with `all`: treat as parent, subdirs per body.
-            (Some(p), true) => p.join(&body.name),
-            // Default: stage-bakes/<body>.
-            (None, _) => PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name),
-        };
+    let jobs: Vec<_> = targets
+        .into_iter()
+        .map(|body| {
+            let out_dir = match (&args.out_dir, is_all) {
+                // Explicit --out with a single body: use it directly.
+                (Some(p), false) => p.clone(),
+                // Explicit --out with `all`: treat as parent, subdirs per body.
+                (Some(p), true) => p.join(&body.name),
+                // Default: stage-bakes/<body>.
+                (None, _) => PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name),
+            };
+            (body, out_dir)
+        })
+        .collect();
 
-        bake_one(body, &out_dir, args.equirect_width, args.debug);
+    if is_all {
+        bake_all_in_child_processes(&args, &jobs);
+    } else {
+        for (body, out_dir) in &jobs {
+            bake_one(
+                body,
+                out_dir,
+                args.cubemap_resolution,
+                args.equirect_width,
+                args.debug,
+            );
+        }
+    }
+}
+
+fn bake_all_in_child_processes(
+    args: &Args,
+    jobs: &[(&thalos_physics::types::BodyDefinition, PathBuf)],
+) {
+    let exe = std::env::current_exe().expect("locating bake_dump executable");
+    let mut children: Vec<(String, Child)> = Vec::with_capacity(jobs.len());
+
+    for (body, out_dir) in jobs {
+        let mut cmd = Command::new(&exe);
+        cmd.arg(&body.name)
+            .arg("--out")
+            .arg(out_dir)
+            .arg("--solar-system")
+            .arg(&args.solar_system)
+            .arg("--cubemap-resolution")
+            .arg(args.cubemap_resolution.to_string())
+            .arg("--equirect-width")
+            .arg(args.equirect_width.to_string());
+        if args.debug {
+            cmd.arg("--debug");
+        }
+        let child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawning bake_dump for {}: {e}", body.name));
+        children.push((body.name.clone(), child));
+    }
+
+    let mut failed = false;
+    for (name, mut child) in children {
+        let status = child
+            .wait()
+            .unwrap_or_else(|e| panic!("waiting for bake_dump child {name}: {e}"));
+        if !status.success() {
+            eprintln!("bake_dump child for {name} exited with {status}");
+            failed = true;
+        }
+    }
+    if failed {
+        std::process::exit(1);
     }
 }
 
 fn bake_one(
     body: &thalos_physics::types::BodyDefinition,
     out_dir: &Path,
+    cubemap_resolution: u32,
     equirect_width: u32,
     debug: bool,
 ) {
-    let (body_data, route) = run_terrain(body);
+    let (body_data, route, cache_status) = run_terrain(body, cubemap_resolution);
 
     fs::create_dir_all(out_dir).expect("creating out dir");
     remove_legacy_outputs(out_dir, debug);
 
     println!(
-        "{}: baked via {} ({} craters) → {}",
+        "{}: baked via {} ({}, {} craters) → {}",
         body.name,
         route,
+        cache_status_label(cache_status),
         body_data.craters.len(),
         out_dir.display(),
     );
@@ -199,18 +277,46 @@ fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompi
     }
 }
 
-fn run_terrain(body: &thalos_physics::types::BodyDefinition) -> (BodyData, String) {
+fn run_terrain(
+    body: &thalos_physics::types::BodyDefinition,
+    cubemap_resolution: u32,
+) -> (BodyData, String, CacheStatus) {
     let route = body.terrain.route_label();
     let context = terrain_context(body);
-    let data = compile_terrain_config(
-        &body.terrain,
-        &context,
-        TerrainCompileOptions {
-            crater_count_scale: 1.0,
-        },
-    )
-    .unwrap_or_else(|e| panic!("terrain compile failed for {}: {e}", body.name));
-    (data, route)
+    let options = TerrainCompileOptions {
+        crater_count_scale: 1.0,
+        cubemap_resolution_override: Some(cubemap_resolution),
+    };
+    let cache_dir = terrain_cache_dir();
+    let key = thalos_terrain_gen::cache::terrain_cache_key(&body.terrain, &context, options);
+    let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body.name, key);
+
+    if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
+        return (data, route, CacheStatus::Hit);
+    }
+
+    let data = compile_terrain_config(&body.terrain, &context, options)
+        .unwrap_or_else(|e| panic!("terrain compile failed for {}: {e}", body.name));
+    let cache_status = match thalos_terrain_gen::cache::store(&path, key, &data) {
+        Ok(()) => CacheStatus::Stored,
+        Err(e) => {
+            eprintln!("terrain cache write failed for {}: {e}", body.name);
+            CacheStatus::StoreFailed
+        }
+    };
+    (data, route, cache_status)
+}
+
+fn terrain_cache_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/terrain_cache")
+}
+
+fn cache_status_label(status: CacheStatus) -> &'static str {
+    match status {
+        CacheStatus::Hit => "cache hit",
+        CacheStatus::Stored => "cache stored",
+        CacheStatus::StoreFailed => "cache store failed",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +455,19 @@ fn dump_info(body: &BodyData, route: &str, out: &Path) {
     s.push_str(&format!("craters:     {}\n", body.craters.len()));
     s.push_str(&format!("volcanoes:   {}\n", body.volcanoes.len()));
     s.push_str(&format!("channels:    {}\n", body.channels.len()));
+    s.push_str(&format!("dune_seas:   {}\n", body.dune_seas.len()));
+    s.push_str(&format!(
+        "dynamic_surface_features: {}\n",
+        body.dynamic_surface_features.len()
+    ));
+    let seasonal_ice_caps = body
+        .dynamic_surface_features
+        .iter()
+        .filter(|feature| matches!(feature, DynamicSurfaceFeature::SeasonalIceCap(_)))
+        .count();
+    if seasonal_ice_caps > 0 {
+        s.push_str(&format!("  seasonal_ice_caps: {seasonal_ice_caps}\n"));
+    }
     s.push_str(&format!("materials:   {}\n", body.materials.len()));
     if !body.materials.is_empty() {
         // Texel-level histogram so you can see which material rules

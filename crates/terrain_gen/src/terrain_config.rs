@@ -7,13 +7,13 @@ use crate::body_builder::BodyBuilder;
 use crate::body_data::BodyData;
 use crate::cubemap::CubemapFace;
 use crate::feature_compiler::{
-    AtmosphereSpec, AuthoredFeatureSpec, BodyArchetype, CompositionClass, FeatureCompileError,
-    FeatureCompileOptions, FeatureFootprint, FeatureId, FeatureKind, FeatureLock, FeatureParam,
-    FeatureProjectionConfig, FeatureSeed, HydrosphereSpec, IceInventory, PlanetPhysicalSpec,
-    PlanetTerrainSpec, ScaleRangeM, TerrainIntent, compile_initial_body_data,
+    compile_initial_body_data, AtmosphereSpec, AuthoredFeatureSpec, BodyArchetype,
+    CompositionClass, FeatureCompileError, FeatureCompileOptions, FeatureFootprint, FeatureId,
+    FeatureKind, FeatureLock, FeatureParam, FeatureProjectionConfig, FeatureSeed, HydrosphereSpec,
+    IceInventory, PlanetPhysicalSpec, PlanetTerrainSpec, ScaleRangeM, TerrainIntent,
 };
 use crate::surface_field::quantize_unit_to_u8;
-use crate::types::Composition;
+use crate::types::{Composition, IceCapSpec};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub enum TerrainConfig {
@@ -48,6 +48,10 @@ pub struct FeatureTerrainConfig {
     pub intent: Vec<TerrainIntent>,
     #[serde(default)]
     pub projection: FeatureProjectionConfig,
+    /// Seasonal polar surface overlays. These are carried into `BodyData` as
+    /// dynamic descriptors and are not baked into static terrain cubemaps.
+    #[serde(default)]
+    pub ice_caps: Vec<IceCapSpec>,
     #[serde(default)]
     pub authored_features: Vec<AuthoredFeatureConfig>,
 }
@@ -112,12 +116,14 @@ pub struct TerrainCompileContext {
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainCompileOptions {
     pub crater_count_scale: f32,
+    pub cubemap_resolution_override: Option<u32>,
 }
 
 impl Default for TerrainCompileOptions {
     fn default() -> Self {
         Self {
             crater_count_scale: 1.0,
+            cubemap_resolution_override: None,
         }
     }
 }
@@ -157,25 +163,35 @@ pub fn compile_terrain_config(
             compile_initial_body_data(
                 &spec,
                 FeatureCompileOptions {
-                    cubemap_resolution: feature.cubemap_resolution,
+                    cubemap_resolution: options
+                        .cubemap_resolution_override
+                        .unwrap_or(feature.cubemap_resolution),
                     crater_count_scale: options.crater_count_scale,
                     projection: feature.projection.clone(),
                 },
             )
             .map_err(Into::into)
         }
-        TerrainConfig::Ocean(config) => Ok(compile_ocean(config, context)),
+        TerrainConfig::Ocean(config) => Ok(compile_ocean(
+            config,
+            context,
+            options.cubemap_resolution_override,
+        )),
     }
 }
 
-fn compile_ocean(config: &OceanTerrainConfig, context: &TerrainCompileContext) -> BodyData {
+fn compile_ocean(
+    config: &OceanTerrainConfig,
+    context: &TerrainCompileContext,
+    cubemap_resolution_override: Option<u32>,
+) -> BodyData {
     let mut builder = BodyBuilder::new(
         context.radius_m,
         config.seed,
         // Composition is irrelevant for a flat-ocean placeholder — no
         // stage reads it. Pick a neutral value.
         Composition::new(1.0, 0.0, 0.0, 0.0, 0.0),
-        config.cubemap_resolution,
+        cubemap_resolution_override.unwrap_or(config.cubemap_resolution),
         4.5,
         context.tidal_axis,
         context.axial_tilt_rad,
@@ -222,6 +238,7 @@ impl FeatureTerrainConfig {
             },
             archetype: self.archetype,
             intent: self.intent.clone(),
+            ice_caps: self.ice_caps.clone(),
             authored_features: self
                 .authored_features
                 .iter()

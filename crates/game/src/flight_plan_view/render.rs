@@ -20,7 +20,7 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory};
+use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory, TrajectoryBranch};
 use thalos_physics::types::{BodyDefinition, BodyId, TrajectorySample};
 
 use crate::coords::{RenderGhostFocus, RenderOrigin, WorldScale, sample_render_pos};
@@ -47,10 +47,37 @@ pub(super) fn render_trajectory(
     }
     let body_states = snapshot.body_states.as_slice();
 
-    let focused_ghost = view.focused_ghost();
-    if focused_ghost.is_some()
-        && render_ghost_encounter_windows(
+    let Some(branch_stack) = snapshot.branch_stack.as_ref() else {
+        if view.focused_ghost().is_some()
+            && render_ghost_encounter_windows(
+                prediction,
+                LineStyle::Actual,
+                &view,
+                &snapshot,
+                &snapshot.body_defs,
+                body_states,
+                &origin,
+                &scale,
+                &mut gizmos,
+            )
+        {
+            return;
+        }
+        render_plan_segments(
             prediction,
+            LineStyle::Actual,
+            None,
+            None,
+            &view,
+            &snapshot.body_defs,
+            body_states,
+            &origin,
+            &scale,
+            &mut gizmos,
+        );
+        let _ = render_ghost_encounter_windows(
+            prediction,
+            LineStyle::Actual,
             &view,
             &snapshot,
             &snapshot.body_defs,
@@ -58,16 +85,111 @@ pub(super) fn render_trajectory(
             &origin,
             &scale,
             &mut gizmos,
-        )
-    {
+        );
         return;
-    }
+    };
 
+    let projected_count = branch_stack.branches.len().max(1);
+    let focused_hidden_interval = focused_ghost_hidden_interval(&view);
+    for (idx, branch) in branch_stack.branches.iter().enumerate() {
+        let alpha = 0.35 + 0.35 * ((idx + 1) as f32 / projected_count as f32);
+        let style = LineStyle::Projected { alpha };
+        render_branch(
+            branch,
+            style,
+            focused_hidden_interval,
+            &view,
+            &snapshot.body_defs,
+            body_states,
+            &origin,
+            &scale,
+            &mut gizmos,
+        );
+        if focused_hidden_interval.is_some() {
+            let _ = render_ghost_encounter_windows(
+                &branch.plan,
+                style,
+                &view,
+                &snapshot,
+                &snapshot.body_defs,
+                body_states,
+                &origin,
+                &scale,
+                &mut gizmos,
+            );
+        }
+    }
+    render_branch(
+        &branch_stack.actual,
+        LineStyle::Actual,
+        focused_hidden_interval,
+        &view,
+        &snapshot.body_defs,
+        body_states,
+        &origin,
+        &scale,
+        &mut gizmos,
+    );
+    if focused_hidden_interval.is_some() {
+        let _ = render_ghost_encounter_windows(
+            &branch_stack.actual.plan,
+            LineStyle::Actual,
+            &view,
+            &snapshot,
+            &snapshot.body_defs,
+            body_states,
+            &origin,
+            &scale,
+            &mut gizmos,
+        );
+    }
+}
+
+fn render_branch(
+    branch: &TrajectoryBranch,
+    style: LineStyle,
+    hidden_interval: Option<HiddenEpochInterval>,
+    view: &FlightPlanView,
+    system: &[BodyDefinition],
+    body_states: &[thalos_physics::types::BodyState],
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    gizmos: &mut Gizmos,
+) {
+    let clip_start = match branch.kind {
+        thalos_physics::trajectory::BranchKind::Actual => None,
+        thalos_physics::trajectory::BranchKind::Projected => Some(branch.fork_time),
+    };
+    render_plan_segments(
+        &branch.plan,
+        style,
+        clip_start,
+        hidden_interval,
+        view,
+        system,
+        body_states,
+        origin,
+        scale,
+        gizmos,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_plan_segments(
+    prediction: &FlightPlan,
+    style: LineStyle,
+    clip_start: Option<f64>,
+    hidden_interval: Option<HiddenEpochInterval>,
+    view: &FlightPlanView,
+    system: &[BodyDefinition],
+    body_states: &[thalos_physics::types::BodyState],
+    origin: &RenderOrigin,
+    scale: &WorldScale,
+    gizmos: &mut Gizmos,
+) {
     let mut prev_end: Option<(Vec3, BodyId)> = None;
 
-    for (leg_idx, leg) in prediction.legs().iter().enumerate() {
-        let is_ghost_leg = leg_idx > 0;
-
+    for leg in prediction.legs().iter() {
         if let Some(burn) = &leg.burn_segment {
             // Per-segment relock: burn and coast within one leg can
             // carry distinct anchors, so each gets its own pin.
@@ -80,26 +202,27 @@ pub(super) fn render_trajectory(
             if let (Some((prev, prev_anchor)), Some(first), Some(anchor)) =
                 (prev_end, burn.samples.first(), burn_anchor)
                 && prev_anchor == anchor
+                && clip_start.is_none_or(|start| first.time >= start - 1.0e-6)
+                && hidden_interval.is_none()
             {
                 let first_pos = sample_render_pos(first, burn_pin, &origin, &scale);
-                let color = ghost_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), is_ghost_leg);
+                let color = style_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), style);
                 gizmos.line(prev, first_pos, color);
             }
-            render_burn_segment(
+            let burn_end = render_burn_segment(
                 burn,
                 burn_pin,
                 prediction,
-                &view,
-                &snapshot.body_defs,
-                &origin,
-                &scale,
-                &mut gizmos,
+                view,
+                system,
+                origin,
+                scale,
+                style,
+                clip_start,
+                hidden_interval,
+                gizmos,
             );
-            if let Some(last) = burn.samples.last()
-                && let Some(anchor) = burn_anchor
-            {
-                prev_end = Some((sample_render_pos(last, burn_pin, &origin, &scale), anchor));
-            }
+            prev_end = burn_end.zip(burn_anchor);
         }
 
         let coast_pin = segment_pin(&leg.coast_segment, &view, body_states);
@@ -107,56 +230,28 @@ pub(super) fn render_trajectory(
         if let (Some((prev, prev_anchor)), Some(first), Some(anchor)) =
             (prev_end, leg.coast_segment.samples.first(), coast_anchor)
             && prev_anchor == anchor
+            && clip_start.is_none_or(|start| first.time >= start - 1.0e-6)
+            && hidden_interval.is_none()
         {
             let first_pos = sample_render_pos(first, coast_pin, &origin, &scale);
-            let color = ghost_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), is_ghost_leg);
+            let color = style_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), style);
             gizmos.line(prev, first_pos, color);
         }
         prev_end = render_segment(
             &leg.coast_segment,
             coast_pin,
-            is_ghost_leg,
             prediction,
-            &view,
-            &snapshot.body_defs,
-            &origin,
-            &scale,
-            &mut gizmos,
+            view,
+            system,
+            origin,
+            scale,
+            style,
+            clip_start,
+            hidden_interval,
+            gizmos,
         )
         .zip(coast_anchor);
     }
-
-    // Baseline: original trajectory without maneuvers. Pinned to its
-    // own first-sample anchor at its first-sample time, which means a
-    // maneuver that shifts an active-plan encounter doesn't drag the
-    // baseline along — they have independent ghost lookups.
-    if let Some(baseline) = &prediction.baseline
-        && !baseline.samples.is_empty()
-    {
-        let pin = segment_pin(baseline, &view, body_states);
-        render_segment(
-            baseline,
-            pin,
-            true,
-            prediction,
-            &view,
-            &snapshot.body_defs,
-            &origin,
-            &scale,
-            &mut gizmos,
-        );
-    }
-
-    let _ = render_ghost_encounter_windows(
-        prediction,
-        &view,
-        &snapshot,
-        &snapshot.body_defs,
-        body_states,
-        &origin,
-        &scale,
-        &mut gizmos,
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +282,51 @@ fn segment_anchor(segment: &NumericSegment) -> Option<BodyId> {
 // Segment rendering
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+enum LineStyle {
+    Actual,
+    Projected { alpha: f32 },
+}
+
+#[derive(Clone, Copy)]
+struct HiddenEpochInterval {
+    start: f64,
+    end: f64,
+}
+
+impl HiddenEpochInterval {
+    fn overlaps(self, start: f64, end: f64) -> bool {
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        start < self.end - 1.0e-6 && end > self.start + 1.0e-6
+    }
+}
+
+fn focused_ghost_hidden_interval(view: &FlightPlanView) -> Option<HiddenEpochInterval> {
+    let ghost = view.focused_ghost_ref()?;
+    let window = ghost.trajectory_window?;
+    let end = window.exit_epoch.unwrap_or(window.end_epoch);
+    (end > window.start_epoch).then_some(HiddenEpochInterval {
+        start: window.start_epoch,
+        end,
+    })
+}
+
+fn interval_hidden_for_render(
+    prediction: &FlightPlan,
+    view: &FlightPlanView,
+    system: &[BodyDefinition],
+    hidden_interval: Option<HiddenEpochInterval>,
+    start_epoch: f64,
+    end_epoch: f64,
+) -> bool {
+    hidden_interval.is_some_and(|interval| interval.overlaps(start_epoch, end_epoch))
+        || view.interval_hidden_in_focus(prediction, system, start_epoch, end_epoch)
+}
+
 fn render_burn_segment(
     segment: &NumericSegment,
     pin: DVec3,
@@ -195,16 +335,23 @@ fn render_burn_segment(
     system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
+    style: LineStyle,
+    clip_start: Option<f64>,
+    hidden_interval: Option<HiddenEpochInterval>,
     gizmos: &mut Gizmos,
-) {
+) -> Option<Vec3> {
     if segment.samples.len() < 2 {
-        return;
+        return None;
     }
-    let burn_color = Color::srgba(1.0, 0.65, 0.1, 1.0);
+    let burn_color = style_adjust(Color::srgba(1.0, 0.65, 0.1, 1.0), style);
+    let mut rendered_any = false;
     for pair in segment.samples.windows(2) {
         let a = &pair[0];
         let b = &pair[1];
-        if view.interval_hidden_in_focus(prediction, system, a.time, b.time) {
+        if clip_start.is_some_and(|start| b.time <= start + 1.0e-6) {
+            continue;
+        }
+        if interval_hidden_for_render(prediction, view, system, hidden_interval, a.time, b.time) {
             continue;
         }
         gizmos.line(
@@ -212,18 +359,29 @@ fn render_burn_segment(
             sample_render_pos(b, pin, origin, scale),
             burn_color,
         );
+        rendered_any = true;
+    }
+    if rendered_any {
+        segment
+            .samples
+            .last()
+            .map(|last| sample_render_pos(last, pin, origin, scale))
+    } else {
+        None
     }
 }
 
 fn render_segment(
     segment: &NumericSegment,
     pin: DVec3,
-    is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
     system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
+    style: LineStyle,
+    clip_start: Option<f64>,
+    hidden_interval: Option<HiddenEpochInterval>,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
     if segment.samples.is_empty() {
@@ -232,19 +390,31 @@ fn render_segment(
 
     if segment.is_stable_orbit {
         return render_stable_orbit_segment(
-            segment, pin, is_ghost, prediction, view, system, origin, scale, gizmos,
+            segment,
+            pin,
+            prediction,
+            view,
+            system,
+            origin,
+            scale,
+            style,
+            clip_start,
+            hidden_interval,
+            gizmos,
         );
     }
 
     render_open_samples(
         &segment.samples,
         pin,
-        is_ghost,
         prediction,
         view,
         system,
         origin,
         scale,
+        style,
+        clip_start,
+        hidden_interval,
         gizmos,
     )
 }
@@ -252,12 +422,14 @@ fn render_segment(
 fn render_open_samples(
     samples: &[TrajectorySample],
     pin: DVec3,
-    is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
     system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
+    style: LineStyle,
+    clip_start: Option<f64>,
+    hidden_interval: Option<HiddenEpochInterval>,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
     if samples.is_empty() {
@@ -265,10 +437,14 @@ fn render_open_samples(
     }
 
     let total = samples.len();
+    let mut rendered_any = false;
     for k in 0..total.saturating_sub(1) {
         let a = &samples[k];
         let b = &samples[k + 1];
-        if view.interval_hidden_in_focus(prediction, system, a.time, b.time) {
+        if clip_start.is_some_and(|start| b.time <= start + 1.0e-6) {
+            continue;
+        }
+        if interval_hidden_for_render(prediction, view, system, hidden_interval, a.time, b.time) {
             continue;
         }
 
@@ -280,53 +456,73 @@ fn render_open_samples(
         let p_a = sample_render_pos(a, pin, origin, scale);
         let p_b = sample_render_pos(b, pin, origin, scale);
 
-        let color_a = ghost_adjust(line_color(a, b, system, alpha_a), is_ghost);
-        let color_b = ghost_adjust(line_color(b, a, system, alpha_b), is_ghost);
+        let color_a = style_adjust(line_color(a, b, system, alpha_a), style);
+        let color_b = style_adjust(line_color(b, a, system, alpha_b), style);
         gizmos.line_gradient(p_a, p_b, color_a, color_b);
+        rendered_any = true;
     }
 
-    Some(sample_render_pos(&samples[total - 1], pin, origin, scale))
+    if rendered_any {
+        Some(sample_render_pos(&samples[total - 1], pin, origin, scale))
+    } else {
+        None
+    }
 }
 
 fn render_stable_orbit_segment(
     segment: &NumericSegment,
     pin: DVec3,
-    is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
     system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
+    style: LineStyle,
+    clip_start: Option<f64>,
+    hidden_interval: Option<HiddenEpochInterval>,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
+    let loop_end = segment
+        .stable_orbit_loop_end_index
+        .unwrap_or(segment.samples.len())
+        .min(segment.samples.len());
     let loop_start = segment
         .stable_orbit_start_index
         .unwrap_or(0)
-        .min(segment.samples.len().saturating_sub(1));
+        .min(loop_end.saturating_sub(1));
 
     if loop_start > 0 {
         render_open_samples(
             &segment.samples[..=loop_start],
             pin,
-            is_ghost,
             prediction,
             view,
             system,
             origin,
             scale,
+            style,
+            clip_start,
+            hidden_interval,
             gizmos,
         );
     }
 
+    // Samples past `loop_end` are sparse out-of-loop extensions kept so
+    // `state_at(target_time)` returns the correct state. Drawing a chord
+    // from the loop end to those samples cuts straight across the orbit
+    // interior, which is exactly the visual artifact this whole code
+    // path exists to avoid. Render only the closed-loop slice.
     render_stable_orbit(
-        &segment.samples[loop_start..],
+        &segment.samples[loop_start..loop_end],
         pin,
-        is_ghost,
         prediction,
         view,
         system,
         origin,
         scale,
+        style,
+        clip_start,
+        hidden_interval,
         gizmos,
     )
 }
@@ -334,12 +530,14 @@ fn render_stable_orbit_segment(
 fn render_stable_orbit(
     samples: &[TrajectorySample],
     pin: DVec3,
-    is_ghost: bool,
     prediction: &FlightPlan,
     view: &FlightPlanView,
     system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
+    style: LineStyle,
+    clip_start: Option<f64>,
+    hidden_interval: Option<HiddenEpochInterval>,
     gizmos: &mut Gizmos,
 ) -> Option<Vec3> {
     if samples.len() < 2 {
@@ -351,12 +549,16 @@ fn render_stable_orbit(
         .get(anchor)
         .map(|bd| bd.color)
         .unwrap_or([1.0, 1.0, 1.0]);
-    let color = ghost_adjust(Color::srgba(r, g, b, 1.0), is_ghost);
+    let color = style_adjust(Color::srgba(r, g, b, 1.0), style);
 
+    let mut rendered_any = false;
     for pair in samples.windows(2) {
         let a = &pair[0];
         let b = &pair[1];
-        if view.interval_hidden_in_focus(prediction, system, a.time, b.time) {
+        if clip_start.is_some_and(|start| b.time <= start + 1.0e-6) {
+            continue;
+        }
+        if interval_hidden_for_render(prediction, view, system, hidden_interval, a.time, b.time) {
             continue;
         }
         gizmos.line(
@@ -364,16 +566,27 @@ fn render_stable_orbit(
             sample_render_pos(b, pin, origin, scale),
             color,
         );
+        rendered_any = true;
     }
-    Some(sample_render_pos(samples.last()?, pin, origin, scale))
+    if rendered_any {
+        samples
+            .last()
+            .map(|last| sample_render_pos(last, pin, origin, scale))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Ghost encounter windows
 // ---------------------------------------------------------------------------
 
+const GHOST_WINDOW_MIN_SUBDIVISIONS: usize = 160;
+const GHOST_WINDOW_MAX_SUBDIVISIONS: usize = 768;
+
 fn render_ghost_encounter_windows(
     prediction: &FlightPlan,
+    style: LineStyle,
     view: &FlightPlanView,
     snapshot: &MapSnapshot,
     system: &[BodyDefinition],
@@ -412,7 +625,7 @@ fn render_ghost_encounter_windows(
             if let Some(burn) = &leg.burn_segment {
                 rendered |= render_ghost_segment(
                     burn, true, ghost, snapshot, pin, soi_radius, start, end, system, origin,
-                    scale, gizmos,
+                    scale, style, gizmos,
                 );
             }
             rendered |= render_ghost_segment(
@@ -427,6 +640,7 @@ fn render_ghost_encounter_windows(
                 system,
                 origin,
                 scale,
+                style,
                 gizmos,
             );
         }
@@ -451,6 +665,7 @@ fn render_ghost_segment(
     system: &[BodyDefinition],
     origin: &RenderOrigin,
     scale: &WorldScale,
+    style: LineStyle,
     gizmos: &mut Gizmos,
 ) -> bool {
     let points = ghost_segment_points(
@@ -474,7 +689,12 @@ fn render_ghost_segment(
         } else {
             encounter_color(ghost.body_id, system, alpha_b, 0.20)
         };
-        gizmos.line_gradient(points[k].1, points[k + 1].1, color_a, color_b);
+        gizmos.line_gradient(
+            points[k].1,
+            points[k + 1].1,
+            style_adjust(color_a, style),
+            style_adjust(color_b, style),
+        );
     }
     true
 }
@@ -501,7 +721,11 @@ fn ghost_segment_points(
         return points;
     }
 
-    let mut times = Vec::with_capacity(segment.samples.len() + 2);
+    let subdivisions = segment
+        .samples
+        .len()
+        .clamp(GHOST_WINDOW_MIN_SUBDIVISIONS, GHOST_WINDOW_MAX_SUBDIVISIONS);
+    let mut times = Vec::with_capacity(segment.samples.len() + subdivisions + 3);
     times.push(start);
     times.extend(
         segment
@@ -510,11 +734,16 @@ fn ghost_segment_points(
             .map(|sample| sample.time)
             .filter(|time| *time > start && *time < end),
     );
+    for i in 0..=subdivisions {
+        let t = start + (end - start) * (i as f64 / subdivisions as f64);
+        times.push(t);
+    }
     times.push(end);
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
 
-    for (i, t) in times.into_iter().enumerate() {
+    let mut pending_entry_boundary: Option<(f64, Vec3)> = None;
+    for t in times {
         let Some(state) = segment.state_at(t) else {
             continue;
         };
@@ -532,14 +761,18 @@ fn ghost_segment_points(
         };
 
         if sample.inside {
-            points.push((t, sample.position));
-            inside_started = true;
-        } else if i == 0 {
+            if points.is_empty()
+                && let Some(boundary) = pending_entry_boundary.take()
+            {
+                points.push(boundary);
+            }
             points.push((t, sample.position));
             inside_started = true;
         } else if inside_started {
             points.push((t, sample.position));
             break;
+        } else {
+            pending_entry_boundary = Some((t, sample.position));
         }
     }
 
@@ -594,17 +827,17 @@ fn encounter_color(body_id: BodyId, system: &[BodyDefinition], alpha: f32, mix: 
     )
 }
 
-fn ghost_adjust(color: Color, is_ghost: bool) -> Color {
-    if !is_ghost {
+fn style_adjust(color: Color, style: LineStyle) -> Color {
+    let LineStyle::Projected { alpha } = style else {
         return color;
-    }
+    };
     let srgba = color.to_srgba();
-    let mix = 0.3;
+    let mix = 0.35;
     Color::srgba(
         srgba.red + (1.0 - srgba.red) * mix,
         srgba.green + (1.0 - srgba.green) * mix,
         srgba.blue + (1.0 - srgba.blue) * mix,
-        srgba.alpha * 0.6,
+        srgba.alpha * alpha,
     )
 }
 

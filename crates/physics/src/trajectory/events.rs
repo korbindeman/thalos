@@ -184,7 +184,21 @@ pub(super) fn detect_segment_events(
         }
     }
 
-    for pair in segment.samples.windows(2) {
+    // For multi-period stable orbits, samples past
+    // `stable_orbit_loop_end_index` are sparse out-of-loop extensions
+    // (a single analytical sample at the leg's target_time). The pair
+    // bridging the loop end to that straggler crosses many revolutions
+    // — Hermite over that chord is not the trajectory, so apsis sign
+    // flips on it would emit phantom events.
+    let pair_limit = segment
+        .stable_orbit_loop_end_index
+        .map(|end| end.saturating_sub(1))
+        .unwrap_or(usize::MAX);
+
+    for (i, pair) in segment.samples.windows(2).enumerate() {
+        if i >= pair_limit {
+            break;
+        }
         let a = pair[0];
         let b = pair[1];
 
@@ -773,6 +787,7 @@ mod tests {
             ],
             is_stable_orbit: false,
             stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
             collision_body: None,
         }];
 

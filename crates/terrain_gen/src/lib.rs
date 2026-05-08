@@ -1,3 +1,4 @@
+pub mod aeolian;
 pub mod biome_mask;
 pub mod body_builder;
 pub mod body_data;

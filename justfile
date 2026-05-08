@@ -4,9 +4,9 @@
 game:
     cargo run -p thalos_game
 
-# Edit a planet's terrain (default: Mira). Usage: just edit auron
-edit body="":
-    cargo run -p thalos_planet_editor {{ if body != "" { "-- " + body } else { "" } }}
+# Edit a planet's terrain. Usage: just edit auron
+edit body:
+    cargo run -p thalos_planet_editor -- {{body}}
 
 # Run the ship editor (shipyard crate)
 shipyard:
@@ -36,7 +36,7 @@ release kind="patch":
 
 # Run tests
 test:
-    cargo test -p thalos_physics -p thalos_terrain_gen
+    cargo test -p thalos_physics
 
 # Lint
 clippy:

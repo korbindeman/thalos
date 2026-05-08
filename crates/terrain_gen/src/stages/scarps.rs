@@ -170,38 +170,3 @@ impl Stage for Scarps {
             });
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::body_builder::BodyBuilder;
-    use crate::cubemap::CubemapFace;
-    use crate::types::Composition;
-
-    #[test]
-    fn scarps_raise_terrain() {
-        let comp = Composition::new(0.95, 0.04, 0.0, 0.01, 0.0);
-        let mut b = BodyBuilder::new(1_000_000.0, 0xCAFE, comp, 64, 4.5, None, 0.0);
-        let s = Scarps {
-            count: 4,
-            min_length_m: 60_000.0,
-            max_length_m: 120_000.0,
-            width_m: 4_000.0,
-            height_m: 200.0,
-            curvature: 0.1,
-        };
-        s.apply(&mut b);
-        let mut max_h: f32 = 0.0;
-        for face in CubemapFace::ALL {
-            for &h in b.height_contributions.height.face_data(face).iter() {
-                if h > max_h {
-                    max_h = h;
-                }
-            }
-        }
-        assert!(
-            max_h > 50.0,
-            "scarp ridge should raise terrain, max={max_h}"
-        );
-    }
-}

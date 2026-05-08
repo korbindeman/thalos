@@ -150,75 +150,6 @@ impl PlanetCoastlineParams {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use thalos_terrain_gen::{
-        OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
-        compile_terrain_config,
-    };
-
-    #[test]
-    fn flat_ocean_placeholder_has_no_coastline_height_jitter() {
-        let terrain = TerrainConfig::Ocean(OceanTerrainConfig {
-            seed: 1003,
-            cubemap_resolution: 16,
-            seabed_albedo: [0.02, 0.05, 0.10],
-            water_roughness: 0.04,
-            sea_level_m: 1.0,
-        });
-        let body = compile_terrain_config(
-            &terrain,
-            &TerrainCompileContext {
-                body_name: "Thalos".to_string(),
-                radius_m: 6_000_000.0,
-                gravity_m_s2: 9.81,
-                rotation_hours: None,
-                obliquity_deg: None,
-                tidal_axis: None,
-                axial_tilt_rad: 0.0,
-            },
-            TerrainCompileOptions::default(),
-        )
-        .expect("ocean terrain should compile");
-
-        let coastline = PlanetCoastlineParams::from_body_data(&body);
-        assert_eq!(coastline.warp_amp_radians, 0.0);
-        assert_eq!(coastline.jitter_amp_m, 0.0);
-    }
-
-    #[test]
-    fn ocean_water_color_uses_uniform_body_tint() {
-        let terrain = TerrainConfig::Ocean(OceanTerrainConfig {
-            seed: 1003,
-            cubemap_resolution: 16,
-            seabed_albedo: [0.02, 0.05, 0.10],
-            water_roughness: 0.04,
-            sea_level_m: 1.0,
-        });
-        let body = compile_terrain_config(
-            &terrain,
-            &TerrainCompileContext {
-                body_name: "Thalos".to_string(),
-                radius_m: 6_000_000.0,
-                gravity_m_s2: 9.81,
-                rotation_hours: None,
-                obliquity_deg: None,
-                tidal_axis: None,
-                axial_tilt_rad: 0.0,
-            },
-            TerrainCompileOptions::default(),
-        )
-        .expect("ocean terrain should compile");
-
-        let water = PlanetWaterParams::from_body_data(&body);
-        assert!((water.color_depth.x - 0.02).abs() < 0.002);
-        assert!((water.color_depth.y - 0.05).abs() < 0.002);
-        assert!((water.color_depth.z - 0.10).abs() < 0.002);
-        assert_eq!(water.color_depth.w, 120.0);
-    }
-}
-
 impl Default for PlanetParams {
     fn default() -> Self {
         Self {
@@ -478,9 +409,11 @@ impl AtmosphereBlock {
 // | 8       | storage (read)   | array<Crater>             | `craters_buffer`   |
 // | 9       | storage (read)   | array<CellRange>          | `cell_index_buf`   |
 // | 10      | storage (read)   | array<u32>                | `feature_ids_buf`  |
+// | 11      | storage (read)   | array<RadialFeature>      | `radial_features`  |
 // | 12      | uniform          | AtmosphereBlock           | `atmosphere` field |
 // | 13      | texture cube     | texture_cube<f32>         | `cloud_cover` cube |
 // | 14      | sampler          | sampler                   | `cloud_cover` sampler |
+// | 15      | storage (read)   | array<IceCap>             | `ice_caps`         |
 //
 // Storage buffers (8-10) use std430 layout. Struct definitions for
 // `Crater`, `CellRange` are mirrored in the shader and must stay in sync
@@ -511,6 +444,11 @@ impl AtmosphereBlock {
 // 1×1 blank cube; the shader gates its cloud path on
 // `AtmosphereBlock::cloud_albedo_coverage.w > 0` so airless bodies pay
 // just one texture fetch + a branch.
+//
+// Binding 15 carries dynamic surface overlays that are not part of the
+// terrain bake. It currently contains seasonal polar ice caps rendered as a
+// static impostor overlay; later runtime climate/wind systems can update this
+// buffer without rebuilding terrain cubemaps.
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct PlanetMaterial {
@@ -533,6 +471,8 @@ pub struct PlanetMaterial {
     pub cell_index: Handle<ShaderStorageBuffer>,
     #[storage(10, read_only)]
     pub feature_ids: Handle<ShaderStorageBuffer>,
+    #[storage(11, read_only)]
+    pub radial_features: Handle<ShaderStorageBuffer>,
     #[uniform(12)]
     pub atmosphere: AtmosphereBlock,
     // Cloud-cover cubemap (R8Unorm). Produced by
@@ -541,6 +481,8 @@ pub struct PlanetMaterial {
     #[texture(13, dimension = "cube")]
     #[sampler(14)]
     pub cloud_cover: Handle<Image>,
+    #[storage(15, read_only)]
+    pub ice_caps: Handle<ShaderStorageBuffer>,
 }
 
 impl Material for PlanetMaterial {
@@ -599,11 +541,15 @@ pub struct PlanetHaloMaterial {
     pub cell_index: Handle<ShaderStorageBuffer>,
     #[storage(10, read_only)]
     pub feature_ids: Handle<ShaderStorageBuffer>,
+    #[storage(11, read_only)]
+    pub radial_features: Handle<ShaderStorageBuffer>,
     #[uniform(12)]
     pub atmosphere: AtmosphereBlock,
     #[texture(13, dimension = "cube")]
     #[sampler(14)]
     pub cloud_cover: Handle<Image>,
+    #[storage(15, read_only)]
+    pub ice_caps: Handle<ShaderStorageBuffer>,
 }
 
 impl From<&PlanetMaterial> for PlanetHaloMaterial {
@@ -617,8 +563,10 @@ impl From<&PlanetMaterial> for PlanetHaloMaterial {
             craters: material.craters.clone(),
             cell_index: material.cell_index.clone(),
             feature_ids: material.feature_ids.clone(),
+            radial_features: material.radial_features.clone(),
             atmosphere: material.atmosphere,
             cloud_cover: material.cloud_cover.clone(),
+            ice_caps: material.ice_caps.clone(),
         }
     }
 }

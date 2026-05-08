@@ -457,7 +457,6 @@ pub(crate) fn maneuver_burn_direction(sim: &Simulation, plan: &ManeuverPlan) -> 
 pub(crate) fn maneuver_node_burn_direction(sim: &Simulation, node: &GameNode) -> Option<DVec3> {
     let ship = sim.ship_state();
     let time = sim.sim_time();
-    let rail_state = node.rail.as_ref().and_then(|rail| rail.state_at(node.time));
     let prediction_state = sim
         .prediction()
         .and_then(|p| p.pre_burn_state_at(node.time, sim.ephemeris(), sim.bodies()))
@@ -466,7 +465,7 @@ pub(crate) fn maneuver_node_burn_direction(sim: &Simulation, node: &GameNode) ->
             velocity: s.velocity,
         })
         .or_else(|| sim.prediction().and_then(|p| p.state_at(node.time)));
-    let (ship_pos, ship_vel, frame_time) = match rail_state.or(prediction_state) {
+    let (ship_pos, ship_vel, frame_time) = match prediction_state {
         Some(s) => (s.position, s.velocity, node.time),
         None => (ship.position, ship.velocity, time),
     };

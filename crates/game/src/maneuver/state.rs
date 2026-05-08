@@ -6,12 +6,11 @@ use thalos_physics::types::{BodyId, StateVector, TrajectorySample};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u64);
 
-/// Immutable trajectory section captured when a maneuver node is placed.
+/// Transient trajectory section used for picking and slide interaction.
 ///
-/// The physics maneuver sequence still only consumes `(time, delta_v,
-/// reference_body)`. This rail is game-side UX state: node markers, drag
-/// handles, and slide interaction stay attached to the exact visible path the
-/// player clicked, even after later prediction rebuilds bend the planned path.
+/// Rails are rebuilt from the current branch stack instead of being stored on
+/// maneuver nodes, so upstream maneuver edits cannot leave stale copied paths
+/// behind.
 #[derive(Clone, Debug)]
 pub struct TrajectoryRail {
     pub frame: RailFrame,
@@ -54,8 +53,6 @@ pub struct GameNode {
     pub delta_v: DVec3,
     /// Body used as the local reference frame (dominant body at placement time).
     pub reference_body: usize,
-    /// Exact visible path section this node was placed on.
-    pub rail: Option<TrajectoryRail>,
 }
 
 /// UI-side maneuver plan. Synced to `ManeuverSequence` in physics when dirty.
@@ -106,9 +103,8 @@ pub(super) struct SelectedNodeView {
 /// During a slide, [`ManeuverPlan::last_slide_apply_secs`] throttles flight-
 /// plan rebuilds to ~10 Hz, so the cached prediction can be up to 100 ms
 /// behind `node.time` for the dragged node. Sampling that prediction at the
-/// fresh `node.time` may land on the wrong leg (e.g. the post-burn coast
-/// instead of the unperturbed baseline) and snap the visual marker off the
-/// orbit the user is dragging along.
+/// fresh `node.time` may land on the wrong leg and snap the visual marker off
+/// the branch the user is dragging along.
 ///
 /// [`super::interaction::maneuver_input`] writes this resource directly from
 /// the chosen [`super::helpers::ClosestTrailPoint`], bypassing the stale
@@ -134,7 +130,6 @@ pub enum InteractionMode {
         snap_time: Option<f64>,
         snap_world_pos: Option<Vec3>,
         snap_anchor_body: Option<usize>,
-        snap_rail: Option<TrajectoryRail>,
     },
     /// Dragging an arrow handle to adjust delta-v.
     DraggingArrow {
@@ -159,7 +154,6 @@ pub enum ManeuverEvent {
     PlaceNode {
         trail_time: f64,
         reference_body: usize,
-        rail: Option<TrajectoryRail>,
     },
     AdjustNode {
         id: NodeId,

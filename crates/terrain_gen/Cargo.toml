@@ -10,6 +10,4 @@ bincode = { version = "2", features = ["serde"] }
 zstd = "0.13"
 rayon = "1.10"
 noise = "0.9"
-
-[dev-dependencies]
-ron = "0.12"
+bevy_erosion_filter = "0.1.1"

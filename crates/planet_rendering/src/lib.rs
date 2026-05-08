@@ -33,7 +33,7 @@ pub use rings::{
     MAX_RING_STOPS, RingLayers, RingMaterial, RingMaterialHandle, RingParams, build_ring_mesh,
     ring_plane_normal,
 };
-pub use shader_types::{GpuCellRange, GpuCrater};
+pub use shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature};
 pub use solid_planet::{SolidPlanetMaterial, SolidPlanetParams};
 pub use texture::PlanetTextures;
 
@@ -51,6 +51,7 @@ impl Plugin for PlanetRenderingPlugin {
         bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/noise.wgsl");
+        app.add_plugins(bevy_erosion_filter::ErosionFilterPlugin);
         app.add_plugins((
             MaterialPlugin::<PlanetMaterial>::default(),
             MaterialPlugin::<PlanetHaloMaterial>::default(),

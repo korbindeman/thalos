@@ -2,7 +2,7 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics::body_trajectory_provider::BodyTrajectoryProvider;
 use thalos_physics::maneuver::{delta_v_to_world, orbital_frame};
-use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory};
+use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory, TrajectoryBranchStack};
 use thalos_physics::types::{BodyId, BodyState, SolarSystemDefinition, TrajectorySample};
 
 use super::state::{GameNode, ManeuverPlan, NodeId, RailFrame, TrajectoryRail};
@@ -21,7 +21,6 @@ pub(super) struct ClosestTrailPoint {
     /// prediction (which may be stale during throttled slides).
     pub sample_position: DVec3,
     pub sample_velocity: DVec3,
-    pub rail: Option<TrajectoryRail>,
 }
 
 /// Compute the prograde/normal/radial frame as a Mat3 from ship + body state.
@@ -49,13 +48,13 @@ pub(super) fn orbital_frame_mat3(
 /// pre-burn velocity for the same reason: prograde/normal/radial must stay
 /// rigid while the user drags a handle.
 ///
-/// Falls back to the baseline (full pre-maneuver orbit) for the slide-snap
-/// latency case: `closest_trail_point_on_leg` may snap a slide to a baseline
-/// sample whose time sits outside the current legs until the prediction is
-/// rebuilt one frame later.
+/// Falls back to the actual branch for the slide-snap latency case: the
+/// dynamic branch hit may land outside the active plan's current legs until
+/// the prediction is rebuilt one frame later.
 pub(super) fn node_world_pos_and_frame(
     node: &GameNode,
     prediction: &FlightPlan,
+    branch_stack: Option<&TrajectoryBranchStack>,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -63,18 +62,6 @@ pub(super) fn node_world_pos_and_frame(
     ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Option<(Vec3, Mat3)> {
-    if let Some(rail) = &node.rail {
-        return rail_world_pos_and_frame(
-            rail,
-            node.time,
-            body_states,
-            origin,
-            scale,
-            ephemeris,
-            flight_plan_view,
-        );
-    }
-
     let time = node.time;
     let reference_body = node.reference_body;
     if !node_visible_at_time(prediction, system, flight_plan_view, reference_body, time) {
@@ -83,7 +70,7 @@ pub(super) fn node_world_pos_and_frame(
 
     let sample = prediction
         .pre_burn_state_at(time, ephemeris, &system.bodies)
-        .or_else(|| baseline_sample_at(prediction, time, ephemeris))?;
+        .or_else(|| actual_sample_at(branch_stack, time, ephemeris))?;
 
     let ref_state = ephemeris.state(
         reference_body,
@@ -122,20 +109,19 @@ fn node_visible_at_time(
     !flight_plan_view.epoch_hidden_in_focus(prediction, &system.bodies, time)
 }
 
-/// Build a sample on the baseline (unperturbed) orbit at `time`.
-fn baseline_sample_at(
-    prediction: &FlightPlan,
+/// Build a sample on the actual no-maneuver branch at `time`.
+fn actual_sample_at(
+    branch_stack: Option<&TrajectoryBranchStack>,
     time: f64,
     ephemeris: &dyn BodyTrajectoryProvider,
 ) -> Option<thalos_physics::types::TrajectorySample> {
-    let baseline = prediction.baseline.as_ref()?;
-    let first = baseline.samples.first()?;
-    let last = baseline.samples.last()?;
-    if time < first.time - 1e-6 || time > last.time + 1e-6 {
+    let actual = &branch_stack?.actual.plan;
+    let (start, end) = actual.epoch_range();
+    if time < start - 1.0e-6 || time > end + 1.0e-6 {
         return None;
     }
-    let state = baseline.state_at(time)?;
-    let anchor = last.anchor_body;
+    let state = actual.state_at(time)?;
+    let anchor = actual.anchor_body_at(time)?;
     let body_state = ephemeris.state(anchor, thalos_physics::canonical::Epoch(time));
     Some(thalos_physics::types::TrajectorySample {
         time,
@@ -144,36 +130,6 @@ fn baseline_sample_at(
         anchor_body: anchor,
         ref_pos: body_state.position,
     })
-}
-
-fn rail_world_pos_and_frame(
-    rail: &TrajectoryRail,
-    time: f64,
-    body_states: &[BodyState],
-    origin: &RenderOrigin,
-    scale: &WorldScale,
-    ephemeris: &dyn BodyTrajectoryProvider,
-    flight_plan_view: &FlightPlanView,
-) -> Option<(Vec3, Mat3)> {
-    let state = rail.state_at(time)?;
-    let world_pos = rail_world_position_for_state(
-        rail,
-        time,
-        state.position,
-        body_states,
-        origin,
-        scale,
-        ephemeris,
-        flight_plan_view,
-    )?;
-    let reference = ephemeris.state(rail.reference_body, thalos_physics::canonical::Epoch(time));
-    let frame = orbital_frame_mat3(
-        state.position,
-        state.velocity,
-        reference.position,
-        reference.velocity,
-    );
-    Some((world_pos, frame))
 }
 
 fn rail_visible(rail: &TrajectoryRail, flight_plan_view: &FlightPlanView) -> bool {
@@ -266,39 +222,10 @@ fn rail_world_position_for_state(
     }
 }
 
-pub(super) fn trajectory_rail_points(
-    rail: &TrajectoryRail,
-    body_states: &[BodyState],
-    origin: &RenderOrigin,
-    scale: &WorldScale,
-    ephemeris: &dyn BodyTrajectoryProvider,
-    flight_plan_view: &FlightPlanView,
-) -> Vec<Vec3> {
-    if !rail_visible(rail, flight_plan_view) {
-        return Vec::new();
-    }
-
-    rail_candidate_times(rail)
-        .into_iter()
-        .filter_map(|time| {
-            let state = rail.state_at(time)?;
-            rail_world_position_for_state(
-                rail,
-                time,
-                state.position,
-                body_states,
-                origin,
-                scale,
-                ephemeris,
-                flight_plan_view,
-            )
-        })
-        .collect()
-}
-
 pub(super) fn node_world_position(
     node: &GameNode,
     prediction: &FlightPlan,
+    branch_stack: Option<&TrajectoryBranchStack>,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -309,6 +236,7 @@ pub(super) fn node_world_position(
     node_world_pos_and_frame(
         node,
         prediction,
+        branch_stack,
         body_states,
         origin,
         scale,
@@ -323,6 +251,7 @@ pub(super) fn selected_node_world_and_frame(
     selected_id: Option<NodeId>,
     plan: &ManeuverPlan,
     prediction: &FlightPlan,
+    branch_stack: Option<&TrajectoryBranchStack>,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -335,6 +264,7 @@ pub(super) fn selected_node_world_and_frame(
     node_world_pos_and_frame(
         node,
         prediction,
+        branch_stack,
         body_states,
         origin,
         scale,
@@ -408,6 +338,7 @@ pub(super) fn orbit_sensitivity_scale(
 pub(super) fn closest_node(
     plan: &ManeuverPlan,
     prediction: &FlightPlan,
+    branch_stack: Option<&TrajectoryBranchStack>,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -426,6 +357,7 @@ pub(super) fn closest_node(
         let Some(world_pos) = node_world_position(
             node,
             prediction,
+            branch_stack,
             body_states,
             origin,
             scale,
@@ -456,24 +388,18 @@ pub(super) fn closest_node(
 /// the node from wandering across maneuver boundaries onto a different
 /// trajectory.
 ///
-/// - **First node by time:** the pre-burn orbit is the unperturbed coast
-///   from `sim_time`. Use [`FlightPlan::baseline`] — propagated to one full
-///   revolution, so the slide closes back at the ship and wraps cleanly.
-///   `legs[0].coast_segment` is the wrong choice here: it is only the
-///   segment of the same orbit truncated at `node[0].time − d/2`, so a
-///   finite-burn node on the first slot would have *no* baseline available
-///   to wrap around.
-/// - **Subsequent nodes:** sliding node `M` (chronologically the M-th, 0-
-///   indexed) walks along `legs[M].coast_segment` — the coast that the
-///   previous burn deposits the ship onto, leading up to this node's burn.
-///   We do not include the post-burn leg `legs[M+1]`, which lives on a
-///   different orbit; sliding into it would let the user hop across
-///   trajectories mid-drag.
+/// The source is the current branch immediately before this node in
+/// chronological order: actual for the first effective node, otherwise the
+/// latest projected prefix branch whose source node is earlier than this one.
 pub(super) fn slide_search_segments<'a>(
     plan: &ManeuverPlan,
-    prediction: &'a FlightPlan,
+    branch_stack: Option<&'a TrajectoryBranchStack>,
     slide_id: NodeId,
 ) -> Vec<&'a NumericSegment> {
+    let Some(branch_stack) = branch_stack else {
+        return Vec::new();
+    };
+
     // Sort nodes by time to find the slide_id's chronological index.
     let mut sorted: Vec<&GameNode> = plan.nodes.iter().collect();
     sorted.sort_by(|a, b| {
@@ -484,36 +410,31 @@ pub(super) fn slide_search_segments<'a>(
     let Some(idx) = sorted.iter().position(|n| n.id == slide_id) else {
         return Vec::new();
     };
+    let node_time = sorted[idx].time;
 
-    if idx == 0 {
-        // First node: prefer baseline (full revolution from sim_time).
-        if let Some(baseline) = &prediction.baseline {
-            return vec![baseline];
-        }
-        // Baseline is only built when maneuvers exist — but we *do* have a
-        // maneuver here, so this branch is unreachable in normal operation.
-        // Fall through to leg 0's coast as a defensive fallback.
-        if let Some(leg) = prediction.legs().first() {
-            return vec![&leg.coast_segment];
-        }
-        return Vec::new();
-    }
+    let source_plan = branch_stack
+        .branches
+        .iter()
+        .rev()
+        .find(|branch| branch.prefix_len <= idx)
+        .map(|branch| &branch.plan)
+        .unwrap_or(&branch_stack.actual.plan);
 
-    if let Some(leg) = prediction.legs().get(idx) {
-        return vec![&leg.coast_segment];
-    }
-    Vec::new()
+    coast_segments_for_time(source_plan, node_time)
 }
 
-fn body_rail_from_segment(segment: &NumericSegment) -> Option<TrajectoryRail> {
-    let first = segment.samples.first()?;
-    Some(TrajectoryRail {
-        frame: RailFrame::Body {
-            body_id: first.anchor_body,
-        },
-        reference_body: first.anchor_body,
-        samples: segment.samples.clone(),
-    })
+fn coast_segments_for_time(plan: &FlightPlan, time: f64) -> Vec<&NumericSegment> {
+    for leg in plan.legs() {
+        let (start, end) = leg.coast_segment.epoch_range();
+        if time >= start - 1.0e-6 && time <= end + 1.0e-6 {
+            return vec![&leg.coast_segment];
+        }
+    }
+
+    plan.legs()
+        .last()
+        .map(|leg| vec![&leg.coast_segment])
+        .unwrap_or_default()
 }
 
 fn rail_from_segment_interval(
@@ -586,33 +507,89 @@ fn push_body_rail(runs: &mut Vec<TrajectoryRail>, samples: &mut Vec<TrajectorySa
 
 fn visible_trajectory_rails(
     prediction: &FlightPlan,
+    branch_stack: Option<&TrajectoryBranchStack>,
     system: &SolarSystemDefinition,
     ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Vec<TrajectoryRail> {
     if flight_plan_view.focused_ghost().is_some() {
+        if let Some(branch_stack) = branch_stack {
+            let mut rails = Vec::new();
+            for branch in branch_stack.branches.iter().rev() {
+                append_focused_ghost_rails(
+                    &mut rails,
+                    &branch.plan,
+                    system,
+                    ephemeris,
+                    flight_plan_view,
+                );
+            }
+            append_focused_ghost_rails(
+                &mut rails,
+                &branch_stack.actual.plan,
+                system,
+                ephemeris,
+                flight_plan_view,
+            );
+            return rails;
+        }
         return focused_ghost_rails(prediction, system, ephemeris, flight_plan_view);
     }
 
+    if let Some(branch_stack) = branch_stack {
+        let mut rails = Vec::new();
+        // Search projected branches from newest to oldest so overlapping
+        // projected paths are picked before the actual reference path.
+        for branch in branch_stack.branches.iter().rev() {
+            append_plan_rails(
+                &mut rails,
+                &branch.plan,
+                Some(branch.fork_time),
+                system,
+                flight_plan_view,
+            );
+        }
+        append_plan_rails(
+            &mut rails,
+            &branch_stack.actual.plan,
+            None,
+            system,
+            flight_plan_view,
+        );
+        return rails;
+    }
+
     let mut rails = Vec::new();
-    for segment in prediction.segments.iter() {
+    append_plan_rails(&mut rails, prediction, None, system, flight_plan_view);
+    rails
+}
+
+fn append_plan_rails(
+    rails: &mut Vec<TrajectoryRail>,
+    plan: &FlightPlan,
+    clip_start: Option<f64>,
+    system: &SolarSystemDefinition,
+    flight_plan_view: &FlightPlanView,
+) {
+    for segment in plan.segments.iter() {
         let Some(first) = segment.samples.first() else {
             continue;
         };
         let mut run = Vec::new();
         for sample in &segment.samples {
             let same_anchor = sample.anchor_body == first.anchor_body;
+            let after_clip = clip_start.is_none_or(|start| sample.time >= start - 1.0e-6);
             let visible = same_anchor
-                && !flight_plan_view.epoch_hidden_in_focus(prediction, &system.bodies, sample.time);
+                && after_clip
+                && !flight_plan_view.epoch_hidden_in_focus(plan, &system.bodies, sample.time);
             if visible {
                 run.push(*sample);
             } else {
-                push_body_rail(&mut rails, &mut run);
+                push_body_rail(rails, &mut run);
             }
         }
-        push_body_rail(&mut rails, &mut run);
+        push_body_rail(rails, &mut run);
     }
-    rails
 }
 
 fn focused_ghost_rails(
@@ -621,8 +598,20 @@ fn focused_ghost_rails(
     ephemeris: &dyn BodyTrajectoryProvider,
     flight_plan_view: &FlightPlanView,
 ) -> Vec<TrajectoryRail> {
+    let mut rails = Vec::new();
+    append_focused_ghost_rails(&mut rails, prediction, system, ephemeris, flight_plan_view);
+    rails
+}
+
+fn append_focused_ghost_rails(
+    rails: &mut Vec<TrajectoryRail>,
+    prediction: &FlightPlan,
+    system: &SolarSystemDefinition,
+    ephemeris: &dyn BodyTrajectoryProvider,
+    flight_plan_view: &FlightPlanView,
+) {
     let Some(focus) = flight_plan_view.focused_ghost() else {
-        return Vec::new();
+        return;
     };
     let Some(ghost) = flight_plan_view.focused_ghost_ref().or_else(|| {
         flight_plan_view
@@ -635,14 +624,14 @@ fn focused_ghost_rails(
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             })
     }) else {
-        return Vec::new();
+        return;
     };
     let Some(window) = ghost.trajectory_window else {
-        return Vec::new();
+        return;
     };
     let end = window.exit_epoch.unwrap_or(window.end_epoch);
     if end <= window.start_epoch {
-        return Vec::new();
+        return;
     }
 
     let soi_radius = system
@@ -659,7 +648,6 @@ fn focused_ghost_rails(
         soi_radius,
     };
 
-    let mut rails = Vec::new();
     for leg in prediction.legs() {
         if let Some(burn) = &leg.burn_segment
             && let Some(rail) = rail_from_segment_interval(
@@ -684,7 +672,6 @@ fn focused_ghost_rails(
             rails.push(rail);
         }
     }
-    rails
 }
 
 fn rail_candidate_times(rail: &TrajectoryRail) -> Vec<f64> {
@@ -732,7 +719,7 @@ pub(super) fn closest_trail_point_on_orbit(
     cam_transform: &GlobalTransform,
     cursor_pos: Vec2,
 ) -> Option<ClosestTrailPoint> {
-    // Total time covered by the searched coasts. For a closed-orbit baseline
+    // Total time covered by the searched coasts. For a closed actual branch
     // this is one orbital period; for a partial coast it's that arc's
     // duration. Half of it is the seam threshold below — adjacent samples
     // (~stride seconds apart) never meet it; only the closure of a one-rev
@@ -759,7 +746,6 @@ pub(super) fn closest_trail_point_on_orbit(
         let Some(first) = coast.samples.first() else {
             continue;
         };
-        let rail = body_rail_from_segment(coast);
         // Per-leg relock makes all samples in a coast share an anchor,
         // so the pin is constant across the segment — compute once.
         let pin = flight_plan_view.pin_for_body(first.anchor_body, first.time, body_states);
@@ -808,7 +794,6 @@ pub(super) fn closest_trail_point_on_orbit(
                 screen_distance: d,
                 sample_position: sample.position,
                 sample_velocity: sample.velocity,
-                rail: rail.clone(),
             };
             match (&best_a, &best_b) {
                 (None, _) => best_a = Some(candidate),
@@ -842,82 +827,9 @@ pub(super) fn closest_trail_point_on_orbit(
     Some(a)
 }
 
-pub(super) fn closest_trail_point_on_rail(
-    rail: &TrajectoryRail,
-    prev_time: f64,
-    body_states: &[BodyState],
-    origin: &RenderOrigin,
-    scale: &WorldScale,
-    ephemeris: &dyn BodyTrajectoryProvider,
-    flight_plan_view: &FlightPlanView,
-    camera: &Camera,
-    cam_transform: &GlobalTransform,
-    cursor_pos: Vec2,
-) -> Option<ClosestTrailPoint> {
-    let (start, end) = rail.epoch_range()?;
-    let seam_time_threshold = (end - start) * 0.5;
-
-    let mut best_a: Option<ClosestTrailPoint> = None;
-    let mut best_b: Option<ClosestTrailPoint> = None;
-
-    for time in rail_candidate_times(rail) {
-        let Some(state) = rail.state_at(time) else {
-            continue;
-        };
-        let Some(world_pos) = rail_world_position_for_state(
-            rail,
-            time,
-            state.position,
-            body_states,
-            origin,
-            scale,
-            ephemeris,
-            flight_plan_view,
-        ) else {
-            continue;
-        };
-        let Some(screen_pos) = camera.world_to_viewport(cam_transform, world_pos).ok() else {
-            continue;
-        };
-        let d = (screen_pos - cursor_pos).length();
-        let candidate = ClosestTrailPoint {
-            time,
-            world_pos,
-            anchor_body: rail.reference_body,
-            screen_distance: d,
-            sample_position: state.position,
-            sample_velocity: state.velocity,
-            rail: Some(rail.clone()),
-        };
-        match (&best_a, &best_b) {
-            (None, _) => best_a = Some(candidate),
-            (Some(a), _) if d < a.screen_distance => {
-                best_b = best_a.take();
-                best_a = Some(candidate);
-            }
-            (Some(_), None) => best_b = Some(candidate),
-            (Some(_), Some(b)) if d < b.screen_distance => best_b = Some(candidate),
-            _ => {}
-        }
-    }
-
-    let a = best_a?;
-    let Some(b) = best_b else {
-        return Some(a);
-    };
-
-    const SEAM_DIST_PX: f32 = 8.0;
-    if (b.screen_distance - a.screen_distance) < SEAM_DIST_PX
-        && (a.time - b.time).abs() > seam_time_threshold
-        && (b.time - prev_time).abs() < (a.time - prev_time).abs()
-    {
-        return Some(b);
-    }
-    Some(a)
-}
-
 pub(super) fn closest_trail_point(
     prediction: &FlightPlan,
+    branch_stack: Option<&TrajectoryBranchStack>,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -930,10 +842,16 @@ pub(super) fn closest_trail_point(
 ) -> Option<ClosestTrailPoint> {
     let mut best: Option<ClosestTrailPoint> = None;
 
-    for rail in visible_trajectory_rails(prediction, system, ephemeris, flight_plan_view) {
+    for rail in visible_trajectory_rails(
+        prediction,
+        branch_stack,
+        system,
+        ephemeris,
+        flight_plan_view,
+    ) {
         update_best_on_rail(
             &mut best,
-            Some(rail),
+            rail,
             body_states,
             origin,
             scale,
@@ -951,7 +869,7 @@ pub(super) fn closest_trail_point(
 #[allow(clippy::too_many_arguments)]
 fn update_best_on_rail(
     best: &mut Option<ClosestTrailPoint>,
-    rail: Option<TrajectoryRail>,
+    rail: TrajectoryRail,
     body_states: &[BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
@@ -961,10 +879,6 @@ fn update_best_on_rail(
     cam_transform: &GlobalTransform,
     cursor_pos: Vec2,
 ) {
-    let Some(rail) = rail else {
-        return;
-    };
-
     for time in rail_candidate_times(&rail) {
         let Some(state) = rail.state_at(time) else {
             continue;
@@ -994,7 +908,6 @@ fn update_best_on_rail(
                 screen_distance: d,
                 sample_position: state.position,
                 sample_velocity: state.velocity,
-                rail: Some(rail.clone()),
             });
         }
     }
@@ -1034,5 +947,103 @@ pub(super) fn overlay_marker_transform(
         translation: world_pos,
         rotation: camera_rotation,
         scale: Vec3::splat(marker_scale),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use thalos_physics::trajectory::{BranchKind, Leg, TrajectoryBranch};
+    use thalos_physics::types::StateVector;
+
+    fn sample(time: f64) -> TrajectorySample {
+        TrajectorySample {
+            time,
+            position: DVec3::new(time, 0.0, 0.0),
+            velocity: DVec3::X,
+            anchor_body: 0,
+            ref_pos: DVec3::ZERO,
+        }
+    }
+
+    fn segment(start: f64, end: f64) -> NumericSegment {
+        NumericSegment {
+            samples: vec![sample(start), sample(end)],
+            is_stable_orbit: false,
+            stable_orbit_start_index: None,
+            stable_orbit_loop_end_index: None,
+            collision_body: None,
+        }
+    }
+
+    fn plan(start: f64, end: f64) -> FlightPlan {
+        let segment = segment(start, end);
+        FlightPlan {
+            initial_state: StateVector {
+                position: DVec3::new(start, 0.0, 0.0),
+                velocity: DVec3::X,
+            },
+            initial_time: start,
+            legs: vec![Leg {
+                start_state: StateVector {
+                    position: DVec3::new(start, 0.0, 0.0),
+                    velocity: DVec3::X,
+                },
+                start_time: start,
+                applied_delta_v: None,
+                burn_segment: None,
+                coast_segment: segment.clone(),
+            }],
+            segments: vec![segment],
+            events: Vec::new(),
+            encounters: Vec::new(),
+            approaches: Vec::new(),
+        }
+    }
+
+    fn node(id: u64, time: f64, delta_v: DVec3) -> GameNode {
+        GameNode {
+            id: NodeId(id),
+            time,
+            delta_v,
+            reference_body: 0,
+        }
+    }
+
+    #[test]
+    fn slide_search_uses_actual_for_first_node_and_previous_branch_for_later_node() {
+        let actual_plan = plan(0.0, 100.0);
+        let first_branch_plan = plan(100.0, 200.0);
+        let stack = TrajectoryBranchStack {
+            actual: TrajectoryBranch {
+                kind: BranchKind::Actual,
+                prefix_len: 0,
+                source_node_id: None,
+                fork_time: 0.0,
+                plan: actual_plan,
+            },
+            branches: vec![TrajectoryBranch {
+                kind: BranchKind::Projected,
+                prefix_len: 1,
+                source_node_id: Some(1),
+                fork_time: 50.0,
+                plan: first_branch_plan,
+            }],
+            active_plan: plan(0.0, 200.0),
+        };
+
+        let mut maneuver_plan = ManeuverPlan::default();
+        maneuver_plan
+            .nodes
+            .push(node(1, 50.0, DVec3::new(10.0, 0.0, 0.0)));
+        maneuver_plan.nodes.push(node(2, 150.0, DVec3::ZERO));
+
+        let first_source = slide_search_segments(&maneuver_plan, Some(&stack), NodeId(1));
+        assert_eq!(first_source.len(), 1);
+        assert_eq!(first_source[0].start_time(), Some(0.0));
+
+        let second_source = slide_search_segments(&maneuver_plan, Some(&stack), NodeId(2));
+        assert_eq!(second_source.len(), 1);
+        assert_eq!(second_source[0].start_time(), Some(100.0));
     }
 }

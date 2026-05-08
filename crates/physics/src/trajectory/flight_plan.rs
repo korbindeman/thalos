@@ -31,7 +31,7 @@ use super::propagation::{
     PredictionConfig, PropagationBudget, PropagationContext, propagate_segment,
 };
 use crate::body_trajectory_provider::BodyTrajectoryProvider;
-use crate::maneuver::{ManeuverSequence, burn_duration};
+use crate::maneuver::{ManeuverNode, ManeuverSequence, burn_duration};
 use crate::orbital_math::propagate_kepler;
 use crate::ship_propagator::ShipPropagator;
 use crate::types::{BodyDefinition, BodyId, StateVector, TrajectorySample};
@@ -162,10 +162,6 @@ pub struct FlightPlan {
     pub events: Vec<TrajectoryEvent>,
     pub encounters: Vec<Encounter>,
     pub approaches: Vec<ClosestApproach>,
-    /// Full coast from initial state with no maneuvers applied.
-    /// Present only when maneuver nodes exist, so the renderer can show
-    /// the original orbit alongside the planned trajectory.
-    pub baseline: Option<NumericSegment>,
 }
 
 impl FlightPlan {
@@ -178,7 +174,6 @@ impl FlightPlan {
             events: Vec::new(),
             encounters: Vec::new(),
             approaches: Vec::new(),
-            baseline: None,
         }
     }
 
@@ -331,6 +326,45 @@ impl FlightPlan {
     }
 }
 
+/// Minimum maneuver magnitude that gets its own projected branch.
+pub const MEANINGFUL_DELTA_V_MPS: f64 = 1.0e-3;
+
+/// Visual/semantic role of a trajectory branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchKind {
+    /// The ship's current future path with no future maneuver nodes applied.
+    Actual,
+    /// A path produced by applying one or more future maneuver nodes.
+    Projected,
+}
+
+/// One visible trajectory branch in the map view.
+#[derive(Debug, Clone)]
+pub struct TrajectoryBranch {
+    pub kind: BranchKind,
+    /// Number of chronological maneuver nodes included in this branch.
+    pub prefix_len: usize,
+    /// UI/physics id of the maneuver that creates this projected branch.
+    pub source_node_id: Option<u64>,
+    /// First epoch at which this branch should be drawn.
+    pub fork_time: f64,
+    pub plan: FlightPlan,
+}
+
+/// Active prediction plus the branch stack used for map rendering and picking.
+#[derive(Debug, Clone)]
+pub struct TrajectoryBranchStack {
+    pub actual: TrajectoryBranch,
+    pub branches: Vec<TrajectoryBranch>,
+    pub active_plan: FlightPlan,
+}
+
+impl TrajectoryBranchStack {
+    pub fn active_plan(&self) -> &FlightPlan {
+        &self.active_plan
+    }
+}
+
 impl Trajectory for FlightPlan {
     fn state_at(&self, time: f64) -> Option<StateVector> {
         for leg in &self.legs {
@@ -440,21 +474,6 @@ pub fn propagate_flight_plan(
 
     let ephemeris_end = start_time + ctx.ephemeris.time_span();
     let leg_count = node_order.len() + 1;
-
-    // Baseline: full coast from initial state with no maneuvers. Cheap in
-    // analytical propagation, so we always produce it when maneuvers exist.
-    let mut baseline = if !maneuvers.nodes.is_empty() {
-        Some(propagate_segment(
-            initial_state,
-            start_time,
-            ephemeris_end,
-            None,
-            &ctx,
-            true,
-        ))
-    } else {
-        None
-    };
 
     // Walking state: where the next leg begins.
     let mut state = initial_state;
@@ -602,6 +621,7 @@ pub fn propagate_flight_plan(
                 samples: Vec::new(),
                 is_stable_orbit: false,
                 stable_orbit_start_index: None,
+                stable_orbit_loop_end_index: None,
                 collision_body: None,
             }
         } else {
@@ -701,13 +721,6 @@ pub fn propagate_flight_plan(
                 .position;
         }
     };
-    let relock_samples_to_first = |samples: &mut [crate::types::TrajectorySample]| {
-        let Some(first) = samples.first() else {
-            return;
-        };
-        let anchor = first.anchor_body;
-        relock_samples_to(samples, anchor);
-    };
     for leg in legs.iter_mut() {
         // The leg's first sample is the burn's first when a burn exists,
         // otherwise the coast's first. Both burn and coast get relocked
@@ -739,10 +752,6 @@ pub fn propagate_flight_plan(
         }
         segments.push(leg.coast_segment.clone());
     }
-    if let Some(base) = baseline.as_mut() {
-        relock_samples_to_first(&mut base.samples);
-    }
-
     let encounters = aggregate_encounters(
         &events,
         &segments,
@@ -764,6 +773,117 @@ pub fn propagate_flight_plan(
         events,
         encounters,
         approaches,
-        baseline,
     }
+}
+
+/// Build the active prediction and all visible trajectory branches.
+///
+/// The active plan remains the authoritative sequence used by navigation,
+/// event markers, and autopilot. The branch stack is a rendering/picking view:
+/// actual no-maneuver trajectory first, then one projected branch per
+/// meaningful maneuver prefix that really diverges from its parent branch.
+pub fn propagate_branch_stack(
+    request: &PredictionRequest,
+    budget: Option<PropagationBudget>,
+) -> TrajectoryBranchStack {
+    let active_plan = propagate_flight_plan(request, budget);
+
+    let mut actual_request = request.clone();
+    actual_request.maneuvers = ManeuverSequence::new();
+    let actual_plan = propagate_flight_plan(&actual_request, None);
+    let actual = TrajectoryBranch {
+        kind: BranchKind::Actual,
+        prefix_len: 0,
+        source_node_id: None,
+        fork_time: request.sim_time,
+        plan: actual_plan,
+    };
+
+    let mut chronological_nodes = request.maneuvers.nodes.clone();
+    chronological_nodes.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut branches = Vec::new();
+    for idx in 0..chronological_nodes.len() {
+        let node = &chronological_nodes[idx];
+        if node.delta_v.length() < MEANINGFUL_DELTA_V_MPS {
+            continue;
+        }
+
+        let prefix_nodes = chronological_nodes[..=idx].to_vec();
+        let mut prefix_request = request.clone();
+        prefix_request.maneuvers = ManeuverSequence {
+            nodes: prefix_nodes,
+        };
+        let plan = propagate_flight_plan(&prefix_request, None);
+        let fork_time = branch_fork_time(&plan, idx + 1, node);
+
+        let parent_plan = branches
+            .last()
+            .map(|branch: &TrajectoryBranch| &branch.plan)
+            .unwrap_or(&actual.plan);
+        if !branch_diverges_from_parent(&plan, parent_plan, fork_time) {
+            continue;
+        }
+
+        branches.push(TrajectoryBranch {
+            kind: BranchKind::Projected,
+            prefix_len: idx + 1,
+            source_node_id: node.id,
+            fork_time,
+            plan,
+        });
+    }
+
+    TrajectoryBranchStack {
+        actual,
+        branches,
+        active_plan,
+    }
+}
+
+fn branch_fork_time(plan: &FlightPlan, prefix_len: usize, node: &ManeuverNode) -> f64 {
+    plan.legs
+        .get(prefix_len)
+        .and_then(|leg| leg.burn_segment.as_ref())
+        .and_then(|burn| burn.start_time())
+        .unwrap_or(node.time)
+}
+
+fn branch_diverges_from_parent(
+    candidate: &FlightPlan,
+    parent: &FlightPlan,
+    fork_time: f64,
+) -> bool {
+    const POS_EPS_M: f64 = 1.0;
+    const VEL_EPS_MPS: f64 = 1.0e-3;
+
+    let parent_collided = parent
+        .segments
+        .iter()
+        .any(|segment| segment.collision_body.is_some());
+
+    for sample in candidate
+        .segments
+        .iter()
+        .flat_map(|segment| segment.samples.iter())
+        .filter(|sample| sample.time > fork_time + 1.0e-6)
+    {
+        let Some(parent_state) = parent.state_at(sample.time) else {
+            if parent_collided {
+                return true;
+            }
+            continue;
+        };
+        if (sample.position - parent_state.position).length() > POS_EPS_M
+            || (sample.velocity - parent_state.velocity).length() > VEL_EPS_MPS
+        {
+            return true;
+        }
+    }
+
+    false
 }

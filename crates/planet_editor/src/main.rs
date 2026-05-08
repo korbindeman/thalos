@@ -19,9 +19,9 @@ use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinit
 use thalos_planet_rendering::{
     AtmosphereBlock, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle,
     GasGiantParams, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial,
-    PlanetHaloMaterialHandle, PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetWaterParams,
-    PlanetRenderingPlugin, ReferenceClouds, RingLayers, RingMaterial, RingMaterialHandle,
-    RingParams, SceneLighting, StarLight, bake_from_body_data, build_ring_mesh,
+    PlanetHaloMaterialHandle, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
+    PlanetRenderingPlugin, PlanetWaterParams, ReferenceClouds, RingLayers, RingMaterial,
+    RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_from_body_data, build_ring_mesh,
     cloud_cover_image_for_body, convert_reference_clouds_when_ready, load_reference_cloud_sources,
 };
 use thalos_terrain_gen::{
@@ -53,6 +53,9 @@ const REBAKE_DEBOUNCE_MS: u128 = 150;
 /// Cubemap resolution used for live preview rebakes. Macro composition reads
 /// fine at this size; full-resolution bakes are explicit via the UI button.
 const PREVIEW_CUBEMAP_RESOLUTION: u32 = 256;
+/// Explicit mid-resolution bake for checking near-final terrain without paying
+/// the full 2048² compile cost.
+const HALF_CUBEMAP_RESOLUTION: u32 = 1024;
 
 const SOLAR_SYSTEM_RON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -95,6 +98,32 @@ enum ToolMode {
     #[default]
     Inspect,
     AddMegabasin,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum TerrainBakeMode {
+    #[default]
+    Preview,
+    Half,
+    Full,
+}
+
+impl TerrainBakeMode {
+    fn resolution_override(self) -> Option<u32> {
+        match self {
+            Self::Preview => Some(PREVIEW_CUBEMAP_RESOLUTION),
+            Self::Half => Some(HALF_CUBEMAP_RESOLUTION),
+            Self::Full => None,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Preview => format!("preview {PREVIEW_CUBEMAP_RESOLUTION}²"),
+            Self::Half => format!("half {HALF_CUBEMAP_RESOLUTION}²"),
+            Self::Full => "full".to_string(),
+        }
+    }
 }
 
 impl ToolMode {
@@ -142,12 +171,11 @@ struct EditedPlanet {
     /// Wall-clock time of the most recent terrain-affecting edit. Drives the
     /// debounced preview rebake so a slider drag doesn't spawn throwaway tasks.
     last_edit: Option<Instant>,
-    /// Set by the "Bake full res" button. Bypasses debounce and the preview
-    /// resolution override, then resets after dispatch.
-    full_bake_requested: bool,
-    /// Whether the last (or in-flight) bake was a low-res preview, for status
-    /// display.
-    last_bake_was_preview: bool,
+    /// Set by explicit bake buttons. Bypasses debounce, then resets after
+    /// dispatch. Live edits use `Preview`.
+    requested_bake: Option<TerrainBakeMode>,
+    /// Last or in-flight bake mode, for status display.
+    last_bake_mode: TerrainBakeMode,
     /// Currently-selected manifest feature (None = nothing selected). Drives
     /// the per-feature inspector panel.
     selected_feature_id: Option<FeatureId>,
@@ -175,6 +203,15 @@ fn sun_direction(azimuth: f32, elevation: f32) -> Vec3 {
     let (sa, ca) = azimuth.sin_cos();
     let (se, ce) = elevation.sin_cos();
     Vec3::new(ce * sa, se, ce * ca)
+}
+
+/// Body→world orientation quaternion for the preview, matching the game's
+/// `update_planet_orientations` at sim_time = 0 (free-spinning case): the
+/// `Ry(phase) * Rx(tilt)` composition collapses to `Rx(tilt)` since phase = 0.
+/// Stored in `PlanetParams.orientation` / `GasGiantParams.orientation`, where
+/// the shaders use it to rotate world-space directions into body-local space.
+fn body_orientation(planet: &EditedPlanet) -> Quat {
+    Quat::from_rotation_x(planet.axial_tilt_rad)
 }
 
 // ---------------------------------------------------------------------------
@@ -542,19 +579,22 @@ fn dispatch_terrain_bake(
         };
         let options = TerrainCompileOptions {
             crater_count_scale: DEV_CRATER_SCALE,
+            cubemap_resolution_override: None,
         };
-        let key = thalos_terrain_gen::cache::terrain_cache_key(&terrain, &context, options);
-        let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
-        if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
-            info!("terrain cache hit: {body_name} via {route}");
-            return data;
-        }
-        info!("terrain cache miss, baking {body_name} via {route}");
+        // The editor never reads from the cache so edits and compile changes
+        // always show up; only full-res bakes write, producing artifacts for
+        // downstream consumers.
+        let is_full_bake = cubemap_resolution_override.is_none();
+        info!("baking {body_name} via {route}");
         let data = compile_terrain_config(&terrain, &context, options)
             .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
-        match thalos_terrain_gen::cache::store(&path, key, &data) {
-            Ok(()) => info!("terrain cache wrote: {body_name}"),
-            Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
+        if is_full_bake {
+            let key = thalos_terrain_gen::cache::terrain_cache_key(&terrain, &context, options);
+            let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
+            match thalos_terrain_gen::cache::store(&path, key, &data) {
+                Ok(()) => info!("terrain cache wrote: {body_name}"),
+                Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
+            }
         }
         data
     })
@@ -568,7 +608,7 @@ fn spawn_preview(
     gas_giant_materials: &mut Assets<GasGiantMaterial>,
     ring_materials: &mut Assets<RingMaterial>,
     billboard: &BillboardMesh,
-    planet: &EditedPlanet,
+    planet: &mut EditedPlanet,
     status: &mut TerrainGenStatus,
 ) {
     let parent = commands
@@ -608,8 +648,9 @@ fn spawn_preview(
                 *tidal_axis,
                 planet.axial_tilt_rad,
                 planet.selected_body.clone(),
-                None,
+                TerrainBakeMode::Preview.resolution_override(),
             );
+            planet.last_bake_mode = TerrainBakeMode::Preview;
             status.current_started = Some(Instant::now());
             commands
                 .entity(parent)
@@ -617,7 +658,7 @@ fn spawn_preview(
         }
         BodyMode::GasGiant { layers } => {
             let scene = scene_lighting_for(planet);
-            let tilt = Quat::from_rotation_x(planet.axial_tilt_rad);
+            let tilt = body_orientation(planet);
 
             let mat_handle = gas_giant_materials.add(GasGiantMaterial {
                 params: GasGiantParams {
@@ -698,7 +739,7 @@ fn spawn_preview_planet(
     mut gas_giant_materials: ResMut<Assets<GasGiantMaterial>>,
     mut ring_materials: ResMut<Assets<RingMaterial>>,
     mut status: ResMut<TerrainGenStatus>,
-    planet: Res<EditedPlanet>,
+    mut planet: ResMut<EditedPlanet>,
 ) {
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
     commands.insert_resource(BillboardMesh(billboard_mesh));
@@ -715,7 +756,7 @@ fn spawn_preview_planet(
         &mut gas_giant_materials,
         &mut ring_materials,
         &billboard,
-        &planet,
+        &mut planet,
         &mut status,
     );
 
@@ -753,6 +794,7 @@ fn finalize_terrain_bake(
         let water = PlanetWaterParams::from_body_data(&body);
         let atmosphere = active_atmosphere(&planet);
         let cloud_cover = cloud_cover_for(&planet, &reference_clouds, &mut images);
+        let q = body_orientation(&planet);
 
         let planet_material = PlanetMaterial {
             params: PlanetParams {
@@ -760,6 +802,7 @@ fn finalize_terrain_bake(
                 height_range,
                 terminator_wrap: wrap,
                 fullbright: if planet.full_bright { 1.0 } else { 0.0 },
+                orientation: Vec4::new(q.x, q.y, q.z, q.w),
                 scene,
                 sea_level_m: body.sea_level_m.unwrap_or(-1.0e9),
                 water_color_depth: water.color_depth,
@@ -775,8 +818,10 @@ fn finalize_terrain_bake(
             craters: textures.craters,
             cell_index: textures.cell_index,
             feature_ids: textures.feature_ids,
+            radial_features: textures.radial_features,
             atmosphere,
             cloud_cover,
+            ice_caps: textures.ice_caps,
         };
         let halo_handle = planet_halo_materials.add(PlanetHaloMaterial::from(&planet_material));
         let mat_handle = planet_materials.add(planet_material);
@@ -873,7 +918,7 @@ fn handle_body_switch(
         &mut gas_giant_materials,
         &mut ring_materials,
         &billboard,
-        &planet,
+        &mut planet,
         &mut status,
     );
 }
@@ -999,8 +1044,8 @@ fn select_body(planet: &mut EditedPlanet, system: &SolarSystemDefinition, body_i
     planet.uniforms_dirty = true;
     planet.terrain_dirty = false;
     planet.last_edit = None;
-    planet.full_bake_requested = false;
-    planet.last_bake_was_preview = false;
+    planet.requested_bake = None;
+    planet.last_bake_mode = TerrainBakeMode::Preview;
     planet.selected_feature_id = None;
     planet.tool = ToolMode::default();
 }
@@ -1417,15 +1462,11 @@ fn draw_selected_inspector(
         ui.label("(authored)");
         match &mut authored[idx] {
             AuthoredFeatureConfig::Megabasin(config) => {
+                changed |= fires(&ui.add(
+                    egui::Slider::new(&mut config.radius_km, 50.0..=2000.0).text("Radius (km)"),
+                ));
                 changed |= fires(
-                    &ui.add(
-                        egui::Slider::new(&mut config.radius_km, 50.0..=2000.0).text("Radius (km)"),
-                    ),
-                );
-                changed |= fires(
-                    &ui.add(
-                        egui::Slider::new(&mut config.depth_km, 0.5..=20.0).text("Depth (km)"),
-                    ),
+                    &ui.add(egui::Slider::new(&mut config.depth_km, 0.5..=20.0).text("Depth (km)")),
                 );
 
                 let mut has_rings = config.ring_count.is_some();
@@ -1578,7 +1619,10 @@ fn pick_planet_click(
     let new_id = match tool {
         ToolMode::Inspect => return,
         ToolMode::AddMegabasin => {
-            let BodyMode::Terrain { ref mut terrain, .. } = planet.mode else {
+            let BodyMode::Terrain {
+                ref mut terrain, ..
+            } = planet.mode
+            else {
                 return;
             };
             let TerrainConfig::Feature(config) = terrain else {
@@ -1640,184 +1684,215 @@ fn editor_ui(
         .default_width(340.0)
         .max_height(max_panel_height)
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
-            let fps = diagnostics
-                .get(&FrameTimeDiagnosticsPlugin::FPS)
-                .and_then(|d| d.smoothed())
-                .unwrap_or(0.0);
-            ui.label(format!("FPS: {:.0}", fps));
-            ui.label(format!("Body: {}", planet.selected_body));
-            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let fps = diagnostics
+                        .get(&FrameTimeDiagnosticsPlugin::FPS)
+                        .and_then(|d| d.smoothed())
+                        .unwrap_or(0.0);
+                    ui.label(format!("FPS: {:.0}", fps));
+                    ui.label(format!("Body: {}", planet.selected_body));
+                    ui.separator();
 
-            // ---- Terrain gen status ----------------------------------------
-            if matches!(planet.mode, BodyMode::Terrain { .. }) {
-                let mode_label = if planet.last_bake_was_preview {
-                    format!("preview {PREVIEW_CUBEMAP_RESOLUTION}²")
-                } else {
-                    "full".to_string()
-                };
-                match (status.current_started, status.last_duration) {
-                    (Some(started), _) => {
-                        let elapsed = started.elapsed().as_secs_f32();
-                        ui.label(format!("Generating ({mode_label}) for {elapsed:.2}s…"));
-                    }
-                    (None, Some(d)) => {
-                        ui.label(format!("Last bake ({mode_label}): {:.2}s", d.as_secs_f32()));
-                    }
-                    (None, None) => {}
-                }
-                ui.horizontal(|ui| {
-                    let busy = status.current_started.is_some();
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Bake full res"))
-                        .clicked()
-                    {
-                        planet.full_bake_requested = true;
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Tool:");
-                    for tool in [ToolMode::Inspect, ToolMode::AddMegabasin] {
-                        let selected = planet.tool == tool;
-                        if ui.selectable_label(selected, tool.label()).clicked() {
-                            planet.tool = if selected { ToolMode::Inspect } else { tool };
+                    // ---- Terrain gen status ----------------------------------------
+                    if matches!(planet.mode, BodyMode::Terrain { .. }) {
+                        let mode_label = planet.last_bake_mode.label();
+                        match (status.current_started, status.last_duration) {
+                            (Some(started), _) => {
+                                let elapsed = started.elapsed().as_secs_f32();
+                                ui.label(format!("Generating ({mode_label}) for {elapsed:.2}s…"));
+                            }
+                            (None, Some(d)) => {
+                                ui.label(format!(
+                                    "Last bake ({mode_label}): {:.2}s",
+                                    d.as_secs_f32()
+                                ));
+                            }
+                            (None, None) => {}
                         }
-                    }
-                });
-            }
-
-            ui.separator();
-
-            // ---- Read-only derived info ------------------------------------
-            ui.label(format!("Radius: {:.1} km", planet.radius_m / 1000.0));
-            ui.label(format!(
-                "Heliocentric: {:.3} AU",
-                planet.heliocentric_distance_m / AU_M
-            ));
-            ui.label(format!("Light intensity: {:.2}", planet.light_intensity));
-
-            ui.separator();
-
-            let mut terrain_changed = false;
-            let mut uniforms_changed = false;
-            let body_name = planet.selected_body.clone();
-            let radius_m = planet.radius_m as f32;
-            let gravity_m_s2 = planet.gravity_m_s2;
-            let axial_tilt_rad = planet.axial_tilt_rad;
-            let mut selected_id = planet.selected_feature_id.clone();
-            let mut delete_request: Option<FeatureId> = None;
-
-            if let BodyMode::Terrain {
-                ref mut terrain,
-                tidal_axis,
-            } = planet.mode
-            {
-                ui.heading("Parameters");
-                ui.label(format!("Terrain: {}", terrain.route_label()));
-                match terrain {
-                    TerrainConfig::Feature(config) => {
                         ui.horizontal(|ui| {
-                            terrain_changed |= fires(
-                                &ui.add(egui::Slider::new(&mut config.seed, 0..=9999).text("Seed")),
-                            );
-                            if ui.button("Reroll World").clicked() {
-                                config.seed = sub_seed(config.seed, "planet_editor:world_seed");
-                                terrain_changed = true;
+                            let busy = status.current_started.is_some();
+                            if ui
+                                .add_enabled(!busy, egui::Button::new("Bake half res"))
+                                .clicked()
+                            {
+                                planet.requested_bake = Some(TerrainBakeMode::Half);
+                            }
+                            if ui
+                                .add_enabled(!busy, egui::Button::new("Bake full res"))
+                                .clicked()
+                            {
+                                planet.requested_bake = Some(TerrainBakeMode::Full);
                             }
                         });
-                        terrain_changed |= draw_spec_controls(ui, config);
-                        terrain_changed |= draw_projection_controls(ui, &mut config.projection);
 
-                        let compile_context = TerrainCompileContext {
-                            body_name: body_name.clone(),
-                            radius_m,
-                            gravity_m_s2,
-                            rotation_hours: None,
-                            obliquity_deg: Some(axial_tilt_rad.to_degrees()),
-                            tidal_axis,
-                            axial_tilt_rad,
-                        };
-                        let spec = config.to_planet_spec(&compile_context);
-                        let plan = plan_initial_compilation(&spec);
-                        if let Some(c) =
-                            draw_feature_manifest(ui, &plan.manifest, selected_id.as_ref())
-                        {
-                            selected_id = Some(c);
-                        }
-                        if let Some(sel) = selected_id.clone() {
-                            ui.separator();
-                            ui.heading("Selected");
-                            terrain_changed |= draw_selected_inspector(
-                                ui,
-                                &sel,
-                                &plan.manifest,
-                                config.seed,
-                                &mut config.authored_features,
-                                &mut delete_request,
-                            );
-                            if let Some(del_id) = delete_request.clone() {
-                                config.authored_features.retain(|a| match a {
-                                    AuthoredFeatureConfig::Megabasin(c) => c.id != del_id,
-                                });
-                                selected_id = None;
-                                terrain_changed = true;
+                        ui.horizontal(|ui| {
+                            ui.label("Tool:");
+                            for tool in [ToolMode::Inspect, ToolMode::AddMegabasin] {
+                                let selected = planet.tool == tool;
+                                if ui.selectable_label(selected, tool.label()).clicked() {
+                                    planet.tool = if selected { ToolMode::Inspect } else { tool };
+                                }
                             }
+                        });
+                    }
+
+                    ui.separator();
+
+                    // ---- Read-only derived info ------------------------------------
+                    ui.label(format!("Radius: {:.1} km", planet.radius_m / 1000.0));
+                    ui.label(format!(
+                        "Heliocentric: {:.3} AU",
+                        planet.heliocentric_distance_m / AU_M
+                    ));
+                    ui.label(format!("Light intensity: {:.2}", planet.light_intensity));
+
+                    ui.separator();
+
+                    let mut terrain_changed = false;
+                    let mut uniforms_changed = false;
+                    let body_name = planet.selected_body.clone();
+                    let radius_m = planet.radius_m as f32;
+                    let gravity_m_s2 = planet.gravity_m_s2;
+                    let axial_tilt_rad = planet.axial_tilt_rad;
+                    let mut selected_id = planet.selected_feature_id.clone();
+                    let mut delete_request: Option<FeatureId> = None;
+
+                    if let BodyMode::Terrain {
+                        ref mut terrain,
+                        tidal_axis,
+                    } = planet.mode
+                    {
+                        ui.heading("Parameters");
+                        ui.label(format!("Terrain: {}", terrain.route_label()));
+                        match terrain {
+                            TerrainConfig::Feature(config) => {
+                                ui.horizontal(|ui| {
+                                    terrain_changed |= fires(&ui.add(
+                                        egui::Slider::new(&mut config.seed, 0..=9999).text("Seed"),
+                                    ));
+                                    if ui.button("Reroll World").clicked() {
+                                        config.seed =
+                                            sub_seed(config.seed, "planet_editor:world_seed");
+                                        terrain_changed = true;
+                                    }
+                                });
+                                terrain_changed |= draw_spec_controls(ui, config);
+                                terrain_changed |=
+                                    draw_projection_controls(ui, &mut config.projection);
+
+                                let compile_context = TerrainCompileContext {
+                                    body_name: body_name.clone(),
+                                    radius_m,
+                                    gravity_m_s2,
+                                    rotation_hours: None,
+                                    obliquity_deg: Some(axial_tilt_rad.to_degrees()),
+                                    tidal_axis,
+                                    axial_tilt_rad,
+                                };
+                                let spec = config.to_planet_spec(&compile_context);
+                                let plan = plan_initial_compilation(&spec);
+                                if let Some(c) =
+                                    draw_feature_manifest(ui, &plan.manifest, selected_id.as_ref())
+                                {
+                                    selected_id = Some(c);
+                                }
+                                if let Some(sel) = selected_id.clone() {
+                                    ui.separator();
+                                    ui.heading("Selected");
+                                    terrain_changed |= draw_selected_inspector(
+                                        ui,
+                                        &sel,
+                                        &plan.manifest,
+                                        config.seed,
+                                        &mut config.authored_features,
+                                        &mut delete_request,
+                                    );
+                                    if let Some(del_id) = delete_request.clone() {
+                                        config.authored_features.retain(|a| match a {
+                                            AuthoredFeatureConfig::Megabasin(c) => c.id != del_id,
+                                        });
+                                        selected_id = None;
+                                        terrain_changed = true;
+                                    }
+                                }
+                            }
+                            TerrainConfig::Ocean(ocean) => {
+                                terrain_changed |= fires(&ui.add(
+                                    egui::Slider::new(&mut ocean.seed, 0..=9999).text("Seed"),
+                                ));
+                                terrain_changed |= fires(
+                                    &ui.add(
+                                        egui::Slider::new(&mut ocean.sea_level_m, 0.0..=10.0)
+                                            .text("Sea level (m)"),
+                                    ),
+                                );
+                                terrain_changed |= fires(
+                                    &ui.add(
+                                        egui::Slider::new(&mut ocean.water_roughness, 0.0..=0.3)
+                                            .text("Water roughness"),
+                                    ),
+                                );
+                            }
+                            TerrainConfig::None => {}
+                        }
+                        ui.separator();
+                    }
+
+                    ui.heading("Shading");
+                    if planet.atmosphere.is_some() {
+                        uniforms_changed |= ui
+                            .checkbox(&mut planet.atmosphere_enabled, "Atmosphere")
+                            .changed();
+                    }
+                    uniforms_changed |= ui
+                        .checkbox(&mut planet.full_bright, "Full bright")
+                        .changed();
+                    uniforms_changed |= ui
+                        .checkbox(&mut planet.ambient_light, "Ambient light")
+                        .changed();
+                    let mut sun_azimuth_deg = planet.sun_azimuth.to_degrees();
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut sun_azimuth_deg)
+                                .speed(0.25)
+                                .prefix("Sun azimuth: ")
+                                .suffix(" deg")
+                                .custom_formatter(|n, _| format!("{:.1}", n.rem_euclid(360.0))),
+                        )
+                        .changed()
+                    {
+                        planet.sun_azimuth = sun_azimuth_deg.to_radians();
+                        uniforms_changed = true;
+                    }
+                    // Axial tilt affects both shader orientation and terrain compile
+                    // context. Apply the visible orientation immediately, then let
+                    // terrain preview bakes use the normal debounce.
+                    let mut tilt_deg = planet.axial_tilt_rad.to_degrees();
+                    if ui
+                        .add(
+                            bevy_egui::egui::Slider::new(&mut tilt_deg, -180.0..=180.0)
+                                .text("Axial tilt (deg)"),
+                        )
+                        .changed()
+                    {
+                        planet.axial_tilt_rad = tilt_deg.to_radians();
+                        uniforms_changed = true;
+                        if matches!(&planet.mode, BodyMode::Terrain { .. }) {
+                            terrain_changed = true;
                         }
                     }
-                    TerrainConfig::Ocean(ocean) => {
-                        terrain_changed |= fires(
-                            &ui.add(egui::Slider::new(&mut ocean.seed, 0..=9999).text("Seed")),
-                        );
-                        terrain_changed |= fires(
-                            &ui.add(
-                                egui::Slider::new(&mut ocean.sea_level_m, 0.0..=10.0)
-                                    .text("Sea level (m)"),
-                            ),
-                        );
-                        terrain_changed |= fires(
-                            &ui.add(
-                                egui::Slider::new(&mut ocean.water_roughness, 0.0..=0.3)
-                                    .text("Water roughness"),
-                            ),
-                        );
+
+                    if terrain_changed {
+                        planet.terrain_dirty = true;
+                        planet.last_edit = Some(Instant::now());
                     }
-                    TerrainConfig::None => {}
-                }
-                ui.separator();
-            }
-
-            ui.heading("Shading");
-            if planet.atmosphere.is_some() {
-                uniforms_changed |= ui
-                    .checkbox(&mut planet.atmosphere_enabled, "Atmosphere")
-                    .changed();
-            }
-            uniforms_changed |= ui
-                .checkbox(&mut planet.full_bright, "Full bright")
-                .changed();
-            uniforms_changed |= ui
-                .checkbox(&mut planet.ambient_light, "Ambient light")
-                .changed();
-            uniforms_changed |= fires(
-                &ui.add(
-                    bevy_egui::egui::Slider::new(
-                        &mut planet.sun_azimuth,
-                        -std::f32::consts::PI..=std::f32::consts::PI,
-                    )
-                    .text("Sun azimuth"),
-                ),
-            );
-
-            if terrain_changed {
-                planet.terrain_dirty = true;
-                planet.last_edit = Some(Instant::now());
-            }
-            if uniforms_changed {
-                planet.uniforms_dirty = true;
-            }
-            planet.selected_feature_id = selected_id;
-            });
+                    if uniforms_changed {
+                        planet.uniforms_dirty = true;
+                    }
+                    planet.selected_feature_id = selected_id;
+                });
         });
 }
 
@@ -1842,6 +1917,8 @@ fn apply_uniform_changes(
     let (_, _, wrap) = lighting_for(&planet);
     let scene = scene_lighting_for(&planet);
     let atmosphere = active_atmosphere(&planet);
+    let q = body_orientation(&planet);
+    let q4 = Vec4::new(q.x, q.y, q.z, q.w);
 
     match &planet.mode {
         BodyMode::Terrain { .. } => {
@@ -1851,6 +1928,7 @@ fn apply_uniform_changes(
                 };
                 mat.params.terminator_wrap = wrap;
                 mat.params.fullbright = if planet.full_bright { 1.0 } else { 0.0 };
+                mat.params.orientation = q4;
                 mat.params.scene = scene.clone();
                 mat.atmosphere = atmosphere;
             }
@@ -1860,6 +1938,7 @@ fn apply_uniform_changes(
                 };
                 mat.params.terminator_wrap = wrap;
                 mat.params.fullbright = if planet.full_bright { 1.0 } else { 0.0 };
+                mat.params.orientation = q4;
                 mat.params.scene = scene.clone();
                 mat.atmosphere = atmosphere;
             }
@@ -1869,6 +1948,7 @@ fn apply_uniform_changes(
                 let Some(mat) = gas_materials.get_mut(&handle.0) else {
                     continue;
                 };
+                mat.params.orientation = q4;
                 mat.params.scene = scene.clone();
             }
         }
@@ -2001,13 +2081,13 @@ fn dispatch_rebake(
     preview_q: Query<(Entity, &Children), With<PreviewPlanet>>,
     pending_q: Query<&PendingTerrainGen, With<PreviewPlanet>>,
 ) {
-    let full_bake = planet.full_bake_requested;
-    if !full_bake && !planet.terrain_dirty {
+    let requested_bake = planet.requested_bake;
+    if requested_bake.is_none() && !planet.terrain_dirty {
         return;
     }
     // Debounce live edits so a slider drag doesn't queue throwaway tasks.
-    // The full-res button bypasses this so a deliberate request fires now.
-    if !full_bake
+    // Explicit bake buttons bypass this so a deliberate request fires now.
+    if requested_bake.is_none()
         && let Some(last) = planet.last_edit
         && last.elapsed().as_millis() < REBAKE_DEBOUNCE_MS
     {
@@ -2024,7 +2104,7 @@ fn dispatch_rebake(
     } = planet.mode
     else {
         planet.terrain_dirty = false;
-        planet.full_bake_requested = false;
+        planet.requested_bake = None;
         return;
     };
     let Ok((entity, children)) = preview_q.single() else {
@@ -2037,10 +2117,11 @@ fn dispatch_rebake(
     let radius_m = planet.radius_m;
     let gravity_m_s2 = planet.gravity_m_s2;
     let axial_tilt_rad = planet.axial_tilt_rad;
-    let resolution_override = (!full_bake).then_some(PREVIEW_CUBEMAP_RESOLUTION);
+    let bake_mode = requested_bake.unwrap_or(TerrainBakeMode::Preview);
+    let resolution_override = bake_mode.resolution_override();
     planet.terrain_dirty = false;
-    planet.full_bake_requested = false;
-    planet.last_bake_was_preview = !full_bake;
+    planet.requested_bake = None;
+    planet.last_bake_mode = bake_mode;
 
     let task = dispatch_terrain_bake(
         &terrain,
@@ -2114,8 +2195,8 @@ fn main() {
             uniforms_dirty: false,
             body_changed: false,
             last_edit: None,
-            full_bake_requested: false,
-            last_bake_was_preview: false,
+            requested_bake: None,
+            last_bake_mode: TerrainBakeMode::Preview,
             selected_feature_id: None,
             tool: ToolMode::default(),
         })

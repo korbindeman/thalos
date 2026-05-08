@@ -18,7 +18,9 @@ use crate::canonical::{
 use crate::gravity_mode::GravityImpls;
 use crate::maneuver::{ManeuverSequence, burn_duration};
 use crate::ship_propagator::{CoastRequest, SegmentTerminator, ShipPropagator};
-use crate::trajectory::{FlightPlan, PredictionConfig, PredictionRequest, propagate_flight_plan};
+use crate::trajectory::{
+    FlightPlan, PredictionConfig, PredictionRequest, TrajectoryBranchStack, propagate_branch_stack,
+};
 use crate::types::{
     AttitudeState, BodyDefinition, BodyId, BodyKind, ControlInput, ShipParameters, StateVector,
 };
@@ -163,7 +165,7 @@ impl WarpController {
 
 pub struct PredictionState {
     config: PredictionConfig,
-    prediction: Option<FlightPlan>,
+    branches: Option<TrajectoryBranchStack>,
     dirty: bool,
     stale_after: f64,
     last_recompute_time: Option<f64>,
@@ -174,7 +176,7 @@ impl PredictionState {
     fn new(config: PredictionConfig, stale_after: f64) -> Self {
         Self {
             config,
-            prediction: None,
+            branches: None,
             dirty: true,
             stale_after,
             last_recompute_time: None,
@@ -191,7 +193,13 @@ impl PredictionState {
     }
 
     pub fn prediction(&self) -> Option<&FlightPlan> {
-        self.prediction.as_ref()
+        self.branches
+            .as_ref()
+            .map(TrajectoryBranchStack::active_plan)
+    }
+
+    pub fn branch_stack(&self) -> Option<&TrajectoryBranchStack> {
+        self.branches.as_ref()
     }
 
     pub fn version(&self) -> u64 {
@@ -203,7 +211,7 @@ impl PredictionState {
     }
 
     pub fn needs_refresh(&self, sim_time: f64) -> bool {
-        if self.dirty || self.prediction.is_none() {
+        if self.dirty || self.branches.is_none() {
             return true;
         }
         self.last_recompute_time
@@ -211,8 +219,8 @@ impl PredictionState {
             .unwrap_or(true)
     }
 
-    fn install(&mut self, prediction: FlightPlan, at_sim_time: f64) {
-        self.prediction = Some(prediction);
+    fn install(&mut self, branches: TrajectoryBranchStack, at_sim_time: f64) {
+        self.branches = Some(branches);
         self.last_recompute_time = Some(at_sim_time);
         self.dirty = false;
         self.version = self.version.wrapping_add(1);
@@ -715,8 +723,8 @@ impl Simulation {
             ship_dry_mass_kg: self.ship_params.dry_mass_kg,
             target_body: self.target_body,
         };
-        let prediction = propagate_flight_plan(&req, None);
-        self.prediction_state.install(prediction, req.sim_time);
+        let branches = propagate_branch_stack(&req, None);
+        self.prediction_state.install(branches, req.sim_time);
     }
 
     pub fn prediction_needs_refresh(&self) -> bool {
@@ -725,6 +733,10 @@ impl Simulation {
 
     pub fn prediction(&self) -> Option<&FlightPlan> {
         self.prediction_state.prediction()
+    }
+
+    pub fn trajectory_branches(&self) -> Option<&TrajectoryBranchStack> {
+        self.prediction_state.branch_stack()
     }
 
     // -- Body orbit trails --------------------------------------------------

@@ -68,6 +68,82 @@ impl Volcano {
     }
 }
 
+/// A hand-anchored aeolian dune-sea region. Carries everything needed by both
+/// the bake stage and the impostor's per-fragment dune synthesis.
+///
+/// Two morphological bands compose the visible dune signature
+/// (see `docs/gen/dunes.md` §C.3):
+/// - **Draa** (~2–5 km): rasterized into the height + albedo cubemaps at
+///   bake time. Sun-shadowed silhouettes that read from orbit.
+/// - **Dune** (~30–500 m): synthesized per fragment in the impostor shader
+///   using `axis_tangent`, `lambda_dune_m`, `amplitude_dune_m`, `alpha_skew`.
+///   Sub-cubemap-resolution on bodies the size of Vaelen — cannot be baked.
+///
+/// Per-region `axis_tangent` is constant for v1: parallel-transport drift
+/// across a few-degree region on a 1130 km radius is small enough to ignore.
+/// The full sphere wind field treatment lives in `dunes.md §C.1` if region
+/// sizes ever grow.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DuneSea {
+    /// Unit-vector direction of the region center on the body sphere.
+    pub center: Vec3,
+    /// Angular radius of the region's full-strength core, in radians.
+    pub radius_rad: f32,
+    /// Soft-edge feathering width in radians. Acts as the smoothstep
+    /// half-width that fades dune contribution to zero past `radius_rad`.
+    pub feather_rad: f32,
+    /// Wind axis at the region center, expressed in the local tangent
+    /// plane (unit vector tangent to `center`). Crests align perpendicular
+    /// to this for a transverse field.
+    pub axis_tangent: Vec3,
+
+    /// Draa-scale wavelength. Baked into the height cubemap.
+    pub lambda_draa_m: f32,
+    /// Draa-scale amplitude.
+    pub amplitude_draa_m: f32,
+
+    /// Dune-scale wavelength. Synthesized per fragment in the impostor.
+    pub lambda_dune_m: f32,
+    /// Dune-scale amplitude.
+    pub amplitude_dune_m: f32,
+
+    /// Stoss-fraction of the asymmetric ridge in [0.5, 0.95]. ~0.85 gives
+    /// a ~5.7:1 stoss/slip slope ratio matching dry granular media's
+    /// angle of repose. See `docs/gen/dunes.md §B.2`.
+    pub alpha_skew: f32,
+
+    /// Anisotropic cross-wind warp amplitude, in unit-sphere coordinates.
+    /// Displaces the sample point along `center × axis_tangent` by an
+    /// fbm-driven amount before computing the wind phase. Crests stay
+    /// spaced along the wind axis but meander cross-wind, producing
+    /// the sinuous Namib-style read instead of straight bars. A value of
+    /// ~0.4 × λ_draa / radius_m is a reasonable starting point.
+    pub warp_amp_unit: f32,
+    /// Spatial frequency of the warp fbm (cycles per unit-sphere-radius).
+    /// Higher = tighter meanders.
+    pub warp_freq: f32,
+
+    /// Linear-RGB color the crest tint pulls toward. The bake stage and
+    /// the impostor mix surface albedo toward this on dune crests. Per
+    /// region so different bodies can express their own active-dune
+    /// signature (e.g. saturated gold on a rust-desert, warm bone on a
+    /// coastal beach, subtle frost on an icy moon).
+    pub albedo_crest_lin: [f32; 3],
+    /// Strength in [0, 1] of the crest-tint mix. 0 disables the tint
+    /// entirely; the surrounding terrain color shows through unchanged.
+    pub crest_strength: f32,
+
+    /// Per-region seed for warp/jitter noise streams.
+    pub seed: u64,
+}
+
+impl DuneSea {
+    /// Outer angular extent for spatial indexing.
+    pub fn influence_radius_rad(&self) -> f32 {
+        self.radius_rad + self.feather_rad
+    }
+}
+
 /// A linear/curved surface feature: rift, graben, ancient riverbed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
@@ -88,6 +164,154 @@ impl Channel {
 pub struct Material {
     pub albedo: [f32; 3],
     pub roughness: f32,
+}
+
+/// Data-driven polar ice veneer parameters for a seasonal surface overlay.
+/// The static compiler carries these in `DynamicSurfaceFeature` instead of
+/// baking them into terrain cubemaps.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct IceCapSpec {
+    /// Body-local spin axis. North caps grow toward `axis`, south caps grow
+    /// toward `-axis`.
+    #[serde(default = "default_ice_cap_axis")]
+    pub axis: Vec3,
+    #[serde(default = "default_ice_cap_include_pole")]
+    pub north: bool,
+    #[serde(default = "default_ice_cap_include_pole")]
+    pub south: bool,
+    /// Latitude where the cap starts fading in.
+    #[serde(default = "default_ice_cap_edge_latitude_deg")]
+    pub edge_latitude_deg: f32,
+    /// Latitude where coverage reaches full strength.
+    #[serde(default = "default_ice_cap_solid_latitude_deg")]
+    pub solid_latitude_deg: f32,
+    /// Low-frequency boundary warp in degrees so the edge does not read as a
+    /// perfect circle of latitude.
+    #[serde(default = "default_ice_cap_edge_noise_deg")]
+    pub edge_noise_deg: f32,
+    /// Contrast applied to the latitudinal coverage ramp. Higher values keep
+    /// the lobed edge but make the ice/sand boundary read as a sharper cap.
+    #[serde(default = "default_ice_cap_edge_sharpness")]
+    pub edge_sharpness: f32,
+    #[serde(default = "default_ice_cap_noise_frequency")]
+    pub noise_frequency: f32,
+    /// Maximum vertical veneer thickness at full coverage.
+    #[serde(default = "default_ice_cap_max_thickness_m")]
+    pub max_thickness_m: f32,
+    #[serde(default = "default_ice_cap_albedo_linear")]
+    pub albedo_linear: [f32; 3],
+    #[serde(default = "default_ice_cap_dust_albedo_linear")]
+    pub dust_albedo_linear: [f32; 3],
+    /// Blend strength from existing albedo toward the ice/dust color.
+    #[serde(default = "default_ice_cap_albedo_strength")]
+    pub albedo_strength: f32,
+    #[serde(default = "default_ice_cap_roughness")]
+    pub roughness: f32,
+    #[serde(default = "default_ice_cap_roughness_strength")]
+    pub roughness_strength: f32,
+    /// How much effective obliquity modulates this cap. `0` means the authored
+    /// latitudes are literal; `1` uses the default climate response.
+    #[serde(default = "default_ice_cap_obliquity_response")]
+    pub obliquity_response: f32,
+}
+
+impl Default for IceCapSpec {
+    fn default() -> Self {
+        Self {
+            axis: default_ice_cap_axis(),
+            north: default_ice_cap_include_pole(),
+            south: default_ice_cap_include_pole(),
+            edge_latitude_deg: default_ice_cap_edge_latitude_deg(),
+            solid_latitude_deg: default_ice_cap_solid_latitude_deg(),
+            edge_noise_deg: default_ice_cap_edge_noise_deg(),
+            edge_sharpness: default_ice_cap_edge_sharpness(),
+            noise_frequency: default_ice_cap_noise_frequency(),
+            max_thickness_m: default_ice_cap_max_thickness_m(),
+            albedo_linear: default_ice_cap_albedo_linear(),
+            dust_albedo_linear: default_ice_cap_dust_albedo_linear(),
+            albedo_strength: default_ice_cap_albedo_strength(),
+            roughness: default_ice_cap_roughness(),
+            roughness_strength: default_ice_cap_roughness_strength(),
+            obliquity_response: default_ice_cap_obliquity_response(),
+        }
+    }
+}
+
+/// Runtime surface feature that is intentionally not baked into the static
+/// terrain cubemaps.
+///
+/// These descriptors travel with `BodyData` so the renderer/editor/runtime can
+/// draw or simulate seasonal/changeable surface state without making it part
+/// of the immutable geomorphology. Polar caps use this path because their
+/// extent is seasonal; active dune overlays can move here once wind transport
+/// becomes time-dependent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum DynamicSurfaceFeature {
+    SeasonalIceCap(IceCapSpec),
+}
+
+impl DynamicSurfaceFeature {
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::SeasonalIceCap(_) => "seasonal_ice_cap",
+        }
+    }
+}
+
+fn default_ice_cap_axis() -> Vec3 {
+    Vec3::Y
+}
+
+fn default_ice_cap_include_pole() -> bool {
+    true
+}
+
+fn default_ice_cap_edge_latitude_deg() -> f32 {
+    68.0
+}
+
+fn default_ice_cap_solid_latitude_deg() -> f32 {
+    82.0
+}
+
+fn default_ice_cap_edge_noise_deg() -> f32 {
+    4.0
+}
+
+fn default_ice_cap_edge_sharpness() -> f32 {
+    0.35
+}
+
+fn default_ice_cap_noise_frequency() -> f32 {
+    2.0
+}
+
+fn default_ice_cap_max_thickness_m() -> f32 {
+    220.0
+}
+
+fn default_ice_cap_albedo_linear() -> [f32; 3] {
+    [0.82, 0.86, 0.88]
+}
+
+fn default_ice_cap_dust_albedo_linear() -> [f32; 3] {
+    [0.56, 0.54, 0.50]
+}
+
+fn default_ice_cap_albedo_strength() -> f32 {
+    0.86
+}
+
+fn default_ice_cap_roughness() -> f32 {
+    0.48
+}
+
+fn default_ice_cap_roughness_strength() -> f32 {
+    0.82
+}
+
+fn default_ice_cap_obliquity_response() -> f32 {
+    1.0
 }
 
 /// Parameters for the high-frequency statistical detail noise layer.
