@@ -8,13 +8,14 @@ use bevy::tasks::{block_on, poll_once};
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
     AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
-    PlanetParams, PlanetWaterParams, ReferenceClouds, bake_from_body_data,
+    PlanetParams, PlanetWaterParams, ReferenceClouds, bake_from_planet_surface,
     cloud_cover_image_for_body,
 };
+use thalos_terrain_gen::DynamicSurfaceState;
 
 use super::types::{
-    BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetMaterials, PlanetshineTints,
-    SharedPlanetMeshes, ShipBodyMesh, SimulationState,
+    BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetDynamicSurface, PlanetMaterials,
+    PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh, SimulationState,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 
@@ -62,9 +63,11 @@ pub(super) fn finalize_planet_generation(
 ) {
     for (entity, mut pending) in &mut pending_q {
         let _span = tracing::info_span!("finalize_planet_generation").entered();
-        let Some(baked) = block_on(poll_once(&mut pending.task)) else {
+        let Some(surface) = block_on(poll_once(&mut pending.task)) else {
             continue;
         };
+        let baked = &surface.static_surface;
+        let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
 
         let body = &sim.system.bodies[pending.body_id];
         let detail =
@@ -73,7 +76,8 @@ pub(super) fn finalize_planet_generation(
         planetshine
             .by_body
             .insert(pending.body_id, baked.mean_albedo);
-        let textures = bake_from_body_data(&baked, &mut images, &mut storage_buffers);
+        let textures =
+            bake_from_planet_surface(&surface, &dynamic_state, &mut images, &mut storage_buffers);
 
         let roughness = body_surface_roughness(body);
         // Two atmosphere blocks: scale-dependent fields (`rim_shape.x`,
@@ -98,8 +102,8 @@ pub(super) fn finalize_planet_generation(
         let (cloud_cover, uses_reference_cloud) =
             cloud_cover_image_for_body(&body.name, cloud_seed, &reference_clouds, &mut images);
 
-        let coastline = PlanetCoastlineParams::from_body_data(&baked);
-        let water = PlanetWaterParams::from_body_data(&baked);
+        let coastline = PlanetCoastlineParams::from_static_surface(baked);
+        let water = PlanetWaterParams::from_static_surface(baked);
 
         let map_radius = pending.render_radius;
         let ship_radius = ((body.radius_m * SHIP_SCALE) as f32).max(0.005);
@@ -129,6 +133,9 @@ pub(super) fn finalize_planet_generation(
             atmosphere,
             cloud_cover: cloud_cover.clone(),
             ice_caps: textures.ice_caps.clone(),
+            active_dunes: textures.active_dunes.clone(),
+            active_dune_height: textures.active_dune_height.clone(),
+            active_dune_albedo: textures.active_dune_albedo.clone(),
         };
 
         let map_material = make_material(map_radius, map_atmosphere);
@@ -198,6 +205,10 @@ pub(super) fn finalize_planet_generation(
                 ship: ship_handle,
                 map_halo: map_halo_handle,
                 ship_halo: ship_halo_handle,
+            })
+            .insert(PlanetDynamicSurface {
+                layers: surface.dynamic_layers,
+                state: dynamic_state,
             })
             .remove::<PendingPlanetGeneration>();
         if has_clouds {

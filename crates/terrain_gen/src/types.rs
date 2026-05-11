@@ -83,7 +83,7 @@ impl Volcano {
 /// across a few-degree region on a 1130 km radius is small enough to ignore.
 /// The full sphere wind field treatment lives in `dunes.md §C.1` if region
 /// sizes ever grow.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DuneSea {
     /// Unit-vector direction of the region center on the body sphere.
     pub center: Vec3,
@@ -213,8 +213,8 @@ impl Default for ImpactColorPalette {
     }
 }
 
-/// Data-driven polar ice veneer parameters for a seasonal surface overlay.
-/// The static compiler carries these in `DynamicSurfaceFeature` instead of
+/// Data-driven polar ice veneer parameters for a dynamic surface layer.
+/// The static compiler carries these in `DynamicSurfaceLayers` instead of
 /// baking them into terrain cubemaps.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub struct IceCapSpec {
@@ -284,23 +284,150 @@ impl Default for IceCapSpec {
     }
 }
 
-/// Runtime surface feature that is intentionally not baked into the static
-/// terrain cubemaps.
+/// Authored/compiled dynamic surface layers for a body.
 ///
-/// These descriptors travel with `BodyData` so the renderer/editor/runtime can
-/// draw or simulate seasonal/changeable surface state without making it part
-/// of the immutable geomorphology. Polar caps use this path because their
-/// extent is seasonal; active dune overlays can move here once wind transport
-/// becomes time-dependent.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum DynamicSurfaceFeature {
-    SeasonalIceCap(IceCapSpec),
+/// These definitions are terrain-owned but intentionally separate from
+/// `StaticSurfaceData`: changing them should rebuild dynamic GPU buffers, not
+/// invalidate the cached static substrate.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DynamicSurfaceLayers {
+    #[serde(default)]
+    pub ice_caps: Vec<IceCapLayer>,
+    #[serde(default)]
+    pub active_dunes: Vec<ActiveDuneLayer>,
 }
 
-impl DynamicSurfaceFeature {
-    pub fn kind_label(&self) -> &'static str {
-        match self {
-            Self::SeasonalIceCap(_) => "seasonal_ice_cap",
+impl DynamicSurfaceLayers {
+    pub fn is_empty(&self) -> bool {
+        self.ice_caps.is_empty() && self.active_dunes.is_empty()
+    }
+}
+
+/// Stable authored definition for one dynamic ice veneer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IceCapLayer {
+    pub id: String,
+    pub spec: IceCapSpec,
+}
+
+/// Stable authored definition for one active, unconsolidated dune field.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActiveDuneLayer {
+    pub id: String,
+    pub region: DuneSea,
+    /// Default mobility for newly constructed state. `0` represents an
+    /// inactive but still dynamic overprint: it remains in the shared layer
+    /// path, but phase does not advance until a runtime system changes it.
+    #[serde(default)]
+    pub mobility: f32,
+}
+
+/// Mutable per-body dynamic state. Vectors mirror `DynamicSurfaceLayers` by
+/// stable id and index; callers should rebuild this with `for_layers` when
+/// definitions are replaced.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DynamicSurfaceState {
+    #[serde(default)]
+    pub ice_caps: Vec<IceCapState>,
+    #[serde(default)]
+    pub active_dunes: Vec<ActiveDuneState>,
+}
+
+impl DynamicSurfaceState {
+    pub fn for_layers(layers: &DynamicSurfaceLayers) -> Self {
+        Self {
+            ice_caps: layers
+                .ice_caps
+                .iter()
+                .map(|layer| IceCapState {
+                    id: layer.id.clone(),
+                    ..IceCapState::default()
+                })
+                .collect(),
+            active_dunes: layers
+                .active_dunes
+                .iter()
+                .map(|layer| ActiveDuneState {
+                    id: layer.id.clone(),
+                    mobility: layer.mobility,
+                    ..ActiveDuneState::default()
+                })
+                .collect(),
+        }
+    }
+
+    pub fn ice_cap_state<'a>(
+        &'a self,
+        index: usize,
+        layer: &IceCapLayer,
+    ) -> Option<&'a IceCapState> {
+        self.ice_caps
+            .get(index)
+            .filter(|state| state.id == layer.id)
+            .or_else(|| self.ice_caps.iter().find(|state| state.id == layer.id))
+    }
+
+    pub fn active_dune_state<'a>(
+        &'a self,
+        index: usize,
+        layer: &ActiveDuneLayer,
+    ) -> Option<&'a ActiveDuneState> {
+        self.active_dunes
+            .get(index)
+            .filter(|state| state.id == layer.id)
+            .or_else(|| self.active_dunes.iter().find(|state| state.id == layer.id))
+    }
+}
+
+/// Mutable state for one ice veneer layer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IceCapState {
+    pub id: String,
+    /// Multiplies the authored coverage mask.
+    pub coverage_scale: f32,
+    /// Seasonal migration of the cap edge, in latitude degrees.
+    pub edge_offset_deg: f32,
+    /// Multiplies authored veneer thickness.
+    pub thickness_scale: f32,
+    /// Blend from clean ice albedo toward dusty ice albedo.
+    pub dustiness: f32,
+}
+
+impl Default for IceCapState {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            coverage_scale: 1.0,
+            edge_offset_deg: 0.0,
+            thickness_scale: 1.0,
+            dustiness: 0.0,
+        }
+    }
+}
+
+/// Mutable state for one active dune layer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActiveDuneState {
+    pub id: String,
+    /// Multiplies the authored regional mask.
+    pub coverage_scale: f32,
+    /// Multiplies authored dune/draa amplitudes.
+    pub amplitude_scale: f32,
+    /// Advances the wind-axis phase in meters.
+    pub phase_offset_m: f32,
+    /// Runtime mobility. A simulation can advance `phase_offset_m` from this;
+    /// zero keeps the layer visually present but currently inactive.
+    pub mobility: f32,
+}
+
+impl Default for ActiveDuneState {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            coverage_scale: 1.0,
+            amplitude_scale: 1.0,
+            phase_offset_m: 0.0,
+            mobility: 0.0,
         }
     }
 }

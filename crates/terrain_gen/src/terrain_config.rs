@@ -4,17 +4,20 @@ use glam::Vec3;
 use serde::Deserialize;
 
 use crate::body_builder::BodyBuilder;
-use crate::body_data::BodyData;
 use crate::cold_desert_field::ColdDesertStyle;
 use crate::cubemap::CubemapFace;
 use crate::feature_compiler::{
     AtmosphereSpec, AuthoredFeatureSpec, BodyArchetype, CompositionClass, FeatureCompileError,
     FeatureCompileOptions, FeatureFootprint, FeatureId, FeatureKind, FeatureLock, FeatureParam,
     FeatureProjectionConfig, FeatureSeed, HydrosphereSpec, IceInventory, PlanetPhysicalSpec,
-    PlanetTerrainSpec, ScaleRangeM, TerrainIntent, compile_initial_body_data,
+    PlanetTerrainSpec, ScaleRangeM, TerrainIntent, compile_initial_static_surface,
+    dynamic_surface_layers_for,
 };
+use crate::seeding::sub_seed;
+use crate::static_surface::{PlanetSurface, StaticSurfaceData};
 use crate::surface_field::quantize_unit_to_u8;
-use crate::types::{Composition, IceCapSpec};
+use crate::tectonics::{TectonicConfig, TectonicSystem};
+use crate::types::{Composition, DynamicSurfaceLayers, IceCapSpec};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub enum TerrainConfig {
@@ -41,7 +44,13 @@ impl TerrainConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct FeatureTerrainConfig {
     pub seed: u64,
-    pub cubemap_resolution: u32,
+    /// Authored override for the cubemap face resolution. When omitted, the
+    /// pipeline derives one from body radius via
+    /// [`crate::cubemap::default_resolution`] (constant ~m/equator-texel
+    /// budget, clamped to 4096). Set this only for art reasons that justify
+    /// deviating from the radius-proportional default.
+    #[serde(default)]
+    pub cubemap_resolution: Option<u32>,
     pub body_age_gyr: f32,
     pub archetype: BodyArchetype,
     pub composition: CompositionClass,
@@ -49,8 +58,8 @@ pub struct FeatureTerrainConfig {
     pub intent: Vec<TerrainIntent>,
     #[serde(default)]
     pub projection: FeatureProjectionConfig,
-    /// Seasonal polar surface overlays. These are carried into `BodyData` as
-    /// dynamic descriptors and are not baked into static terrain cubemaps.
+    /// Seasonal polar surface overlays. These compile into
+    /// `DynamicSurfaceLayers` and are not baked into static terrain cubemaps.
     #[serde(default)]
     pub ice_caps: Vec<IceCapSpec>,
     /// Optional style override for cold-desert archetypes. Omitted means the
@@ -61,13 +70,17 @@ pub struct FeatureTerrainConfig {
     pub authored_features: Vec<AuthoredFeatureConfig>,
 }
 
-/// Flat-water placeholder. The compiled `BodyData` has zero height
+/// Flat-water placeholder. The compiled `StaticSurfaceData` has zero height
 /// everywhere and `sea_level_m` set to a small positive value, so the
 /// impostor's water BRDF fires for the entire surface.
 #[derive(Clone, Debug, Deserialize)]
 pub struct OceanTerrainConfig {
     pub seed: u64,
-    pub cubemap_resolution: u32,
+    /// Authored override for the cubemap face resolution. Same semantics as
+    /// [`FeatureTerrainConfig::cubemap_resolution`] — omit to use the
+    /// radius-derived default.
+    #[serde(default)]
+    pub cubemap_resolution: Option<u32>,
     /// sRGB linear seabed albedo. Only visible through shallow water; deep
     /// water is dominated by the shader's absorption tint.
     pub seabed_albedo: [f32; 3],
@@ -158,19 +171,58 @@ impl From<FeatureCompileError> for TerrainCompileError {
 
 pub fn compile_terrain_config(
     terrain: &TerrainConfig,
+    tectonics: Option<&TectonicConfig>,
     context: &TerrainCompileContext,
     options: TerrainCompileOptions,
-) -> Result<BodyData, TerrainCompileError> {
+) -> Result<PlanetSurface, TerrainCompileError> {
+    // Build the tectonic system once; downstream consumers (the static-
+    // surface compile and the editor's `PreviewTectonics` component) read
+    // from the same instance. Cheap (~ms for 2k cells) but needs body
+    // radius + body-name-derived seed, both of which live in `context`.
+    let tectonics = compile_tectonics_from_config(tectonics, context);
+    let static_surface =
+        compile_static_terrain_config(terrain, tectonics.as_ref(), context, options)?;
+    let dynamic_layers = compile_dynamic_surface_layers(terrain, context)?;
+    Ok(PlanetSurface {
+        static_surface,
+        dynamic_layers,
+        tectonics,
+    })
+}
+
+/// Build the tectonic system for a body when one is configured. The system
+/// is regenerated on every load (it lives outside the static-surface cache)
+/// because computing it is cheap (~ms for 2k cells) and doing so keeps the
+/// cache key surface small. Body identity contributes to the seed so two
+/// bodies that share a `TectonicConfig::seed` value still produce distinct
+/// plate graphs.
+pub fn compile_tectonics_from_config(
+    tectonics: Option<&TectonicConfig>,
+    context: &TerrainCompileContext,
+) -> Option<TectonicSystem> {
+    tectonics.map(|cfg| {
+        let body_seed = sub_seed(0, &context.body_name.to_lowercase());
+        TectonicSystem::build(cfg, context.radius_m, body_seed)
+    })
+}
+
+pub fn compile_static_terrain_config(
+    terrain: &TerrainConfig,
+    tectonics: Option<&TectonicSystem>,
+    context: &TerrainCompileContext,
+    options: TerrainCompileOptions,
+) -> Result<StaticSurfaceData, TerrainCompileError> {
     match terrain {
         TerrainConfig::None => Err(TerrainCompileError::UnsupportedNone),
         TerrainConfig::Feature(feature) => {
             let spec = feature.to_planet_spec(context);
-            compile_initial_body_data(
+            compile_initial_static_surface(
                 &spec,
+                tectonics,
                 FeatureCompileOptions {
                     cubemap_resolution: options
                         .cubemap_resolution_override
-                        .unwrap_or(feature.cubemap_resolution),
+                        .or(feature.cubemap_resolution),
                     crater_count_scale: options.crater_count_scale,
                     projection: feature.projection.clone(),
                     cold_desert_style: feature.cold_desert_style.clone().unwrap_or_default(),
@@ -186,18 +238,33 @@ pub fn compile_terrain_config(
     }
 }
 
+pub fn compile_dynamic_surface_layers(
+    terrain: &TerrainConfig,
+    context: &TerrainCompileContext,
+) -> Result<DynamicSurfaceLayers, TerrainCompileError> {
+    match terrain {
+        TerrainConfig::None => Err(TerrainCompileError::UnsupportedNone),
+        TerrainConfig::Feature(feature) => {
+            let spec = feature.to_planet_spec(context);
+            let style = feature.cold_desert_style.clone().unwrap_or_default();
+            Ok(dynamic_surface_layers_for(&spec, &style))
+        }
+        TerrainConfig::Ocean(_) => Ok(DynamicSurfaceLayers::default()),
+    }
+}
+
 fn compile_ocean(
     config: &OceanTerrainConfig,
     context: &TerrainCompileContext,
     cubemap_resolution_override: Option<u32>,
-) -> BodyData {
+) -> StaticSurfaceData {
     let mut builder = BodyBuilder::new(
         context.radius_m,
         config.seed,
         // Composition is irrelevant for a flat-ocean placeholder — no
         // stage reads it. Pick a neutral value.
         Composition::new(1.0, 0.0, 0.0, 0.0, 0.0),
-        cubemap_resolution_override.unwrap_or(config.cubemap_resolution),
+        cubemap_resolution_override.or(config.cubemap_resolution),
         4.5,
         context.tidal_axis,
         context.axial_tilt_rad,

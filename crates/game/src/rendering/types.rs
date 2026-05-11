@@ -19,7 +19,7 @@ use thalos_planet_rendering::{
     CLOUD_BAND_COUNT, GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial,
     SolidPlanetMaterial,
 };
-use thalos_terrain_gen::BodyData;
+use thalos_terrain_gen::{DynamicSurfaceLayers, DynamicSurfaceState};
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -46,7 +46,7 @@ pub struct FrameBodyStates {
 
 /// Linear-RGB tint to use as a body's planetshine emission. Populated when
 /// the body's surface info first becomes known: at bake completion for
-/// terrain bodies (from `BodyData::mean_albedo`), at spawn for gas giants
+/// terrain bodies (from `StaticSurfaceData::mean_albedo`), at spawn for gas giants
 /// (from cloud albedo). Bodies without an entry contribute no planetshine
 /// to their moons.
 #[derive(Resource, Default)]
@@ -160,6 +160,18 @@ pub struct PlanetMaterials {
     pub ship_halo: Handle<PlanetHaloMaterial>,
 }
 
+/// Runtime-owned dynamic surface state for a generated terrain body.
+///
+/// Static cubemaps live in the material textures. These layer definitions and
+/// mutable state are kept on the body root so a future climate/wind/editor
+/// system can rebuild only the dynamic SSBOs without touching the static bake.
+#[allow(dead_code)]
+#[derive(Component, Clone)]
+pub struct PlanetDynamicSurface {
+    pub layers: DynamicSurfaceLayers,
+    pub state: DynamicSurfaceState,
+}
+
 /// Same idea as [`PlanetMaterials`] but for [`SolidPlanetMaterial`] —
 /// the placeholder used by bodies that don't have a terrain pipeline.
 #[derive(Component)]
@@ -194,7 +206,7 @@ pub(super) struct ShipRingMaterial(pub(super) Handle<RingMaterial>);
 /// removes this component.
 #[derive(Component)]
 pub(super) struct PendingPlanetGeneration {
-    pub(super) task: Task<BodyData>,
+    pub(super) task: Task<thalos_terrain_gen::PlanetSurface>,
     pub(super) body_id: usize,
     pub(super) render_radius: f32,
     /// Map-view child holding the placeholder mesh; gets swapped to the

@@ -2,7 +2,6 @@
 (
     terrain: Feature((
         seed: 1004,
-        cubemap_resolution: 2048,
         body_age_gyr: 4.5,
         archetype: AirlessImpactMoon,
         composition: SilicateDominated,

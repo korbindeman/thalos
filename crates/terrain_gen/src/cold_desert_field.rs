@@ -4,7 +4,6 @@ use bevy_erosion_filter::cpu::{ErosionFilterParams, erosion_filter};
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::aeolian::asym_ridge;
 use crate::biome_mask::{
     BiomeMaskContext, BiomeMaskExpr, BiomeMaskPlan, BiomeMaskRule, BiomeMaskSeedStream,
     BiomeMaskSeeds, BiomeMaskWeights,
@@ -791,7 +790,7 @@ fn sample_cold_desert(
     let mut dark_score = 0.0;
     let mut sediment_score = 0.0;
     let mut evaporite_score = 0.0;
-    let mut dune_score = 0.0;
+    let dune_score = 0.0;
 
     let dark_belt = biomes.dark_volcanic_province * projection.volcanic_dark_strength;
     let dark_belt_albedo = dark_belt * (1.0 - shield.apron * 0.62);
@@ -939,87 +938,10 @@ fn sample_cold_desert(
         dark_score = dark_score.max(channels * 0.28);
     }
 
-    let dune_center = style.dune_texture_center.normalize();
-    let active_dune_noise = smoothstep(
-        0.12,
-        0.62,
-        fbm_dir(dir, root_seed.children, "dune_mask", 2.8, 4, 0.54) + 0.30,
-    );
-    let dune_coherence = smoothstep(
-        0.20,
-        0.78,
-        dune_contact.dune_plate * 0.48
-            + active_dune_noise * 0.46
-            + fbm_dir(dir, root_seed.detail, "dune_mask_edge_lace", 9.0, 3, 0.52) * 0.16,
-    );
-    let dune_mask = dune_contact.dune_plate
-        * dune_coherence
-        * smoothstep(
-            0.02,
-            0.42,
-            1.0 - biomes.rugged_badlands * 0.82 - biomes.dark_volcanic_province * 0.24,
-        )
-        * projection.dune_strength;
-    if dune_mask > 0.015 {
-        let east = Vec3::Y.cross(dune_center).normalize();
-        let north = dune_center.cross(east).normalize();
-        let wind_x = dir.dot(east);
-        let wind_y = dir.dot(north);
-        let dune_visibility = scale_visibility(sample_scale_m, 90_000.0);
-        let cross_warp = fbm_dir(dir, root_seed.detail, "dune_cross_warp_broad", 2.1, 4, 0.56)
-            * 0.095
-            + fbm_dir(dir, root_seed.detail, "dune_cross_warp_lace", 7.4, 3, 0.52) * 0.040;
-        let along_warp =
-            fbm_dir(dir, root_seed.detail, "dune_along_warp_broad", 2.7, 3, 0.54) * 0.040;
-        let u = wind_x + wind_y * 0.14 + cross_warp;
-        let v = wind_y - wind_x * 0.08 + along_warp;
-        let dune_lobe_noise = fbm_dir(dir, root_seed.children, "dune_lobe_bodies", 2.2, 4, 0.56)
-            * 0.78
-            + fbm_dir(dir, root_seed.detail, "dune_lobe_edges", 6.4, 3, 0.52) * 0.30
-            + dune_contact.floor_undulation * 0.26
-            - dune_contact.interior_highs * 0.22;
-        let lobe = smoothstep(
-            -0.18,
-            0.56,
-            dune_lobe_noise + dune_contact.dune_plate * 0.12,
-        );
-        let lobe = lobe * lobe;
-        let wavelength_jitter = (1.0
-            + fbm_dir(
-                dir,
-                root_seed.detail,
-                "dune_wavelength_jitter",
-                2.6,
-                3,
-                0.53,
-            ) * 0.24)
-            .clamp(0.72, 1.42);
-        let phase = (u * 5.8 + v * 0.9) / wavelength_jitter
-            + fbm_dir(
-                dir,
-                root_seed.detail,
-                "dune_phase_broad_drift",
-                2.4,
-                4,
-                0.55,
-            ) * 1.20
-            + fbm_dir(dir, root_seed.detail, "dune_phase_lace", 8.5, 3, 0.50) * 0.42;
-        let (primary_body, primary_crest) = dune_body_profile(phase, 0.84);
-        let dune_body = (primary_body * (0.16 + lobe * 1.05)).clamp(0.0, 1.0) * dune_visibility;
-        let dune_crest = (primary_crest * (0.34 + lobe * 0.76)).clamp(0.0, 1.0) * dune_visibility;
-        height_m += dune_mask * (dune_body * 34.0 + dune_crest * 14.0 + texture_n * 2.0) * relief;
-        let sand_polish = fbm_dir(dir, root_seed.detail, "dune_sand_polish", 18.0, 2, 0.50);
-        let dune_tone = (lobe * 0.46 + dune_body * 0.36 + dune_crest * 0.18 + sand_polish * 0.08)
-            .clamp(0.0, 1.0);
-        albedo = mix3(
-            albedo,
-            mix3([0.43, 0.18, 0.080], [0.70, 0.36, 0.17], dune_tone),
-            (dune_mask * (0.08 + lobe * 0.16 + dune_body * 0.08 + dune_crest * 0.04))
-                .clamp(0.0, 0.30),
-        );
-        dune_score = dune_mask
-            * (0.36 + lobe * 0.28 + dune_body * 0.24 + dune_crest * 0.14).clamp(0.0, 0.86);
-    }
+    // Active, unconsolidated dune bodies are dynamic surface layers now. The
+    // static cold-desert field keeps the basin substrate, margins, scarps, and
+    // broad sand-sheet material tendency, but no longer bakes oriented dune
+    // crests or migratory bodies into immutable terrain.
 
     let relief_slope_signal = (dune_contact.suture_crest * 0.86
         + dune_contact.mountain_web * 0.54
@@ -2699,13 +2621,6 @@ fn seed32(seed: u64, stream: &str) -> u32 {
 
 fn ridge(v: f32) -> f32 {
     1.0 - v.abs().clamp(0.0, 1.0)
-}
-
-fn dune_body_profile(phase: f32, alpha: f32) -> (f32, f32) {
-    let profile = asym_ridge(phase, alpha);
-    let body = smoothstep(0.06, 0.90, profile);
-    let crest = smoothstep(0.70, 0.98, profile);
-    (body, crest)
 }
 
 fn band_mask(v: f32, center: f32, half_width: f32) -> f32 {

@@ -1,6 +1,6 @@
 //! Single source of truth for explicit-crater morphometry and radial profiles.
 //!
-//! Both the `Cratering` stage (bake path) and the CPU `sample()` function
+//! Both the `Cratering` stage (bake path) and the CPU `sample_static_surface()` function
 //! (read path) evaluate the same math from this module. The shader's detail
 //! noise layer uses a different, simplified profile family defined in
 //! `assets/shaders/planet_impostor.wgsl` — see `sample::sample_detail_noise`

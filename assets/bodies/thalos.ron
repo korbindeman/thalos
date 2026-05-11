@@ -1,12 +1,69 @@
 #![enable(implicit_some)]
 (
-    terrain: Ocean((
+    terrain: Feature((
         seed: 1003,
-        cubemap_resolution: 64,
-        seabed_albedo: (0.02, 0.05, 0.10),
-        water_roughness: 0.04,
-        sea_level_m: 1.0,
+        body_age_gyr: 5.5,
+        archetype: AgingOceanicHomeworld,
+        composition: IronRichSilicate,
+        environment: (
+            stellar_flux_earth: 1.0,
+            atmosphere: Breathable(pressure_bar: 1.0),
+            hydrosphere: OceanFraction(0.6),
+            ice_inventory: Moderate,
+        ),
+        intent: [
+            HomeworldIdentity,
+        ],
+        // Earth-like polar caps. Both hemispheres covered by a single
+        // symmetric IceCapSpec — Antarctic (continental ice over land) and
+        // Arctic (sea ice over ocean) differ in reality but read the same
+        // from orbit at MVP fidelity. Edge starts ~68°, fully solid by 76°.
+        ice_caps: [
+            (
+                edge_latitude_deg: 68.0,
+                solid_latitude_deg: 76.0,
+                edge_noise_deg: 4.5,
+                edge_sharpness: 0.94,
+                noise_frequency: 3.5,
+                max_thickness_m: 1500.0,
+                albedo_linear: (0.94, 0.96, 0.98),
+                dust_albedo_linear: (0.55, 0.55, 0.50),
+                albedo_strength: 0.92,
+                roughness: 0.40,
+                roughness_strength: 0.86,
+            ),
+        ],
     )),
+    // Legacy plate tectonics. Thalos is described as deeply ancient,
+    // geologically declining; StagnantLid mode encodes the historical
+    // motion in the Euler poles (so boundary scars classify as the
+    // mountain belts and rift trenches they once produced) but no live
+    // surface motion. AgingOceanicField above reads this graph to set
+    // ocean/land split and mountain-belt placement.
+    tectonics: (
+        plate_count: 12,
+        mesh_cells: 2000,
+        activity: StagnantLid,
+        // 0.40 × 12 = 4.8 → 4 continental plates. The seeds no longer
+        // spread tetrahedrally: clustering + equatorial bias produce a
+        // dominant supercontinent with a small cluster nearby and one
+        // outlier in the far hemisphere. Earth-like distribution at MVP
+        // fidelity, easier to navigate from orbit than four equal blobs.
+        continental_fraction: 0.40,
+        seed: 91421,
+        // Tight cluster cap (~67°) so cluster seeds fuse with the primary
+        // into one Pangaea-style supercontinent. The outlier remains far
+        // from the cluster and reads as a separate Australia/Antarctica
+        // landmass.
+        continental_clustering: 0.75,
+        // Pull the primary toward the equator. Cluster seeds inherit via
+        // the cap; the outlier lands wherever Mitchell repulsion sends it.
+        equatorial_bias: 1.0,
+        // Primary gets two extra expansions per round → ~3× equal share,
+        // but small enough that the outlier plate still reaches a visible
+        // size after K-IDW smoothing.
+        primary_size_multiplier: 3.0,
+    ),
     terrestrial_atmosphere: Some((
         rim_halo: Some((
             color: (0.45, 0.65, 0.95),

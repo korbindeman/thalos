@@ -18,7 +18,8 @@ use thalos_planet_rendering::{
     SceneLighting, SolidPlanetMaterial, SolidPlanetParams, build_ring_mesh,
 };
 use thalos_terrain_gen::{
-    TerrainCompileContext, TerrainCompileOptions, TerrainConfig, compile_terrain_config,
+    PlanetSurface, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+    compile_dynamic_surface_layers, compile_static_terrain_config, compile_tectonics_from_config,
 };
 
 use super::real_space::{RealSpaceRoot, real_space_grid};
@@ -173,6 +174,7 @@ pub(super) fn spawn_bodies(
             // sphere; `finalize_planet_generation` swaps in the impostor
             // billboard with a baked `PlanetMaterial` once the task completes.
             let terrain = body.terrain.clone();
+            let tectonics = body.tectonics.clone();
             let radius_m = body.radius_m as f32;
             let gravity_m_s2 = (body.gm / (body.radius_m * body.radius_m)) as f32;
             // Tidally-locked moons get their local +Z axis as the parent
@@ -196,20 +198,46 @@ pub(super) fn spawn_bodies(
                     crater_count_scale: DEV_CRATER_SCALE,
                     cubemap_resolution_override: None,
                 };
-                let key = thalos_terrain_gen::cache::terrain_cache_key(&terrain, &context, options);
+                let key = thalos_terrain_gen::cache::terrain_cache_key(
+                    &terrain,
+                    tectonics.as_ref(),
+                    &context,
+                    options,
+                );
                 let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
-                if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
+                let dynamic_layers = compile_dynamic_surface_layers(&terrain, &context)
+                    .unwrap_or_else(|e| {
+                        panic!("dynamic layer compile failed for {body_name}: {e}")
+                    });
+                // Tectonics is regenerated on each load (it's not cached); build
+                // on both the cache-hit and cache-miss paths so downstream
+                // archetypes that read the tectonic graph see the same instance.
+                let tectonics_built = compile_tectonics_from_config(tectonics.as_ref(), &context);
+                if let Some(static_surface) = thalos_terrain_gen::cache::load(&path, key) {
                     info!("terrain cache hit: {body_name}");
-                    return data;
+                    return PlanetSurface {
+                        static_surface,
+                        dynamic_layers,
+                        tectonics: tectonics_built,
+                    };
                 }
                 info!("terrain cache miss, baking: {body_name}");
-                let data = compile_terrain_config(&terrain, &context, options)
-                    .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
-                match thalos_terrain_gen::cache::store(&path, key, &data) {
+                let static_surface = compile_static_terrain_config(
+                    &terrain,
+                    tectonics_built.as_ref(),
+                    &context,
+                    options,
+                )
+                .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
+                match thalos_terrain_gen::cache::store(&path, key, &static_surface) {
                     Ok(()) => info!("terrain cache wrote: {body_name}"),
                     Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
                 }
-                data
+                PlanetSurface {
+                    static_surface,
+                    dynamic_layers,
+                    tectonics: tectonics_built,
+                }
             });
 
             // Placeholder: same plain-sphere look as the non-procedural branch

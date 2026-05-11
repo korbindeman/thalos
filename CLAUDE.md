@@ -38,6 +38,11 @@ with a terrain block. This is Claude's primary visual-feedback loop for
 terrain work — Claude can `Read` the PNGs directly as images to inspect
 output without anyone launching the editor.
 
+Default cubemap face resolution is **512²** for fast iteration. Use
+`--full` to bake at the body's authored or radius-derived resolution
+(see `terrain_gen::cubemap::default_resolution`), or
+`--cubemap-resolution N` to force a specific size.
+
 **Outputs** (overwrites each run):
 - `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection.
 - `height-equirect.png` — grayscale height normalized to the body's

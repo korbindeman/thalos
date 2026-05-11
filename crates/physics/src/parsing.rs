@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
-use thalos_terrain_gen::TerrainConfig;
+use thalos_terrain_gen::{TectonicConfig, TerrainConfig};
 
 use crate::debug_orbits::debug_parking_orbit_relative_state;
 use crate::types::{
@@ -32,12 +32,14 @@ pub struct SolarSystemFile {
     pub bodies: Vec<BodyFile>,
 }
 
-/// Per-body detail file containing terrain, atmosphere, rings.
+/// Per-body detail file containing terrain, atmosphere, rings, tectonics.
 /// All fields are optional — bodies without these blocks will have None fields.
 #[derive(Debug, Deserialize, Default)]
 pub struct BodyDetailsFile {
     #[serde(default)]
     pub terrain: Option<TerrainConfig>,
+    #[serde(default)]
+    pub tectonics: Option<TectonicConfig>,
     #[serde(default)]
     pub atmosphere: Option<AtmosphereParams>,
     #[serde(default)]
@@ -57,6 +59,8 @@ pub struct BodyFile {
     pub orbit: Option<OrbitFile>,
     #[serde(default)]
     pub terrain: Option<TerrainConfig>,
+    #[serde(default)]
+    pub tectonics: Option<TectonicConfig>,
     #[serde(default)]
     pub atmosphere: Option<AtmosphereParams>,
     #[serde(default)]
@@ -151,6 +155,9 @@ pub fn load_solar_system_with_bodies(
             if details.terrain.is_some() {
                 body.terrain = details.terrain;
             }
+            if details.tectonics.is_some() {
+                body.tectonics = details.tectonics;
+            }
             if details.atmosphere.is_some() {
                 body.atmosphere = details.atmosphere;
             }
@@ -197,6 +204,7 @@ fn load_solar_system_impl(file: &SolarSystemFile) -> Result<SolarSystemDefinitio
         });
 
         let terrain = b.terrain.clone().unwrap_or(TerrainConfig::None);
+        let tectonics = b.tectonics.clone();
 
         bodies.push(BodyDefinition {
             id,
@@ -212,6 +220,7 @@ fn load_solar_system_impl(file: &SolarSystemFile) -> Result<SolarSystemDefinitio
             soi_radius_m: 0.0, // filled below once all bodies exist
             orbital_elements,
             terrain,
+            tectonics,
             atmosphere: b.atmosphere.clone(),
             terrestrial_atmosphere: b.terrestrial_atmosphere.clone(),
             rings: b.rings.clone(),

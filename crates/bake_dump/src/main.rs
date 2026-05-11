@@ -37,9 +37,11 @@ use image::{ImageBuffer, Rgb, RgbImage};
 use thalos_physics::parsing::load_solar_system_from_dir;
 use thalos_terrain_gen::cubemap::{CubemapFace, dir_to_face_uv};
 use thalos_terrain_gen::{
-    BodyArchetype, BodyData, ColdDesertField, DynamicSurfaceFeature, FeatureId,
-    FeatureProjectionConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
-    compile_terrain_config, generate_initial_manifest,
+    BodyArchetype, BoundaryKind, ColdDesertField, DynamicSurfaceState, FeatureId,
+    FeatureProjectionConfig, PlanetSurface, PlateKind, StaticSurfaceData, TectonicSystem,
+    TerrainCompileContext, TerrainCompileOptions, TerrainConfig, compile_dynamic_surface_layers,
+    compile_static_terrain_config, compile_tectonics_from_config, generate_initial_manifest,
+    sample_surface,
 };
 
 // ---------------------------------------------------------------------------
@@ -52,7 +54,9 @@ struct Args {
     /// Explicit `--out DIR`; when absent, defaults are derived per body.
     out_dir: Option<PathBuf>,
     solar_system: PathBuf,
-    cubemap_resolution: u32,
+    /// Explicit `--cubemap-resolution N` override. `None` defers to the body
+    /// (per-body override → radius-derived default).
+    cubemap_resolution: Option<u32>,
     equirect_width: u32,
     /// Emit debug-only dumps (biome / suture / material-id) alongside the
     /// production PBR set. Off by default — production bakes ship only the
@@ -71,7 +75,7 @@ fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.is_empty() || raw.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "usage: bake_dump <body_name|all> [--out DIR] [--solar-system PATH] [--cubemap-resolution N] [--equirect-width W] [--debug]"
+            "usage: bake_dump <body_name|all> [--out DIR] [--solar-system PATH] [--cubemap-resolution N | --full] [--equirect-width W] [--debug]"
         );
         std::process::exit(if raw.is_empty() { 1 } else { 0 });
     }
@@ -79,7 +83,12 @@ fn parse_args() -> Args {
     let mut body_name: Option<String> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut solar_system: PathBuf = PathBuf::from("assets/solar_system.ron");
-    let mut cubemap_resolution: u32 = 512;
+    // Iteration default: a fixed 512² preview, regardless of the body's
+    // authored or radius-derived resolution. Full-res bakes are paid for
+    // explicitly via `--full` (defer to body) or `--cubemap-resolution N`
+    // (force a specific size). The editor's Full button takes the same path.
+    let mut cubemap_resolution: Option<u32> = Some(512);
+    let mut explicit_resolution: Option<&'static str> = None;
     let mut equirect_width: u32 = 512;
     let mut debug = false;
 
@@ -96,10 +105,23 @@ fn parse_args() -> Args {
                 solar_system = PathBuf::from(&raw[i]);
             }
             "--cubemap-resolution" => {
+                if let Some(prior) = explicit_resolution {
+                    panic!("--cubemap-resolution conflicts with prior {prior}");
+                }
                 i += 1;
-                cubemap_resolution = raw[i]
-                    .parse()
-                    .expect("--cubemap-resolution needs an integer");
+                cubemap_resolution = Some(
+                    raw[i]
+                        .parse()
+                        .expect("--cubemap-resolution needs an integer"),
+                );
+                explicit_resolution = Some("--cubemap-resolution");
+            }
+            "--full" => {
+                if let Some(prior) = explicit_resolution {
+                    panic!("--full conflicts with prior {prior}");
+                }
+                cubemap_resolution = None;
+                explicit_resolution = Some("--full");
             }
             "--equirect-width" => {
                 i += 1;
@@ -209,10 +231,16 @@ fn bake_all_in_child_processes(
             .arg(out_dir)
             .arg("--solar-system")
             .arg(&args.solar_system)
-            .arg("--cubemap-resolution")
-            .arg(args.cubemap_resolution.to_string())
             .arg("--equirect-width")
             .arg(args.equirect_width.to_string());
+        match args.cubemap_resolution {
+            Some(res) => {
+                cmd.arg("--cubemap-resolution").arg(res.to_string());
+            }
+            None => {
+                cmd.arg("--full");
+            }
+        }
         if args.debug {
             cmd.arg("--debug");
         }
@@ -240,11 +268,12 @@ fn bake_all_in_child_processes(
 fn bake_one(
     body: &thalos_physics::types::BodyDefinition,
     out_dir: &Path,
-    cubemap_resolution: u32,
+    cubemap_resolution: Option<u32>,
     equirect_width: u32,
     debug: bool,
 ) {
-    let (body_data, route, cache_status) = run_terrain(body, cubemap_resolution);
+    let (surface, route, cache_status) = run_terrain(body, cubemap_resolution);
+    let static_surface = &surface.static_surface;
 
     fs::create_dir_all(out_dir).expect("creating out dir");
     remove_legacy_outputs(out_dir, debug);
@@ -254,15 +283,18 @@ fn bake_one(
         body.name,
         route,
         cache_status_label(cache_status),
-        body_data.craters.len(),
+        static_surface.craters.len(),
         out_dir.display(),
     );
 
-    dump_pbr_set(&body_data, out_dir, equirect_width);
-    if debug {
-        dump_debug_set(&body_data, body, out_dir, equirect_width);
+    dump_pbr_set(&surface, out_dir, equirect_width);
+    if let Some(tectonics) = surface.tectonics.as_ref() {
+        dump_tectonic_set(tectonics, out_dir, equirect_width);
     }
-    dump_info(&body_data, &route, out_dir);
+    if debug {
+        dump_debug_set(static_surface, body, out_dir, equirect_width);
+    }
+    dump_info(&surface, &route, out_dir);
 }
 
 fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompileContext {
@@ -279,32 +311,62 @@ fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompi
 
 fn run_terrain(
     body: &thalos_physics::types::BodyDefinition,
-    cubemap_resolution: u32,
-) -> (BodyData, String, CacheStatus) {
+    cubemap_resolution: Option<u32>,
+) -> (PlanetSurface, String, CacheStatus) {
     let route = body.terrain.route_label();
     let context = terrain_context(body);
     let options = TerrainCompileOptions {
         crater_count_scale: 1.0,
-        cubemap_resolution_override: Some(cubemap_resolution),
+        cubemap_resolution_override: cubemap_resolution,
     };
     let cache_dir = terrain_cache_dir();
-    let key = thalos_terrain_gen::cache::terrain_cache_key(&body.terrain, &context, options);
+    let key = thalos_terrain_gen::cache::terrain_cache_key(
+        &body.terrain,
+        body.tectonics.as_ref(),
+        &context,
+        options,
+    );
     let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body.name, key);
 
-    if let Some(data) = thalos_terrain_gen::cache::load(&path, key) {
-        return (data, route, CacheStatus::Hit);
+    let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
+        .unwrap_or_else(|e| panic!("dynamic layer compile failed for {}: {e}", body.name));
+    // Tectonics regenerates on every load (it's not cached). Build on both
+    // the cache-hit and cache-miss paths so the editor and equirect dumpers
+    // always see a consistent layer; downstream archetypes that read the
+    // tectonic graph (currently AgingOceanicHomeworld) consume the same
+    // instance.
+    let tectonics = compile_tectonics_from_config(body.tectonics.as_ref(), &context);
+    if let Some(static_surface) = thalos_terrain_gen::cache::load(&path, key) {
+        return (
+            PlanetSurface {
+                static_surface,
+                dynamic_layers,
+                tectonics,
+            },
+            route,
+            CacheStatus::Hit,
+        );
     }
 
-    let data = compile_terrain_config(&body.terrain, &context, options)
-        .unwrap_or_else(|e| panic!("terrain compile failed for {}: {e}", body.name));
-    let cache_status = match thalos_terrain_gen::cache::store(&path, key, &data) {
+    let static_surface =
+        compile_static_terrain_config(&body.terrain, tectonics.as_ref(), &context, options)
+            .unwrap_or_else(|e| panic!("terrain compile failed for {}: {e}", body.name));
+    let cache_status = match thalos_terrain_gen::cache::store(&path, key, &static_surface) {
         Ok(()) => CacheStatus::Stored,
         Err(e) => {
             eprintln!("terrain cache write failed for {}: {e}", body.name);
             CacheStatus::StoreFailed
         }
     };
-    (data, route, cache_status)
+    (
+        PlanetSurface {
+            static_surface,
+            dynamic_layers,
+            tectonics,
+        },
+        route,
+        cache_status,
+    )
 }
 
 fn terrain_cache_dir() -> PathBuf {
@@ -325,28 +387,34 @@ fn cache_status_label(status: CacheStatus) -> &'static str {
 
 /// Production PBR set: albedo, height, roughness, normal. The four cubemaps
 /// the impostor shader actually consumes.
-fn dump_pbr_set(body: &BodyData, out: &Path, equirect_w: u32) {
+fn dump_pbr_set(surface: &PlanetSurface, out: &Path, equirect_w: u32) {
+    let body = &surface.static_surface;
+    let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+    let lod = ((std::f32::consts::TAU * body.radius_m) / equirect_w.max(1) as f32)
+        .max(1.0)
+        .log2();
     let albedo_shade = |dir: Vec3| -> [u8; 3] {
-        let (face, u, v) = dir_to_face_uv(dir);
-        let (x, y) = uv_to_texel(u, v, body.albedo_cubemap.resolution());
-        let px = body.albedo_cubemap.get(face, x, y);
-        [px[0], px[1], px[2]]
+        let sample = sample_surface(surface, &state, dir, lod);
+        [
+            linear_to_srgb8(sample.albedo.x),
+            linear_to_srgb8(sample.albedo.y),
+            linear_to_srgb8(sample.albedo.z),
+        ]
     };
     write_equirect(out.join("albedo-equirect.png"), equirect_w, albedo_shade);
 
     let height_shade = |dir: Vec3| -> [u8; 3] {
-        let (face, u, v) = dir_to_face_uv(dir);
-        let (x, y) = uv_to_texel(u, v, body.height_cubemap.resolution());
-        let raw = body.height_cubemap.get(face, x, y);
-        let g = (raw / 257) as u8;
+        let sample = sample_surface(surface, &state, dir, lod);
+        let g = ((sample.height / body.height_range.max(1.0) * 0.5 + 0.5) * 255.0)
+            .clamp(0.0, 255.0)
+            .round() as u8;
         [g, g, g]
     };
     write_equirect(out.join("height-equirect.png"), equirect_w, height_shade);
 
     let roughness_shade = |dir: Vec3| -> [u8; 3] {
-        let (face, u, v) = dir_to_face_uv(dir);
-        let (x, y) = uv_to_texel(u, v, body.roughness_cubemap.resolution());
-        let g = body.roughness_cubemap.get(face, x, y);
+        let sample = sample_surface(surface, &state, dir, lod);
+        let g = (sample.roughness.clamp(0.0, 1.0) * 255.0).round() as u8;
         [g, g, g]
     };
     write_equirect(
@@ -356,18 +424,34 @@ fn dump_pbr_set(body: &BodyData, out: &Path, equirect_w: u32) {
     );
 
     let normal_shade = |dir: Vec3| -> [u8; 3] {
-        let (face, u, v) = dir_to_face_uv(dir);
-        let (x, y) = uv_to_texel(u, v, body.normal_cubemap.resolution());
-        let n = body.normal_cubemap.get(face, x, y);
-        [n[0], n[1], n[2]]
+        let sample = sample_surface(surface, &state, dir, lod);
+        [
+            normal_to_u8(sample.normal.x),
+            normal_to_u8(sample.normal.y),
+            normal_to_u8(sample.normal.z),
+        ]
     };
     write_equirect(out.join("normal-equirect.png"), equirect_w, normal_shade);
+}
+
+fn linear_to_srgb8(linear: f32) -> u8 {
+    let x = linear.clamp(0.0, 1.0);
+    let srgb = if x <= 0.0031308 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn normal_to_u8(v: f32) -> u8 {
+    ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8
 }
 
 /// Debug overlays — material-id, biome, suture maps. Useful when iterating on
 /// generation; not part of the production rendering path.
 fn dump_debug_set(
-    body: &BodyData,
+    body: &StaticSurfaceData,
     body_def: &thalos_physics::types::BodyDefinition,
     out: &Path,
     equirect_w: u32,
@@ -419,6 +503,100 @@ fn cold_desert_biome_field(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Tectonic equirects
+// ---------------------------------------------------------------------------
+
+/// Tectonic equirects: plate-id colored regions, and a boundary-type overlay
+/// fading by distance. Both are written when a body has a tectonic layer,
+/// regardless of `--debug`, because seeing the plates is the deliverable.
+fn dump_tectonic_set(tectonics: &TectonicSystem, out: &Path, equirect_w: u32) {
+    // Threshold for boundary-line rendering: 8% of the body radius. Wide
+    // enough that the boundary reads from orbit at typical equirect
+    // resolutions; narrow enough that interior cells stay clean. Tune
+    // visually if it looks wrong.
+    let threshold_m = tectonics.body_radius_m * 0.08;
+
+    let plate_shade = |dir: glam::Vec3| -> [u8; 3] {
+        let sample = tectonics.sample(dir);
+        plate_color_srgb(sample.plate_id.0, sample.plate_kind)
+    };
+    write_equirect(out.join("plate-id-equirect.png"), equirect_w, plate_shade);
+
+    let boundary_shade = |dir: glam::Vec3| -> [u8; 3] {
+        let sample = tectonics.sample(dir);
+        let Some(kind) = sample.boundary_kind else {
+            return [10, 10, 14];
+        };
+        let d = sample.boundary_distance_m;
+        if d > threshold_m {
+            return [10, 10, 14];
+        }
+        let intensity = 1.0 - (d / threshold_m).clamp(0.0, 1.0);
+        let base = boundary_kind_linear(kind);
+        [
+            linear_to_srgb8(base[0] * intensity),
+            linear_to_srgb8(base[1] * intensity),
+            linear_to_srgb8(base[2] * intensity),
+        ]
+    };
+    write_equirect(
+        out.join("boundary-type-equirect.png"),
+        equirect_w,
+        boundary_shade,
+    );
+}
+
+/// Deterministic per-plate sRGB color. Continental plates land in warm hues
+/// (browns/reds/oranges) at moderate brightness; oceanic plates land in
+/// cool blue-greens at lower brightness so the land/sea split reads at a
+/// glance.
+fn plate_color_srgb(plate_id: u32, kind: PlateKind) -> [u8; 3] {
+    let h = thalos_terrain_gen::seeding::splitmix64(plate_id as u64 ^ 0xB1ADE0FF);
+    let hue_unit = ((h & 0xFFFF) as f32) / 65535.0;
+    let (hue_deg, sat, val) = match kind {
+        // Land: warm wedge, hue ∈ [0°, 60°] ∪ [300°, 360°] mapped from a
+        // single uniform sample.
+        PlateKind::Continental => {
+            let hue = if hue_unit < 0.5 {
+                hue_unit * 120.0
+            } else {
+                300.0 + (hue_unit - 0.5) * 120.0
+            };
+            (hue, 0.55, 0.72)
+        }
+        // Ocean: cool wedge, hue ∈ [180°, 240°].
+        PlateKind::Oceanic => (180.0 + hue_unit * 60.0, 0.60, 0.40),
+    };
+    let [r, g, b] = hsv_to_linear_rgb(hue_deg, sat, val);
+    [linear_to_srgb8(r), linear_to_srgb8(g), linear_to_srgb8(b)]
+}
+
+fn boundary_kind_linear(kind: BoundaryKind) -> [f32; 3] {
+    match kind {
+        BoundaryKind::Convergent => [1.00, 0.18, 0.18],
+        BoundaryKind::Divergent => [0.20, 0.55, 1.00],
+        BoundaryKind::Transform => [1.00, 0.85, 0.20],
+    }
+}
+
+/// Linear-RGB output from HSV. Standard reference formula.
+fn hsv_to_linear_rgb(h_deg: f32, s: f32, v: f32) -> [f32; 3] {
+    let h = (h_deg.rem_euclid(360.0)) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [r + m, g + m, b + m]
+}
+
 fn remove_legacy_outputs(out: &Path, debug: bool) {
     let mut targets: Vec<&str> = vec![
         "domain-equirect.png",
@@ -444,7 +622,8 @@ fn remove_legacy_outputs(out: &Path, debug: bool) {
     }
 }
 
-fn dump_info(body: &BodyData, route: &str, out: &Path) {
+fn dump_info(surface: &PlanetSurface, route: &str, out: &Path) {
+    let body = &surface.static_surface;
     let mut s = String::new();
     s.push_str(&format!("radius_m:    {}\n", body.radius_m));
     s.push_str(&format!("height_range_m: {}\n", body.height_range));
@@ -459,18 +638,37 @@ fn dump_info(body: &BodyData, route: &str, out: &Path) {
     s.push_str(&format!("craters:     {}\n", body.craters.len()));
     s.push_str(&format!("volcanoes:   {}\n", body.volcanoes.len()));
     s.push_str(&format!("channels:    {}\n", body.channels.len()));
-    s.push_str(&format!("dune_seas:   {}\n", body.dune_seas.len()));
     s.push_str(&format!(
-        "dynamic_surface_features: {}\n",
-        body.dynamic_surface_features.len()
+        "dynamic_layers: ice_caps={}, active_dunes={}\n",
+        surface.dynamic_layers.ice_caps.len(),
+        surface.dynamic_layers.active_dunes.len()
     ));
-    let seasonal_ice_caps = body
-        .dynamic_surface_features
-        .iter()
-        .filter(|feature| matches!(feature, DynamicSurfaceFeature::SeasonalIceCap(_)))
-        .count();
-    if seasonal_ice_caps > 0 {
-        s.push_str(&format!("  seasonal_ice_caps: {seasonal_ice_caps}\n"));
+    if let Some(tectonics) = surface.tectonics.as_ref() {
+        let n_plates = tectonics.plates.len();
+        let n_continental = tectonics
+            .plates
+            .iter()
+            .filter(|p| p.kind == PlateKind::Continental)
+            .count();
+        let n_oceanic = n_plates - n_continental;
+        let mut convergent = 0usize;
+        let mut divergent = 0usize;
+        let mut transform = 0usize;
+        for b in &tectonics.boundaries {
+            match b.kind {
+                BoundaryKind::Convergent => convergent += 1,
+                BoundaryKind::Divergent => divergent += 1,
+                BoundaryKind::Transform => transform += 1,
+            }
+        }
+        s.push_str(&format!(
+            "tectonics: plates={n_plates} (continental={n_continental}, oceanic={n_oceanic}), \
+             cells={}, boundaries={} (convergent={convergent}, divergent={divergent}, transform={transform}), \
+             activity={:?}\n",
+            tectonics.mesh.cells.len(),
+            tectonics.boundaries.len(),
+            tectonics.config.activity,
+        ));
     }
     s.push_str(&format!("materials:   {}\n", body.materials.len()));
     if !body.materials.is_empty() {

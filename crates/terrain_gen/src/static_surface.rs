@@ -2,16 +2,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::cubemap::Cubemap;
 use crate::spatial_index::IcoBuckets;
-use crate::types::{
-    Channel, Crater, DetailNoiseParams, DuneSea, DynamicSurfaceFeature, Material, Volcano,
-};
+use crate::tectonics::TectonicSystem;
+use crate::types::{Channel, Crater, DetailNoiseParams, DynamicSurfaceLayers, Material, Volcano};
 
-/// Immutable, GPU-facing surface data for a celestial body.
+/// Full terrain product for a celestial body.
+///
+/// Static data is the immutable, cacheable substrate. Dynamic layers are
+/// terrain-owned definitions for time-varying surface state such as seasonal
+/// ice and unconsolidated aeolian bedforms. Tectonics carries the plate
+/// graph for editor visualization and (later) `SurfaceField` height
+/// contributions; the graph is regenerated on each load rather than cached
+/// because it's cheap (~ms) and lives outside the `StaticSurfaceData` cache.
+#[derive(Serialize, Deserialize)]
+pub struct PlanetSurface {
+    pub static_surface: StaticSurfaceData,
+    #[serde(default)]
+    pub dynamic_layers: DynamicSurfaceLayers,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tectonics: Option<TectonicSystem>,
+}
+
+/// Immutable, GPU-facing static surface data for a celestial body.
 ///
 /// Produced by `BodyBuilder::build()` after all pipeline stages have run.
 /// The renderer reads this; it never runs the pipeline.
 #[derive(Serialize, Deserialize)]
-pub struct BodyData {
+pub struct StaticSurfaceData {
     pub radius_m: f32,
 
     /// Craters with `radius_m >= cubemap_bake_threshold_m` are rasterized
@@ -45,19 +61,6 @@ pub struct BodyData {
     pub craters: Vec<Crater>,
     pub volcanoes: Vec<Volcano>,
     pub channels: Vec<Channel>,
-
-    /// Hand-anchored aeolian regions. The draa-scale band is rasterized
-    /// into `height_cubemap` + `albedo_cubemap` at bake time; the dune-
-    /// scale band is synthesized per fragment in the impostor using these
-    /// records (see `crate::types::DuneSea`).
-    #[serde(default)]
-    pub dune_seas: Vec<DuneSea>,
-
-    /// Changeable surface features that are deliberately excluded from the
-    /// static cubemaps. Runtime/rendering systems can apply these as overlays
-    /// without invalidating the immutable terrain bake.
-    #[serde(default)]
-    pub dynamic_surface_features: Vec<DynamicSurfaceFeature>,
 
     /// Shared spatial index over all feature arrays.
     pub feature_index: IcoBuckets,

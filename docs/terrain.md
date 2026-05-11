@@ -16,14 +16,16 @@ Two halves, one contract:
 
 1. **Generation** (`thalos_terrain_gen`, pure Rust, no Bevy). A
    feature-first compiler. Inputs: a `PlanetTerrainSpec`. Outputs:
-   `BodyData` (cubemap textures + analytic feature buffers) and a
-   `SurfaceField` sampling contract. Source of truth for terrain
-   identity.
+   `PlanetSurface`, split into immutable `StaticSurfaceData` (cubemap
+   textures + analytic feature buffers) and `DynamicSurfaceLayers`
+   (authored/compiled layer definitions for ice caps, active dunes, and
+   future time-varying overprints). Source of truth for terrain identity.
 2. **Rendering**. Today: a flat impostor renderer
-   (`planet_impostor.wgsl`) consumes `BodyData` directly. Future
-   (M3): a forked `bevy_terrain` provides UDLOD on an ellipsoidal
-   cubesphere, with the synthesis pipeline plugged in via a runtime
-   `TileProvider` trait.
+   (`planet_impostor.wgsl`) consumes static cubemaps plus dynamic layer
+   buffers built from `PlanetSurface + DynamicSurfaceState`. Future (M3):
+   a forked `bevy_terrain` provides UDLOD on an ellipsoidal cubesphere,
+   with the same sampling pipeline plugged in via a runtime `TileProvider`
+   trait.
 
 The bridge between the two halves is the **`SurfaceField` sample
 contract** on the generation side and the **`TileProvider` trait** on
@@ -36,7 +38,7 @@ pair once ground LOD lands.
 |---|---|---|
 | Feature compiler | `AirlessImpactMoon` and `ColdDesertFormerlyWet` archetypes wired (Mira, Vaelen). v1 has no first-class hydrology, no layered substrate, no climate fields. | Revamped compiler with v2 backlog landed; all four main bodies through it (M2) |
 | Terrestrial bodies | Thalos, Pelagos use `Ocean` flat-water placeholder | `AgingOceanicHomeworld`, `GenericTerrestrial` archetypes (M2) |
-| Renderer (orbital) | Flat impostor reads `BodyData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
+| Renderer (orbital) | Flat impostor reads `StaticSurfaceData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
 | Renderer (surface) | Not wired into Thalos. The `bevy_terrain` fork itself (Bevy 0.18 port + `TileProvider` trait) is done at `~/dev/bevy_terrain`. | Fork pulled into the Thalos workspace; `PipelineTileProvider` connected to the revamped feature compiler; Mira/Vaelen/Thalos/Pelagos rendering at surface scale (M3) |
 | Big-space hierarchy | Not present | Per-body grids parented to system grid (M1, M3) |
 
@@ -59,6 +61,9 @@ pair once ground LOD lands.
   grids.
 - Single sampling contract (`SurfaceField`) consumed by every
   projection: bake, tile, physics, editor.
+- Hard cache boundary: immutable substrate is cached as `StaticSurfaceData`;
+  dynamic layer definitions/state rebuild only dynamic buffers and do not
+  invalidate the static terrain cache unless they also alter substrate.
 
 ## Non-goals (this doc)
 
@@ -381,7 +386,10 @@ Current migration shape:
 FeatureManifest
   -> SurfaceField::sample(dir, sample_scale_m)
   -> bake_surface_field_into_builder()
-  -> BodyData cubemaps + analytic buffers + dynamic overlay descriptors
+  -> PlanetSurface {
+       static_surface: StaticSurfaceData cubemaps + analytic buffers
+       dynamic_layers: DynamicSurfaceLayers
+     }
 ```
 
 `SurfaceField` is the render-agnostic contract. For a direction on
@@ -417,11 +425,11 @@ Impostor contract (consumed directly by `planet_impostor.wgsl`):
   hash that walks them. Crater LOD fades sub-pixel features at far
   zoom.
 
-Also baked into `BodyData` but reserved for non-impostor consumers:
+Also baked into `StaticSurfaceData` but reserved for non-impostor consumers:
 
 - `material_cubemap` (R8Uint dominant ID): used internally by stages
   (`PaintBiomes`, `MareFlood`, `SpaceWeather`) and by the CPU
-  `sample()` path. Not bound to the impostor's GPU bind group.
+  `sample_static_surface()` path. Not bound to the impostor's GPU bind group.
 - `normal_cubemap` (`Rgba8Unorm` object-space): reserved for ground
   LOD where chunked geometry can't cheaply finite-difference height
   at runtime. 8-bit encoding crushes shallow slope angles, so the
@@ -430,10 +438,34 @@ Also baked into `BodyData` but reserved for non-impostor consumers:
 - `materials` palette: still authored by stages for CPU sampling and
   for ground-LOD detail-texture blending; no longer uploaded as a GPU
   storage buffer.
-- `dynamic_surface_features`: runtime overlay descriptors that are
-  deliberately excluded from static cubemap bakes. Seasonal polar ice
-  caps live here; their coverage, albedo, roughness, and thickness are
-  renderer/runtime state, not immutable terrain identity.
+
+Dynamic surface layers are deliberately not part of `StaticSurfaceData`:
+
+- `DynamicSurfaceLayers::ice_caps`: authored/compiled ice veneer
+  definitions. All production ice caps use this path; there is no
+  permanent baked polar ice stage in the production compiler.
+- `DynamicSurfaceLayers::active_dunes`: active, unconsolidated aeolian
+  bedforms. Static terrain keeps basin structure, lithified/ancient
+  geology, margins, scarps, and substrate; mobile sand sheets, dune
+  relief, crests, ripples, tint, roughness, phase, amplitude, and
+  mobility are dynamic layer data/state. The current impostor projection
+  uses a prefiltered dynamic dune texture layer plus a transform uniform
+  for slow migration, rather than evaluating dune-wave noise per fragment.
+- `DynamicSurfaceState`: mutable runtime/editor state keyed by stable
+  layer IDs. The default state reproduces authored appearance.
+
+The shared Rust sampling entry points are:
+
+```rust
+sample_static_surface(&StaticSurfaceData, dir, lod) -> SurfaceSample
+sample_surface(&PlanetSurface, &DynamicSurfaceState, dir, lod) -> SurfaceSample
+```
+
+Dynamic layer contributions include height, normal, albedo, roughness,
+and later optional material override. Dynamic height feeds the shared
+sampled height, normals, water tests, self-shadow where supported, and
+future terrain vertices. The current impostor silhouette is still the
+mathematical sphere; dynamic displacement does not move the disk edge.
 
 Silhouette displacement is intentionally out of scope for the first
 projection. Good albedo, normals, roughness, and compact meso
@@ -477,8 +509,8 @@ Typical projection policies:
 | Feature kind | Impostor projection | Ground projection |
 |---|---|---|
 | Craters | Large craters bake into cubemaps; mid-size craters use compact SSBO descriptors; sub-resolution craters use generator-authored statistical params or are omitted. | `SurfaceField` evaluates the same crater profiles into tiles; terrain fragments may reuse the crater/detail evaluator only for sub-tile normal or albedo detail. |
-| Dune seas | Broad sand region, roughness, and macro relief bake into cubemaps; analytic impostor data is optional and only for kilometer-scale ridges that blur badly. | Tile provider evaluates wind-aligned dune bands, slip faces, and sand material weights from the dune population; fragment ripples come from material detail params. |
-| Seasonal ice caps | Not baked into height, albedo, roughness, or material cubemaps. The compiler carries cap descriptors in `dynamic_surface_features`; the impostor shader currently renders them as a static albedo/roughness overlay. | Tile provider/runtime applies seasonal ice as a surface state layer over the static terrain sample; later climate simulation can vary coverage without rebuilding terrain. |
+| Dune seas | Static substrate keeps basin/margin geology and any lithified ancient dune-derived terrain. Active sand sheets and dune relief are uploaded as a dynamic texture layer and transform-sampled in the canonical height/normal/material path; the `active_dunes` buffer remains layer metadata, not a per-fragment procedural evaluator. | Tile provider evaluates the same `ActiveDuneLayer + ActiveDuneState` over the static sample; fragment ripples come from material detail params when needed. |
+| Seasonal ice caps | Not baked into height, albedo, roughness, or material cubemaps. The compiler carries cap definitions in `DynamicSurfaceLayers::ice_caps`; the impostor shader evaluates dynamic ice height, normals, albedo, and roughness from shared state. | Tile provider/runtime applies the same ice state layer over the static terrain sample; later climate simulation can vary coverage without rebuilding terrain. |
 | Channels and dry riverbeds | Main incision, sediment color, and roughness bake into cubemaps; sharp banks or levees may use a generic linear-feature buffer. | Tile provider evaluates signed distance to the channel network, banks, terraces, bed material, and exposed strata from the same descriptors. |
 | Rifts and grabens | Regional scarps and troughs usually bake into height/roughness; analytic linear buffers are reserved for sharp fault edges that need orbital crispness. | Tile provider evaluates the exact fault profile, talus, floor material, and secondary cracks. |
 | Shield volcanoes | Shield shape, caldera, lava-flow color, and roughness bake into cubemaps; optional radial descriptors preserve caldera rims or large lobes. | Tile provider evaluates radial height profile, caldera depression, flank channels, lava-flow splats, and volcanic material detail. |
@@ -584,29 +616,31 @@ terrain: Feature((
 1. Add feature compiler data types and deterministic feature seeding.
 2. Infer `TerrainPrior` from `PlanetTerrainSpec`.
 3. Generate initial feature manifests for Mira and Vaelen.
-4. Compile those manifests into the current `BodyData` render
-   contract.
+4. Compile those manifests into `PlanetSurface`: cached
+   `StaticSurfaceData` substrate plus first-class dynamic layer
+   definitions/state.
 5. Switch body definitions from `pipeline: [...]` to feature specs
    one body at a time.
 6. Retire old stages after all bodies are compiled through the
    feature graph.
 
-During migration, `BodyData` remains the renderer handoff. The
-feature compiler becomes the new source of truth before the renderer
-changes.
+During migration, `PlanetSurface` is the renderer handoff. Static
+textures and analytic feature buffers remain stable, while dynamic layer
+buffers can be rebuilt independently from `DynamicSurfaceState`.
 
 ### Current implementation status
 
 `AirlessImpactMoon` and `ColdDesertFormerlyWet` are wired up: a
 `PlanetTerrainSpec` is expanded into a `FeatureManifest`, then
-compiled into the existing `BodyData` contract using the current
-bake primitives. This keeps the flat impostor renderer working while
-moving source-of-truth terrain identity and seeding into the feature
-compiler. Configured polar caps are now carried as dynamic surface
-features rather than projected into the static bake. `AgingOceanicHomeworld`
-and `GenericTerrestrial` are not yet implemented — Thalos and Pelagos
-render via the flat-water `TerrainConfig::Ocean` placeholder until the
-terrestrial pipeline lands (M2).
+compiled into `PlanetSurface` using the current bake primitives for
+static substrate and dynamic layer definitions for changeable surface
+state. This keeps the flat impostor renderer working while moving
+source-of-truth terrain identity and seeding into the feature compiler.
+Configured polar caps and active unconsolidated dunes are dynamic
+surface layers rather than projected into static cache ownership.
+`AgingOceanicHomeworld` and `GenericTerrestrial` are not yet implemented
+— Thalos and Pelagos render via the flat-water `TerrainConfig::Ocean`
+placeholder until the terrestrial pipeline lands (M2).
 
 ### M2 — Terrain pipeline revamp
 

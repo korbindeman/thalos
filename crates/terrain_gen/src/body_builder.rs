@@ -1,20 +1,19 @@
 use glam::Vec3;
 
-use crate::body_data::BodyData;
-use crate::cubemap::{default_resolution, Cubemap, CubemapAccumulator};
+use crate::cubemap::{Cubemap, CubemapAccumulator, default_resolution};
 use crate::spatial_index::IcoBuckets;
 use crate::stages::{BasinDef, MAT_HIGHLAND};
+use crate::static_surface::StaticSurfaceData;
 use crate::surface_field::{BiomeMixTexel, ReliefPalette};
 use crate::types::{
-    BiomeParams, Channel, Composition, Crater, DetailNoiseParams, DuneSea, DynamicSurfaceFeature,
-    Material, Volcano,
+    BiomeParams, Channel, Composition, Crater, DetailNoiseParams, Material, Volcano,
 };
 
 /// Mutable build-time state for surface generation.
 ///
 /// Stages mutate this during pipeline execution.  After all stages run,
 /// `build()` finalizes accumulators into immutable cubemaps and produces
-/// the GPU-facing `BodyData`.
+/// the GPU-facing `StaticSurfaceData`.
 pub struct BodyBuilder {
     pub radius_m: f32,
     pub seed: u64,
@@ -46,7 +45,7 @@ pub struct BodyBuilder {
     /// Per-texel material index (R8). Initialized to MAT_HIGHLAND at builder
     /// construction; stages overwrite as needed (MareFlood flips flooded
     /// regions to MAT_MARE, future cryovolcanism overwrites with ice, etc.).
-    /// Finalized into `BodyData::material_cubemap` without any transformation
+    /// Finalized into `StaticSurfaceData::material_cubemap` without any transformation
     /// — stages see the same buffer the GPU will see.
     pub material_cubemap: Cubemap<u8>,
     /// Per-texel surface roughness (0..1, encoded R8Unorm). Default ~0.85
@@ -61,7 +60,7 @@ pub struct BodyBuilder {
     pub normal_cubemap: Cubemap<[u8; 4]>,
     /// Cutoff below which craters stay SSBO-only; at-or-above, Cratering
     /// rasterizes into the cubemap. Written by the Cratering stage from its
-    /// own parameter; the sampler and shader read it from BodyData to avoid
+    /// own parameter; the sampler and shader read it from StaticSurfaceData to avoid
     /// double-counting baked craters.
     pub cubemap_bake_threshold_m: f32,
 
@@ -69,13 +68,6 @@ pub struct BodyBuilder {
     pub craters: Vec<Crater>,
     pub volcanoes: Vec<Volcano>,
     pub channels: Vec<Channel>,
-    /// Hand-anchored aeolian regions. The `DuneSeas` stage rasterizes the
-    /// draa-scale band into the height + albedo cubemaps and pushes the
-    /// regions into this vector so the impostor sees them via `BodyData`.
-    pub dune_seas: Vec<DuneSea>,
-    /// Seasonal/changeable surface features that should not mutate the static
-    /// height, albedo, roughness, or material cubemaps.
-    pub dynamic_surface_features: Vec<DynamicSurfaceFeature>,
     /// Megabasin definitions written by the Megabasin stage and read by
     /// later stages (MareFlood selects flood targets from these).
     pub megabasins: Vec<BasinDef>,
@@ -100,7 +92,7 @@ pub struct BodyBuilder {
     /// `bake_surface_field_into_builder` from each `SurfaceFieldSample`'s
     /// `biome_mix` so a downstream relief-color stage can blend per-biome
     /// palettes after later stages have written into the albedo cube.
-    /// Build-time only — not exported into `BodyData`.
+    /// Build-time only — not exported into `StaticSurfaceData`.
     pub biome_weights_cubemap: Cubemap<BiomeMixTexel>,
 
     /// Sea level above which texels render as land. Set by the Ocean
@@ -114,21 +106,18 @@ pub struct BodyBuilder {
 impl BodyBuilder {
     /// Create a new builder with default (empty) state.
     ///
-    /// If `cubemap_resolution` is 0, a default is computed from `radius_m`.
+    /// `cubemap_resolution = None` derives the resolution from `radius_m`
+    /// via [`default_resolution`].
     pub fn new(
         radius_m: f32,
         seed: u64,
         composition: Composition,
-        cubemap_resolution: u32,
+        cubemap_resolution: Option<u32>,
         body_age_gyr: f32,
         tidal_axis: Option<Vec3>,
         axial_tilt_rad: f32,
     ) -> Self {
-        let resolution = if cubemap_resolution == 0 {
-            default_resolution(radius_m)
-        } else {
-            cubemap_resolution
-        };
+        let resolution = cubemap_resolution.unwrap_or_else(|| default_resolution(radius_m));
 
         Self {
             radius_m,
@@ -169,8 +158,6 @@ impl BodyBuilder {
             craters: Vec::new(),
             volcanoes: Vec::new(),
             channels: Vec::new(),
-            dune_seas: Vec::new(),
-            dynamic_surface_features: Vec::new(),
             megabasins: Vec::new(),
             detail_params: DetailNoiseParams {
                 body_radius_m: radius_m,
@@ -193,11 +180,11 @@ impl BodyBuilder {
         self.stage_seed
     }
 
-    /// Finalize into immutable `BodyData`.
+    /// Finalize into immutable `StaticSurfaceData`.
     ///
     /// Bakes accumulators into cubemaps, builds the spatial index, and drops
     /// build-time-only fields (composition, seed, scratch state).
-    pub fn build(self) -> BodyData {
+    pub fn build(self) -> StaticSurfaceData {
         let (height_cubemap, height_range) = self.height_contributions.finalize_height();
         let albedo_cubemap = self.albedo_contributions.finalize_albedo();
         let mean_albedo = mean_albedo_linear(&albedo_cubemap);
@@ -209,7 +196,7 @@ impl BodyBuilder {
             self.radius_m,
         );
 
-        BodyData {
+        StaticSurfaceData {
             radius_m: self.radius_m,
             cubemap_bake_threshold_m: self.cubemap_bake_threshold_m,
             height_cubemap,
@@ -221,8 +208,6 @@ impl BodyBuilder {
             craters: self.craters,
             volcanoes: self.volcanoes,
             channels: self.channels,
-            dune_seas: self.dune_seas,
-            dynamic_surface_features: self.dynamic_surface_features,
             feature_index,
             detail_params: self.detail_params,
             materials: self.materials,

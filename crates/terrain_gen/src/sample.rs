@@ -11,7 +11,7 @@
 //! │                │                  │ (sRGB8), material_cubemap (R8).    │
 //! │                │                  │ One fetch per sample.              │
 //! ├────────────────┼──────────────────┼────────────────────────────────────┤
-//! │ Feature SSBO   │ 500 m – 5 km    │ BodyData.craters + feature_index.  │
+//! │ Feature SSBO   │ 500 m – 5 km    │ StaticSurfaceData.craters + feature_index.  │
 //! │                │                  │ Iterated per fragment via spatial  │
 //! │                │                  │ index. ~18 features/cell at L4     │
 //! │                │                  │ ico, ~125/fragment worst case.     │
@@ -53,14 +53,14 @@
 
 use glam::Vec3;
 
-use crate::body_data::BodyData;
 use crate::crater_profile::{
     SubPeaks, crater_profile, degradation_factor, degradation_softness, morphology_for_radius,
     smoothstep_range,
 };
 use crate::cubemap::dir_to_face_uv;
 use crate::spatial_index::FeatureRef;
-use crate::types::{Crater, DetailNoiseParams};
+use crate::static_surface::{PlanetSurface, StaticSurfaceData};
+use crate::types::{ActiveDuneState, Crater, DetailNoiseParams, DynamicSurfaceState, IceCapState};
 
 /// Result of sampling the surface at a point.
 pub struct SurfaceSample {
@@ -72,7 +72,7 @@ pub struct SurfaceSample {
     pub albedo: Vec3,
     /// PBR roughness, 0..1.
     pub roughness: f32,
-    /// Index into `BodyData::materials`.
+    /// Index into `StaticSurfaceData::materials`.
     pub material_id: u32,
 }
 
@@ -87,7 +87,7 @@ pub struct SurfaceSample {
 ///    index. Each crater's contribution is weighted by a screen-space-size
 ///    smoothstep so sub-pixel features drop out continuously.
 /// 3. **If `pixel_size_m < d_max_m`**: evaluate statistical detail noise.
-pub fn sample(body: &BodyData, dir: Vec3, lod: f32) -> SurfaceSample {
+pub fn sample_static_surface(body: &StaticSurfaceData, dir: Vec3, lod: f32) -> SurfaceSample {
     let dir = dir.normalize();
 
     let height = sample_height_only(body, dir, lod);
@@ -95,11 +95,7 @@ pub fn sample(body: &BodyData, dir: Vec3, lod: f32) -> SurfaceSample {
     let albedo = sample_albedo(body, dir);
 
     let material_id = body.material_cubemap.sample_nearest(dir) as u32;
-    let roughness = body
-        .materials
-        .get(material_id as usize)
-        .map(|m| m.roughness)
-        .unwrap_or(0.5);
+    let roughness = sample_roughness(body, dir, material_id);
 
     SurfaceSample {
         height,
@@ -110,8 +106,46 @@ pub fn sample(body: &BodyData, dir: Vec3, lod: f32) -> SurfaceSample {
     }
 }
 
+/// Sample the static substrate plus dynamic surface layers.
+///
+/// Dynamic displacement contributes to the shared height and normal paths so
+/// the impostor projection and future ground tiles can mirror one canonical
+/// surface evaluation. The impostor still uses a sphere silhouette; this API
+/// only defines sampled surface height.
+pub fn sample_surface(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
+    dir: Vec3,
+    lod: f32,
+) -> SurfaceSample {
+    let dir = dir.normalize();
+    let body = &surface.static_surface;
+
+    let mut height = sample_height_only(body, dir, lod);
+    let mut albedo = sample_albedo(body, dir);
+    let material_id = body.material_cubemap.sample_nearest(dir) as u32;
+    let mut roughness = sample_roughness(body, dir, material_id);
+    apply_dynamic_layers(
+        surface,
+        state,
+        dir,
+        lod,
+        &mut height,
+        &mut albedo,
+        &mut roughness,
+    );
+
+    SurfaceSample {
+        height,
+        normal: compute_surface_normal(surface, state, dir, lod),
+        albedo,
+        roughness,
+        material_id,
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Height (Layer 1 + 2 + 3), no normal.  Used directly by `sample()` and
+// Height (Layer 1 + 2 + 3), no normal.  Used directly by `sample_static_surface()` and
 // recursively by `compute_normal` for finite-difference offsets.
 // ---------------------------------------------------------------------------
 
@@ -120,7 +154,7 @@ pub fn sample(body: &BodyData, dir: Vec3, lod: f32) -> SurfaceSample {
 /// This function does not compute a normal and does not recurse into
 /// `compute_normal`. The finite-difference normal derivation is the only
 /// thing that calls this directly with offset directions.
-fn sample_height_only(body: &BodyData, dir: Vec3, lod: f32) -> f32 {
+fn sample_height_only(body: &StaticSurfaceData, dir: Vec3, lod: f32) -> f32 {
     // Layer 1: baked cubemap.
     let mut h = sample_cubemap_height(body, dir);
 
@@ -156,7 +190,7 @@ fn decode_height(texel: u16, range: f32) -> f32 {
 }
 
 /// Sample height from the cubemap via bilinear interpolation.
-fn sample_cubemap_height(body: &BodyData, dir: Vec3) -> f32 {
+fn sample_cubemap_height(body: &StaticSurfaceData, dir: Vec3) -> f32 {
     let (face, u, v) = dir_to_face_uv(dir);
     let res = body.height_cubemap.resolution() as f32;
     let px = (u * res - 0.5).clamp(0.0, res - 1.001);
@@ -179,7 +213,7 @@ fn sample_cubemap_height(body: &BodyData, dir: Vec3) -> f32 {
 }
 
 /// Sample albedo from the cubemap.  Returns linear-space color.
-fn sample_albedo(body: &BodyData, dir: Vec3) -> Vec3 {
+fn sample_albedo(body: &StaticSurfaceData, dir: Vec3) -> Vec3 {
     let (face, u, v) = dir_to_face_uv(dir);
     let res = body.albedo_cubemap.resolution();
     let x = ((u * res as f32) as u32).min(res - 1);
@@ -190,6 +224,274 @@ fn sample_albedo(body: &BodyData, dir: Vec3) -> Vec3 {
         srgb_to_linear(texel[1]),
         srgb_to_linear(texel[2]),
     )
+}
+
+fn sample_roughness(body: &StaticSurfaceData, dir: Vec3, material_id: u32) -> f32 {
+    let texel = body.roughness_cubemap.sample_nearest(dir);
+    if texel > 0 {
+        texel as f32 / 255.0
+    } else {
+        body.materials
+            .get(material_id as usize)
+            .map(|m| m.roughness)
+            .unwrap_or(0.5)
+    }
+}
+
+fn apply_dynamic_layers(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
+    dir: Vec3,
+    lod: f32,
+    height: &mut f32,
+    albedo: &mut Vec3,
+    roughness: &mut f32,
+) {
+    for (index, layer) in surface.dynamic_layers.ice_caps.iter().enumerate() {
+        let fallback;
+        let state = match state.ice_cap_state(index, layer) {
+            Some(state) => state,
+            None => {
+                fallback = IceCapState {
+                    id: layer.id.clone(),
+                    ..IceCapState::default()
+                };
+                &fallback
+            }
+        };
+        apply_ice_cap(layer, state, dir, height, albedo, roughness);
+    }
+
+    for (index, layer) in surface.dynamic_layers.active_dunes.iter().enumerate() {
+        let fallback;
+        let state = match state.active_dune_state(index, layer) {
+            Some(state) => state,
+            None => {
+                fallback = ActiveDuneState {
+                    id: layer.id.clone(),
+                    mobility: layer.mobility,
+                    ..ActiveDuneState::default()
+                };
+                &fallback
+            }
+        };
+        apply_active_dune(
+            layer,
+            state,
+            surface.static_surface.radius_m,
+            dir,
+            lod,
+            height,
+            albedo,
+            roughness,
+        );
+    }
+}
+
+fn dynamic_height_delta(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
+    dir: Vec3,
+    lod: f32,
+) -> f32 {
+    let mut height = 0.0;
+    let mut albedo = Vec3::ZERO;
+    let mut roughness = 0.0;
+    apply_dynamic_layers(
+        surface,
+        state,
+        dir,
+        lod,
+        &mut height,
+        &mut albedo,
+        &mut roughness,
+    );
+    height
+}
+
+fn apply_ice_cap(
+    layer: &crate::types::IceCapLayer,
+    state: &IceCapState,
+    dir: Vec3,
+    height: &mut f32,
+    albedo: &mut Vec3,
+    roughness: &mut f32,
+) {
+    let spec = layer.spec;
+    if state.coverage_scale <= 0.0 || state.thickness_scale <= 0.0 || spec.max_thickness_m <= 0.0 {
+        return;
+    }
+
+    let axis = safe_normalize(spec.axis, Vec3::Y);
+    let latitude_deg = dir.dot(axis).clamp(-1.0, 1.0).asin().to_degrees();
+    let mut coverage: f32 = 0.0;
+    if spec.north {
+        coverage = coverage.max(ice_pole_coverage(latitude_deg, &spec, state));
+    }
+    if spec.south {
+        coverage = coverage.max(ice_pole_coverage(-latitude_deg, &spec, state));
+    }
+    coverage = (coverage * state.coverage_scale).clamp(0.0, 1.0);
+    if coverage <= 0.0 {
+        return;
+    }
+
+    *height += spec.max_thickness_m * state.thickness_scale.max(0.0) * coverage;
+
+    let clean = Vec3::from_array(spec.albedo_linear);
+    let dusty = Vec3::from_array(spec.dust_albedo_linear);
+    let ice_albedo = clean.lerp(dusty, state.dustiness.clamp(0.0, 1.0));
+    let albedo_t = (coverage * spec.albedo_strength).clamp(0.0, 1.0);
+    *albedo = albedo.lerp(ice_albedo, albedo_t);
+
+    let roughness_t = (coverage * spec.roughness_strength).clamp(0.0, 1.0);
+    *roughness += (spec.roughness.clamp(0.0, 1.0) - *roughness) * roughness_t;
+}
+
+fn ice_pole_coverage(
+    pole_latitude_deg: f32,
+    spec: &crate::types::IceCapSpec,
+    state: &IceCapState,
+) -> f32 {
+    let sharpness = spec.edge_sharpness.clamp(0.0, 1.0);
+    let transition_deg = (1.25 + (0.32 - 1.25) * sharpness).max(0.25);
+    let edge = (spec.edge_latitude_deg + state.edge_offset_deg).clamp(0.0, 89.5);
+    let solid = (spec.solid_latitude_deg + state.edge_offset_deg)
+        .max(edge + transition_deg + 0.35)
+        .clamp(edge + 0.6, 90.0);
+    let coverage = smoothstep(edge, edge + transition_deg, pole_latitude_deg);
+    let interior = smoothstep(edge + transition_deg, solid, pole_latitude_deg);
+    (coverage * (0.62 + 0.38 * interior)).clamp(0.0, 1.0)
+}
+
+fn apply_active_dune(
+    layer: &crate::types::ActiveDuneLayer,
+    state: &ActiveDuneState,
+    body_radius_m: f32,
+    dir: Vec3,
+    lod: f32,
+    height: &mut f32,
+    albedo: &mut Vec3,
+    roughness: &mut f32,
+) {
+    if state.coverage_scale <= 0.0 || state.amplitude_scale <= 0.0 {
+        return;
+    }
+
+    let region = &layer.region;
+    let center = safe_normalize(region.center, dir);
+    let angular_distance = dir.dot(center).clamp(-1.0, 1.0).acos();
+    let outer = region.radius_rad + region.feather_rad.max(0.0);
+    let mut weight = 1.0
+        - smoothstep(
+            region.radius_rad,
+            outer.max(region.radius_rad + 1e-5),
+            angular_distance,
+        );
+    weight = (weight * state.coverage_scale).clamp(0.0, 1.0);
+    if weight <= 0.0 {
+        return;
+    }
+
+    let pixel_size_m = 2.0_f32.powf(lod).max(1.0);
+    let draa_lod = smoothstep(4.0, 9.0, region.lambda_draa_m / pixel_size_m);
+    let dune_lod = smoothstep(2.0, 5.0, region.lambda_dune_m / pixel_size_m);
+    if draa_lod.max(dune_lod) <= 0.001 {
+        let tint = Vec3::from_array(region.albedo_crest_lin);
+        let broad_t = (weight * region.crest_strength * 0.34).clamp(0.0, 0.18);
+        *albedo = albedo.lerp(tint * 0.68, broad_t * 0.42);
+        *roughness += (0.78 - *roughness) * (weight * 0.18).clamp(0.0, 0.24);
+        return;
+    }
+
+    let axis = safe_normalize(
+        region.axis_tangent - center * region.axis_tangent.dot(center),
+        {
+            let up = if center.y.abs() > 0.99 {
+                Vec3::X
+            } else {
+                Vec3::Y
+            };
+            center.cross(up).normalize()
+        },
+    );
+    let local = dir - center * dir.dot(center);
+    let along_m = local.dot(axis) * body_radius_m + state.phase_offset_m;
+    let across = safe_normalize(center.cross(axis), Vec3::Z);
+    let cross_m = local.dot(across) * body_radius_m;
+    let broad_warp = simple_value_noise(
+        cross_m / body_radius_m * region.warp_freq * 0.52,
+        region.seed ^ 0x6D2B_79F5,
+    );
+    let lace_warp = simple_value_noise(
+        cross_m / body_radius_m * region.warp_freq * 2.2 + 13.7,
+        region.seed ^ 0x9E37_79B9,
+    );
+    let meander_m = (broad_warp * 0.75 + lace_warp * 0.25) * region.warp_amp_unit * body_radius_m;
+    let wind_m = along_m + meander_m;
+
+    let lobe = smoothstep(-0.20, 0.52, broad_warp * 0.62 + weight * 0.10);
+    let wavelength_jitter = (1.0
+        + simple_value_noise(
+            cross_m / body_radius_m * region.warp_freq * 0.8 + 19.3,
+            region.seed ^ 0xA24B_AED5,
+        ) * 0.24)
+        .clamp(0.72, 1.42);
+    let draa = asymmetric_ridge(
+        wind_m / (region.lambda_draa_m.max(1.0) * wavelength_jitter) + broad_warp * 0.35,
+        region.alpha_skew,
+    ) * draa_lod;
+    let dune = asymmetric_ridge(
+        wind_m / region.lambda_dune_m.max(1.0) + lace_warp * 0.42,
+        region.alpha_skew,
+    ) * dune_lod;
+    let body = (draa * (0.16 + lobe * 1.05)).clamp(0.0, 1.0);
+    let crest = (0.55 * body + 0.45 * dune).clamp(0.0, 1.0);
+    let amp = state.amplitude_scale.max(0.0);
+    *height += weight
+        * amp
+        * (region.amplitude_draa_m.max(0.0) * body + region.amplitude_dune_m.max(0.0) * dune);
+
+    let tint = Vec3::from_array(region.albedo_crest_lin);
+    let tint_t = (weight * crest * region.crest_strength).clamp(0.0, 1.0);
+    *albedo = albedo.lerp(tint, tint_t);
+    *roughness += (0.76 - *roughness) * (weight * (0.25 + 0.35 * crest)).clamp(0.0, 1.0);
+}
+
+fn asymmetric_ridge(phase: f32, alpha_skew: f32) -> f32 {
+    let t = phase - phase.floor();
+    let alpha = alpha_skew.clamp(0.05, 0.95);
+    let tri = if t < alpha {
+        t / alpha
+    } else {
+        1.0 - (t - alpha) / (1.0 - alpha)
+    };
+    tri.clamp(0.0, 1.0).powf(1.35)
+}
+
+fn simple_value_noise(x: f32, seed: u64) -> f32 {
+    let i0 = x.floor() as i32;
+    let i1 = i0 + 1;
+    let t = smoothstep(0.0, 1.0, x - x.floor());
+    let a = hash_cell(i0, 0, 0, 0, seed as u32, (seed >> 32) as u32);
+    let b = hash_cell(i1, 0, 0, 0, seed as u32, (seed >> 32) as u32);
+    (u32_to_unit(a) * 2.0 - 1.0) * (1.0 - t) + (u32_to_unit(b) * 2.0 - 1.0) * t
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if (edge1 - edge0).abs() <= f32::EPSILON {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn safe_normalize(v: Vec3, fallback: Vec3) -> Vec3 {
+    if v.length_squared() > 1e-12 {
+        v.normalize()
+    } else {
+        fallback
+    }
 }
 
 fn srgb_to_linear(srgb: u8) -> f32 {
@@ -211,7 +513,7 @@ fn srgb_to_linear(srgb: u8) -> f32 {
 /// to `FeatureRef::Crater`, and for each crater whose influence region
 /// contains the sample point, evaluates the Pike/Krüger profile from
 /// `crater_profile` and applies the screen-space-size fade.
-fn sample_layer2_craters(body: &BodyData, dir: Vec3, lod: f32) -> f32 {
+fn sample_layer2_craters(body: &StaticSurfaceData, dir: Vec3, lod: f32) -> f32 {
     if body.craters.is_empty() {
         return 0.0;
     }
@@ -629,7 +931,7 @@ fn u32_to_unit(x: u32) -> f32 {
 /// Each probe re-enters `sample_height_only`, so Layer 2 and Layer 3
 /// contributions feed the normal just like Layer 1 does. Recursion is
 /// bounded — `sample_height_only` never calls `compute_normal`.
-fn compute_normal(body: &BodyData, dir: Vec3, lod: f32) -> Vec3 {
+fn compute_normal(body: &StaticSurfaceData, dir: Vec3, lod: f32) -> Vec3 {
     // Build a continuous tangent frame on the sphere at `dir`.
     // The `dir.y > 0.99` branch is a coarse fallback — fine for the offsets
     // we actually use; the UV artifact from flipping tangent is bounded to
@@ -652,6 +954,39 @@ fn compute_normal(body: &BodyData, dir: Vec3, lod: f32) -> Vec3 {
     let h_south = sample_height_only(body, (dir - bitangent * offset).normalize(), lod);
 
     // Convert the angular offset to a world-space arc length.
+    let ds = body.radius_m * offset * 2.0;
+    let dh_dt = (h_east - h_west) / ds;
+    let dh_db = (h_north - h_south) / ds;
+
+    (dir - tangent * dh_dt - bitangent * dh_db).normalize()
+}
+
+fn compute_surface_normal(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
+    dir: Vec3,
+    lod: f32,
+) -> Vec3 {
+    let body = &surface.static_surface;
+    let up = if dir.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+    let tangent = dir.cross(up).normalize();
+    let bitangent = tangent.cross(dir);
+
+    let texel_offset = 1.5 / body.height_cubemap.resolution() as f32;
+    let pixel_size_m = 2_f32.powf(lod);
+    let pixel_offset = pixel_size_m / body.radius_m;
+    let offset = texel_offset.max(pixel_offset);
+
+    let height_at = |probe: Vec3| {
+        let probe = probe.normalize();
+        sample_height_only(body, probe, lod) + dynamic_height_delta(surface, state, probe, lod)
+    };
+
+    let h_east = height_at(dir + tangent * offset);
+    let h_west = height_at(dir - tangent * offset);
+    let h_north = height_at(dir + bitangent * offset);
+    let h_south = height_at(dir - bitangent * offset);
+
     let ds = body.radius_m * offset * 2.0;
     let dh_dt = (h_east - h_west) / ds;
     let dh_db = (h_north - h_south) / ds;

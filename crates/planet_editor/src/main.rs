@@ -21,21 +21,28 @@ use thalos_planet_rendering::{
     GasGiantParams, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial,
     PlanetHaloMaterialHandle, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
     PlanetRenderingPlugin, PlanetWaterParams, ReferenceClouds, RingLayers, RingMaterial,
-    RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_from_body_data, build_ring_mesh,
-    cloud_cover_image_for_body, convert_reference_clouds_when_ready, load_reference_cloud_sources,
+    RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_from_planet_surface,
+    build_ring_mesh, cloud_cover_image_for_body, convert_reference_clouds_when_ready,
+    load_reference_cloud_sources,
 };
 use thalos_terrain_gen::{
-    AirlessImpactProjectionConfig, AtmosphereSpec, AuthoredFeatureConfig, BodyArchetype, BodyData,
-    ColdDesertProjectionConfig, CompositionClass, FeatureId, FeatureLock, FeatureManifest,
-    FeatureParamValue, FeatureProjectionConfig, FeatureSeed, FeatureSeedStream,
-    FeatureTerrainConfig, HydrosphereSpec, IceInventory, MegabasinFeatureConfig,
-    OceanTerrainConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig, TerrainIntent,
-    compile_terrain_config, plan_initial_compilation, sub_seed,
+    AirlessImpactProjectionConfig, AtmosphereSpec, AuthoredFeatureConfig, BodyArchetype,
+    BoundaryKind, ColdDesertProjectionConfig, CompositionClass, DynamicSurfaceLayers,
+    DynamicSurfaceState, FeatureId, FeatureLock, FeatureManifest, FeatureParamValue,
+    FeatureProjectionConfig, FeatureSeed, FeatureSeedStream, FeatureTerrainConfig, HydrosphereSpec,
+    IceInventory, MegabasinFeatureConfig, OceanTerrainConfig, PlanetSurface, PlateKind,
+    TectonicActivity, TectonicConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
+    TerrainIntent, compile_terrain_config, plan_initial_compilation, sub_seed,
 };
 
 mod sky_backdrop;
+mod tectonic_overlay;
 
 use sky_backdrop::SkyBackdropPlugin;
+use tectonic_overlay::{
+    PreviewTectonics, TectonicOverlayOrientation, TectonicOverlayPlugin, TectonicOverlayState,
+    TectonicRenderRadius, activity_label,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,9 +57,10 @@ const RENDER_RADIUS: f32 = 1.5;
 /// Live-edit rebakes wait this long after the last edit before kicking off,
 /// so a slider drag doesn't queue dozens of throwaway bakes.
 const REBAKE_DEBOUNCE_MS: u128 = 150;
-/// Cubemap resolution used for live preview rebakes. Macro composition reads
-/// fine at this size; full-resolution bakes are explicit via the UI button.
-const PREVIEW_CUBEMAP_RESOLUTION: u32 = 256;
+/// Cubemap resolution used for live preview rebakes. Keep this at the same
+/// resolution as the normal headless bake so coastline shaping reads in the
+/// editor instead of being smoothed away by the preview texture.
+const PREVIEW_CUBEMAP_RESOLUTION: u32 = 512;
 /// Explicit mid-resolution bake for checking near-final terrain without paying
 /// the full 2048² compile cost.
 const HALF_CUBEMAP_RESOLUTION: u32 = 1024;
@@ -69,6 +77,11 @@ const SOLAR_SYSTEM_RON: &str = include_str!(concat!(
 enum BodyMode {
     Terrain {
         terrain: TerrainConfig,
+        /// Optional tectonic structural prior. Cloned from the body's
+        /// `BodyDefinition.tectonics`. Threaded through to the bake task
+        /// so the resulting `PlanetSurface` carries a `TectonicSystem`
+        /// for downstream visualization.
+        tectonics: Option<TectonicConfig>,
         tidal_axis: Option<Vec3>,
     },
     GasGiant {
@@ -195,8 +208,19 @@ struct BillboardMesh(Handle<Mesh>);
 
 #[derive(Component)]
 struct PendingTerrainGen {
-    task: Task<BodyData>,
+    /// Bake task. Returns `Err` rather than panicking so a transient compile
+    /// failure (e.g. an in-progress edit that puts the spec into a state the
+    /// compiler rejects) just logs and leaves the existing terrain on
+    /// screen, instead of taking the editor down with the task pool.
+    task: Task<Result<PlanetSurface, String>>,
     mesh_entity: Entity,
+}
+
+#[allow(dead_code)]
+#[derive(Component, Clone)]
+struct PreviewDynamicSurface {
+    layers: DynamicSurfaceLayers,
+    state: DynamicSurfaceState,
 }
 
 fn sun_direction(azimuth: f32, elevation: f32) -> Vec3 {
@@ -245,11 +269,13 @@ fn build_params_for_body(
     } else if body.terrain.is_some() {
         BodyMode::Terrain {
             terrain: body.terrain.clone(),
+            tectonics: body.tectonics.clone(),
             tidal_axis: matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z),
         }
     } else {
         BodyMode::Terrain {
             terrain: placeholder_terrain_config(),
+            tectonics: body.tectonics.clone(),
             tidal_axis: matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z),
         }
     };
@@ -282,7 +308,7 @@ fn build_params_for_body(
 fn placeholder_terrain_config() -> TerrainConfig {
     TerrainConfig::Ocean(OceanTerrainConfig {
         seed: 0,
-        cubemap_resolution: 64,
+        cubemap_resolution: Some(64),
         seabed_albedo: [0.02, 0.05, 0.10],
         water_roughness: 0.04,
         sea_level_m: 1.0,
@@ -509,6 +535,29 @@ fn camera_input(
     }
 }
 
+/// `F` flips `full_bright` and forces atmosphere to the opposite state, so
+/// the surface can be inspected unlit and unobscured in one keystroke.
+fn toggle_fullbright_hotkey(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut planet: ResMut<EditedPlanet>,
+    mut egui_ctx: bevy_egui::EguiContexts,
+) {
+    if !keys.just_pressed(KeyCode::KeyF) {
+        return;
+    }
+    if egui_ctx
+        .ctx_mut()
+        .is_ok_and(|ctx| ctx.wants_keyboard_input())
+    {
+        return;
+    }
+    planet.full_bright = !planet.full_bright;
+    if planet.atmosphere.is_some() {
+        planet.atmosphere_enabled = !planet.full_bright;
+    }
+    planet.uniforms_dirty = true;
+}
+
 fn camera_zoom_smoothing(mut orbit: ResMut<OrbitCamera>, time: Res<Time>) {
     let speed = 10.0;
     let t = (speed * time.delta_secs()).min(1.0);
@@ -549,19 +598,21 @@ fn terrain_cache_dir() -> std::path::PathBuf {
 
 fn dispatch_terrain_bake(
     terrain: &TerrainConfig,
+    tectonics: Option<&TectonicConfig>,
     radius_m: f64,
     gravity_m_s2: f32,
     tidal_axis: Option<Vec3>,
     axial_tilt_rad: f32,
     body_name: String,
     cubemap_resolution_override: Option<u32>,
-) -> Task<BodyData> {
+) -> Task<Result<PlanetSurface, String>> {
     let radius_m = radius_m as f32;
     let mut terrain = terrain.clone();
+    let tectonics = tectonics.cloned();
     if let Some(res) = cubemap_resolution_override {
         match &mut terrain {
-            TerrainConfig::Feature(c) => c.cubemap_resolution = res,
-            TerrainConfig::Ocean(c) => c.cubemap_resolution = res,
+            TerrainConfig::Feature(c) => c.cubemap_resolution = Some(res),
+            TerrainConfig::Ocean(c) => c.cubemap_resolution = Some(res),
             TerrainConfig::None => {}
         }
     }
@@ -586,17 +637,24 @@ fn dispatch_terrain_bake(
         // downstream consumers.
         let is_full_bake = cubemap_resolution_override.is_none();
         info!("baking {body_name} via {route}");
-        let data = compile_terrain_config(&terrain, &context, options)
-            .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
+        let data = match compile_terrain_config(&terrain, tectonics.as_ref(), &context, options) {
+            Ok(data) => data,
+            Err(e) => return Err(format!("terrain compile failed for {body_name}: {e}")),
+        };
         if is_full_bake {
-            let key = thalos_terrain_gen::cache::terrain_cache_key(&terrain, &context, options);
+            let key = thalos_terrain_gen::cache::terrain_cache_key(
+                &terrain,
+                tectonics.as_ref(),
+                &context,
+                options,
+            );
             let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
-            match thalos_terrain_gen::cache::store(&path, key, &data) {
+            match thalos_terrain_gen::cache::store(&path, key, &data.static_surface) {
                 Ok(()) => info!("terrain cache wrote: {body_name}"),
                 Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
             }
         }
-        data
+        Ok(data)
     })
 }
 
@@ -623,6 +681,7 @@ fn spawn_preview(
     match &planet.mode {
         BodyMode::Terrain {
             terrain,
+            tectonics,
             tidal_axis,
         } => {
             let placeholder_mesh = meshes.add(Sphere::new(RENDER_RADIUS).mesh().ico(4).unwrap());
@@ -643,6 +702,7 @@ fn spawn_preview(
 
             let task = dispatch_terrain_bake(
                 terrain,
+                tectonics.as_ref(),
                 planet.radius_m,
                 planet.gravity_m_s2,
                 *tidal_axis,
@@ -779,19 +839,35 @@ fn finalize_terrain_bake(
     halo_q: Query<Entity, With<PreviewAtmosphereHalo>>,
 ) {
     for (entity, mut pending) in &mut pending_q {
-        let Some(body) = block_on(poll_once(&mut pending.task)) else {
+        let Some(result) = block_on(poll_once(&mut pending.task)) else {
             continue;
         };
+        let surface = match result {
+            Ok(surface) => surface,
+            Err(e) => {
+                // Compile failure (e.g. a transient invalid edit). Log and
+                // drop the pending bake without touching the entity's
+                // existing PlanetMaterial — the previous terrain stays on
+                // screen so the user can recover by undoing the edit.
+                warn!("{e}");
+                commands.entity(entity).remove::<PendingTerrainGen>();
+                status.current_started = None;
+                continue;
+            }
+        };
+        let body = &surface.static_surface;
+        let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
 
         let detail =
             PlanetDetailParams::from_body(&body.detail_params, body.cubemap_bake_threshold_m);
         let height_range = body.height_range;
-        let textures = bake_from_body_data(&body, &mut images, &mut storage_buffers);
+        let textures =
+            bake_from_planet_surface(&surface, &dynamic_state, &mut images, &mut storage_buffers);
         let (_, _, wrap) = lighting_for(&planet);
         let scene = scene_lighting_for(&planet);
 
-        let coastline = PlanetCoastlineParams::from_body_data(&body);
-        let water = PlanetWaterParams::from_body_data(&body);
+        let coastline = PlanetCoastlineParams::from_static_surface(body);
+        let water = PlanetWaterParams::from_static_surface(body);
         let atmosphere = active_atmosphere(&planet);
         let cloud_cover = cloud_cover_for(&planet, &reference_clouds, &mut images);
         let q = body_orientation(&planet);
@@ -822,6 +898,9 @@ fn finalize_terrain_bake(
             atmosphere,
             cloud_cover,
             ice_caps: textures.ice_caps,
+            active_dunes: textures.active_dunes,
+            active_dune_height: textures.active_dune_height,
+            active_dune_albedo: textures.active_dune_albedo,
         };
         let halo_handle = planet_halo_materials.add(PlanetHaloMaterial::from(&planet_material));
         let mat_handle = planet_materials.add(planet_material);
@@ -861,11 +940,24 @@ fn finalize_terrain_bake(
             }
         }
 
-        commands
-            .entity(entity)
+        let mut entity_commands = commands.entity(entity);
+        entity_commands
             .insert(PlanetMaterialHandle(mat_handle))
             .insert(PlanetHaloMaterialHandle(halo_handle))
+            .insert(PreviewDynamicSurface {
+                layers: surface.dynamic_layers,
+                state: dynamic_state,
+            })
             .remove::<PendingTerrainGen>();
+        // PreviewTectonics is inserted only when the body has a tectonic
+        // layer; bodies without one drop the existing component (if any)
+        // so previously-loaded tectonic data doesn't linger after a body
+        // switch.
+        if let Some(system) = surface.tectonics {
+            entity_commands.insert(PreviewTectonics { system });
+        } else {
+            entity_commands.remove::<PreviewTectonics>();
+        }
         if planet
             .atmosphere
             .as_ref()
@@ -1359,6 +1451,181 @@ fn draw_projection_controls(ui: &mut egui::Ui, projection: &mut FeatureProjectio
     }
 }
 
+/// Tectonics panel: gizmo overlay toggles, live stats from the most recent
+/// bake, and a config sub-section. The overlay toggles are surfaced first
+/// because they're the most-fiddled control and never trigger a rebake.
+/// The layer config is separated so its edits (which *do* trigger rebakes)
+/// can't be confused with the overlay toggles.
+///
+/// `archetype_requires_tectonics` locks the layer-on/off checkbox: bodies
+/// whose archetype requires a tectonic graph (currently
+/// `AgingOceanicHomeworld`) cannot be toggled to None — disabling would put
+/// the bake into a guaranteed-fail state.
+///
+/// Returns true if any edit should trigger a rebake (overlay toggles do not).
+fn draw_tectonics_panel(
+    ui: &mut egui::Ui,
+    tectonics: &mut Option<TectonicConfig>,
+    preview: Option<&PreviewTectonics>,
+    overlay: &mut TectonicOverlayState,
+    archetype_requires_tectonics: bool,
+) -> bool {
+    let mut changed = false;
+    ui.heading("Tectonics");
+
+    // ── Overlay toggles ──
+    // No rebake side-effects; pure visualization control.
+    ui.label("Overlay (gizmos):");
+    ui.checkbox(&mut overlay.show_boundaries, "Boundary lines");
+    ui.checkbox(&mut overlay.show_motion_arrows, "Motion arrows");
+    ui.checkbox(&mut overlay.show_plate_centroids, "Plate centroids");
+
+    ui.separator();
+
+    // ── Layer presence ──
+    // For required archetypes the toggle is shown disabled with a label so
+    // the constraint is visible; for optional archetypes it lets you opt in
+    // or out of the layer entirely.
+    if archetype_requires_tectonics {
+        ui.label("Tectonic layer: required by archetype");
+        if tectonics.is_none() {
+            // Defensive: an archetype that requires tectonics shouldn't be
+            // sitting at None. Seed a default so the bake doesn't fail on
+            // the next rebake. Mark as changed so the rebake fires.
+            *tectonics = Some(default_tectonic_config());
+            changed = true;
+        }
+    } else {
+        let mut enabled = tectonics.is_some();
+        if ui
+            .checkbox(&mut enabled, "Tectonic layer")
+            .on_hover_text("Spherical-Voronoi plate graph; drives boundary gizmos and (for AgingOceanicHomeworld) terrain shape.")
+            .changed()
+        {
+            if enabled {
+                *tectonics = Some(default_tectonic_config());
+            } else {
+                *tectonics = None;
+            }
+            changed = true;
+        }
+    }
+
+    let Some(config) = tectonics.as_mut() else {
+        return changed;
+    };
+
+    // ── Stats from the most recent bake ──
+    // `preview` is None during the brief gap between dispatch and finalize;
+    // show "–" placeholders so the layout doesn't jump.
+    if let Some(p) = preview {
+        let sys = &p.system;
+        let n_continental = sys
+            .plates
+            .iter()
+            .filter(|p| p.kind == PlateKind::Continental)
+            .count();
+        let n_oceanic = sys.plates.len() - n_continental;
+        let mut convergent = 0usize;
+        let mut divergent = 0usize;
+        let mut transform = 0usize;
+        for b in &sys.boundaries {
+            match b.kind {
+                BoundaryKind::Convergent => convergent += 1,
+                BoundaryKind::Divergent => divergent += 1,
+                BoundaryKind::Transform => transform += 1,
+            }
+        }
+        ui.label(format!(
+            "Plates: {} (continental {}, oceanic {})",
+            sys.plates.len(),
+            n_continental,
+            n_oceanic,
+        ));
+        ui.label(format!(
+            "Boundaries: {} (convergent {}, divergent {}, transform {})",
+            sys.boundaries.len(),
+            convergent,
+            divergent,
+            transform,
+        ));
+        ui.label(format!("Mesh cells: {}", sys.mesh.cells.len()));
+        ui.label(format!("Activity: {}", activity_label(sys.config.activity)));
+    } else {
+        ui.label("Plates: –");
+        ui.label("Boundaries: –");
+        ui.label("Mesh cells: –");
+        ui.label("Activity: –");
+    }
+
+    ui.separator();
+
+    // ── Layer config ──
+    // Slider ranges are conservative enough that no value produces a
+    // degenerate tectonic graph. plate_count should stay below mesh_cells;
+    // we don't enforce that on slider clamp because it's unusual and a
+    // deliberate footgun there is fine.
+    ui.label("Configuration:");
+    ui.horizontal(|ui| {
+        changed |= fires(&ui.add(egui::Slider::new(&mut config.seed, 0..=99_999).text("Seed")));
+        if ui.button("Reroll").clicked() {
+            config.seed = sub_seed(config.seed, "planet_editor:tectonic_seed");
+            changed = true;
+        }
+    });
+    changed |= fires(&ui.add(egui::Slider::new(&mut config.plate_count, 1..=64).text("Plates")));
+    changed |=
+        fires(&ui.add(egui::Slider::new(&mut config.mesh_cells, 256..=8192).text("Mesh cells")));
+    changed |= fires(&ui.add(
+        egui::Slider::new(&mut config.continental_fraction, 0.0..=1.0).text("Continental fraction"),
+    ));
+
+    let prev_activity = config.activity;
+    egui::ComboBox::from_label("Activity")
+        .selected_text(activity_label(config.activity))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut config.activity, TectonicActivity::Active, "Active");
+            ui.selectable_value(
+                &mut config.activity,
+                TectonicActivity::StagnantLid,
+                "Stagnant lid",
+            );
+            // Frozen carries an age; pin to a placeholder when toggling
+            // from the dropdown. The age field gets its own slider when
+            // Frozen is selected.
+            ui.selectable_value(
+                &mut config.activity,
+                TectonicActivity::Frozen { age_my: 1000.0 },
+                "Frozen",
+            );
+        });
+    if config.activity != prev_activity {
+        changed = true;
+    }
+    if let TectonicActivity::Frozen { age_my } = &mut config.activity {
+        changed |= fires(&ui.add(egui::Slider::new(age_my, 0.0..=4500.0).text("Frozen age (Myr)")));
+    }
+
+    changed
+}
+
+/// Default tectonic config seeded when the user opts in via the panel.
+/// Earth-like ratios, StagnantLid (no live motion) so it's safe on bodies
+/// regardless of activity expectations.
+fn default_tectonic_config() -> TectonicConfig {
+    TectonicConfig {
+        plate_count: 12,
+        mesh_cells: 2000,
+        activity: TectonicActivity::StagnantLid,
+        continental_fraction: 0.30,
+        seed: 1,
+        seed_dirs: None,
+        continental_clustering: 0.0,
+        equatorial_bias: 0.0,
+        primary_size_multiplier: 1.0,
+    }
+}
+
 fn reroll_authored_seed(
     root_seed: u64,
     id: &FeatureId,
@@ -1657,6 +1924,8 @@ fn editor_ui(
     system: Res<SystemData>,
     diagnostics: Res<DiagnosticsStore>,
     status: Res<TerrainGenStatus>,
+    mut overlay_state: ResMut<TectonicOverlayState>,
+    tectonic_q: Query<&PreviewTectonics, With<PreviewPlanet>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -1761,6 +2030,7 @@ fn editor_ui(
 
                     if let BodyMode::Terrain {
                         ref mut terrain,
+                        ref mut tectonics,
                         tidal_axis,
                     } = planet.mode
                     {
@@ -1837,6 +2107,20 @@ fn editor_ui(
                             }
                             TerrainConfig::None => {}
                         }
+
+                        ui.separator();
+                        let archetype_requires_tectonics = matches!(
+                            terrain,
+                            TerrainConfig::Feature(c)
+                                if c.archetype == BodyArchetype::AgingOceanicHomeworld
+                        );
+                        terrain_changed |= draw_tectonics_panel(
+                            ui,
+                            tectonics,
+                            tectonic_q.single().ok(),
+                            &mut overlay_state,
+                            archetype_requires_tectonics,
+                        );
                         ui.separator();
                     }
 
@@ -1898,6 +2182,20 @@ fn editor_ui(
 
 /// Applies shader-uniform-only changes to the current material.
 #[allow(clippy::too_many_arguments)]
+/// Mirror the editor's planet orientation quaternion into the resource the
+/// tectonic overlay reads. The overlay draws gizmos in world space, so
+/// boundaries follow the visually rendered axial-tilt orientation rather
+/// than the body-local frame.
+fn sync_tectonic_orientation(
+    planet: Res<EditedPlanet>,
+    mut orientation: ResMut<TectonicOverlayOrientation>,
+) {
+    let q = body_orientation(&planet);
+    if orientation.0 != q {
+        orientation.0 = q;
+    }
+}
+
 fn apply_uniform_changes(
     mut planet: ResMut<EditedPlanet>,
     terrain_q: Query<&PlanetMaterialHandle, With<PreviewPlanet>>,
@@ -2100,6 +2398,7 @@ fn dispatch_rebake(
     }
     let BodyMode::Terrain {
         ref terrain,
+        ref tectonics,
         tidal_axis,
     } = planet.mode
     else {
@@ -2114,6 +2413,7 @@ fn dispatch_rebake(
         return;
     };
     let terrain = terrain.clone();
+    let tectonics = tectonics.clone();
     let radius_m = planet.radius_m;
     let gravity_m_s2 = planet.gravity_m_s2;
     let axial_tilt_rad = planet.axial_tilt_rad;
@@ -2125,6 +2425,7 @@ fn dispatch_rebake(
 
     let task = dispatch_terrain_bake(
         &terrain,
+        tectonics.as_ref(),
         radius_m,
         gravity_m_s2,
         tidal_axis,
@@ -2223,6 +2524,9 @@ fn main() {
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_plugins(PlanetRenderingPlugin)
         .add_plugins(SkyBackdropPlugin)
+        .add_plugins(TectonicOverlayPlugin)
+        .insert_resource(TectonicRenderRadius(RENDER_RADIUS))
+        .init_resource::<TectonicOverlayOrientation>()
         .add_systems(
             Startup,
             (
@@ -2240,7 +2544,8 @@ fn main() {
                 camera_zoom_smoothing.after(camera_input),
                 camera_apply_transform.after(camera_zoom_smoothing),
                 pick_planet_click.after(camera_input),
-                apply_uniform_changes,
+                toggle_fullbright_hotkey,
+                apply_uniform_changes.after(toggle_fullbright_hotkey),
                 handle_body_switch,
                 dispatch_rebake
                     .after(handle_body_switch)
@@ -2252,6 +2557,7 @@ fn main() {
                 update_preview_atmosphere
                     .after(apply_uniform_changes)
                     .after(finalize_terrain_bake),
+                sync_tectonic_orientation,
             ),
         )
         .run();

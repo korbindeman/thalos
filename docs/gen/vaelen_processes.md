@@ -102,7 +102,7 @@ desert reworks the surface.
 ## First Vertical Slice
 
 The first compiler slice evaluates `VaelenColdDesertField` over cubemap
-directions, then projects the samples into `BodyData` for the current impostor:
+directions, then projects the samples into `StaticSurfaceData` for the current impostor:
 
 - continuous fractal macro height with biome-anchored generator stacks
 - dark volcanic, pale sediment/evaporite, and rust highland biomes with palette

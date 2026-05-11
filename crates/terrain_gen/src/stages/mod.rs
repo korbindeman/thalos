@@ -4,7 +4,6 @@ mod cratering;
 mod differentiate;
 mod dune_seas;
 mod erosion;
-mod ice_caps;
 mod impact_color_overprint;
 mod mare_flood;
 mod megabasin;
@@ -22,7 +21,6 @@ pub use differentiate::{
 };
 pub use dune_seas::{DuneSeaCoverageMask, DuneSeas};
 pub use erosion::Erosion;
-pub use ice_caps::IceCaps;
 pub use impact_color_overprint::{ImpactColorOverprint, VaelenImpactColor};
 pub use mare_flood::MareFlood;
 pub use megabasin::{BasinDef, Megabasin};

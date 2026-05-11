@@ -205,15 +205,23 @@ pub fn face_uv_to_dir(face: CubemapFace, u: f32, v: f32) -> Vec3 {
     dir.normalize()
 }
 
+/// Target equatorial texel size for the derived cubemap resolution. With
+/// ceil-to-pow2 and the 4096 cap, this gives ~1024² on ~900 km bodies,
+/// 2048² on ~1.1 Mm bodies, and 4096² on bodies above ~2 Mm. Bodies above
+/// ~2 Mm clamp at 4096 and so trade a little uniform-density for a
+/// hard memory ceiling — the low-freq cubemap is one of three impostor
+/// layers, so detail below this scale comes from SSBO mid-freq features
+/// and shader-synthesized high-freq noise rather than from more texels.
+const TARGET_M_PER_EQUATOR_TEXEL: f32 = 1500.0;
+
 /// Compute a reasonable cubemap resolution for a body of the given radius.
-/// Targets ~1.5 km/texel at the equator, clamped to [4, 2048] and rounded to
-/// the next power of two.
+/// Targets [`TARGET_M_PER_EQUATOR_TEXEL`] at the equator, clamped to
+/// [4, 4096] and rounded to the next power of two.
 pub fn default_resolution(radius_m: f32) -> u32 {
-    // Equator circumference / target_texel_size = total texels around equator
+    // Equator circumference / target_texel_size = total texels around equator.
     // Each face spans 90° of the equator, so face_res ≈ total / 4.
-    // With target 1.5 km/texel: face_res ≈ (2π × radius_m) / (4 × 1500)
-    let raw = (std::f32::consts::TAU * radius_m / (4.0 * 1500.0)).ceil() as u32;
-    raw.next_power_of_two().clamp(4, 2048)
+    let raw = (std::f32::consts::TAU * radius_m / (4.0 * TARGET_M_PER_EQUATOR_TEXEL)).ceil() as u32;
+    raw.next_power_of_two().clamp(4, 4096)
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +232,7 @@ pub fn default_resolution(radius_m: f32) -> u32 {
 ///
 /// Stages write to this during pipeline execution.  After all stages run,
 /// `finalize_height()` and `finalize_albedo()` produce the immutable cubemaps
-/// for `BodyData`.
+/// for `StaticSurfaceData`.
 pub struct CubemapAccumulator {
     pub height: Cubemap<f32>,
     pub albedo: Cubemap<[f32; 4]>,

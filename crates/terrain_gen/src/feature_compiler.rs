@@ -2,14 +2,14 @@
 //!
 //! This module is the replacement architecture's data/model layer. It does
 //! not mutate `BodyBuilder` and has no Bevy dependency. The current stage
-//! pipeline can keep producing `BodyData` while this module grows into the new
+//! pipeline can keep producing `StaticSurfaceData` while this module grows into the new
 //! source of truth for body terrain.
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::aging_oceanic_field::{AgingOceanicField, enforce_single_connected_ocean};
 use crate::body_builder::BodyBuilder;
-use crate::body_data::BodyData;
 use crate::cold_desert_field::{ColdDesertField, ColdDesertStyle};
 use crate::height_generator::{
     ColdDesertBiomeHeightGenerators, HeightGenerator, HeightGeneratorStack, IqDerivativeFbmHeight,
@@ -17,12 +17,15 @@ use crate::height_generator::{
 use crate::seeding::sub_seed;
 use crate::stage::Stage;
 use crate::stages::{
-    BasinDef, BiomeReliefColor, BiomeRule, Biomes, Cratering, Differentiate, DuneSeaCoverageMask,
-    DuneSeas, Erosion, ImpactColorOverprint, MareFlood as MareFloodStage, Megabasin, Regolith,
-    Scarps, SpaceWeather,
+    BasinDef, BiomeReliefColor, BiomeRule, Biomes, Cratering, Differentiate, Erosion,
+    ImpactColorOverprint, MareFlood as MareFloodStage, Megabasin, Regolith, Scarps, SpaceWeather,
 };
+use crate::static_surface::{PlanetSurface, StaticSurfaceData};
 use crate::surface_field::bake_surface_field_into_builder;
-use crate::types::{BiomeParams, Composition, DynamicSurfaceFeature, IceCapSpec, Volcano};
+use crate::types::{
+    ActiveDuneLayer, BiomeParams, Composition, DynamicSurfaceLayers, IceCapLayer, IceCapSpec,
+    Material, Volcano,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -951,27 +954,28 @@ impl FeatureManifest {
 pub struct TerrainCompilationPlan {
     pub prior: TerrainPrior,
     pub manifest: FeatureManifest,
-    pub dynamic_surface_features: Vec<DynamicSurfaceFeature>,
+    pub dynamic_layers: DynamicSurfaceLayers,
     pub impostor: ImpostorProjectionPlan,
 }
 
 pub fn plan_initial_compilation(spec: &PlanetTerrainSpec) -> TerrainCompilationPlan {
     let prior = TerrainPrior::infer(spec);
     let manifest = generate_initial_manifest(spec);
-    let dynamic_surface_features = dynamic_surface_features_for(spec);
+    let dynamic_layers = dynamic_surface_layers_for(spec, &ColdDesertStyle::default());
     let impostor = ImpostorProjectionPlan::for_archetype(spec.archetype);
     TerrainCompilationPlan {
         prior,
         manifest,
-        dynamic_surface_features,
+        dynamic_layers,
         impostor,
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FeatureCompileOptions {
-    /// `0` means use `BodyBuilder`'s radius-based default resolution.
-    pub cubemap_resolution: u32,
+    /// Cubemap face resolution. `None` means use `BodyBuilder`'s
+    /// radius-derived default.
+    pub cubemap_resolution: Option<u32>,
     /// Multiplies expensive generated populations for iteration bakes.
     pub crater_count_scale: f32,
     pub projection: FeatureProjectionConfig,
@@ -981,7 +985,7 @@ pub struct FeatureCompileOptions {
 impl Default for FeatureCompileOptions {
     fn default() -> Self {
         Self {
-            cubemap_resolution: 0,
+            cubemap_resolution: None,
             crater_count_scale: 1.0,
             projection: FeatureProjectionConfig::Auto,
             cold_desert_style: ColdDesertStyle::default(),
@@ -1412,6 +1416,9 @@ pub enum FeatureCompileError {
     UnsupportedArchetype(BodyArchetype),
     MissingFeature(FeatureId),
     InvalidFeatureFootprint(FeatureId),
+    /// Archetype requires a tectonic system but none was provided. Author
+    /// a `tectonics: (...)` block in the body's RON detail file.
+    MissingTectonics,
 }
 
 impl std::fmt::Display for FeatureCompileError {
@@ -1427,39 +1434,68 @@ impl std::fmt::Display for FeatureCompileError {
                     "feature has an invalid footprint for this projection: {id}"
                 )
             }
+            Self::MissingTectonics => write!(
+                f,
+                "archetype requires a tectonic system; author a `tectonics:` block on the body"
+            ),
         }
     }
 }
 
 impl std::error::Error for FeatureCompileError {}
 
-/// Compile an initial feature terrain spec into the current render handoff.
-///
-/// This is the compatibility projection that lets the new feature compiler
-/// drive the existing flat impostor renderer. The implementation currently
-/// supports Mira-style airless impact moons and uses the existing bake stages
-/// as projection primitives, but seeds and feature placement come from the
-/// feature manifest.
-pub fn compile_initial_body_data(
+/// Compile an initial feature terrain spec into the full static + dynamic
+/// terrain product.
+pub fn compile_initial_planet_surface(
     spec: &PlanetTerrainSpec,
     options: FeatureCompileOptions,
-) -> Result<BodyData, FeatureCompileError> {
-    let plan = plan_initial_compilation(spec);
-    compile_manifest_to_body_data(spec, &plan.manifest, &plan.prior, options)
+) -> Result<PlanetSurface, FeatureCompileError> {
+    let dynamic_layers = dynamic_surface_layers_for(spec, &options.cold_desert_style);
+    let static_surface = compile_initial_static_surface(spec, None, options)?;
+    Ok(PlanetSurface {
+        static_surface,
+        dynamic_layers,
+        // Tectonics is authored on the body's RON detail file alongside
+        // `terrain`, not on the `PlanetTerrainSpec`. The internal feature-
+        // compiler entry doesn't see it; callers who need tectonics use
+        // the public `compile_terrain_config` instead.
+        tectonics: None,
+    })
 }
 
-pub fn compile_manifest_to_body_data(
+/// Compile an initial feature terrain spec into the static render handoff.
+///
+/// This is the compatibility projection that lets the new feature compiler
+/// drive the existing flat impostor renderer. Tectonics is optional and
+/// only consumed by archetypes that need it (currently `AgingOceanicHomeworld`);
+/// other archetypes ignore it. Seeds and feature placement come from the
+/// feature manifest.
+pub fn compile_initial_static_surface(
+    spec: &PlanetTerrainSpec,
+    tectonics: Option<&crate::tectonics::TectonicSystem>,
+    options: FeatureCompileOptions,
+) -> Result<StaticSurfaceData, FeatureCompileError> {
+    let plan = plan_initial_compilation(spec);
+    compile_manifest_to_static_surface(spec, &plan.manifest, &plan.prior, tectonics, options)
+}
+
+pub fn compile_manifest_to_static_surface(
     spec: &PlanetTerrainSpec,
     manifest: &FeatureManifest,
     prior: &TerrainPrior,
+    tectonics: Option<&crate::tectonics::TectonicSystem>,
     options: FeatureCompileOptions,
-) -> Result<BodyData, FeatureCompileError> {
+) -> Result<StaticSurfaceData, FeatureCompileError> {
     match spec.archetype {
         BodyArchetype::AirlessImpactMoon => {
             compile_airless_impact_moon(spec, manifest, prior, options)
         }
         BodyArchetype::ColdDesertFormerlyWet => {
             compile_cold_desert_formerly_wet(spec, manifest, prior, options)
+        }
+        BodyArchetype::AgingOceanicHomeworld => {
+            let tectonics = tectonics.ok_or(FeatureCompileError::MissingTectonics)?;
+            compile_aging_oceanic_homeworld(spec, manifest, prior, tectonics, options)
         }
         archetype => Err(FeatureCompileError::UnsupportedArchetype(archetype)),
     }
@@ -1584,7 +1620,7 @@ fn compile_airless_impact_moon(
     manifest: &FeatureManifest,
     prior: &TerrainPrior,
     options: FeatureCompileOptions,
-) -> Result<BodyData, FeatureCompileError> {
+) -> Result<StaticSurfaceData, FeatureCompileError> {
     let FeatureCompileOptions {
         cubemap_resolution,
         crater_count_scale,
@@ -1754,8 +1790,6 @@ fn compile_airless_impact_moon(
         },
     );
 
-    register_dynamic_surface_features(spec, &mut builder);
-
     Ok(builder.build())
 }
 
@@ -1764,7 +1798,7 @@ fn compile_cold_desert_formerly_wet(
     manifest: &FeatureManifest,
     prior: &TerrainPrior,
     options: FeatureCompileOptions,
-) -> Result<BodyData, FeatureCompileError> {
+) -> Result<StaticSurfaceData, FeatureCompileError> {
     let FeatureCompileOptions {
         cubemap_resolution,
         crater_count_scale,
@@ -1903,24 +1937,6 @@ fn compile_cold_desert_formerly_wet(
         BiomeReliefColor::default(),
     );
 
-    // Aeolian dune seas. Preset anchors live in the cold-desert style so other
-    // bodies can replace them without changing the compiler path. Run after
-    // the biome color grade so active sand leaves visible albedo variation.
-    let dune_regions = style.dune_regions(spec.physical.radius_m, spec.root_seed);
-    let dune_mask_field = field.clone();
-    apply_projection_stage(
-        &mut builder,
-        sub_seed(spec.root_seed, "feature_projection:dune_seas"),
-        DuneSeas {
-            regions: dune_regions,
-            coverage_mask: Some(DuneSeaCoverageMask::from_fn(move |dir| {
-                dune_mask_field.sample_dune_basin_mask(dir).fill
-            })),
-        },
-    );
-
-    register_dynamic_surface_features(spec, &mut builder);
-
     Ok(builder.build())
 }
 
@@ -1929,18 +1945,148 @@ fn apply_projection_stage<S: Stage>(builder: &mut BodyBuilder, seed: u64, stage:
     stage.apply(builder);
 }
 
-fn dynamic_surface_features_for(spec: &PlanetTerrainSpec) -> Vec<DynamicSurfaceFeature> {
-    spec.ice_caps
-        .iter()
-        .copied()
-        .map(DynamicSurfaceFeature::SeasonalIceCap)
-        .collect()
+/// Compile an `AgingOceanicHomeworld` body. Reads the tectonic system to
+/// produce structural shape via [`AgingOceanicField`]; baked cubemaps carry
+/// height + albedo + roughness with sea level set so the impostor renders
+/// water for negative elevations.
+///
+/// MVP scope: tectonic-driven shape only — no biome graph, no analytic
+/// features, no hydrology. Detail is expected to come from the
+/// erosion-filter pass on a separate fBM heightmap downstream of this bake.
+fn compile_aging_oceanic_homeworld(
+    spec: &PlanetTerrainSpec,
+    _manifest: &FeatureManifest,
+    prior: &TerrainPrior,
+    tectonics: &crate::tectonics::TectonicSystem,
+    options: FeatureCompileOptions,
+) -> Result<StaticSurfaceData, FeatureCompileError> {
+    let FeatureCompileOptions {
+        cubemap_resolution,
+        crater_count_scale: _,
+        projection: _,
+        cold_desert_style: _,
+    } = options;
+
+    let mut builder = BodyBuilder::new(
+        spec.physical.radius_m,
+        spec.root_seed,
+        composition_for(spec.physical.composition),
+        cubemap_resolution,
+        spec.physical.age_gyr,
+        None,
+        spec.physical.obliquity_deg.unwrap_or(0.0).to_radians(),
+    );
+
+    // Material palette in the order [`AgingOceanicField`] publishes its
+    // material IDs. Albedos are linear-RGB; only the dominant id reaches
+    // the impostor (via `material_cubemap`), and the impostor reads
+    // `albedo_cubemap` for visible color anyway. These exist for CPU
+    // samplers and downstream ground-LOD splat blending.
+    builder.materials = vec![
+        // 0: abyssal seabed
+        Material {
+            albedo: [0.030, 0.045, 0.060],
+            roughness: 0.95,
+        },
+        // 1: continental lowland
+        Material {
+            albedo: [0.260, 0.310, 0.180],
+            roughness: 0.80,
+        },
+        // 2: continental highland
+        Material {
+            albedo: [0.350, 0.290, 0.220],
+            roughness: 0.75,
+        },
+        // 3: coastal beach
+        Material {
+            albedo: [0.660, 0.575, 0.405],
+            roughness: 0.55,
+        },
+        // 4: snow-capped peaks
+        Material {
+            albedo: [0.880, 0.880, 0.900],
+            roughness: 0.50,
+        },
+    ];
+
+    let field = AgingOceanicField::new(tectonics.clone(), spec.root_seed, prior.ocean_fraction);
+    bake_surface_field_into_builder(&mut builder, &field);
+    let sea_level_m = sea_level_for_ocean_fraction(&builder, prior.ocean_fraction);
+    enforce_single_connected_ocean(&mut builder, sea_level_m);
+    field.repaint_baked_surface(&mut builder, sea_level_m);
+
+    // Sea level is chosen from the authored hydrosphere target, then the
+    // connectivity cleanup removes isolated inland water components.
+    builder.sea_level_m = Some(sea_level_m);
+
+    Ok(builder.build())
 }
 
-fn register_dynamic_surface_features(spec: &PlanetTerrainSpec, builder: &mut BodyBuilder) {
-    builder
-        .dynamic_surface_features
-        .extend(dynamic_surface_features_for(spec));
+fn sea_level_for_ocean_fraction(builder: &BodyBuilder, ocean_fraction: f32) -> f32 {
+    let target = ocean_fraction.clamp(0.05, 0.95);
+    let res = builder.height_contributions.resolution() as usize;
+    let texel_count = res * res * crate::cubemap::CubemapFace::ALL.len();
+    let mut heights = Vec::with_capacity(texel_count);
+    for face in crate::cubemap::CubemapFace::ALL {
+        heights.extend_from_slice(builder.height_contributions.height.face_data(face));
+    }
+    if heights.is_empty() {
+        return 0.0;
+    }
+
+    let idx = ((heights.len() - 1) as f32 * target).round() as usize;
+    let (_, sea_level, _) = heights.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
+    *sea_level
+}
+
+pub fn dynamic_surface_layers_for(
+    spec: &PlanetTerrainSpec,
+    cold_desert_style: &ColdDesertStyle,
+) -> DynamicSurfaceLayers {
+    let ice_caps = spec
+        .ice_caps
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, cap_spec)| IceCapLayer {
+            id: format!("{}.ice_cap.{index}", spec_id_segment(&spec.body_id)),
+            spec: cap_spec,
+        })
+        .collect();
+
+    let active_dunes = if spec.archetype == BodyArchetype::ColdDesertFormerlyWet {
+        cold_desert_style
+            .dune_regions(spec.physical.radius_m, spec.root_seed)
+            .into_iter()
+            .enumerate()
+            .map(|(index, region)| ActiveDuneLayer {
+                id: format!("{}.active_dune.{index}", spec_id_segment(&spec.body_id)),
+                region,
+                mobility: 0.0,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    DynamicSurfaceLayers {
+        ice_caps,
+        active_dunes,
+    }
+}
+
+fn spec_id_segment(body_id: &str) -> String {
+    body_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn megabasin_defs_from_manifest(

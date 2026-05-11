@@ -56,10 +56,8 @@ pub struct GpuCellRange {
     pub count: u32,
 }
 
-/// A hand-anchored aeolian dune-sea region as seen by the impostor's
-/// per-fragment dune synthesis. Only the *runtime* parameters live here;
-/// bake-time-only fields (`lambda_draa_m`, `amplitude_draa_m`) stay in
-/// the CPU `DuneSea` and are consumed by the dune bake stage.
+/// A hand-anchored active dune region as seen by the impostor's per-fragment
+/// dynamic layer synthesis.
 ///
 /// WGSL layout (std430), `align 16` due to `vec3<f32>`:
 /// ```wgsl
@@ -68,13 +66,21 @@ pub struct GpuCellRange {
 ///     radius_rad:        f32,        // offset 12, size 4
 ///     axis_tangent:      vec3<f32>,  // offset 16, size 12
 ///     feather_rad:       f32,        // offset 28, size 4
-///     lambda_dune_m:     f32,        // offset 32
-///     amplitude_dune_m:  f32,        // offset 36
-///     alpha_skew:        f32,        // offset 40
-///     crest_strength:    f32,        // offset 44
-///     albedo_crest_lin:  vec3<f32>,  // offset 48, size 12 (16-aligned ✓)
-///     seed:              u32,        // offset 60, size 4
-/// };                                  // total 64 bytes (multiple of 16)
+///     albedo_crest_lin:  vec3<f32>,  // offset 32, size 12
+///     crest_strength:    f32,        // offset 44, size 4
+///     lambda_draa_m:     f32,        // offset 48
+///     amplitude_draa_m:  f32,        // offset 52
+///     lambda_dune_m:     f32,        // offset 56
+///     amplitude_dune_m:  f32,        // offset 60
+///     alpha_skew:        f32,        // offset 64
+///     warp_amp_unit:     f32,        // offset 68
+///     warp_freq:         f32,        // offset 72
+///     coverage_scale:    f32,        // offset 76
+///     phase_offset_m:    f32,        // offset 80
+///     amplitude_scale:   f32,        // offset 84
+///     mobility:          f32,        // offset 88
+///     seed:              u32,        // offset 92
+/// };                                  // total 96 bytes (multiple of 16)
 /// ```
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -83,11 +89,19 @@ pub struct GpuDuneSea {
     pub radius_rad: f32,
     pub axis_tangent: Vec3,
     pub feather_rad: f32,
+    pub albedo_crest_lin: Vec3,
+    pub crest_strength: f32,
+    pub lambda_draa_m: f32,
+    pub amplitude_draa_m: f32,
     pub lambda_dune_m: f32,
     pub amplitude_dune_m: f32,
     pub alpha_skew: f32,
-    pub crest_strength: f32,
-    pub albedo_crest_lin: Vec3,
+    pub warp_amp_unit: f32,
+    pub warp_freq: f32,
+    pub coverage_scale: f32,
+    pub phase_offset_m: f32,
+    pub amplitude_scale: f32,
+    pub mobility: f32,
     pub seed: u32,
 }
 
@@ -112,11 +126,15 @@ pub struct GpuDuneSea {
 ///     roughness:            f32,       // offset 68, size 4
 ///     roughness_strength:   f32,       // offset 72, size 4
 ///     obliquity_response:   f32,       // offset 76, size 4
-///     seed:                 u32,       // offset 80, size 4
-///     _pad0:                u32,       // offset 84, size 4
-///     _pad1:                u32,       // offset 88, size 4
-///     _pad2:                u32,       // offset 92, size 4
-/// };                                   // total 96 bytes
+///     coverage_scale:       f32,       // offset 80, size 4
+///     edge_offset_deg:      f32,       // offset 84, size 4
+///     thickness_scale:      f32,       // offset 88, size 4
+///     dustiness:            f32,       // offset 92, size 4
+///     seed:                 u32,       // offset 96, size 4
+///     _pad0:                u32,       // offset 100, size 4
+///     _pad1:                u32,       // offset 104, size 4
+///     _pad2:                u32,       // offset 108, size 4
+/// };                                   // total 112 bytes
 /// ```
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -135,6 +153,10 @@ pub struct GpuIceCap {
     pub roughness: f32,
     pub roughness_strength: f32,
     pub obliquity_response: f32,
+    pub coverage_scale: f32,
+    pub edge_offset_deg: f32,
+    pub thickness_scale: f32,
+    pub dustiness: f32,
     pub seed: u32,
     pub _pad0: u32,
     pub _pad1: u32,
@@ -185,8 +207,8 @@ mod tests {
     fn struct_sizes_match_wgsl_std430() {
         assert_eq!(std::mem::size_of::<GpuCrater>(), 32);
         assert_eq!(std::mem::size_of::<GpuCellRange>(), 8);
-        assert_eq!(std::mem::size_of::<GpuDuneSea>(), 64);
-        assert_eq!(std::mem::size_of::<GpuIceCap>(), 96);
+        assert_eq!(std::mem::size_of::<GpuDuneSea>(), 96);
+        assert_eq!(std::mem::size_of::<GpuIceCap>(), 112);
         assert_eq!(std::mem::size_of::<GpuRadialFeature>(), 64);
     }
 
@@ -214,11 +236,19 @@ mod tests {
             radius_rad: 0.0,
             axis_tangent: Vec3::ZERO,
             feather_rad: 0.0,
+            albedo_crest_lin: Vec3::ZERO,
+            crest_strength: 0.0,
+            lambda_draa_m: 0.0,
+            amplitude_draa_m: 0.0,
             lambda_dune_m: 0.0,
             amplitude_dune_m: 0.0,
             alpha_skew: 0.0,
-            crest_strength: 0.0,
-            albedo_crest_lin: Vec3::ZERO,
+            warp_amp_unit: 0.0,
+            warp_freq: 0.0,
+            coverage_scale: 0.0,
+            phase_offset_m: 0.0,
+            amplitude_scale: 0.0,
+            mobility: 0.0,
             seed: 0,
         };
         let base = (&z as *const GpuDuneSea) as usize;
@@ -227,12 +257,20 @@ mod tests {
         assert_eq!(off((&z.radius_rad as *const f32) as usize), 12);
         assert_eq!(off((&z.axis_tangent as *const Vec3) as usize), 16);
         assert_eq!(off((&z.feather_rad as *const f32) as usize), 28);
-        assert_eq!(off((&z.lambda_dune_m as *const f32) as usize), 32);
-        assert_eq!(off((&z.amplitude_dune_m as *const f32) as usize), 36);
-        assert_eq!(off((&z.alpha_skew as *const f32) as usize), 40);
+        assert_eq!(off((&z.albedo_crest_lin as *const Vec3) as usize), 32);
         assert_eq!(off((&z.crest_strength as *const f32) as usize), 44);
-        assert_eq!(off((&z.albedo_crest_lin as *const Vec3) as usize), 48);
-        assert_eq!(off((&z.seed as *const u32) as usize), 60);
+        assert_eq!(off((&z.lambda_draa_m as *const f32) as usize), 48);
+        assert_eq!(off((&z.amplitude_draa_m as *const f32) as usize), 52);
+        assert_eq!(off((&z.lambda_dune_m as *const f32) as usize), 56);
+        assert_eq!(off((&z.amplitude_dune_m as *const f32) as usize), 60);
+        assert_eq!(off((&z.alpha_skew as *const f32) as usize), 64);
+        assert_eq!(off((&z.warp_amp_unit as *const f32) as usize), 68);
+        assert_eq!(off((&z.warp_freq as *const f32) as usize), 72);
+        assert_eq!(off((&z.coverage_scale as *const f32) as usize), 76);
+        assert_eq!(off((&z.phase_offset_m as *const f32) as usize), 80);
+        assert_eq!(off((&z.amplitude_scale as *const f32) as usize), 84);
+        assert_eq!(off((&z.mobility as *const f32) as usize), 88);
+        assert_eq!(off((&z.seed as *const u32) as usize), 92);
     }
 
     #[test]
@@ -252,6 +290,10 @@ mod tests {
             roughness: 0.0,
             roughness_strength: 0.0,
             obliquity_response: 0.0,
+            coverage_scale: 0.0,
+            edge_offset_deg: 0.0,
+            thickness_scale: 0.0,
+            dustiness: 0.0,
             seed: 0,
             _pad0: 0,
             _pad1: 0,
@@ -273,10 +315,14 @@ mod tests {
         assert_eq!(off((&z.roughness as *const f32) as usize), 68);
         assert_eq!(off((&z.roughness_strength as *const f32) as usize), 72);
         assert_eq!(off((&z.obliquity_response as *const f32) as usize), 76);
-        assert_eq!(off((&z.seed as *const u32) as usize), 80);
-        assert_eq!(off((&z._pad0 as *const u32) as usize), 84);
-        assert_eq!(off((&z._pad1 as *const u32) as usize), 88);
-        assert_eq!(off((&z._pad2 as *const u32) as usize), 92);
+        assert_eq!(off((&z.coverage_scale as *const f32) as usize), 80);
+        assert_eq!(off((&z.edge_offset_deg as *const f32) as usize), 84);
+        assert_eq!(off((&z.thickness_scale as *const f32) as usize), 88);
+        assert_eq!(off((&z.dustiness as *const f32) as usize), 92);
+        assert_eq!(off((&z.seed as *const u32) as usize), 96);
+        assert_eq!(off((&z._pad0 as *const u32) as usize), 100);
+        assert_eq!(off((&z._pad1 as *const u32) as usize), 104);
+        assert_eq!(off((&z._pad2 as *const u32) as usize), 108);
     }
 
     #[test]

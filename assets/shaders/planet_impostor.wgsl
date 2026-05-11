@@ -19,8 +19,9 @@
 //      crater's contribution is faded in by a screen-space smoothstep so it
 //      never pops during zoom.
 //
-//   3. Dynamic surface overlays — seasonal ice cap descriptors are rendered
-//      on top of the baked terrain as a static visual layer for now.
+//   3. Dynamic surface overlays — seasonal ice caps and active dune texture
+//      layers are rendered on top of the baked terrain without invalidating
+//      the static terrain cache.
 //
 // Sub-500 m craters are intentionally not rendered in the impostor — the
 // statistical shader-hash layer was dropped.
@@ -102,6 +103,10 @@ struct PlanetParams {
     // Quaternion (xyzw) rotating world-space directions into body-local space
     // where the cubemaps were baked. Identity = no rotation.
     orientation:     vec4<f32>,
+    // Quaternion mapping body-local directions into the active-dune texture
+    // layer. Dune evolution can update this one uniform instead of running
+    // per-fragment procedural dune synthesis.
+    active_dune_texture_from_body: vec4<f32>,
     // Shared scene-lighting description: stars, ambient, eclipse occluders,
     // planetshine parent. Mirror of `thalos::lighting::SceneLighting`.
     scene:           SceneLighting,
@@ -206,9 +211,9 @@ struct RadialFeature {
     _pad1:           u32,
 }
 
-// IceCap: seasonal/dynamic surface overlay. This is deliberately not baked
-// into the terrain cubemaps; it is rendered here as a static visual layer for
-// now.
+// IceCap: dynamic surface layer. Displacement contributes to canonical
+// sampled height where needed, but not to impostor finite-difference normals,
+// self-shadow, or disk silhouette.
 struct IceCap {
     axis:                 vec3<f32>,
     flags:                u32,
@@ -224,10 +229,35 @@ struct IceCap {
     roughness:            f32,
     roughness_strength:   f32,
     obliquity_response:   f32,
+    coverage_scale:       f32,
+    edge_offset_deg:      f32,
+    thickness_scale:      f32,
+    dustiness:            f32,
     seed:                 u32,
     _pad0:                u32,
     _pad1:                u32,
     _pad2:                u32,
+}
+
+struct DuneSea {
+    center:            vec3<f32>,
+    radius_rad:        f32,
+    axis_tangent:      vec3<f32>,
+    feather_rad:       f32,
+    albedo_crest_lin:  vec3<f32>,
+    crest_strength:    f32,
+    lambda_draa_m:     f32,
+    amplitude_draa_m:  f32,
+    lambda_dune_m:     f32,
+    amplitude_dune_m:  f32,
+    alpha_skew:        f32,
+    warp_amp_unit:     f32,
+    warp_freq:         f32,
+    coverage_scale:    f32,
+    phase_offset_m:    f32,
+    amplitude_scale:   f32,
+    mobility:          f32,
+    seed:              u32,
 }
 
 @group(3) @binding(0)  var<uniform> params:          PlanetParams;
@@ -253,6 +283,11 @@ struct IceCap {
 @group(3) @binding(13) var          cloud_cover_tex: texture_cube<f32>;
 @group(3) @binding(14) var          cloud_cover_sampler: sampler;
 @group(3) @binding(15) var<storage, read> ice_caps:    array<IceCap>;
+@group(3) @binding(16) var<storage, read> active_dunes: array<DuneSea>;
+@group(3) @binding(17) var          active_dune_height_tex: texture_cube<f32>;
+@group(3) @binding(18) var          active_dune_height_sampler: sampler;
+@group(3) @binding(19) var          active_dune_albedo_tex: texture_cube<f32>;
+@group(3) @binding(20) var          active_dune_albedo_sampler: sampler;
 
 // ── Vertex stage ─────────────────────────────────────────────────────────────
 
@@ -751,6 +786,7 @@ struct IceOverlay {
     albedo_strength: f32,
     roughness: f32,
     roughness_strength: f32,
+    height_delta_m: f32,
 }
 
 struct IceCapMasks {
@@ -851,12 +887,24 @@ fn ice_pole_masks(
 }
 
 fn ice_cap_masks(dir: vec3<f32>, cap: IceCap) -> IceCapMasks {
-    if cap.flags == 0u || cap.max_thickness_m <= 0.0 {
+    if cap.flags == 0u || cap.coverage_scale <= 0.0 || cap.max_thickness_m <= 0.0 {
         return empty_ice_cap_masks();
     }
 
     let axis = normalize(cap.axis);
     let sample_lat_deg = asin(clamp(dot(dir, axis), -1.0, 1.0)) * (180.0 / PI);
+    let reach_latitude = clamp(
+        cap.edge_latitude_deg + cap.edge_offset_deg - cap.edge_noise_deg * 1.8 - 3.0,
+        0.0,
+        89.5,
+    );
+    let near_included_pole =
+        (((cap.flags & 1u) != 0u) && sample_lat_deg >= reach_latitude)
+        || (((cap.flags & 2u) != 0u) && -sample_lat_deg >= reach_latitude);
+    if !near_included_pole {
+        return empty_ice_cap_masks();
+    }
+
     let freq = max(cap.noise_frequency, 0.001);
     let edge_noise = fbm3(dir * freq, cap.seed ^ 0xA71C3E55u, 4u, 0.55, 2.03);
     let scallop_noise = fbm3(dir * freq * 5.8, cap.seed ^ 0x8CEB7A91u, 3u, 0.56, 2.07);
@@ -864,9 +912,9 @@ fn ice_cap_masks(dir: vec3<f32>, cap: IceCap) -> IceCapMasks {
 
     let scallop_strength = 0.25 + 0.35 * clamp(cap.edge_sharpness, 0.0, 1.0);
     let edge_offset = edge_noise * cap.edge_noise_deg + scallop_noise * cap.edge_noise_deg * scallop_strength;
-    let edge_latitude = clamp(cap.edge_latitude_deg + edge_offset, 0.0, 89.5);
+    let edge_latitude = clamp(cap.edge_latitude_deg + cap.edge_offset_deg + edge_offset, 0.0, 89.5);
     let solid_latitude = clamp(
-        max(cap.solid_latitude_deg + edge_noise * cap.edge_noise_deg * 0.18, edge_latitude + 0.6),
+        max(cap.solid_latitude_deg + cap.edge_offset_deg + edge_noise * cap.edge_noise_deg * 0.18, edge_latitude + 0.6),
         edge_latitude + 0.6,
         90.0,
     );
@@ -904,6 +952,7 @@ fn sample_ice_caps(dir: vec3<f32>) -> IceOverlay {
         0.0,
         0.0,
         0.0,
+        0.0,
     );
 
     let count = arrayLength(&ice_caps);
@@ -911,7 +960,7 @@ fn sample_ice_caps(dir: vec3<f32>) -> IceOverlay {
         let cap = ice_caps[i];
         let masks = ice_cap_masks(dir, cap);
         let sparse_ice = max(masks.detached_frost * 0.68, masks.dirty_fringe * 0.34);
-        let coverage = max(masks.coverage, sparse_ice);
+        let coverage = clamp(max(masks.coverage, sparse_ice) * cap.coverage_scale, 0.0, 1.0);
         if coverage <= out.coverage {
             continue;
         }
@@ -927,7 +976,8 @@ fn sample_ice_caps(dir: vec3<f32>) -> IceOverlay {
             0.0,
             1.0,
         );
-        let frost_color = mix(cap.dust_albedo_linear, cap.albedo_linear, clean_ice);
+        let clean_color = mix(cap.dust_albedo_linear, cap.albedo_linear, clean_ice);
+        let frost_color = mix(clean_color, cap.dust_albedo_linear, clamp(cap.dustiness, 0.0, 1.0));
         let dirty_color = mix(cap.dust_albedo_linear, frost_color, 0.32 + texture * 0.26);
         let dirty_mix = clamp(
             masks.dirty_fringe * 0.85 + masks.edge_band * 0.45 + masks.troughs * 0.55,
@@ -939,9 +989,54 @@ fn sample_ice_caps(dir: vec3<f32>) -> IceOverlay {
         out.albedo_strength = cap.albedo_strength;
         out.roughness = cap.roughness;
         out.roughness_strength = cap.roughness_strength;
+        out.height_delta_m = cap.max_thickness_m * max(cap.thickness_scale, 0.0) * coverage;
     }
 
     return out;
+}
+
+// ── Dynamic active-dune overlay ────────────────────────────────────────────
+
+struct DuneOverlay {
+    coverage: f32,
+    albedo: vec3<f32>,
+    albedo_strength: f32,
+    roughness: f32,
+    roughness_strength: f32,
+    height_delta_m: f32,
+}
+
+fn empty_dune_overlay() -> DuneOverlay {
+    return DuneOverlay(0.0, vec3<f32>(0.0), 0.0, 0.76, 0.0, 0.0);
+}
+
+fn active_dune_layer_dir(dir: vec3<f32>) -> vec3<f32> {
+    return normalize(rotate_quat(params.active_dune_texture_from_body, dir));
+}
+
+fn sample_baked_active_dunes(dir: vec3<f32>) -> DuneOverlay {
+    if arrayLength(&active_dunes) == 0u {
+        return empty_dune_overlay();
+    }
+
+    let layer_dir = active_dune_layer_dir(dir);
+    let rgba = textureSample(active_dune_albedo_tex, active_dune_albedo_sampler, layer_dir);
+    return DuneOverlay(
+        rgba.a,
+        rgba.rgb,
+        1.0,
+        0.78,
+        clamp(rgba.a * 0.32, 0.0, 0.32),
+        0.0,
+    );
+}
+
+fn dynamic_height_delta_m(dir: vec3<f32>, include_active_dunes: bool) -> f32 {
+    var h = sample_ice_caps(dir).height_delta_m;
+    if include_active_dunes {
+        h = h + textureSample(active_dune_height_tex, active_dune_height_sampler, active_dune_layer_dir(dir)).r * params.height_range;
+    }
+    return h;
 }
 
 // ── Radial feature erosion/color detail ────────────────────────────────────
@@ -1156,7 +1251,7 @@ fn iterate_radial_features(p_unit: vec3<f32>, pixel_size_m: f32) -> RadialAccum 
 //
 // Finite-difference normals derived from the filterable height cubemap.
 // Per-fragment evaluation gives full f32 precision for the gradient — the
-// pre-baked normal cube in `BodyData` exists for future ground LOD use, but
+// pre-baked normal cube in `StaticSurfaceData` exists for future ground LOD use, but
 // the impostor reconstructs normals here so the shading retains the
 // continuous depth that 8-bit object-space encoding can't preserve at
 // shallow slope angles (where the terminator and crater rim transitions
@@ -1181,10 +1276,10 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
     // Offset ~1.5 texels on the cubemap.
     let offset = 1.5 / res;
 
-    let h_e = sample_height_baked_auto_lod_m(n + tangent * offset);
-    let h_w = sample_height_baked_auto_lod_m(n - tangent * offset);
-    let h_n = sample_height_baked_auto_lod_m(n + bitangent * offset);
-    let h_s = sample_height_baked_auto_lod_m(n - bitangent * offset);
+    let h_e = sample_height_normal_m(n + tangent * offset);
+    let h_w = sample_height_normal_m(n - tangent * offset);
+    let h_n = sample_height_normal_m(n + bitangent * offset);
+    let h_s = sample_height_normal_m(n - bitangent * offset);
 
     let ds = detail.body_radius_m * offset * 2.0;
     if ds < 1e-6 {
@@ -1280,6 +1375,11 @@ fn sample_height_baked_auto_lod_m(dir: vec3<f32>) -> f32 {
     return (stored - 0.5) * 2.0 * params.height_range;
 }
 
+fn sample_height_normal_m(dir: vec3<f32>) -> f32 {
+    let d = normalize(dir);
+    return sample_height_baked_auto_lod_m(d);
+}
+
 // Canonical surface height in meters: bake (sampled at the warped
 // direction) + height jitter. This is the function the future 3D
 // mesher must reproduce at the iso-contour to keep the LOD handoff
@@ -1288,18 +1388,15 @@ fn sample_height_baked_auto_lod_m(dir: vec3<f32>) -> f32 {
 // of evaluating warp + jitter (4 fbm calls) is justified.
 //
 // Iso-contour cull: read the bare cubemap height first; when it sits
-// well clear of sea level, the canonical warp + jitter cannot push
-// the result across the smoothstep band at the call site, so skip
-// the four fbm evaluations and return the bare value. Authored
-// `coastline_jitter_amp_m` is ~30 m on water bodies; the warp arc is
-// ~5 km on a 6 Mm body — a band of `10 × jitter_amp + 100 m` covers
-// the worst plausible perturbation. Far from a coast (most of the
-// disk), this is the hot path. Airless bodies already short-circuit
-// inside `coastline_warp_dir` / `coastline_jitter_m`, so the explicit
-// cull below is a no-op for them.
+// well clear of sea level, optional canonical warp + jitter cannot push
+// the result across the smoothstep band at the call site, so skip the
+// four fbm evaluations and return the bare value. Current ocean materials
+// leave these amplitudes at zero because coastline shape is baked; this
+// path remains for explicit material experiments.
 fn sample_height_m(dir: vec3<f32>) -> f32 {
     let bare_stored = textureSampleLevel(height_tex, height_sampler, dir, 0.0).r;
-    let bare_m = (bare_stored - 0.5) * 2.0 * params.height_range;
+    let dynamic_m = dynamic_height_delta_m(dir, true);
+    let bare_m = (bare_stored - 0.5) * 2.0 * params.height_range + dynamic_m;
     let bare_above_sea = bare_m - params.sea_level_m;
     let band = params.coastline_jitter_amp_m * 10.0 + 100.0;
     if abs(bare_above_sea) > band {
@@ -1309,7 +1406,14 @@ fn sample_height_m(dir: vec3<f32>) -> f32 {
     let warped = coastline_warp_dir(dir);
     let stored = textureSampleLevel(height_tex, height_sampler, warped, 0.0).r;
     let baked_m = (stored - 0.5) * 2.0 * params.height_range;
-    return baked_m + coastline_jitter_m(warped);
+    return baked_m + coastline_jitter_m(warped) + dynamic_m;
+}
+
+fn sample_height_shadow_m(dir: vec3<f32>) -> f32 {
+    // Dynamic veneers are too small or too broad to justify evaluating inside
+    // the long-range self-shadow ray march. Keep this static-only: the ray
+    // loop is 20 taps and sits on the fragment hot path near the terminator.
+    return sample_height_baked_m(dir);
 }
 
 fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
@@ -1317,7 +1421,7 @@ fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
     // Bare baked height — the canonical high-freq band would only
     // contribute sub-texel shadows below the impostor's visible
     // shadow scale, and 21 fbm evaluations per ray is too costly.
-    let h0 = sample_height_baked_m(sample_dir);
+    let h0 = sample_height_shadow_m(sample_dir);
 
     // Start a hair above the local surface so we don't self-intersect.
     let bias_m = max(radius_m * 0.0001, 5.0);
@@ -1338,7 +1442,7 @@ fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
         let p = origin + light_dir_local * t;
         let r = length(p);
         let d = p / r;
-        let h = sample_height_baked_m(d);
+        let h = sample_height_shadow_m(d);
         let surface_r = radius_m + h;
         if surface_r > r {
             let penetration = (surface_r - r) / (radius_m * 0.0003);
@@ -1669,6 +1773,10 @@ fn fragment(in: VertexOutput) -> FragOutput {
     var baked_albedo = textureSample(albedo_tex, albedo_sampler, sample_dir).rgb * regional;
     var surface_roughness = textureSample(roughness_tex, roughness_sampler, sample_dir).r;
 
+    // ── Pixel size in meters ────────────────────────────────────────────
+    // Carried from the vertex stage; see vertex() for the derivation.
+    let pixel_size_m = in.pixel_size_m;
+
     // ── Layer 1b: height-derived normal perturbation ─────────────────────
     // Per-fragment finite-difference of the filterable height cube. f32
     // precision in the gradient preserves shallow slope angles that an
@@ -1676,10 +1784,6 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // rim transitions read continuously here. Body-local until after the
     // SSBO crater gradients combine, then rotated to world space.
     var shading_normal = perturb_normal_from_height(sample_dir);
-
-    // ── Pixel size in meters ────────────────────────────────────────────
-    // Carried from the vertex stage; see vertex() for the derivation.
-    let pixel_size_m = in.pixel_size_m;
 
     // Feature-local radial erosion detail. This is intentionally independent
     // of `sample_height_m`: at impostor distances the signal should read
@@ -1750,10 +1854,19 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let crater_mod = clamp(crater_albedo_mod, -0.65, 1.20);
     var albedo = baked_albedo * (1.0 + fresh_boost + crater_mod);
 
-    // Seasonal ice caps are dynamic surface state, not baked terrain. Render
-    // them as a static overlay for now: they cover the final terrain albedo
-    // and microsurface roughness while leaving the immutable height cube
-    // untouched.
+    // Dynamic active dunes sit above the static substrate. The orbital
+    // impostor applies them as a cheap material layer; dynamic height is
+    // reserved for canonical sampled height where needed, not the normal path.
+    let dune_overlay = sample_baked_active_dunes(sample_dir);
+    if dune_overlay.coverage > 0.001 {
+        let dune_albedo_t = clamp(dune_overlay.coverage * dune_overlay.albedo_strength, 0.0, 1.0);
+        albedo = mix(albedo, dune_overlay.albedo, dune_albedo_t);
+        let dune_roughness_t = clamp(dune_overlay.roughness_strength, 0.0, 1.0);
+        surface_roughness = mix(surface_roughness, dune_overlay.roughness, dune_roughness_t);
+    }
+    // Seasonal ice caps are dynamic surface state, not baked terrain. The
+    // orbital impostor keeps the visible veneer material cheap and does not
+    // perturb normals or self-shadow from ice height.
     let ice_overlay = sample_ice_caps(sample_dir);
     if ice_overlay.coverage > 0.001 {
         let ice_albedo_t = clamp(ice_overlay.coverage * ice_overlay.albedo_strength, 0.0, 1.0);
@@ -1836,26 +1949,34 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // Cook-Torrance water BRDF. The smoothstep gives a soft coastline at
     // the height cube's bilinear-filter scale — no separate coastline mask
     // needed.
-    let height_above_sea_m = sample_height_m(sample_dir) - params.sea_level_m;
-    let water_depth_m = -height_above_sea_m;
-    let water_t = smoothstep(-1.0, 1.0, water_depth_m) * (1.0 - ice_overlay.coverage);
-    if water_t > 0.0 {
-        // Sky tint for grazing-angle reflection. Rayleigh τ carries the
-        // per-channel atmosphere tint cue (blue > green > red on Earth-
-        // like). Airless bodies have rayleigh = 0 → black sky reflection,
-        // which is physically correct for vacuum.
-        let sky_tint = atmosphere.rayleigh.xyz * atmosphere.rayleigh.w * 3.0;
-        let water_lit = shade_water(
-            normal,
-            view_dir,
-            sun_dir_ws,
-            water_depth_m,
-            sun_flux,
-            params.scene.ambient_intensity,
-            sky_tint,
-            hit,
-        );
-        lit = mix(lit, water_lit, water_t);
+    if params.sea_level_m > -1.0e8 {
+        let height_above_sea_m = sample_height_m(sample_dir) - params.sea_level_m;
+        let water_depth_m = -height_above_sea_m;
+        let water_t = smoothstep(-1.0, 1.0, water_depth_m) * (1.0 - ice_overlay.coverage);
+        if water_t > 0.0 {
+            var water_lit = vec3<f32>(0.0);
+            if params.fullbright >= 0.5 {
+                let water_n_dot_v = max(dot(normal, view_dir), 0.0);
+                water_lit = water_column_color(water_depth_m, water_n_dot_v);
+            } else {
+                // Sky tint for grazing-angle reflection. Rayleigh τ carries the
+                // per-channel atmosphere tint cue (blue > green > red on Earth-
+                // like). Airless bodies have rayleigh = 0 → black sky reflection,
+                // which is physically correct for vacuum.
+                let sky_tint = atmosphere.rayleigh.xyz * atmosphere.rayleigh.w * 3.0;
+                water_lit = shade_water(
+                    normal,
+                    view_dir,
+                    sun_dir_ws,
+                    water_depth_m,
+                    sun_flux,
+                    params.scene.ambient_intensity,
+                    sky_tint,
+                    hit,
+                );
+            }
+            lit = mix(lit, water_lit, water_t);
+        }
     }
 
     // ── Rayleigh ground transmission ────────────────────────────────────

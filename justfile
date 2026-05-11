@@ -54,11 +54,15 @@ clear-terrain-cache:
 
 # Headless terrain bake + PNG dump. Writes to `stage-bakes/<body>/`.
 # Body name is case-insensitive; pass `all` to bake every body with a
-# terrain block.
+# terrain block. Default resolution is 512² for fast iteration; pass
+# `--full` for the body's authored/derived resolution, or
+# `--cubemap-resolution N` to force a specific size.
 #
 # Examples:
 #   just bake Thalos
 #   just bake thalos
 #   just bake all
-bake body:
-    cargo run --release -p thalos_bake_dump -- {{body}}
+#   just bake Thalos --full
+#   just bake Mira --cubemap-resolution 2048
+bake body *args:
+    cargo run --release -p thalos_bake_dump -- {{body}} {{args}}

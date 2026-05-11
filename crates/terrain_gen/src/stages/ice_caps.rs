@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::body_builder::BodyBuilder;
-use crate::cubemap::{face_uv_to_dir, CubemapFace};
+use crate::cubemap::{CubemapFace, face_uv_to_dir};
 use crate::noise::fbm3;
 use crate::seeding::sub_seed;
 use crate::stage::Stage;
@@ -12,10 +12,11 @@ use crate::types::{IceCapSpec, Material};
 
 /// Late, data-driven ice veneer for polar caps.
 ///
-/// Static terrain compilers should not schedule this stage for seasonal polar
-/// caps; they should carry `DynamicSurfaceFeature::SeasonalIceCap` instead.
-/// This remains available for explicit preview/debug bakes or future bodies
-/// with permanent, geologic ice sheets that truly belong in immutable terrain.
+/// Deprecated debug-only baked ice veneer.
+///
+/// Production terrain compilers should not schedule this stage. Polar ice is
+/// represented as `DynamicSurfaceLayers::ice_caps` so runtime state can be
+/// shared by the impostor and future ground tiles.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IceCaps {
     #[serde(default)]

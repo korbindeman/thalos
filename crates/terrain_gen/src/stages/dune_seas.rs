@@ -257,9 +257,9 @@ impl Stage for DuneSeas {
             }
         }
 
-        // Hand the regions to BodyBuilder so they end up on BodyData.
-        // The impostor will pull them via `BodyData.dune_seas`.
-        builder.dune_seas.extend(regions.iter().cloned());
+        // Dynamic dune definitions are owned by `DynamicSurfaceLayers`. This
+        // static stage only rasterizes lithified/ancient dune-derived terrain
+        // when a compiler explicitly opts into it.
     }
 }
 

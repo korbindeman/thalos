@@ -7,7 +7,7 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 use thalos_atmosphere_gen::TerrestrialAtmosphere;
-use thalos_terrain_gen::BodyData;
+use thalos_terrain_gen::StaticSurfaceData;
 
 use crate::lighting::SceneLighting;
 
@@ -35,6 +35,10 @@ pub struct PlanetParams {
     /// the baked near-side (+Z) with the direction toward the parent body.
     /// Identity quaternion = no rotation.
     pub orientation: Vec4,
+    /// Quaternion (xyzw) mapping body-local directions into the active-dune
+    /// overlay texture. Slow dune migration can update this field without
+    /// rebuilding static terrain or running per-fragment dune synthesis.
+    pub active_dune_texture_from_body: Vec4,
     /// Stars, eclipse occluders, ambient, and planetshine parent. See
     /// `crate::lighting::SceneLighting`.
     pub scene: SceneLighting,
@@ -95,7 +99,7 @@ pub struct PlanetWaterParams {
 }
 
 impl PlanetWaterParams {
-    pub fn from_body_data(body: &BodyData) -> Self {
+    pub fn from_static_surface(body: &StaticSurfaceData) -> Self {
         if body.sea_level_m.is_some() {
             Self {
                 color_depth: Vec4::new(
@@ -121,7 +125,7 @@ pub struct PlanetCoastlineParams {
 }
 
 impl PlanetCoastlineParams {
-    pub fn from_body_data(body: &BodyData) -> Self {
+    pub fn from_static_surface(body: &StaticSurfaceData) -> Self {
         let seed = (body.detail_params.seed as u32)
             ^ ((body.detail_params.seed >> 32) as u32)
             ^ 0xC0A5_711E_u32;
@@ -135,9 +139,11 @@ impl PlanetCoastlineParams {
 
         if has_ocean && !flat_ocean_placeholder {
             Self {
-                // ~1 texel of arc on a 2048² cube = 2π/(4·2048) ≈ 7.7e-4 rad.
-                warp_amp_radians: 8.0e-4,
-                jitter_amp_m: 30.0,
+                // Coastline shape is baked into the terrain cubemap. Keep the
+                // runtime material from adding high-frequency shoreline fuzz
+                // that makes editor/runtime diverge from the bake.
+                warp_amp_radians: 0.0,
+                jitter_amp_m: 0.0,
                 seed,
             }
         } else {
@@ -158,16 +164,16 @@ impl Default for PlanetParams {
             terminator_wrap: 0.0,
             fullbright: 0.0,
             orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            active_dune_texture_from_body: Vec4::new(0.0, 0.0, 0.0, 1.0),
             scene: SceneLighting::default(),
             // Large negative sentinel — airless bodies leave this at the
             // default, and the shader's `sample_height_m(dir) < sea_level_m`
             // test never fires.
             sea_level_m: -1.0e9,
             water_color_depth: Vec4::new(0.012, 0.040, 0.090, 120.0),
-            // Defaults are 0 so airless / preview bodies pay zero
-            // cost. Bodies with a sea level should set warp_amp to
-            // ~8e-4 rad (≈1 texel on Thalos) and jitter_amp_m to
-            // ~30 m for the design-point Earth-like look.
+            // Defaults are 0 so airless / preview bodies pay zero cost.
+            // Coastline shape belongs in the bake; shader-side perturbation
+            // is reserved for explicit experiments.
             coastline_warp_amp_radians: 0.0,
             coastline_warp_freq_per_m: 1.0 / 2500.0,
             coastline_jitter_amp_m: 0.0,
@@ -216,7 +222,7 @@ impl Default for PlanetDetailParams {
 
 impl PlanetDetailParams {
     /// Build from terrain_gen's DetailNoiseParams plus the Cratering stage's
-    /// cubemap bake threshold. Both come from `BodyData` — pass both.
+    /// cubemap bake threshold. Both come from `StaticSurfaceData` — pass both.
     pub fn from_body(
         detail: &thalos_terrain_gen::DetailNoiseParams,
         cubemap_bake_threshold_m: f32,
@@ -394,7 +400,7 @@ impl AtmosphereBlock {
 // Bind group layout (group 3, planet material). `PlanetMaterial` and
 // `PlanetHaloMaterial` intentionally share this exact layout; only the
 // pipeline shader def / depth-write state differs. This is the contract both
-// the shader and `bake_from_body_data` must match.
+// the shader and `bake_from_planet_surface` must match.
 //
 // | Binding | Kind             | WGSL type                 | Source             |
 // |---------|------------------|---------------------------|--------------------|
@@ -414,6 +420,11 @@ impl AtmosphereBlock {
 // | 13      | texture cube     | texture_cube<f32>         | `cloud_cover` cube |
 // | 14      | sampler          | sampler                   | `cloud_cover` sampler |
 // | 15      | storage (read)   | array<IceCap>             | `ice_caps`         |
+// | 16      | storage (read)   | array<DuneSea>            | `active_dunes`     |
+// | 17      | texture cube     | texture_cube<f32>         | `active_dune_height` |
+// | 18      | sampler          | sampler                   | `active_dune_height_sampler` |
+// | 19      | texture cube     | texture_cube<f32>         | `active_dune_albedo` |
+// | 20      | sampler          | sampler                   | `active_dune_albedo_sampler` |
 //
 // Storage buffers (8-10) use std430 layout. Struct definitions for
 // `Crater`, `CellRange` are mirrored in the shader and must stay in sync
@@ -429,7 +440,7 @@ impl AtmosphereBlock {
 // (`perturb_normal_from_height` in `planet_impostor.wgsl`). 8-bit object-
 // space normal encoding crushed the shallow slope gradients that drive
 // terminator depth and crater rim transitions, so the baked
-// `normal_cubemap` in `BodyData` is reserved for future ground LOD
+// `normal_cubemap` in `StaticSurfaceData` is reserved for future ground LOD
 // consumers where chunked geometry can't cheaply finite-difference at
 // runtime.
 //
@@ -445,10 +456,9 @@ impl AtmosphereBlock {
 // `AtmosphereBlock::cloud_albedo_coverage.w > 0` so airless bodies pay
 // just one texture fetch + a branch.
 //
-// Binding 15 carries dynamic surface overlays that are not part of the
-// terrain bake. It currently contains seasonal polar ice caps rendered as a
-// static impostor overlay; later runtime climate/wind systems can update this
-// buffer without rebuilding terrain cubemaps.
+// Bindings 15-16 carry dynamic surface overlays that are not part of the
+// static terrain bake. Runtime climate/wind systems can update these buffers
+// without rebuilding terrain cubemaps.
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct PlanetMaterial {
@@ -483,6 +493,14 @@ pub struct PlanetMaterial {
     pub cloud_cover: Handle<Image>,
     #[storage(15, read_only)]
     pub ice_caps: Handle<ShaderStorageBuffer>,
+    #[storage(16, read_only)]
+    pub active_dunes: Handle<ShaderStorageBuffer>,
+    #[texture(17, dimension = "cube")]
+    #[sampler(18)]
+    pub active_dune_height: Handle<Image>,
+    #[texture(19, dimension = "cube")]
+    #[sampler(20)]
+    pub active_dune_albedo: Handle<Image>,
 }
 
 impl Material for PlanetMaterial {
@@ -550,6 +568,14 @@ pub struct PlanetHaloMaterial {
     pub cloud_cover: Handle<Image>,
     #[storage(15, read_only)]
     pub ice_caps: Handle<ShaderStorageBuffer>,
+    #[storage(16, read_only)]
+    pub active_dunes: Handle<ShaderStorageBuffer>,
+    #[texture(17, dimension = "cube")]
+    #[sampler(18)]
+    pub active_dune_height: Handle<Image>,
+    #[texture(19, dimension = "cube")]
+    #[sampler(20)]
+    pub active_dune_albedo: Handle<Image>,
 }
 
 impl From<&PlanetMaterial> for PlanetHaloMaterial {
@@ -567,6 +593,9 @@ impl From<&PlanetMaterial> for PlanetHaloMaterial {
             atmosphere: material.atmosphere,
             cloud_cover: material.cloud_cover.clone(),
             ice_caps: material.ice_caps.clone(),
+            active_dunes: material.active_dunes.clone(),
+            active_dune_height: material.active_dune_height.clone(),
+            active_dune_albedo: material.active_dune_albedo.clone(),
         }
     }
 }

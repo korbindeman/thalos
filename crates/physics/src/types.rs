@@ -2,7 +2,7 @@ use glam::{DQuat, DVec3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thalos_atmosphere_gen::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
-use thalos_terrain_gen::TerrainConfig;
+use thalos_terrain_gen::{TectonicConfig, TerrainConfig};
 
 /// Gravitational constant in m^3 kg^-1 s^-2.
 pub const G: f64 = 6.674_30e-11;
@@ -130,6 +130,14 @@ pub struct BodyDefinition {
     pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
     pub terrain: TerrainConfig,
+    /// Optional tectonic structural prior. When present, bodies carry a
+    /// plate graph (mesh + plates + boundaries + per-cell distance fields)
+    /// that the editor visualizes and a future `SurfaceField` height
+    /// contribution will read. Independent of `terrain` — bodies on the
+    /// flat-water `Ocean` placeholder can still carry tectonics, and
+    /// bodies with feature terrain can opt into or out of tectonics
+    /// independently.
+    pub tectonics: Option<TectonicConfig>,
     /// Gas / ice giant atmosphere definition. A body with
     /// `atmosphere: Some(_)` and no `terrain` is rendered as a gas
     /// giant (optically thick all the way down, no solid surface).

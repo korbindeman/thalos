@@ -2,7 +2,6 @@
 (
     terrain: Feature((
         seed: 1007,
-        cubemap_resolution: 2048,
         body_age_gyr: 4.3,
         archetype: ColdDesertFormerlyWet,
         composition: BasalticSilicate,

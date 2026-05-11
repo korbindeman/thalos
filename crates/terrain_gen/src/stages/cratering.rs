@@ -714,7 +714,7 @@ impl Stage for Cratering {
         }
 
         builder.craters.extend(craters);
-        // Publish the threshold to BodyData so the sampler and shader can
+        // Publish the threshold to StaticSurfaceData so the sampler and shader can
         // skip baked craters during Layer 2 iteration (otherwise their
         // contribution is counted twice — once from the cubemap texel, once
         // from the SSBO).

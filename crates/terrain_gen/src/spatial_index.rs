@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{Channel, Crater, Volcano};
 
-/// Reference to a feature in one of the typed arrays on `BodyData`.
+/// Reference to a feature in one of the typed arrays on `StaticSurfaceData`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeatureRef {
     Crater(u32),
@@ -26,7 +26,7 @@ pub enum FeatureRef {
 /// Icosahedral spatial index over sphere features.
 ///
 /// Built once during `BodyBuilder::build()` from the populated feature arrays.
-/// Immutable after construction — lives on `BodyData`.
+/// Immutable after construction — lives on `StaticSurfaceData`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IcoBuckets {
     /// Cell vertex indices into `vertices` (3 per triangle).

@@ -11,7 +11,7 @@ mod solid_planet;
 mod texture;
 
 pub use bake::{
-    bake_cloud_cover_image, bake_from_body_data, blank_cloud_cover_image,
+    bake_cloud_cover_image, bake_from_planet_surface, blank_cloud_cover_image,
     equirect_to_cloud_cover_image,
 };
 pub use film_grain::FilmGrain;

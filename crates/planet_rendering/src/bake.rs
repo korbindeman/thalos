@@ -1,13 +1,15 @@
-//! Bake a [`thalos_terrain_gen::BodyData`] into GPU resources.
+//! Bake a [`thalos_terrain_gen::PlanetSurface`] into GPU resources.
 //!
 //! Three layers are produced:
 //! - **Cubemaps** (layer 1, always): albedo (`Rgba8UnormSrgb`), height
 //!   (`R16Unorm`), roughness (`R8Unorm`). Normals are reconstructed per-
 //!   fragment in the impostor shader from the height cube; the bake's
-//!   `normal_cubemap` lives in `BodyData` for future ground LOD use.
+//!   `normal_cubemap` lives in `StaticSurfaceData` for future ground LOD use.
 //! - **Feature SSBOs** (layer 2): craters, cell index, feature ids,
 //!   radial volcanic features.
-//! - **Detail noise params** (layer 3) travel separately via `PlanetDetailParams`.
+//! - **Dynamic overlay textures/buffers** (layer 3): seasonal ice-cap buffers
+//!   and active-dune cubemaps. These can be rebuilt or transform-sampled
+//!   without touching the static terrain cubemaps.
 //!
 //! See `crates/terrain_gen/src/sample.rs` for the full LOD contract.
 
@@ -19,11 +21,10 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderStorageBuffer;
 
 use thalos_cloud_gen::{CloudBakeConfig, bake_cloud_cover};
-use thalos_terrain_gen::Cubemap;
-use thalos_terrain_gen::cubemap::CubemapFace;
-use thalos_terrain_gen::{BodyData, DynamicSurfaceFeature};
+use thalos_terrain_gen::cubemap::{CubemapFace, face_uv_to_dir};
+use thalos_terrain_gen::{Cubemap, DynamicSurfaceState, PlanetSurface};
 
-use crate::shader_types::{GpuCellRange, GpuCrater, GpuIceCap, GpuRadialFeature};
+use crate::shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature};
 use crate::texture::PlanetTextures;
 
 // Cubemap resolution for baked cloud cover. 256² is ~1.5 MB at R8Unorm
@@ -150,17 +151,208 @@ fn feature_seed(base_seed: u64, index: usize) -> u32 {
     (x as u32) ^ ((x >> 32) as u32)
 }
 
-/// Bake `BodyData` into the full set of GPU resources consumed by
+fn bake_active_dune_overlay(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
+) -> (Cubemap<u16>, Cubemap<[u8; 4]>) {
+    let body = &surface.static_surface;
+    // Dynamic dunes evolve slowly. Keep their overlay texture moderate even
+    // when the immutable terrain bake is higher resolution; runtime movement
+    // is handled by transforming the texture sample direction, not by
+    // per-fragment procedural dune synthesis.
+    let resolution = body.height_cubemap.resolution().min(512);
+    let mut height = Cubemap::<u16>::new(resolution);
+    let mut albedo = Cubemap::<[u8; 4]>::new(resolution);
+    if surface.dynamic_layers.active_dunes.is_empty() {
+        return (height, albedo);
+    }
+
+    let inv = 1.0 / resolution as f32;
+    let pixel_size_m = (std::f32::consts::TAU * body.radius_m / (resolution as f32 * 4.0)).max(1.0);
+    for face in CubemapFace::ALL {
+        let height_face = height.face_data_mut(face);
+        let albedo_face = albedo.face_data_mut(face);
+        for y in 0..resolution {
+            let v = (y as f32 + 0.5) * inv;
+            for x in 0..resolution {
+                let u = (x as f32 + 0.5) * inv;
+                let dir = face_uv_to_dir(face, u, v).normalize();
+                let overlay = active_dune_overlay_at(surface, state, dir, pixel_size_m);
+                let idx = (y * resolution + x) as usize;
+                height_face[idx] = ((overlay.height_m / body.height_range.max(1.0)).clamp(0.0, 1.0)
+                    * 65535.0
+                    + 0.5) as u16;
+                albedo_face[idx] = [
+                    linear_to_srgb8(overlay.albedo.x),
+                    linear_to_srgb8(overlay.albedo.y),
+                    linear_to_srgb8(overlay.albedo.z),
+                    quantize_unit_to_u8(overlay.albedo_strength),
+                ];
+            }
+        }
+    }
+
+    (height, albedo)
+}
+
+#[derive(Clone, Copy)]
+struct DuneOverlayBake {
+    height_m: f32,
+    albedo: Vec3,
+    albedo_strength: f32,
+}
+
+fn active_dune_overlay_at(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
+    dir: Vec3,
+    pixel_size_m: f32,
+) -> DuneOverlayBake {
+    let mut out = DuneOverlayBake {
+        height_m: 0.0,
+        albedo: Vec3::ZERO,
+        albedo_strength: 0.0,
+    };
+    let radius_m = surface.static_surface.radius_m;
+    for (index, layer) in surface.dynamic_layers.active_dunes.iter().enumerate() {
+        let dune = &layer.region;
+        let dune_state = state
+            .active_dune_state(index, layer)
+            .cloned()
+            .unwrap_or_else(|| thalos_terrain_gen::ActiveDuneState {
+                id: layer.id.clone(),
+                mobility: layer.mobility,
+                ..Default::default()
+            });
+        if dune_state.coverage_scale <= 0.0 || dune_state.amplitude_scale <= 0.0 {
+            continue;
+        }
+
+        let center = dune.center.try_normalize().unwrap_or(dir);
+        let angular_distance = dir.dot(center).clamp(-1.0, 1.0).acos();
+        let outer = (dune.radius_rad + dune.feather_rad.max(0.0)).max(dune.radius_rad + 1e-5);
+        let weight = ((1.0 - smoothstep(dune.radius_rad, outer, angular_distance))
+            * dune_state.coverage_scale)
+            .clamp(0.0, 1.0);
+        if weight <= 0.0 {
+            continue;
+        }
+
+        let draa_lod = smoothstep(4.0, 9.0, dune.lambda_draa_m / pixel_size_m);
+        if draa_lod <= 0.001 {
+            let broad = (weight * dune.crest_strength * 0.34).clamp(0.0, 0.18);
+            if broad > out.albedo_strength {
+                out.albedo = Vec3::from_array(dune.albedo_crest_lin) * 0.68;
+                out.albedo_strength = broad * 0.42;
+            }
+            continue;
+        }
+
+        let axis = (dune.axis_tangent - center * dune.axis_tangent.dot(center))
+            .try_normalize()
+            .unwrap_or(Vec3::X);
+        let across = center.cross(axis).try_normalize().unwrap_or(Vec3::Z);
+        let local = dir - center * dir.dot(center);
+        let along_m = local.dot(axis) * radius_m + dune_state.phase_offset_m;
+        let cross_m = local.dot(across) * radius_m;
+        let broad_warp = simple_value_noise(
+            cross_m / radius_m * dune.warp_freq * 0.52,
+            dune.seed ^ 0x6D2B_79F5,
+        );
+        let lace_warp = simple_value_noise(
+            cross_m / radius_m * dune.warp_freq * 2.2 + 13.7,
+            dune.seed ^ 0x9E37_79B9,
+        );
+        let meander_m = (broad_warp * 0.75 + lace_warp * 0.25) * dune.warp_amp_unit * radius_m;
+        let wind_m = along_m + meander_m;
+        let lobe = smoothstep(-0.20, 0.52, broad_warp * 0.62 + weight * 0.10);
+        let wavelength_jitter = (1.0
+            + simple_value_noise(
+                cross_m / radius_m * dune.warp_freq * 0.8 + 19.3,
+                dune.seed ^ 0xA24B_AED5,
+            ) * 0.24)
+            .clamp(0.72, 1.42);
+        let ridge = asymmetric_ridge(
+            wind_m / (dune.lambda_draa_m.max(1.0) * wavelength_jitter) + broad_warp * 0.35,
+            dune.alpha_skew,
+        ) * draa_lod;
+        let body = (ridge * (0.16 + lobe * 1.05)).clamp(0.0, 1.0);
+        let crest = body;
+        out.height_m += weight * dune_state.amplitude_scale * dune.amplitude_draa_m.max(0.0) * body;
+
+        let visual = weight * crest;
+        if visual > out.albedo_strength {
+            out.albedo = Vec3::from_array(dune.albedo_crest_lin);
+            out.albedo_strength = (visual * dune.crest_strength).clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
+fn asymmetric_ridge(phase: f32, alpha_skew: f32) -> f32 {
+    let t = phase - phase.floor();
+    let alpha = alpha_skew.clamp(0.05, 0.95);
+    let tri = if t < alpha {
+        t / alpha
+    } else {
+        1.0 - (t - alpha) / (1.0 - alpha)
+    };
+    tri.clamp(0.0, 1.0).powf(1.35)
+}
+
+fn simple_value_noise(x: f32, seed: u64) -> f32 {
+    let i0 = x.floor() as i32;
+    let i1 = i0 + 1;
+    let t = smoothstep(0.0, 1.0, x - x.floor());
+    let a = hash_1d(i0, seed);
+    let b = hash_1d(i1, seed);
+    (a * 2.0 - 1.0) * (1.0 - t) + (b * 2.0 - 1.0) * t
+}
+
+fn hash_1d(i: i32, seed: u64) -> f32 {
+    let mut h = (i as u32).wrapping_mul(73856093);
+    h ^= seed as u32;
+    h = pcg(h);
+    h ^= (seed >> 32) as u32;
+    h = pcg(h);
+    h as f32 / 4294967296.0
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if (edge1 - edge0).abs() <= f32::EPSILON {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn quantize_unit_to_u8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+fn linear_to_srgb8(linear: f32) -> u8 {
+    let linear = linear.clamp(0.0, 1.0);
+    let srgb = if linear <= 0.0031308 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    quantize_unit_to_u8(srgb)
+}
+
+/// Bake `PlanetSurface` into the full set of GPU resources consumed by
 /// [`crate::PlanetMaterial`].
 ///
 /// Uploads the cubemap layers (albedo, height, roughness) and the feature
 /// storage buffers (craters, cell index, feature ids, radial features).
 /// All handles are bundled into a single [`PlanetTextures`].
-pub fn bake_from_body_data(
-    body: &BodyData,
+pub fn bake_from_planet_surface(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
     images: &mut Assets<Image>,
     storage_buffers: &mut Assets<ShaderStorageBuffer>,
 ) -> PlanetTextures {
+    let body = &surface.static_surface;
     // --- Layer 1: cubemaps -------------------------------------------------
     let albedo = create_cubemap_image(
         &body.albedo_cubemap,
@@ -183,11 +375,27 @@ pub fn bake_from_body_data(
         1,
         images,
     );
+    let (active_dune_height_cube, active_dune_albedo_cube) =
+        bake_active_dune_overlay(surface, state);
+    let active_dune_height = create_cubemap_image(
+        &active_dune_height_cube,
+        active_dune_height_cube.resolution(),
+        TextureFormat::R16Unorm,
+        2,
+        images,
+    );
+    let active_dune_albedo = create_cubemap_image(
+        &active_dune_albedo_cube,
+        active_dune_albedo_cube.resolution(),
+        TextureFormat::Rgba8UnormSrgb,
+        4,
+        images,
+    );
     // Note: `body.normal_cubemap` is intentionally NOT uploaded to the
     // impostor's bind group. 8-bit object-space encoding crushes shallow
     // slope angles (terminator depth, crater rim falloff), so the shader
     // reconstructs normals per-fragment via `perturb_normal_from_height`.
-    // The baked normal cube remains in `BodyData` for future ground LOD
+    // The baked normal cube remains in `StaticSurfaceData` for future ground LOD
     // consumers where per-fragment height finite differencing isn't free.
 
     // --- Layer 2: feature SSBOs --------------------------------------------
@@ -243,54 +451,105 @@ pub fn bake_from_body_data(
         .collect();
     let radial_features_handle =
         create_storage_buffer_from_slice(&radial_features, storage_buffers);
-    let ice_caps: Vec<GpuIceCap> = body
-        .dynamic_surface_features
+    let ice_caps: Vec<GpuIceCap> = surface
+        .dynamic_layers
+        .ice_caps
         .iter()
         .enumerate()
-        .filter_map(|(i, feature)| match feature {
-            DynamicSurfaceFeature::SeasonalIceCap(cap) => {
-                let mut flags = 0u32;
-                if cap.north {
-                    flags |= 1;
+        .map(|(i, layer)| {
+            let cap = layer.spec;
+            let cap_state = state.ice_cap_state(i, layer).cloned().unwrap_or_else(|| {
+                thalos_terrain_gen::IceCapState {
+                    id: layer.id.clone(),
+                    ..Default::default()
                 }
-                if cap.south {
-                    flags |= 2;
-                }
-                let axis = cap.axis.try_normalize().unwrap_or(Vec3::Y);
-                Some(GpuIceCap {
-                    axis,
-                    flags,
-                    albedo_linear: Vec3::from_array(cap.albedo_linear),
-                    edge_latitude_deg: cap.edge_latitude_deg,
-                    dust_albedo_linear: Vec3::from_array(cap.dust_albedo_linear),
-                    solid_latitude_deg: cap.solid_latitude_deg,
-                    edge_noise_deg: cap.edge_noise_deg,
-                    edge_sharpness: cap.edge_sharpness,
-                    noise_frequency: cap.noise_frequency,
-                    max_thickness_m: cap.max_thickness_m,
-                    albedo_strength: cap.albedo_strength,
-                    roughness: cap.roughness,
-                    roughness_strength: cap.roughness_strength,
-                    obliquity_response: cap.obliquity_response,
-                    seed: feature_seed(body.detail_params.seed ^ 0x1CE_CAFE5_EA50_0001, i),
-                    _pad0: 0,
-                    _pad1: 0,
-                    _pad2: 0,
-                })
+            });
+            let mut flags = 0u32;
+            if cap.north {
+                flags |= 1;
+            }
+            if cap.south {
+                flags |= 2;
+            }
+            let axis = cap.axis.try_normalize().unwrap_or(Vec3::Y);
+            GpuIceCap {
+                axis,
+                flags,
+                albedo_linear: Vec3::from_array(cap.albedo_linear),
+                edge_latitude_deg: cap.edge_latitude_deg,
+                dust_albedo_linear: Vec3::from_array(cap.dust_albedo_linear),
+                solid_latitude_deg: cap.solid_latitude_deg,
+                edge_noise_deg: cap.edge_noise_deg,
+                edge_sharpness: cap.edge_sharpness,
+                noise_frequency: cap.noise_frequency,
+                max_thickness_m: cap.max_thickness_m,
+                albedo_strength: cap.albedo_strength,
+                roughness: cap.roughness,
+                roughness_strength: cap.roughness_strength,
+                obliquity_response: cap.obliquity_response,
+                coverage_scale: cap_state.coverage_scale,
+                edge_offset_deg: cap_state.edge_offset_deg,
+                thickness_scale: cap_state.thickness_scale,
+                dustiness: cap_state.dustiness,
+                seed: feature_seed(body.detail_params.seed ^ 0x1CE_CAFE5_EA50_0001, i),
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             }
         })
         .collect();
     let ice_caps_handle = create_storage_buffer_from_slice(&ice_caps, storage_buffers);
+    let active_dunes: Vec<GpuDuneSea> = surface
+        .dynamic_layers
+        .active_dunes
+        .iter()
+        .enumerate()
+        .map(|(i, layer)| {
+            let dune = &layer.region;
+            let dune_state = state
+                .active_dune_state(i, layer)
+                .cloned()
+                .unwrap_or_else(|| thalos_terrain_gen::ActiveDuneState {
+                    id: layer.id.clone(),
+                    mobility: layer.mobility,
+                    ..Default::default()
+                });
+            GpuDuneSea {
+                center: dune.center.try_normalize().unwrap_or(Vec3::Y),
+                radius_rad: dune.radius_rad,
+                axis_tangent: dune.axis_tangent.try_normalize().unwrap_or(Vec3::X),
+                feather_rad: dune.feather_rad,
+                albedo_crest_lin: Vec3::from_array(dune.albedo_crest_lin),
+                crest_strength: dune.crest_strength,
+                lambda_draa_m: dune.lambda_draa_m,
+                amplitude_draa_m: dune.amplitude_draa_m,
+                lambda_dune_m: dune.lambda_dune_m,
+                amplitude_dune_m: dune.amplitude_dune_m,
+                alpha_skew: dune.alpha_skew,
+                warp_amp_unit: dune.warp_amp_unit,
+                warp_freq: dune.warp_freq,
+                coverage_scale: dune_state.coverage_scale,
+                phase_offset_m: dune_state.phase_offset_m,
+                amplitude_scale: dune_state.amplitude_scale,
+                mobility: dune_state.mobility,
+                seed: feature_seed(dune.seed, i),
+            }
+        })
+        .collect();
+    let active_dunes_handle = create_storage_buffer_from_slice(&active_dunes, storage_buffers);
 
     PlanetTextures {
         albedo,
         height,
         roughness,
+        active_dune_height,
+        active_dune_albedo,
         craters: craters_handle,
         cell_index: cell_index_handle,
         feature_ids: feature_ids_handle,
         radial_features: radial_features_handle,
         ice_caps: ice_caps_handle,
+        active_dunes: active_dunes_handle,
     }
 }
 
