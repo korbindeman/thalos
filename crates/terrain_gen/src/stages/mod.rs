@@ -11,7 +11,7 @@ mod noise_fbm;
 mod regolith;
 mod scarps;
 mod space_weather;
-mod util;
+pub(crate) mod util;
 
 pub use biome_relief_color::BiomeReliefColor;
 pub use biomes::{BiomeRule, Biomes};

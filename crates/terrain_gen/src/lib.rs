@@ -16,6 +16,7 @@ pub mod spatial_index;
 pub mod stage;
 pub mod stages;
 pub mod static_surface;
+pub mod surface_color;
 pub mod surface_field;
 pub mod tectonics;
 pub mod terrain_config;
@@ -36,6 +37,7 @@ pub use spatial_index::{FeatureRef, IcoBuckets};
 pub use stage::Stage;
 pub use stages::*;
 pub use static_surface::{PlanetSurface, StaticSurfaceData};
+pub use surface_color::*;
 pub use surface_field::*;
 pub use tectonics::{
     Boundary, BoundaryKind, Plate, PlateId, PlateKind, SphericalMesh, TectonicActivity,

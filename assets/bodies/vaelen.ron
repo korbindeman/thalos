@@ -74,17 +74,21 @@
         ],
     )),
     terrestrial_atmosphere: Some((
-        rim_halo: Some((
-            color: (0.90, 0.52, 0.32),
-            intensity: 0.24,
-            scale_height_m: 22000.0,
-            outer_altitude_m: 140000.0,
-        )),
-        limb: None,
-        limb_darkening: None,
-        rayleigh: Some((
-            vertical_optical_depth: (0.018, 0.011, 0.006),
-            strength: 1.1,
+        // Cold-desert atmosphere — thinner than Thalos's, warm/red
+        // tinted. Rayleigh per-channel τ skews strongly red (R = 7×
+        // B) so any in-scatter shifts orange/butterscotch instead of
+        // Thalos's blue. Mie is leaner than Thalos's Earth-clean
+        // baseline (0.015 vs 0.021) and concentrated near the
+        // surface (H_M = 1500 m), so the halo reads as a thin warm
+        // rim rather than a wide diffuse glow. Strength scaled to
+        // 0.7 so the overall column is visibly less than Thalos's.
+        scattering: Some((
+            vertical_optical_depth: (0.035, 0.013, 0.004),
+            rayleigh_scale_height_m: 8000.0,
+            mie_optical_depth: 0.015,
+            mie_scale_height_m: 1500.0,
+            mie_asymmetry: 0.60,
+            strength: 0.7,
         )),
         clouds: None,
     )),

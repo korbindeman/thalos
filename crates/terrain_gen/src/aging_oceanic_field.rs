@@ -56,6 +56,12 @@ use crate::body_builder::BodyBuilder;
 use crate::cubemap::{Cubemap, CubemapFace, dir_to_face_uv, face_uv_to_dir};
 use crate::noise::fbm3;
 use crate::seeding::{Rng, sub_seed};
+use crate::surface_color::{
+    AGING_OCEANIC_BIOME_BEACH, AGING_OCEANIC_BIOME_BOREAL, AGING_OCEANIC_BIOME_DESERT,
+    AGING_OCEANIC_BIOME_FOREST, AGING_OCEANIC_BIOME_GRASSLAND, AGING_OCEANIC_BIOME_OCEAN,
+    AGING_OCEANIC_BIOME_ROCK, AGING_OCEANIC_BIOME_SHELF, AGING_OCEANIC_BIOME_SNOW,
+    AGING_OCEANIC_BIOME_STEPPE, AGING_OCEANIC_BIOME_TUNDRA,
+};
 use crate::surface_field::{
     BiomeMix, SurfaceField, SurfaceFieldSample, SurfaceMaterialMix, cube_face_texel_scale_m, mix3,
     quantize_unit_to_u8, smoothstep,
@@ -300,6 +306,7 @@ fn surface_roughness(relative_height_m: f32, slope: f32) -> f32 {
 /// Altitude-banded albedo: deep seabed → shallow seabed → coastal beach
 /// → lowland → highland → snow peaks. Smooth blends keep the bands from
 /// reading as hard color banding from orbit.
+#[allow(dead_code)]
 fn altitude_albedo(relative_height_m: f32) -> [f32; 3] {
     // Anchor colors. All linear-RGB. Tuned to read against the impostor's
     // water tint and atmospheric optics.
@@ -328,6 +335,7 @@ fn altitude_albedo(relative_height_m: f32) -> [f32; 3] {
 /// `lushness` (sparse → dense) and `moisture` (dry → wet). Used to give
 /// each biome continuous tonal variation along two independent climate
 /// axes instead of one flat fill colour.
+#[allow(dead_code)]
 fn bilinear_palette(
     dry_sparse: [f32; 3],
     dry_dense: [f32; 3],
@@ -915,6 +923,7 @@ impl AgingOceanicField {
             .unwrap_or(dir)
     }
 
+    #[allow(dead_code)]
     fn surface_albedo(
         &self,
         relative_height_m: f32,
@@ -1047,51 +1056,59 @@ impl AgingOceanicField {
         let total = forest_w + grass_w + steppe_w + desert_w + boreal_w + tundra_w;
         let climate_strength = smoothstep(0.006, 0.085, total);
 
+        // Forest pulled significantly darker — dense canopy reads
+        // near-black green from orbit, and the brightness contrast against
+        // the lighter grassland is what reads as richness rather than as
+        // a saturated colour pop.
         let forest = bilinear_palette(
-            [0.170, 0.240, 0.075],
-            [0.095, 0.175, 0.055],
-            [0.115, 0.230, 0.065],
-            [0.045, 0.125, 0.038],
+            [0.100, 0.155, 0.055],
+            [0.055, 0.108, 0.040],
+            [0.065, 0.140, 0.045],
+            [0.022, 0.068, 0.022],
             lushness,
             moisture,
         );
+        // Grassland desaturated at the bright corner — the previous
+        // [0.41, 0.46, 0.15] read as eye-watering yellow-green. R+B raised
+        // and G eased so the savanna sits closer to khaki than to
+        // electric-green.
         let grassland = bilinear_palette(
-            [0.410, 0.455, 0.150],
-            [0.285, 0.390, 0.115],
-            [0.245, 0.395, 0.100],
-            [0.120, 0.265, 0.072],
+            [0.340, 0.390, 0.180],
+            [0.240, 0.330, 0.140],
+            [0.215, 0.330, 0.130],
+            [0.115, 0.230, 0.090],
             lushness,
             moisture,
         );
         let steppe = bilinear_palette(
-            [0.505, 0.430, 0.185],
-            [0.390, 0.350, 0.135],
-            [0.430, 0.420, 0.165],
-            [0.300, 0.315, 0.115],
+            [0.450, 0.395, 0.205],
+            [0.355, 0.320, 0.150],
+            [0.385, 0.380, 0.180],
+            [0.275, 0.290, 0.130],
             lushness,
             moisture,
         );
         let desert = bilinear_palette(
-            [0.690, 0.565, 0.335],
-            [0.585, 0.465, 0.260],
-            [0.585, 0.515, 0.300],
-            [0.455, 0.400, 0.210],
+            [0.625, 0.530, 0.330],
+            [0.535, 0.435, 0.265],
+            [0.540, 0.480, 0.295],
+            [0.425, 0.380, 0.215],
             lushness,
             moisture,
         );
         let boreal = bilinear_palette(
-            [0.205, 0.245, 0.145],
-            [0.120, 0.185, 0.115],
-            [0.165, 0.245, 0.145],
-            [0.070, 0.155, 0.105],
+            [0.195, 0.235, 0.150],
+            [0.115, 0.175, 0.115],
+            [0.155, 0.230, 0.145],
+            [0.065, 0.145, 0.105],
             lushness,
             moisture,
         );
         let tundra = bilinear_palette(
-            [0.390, 0.385, 0.290],
-            [0.295, 0.325, 0.235],
-            [0.320, 0.370, 0.255],
-            [0.215, 0.295, 0.205],
+            [0.370, 0.370, 0.290],
+            [0.285, 0.315, 0.230],
+            [0.310, 0.355, 0.250],
+            [0.210, 0.285, 0.200],
             lushness,
             moisture,
         );
@@ -1155,6 +1172,169 @@ impl AgingOceanicField {
         )
     }
 
+    /// Weighted biome identity for the shared surface-color painter.
+    ///
+    /// This mirrors the climate logic that used to live inside
+    /// `surface_albedo`, but it returns semantic weights instead of final
+    /// color. The painter owns the palette and relief grading.
+    fn surface_biome_mix(
+        &self,
+        relative_height_m: f32,
+        dir: Vec3,
+        slope: f32,
+        coast_distance_m: f32,
+    ) -> BiomeMix {
+        let water_depth_m = -relative_height_m;
+        let ocean_w = smoothstep(60.0, 1_600.0, water_depth_m);
+        let shelf_w =
+            smoothstep(1_900.0, 90.0, water_depth_m) * smoothstep(-80.0, -900.0, relative_height_m);
+        let beach_w = (1.0 - smoothstep(35.0, 260.0, relative_height_m))
+            * smoothstep(-60.0, 35.0, relative_height_m);
+        if relative_height_m < -80.0 {
+            return BiomeMix::from_weighted([
+                (AGING_OCEANIC_BIOME_OCEAN, ocean_w.max(0.10)),
+                (AGING_OCEANIC_BIOME_SHELF, shelf_w),
+                (AGING_OCEANIC_BIOME_BEACH, beach_w * 0.25),
+            ]);
+        }
+
+        let abs_lat = dir.y.clamp(-1.0, 1.0).asin().abs() / std::f32::consts::FRAC_PI_2;
+        let warm_lat = 1.0 - smoothstep(0.52, 0.86, abs_lat);
+        let cold = smoothstep(0.48, 0.86, abs_lat);
+        let highland = smoothstep(900.0, 2300.0, relative_height_m);
+        let coastal = 1.0 - smoothstep(160_000.0, 1_900_000.0, coast_distance_m);
+        let interior = smoothstep(350_000.0, 2_600_000.0, coast_distance_m);
+
+        let macro_warp = self.domain_warp(dir, self.climate_seed ^ 0x31A7_0B10, 0.75, 0.28);
+        let macro_p = macro_warp * 1.45;
+        let macro_moisture = (fbm3(
+            macro_p.x,
+            macro_p.y,
+            macro_p.z,
+            self.climate_seed ^ 0x31A7_0B11,
+            5,
+            0.58,
+            2.0,
+        ) * 0.5
+            + 0.5)
+            .clamp(0.0, 1.0);
+
+        let lobe_warp = self.domain_warp(dir, self.climate_seed ^ 0x31A7_0B20, 1.55, 0.20);
+        let lobe_p = lobe_warp * 3.4;
+        let wet_lobes = (fbm3(
+            lobe_p.x,
+            lobe_p.y,
+            lobe_p.z,
+            self.climate_seed ^ 0x31A7_0B21,
+            4,
+            0.55,
+            2.0,
+        ) * 0.5
+            + 0.5)
+            .clamp(0.0, 1.0);
+        let dry_lobes = (fbm3(
+            lobe_p.x + 11.7,
+            lobe_p.y - 4.3,
+            lobe_p.z + 8.1,
+            self.climate_seed ^ 0x31A7_0B22,
+            4,
+            0.55,
+            2.0,
+        ) * 0.5
+            + 0.5)
+            .clamp(0.0, 1.0);
+
+        let ridge_p = self.domain_warp(dir, self.climate_seed ^ 0x31A7_0B30, 0.9, 0.16) * 2.65;
+        let ridge_raw = fbm3(
+            ridge_p.x,
+            ridge_p.y,
+            ridge_p.z,
+            self.climate_seed ^ 0x31A7_0B31,
+            5,
+            0.55,
+            2.0,
+        );
+        let dry_corridors = (1.0 - ridge_raw.abs()).powf(2.0);
+        let orographic_dry = dry_corridors
+            * (smoothstep(700.0, 2100.0, relative_height_m) * 0.65 + slope * 26.0).clamp(0.0, 1.0);
+
+        let moisture = (0.23 + macro_moisture * 0.50 + coastal * 0.24 + (wet_lobes - 0.5) * 0.30
+            - interior * 0.20
+            - orographic_dry * 0.30
+            - highland * 0.10)
+            .clamp(0.0, 1.0);
+        let dryness = (1.0 - moisture + dry_lobes * 0.24 + interior * 0.13 + highland * 0.10
+            - coastal * 0.16)
+            .clamp(0.0, 1.0);
+        let desert_shape = smoothstep(0.42, 0.80, dry_lobes + interior * 0.22);
+        let forest_shape = smoothstep(0.28, 0.78, wet_lobes + coastal * 0.16);
+        let slope_t = smoothstep(0.005, 0.020, slope);
+        let altitude_gate = smoothstep(850.0, 1550.0, relative_height_m);
+
+        let forest_w = sharpen_biome_weight(
+            smoothstep(0.30, 0.66, moisture)
+                * forest_shape
+                * (1.0 - cold * 0.58)
+                * (1.0 - highland * 0.44),
+        ) * 2.15;
+        let grass_w = sharpen_biome_weight(
+            biome_band(moisture + coastal * 0.08, 0.22, 0.56, 0.90)
+                * (1.0 - cold * 0.30)
+                * (1.0 - highland * 0.18),
+        ) * 0.54;
+        let steppe_w = sharpen_biome_weight(
+            biome_band(dryness, 0.22, 0.56, 0.94)
+                * warm_lat
+                * (1.0 - coastal * 0.28)
+                * (1.0 - highland * 0.12),
+        ) * 0.92;
+        let desert_w = sharpen_biome_weight(
+            smoothstep(0.46, 0.80, dryness) * desert_shape * warm_lat * (1.0 - coastal * 0.42),
+        ) * 1.08;
+        let boreal_w = sharpen_biome_weight(
+            cold * smoothstep(0.22, 0.66, moisture + forest_shape * 0.14) * (1.0 - highland * 0.35),
+        ) * 1.25;
+        let tundra_w = sharpen_biome_weight(
+            cold * (1.0 - smoothstep(0.40, 0.78, moisture))
+                * (0.55 + highland * 0.55)
+                * (1.0 - coastal * 0.18),
+        );
+        let rock_w = (smoothstep(1_650.0, 2_850.0, relative_height_m) * 0.42
+            + slope_t * altitude_gate * 0.36)
+            .clamp(0.0, 0.74);
+        let snow_w = smoothstep(3_250.0, 3_900.0, relative_height_m);
+
+        BiomeMix::from_weighted([
+            (AGING_OCEANIC_BIOME_BEACH, beach_w * 1.40),
+            (
+                AGING_OCEANIC_BIOME_FOREST,
+                forest_w * (1.0 - rock_w * 0.45) * (1.0 - snow_w),
+            ),
+            (
+                AGING_OCEANIC_BIOME_GRASSLAND,
+                grass_w * (1.0 - rock_w * 0.35) * (1.0 - snow_w),
+            ),
+            (
+                AGING_OCEANIC_BIOME_STEPPE,
+                steppe_w * (1.0 - rock_w * 0.30) * (1.0 - snow_w),
+            ),
+            (
+                AGING_OCEANIC_BIOME_DESERT,
+                desert_w * (1.0 - rock_w * 0.25) * (1.0 - snow_w),
+            ),
+            (
+                AGING_OCEANIC_BIOME_BOREAL,
+                boreal_w * (1.0 - rock_w * 0.30) * (1.0 - snow_w),
+            ),
+            (
+                AGING_OCEANIC_BIOME_TUNDRA,
+                tundra_w * (1.0 - rock_w * 0.20) * (1.0 - snow_w),
+            ),
+            (AGING_OCEANIC_BIOME_ROCK, rock_w * (1.0 - snow_w * 0.55)),
+            (AGING_OCEANIC_BIOME_SNOW, snow_w),
+        ])
+    }
+
     /// Repaint the baked cubemaps after connectivity cleanup so dry-filled
     /// interior basins use the same relative-to-sea-level palette as the
     /// original field samples.
@@ -1178,9 +1358,9 @@ impl AgingOceanicField {
 
         for face in CubemapFace::ALL {
             let heights = heights_full.face_data(face);
-            let albedo = builder.albedo_contributions.albedo.face_data_mut(face);
             let materials = builder.material_cubemap.face_data_mut(face);
             let roughness = builder.roughness_cubemap.face_data_mut(face);
+            let biome_weights = builder.biome_weights_cubemap.face_data_mut(face);
             let face_offset = face as usize * face_len;
 
             for (i, &height_m) in heights.iter().enumerate() {
@@ -1192,8 +1372,8 @@ impl AgingOceanicField {
                 let relative_height_m = height_m - sea_level_m;
                 let slope = sample_slope(&heights_full, face, x, y, res, pixel_size_m);
                 let coast_d = coast_distances[face_offset + i];
-                let color = self.surface_albedo(relative_height_m, dir, slope, coast_d);
-                albedo[i] = [color[0], color[1], color[2], 1.0];
+                let biome_mix = self.surface_biome_mix(relative_height_m, dir, slope, coast_d);
+                biome_weights[i] = crate::surface_field::BiomeMixTexel::from_mix(biome_mix);
                 materials[i] = altitude_material(relative_height_m);
                 roughness[i] = quantize_unit_to_u8(surface_roughness(relative_height_m, slope));
             }
@@ -1247,14 +1427,12 @@ impl SurfaceField for AgingOceanicField {
         // pass; the per-direction sample path doesn't see neighbors, so
         // pass 0. Repaint overwrites both albedo and roughness anyway —
         // this output only serves direct callers of `SurfaceField::sample`.
-        let albedo_linear = self.surface_albedo(height_m, dir, 0.0, 0.0);
         let roughness = altitude_roughness(height_m);
         let material_mix = SurfaceMaterialMix::single(altitude_material(height_m));
-        let biome_mix = BiomeMix::single(0);
+        let biome_mix = self.surface_biome_mix(height_m, dir, 0.0, 0.0);
 
         SurfaceFieldSample {
             height_m,
-            albedo_linear,
             material_mix,
             biome_mix,
             roughness,
@@ -1351,9 +1529,6 @@ fn dry_fill_water_texel(builder: &mut BodyBuilder, index: usize, res: usize, sea
         filled_height
     };
 
-    let albedo = altitude_albedo(filled_height);
-    builder.albedo_contributions.albedo.face_data_mut(face)[local] =
-        [albedo[0], albedo[1], albedo[2], 1.0];
     builder.material_cubemap.face_data_mut(face)[local] = altitude_material(filled_height);
     builder.roughness_cubemap.face_data_mut(face)[local] =
         quantize_unit_to_u8(altitude_roughness(filled_height));

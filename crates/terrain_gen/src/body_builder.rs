@@ -4,6 +4,7 @@ use crate::cubemap::{Cubemap, CubemapAccumulator, default_resolution};
 use crate::spatial_index::IcoBuckets;
 use crate::stages::{BasinDef, MAT_HIGHLAND};
 use crate::static_surface::StaticSurfaceData;
+use crate::surface_color::WaterAppearance;
 use crate::surface_field::{BiomeMixTexel, ReliefPalette};
 use crate::types::{
     BiomeParams, Channel, Composition, Crater, DetailNoiseParams, Material, Volcano,
@@ -36,7 +37,7 @@ pub struct BodyBuilder {
     /// Signed multiplicative albedo modulation from megabasin-scale features.
     /// Per-texel: negative darkens (basin interior, eroded lobes), positive
     /// brightens (ejecta apron, anorthositic melt sheets). Read by the
-    /// SpaceWeather base pass: `albedo *= 1.0 + basin_albedo_field`.
+    /// unified surface-color base pass: `albedo *= 1.0 + basin_albedo_field`.
     ///
     /// Megabasin writes this with soft noise-warped boundaries and Imbrium-
     /// style radial ejecta sculpture so basins don't read as the hard discs
@@ -84,20 +85,22 @@ pub struct BodyBuilder {
     /// construction; the Biomes stage paints it.
     pub biome_map: Cubemap<u8>,
     /// Per-biome relief palette, indexed by biome id (parallel to `biomes`).
-    /// Populated by archetype compilers that want a downstream
-    /// `BiomeReliefColor` stage to do height/slope-based grading; left empty
-    /// otherwise. Only entries up to `biome_palettes.len()` are read.
+    /// Populated by archetype compilers that want the unified surface-color
+    /// painter to do height/slope-based grading; left empty otherwise. Only
+    /// entries up to `biome_palettes.len()` are read.
     pub biome_palettes: Vec<ReliefPalette>,
     /// Per-texel top-K weighted biome mix. Written by
     /// `bake_surface_field_into_builder` from each `SurfaceFieldSample`'s
-    /// `biome_mix` so a downstream relief-color stage can blend per-biome
-    /// palettes after later stages have written into the albedo cube.
-    /// Build-time only — not exported into `StaticSurfaceData`.
+    /// `biome_mix` so the unified surface-color painter can blend per-biome
+    /// palettes after structural stages have finished.
     pub biome_weights_cubemap: Cubemap<BiomeMixTexel>,
 
     /// Sea level above which texels render as land. Set by the Ocean
     /// terrain config or by future hydrology work; `None` on airless bodies.
     pub sea_level_m: Option<f32>,
+    /// Explicit water shading parameters. Kept separate from mean albedo so
+    /// ocean color remains art-directed instead of derived from land coverage.
+    pub water_appearance: Option<WaterAppearance>,
 
     /// Per-stage seed, set by the caller before each stage.
     pub stage_seed: u64,
@@ -170,6 +173,7 @@ impl BodyBuilder {
             biome_palettes: Vec::new(),
             biome_weights_cubemap: Cubemap::<BiomeMixTexel>::new(resolution),
             sea_level_m: None,
+            water_appearance: None,
             stage_seed: 0,
         }
     }
@@ -188,6 +192,8 @@ impl BodyBuilder {
         let (height_cubemap, height_range) = self.height_contributions.finalize_height();
         let albedo_cubemap = self.albedo_contributions.finalize_albedo();
         let mean_albedo = mean_albedo_linear(&albedo_cubemap);
+        let biome_weights_cubemap =
+            finalized_biome_weights(self.biome_weights_cubemap, &self.biome_map);
 
         let feature_index = IcoBuckets::build(
             &self.craters,
@@ -203,6 +209,7 @@ impl BodyBuilder {
             height_range,
             albedo_cubemap,
             material_cubemap: self.material_cubemap,
+            biome_weights_cubemap,
             roughness_cubemap: self.roughness_cubemap,
             normal_cubemap: self.normal_cubemap,
             craters: self.craters,
@@ -213,8 +220,25 @@ impl BodyBuilder {
             materials: self.materials,
             mean_albedo,
             sea_level_m: self.sea_level_m,
+            water_appearance: self.water_appearance,
         }
     }
+}
+
+fn finalized_biome_weights(
+    mut weights: Cubemap<BiomeMixTexel>,
+    biome_map: &Cubemap<u8>,
+) -> Cubemap<BiomeMixTexel> {
+    for face in crate::cubemap::CubemapFace::ALL {
+        let weights_face = weights.face_data_mut(face);
+        let biome_face = biome_map.face_data(face);
+        for (weight, &biome_id) in weights_face.iter_mut().zip(biome_face.iter()) {
+            if weight.is_empty() {
+                *weight = BiomeMixTexel::single(biome_id);
+            }
+        }
+    }
+    weights
 }
 
 /// Averages a baked sRGB8 albedo cubemap into a single linear-RGB tint.

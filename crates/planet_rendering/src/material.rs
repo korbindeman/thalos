@@ -100,14 +100,18 @@ pub struct PlanetWaterParams {
 
 impl PlanetWaterParams {
     pub fn from_static_surface(body: &StaticSurfaceData) -> Self {
-        if body.sea_level_m.is_some() {
+        if let Some(water) = body.water_appearance {
             Self {
                 color_depth: Vec4::new(
-                    body.mean_albedo[0],
-                    body.mean_albedo[1],
-                    body.mean_albedo[2],
-                    120.0,
+                    water.color_depth[0],
+                    water.color_depth[1],
+                    water.color_depth[2],
+                    water.color_depth[3],
                 ),
+            }
+        } else if body.sea_level_m.is_some() {
+            Self {
+                color_depth: Vec4::new(0.012, 0.040, 0.090, 120.0),
             }
         } else {
             Self {
@@ -244,23 +248,39 @@ impl PlanetDetailParams {
 
 /// Atmosphere uniform consumed by the impostor's atmosphere pass.
 ///
-/// Mirrors `AtmosphereBlock` in `shaders/atmosphere.wgsl`. Every field
-/// corresponds to one optional layer of the terrestrial atmosphere
-/// schema; the shader skips a layer when its intensity/strength scalar
-/// is zero, so `AtmosphereBlock::default()` produces an impostor that
-/// renders identically to one with no atmosphere at all.
+/// Mirrors `AtmosphereBlock` in `shaders/atmosphere.wgsl`. The
+/// dominant data block is the single-scattering Rayleigh + Mie set:
+/// per-channel β at sea level, scale heights, atmosphere top, Mie
+/// asymmetry. The view-path raymarch in `integrate_atmosphere`
+/// consumes them and produces both the in-scatter and the
+/// transmittance for the surface.
+///
+/// `AtmosphereBlock::default()` produces a vacuum: every scalar that
+/// gates a layer (`scattering_strength`, `cloud_coverage`,
+/// `limb_strength`) is zero, so the shader early-outs.
 #[derive(Clone, Copy, ShaderType)]
 pub struct AtmosphereBlock {
-    /// xyz = rim halo colour (linear RGB), w = intensity scalar.
-    pub rim_color_intensity: Vec4,
-    /// x = scale height (render units), y = outer-shell altitude
-    /// (render units), z/w reserved for future extensions.
-    pub rim_shape: Vec4,
-    /// xyz = terminator warmth tint, w = strength.
-    pub terminator_warmth: Vec4,
-    /// xyz = Fresnel rim colour, w = strength.
-    pub fresnel_rim: Vec4,
+    /// Rayleigh sea-level scattering coefficient β_R, per render unit.
+    /// xyz = R/G/B; w = Rayleigh scale height H_R in render units.
+    /// Computed from authored τ_v and H via β = τ_v / H, then converted
+    /// from per-meter to per-render-unit. β_R = 0 disables Rayleigh.
+    pub rayleigh_beta_h: Vec4,
+    /// Mie scattering parameters.
+    /// xyz = β_M at sea level (per render unit, R = G = B for spectrally
+    /// neutral aerosols; authoring may colour it for specific dust),
+    /// w = Henyey-Greenstein asymmetry g in [-1, 1].
+    pub mie_beta_g: Vec4,
+    /// Atmosphere geometry + global gates.
+    /// x = atmosphere top altitude above the surface (render units —
+    ///     view raymarch terminates here),
+    /// y = Mie scale height H_M (render units),
+    /// z = strength multiplier (artistic; 0 disables the entire
+    ///     scattering raymarch and the surface renders as if in vacuum),
+    /// w = reserved for ozone band altitude (M4 follow-up).
+    pub atmos_geom: Vec4,
     /// xyz = per-channel Minnaert exponents (R, G, B), w = strength.
+    /// Pure artistic limb darkening on the lit surface; independent
+    /// of the scattering model.
     pub limb_exponents: Vec4,
     /// xyz = sunlit-cloud albedo, w = coverage fraction in [0, 1].
     pub cloud_albedo_coverage: Vec4,
@@ -272,11 +292,6 @@ pub struct AtmosphereBlock {
     /// z = seed lo bits (bitcast u32→f32),
     /// w = seed hi bits.
     pub cloud_dynamics: Vec4,
-    /// Per-wavelength Rayleigh scattering. xyz = vertical optical depth
-    /// at zenith (R, G, B); w = overall strength multiplier. w = 0
-    /// disables Rayleigh entirely — `apply_rayleigh_*` early-out and
-    /// the impostor renders with unattenuated white sunlight.
-    pub rayleigh: Vec4,
     /// Cloud main-deck band phases 0..=3. 16 total phases packed into
     /// four `Vec4`s carry the per-latitude-strip rotation state for
     /// the banded cloud decomposition. See
@@ -294,15 +309,13 @@ pub struct AtmosphereBlock {
 impl Default for AtmosphereBlock {
     fn default() -> Self {
         Self {
-            rim_color_intensity: Vec4::ZERO,
-            rim_shape: Vec4::ZERO,
-            terminator_warmth: Vec4::ZERO,
-            fresnel_rim: Vec4::ZERO,
+            rayleigh_beta_h: Vec4::ZERO,
+            mie_beta_g: Vec4::ZERO,
+            atmos_geom: Vec4::ZERO,
             limb_exponents: Vec4::ZERO,
             cloud_albedo_coverage: Vec4::ZERO,
             cloud_shape: Vec4::ZERO,
             cloud_dynamics: Vec4::ZERO,
-            rayleigh: Vec4::ZERO,
             cloud_bands_a: Vec4::ZERO,
             cloud_bands_b: Vec4::ZERO,
             cloud_bands_c: Vec4::ZERO,
@@ -330,33 +343,16 @@ impl AtmosphereBlock {
     /// "skip this layer entirely." The `cloud_dynamics.y` (sim time)
     /// field is left at zero here; `update_planet_light_dirs` writes
     /// the current sim time every frame.
+    ///
+    /// Authored quantities are converted from meters into render units
+    /// at this boundary, so the GPU side never has to divide by the
+    /// scale factor. The Rayleigh / Mie β coefficients are derived
+    /// from the authored vertical optical depth and scale height
+    /// (β = τ_v / H, in 1/m), then scaled into 1/render-unit.
     pub fn from_terrestrial(atmos: &TerrestrialAtmosphere, meters_per_render_unit: f32) -> Self {
         let mut out = Self::default();
-        if let Some(rim) = &atmos.rim_halo {
-            out.rim_color_intensity =
-                Vec4::new(rim.color[0], rim.color[1], rim.color[2], rim.intensity);
-            let inv_m = 1.0 / meters_per_render_unit.max(1.0);
-            out.rim_shape = Vec4::new(
-                rim.scale_height_m * inv_m,
-                rim.outer_altitude_m * inv_m,
-                0.0,
-                0.0,
-            );
-        }
-        if let Some(limb) = &atmos.limb {
-            out.terminator_warmth = Vec4::new(
-                limb.terminator_warmth[0],
-                limb.terminator_warmth[1],
-                limb.terminator_warmth[2],
-                limb.terminator_strength,
-            );
-            out.fresnel_rim = Vec4::new(
-                limb.fresnel_color[0],
-                limb.fresnel_color[1],
-                limb.fresnel_color[2],
-                limb.fresnel_strength,
-            );
-        }
+        let inv_m = 1.0 / meters_per_render_unit.max(1.0);
+
         if let Some(ld) = &atmos.limb_darkening {
             out.limb_exponents = Vec4::new(
                 ld.red.max(0.0),
@@ -365,14 +361,43 @@ impl AtmosphereBlock {
                 ld.strength.clamp(0.0, 1.0),
             );
         }
-        if let Some(ray) = &atmos.rayleigh {
-            out.rayleigh = Vec4::new(
-                ray.vertical_optical_depth[0].max(0.0),
-                ray.vertical_optical_depth[1].max(0.0),
-                ray.vertical_optical_depth[2].max(0.0),
-                ray.strength.max(0.0),
+
+        if let Some(sc) = &atmos.scattering {
+            // β has units of 1/length. Author gives τ_v + scale height
+            // (m), so β_per_m = τ_v / H_m. Convert to per render unit
+            // by dividing by inv_m once more (i.e. multiplying by
+            // `meters_per_render_unit`): a 1 km of render-unit path
+            // accumulates `β_per_m × m_per_render_unit × 1` of
+            // optical depth.
+            let h_r_m = sc.rayleigh_scale_height_m.max(1.0);
+            let h_m_m = sc.mie_scale_height_m.max(1.0);
+            let beta_r_per_m = [
+                sc.vertical_optical_depth[0].max(0.0) / h_r_m,
+                sc.vertical_optical_depth[1].max(0.0) / h_r_m,
+                sc.vertical_optical_depth[2].max(0.0) / h_r_m,
+            ];
+            let beta_m_per_m = sc.mie_optical_depth.max(0.0) / h_m_m;
+            let m_per_unit = meters_per_render_unit.max(1.0);
+            out.rayleigh_beta_h = Vec4::new(
+                beta_r_per_m[0] * m_per_unit,
+                beta_r_per_m[1] * m_per_unit,
+                beta_r_per_m[2] * m_per_unit,
+                h_r_m * inv_m,
+            );
+            out.mie_beta_g = Vec4::new(
+                beta_m_per_m * m_per_unit,
+                beta_m_per_m * m_per_unit,
+                beta_m_per_m * m_per_unit,
+                sc.mie_asymmetry.clamp(-0.999, 0.999),
+            );
+            out.atmos_geom = Vec4::new(
+                sc.resolved_top_m() * inv_m,
+                h_m_m * inv_m,
+                sc.strength.max(0.0),
+                0.0,
             );
         }
+
         if let Some(clouds) = &atmos.clouds {
             out.cloud_albedo_coverage = Vec4::new(
                 clouds.albedo[0],

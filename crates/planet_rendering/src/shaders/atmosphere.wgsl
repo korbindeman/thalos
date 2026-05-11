@@ -13,33 +13,34 @@
 
 const PI: f32 = 3.14159265358979323846;
 
-/// Packed uniform carrying every optional atmosphere layer.
+/// Packed uniform carrying the terrestrial atmosphere parameters.
 ///
-/// Every layer is gated by its own intensity/strength scalar: the shader
-/// is expected to early-out when the scalar is zero so a body without an
-/// atmosphere (Mira, Ignis, …) pays no extra cost beyond a couple of
-/// scalar comparisons.
+/// The dominant block is the single-scattering Rayleigh + Mie set
+/// consumed by `integrate_atmosphere`; cloud and limb-darkening fields
+/// are kept independent because they are not produced by the
+/// scattering integral. Every gate scalar is zero by default — bodies
+/// without an atmosphere (Mira, Ignis, …) pay only the early-out
+/// cost.
 struct AtmosphereBlock {
-    /// Rim halo colour and intensity.
-    ///   xyz = linear-RGB colour at peak,
-    ///   w   = intensity scalar. `0` disables the rim halo entirely.
-    rim_color_intensity: vec4<f32>,
-    /// Rim halo shape, in render units (pre-scaled by the CPU).
-    ///   x = scale height,
-    ///   y = outer-shell altitude (planet_radius + y = shell outer
-    ///       radius),
-    ///   z = reserved for a future ground-altitude offset,
-    ///   w = reserved.
-    rim_shape: vec4<f32>,
-    /// Terminator warmth (sunset band).
-    ///   xyz = linear-RGB tint applied near `n_dot_l ≈ 0` on the lit
-    ///         side,
-    ///   w   = strength scalar. `0` disables the warmth band.
-    terminator_warmth: vec4<f32>,
-    /// Fresnel rim on the lit limb (cold Rayleigh stand-in).
-    ///   xyz = linear-RGB tint,
-    ///   w   = strength scalar. `0` disables the Fresnel rim.
-    fresnel_rim: vec4<f32>,
+    /// Rayleigh sea-level coefficient β_R, per render unit.
+    ///   xyz = R/G/B (Earth ≈ vec3(0.046,0.108,0.264) / H_R, scaled
+    ///         from per-meter to per-render-unit on the CPU),
+    ///   w   = Rayleigh scale height H_R in render units.
+    rayleigh_beta_h: vec4<f32>,
+    /// Mie scattering parameters.
+    ///   xyz = Mie sea-level coefficient β_M (per render unit; usually
+    ///         spectrally white so x=y=z),
+    ///   w   = Henyey-Greenstein asymmetry g ∈ [-1, 1] (Earth aerosols
+    ///         ≈ 0.76 forward-peaked).
+    mie_beta_g: vec4<f32>,
+    /// Atmosphere geometry + global gates.
+    ///   x = atmosphere top altitude above the surface (render units;
+    ///       view raymarch terminates here),
+    ///   y = Mie scale height H_M (render units),
+    ///   z = strength multiplier (artistic; 0 disables the entire
+    ///       scattering raymarch),
+    ///   w = reserved (ozone band — M4 follow-up).
+    atmos_geom: vec4<f32>,
     /// Per-channel Minnaert limb darkening.
     ///   xyz = R/G/B exponents (typical 0.2–0.45),
     ///   w   = overall strength in [0, 1]. `0` disables darkening.
@@ -62,12 +63,6 @@ struct AtmosphereBlock {
     ///   z = seed low 32 bits (as f32-bit reinterpret of u32),
     ///   w = seed high 32 bits.
     cloud_dynamics: vec4<f32>,
-    /// Per-wavelength Rayleigh scattering.
-    ///   xyz = vertical optical depth at zenith (R, G, B),
-    ///   w   = overall strength multiplier. `0` disables Rayleigh
-    ///         entirely and the surface renders with unattenuated
-    ///         white sunlight.
-    rayleigh: vec4<f32>,
     /// Cloud main-deck band phases 0..=3. 16 phases total spread across
     /// four vec4s — `cloud_band_phase()` unpacks by index. Each band
     /// carries a rigidly-wrapped rotation angle (mod TAU) so
@@ -119,135 +114,6 @@ fn rotate_around_y(dir: vec3<f32>, phase: f32) -> vec3<f32> {
     );
 }
 
-/// Result of a rim-halo column integration.
-struct RimHit {
-    contribution: vec3<f32>,
-    opacity: f32,
-}
-
-fn no_rim() -> RimHit {
-    return RimHit(vec3<f32>(0.0), 0.0);
-}
-
-/// Rim-halo contribution for a ray that may or may not hit the body.
-///
-/// Integrates an exponential-density atmospheric column between the
-/// body's inner sphere (radius `inner_r`) and the outer shell (radius
-/// `inner_r + outer_alt`). Returns a coloured contribution and an
-/// opacity for the compositor. Mirrors `rim_halo_contribution` in
-/// `gas_giant.wgsl`, parameterised instead of reading globals.
-///
-/// The returned `contribution` is *not* scaled by the caller's light
-/// flux; the caller multiplies by `sun_flux * (1 / 4π)` at the
-/// compositing site so the normalisation matches the cloud-deck /
-/// surface lighting budget already in that shader.
-fn rim_halo_contribution(
-    cam_pos: vec3<f32>,
-    ray_dir: vec3<f32>,
-    center: vec3<f32>,
-    light_dir_ws: vec3<f32>,
-    inner_r: f32,
-    outer_alt: f32,
-    scale_h: f32,
-    color: vec3<f32>,
-    intensity: f32,
-) -> RimHit {
-    if intensity <= 0.0 || outer_alt <= 0.0 {
-        return no_rim();
-    }
-
-    let r_inner = inner_r;
-    let r_outer = inner_r + outer_alt;
-
-    // Ray-sphere intersection against the outer shell.
-    let oc = cam_pos - center;
-    let half_b = dot(oc, ray_dir);
-    let c_outer = dot(oc, oc) - r_outer * r_outer;
-    let disc_o = half_b * half_b - c_outer;
-    if disc_o < 0.0 {
-        return no_rim();
-    }
-    let sq_o = sqrt(max(disc_o, 0.0));
-    let t0 = -half_b - sq_o;
-    let t1 = -half_b + sq_o;
-    let t_entry = max(t0, 0.0);
-    if t1 <= t_entry {
-        return no_rim();
-    }
-
-    // Closest approach altitude.
-    let closest = oc + ray_dir * (-half_b);
-    let closest_d = length(closest);
-    let shell_span = max(r_outer - r_inner, 1e-6);
-    let closest_alt = clamp((closest_d - r_inner) / shell_span, -1.0, 1.0);
-
-    // Exponential falloff with altitude. `scale_h` is in render units.
-    let sh = max(scale_h, 1e-4);
-    let rel_h = (closest_alt * shell_span) / sh;
-    let density = exp(-max(rel_h, 0.0));
-
-    // Column length along the ray within the shell; clamp at the
-    // inner sphere if the ray hits it.
-    let c_inner = dot(oc, oc) - r_inner * r_inner;
-    let disc_i = half_b * half_b - c_inner;
-    var t_exit = t1;
-    if disc_i >= 0.0 {
-        let ti = -half_b - sqrt(max(disc_i, 0.0));
-        if ti > t_entry {
-            t_exit = min(t_exit, ti);
-        }
-    }
-    let column = max(t_exit - t_entry, 0.0);
-
-    // Sun factor: the halo only appears on the lit side of the body.
-    let closest_dir = normalize(oc + ray_dir * (-half_b));
-    let sun_factor = clamp(dot(closest_dir, light_dir_ws) * 0.5 + 0.5, 0.0, 1.0);
-
-    // Normalise the column by the shell thickness so intensity stays
-    // consistent as `outer_altitude_m` is tuned, and clamp the path
-    // factor so grazing rays don't peg the tonemapper.
-    let column_norm = column / shell_span;
-    let path_factor = column_norm / (1.0 + column_norm);
-    let strength = clamp(intensity * density * sun_factor * path_factor, 0.0, intensity);
-    return RimHit(color * strength, min(strength, 1.0));
-}
-
-/// Apply a terminator-warmth tint near the day/night line on the lit
-/// hemisphere. Strength 0 returns `base` unchanged.
-fn apply_terminator_warmth(
-    base: vec3<f32>,
-    n_dot_l: f32,
-    tint: vec3<f32>,
-    strength: f32,
-) -> vec3<f32> {
-    if strength <= 0.0 {
-        return base;
-    }
-    let lit_side = smoothstep(-0.05, 0.10, n_dot_l);
-    let near_zero = 1.0 - smoothstep(0.05, 0.30, n_dot_l);
-    let w = clamp(lit_side * near_zero * strength, 0.0, 1.0);
-    return mix(base, base * tint, w);
-}
-
-/// Apply a Fresnel-style tint to the lit limb (cool Rayleigh-like
-/// rim). Gated by `n_dot_l²` so the unlit limb stays dark. Strength 0
-/// returns `base` unchanged.
-fn apply_fresnel_rim(
-    base: vec3<f32>,
-    n_dot_l: f32,
-    n_dot_v: f32,
-    tint: vec3<f32>,
-    strength: f32,
-) -> vec3<f32> {
-    if strength <= 0.0 {
-        return base;
-    }
-    let fresnel = pow(1.0 - clamp(n_dot_v, 0.0, 1.0), 4.0);
-    let lit_gate = clamp(n_dot_l, 0.0, 1.0);
-    let w = clamp(fresnel * lit_gate * lit_gate * strength, 0.0, 1.0);
-    return mix(base, base * tint, w);
-}
-
 /// Apply per-channel Minnaert limb darkening. Strength 0 returns
 /// `base` unchanged. Exponents are per-channel; typical terrestrial
 /// values are near 1.0 (barely any effect); gas giants sit around 0.2–0.45.
@@ -268,136 +134,273 @@ fn apply_limb_darkening(
     return mix(base, darkened, clamp(strength, 0.0, 1.0));
 }
 
-// ── Rayleigh scattering ─────────────────────────────────────────────────────
+// ── Single-scattering Rayleigh + Mie atmosphere ─────────────────────────────
 //
-// Two complementary effects from one physical parameter set (per-channel
-// vertical optical depth `τ_v`):
+// One numeric raymarch produces both the in-scattered radiance along a
+// view ray and the per-channel transmittance from the camera entry
+// point to the ray exit (surface hit on body-pass, atmosphere shell
+// exit on miss-pass). The same path delivers:
 //
-//   1. Ground transmission `T(λ) = exp(-τ_v(λ) · airmass(μ_sun))`. Multiplies
-//      the direct-sun component of the lit surface. At high sun the
-//      transmission is near-white; as the sun lowers, blue dies first and
-//      the surface is progressively lit by redder light — which is what
-//      actually produces sunset colours (not an ad-hoc tint).
+//   - the rim halo outside the silhouette (miss rays integrate the
+//     full atmosphere chord, accumulating Rayleigh in-scatter along
+//     it);
+//   - the daylight haze across the lit disk (small but non-zero
+//     in-scatter on the sub-solar surface);
+//   - the orange/red sunset band at the terminator (long sun column
+//     eats blue from `T_sun`, leaving the red residue scattering);
+//   - the surface aerial perspective (transmittance dims and tints
+//     the lit ground);
+//   - the soft warm "wrap" around the terminator (Mie's forward-peaked
+//     phase function brightens haze where the view ray is aligned
+//     with the sun direction).
 //
-//   2. View-path in-scatter `β(λ) · T_sun(λ) · airmass_view · sun_flux`.
-//      β is proportional to `τ_v`. At the sub-solar point this reads blue
-//      (β_blue large, T_blue still decent); at the terminator the long
-//      sun column eats blue entirely and the orange/red β × T product
-//      dominates — this is the terminator ring seen from orbit.
+// All the legacy stand-in helpers (`apply_rayleigh_ground_transmission`,
+// `apply_rayleigh_inscatter`, `apply_terminator_warmth`,
+// `apply_fresnel_rim`, `rim_halo_contribution`) are gone — their
+// approximations are now produced as natural consequences of this
+// physical integral.
 //
-// The airmass approximation below is a Chapman-function soft clamp rather
-// than pure `1/μ`: `1 / (μ + 0.15 · (1.65 - acos(μ)/π·180·k)^-1.253)` is
-// the Kasten-Young formula; here we use the simpler `1/max(μ, 0.02)` clamp
-// (asymptote 50× at μ=0.02 ≈ 88.8° zenith), which is fast and
-// well-behaved through the terminator.
+// Reference: Sébastien Hillaire's "A Scalable and Production-Ready
+// Sky and Atmosphere Rendering Technique" (2020) for the integration
+// scheme; Bucholtz 1995 for Rayleigh β; Henyey-Greenstein 1941 for
+// the Mie phase function. Single-scattering only — multi-scatter
+// matters in-atmosphere but is below visual threshold for orbital
+// impostors. Ozone absorption (the source of Earth's blue twilight)
+// is a queued M4 follow-up: cheap per-sample multiplier on transmittance,
+// adds two parameters; defer until the visual budget calls for it.
 
-fn rayleigh_airmass(cos_zenith: f32) -> f32 {
-    return 1.0 / max(cos_zenith, 0.02);
+const ATMOS_VIEW_STEPS: u32 = 8u;
+const ATMOS_SUN_STEPS: u32 = 6u;
+
+struct ScatterResult {
+    /// In-scattered radiance accumulated along `[t_enter, t_exit]`.
+    /// Already pre-multiplied by sun flux, β coefficients, phase
+    /// functions, and the artistic `strength` knob — caller adds it
+    /// to the surface colour without further scaling.
+    in_scatter: vec3<f32>,
+    /// Per-channel transmittance through `[t_enter, t_exit]`. Multiply
+    /// the surface colour by this to get aerial perspective. `vec3(1)`
+    /// = vacuum (no extinction).
+    transmittance: vec3<f32>,
 }
 
-/// Multiply the lit surface by the per-channel Rayleigh illumination
-/// the ground actually receives: direct sun (attenuated by airmass)
-/// PLUS the fraction of scattered-out light that returns via the sky.
+fn no_scatter() -> ScatterResult {
+    return ScatterResult(vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+/// True when the body has an active scattering atmosphere. Caller
+/// uses this to skip the raymarch entirely on airless / vacuum bodies.
+fn atmosphere_scattering_active(layers: AtmosphereBlock) -> bool {
+    let beta_total = layers.rayleigh_beta_h.x + layers.rayleigh_beta_h.y
+        + layers.rayleigh_beta_h.z + layers.mie_beta_g.x;
+    return layers.atmos_geom.z > 0.0
+        && layers.atmos_geom.x > 0.0
+        && beta_total > 0.0;
+}
+
+/// Rayleigh phase function: P_R(θ) = 3/(16π) · (1 + cos²θ).
 ///
-/// The naive formula `base * exp(-τ · airmass)` over-reddens the lit
-/// disk because it assumes any blue photon scattered out of the sun's
-/// beam is lost to the viewer. In reality most of it reaches the
-/// ground indirectly via multiple-scatter through the sky, and the
-/// ground under a moderate sun reads mostly neutral — only the
-/// narrow band near the terminator genuinely reddens. Model:
+/// Symmetric in cos θ → equal forward and backward scatter, with a
+/// dip at 90°. This is what produces the "blue everywhere on the lit
+/// disk, slightly brighter near and away from the sun" Rayleigh look.
+fn phase_rayleigh(cos_theta: f32) -> f32 {
+    return (3.0 / (16.0 * PI)) * (1.0 + cos_theta * cos_theta);
+}
+
+/// Henyey-Greenstein Mie phase: 1/(4π) · (1−g²)/(1+g²−2g·cosθ)^(3/2).
 ///
-///   effective(λ) = T(λ) + α · (1 − T(λ))
+/// `g` controls anisotropy: positive = forward-peaked (Earth aerosols
+/// ≈ 0.76 — sun-side haze whitens noticeably); 0 = isotropic; negative
+/// = back-peaked (rare). At g ≈ 0.76 the forward peak is ~30× the
+/// isotropic floor — this is what gives the lit limb its desaturated
+/// glow and the haze-near-sun brightening.
+fn phase_mie_hg(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom = max(1.0 + g2 - 2.0 * g * cos_theta, 1e-6);
+    return (1.0 / (4.0 * PI)) * (1.0 - g2) / pow(denom, 1.5);
+}
+
+/// Optical depth from `p` toward the sun, integrating exponential
+/// densities of Rayleigh + Mie species. Returns the per-channel
+/// `τ = β_R · ∫ρ_R + β_M · ∫ρ_M`, ready for `T = exp(-τ)`.
 ///
-/// where α is the "sky-diffuse recovery fraction" — the share of the
-/// scattered-out light at wavelength λ that returns to this ground
-/// pixel via the sky hemisphere. α ≈ 0.45 is a first-order fit to
-/// full radiative-transfer solutions under an isotropic-scattering
-/// assumption, and matches the broad visual feel of Apollo-era
-/// Earth-from-orbit imagery: near-natural ground under a high sun,
-/// a concentrated red band within ~15–20° of the terminator.
-///
-/// α = 0 recovers the naive (over-reddening) formula; α = 1 is
-/// indistinguishable from no atmosphere at all.
-fn apply_rayleigh_ground_transmission(
-    base: vec3<f32>,
-    n_dot_l: f32,
-    tau_v_rgb: vec3<f32>,
-    strength: f32,
+/// Includes a planet-occlusion test: if the sun ray from `p` hits the
+/// solid sphere, the sun is below the local horizon and the function
+/// returns a saturating optical depth so `T_sun → 0`. This is what
+/// prevents the night-side surface from picking up a phantom haze.
+fn sun_optical_depth(
+    p: vec3<f32>,
+    sun_dir: vec3<f32>,
+    center: vec3<f32>,
+    planet_r: f32,
+    atmos_top_r: f32,
+    beta_r: vec3<f32>,
+    beta_m: f32,
+    h_r: f32,
+    h_m: f32,
 ) -> vec3<f32> {
-    if strength <= 0.0 {
-        return base;
+    let oc = p - center;
+    let half_b = dot(oc, sun_dir);
+
+    // Planet occlusion. Ray (p, sun_dir) hits the solid sphere ahead?
+    // Then the sun is below `p`'s local horizon — the sun column is
+    // effectively infinite, T_sun = 0.
+    let c_p = dot(oc, oc) - planet_r * planet_r;
+    let disc_p = half_b * half_b - c_p;
+    if disc_p > 0.0 {
+        let t_p = -half_b - sqrt(disc_p);
+        if t_p > 1e-3 {
+            // exp(-40) ≈ 4e-18: indistinguishable from zero in any
+            // tonemapped output; avoids `inf` propagating from a true
+            // infinity sentinel.
+            return vec3<f32>(40.0);
+        }
     }
-    let airmass = rayleigh_airmass(n_dot_l);
-    let t = exp(-tau_v_rgb * airmass);
-    let alpha = 0.45;
-    let effective = t + alpha * (vec3<f32>(1.0) - t);
-    let gate = smoothstep(-0.05, 0.20, n_dot_l);
-    return mix(base, base * effective, gate * strength);
+
+    // Atmosphere shell exit along the sun ray.
+    let c_a = dot(oc, oc) - atmos_top_r * atmos_top_r;
+    let disc_a = half_b * half_b - c_a;
+    if disc_a < 0.0 {
+        // `p` outside the shell — no extinction along this leg.
+        return vec3<f32>(0.0);
+    }
+    let t_a = -half_b + sqrt(disc_a);
+    if t_a <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    let n = ATMOS_SUN_STEPS;
+    let ds = t_a / f32(n);
+    var od_r: f32 = 0.0;
+    var od_m: f32 = 0.0;
+    for (var i: u32 = 0u; i < n; i = i + 1u) {
+        let t = (f32(i) + 0.5) * ds;
+        let q = p + t * sun_dir;
+        let h = max(length(q - center) - planet_r, 0.0);
+        od_r = od_r + exp(-h / h_r) * ds;
+        od_m = od_m + exp(-h / h_m) * ds;
+    }
+    return beta_r * od_r + vec3<f32>(beta_m) * od_m;
 }
 
-/// Additive Rayleigh in-scatter along the view path. Per-wavelength tint
-/// is naturally blue at the sub-solar point and orange/red at the
-/// terminator — see the module header for the derivation. `β` is
-/// proportional to `τ_v`, so we pass `τ_v` alone and scale it here.
+/// Single-scattering raymarch along view ray segment `[t_enter, t_exit]`.
 ///
-/// Uses `(1 − exp(−τ · airmass_view))` as the view-path opacity per
-/// channel. This is the fraction of the column occupied by atmosphere
-/// from the viewer's perspective, saturating smoothly at the limb
-/// (where airmass_view → large and the opacity approaches 1) instead
-/// of blowing up like naive `airmass_view` would. At the sub-solar
-/// point it's the vertical opacity `1 − exp(−τ)` — small, but nonzero,
-/// so the daylight blue haze IS visible across the whole disk. That
-/// "visible everywhere, stronger at the limb" distribution is what
-/// reads as atmosphere in orbital photos.
+/// `cam_pos`, `ray_dir`, `center`, `sun_dir` are world-space; `t_enter`
+/// is the atmosphere shell entry distance (or 0 if the camera is
+/// inside the shell), `t_exit` is the surface hit distance (body
+/// pass) or the atmosphere shell exit distance (miss / halo pass).
+/// `planet_r` is the body's solid radius in render units.
 ///
-/// `sun_flux_scaled` is the caller's pre-normalised sunlight contribution
-/// (e.g. `sun_flux * hapke_scale`) so haze brightness tracks surface
-/// brightness as the sun distance or luminosity changes.
-fn apply_rayleigh_inscatter(
-    base: vec3<f32>,
-    n_dot_l: f32,
-    n_dot_v: f32,
-    tau_v_rgb: vec3<f32>,
-    strength: f32,
-    sun_flux_scaled: f32,
-) -> vec3<f32> {
-    if strength <= 0.0 {
-        return base;
+/// `pixel_jitter ∈ [0, 1)` shifts the sample positions sub-step to
+/// break the regular sampling pattern — without it, the terminator
+/// shows banded artifacts at orbital views. `0.5` recovers the
+/// centred-sample scheme (no jitter); per-pixel hash is the production
+/// path. See `atmosphere_jitter`.
+///
+/// Returns `(in_scatter, transmittance)`. The caller does:
+///   surface_lit = surface_lit * result.transmittance;
+///   surface_lit = surface_lit + result.in_scatter;
+fn integrate_atmosphere(
+    cam_pos: vec3<f32>,
+    ray_dir: vec3<f32>,
+    center: vec3<f32>,
+    sun_dir: vec3<f32>,
+    sun_flux: f32,
+    t_enter: f32,
+    t_exit: f32,
+    planet_r: f32,
+    layers: AtmosphereBlock,
+    pixel_jitter: f32,
+) -> ScatterResult {
+    if !atmosphere_scattering_active(layers) {
+        return no_scatter();
     }
-    let airmass_sun = rayleigh_airmass(n_dot_l);
-    let t_sun = exp(-tau_v_rgb * airmass_sun);
-    let airmass_view = rayleigh_airmass(n_dot_v);
-    // View-path opacity per channel. Saturates at the limb instead of
-    // exploding; equals `1 − exp(−τ_v)` at zenith, which is what
-    // gives the sub-solar point a faint blue haze.
-    let view_opacity = vec3<f32>(1.0) - exp(-tau_v_rgb * airmass_view);
-    // Soft lit-gate: the in-scatter ring reaches slightly past the
-    // geometric terminator (atmosphere above the surface is lit even
-    // when the surface is not) — hence the -0.15 lower edge.
-    let lit_gate = smoothstep(-0.15, 0.30, n_dot_l);
-    // Phase-function / isotropic-scatter normalisation. Of the flux
-    // Rayleigh-scattered out of a view-path column, only `1/(4π)` of
-    // it per steradian ends up travelling toward the viewer. Without
-    // this factor a physical `τ_v = 0.264` on blue produces a haze
-    // radiance brighter than the lit ground — the "whole planet
-    // bathed in cyan" look. The proper Rayleigh phase function is
-    // `3/(16π) · (1 + cos²θ)`, ranging 0.06 → 0.12; the isotropic
-    // constant picks the middle-of-the-range value, which is close
-    // enough for typical orbital viewing geometries and avoids
-    // plumbing `cos_phase` through the call site.
-    let phase_norm = 1.0 / (4.0 * PI);
-    let w = lit_gate * strength * sun_flux_scaled * phase_norm;
-    return base + view_opacity * t_sun * w;
+    let path = max(t_exit - t_enter, 0.0);
+    if path <= 0.0 {
+        return no_scatter();
+    }
+
+    let beta_r = layers.rayleigh_beta_h.xyz;
+    let beta_m_scalar = layers.mie_beta_g.x;
+    let h_r = max(layers.rayleigh_beta_h.w, 1e-3);
+    let h_m = max(layers.atmos_geom.y, 1e-3);
+    let atmos_top_r = planet_r + layers.atmos_geom.x;
+    let strength = layers.atmos_geom.z;
+    let g = layers.mie_beta_g.w;
+
+    // Phase angle θ = angle between view direction (camera → scatter
+    // point) and sun direction (scatter point → sun). Forward Mie
+    // scatter peaks at θ = 0, which is when the camera looks toward
+    // the sun through the atmosphere. cos θ = dot(ray_dir, sun_dir):
+    // both vectors point in the "physical light/view" sense, so a
+    // ray pointed at the sun has cos θ = +1 and the HG kernel peaks
+    // there, brightening the haze on the lit limb / sub-solar side.
+    let cos_theta = dot(ray_dir, sun_dir);
+    let p_r = phase_rayleigh(cos_theta);
+    let p_m = phase_mie_hg(cos_theta, g);
+
+    let n = ATMOS_VIEW_STEPS;
+    let ds = path / f32(n);
+    let jitter = clamp(pixel_jitter, 0.0, 0.999);
+
+    var sum_r = vec3<f32>(0.0);
+    var sum_m = vec3<f32>(0.0);
+    var od_r: f32 = 0.0;
+    var od_m: f32 = 0.0;
+
+    for (var i: u32 = 0u; i < n; i = i + 1u) {
+        let t = t_enter + (f32(i) + jitter) * ds;
+        let p_pt = cam_pos + t * ray_dir;
+        let h = max(length(p_pt - center) - planet_r, 0.0);
+        let rho_r = exp(-h / h_r);
+        let rho_m = exp(-h / h_m);
+        od_r = od_r + rho_r * ds;
+        od_m = od_m + rho_m * ds;
+
+        // Transmittance from camera entry to this sample point.
+        let tau_view = beta_r * od_r + vec3<f32>(beta_m_scalar) * od_m;
+        let trans_view = exp(-tau_view);
+
+        // Transmittance from sample point to sun.
+        let tau_sun = sun_optical_depth(
+            p_pt, sun_dir, center,
+            planet_r, atmos_top_r,
+            beta_r, beta_m_scalar, h_r, h_m,
+        );
+        let trans_sun = exp(-tau_sun);
+
+        let weight = trans_view * trans_sun * ds;
+        sum_r = sum_r + rho_r * weight;
+        sum_m = sum_m + rho_m * weight;
+    }
+
+    let in_scatter = sun_flux * strength
+        * (beta_r * (sum_r * p_r) + vec3<f32>(beta_m_scalar) * (sum_m * p_m));
+    let total_tau = beta_r * od_r + vec3<f32>(beta_m_scalar) * od_m;
+    let transmittance = exp(-total_tau);
+    return ScatterResult(in_scatter, transmittance);
 }
 
-/// Returns true if any atmosphere layer carries a non-zero strength.
-/// The shader can skip the entire atmosphere path when this is false.
-fn atmosphere_is_active(layers: AtmosphereBlock) -> bool {
-    return layers.rim_color_intensity.w > 0.0
-        || layers.terminator_warmth.w > 0.0
-        || layers.fresnel_rim.w > 0.0
-        || layers.limb_exponents.w > 0.0
-        || layers.cloud_albedo_coverage.w > 0.0;
+/// Per-pixel jitter ∈ [0, 1) for raymarch sample offsets.
+///
+/// Interleaved Gradient Noise (Jorge Jimenez, "Next Generation Post
+/// Processing in Call of Duty Advanced Warfare", 2014). Gives a
+/// gradient-like high-frequency pattern that visually resolves to
+/// uniform mid-grey at the eye's perceptual scale, instead of the
+/// salt-and-pepper speckle a white-noise hash produces. Same
+/// statistical decorrelation across pixels, much smoother under
+/// the smooth-output integral; the jittered-sample variance lands
+/// below the perceptual threshold where white-noise jitter is
+/// visible as static.
+///
+/// Output is multiplied into `(f32(i) + jitter) * ds` in
+/// `integrate_atmosphere`, shifting each pixel's sample positions
+/// sub-step to break the regular sampling pattern that otherwise
+/// produces banded artifacts at the terminator (where the sun-column
+/// changes rapidly along the view ray).
+fn atmosphere_jitter(coord: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(coord, magic.xy)));
 }
 
 // ── Cloud layer ─────────────────────────────────────────────────────────────

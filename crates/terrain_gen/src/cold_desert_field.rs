@@ -1009,7 +1009,7 @@ fn sample_cold_desert(
         + basin_dune_fill * 0.10)
         .clamp(0.30, 0.58);
     albedo = mix3(albedo, palette_albedo, palette_strength);
-    albedo = cold_desert_rust_saturation_grade(albedo);
+    let _surface_color_hint = cold_desert_rust_saturation_grade(albedo);
 
     // The renderer currently treats the dominant material id as the primary
     // palette lookup. Keep the dominant material conservative so broad
@@ -1054,9 +1054,8 @@ fn sample_cold_desert(
         - shield.eroded_flanks * 0.025
         + shield.caldera_floor * 0.025;
 
-    // Persist the full biome weights so the generic BiomeReliefColor stage
-    // can blend per-biome palettes after later stages have written into the
-    // albedo cube. Several biomes get boosted on physical signals
+    // Persist the full biome weights so the unified surface-color painter can
+    // blend per-biome palettes after structural stages have finished. Several biomes get boosted on physical signals
     // (dune fill, shield flanks, sediment coherence) so the post-pass picks
     // up the right palette where features have actually landed.
     let biome_mix = BiomeMix::from_weighted([
@@ -1093,7 +1092,6 @@ fn sample_cold_desert(
 
     SurfaceFieldSample::new(
         height_m,
-        albedo,
         material_mix,
         biome_mix,
         roughness.clamp(0.55, 0.96),
@@ -1174,7 +1172,7 @@ fn cold_desert_relief_albedo_grade(albedo: [f32; 3], height_m: f32, slope_signal
 /// Per-biome relief palettes for the default cold-desert preset, indexed by
 /// `ColdDesertBiome::index()`.
 /// The compile path copies this into `BodyBuilder::biome_palettes` so the
-/// generic `BiomeReliefColor` stage can blend palettes from the baked
+/// unified surface-color painter can blend palettes from the baked
 /// biome-weights cubemap.
 pub fn cold_desert_relief_palettes() -> Vec<ReliefPalette> {
     default_cold_desert_relief_palettes()

@@ -132,9 +132,9 @@ fn rim_ridge(t: f32, softness: f32) -> f32 {
 /// `ejecta_scale ∈ [0, 1]` is a direct multiplier on the apron thickness.
 /// Used by the bake loop to carve an uprange suppression wedge for oblique
 /// impacts. Angular ray streaks are an albedo phenomenon (exposed fresh
-/// material) and live in the SpaceWeather stage's albedo bake — never in
-/// the height channel. `softness` widens the gate to match the broadened
-/// rim ridge, keeping the apron continuous with the crest.
+/// material) and live in the unified surface-color bake — never in the
+/// height channel. `softness` widens the gate to match the broadened rim
+/// ridge, keeping the apron continuous with the crest.
 #[inline]
 fn ejecta_apron(t: f32, radius_m: f32, ejecta_scale: f32, softness: f32) -> f32 {
     if !(1.0..=EJECTA_MAX_T).contains(&t) {

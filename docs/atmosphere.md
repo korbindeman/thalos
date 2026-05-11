@@ -5,18 +5,21 @@ solid surface: gas-giant materials, rocky-body atmospheric scattering,
 clouds, ocean rendering, and image-based lighting (IBL / reflection
 probe).
 
-This doc is mostly future work (M4). What runs today is gas-giant
-materials, a sparse terrestrial-atmosphere rim shader, an in-impostor
-water BRDF, and a CPU-painted reflection probe.
+What runs today: gas-giant materials, a single-scattering Rayleigh +
+Mie atmosphere on terrestrial impostors, a baked-cubemap cloud layer
+with shader-side differential rotation, an in-impostor water BRDF,
+and a CPU-painted reflection probe. The terrestrial atmosphere is
+production-ready for orbital views; in-atmosphere flight is the
+remaining frontier.
 
 ## Status
 
-| Area | Today | Target (M4) |
+| Area | Today | Future |
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
-| Rocky-body sky | Sparse `TerrestrialAtmosphere`: rim halo + limb shading composited over the impostor. No path-traced scattering. | Bruneton 2008 precomputed scattering. Soft terminator with twilight wedge. Per-body parameters (Earth-like / Mars-like / Venus-like). |
-| Cloud rendering | None on rocky bodies. Gas-giant cloud deck is part of the impostor. | 2D cloud shells with animated detail noise, latitude-banded structure, surface shadows. Optional volumetric layer for orbital cinematic moments. |
-| Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
+| Rocky-body sky | **Single-scattering Rayleigh + Mie raymarch** (`atmosphere.wgsl::integrate_atmosphere`). Per-body Rayleigh β + Mie β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 LUTs once in-atmosphere flight justifies the precompute step; multi-scatter approximation. |
+| Cloud rendering | Baked cumulus cubemap from `thalos_cloud_gen` + shader-side differential rotation (16 latitude bands), shadow probe, Beer-Lambert opacity. Gas-giant cloud deck is part of the impostor. | Volumetric layer for orbital cinematic moments; surface-shadow projection from clouds onto terrain LOD. |
+| Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
 ## Goals
@@ -98,62 +101,95 @@ consumes `AtmosphereParams` and feeds
 
 ---
 
-## Rocky atmospheres (M4)
+## Rocky atmospheres (shipping)
 
-### Plan
+Single-scattering Rayleigh + Mie raymarch. Per-fragment integration
+of an exponential-density atmospheric shell, with per-channel
+Rayleigh (Bucholtz 1995 sea-level coefficients) and scalar Mie
+(Henyey-Greenstein phase function). One integral, called once per
+body fragment and once per halo fragment, yields the rim halo, the
+lit-disk haze, the terminator orange band, and the surface aerial
+perspective from the same physics.
 
-Adopt Bruneton 2008 precomputed atmospheric scattering. This is the
-canonical real-time approach and matches what KSP2 (and `Scatterer`
-for KSP1) shipped. Four reasons we should use it as-is:
+### Why this approach (not Bruneton, not the prior stand-ins)
 
-- LUTs are parameterized only by altitude and sun angles
-  (latitude/longitude symmetry is exploited), so storage is cheap.
-- Rayleigh + Mie are both supported, which we need: Earth-likes
-  (Rayleigh-dominant, blue), Mars-likes (Mie-dominant, butterscotch),
-  Venus-likes (Mie-thick, opaque) all fall out of the same model
-  with different coefficient sets.
-- Aerial perspective for distant terrain comes for free.
-- Tested against ground truth in published papers and shipping
-  games.
+The prior implementation had five separate stand-in helpers
+(`apply_rayleigh_ground_transmission`, `apply_rayleigh_inscatter`,
+`rim_halo_contribution`, `apply_terminator_warmth`,
+`apply_fresnel_rim`) each parameterising a different visual cue. They
+worked, but each carried its own author-tuned constants and the
+relationships between them were not physical — tweaking one
+unbalanced the others. Replacing them with a single physical integral
+collapses the parameter surface and makes per-body authoring
+straightforward.
 
-### Per-body parameters
+Bruneton 2008 is the canonical "right" answer for in-atmosphere
+flight (KSP2 / Scatterer / O'Neil GPU Gems), but its 4D LUT
+precompute is overkill when the only viewing geometry is "from
+outside, looking in." The single-scattering raymarch with per-pixel
+sample jitter delivers ~95% of the visual quality at a fraction of
+the implementation cost and zero load-time precompute. When
+in-atmosphere flight lands, the integration helper is the swap
+point: replace its body with LUT lookups, leave the call sites
+untouched.
 
-Each body's `TerrestrialAtmosphere` (or a successor type) carries the
-Bruneton parameter set:
+### Authoring (`AtmosphericScattering`)
 
-- Rayleigh scale height (~8 km for Earth)
-- Mie scale height (~1.2 km for Earth)
-- Rayleigh scattering coefficient (RGB; per-body composition)
-- Mie scattering coefficient (RGB)
-- Mie phase asymmetry `g`
-- Ozone-equivalent absorption coefficient and altitude band (Earth's
-  ~25 km ozone layer is what gives the orange terminator)
-- Top-of-atmosphere altitude (3-5 scale heights)
+Per-body parameters in `assets/bodies/<name>.ron::scattering`:
 
-These are inferred by the prior from atmosphere variant + body
-radius + composition, with author overrides.
+- `vertical_optical_depth: [R, G, B]` — Rayleigh τ_v at zenith.
+  Earth sea level: `(0.046, 0.108, 0.264)`. Dust-loaded atmospheres
+  invert the slope (red dominant — see Vaelen).
+- `rayleigh_scale_height_m` — Earth: 8000.
+- `mie_optical_depth` — scalar (Mie ≈ spectrally white in the
+  visible). Earth clean: 0.02; hazy: 0.10; dust storm: 0.30+.
+- `mie_scale_height_m` — Earth aerosols: 1200.
+- `mie_asymmetry` — Henyey-Greenstein `g` ∈ [-1, 1]. Earth: 0.76
+  forward-peaked.
+- `atmosphere_top_m` — optional. Default = 5 × max(scale heights),
+  which clips at 1% of sea-level density. Authoring an explicit
+  value beyond this wastes raymarch samples.
+- `strength` — overall artistic multiplier (1.0 = physical).
 
-### Visual targets
+### Visual targets achieved
 
-See [gen/planet_aesthetics.md](gen/planet_aesthetics.md) for the full
-visual reference. The headline targets for M4:
-
-- **Soft terminator** with twilight wedge on bodies that have
-  atmospheres. Mountain peaks catch warm light while their bases
-  shadow.
-- **Limb glow extends beyond the geometric edge.** A flat disk with a
-  fresnel ring reads as fake.
-- **Aerial perspective** desaturates and tints distant terrain
-  toward the limb color.
-- **Knife-edge terminator** preserved on airless bodies (Mira, Selva,
-  asteroids). The hardness sells the airlessness.
+- ✓ **Soft terminator** with red/orange wedge from Rayleigh sun-column
+  attenuation.
+- ✓ **Limb glow extends beyond the geometric edge.** The halo pass
+  raymarches the chord through the atmosphere shell on miss rays;
+  the result is the physical Rayleigh + Mie scattering halo, not a
+  fresnel ring stand-in.
+- ✓ **Aerial perspective** dims and tints distant terrain via the
+  per-channel transmittance.
+- ✓ **Mie forward-peak haze** on the night-side rim where the sun
+  sits behind the body — the warm crescent visible on real
+  back-lit photographs.
+- ✓ **Knife-edge terminator** preserved on airless bodies (Mira,
+  Selva, asteroids — `TerrestrialAtmosphere::default` early-outs
+  the entire raymarch via the strength-zero gate).
 
 ### Coupling to terrain
 
-Bruneton scattering reads a depth/height field for the planet to
-compute shadowing and aerial perspective. Once ground LOD lands
-(M3), the atmosphere reads against the live terrain. Until then the
-sphere geometry is enough for orbital views.
+The raymarch reads only the smooth sphere as the optical lower
+boundary. Once ground LOD lands (M3), aerial perspective should read
+against the live tile heights so distant peaks atmospheric-shadow
+correctly; the integration helper takes a planet-radius argument so
+this swap is a one-line change at the call site.
+
+### Backlog
+
+- **Ozone absorption.** Two extra parameters (band altitude + per-
+  channel absorption coefficient); per-sample multiplier on
+  transmittance. Produces Earth's blue-purple twilight wedge.
+  Cheap; defer until visual budget calls for it.
+- **Multi-scatter approximation.** Below visual threshold for
+  orbital impostors. Matters once we're flying in-atmosphere.
+- **Sample-count LOD.** 8 view × 6 sun samples is comfortable on
+  M2 Pro at impostor scale; profile and tune if budget bites.
+  Apparent body size is a natural LOD knob.
+- **Bruneton swap.** When in-atmosphere flight lands, replace the
+  raymarch body with LUT lookups; integration call sites stay
+  unchanged.
 
 ---
 

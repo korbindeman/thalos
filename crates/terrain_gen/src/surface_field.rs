@@ -210,13 +210,17 @@ impl BiomeMix {
 /// Storage form of a `BiomeMix` for the build-time `biome_weights_cubemap`.
 /// Quantizes weights to u8 (255 = 1.0) so each texel is 8 bytes regardless of
 /// `MAX_BIOME_WEIGHTS`.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct BiomeMixTexel {
     pub biome_ids: [u8; MAX_BIOME_WEIGHTS],
     pub weights_q: [u8; MAX_BIOME_WEIGHTS],
 }
 
 impl BiomeMixTexel {
+    pub fn single(biome_id: u8) -> Self {
+        Self::from_mix(BiomeMix::single(biome_id))
+    }
+
     pub fn from_mix(mix: BiomeMix) -> Self {
         let mut biome_ids = [0u8; MAX_BIOME_WEIGHTS];
         let mut weights_q = [0u8; MAX_BIOME_WEIGHTS];
@@ -318,12 +322,10 @@ impl ReliefPalette {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceFieldSample {
     pub height_m: f32,
-    pub albedo_linear: [f32; 3],
     pub material_mix: SurfaceMaterialMix,
     /// Top-K weighted biome mix at this point. Persisted by the bake into
-    /// `BodyBuilder::biome_weights_cubemap` so a generic relief-color stage
-    /// can blend per-biome palettes after later stages (craters, dunes,
-    /// impact splotches) have written into the albedo cube.
+    /// `BodyBuilder::biome_weights_cubemap` so the unified surface-color
+    /// painter can blend per-biome palettes after height/material generation.
     pub biome_mix: BiomeMix,
     pub roughness: f32,
     /// Body-local normal contribution at this point. Use `dir` to mean
@@ -336,7 +338,6 @@ pub struct SurfaceFieldSample {
 impl SurfaceFieldSample {
     pub fn new(
         height_m: f32,
-        albedo_linear: [f32; 3],
         material_mix: SurfaceMaterialMix,
         biome_mix: BiomeMix,
         roughness: f32,
@@ -344,7 +345,6 @@ impl SurfaceFieldSample {
     ) -> Self {
         Self {
             height_m,
-            albedo_linear,
             material_mix,
             biome_mix,
             roughness,
@@ -363,7 +363,6 @@ pub fn bake_surface_field_into_builder<F: SurfaceField>(builder: &mut BodyBuilde
 
     for face in CubemapFace::ALL {
         let heights = builder.height_contributions.height.face_data_mut(face);
-        let albedo = builder.albedo_contributions.albedo.face_data_mut(face);
         let materials = builder.material_cubemap.face_data_mut(face);
         let roughness = builder.roughness_cubemap.face_data_mut(face);
         let normals = builder.normal_cubemap.face_data_mut(face);
@@ -371,46 +370,37 @@ pub fn bake_surface_field_into_builder<F: SurfaceField>(builder: &mut BodyBuilde
 
         heights
             .par_iter_mut()
-            .zip(albedo.par_iter_mut())
             .zip(materials.par_iter_mut())
             .zip(roughness.par_iter_mut())
             .zip(normals.par_iter_mut())
             .zip(biomes.par_iter_mut())
             .enumerate()
-            .for_each(
-                |(i, (((((height, color), material), rough), nrm), biome))| {
-                    let x = i % res;
-                    let y = i / res;
-                    let u = (x as f32 + 0.5) / res as f32;
-                    let v = (y as f32 + 0.5) / res as f32;
-                    let dir = face_uv_to_dir(face, u, v);
-                    let sample = field.sample(dir, sample_scale_m);
+            .for_each(|(i, ((((height, material), rough), nrm), biome))| {
+                let x = i % res;
+                let y = i / res;
+                let u = (x as f32 + 0.5) / res as f32;
+                let v = (y as f32 + 0.5) / res as f32;
+                let dir = face_uv_to_dir(face, u, v);
+                let sample = field.sample(dir, sample_scale_m);
 
-                    *height = sample.height_m;
-                    *color = [
-                        sample.albedo_linear[0],
-                        sample.albedo_linear[1],
-                        sample.albedo_linear[2],
-                        1.0,
-                    ];
-                    *material = sample.material_mix.dominant_material_id();
-                    *rough = quantize_unit_to_u8(sample.roughness);
-                    *biome = BiomeMixTexel::from_mix(sample.biome_mix);
+                *height = sample.height_m;
+                *material = sample.material_mix.dominant_material_id();
+                *rough = quantize_unit_to_u8(sample.roughness);
+                *biome = BiomeMixTexel::from_mix(sample.biome_mix);
 
-                    // Normal cube: encode the field's analytical contribution
-                    // plus the geometric outward direction. Height-derived bumps
-                    // are NOT folded in here — that requires 4 extra `field.sample()`
-                    // calls per texel for finite differencing, and the impostor
-                    // shader doesn't consume this cube anyway (it reconstructs
-                    // normals per-fragment from the filterable height cube). When
-                    // ground LOD comes online and needs pre-baked normals, add a
-                    // separate two-pass bake that finite-differences the finalized
-                    // height cubemap.
-                    let perturb = sample.normal_local - sample.normal_local.dot(dir) * dir;
-                    let final_normal = (dir + perturb).try_normalize().unwrap_or(dir);
-                    *nrm = encode_object_space_normal(final_normal);
-                },
-            );
+                // Normal cube: encode the field's analytical contribution
+                // plus the geometric outward direction. Height-derived bumps
+                // are NOT folded in here — that requires 4 extra `field.sample()`
+                // calls per texel for finite differencing, and the impostor
+                // shader doesn't consume this cube anyway (it reconstructs
+                // normals per-fragment from the filterable height cube). When
+                // ground LOD comes online and needs pre-baked normals, add a
+                // separate two-pass bake that finite-differences the finalized
+                // height cubemap.
+                let perturb = sample.normal_local - sample.normal_local.dot(dir) * dir;
+                let final_normal = (dir + perturb).try_normalize().unwrap_or(dir);
+                *nrm = encode_object_space_normal(final_normal);
+            });
     }
 }
 

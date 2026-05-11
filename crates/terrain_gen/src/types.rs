@@ -604,7 +604,8 @@ pub struct BiomeParams {
     /// Base linear albedo for mature (fully space-weathered) surface.
     pub albedo: f32,
     /// Base linear albedo for fresh (recently exposed) surface. Used by
-    /// SpaceWeather as the target color for crater rims, ejecta, and rays.
+    /// the unified surface-color painter as the target color for crater
+    /// rims, ejecta, and rays.
     /// Defaults to `albedo * 1.9` if omitted.
     #[serde(default)]
     pub fresh_albedo: Option<f32>,

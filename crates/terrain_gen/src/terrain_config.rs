@@ -15,6 +15,7 @@ use crate::feature_compiler::{
 };
 use crate::seeding::sub_seed;
 use crate::static_surface::{PlanetSurface, StaticSurfaceData};
+use crate::surface_color::{SurfaceColorSpec, WaterAppearance, paint_surface_albedo};
 use crate::surface_field::quantize_unit_to_u8;
 use crate::tectonics::{TectonicConfig, TectonicSystem};
 use crate::types::{Composition, DynamicSurfaceLayers, IceCapSpec};
@@ -176,7 +177,7 @@ pub fn compile_terrain_config(
     options: TerrainCompileOptions,
 ) -> Result<PlanetSurface, TerrainCompileError> {
     // Build the tectonic system once; downstream consumers (the static-
-    // surface compile and the editor's `PreviewTectonics` component) read
+    // surface compile and the editor's `PreviewSurfaceOverlays` component) read
     // from the same instance. Cheap (~ms for 2k cells) but needs body
     // radius + body-name-derived seed, both of which live in `context`.
     let tectonics = compile_tectonics_from_config(tectonics, context);
@@ -270,17 +271,6 @@ fn compile_ocean(
         context.axial_tilt_rad,
     );
 
-    // Seabed albedo: linear RGB written into every accumulator texel with
-    // alpha = 1 so `finalize_albedo` divides through cleanly and converts
-    // to sRGB. Only visible through shallow water; deep water is dominated
-    // by the impostor's absorption tint.
-    let [r, g, b] = config.seabed_albedo;
-    for face in CubemapFace::ALL {
-        for v in builder.albedo_contributions.albedo.face_data_mut(face) {
-            *v = [r, g, b, 1.0];
-        }
-    }
-
     let roughness_texel = quantize_unit_to_u8(config.water_roughness.clamp(0.0, 1.0));
     for face in CubemapFace::ALL {
         for v in builder.roughness_cubemap.face_data_mut(face) {
@@ -289,6 +279,12 @@ fn compile_ocean(
     }
 
     builder.sea_level_m = Some(config.sea_level_m);
+    let water = WaterAppearance::new([0.012, 0.045, 0.105], 130.0);
+    builder.water_appearance = Some(water);
+    paint_surface_albedo(
+        &mut builder,
+        &SurfaceColorSpec::ocean(config.seed, config.sea_level_m, config.seabed_albedo, water),
+    );
     builder.build()
 }
 

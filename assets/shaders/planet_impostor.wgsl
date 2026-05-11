@@ -56,14 +56,11 @@
 }
 #import thalos::atmosphere::{
     AtmosphereBlock,
-    RimHit,
-    rim_halo_contribution,
-    apply_terminator_warmth,
-    apply_fresnel_rim,
+    ScatterResult,
+    integrate_atmosphere,
+    atmosphere_jitter,
+    atmosphere_scattering_active,
     apply_limb_darkening,
-    apply_rayleigh_ground_transmission,
-    apply_rayleigh_inscatter,
-    atmosphere_is_active,
     composite_clouds,
     rotate_cloud_dir_local,
     cloud_band_phase,
@@ -76,6 +73,14 @@ const TAU: f32 = 6.28318530717958647692;
 
 const CELL_TABLE_SIZE: u32 = 8192u;
 const CELL_TABLE_MASK: u32 = 8191u;
+
+// Scene-flux normalisation. Hapke's BRDF returns a radiance factor; the
+// prior pipeline used a Lambert `/PI` normalisation that we fold into
+// this single scalar so existing flux values don't need re-tuning. The
+// atmosphere raymarch consumes the same scaled flux so haze radiance
+// stays in unit consistency with the lit surface — without the scale,
+// in-scatter reads ~2× too bright relative to the ground.
+const SCENE_FLUX_SCALE: f32 = 0.5;
 
 // Cell size for the SSBO spatial index, in unit-sphere coordinates.
 // ~0.06 on the unit sphere ≈ 52 km per cell on a 869 km Mira — chosen so
@@ -322,12 +327,12 @@ fn vertex(in: VertexInput) -> VertexOutput {
     // Expand the billboard to the atmosphere shell silhouette, not just
     // the solid sphere. The quad is square with the silhouette inscribed,
     // so along the cardinal edges (up/right) the quad has zero margin
-    // beyond the inscribed circle — and the rim-halo shell, which lives
-    // at altitudes up to `atmosphere.rim_shape.y`, gets scissored off
-    // there. Sizing from the outer shell radius keeps the halo visible
-    // all the way around. Airless bodies have `rim_shape.y == 0`, so
-    // this collapses to the original formula.
-    let effective_radius = params.radius + atmosphere.rim_shape.y;
+    // beyond the inscribed circle — and the in-scattered halo, which
+    // lives at altitudes up to `atmosphere.atmos_geom.x`, gets scissored
+    // off there. Sizing from the outer shell radius keeps the halo
+    // visible all the way around. Airless bodies have `atmos_geom.x == 0`,
+    // so this collapses to the original formula.
+    let effective_radius = params.radius + atmosphere.atmos_geom.x;
     let d      = length(cam_pos - sphere_center);
     let d_safe = max(d, effective_radius * 1.0001);
     let billboard_radius = effective_radius * d_safe
@@ -764,18 +769,8 @@ fn iterate_ssbo_craters(
 
 // ── Regional (large-scale) albedo modulation ───────────────────────────────
 
-fn regional_albedo_mod(p: vec3<f32>) -> f32 {
-    let s = f32(detail.seed_lo & 0xFFFFu) * (1.0 / 65535.0);
-    let phase = vec3<f32>(s * 6.283, s * 4.193, s * 2.711);
-    let low =
-          sin(p.x * 2.3 + phase.x + 0.7)
-        * sin(p.y * 2.1 + phase.y + 1.3)
-        * sin(p.z * 2.7 + phase.z + 2.1);
-    let mid =
-          sin(p.x * 5.1 + phase.y + 3.0)
-        * sin(p.y * 4.7 + phase.z + 0.5)
-        * sin(p.z * 5.9 + phase.x + 1.7);
-    return 1.0 + 0.12 * low + 0.06 * mid;
+fn regional_albedo_mod(_p: vec3<f32>) -> f32 {
+    return 1.0;
 }
 
 // ── Dynamic ice-cap overlay ────────────────────────────────────────────────
@@ -1286,8 +1281,9 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
         return n;
     }
 
-    let dh_dt = (h_e - h_w) / ds;
-    let dh_db = (h_n - h_s) / ds;
+    let relief_normal_strength = select(1.0, 0.42, params.sea_level_m > -1.0e8);
+    let dh_dt = (h_e - h_w) / ds * relief_normal_strength;
+    let dh_db = (h_n - h_s) / ds * relief_normal_strength;
 
     return normalize(n - tangent * dh_dt - bitangent * dh_db);
 }
@@ -1661,20 +1657,44 @@ fn primary_light() -> PrimaryLight {
     return PrimaryLight(s.dir_flux.xyz, s.dir_flux.w);
 }
 
-fn sample_rim_halo(
+/// Geometric distances at which the view ray enters and exits the
+/// atmosphere shell. Used by both the halo and body passes to bound
+/// the scattering raymarch.
+struct AtmosShellHit {
+    /// True iff the view ray intersects the atmosphere shell (false
+    /// means the body has no atmosphere or the ray misses entirely).
+    valid: bool,
+    /// Entry distance along the ray; clamped to 0 if the camera is
+    /// inside the shell.
+    t_enter: f32,
+    /// Exit distance along the ray (far intersection with the outer
+    /// shell). Always >= t_enter when `valid` is true.
+    t_exit: f32,
+}
+
+fn atmosphere_shell_hit(
     cam_pos: vec3<f32>,
     ray_dir: vec3<f32>,
     center: vec3<f32>,
-    light: PrimaryLight,
-) -> RimHit {
-    return rim_halo_contribution(
-        cam_pos, ray_dir, center, light.dir_ws,
-        params.radius,
-        atmosphere.rim_shape.y,
-        atmosphere.rim_shape.x,
-        atmosphere.rim_color_intensity.xyz,
-        atmosphere.rim_color_intensity.w,
-    );
+) -> AtmosShellHit {
+    let r_outer = params.radius + atmosphere.atmos_geom.x;
+    if atmosphere.atmos_geom.x <= 0.0 {
+        return AtmosShellHit(false, 0.0, 0.0);
+    }
+    let oc = cam_pos - center;
+    let half_b = dot(oc, ray_dir);
+    let c_o = dot(oc, oc) - r_outer * r_outer;
+    let disc_o = half_b * half_b - c_o;
+    if disc_o < 0.0 {
+        return AtmosShellHit(false, 0.0, 0.0);
+    }
+    let sq = sqrt(disc_o);
+    let t_near = -half_b - sq;
+    let t_far  = -half_b + sq;
+    if t_far <= 0.0 {
+        return AtmosShellHit(false, 0.0, 0.0);
+    }
+    return AtmosShellHit(true, max(t_near, 0.0), t_far);
 }
 
 /// Sample the cloud-cover cube with banded differential rotation.
@@ -1741,17 +1761,41 @@ fn fragment(in: VertexOutput) -> FragOutput {
     if !is_miss {
         discard;
     }
-    let rim = sample_rim_halo(cam_pos, ray_dir, in.sphere_center, light);
-    if rim.opacity <= 0.001 {
+    if !atmosphere_scattering_active(atmosphere) {
         discard;
     }
-    let color = rim.contribution * light.flux * (1.0 / (4.0 * PI));
+    let shell = atmosphere_shell_hit(cam_pos, ray_dir, in.sphere_center);
+    if !shell.valid {
+        discard;
+    }
+    // Per-pixel jitter breaks the regular sample pattern that would
+    // otherwise show as banding at the terminator (where the sun
+    // column changes rapidly between adjacent pixels).
+    let jitter = atmosphere_jitter(in.clip_position.xy);
+    let scatter = integrate_atmosphere(
+        cam_pos, ray_dir, in.sphere_center, light.dir_ws,
+        light.flux * SCENE_FLUX_SCALE,
+        shell.t_enter, shell.t_exit,
+        params.radius, atmosphere, jitter,
+    );
+    // Halo opacity = how much of the background is occluded by the
+    // atmospheric column. Rec.709 luminance of the per-channel
+    // transmittance gives a coherent single-alpha value that fades
+    // smoothly between vacuum (T=1, α=0) and a fully extinguished
+    // chord (T=0, α=1). Bias by a tiny floor so the discard below
+    // skips numerically-empty fragments without dropping faint glow.
+    let alpha = clamp(1.0 - dot(scatter.transmittance, vec3<f32>(0.2126, 0.7152, 0.0722)),
+                      0.0, 1.0);
+    let lum = dot(scatter.in_scatter, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if alpha < 0.002 && lum < 0.0005 {
+        discard;
+    }
     // Closest-approach depth gives a sensible silhouette depth for
     // halo fragments — used so opaque objects in front of the halo
     // (and other halos sorted closer) depth-test correctly.
     let closest_point = cam_pos + ray_dir * max(-half_b, 0.0);
     let clip = view.clip_from_world * vec4(closest_point, 1.0);
-    return FragOutput(vec4(color, rim.opacity), clip.z / clip.w);
+    return FragOutput(vec4(scatter.in_scatter, alpha), clip.z / clip.w);
 #else
     if is_miss {
         discard;
@@ -1929,7 +1973,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // Combine. Hapke's r is a radiance factor; the prior pipeline used a
     // Lambert `/PI` normalization we now fold into a global scale so
     // existing flux values don't need re-tuning.
-    let hapke_scale: f32 = 0.5;
+    let hapke_scale: f32 = SCENE_FLUX_SCALE;
     var sun_rgb = vec3<f32>(sun_r * sun_flux * hapke_scale);
     var ambient_term = vec3<f32>(params.scene.ambient_intensity);
     if params.fullbright >= 0.5 {
@@ -1959,11 +2003,15 @@ fn fragment(in: VertexOutput) -> FragOutput {
                 let water_n_dot_v = max(dot(normal, view_dir), 0.0);
                 water_lit = water_column_color(water_depth_m, water_n_dot_v);
             } else {
-                // Sky tint for grazing-angle reflection. Rayleigh τ carries the
-                // per-channel atmosphere tint cue (blue > green > red on Earth-
-                // like). Airless bodies have rayleigh = 0 → black sky reflection,
-                // which is physically correct for vacuum.
-                let sky_tint = atmosphere.rayleigh.xyz * atmosphere.rayleigh.w * 3.0;
+                // Sky tint for grazing-angle reflection. β_R · H_R is
+                // the per-channel vertical optical depth (= Rayleigh τ_v
+                // at zenith); the multiplier matches the prior visual
+                // calibration. Airless bodies have β = 0 → black sky
+                // reflection, which is physically correct for vacuum.
+                let sky_tint = atmosphere.rayleigh_beta_h.xyz
+                    * atmosphere.rayleigh_beta_h.w
+                    * atmosphere.atmos_geom.z
+                    * 3.0;
                 water_lit = shade_water(
                     normal,
                     view_dir,
@@ -1979,23 +2027,37 @@ fn fragment(in: VertexOutput) -> FragOutput {
         }
     }
 
-    // ── Rayleigh ground transmission ────────────────────────────────────
+    // ── Atmospheric scattering raymarch ─────────────────────────────────
     //
-    // Attenuate the lit surface by the per-channel optical depth of the
-    // sun's column to the ground. At the terminator the sun's path is
-    // an order of magnitude longer than at noon — blue is scattered
-    // out, so the surface is lit by progressively redder light. This is
-    // the physical cause of sunset colouring on the ground; previously
-    // approximated with a flat "terminator warmth" tint.
+    // One numeric integration along the view ray produces both the
+    // per-channel transmittance from camera to surface (aerial
+    // perspective + sun column attenuation) and the in-scattered
+    // radiance reaching the camera (the daylight haze, the lit-limb
+    // halo, the terminator orange band).
     //
-    // Applied BEFORE cloud compositing so the surface already carries
-    // the transmitted colour when clouds darken it with cast shadows.
-    lit = apply_rayleigh_ground_transmission(
-        lit,
-        geo_n_dot_l,
-        atmosphere.rayleigh.xyz,
-        atmosphere.rayleigh.w,
-    );
+    // The raymarch is run BEFORE cloud compositing so the surface is
+    // already darkened by the sun-column transmission when clouds
+    // cast their own shadow on it. Clouds themselves are not
+    // multiplied by `transmittance` — they sit above most of the
+    // atmosphere mass, and applying the surface-path transmittance
+    // to them would over-dim them at the limb (see atmosphere.wgsl
+    // header for the discussion). The in-scatter is added on top of
+    // the surface+cloud composite so it correctly hazes both.
+    let shell_body = atmosphere_shell_hit(cam_pos, ray_dir, in.sphere_center);
+    var scatter_body: ScatterResult;
+    if shell_body.valid {
+        let jitter_b = atmosphere_jitter(in.clip_position.xy);
+        scatter_body = integrate_atmosphere(
+            cam_pos, ray_dir, in.sphere_center, sun_dir_ws,
+            sun_flux * SCENE_FLUX_SCALE,
+            shell_body.t_enter, t,
+            params.radius, atmosphere, jitter_b,
+        );
+    } else {
+        // Vacuum / airless: identity transmittance, zero in-scatter.
+        scatter_body = ScatterResult(vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    lit = lit * scatter_body.transmittance;
 
     // ── Cloud layer ─────────────────────────────────────────────────────
     //
@@ -2059,68 +2121,22 @@ fn fragment(in: VertexOutput) -> FragOutput {
         shadow_cloud_density,
     );
 
-    // ── Atmosphere composition ──────────────────────────────────────────
+    // ── Atmospheric in-scatter + artistic limb darkening ────────────────
     //
-    // Applied on top of the Hapke-lit surface. Each helper early-outs on
-    // a zero scalar so bodies without a `terrestrial_atmosphere` block
-    // cost nothing here.
-    //
-    // Order: limb darkening first (it multiplies the lit colour before
-    // any rim tints fold in), then terminator warmth, then Fresnel rim.
-    //
-    // The rim halo is NOT added on surface-hit fragments — only on miss
-    // rays (outside the silhouette). Adding it on hit was the cause of
-    // two visible bugs:
-    //   1. Night side never went dark. The halo's `sun_factor` bottoms
-    //      out at 0.5, so every hit fragment picked up a uniform blue
-    //      tint no matter which hemisphere the ray terminated on.
-    //   2. A bright singular point at the screen-space centre of the
-    //      planet. A ray aimed exactly at the body centre has
-    //      `closest = oc + ray_dir * -half_b = 0`, and `normalize(0)`
-    //      is undefined — the NaN propagated into `sun_factor` and
-    //      lit a pinprick pixel.
-    //
-    // A proper in-scatter integral (Rayleigh scattering along the
-    // column from camera to surface, sun-gated per sample) would
-    // restore a physical "atmosphere over surface" contribution; that
-    // is a follow-up. Limb shading below already carries the dominant
-    // "blue atmosphere on the lit disk" cue.
+    // The in-scatter is what carries the daylight blue haze, the
+    // terminator orange band, and the Mie forward-scattered haze near
+    // the sun direction. Added on top of the surface+cloud composite so
+    // it hazes both correctly.
+    lit = lit + scatter_body.in_scatter;
+    // Pure-artistic limb darkening (Minnaert per-channel). Most
+    // terrestrial bodies leave this at zero strength; gas-giant-style
+    // bodies use it to round the disk past what scattering already
+    // gives them.
     lit = apply_limb_darkening(
         lit,
         n_dot_v,
         atmosphere.limb_exponents.xyz,
         atmosphere.limb_exponents.w,
-    );
-    // Rayleigh view-path in-scatter. At the sub-solar point this adds
-    // the familiar blue daylight haze (β_blue >> β_red, short sun
-    // column so T_sun is still mostly white, blue wins the β · T
-    // product). At the terminator the long sun column wipes blue
-    // entirely and the orange/red residue dominates — the in-scatter
-    // band visible at the limb in every orbital sunset photograph.
-    lit = apply_rayleigh_inscatter(
-        lit,
-        geo_n_dot_l,
-        n_dot_v,
-        atmosphere.rayleigh.xyz,
-        atmosphere.rayleigh.w,
-        sun_flux * hapke_scale,
-    );
-    // Legacy tint helpers — retained for artistic control on bodies
-    // without a full Rayleigh setup. With Rayleigh authored, both
-    // `terminator_warmth` and `fresnel_rim` are zero-strength on the
-    // relevant bodies so they cost only the early-return.
-    lit = apply_terminator_warmth(
-        lit,
-        geo_n_dot_l,
-        atmosphere.terminator_warmth.xyz,
-        atmosphere.terminator_warmth.w,
-    );
-    lit = apply_fresnel_rim(
-        lit,
-        geo_n_dot_l,
-        n_dot_v,
-        atmosphere.fresnel_rim.xyz,
-        atmosphere.fresnel_rim.w,
     );
 
     // Correct depth.

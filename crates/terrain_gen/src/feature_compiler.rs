@@ -17,10 +17,11 @@ use crate::height_generator::{
 use crate::seeding::sub_seed;
 use crate::stage::Stage;
 use crate::stages::{
-    BasinDef, BiomeReliefColor, BiomeRule, Biomes, Cratering, Differentiate, Erosion,
-    ImpactColorOverprint, MareFlood as MareFloodStage, Megabasin, Regolith, Scarps, SpaceWeather,
+    BasinDef, BiomeRule, Biomes, Cratering, Differentiate, Erosion, MareFlood as MareFloodStage,
+    Megabasin, Regolith, Scarps,
 };
 use crate::static_surface::{PlanetSurface, StaticSurfaceData};
+use crate::surface_color::{SurfaceColorSpec, paint_surface_albedo};
 use crate::surface_field::bake_surface_field_into_builder;
 use crate::types::{
     ActiveDuneLayer, BiomeParams, Composition, DynamicSurfaceLayers, IceCapLayer, IceCapSpec,
@@ -1638,10 +1639,6 @@ fn compile_airless_impact_moon(
     let regolith = manifest
         .get(&body_id.child("regolith_garden"))
         .ok_or_else(|| FeatureCompileError::MissingFeature(body_id.child("regolith_garden")))?;
-    let space_weathering = manifest
-        .get(&body_id.child("space_weathering"))
-        .ok_or_else(|| FeatureCompileError::MissingFeature(body_id.child("space_weathering")))?;
-
     let mut builder = BodyBuilder::new(
         spec.physical.radius_m,
         spec.root_seed,
@@ -1767,27 +1764,20 @@ fn compile_airless_impact_moon(
         },
     );
 
-    apply_projection_stage(
+    paint_surface_albedo(
         &mut builder,
-        space_weathering.seed.detail,
-        SpaceWeather {
-            highland_mature_albedo: projection
-                .highland_biomes
-                .is_empty()
-                .then_some(projection.highland_mature_albedo),
-            highland_fresh_albedo: projection
-                .highland_biomes
-                .is_empty()
-                .then_some(projection.highland_fresh_albedo),
-            mare_mature_albedo: projection.mare_mature_albedo,
-            mare_fresh_albedo: projection.mare_fresh_albedo,
-            mare_tint: projection.mare_tint,
-            young_crater_age_threshold: projection.young_crater_age_threshold,
-            ray_age_threshold: projection.ray_age_threshold,
-            ray_extent_radii: projection.ray_extent_radii,
-            ray_count_per_crater: projection.ray_count_per_crater,
-            ray_half_width: projection.ray_half_width,
-        },
+        &SurfaceColorSpec::airless_impact(
+            spec.root_seed,
+            projection.highland_mature_albedo,
+            projection.highland_fresh_albedo,
+            projection.mare_mature_albedo,
+            projection.mare_fresh_albedo,
+            projection.mare_tint,
+            projection.young_crater_age_threshold,
+            projection.ray_age_threshold,
+            projection.ray_extent_radii,
+            projection.ray_half_width,
+        ),
     );
 
     Ok(builder.build())
@@ -1922,19 +1912,13 @@ fn compile_cold_desert_formerly_wet(
         },
     );
 
-    apply_projection_stage(
+    let color_palettes = builder.biome_palettes.clone();
+    paint_surface_albedo(
         &mut builder,
-        sub_seed(spec.root_seed, "feature_projection:impact_color_overprint"),
-        ImpactColorOverprint {
-            crater_min_radius_m: projection.cubemap_bake_threshold_m.max(3_000.0),
-            palette: style.impact_palette,
-        },
-    );
-
-    apply_projection_stage(
-        &mut builder,
-        sub_seed(spec.root_seed, "feature_projection:biome_relief_color"),
-        BiomeReliefColor::default(),
+        &SurfaceColorSpec::cold_desert(
+            sub_seed(spec.root_seed, "feature_projection:surface_color"),
+            &color_palettes,
+        ),
     );
 
     Ok(builder.build())
@@ -2019,6 +2003,10 @@ fn compile_aging_oceanic_homeworld(
     // Sea level is chosen from the authored hydrosphere target, then the
     // connectivity cleanup removes isolated inland water components.
     builder.sea_level_m = Some(sea_level_m);
+    paint_surface_albedo(
+        &mut builder,
+        &SurfaceColorSpec::aging_oceanic_homeworld(spec.root_seed, sea_level_m),
+    );
 
     Ok(builder.build())
 }

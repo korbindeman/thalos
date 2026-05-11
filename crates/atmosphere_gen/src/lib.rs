@@ -312,33 +312,96 @@ pub struct RayleighLayer {
     pub latitude_bias: f32,
 }
 
-/// Per-wavelength Rayleigh scattering for a terrestrial atmosphere.
+/// Single-scattering Rayleigh + Mie atmosphere for a terrestrial body.
 ///
-/// Drives both the ground-illumination reddening at low sun (sunsets)
-/// and the view-path in-scatter glow (the orange band seen from orbit
-/// at the terminator, the blue haze at the sub-solar point). Unlike
-/// [`RayleighLayer`] above — which is a gas-giant "blue gap" modulation
-/// of the cloud-deck colour — this models the actual physical process:
-/// short wavelengths accumulate more optical depth per unit path, so
-/// long paths (low sun, grazing views) preferentially transmit red.
+/// This is the physical scattering model the impostor renders against:
+/// per-fragment view raymarch through an exponential-density shell,
+/// with per-channel Rayleigh (molecular scattering, blue-dominant) and
+/// scalar Mie (aerosol scattering, near-spectrally-white, forward-
+/// peaked phase function). The same integral produces the body's
+/// surface aerial perspective, the daylight haze, the terminator
+/// orange band, and the rim halo outside the silhouette — one path,
+/// no parallel rim/Fresnel/warmth helpers.
 ///
-/// Parameters are per-channel vertical optical depth `τ_v`. Canonical
-/// Earth values at sea level: `(0.046, 0.108, 0.264)` for R/G/B. Other
-/// bodies scale with atmospheric column depth (thinner atmospheres
-/// → smaller τ_v uniformly; dustier atmospheres → elevated red).
+/// Authored values use canonical photometric units:
+///
+/// - **Rayleigh `vertical_optical_depth`** is the per-channel vertical
+///   τ_v at zenith. Earth at sea level: `(0.046, 0.108, 0.264)` for
+///   R/G/B (β_R · H_R, with β_R from Bucholtz 1995). Thin atmospheres
+///   scale uniformly down; dust-loaded atmospheres invert the slope
+///   (red dominant, see Vaelen).
+///
+/// - **`mie_optical_depth`** is the scalar vertical Mie τ_v. Earth
+///   clean conditions: ~0.02; hazy conditions: ~0.10; Mars dust
+///   storm: 1.0+.
+///
+/// - **Scale heights** set the exponential density falloff and define
+///   "where most of the column is" — Earth Rayleigh ~8 km, Mie ~1.2 km.
+///   `atmosphere_top_m` truncates the integration; samples beyond
+///   ~5 × scale_height are wasted, so keep this lean. The default
+///   matches `5 × max(rayleigh_scale_height_m, mie_scale_height_m)`,
+///   which clips at 1% of sea-level density.
+///
+/// - **`mie_asymmetry`** is the Henyey-Greenstein `g` parameter in
+///   [-1, 1]. Earth aerosols: 0.76 (forward-peaked); Mars dust: ~0.5.
+///   Drives the brightening of haze toward the sun.
+///
+/// - **`strength`** is an artistic overall multiplier (1.0 = physical).
+///
+/// `AtmosphericScattering::default()` produces a vacuum (no
+/// scattering, no rim halo, no in-scatter) — bodies without an
+/// atmosphere either omit `terrestrial_atmosphere` or set this layer
+/// to None.
 #[derive(Debug, Clone, Deserialize)]
-pub struct RayleighAtmosphere {
-    /// Vertical optical depth per RGB channel at zenith (unit airmass).
-    /// Drives both transmission of sunlight to the ground and in-scatter
-    /// intensity toward the viewer. Earth-like: `(0.046, 0.108, 0.264)`.
+pub struct AtmosphericScattering {
+    /// Per-channel Rayleigh vertical optical depth at zenith. Earth at
+    /// sea level: `(0.046, 0.108, 0.264)`.
     pub vertical_optical_depth: [f32; 3],
-    /// Overall multiplier on both ground transmission and view-path
-    /// in-scatter. 0 disables Rayleigh entirely; 1 = physical scale.
-    /// Values above 1 exaggerate the effect for artistic purposes
-    /// (more saturated sunsets, deeper daylight haze) at the cost of
-    /// physical accuracy.
+
+    /// Rayleigh scale height in meters. Density falls off as
+    /// `exp(-h / H)`. Earth: 8000.
+    #[serde(default = "default_rayleigh_scale_height")]
+    pub rayleigh_scale_height_m: f32,
+
+    /// Scalar Mie vertical optical depth at zenith. Mie is spectrally
+    /// near-white in the visible, so a scalar instead of a per-channel
+    /// vector. Earth clean: 0.02; hazy: 0.10; dust-loaded: 0.30+.
+    #[serde(default = "default_mie_optical_depth")]
+    pub mie_optical_depth: f32,
+
+    /// Mie scale height in meters. Earth aerosols: 1200.
+    #[serde(default = "default_mie_scale_height")]
+    pub mie_scale_height_m: f32,
+
+    /// Henyey-Greenstein asymmetry parameter `g` in [-1, 1]. Positive
+    /// = forward-peaked (Earth aerosols ~0.76); 0 = isotropic; negative
+    /// = back-peaked. Drives the "haze brightens near the sun" cue.
+    #[serde(default = "default_mie_asymmetry")]
+    pub mie_asymmetry: f32,
+
+    /// Atmosphere top altitude in meters. The view raymarch terminates
+    /// here; beyond ~5 × scale_height the contribution is negligible.
+    /// Default = 5 × max(rayleigh_scale_height_m, mie_scale_height_m),
+    /// resolved when the field is omitted at parse time. Authoring an
+    /// explicit value above this is wasted samples.
+    #[serde(default)]
+    pub atmosphere_top_m: Option<f32>,
+
+    /// Overall artistic multiplier on both in-scatter and surface
+    /// transmittance. 0 disables the scattering model entirely (the
+    /// impostor renders with unattenuated white sunlight); 1 = physical;
+    /// > 1 exaggerates haze and sunsets at the cost of accuracy.
     #[serde(default = "default_one")]
     pub strength: f32,
+}
+
+impl AtmosphericScattering {
+    /// Resolve the atmosphere top altitude, falling back to `5 × max
+    /// scale height` when the author left it unset.
+    pub fn resolved_top_m(&self) -> f32 {
+        self.atmosphere_top_m
+            .unwrap_or_else(|| 5.0 * self.rayleigh_scale_height_m.max(self.mie_scale_height_m))
+    }
 }
 
 /// Per-channel Minnaert-style limb darkening.
@@ -442,6 +505,18 @@ fn default_one() -> f32 {
 fn default_rayleigh_scale() -> f32 {
     4.0
 }
+fn default_rayleigh_scale_height() -> f32 {
+    8000.0
+}
+fn default_mie_optical_depth() -> f32 {
+    0.021
+}
+fn default_mie_scale_height() -> f32 {
+    1200.0
+}
+fn default_mie_asymmetry() -> f32 {
+    0.76
+}
 fn default_rayleigh_threshold() -> f32 {
     0.35
 }
@@ -460,61 +535,41 @@ fn default_ringlet_octaves() -> u32 {
 ///
 /// Where `AtmosphereParams` describes the entirety of a gas giant's
 /// visible disk, `TerrestrialAtmosphere` describes only what modifies
-/// light passing through a thin gas shell above a baked planet impostor.
-/// First-pass schema: the gas-giant `RimHalo` + `LimbShading` primitives
-/// are reused directly — they already model the two dominant cues that
-/// read as "planet with atmosphere" from orbit (blue halo outside the
-/// silhouette, cool limb on the lit side, warm sunset band near the
-/// terminator). A proper Rayleigh/Mie scattering model with per-fragment
-/// in-scatter integration is a later pass.
+/// light passing through a thin gas shell above a baked planet
+/// impostor. The dominant layer is [`AtmosphericScattering`]: a
+/// physically-based single-scattering Rayleigh + Mie raymarch that
+/// produces the rim halo, the lit-disk haze, the terminator orange
+/// band, the surface aerial perspective, and the silhouette glow from
+/// one integral. The previous stand-in fields (a manual exponential
+/// rim halo, a terminator-warmth tint, a Fresnel limb) were removed
+/// when the raymarch landed — those signals now fall out of the
+/// physics and don't need parallel parameters.
 ///
 /// Every field is optional. A body with `TerrestrialAtmosphere::default`
 /// renders identically to a body with no atmosphere — the shader gates
-/// each layer on its own intensity scalar.
+/// each layer on its own scalar.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TerrestrialAtmosphere {
-    /// Rim glow visible just outside the body's silhouette. Uses the
-    /// same exponential-density column integration the gas-giant
-    /// shader uses. None disables the rim entirely.
-    #[serde(default)]
-    pub rim_halo: Option<RimHalo>,
-
-    /// Terminator warmth (sunset band) plus Fresnel-style limb tint on
-    /// the lit hemisphere. For a terrestrial impostor, the Fresnel tint
-    /// is the dominant "blue atmosphere on the lit disk" cue. None
-    /// disables limb shading.
-    #[serde(default)]
-    pub limb: Option<LimbShading>,
-
-    /// Per-channel Minnaert limb darkening. Terrestrials typically show
-    /// weaker chromatic limb darkening than gas giants (thinner
-    /// scattering path), so this is usually left off for a first pass.
-    /// None disables the effect.
+    /// Per-channel Minnaert limb darkening on the lit surface. Pure
+    /// artistic knob — most terrestrial bodies leave this None and
+    /// rely on the scattering raymarch for limb shading.
     #[serde(default)]
     pub limb_darkening: Option<LimbDarkening>,
 
-    /// Per-wavelength Rayleigh scattering: produces sunset-coloured
-    /// terrain at the terminator, blue haze across the lit disk, and
-    /// the red-orange in-scatter band seen from orbit. None disables
-    /// the effect entirely and the impostor renders with unattenuated
-    /// white sunlight.
+    /// Single-scattering Rayleigh + Mie atmospheric model. Drives the
+    /// rim halo, in-scattered haze, sunset reddening, terminator band,
+    /// and aerial perspective. None disables the model entirely and
+    /// the impostor renders with unattenuated white sunlight + no
+    /// rim glow (vacuum behaviour, identical to airless bodies).
     #[serde(default)]
-    pub rayleigh: Option<RayleighAtmosphere>,
+    pub scattering: Option<AtmosphericScattering>,
 
-    /// Cloud cover layer. A shader-synthesized cloud field composited
-    /// over the lit surface — bright white in sunlight, alpha-blended
-    /// by density, drifting with differential rotation by latitude so
-    /// weather systems evolve visibly as the impostor rotates. None
-    /// disables the layer.
-    ///
-    /// The physical model is deliberately the cheapest thing that
-    /// reads as "weather" at impostor distance: fractal noise on the
-    /// sphere, no explicit storm list, no shadow-casting on the
-    /// surface below. A real physical cloud volume (shadow casting,
-    /// proper altitude parallax, named storms) belongs in the
-    /// real-size volumetric renderer that comes after UDLOD lands;
-    /// this layer is the stand-in so Thalos reads as a living planet
-    /// from orbit today.
+    /// Cloud cover layer composited above the surface. Mostly-baked
+    /// (cumulus density lives in a cubemap from `thalos_cloud_gen`),
+    /// with shader-side differential rotation. Independent of the
+    /// scattering model — clouds reflect direct sunlight at cloud
+    /// altitude and are darkened by the surface aerial perspective at
+    /// composite time. None disables the layer.
     #[serde(default)]
     pub clouds: Option<CloudCover>,
 }

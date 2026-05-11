@@ -31,17 +31,17 @@ use thalos_terrain_gen::{
     DynamicSurfaceState, FeatureId, FeatureLock, FeatureManifest, FeatureParamValue,
     FeatureProjectionConfig, FeatureSeed, FeatureSeedStream, FeatureTerrainConfig, HydrosphereSpec,
     IceInventory, MegabasinFeatureConfig, OceanTerrainConfig, PlanetSurface, PlateKind,
-    TectonicActivity, TectonicConfig, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
-    TerrainIntent, compile_terrain_config, plan_initial_compilation, sub_seed,
+    TectonicActivity, TectonicConfig, TectonicSystem, TerrainCompileContext, TerrainCompileOptions,
+    TerrainConfig, TerrainIntent, compile_terrain_config, plan_initial_compilation, sub_seed,
 };
 
 mod sky_backdrop;
-mod tectonic_overlay;
+mod surface_overlay;
 
 use sky_backdrop::SkyBackdropPlugin;
-use tectonic_overlay::{
-    PreviewTectonics, TectonicOverlayOrientation, TectonicOverlayPlugin, TectonicOverlayState,
-    TectonicRenderRadius, activity_label,
+use surface_overlay::{
+    PreviewSurfaceOverlays, SurfaceOverlayOrientation, SurfaceOverlayPlugin,
+    SurfaceOverlayRenderRadius, SurfaceOverlayState, activity_label,
 };
 
 // ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ fn sun_direction(azimuth: f32, elevation: f32) -> Vec3 {
     Vec3::new(ce * sa, se, ce * ca)
 }
 
-/// Body→world orientation quaternion for the preview, matching the game's
+/// World→body orientation quaternion for the preview, matching the game's
 /// `update_planet_orientations` at sim_time = 0 (free-spinning case): the
 /// `Ry(phase) * Rx(tilt)` composition collapses to `Rx(tilt)` since phase = 0.
 /// Stored in `PlanetParams.orientation` / `GasGiantParams.orientation`, where
@@ -941,23 +941,20 @@ fn finalize_terrain_bake(
         }
 
         let mut entity_commands = commands.entity(entity);
+        let biome_weights = surface.static_surface.biome_weights_cubemap.clone();
+        let overlays = PreviewSurfaceOverlays {
+            tectonics: surface.tectonics,
+            biome_weights,
+        };
         entity_commands
             .insert(PlanetMaterialHandle(mat_handle))
             .insert(PlanetHaloMaterialHandle(halo_handle))
+            .insert(overlays)
             .insert(PreviewDynamicSurface {
                 layers: surface.dynamic_layers,
                 state: dynamic_state,
             })
             .remove::<PendingTerrainGen>();
-        // PreviewTectonics is inserted only when the body has a tectonic
-        // layer; bodies without one drop the existing component (if any)
-        // so previously-loaded tectonic data doesn't linger after a body
-        // switch.
-        if let Some(system) = surface.tectonics {
-            entity_commands.insert(PreviewTectonics { system });
-        } else {
-            entity_commands.remove::<PreviewTectonics>();
-        }
         if planet
             .atmosphere
             .as_ref()
@@ -1451,36 +1448,46 @@ fn draw_projection_controls(ui: &mut egui::Ui, projection: &mut FeatureProjectio
     }
 }
 
-/// Tectonics panel: gizmo overlay toggles, live stats from the most recent
-/// bake, and a config sub-section. The overlay toggles are surfaced first
-/// because they're the most-fiddled control and never trigger a rebake.
-/// The layer config is separated so its edits (which *do* trigger rebakes)
-/// can't be confused with the overlay toggles.
+/// Overlay panel: solid metadata layers from the most recent bake. These are
+/// pure visualization controls and never trigger a rebake.
+fn draw_surface_overlay_panel(
+    ui: &mut egui::Ui,
+    overlay: &mut SurfaceOverlayState,
+    preview: Option<&PreviewSurfaceOverlays>,
+) {
+    ui.heading("Overlays");
+    let has_plates = preview.and_then(|p| p.tectonics.as_ref()).is_some();
+    let has_biomes = preview.is_some();
+
+    ui.add_enabled(
+        has_plates,
+        egui::Checkbox::new(&mut overlay.show_plates, "Plate colors"),
+    );
+    ui.add_enabled(
+        has_biomes,
+        egui::Checkbox::new(&mut overlay.show_biomes, "Biome colors"),
+    );
+}
+
+/// Tectonics panel: live stats from the most recent bake and a config
+/// sub-section. The layer config is separated from overlay controls so its
+/// edits (which *do* trigger rebakes) can't be confused with visualization
+/// toggles.
 ///
 /// `archetype_requires_tectonics` locks the layer-on/off checkbox: bodies
 /// whose archetype requires a tectonic graph (currently
 /// `AgingOceanicHomeworld`) cannot be toggled to None — disabling would put
 /// the bake into a guaranteed-fail state.
 ///
-/// Returns true if any edit should trigger a rebake (overlay toggles do not).
+/// Returns true if any edit should trigger a rebake.
 fn draw_tectonics_panel(
     ui: &mut egui::Ui,
     tectonics: &mut Option<TectonicConfig>,
-    preview: Option<&PreviewTectonics>,
-    overlay: &mut TectonicOverlayState,
+    preview: Option<&TectonicSystem>,
     archetype_requires_tectonics: bool,
 ) -> bool {
     let mut changed = false;
     ui.heading("Tectonics");
-
-    // ── Overlay toggles ──
-    // No rebake side-effects; pure visualization control.
-    ui.label("Overlay (gizmos):");
-    ui.checkbox(&mut overlay.show_boundaries, "Boundary lines");
-    ui.checkbox(&mut overlay.show_motion_arrows, "Motion arrows");
-    ui.checkbox(&mut overlay.show_plate_centroids, "Plate centroids");
-
-    ui.separator();
 
     // ── Layer presence ──
     // For required archetypes the toggle is shown disabled with a label so
@@ -1499,7 +1506,7 @@ fn draw_tectonics_panel(
         let mut enabled = tectonics.is_some();
         if ui
             .checkbox(&mut enabled, "Tectonic layer")
-            .on_hover_text("Spherical-Voronoi plate graph; drives boundary gizmos and (for AgingOceanicHomeworld) terrain shape.")
+            .on_hover_text("Spherical-Voronoi plate graph; drives the plate-color overlay and (for AgingOceanicHomeworld) terrain shape.")
             .changed()
         {
             if enabled {
@@ -1518,8 +1525,7 @@ fn draw_tectonics_panel(
     // ── Stats from the most recent bake ──
     // `preview` is None during the brief gap between dispatch and finalize;
     // show "–" placeholders so the layout doesn't jump.
-    if let Some(p) = preview {
-        let sys = &p.system;
+    if let Some(sys) = preview {
         let n_continental = sys
             .plates
             .iter()
@@ -1924,8 +1930,8 @@ fn editor_ui(
     system: Res<SystemData>,
     diagnostics: Res<DiagnosticsStore>,
     status: Res<TerrainGenStatus>,
-    mut overlay_state: ResMut<TectonicOverlayState>,
-    tectonic_q: Query<&PreviewTectonics, With<PreviewPlanet>>,
+    mut overlay_state: ResMut<SurfaceOverlayState>,
+    surface_overlay_q: Query<&PreviewSurfaceOverlays, With<PreviewPlanet>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -2027,6 +2033,7 @@ fn editor_ui(
                     let axial_tilt_rad = planet.axial_tilt_rad;
                     let mut selected_id = planet.selected_feature_id.clone();
                     let mut delete_request: Option<FeatureId> = None;
+                    let surface_overlays = surface_overlay_q.single().ok();
 
                     if let BodyMode::Terrain {
                         ref mut terrain,
@@ -2109,6 +2116,9 @@ fn editor_ui(
                         }
 
                         ui.separator();
+                        draw_surface_overlay_panel(ui, &mut overlay_state, surface_overlays);
+                        ui.separator();
+
                         let archetype_requires_tectonics = matches!(
                             terrain,
                             TerrainConfig::Feature(c)
@@ -2117,8 +2127,7 @@ fn editor_ui(
                         terrain_changed |= draw_tectonics_panel(
                             ui,
                             tectonics,
-                            tectonic_q.single().ok(),
-                            &mut overlay_state,
+                            surface_overlays.and_then(|o| o.tectonics.as_ref()),
                             archetype_requires_tectonics,
                         );
                         ui.separator();
@@ -2182,13 +2191,12 @@ fn editor_ui(
 
 /// Applies shader-uniform-only changes to the current material.
 #[allow(clippy::too_many_arguments)]
-/// Mirror the editor's planet orientation quaternion into the resource the
-/// tectonic overlay reads. The overlay draws gizmos in world space, so
-/// boundaries follow the visually rendered axial-tilt orientation rather
-/// than the body-local frame.
-fn sync_tectonic_orientation(
+/// Mirror the editor's world-to-body orientation quaternion into the resource
+/// the surface overlays read. The overlay plugin inverts it for the shell
+/// transform so metadata colors physically track the rendered body.
+fn sync_surface_overlay_orientation(
     planet: Res<EditedPlanet>,
-    mut orientation: ResMut<TectonicOverlayOrientation>,
+    mut orientation: ResMut<SurfaceOverlayOrientation>,
 ) {
     let q = body_orientation(&planet);
     if orientation.0 != q {
@@ -2524,9 +2532,9 @@ fn main() {
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_plugins(PlanetRenderingPlugin)
         .add_plugins(SkyBackdropPlugin)
-        .add_plugins(TectonicOverlayPlugin)
-        .insert_resource(TectonicRenderRadius(RENDER_RADIUS))
-        .init_resource::<TectonicOverlayOrientation>()
+        .add_plugins(SurfaceOverlayPlugin)
+        .insert_resource(SurfaceOverlayRenderRadius(RENDER_RADIUS))
+        .init_resource::<SurfaceOverlayOrientation>()
         .add_systems(
             Startup,
             (
@@ -2557,7 +2565,7 @@ fn main() {
                 update_preview_atmosphere
                     .after(apply_uniform_changes)
                     .after(finalize_terrain_bake),
-                sync_tectonic_orientation,
+                sync_surface_overlay_orientation,
             ),
         )
         .run();

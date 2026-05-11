@@ -8,17 +8,20 @@
         sea_level_m: 1.0,
     )),
     terrestrial_atmosphere: Some((
-        rim_halo: Some((
-            color: (0.42, 0.66, 0.98),
-            intensity: 0.42,
-            scale_height_m: 15500.0,
-            outer_altitude_m: 180000.0,
-        )),
-        limb: None,
-        limb_darkening: None,
-        rayleigh: Some((
+        // Thicker-than-Earth atmosphere — ocean world with deeper
+        // Rayleigh column, more saturated blue. τ_v ≈ 2.4× Earth on
+        // blue keeps sunsets dramatic without losing the lit-disk
+        // identity. Rayleigh H stretched to 9.5 km (warmer surface,
+        // more ascent before density falls). Mie τ = 0.04 — clean
+        // ocean-air aerosol layer. Atmosphere top defaults to 5 ×
+        // max(scale heights) ≈ 47 km.
+        scattering: Some((
             vertical_optical_depth: (0.110, 0.255, 0.620),
-            strength: 0.95,
+            rayleigh_scale_height_m: 9500.0,
+            mie_optical_depth: 0.04,
+            mie_scale_height_m: 1500.0,
+            mie_asymmetry: 0.78,
+            strength: 1.0,
         )),
         clouds: Some((
             coverage: 0.30,

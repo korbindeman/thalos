@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cubemap::Cubemap;
 use crate::spatial_index::IcoBuckets;
+use crate::surface_color::WaterAppearance;
+use crate::surface_field::BiomeMixTexel;
 use crate::tectonics::TectonicSystem;
 use crate::types::{Channel, Crater, DetailNoiseParams, DynamicSurfaceLayers, Material, Volcano};
 
@@ -47,6 +49,10 @@ pub struct StaticSurfaceData {
     /// directly (MareFlood marks flooded regions with MAT_MARE; everything
     /// else stays at the initial MAT_HIGHLAND).
     pub material_cubemap: Cubemap<u8>,
+    /// Per-texel dominant/top-K biome identity. Editor-only today, but kept
+    /// in the static product because biome identity is part of the compiled
+    /// surface substrate, not a runtime renderer concern.
+    pub biome_weights_cubemap: Cubemap<BiomeMixTexel>,
     /// Per-texel surface roughness (R8Unorm; `roughness = byte / 255.0`).
     /// Consumed by the impostor shader for PBR microsurface response.
     pub roughness_cubemap: Cubemap<u8>,
@@ -82,4 +88,8 @@ pub struct StaticSurfaceData {
     /// render the impostor's water BRDF wherever `height < sea_level`;
     /// airless bodies leave it `None`.
     pub sea_level_m: Option<f32>,
+    /// Explicit water appearance for ocean-bearing bodies. This replaces the
+    /// old renderer behavior of deriving deep-water color from mean albedo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub water_appearance: Option<WaterAppearance>,
 }
