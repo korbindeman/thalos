@@ -80,27 +80,48 @@ impl Default for SimulationConfig {
 // Warp controller
 // ---------------------------------------------------------------------------
 
+const WARP_TRANSITION_DURATION_S: f64 = 0.35;
+
 pub struct WarpController {
+    /// Target level index. The effective speed may be between this and the
+    /// previous target while a transition is in flight.
     level_index: usize,
     levels: Vec<f64>,
     resume_index: Option<usize>,
+    speed: f64,
+    transition_from: f64,
+    transition_elapsed: f64,
 }
 
 impl WarpController {
     fn new(levels: Vec<f64>) -> Self {
+        let speed = levels.first().copied().unwrap_or(0.0);
         Self {
             level_index: 0,
             levels,
             resume_index: None,
+            speed,
+            transition_from: speed,
+            transition_elapsed: WARP_TRANSITION_DURATION_S,
         }
     }
 
+    /// Effective warp multiplier currently used to advance simulation time.
+    /// This lerps toward [`Self::target_speed`] after most level changes.
     pub fn speed(&self) -> f64 {
-        self.levels[self.level_index]
+        self.speed
     }
 
     pub fn levels(&self) -> &[f64] {
         &self.levels
+    }
+
+    /// Discrete multiplier for the currently selected target level.
+    pub fn target_speed(&self) -> f64 {
+        self.levels
+            .get(self.level_index)
+            .copied()
+            .unwrap_or(self.speed)
     }
 
     pub fn level_index(&self) -> usize {
@@ -129,19 +150,47 @@ impl WarpController {
         }
     }
 
+    /// Advance the effective warp speed toward the selected target level.
+    pub fn update(&mut self, real_dt: f64) {
+        if real_dt <= 0.0 {
+            return;
+        }
+
+        let target = self.target_speed();
+        if (self.speed - target).abs() <= f64::EPSILON {
+            self.speed = target;
+            self.transition_from = target;
+            self.transition_elapsed = WARP_TRANSITION_DURATION_S;
+            return;
+        }
+
+        self.transition_elapsed += real_dt;
+        let t = (self.transition_elapsed / WARP_TRANSITION_DURATION_S).clamp(0.0, 1.0);
+        self.speed = self.transition_from + (target - self.transition_from) * t;
+
+        if t >= 1.0 {
+            self.speed = target;
+            self.transition_from = target;
+        }
+    }
+
     pub fn increase(&mut self) {
+        if self.levels.is_empty() {
+            return;
+        }
         self.resume_index = None;
-        self.level_index = (self.level_index + 1).min(self.levels.len() - 1);
+        self.set_level_smooth((self.level_index + 1).min(self.levels.len() - 1));
     }
 
     pub fn decrease(&mut self) {
         self.resume_index = None;
-        self.level_index = self.level_index.saturating_sub(1);
+        self.set_level_smooth(self.level_index.saturating_sub(1));
     }
 
     pub fn reset(&mut self) {
         self.resume_index = None;
-        self.level_index = self.levels.iter().position(|&w| w == 1.0).unwrap_or(0);
+        let index = self.levels.iter().position(|&w| w == 1.0).unwrap_or(0);
+        self.set_level_capped(index);
     }
 
     pub fn toggle_pause(&mut self) {
@@ -150,17 +199,20 @@ impl WarpController {
                 .resume_index
                 .take()
                 .unwrap_or_else(|| self.levels.iter().position(|&w| w == 1.0).unwrap_or(0));
-            self.level_index = target;
+            self.set_level_smooth(target);
         } else {
             self.resume_index = Some(self.level_index);
-            self.level_index = 0;
+            self.set_level_immediate(0);
         }
     }
 
-    /// Snap the warp level to the highest configured speed that does not
-    /// exceed `target_speed`. Used by the warp-to-event auto-warp to size
+    /// Select the highest configured speed that does not exceed
+    /// `target_speed`. Used by the warp-to-event auto-warp to size
     /// each frame's advance against the time remaining to a target event,
-    /// stepping up or down through the discrete levels in a single call.
+    /// stepping the target up or down through the discrete levels in a single
+    /// call. Upward changes lerp through effective speeds; downward changes
+    /// clamp immediately so event-arrival and burn-prep windows cannot
+    /// overshoot while decelerating.
     ///
     /// Falls back to the lowest level (typically pause) when no level
     /// satisfies the cap. Callers that always want forward motion should
@@ -168,11 +220,65 @@ impl WarpController {
     /// this with `target_speed.max(1.0)`.
     pub fn set_speed(&mut self, target_speed: f64) {
         self.resume_index = None;
-        self.level_index = self
+        let index = self
             .levels
             .iter()
             .rposition(|&w| w <= target_speed)
             .unwrap_or(0);
+        self.set_level_capped(index);
+    }
+
+    fn set_level_smooth(&mut self, target_index: usize) {
+        let Some(target_speed) = self.levels.get(target_index).copied() else {
+            return;
+        };
+        let previous_index = self.level_index;
+        self.level_index = target_index;
+
+        if previous_index == target_index {
+            return;
+        }
+        if (self.speed - target_speed).abs() <= f64::EPSILON {
+            self.speed = target_speed;
+            self.transition_from = target_speed;
+            self.transition_elapsed = WARP_TRANSITION_DURATION_S;
+            return;
+        }
+
+        self.transition_from = self.speed;
+        self.transition_elapsed = 0.0;
+    }
+
+    fn set_level_capped(&mut self, target_index: usize) {
+        let Some(target_speed) = self.levels.get(target_index).copied() else {
+            return;
+        };
+        let previous_index = self.level_index;
+        self.level_index = target_index;
+
+        if target_speed <= self.speed {
+            self.snap_to_target();
+            return;
+        }
+        if previous_index != target_index {
+            self.transition_from = self.speed;
+            self.transition_elapsed = 0.0;
+        }
+    }
+
+    fn set_level_immediate(&mut self, target_index: usize) {
+        if self.levels.get(target_index).is_none() {
+            return;
+        }
+        self.level_index = target_index;
+        self.snap_to_target();
+    }
+
+    fn snap_to_target(&mut self) {
+        let target = self.target_speed();
+        self.speed = target;
+        self.transition_from = target;
+        self.transition_elapsed = WARP_TRANSITION_DURATION_S;
     }
 }
 
@@ -354,6 +460,7 @@ impl Simulation {
     pub fn step(&mut self, real_dt: f64) {
         let _span = tracing::info_span!("Simulation::step").entered();
         let real_delta = real_dt.min(self.max_real_delta);
+        self.warp.update(real_delta);
 
         // Attitude advances on real-time dt and only at 1× warp; under
         // any other warp (including pause) we zero ω so the ship doesn't
@@ -813,6 +920,7 @@ mod tests {
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
             terrain: thalos_terrain_gen::TerrainConfig::None,
+            tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
             rings: None,
@@ -841,12 +949,19 @@ mod tests {
     fn set_speed_picks_highest_level_at_or_below_target() {
         let mut w = ctrl();
         w.set_speed(50.0);
+        assert_eq!(w.target_speed(), 10.0);
+        w.update(WARP_TRANSITION_DURATION_S);
         assert_eq!(w.speed(), 10.0);
         w.set_speed(99.999);
+        assert_eq!(w.target_speed(), 10.0);
         assert_eq!(w.speed(), 10.0);
         w.set_speed(100.0);
+        assert_eq!(w.target_speed(), 100.0);
+        w.update(WARP_TRANSITION_DURATION_S);
         assert_eq!(w.speed(), 100.0);
         w.set_speed(1e9);
+        assert_eq!(w.target_speed(), 1_000.0);
+        w.update(WARP_TRANSITION_DURATION_S);
         assert_eq!(w.speed(), 1_000.0);
     }
 
@@ -855,6 +970,7 @@ mod tests {
         let mut w = ctrl();
         w.increase();
         w.increase();
+        w.update(WARP_TRANSITION_DURATION_S);
         assert!(w.speed() > 0.0);
         w.set_speed(-1.0);
         assert_eq!(w.speed(), 0.0);
@@ -869,12 +985,63 @@ mod tests {
         w.increase();
         w.increase();
         w.increase();
+        w.update(WARP_TRANSITION_DURATION_S);
         assert_eq!(w.speed(), 100.0);
         w.toggle_pause();
         assert_eq!(w.speed(), 0.0);
         w.set_speed(0.0);
         w.toggle_pause();
+        assert_eq!(w.target_speed(), 1.0);
+        w.update(WARP_TRANSITION_DURATION_S);
         assert_eq!(w.speed(), 1.0);
+    }
+
+    #[test]
+    fn warp_increase_lerps_effective_speed_between_levels() {
+        let mut w = ctrl();
+        w.increase();
+        w.update(WARP_TRANSITION_DURATION_S);
+        assert_eq!(w.speed(), 1.0);
+
+        w.increase();
+        assert_eq!(w.target_speed(), 10.0);
+        assert_eq!(w.speed(), 1.0);
+
+        w.update(WARP_TRANSITION_DURATION_S * 0.5);
+        assert!(w.speed() > 1.0 && w.speed() < 10.0);
+
+        w.update(WARP_TRANSITION_DURATION_S);
+        assert_eq!(w.speed(), 10.0);
+    }
+
+    #[test]
+    fn warp_decrease_lerps_effective_speed_between_levels() {
+        let mut w = ctrl();
+        w.set_speed(100.0);
+        w.update(WARP_TRANSITION_DURATION_S);
+        assert_eq!(w.speed(), 100.0);
+
+        w.decrease();
+        assert_eq!(w.target_speed(), 10.0);
+        assert_eq!(w.speed(), 100.0);
+
+        w.update(WARP_TRANSITION_DURATION_S * 0.5);
+        assert!(w.speed() > 10.0 && w.speed() < 100.0);
+
+        w.update(WARP_TRANSITION_DURATION_S);
+        assert_eq!(w.speed(), 10.0);
+    }
+
+    #[test]
+    fn capped_speed_reduction_snaps_effective_speed_downward() {
+        let mut w = ctrl();
+        w.set_speed(1_000.0);
+        w.update(WARP_TRANSITION_DURATION_S);
+        assert_eq!(w.speed(), 1_000.0);
+
+        w.set_speed(50.0);
+        assert_eq!(w.target_speed(), 10.0);
+        assert_eq!(w.speed(), 10.0);
     }
 
     #[test]

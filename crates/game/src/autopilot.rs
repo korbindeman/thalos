@@ -535,17 +535,14 @@ pub(crate) fn autopilot_system(
             let lead = lead_for_directive(directive, &sim.simulation);
             let safe_target = (directive.center_time - lead).max(now);
 
-            // Defensive warp clamp: drop one level whenever a single
-            // worst-case frame would overshoot `safe_target`. Runs in
+            // Defensive warp clamp: cap the effective warp speed whenever a
+            // single worst-case frame would overshoot `safe_target`. Runs in
             // Armed (no lockout) so the player keeps controls while the
-            // cascade ramps speed down.
-            while sim.simulation.warp.speed() > 1.0 {
-                let warp = sim.simulation.warp.speed();
-                if now + warp * FRAME_DT_BUDGET_S > safe_target {
-                    sim.simulation.warp.decrease();
-                } else {
-                    break;
-                }
+            // sim drops out of high warp.
+            let warp = sim.simulation.warp.speed();
+            if warp > 1.0 && now + warp * FRAME_DT_BUDGET_S > safe_target {
+                let max_speed = ((safe_target - now) / FRAME_DT_BUDGET_S).max(1.0);
+                sim.simulation.warp.set_speed(max_speed);
             }
 
             if now >= safe_target {
@@ -580,12 +577,10 @@ pub(crate) fn autopilot_system(
             let now = sim.simulation.sim_time();
 
             // We entered Engaging at `now ≥ safe_target`, so the
-            // Armed-side cascade has already pulled warp down close to
+            // Armed-side clamp has already pulled warp down close to
             // 1×. Final drop in case any level remains, then require 1×
             // before checking attitude/burn-start.
-            while sim.simulation.warp.speed() > 1.0 {
-                sim.simulation.warp.decrease();
-            }
+            sim.simulation.warp.set_speed(1.0);
 
             let warp = sim.simulation.warp.speed();
             let at_1x = (warp - 1.0).abs() < f64::EPSILON;

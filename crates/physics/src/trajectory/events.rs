@@ -689,6 +689,7 @@ mod tests {
             },
             orbital_elements: None,
             terrain: thalos_terrain_gen::TerrainConfig::None,
+            tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
             rings: None,
