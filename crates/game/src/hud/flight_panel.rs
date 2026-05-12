@@ -23,8 +23,6 @@ const THROTTLE_INNER_RADIUS: f32 = THROTTLE_FRAME_RADIUS - 14.0;
 const THROTTLE_OUTER_RADIUS: f32 = THROTTLE_FRAME_RADIUS + 16.0;
 const THROTTLE_NODE_PADDING: f32 = THROTTLE_OUTER_RADIUS - THROTTLE_FRAME_RADIUS + 4.0;
 const THROTTLE_NODE_SIZE: f32 = FRAME_SIZE_PX + THROTTLE_NODE_PADDING * 2.0;
-const THROTTLE_CENTER_X: f32 = THROTTLE_NODE_SIZE * 0.5;
-const THROTTLE_CENTER_Y: f32 = THROTTLE_NODE_SIZE * 0.5;
 const THROTTLE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
 const THROTTLE_BORDER_WIDTH: f32 = 1.6;
 
@@ -39,7 +37,7 @@ pub(super) struct ThrottleBar {
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
 pub(super) struct ThrottleArcMaterial {
-    /// xy = polar centre in node pixels; zw = inner/outer radii.
+    /// x = logical node size; y/z = logical inner/outer radii.
     #[uniform(0)]
     geometry: Vec4,
     /// x = commanded; y = effective; z = half-angle; w = border width.
@@ -63,10 +61,10 @@ impl ThrottleArcMaterial {
     fn new(commanded: f32, effective: f32, theme: &HudTheme) -> Self {
         Self {
             geometry: Vec4::new(
-                THROTTLE_CENTER_X,
-                THROTTLE_CENTER_Y,
+                THROTTLE_NODE_SIZE,
                 THROTTLE_INNER_RADIUS,
                 THROTTLE_OUTER_RADIUS,
+                0.0,
             ),
             levels: Vec4::new(
                 commanded,

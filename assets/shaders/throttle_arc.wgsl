@@ -9,6 +9,10 @@
 @group(1) @binding(6) var<uniform> tick_major_color: vec4<f32>;
 @group(1) @binding(7) var<uniform> border_color: vec4<f32>;
 
+fn scaled_px(value: f32, pixel_scale: f32) -> f32 {
+    return value * pixel_scale;
+}
+
 fn band_mask(value: f32, min_v: f32, max_v: f32, aa: f32) -> f32 {
     let lower = smoothstep(min_v - aa, min_v + aa, value);
     let upper = 1.0 - smoothstep(max_v - aa, max_v + aa, value);
@@ -23,13 +27,15 @@ fn overlay(base: vec4<f32>, top: vec4<f32>, amount: f32) -> vec4<f32> {
 @fragment
 fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     let p = in.uv * in.size;
-    let center = geometry.xy;
-    let inner_radius = geometry.z;
-    let outer_radius = geometry.w;
+    let logical_node_size = max(geometry.x, 1.0);
+    let pixel_scale = min(in.size.x, in.size.y) / logical_node_size;
+    let center = in.size * 0.5;
+    let inner_radius = scaled_px(geometry.y, pixel_scale);
+    let outer_radius = scaled_px(geometry.z, pixel_scale);
     let commanded = clamp(levels.x, 0.0, 1.0);
     let effective = clamp(levels.y, 0.0, 1.0);
     let half_angle = levels.z;
-    let border_width = levels.w;
+    let border_width = scaled_px(levels.w, pixel_scale);
 
     let d = p - center;
     let r = length(d);
@@ -66,7 +72,7 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
         let tick_level = f32(i) / 10.0;
         let tick_phi = half_angle - tick_level * half_angle * 2.0;
         let major = (i % 5u) == 0u;
-        let tick_half_width = select(0.75, 1.25, major);
+        let tick_half_width = scaled_px(select(0.75, 1.25, major), pixel_scale);
         let band_start = select(0.36, 0.18, major);
         let band_end = select(0.78, 0.88, major);
         let tick_dist = abs(phi - tick_phi) * r;
