@@ -81,10 +81,10 @@ pub struct NavigationPlugin;
 
 impl Plugin for NavigationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NavigationState>().add_systems(
-            bevy_egui::EguiPrimaryContextPass,
-            navigation_panel.run_if(not_in_photo_mode),
-        );
+        // The egui `navigation_panel` system has been replaced by the
+        // bevy_ui `hud::nav_panel` cluster. We still need the
+        // `NavigationState` resource so the autopilot/UI can communicate.
+        app.init_resource::<NavigationState>();
     }
 }
 

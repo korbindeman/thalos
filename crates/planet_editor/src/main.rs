@@ -2206,6 +2206,8 @@ fn sync_surface_overlay_orientation(
 
 fn apply_uniform_changes(
     mut planet: ResMut<EditedPlanet>,
+    overlay_state: Res<SurfaceOverlayState>,
+    keys: Res<ButtonInput<KeyCode>>,
     terrain_q: Query<&PlanetMaterialHandle, With<PreviewPlanet>>,
     halo_q: Query<&PlanetHaloMaterialHandle, With<PreviewPlanet>>,
     gas_q: Query<&GasGiantMaterialHandle, With<PreviewPlanet>>,
@@ -2214,15 +2216,37 @@ fn apply_uniform_changes(
     mut planet_halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
     mut gas_materials: ResMut<Assets<GasGiantMaterial>>,
     mut ring_materials: ResMut<Assets<RingMaterial>>,
+    mut last_force: Local<bool>,
 ) {
-    if !planet.uniforms_dirty {
+    // Any of: an overlay being on, OR space being held, forces fullbright
+    // + atmosphere-off so debug views read cleanly. Press / release of
+    // either source must rewrite uniforms, so we track the combined flag
+    // with a Local — `ResMut<SurfaceOverlayState>` and `ButtonInput` both
+    // mutably tick every frame, so `is_changed()` on them is unusable.
+    let overlays_on = overlay_state.show_plates || overlay_state.show_biomes;
+    let space_held = keys.pressed(KeyCode::Space);
+    let force = overlays_on || space_held;
+    let force_changed = *last_force != force;
+    if force_changed {
+        *last_force = force;
+    }
+    if !planet.uniforms_dirty && !force_changed {
         return;
     }
     planet.uniforms_dirty = false;
 
     let (_, _, wrap) = lighting_for(&planet);
     let scene = scene_lighting_for(&planet);
-    let atmosphere = active_atmosphere(&planet);
+    let fullbright = if force || planet.full_bright {
+        1.0
+    } else {
+        0.0
+    };
+    let atmosphere = if force {
+        AtmosphereBlock::default()
+    } else {
+        active_atmosphere(&planet)
+    };
     let q = body_orientation(&planet);
     let q4 = Vec4::new(q.x, q.y, q.z, q.w);
 
@@ -2233,7 +2257,7 @@ fn apply_uniform_changes(
                     continue;
                 };
                 mat.params.terminator_wrap = wrap;
-                mat.params.fullbright = if planet.full_bright { 1.0 } else { 0.0 };
+                mat.params.fullbright = fullbright;
                 mat.params.orientation = q4;
                 mat.params.scene = scene.clone();
                 mat.atmosphere = atmosphere;
@@ -2243,7 +2267,7 @@ fn apply_uniform_changes(
                     continue;
                 };
                 mat.params.terminator_wrap = wrap;
-                mat.params.fullbright = if planet.full_bright { 1.0 } else { 0.0 };
+                mat.params.fullbright = fullbright;
                 mat.params.orientation = q4;
                 mat.params.scene = scene.clone();
                 mat.atmosphere = atmosphere;

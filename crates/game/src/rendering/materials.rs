@@ -35,6 +35,8 @@ pub(super) fn update_gas_giant_params(
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
     view: Res<ViewMode>,
+    mut map_occluders: Local<Vec<(usize, Vec3, f32)>>,
+    mut ship_occluders: Local<Vec<(usize, Vec3, f32)>>,
 ) {
     let Some(ref states) = cache.states else {
         return;
@@ -48,8 +50,22 @@ pub(super) fn update_gas_giant_params(
     let do_map = force_both || matches!(*view, ViewMode::Map);
     let do_ship = force_both || matches!(*view, ViewMode::Ship);
 
-    let map_occluders = collect_occluders(states, &origin, MAP_SCALE, all_bodies.iter());
-    let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, all_bodies.iter());
+    collect_occluders(
+        &mut map_occluders,
+        states,
+        &origin,
+        MAP_SCALE,
+        all_bodies.iter(),
+    );
+    collect_occluders(
+        &mut ship_occluders,
+        states,
+        &origin,
+        SHIP_SCALE,
+        all_bodies.iter(),
+    );
+    let map_slice: &[(usize, Vec3, f32)] = &map_occluders;
+    let ship_slice: &[(usize, Vec3, f32)] = &ship_occluders;
 
     // Raw sim seconds — the gas-giant shader uses this for differential
     // rotation scroll, edge-wave phase, and edge vortex chain epoch
@@ -74,8 +90,8 @@ pub(super) fn update_gas_giant_params(
         let orientation = Vec4::new(q.x, q.y, q.z, q.w);
 
         for (handle, occluders, scale, want) in [
-            (&mats.map, &map_occluders, MAP_SCALE, do_map),
-            (&mats.ship, &ship_occluders, SHIP_SCALE, do_ship),
+            (&mats.map, map_slice, MAP_SCALE, do_map),
+            (&mats.ship, ship_slice, SHIP_SCALE, do_ship),
         ] {
             if !want {
                 continue;
@@ -114,6 +130,7 @@ pub(super) fn update_ring_params(
     cache: Res<FrameBodyStates>,
     exposure: Res<CameraExposure>,
     view: Res<ViewMode>,
+    mut occluder_buf: Local<Vec<(usize, Vec3, f32)>>,
 ) {
     let Some(ref states) = cache.states else {
         return;
@@ -126,7 +143,13 @@ pub(super) fn update_ring_params(
     let do_ship = force_both || matches!(*view, ViewMode::Ship);
 
     if do_map {
-        let map_occluders = collect_occluders(states, &origin, MAP_SCALE, body_query.iter());
+        collect_occluders(
+            &mut occluder_buf,
+            states,
+            &origin,
+            MAP_SCALE,
+            body_query.iter(),
+        );
         for (parent, handle) in &map_rings {
             write_ring_params(
                 &body_query,
@@ -136,13 +159,19 @@ pub(super) fn update_ring_params(
                 parent.0,
                 &origin,
                 MAP_SCALE,
-                &map_occluders,
+                &occluder_buf,
                 gain,
             );
         }
     }
     if do_ship {
-        let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, body_query.iter());
+        collect_occluders(
+            &mut occluder_buf,
+            states,
+            &origin,
+            SHIP_SCALE,
+            body_query.iter(),
+        );
         for (parent, handle) in &ship_rings {
             write_ring_params(
                 &body_query,
@@ -152,7 +181,7 @@ pub(super) fn update_ring_params(
                 parent.0,
                 &origin,
                 SHIP_SCALE,
-                &ship_occluders,
+                &occluder_buf,
                 gain,
             );
         }

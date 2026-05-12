@@ -194,7 +194,9 @@ pub fn handle_warp_controls(
     if keys.just_pressed(KeyCode::Period) {
         sim.simulation.warp.increase();
     } else if keys.just_pressed(KeyCode::Comma) {
-        sim.simulation.warp.decrease();
+        if sim.simulation.warp.level_index() > 1 {
+            sim.simulation.warp.decrease();
+        }
     } else if keys.just_pressed(KeyCode::Backslash) {
         sim.simulation.warp.reset();
     }

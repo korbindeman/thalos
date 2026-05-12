@@ -151,13 +151,17 @@ pub(super) fn build_scene_lighting(
 /// at the given metres → render-units scale. Used twice per frame: once
 /// at [`MAP_SCALE`] for the map-layer impostor materials, once at
 /// [`SHIP_SCALE`] for the ship-layer ones.
+///
+/// Caller owns the buffer (typically a `Local`) so the per-frame
+/// allocation is paid once at startup and reused thereafter.
 pub(super) fn collect_occluders<'a>(
+    out: &mut Vec<(usize, Vec3, f32)>,
     states: &BodyStates,
     origin: &RenderOrigin,
     scale: f64,
     bodies: impl IntoIterator<Item = &'a CelestialBody>,
-) -> Vec<(usize, Vec3, f32)> {
-    let mut occluders: Vec<(usize, Vec3, f32)> = Vec::new();
+) {
+    out.clear();
     for body in bodies {
         if body.is_star || body.radius_m < 1.0 {
             continue;
@@ -167,9 +171,8 @@ pub(super) fn collect_occluders<'a>(
         };
         let render_pos = ((state.position - origin.position) * scale).as_vec3();
         let render_radius = ((body.radius_m * scale) as f32).max(0.005);
-        occluders.push((body.body_id, render_pos, render_radius));
+        out.push((body.body_id, render_pos, render_radius));
     }
-    occluders
 }
 
 /// Updates each planet material's `light_dir` uniform to point from the body
@@ -184,6 +187,8 @@ pub(super) fn update_planet_light_dirs(
     exposure: Res<CameraExposure>,
     view: Res<ViewMode>,
     planetshine: Res<PlanetshineTints>,
+    mut map_occluders: Local<Vec<(usize, Vec3, f32)>>,
+    mut ship_occluders: Local<Vec<(usize, Vec3, f32)>>,
 ) {
     let Some(ref states) = cache.states else {
         return;
@@ -201,10 +206,18 @@ pub(super) fn update_planet_light_dirs(
     let do_map = force_both || matches!(*view, ViewMode::Map);
     let do_ship = force_both || matches!(*view, ViewMode::Ship);
 
-    // Compute occluder lists at both scales once per frame.
+    // Compute occluder lists at both scales once per frame. Buffers are
+    // `Local`s, so we pay the allocation once and reuse on subsequent
+    // frames.
     let body_iter = || query.iter().map(|(b, _)| b);
-    let map_occluders = collect_occluders(states, &origin, MAP_SCALE, body_iter());
-    let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, body_iter());
+    collect_occluders(&mut map_occluders, states, &origin, MAP_SCALE, body_iter());
+    collect_occluders(
+        &mut ship_occluders,
+        states,
+        &origin,
+        SHIP_SCALE,
+        body_iter(),
+    );
 
     // Cloud layer drift: wrap sim time at the body's equatorial cloud
     // period (`TAU / scroll_rate`) so the equator rotates seamlessly
@@ -214,20 +227,16 @@ pub(super) fn update_planet_light_dirs(
     // at a slow multi-day cadence.
     let sim_time = sim.simulation.sim_time();
 
+    let map_slice: &[(usize, Vec3, f32)] = &map_occluders;
+    let ship_slice: &[(usize, Vec3, f32)] = &ship_occluders;
     for (body, mats) in &query {
         let body_def = &body_defs[body.body_id];
         // Same scale-independent inputs feed both materials; only the
         // scale-dependent fields (radius, occluders, planetshine pos)
         // differ.
         for (handle, halo_handle, occluders, scale, want) in [
-            (&mats.map, &mats.map_halo, &map_occluders, MAP_SCALE, do_map),
-            (
-                &mats.ship,
-                &mats.ship_halo,
-                &ship_occluders,
-                SHIP_SCALE,
-                do_ship,
-            ),
+            (&mats.map, &mats.map_halo, map_slice, MAP_SCALE, do_map),
+            (&mats.ship, &mats.ship_halo, ship_slice, SHIP_SCALE, do_ship),
         ] {
             if !want {
                 continue;
@@ -269,7 +278,16 @@ pub(super) fn update_planet_light_dirs(
             };
             let cloud_time = (sim_time - (sim_time / period).floor() * period) as f32;
 
-            if let Some(mat) = materials.get_mut(handle) {
+            // Peek before mutating: `get_mut` flags the asset changed and
+            // triggers a full re-extract in the render world, so skip it
+            // when the inputs are bit-identical (paused sim, no view drift).
+            let primary_dirty = matches!(
+                materials.get(handle),
+                Some(mat) if mat.params.radius != radius
+                    || mat.params.scene != scene
+                    || mat.atmosphere.cloud_dynamics.y != cloud_time
+            );
+            if primary_dirty && let Some(mat) = materials.get_mut(handle) {
                 mat.params.radius = radius;
                 mat.params.scene = scene.clone();
                 // Drive the cloud layer's time uniform. Bodies without a
@@ -280,7 +298,13 @@ pub(super) fn update_planet_light_dirs(
                 mat.atmosphere.cloud_dynamics.y = cloud_time;
             }
 
-            if let Some(mat) = halo_materials.get_mut(halo_handle) {
+            let halo_dirty = matches!(
+                halo_materials.get(halo_handle),
+                Some(mat) if mat.params.radius != radius
+                    || mat.params.scene != scene
+                    || mat.atmosphere.cloud_dynamics.y != cloud_time
+            );
+            if halo_dirty && let Some(mat) = halo_materials.get_mut(halo_handle) {
                 mat.params.radius = radius;
                 mat.params.scene = scene;
                 mat.atmosphere.cloud_dynamics.y = cloud_time;
@@ -304,6 +328,8 @@ pub(super) fn update_solid_planet_params(
     exposure: Res<CameraExposure>,
     view: Res<ViewMode>,
     planetshine: Res<PlanetshineTints>,
+    mut map_occluders: Local<Vec<(usize, Vec3, f32)>>,
+    mut ship_occluders: Local<Vec<(usize, Vec3, f32)>>,
 ) {
     let Some(ref states) = cache.states else {
         return;
@@ -318,22 +344,27 @@ pub(super) fn update_solid_planet_params(
     let do_ship = force_both || matches!(*view, ViewMode::Ship);
 
     let body_iter = || query.iter().map(|(b, _)| b);
-    let map_occluders = collect_occluders(states, &origin, MAP_SCALE, body_iter());
-    let ship_occluders = collect_occluders(states, &origin, SHIP_SCALE, body_iter());
+    collect_occluders(&mut map_occluders, states, &origin, MAP_SCALE, body_iter());
+    collect_occluders(
+        &mut ship_occluders,
+        states,
+        &origin,
+        SHIP_SCALE,
+        body_iter(),
+    );
+    let map_slice: &[(usize, Vec3, f32)] = &map_occluders;
+    let ship_slice: &[(usize, Vec3, f32)] = &ship_occluders;
 
     for (body, mats) in &query {
         let body_def = &body_defs[body.body_id];
         for (handle, occluders, scale, want) in [
-            (&mats.map, &map_occluders, MAP_SCALE, do_map),
-            (&mats.ship, &ship_occluders, SHIP_SCALE, do_ship),
+            (&mats.map, map_slice, MAP_SCALE, do_map),
+            (&mats.ship, ship_slice, SHIP_SCALE, do_ship),
         ] {
             if !want {
                 continue;
             }
-            let Some(mat) = materials.get_mut(handle) else {
-                continue;
-            };
-            mat.params.radius = ((body.radius_m * scale) as f32).max(0.005);
+            let radius = ((body.radius_m * scale) as f32).max(0.005);
             let mut scene = build_scene_lighting(body.body_id, states, occluders, gain);
 
             if let Some(parent_id) = body_def.parent {
@@ -355,7 +386,16 @@ pub(super) fn update_solid_planet_params(
                 }
             }
 
-            mat.params.scene = scene;
+            // Peek before mutating; `get_mut` re-uploads the uniform even
+            // on identical writes.
+            let dirty = matches!(
+                materials.get(handle),
+                Some(mat) if mat.params.radius != radius || mat.params.scene != scene
+            );
+            if dirty && let Some(mat) = materials.get_mut(handle) {
+                mat.params.radius = radius;
+                mat.params.scene = scene;
+            }
         }
     }
 }

@@ -13,7 +13,6 @@ use thalos_physics::types::{BodyDefinition, BodyId, BodyKind};
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::debug::{DebugMode, low_orbit_state};
-use crate::hud::time_control_panel;
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::photo_mode::not_in_photo_mode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
@@ -29,15 +28,9 @@ pub struct BodyTreePanelPlugin;
 
 impl Plugin for BodyTreePanelPlugin {
     fn build(&self, app: &mut App) {
-        // Run after the HUD top panel so `ctx.available_rect()` already
-        // excludes its docked area on the first frame — otherwise
-        // `default_pos` (used only on first show) anchors the window
-        // under the top bar permanently.
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            body_tree_panel
-                .run_if(not_in_photo_mode.and(in_map_view))
-                .after(time_control_panel),
+            body_tree_panel.run_if(not_in_photo_mode.and(in_map_view)),
         );
     }
 }

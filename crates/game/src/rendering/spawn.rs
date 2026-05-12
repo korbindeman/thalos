@@ -638,11 +638,15 @@ pub(super) fn spawn_bodies(
             shadow_normal_bias: 2.0,
             ..default()
         },
+        // The ship is the only shadow caster — every body mesh is tagged
+        // `NotShadowCaster` / `NotShadowReceiver`. A ~10 m caster doesn't
+        // need a 100 km cascade chain; two cascades sized for the ship's
+        // local neighbourhood keep the shadow pass cheap.
         CascadeShadowConfigBuilder {
-            num_cascades: 4,
+            num_cascades: 2,
             minimum_distance: 0.1,
-            maximum_distance: 100_000.0,
-            first_cascade_far_bound: 10.0,
+            maximum_distance: 500.0,
+            first_cascade_far_bound: 30.0,
             overlap_proportion: 0.2,
         }
         .build(),

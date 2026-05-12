@@ -99,6 +99,14 @@ impl WarpController {
         self.levels[self.level_index]
     }
 
+    pub fn levels(&self) -> &[f64] {
+        &self.levels
+    }
+
+    pub fn level_index(&self) -> usize {
+        self.level_index
+    }
+
     pub fn label(&self) -> String {
         let speed = self.speed();
         if speed == 0.0 {

@@ -801,10 +801,20 @@ fn cloud_deck_color(p_local: vec3<f32>, t: f32) -> CloudDeckResult {
     //
     // Reuses the already-computed IQ warp vector `r` instead of
     // evaluating a fresh fbm_3d_vec3 — free pseudorandom 3D vector.
-    let streak_n = normalize(n + r * layers.turbulence * 1.8);
-    let streak_mid   = fbm_3d(streak_n * vec3<f32>(4.0,  48.0, 4.0),  seed ^ 0xCAFEu);
-    let streak_fine  = fbm_3d(streak_n * vec3<f32>(7.0, 140.0, 7.0),  seed ^ 0xF1BEu);
-    let streak_ultra = fbm_3d(streak_n * vec3<f32>(11.0, 230.0, 11.0), seed ^ 0xA55Eu);
+    //
+    // Streak contributions downstream multiply by `layers.turbulence`,
+    // so evaluating the three high-frequency fbms on quiet bodies
+    // (turbulence = 0) is wasted work. Gate the fbm calls themselves,
+    // not just the contribution.
+    var streak_mid: f32 = 0.0;
+    var streak_fine: f32 = 0.0;
+    var streak_ultra: f32 = 0.0;
+    if layers.turbulence > 0.0 {
+        let streak_n = normalize(n + r * layers.turbulence * 1.8);
+        streak_mid   = fbm_3d(streak_n * vec3<f32>(4.0,  48.0, 4.0),  seed ^ 0xCAFEu);
+        streak_fine  = fbm_3d(streak_n * vec3<f32>(7.0, 140.0, 7.0),  seed ^ 0xF1BEu);
+        streak_ultra = fbm_3d(streak_n * vec3<f32>(11.0, 230.0, 11.0), seed ^ 0xA55Eu);
+    }
 
     // Low-frequency organic drift — gentle hue wander across the
     // disk so the staircase picks up subtle longitudinal variation.

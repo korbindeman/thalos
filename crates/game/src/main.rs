@@ -11,6 +11,7 @@ mod fuel;
 mod hud;
 mod maneuver;
 mod map_view;
+mod navball;
 mod navigation;
 mod photo_mode;
 mod reflection_probe;
@@ -52,6 +53,7 @@ use fuel::FuelPlugin;
 use hud::HudPlugin;
 use maneuver::ManeuverPlugin;
 use map_view::MapViewPlugin;
+use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use photo_mode::PhotoModePlugin;
 use rendering::{RenderingPlugin, SimulationState};
@@ -204,12 +206,24 @@ fn main() {
                 system.bodies.clone(),
                 SimulationConfig::default(),
             );
-            // Spawn facing prograde — rotate the body nose axis onto the
-            // ship's velocity relative to its homeworld (the dominant body
-            // at spawn).
+            // Spawn in level orbital flight: body +Y (nose) along prograde,
+            // body +Z (dorsal) along local-up (radial-out from the
+            // homeworld). This is the convention shared by the navball
+            // (which puts the zenith of the local frame at the top of
+            // the sphere texture) and the controls (pitch around the
+            // wing axis, yaw around dorsal, roll around the nose), so
+            // all three stay aligned when the craft is "upright".
             let prograde = rel.velocity.normalize();
+            let radial_raw = rel.position.normalize();
+            // Project radial perpendicular to prograde — for circular
+            // orbits these are already orthogonal, but for eccentric
+            // ones the velocity has a radial component.
+            let dorsal = (radial_raw - radial_raw.dot(prograde) * prograde).normalize();
+            // Right wing: body +X = body +Y × body +Z (right-hand rule).
+            let right = prograde.cross(dorsal);
+            let basis = bevy::math::DMat3::from_cols(right, prograde, dorsal);
             simulation.set_attitude(AttitudeState {
-                orientation: DQuat::from_rotation_arc(navigation::SHIP_NOSE_BODY, prograde),
+                orientation: DQuat::from_mat3(&basis),
                 angular_velocity: DVec3::ZERO,
             });
             SimulationState {
@@ -247,6 +261,7 @@ fn main() {
         .add_plugins(ControlLocksPlugin)
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
+        .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ScreenshotPlugin)
         .add_plugins(ViewPlugin)

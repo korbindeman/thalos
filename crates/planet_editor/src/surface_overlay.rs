@@ -1,16 +1,20 @@
 //! Editor surface overlays for compiled terrain metadata.
 //!
-//! Plate and biome overlays share the same rendering path: build a
-//! vertex-colored shell, sample one compiled metadata layer per triangle,
-//! and place the shell in the preview body's display orientation.
+//! Plate and biome overlays render through a single vertex-colored shell.
+//! Each overlay quad samples both compiled layers (subject to which are
+//! enabled) and emits an averaged color. A single mesh avoids the
+//! sort-order flicker that two alpha-blended shells produced when both
+//! were enabled.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
-use thalos_terrain_gen::cubemap::dir_to_face_uv;
-use thalos_terrain_gen::{BiomeMixTexel, Cubemap, PlateKind, TectonicActivity, TectonicSystem};
+use thalos_terrain_gen::cubemap::face_uv_to_dir;
+use thalos_terrain_gen::{
+    BiomeMixTexel, Cubemap, CubemapFace, PlateKind, TectonicActivity, TectonicSystem,
+};
 
 /// Edit-time component carrying compiled metadata for editor overlays.
 /// Inserted by `finalize_terrain_bake` when a terrain bake succeeds.
@@ -38,25 +42,24 @@ impl Plugin for SurfaceOverlayPlugin {
     }
 }
 
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum SurfaceOverlayLayer {
-    Plates,
-    Biomes,
-}
-
 #[derive(Component)]
-struct SurfaceOverlayEntity {
-    layer: SurfaceOverlayLayer,
-}
+struct SurfaceOverlayEntity;
 
-/// Inflate shells slightly past the impostor surface so overlays win the
-/// depth test without visibly floating away from the planet. Biomes sit a
-/// hair above plates so both can be toggled for quick comparison.
-const PLATE_OVERLAY_LIFT: f32 = 1.012;
-const BIOME_OVERLAY_LIFT: f32 = 1.018;
-const OVERLAY_ALPHA: f32 = 1.0;
-const OVERLAY_LAT_SEGMENTS: usize = 48;
-const OVERLAY_LON_SEGMENTS: usize = 96;
+/// Inflate the shell slightly past the impostor surface so the overlay
+/// wins the depth test without visibly floating away from the planet.
+const OVERLAY_LIFT: f32 = 1.015;
+/// Overlay alpha. Tuned to keep the underlying terrain visible while the
+/// overlay color still reads dominantly. When the planet is forced
+/// fullbright (which the editor does whenever any overlay is on), this
+/// blend rate lands somewhere around 60/40 overlay/terrain.
+const OVERLAY_ALPHA: f32 = 0.6;
+/// Overlay quads per cubemap face edge. Six faces × this², two triangles
+/// per quad. Picked to match the topology of the underlying biome /
+/// tectonic data (cubemap-aligned, no pole singularity) while keeping the
+/// mesh inside ~200k triangles for cheap rebuilds. When the source
+/// cubemap is finer than this, each overlay quad represents a
+/// `(cm_res / OVERLAY_FACE_RES)²` block and the dominant biome wins.
+const OVERLAY_FACE_RES: u32 = 128;
 
 fn sync_surface_overlays(
     mut commands: Commands,
@@ -65,11 +68,18 @@ fn sync_surface_overlays(
     state: Res<SurfaceOverlayState>,
     render_radius: Res<SurfaceOverlayRenderRadius>,
     orientation: Res<SurfaceOverlayOrientation>,
+    keys: Res<ButtonInput<KeyCode>>,
     preview_q: Query<(Entity, Ref<PreviewSurfaceOverlays>)>,
-    mut overlay_q: Query<(Entity, &SurfaceOverlayEntity, &mut Transform)>,
+    mut overlay_q: Query<(
+        Entity,
+        &SurfaceOverlayEntity,
+        &mut Transform,
+        &mut Visibility,
+    )>,
+    mut last_state: Local<(bool, bool)>,
 ) {
     let Ok((preview_entity, preview)) = preview_q.single() else {
-        for (entity, _, _) in &mut overlay_q {
+        for (entity, _, _, _) in &mut overlay_q {
             commands.entity(entity).despawn();
         }
         return;
@@ -77,19 +87,32 @@ fn sync_surface_overlays(
 
     let wants_plates = state.show_plates && preview.tectonics.is_some();
     let wants_biomes = state.show_biomes;
-    let rebuild = preview.is_changed() || render_radius.is_changed();
+    let wants_overlay = wants_plates || wants_biomes;
+    // Space-held suppresses overlays without despawning them — a rebuild
+    // on each press/release would be ~50–100ms, but flipping Visibility
+    // is free.
+    let suppress = keys.pressed(KeyCode::Space);
+    let target_visibility = if suppress {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+    // Bevy's resource change detection fires whenever a system declares
+    // `ResMut<SurfaceOverlayState>` and mutably derefs it — which the egui
+    // panel does every frame even when the user isn't toggling anything.
+    // Track the last-observed values locally to detect real transitions.
+    let current_state = (wants_plates, wants_biomes);
+    let state_changed = *last_state != current_state;
+    if state_changed {
+        *last_state = current_state;
+    }
+    let rebuild = preview.is_changed() || render_radius.is_changed() || state_changed;
     let body_to_world = orientation.0.inverse();
     let orientation_changed = orientation.is_changed();
-    let mut has_plates = false;
-    let mut has_biomes = false;
+    let mut has_overlay = false;
 
-    for (entity, marker, mut transform) in &mut overlay_q {
-        let wanted = match marker.layer {
-            SurfaceOverlayLayer::Plates => wants_plates,
-            SurfaceOverlayLayer::Biomes => wants_biomes,
-        };
-
-        if !wanted || rebuild {
+    for (entity, _, mut transform, mut visibility) in &mut overlay_q {
+        if !wants_overlay || rebuild {
             commands.entity(entity).despawn();
             continue;
         }
@@ -97,77 +120,72 @@ fn sync_surface_overlays(
         if orientation_changed && transform.rotation != body_to_world {
             transform.rotation = body_to_world;
         }
-        match marker.layer {
-            SurfaceOverlayLayer::Plates => has_plates = true,
-            SurfaceOverlayLayer::Biomes => has_biomes = true,
+        if *visibility != target_visibility {
+            *visibility = target_visibility;
         }
+        has_overlay = true;
     }
 
-    if wants_plates && !has_plates {
-        if let Some(sys) = preview.tectonics.as_ref() {
-            spawn_overlay(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                preview_entity,
-                SurfaceOverlayLayer::Plates,
-                Transform::from_rotation(body_to_world),
-                build_spherical_overlay_mesh(render_radius.0 * PLATE_OVERLAY_LIFT, |dir| {
-                    plate_overlay_color(sys, dir)
-                }),
-            );
-        }
-    }
+    if wants_overlay && !has_overlay {
+        let tectonics = preview.tectonics.as_ref();
+        let biome_weights = &preview.biome_weights;
+        let mesh = build_cube_overlay_mesh(
+            render_radius.0 * OVERLAY_LIFT,
+            |face, x, y, res| {
+                combined_overlay_color(
+                    wants_plates,
+                    wants_biomes,
+                    tectonics,
+                    biome_weights,
+                    face,
+                    x,
+                    y,
+                    res,
+                )
+            },
+        );
 
-    if wants_biomes && !has_biomes {
         spawn_overlay(
             &mut commands,
             &mut meshes,
             &mut materials,
             preview_entity,
-            SurfaceOverlayLayer::Biomes,
             Transform::from_rotation(body_to_world),
-            build_spherical_overlay_mesh(render_radius.0 * BIOME_OVERLAY_LIFT, |dir| {
-                biome_overlay_color(&preview.biome_weights, dir)
-            }),
+            mesh,
+            target_visibility,
         );
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_overlay(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     parent: Entity,
-    layer: SurfaceOverlayLayer,
     transform: Transform,
     mesh: Mesh,
+    visibility: Visibility,
 ) {
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        alpha_mode: AlphaMode::Opaque,
+        alpha_mode: AlphaMode::Blend,
         unlit: true,
         perceptual_roughness: 1.0,
         metallic: 0.0,
         ..default()
     });
 
-    let name = match layer {
-        SurfaceOverlayLayer::Plates => "Tectonic Plate Overlay",
-        SurfaceOverlayLayer::Biomes => "Biome Overlay",
-    };
-
     commands.spawn((
         Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(material),
         transform,
+        visibility,
         ChildOf(parent),
-        SurfaceOverlayEntity { layer },
+        SurfaceOverlayEntity,
         NoFrustumCulling,
         NotShadowCaster,
         NotShadowReceiver,
-        Name::new(name),
+        Name::new("Surface Overlay"),
     ));
 }
 
@@ -183,43 +201,47 @@ pub struct SurfaceOverlayRenderRadius(pub f32);
 #[derive(Resource, Default)]
 pub struct SurfaceOverlayOrientation(pub Quat);
 
-fn build_spherical_overlay_mesh(radius: f32, mut color_at: impl FnMut(Vec3) -> [f32; 4]) -> Mesh {
-    let vertex_count = OVERLAY_LAT_SEGMENTS * OVERLAY_LON_SEGMENTS * 6;
+/// Build a cubemap-topology overlay shell. Six face grids of
+/// `OVERLAY_FACE_RES × OVERLAY_FACE_RES` quads are spherified via the
+/// same `face_uv_to_dir` mapping the cubemap data uses, so each overlay
+/// quad sits over the cubemap block it samples and the sphere has no
+/// pole singularity.
+fn build_cube_overlay_mesh(
+    radius: f32,
+    mut color_at: impl FnMut(CubemapFace, u32, u32, u32) -> [f32; 4],
+) -> Mesh {
+    let res = OVERLAY_FACE_RES;
+    let quads_per_face = (res * res) as usize;
+    let vertex_count = 6 * quads_per_face * 6;
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_count);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(vertex_count);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(vertex_count);
 
-    for lat_i in 0..OVERLAY_LAT_SEGMENTS {
-        let lat0 = -std::f32::consts::FRAC_PI_2
-            + std::f32::consts::PI * lat_i as f32 / OVERLAY_LAT_SEGMENTS as f32;
-        let lat1 = -std::f32::consts::FRAC_PI_2
-            + std::f32::consts::PI * (lat_i + 1) as f32 / OVERLAY_LAT_SEGMENTS as f32;
+    let inv_res = 1.0 / res as f32;
+    for face in CubemapFace::ALL {
+        for y in 0..res {
+            for x in 0..res {
+                let u0 = x as f32 * inv_res;
+                let u1 = (x + 1) as f32 * inv_res;
+                let v0 = y as f32 * inv_res;
+                let v1 = (y + 1) as f32 * inv_res;
 
-        for lon_i in 0..OVERLAY_LON_SEGMENTS {
-            let lon0 = std::f32::consts::TAU * lon_i as f32 / OVERLAY_LON_SEGMENTS as f32;
-            let lon1 = std::f32::consts::TAU * (lon_i + 1) as f32 / OVERLAY_LON_SEGMENTS as f32;
+                let p00 = face_uv_to_dir(face, u0, v0);
+                let p10 = face_uv_to_dir(face, u1, v0);
+                let p11 = face_uv_to_dir(face, u1, v1);
+                let p01 = face_uv_to_dir(face, u0, v1);
 
-            let p00 = direction_from_lat_lon(lat0, lon0);
-            let p10 = direction_from_lat_lon(lat1, lon0);
-            let p11 = direction_from_lat_lon(lat1, lon1);
-            let p01 = direction_from_lat_lon(lat0, lon1);
+                let color = color_at(face, x, y, res);
 
-            push_overlay_triangle(
-                radius,
-                [p00, p10, p11],
-                &mut color_at,
-                &mut positions,
-                &mut normals,
-                &mut colors,
-            );
-            push_overlay_triangle(
-                radius,
-                [p00, p11, p01],
-                &mut color_at,
-                &mut positions,
-                &mut normals,
-                &mut colors,
-            );
+                push_overlay_quad(
+                    radius,
+                    [p00, p10, p11, p01],
+                    color,
+                    &mut positions,
+                    &mut normals,
+                    &mut colors,
+                );
+            }
         }
     }
 
@@ -233,48 +255,126 @@ fn build_spherical_overlay_mesh(radius: f32, mut color_at: impl FnMut(Vec3) -> [
     mesh
 }
 
-fn direction_from_lat_lon(lat: f32, lon: f32) -> Vec3 {
-    let (sin_lat, cos_lat) = lat.sin_cos();
-    let (sin_lon, cos_lon) = lon.sin_cos();
-    Vec3::new(cos_lat * cos_lon, sin_lat, cos_lat * sin_lon)
-}
-
-fn push_overlay_triangle(
+fn push_overlay_quad(
     radius: f32,
-    dirs: [Vec3; 3],
-    color_at: &mut impl FnMut(Vec3) -> [f32; 4],
+    corners: [Vec3; 4],
+    color: [f32; 4],
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     colors: &mut Vec<[f32; 4]>,
 ) {
-    let sample_dir = (dirs[0] + dirs[1] + dirs[2]).normalize_or_zero();
-    let color = color_at(sample_dir);
-
-    for dir in dirs {
+    // CCW-from-outside winding: face_uv_to_dir's u/v axes flip handedness
+    // on each face relative to the outward normal, so the naive
+    // (p00, p10, p11) order is back-facing. Reversing each triangle gives
+    // consistent front-facing geometry across all six faces.
+    let [p00, p10, p11, p01] = corners;
+    for dir in [p00, p11, p10, p00, p01, p11] {
         positions.push((dir * radius).to_array());
         normals.push(dir.to_array());
         colors.push(color);
     }
 }
 
-fn plate_overlay_color(sys: &TectonicSystem, dir: Vec3) -> [f32; 4] {
-    let sample = sys.sample(dir);
+/// Mixes the active overlay layers into a single linear-RGB + alpha
+/// triple per quad. When only one layer is on its color passes through
+/// unchanged; when both are on the colors are averaged. Caller has
+/// already filtered out the plate layer if the body has no tectonics.
+fn combined_overlay_color(
+    want_plate: bool,
+    want_biome: bool,
+    tectonics: Option<&TectonicSystem>,
+    biome_weights: &Cubemap<BiomeMixTexel>,
+    face: CubemapFace,
+    x: u32,
+    y: u32,
+    res: u32,
+) -> [f32; 4] {
+    let mut acc = [0.0f32; 3];
+    let mut count = 0u32;
+    if want_plate {
+        if let Some(sys) = tectonics {
+            let c = plate_overlay_rgb(sys, face, x, y, res);
+            acc[0] += c[0];
+            acc[1] += c[1];
+            acc[2] += c[2];
+            count += 1;
+        }
+    }
+    if want_biome {
+        let c = biome_overlay_rgb(biome_weights, face, x, y, res);
+        acc[0] += c[0];
+        acc[1] += c[1];
+        acc[2] += c[2];
+        count += 1;
+    }
+    if count == 0 {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+    let inv = 1.0 / count as f32;
+    [acc[0] * inv, acc[1] * inv, acc[2] * inv, OVERLAY_ALPHA]
+}
+
+fn plate_overlay_rgb(
+    sys: &TectonicSystem,
+    face: CubemapFace,
+    x: u32,
+    y: u32,
+    res: u32,
+) -> [f32; 3] {
+    let u = (x as f32 + 0.5) / res as f32;
+    let v = (y as f32 + 0.5) / res as f32;
+    let sample = sys.sample(face_uv_to_dir(face, u, v));
     let c = plate_color(sample.plate_kind, sample.plate_id.0).to_linear();
-    [c.red, c.green, c.blue, OVERLAY_ALPHA]
+    [c.red, c.green, c.blue]
 }
 
-fn biome_overlay_color(weights: &Cubemap<BiomeMixTexel>, dir: Vec3) -> [f32; 4] {
-    let biome_id = sample_dominant_biome(weights, dir);
+fn biome_overlay_rgb(
+    weights: &Cubemap<BiomeMixTexel>,
+    face: CubemapFace,
+    x: u32,
+    y: u32,
+    res: u32,
+) -> [f32; 3] {
+    let biome_id = dominant_biome_in_block(weights, face, x, y, res);
     let c = biome_color(biome_id).to_linear();
-    [c.red, c.green, c.blue, OVERLAY_ALPHA]
+    [c.red, c.green, c.blue]
 }
 
-fn sample_dominant_biome(weights: &Cubemap<BiomeMixTexel>, dir: Vec3) -> u8 {
-    let (face, u, v) = dir_to_face_uv(dir);
-    let res = weights.resolution();
-    let x = ((u * res as f32) as u32).min(res - 1);
-    let y = ((v * res as f32) as u32).min(res - 1);
-    weights.get(face, x, y).biome_ids[0]
+/// Histogram the dominant biome id across the cubemap texels that fall
+/// under the given overlay quad. When the cubemap is coarser than the
+/// overlay (cm_res ≤ res) the block degenerates to a single texel.
+fn dominant_biome_in_block(
+    weights: &Cubemap<BiomeMixTexel>,
+    face: CubemapFace,
+    x: u32,
+    y: u32,
+    res: u32,
+) -> u8 {
+    let cm_res = weights.resolution();
+    let x_min = (x as u64 * cm_res as u64 / res as u64) as u32;
+    let x_max = (((x + 1) as u64 * cm_res as u64).div_ceil(res as u64) as u32).min(cm_res);
+    let y_min = (y as u64 * cm_res as u64 / res as u64) as u32;
+    let y_max = (((y + 1) as u64 * cm_res as u64).div_ceil(res as u64) as u32).min(cm_res);
+    let x_max = x_max.max(x_min + 1);
+    let y_max = y_max.max(y_min + 1);
+
+    let mut counts = [0u32; 256];
+    for cy in y_min..y_max {
+        for cx in x_min..x_max {
+            let texel = weights.get(face, cx, cy);
+            if texel.is_empty() {
+                continue;
+            }
+            counts[texel.biome_ids[0] as usize] += 1;
+        }
+    }
+
+    counts
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, c)| *c)
+        .map(|(i, _)| i as u8)
+        .unwrap_or(0)
 }
 
 fn plate_color(kind: PlateKind, plate_id: u32) -> Color {

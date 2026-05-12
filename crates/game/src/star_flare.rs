@@ -377,7 +377,6 @@ fn update_lens_flare(
     };
     let sun_phys = sun_state.position;
 
-    // --- Occlusion: ray camera→sun vs every non-star sphere, in physics space.
     let to_sun = sun_phys - cam_phys;
     let sun_dist = to_sun.length();
     if sun_dist < 1e-6 {
@@ -386,6 +385,35 @@ fn update_lens_flare(
     }
     let ray_dir: DVec3 = to_sun / sun_dist;
 
+    // --- On-screen projection --------------------------------------------
+    // Project the sun first so we can early-out before the per-body
+    // occlusion sweep when the flare wouldn't be drawn anyway. Saves
+    // the O(N) ray test on every frame the sun isn't framed.
+    let sun_world = ((sun_phys - origin.position) * scale).as_vec3();
+    let sun_screen = match camera.world_to_viewport(cam_tf, sun_world) {
+        Ok(p) => p,
+        Err(_) => {
+            hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
+            return;
+        }
+    };
+
+    let screen = Vec2::new(window.width(), window.height());
+
+    // Fade starts `inset` pixels inside the viewport and reaches zero at
+    // the edge — so the flare is fully gone the moment the sun crosses
+    // off-screen, never floating in empty space.
+    let inset = 60.0;
+    let dx = ((inset - sun_screen.x).max(sun_screen.x - (screen.x - inset))).max(0.0);
+    let dy = ((inset - sun_screen.y).max(sun_screen.y - (screen.y - inset))).max(0.0);
+    let on_screen = 1.0 - (dx.max(dy) / inset).clamp(0.0, 1.0);
+    if on_screen <= 0.0 {
+        hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
+        return;
+    }
+
+    // --- Occlusion: ray camera→sun vs every non-star sphere, in physics
+    // space. Reached only when the sun is actually on-screen.
     let mut occlusion = 1.0_f32;
     for body in bodies.iter() {
         if body.is_star {
@@ -409,28 +437,6 @@ fn update_lens_flare(
             break;
         }
     }
-
-    // --- On-screen projection --------------------------------------------
-    // Use the sun's render-space position at the active scale so the
-    // projection matches what the camera actually sees.
-    let sun_world = ((sun_phys - origin.position) * scale).as_vec3();
-    let sun_screen = match camera.world_to_viewport(cam_tf, sun_world) {
-        Ok(p) => p,
-        Err(_) => {
-            hide_now(&mut tex_ghosts, &mut halo_ghosts, &mut was_visible);
-            return;
-        }
-    };
-
-    let screen = Vec2::new(window.width(), window.height());
-
-    // Fade starts `inset` pixels inside the viewport and reaches zero at
-    // the edge — so the flare is fully gone the moment the sun crosses
-    // off-screen, never floating in empty space.
-    let inset = 60.0;
-    let dx = ((inset - sun_screen.x).max(sun_screen.x - (screen.x - inset))).max(0.0);
-    let dy = ((inset - sun_screen.y).max(sun_screen.y - (screen.y - inset))).max(0.0);
-    let on_screen = 1.0 - (dx.max(dy) / inset).clamp(0.0, 1.0);
 
     let center = screen * 0.5;
     let to_center = center - sun_screen;

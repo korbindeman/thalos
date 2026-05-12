@@ -424,6 +424,7 @@ fn ship_camera_mode_input(
 pub fn camera_input_system(
     block: Res<BlockCameraInput>,
     mut contexts: EguiContexts,
+    ui_pointer_gate: Res<crate::hud::UiPointerGate>,
     view: Res<ViewMode>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
@@ -439,11 +440,15 @@ pub fn camera_input_system(
         .ctx_mut()
         .map(|ctx| ctx.wants_pointer_input())
         .unwrap_or(false);
+    // Bevy-UI interactive HUD elements (the new HUD nav buttons, etc.)
+    // also block the camera so clicking a button doesn't double up as a
+    // camera drag/zoom.
+    let ui_pointer_busy = egui_wants_pointer || ui_pointer_gate.hovered;
 
     // --- Rotation -----------------------------------------------------------
     // Suppressed while a maneuver element is hovered or being dragged, or
     // while egui is handling the pointer (e.g. dragging a panel).
-    if mouse_buttons.pressed(MouseButton::Left) && !block.0 && !egui_wants_pointer {
+    if mouse_buttons.pressed(MouseButton::Left) && !block.0 && !ui_pointer_busy {
         let delta = mouse_motion.delta;
         if delta != Vec2::ZERO {
             focus.azimuth += delta.x * ROTATION_SENSITIVITY;
@@ -469,7 +474,7 @@ pub fn camera_input_system(
     // Drain scroll events even when blocked so they don't carry into the
     // next frame and cause a delayed zoom after the cursor leaves egui.
     for event in scroll_events.read() {
-        if egui_wants_pointer {
+        if ui_pointer_busy {
             continue;
         }
         let raw = event.y as f64;

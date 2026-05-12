@@ -45,7 +45,7 @@ pub const MAX_ECLIPSE_OCCLUDERS: usize = 8;
 /// `color.xyz` is a per-star linear-RGB tint (defaults to white — stars
 /// differing only in luminosity collapse to the scalar flux term).
 /// `color.w` is reserved.
-#[derive(Clone, Copy, ShaderType)]
+#[derive(Clone, Copy, PartialEq, ShaderType)]
 pub struct StarLight {
     pub dir_flux: Vec4,
     pub color: Vec4,
@@ -70,7 +70,7 @@ impl Default for StarLight {
 /// match. `encase` handles std140 padding automatically for the derived
 /// `ShaderType`, so the manual `_pad0` below is only there to keep the
 /// 16-byte scalar header aligned cleanly before the `stars` array.
-#[derive(Clone, ShaderType)]
+#[derive(Clone, PartialEq, ShaderType)]
 pub struct SceneLighting {
     /// Number of valid entries in `stars`.
     pub star_count: u32,
