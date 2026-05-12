@@ -13,6 +13,7 @@ mod maneuver;
 mod map_view;
 mod navball;
 mod navigation;
+mod pause_menu;
 mod photo_mode;
 mod reflection_probe;
 mod rendering;
@@ -55,6 +56,7 @@ use maneuver::ManeuverPlugin;
 use map_view::MapViewPlugin;
 use navball::NavballPlugin;
 use navigation::NavigationPlugin;
+use pause_menu::PauseMenuPlugin;
 use photo_mode::PhotoModePlugin;
 use rendering::{RenderingPlugin, SimulationState};
 use screenshot::ScreenshotPlugin;
@@ -168,7 +170,12 @@ fn main() {
     App::new()
         .configure_sets(
             Update,
-            (SimStage::Physics, SimStage::Sync, SimStage::Camera).chain(),
+            (
+                SimStage::Physics.run_if(pause_menu::not_game_paused),
+                SimStage::Sync,
+                SimStage::Camera.run_if(pause_menu::not_game_paused),
+            )
+                .chain(),
         )
         .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
         .add_plugins(
@@ -261,6 +268,7 @@ fn main() {
         .add_plugins(ControlLocksPlugin)
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
+        .add_plugins(PauseMenuPlugin)
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ScreenshotPlugin)

@@ -14,6 +14,7 @@ use thalos_physics::types::{BodyDefinition, BodyId, BodyKind};
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::debug::{DebugMode, low_orbit_state};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
+use crate::pause_menu::not_game_paused;
 use crate::photo_mode::not_in_photo_mode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
 use crate::view::in_map_view;
@@ -30,7 +31,7 @@ impl Plugin for BodyTreePanelPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            body_tree_panel.run_if(not_in_photo_mode.and(in_map_view)),
+            body_tree_panel.run_if(not_game_paused.and(not_in_photo_mode).and(in_map_view)),
         );
     }
 }

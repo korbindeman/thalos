@@ -136,6 +136,7 @@ impl Plugin for ManeuverPlugin {
                         .after(maneuver_input)
                         .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                 )
+                    .run_if(crate::pause_menu::not_game_paused)
                     .before(crate::SimStage::Physics),
             )
             .add_observer(arrow_drag_start)
@@ -144,8 +145,11 @@ impl Plugin for ManeuverPlugin {
             .add_observer(slide_sphere_drag_end)
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
-                node_editor_panel
-                    .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                node_editor_panel.run_if(
+                    crate::pause_menu::not_game_paused
+                        .and(crate::photo_mode::not_in_photo_mode)
+                        .and(crate::view::in_map_view),
+                ),
             );
     }
 }

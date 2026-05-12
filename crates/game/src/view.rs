@@ -49,7 +49,10 @@ impl Plugin for ViewPlugin {
             .add_observer(attach_map_layer_for_hide_in_ship)
             .add_observer(attach_ship_layer_for_hide_in_map)
             .add_systems(Startup, spawn_ui_camera)
-            .add_systems(Update, toggle_view_input)
+            .add_systems(
+                Update,
+                toggle_view_input.run_if(crate::pause_menu::not_game_paused),
+            )
             .add_systems(
                 Update,
                 apply_active_camera

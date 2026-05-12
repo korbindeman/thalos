@@ -28,7 +28,10 @@ pub struct PhotoModePlugin;
 impl Plugin for PhotoModePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PhotoMode>()
-            .add_systems(Update, toggle_photo_mode_input)
+            .add_systems(
+                Update,
+                toggle_photo_mode_input.run_if(crate::pause_menu::not_game_paused),
+            )
             // Runs after everything in `Sync` so newly spawned tagged entities
             // (e.g. ghost bodies, maneuver handles) are caught the same frame.
             .add_systems(
