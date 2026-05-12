@@ -16,7 +16,6 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::gestures::PinchGesture;
-use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::picking::Pickable;
@@ -37,6 +36,9 @@ use std::path::PathBuf;
 
 use thalos_celestial::Universe;
 use thalos_celestial::generate::{DefaultGenParams, generate_default};
+use thalos_input::enhanced::{ActionSources, EnhancedInputSystems};
+use thalos_input::settings::InputSettings;
+use thalos_input::shipyard::{ShipyardInputIntent, ShipyardInputPlugin};
 use thalos_ship_rendering::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
 };
@@ -243,6 +245,10 @@ fn main() {
     };
 
     App::new()
+        .insert_resource(
+            InputSettings::load_from_path("assets/input.ron")
+                .expect("Failed to load input bindings from assets/input.ron"),
+        )
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -261,6 +267,7 @@ fn main() {
         )
         .insert_resource(catalog)
         .add_plugins(EguiPlugin::default())
+        .add_plugins(ShipyardInputPlugin)
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(MeshPickingPlugin)
         .insert_resource(MeshPickingSettings {
@@ -277,6 +284,10 @@ fn main() {
         .init_resource::<DeselectTracker>()
         .init_resource::<SkyBackdropEnabled>()
         .add_systems(Startup, setup)
+        .add_systems(
+            PreUpdate,
+            gate_shipyard_input_sources.before(EnhancedInputSystems::Update),
+        )
         .add_systems(
             Update,
             (
@@ -939,6 +950,23 @@ fn pointer_over_egui(contexts: &mut EguiContexts) -> bool {
         .unwrap_or(false)
 }
 
+fn gate_shipyard_input_sources(
+    mut action_sources: ResMut<ActionSources>,
+    mut contexts: EguiContexts,
+) {
+    let (pointer_busy, keyboard_busy) = contexts
+        .ctx_mut()
+        .map(|ctx| {
+            (
+                ctx.is_pointer_over_area() || ctx.wants_pointer_input(),
+                ctx.wants_keyboard_input(),
+            )
+        })
+        .unwrap_or((false, false));
+    thalos_input::gating::set_mouse_sources(&mut action_sources, !pointer_busy);
+    thalos_input::gating::set_keyboard_source(&mut action_sources, !keyboard_busy);
+}
+
 // ---------------------------------------------------------------------------
 // Tank resize arrow (parametric handle)
 // ---------------------------------------------------------------------------
@@ -1084,13 +1112,13 @@ fn on_arrow_drag_end(_trigger: On<Pointer<DragEnd>>, mut drag: ResMut<TankResize
 fn update_tank_resize_drag(
     mut drag: ResMut<TankResizeDrag>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    input: Res<ShipyardInputIntent>,
     mut tanks: Query<(&mut FuelTank, &AttachNodes)>,
 ) {
     let Some(state) = drag.active.as_ref() else {
         return;
     };
-    if !mouse.pressed(MouseButton::Left) {
+    if !input.primary_pressed {
         drag.active = None;
         return;
     }
@@ -1133,7 +1161,7 @@ fn update_tank_resize_drag(
 /// deselect at release.
 fn deselect_on_empty_click(
     mut tracker: ResMut<DeselectTracker>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    input: Res<ShipyardInputIntent>,
     windows: Query<&Window, With<PrimaryWindow>>,
     hover_map: Res<HoverMap>,
     pickables: Query<(), Or<(With<PartBody>, With<AttachNodePin>, With<TankResizeArrow>)>>,
@@ -1145,7 +1173,7 @@ fn deselect_on_empty_click(
     };
     let cursor = window.cursor_position();
 
-    if mouse.just_pressed(MouseButton::Left) {
+    if input.primary_started {
         if pointer_over_egui(&mut contexts) {
             tracker.press_cursor = None;
         } else {
@@ -1157,12 +1185,11 @@ fn deselect_on_empty_click(
         }
     }
 
-    if mouse.just_released(MouseButton::Left) {
-        if let (Some(press), Some(current)) = (tracker.press_cursor.take(), cursor) {
-            if (current - press).length() < CLICK_THRESHOLD_PX {
-                state.selected = None;
-            }
-        }
+    if input.primary_released
+        && let (Some(press), Some(current)) = (tracker.press_cursor.take(), cursor)
+        && (current - press).length() < CLICK_THRESHOLD_PX
+    {
+        state.selected = None;
     }
 }
 
@@ -1298,10 +1325,7 @@ fn on_pin_click(
 
 fn orbit_camera(
     mut cam: Query<(&mut Transform, &mut OrbitCamera)>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut motion: MessageReader<MouseMotion>,
-    mut wheel: MessageReader<MouseWheel>,
+    input: Res<ShipyardInputIntent>,
     mut pinch: MessageReader<PinchGesture>,
     mut contexts: EguiContexts,
     state: Res<EditorState>,
@@ -1322,26 +1346,14 @@ fn orbit_camera(
         .values()
         .any(|hovers| hovers.keys().any(|e| arrows.get(*e).is_ok()));
 
-    let mut delta = Vec2::ZERO;
-    for m in motion.read() {
-        delta += m.delta;
-    }
-    // Normalize wheel deltas so trackpad pixel scrolling isn't 20x faster
-    // than a real mouse wheel.
-    let mut wheel_d: f32 = 0.0;
-    for w in wheel.read() {
-        let scale = match w.unit {
-            bevy::input::mouse::MouseScrollUnit::Line => 1.0,
-            bevy::input::mouse::MouseScrollUnit::Pixel => 1.0 / 40.0,
-        };
-        wheel_d += w.y * scale;
-    }
+    let delta = input.camera_motion;
+    let wheel_d = input.camera_wheel.y;
     let mut pinch_d: f32 = 0.0;
     for p in pinch.read() {
         pinch_d += p.0;
     }
 
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let shift = input.precision_slow;
 
     // Click/drag arbitration for LMB: we want a press→release on a pin to
     // fire `Pointer<Click>`, which Bevy's picking only emits when the same
@@ -1352,11 +1364,11 @@ fn orbit_camera(
     // orbit mode for the remainder of the press. With no pending part
     // there's no click target to protect, so orbit is unconditional.
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
-    if mouse.just_pressed(MouseButton::Left) {
+    if input.primary_started {
         *press_cursor = cursor;
         *orbit_active = false;
     }
-    if mouse.just_released(MouseButton::Left) {
+    if input.primary_released {
         *press_cursor = None;
         *orbit_active = false;
     }
@@ -1376,7 +1388,7 @@ fn orbit_camera(
         && (state.pending.is_none() || *orbit_active);
 
     for (mut t, mut orbit) in cam.iter_mut() {
-        if orbit_allowed && mouse.pressed(MouseButton::Left) {
+        if orbit_allowed && input.primary_pressed {
             orbit.yaw -= delta.x * 0.005;
             orbit.pitch = (orbit.pitch - delta.y * 0.005).clamp(-1.5, 1.5);
         }

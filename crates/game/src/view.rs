@@ -16,6 +16,7 @@
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, PrimaryEguiContext};
+use thalos_input::game::GameInputIntent;
 
 use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
 use crate::coords::{MAP_LAYER, SHIP_LAYER};
@@ -225,11 +226,11 @@ pub fn in_ship_view(view: Res<ViewMode>) -> bool {
 }
 
 fn toggle_view_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<GameInputIntent>,
     mut contexts: EguiContexts,
     mut view: ResMut<ViewMode>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyM) {
+    if !input.toggle_view {
         return;
     }
     if let Ok(ctx) = contexts.ctx_mut()

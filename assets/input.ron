@@ -1,0 +1,76 @@
+#![enable(implicit_some)]
+(
+    version: 1,
+    game: (
+        system: (
+            bindings: {
+                "escape": [Key("Escape")],
+                "screenshot": [Key("F12")],
+            },
+        ),
+        flight: (
+            bindings: {
+                "toggle_sas": [Key("KeyT")],
+                "warp_to_maneuver": [Key("KeyG")],
+                "warp_pause": [Key("Space")],
+                "warp_increase": [Key("Period")],
+                "warp_decrease": [Key("Comma")],
+                "warp_reset": [Key("Backslash")],
+                "throttle_full": [Key("KeyZ")],
+                "throttle_cut": [Key("KeyX")],
+            },
+            axes: {
+                "pitch": (positive: [Key("KeyW")], negative: [Key("KeyS")]),
+                "yaw": (positive: [Key("KeyD")], negative: [Key("KeyA")]),
+                "roll": (positive: [Key("KeyE")], negative: [Key("KeyQ")]),
+                "throttle_ramp": (
+                    positive: [Key("ShiftLeft"), Key("ShiftRight")],
+                    negative: [Key("ControlLeft"), Key("ControlRight")],
+                ),
+            },
+        ),
+        view: (
+            bindings: {
+                "toggle_view": [Key("KeyM")],
+                "toggle_photo_mode": [Key("KeyP")],
+                "cycle_ship_camera": [Key("KeyV")],
+            },
+        ),
+        camera: (
+            bindings: {
+                "primary": [MouseButton("Left")],
+                "motion": [MouseMotion],
+                "wheel": [MouseWheel],
+            },
+        ),
+        maneuver: (
+            bindings: {
+                "toggle_place_node": [Key("KeyN")],
+                "delete_node": [Key("Delete"), Key("Backspace")],
+            },
+        ),
+        maneuver_precision: (
+            bindings: {
+                "fine": [Key("ShiftLeft"), Key("ShiftRight")],
+                "ultra": [Key("ControlLeft"), Key("ControlRight")],
+            },
+        ),
+    ),
+    planet_editor: (
+        bindings: {
+            "primary": [MouseButton("Left")],
+            "camera_motion": [MouseMotion],
+            "camera_wheel": [MouseWheel],
+            "toggle_fullbright": [Key("KeyF")],
+            "overlay_suppress": [Key("Space")],
+        },
+    ),
+    shipyard: (
+        bindings: {
+            "primary": [MouseButton("Left")],
+            "camera_motion": [MouseMotion],
+            "camera_wheel": [MouseWheel],
+            "precision_slow": [Key("ShiftLeft"), Key("ShiftRight")],
+        },
+    ),
+)

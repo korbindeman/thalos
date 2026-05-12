@@ -6,6 +6,8 @@ mod state;
 
 use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
+use thalos_input::enhanced::ContextActivity;
+use thalos_input::game::GameManeuverPrecisionContext;
 
 use interaction::{
     arrow_drag_end, arrow_drag_start, handle_maneuver_events, maneuver_input,
@@ -34,6 +36,30 @@ fn update_camera_block(
         .any(|hovers| hovers.keys().any(|e| hitboxes.get(*e).is_ok()));
 
     block.0 = pointer_on_element || !matches!(*mode, InteractionMode::Idle);
+}
+
+/// Precision modifier bindings are only active during a maneuver edit that
+/// actually consumes them. This keeps Shift/Ctrl free for throttle control in
+/// normal flight.
+fn sync_maneuver_precision_context(
+    mut commands: Commands,
+    mode: Res<InteractionMode>,
+    contexts: Query<(Entity, &ContextActivity<GameManeuverPrecisionContext>)>,
+) {
+    let active = matches!(
+        *mode,
+        InteractionMode::DraggingArrow { .. } | InteractionMode::SlidingNode
+    );
+    let target = if active {
+        ContextActivity::<GameManeuverPrecisionContext>::ACTIVE
+    } else {
+        ContextActivity::<GameManeuverPrecisionContext>::INACTIVE
+    };
+    for (entity, context) in &contexts {
+        if **context != active {
+            commands.entity(entity).insert(target);
+        }
+    }
 }
 
 /// Recomputes the cached world position and orbital frame for the selected node.
@@ -119,6 +145,7 @@ impl Plugin for ManeuverPlugin {
                 Update,
                 (
                     update_camera_block,
+                    sync_maneuver_precision_context,
                     maneuver_input,
                     handle_maneuver_events.after(maneuver_input),
                     sync_node_delta_v.after(handle_maneuver_events),

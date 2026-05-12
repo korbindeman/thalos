@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 thalos_physics = { path = "../physics" }
+thalos_input = { path = "../input" }
 thalos_terrain_gen = { path = "../terrain_gen" }
 thalos_planet_rendering = { path = "../planet_rendering" }
 thalos_celestial = { path = "../celestial" }

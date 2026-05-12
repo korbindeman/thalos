@@ -11,6 +11,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
+use thalos_input::game::GameInputIntent;
 
 /// Global photo-mode state.
 #[derive(Resource, Default, Debug)]
@@ -48,11 +49,11 @@ pub fn not_in_photo_mode(photo_mode: Res<PhotoMode>) -> bool {
 }
 
 fn toggle_photo_mode_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<GameInputIntent>,
     mut contexts: EguiContexts,
     mut photo_mode: ResMut<PhotoMode>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyP) {
+    if !input.toggle_photo_mode {
         return;
     }
     // Don't steal P while the user is typing into an egui widget.

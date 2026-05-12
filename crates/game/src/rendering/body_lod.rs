@@ -7,6 +7,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
+use thalos_input::game::GameInputIntent;
 use thalos_physics::types::BodyKind;
 
 use super::screen_marker_radius;
@@ -227,7 +228,7 @@ pub(super) fn focus_camera_on_homeworld(
 /// closest one to the cursor.  Works for both 3D sphere meshes and billboard
 /// icons because we test the parent entity's transform, not the mesh child.
 pub(super) fn double_click_focus_system(
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    input: Res<GameInputIntent>,
     mut contexts: EguiContexts,
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -270,7 +271,7 @@ pub(super) fn double_click_focus_system(
             .map(|(_, _, transform, _)| transform.translation),
         _ => None,
     };
-    if !mouse_buttons.just_pressed(MouseButton::Left) {
+    if !input.primary_started {
         return;
     }
     // Skip clicks consumed by egui — otherwise clicking a button or

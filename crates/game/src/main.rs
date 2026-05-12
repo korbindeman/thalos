@@ -9,6 +9,7 @@ mod engine;
 mod flight_plan_view;
 mod fuel;
 mod hud;
+mod input;
 mod maneuver;
 mod map_view;
 mod navball;
@@ -33,6 +34,8 @@ use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, WindowMode};
 use big_space::prelude::BigSpaceDefaultPlugins;
+use thalos_input::game::GameInputPlugin;
+use thalos_input::settings::InputSettings;
 use thalos_physics::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::{Epoch, WorldPhysicsConfig},
@@ -52,6 +55,7 @@ use engine::EnginePlugin;
 use flight_plan_view::FlightPlanViewPlugin;
 use fuel::FuelPlugin;
 use hud::HudPlugin;
+use input::GameInputGatePlugin;
 use maneuver::ManeuverPlugin;
 use map_view::MapViewPlugin;
 use navball::NavballPlugin;
@@ -178,6 +182,10 @@ fn main() {
                 .chain(),
         )
         .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
+        .insert_resource(
+            InputSettings::load_from_path("assets/input.ron")
+                .expect("Failed to load input bindings from assets/input.ron"),
+        )
         .add_plugins(
             DefaultPlugins
                 .build()
@@ -251,6 +259,8 @@ fn main() {
             ..default()
         })
         .add_plugins(PlanetRenderingPlugin)
+        .add_plugins(GameInputPlugin)
+        .add_plugins(GameInputGatePlugin)
         .add_plugins(CameraPlugin)
         .add_plugins(reflection_probe::ReflectionProbePlugin)
         .add_plugins(sky_render::SkyRenderPlugin)

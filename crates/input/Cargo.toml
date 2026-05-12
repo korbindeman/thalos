@@ -1,0 +1,11 @@
+[package]
+name = "thalos_input"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.18", features = ["serialize"] }
+bevy_enhanced_input = { version = "0.24", features = ["serialize"] }
+ron = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+

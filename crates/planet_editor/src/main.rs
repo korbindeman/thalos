@@ -4,13 +4,15 @@ use std::time::{Duration, Instant};
 use bevy::asset::AssetPlugin;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PresentMode;
 use bevy_egui::egui;
+use thalos_input::enhanced::{ActionSources, EnhancedInputSystems};
+use thalos_input::planet_editor::{PlanetEditorInputIntent, PlanetEditorInputPlugin};
+use thalos_input::settings::InputSettings;
 use thalos_physics::body_trajectory_provider::BodyTrajectoryProvider;
 use thalos_physics::canonical::Epoch;
 use thalos_physics::parsing::load_solar_system_from_dir;
@@ -498,9 +500,7 @@ fn spawn_camera(mut commands: Commands) {
 }
 
 fn camera_input(
-    mouse: Res<ButtonInput<MouseButton>>,
-    motion: Res<AccumulatedMouseMotion>,
-    scroll: Res<AccumulatedMouseScroll>,
+    input: Res<PlanetEditorInputIntent>,
     mut orbit: ResMut<OrbitCamera>,
     mut egui_ctx: bevy_egui::EguiContexts,
     planet: Res<EditedPlanet>,
@@ -517,32 +517,44 @@ fn camera_input(
 
     // While a placement tool is active, left-click is reserved for adding
     // features — don't also rotate the camera. Scroll-zoom stays usable.
-    if mouse.pressed(MouseButton::Left) && !planet.tool.placing() {
-        let delta = motion.delta;
+    if input.primary_pressed && !planet.tool.placing() {
+        let delta = input.camera_motion;
         orbit.azimuth += delta.x * ROTATE_SENSITIVITY;
         orbit.elevation = (orbit.elevation - delta.y * ROTATE_SENSITIVITY)
             .clamp(-89.0_f32.to_radians(), 89.0_f32.to_radians());
     }
 
-    if scroll.delta.y != 0.0 {
+    if input.camera_wheel.y != 0.0 {
         let surface = orbit.planet_render_radius;
         let min_h = (orbit.min_distance - surface).max(1e-4);
         let max_h = orbit.max_distance - surface;
         let h = (orbit.target_distance - surface).max(min_h);
-        let log_h = h.ln() - scroll.delta.y * ZOOM_SENSITIVITY;
+        let log_h = h.ln() - input.camera_wheel.y * ZOOM_SENSITIVITY;
         let new_h = log_h.exp().clamp(min_h, max_h);
         orbit.target_distance = surface + new_h;
     }
 }
 
+fn gate_editor_input_sources(
+    mut action_sources: ResMut<ActionSources>,
+    mut egui_ctx: bevy_egui::EguiContexts,
+) {
+    let (pointer_busy, keyboard_busy) = egui_ctx
+        .ctx_mut()
+        .map(|ctx| (ctx.wants_pointer_input(), ctx.wants_keyboard_input()))
+        .unwrap_or((false, false));
+    thalos_input::gating::set_mouse_sources(&mut action_sources, !pointer_busy);
+    thalos_input::gating::set_keyboard_source(&mut action_sources, !keyboard_busy);
+}
+
 /// `F` flips `full_bright` and forces atmosphere to the opposite state, so
 /// the surface can be inspected unlit and unobscured in one keystroke.
 fn toggle_fullbright_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<PlanetEditorInputIntent>,
     mut planet: ResMut<EditedPlanet>,
     mut egui_ctx: bevy_egui::EguiContexts,
 ) {
-    if !keys.just_pressed(KeyCode::KeyF) {
+    if !input.toggle_fullbright {
         return;
     }
     if egui_ctx
@@ -1853,13 +1865,13 @@ fn ray_vs_sphere(origin: Vec3, dir: Vec3, radius: f32) -> Option<Vec3> {
 /// planet surface. Inert when no placement tool is active or when the cursor
 /// is over an egui panel.
 fn pick_planet_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    input: Res<PlanetEditorInputIntent>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<EditorCamera>>,
     mut planet: ResMut<EditedPlanet>,
     mut egui_ctx: bevy_egui::EguiContexts,
 ) {
-    if !mouse.just_pressed(MouseButton::Left) {
+    if !input.primary_started {
         return;
     }
     if !planet.tool.placing() {
@@ -2207,7 +2219,7 @@ fn sync_surface_overlay_orientation(
 fn apply_uniform_changes(
     mut planet: ResMut<EditedPlanet>,
     overlay_state: Res<SurfaceOverlayState>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<PlanetEditorInputIntent>,
     terrain_q: Query<&PlanetMaterialHandle, With<PreviewPlanet>>,
     halo_q: Query<&PlanetHaloMaterialHandle, With<PreviewPlanet>>,
     gas_q: Query<&GasGiantMaterialHandle, With<PreviewPlanet>>,
@@ -2221,10 +2233,10 @@ fn apply_uniform_changes(
     // Any of: an overlay being on, OR space being held, forces fullbright
     // + atmosphere-off so debug views read cleanly. Press / release of
     // either source must rewrite uniforms, so we track the combined flag
-    // with a Local — `ResMut<SurfaceOverlayState>` and `ButtonInput` both
+    // with a Local — overlay toggles and semantic input can both
     // mutably tick every frame, so `is_changed()` on them is unusable.
     let overlays_on = overlay_state.show_plates || overlay_state.show_biomes;
-    let space_held = keys.pressed(KeyCode::Space);
+    let space_held = input.overlay_suppress;
     let force = overlays_on || space_held;
     let force_changed = *last_force != force;
     if force_changed {
@@ -2508,6 +2520,10 @@ fn main() {
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(
+            InputSettings::load_from_path("assets/input.ron")
+                .expect("Failed to load input bindings from assets/input.ron"),
+        )
         .insert_resource(SystemData { system })
         .insert_resource(EditedPlanet {
             selected_body,
@@ -2555,6 +2571,7 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_plugins(PlanetRenderingPlugin)
+        .add_plugins(PlanetEditorInputPlugin)
         .add_plugins(SkyBackdropPlugin)
         .add_plugins(SurfaceOverlayPlugin)
         .insert_resource(SurfaceOverlayRenderRadius(RENDER_RADIUS))
@@ -2568,6 +2585,10 @@ fn main() {
             ),
         )
         .add_systems(bevy_egui::EguiPrimaryContextPass, editor_ui)
+        .add_systems(
+            PreUpdate,
+            gate_editor_input_sources.before(EnhancedInputSystems::Update),
+        )
         .add_systems(
             Update,
             (

@@ -20,7 +20,7 @@ pub struct TargetPlugin;
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TargetBody>()
-            .add_systems(Update, (clear_target_input, sync_target_to_simulation));
+            .add_systems(Update, sync_target_to_simulation);
     }
 }
 
@@ -30,12 +30,5 @@ fn sync_target_to_simulation(target: Res<TargetBody>, sim: Option<ResMut<Simulat
     let Some(mut sim) = sim else { return };
     if sim.simulation.target_body() != target.target {
         sim.simulation.set_target_body(target.target);
-    }
-}
-
-fn clear_target_input(keys: Res<ButtonInput<KeyCode>>, mut target: ResMut<TargetBody>) {
-    if keys.just_pressed(KeyCode::Escape) && target.target.is_some() {
-        target.target = None;
-        target.set_changed();
     }
 }

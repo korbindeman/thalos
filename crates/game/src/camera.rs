@@ -1,9 +1,9 @@
 use bevy::camera::visibility::RenderLayers;
-use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 use big_space::prelude::CellCoord;
+use thalos_input::game::GameInputIntent;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::space_camera_post_stack;
 
@@ -397,12 +397,12 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
 /// `V` cycles ship-view camera mode (Free ↔ Orbital). Suppressed in map view
 /// and while egui is consuming keyboard input (e.g. text fields).
 fn ship_camera_mode_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<GameInputIntent>,
     mut contexts: EguiContexts,
     view: Res<ViewMode>,
     mut mode: ResMut<ShipCameraMode>,
 ) {
-    if *view != ViewMode::Ship || !keys.just_pressed(KeyCode::KeyV) {
+    if *view != ViewMode::Ship || !input.cycle_ship_camera {
         return;
     }
     if let Ok(ctx) = contexts.ctx_mut()
@@ -426,9 +426,7 @@ pub fn camera_input_system(
     mut contexts: EguiContexts,
     ui_pointer_gate: Res<crate::hud::UiPointerGate>,
     view: Res<ViewMode>,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mouse_motion: Res<AccumulatedMouseMotion>,
-    mut scroll_events: MessageReader<MouseWheel>,
+    input: Res<GameInputIntent>,
     mut focus: ResMut<CameraFocus>,
 ) {
     const ROTATION_SENSITIVITY: f32 = 0.005; // rad per pixel
@@ -448,8 +446,8 @@ pub fn camera_input_system(
     // --- Rotation -----------------------------------------------------------
     // Suppressed while a maneuver element is hovered or being dragged, or
     // while egui is handling the pointer (e.g. dragging a panel).
-    if mouse_buttons.pressed(MouseButton::Left) && !block.0 && !ui_pointer_busy {
-        let delta = mouse_motion.delta;
+    if input.primary_pressed && !block.0 && !ui_pointer_busy {
+        let delta = input.camera_motion;
         if delta != Vec2::ZERO {
             focus.azimuth += delta.x * ROTATION_SENSITIVITY;
             focus.elevation -= delta.y * ROTATION_SENSITIVITY;
@@ -471,17 +469,8 @@ pub fn camera_input_system(
     };
     let zoom_factor = ZOOM_FACTOR_MIN + (ZOOM_FACTOR_MAX - ZOOM_FACTOR_MIN) * t;
 
-    // Drain scroll events even when blocked so they don't carry into the
-    // next frame and cause a delayed zoom after the cursor leaves egui.
-    for event in scroll_events.read() {
-        if ui_pointer_busy {
-            continue;
-        }
-        let raw = event.y as f64;
-        let ticks = match event.unit {
-            MouseScrollUnit::Line => raw * 25.0,
-            MouseScrollUnit::Pixel => raw,
-        };
+    if !ui_pointer_busy && input.camera_wheel.y != 0.0 {
+        let ticks = input.camera_wheel.y as f64 * 25.0;
         let multiplier = (1.0 - zoom_factor * ticks).max(0.01);
         focus.target_distance =
             (focus.target_distance * multiplier).clamp(min_distance, max_distance);

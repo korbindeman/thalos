@@ -11,6 +11,7 @@ use bevy::{
     render::view::screenshot::{Capturing, Screenshot, save_to_disk},
     window::{CursorIcon, SystemCursorIcon},
 };
+use thalos_input::game::GameInputIntent;
 
 pub struct ScreenshotPlugin;
 
@@ -22,10 +23,10 @@ impl Plugin for ScreenshotPlugin {
 
 fn screenshot_on_f12(
     mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<GameInputIntent>,
     active_captures: Query<Entity, With<Capturing>>,
 ) {
-    if !keys.just_pressed(KeyCode::F12) || !active_captures.is_empty() {
+    if !input.screenshot || !active_captures.is_empty() {
         return;
     }
 

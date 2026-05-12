@@ -1163,7 +1163,8 @@ Target schedule shape in Bevy:
 
 ```text
 Input
-  collect controls, maneuver edits, view commands
+  bevy_enhanced_input contexts evaluate semantic controls
+  collect per-binary intent resources after EnhancedInputSystems::Apply
 
 SimClock
   advance deterministic simulation epoch
@@ -1198,7 +1199,8 @@ Camera
 ```
 
 The exact Bevy schedules can change, but the data flow should remain:
-input -> simulation -> physics readback -> presentation -> camera.
+enhanced-input contexts -> intent resources -> simulation -> physics
+readback -> presentation -> camera.
 
 ## Save/load
 

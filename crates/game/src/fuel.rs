@@ -32,6 +32,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use bevy::prelude::*;
+use thalos_input::game::GameInputIntent;
 use thalos_shipyard::{
     Adapter, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelCrossfeed, FuelTank,
     G0, Part, PartResources, Resource,
@@ -195,7 +196,7 @@ fn finish_with_throttle(
 /// autopilot) owns the throttle. See [`crate::controls`] for who
 /// publishes the locks.
 pub fn handle_throttle_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<GameInputIntent>,
     time: Res<Time>,
     locks: Res<ControlLocks>,
     mut throttle: ResMut<ThrottleState>,
@@ -204,22 +205,20 @@ pub fn handle_throttle_input(
         return;
     }
 
-    if keys.just_pressed(KeyCode::KeyZ) {
+    if input.throttle_full {
         throttle.commanded = 1.0;
         return;
     }
-    if keys.just_pressed(KeyCode::KeyX) {
+    if input.throttle_cut {
         throttle.commanded = 0.0;
         return;
     }
 
     let dt = time.delta_secs_f64();
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    if shift {
+    if input.throttle_up {
         throttle.commanded = (throttle.commanded + THROTTLE_RAMP_RATE * dt).min(1.0);
     }
-    if ctrl {
+    if input.throttle_down {
         throttle.commanded = (throttle.commanded - THROTTLE_RAMP_RATE * dt).max(0.0);
     }
 }

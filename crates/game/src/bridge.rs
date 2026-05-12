@@ -14,6 +14,7 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use thalos_input::game::GameInputIntent;
 use thalos_physics::maneuver::ManeuverNode;
 
 use crate::SimStage;
@@ -92,7 +93,7 @@ fn update_prediction(mut sim: ResMut<SimulationState>) {
 /// `compute_attitude_control` still runs — it's the path that drives
 /// the autopilot's PD command from its direct target.
 pub fn handle_attitude_controls(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<GameInputIntent>,
     nav: Res<NavigationState>,
     locks: Res<ControlLocks>,
     target: Res<TargetBody>,
@@ -101,31 +102,18 @@ pub fn handle_attitude_controls(
     mut sim: ResMut<SimulationState>,
     mut sas_enabled: Local<bool>,
 ) {
-    if keys.just_pressed(KeyCode::KeyT) {
+    if input.toggle_sas {
         *sas_enabled = !*sas_enabled;
     }
 
     let autopilot_target = autopilot.attitude_target();
     let mut player_torque = DVec3::ZERO;
     if !locks.attitude && autopilot_target.is_none() {
-        if keys.pressed(KeyCode::KeyW) {
-            player_torque.x += 1.0;
-        }
-        if keys.pressed(KeyCode::KeyS) {
-            player_torque.x -= 1.0;
-        }
-        if keys.pressed(KeyCode::KeyD) {
-            player_torque.z += 1.0;
-        }
-        if keys.pressed(KeyCode::KeyA) {
-            player_torque.z -= 1.0;
-        }
-        if keys.pressed(KeyCode::KeyE) {
-            player_torque.y += 1.0;
-        }
-        if keys.pressed(KeyCode::KeyQ) {
-            player_torque.y -= 1.0;
-        }
+        player_torque = DVec3::new(
+            input.attitude.x as f64,
+            input.attitude.y as f64,
+            input.attitude.z as f64,
+        );
     }
 
     let control = compute_attitude_control(
@@ -160,12 +148,12 @@ pub fn handle_attitude_controls(
 /// suspends it and unpausing resumes. Pressing any manual warp key
 /// cancels an in-progress auto-warp.
 pub fn handle_warp_controls(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<GameInputIntent>,
     locks: Res<ControlLocks>,
     mut sim: ResMut<SimulationState>,
     mut warp_to: ResMut<WarpToManeuver>,
 ) {
-    if keys.just_pressed(KeyCode::KeyG) {
+    if input.warp_to_maneuver {
         if warp_to.active {
             warp_to.cancel();
         } else if find_next_maneuver(sim.simulation.sim_time(), &sim.simulation).is_some() {
@@ -174,15 +162,13 @@ pub fn handle_warp_controls(
         return;
     }
 
-    let manual_warp_key = keys.just_pressed(KeyCode::Space)
-        || keys.just_pressed(KeyCode::Period)
-        || keys.just_pressed(KeyCode::Comma)
-        || keys.just_pressed(KeyCode::Backslash);
+    let manual_warp_key =
+        input.warp_pause || input.warp_increase || input.warp_decrease || input.warp_reset;
     if manual_warp_key && warp_to.active {
         warp_to.cancel();
     }
 
-    if keys.just_pressed(KeyCode::Space) {
+    if input.warp_pause {
         sim.simulation.warp.toggle_pause();
         return;
     }
@@ -191,13 +177,13 @@ pub fn handle_warp_controls(
         return;
     }
 
-    if keys.just_pressed(KeyCode::Period) {
+    if input.warp_increase {
         sim.simulation.warp.increase();
-    } else if keys.just_pressed(KeyCode::Comma) {
+    } else if input.warp_decrease {
         if sim.simulation.warp.level_index() > 1 {
             sim.simulation.warp.decrease();
         }
-    } else if keys.just_pressed(KeyCode::Backslash) {
+    } else if input.warp_reset {
         sim.simulation.warp.reset();
     }
 }

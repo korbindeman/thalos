@@ -100,6 +100,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 (edition 2024, Bevy 0.18, glam 0.30). Workspace crates:
 
 - **`thalos_physics`** — pure Rust library, zero Bevy dependency, fully testable in isolation
+- **`thalos_input`** — Bevy enhanced-input contexts, RON binding loader, and per-binary input intent resources
 - **`thalos_game`** — Bevy consumer of physics + terrain outputs
 - **`thalos_terrain_gen`** — procedural terrain generation pipeline (no Bevy dependency)
 - **`thalos_atmosphere_gen`** — gas giant atmosphere definitions (cloud decks, hazes, rings; no Bevy dependency)
@@ -111,8 +112,11 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_cloud_gen`** — cloud texture generation
 
 Core separation: `physics`, `terrain_gen`, `atmosphere_gen`, `celestial`,
-and `cloud_gen` are pure Rust libraries; `game`, `planet_rendering`,
-`planet_editor`, and `shipyard` are Bevy consumers.
+and `cloud_gen` are pure Rust libraries; `input`, `game`,
+`planet_rendering`, `planet_editor`, and `shipyard` are Bevy consumers.
+Semantic input for the Bevy binaries flows through `thalos_input`
+contexts and intent resources, with checked-in defaults at
+`assets/input.ron`.
 
 ### Physics crate (`crates/physics/`)
 
@@ -169,6 +173,9 @@ Key modules:
 
 ### Game crate (`crates/game/`)
 
+- Semantic player input is read from `thalos_input::game::GameInputIntent`.
+  Keep raw Bevy input only for cursor positions, picking spatial data, and UI
+  internals. See `docs/input.md`.
 - `bridge` — Core adapter. Calls `Simulation::step()` each frame,
   recomputes trajectory prediction *synchronously* on the main thread
   when the cached plan is dirty/stale, syncs maneuver edits, handles
@@ -216,7 +223,8 @@ Key modules:
 
 Systems run in `SimStage` order: `Physics → Sync → Camera`
 (configured in `main.rs`), ensuring deterministic state flow each
-frame.
+frame. Enhanced input intent collection runs in `PreUpdate` before these
+sets.
 
 ### Terrain gen crate (`crates/terrain_gen/`)
 
@@ -372,6 +380,8 @@ status, dependency graph. Each major system has a unified spec doc.
 - `simulation.md` — simulation architecture (orbital mechanics,
   authority, time warp, map decoupling, big_space, Avian local
   bubble). Target design.
+- `input.md` — enhanced-input context model, binding file rules, and
+  per-binary intent resources.
 - `terrain.md` — terrain generation (feature compiler) + ground LOD
   rendering. Includes v2 backlog from terrestrial-pipeline research.
 - `atmosphere.md` — gas giants, rocky-atmosphere Bruneton scattering,

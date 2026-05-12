@@ -11,6 +11,7 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
+use thalos_input::planet_editor::PlanetEditorInputIntent;
 use thalos_terrain_gen::cubemap::face_uv_to_dir;
 use thalos_terrain_gen::{
     BiomeMixTexel, Cubemap, CubemapFace, PlateKind, TectonicActivity, TectonicSystem,
@@ -68,7 +69,7 @@ fn sync_surface_overlays(
     state: Res<SurfaceOverlayState>,
     render_radius: Res<SurfaceOverlayRenderRadius>,
     orientation: Res<SurfaceOverlayOrientation>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<PlanetEditorInputIntent>,
     preview_q: Query<(Entity, Ref<PreviewSurfaceOverlays>)>,
     mut overlay_q: Query<(
         Entity,
@@ -91,7 +92,7 @@ fn sync_surface_overlays(
     // Space-held suppresses overlays without despawning them — a rebuild
     // on each press/release would be ~50–100ms, but flipping Visibility
     // is free.
-    let suppress = keys.pressed(KeyCode::Space);
+    let suppress = input.overlay_suppress;
     let target_visibility = if suppress {
         Visibility::Hidden
     } else {

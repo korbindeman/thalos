@@ -2,6 +2,7 @@ use bevy::math::DVec3;
 use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use thalos_input::game::GameInputIntent;
 
 use super::super::helpers::{
     closest_node, closest_trail_point, closest_trail_point_on_orbit, orbit_sensitivity_scale,
@@ -18,11 +19,8 @@ use crate::rendering::{FrameBodyStates, SimulationState};
 
 /// Main input system for maneuver nodes.
 pub(in crate::maneuver) fn maneuver_input(
-    input: (
-        Res<ButtonInput<KeyCode>>,
-        Res<ButtonInput<MouseButton>>,
-        Res<Time>,
-    ),
+    intent: Res<GameInputIntent>,
+    time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
     sim: Option<Res<SimulationState>>,
@@ -41,7 +39,6 @@ pub(in crate::maneuver) fn maneuver_input(
     ),
     mut writer: bevy::ecs::message::MessageWriter<ManeuverEvent>,
 ) {
-    let (keys, mouse, time) = input;
     let (hover_map, hitboxes) = picking;
 
     let pointer_on_arrow = hover_map
@@ -49,7 +46,7 @@ pub(in crate::maneuver) fn maneuver_input(
         .values()
         .any(|hovers| hovers.keys().any(|entity| hitboxes.get(*entity).is_ok()));
 
-    if keys.just_pressed(KeyCode::KeyN) {
+    if intent.toggle_place_node {
         if matches!(*mode, InteractionMode::PlacingNode { .. }) {
             *mode = InteractionMode::Idle;
         } else {
@@ -61,11 +58,7 @@ pub(in crate::maneuver) fn maneuver_input(
         }
     }
 
-    if keys.just_pressed(KeyCode::Escape) && matches!(*mode, InteractionMode::PlacingNode { .. }) {
-        *mode = InteractionMode::Idle;
-    }
-
-    if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace) {
+    if intent.delete_node {
         if let Some(id) = selected.id {
             writer.write(ManeuverEvent::DeleteNode { id });
             selected.id = None;
@@ -106,7 +99,7 @@ pub(in crate::maneuver) fn maneuver_input(
             rate_sign,
             ..
         } => {
-            if mouse.pressed(MouseButton::Left) {
+            if intent.primary_pressed {
                 let screen_delta = cursor_pos - *drag_origin;
                 let displacement = screen_delta.dot(*axis_screen_dir);
                 let raw_rate = displacement as f64 * 10.0;
@@ -131,10 +124,10 @@ pub(in crate::maneuver) fn maneuver_input(
 
                 // Precision modifiers: Shift = 10× finer, Ctrl = 100× finer.
                 let mut modifier_scale = 1.0;
-                if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+                if intent.precision_fine {
                     modifier_scale *= 0.1;
                 }
-                if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+                if intent.precision_ultra {
                     modifier_scale *= 0.01;
                 }
 
@@ -170,7 +163,7 @@ pub(in crate::maneuver) fn maneuver_input(
         }
 
         InteractionMode::SlidingNode => {
-            if mouse.pressed(MouseButton::Left) {
+            if intent.primary_pressed {
                 if let Some(sel_id) = selected.id {
                     let node_time = plan
                         .nodes
@@ -257,7 +250,7 @@ pub(in crate::maneuver) fn maneuver_input(
             *snap_world_pos = closest.as_ref().map(|p| p.world_pos);
             *snap_anchor_body = closest.as_ref().map(|p| p.anchor_body);
 
-            if mouse.just_pressed(MouseButton::Left) {
+            if intent.primary_started {
                 if let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_anchor_body) {
                     writer.write(ManeuverEvent::PlaceNode {
                         trail_time,
@@ -272,7 +265,7 @@ pub(in crate::maneuver) fn maneuver_input(
         InteractionMode::Idle => {}
     }
 
-    if mouse.just_pressed(MouseButton::Left) && !pointer_on_arrow {
+    if intent.primary_started && !pointer_on_arrow {
         if let Some(id) = closest_node(
             &plan,
             prediction,
