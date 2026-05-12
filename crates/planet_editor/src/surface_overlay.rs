@@ -129,21 +129,18 @@ fn sync_surface_overlays(
     if wants_overlay && !has_overlay {
         let tectonics = preview.tectonics.as_ref();
         let biome_weights = &preview.biome_weights;
-        let mesh = build_cube_overlay_mesh(
-            render_radius.0 * OVERLAY_LIFT,
-            |face, x, y, res| {
-                combined_overlay_color(
-                    wants_plates,
-                    wants_biomes,
-                    tectonics,
-                    biome_weights,
-                    face,
-                    x,
-                    y,
-                    res,
-                )
-            },
-        );
+        let mesh = build_cube_overlay_mesh(render_radius.0 * OVERLAY_LIFT, |face, x, y, res| {
+            combined_overlay_color(
+                wants_plates,
+                wants_biomes,
+                tectonics,
+                biome_weights,
+                face,
+                x,
+                y,
+                res,
+            )
+        });
 
         spawn_overlay(
             &mut commands,

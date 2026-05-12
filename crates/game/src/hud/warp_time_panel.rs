@@ -7,7 +7,8 @@
 //!     - Mode pill (`UT` / `MET`) — toggles [`TimeDisplayMode`].
 //!     - Time readout in `T+NNNy,NNNd,HH:MM:SS` form.
 //!     - Row of warp-level buttons (one per non-pause entry in
-//!       `WarpController::levels`). Active level is highlighted.
+//!       `WarpController::levels`) plus the active warp amount. Active
+//!       level is highlighted.
 //! - Subtitle line: `TIME`.
 //!
 //! Both `UT` and `MET` currently read the same `sim_time` — the
@@ -80,6 +81,9 @@ pub(super) struct WarpLevelButton {
     index: usize,
 }
 
+#[derive(Component)]
+pub(super) struct WarpAmountLabel;
+
 const PAUSE_BUTTON_SIZE: f32 = 44.0;
 const WARP_BUTTON_WIDTH: f32 = 26.0;
 const WARP_BUTTON_HEIGHT: f32 = 20.0;
@@ -130,6 +134,7 @@ pub fn setup(
                         });
                         col.spawn(Node {
                             flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
                             column_gap: Val::Px(WARP_BUTTON_GAP),
                             ..default()
                         })
@@ -139,6 +144,7 @@ pub fn setup(
                             for (idx, _speed) in levels.iter().enumerate().skip(1) {
                                 spawn_warp_button(btn_row, &theme, idx);
                             }
+                            spawn_warp_amount_label(btn_row, &theme, &sim.simulation.warp.label());
                         });
                     });
                 });
@@ -316,6 +322,20 @@ fn spawn_warp_button(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, in
         });
 }
 
+fn spawn_warp_amount_label(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, label: &str) {
+    parent.spawn((
+        Text::new(label.to_string()),
+        TextFont {
+            font: theme.font.clone(),
+            font_size: 12.0,
+            ..default()
+        },
+        TextColor(theme.text_accent),
+        WarpAmountLabel,
+        Name::new("WarpAmountLabel"),
+    ));
+}
+
 fn subtitle(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
     (
         Text::new(content),
@@ -368,7 +388,10 @@ pub fn handle_warp_level_click(
 pub fn update(
     sim: Res<SimulationState>,
     mode: Res<TimeDisplayMode>,
-    mut mode_label: Query<&mut Text, With<TimeModeButtonLabel>>,
+    mut labels: ParamSet<(
+        Query<&mut Text, With<TimeModeButtonLabel>>,
+        Query<&mut Text, With<WarpAmountLabel>>,
+    )>,
     mut spans: ParamSet<(
         Query<&mut TextSpan, With<TimeYearsSpan>>,
         Query<&mut TextSpan, With<TimeDaysSpan>>,
@@ -394,10 +417,17 @@ pub fn update(
     }
 
     let label = mode.pill_label();
-    if let Ok(mut t) = mode_label.single_mut()
+    if let Ok(mut t) = labels.p0().single_mut()
         && t.0 != label
     {
         t.0 = label.to_string();
+    }
+
+    let label = sim.simulation.warp.label();
+    if let Ok(mut t) = labels.p1().single_mut()
+        && t.0 != label
+    {
+        t.0 = label;
     }
 }
 
@@ -444,6 +474,7 @@ pub fn update_button_visuals(
 ) {
     let paused = sim.simulation.warp.speed() == 0.0;
     let active_index = sim.simulation.warp.level_index();
+    let latched_index = sim.simulation.warp.latched_level_index();
 
     for (interaction, mut border, mut bg) in &mut buttons.p0() {
         let (border_color, bg_color) = button_colors(&theme, paused, interaction);
@@ -463,9 +494,12 @@ pub fn update_button_visuals(
 
     for (button, interaction, mut border, mut bg, children) in &mut buttons.p2() {
         let active = button.index == active_index;
-        let (border_color, bg_color) = button_colors(&theme, active, interaction);
+        let latched = latched_index == Some(button.index);
+        let (border_color, bg_color) = warp_button_colors(&theme, active, latched, interaction);
         apply_button_colors(&mut border, &mut bg, border_color, bg_color);
-        let glyph_color = if active {
+        let glyph_color = if latched {
+            theme.text_primary
+        } else if active {
             theme.text_accent
         } else {
             theme.text_dim
@@ -476,6 +510,19 @@ pub fn update_button_visuals(
         {
             tc.0 = glyph_color;
         }
+    }
+}
+
+fn warp_button_colors(
+    theme: &HudTheme,
+    active: bool,
+    latched: bool,
+    interaction: &Interaction,
+) -> (Color, Color) {
+    if latched {
+        (theme.text_primary, theme.panel_bg)
+    } else {
+        button_colors(theme, active, interaction)
     }
 }
 

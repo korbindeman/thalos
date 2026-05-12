@@ -1,29 +1,101 @@
-//! Bottom-left HUD panel (next to the navball): throttle + orbital
-//! velocity relative to the current SOI body.
+//! Bottom-left HUD panel cluster: orbital velocity above the navball and
+//! a vector throttle arc along the navball's left side.
 
 use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
 use thalos_physics::canonical::Epoch;
 
 use crate::fuel::ThrottleState;
 use crate::hud::HudPanel;
 use crate::hud::format;
-use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node, text};
+use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
+use crate::navball::ui::{
+    FRAME_SIZE_PX, NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX, NavballFrameRoot,
+};
 use crate::rendering::SimulationState;
 
 /// The navball cluster sits at the bottom-left (navball at x=40,
 /// nav panel just to its right). The flight readouts sit ABOVE the
 /// navball with a small gap.
-const NAVBALL_LEFT_PX: f32 = 40.0;
-const NAVBALL_BOTTOM_PX: f32 = 40.0;
-const NAVBALL_SIZE_PX: f32 = 256.0;
+const THROTTLE_FRAME_RADIUS: f32 = FRAME_SIZE_PX * 0.5;
+const THROTTLE_INNER_RADIUS: f32 = THROTTLE_FRAME_RADIUS - 14.0;
+const THROTTLE_OUTER_RADIUS: f32 = THROTTLE_FRAME_RADIUS + 16.0;
+const THROTTLE_NODE_PADDING: f32 = THROTTLE_OUTER_RADIUS - THROTTLE_FRAME_RADIUS + 4.0;
+const THROTTLE_NODE_SIZE: f32 = FRAME_SIZE_PX + THROTTLE_NODE_PADDING * 2.0;
+const THROTTLE_CENTER_X: f32 = THROTTLE_NODE_SIZE * 0.5;
+const THROTTLE_CENTER_Y: f32 = THROTTLE_NODE_SIZE * 0.5;
+const THROTTLE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
+const THROTTLE_BORDER_WIDTH: f32 = 1.6;
 
 #[derive(Component)]
 pub(super) struct VelocityText;
 
 #[derive(Component)]
-pub(super) struct ThrottleText;
+pub(super) struct ThrottleBar {
+    commanded: f32,
+    effective: f32,
+}
 
-pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub(super) struct ThrottleArcMaterial {
+    /// xy = polar centre in node pixels; zw = inner/outer radii.
+    #[uniform(0)]
+    geometry: Vec4,
+    /// x = commanded; y = effective; z = half-angle; w = border width.
+    #[uniform(1)]
+    levels: Vec4,
+    #[uniform(2)]
+    track_color: Vec4,
+    #[uniform(3)]
+    fill_color: Vec4,
+    #[uniform(4)]
+    warn_color: Vec4,
+    #[uniform(5)]
+    tick_color: Vec4,
+    #[uniform(6)]
+    tick_major_color: Vec4,
+    #[uniform(7)]
+    border_color: Vec4,
+}
+
+impl ThrottleArcMaterial {
+    fn new(commanded: f32, effective: f32, theme: &HudTheme) -> Self {
+        Self {
+            geometry: Vec4::new(
+                THROTTLE_CENTER_X,
+                THROTTLE_CENTER_Y,
+                THROTTLE_INNER_RADIUS,
+                THROTTLE_OUTER_RADIUS,
+            ),
+            levels: Vec4::new(
+                commanded,
+                effective,
+                THROTTLE_HALF_ANGLE,
+                THROTTLE_BORDER_WIDTH,
+            ),
+            track_color: Color::srgba(0.02, 0.04, 0.08, 0.80).to_linear().to_vec4(),
+            fill_color: Color::srgba(0.16, 0.90, 0.34, 0.95).to_linear().to_vec4(),
+            warn_color: theme.text_warn.to_linear().to_vec4(),
+            tick_color: with_alpha(theme.text_subtitle, 0.62),
+            tick_major_color: with_alpha(theme.text_subtitle, 0.88),
+            border_color: with_alpha(theme.panel_border, 0.95),
+        }
+    }
+}
+
+impl UiMaterial for ThrottleArcMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/throttle_arc.wgsl".into()
+    }
+}
+
+pub fn setup(
+    mut commands: Commands,
+    mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
+    theme: Res<HudTheme>,
+    navball_frame_q: Query<Entity, With<NavballFrameRoot>>,
+) {
     let mut root = panel_node();
     // Sit immediately above the navball, aligned with its left edge.
     root.left = Val::Px(NAVBALL_LEFT_PX);
@@ -36,21 +108,42 @@ pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {
         .with_children(|p| {
             p.spawn(label(&theme, "ORBITAL VELOCITY"));
             p.spawn((emphasis(&theme, "—"), VelocityText));
-            p.spawn(Node {
-                height: Val::Px(4.0),
-                ..default()
-            });
-            p.spawn(label(&theme, "THROTTLE"));
-            p.spawn((text(&theme, "0%"), ThrottleText));
         });
+
+    let throttle_material = throttle_materials.add(ThrottleArcMaterial::new(0.0, 0.0, &theme));
+    let Ok(navball_frame) = navball_frame_q.single() else {
+        warn!("navball frame missing; throttle arc not spawned");
+        return;
+    };
+
+    commands.entity(navball_frame).with_children(|p| {
+        p.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(-THROTTLE_NODE_PADDING),
+                top: Val::Px(-THROTTLE_NODE_PADDING),
+                width: Val::Px(THROTTLE_NODE_SIZE),
+                height: Val::Px(THROTTLE_NODE_SIZE),
+                ..default()
+            },
+            MaterialNode(throttle_material),
+            ThrottleBar {
+                commanded: 0.0,
+                effective: 0.0,
+            },
+            HudPanel,
+            ZIndex(2),
+            Name::new("HudThrottleBar"),
+        ));
+    });
 }
 
 pub fn update(
     sim: Res<SimulationState>,
     throttle: Res<ThrottleState>,
-    theme: Res<HudTheme>,
-    mut vel_q: Query<&mut Text, (With<VelocityText>, Without<ThrottleText>)>,
-    mut thr_q: Query<(&mut Text, &mut TextColor), (With<ThrottleText>, Without<VelocityText>)>,
+    mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
+    mut vel_q: Query<&mut Text, With<VelocityText>>,
+    mut throttle_q: Query<(&mut ThrottleBar, &MaterialNode<ThrottleArcMaterial>)>,
 ) {
     let ship = sim.simulation.ship_state();
     let body = sim.simulation.dominant_body();
@@ -67,21 +160,28 @@ pub fn update(
         }
     }
 
-    if let Ok((mut t, mut color)) = thr_q.single_mut() {
-        let s = format!("{:>3.0}%", throttle.commanded * 100.0);
-        if t.0 != s {
-            t.0 = s;
-        }
-        // Engine starvation: commanded > 0 but effective thrust capped
-        // below — recolor the readout so the player sees it.
-        let starved = throttle.commanded > 0.0 && throttle.effective + 1e-3 < throttle.commanded;
-        let want = if starved {
-            theme.text_warn
-        } else {
-            theme.text_primary
-        };
-        if color.0 != want {
-            color.0 = want;
+    if let Ok((mut bar, material_node)) = throttle_q.single_mut() {
+        let commanded = throttle.commanded.clamp(0.0, 1.0) as f32;
+        let effective = throttle.effective.clamp(0.0, 1.0) as f32;
+        if (bar.commanded - commanded).abs() > 0.002 || (bar.effective - effective).abs() > 0.002 {
+            if let Some(material) = throttle_materials.get_mut(material_node) {
+                material.levels.x = commanded;
+                material.levels.y = effective;
+            }
+            bar.commanded = commanded;
+            bar.effective = effective;
         }
     }
+}
+
+fn with_alpha(color: Color, alpha_scale: f32) -> Vec4 {
+    let srgba = color.to_srgba();
+    Color::srgba(
+        srgba.red,
+        srgba.green,
+        srgba.blue,
+        srgba.alpha * alpha_scale,
+    )
+    .to_linear()
+    .to_vec4()
 }

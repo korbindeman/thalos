@@ -66,7 +66,7 @@ use crate::surface_field::{
     BiomeMix, SurfaceField, SurfaceFieldSample, SurfaceMaterialMix, cube_face_texel_scale_m, mix3,
     quantize_unit_to_u8, smoothstep,
 };
-use crate::tectonics::{BoundaryKind, PlateKind, TectonicSystem};
+use crate::tectonics::{BoundaryKind, PlateKind, TectonicActivity, TectonicSystem};
 
 // Material IDs published in the AgingOceanicHomeworld palette. The
 // dominant id only feeds CPU samplers; the impostor reads the baked
@@ -147,6 +147,15 @@ const TRENCH_DEPTH_M: f32 = 1_250.0;
 const RIDGE_BUMP_M: f32 = 650.0;
 const RIFT_DEPTH_M: f32 = 350.0;
 const TRANSFORM_JITTER_M: f32 = 90.0;
+
+/// Stagnant-lid boundaries are historical scaffolding, not live plate
+/// margins. They may guide editor/debug overlays and future broad process
+/// fields, but this archetype does not let the raw graph edge write visible
+/// relief into the final height/albedo cubemaps.
+const STAGNANT_SCAR_AMPLITUDE_SCALE: f32 = 0.0;
+const STAGNANT_SCAR_WIDTH_SCALE: f32 = 2.6;
+const FROZEN_SCAR_AMPLITUDE_SCALE: f32 = 0.0;
+const FROZEN_SCAR_WIDTH_SCALE: f32 = 3.2;
 
 // ---------------------------------------------------------------------------
 // Coastline shaping
@@ -720,8 +729,30 @@ impl AgingOceanicField {
     /// boundaries are different kinds gets a continuous interpolation —
     /// no cell-edge switching of regime.
     fn boundary_contribution(&self, smooth: &SmoothCell, dir: Vec3) -> f32 {
+        let (amplitude_scale, width_scale, scar_floor, visibility_lo, visibility_hi) =
+            match self.tectonics.config.activity {
+                TectonicActivity::Active => (1.0, 1.0, 0.22, 0.30, 0.82),
+                TectonicActivity::StagnantLid => (
+                    STAGNANT_SCAR_AMPLITUDE_SCALE,
+                    STAGNANT_SCAR_WIDTH_SCALE,
+                    0.0,
+                    0.52,
+                    0.90,
+                ),
+                TectonicActivity::Frozen { .. } => (
+                    FROZEN_SCAR_AMPLITUDE_SCALE,
+                    FROZEN_SCAR_WIDTH_SCALE,
+                    0.0,
+                    0.58,
+                    0.94,
+                ),
+            };
+        if amplitude_scale <= 0.0 {
+            return 0.0;
+        }
+
         let d = smooth.boundary_distance_m;
-        let falloff = (-(d / BOUNDARY_HALF_WIDTH_M).powi(2)).exp();
+        let falloff = (-(d / (BOUNDARY_HALF_WIDTH_M * width_scale)).powi(2)).exp();
 
         // `cont` smoothsteps continentalness so the transition between
         // mountain-belt regime and trench regime is gradual, producing
@@ -742,23 +773,22 @@ impl AgingOceanicField {
             + divergent * smooth.divergent_w
             + transform * smooth.transform_w;
         let scar_p = dir * 3.4;
-        let scar_visibility = 0.22
-            + 0.78
-                * smoothstep(
-                    0.30,
-                    0.82,
-                    fbm3(
-                        scar_p.x,
-                        scar_p.y,
-                        scar_p.z,
-                        self.transform_seed ^ 0x57A1_5CA7,
-                        4,
-                        0.55,
-                        2.0,
-                    ) * 0.5
-                        + 0.5,
-                );
-        raw * falloff * scar_visibility
+        let scar_mask = smoothstep(
+            visibility_lo,
+            visibility_hi,
+            fbm3(
+                scar_p.x,
+                scar_p.y,
+                scar_p.z,
+                self.transform_seed ^ 0x57A1_5CA7,
+                4,
+                0.55,
+                2.0,
+            ) * 0.5
+                + 0.5,
+        );
+        let scar_visibility = scar_floor + (1.0 - scar_floor) * scar_mask;
+        raw * falloff * scar_visibility * amplitude_scale
     }
 
     fn coastal_margin_weight(&self, continentalness: f32) -> f32 {

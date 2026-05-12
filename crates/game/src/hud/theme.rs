@@ -61,19 +61,6 @@ pub fn panel_node() -> Node {
     }
 }
 
-/// Single-line text bundle styled for HUD body text.
-pub fn text(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
-    (
-        Text::new(content),
-        TextFont {
-            font: theme.font.clone(),
-            font_size: 14.0,
-            ..default()
-        },
-        TextColor(theme.text_primary),
-    )
-}
-
 /// Dim label-style text (for "ALT", "AP", "PE" headers).
 pub fn label(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
     (

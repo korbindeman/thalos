@@ -15,6 +15,7 @@ bevy_egui = "0.39"
 big_space = { version = "0.12", features = ["i64"] }
 tracing = "0.1"
 ab_glyph = "0.2"
+resvg = { version = "0.45", default-features = false }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

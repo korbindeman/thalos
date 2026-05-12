@@ -35,11 +35,11 @@
         ],
     )),
     // Legacy plate tectonics. Thalos is described as deeply ancient,
-    // geologically declining; StagnantLid mode encodes the historical
-    // motion in the Euler poles (so boundary scars classify as the
-    // mountain belts and rift trenches they once produced) but no live
-    // surface motion. AgingOceanicField above reads this graph to set
-    // ocean/land split and mountain-belt placement.
+    // geologically declining; StagnantLid mode keeps the historical
+    // motion in the Euler poles for editor/debug overlays and broad
+    // structural priors, but the final AgingOceanicHomeworld bake must
+    // bury the raw plate graph so boundary polygons do not survive as
+    // visible terrain linework.
     tectonics: (
         plate_count: 12,
         mesh_cells: 2000,

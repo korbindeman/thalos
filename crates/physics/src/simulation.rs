@@ -107,6 +107,15 @@ impl WarpController {
         self.level_index
     }
 
+    pub fn latched_level_index(&self) -> Option<usize> {
+        if self.level_index == 0 {
+            self.resume_index
+                .or_else(|| self.levels.iter().position(|&w| w == 1.0))
+        } else {
+            None
+        }
+    }
+
     pub fn label(&self) -> String {
         let speed = self.speed();
         if speed == 0.0 {

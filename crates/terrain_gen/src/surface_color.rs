@@ -277,16 +277,7 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
             let slope_signal = smoothstep(0.010, 0.095, slope_m_per_m);
             let ridge_signal = smoothstep(18.0, 220.0, center_h - neighbor_mean);
             let hollow_signal = smoothstep(18.0, 260.0, neighbor_mean - center_h);
-            let broad_seed = splitmix64(
-                spec.seed
-                    ^ 0x51F0_0DCA_10B1_EA55
-                    ^ (dominant_biome(
-                        biome_weights.get(face, x as u32, y as u32),
-                        material_ids.get(face, x as u32, y as u32),
-                        spec,
-                    ) as u64)
-                        .wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            ) as u32;
+            let broad_seed = splitmix64(spec.seed ^ 0x51F0_0DCA_10B1_EA55) as u32;
             let mottle_seed = splitmix64(spec.seed ^ 0xA1BE_D011_77A1_0B55) as u32 ^ broad_seed;
             let broad_noise = fbm3(
                 dir.x * spec.broad_frequency,
@@ -399,14 +390,6 @@ fn evaluate_mix(
         spec.palettes[0].evaluate(context, 0.0)
     } else {
         [color[0] / total, color[1] / total, color[2] / total]
-    }
-}
-
-fn dominant_biome(mix_texel: BiomeMixTexel, material_id: u8, spec: &SurfaceColorSpec) -> u8 {
-    if mix_texel.is_empty() && spec.use_material_id_when_biome_empty {
-        material_id
-    } else {
-        mix_texel.biome_ids[0]
     }
 }
 

@@ -28,6 +28,18 @@ just clear-terrain-cache  # wipe target/terrain_cache/ after stage code changes
 cargo test -p thalos_physics -- test_name
 ```
 
+## Toolchain
+
+`rust-toolchain.toml` pins nightly only. There is no checked-in Cargo backend
+override, so Cargo uses its default LLVM backend on every platform. Do not add
+`rustc-codegen-cranelift-preview` or `codegen-backend = "cranelift"` to
+project config unless the project intentionally re-adopts Cranelift for all
+platforms.
+
+macOS developers who want Cranelift for local iteration can install and
+select it in their personal Cargo config or via one-off `cargo --config`
+flags. Keep that opt-in local so Windows and Linux continue to use LLVM.
+
 ## Planet generation iteration
 
 Planet generation is in an iterative development phase. Do not add or run
@@ -366,6 +378,7 @@ status, dependency graph. Each major system has a unified spec doc.
   ocean rendering, IBL/reflection probe.
 - `celestial.md` — celestial sphere design: source model, spectrum,
   generation, rendering pipeline.
+- `tooling.md` — Rust toolchain policy and local developer tooling notes.
 - `lore/solar_system.md` — per-body reference with scale philosophy
   (hybrid 1:1/1:2/1:3 scale rationale) and formation scenario.
 - `lore/civilization.md` — civilization, narrative progression

@@ -663,9 +663,11 @@ requires:
 
 - **`AgingOceanicHomeworld`** for Thalos. Deeply ancient, oceanic,
   iron-rich, geologically declining. Relevant prior outputs:
-  hemispheric land/water asymmetry, continuous mountain belts along
-  legacy plate boundaries, dust mantles in dry interiors,
-  ice-stability bands.
+  hemispheric land/water asymmetry, buried legacy tectonic structure,
+  dust mantles in dry interiors, ice-stability bands. Stagnant-lid
+  plate boundaries are control scaffolding only: they can influence
+  broad priors or debug overlays, but raw plate polygons must not be
+  readable in final height, albedo, roughness, or normal cubemaps.
 - **`GenericTerrestrial`** for Pelagos and other thick-atmosphere
   oceanic moons. Volcanic island arcs from tidal heating,
   hydrothermal circulation, photosynthetic shelf ecosystems. Read

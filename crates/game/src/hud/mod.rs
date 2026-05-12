@@ -4,10 +4,10 @@
 //!
 //! - **Top-left**: warp speed + mission time
 //! - **Top-middle**: altitude + apoapsis / periapsis
-//! - **Bottom-left (next to navball)**: throttle + orbital velocity
+//! - **Bottom-left (navball cluster)**: navball + throttle arc
+//! - **Bottom-left (above navball)**: orbital velocity
 //! - **Bottom-right**: Δv estimate + fuel
-//! - **Bottom-left (navball cluster)**: the navball + (next commit) the
-//!   circular navigation panel
+//! - **Bottom-left (beside navball)**: circular navigation panel
 //!
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
@@ -15,6 +15,7 @@
 mod delta_v_panel;
 mod flight_panel;
 mod format;
+mod fps_overlay;
 pub mod input_gate;
 mod nav_attitude;
 mod nav_panel;
@@ -59,7 +60,8 @@ fn setup_top_left_row(mut commands: Commands) {
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UiPointerGate>()
+        app.add_plugins(UiMaterialPlugin::<flight_panel::ThrottleArcMaterial>::default())
+            .init_resource::<UiPointerGate>()
             .init_resource::<TimeDisplayMode>()
             .add_systems(Startup, theme::init_theme)
             .add_systems(Startup, setup_top_left_row.after(theme::init_theme))
@@ -70,7 +72,8 @@ impl Plugin for HudPlugin {
                     (warp_time_panel::setup, view_mode_panel::setup).chain(),
                     orbital_panel::setup,
                     delta_v_panel::setup,
-                    flight_panel::setup,
+                    flight_panel::setup.after(crate::navball::ui::setup_navball_ui),
+                    fps_overlay::setup,
                 )
                     .after(theme::init_theme)
                     .after(setup_top_left_row),
@@ -95,6 +98,7 @@ impl Plugin for HudPlugin {
                     orbital_panel::update,
                     delta_v_panel::update,
                     flight_panel::update,
+                    fps_overlay::update,
                     nav_panel::handle_clicks,
                     nav_panel::update_button_visuals,
                     nav_attitude::update_attitude,

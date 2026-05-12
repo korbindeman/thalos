@@ -30,7 +30,9 @@ impl Plugin for NavballPlugin {
             .add_systems(Startup, render::setup_navball_render)
             .add_systems(
                 Startup,
-                ui::setup_navball_ui.after(render::setup_navball_render),
+                ui::setup_navball_ui
+                    .after(render::setup_navball_render)
+                    .after(crate::hud::theme::init_theme),
             )
             .add_systems(
                 Startup,
