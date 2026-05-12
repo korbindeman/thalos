@@ -64,6 +64,7 @@ impl Plugin for HudPlugin {
             .init_resource::<UiPointerGate>()
             .init_resource::<TimeDisplayMode>()
             .add_systems(Startup, theme::init_theme)
+            .add_systems(bevy_egui::EguiPrimaryContextPass, theme::apply_egui_theme)
             .add_systems(Startup, setup_top_left_row.after(theme::init_theme))
             .add_systems(
                 Startup,

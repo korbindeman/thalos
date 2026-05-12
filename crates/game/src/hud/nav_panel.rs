@@ -328,7 +328,7 @@ fn utility_button_bundle(
             align_items: AlignItems::Center,
             ..default()
         },
-        BackgroundColor(Color::srgba(0.03, 0.045, 0.075, 0.82)),
+        BackgroundColor(theme.panel_bg_alt),
         BorderColor::all(theme.panel_border),
         NavModeButton { mode },
         Interaction::None,
@@ -520,8 +520,8 @@ fn nav_button_colors(
 ) -> (Color, Color) {
     if !available {
         (
-            Color::srgba(0.16, 0.18, 0.22, 0.70),
-            Color::srgba(0.025, 0.032, 0.05, 0.72),
+            Color::srgba(0.15, 0.14, 0.12, 0.70),
+            Color::srgba(0.045, 0.042, 0.036, 0.72),
         )
     } else if locked {
         (theme.text_dim, theme.panel_bg)
@@ -551,7 +551,7 @@ fn apply_button_colors(
 }
 
 fn disabled_text_color() -> Color {
-    Color::srgba(0.34, 0.38, 0.45, 1.0)
+    Color::srgba(0.39, 0.37, 0.32, 1.0)
 }
 
 fn marker_kind_for(mode: NavigationMode) -> MarkerKind {

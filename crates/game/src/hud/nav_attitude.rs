@@ -70,12 +70,12 @@ pub fn setup(
     });
 
     let body_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.88, 0.90, 0.94),
+        base_color: Color::srgb(0.88, 0.86, 0.80),
         unlit: true,
         ..default()
     });
     let accent_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.55, 0.60, 0.68),
+        base_color: Color::srgb(0.58, 0.54, 0.47),
         unlit: true,
         ..default()
     });

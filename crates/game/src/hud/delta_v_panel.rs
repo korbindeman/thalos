@@ -103,7 +103,7 @@ fn spawn_resource_row(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, r
                     border_radius: BorderRadius::all(Val::Px(2.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.07, 0.10, 0.14, 0.85)),
+                BackgroundColor(theme.panel_bg_alt),
                 BorderColor::all(theme.panel_border),
             ))
             .with_children(|bar| {
