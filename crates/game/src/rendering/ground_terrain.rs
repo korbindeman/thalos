@@ -131,7 +131,7 @@ pub(super) fn spawn_body_terrain(
         format: AttachmentFormat::Rgba8,
     });
 
-    let provider = PipelineTileProvider::new(body.name.clone(), surface, radius_m, height_range);
+    let provider = PipelineTileProvider::new(body.name.clone(), surface);
     let tile_atlas = TileAtlas::with_provider(&config, Box::new(provider));
     let view_config = TerrainViewConfig::default();
     let tile_tree = TileTree::new(&tile_atlas, &view_config);
