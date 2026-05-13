@@ -128,4 +128,12 @@ pub(super) fn spawn_body_terrain(
         .id();
 
     tile_trees.insert((terrain_entity, ship_camera), tile_tree);
+
+    info!(
+        "spawned ground terrain for '{}' (radius {:.0} km, height range ±{:.0} m, atlas size {})",
+        body.name,
+        radius_m / 1000.0,
+        height_range,
+        ATLAS_SIZE,
+    );
 }

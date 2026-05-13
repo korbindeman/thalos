@@ -233,11 +233,16 @@ pub(super) fn finalize_planet_generation(
         // M3 stage 2/3: spawn the ground-LOD terrain entity alongside the
         // impostor. The same `PlanetSurface` backs both via `Arc`. Runs after
         // the `EntityCommands` block above so its `&mut commands` borrow
-        // doesn't conflict with the `spawn_body_terrain` call. If the ship
-        // camera doesn't exist yet (e.g., extreme startup races), skip the
-        // terrain spawn — `PendingPlanetGeneration` is removed above so we
-        // won't retry; this is acceptable because the ship camera is spawned
-        // at startup and the terrain task runs strictly after.
+        // doesn't conflict with the `spawn_body_terrain` call.
+        //
+        // `ShipCamera` is spawned once at startup (`camera::spawn_camera`)
+        // and never despawned — view-switching toggles `Camera::is_active`
+        // rather than spawning/despawning camera entities. The fallback
+        // branch below should therefore never fire in practice; we log a
+        // warning instead of panicking so that any future regression that
+        // breaks this invariant doesn't permanently lose terrain
+        // (`PendingPlanetGeneration` is removed above so the body won't
+        // retry, but the regression is loud).
         match ship_camera_q.single() {
             Ok(ship_camera) => {
                 spawn_body_terrain(
