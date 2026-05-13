@@ -23,6 +23,7 @@ mod types;
 
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
 use generation::{finalize_planet_generation, patch_reference_cloud_covers};
+use ground_terrain::sync_terrain_impostor_swap;
 use lighting::{
     sync_film_grain_to_exposure, update_camera_exposure, update_planet_light_dirs,
     update_solid_planet_params, update_sun_light,
@@ -130,6 +131,14 @@ impl Plugin for RenderingPlugin {
                         .after(finalize_planet_generation),
                     update_planet_orientations
                         .after(cache_body_states)
+                        .after(finalize_planet_generation),
+                    // Ground-LOD ↔ impostor LOD swap. Must run after both
+                    // `update_real_space_body_positions` (to read up-to-date
+                    // body world positions) and `finalize_planet_generation`
+                    // (so new terrains/impostors are present), and ideally
+                    // before the render extract picks up `Visibility`.
+                    sync_terrain_impostor_swap
+                        .after(update_real_space_body_positions)
                         .after(finalize_planet_generation),
                     update_gas_giant_params
                         .after(cache_body_states)

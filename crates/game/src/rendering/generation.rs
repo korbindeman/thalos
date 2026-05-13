@@ -17,7 +17,7 @@ use thalos_planet_rendering::{
 use thalos_terrain::BodyTerrainMaterial;
 use thalos_terrain_gen::DynamicSurfaceState;
 
-use super::ground_terrain::spawn_body_terrain;
+use super::ground_terrain::{spawn_body_terrain, RealSpaceImpostor};
 use super::types::{
     BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetDynamicSurface, PlanetMaterials,
     PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh, SimulationState,
@@ -176,6 +176,12 @@ pub(super) fn finalize_planet_generation(
                 Mesh3d(shared.billboard.clone()),
                 MeshMaterial3d(ship_handle.clone()),
                 NoFrustumCulling,
+                // Pair this impostor with the ground-LOD terrain via
+                // `BodyTerrain`/`RealSpaceImpostor` so the LOD-swap system
+                // can hide one half at a time based on camera distance.
+                RealSpaceImpostor {
+                    body_id: pending.body_id,
+                },
             ))
             .remove::<MeshMaterial3d<StandardMaterial>>();
 

@@ -1059,9 +1059,19 @@ into Thalos and wiring it to the revamped feature compiler.
   cells) and inherits orbital + rotational motion automatically.
   Tile-tree association is per-`(terrain, ship_camera)`; map view and
   photo mode views do not load body tiles.
+- **Impostor ↔ terrain handoff.** Each procedural body has *one* visible
+  representation at a time on the ship layer. A
+  `sync_terrain_impostor_swap` system flips visibility hard at a
+  distance threshold of `4 × body_radius` from the body centre: closer
+  than that, the UDLOD terrain is visible and the ship-layer impostor
+  is hidden; farther, the reverse. The map-layer impostor renders at
+  every distance and is unaffected.
+  Smooth opacity crossfade requires `PlanetMaterial`/`BodyTerrainMaterial`
+  opacity uniforms + matching shader work and lands alongside terrain
+  PBR + atmospheric optics in M4.
 - **Exit criterion (met):** every procedural body renders ground LOD
-  alongside its impostor; atmospheric optics + cascaded shadowing land
-  in M4.
+  alongside its impostor (one visible at a time per camera distance);
+  atmospheric optics + cascaded shadowing land in M4.
 
 Other Pyros bodies (Auron's moon system, Ceryx, outer-system worlds)
 follow incrementally — same pipeline, no separate stage.
