@@ -18,7 +18,7 @@ use crate::seeding::sub_seed;
 use crate::stage::Stage;
 use crate::stages::{
     BasinDef, BiomeRule, Biomes, Cratering, Differentiate, Erosion, MareFlood as MareFloodStage,
-    Megabasin, Regolith, Scarps,
+    Megabasin, ProcellarumConfig, Regolith, Scarps,
 };
 use crate::static_surface::{PlanetSurface, StaticSurfaceData};
 use crate::surface_color::{SurfaceColorSpec, paint_surface_albedo};
@@ -1064,6 +1064,8 @@ pub struct AirlessImpactProjectionConfig {
     pub mare_episode_count: u32,
     #[serde(default = "default_airless_mare_wrinkle_ridges")]
     pub mare_wrinkle_ridges: bool,
+    #[serde(default)]
+    pub procellarum: Option<ProcellarumConfig>,
     #[serde(default = "default_airless_regolith_amplitude_m")]
     pub regolith_amplitude_m: f32,
     #[serde(default = "default_airless_regolith_characteristic_wavelength_m")]
@@ -1138,6 +1140,7 @@ impl Default for AirlessImpactProjectionConfig {
             mare_boundary_noise_freq: default_airless_mare_boundary_noise_freq(),
             mare_episode_count: default_airless_mare_episode_count(),
             mare_wrinkle_ridges: default_airless_mare_wrinkle_ridges(),
+            procellarum: None,
             regolith_amplitude_m: default_airless_regolith_amplitude_m(),
             regolith_characteristic_wavelength_m:
                 default_airless_regolith_characteristic_wavelength_m(),
@@ -1730,7 +1733,7 @@ fn compile_airless_impact_moon(
                 boundary_noise_freq: projection.mare_boundary_noise_freq,
                 episode_count: projection.mare_episode_count,
                 wrinkle_ridges: projection.mare_wrinkle_ridges,
-                procellarum: None,
+                procellarum: projection.procellarum.clone(),
             },
         );
     }

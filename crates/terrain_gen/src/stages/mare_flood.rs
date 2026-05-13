@@ -1,15 +1,16 @@
 use glam::Vec3;
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use super::MAT_MARE;
 use super::noise_fbm::{GradientWarp, SsFbm, bulk_sample};
 use super::util::{face_may_intersect_cap, face_position_arrays, for_face_texels_in_cap};
+use super::{MAT_HIGHLAND, MAT_MARE};
 use crate::body_builder::BodyBuilder;
 use crate::crater_profile::degradation_factor;
-use crate::cubemap::CubemapFace;
+use crate::cubemap::{Cubemap, CubemapFace};
 use crate::seeding::{Rng, sub_seed};
 use crate::stage::Stage;
+use crate::types::Crater;
 
 /// A candidate region for mare flooding.
 #[derive(Clone, Debug)]
@@ -18,6 +19,16 @@ struct FloodTarget {
     search_radius_m: f32,
     fill_level: f32,
 }
+
+const FLOOD_HEIGHT_FEATHER_M: f32 = 420.0;
+const PROCELLARUM_HEIGHT_FEATHER_M: f32 = 620.0;
+const PROCELLARUM_MASK_FEATHER: f32 = 0.24;
+const PROCELLARUM_NEAR_EDGE_FRACTION: f32 = 0.22;
+const MARE_DOMINANT_THRESHOLD: f32 = 0.48;
+const MARE_RELEASE_THRESHOLD: f32 = 0.18;
+const MARE_CRATER_MIN_RADIUS_M: f32 = 4_000.0;
+const MARE_CRATER_OLD_EDGE_GYR: f32 = 0.45;
+const MARE_CRATER_OLD_FULL_GYR: f32 = 1.8;
 
 /// Floods the deepest basins on the near side with mare basalt.
 ///
@@ -64,7 +75,7 @@ pub struct MareFlood {
 }
 
 /// Parameters for the Procellarum-style near-side flood pass.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcellarumConfig {
     /// Absolute fill level in meters (height below which near-side texels
     /// inside the mask become mare). Use a value between the near-side
@@ -231,11 +242,13 @@ impl Stage for MareFlood {
 
                 let h_faces = builder.height_contributions.height.faces_mut();
                 let m_faces = builder.material_cubemap.faces_mut();
+                let c_faces = builder.mare_coverage_cubemap.faces_mut();
                 h_faces
                     .par_iter_mut()
                     .zip(m_faces.par_iter_mut())
+                    .zip(c_faces.par_iter_mut())
                     .enumerate()
-                    .for_each(|(face_idx, (h_slice, m_slice))| {
+                    .for_each(|(face_idx, ((h_slice, m_slice), c_slice))| {
                         let face = CubemapFace::ALL[face_idx];
                         if !face_may_intersect_cap(face, target_center, search_angle) {
                             return;
@@ -265,10 +278,18 @@ impl Stage for MareFlood {
                                 let current_h = h_slice[idx];
                                 let threshold =
                                     ep_fill + noise_out[idx] * boundary_noise_amplitude_m;
-                                if current_h < threshold {
+                                let coverage =
+                                    flood_coverage(current_h, threshold, FLOOD_HEIGHT_FEATHER_M);
+                                if coverage > 0.001 {
                                     let new_h = ep_fill + relief_out[idx] * 25.0;
-                                    h_slice[idx] = new_h;
-                                    m_slice[idx] = MAT_MARE as u8;
+                                    if new_h > current_h {
+                                        h_slice[idx] = current_h + (new_h - current_h) * coverage;
+                                    }
+                                    let combined = c_slice[idx].max(coverage);
+                                    c_slice[idx] = combined;
+                                    if combined > MARE_DOMINANT_THRESHOLD {
+                                        m_slice[idx] = MAT_MARE as u8;
+                                    }
                                 }
                             },
                         );
@@ -316,11 +337,13 @@ impl Stage for MareFlood {
 
             let h_faces = builder.height_contributions.height.faces_mut();
             let m_faces = builder.material_cubemap.faces_mut();
+            let c_faces = builder.mare_coverage_cubemap.faces_mut();
             h_faces
                 .par_iter_mut()
                 .zip(m_faces.par_iter_mut())
+                .zip(c_faces.par_iter_mut())
                 .enumerate()
-                .for_each(|(face_idx, (h_slice, m_slice))| {
+                .for_each(|(face_idx, ((h_slice, m_slice), c_slice))| {
                     let face = CubemapFace::ALL[face_idx];
                     let n = (res * res) as usize;
                     let (xs, ys, zs) = face_position_arrays(face, res);
@@ -345,28 +368,45 @@ impl Stage for MareFlood {
                             let dir = Vec3::new(xs[idx], ys[idx], zs[idx]);
 
                             let near_dot = dir.dot(near);
-                            if near_dot < cos_window {
+                            if near_dot <= cos_window {
                                 continue;
                             }
 
                             let near_weight =
                                 ((near_dot - cos_window) / (1.0 - cos_window)).clamp(0.0, 1.0);
+                            let near_coverage =
+                                smooth01(near_weight / PROCELLARUM_NEAR_EDGE_FRACTION);
                             let mask_effective = mask_out[idx] + (near_weight - 0.5) * 0.6;
-                            if mask_effective < mask_threshold {
-                                continue;
-                            }
+                            let mask_coverage = smooth01(
+                                (mask_effective - mask_threshold + PROCELLARUM_MASK_FEATHER)
+                                    / (2.0 * PROCELLARUM_MASK_FEATHER),
+                            );
 
                             let threshold = fill_level_m + fuzz_out[idx] * proc_boundary_amp;
                             let current_h = h_slice[idx];
-                            if current_h < threshold {
+                            let coverage =
+                                flood_coverage(current_h, threshold, PROCELLARUM_HEIGHT_FEATHER_M)
+                                    * mask_coverage
+                                    * near_coverage;
+                            if coverage > 0.001 {
                                 let new_h = fill_level_m + relief_out[idx] * 30.0;
-                                h_slice[idx] = new_h;
-                                m_slice[idx] = MAT_MARE as u8;
+                                if new_h > current_h {
+                                    h_slice[idx] = current_h + (new_h - current_h) * coverage;
+                                }
+                                let combined = c_slice[idx].max(coverage);
+                                c_slice[idx] = combined;
+                                if combined > MARE_DOMINANT_THRESHOLD {
+                                    m_slice[idx] = MAT_MARE as u8;
+                                }
                             }
                         }
                     }
                 });
         }
+
+        smooth_mare_coverage(builder);
+        resurface_mare_craters(builder);
+        smooth_mare_coverage(builder);
 
         // Wrinkle ridges: narrow compressional ridges that form as the mare basalt
         // cools and contracts, following roughly concentric arcs around each basin.
@@ -394,7 +434,7 @@ impl Stage for MareFlood {
                     let seg_fbm = SsFbm::new(ridge_seed, 0.5, 3, 2.0);
                     let seg_fbm_ref = &seg_fbm;
 
-                    let material_cubemap = &builder.material_cubemap;
+                    let mare_coverage = &builder.mare_coverage_cubemap;
                     builder
                         .height_contributions
                         .height
@@ -419,7 +459,8 @@ impl Stage for MareFlood {
                                 target_center,
                                 cap_angle,
                                 |x, y, _dir, dist| {
-                                    if material_cubemap.get(face, x, y) != MAT_MARE as u8 {
+                                    let mare = mare_coverage.get(face, x, y);
+                                    if mare <= MARE_DOMINANT_THRESHOLD {
                                         return;
                                     }
                                     let dr_m = (dist * body_radius) - ring_r_m;
@@ -432,7 +473,7 @@ impl Stage for MareFlood {
                                         return;
                                     }
                                     let gauss = (-(dr_m * dr_m) / (2.0 * sigma_m * sigma_m)).exp();
-                                    let add = ridge_h * gauss * seg_factor;
+                                    let add = ridge_h * gauss * seg_factor * mare;
                                     if add > 0.5 {
                                         h_slice[idx] += add;
                                     }
@@ -445,20 +486,23 @@ impl Stage for MareFlood {
 
         // Cull buried craters and retag ghost craters.
         //
-        // Any crater whose center texel is MAT_MARE has been covered by lava.
-        // If its rim relief — after age-based diffusion, the same degradation
-        // factor the Cratering stage applied when stamping height — is too
-        // small to rise above the fill, it's geologically erased. Drop it from
-        // the SSBO. Otherwise its rim still pokes above the basalt as a ghost
-        // crater; retag its material_id so the renderer knows its interior is
-        // mare.
-        const GHOST_RIM_THRESHOLD_M: f32 = 10.0;
+        // Craters with meaningful mare provenance have been covered by lava.
+        // If their effective rim relief is too small to rise above the fill,
+        // drop them from the SSBO. Otherwise keep them as subdued ghost
+        // craters and retag the analytic material toward mare basalt.
+        const GHOST_RIM_THRESHOLD_M: f32 = 45.0;
+        let mare_coverage = builder.mare_coverage_cubemap.clone();
+        let body_radius = builder.radius_m;
         builder.craters.retain_mut(|c| {
             let dir = c.center.normalize();
-            let is_mare = builder.material_cubemap.sample_nearest(dir) == MAT_MARE as u8;
-            if is_mare {
+            let mare = crater_mare_coverage(&mare_coverage, dir, c.radius_m, body_radius);
+            if mare > 0.20 {
                 let effective_rim = c.rim_height_m * degradation_factor(c.radius_m, c.age_gyr);
-                if effective_rim < GHOST_RIM_THRESHOLD_M {
+                let age_burial = smooth01(
+                    (c.age_gyr - MARE_CRATER_OLD_EDGE_GYR)
+                        / (MARE_CRATER_OLD_FULL_GYR - MARE_CRATER_OLD_EDGE_GYR),
+                );
+                if effective_rim * (1.0 - mare * age_burial * 0.55) < GHOST_RIM_THRESHOLD_M {
                     return false;
                 }
                 c.material_id = MAT_MARE;
@@ -466,6 +510,212 @@ impl Stage for MareFlood {
             true
         });
     }
+}
+
+#[inline]
+fn smooth01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn flood_coverage(current_h: f32, threshold: f32, feather_m: f32) -> f32 {
+    let feather_m = feather_m.max(1.0);
+    smooth01((threshold + feather_m - current_h) / (2.0 * feather_m))
+}
+
+fn smooth_mare_coverage(builder: &mut BodyBuilder) {
+    let res = builder.cubemap_resolution;
+    let before = builder.mare_coverage_cubemap.clone();
+
+    for face in CubemapFace::ALL {
+        let out = builder.mare_coverage_cubemap.face_data_mut(face);
+        for y in 0..res {
+            for x in 0..res {
+                let center = before.get(face, x, y);
+                let mut weighted = 0.0_f32;
+                let mut total = 0.0_f32;
+                for oy in -2..=2 {
+                    for ox in -2..=2 {
+                        let nx = (x as i32 + ox).clamp(0, res as i32 - 1) as u32;
+                        let ny = (y as i32 + oy).clamp(0, res as i32 - 1) as u32;
+                        let d2 = (ox * ox + oy * oy) as f32;
+                        let w = (-d2 / 5.5).exp();
+                        weighted += before.get(face, nx, ny) * w;
+                        total += w;
+                    }
+                }
+
+                let idx = (y * res + x) as usize;
+                let avg = weighted / total.max(1.0);
+                let boundary = 1.0 - (center * 2.0 - 1.0).abs();
+                let mix = (boundary * 0.34).clamp(0.0, 0.34);
+                let smoothed = (center + (avg - center) * mix).clamp(0.0, 1.0);
+                let support = broad_mare_support(&before, face, x, y, res);
+                let support_gate = smooth01((support - 0.16) / 0.22);
+                let supported = smoothed.min(support * 1.35);
+                out[idx] = (supported + (smoothed - supported) * support_gate).clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    update_dominant_mare_material(builder);
+}
+
+fn broad_mare_support(coverage: &Cubemap<f32>, face: CubemapFace, x: u32, y: u32, res: u32) -> f32 {
+    let mut sum = 0.0_f32;
+    let mut total = 0.0_f32;
+    for oy in -6..=6 {
+        for ox in -6..=6 {
+            let nx = (x as i32 + ox).clamp(0, res as i32 - 1) as u32;
+            let ny = (y as i32 + oy).clamp(0, res as i32 - 1) as u32;
+            let d2 = (ox * ox + oy * oy) as f32;
+            let w = (-d2 / 38.0).exp();
+            sum += coverage.get(face, nx, ny).clamp(0.0, 1.0) * w;
+            total += w;
+        }
+    }
+    sum / total.max(1.0)
+}
+
+fn update_dominant_mare_material(builder: &mut BodyBuilder) {
+    for face in CubemapFace::ALL {
+        let coverage = builder.mare_coverage_cubemap.face_data(face);
+        let material = builder.material_cubemap.face_data_mut(face);
+        for (mat, &mare) in material.iter_mut().zip(coverage.iter()) {
+            if mare > MARE_DOMINANT_THRESHOLD {
+                *mat = MAT_MARE as u8;
+            } else if *mat == MAT_MARE as u8 && mare < MARE_RELEASE_THRESHOLD {
+                *mat = MAT_HIGHLAND as u8;
+            }
+        }
+    }
+}
+
+fn resurface_mare_craters(builder: &mut BodyBuilder) {
+    let coverage_snapshot = builder.mare_coverage_cubemap.clone();
+    let craters: Vec<(Crater, f32)> = builder
+        .craters
+        .iter()
+        .filter(|c| c.radius_m >= MARE_CRATER_MIN_RADIUS_M)
+        .filter_map(|c| {
+            let coverage = crater_mare_coverage(
+                &coverage_snapshot,
+                c.center.normalize(),
+                c.radius_m,
+                builder.radius_m,
+            );
+            (coverage >= 0.16).then(|| (c.clone(), coverage))
+        })
+        .collect();
+
+    for (crater, crater_mare) in &craters {
+        let center = crater.center.normalize();
+        let old = smooth01(
+            (crater.age_gyr - MARE_CRATER_OLD_EDGE_GYR)
+                / (MARE_CRATER_OLD_FULL_GYR - MARE_CRATER_OLD_EDGE_GYR),
+        );
+        if old <= 0.001 {
+            continue;
+        }
+
+        let fill_h = builder.height_contributions.height.sample_bilinear(center);
+        let cap_angle = (crater.radius_m * 1.18) / builder.radius_m;
+        let effective_rim =
+            crater.rim_height_m * degradation_factor(crater.radius_m, crater.age_gyr);
+        let burial = (old * *crater_mare).clamp(0.0, 1.0);
+        let fill_strength = 0.20 + burial * 0.72;
+        let rim_bury_strength = burial * 0.72;
+        let body_radius = builder.radius_m;
+        let res = builder.cubemap_resolution;
+
+        let h_faces = builder.height_contributions.height.faces_mut();
+        let m_faces = builder.material_cubemap.faces_mut();
+        let c_faces = builder.mare_coverage_cubemap.faces_mut();
+        h_faces
+            .par_iter_mut()
+            .zip(m_faces.par_iter_mut())
+            .zip(c_faces.par_iter_mut())
+            .enumerate()
+            .for_each(|(face_idx, ((h_slice, m_slice), c_slice))| {
+                let face = CubemapFace::ALL[face_idx];
+                if !face_may_intersect_cap(face, center, cap_angle) {
+                    return;
+                }
+
+                for_face_texels_in_cap(face, res, center, cap_angle, |x, y, _dir, angular_dist| {
+                    let idx = (y * res + x) as usize;
+                    let t = (angular_dist * body_radius) / crater.radius_m;
+                    if t > 1.18 {
+                        return;
+                    }
+
+                    let floor_w = (1.0 - smooth01((t - 0.30) / 0.58)).clamp(0.0, 1.0);
+                    if floor_w > 0.001 && h_slice[idx] < fill_h {
+                        h_slice[idx] += (fill_h - h_slice[idx]) * floor_w * fill_strength;
+                    }
+
+                    let rim_w = (1.0 - ((t - 1.0).abs() / 0.24)).clamp(0.0, 1.0);
+                    if rim_w > 0.001 && h_slice[idx] > fill_h {
+                        let lowering = (effective_rim * rim_w * rim_bury_strength)
+                            .min((h_slice[idx] - fill_h) * 0.82);
+                        h_slice[idx] -= lowering;
+                    }
+
+                    let interior_w = (1.0 - smooth01((t - 0.78) / 0.30)).clamp(0.0, 1.0);
+                    let ghost_w = 1.0 - smooth01((t - 1.08) / 0.14);
+                    if ghost_w > 0.001 {
+                        let ghost_coverage =
+                            (*crater_mare * old * ghost_w * (0.45 + interior_w * 0.55))
+                                .clamp(0.0, 1.0);
+                        c_slice[idx] = c_slice[idx].max(ghost_coverage);
+                    }
+
+                    if c_slice[idx] > MARE_DOMINANT_THRESHOLD {
+                        m_slice[idx] = MAT_MARE as u8;
+                    }
+                });
+            });
+    }
+
+    update_dominant_mare_material(builder);
+}
+
+fn crater_mare_coverage(
+    coverage: &Cubemap<f32>,
+    center: Vec3,
+    crater_radius_m: f32,
+    body_radius_m: f32,
+) -> f32 {
+    let mut mare = coverage.sample_bilinear(center).clamp(0.0, 1.0) * 1.5;
+    let mut total = 1.5;
+
+    for &(radius_frac, weight, samples) in &[(0.42, 1.0, 8_u32), (0.78, 0.55, 12_u32)] {
+        let sample_angle = (crater_radius_m * radius_frac) / body_radius_m;
+        for i in 0..samples {
+            let dir = ring_dir(
+                center,
+                sample_angle,
+                i as f32 * std::f32::consts::TAU / samples as f32,
+            );
+            mare += coverage.sample_bilinear(dir).clamp(0.0, 1.0) * weight;
+            total += weight;
+        }
+    }
+
+    (mare / total.max(1.0)).clamp(0.0, 1.0)
+}
+
+fn ring_dir(center: Vec3, angle: f32, azimuth: f32) -> Vec3 {
+    let up = if center.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let right = center.cross(up).normalize();
+    let forward = right.cross(center).normalize();
+    let (sin_phi, cos_phi) = azimuth.sin_cos();
+    let (sin_a, cos_a) = angle.sin_cos();
+    (center * cos_a + (right * cos_phi + forward * sin_phi) * sin_a).normalize()
 }
 
 /// Sample the average height on a ring at `angle` radians from `center`.

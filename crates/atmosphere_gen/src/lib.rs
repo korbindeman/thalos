@@ -564,50 +564,28 @@ pub struct TerrestrialAtmosphere {
     #[serde(default)]
     pub scattering: Option<AtmosphericScattering>,
 
-    /// Cloud cover layer composited above the surface. Mostly-baked
-    /// (cumulus density lives in a cubemap from `thalos_cloud_gen`),
-    /// with shader-side differential rotation. Independent of the
-    /// scattering model — clouds reflect direct sunlight at cloud
-    /// altitude and are darkened by the surface aerial perspective at
-    /// composite time. None disables the layer.
+    /// Cloud cover layer composited above the surface from reference
+    /// cloud-cover overlays, with shader-side differential rotation.
+    /// Independent of the scattering model — clouds reflect direct
+    /// sunlight at cloud altitude and are darkened by the surface aerial
+    /// perspective at composite time. None disables the layer.
     #[serde(default)]
     pub clouds: Option<CloudCover>,
 }
 
-/// Shader-synthesized cloud layer for a terrestrial impostor.
+/// Reference cloud overlay for a terrestrial impostor.
 ///
-/// Clouds are modelled as a fractal-noise density field over the unit
-/// sphere, drifted by differential rotation (faster at the equator,
-/// slower at the poles) and composited on top of the lit surface. The
-/// parameters below are authored per body so different worlds can have
-/// visibly distinct weather characters — Thalos's scattered mid-latitude
-/// systems vs. an Exo-Venus's global overcast vs. a thin-atmosphere
-/// Mars-analog with occasional dust haze.
+/// Clouds are read from a reference density cubemap, drifted by
+/// differential rotation (faster at the equator, slower at the poles),
+/// and composited on top of the lit surface. The procedural cloud
+/// generator has been removed for now; bodies without a registered
+/// reference overlay bind a blank cubemap.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CloudCover {
     /// Total disk coverage fraction in [0, 1]. 0 = clear skies, 1 =
     /// fully overcast. Earth sits around 0.55–0.65; Thalos with a
     /// thinner atmosphere nominally a bit lower.
     pub coverage: f32,
-
-    /// Soft-edge width of the cloud/no-cloud boundary in density units.
-    /// Smaller = crisp cumulus edges, larger = hazy boundaries. Typical
-    /// range 0.04–0.15.
-    #[serde(default = "default_cloud_softness")]
-    pub softness: f32,
-
-    /// Base spatial frequency of the cloud fBm field, in cycles over
-    /// the unit sphere. 3–5 → continent-sized cloud clusters; 8+ →
-    /// fine-grained clutter suitable for tropical convection. Earth-
-    /// analog starting point: 4.
-    #[serde(default = "default_cloud_frequency")]
-    pub frequency: f32,
-
-    /// Number of fBm octaves. 3 is the minimum for recognisable shape;
-    /// 5–6 gives storm-like substructure at the cost of per-fragment
-    /// work.
-    #[serde(default = "default_cloud_octaves")]
-    pub octaves: u32,
 
     /// Linear-space RGB albedo of sunlit clouds. Typically very near
     /// `(1, 1, 1)` — water-vapour clouds are close to spectrally
@@ -629,21 +607,6 @@ pub struct CloudCover {
     /// terrestrial: 0.3–0.5.
     #[serde(default = "default_cloud_differential")]
     pub differential_rotation: f32,
-
-    /// Per-body noise seed. Changes the cloud pattern without touching
-    /// any other parameter.
-    #[serde(default)]
-    pub seed: u64,
-}
-
-fn default_cloud_softness() -> f32 {
-    0.08
-}
-fn default_cloud_frequency() -> f32 {
-    4.0
-}
-fn default_cloud_octaves() -> u32 {
-    5
 }
 fn default_cloud_albedo() -> [f32; 3] {
     [1.0, 1.0, 1.0]

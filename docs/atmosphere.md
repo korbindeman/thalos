@@ -6,7 +6,7 @@ clouds, ocean rendering, and image-based lighting (IBL / reflection
 probe).
 
 What runs today: gas-giant materials, a single-scattering Rayleigh +
-Mie atmosphere on terrestrial impostors, a baked-cubemap cloud layer
+Mie atmosphere on terrestrial impostors, reference cloud-cover overlays
 with shader-side differential rotation, an in-impostor water BRDF,
 and a CPU-painted reflection probe. The terrestrial atmosphere is
 production-ready for orbital views; in-atmosphere flight is the
@@ -18,7 +18,7 @@ remaining frontier.
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
 | Rocky-body sky | **Single-scattering Rayleigh + Mie raymarch** (`atmosphere.wgsl::integrate_atmosphere`). Per-body Rayleigh β + Mie β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 LUTs once in-atmosphere flight justifies the precompute step; multi-scatter approximation. |
-| Cloud rendering | Baked cumulus cubemap from `thalos_cloud_gen` + shader-side differential rotation (16 latitude bands), shadow probe, Beer-Lambert opacity. Gas-giant cloud deck is part of the impostor. | Volumetric layer for orbital cinematic moments; surface-shadow projection from clouds onto terrain LOD. |
+| Cloud rendering | Reference equirectangular cloud overlays projected into cubemaps, with shader-side differential rotation (16 latitude bands), shadow probe, and Beer-Lambert opacity. Bodies without a registered overlay bind a blank cube. Gas-giant cloud deck is part of the impostor. | Revisit procedural terrestrial clouds; volumetric layer for orbital cinematic moments; surface-shadow projection from clouds onto terrain LOD. |
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
@@ -41,8 +41,8 @@ remaining frontier.
 
 - Volumetric in-atmosphere flight effects (god rays through cloud
   layers, mist banks). Worth a stretch goal but not in M4 scope.
-- Realtime weather simulation. Cloud fields are procedural, not
-  evolving.
+- Realtime weather simulation. Cloud fields are static reference
+  overlays with differential rotation only.
 - Sea state animation beyond a tile-able displacement / normal
   texture. No Tessendorf, no spectral wave sim.
 - Real-scene reflection probe capture. Deferred.

@@ -81,13 +81,9 @@
         )),
         clouds: Some((
             coverage: 0.25,
-            softness: 0.15,
-            frequency: 2.8,
-            octaves: 10,
             albedo: (0.74, 0.76, 0.80),
             scroll_rate: 2.0e-5,
             differential_rotation: 0.40,
-            seed: 7142,
         )),
     )),
 )

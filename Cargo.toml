@@ -4,7 +4,6 @@ members = [
     "crates/physics",
     "crates/terrain_gen",
     "crates/atmosphere_gen",
-    "crates/cloud_gen",
     "crates/celestial",
     "crates/input",
     "crates/planet_rendering",

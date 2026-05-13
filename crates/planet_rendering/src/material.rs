@@ -284,13 +284,12 @@ pub struct AtmosphereBlock {
     pub limb_exponents: Vec4,
     /// xyz = sunlit-cloud albedo, w = coverage fraction in [0, 1].
     pub cloud_albedo_coverage: Vec4,
-    /// x = fBm frequency, y = boundary softness, z = octave count (f32),
+    /// xyz = reserved for future cloud shape controls,
     /// w = differential-rotation coefficient.
     pub cloud_shape: Vec4,
     /// x = equatorial scroll rate (rad/s), y = sim time seconds
     /// (wrapped; written per frame by `update_planet_light_dirs`),
-    /// z = seed lo bits (bitcast u32→f32),
-    /// w = seed hi bits.
+    /// zw = reserved for future cloud dynamics controls.
     pub cloud_dynamics: Vec4,
     /// Cloud main-deck band phases 0..=3. 16 total phases packed into
     /// four `Vec4`s carry the per-latitude-strip rotation state for
@@ -405,18 +404,8 @@ impl AtmosphereBlock {
                 clouds.albedo[2],
                 clouds.coverage.clamp(0.0, 1.0),
             );
-            out.cloud_shape = Vec4::new(
-                clouds.frequency.max(0.0),
-                clouds.softness.max(0.0),
-                0.0,
-                clouds.differential_rotation,
-            );
-            out.cloud_dynamics = Vec4::new(
-                clouds.scroll_rate,
-                0.0,
-                f32::from_bits(clouds.seed as u32),
-                f32::from_bits((clouds.seed >> 32) as u32),
-            );
+            out.cloud_shape = Vec4::new(0.0, 0.0, 0.0, clouds.differential_rotation);
+            out.cloud_dynamics = Vec4::new(clouds.scroll_rate, 0.0, 0.0, 0.0);
         }
         out
     }
@@ -474,12 +463,10 @@ impl AtmosphereBlock {
 // scalar, so bodies without a `terrestrial_atmosphere` block (Mira,
 // Ignis, the airless moons) cost only a handful of scalar comparisons.
 //
-// Bindings 13–14 carry the baked cloud-cover cubemap (R8Unorm; each
-// texel's value divided by 255 is the raw Worley-fBm density at the
-// curl-warp-advected direction). Bodies without a cloud layer bind a
-// 1×1 blank cube; the shader gates its cloud path on
-// `AtmosphereBlock::cloud_albedo_coverage.w > 0` so airless bodies pay
-// just one texture fetch + a branch.
+// Bindings 13–14 carry the reference cloud-cover cubemap (R8Unorm).
+// Bodies without a reference overlay bind a 1×1 blank cube; the shader
+// gates its cloud path on `AtmosphereBlock::cloud_albedo_coverage.w > 0`
+// so airless bodies pay just one texture fetch + a branch.
 //
 // Bindings 15-16 carry dynamic surface overlays that are not part of the
 // static terrain bake. Runtime climate/wind systems can update these buffers
@@ -511,8 +498,8 @@ pub struct PlanetMaterial {
     #[uniform(12)]
     pub atmosphere: AtmosphereBlock,
     // Cloud-cover cubemap (R8Unorm). Produced by
-    // `bake_cloud_cover_image`, or a 1×1 black fallback via
-    // `blank_cloud_cover_image` for bodies with no clouds.
+    // reference equirectangular overlays, or a 1×1 black fallback via
+    // `blank_cloud_cover_image` for bodies without a reference overlay.
     #[texture(13, dimension = "cube")]
     #[sampler(14)]
     pub cloud_cover: Handle<Image>,

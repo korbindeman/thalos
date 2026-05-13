@@ -62,7 +62,6 @@
     atmosphere_scattering_active,
     apply_limb_darkening,
     composite_clouds,
-    rotate_cloud_dir_local,
     cloud_band_phase,
     rotate_around_y,
     CLOUD_BAND_COUNT,
@@ -281,10 +280,9 @@ struct DuneSea {
 // no atmosphere (Mira, Ignis, …) every layer's intensity scalar is zero
 // and the atmosphere path is effectively skipped.
 @group(3) @binding(12) var<uniform> atmosphere:      AtmosphereBlock;
-// Baked cloud-cover cubemap (R8Unorm). Produced by `thalos_cloud_gen`
-// via Wedekind curl-noise warp advection. For airless bodies this is a
-// 1×1 blank cube; the cloud path gates on `cloud_albedo_coverage.w > 0`
-// so those bodies pay just the branch cost.
+// Reference cloud-cover cubemap (R8Unorm). For bodies without a reference
+// overlay this is a 1×1 blank cube; the cloud path gates on
+// `cloud_albedo_coverage.w > 0` so those bodies pay just the branch cost.
 @group(3) @binding(13) var          cloud_cover_tex: texture_cube<f32>;
 @group(3) @binding(14) var          cloud_cover_sampler: sampler;
 @group(3) @binding(15) var<storage, read> ice_caps:    array<IceCap>;
@@ -2061,11 +2059,9 @@ fn fragment(in: VertexOutput) -> FragOutput {
 
     // ── Cloud layer ─────────────────────────────────────────────────────
     //
-    // Main cumulus layer is a baked cubemap produced by
-    // `thalos_cloud_gen` (Wedekind curl-warp advection) — density
-    // lives on the sphere, no live fBm evaluation. Drift over sim
-    // time is reintroduced here by rotating the sample direction via
-    // `rotate_cloud_dir_local` (equator-fastest, decision 1.B).
+    // Main cloud layer is a reference density cubemap. Drift over sim
+    // time is reintroduced by the banded sampler below, which rotates
+    // each latitude band independently.
     //
     // Cloud-shell intersection. Clouds live on a shell at a slight
     // altitude above the surface (~0.15 % of body radius ≈ 9 km on a
@@ -2111,7 +2107,6 @@ fn fragment(in: VertexOutput) -> FragOutput {
 
     lit = composite_clouds(
         lit,
-        cloud_sample_dir,
         normal,
         sun_dir_ws,
         sun_flux * hapke_scale,

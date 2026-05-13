@@ -425,11 +425,20 @@ Impostor contract (consumed directly by `planet_impostor.wgsl`):
   hash that walks them. Crater LOD fades sub-pixel features at far
   zoom.
 
+Build-time provenance fields may feed the final albedo/height bake
+without becoming renderer resources. For airless moons, `MareFlood`
+writes `mare_coverage_cubemap`, a continuous 0..1 resurfacing mask:
+shorelines, ghost-crater burial, and highland/mare palette blending
+come from this fractional field. `material_cubemap` keeps only the
+dominant compatibility ID.
+
 Also baked into `StaticSurfaceData` but reserved for non-impostor consumers:
 
-- `material_cubemap` (R8Uint dominant ID): used internally by stages
-  (`PaintBiomes`, `MareFlood`, `SpaceWeather`) and by the CPU
-  `sample_static_surface()` path. Not bound to the impostor's GPU bind group.
+- `material_cubemap` (R8Uint dominant ID): used by the CPU
+  `sample_static_surface()` path and by compatibility consumers that
+  need one material ID per texel. It is not the color authority for
+  fractional processes such as mare flooding, and is not bound to the
+  impostor's GPU bind group.
 - `normal_cubemap` (`Rgba8Unorm` object-space): reserved for ground
   LOD where chunked geometry can't cheaply finite-difference height
   at runtime. 8-bit encoding crushes shallow slope angles, so the
@@ -534,8 +543,9 @@ visible near-side identity.
 Expected root features:
 
 - global crust
-- near-side megabasin A
-- near-side megabasin B
+- primary near-side mare basin
+- secondary near-side megabasin
+- irregular near-side mare province
 - far-side highlands
 - crater population
 - mare flooding
@@ -545,6 +555,13 @@ Expected root features:
 The key authoring loop is seed-local rerolling: keep a good basin,
 reroll its secondary craters, lock its mare fill, or promote a fresh
 ray crater.
+
+Mare flooding is a fractional resurfacing/provenance pass, not a hard
+material classifier: it writes continuous coverage, blends fill height
+by that coverage, and leaves the dominant material ID as a compatibility
+summary. Old craters inside maria should be partly filled, their rims
+subdued, and their albedo overprint suppressed so they read as
+mare-colored ghost craters instead of bright highland rings.
 
 #### Vaelen
 

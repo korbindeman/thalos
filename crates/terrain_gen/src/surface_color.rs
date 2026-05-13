@@ -11,7 +11,7 @@ use crate::body_builder::BodyBuilder;
 use crate::cubemap::{Cubemap, CubemapFace, face_uv_to_dir};
 use crate::noise::fbm3;
 use crate::seeding::splitmix64;
-use crate::stages::{MAT_MARE, util::for_face_texels_in_cap};
+use crate::stages::util::for_face_texels_in_cap;
 use crate::surface_field::{BiomeMixTexel, mix3, smoothstep};
 use crate::types::Crater;
 
@@ -225,6 +225,7 @@ pub struct SurfaceColorContext {
     pub dir: Vec3,
     pub height_m: f32,
     pub relative_height_m: f32,
+    pub mare_coverage: f32,
     pub slope_signal: f32,
     pub ridge_signal: f32,
     pub hollow_signal: f32,
@@ -250,6 +251,7 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
     let height = builder.height_contributions.height.clone();
     let biome_weights = builder.biome_weights_cubemap.clone();
     let material_ids = builder.material_cubemap.clone();
+    let mare_coverage = builder.mare_coverage_cubemap.clone();
     let sample_angle =
         std::f32::consts::FRAC_PI_2 / builder.cubemap_resolution.max(1) as f32 * 1.35;
     let sample_distance_m = radius_m * sample_angle;
@@ -302,10 +304,12 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
                 + (spec.sea_level_m.is_some() as u8 as f32) * 0.04)
                 .clamp(0.0, 1.0);
             let lushness = (0.50 + mottle_noise * 0.30 + broad_noise * 0.12).clamp(0.0, 1.0);
+            let mare = mare_coverage.get(face, x as u32, y as u32).clamp(0.0, 1.0);
             let context = SurfaceColorContext {
                 dir,
                 height_m: center_h,
                 relative_height_m,
+                mare_coverage: mare,
                 slope_signal,
                 ridge_signal,
                 hollow_signal,
@@ -328,14 +332,18 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
         }
     }
 
+    if matches!(spec.overprint, SurfaceColorOverprint::AirlessImpact { .. }) {
+        soften_mare_contacts(builder);
+    }
+
     if let SurfaceColorOverprint::AirlessImpact {
         highland_fresh,
         mare_fresh,
         mare_tint,
         young_crater_age_threshold,
-        ray_age_threshold,
-        ray_extent_radii,
-        ray_half_width,
+        ray_age_threshold: _,
+        ray_extent_radii: _,
+        ray_half_width: _,
     } = spec.overprint
     {
         apply_airless_crater_overprints(
@@ -345,9 +353,6 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
                 mare_fresh,
                 mare_tint,
                 young_crater_age_threshold,
-                ray_age_threshold,
-                ray_extent_radii,
-                ray_half_width,
             },
         );
     }
@@ -360,6 +365,12 @@ fn evaluate_mix(
     context: &SurfaceColorContext,
 ) -> [f32; 3] {
     if mix_texel.is_empty() {
+        if matches!(spec.overprint, SurfaceColorOverprint::AirlessImpact { .. })
+            && spec.use_material_id_when_biome_empty
+            && spec.palettes.len() >= 2
+        {
+            return evaluate_airless_provenance_color(material_id, spec, context);
+        }
         let palette_id = if spec.use_material_id_when_biome_empty {
             material_id as usize
         } else {
@@ -391,6 +402,28 @@ fn evaluate_mix(
     } else {
         [color[0] / total, color[1] / total, color[2] / total]
     }
+}
+
+fn evaluate_airless_provenance_color(
+    material_id: u8,
+    spec: &SurfaceColorSpec,
+    context: &SurfaceColorContext,
+) -> [f32; 3] {
+    let variation =
+        (context.broad_noise * 0.64 + context.mottle_noise * 0.36) * spec.variation_strength;
+    let highland = spec.palettes[0].evaluate(context, variation);
+    let mare = spec.palettes[1].evaluate(context, variation * 0.58);
+    let provenance = context.mare_coverage.clamp(0.0, 1.0);
+
+    if provenance <= 0.001 {
+        let palette_id = material_id as usize;
+        if palette_id >= 2 {
+            return spec.palettes[palette_id.min(spec.palettes.len() - 1)]
+                .evaluate(context, variation);
+        }
+    }
+
+    mix3(highland, mare, provenance)
 }
 
 fn apply_surface_grade(color: [f32; 3], spec: &SurfaceColorSpec) -> [f32; 3] {
@@ -426,15 +459,64 @@ fn cold_desert_grade(color: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+fn soften_mare_contacts(builder: &mut BodyBuilder) {
+    let res = builder.cubemap_resolution;
+    let mare_coverage = builder.mare_coverage_cubemap.clone();
+    let source = builder.albedo_contributions.albedo.clone();
+
+    for face in CubemapFace::ALL {
+        let out = builder.albedo_contributions.albedo.face_data_mut(face);
+        for y in 0..res {
+            for x in 0..res {
+                let center_mare = mare_coverage.get(face, x, y).clamp(0.0, 1.0);
+                let mut mare = 0.0_f32;
+                let mut total = 0.0_f32;
+                let mut avg = [0.0_f32; 3];
+
+                for oy in -3..=3 {
+                    for ox in -3..=3 {
+                        let nx = (x as i32 + ox).clamp(0, res as i32 - 1) as u32;
+                        let ny = (y as i32 + oy).clamp(0, res as i32 - 1) as u32;
+                        mare += mare_coverage.get(face, nx, ny).clamp(0.0, 1.0);
+                        let c = source.get(face, nx, ny);
+                        avg[0] += c[0];
+                        avg[1] += c[1];
+                        avg[2] += c[2];
+                        total += 1.0;
+                    }
+                }
+
+                let mare_fraction = mare / total.max(1.0);
+                let gradient = (center_mare - mare_fraction).abs();
+                if !(0.03..=0.97).contains(&mare_fraction) || gradient < 0.025 {
+                    continue;
+                }
+
+                avg[0] /= total;
+                avg[1] /= total;
+                avg[2] /= total;
+
+                let boundary = 1.0 - (mare_fraction * 2.0 - 1.0).abs();
+                let mix = (boundary * gradient * 3.2).clamp(0.0, 0.42);
+                let idx = (y * res + x) as usize;
+                let current = out[idx];
+                out[idx] = [
+                    current[0] + (avg[0] - current[0]) * mix,
+                    current[1] + (avg[1] - current[1]) * mix,
+                    current[2] + (avg[2] - current[2]) * mix,
+                    1.0,
+                ];
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AirlessOverprintConfig {
     highland_fresh: f32,
     mare_fresh: f32,
     mare_tint: [f32; 3],
     young_crater_age_threshold: f32,
-    ray_age_threshold: f32,
-    ray_extent_radii: f32,
-    ray_half_width: f32,
 }
 
 fn apply_airless_crater_overprints(builder: &mut BodyBuilder, cfg: AirlessOverprintConfig) {
@@ -450,24 +532,36 @@ fn apply_airless_crater_overprints(builder: &mut BodyBuilder, cfg: AirlessOverpr
     if craters.is_empty() {
         return;
     }
-    let materials: Cubemap<u8> = builder.material_cubemap.clone();
+    let mare_coverage = builder.mare_coverage_cubemap.clone();
 
     for crater in &craters {
         let center = crater.center.normalize();
         let radius_m = crater.radius_m;
-        let cap_angle = (radius_m * cfg.ray_extent_radii.max(2.5)) / body_radius;
-        let freshness = crater_freshness(crater.age_gyr, cfg.young_crater_age_threshold);
-        let persistence = 0.22 + freshness * 0.78;
-        let (east, north) = tangent_frame(center);
-        let ray_seed = splitmix64(
-            (center.x.to_bits() as u64)
-                ^ ((center.y.to_bits() as u64) << 17)
-                ^ ((center.z.to_bits() as u64) << 33),
-        ) as u32;
+        let old_memory = smoothstep(12_000.0, 45_000.0, radius_m);
+        let young_visibility = smoothstep(7_500.0, 14_000.0, radius_m);
+        let freshness =
+            crater_freshness(crater.age_gyr, cfg.young_crater_age_threshold) * young_visibility;
+        // Ray systems are too high-contrast for the baked low-frequency
+        // cubemap/equirect. They belong in an analytic detail layer; here they
+        // become continent-sized bright islands once filtered down to map scale.
+        if old_memory <= 0.001 && freshness <= 0.001 {
+            continue;
+        }
+        let cap_angle = (radius_m * 2.5) / body_radius;
+        // Ancient small craters should shape the height field, not pepper the
+        // low-frequency albedo. Keep persistent color memory only on large
+        // resolved craters; young mid-sized craters still get bright ejecta.
+        let crater_mare =
+            crater_mare_coverage(&mare_coverage, center, radius_m, body_radius).clamp(0.0, 1.0);
+        let mare_burial =
+            smoothstep(0.18, 0.78, crater_mare) * smoothstep(0.55, 2.4, crater.age_gyr);
+        let persistence = (old_memory * 0.0015 * (1.0 - mare_burial * 0.96)
+            + freshness * 0.026 * (1.0 - mare_burial * 0.35))
+            .clamp(0.0, 0.08);
 
         for face in CubemapFace::ALL {
             let albedo = builder.albedo_contributions.albedo.face_data_mut(face);
-            for_face_texels_in_cap(face, res, center, cap_angle, |x, y, dir, angular_dist| {
+            for_face_texels_in_cap(face, res, center, cap_angle, |x, y, _dir, angular_dist| {
                 let surface_dist = angular_dist * body_radius;
                 let t = surface_dist / radius_m;
                 let mut delta = 0.0_f32;
@@ -482,25 +576,6 @@ fn apply_airless_crater_overprints(builder: &mut BodyBuilder, cfg: AirlessOverpr
                     delta += 0.58 * t.powi(-3) * ((2.5 - t) / 1.5).clamp(0.0, 1.0);
                 }
 
-                if crater.age_gyr < cfg.ray_age_threshold && t > 1.0 && t < cfg.ray_extent_radii {
-                    let to_texel = (dir - center * dir.dot(center))
-                        .try_normalize()
-                        .unwrap_or(east);
-                    let azimuth = to_texel.dot(north).atan2(to_texel.dot(east));
-                    let mut ray_w = 0.0_f32;
-                    for arm in 0..12 {
-                        let angle = pseudo_ray_angle(ray_seed, arm);
-                        let mut d = (azimuth - angle).abs();
-                        if d > std::f32::consts::PI {
-                            d = std::f32::consts::TAU - d;
-                        }
-                        let w = 1.0 - d / (cfg.ray_half_width * 1.8).max(1.0e-5);
-                        ray_w = ray_w.max(w.max(0.0));
-                    }
-                    let dist_fade = 1.0 - ((t - 1.0) / (cfg.ray_extent_radii - 1.0).max(1.0e-5));
-                    delta += ray_w * ray_w * dist_fade.max(0.0) * freshness * 0.50;
-                }
-
                 if delta.abs() <= 0.001 {
                     return;
                 }
@@ -508,28 +583,66 @@ fn apply_airless_crater_overprints(builder: &mut BodyBuilder, cfg: AirlessOverpr
                 let idx = (y * res + x) as usize;
                 let current = albedo[idx];
                 let base = [current[0], current[1], current[2]];
-                let is_mare = materials.get(face, x, y) == MAT_MARE as u8;
+                let local_mare = mare_coverage.get(face, x, y).clamp(0.0, 1.0);
                 let target = if delta >= 0.0 {
-                    if is_mare {
-                        [
-                            cfg.mare_fresh * cfg.mare_tint[0],
-                            cfg.mare_fresh * cfg.mare_tint[1],
-                            cfg.mare_fresh * cfg.mare_tint[2],
-                        ]
-                    } else {
-                        [cfg.highland_fresh, cfg.highland_fresh, cfg.highland_fresh]
-                    }
-                } else if is_mare {
-                    [0.035, 0.035, 0.038]
+                    let highland_fresh =
+                        [cfg.highland_fresh, cfg.highland_fresh, cfg.highland_fresh];
+                    let mare_fresh = [
+                        cfg.mare_fresh * cfg.mare_tint[0],
+                        cfg.mare_fresh * cfg.mare_tint[1],
+                        cfg.mare_fresh * cfg.mare_tint[2],
+                    ];
+                    let excavated = (1.0 - freshness * 0.75).clamp(0.0, 1.0);
+                    mix3(highland_fresh, mare_fresh, local_mare * excavated)
                 } else {
-                    [0.055, 0.055, 0.058]
+                    mix3([0.055, 0.055, 0.058], [0.035, 0.035, 0.038], local_mare)
                 };
-                let mix = (delta.abs() * persistence).clamp(0.0, 1.0);
+                let local_burial =
+                    smoothstep(0.25, 0.82, local_mare) * smoothstep(0.55, 2.4, crater.age_gyr);
+                let mix = (delta.abs() * persistence * (1.0 - local_burial * 0.74)).clamp(0.0, 1.0);
                 let out = mix3(base, target, mix);
                 albedo[idx] = [out[0], out[1], out[2], 1.0];
             });
         }
     }
+}
+
+fn crater_mare_coverage(
+    coverage: &Cubemap<f32>,
+    center: Vec3,
+    crater_radius_m: f32,
+    body_radius_m: f32,
+) -> f32 {
+    let mut mare = coverage.sample_bilinear(center).clamp(0.0, 1.0) * 1.5;
+    let mut total = 1.5;
+
+    for &(radius_frac, weight, samples) in &[(0.42, 1.0, 8_u32), (0.78, 0.55, 12_u32)] {
+        let sample_angle = (crater_radius_m * radius_frac) / body_radius_m;
+        for i in 0..samples {
+            let dir = ring_dir(
+                center,
+                sample_angle,
+                i as f32 * std::f32::consts::TAU / samples as f32,
+            );
+            mare += coverage.sample_bilinear(dir).clamp(0.0, 1.0) * weight;
+            total += weight;
+        }
+    }
+
+    (mare / total.max(1.0)).clamp(0.0, 1.0)
+}
+
+fn ring_dir(center: Vec3, angle: f32, azimuth: f32) -> Vec3 {
+    let up = if center.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let right = center.cross(up).normalize();
+    let forward = right.cross(center).normalize();
+    let (sin_phi, cos_phi) = azimuth.sin_cos();
+    let (sin_a, cos_a) = angle.sin_cos();
+    (center * cos_a + (right * cos_phi + forward * sin_phi) * sin_a).normalize()
 }
 
 fn crater_freshness(age_gyr: f32, threshold_gyr: f32) -> f32 {
@@ -539,11 +652,6 @@ fn crater_freshness(age_gyr: f32, threshold_gyr: f32) -> f32 {
         let t = 1.0 - age_gyr / threshold_gyr;
         t * t
     }
-}
-
-fn pseudo_ray_angle(seed: u32, arm: u32) -> f32 {
-    let h = splitmix64(seed as u64 ^ (arm as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    (h as u32 as f32 / u32::MAX as f32) * std::f32::consts::TAU
 }
 
 fn pal(
@@ -819,39 +927,39 @@ impl SurfaceColorSpec {
             palettes: vec![
                 pal(
                     "highland",
-                    gray(highland_mature * 0.78),
+                    gray(highland_mature * 0.96),
                     gray(highland_mature),
                     gray(highland_fresh * 0.82),
-                    gray(highland_mature * 0.55),
-                    gray(highland_fresh),
-                    gray(highland_mature * 0.62),
+                    gray(highland_mature * 0.92),
+                    gray(highland_mature * 1.08),
+                    gray(highland_mature * 0.93),
                     gray(highland_mature * 0.95),
                     gray(highland_mature * 0.82),
                     gray(highland_mature * 1.05),
                     gray(highland_mature * 0.90),
                     0.10,
-                    0.94,
-                    0.80,
+                    0.14,
+                    0.46,
                 ),
                 pal(
                     "mare",
-                    [mare[0] * 0.65, mare[1] * 0.65, mare[2] * 0.65],
+                    [mare[0] * 0.97, mare[1] * 0.97, mare[2] * 0.97],
                     mare,
                     [
                         mare_fresh * mare_tint[0],
                         mare_fresh * mare_tint[1],
                         mare_fresh * mare_tint[2],
                     ],
-                    [mare[0] * 0.50, mare[1] * 0.50, mare[2] * 0.50],
-                    [mare[0] * 1.30, mare[1] * 1.30, mare[2] * 1.30],
-                    [mare[0] * 0.58, mare[1] * 0.58, mare[2] * 0.58],
+                    [mare[0] * 0.96, mare[1] * 0.96, mare[2] * 0.96],
+                    [mare[0] * 1.03, mare[1] * 1.03, mare[2] * 1.03],
+                    [mare[0] * 0.97, mare[1] * 0.97, mare[2] * 0.97],
                     mare,
                     mare,
                     mare,
                     mare,
                     0.08,
-                    0.96,
-                    0.65,
+                    0.04,
+                    0.18,
                 ),
                 pal(
                     "fresh_ejecta",
@@ -866,8 +974,8 @@ impl SurfaceColorSpec {
                     gray(highland_fresh),
                     gray(highland_fresh * 0.92),
                     0.08,
-                    0.90,
-                    0.60,
+                    0.12,
+                    0.34,
                 ),
                 pal(
                     "mature_regolith",
@@ -882,8 +990,8 @@ impl SurfaceColorSpec {
                     gray(highland_mature * 0.96),
                     gray(highland_mature * 0.84),
                     0.08,
-                    0.96,
-                    0.75,
+                    0.12,
+                    0.40,
                 ),
             ],
             seed,

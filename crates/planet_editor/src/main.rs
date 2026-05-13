@@ -102,7 +102,6 @@ struct EditorRings {
 
 struct EditorAtmosphere {
     block: AtmosphereBlock,
-    cloud_seed: Option<u64>,
 }
 
 /// Active sketching tool. `Inspect` is the default — clicks on the planet
@@ -291,7 +290,6 @@ fn build_params_for_body(
         let meters_per_render_unit = body.radius_m as f32 / RENDER_RADIUS;
         EditorAtmosphere {
             block: AtmosphereBlock::from_terrestrial(atmos, meters_per_render_unit),
-            cloud_seed: atmos.clouds.as_ref().map(|clouds| clouds.seed),
         }
     });
 
@@ -415,11 +413,7 @@ fn cloud_cover_for(
     reference_clouds: &ReferenceClouds,
     images: &mut Assets<Image>,
 ) -> Handle<Image> {
-    let cloud_seed = planet
-        .atmosphere
-        .as_ref()
-        .and_then(|atmos| atmos.cloud_seed);
-    cloud_cover_image_for_body(&planet.selected_body, cloud_seed, reference_clouds, images).0
+    cloud_cover_image_for_body(&planet.selected_body, reference_clouds, images).0
 }
 
 // ---------------------------------------------------------------------------
@@ -970,8 +964,7 @@ fn finalize_terrain_bake(
         if planet
             .atmosphere
             .as_ref()
-            .and_then(|atmos| atmos.cloud_seed)
-            .is_some()
+            .is_some_and(|atmos| atmos.block.cloud_albedo_coverage.w > 0.0)
         {
             commands
                 .entity(entity)

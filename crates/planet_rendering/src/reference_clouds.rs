@@ -1,16 +1,13 @@
 //! Temporary reference-cloud texture support shared by the game and editor.
 //!
-//! Bodies listed here use hand-picked equirectangular cloud textures while the
-//! procedural cloud generator is being redesigned. Other bodies fall back to
-//! the procedural cloud-cover bake driven by `TerrestrialAtmosphere::clouds`.
+//! Bodies listed here use hand-picked equirectangular cloud textures. Other
+//! bodies bind a blank cloud cube until the cloud pipeline is revisited.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::bake::{
-    bake_cloud_cover_image, blank_cloud_cover_image, equirect_to_cloud_cover_image_with_rotation,
-};
+use crate::bake::{blank_cloud_cover_image, equirect_to_cloud_cover_image_with_rotation};
 
 #[derive(Clone, Copy)]
 struct ReferenceCloudImage {
@@ -126,7 +123,6 @@ pub fn convert_reference_clouds_when_ready(
 
 pub fn cloud_cover_image_for_body(
     body_name: &str,
-    cloud_seed: Option<u64>,
     reference_clouds: &ReferenceClouds,
     images: &mut Assets<Image>,
 ) -> (Handle<Image>, bool) {
@@ -139,10 +135,5 @@ pub fn cloud_cover_image_for_body(
         );
     }
 
-    (
-        cloud_seed
-            .map(|seed| bake_cloud_cover_image(seed, images))
-            .unwrap_or_else(|| blank_cloud_cover_image(images)),
-        false,
-    )
+    (blank_cloud_cover_image(images), false)
 }

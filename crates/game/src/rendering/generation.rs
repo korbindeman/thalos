@@ -94,13 +94,8 @@ pub(super) fn finalize_planet_generation(
             .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
             .unwrap_or_default();
 
-        let cloud_seed = body
-            .terrestrial_atmosphere
-            .as_ref()
-            .and_then(|a| a.clouds.as_ref())
-            .map(|c| c.seed);
         let (cloud_cover, uses_reference_cloud) =
-            cloud_cover_image_for_body(&body.name, cloud_seed, &reference_clouds, &mut images);
+            cloud_cover_image_for_body(&body.name, &reference_clouds, &mut images);
 
         let coastline = PlanetCoastlineParams::from_static_surface(baked);
         let water = PlanetWaterParams::from_static_surface(baked);
@@ -211,10 +206,8 @@ pub(super) fn finalize_planet_generation(
                 state: dynamic_state,
             })
             .remove::<PendingPlanetGeneration>();
-        if has_clouds {
+        if has_clouds && uses_reference_cloud {
             entity_cmds.insert(CloudBandState::default());
-        }
-        if uses_reference_cloud {
             entity_cmds.insert(ReferenceCloudTarget {
                 body_name: body.name.clone(),
             });

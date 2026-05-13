@@ -22,7 +22,7 @@ pub use differentiate::{
 pub use dune_seas::{DuneSeaCoverageMask, DuneSeas};
 pub use erosion::Erosion;
 pub use impact_color_overprint::{ImpactColorOverprint, VaelenImpactColor};
-pub use mare_flood::MareFlood;
+pub use mare_flood::{MareFlood, ProcellarumConfig};
 pub use megabasin::{BasinDef, Megabasin};
 pub use regolith::Regolith;
 pub use scarps::Scarps;

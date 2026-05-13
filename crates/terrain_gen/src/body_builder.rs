@@ -43,12 +43,18 @@ pub struct BodyBuilder {
     /// style radial ejecta sculpture so basins don't read as the hard discs
     /// a clean biome-id threshold produces.
     pub basin_albedo_field: Cubemap<f32>,
-    /// Per-texel material index (R8). Initialized to MAT_HIGHLAND at builder
-    /// construction; stages overwrite as needed (MareFlood flips flooded
-    /// regions to MAT_MARE, future cryovolcanism overwrites with ice, etc.).
+    /// Per-texel dominant material index (R8). Initialized to MAT_HIGHLAND at
+    /// builder construction; stages overwrite as needed for compatibility
+    /// with material-id consumers. Fractional provenance such as mare
+    /// resurfacing lives in a separate continuous cubemap below.
     /// Finalized into `StaticSurfaceData::material_cubemap` without any transformation
     /// — stages see the same buffer the GPU will see.
     pub material_cubemap: Cubemap<u8>,
+    /// Continuous mare/provenance coverage written by resurfacing stages.
+    /// `0.0` means no mare basalt resurfacing; `1.0` means the texel is fully
+    /// mare resurfaced. This remains build-time color/shape provenance while
+    /// `material_cubemap` stores only the dominant compatibility material.
+    pub mare_coverage_cubemap: Cubemap<f32>,
     /// Per-texel surface roughness (0..1, encoded R8Unorm). Default ~0.85
     /// at construction; written by `bake_surface_field_into_builder` (or any
     /// future stage). Consumed by the impostor shader for the PBR microsurface
@@ -142,6 +148,7 @@ impl BodyBuilder {
                 }
                 mat
             },
+            mare_coverage_cubemap: Cubemap::<f32>::new(resolution),
             roughness_cubemap: {
                 // 0.85 is "moderately rough" — fits regolith / dry rock /
                 // sand. Bodies with a SurfaceField bake overwrite per texel.
