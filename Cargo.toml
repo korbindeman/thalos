@@ -12,6 +12,7 @@ members = [
     "crates/ship_rendering",
     "crates/shipyard",
     "crates/bake_dump",
+    "crates/terrain",
 ]
 
 [workspace.package]
@@ -20,6 +21,9 @@ edition = "2024"
 
 # Optimize dependencies in dev builds for runtime performance without
 # sacrificing incremental compile speed on our own crates.
+[workspace.dependencies]
+bevy_terrain = { git = "https://github.com/korbindeman/bevy_terrain", branch = "main", features = ["high_precision"] }
+
 [profile.dev]
 opt-level = 1
 # Disabled to avoid macOS incremental-compilation linker bug (stale

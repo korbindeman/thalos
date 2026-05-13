@@ -12,6 +12,7 @@
 
 mod body_lod;
 mod generation;
+mod ground_terrain;
 mod lighting;
 mod materials;
 pub(crate) mod real_space;

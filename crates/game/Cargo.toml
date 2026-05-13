@@ -7,11 +7,13 @@ edition.workspace = true
 thalos_physics = { path = "../physics" }
 thalos_input = { path = "../input" }
 thalos_planet_rendering = { path = "../planet_rendering" }
+thalos_terrain = { path = "../terrain" }
 thalos_terrain_gen = { path = "../terrain_gen" }
 thalos_celestial = { path = "../celestial" }
 thalos_shipyard = { path = "../shipyard" }
 thalos_ship_rendering = { path = "../ship_rendering" }
 bevy = { version = "0.18", features = ["wayland", "jpeg"] }
+bevy_terrain = { workspace = true }
 bevy_egui = "0.39"
 big_space = { version = "0.12", features = ["i64"] }
 tracing = "0.1"

@@ -33,9 +33,9 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, WindowMode};
-use big_space::prelude::BigSpaceDefaultPlugins;
 use thalos_input::game::GameInputPlugin;
 use thalos_input::settings::InputSettings;
+use thalos_terrain::ThalosTerrainPlugin;
 use thalos_physics::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::{Epoch, WorldPhysicsConfig},
@@ -203,7 +203,11 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins(BigSpaceDefaultPlugins)
+        // `ThalosTerrainPlugin` wraps `bevy_terrain::TerrainPlugin`, which
+        // adds `BigSpaceDefaultPlugins` itself when the `high_precision`
+        // feature is enabled. Adding the plugin again here would panic on
+        // duplicate registration.
+        .add_plugins(ThalosTerrainPlugin)
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         // The dedicated UI camera in `view::spawn_ui_camera` owns the

@@ -1,22 +1,28 @@
 //! Polling and finalization of in-flight terrain generation.
 
+use std::sync::Arc;
+
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{block_on, poll_once};
+use bevy_terrain::prelude::{TerrainViewComponents, TileTree};
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
     AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
     PlanetParams, PlanetWaterParams, ReferenceClouds, bake_from_planet_surface,
     cloud_cover_image_for_body,
 };
+use thalos_terrain::BodyTerrainMaterial;
 use thalos_terrain_gen::DynamicSurfaceState;
 
+use super::ground_terrain::spawn_body_terrain;
 use super::types::{
     BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetDynamicSurface, PlanetMaterials,
     PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh, SimulationState,
 };
+use crate::camera::ShipCamera;
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 
 // ---------------------------------------------------------------------------
@@ -56,16 +62,25 @@ pub(super) fn finalize_planet_generation(
     shared: Res<SharedPlanetMeshes>,
     mut planet_materials: ResMut<Assets<PlanetMaterial>>,
     mut planet_halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
+    mut body_terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
     reference_clouds: Res<ReferenceClouds>,
     mut planetshine: ResMut<PlanetshineTints>,
+    ship_camera_q: Query<Entity, With<ShipCamera>>,
 ) {
     for (entity, mut pending) in &mut pending_q {
         let _span = tracing::info_span!("finalize_planet_generation").entered();
         let Some(surface) = block_on(poll_once(&mut pending.task)) else {
             continue;
         };
+        // Wrap in Arc so the same `PlanetSurface` can back both the impostor
+        // bake (which only borrows) and the ground-LOD `PipelineTileProvider`
+        // (which holds it across async tile requests). `StaticSurfaceData` is
+        // not `Clone`, so this is the cheap path; `dynamic_layers` is cloned
+        // into `PlanetDynamicSurface` below since that path still moves.
+        let surface = Arc::new(surface);
         let baked = &surface.static_surface;
         let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
 
@@ -193,24 +208,55 @@ pub(super) fn finalize_planet_generation(
             .as_ref()
             .and_then(|a| a.clouds.as_ref())
             .is_some();
-        let mut entity_cmds = commands.entity(entity);
-        entity_cmds
-            .insert(PlanetMaterials {
-                map: map_handle,
-                ship: ship_handle,
-                map_halo: map_halo_handle,
-                ship_halo: ship_halo_handle,
-            })
-            .insert(PlanetDynamicSurface {
-                layers: surface.dynamic_layers,
-                state: dynamic_state,
-            })
-            .remove::<PendingPlanetGeneration>();
-        if has_clouds && uses_reference_cloud {
-            entity_cmds.insert(CloudBandState::default());
-            entity_cmds.insert(ReferenceCloudTarget {
-                body_name: body.name.clone(),
-            });
+        {
+            let mut entity_cmds = commands.entity(entity);
+            entity_cmds
+                .insert(PlanetMaterials {
+                    map: map_handle,
+                    ship: ship_handle,
+                    map_halo: map_halo_handle,
+                    ship_halo: ship_halo_handle,
+                })
+                .insert(PlanetDynamicSurface {
+                    layers: surface.dynamic_layers.clone(),
+                    state: dynamic_state,
+                })
+                .remove::<PendingPlanetGeneration>();
+            if has_clouds && uses_reference_cloud {
+                entity_cmds.insert(CloudBandState::default());
+                entity_cmds.insert(ReferenceCloudTarget {
+                    body_name: body.name.clone(),
+                });
+            }
+        }
+
+        // M3 stage 2/3: spawn the ground-LOD terrain entity alongside the
+        // impostor. The same `PlanetSurface` backs both via `Arc`. Runs after
+        // the `EntityCommands` block above so its `&mut commands` borrow
+        // doesn't conflict with the `spawn_body_terrain` call. If the ship
+        // camera doesn't exist yet (e.g., extreme startup races), skip the
+        // terrain spawn — `PendingPlanetGeneration` is removed above so we
+        // won't retry; this is acceptable because the ship camera is spawned
+        // at startup and the terrain task runs strictly after.
+        match ship_camera_q.single() {
+            Ok(ship_camera) => {
+                spawn_body_terrain(
+                    &mut commands,
+                    body,
+                    surface.clone(),
+                    pending.ship_parent_entity,
+                    &mut body_terrain_materials,
+                    &mut tile_trees,
+                    ship_camera,
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "no unique ShipCamera entity available when finalising '{}' \
+                     terrain; ground LOD will not render for this body: {e}",
+                    body.name,
+                );
+            }
         }
     }
 }

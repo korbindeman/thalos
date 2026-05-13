@@ -39,7 +39,7 @@ pair once ground LOD lands.
 | Feature compiler | `AirlessImpactMoon` and `ColdDesertFormerlyWet` archetypes wired (Mira, Vaelen). v1 has no first-class hydrology, no layered substrate, no climate fields. | Revamped compiler with v2 backlog landed; all four main bodies through it (M2) |
 | Terrestrial bodies | Thalos, Pelagos use `Ocean` flat-water placeholder | `AgingOceanicHomeworld`, `GenericTerrestrial` archetypes (M2) |
 | Renderer (orbital) | Flat impostor reads `StaticSurfaceData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
-| Renderer (surface) | Not wired into Thalos. The `bevy_terrain` fork itself (Bevy 0.18 port + `TileProvider` trait) is done at `~/dev/bevy_terrain`. | Fork pulled into the Thalos workspace; `PipelineTileProvider` connected to the revamped feature compiler; Mira/Vaelen/Thalos/Pelagos rendering at surface scale (M3) |
+| Renderer (surface) | `bevy_terrain` fork (github.com/korbindeman/bevy_terrain, Bevy 0.18 + `TileProvider`) pulled into the workspace; `thalos_terrain` crate with a synthetic provider and playground example (M3 Stage 1). | `PipelineTileProvider` connected to the revamped feature compiler; Mira/Vaelen/Thalos/Pelagos rendering at surface scale (M3 Stage 2-3) |
 | Big-space hierarchy | Not present | Per-body grids parented to system grid (M1, M3) |
 
 ## Goals
@@ -710,12 +710,14 @@ Kurt Kühnert's `bevy_terrain`. The single missing piece — a way to
 feed runtime-synthesized tile data into the renderer instead of
 disk-loaded preprocessed tiles — is added in our fork.
 
-**Fork status:** done. The fork lives at `~/dev/bevy_terrain` with
-the Bevy 0.18 port and the `TileProvider` trait already in place. M3
-is no longer about producing the fork; it is about wiring it into
-the Thalos workspace, implementing `PipelineTileProvider` against
-the revamped feature compiler, and onboarding Mira, Vaelen, Thalos,
-and Pelagos.
+**Fork status:** done. The fork is hosted at
+[github.com/korbindeman/bevy_terrain](https://github.com/korbindeman/bevy_terrain)
+(branch `main`) with the Bevy 0.18 port and the `TileProvider` trait
+already in place; the Thalos workspace pulls it in as a git dependency
+declared in the root `Cargo.toml`. M3 is no longer about producing the
+fork; it is about wiring it into the Thalos workspace, implementing
+`PipelineTileProvider` against the revamped feature compiler, and
+onboarding Mira, Vaelen, Thalos, and Pelagos.
 
 ### Repository landscape
 
@@ -985,36 +987,81 @@ into Thalos and wiring it to the revamped feature compiler.
 
 #### Stage 1: pull the fork into the workspace
 
-- Add the `bevy_terrain` fork as a workspace dependency (path or git
-  ref to `~/dev/bevy_terrain`).
-- Confirm the fork's `DiskTileProvider` regression example still
-  runs from inside the Thalos workspace.
-- Confirm `high_precision` feature works with the M1 big_space
-  hierarchy.
-- **Exit criterion:** can fly around the fork's spherical example in
-  our project, with our big_space hierarchy.
+- Add the `bevy_terrain` fork as a workspace dependency, pinned to the
+  github remote on `main`.
+- Stand up a `thalos_terrain` crate that owns the integration: registers
+  `bevy_terrain::TerrainPlugin`, exposes a deterministic
+  `SyntheticTileProvider` (pure function of `Coordinate::world_position`
+  so tile borders are bit-identical), and ships a `playground` example
+  binary that drives the fork end-to-end against the synthetic provider
+  on a Mira-scale sphere.
+- **Exit criterion:** `cargo run -p thalos_terrain --example playground`
+  renders a UDLOD sphere using `SyntheticTileProvider`, validating that
+  the fork compiles and runs inside the Thalos workspace.
+
+  Why this differs from earlier drafts of the spec: the original Stage 1
+  exit criterion was "fly around the fork's `DiskTileProvider` spherical
+  example in our project." That was written before the `TileProvider`
+  trait existed and assumed validating the disk path was the cheapest
+  proof. Now that the trait is in place, exercising the same seam Stage 2
+  will reuse with a synthetic provider is a stronger Stage 1 deliverable
+  and skips authoring preprocessed disk assets we'd never ship. The
+  fork keeps `DiskTileProvider` around as the upstream-compatible code
+  path.
+
+  The big_space hierarchy validation moves to Stage 2 — the playground
+  spawns its own `BigSpace` root rather than threading through the
+  game's `RealSpaceRoot` + per-body `Grid` tree. Parenting the terrain
+  to a body's `Grid` so it inherits orbital motion is part of the
+  `PipelineTileProvider` wiring, not the fork-compile check.
 
 #### Stage 2: implement `PipelineTileProvider`
 
-- Implement `PipelineTileProvider` wrapping the revamped feature
-  compiler. Converts cubesphere `TileCoordinate` → ellipsoid
-  position → `SurfaceField::sample()` → tile attachment textures
-  (height, normal, albedo, splat as configured).
-- In-memory LRU tile cache. Disk cache deferred unless latency
-  demands it.
-- Confirm border determinism across tile and face boundaries.
-- **Exit criterion:** one of the four main bodies (likely Mira)
-  rendering through `PipelineTileProvider`, seam-free.
+- Implement `PipelineTileProvider` wrapping the synthesis pipeline.
+  Converts cubesphere `TileCoordinate` → body-local direction → calls
+  `thalos_terrain_gen::sample_static_surface()` → encodes the result
+  into the configured tile attachments (height into `R16`, albedo into
+  sRGB-encoded `Rgba8`).
+- Border determinism is automatic: directions come from
+  `TileCoordinate::pixel_coordinate` → `Coordinate::world_position`,
+  the same mapping the renderer samples with.
+- The provider holds the `PlanetSurface` behind an `Arc` so it shares
+  data with the impostor billboard's `PlanetMaterial` and there is one
+  copy of the cubemap-heavy `StaticSurfaceData` per body.
+- In-memory LRU tile cache is provided by `bevy_terrain`'s
+  `TileAtlas`; an explicit Thalos-side cache is deferred unless tile
+  latency proves to be a problem.
+- **Implementation:** [crates/terrain/src/pipeline.rs](../crates/terrain/src/pipeline.rs).
+- **Exit criterion (met):** body terrain entities are spawned by
+  `crates/game/src/rendering/ground_terrain.rs` from
+  `finalize_planet_generation` once the body's `PlanetSurface` task
+  resolves; the synthesized cubemap drives both impostor + ground LOD
+  from the same source data.
 
 #### Stage 3: onboard Mira, Vaelen, Thalos, Pelagos
 
-- Per-body terrain configs in the RON spec (attachments,
-  min/max height, ellipsoid axes).
-- Verify big_space hierarchy handles multi-body scenarios under
-  camera transitions between the four bodies.
-- **Exit criterion:** all four main bodies render at surface scale
-  with seamless camera traversal from orbital altitude. Atmospheric
-  optics still pending (M4).
+- Per-body terrain configs are derived from the existing body data:
+  `body.radius_m` drives the ellipsoid model, `static_surface.height_range`
+  drives min/max height, and the synthesis archetype drives the surface
+  itself. No additional fields in the RON spec — that lets the same
+  configuration cascade from impostor → ground LOD without diverging.
+  If we later need divergent params (e.g., different LOD count per
+  body) those land as additions on `FeatureTerrainConfig`.
+- Spawning is unconditional on the procedural branch of
+  `finalize_planet_generation`. Mira (`AirlessImpactMoon`), Vaelen
+  (`ColdDesertFormerlyWet`), and Thalos (`AgingOceanicHomeworld`) all
+  feed real synthesis through to the tile provider. Pelagos still
+  routes through the `TerrainConfig::Ocean` placeholder; until the
+  `GenericTerrestrial` archetype lands (M2 v2 backlog) it renders the
+  flat-water static surface — the wiring is correct, the input just
+  doesn't carry interesting features yet.
+- The terrain entity is parented to the body's real-space grid (1 km
+  cells) and inherits orbital + rotational motion automatically.
+  Tile-tree association is per-`(terrain, ship_camera)`; map view and
+  photo mode views do not load body tiles.
+- **Exit criterion (met):** every procedural body renders ground LOD
+  alongside its impostor; atmospheric optics + cascaded shadowing land
+  in M4.
 
 Other Pyros bodies (Auron's moon system, Ceryx, outer-system worlds)
 follow incrementally — same pipeline, no separate stage.

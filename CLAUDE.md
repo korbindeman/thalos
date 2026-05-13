@@ -107,11 +107,12 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
 - **`thalos_planet_rendering`** — Bevy materials for planets, gas giants, rings, solid bodies
 - **`thalos_planet_editor`** — interactive planet editor tool
+- **`thalos_terrain`** — Bevy integration of the forked `bevy_terrain` UDLOD renderer; ships `ThalosTerrainPlugin` and a synthetic tile provider (M3 stage 1)
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
 
 Core separation: `physics`, `terrain_gen`, `atmosphere_gen`, and `celestial`
-are pure Rust libraries; `input`, `game`, `planet_rendering`,
+are pure Rust libraries; `input`, `game`, `planet_rendering`, `terrain`,
 `planet_editor`, and `shipyard` are Bevy consumers.
 Semantic input for the Bevy binaries flows through `thalos_input`
 contexts and intent resources, with checked-in defaults at
