@@ -16,8 +16,8 @@ use thalos_physics::{
     types::{BodyStates, SolarSystemDefinition},
 };
 use thalos_planet_rendering::{
-    CLOUD_BAND_COUNT, GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial,
-    SolidPlanetMaterial,
+    CLOUD_BAND_COUNT, GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, PreparedPlanetBake,
+    RingMaterial, SolidPlanetMaterial,
 };
 use thalos_terrain_gen::{DynamicSurfaceLayers, DynamicSurfaceState};
 
@@ -206,7 +206,12 @@ pub(super) struct ShipRingMaterial(pub(super) Handle<RingMaterial>);
 /// removes this component.
 #[derive(Component)]
 pub(super) struct PendingPlanetGeneration {
-    pub(super) task: Task<thalos_terrain_gen::PlanetSurface>,
+    /// Returns both the `PlanetSurface` (consumed by the ground-LOD
+    /// `PipelineTileProvider`) and the CPU-prepared bake (cubemap byte
+    /// buffers + SSBOs ready for `Assets::add`). Synthesising the bake
+    /// inside the task keeps the dune-overlay loop and cubemap byte
+    /// copies off the main thread; finalize only does cheap inserts.
+    pub(super) task: Task<PendingPlanetBake>,
     pub(super) body_id: usize,
     pub(super) render_radius: f32,
     /// Map-view child holding the placeholder mesh; gets swapped to the
@@ -216,6 +221,14 @@ pub(super) struct PendingPlanetGeneration {
     pub(super) ship_mesh_entity: Entity,
     /// Real-space parent for ship-layer children.
     pub(super) ship_parent_entity: Entity,
+}
+
+/// Off-thread task output: both the surface (kept long-term for ground LOD
+/// tile streaming via `Arc<PlanetSurface>`) and the prepared bake (consumed
+/// once during finalize to seed the impostor material).
+pub(super) struct PendingPlanetBake {
+    pub(super) surface: thalos_terrain_gen::PlanetSurface,
+    pub(super) prepared: PreparedPlanetBake,
 }
 
 #[derive(Component)]

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
 use crate::bake::{blank_cloud_cover_image, equirect_to_cloud_cover_image_with_rotation};
 
@@ -66,6 +67,10 @@ struct ReferenceCloudEntry {
     source: Option<Handle<Image>>,
     cube: Option<Handle<Image>>,
     orientation: ReferenceCloudOrientation,
+    /// In-flight equirect→cube conversion on the async-compute pool.
+    /// Set once the source image finishes loading; cleared when the
+    /// resulting cube is inserted into `cube`.
+    task: Option<Task<Image>>,
 }
 
 #[derive(Resource, Default)]
@@ -92,6 +97,7 @@ pub fn load_reference_cloud_sources(
                 source: Some(asset_server.load(spec.path)),
                 cube: None,
                 orientation: spec.orientation,
+                task: None,
             },
         );
     }
@@ -105,19 +111,39 @@ pub fn convert_reference_clouds_when_ready(
         if entry.cube.is_some() {
             continue;
         }
-        let Some(source_handle) = entry.source.clone() else {
+        // If a conversion is in flight, poll it; otherwise dispatch one
+        // when the source asset finishes loading. Each cube is ~1.5 M
+        // pixels of `atan2`/`asin`/lookup work — too heavy to run inline
+        // on the main thread when the source image lands.
+        if let Some(task) = entry.task.as_mut() {
+            if let Some(cube_image) = block_on(poll_once(task)) {
+                entry.cube = Some(images.add(cube_image));
+                entry.task = None;
+            }
+            continue;
+        }
+        let Some(source_handle) = entry.source.as_ref() else {
             continue;
         };
-        let Some(source) = images.get(&source_handle) else {
+        if images.get(source_handle).is_none() {
+            continue;
+        }
+        // Source is loaded — pull it out of `Assets<Image>` so the worker
+        // owns the bytes without a 100+ MB clone. Nothing else references
+        // the handle (only stored in `entry.source`, cleared below).
+        let Some(source_image) = images.remove(source_handle) else {
             continue;
         };
-        let cube_image = equirect_to_cloud_cover_image_with_rotation(
-            source,
-            REFERENCE_CLOUD_CUBE_RES,
-            entry.orientation.source_from_output_rotation(),
-        );
-        entry.cube = Some(images.add(cube_image));
+        let rotation = entry.orientation.source_from_output_rotation();
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            equirect_to_cloud_cover_image_with_rotation(
+                &source_image,
+                REFERENCE_CLOUD_CUBE_RES,
+                rotation,
+            )
+        });
         entry.source = None;
+        entry.task = Some(task);
     }
 }
 

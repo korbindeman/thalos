@@ -17,16 +17,18 @@ use thalos_planet_rendering::{
     GasGiantLayers, GasGiantMaterial, GasGiantParams, RingLayers, RingMaterial, RingParams,
     SceneLighting, SolidPlanetMaterial, SolidPlanetParams, build_ring_mesh,
 };
+use thalos_planet_rendering::prepare_planet_bake;
 use thalos_terrain_gen::{
-    PlanetSurface, TerrainCompileContext, TerrainCompileOptions, TerrainConfig,
-    compile_dynamic_surface_layers, compile_static_terrain_config, compile_tectonics_from_config,
+    DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
+    TerrainConfig, compile_dynamic_surface_layers, compile_static_terrain_config,
+    compile_tectonics_from_config,
 };
 
 use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::types::{
-    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, PendingPlanetGeneration,
-    PlanetshineTints, RealSpaceBody, SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial,
-    SimulationState, SolidPlanetMaterials, SunLight, TidallyLocked,
+    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, PendingPlanetBake,
+    PendingPlanetGeneration, PlanetshineTints, RealSpaceBody, SharedPlanetMeshes, ShipBodyMesh,
+    ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::view::HideInShipView;
@@ -213,31 +215,40 @@ pub(super) fn spawn_bodies(
                 // on both the cache-hit and cache-miss paths so downstream
                 // archetypes that read the tectonic graph see the same instance.
                 let tectonics_built = compile_tectonics_from_config(tectonics.as_ref(), &context);
-                if let Some(static_surface) = thalos_terrain_gen::cache::load(&path, key) {
+                let surface = if let Some(static_surface) =
+                    thalos_terrain_gen::cache::load(&path, key)
+                {
                     info!("terrain cache hit: {body_name}");
-                    return PlanetSurface {
+                    PlanetSurface {
                         static_surface,
                         dynamic_layers,
                         tectonics: tectonics_built,
-                    };
-                }
-                info!("terrain cache miss, baking: {body_name}");
-                let static_surface = compile_static_terrain_config(
-                    &terrain,
-                    tectonics_built.as_ref(),
-                    &context,
-                    options,
-                )
-                .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
-                match thalos_terrain_gen::cache::store(&path, key, &static_surface) {
-                    Ok(()) => info!("terrain cache wrote: {body_name}"),
-                    Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
-                }
-                PlanetSurface {
-                    static_surface,
-                    dynamic_layers,
-                    tectonics: tectonics_built,
-                }
+                    }
+                } else {
+                    info!("terrain cache miss, baking: {body_name}");
+                    let static_surface = compile_static_terrain_config(
+                        &terrain,
+                        tectonics_built.as_ref(),
+                        &context,
+                        options,
+                    )
+                    .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
+                    match thalos_terrain_gen::cache::store(&path, key, &static_surface) {
+                        Ok(()) => info!("terrain cache wrote: {body_name}"),
+                        Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
+                    }
+                    PlanetSurface {
+                        static_surface,
+                        dynamic_layers,
+                        tectonics: tectonics_built,
+                    }
+                };
+                // Run the heavy CPU half of the bake (dune-overlay synthesis,
+                // cubemap byte copies, SSBO packing) here on the task pool so
+                // `finalize_planet_generation` only has to insert assets.
+                let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+                let prepared = prepare_planet_bake(&surface, &dynamic_state);
+                PendingPlanetBake { surface, prepared }
             });
 
             // Placeholder: same plain-sphere look as the non-procedural branch

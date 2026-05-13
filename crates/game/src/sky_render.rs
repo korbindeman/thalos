@@ -20,6 +20,7 @@ use bevy::render::render_resource::{
     SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
 use thalos_celestial::Universe;
 use thalos_celestial::generate::{DefaultGenParams, generate_default};
@@ -123,12 +124,38 @@ impl Plugin for SkyRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<StarsMaterial>::default())
             .add_plugins(MaterialPlugin::<GalaxyMaterial>::default())
-            .add_systems(Startup, spawn_stars)
+            .add_systems(Startup, dispatch_sky_generation)
+            .add_systems(Update, finalize_sky_generation)
             .add_systems(
                 Update,
                 (update_stars_brightness, update_galaxy_uniform).in_set(crate::SimStage::Sync),
             );
     }
+}
+
+/// Result of the off-thread sky build: the two meshes ready for upload.
+struct SkyMeshes {
+    stars: Mesh,
+    galaxies: Mesh,
+}
+
+/// Holds the in-flight sky-build task. Removed once the meshes are spawned.
+#[derive(Resource)]
+struct PendingSkyGeneration {
+    task: Task<SkyMeshes>,
+}
+
+/// Spawn the heavy `generate_default` + mesh-build work on the async
+/// compute pool so the first frame isn't blocked by ~52.5k procedural
+/// sources and ~210k vertices of mesh assembly.
+fn dispatch_sky_generation(mut commands: Commands) {
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let universe = generate_default(&DefaultGenParams::default());
+        let stars = build_star_mesh(&universe);
+        let galaxies = build_galaxy_mesh(&universe);
+        SkyMeshes { stars, galaxies }
+    });
+    commands.insert_resource(PendingSkyGeneration { task });
 }
 
 /// Marker component so the per-frame exposure system can find the
@@ -156,22 +183,25 @@ fn update_stars_brightness(
     }
 }
 
-/// Build the Universe, bake it into a mesh, and spawn a standalone
-/// entity that the vertex shader places relative to the camera.
-///
-/// The entity does NOT parent to the camera — it lives in world space
-/// with an identity transform. Every frame, the vertex shader reads
-/// `view.world_position` and fans star quads out to a virtual infinity
-/// from there, so camera movement is handled entirely in the shader.
-fn spawn_stars(
+/// Poll the in-flight sky build. When it completes, upload the meshes
+/// and spawn the star and galaxy entities. The entity does NOT parent
+/// to the camera — it lives in world space with an identity transform.
+/// Every frame, the vertex shader reads `view.world_position` and fans
+/// the quads out to virtual infinity from there, so camera movement is
+/// handled entirely in the shader.
+fn finalize_sky_generation(
     mut commands: Commands,
+    pending: Option<ResMut<PendingSkyGeneration>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut stars_materials: ResMut<Assets<StarsMaterial>>,
     mut galaxy_materials: ResMut<Assets<GalaxyMaterial>>,
 ) {
-    let universe = generate_default(&DefaultGenParams::default());
+    let Some(mut pending) = pending else { return };
+    let Some(built) = block_on(poll_once(&mut pending.task)) else {
+        return;
+    };
 
-    let stars_mesh = meshes.add(build_star_mesh(&universe));
+    let stars_mesh = meshes.add(built.stars);
     let stars_material = stars_materials.add(StarsMaterial {
         params: StarsParams::default(),
     });
@@ -183,7 +213,7 @@ fn spawn_stars(
         NoFrustumCulling,
     ));
 
-    let galaxy_mesh = meshes.add(build_galaxy_mesh(&universe));
+    let galaxy_mesh = meshes.add(built.galaxies);
     let galaxy_material = galaxy_materials.add(GalaxyMaterial {
         params: GalaxyParams::default(),
     });
@@ -194,6 +224,8 @@ fn spawn_stars(
         Transform::IDENTITY,
         NoFrustumCulling,
     ));
+
+    commands.remove_resource::<PendingSkyGeneration>();
 }
 
 // ---------------------------------------------------------------------------

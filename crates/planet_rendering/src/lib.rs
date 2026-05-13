@@ -10,7 +10,10 @@ pub mod shader_types;
 mod solid_planet;
 mod texture;
 
-pub use bake::{bake_from_planet_surface, blank_cloud_cover_image, equirect_to_cloud_cover_image};
+pub use bake::{
+    PreparedPlanetBake, bake_from_planet_surface, blank_cloud_cover_image,
+    equirect_to_cloud_cover_image, prepare_planet_bake, upload_prepared_bake,
+};
 pub use film_grain::FilmGrain;
 pub use gas_giant::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,

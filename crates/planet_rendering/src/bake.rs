@@ -332,56 +332,67 @@ fn linear_to_srgb8(linear: f32) -> u8 {
     quantize_unit_to_u8(srgb)
 }
 
-/// Bake `PlanetSurface` into the full set of GPU resources consumed by
-/// [`crate::PlanetMaterial`].
+/// CPU-side bake products, ready for main-thread asset insertion.
 ///
-/// Uploads the cubemap layers (albedo, height, roughness) and the feature
-/// storage buffers (craters, cell index, feature ids, radial features).
-/// All handles are bundled into a single [`PlanetTextures`].
-pub fn bake_from_planet_surface(
+/// Produced by [`prepare_planet_bake`] off the main thread (heavy CPU work:
+/// dune-overlay synthesis, cubemap byte copies, SSBO packing), then handed
+/// to [`upload_prepared_bake`] to register the assets and produce final
+/// `Handle<_>`s. Both halves together replace the legacy
+/// [`bake_from_planet_surface`], which is now a thin wrapper.
+pub struct PreparedPlanetBake {
+    pub albedo: Image,
+    pub height: Image,
+    pub roughness: Image,
+    pub active_dune_height: Image,
+    pub active_dune_albedo: Image,
+    pub craters: ShaderStorageBuffer,
+    pub cell_index: ShaderStorageBuffer,
+    pub feature_ids: ShaderStorageBuffer,
+    pub radial_features: ShaderStorageBuffer,
+    pub ice_caps: ShaderStorageBuffer,
+    pub active_dunes: ShaderStorageBuffer,
+}
+
+/// Off-thread half of the bake: synthesise dune overlays, copy cubemap
+/// bytes into `Image` structs, and pack SSBOs into `ShaderStorageBuffer`s.
+/// All work is pure CPU on the caller's thread — no asset-storage access.
+pub fn prepare_planet_bake(
     surface: &PlanetSurface,
     state: &DynamicSurfaceState,
-    images: &mut Assets<Image>,
-    storage_buffers: &mut Assets<ShaderStorageBuffer>,
-) -> PlanetTextures {
+) -> PreparedPlanetBake {
     let body = &surface.static_surface;
     // --- Layer 1: cubemaps -------------------------------------------------
-    let albedo = create_cubemap_image(
+    let albedo = cubemap_image(
         &body.albedo_cubemap,
         body.albedo_cubemap.resolution(),
         TextureFormat::Rgba8UnormSrgb,
         4,
-        images,
     );
-    let height = create_cubemap_image(
+    let height = cubemap_image(
         &body.height_cubemap,
         body.height_cubemap.resolution(),
         TextureFormat::R16Unorm,
         2,
-        images,
     );
-    let roughness = create_cubemap_image(
+    let roughness = cubemap_image(
         &body.roughness_cubemap,
         body.roughness_cubemap.resolution(),
         TextureFormat::R8Unorm,
         1,
-        images,
     );
     let (active_dune_height_cube, active_dune_albedo_cube) =
         bake_active_dune_overlay(surface, state);
-    let active_dune_height = create_cubemap_image(
+    let active_dune_height = cubemap_image(
         &active_dune_height_cube,
         active_dune_height_cube.resolution(),
         TextureFormat::R16Unorm,
         2,
-        images,
     );
-    let active_dune_albedo = create_cubemap_image(
+    let active_dune_albedo = cubemap_image(
         &active_dune_albedo_cube,
         active_dune_albedo_cube.resolution(),
         TextureFormat::Rgba8UnormSrgb,
         4,
-        images,
     );
     // Note: `body.normal_cubemap` is intentionally NOT uploaded to the
     // impostor's bind group. 8-bit object-space encoding crushes shallow
@@ -417,9 +428,9 @@ pub fn bake_from_planet_surface(
         seed_hi,
     );
 
-    let craters_handle = create_storage_buffer_from_slice(&craters, storage_buffers);
-    let cell_index_handle = create_storage_buffer_from_slice(&cell_index, storage_buffers);
-    let feature_ids_handle = create_storage_buffer_from_slice(&feature_ids, storage_buffers);
+    let craters_buf = storage_buffer_from_slice(&craters);
+    let cell_index_buf = storage_buffer_from_slice(&cell_index);
+    let feature_ids_buf = storage_buffer_from_slice(&feature_ids);
     let radial_features: Vec<GpuRadialFeature> = body
         .volcanoes
         .iter()
@@ -441,8 +452,7 @@ pub fn bake_from_planet_surface(
             }
         })
         .collect();
-    let radial_features_handle =
-        create_storage_buffer_from_slice(&radial_features, storage_buffers);
+    let radial_features_buf = storage_buffer_from_slice(&radial_features);
     let ice_caps: Vec<GpuIceCap> = surface
         .dynamic_layers
         .ice_caps
@@ -490,7 +500,7 @@ pub fn bake_from_planet_surface(
             }
         })
         .collect();
-    let ice_caps_handle = create_storage_buffer_from_slice(&ice_caps, storage_buffers);
+    let ice_caps_buf = storage_buffer_from_slice(&ice_caps);
     let active_dunes: Vec<GpuDuneSea> = surface
         .dynamic_layers
         .active_dunes
@@ -528,21 +538,58 @@ pub fn bake_from_planet_surface(
             }
         })
         .collect();
-    let active_dunes_handle = create_storage_buffer_from_slice(&active_dunes, storage_buffers);
+    let active_dunes_buf = storage_buffer_from_slice(&active_dunes);
 
-    PlanetTextures {
+    PreparedPlanetBake {
         albedo,
         height,
         roughness,
         active_dune_height,
         active_dune_albedo,
-        craters: craters_handle,
-        cell_index: cell_index_handle,
-        feature_ids: feature_ids_handle,
-        radial_features: radial_features_handle,
-        ice_caps: ice_caps_handle,
-        active_dunes: active_dunes_handle,
+        craters: craters_buf,
+        cell_index: cell_index_buf,
+        feature_ids: feature_ids_buf,
+        radial_features: radial_features_buf,
+        ice_caps: ice_caps_buf,
+        active_dunes: active_dunes_buf,
     }
+}
+
+/// Main-thread half of the bake: take CPU-prepared assets and insert them
+/// into Bevy's asset storages, returning the [`PlanetTextures`] handle
+/// bundle the material expects. No heavy work — just `Assets::add` calls.
+pub fn upload_prepared_bake(
+    prep: PreparedPlanetBake,
+    images: &mut Assets<Image>,
+    storage_buffers: &mut Assets<ShaderStorageBuffer>,
+) -> PlanetTextures {
+    PlanetTextures {
+        albedo: images.add(prep.albedo),
+        height: images.add(prep.height),
+        roughness: images.add(prep.roughness),
+        active_dune_height: images.add(prep.active_dune_height),
+        active_dune_albedo: images.add(prep.active_dune_albedo),
+        craters: storage_buffers.add(prep.craters),
+        cell_index: storage_buffers.add(prep.cell_index),
+        feature_ids: storage_buffers.add(prep.feature_ids),
+        radial_features: storage_buffers.add(prep.radial_features),
+        ice_caps: storage_buffers.add(prep.ice_caps),
+        active_dunes: storage_buffers.add(prep.active_dunes),
+    }
+}
+
+/// Bake `PlanetSurface` into the full set of GPU resources consumed by
+/// [`crate::PlanetMaterial`]. Equivalent to running [`prepare_planet_bake`]
+/// followed by [`upload_prepared_bake`] on the calling thread, kept for
+/// callers that don't need to split the work across thread boundaries.
+pub fn bake_from_planet_surface(
+    surface: &PlanetSurface,
+    state: &DynamicSurfaceState,
+    images: &mut Assets<Image>,
+    storage_buffers: &mut Assets<ShaderStorageBuffer>,
+) -> PlanetTextures {
+    let prep = prepare_planet_bake(surface, state);
+    upload_prepared_bake(prep, images, storage_buffers)
 }
 
 /// Serialize the 6 faces of a `Cubemap<T>` into a contiguous byte buffer in
@@ -675,7 +722,9 @@ pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
     create_cubemap_image(&blank, 1, TextureFormat::R8Unorm, 1, images)
 }
 
-/// Upload a slice of Pod data as a read-only storage buffer.
+/// Pack a slice of Pod data into a [`ShaderStorageBuffer`] without
+/// touching the asset storage. Pair with [`Assets::add`] on the main
+/// thread.
 ///
 /// The buffer is cast via `bytemuck` — the slice's element type must match
 /// the WGSL layout declared in `shader_types.rs`.
@@ -684,10 +733,9 @@ pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
 /// right stride; a zero-size GPU buffer is not a valid binding and wgpu
 /// will reject it, so we always upload at least one element's worth of
 /// zeroed data.
-fn create_storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(
+fn storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(
     data: &[T],
-    storage_buffers: &mut Assets<ShaderStorageBuffer>,
-) -> Handle<ShaderStorageBuffer> {
+) -> ShaderStorageBuffer {
     let bytes: Vec<u8> = if data.is_empty() {
         // One zeroed element keeps the binding valid; shader loops read 0
         // elements because the accompanying count/range is zero.
@@ -695,6 +743,5 @@ fn create_storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(
     } else {
         bytemuck::cast_slice(data).to_vec()
     };
-    let buffer = ShaderStorageBuffer::new(&bytes, RenderAssetUsages::RENDER_WORLD);
-    storage_buffers.add(buffer)
+    ShaderStorageBuffer::new(&bytes, RenderAssetUsages::RENDER_WORLD)
 }

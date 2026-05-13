@@ -11,8 +11,8 @@ use bevy_terrain::prelude::{TerrainViewComponents, TileTree};
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
     AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
-    PlanetParams, PlanetWaterParams, ReferenceClouds, bake_from_planet_surface,
-    cloud_cover_image_for_body,
+    PlanetParams, PlanetWaterParams, ReferenceClouds, cloud_cover_image_for_body,
+    upload_prepared_bake,
 };
 use thalos_terrain::BodyTerrainMaterial;
 use thalos_terrain_gen::DynamicSurfaceState;
@@ -70,9 +70,15 @@ pub(super) fn finalize_planet_generation(
     mut planetshine: ResMut<PlanetshineTints>,
     ship_camera_q: Query<Entity, With<ShipCamera>>,
 ) {
+    // Cap the per-frame finalize work to a single body. When several
+    // bodies' terrain bakes complete on the same frame (typical on a
+    // fresh launch with the cache empty) processing them all at once
+    // produces a multi-second frame stall as the impostor SSBO uploads
+    // pile up. Spreading them across frames keeps the main loop fluid;
+    // the rest stay queued in their `PendingPlanetGeneration` slot.
     for (entity, mut pending) in &mut pending_q {
         let _span = tracing::info_span!("finalize_planet_generation").entered();
-        let Some(surface) = block_on(poll_once(&mut pending.task)) else {
+        let Some(built) = block_on(poll_once(&mut pending.task)) else {
             continue;
         };
         // Wrap in Arc so the same `PlanetSurface` can back both the impostor
@@ -80,7 +86,7 @@ pub(super) fn finalize_planet_generation(
         // (which holds it across async tile requests). `StaticSurfaceData` is
         // not `Clone`, so this is the cheap path; `dynamic_layers` is cloned
         // into `PlanetDynamicSurface` below since that path still moves.
-        let surface = Arc::new(surface);
+        let surface = Arc::new(built.surface);
         let baked = &surface.static_surface;
         let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
 
@@ -92,7 +98,7 @@ pub(super) fn finalize_planet_generation(
             .by_body
             .insert(pending.body_id, baked.mean_albedo);
         let textures =
-            bake_from_planet_surface(&surface, &dynamic_state, &mut images, &mut storage_buffers);
+            upload_prepared_bake(built.prepared, &mut images, &mut storage_buffers);
 
         let roughness = body_surface_roughness(body);
         // Two atmosphere blocks: scale-dependent fields (`rim_shape.x`,
@@ -269,6 +275,8 @@ pub(super) fn finalize_planet_generation(
                 );
             }
         }
+        // Single-finalize budget per frame — see comment at the loop head.
+        return;
     }
 }
 
