@@ -29,7 +29,9 @@ const LOD_COUNT: u32 = 16;
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins.build().disable::<bevy::transform::TransformPlugin>(),
+            DefaultPlugins
+                .build()
+                .disable::<bevy::transform::TransformPlugin>(),
             ThalosTerrainPlugin,
             TerrainMaterialPlugin::<PlaygroundMaterial>::default(),
             TerrainDebugPlugin,

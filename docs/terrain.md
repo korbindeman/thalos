@@ -39,7 +39,7 @@ pair once ground LOD lands.
 | Feature compiler | `AirlessImpactMoon` and `ColdDesertFormerlyWet` archetypes wired (Mira, Vaelen). v1 has no first-class hydrology, no layered substrate, no climate fields. | Revamped compiler with v2 backlog landed; all four main bodies through it (M2) |
 | Terrestrial bodies | Thalos, Pelagos use `Ocean` flat-water placeholder | `AgingOceanicHomeworld`, `GenericTerrestrial` archetypes (M2) |
 | Renderer (orbital) | Flat impostor reads `StaticSurfaceData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
-| Renderer (surface) | `bevy_terrain` fork (github.com/korbindeman/bevy_terrain, Bevy 0.18 + `TileProvider`) pulled into the workspace; `thalos_terrain` crate with a synthetic provider and playground example (M3 Stage 1). | `PipelineTileProvider` connected to the revamped feature compiler; Mira/Vaelen/Thalos/Pelagos rendering at surface scale (M3 Stage 2-3) |
+| Renderer (surface) | `bevy_terrain` fork (github.com/korbindeman/bevy_terrain, Bevy 0.18 + `TileProvider`) pulled into the workspace; `PipelineTileProvider` reads baked cubemap/R16 height directly for UDLOD tiles. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
 | Big-space hierarchy | Not present | Per-body grids parented to system grid (M1, M3) |
 
 ## Goals
@@ -71,9 +71,8 @@ pair once ground LOD lands.
   rendering. Separate subsystems even if they ultimately render
   alongside terrain. See [atmosphere.md](atmosphere.md).
 - Asset streaming for non-terrain content.
-- Physics interaction with terrain (terrain colliders, rover wheels)
-  beyond providing a sampling contract for the eventual collider
-  generator. Lives in M5.
+- Rover wheels and high-fidelity surface interaction. The M5 first
+  slice has only an aggregate landing collider patch for Thalos.
 
 ---
 
@@ -1018,10 +1017,16 @@ into Thalos and wiring it to the revamped feature compiler.
 #### Stage 2: implement `PipelineTileProvider`
 
 - Implement `PipelineTileProvider` wrapping the synthesis pipeline.
-  Converts cubesphere `TileCoordinate` → body-local direction → calls
-  `thalos_terrain_gen::sample_static_surface()` → encodes the result
-  into the configured tile attachments (height into `R16`, albedo into
-  sRGB-encoded `Rgba8`).
+  Converts cubesphere `TileCoordinate` → body-local direction → reads
+  the matching baked cubemap texel directly from `StaticSurfaceData` →
+  copies the result into the configured tile attachments (height into
+  `R16`, albedo into sRGB-encoded `Rgba8`, roughness into linear `R16`
+  upscaled from the source u8 cubemap by 257).
+- The current height path is deliberately the rendered cubemap/R16
+  source, not `thalos_terrain_gen::sample_static_surface()`. The full
+  sampler includes SSBO crater iteration and statistical detail that
+  UDLOD does not render yet; using it for tiles or colliders would make
+  physics disagree with the visible surface.
 - Border determinism is automatic: directions come from
   `TileCoordinate::pixel_coordinate` → `Coordinate::world_position`,
   the same mapping the renderer samples with.
@@ -1037,6 +1042,58 @@ into Thalos and wiring it to the revamped feature compiler.
   `finalize_planet_generation` once the body's `PlanetSurface` task
   resolves; the synthesized cubemap drives both impostor + ground LOD
   from the same source data.
+
+#### Stage 3: shared Hapke shading
+
+- `BodyTerrainMaterial` binds `AtmosphereBlock` (static, per-body) and
+  `SceneLighting` (per-frame, primary star + eclipse occluders +
+  ambient + planetshine parent). The per-frame writer
+  (`update_body_terrain_atmosphere`) populates `SceneLighting` from
+  the same ephemeris snapshot the impostor's per-frame writer uses,
+  so primary-star direction and flux match across the LOD swap.
+- `body_terrain.wgsl` samples height + albedo + roughness from the
+  bevy_terrain attachment atlases, derives a perturbed normal via
+  `sample_normal` (height finite-difference), and calls
+  `thalos::lighting::shade_hapke_surface` with `external_shadow = 1.0`
+  (no crater shadow / self-shadow on the terrain path today).
+- The impostor (`planet_impostor.wgsl`) calls the same
+  `shade_hapke_surface` with
+  `external_shadow = crater_shadow * self_shadow_term`. Atmosphere
+  transmittance, cloud composite, water BRDF, and limb darkening are
+  applied post-call on the impostor side because the LOD swap happens
+  outside the Kármán line — at that distance the impostor handles
+  aerial perspective; the terrain-LOD path is hidden.
+- **Implementation:**
+  [crates/planet_lighting/src/shaders/lighting.wgsl](../crates/planet_lighting/src/shaders/lighting.wgsl),
+  [crates/terrain/src/body_terrain.wgsl](../crates/terrain/src/body_terrain.wgsl),
+  [crates/game/src/rendering/ground_terrain.rs](../crates/game/src/rendering/ground_terrain.rs).
+- **Exit criterion (met):** terrain ground-LOD pixels go through
+  Hapke + eclipse + planetshine + ambient via the shared helper, with
+  per-fragment roughness sampled from the third tile attachment.
+
+### M5 rendered-height terrain colliders
+
+The first landing slice exposes rendered-height helpers from
+`thalos_terrain`:
+
+```rust
+rendered_height_m(surface: &StaticSurfaceData, dir: Vec3) -> f32
+build_rendered_terrain_patch(surface, body_radius_m, center_dir, basis, config)
+    -> TerrainPatchMesh
+```
+
+These helpers decode the same R16 cubemap interpretation used by
+`PipelineTileProvider`: `real_meters = (texel / 65535 * 2 - 1) *
+height_range`. Local physics builds one tangent-plane patch around the
+active craft from this data and converts the mesh into an Avian static
+trimesh. Current defaults are 4096 m half extent, 129 x 129 vertices,
+and rebuild after the craft moves more than 1024 m laterally from the
+patch center.
+
+This is a fidelity choice: collision matches the visible UDLOD
+surface. When mid/high-frequency terrain detail becomes visible in
+ground LOD, both `PipelineTileProvider` and the collider source must be
+updated together.
 
 #### Stage 3: onboard Mira, Vaelen, Thalos, Pelagos
 

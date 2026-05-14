@@ -16,6 +16,7 @@ mod ground_terrain;
 mod lighting;
 mod materials;
 pub(crate) mod real_space;
+mod scene_depth;
 mod spawn;
 mod trails;
 mod transforms;
@@ -23,7 +24,7 @@ mod types;
 
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
 use generation::{finalize_planet_generation, patch_reference_cloud_covers};
-use ground_terrain::sync_terrain_impostor_swap;
+use ground_terrain::{sync_body_render_lod, update_body_terrain_atmosphere};
 use lighting::{
     sync_film_grain_to_exposure, update_camera_exposure, update_planet_light_dirs,
     update_solid_planet_params, update_sun_light,
@@ -35,6 +36,7 @@ use real_space::{
     attach_player_ship_to_big_space, attach_ship_camera_to_big_space, setup_big_space,
     update_real_space_body_positions,
 };
+use scene_depth::{SceneDepthPlugin, setup_scene_depth_image};
 use spawn::spawn_bodies;
 use trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_planet_orientations, update_ship_position};
@@ -85,7 +87,8 @@ pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(LastClick::default())
+        app.add_plugins(SceneDepthPlugin)
+            .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())
             .insert_resource(FrameBodyStates::default())
@@ -98,7 +101,14 @@ impl Plugin for RenderingPlugin {
                 (
                     configure_gizmos,
                     setup_big_space,
-                    spawn_bodies.after(setup_big_space),
+                    // `spawn_bodies` reads `SceneDepthImage` to seed each
+                    // body's permanent `BodySky` material. The resource is
+                    // inserted by `setup_scene_depth_image` via Commands,
+                    // so we need an explicit `.after` to force a deferred-
+                    // command flush before this runs.
+                    spawn_bodies
+                        .after(setup_big_space)
+                        .after(setup_scene_depth_image),
                     attach_ship_camera_to_big_space
                         .after(setup_big_space)
                         .after(crate::camera::spawn_camera),
@@ -132,14 +142,25 @@ impl Plugin for RenderingPlugin {
                     update_planet_orientations
                         .after(cache_body_states)
                         .after(finalize_planet_generation),
-                    // Ground-LOD ↔ impostor LOD swap. Must run after both
-                    // `update_real_space_body_positions` (to read up-to-date
-                    // body world positions) and `finalize_planet_generation`
-                    // (so new terrains/impostors are present), and ideally
-                    // before the render extract picks up `Visibility`.
-                    sync_terrain_impostor_swap
+                    // Unified per-body render-LOD: one pass toggles
+                    // terrain ↔ impostor (surface LOD) and BodySky ↔ halo
+                    // (atmosphere vantage) from a single camera-to-body
+                    // distance. Must run after `update_real_space_body_positions`
+                    // (for current body world positions) and
+                    // `finalize_planet_generation` (so new render entities
+                    // are present), and ideally before the render extract
+                    // picks up `Visibility`.
+                    sync_body_render_lod
                         .after(update_real_space_body_positions)
                         .after(finalize_planet_generation),
+                    // `update_body_terrain_atmosphere` moved to PostUpdate
+                    // (see below) so it reads body GlobalTransforms after
+                    // big_space's `TransformSystems::Propagate` finishes
+                    // recentering them. Running in Update on a snap
+                    // teleport left the material uniform's `planet_center`
+                    // a frame behind the view uniform's camera position;
+                    // the unified atmosphere shader then saw the camera as
+                    // "outside the shell" and discarded every pixel.
                     update_gas_giant_params
                         .after(cache_body_states)
                         .after(update_camera_exposure),
@@ -168,6 +189,11 @@ impl Plugin for RenderingPlugin {
                     update_cloud_bands.after(finalize_planet_generation),
                 )
                     .in_set(SimStage::Sync),
+            )
+            .add_systems(
+                bevy::app::PostUpdate,
+                update_body_terrain_atmosphere
+                    .after(bevy::transform::TransformSystems::Propagate),
             );
     }
 }

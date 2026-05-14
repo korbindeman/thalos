@@ -48,7 +48,11 @@
 
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::get_world_from_local
-#import thalos::lighting::{SceneLighting, StarLight, PlanetShineSample, eclipse_factor, planetshine_sample}
+#import thalos::lighting::{
+    SceneLighting, StarLight, PlanetShineSample,
+    eclipse_factor, planetshine_sample,
+    shade_hapke_surface, SCENE_FLUX_SCALE,
+}
 #import thalos::noise::fbm3
 #import bevy_erosion_filter::erosion::{
     ErosionFilterParams,
@@ -73,13 +77,6 @@ const TAU: f32 = 6.28318530717958647692;
 const CELL_TABLE_SIZE: u32 = 8192u;
 const CELL_TABLE_MASK: u32 = 8191u;
 
-// Scene-flux normalisation. Hapke's BRDF returns a radiance factor; the
-// prior pipeline used a Lambert `/PI` normalisation that we fold into
-// this single scalar so existing flux values don't need re-tuning. The
-// atmosphere raymarch consumes the same scaled flux so haze radiance
-// stays in unit consistency with the lit surface — without the scale,
-// in-scatter reads ~2× too bright relative to the ground.
-const SCENE_FLUX_SCALE: f32 = 0.5;
 
 // Cell size for the SSBO spatial index, in unit-sphere coordinates.
 // ~0.06 on the unit sphere ≈ 52 km per cell on a 869 km Mira — chosen so
@@ -1448,62 +1445,6 @@ fn self_shadow(sample_dir: vec3<f32>, light_dir_local: vec3<f32>) -> f32 {
     return shadow;
 }
 
-// ── Hapke BRDF for airless regolith ────────────────────────────────────────
-//
-// Hapke (1981, 2002). Three physical ingredients:
-//   - Shadow-hiding opposition effect B(g)
-//   - Single-particle phase function P(g) (Henyey-Greenstein, back-scatter)
-//   - Multiple-scattering H-functions via Chandrasekhar approximation
-//
-// Returns a reflectance factor that multiplies incoming flux × albedo to
-// get reflected radiance. Parameters are tuned for lunar-type regolith.
-//
-// `roughness` (0..1) modulates the opposition surge width — smoother
-// surfaces have a sharper, narrower surge (h smaller); rougher surfaces
-// have a broader, more diffuse surge (h larger). Physical interpretation:
-// shadow-hiding requires a coherent opposition direction; macroscopic
-// roughness spreads that out angularly.
-//
-// Inputs are all in the same space; handedness doesn't matter.
-fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32, roughness: f32) -> f32 {
-    let mu0 = max(n_dot_l, 0.0);
-    let mu  = max(n_dot_v, 0.0);
-    if mu0 <= 0.0 || mu <= 0.0 { return 0.0; }
-
-    // Single-scattering albedo (0..1). Lunar highlands ~0.4, mare ~0.2.
-    // Picked to match the prior visual brightness when combined with the
-    // 2π global scale below.
-    let w: f32 = 0.45;
-
-    let cp = clamp(cos_phase, -1.0, 1.0);
-    let g  = acos(cp);
-
-    // Shadow-hiding opposition effect: B(g) = B0 / (1 + tan(g/2)/h).
-    // h tuned to lunar regolith (~3.4°) at roughness 0.85; widened or
-    // narrowed by surface roughness so e.g. a smooth icy patch keeps a
-    // sharper opposition spike than a rubble field.
-    let B0: f32 = 1.0;
-    let h = mix(0.04, 0.10, clamp(roughness, 0.0, 1.0));
-    let B_g = B0 / (1.0 + tan(g * 0.5) / h);
-
-    // Single-particle phase function: Henyey-Greenstein with asymmetry
-    // g_hg = -0.3 (back-scatter, typical of rough regolith grains).
-    let g_hg: f32 = -0.3;
-    let denom = 1.0 + g_hg * g_hg - 2.0 * g_hg * cp;
-    let P_g = (1.0 - g_hg * g_hg) / pow(max(denom, 1e-6), 1.5);
-
-    // Chandrasekhar H-function (Hapke 2002 two-stream approximation).
-    let gamma = sqrt(max(1.0 - w, 0.0));
-    let H_mu0 = (1.0 + 2.0 * mu0) / (1.0 + 2.0 * mu0 * gamma);
-    let H_mu  = (1.0 + 2.0 * mu) / (1.0 + 2.0 * mu * gamma);
-
-    // Full radiance factor. The `(1 / (4π))` normalization is folded into
-    // a global scale at the call site so brightness matches the prior
-    // Lambert pipeline without re-tuning every planet's `light_intensity`.
-    let r = w * (mu0 / (mu0 + mu)) * ((1.0 + B_g) * P_g + H_mu0 * H_mu - 1.0);
-    return max(r, 0.0);
-}
-
 // ── Water BRDF (Cook-Torrance) ─────────────────────────────────────────────
 //
 // Replaces the Hapke path where the sampled height sits below sea level.
@@ -1919,70 +1860,52 @@ fn fragment(in: VertexOutput) -> FragOutput {
 
     // ── Lighting: Hapke BRDF + planetshine ────────────────────────────────
     //
-    // Replaces the previous Lambert + ad-hoc opposition surge. Hapke already
-    // contains its own shadow-hiding surge term. Headroom ramp still caps
-    // the perturbed shading normal against the geometric normal so crater
-    // rims can't out-light body curvature near the terminator.
-    let headroom = mix(0.05, 0.30, smoothstep(0.15, 0.40, geo_n_dot_l));
+    // Direct surface shading routes through the shared
+    // `shade_hapke_surface` helper in `thalos::lighting`. The impostor
+    // contributes its impostor-specific shadow terms (SSBO crater shadow,
+    // cubemap self-shadow); eclipse, planetshine, ambient, and the
+    // Hapke + headroom math all live in the shared helper so the
+    // bevy_terrain ground-LOD path shades identically. Atmosphere /
+    // clouds / water / limb darkening still happen on the impostor side
+    // (they have no terrain-LOD equivalent).
     let view_dir = normalize(cam_pos - hit);
+    let hapke_scale: f32 = SCENE_FLUX_SCALE;
+    // `n_dot_v` is consumed by the limb-darkening step below. Computed
+    // here (not inside the shared helper) because limb darkening is an
+    // impostor-side post-effect.
     let n_dot_v = max(dot(shading_normal, view_dir), 0.0);
 
-    // Primary: direct sunlight.
-    let sun_n_dot_l_raw = dot(shading_normal, sun_dir_ws);
-    let sun_n_dot_l = min(sun_n_dot_l_raw, geo_n_dot_l + headroom);
-    let cos_phase_sun = dot(view_dir, sun_dir_ws);
-    var sun_r = hapke_brdf(max(sun_n_dot_l, 0.0), n_dot_v, cos_phase_sun, surface_roughness);
-
-    // Apply all shadow terms to the sun contribution only. Planetshine uses
-    // a different incident direction so these don't apply to it.
-    sun_r = sun_r * crater_shadow;
-    // Self-shadow is a 20-tap cubemap ray march. The cast shadows it
-    // captures are long near the terminator and short under high sun,
-    // so fade the contribution to "no shadow" as the sun climbs above
-    // ~50° from local zenith — at that elevation cubemap features
-    // shorter than ~feature_height project a sub-pixel shadow that
-    // doesn't survive the lit-side BRDF anyway. Saves 20 cubemap reads
-    // per fragment on the bright cap of the disk.
+    // Self-shadow ramp matches the previous code: only paid on the lit
+    // side, faded out as the sun climbs above ~50° from local zenith.
+    var self_shadow_term: f32 = 1.0;
     if geo_n_dot_l > 0.0 {
         let shadow_strength = 1.0 - smoothstep(0.5, 0.7, geo_n_dot_l);
         if shadow_strength > 0.001 {
             let sh = self_shadow(sample_dir, light_dir_local);
-            sun_r = sun_r * mix(1.0, sh, shadow_strength);
+            self_shadow_term = mix(1.0, sh, shadow_strength);
         }
     }
-    sun_r = sun_r * eclipse_factor(params.scene, hit, sun_dir_ws);
+    let external_shadow = crater_shadow * self_shadow_term;
 
-    // Secondary: planetshine from the orbital parent.
-    //
-    // Physical model: the parent reflects sunlight back at the moon as a
-    // finite-angular-radius disk. `planetshine_sample_uniform` returns the
-    // direction and arriving flux; we feed the same Hapke BRDF with that
-    // direction so the moon's night side picks up a photographically
-    // faithful dim glow when the parent is "full" overhead.
-    var shine_rgb = vec3<f32>(0.0);
-    let shine = planetshine_sample(params.scene, hit, sun_dir_ws, sun_flux);
-    if shine.enabled {
-        let shine_n_dot_l = dot(shading_normal, shine.dir);
-        let shine_cos_phase = dot(view_dir, shine.dir);
-        let shine_r = hapke_brdf(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase, surface_roughness);
-        shine_rgb = shine.tint * shine_r * shine.flux;
-    }
+    var lit = shade_hapke_surface(
+        albedo,
+        surface_roughness,
+        shading_normal,
+        normal,
+        view_dir,
+        hit,
+        sun_dir_ws,
+        sun_flux,
+        params.scene,
+        external_shadow,
+    );
 
-    // Combine. Hapke's r is a radiance factor; the prior pipeline used a
-    // Lambert `/PI` normalization we now fold into a global scale so
-    // existing flux values don't need re-tuning.
-    let hapke_scale: f32 = SCENE_FLUX_SCALE;
-    var sun_rgb = vec3<f32>(sun_r * sun_flux * hapke_scale);
-    var ambient_term = vec3<f32>(params.scene.ambient_intensity);
     if params.fullbright >= 0.5 {
         // Collapse direct-light contribution so `lit = albedo` everywhere.
-        // Atmosphere/Rayleigh/clouds still shade downstream so surface detail
-        // is readable without losing atmosphere authoring cues.
-        sun_rgb = vec3<f32>(1.0);
-        shine_rgb = vec3<f32>(0.0);
-        ambient_term = vec3<f32>(0.0);
+        // Atmosphere/Rayleigh/clouds still shade downstream so surface
+        // detail is readable without losing atmosphere authoring cues.
+        lit = albedo;
     }
-    var lit = albedo * (sun_rgb + shine_rgb + ambient_term);
 
     // ── Water shading branch ────────────────────────────────────────────
     //

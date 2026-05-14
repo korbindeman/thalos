@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use glam::{DMat3, DQuat, DVec3};
 
+use crate::body_fixed::evaluate_body_fixed_pose;
 use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::canonical::{
     AuthorityMode, CraftAuthorityBook, CraftState, Epoch, MassState, ResourceState,
@@ -193,6 +194,18 @@ impl WarpController {
         self.set_level_capped(index);
     }
 
+    /// Snap directly to 1x without the normal pause/resume transition.
+    ///
+    /// This is intentionally separate from [`Self::reset`], whose smooth
+    /// upward transition is better for normal player input. Systems that must
+    /// immediately hand live dynamics back to the player, such as debug launch
+    /// clamps, use this so throttle gating sees exactly 1x on the next frame.
+    pub fn reset_immediate(&mut self) {
+        self.resume_index = None;
+        let index = self.levels.iter().position(|&w| w == 1.0).unwrap_or(0);
+        self.set_level_immediate(index);
+    }
+
     pub fn toggle_pause(&mut self) {
         if self.level_index == 0 {
             let target = self
@@ -235,6 +248,18 @@ impl WarpController {
         let previous_index = self.level_index;
         self.level_index = target_index;
 
+        // Snap any transition that involves the paused (0) level. While
+        // canonical authority is `LocalRigidBody`, `Simulation::step` is a
+        // no-op for translation — the lerp would freeze the trajectory for
+        // its duration and "lose" ~1.2 km of LEO motion per pause cycle as
+        // sim-time advanced underneath. The smooth lerp is reserved for
+        // transitions between non-zero levels (1x ↔ 10x, etc.) where
+        // canonical advances under `OnRails`.
+        if previous_index == 0 || target_index == 0 {
+            self.snap_to_target();
+            return;
+        }
+
         if previous_index == target_index {
             return;
         }
@@ -255,6 +280,13 @@ impl WarpController {
         };
         let previous_index = self.level_index;
         self.level_index = target_index;
+
+        // Same reason as `set_level_smooth`: never lerp through the paused
+        // level, the translation would be frozen for the duration.
+        if previous_index == 0 || target_index == 0 {
+            self.snap_to_target();
+            return;
+        }
 
         if target_speed <= self.speed {
             self.snap_to_target();
@@ -348,6 +380,18 @@ impl PredictionState {
         self.dirty = false;
         self.version = self.version.wrapping_add(1);
     }
+
+    /// Drop the cached branches and mark dirty so the next ballistic frame
+    /// rebuilds. Bumping the version invalidates any downstream caches keyed
+    /// off [`Self::version`].
+    fn clear(&mut self) {
+        if self.branches.is_some() {
+            self.version = self.version.wrapping_add(1);
+        }
+        self.branches = None;
+        self.last_recompute_time = None;
+        self.dirty = true;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -370,13 +414,15 @@ pub struct Simulation {
     target_body: Option<BodyId>,
 
     /// Lifetime cumulative magnitude of Δv applied through
-    /// [`Self::apply_live_thrust`], in m/s. Sums `|throttle · F/m · dt|`
-    /// over every frame the engine fires. Read by the game-side
-    /// autopilot (see `crates/game/src/autopilot.rs`) to detect when a
-    /// finite burn has delivered its planned Δv — magnitude rather than
-    /// projection because magnitude tracks the same scalar that fuel
-    /// exhaustion clamps, so a propellant-starved burn stops
-    /// accumulating without special-casing.
+    /// [`Self::apply_external_mass_flow`], in m/s. Sums
+    /// `|throttle · F/m · dt|` over every frame the engine fires (Avian
+    /// owns the thrust impulse itself; the simulation only tracks the
+    /// scalar). Read by the game-side autopilot (see
+    /// `crates/game/src/autopilot.rs`) to detect when a finite burn has
+    /// delivered its planned Δv — magnitude rather than projection
+    /// because magnitude tracks the same scalar that fuel exhaustion
+    /// clamps, so a propellant-starved burn stops accumulating without
+    /// special-casing.
     delivered_dv: f64,
 
     ship_params: ShipParameters,
@@ -448,35 +494,47 @@ impl Simulation {
 
     /// Advance the simulation by `real_dt` seconds of wall-clock time.
     ///
-    /// Two parts in order: (1) at 1× warp only, advance attitude and
-    /// apply any live engine thrust as a per-frame impulse on velocity;
-    /// (2) propagate the ship's coast across the warp-scaled time
-    /// interval, breaking on SOI transitions until the cap is reached
-    /// or the target time is hit. Scheduled burn execution is owned by
-    /// the game crate's autopilot layer — it points the ship, drives the
-    /// throttle, and lets producer-specific adapters retire completed
-    /// directives — so this function never reads the maneuver list or
-    /// schedules burns of its own.
+    /// Thrust and attitude no longer integrate here — they are owned by
+    /// the Avian rigid body that the game crate spins up for every player
+    /// craft, at every regime (deep space, orbit, surface). `step` keeps
+    /// canonical state coherent under warp: `BodyFixed` evaluates pose at
+    /// `sim_time`; `LocalRigidBody` is a no-op for translation (Avian
+    /// reads back into canonical separately); `OnRails` /
+    /// `WarpIntegrated` / `Docked` propagate the ship's coast across the
+    /// warp-scaled time interval, breaking on SOI transitions until the
+    /// cap is reached or the target time is hit.
     pub fn step(&mut self, real_dt: f64) {
         let _span = tracing::info_span!("Simulation::step").entered();
         let real_delta = real_dt.min(self.max_real_delta);
         self.warp.update(real_delta);
 
-        // Attitude advances on real-time dt and only at 1× warp; under
-        // any other warp (including pause) we zero ω so the ship doesn't
-        // smear orientation across the warp gap.
-        self.integrate_attitude(real_delta);
-
-        // Live engine thrust. Treated as a single per-frame impulse on
-        // velocity — at 1× warp the 16 ms frame window is small enough
-        // that impulse-then-coast is numerically equivalent to RK4 with
-        // body-frame thrust to well below noise. The autopilot keeps
-        // warp at 1× while a burn is in flight, so this is the only
-        // thrust path.
-        self.apply_live_thrust(real_delta);
-
         let warp_speed = self.warp.speed();
         let sim_delta = real_delta * warp_speed;
+
+        match self.craft.authority {
+            AuthorityMode::BodyFixed { body, pose } => {
+                if sim_delta > 0.0 {
+                    self.sim_time += sim_delta;
+                }
+                self.craft.epoch = Epoch(self.sim_time);
+                let body_state = self.ephemeris.state(body, Epoch(self.sim_time));
+                let (translation, attitude) = evaluate_body_fixed_pose(&body_state, pose);
+                self.craft.translation = translation;
+                self.craft.attitude = attitude;
+                return;
+            }
+            AuthorityMode::LocalRigidBody { .. } => {
+                if sim_delta > 0.0 {
+                    self.sim_time += sim_delta;
+                }
+                self.craft.epoch = Epoch(self.sim_time);
+                return;
+            }
+            AuthorityMode::OnRails { .. }
+            | AuthorityMode::WarpIntegrated { .. }
+            | AuthorityMode::Docked { .. } => {}
+        }
+
         if sim_delta <= 0.0 {
             return;
         }
@@ -530,66 +588,6 @@ impl Simulation {
                     break;
                 }
             }
-        }
-    }
-
-    // -- Attitude -----------------------------------------------------------
-
-    /// Integrate ship orientation forward by `real_dt` seconds.
-    ///
-    /// Skips entirely (and zeros ω) at any warp other than 1×, including
-    /// pause. Player rotation has no meaning while time is warped, and
-    /// allowing ω to persist would let a ship spin up at warp entry and
-    /// keep tumbling out of warp.
-    ///
-    /// Uses Euler integration with quaternion renormalization. The
-    /// gyroscopic term `ω × Iω` is omitted: at the angular rates a
-    /// player-controlled ship reaches it is negligible, and ignoring it
-    /// keeps the integrator a single line. Add Euler's equations if a
-    /// future scenario demands tumbling-asymmetric-body fidelity.
-    fn integrate_attitude(&mut self, real_dt: f64) {
-        if (self.warp.speed() - 1.0).abs() > f64::EPSILON {
-            self.craft.attitude.angular_velocity = DVec3::ZERO;
-            return;
-        }
-        if real_dt <= 0.0 {
-            return;
-        }
-
-        let dt = real_dt;
-        let i = self.ship_params.moment_of_inertia;
-        let tau_max = self.ship_params.max_torque;
-
-        let cmd = self
-            .control
-            .torque_command
-            .clamp(DVec3::splat(-1.0), DVec3::splat(1.0));
-        let player_torque = cmd * tau_max;
-
-        let no_input = cmd.length_squared() < 1e-6;
-        let torque = if self.control.sas_enabled && no_input {
-            // Deadbeat rate damping: choose τ to zero ω in one step,
-            // then clamp to per-axis max. Stable: when the unclamped
-            // value exceeds the cap, the impulse `τ·dt = −Iω` stays
-            // bounded, so ω still trends to zero in finite time.
-            (-i * self.craft.attitude.angular_velocity / dt).clamp(-tau_max, tau_max)
-        } else {
-            player_torque
-        };
-
-        // Per-axis 1/I, guarding the degenerate (no-mass) axis so that
-        // ShipParameters::default() doesn't NaN the integrator.
-        let inv_i = DVec3::new(
-            if i.x > 0.0 { 1.0 / i.x } else { 0.0 },
-            if i.y > 0.0 { 1.0 / i.y } else { 0.0 },
-            if i.z > 0.0 { 1.0 / i.z } else { 0.0 },
-        );
-        self.craft.attitude.angular_velocity += torque * inv_i * dt;
-
-        let omega = self.craft.attitude.angular_velocity;
-        if omega.length_squared() > 0.0 {
-            let delta = DQuat::from_scaled_axis(omega * dt);
-            self.craft.attitude.orientation = (self.craft.attitude.orientation * delta).normalize();
         }
     }
 
@@ -661,61 +659,28 @@ impl Simulation {
         &self.control
     }
 
-    /// Apply engine thrust as a single impulse on velocity. Manual
-    /// throttle and the game-side autopilot both feed in through
-    /// the same path — both end up writing `control.throttle` and
-    /// reading the ship's current attitude.
-    ///
-    /// Skipped at any warp other than 1× (mirrors attitude integration).
-    /// The autopilot is responsible for ensuring 1× warp before opening
-    /// the throttle on a scheduled burn.
-    ///
-    /// **Body-frame nose convention**: `+Y_body` points out the nose,
-    /// shared with the autopilot in `crates/game/src/navigation.rs`.
-    /// Flipping this convention requires updating both call sites.
-    ///
-    /// Accumulates `|throttle · F/m · dt|` into [`Self::delivered_dv`]
-    /// every frame the engine fires, so the game-side autopilot can
-    /// detect when a planned-Δv has been delivered and close the
-    /// throttle. Magnitude (not projection onto a planned axis) means
-    /// the same scalar drops to zero when the dry-mass clamp cuts
-    /// thrust — fuel exhaustion stops the accumulator without any
-    /// special case.
-    ///
-    /// Does *not* mark the prediction dirty. The game-side throttle
-    /// gate owns refresh policy from physical throttle state, keeping
-    /// physics independent of the system that commanded the ship.
-    fn apply_live_thrust(&mut self, real_dt: f64) {
-        if (self.warp.speed() - 1.0).abs() > f64::EPSILON {
+    /// Drain propellant mass and accumulate delivered Δv for an external
+    /// dynamics authority — i.e., the Avian rigid body that owns thrust in
+    /// every regime. The game-side fuel reconciliation still pushes tank
+    /// truth back into `Simulation`, so this only keeps the canonical craft
+    /// mass coherent between those updates; Δv is also tracked here so the
+    /// autopilot's burn-completion check (anchor + delta against
+    /// [`Self::delivered_dv`]) keeps working without re-running thrust on
+    /// the canonical side.
+    pub fn apply_external_mass_flow(&mut self, throttle: f64, real_dt: f64) {
+        if real_dt <= 0.0 || throttle <= 0.0 {
             return;
         }
-        if real_dt <= 0.0 || self.control.throttle <= 0.0 {
-            return;
+        let throttle = throttle.clamp(0.0, 1.0);
+        if self.ship_params.mass_flow_kg_per_s > 0.0 {
+            let drained = self.ship_params.mass_flow_kg_per_s * throttle * real_dt;
+            self.craft.mass.wet_mass_kg =
+                (self.craft.mass.wet_mass_kg - drained).max(self.ship_params.dry_mass_kg);
         }
-        if self.ship_params.thrust_n <= 0.0 {
-            return;
+        if self.ship_params.thrust_n > 0.0 && self.craft.mass.wet_mass_kg > 0.0 {
+            let accel_mag = self.ship_params.thrust_n / self.craft.mass.wet_mass_kg;
+            self.delivered_dv += throttle * accel_mag * real_dt;
         }
-        // Out of fuel — engine cuts off, no thrust applied this frame.
-        // Mass is capped at `dry_mass_kg` so this is the physical
-        // "tanks empty" condition. The same frame's `fuel.rs` system
-        // gates throttle to 0 in this case anyway, but checking here
-        // keeps the simulation self-consistent.
-        if self.craft.mass.wet_mass_kg <= self.ship_params.dry_mass_kg {
-            return;
-        }
-        let throttle = self.control.throttle.clamp(0.0, 1.0);
-        let nose_world = self.craft.attitude.orientation * DVec3::Y;
-        let accel_mag = self.ship_params.thrust_n / self.craft.mass.wet_mass_kg;
-        let dv_mag = throttle * accel_mag * real_dt;
-        self.craft.translation.velocity += dv_mag * nose_world;
-        self.delivered_dv += dv_mag;
-        // Drain mass at the gated throttle the bridge has already applied
-        // (which matches what `crates/game/src/fuel.rs` is draining from
-        // the tanks this same frame, so sim mass and tank mass stay in
-        // sync between fuel.rs's per-frame mass-push reconciliation).
-        let drained = self.ship_params.mass_flow_kg_per_s * throttle * real_dt;
-        self.craft.mass.wet_mass_kg =
-            (self.craft.mass.wet_mass_kg - drained).max(self.ship_params.dry_mass_kg);
     }
 
     // -- Accessors ----------------------------------------------------------
@@ -748,6 +713,19 @@ impl Simulation {
     /// predicted trajectories stay numerically aligned.
     pub fn set_ship_state(&mut self, state: StateVector) {
         self.craft.translation = TranslationalState::from(state);
+        self.craft.epoch = Epoch(self.sim_time);
+        self.prediction_state.mark_dirty();
+    }
+
+    /// Install a state sampled from local physics. This is the canonical
+    /// writeback boundary for `AuthorityMode::LocalRigidBody`.
+    pub fn install_local_rigid_body_state(
+        &mut self,
+        translation: TranslationalState,
+        attitude: AttitudeState,
+    ) {
+        self.craft.translation = translation;
+        self.craft.attitude = attitude;
         self.craft.epoch = Epoch(self.sim_time);
         self.prediction_state.mark_dirty();
     }
@@ -801,10 +779,10 @@ impl Simulation {
         true
     }
 
-    /// Lifetime cumulative magnitude of Δv applied through
-    /// [`Self::apply_live_thrust`], in m/s. The game-side autopilot reads this
-    /// at burn-start (anchor) and each subsequent frame to compute
-    /// "Δv delivered since burn start = current − anchor".
+    /// Lifetime cumulative magnitude of Δv accumulated through
+    /// [`Self::apply_external_mass_flow`], in m/s. The game-side autopilot
+    /// reads this at burn-start (anchor) and each subsequent frame to
+    /// compute "Δv delivered since burn start = current − anchor".
     pub fn delivered_dv(&self) -> f64 {
         self.delivered_dv
     }
@@ -849,6 +827,15 @@ impl Simulation {
         };
         let branches = propagate_branch_stack(&req, None);
         self.prediction_state.install(branches, req.sim_time);
+    }
+
+    /// Drop the cached trajectory prediction and mark it dirty. Used when
+    /// the ship is in a non-ballistic regime (landed, or in surface
+    /// contact under Avian) — feeding a contact-affected velocity into
+    /// Keplerian propagation produces a wobbling line that doesn't
+    /// reflect what the ship will actually do, so the gate hides it.
+    pub fn clear_prediction(&mut self) {
+        self.prediction_state.clear();
     }
 
     pub fn prediction_needs_refresh(&self) -> bool {
@@ -997,6 +984,31 @@ mod tests {
     }
 
     #[test]
+    fn reset_immediate_snaps_from_pause_to_one_x() {
+        let mut w = ctrl();
+        assert_eq!(w.speed(), 0.0);
+        w.reset_immediate();
+        assert_eq!(w.target_speed(), 1.0);
+        assert_eq!(w.speed(), 1.0);
+    }
+
+    #[test]
+    fn transitions_through_paused_level_snap() {
+        // Lerping through the paused (0×) level would freeze translation
+        // for the lerp duration while sim-time advances under the warp,
+        // dropping orbital motion on the floor. 0↔non-zero must snap.
+        let mut w = ctrl();
+        w.set_speed(1.0);
+        assert_eq!(w.speed(), 1.0); // 0 → 1 snaps, even though target>speed
+
+        w.set_speed(0.0);
+        assert_eq!(w.speed(), 0.0); // 1 → 0 snaps too
+
+        w.increase();
+        assert_eq!(w.speed(), 1.0); // increase() out of pause snaps
+    }
+
+    #[test]
     fn warp_increase_lerps_effective_speed_between_levels() {
         let mut w = ctrl();
         w.increase();
@@ -1059,6 +1071,30 @@ mod tests {
             AuthorityMode::WarpIntegrated { integrator: 1 }
         );
         assert_eq!(sim.authority_log().len(), 1);
+    }
+
+    #[test]
+    fn authority_log_records_local_landing_handoff_path() {
+        let mut sim = minimal_simulation();
+
+        sim.transition_authority(AuthorityMode::LocalRigidBody {
+            bubble: 7,
+            root_entity: crate::canonical::EntityRef(11),
+        });
+        sim.transition_authority(AuthorityMode::BodyFixed {
+            body: 0,
+            pose: crate::canonical::BodyFixedPose {
+                position_body_m: DVec3::Y * 1000.0,
+                orientation_body: DQuat::IDENTITY,
+            },
+        });
+
+        let log = sim.authority_log();
+        assert_eq!(log.len(), 2);
+        assert!(matches!(log[0].from, AuthorityMode::OnRails { .. }));
+        assert!(matches!(log[0].to, AuthorityMode::LocalRigidBody { .. }));
+        assert!(matches!(log[1].from, AuthorityMode::LocalRigidBody { .. }));
+        assert!(matches!(log[1].to, AuthorityMode::BodyFixed { .. }));
     }
 
     #[test]

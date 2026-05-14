@@ -42,9 +42,13 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // accuracy.
     let luma = clamp(dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
 
-    // Weight: max at luma=0, drops toward highlights. shadow_bias pins a
-    // floor of grain in mid/high tones so the effect still reads there.
-    let shadow_weight = mix(settings.shadow_bias, 1.0, 1.0 - luma);
+    // Weight: max at luma=0, drops toward highlights. Quadratic falloff in
+    // darkness so mid-tones (lit atmosphere, daylit ground) read clean while
+    // pure shadows keep full grain — closer to digital-camera SNR behavior
+    // than a linear mix. shadow_bias pins a floor of grain in highlights so
+    // the effect still reads there.
+    let darkness = 1.0 - luma;
+    let shadow_weight = mix(settings.shadow_bias, 1.0, darkness * darkness);
 
     // Gate grain against true-black. Additive grain on a zero pixel can
     // only push upward (can't go negative and be clamped), which lifts

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 thalos_terrain_gen = { path = "../terrain_gen" }
+thalos_planet_lighting = { path = "../planet_lighting" }
 bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 bevy_terrain = { workspace = true }
 big_space = { version = "0.12", features = ["i64"] }

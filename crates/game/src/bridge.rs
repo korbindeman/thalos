@@ -5,16 +5,24 @@
 //!
 //! 1. Calls [`Simulation::step`] each frame to advance the ship.
 //! 2. Recomputes trajectory prediction synchronously on the main thread
-//!    whenever the maneuver plan is dirty or the cached result is stale.
-//!    A single `propagate_flight_plan` pass terminates early (stable orbit,
-//!    collision, cone fade), keeping the typical pass well under one frame.
-//!    Running in-line means an edit on frame N produces the fresh trajectory
-//!    on frame N — no worker-thread lag.
+//!    whenever the maneuver plan is dirty or the cached result is stale, and
+//!    *only* while the ship is on an actual ballistic trajectory. When the
+//!    ship is landed (`BodyFixed`) or in `LocalRigidBody` with active
+//!    terrain contact, the live velocity carries Avian's contact reactions —
+//!    feeding that into Keplerian propagation would produce a wobbling
+//!    curve the ship will never follow, so the prediction is cleared and
+//!    the renderer shows nothing. A single `propagate_flight_plan` pass
+//!    terminates early (stable orbit, terrain impact, SOI transition),
+//!    keeping the typical pass well under one frame. Running in-line means
+//!    an edit on frame N produces the fresh trajectory on frame N — no
+//!    worker-thread lag.
 //! 3. Maps keyboard input to warp controls.
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
+use thalos_local_physics::{ActiveLocalBubble, avian::ContactGraph, craft_contacts_terrain};
+use thalos_physics::canonical::{AuthorityMode, Epoch};
 use thalos_physics::maneuver::ManeuverNode;
 
 use crate::SimStage;
@@ -67,10 +75,71 @@ pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
             post_pos, post_t, warp,
         );
     }
+
+    // Scenario-C diagnostic: the propagator's terrain-aware collision check
+    // requires `prev_alt > 0` at every step boundary, so a state that's
+    // already at or below mean radius — typically warp-out from a deep
+    // valley, or Avian readback drift letting the ship sink a few cm into
+    // the collider — will silently run unbounded Kepler instead of
+    // terminating at impact. The propagator never reads back into terrain,
+    // so the failure is "trajectory flies through planet" rather than
+    // anything destructive; log it so we know if it ever happens in
+    // practice. 1 m tolerance keeps Avian's normal contact noise quiet.
+    let soi_body = sim.simulation.dominant_body();
+    let body_def = &sim.simulation.bodies()[soi_body];
+    if body_def.radius_m > 0.0 {
+        let body_state = sim.simulation.ephemeris().state(soi_body, Epoch(post_t));
+        let altitude_above_mean = (post_pos - body_state.position).length() - body_def.radius_m;
+        if altitude_above_mean < -1.0 && post_pos.is_finite() {
+            warn!(
+                "ship sits {:.1}m below mean radius of {} (warp={:.0}x); terrain-aware coast \
+                 will not detect collision from this state — investigate Avian drift or \
+                 warp-from-valley transitions",
+                -altitude_above_mean, body_def.name, warp,
+            );
+        }
+    }
 }
 
-fn update_prediction(mut sim: ResMut<SimulationState>) {
+/// Whether the ship is currently on a ballistic trajectory — coasting under
+/// gravity (or thrusting) without any external authority overriding its
+/// motion. `BodyFixed` is landed and `LocalRigidBody` with active terrain
+/// contact carries Avian's contact reactions in its velocity; in both cases
+/// Keplerian propagation produces a curve the ship will never follow, so
+/// we hide it.
+fn ship_is_ballistic(
+    sim: &SimulationState,
+    active: &ActiveLocalBubble,
+    contact_graph: &ContactGraph,
+) -> bool {
+    match sim.simulation.authority() {
+        AuthorityMode::BodyFixed { .. } => false,
+        AuthorityMode::LocalRigidBody { .. } => {
+            let Some(bubble) = active.bubble.as_ref() else {
+                return true;
+            };
+            let Some(terrain_entity) = bubble.terrain_entity else {
+                return true;
+            };
+            !craft_contacts_terrain(contact_graph, bubble.craft_entity, terrain_entity)
+        }
+        AuthorityMode::OnRails { .. }
+        | AuthorityMode::WarpIntegrated { .. }
+        | AuthorityMode::Docked { .. } => true,
+    }
+}
+
+fn update_prediction(
+    mut sim: ResMut<SimulationState>,
+    active: Res<ActiveLocalBubble>,
+    contact_graph: Res<ContactGraph>,
+) {
     let _span = tracing::info_span!("update_prediction").entered();
+
+    if !ship_is_ballistic(&sim, &active, &contact_graph) {
+        sim.simulation.clear_prediction();
+        return;
+    }
 
     if !sim.simulation.prediction_needs_refresh() {
         return;

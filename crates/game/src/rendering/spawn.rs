@@ -5,26 +5,33 @@
 //! later swaps in the impostor billboard once the background terrain
 //! task finishes.
 
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::image::Image;
 use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::AsyncComputeTaskPool;
 use big_space::prelude::Grid;
 use thalos_physics::canonical::Epoch;
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
-    GasGiantLayers, GasGiantMaterial, GasGiantParams, RingLayers, RingMaterial, RingParams,
-    SceneLighting, SolidPlanetMaterial, SolidPlanetParams, build_ring_mesh,
+    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, MULTI_SCATTER_LUT_HEIGHT,
+    MULTI_SCATTER_LUT_WIDTH, RingLayers, RingMaterial, RingParams, SceneLighting,
+    SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut, build_ring_mesh,
 };
 use thalos_planet_rendering::prepare_planet_bake;
+use thalos_terrain::{BodySkyExtra, BodySkyMaterial};
 use thalos_terrain_gen::{
     DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
     TerrainConfig, compile_dynamic_surface_layers, compile_static_terrain_config,
     compile_tectonics_from_config,
 };
 
+use super::ground_terrain::BodySky;
 use super::real_space::{RealSpaceRoot, real_space_grid};
+use super::scene_depth::SceneDepthImage;
 use super::types::{
     BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, PendingPlanetBake,
     PendingPlanetGeneration, PlanetshineTints, RealSpaceBody, SharedPlanetMeshes, ShipBodyMesh,
@@ -49,12 +56,15 @@ fn terrain_cache_dir() -> std::path::PathBuf {
 pub(super) fn spawn_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut gas_giant_materials: ResMut<Assets<GasGiantMaterial>>,
     mut ring_materials: ResMut<Assets<RingMaterial>>,
     mut solid_planet_materials: ResMut<Assets<SolidPlanetMaterial>>,
+    mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
     sim: Res<SimulationState>,
     real_root: Res<RealSpaceRoot>,
+    scene_depth: Res<SceneDepthImage>,
     mut planetshine: ResMut<PlanetshineTints>,
 ) {
     let bodies = &sim.system.bodies;
@@ -88,6 +98,68 @@ pub(super) fn spawn_bodies(
                 ChildOf(real_root.entity),
             ))
             .id();
+
+        // Unified atmosphere fullscreen pass. Spawned here (not after
+        // terrain bake) so it's live from frame one — otherwise a
+        // cmd-shift-click teleport before the body's terrain task finishes
+        // lands inside an atmosphere shell that has no `BodySky` entity to
+        // render and the sky comes up black. The entity needs nothing from
+        // the bake; the atmosphere block is read straight from the body's
+        // authored config. `BodySky` visibility is hidden when the camera
+        // is outside the shell (see `sync_body_render_lod`).
+        let ship_atmosphere = body
+            .terrestrial_atmosphere
+            .as_ref()
+            .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
+            .unwrap_or_default();
+        if ship_atmosphere.atmos_geom.z > 0.0 {
+            // Bake the multi-scatter LUT once at spawn. Atmosphere parameters
+            // are loaded from the body's RON and never mutated at runtime, so
+            // the LUT stays valid for the session — no rebake path needed.
+            let planet_radius_render = (body.radius_m * SHIP_SCALE) as f32;
+            let lut_bytes = bake_multi_scatter_lut(
+                &ship_atmosphere,
+                planet_radius_render,
+                MULTI_SCATTER_LUT_WIDTH,
+                MULTI_SCATTER_LUT_HEIGHT,
+            );
+            // Default sampler is linear-filtered in Bevy 0.18, which is what
+            // we want for smooth blends across LUT cells.
+            let lut_image = Image::new(
+                Extent3d {
+                    width: MULTI_SCATTER_LUT_WIDTH,
+                    height: MULTI_SCATTER_LUT_HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                lut_bytes,
+                TextureFormat::Rgba32Float,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            let lut_handle = images.add(lut_image);
+
+            let sky_material = BodySkyMaterial {
+                atmosphere: ship_atmosphere,
+                atmosphere_extra: BodySkyExtra::default(),
+                scene_depth: scene_depth.handle.clone(),
+                multi_scatter_lut: lut_handle,
+            };
+            commands.spawn((
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(sky_materials.add(sky_material)),
+                bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                NoFrustumCulling,
+                NotShadowCaster,
+                NotShadowReceiver,
+                // Start hidden — the visibility-culling system flips it on
+                // as soon as the camera crosses the atmosphere shell.
+                Visibility::Hidden,
+                ChildOf(real_body_entity),
+                Name::new(format!("{} Sky", body.name)),
+                BodySky { body_id: body.id },
+            ));
+        }
+
         // Map-side bodies stay under normal Bevy transforms. Ship-layer
         // body meshes are children of the matching real-space BigSpace grid.
         let pos = (state.position * MAP_SCALE).as_vec3();

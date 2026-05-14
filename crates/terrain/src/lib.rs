@@ -21,26 +21,45 @@
 //! `BigSpaceDefaultPlugins` directly must drop that registration to avoid the
 //! duplicate-plugin panic.
 
+use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 use bevy_terrain::prelude::{TerrainMaterialPlugin, TerrainPlugin};
 
 mod body_material;
 mod pipeline;
 mod playground_material;
+mod rendered_height;
+mod sky_material;
 mod synthetic;
 
-pub use body_material::BodyTerrainMaterial;
+pub use body_material::{BodySkyExtra, BodyTerrainMaterial};
 pub use pipeline::PipelineTileProvider;
 pub use playground_material::PlaygroundMaterial;
+pub use rendered_height::{
+    TerrainPatchBasis, TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch,
+    decode_rendered_height_m, rendered_height_m,
+};
+pub use sky_material::BodySkyMaterial;
 pub use synthetic::SyntheticTileProvider;
 
 pub struct ThalosTerrainPlugin;
 
 impl Plugin for ThalosTerrainPlugin {
     fn build(&self, app: &mut App) {
+        // `thalos::lighting` and `thalos::atmosphere` shader libraries live in
+        // the shared `thalos_planet_lighting` crate. Add its plugin defensively
+        // so terrain works in apps that don't also load
+        // `PlanetRenderingPlugin` (e.g. headless examples).
+        if !app.is_plugin_added::<thalos_planet_lighting::PlanetLightingPlugin>() {
+            app.add_plugins(thalos_planet_lighting::PlanetLightingPlugin);
+        }
         app.add_plugins(TerrainPlugin);
         app.add_plugins(TerrainMaterialPlugin::<BodyTerrainMaterial>::default());
+        // Sky uses the standard Bevy MaterialPlugin (renders fullscreen quads
+        // through the regular forward pipeline, not bevy_terrain's pipeline).
+        app.add_plugins(MaterialPlugin::<BodySkyMaterial>::default());
         body_material::embed_body_terrain_shader(app);
+        sky_material::embed_sky_dome_shader(app);
         playground_material::embed_playground_shader(app);
     }
 }

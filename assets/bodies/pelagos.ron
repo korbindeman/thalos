@@ -8,13 +8,15 @@
         sea_level_m: 1.0,
     )),
     terrestrial_atmosphere: Some((
+        // Kármán line at 90 km — slightly deeper than Thalos to match
+        // the thicker Rayleigh column (H_R = 9.5 km vs 8 km).
+        karman_line_m: 90000.0,
         // Thicker-than-Earth atmosphere — ocean world with deeper
         // Rayleigh column, more saturated blue. τ_v ≈ 2.4× Earth on
         // blue keeps sunsets dramatic without losing the lit-disk
         // identity. Rayleigh H stretched to 9.5 km (warmer surface,
         // more ascent before density falls). Mie τ = 0.04 — clean
-        // ocean-air aerosol layer. Atmosphere top defaults to 5 ×
-        // max(scale heights) ≈ 47 km.
+        // ocean-air aerosol layer.
         scattering: Some((
             vertical_optical_depth: (0.110, 0.255, 0.620),
             rayleigh_scale_height_m: 9500.0,

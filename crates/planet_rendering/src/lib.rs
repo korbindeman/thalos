@@ -1,7 +1,6 @@
 pub mod bake;
 mod film_grain;
 mod gas_giant;
-pub mod lighting;
 mod material;
 pub mod post_stack;
 mod reference_clouds;
@@ -18,7 +17,12 @@ pub use film_grain::FilmGrain;
 pub use gas_giant::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,
 };
-pub use lighting::{MAX_STARS, SceneLighting, StarLight};
+// Re-export shared planet lighting types so existing call sites continue to
+// resolve. Canonical definitions live in `thalos_planet_lighting`.
+pub use thalos_planet_lighting::{
+    MAX_STARS, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, SceneLighting, StarLight,
+    bake_multi_scatter_lut,
+};
 pub use material::{
     AtmosphereBlock, CLOUD_BAND_COUNT, MAX_ECLIPSE_OCCLUDERS, PlanetCoastlineParams,
     PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle, PlanetMaterial,
@@ -48,8 +52,9 @@ pub struct PlanetRenderingPlugin;
 
 impl Plugin for PlanetRenderingPlugin {
     fn build(&self, app: &mut App) {
-        bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
-        bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
+        if !app.is_plugin_added::<thalos_planet_lighting::PlanetLightingPlugin>() {
+            app.add_plugins(thalos_planet_lighting::PlanetLightingPlugin);
+        }
         bevy::shader::load_shader_library!(app, "shaders/noise.wgsl");
         app.add_plugins(bevy_erosion_filter::ErosionFilterPlugin);
         app.add_plugins((

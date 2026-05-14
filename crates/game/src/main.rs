@@ -10,6 +10,7 @@ mod flight_plan_view;
 mod fuel;
 mod hud;
 mod input;
+mod local_physics;
 mod maneuver;
 mod map_view;
 mod navball;
@@ -35,15 +36,16 @@ use bevy::prelude::*;
 use bevy::window::{MonitorSelection, WindowMode};
 use thalos_input::game::GameInputPlugin;
 use thalos_input::settings::InputSettings;
-use thalos_terrain::ThalosTerrainPlugin;
 use thalos_physics::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::{Epoch, WorldPhysicsConfig},
     gravity_mode::GravityMode,
     parsing::load_solar_system_from_dir,
     simulation::{Simulation, SimulationConfig},
+    terrain_provider::SharedTerrainRegistry,
     types::{AttitudeState, StateVector},
 };
+use thalos_terrain::ThalosTerrainPlugin;
 
 use autopilot::AutopilotPlugin;
 use body_tree_panel::BodyTreePanelPlugin;
@@ -56,6 +58,7 @@ use flight_plan_view::FlightPlanViewPlugin;
 use fuel::FuelPlugin;
 use hud::HudPlugin;
 use input::GameInputGatePlugin;
+use local_physics::GameLocalPhysicsPlugin;
 use maneuver::ManeuverPlugin;
 use map_view::MapViewPlugin;
 use navball::NavballPlugin;
@@ -92,6 +95,14 @@ pub enum SimStage {
 
 /// Patched-conics runtime span (10,000 Julian years).
 const RUNTIME_TIME_SPAN: f64 = 3.156e11;
+
+/// Bevy-side handle on the shared terrain registry. Holds the same inner
+/// `Arc<RwLock<...>>` as the propagator's terrain provider — inserting a
+/// surface here is immediately visible to the propagator's collision
+/// detection. The wrapper exists because `Resource` is a Bevy derive and
+/// `SharedTerrainRegistry` lives in the pure-Rust `thalos_physics` crate.
+#[derive(Resource, Clone)]
+pub struct GameTerrainRegistry(pub SharedTerrainRegistry);
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -130,7 +141,16 @@ fn main() {
         gravity_mode,
         RUNTIME_TIME_SPAN / 3.156e7,
     );
-    let gravity_impls = gravity_mode.build(&system, RUNTIME_TIME_SPAN);
+    // Shared terrain registry: filled in by `finalize_planet_generation`
+    // as each body's surface finishes baking. The propagator holds a clone
+    // of the same inner Arc<RwLock<...>>, so live propagation and trajectory
+    // prediction collide against the same surface the renderer is showing.
+    let terrain_registry = SharedTerrainRegistry::new();
+    let gravity_impls = gravity_mode.build_with_terrain(
+        &system,
+        RUNTIME_TIME_SPAN,
+        Arc::new(terrain_registry.clone()),
+    );
     let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::clone(&gravity_impls.body_trajectory);
 
     // ------------------------------------------------------------------
@@ -194,6 +214,12 @@ fn main() {
                     primary_window: Some(Window {
                         title: "Thalos".into(),
                         mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+                        // Start hidden; `reveal_window_after_first_frame` flips
+                        // this to true once the first real frame has rendered.
+                        // Without it, macOS's borderless-fullscreen transition
+                        // briefly shows the Metal swapchain's uninitialised
+                        // contents — a single magenta frame on this hardware.
+                        visible: false,
                         ..default()
                     }),
                     ..default()
@@ -252,6 +278,7 @@ fn main() {
                 world_config,
             }
         })
+        .insert_resource(GameTerrainRegistry(terrain_registry))
         .add_plugins(bevy::prelude::MeshPickingPlugin)
         // Opt-in picking: body meshes (and any other Pickable-less mesh) would
         // otherwise absorb rays before the maneuver arrows, since the hover-map
@@ -270,6 +297,7 @@ fn main() {
         .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
+        .add_plugins(GameLocalPhysicsPlugin)
         .add_plugins(MapViewPlugin)
         .add_plugins(BridgePlugin)
         .add_plugins(FuelPlugin)
@@ -290,5 +318,26 @@ fn main() {
         .add_plugins(ShipViewPlugin)
         .add_plugins(BodyTreePanelPlugin)
         .add_plugins(DebugPlugin)
+        .add_systems(Update, reveal_window_after_first_frame)
         .run();
+}
+
+/// Show the primary window once the renderer has had a chance to fill the
+/// swapchain. Without this delay, macOS shows the Metal swapchain's
+/// uninitialised contents during the borderless-fullscreen entry animation
+/// (a single full-screen magenta frame).
+fn reveal_window_after_first_frame(
+    mut frame: Local<u32>,
+    mut windows: Query<&mut Window>,
+) {
+    if *frame > 2 {
+        return;
+    }
+    *frame += 1;
+    if *frame == 2
+        && let Ok(mut window) = windows.single_mut()
+        && !window.visible
+    {
+        window.visible = true;
+    }
 }

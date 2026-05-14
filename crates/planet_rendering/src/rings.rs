@@ -32,7 +32,7 @@ use bevy::shader::ShaderRef;
 
 use thalos_atmosphere_gen::RingSystem;
 
-use crate::lighting::SceneLighting;
+use thalos_planet_lighting::SceneLighting;
 
 /// Maximum number of radial palette stops the ring shader supports.
 /// Matches the WGSL `MAX_RING_STOPS` constant.

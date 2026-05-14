@@ -65,12 +65,14 @@
         primary_size_multiplier: 3.0,
     ),
     terrestrial_atmosphere: Some((
+        // Kármán line at 80 km — well above 5 × max(H_R, H_M) = 40 km so
+        // the raymarch captures the full column, with a wide transition
+        // band for a KSP-style "leaving atmosphere" feel during ascent.
+        karman_line_m: 80000.0,
         // Earth-like single-scattering atmosphere. Rayleigh τ_v at sea
         // level matches Bucholtz 1995 (R/G/B ≈ 0.046/0.108/0.264, with
         // β_R · H_R = τ_v and H_R = 8 km). Mie τ_v = 0.021 is "clean
         // continental" Earth aerosol (g = 0.76 forward-peaked).
-        // Atmosphere top at 5 × max scale height (default) ≈ 40 km;
-        // beyond that the contribution is below 1% of sea level.
         scattering: Some((
             vertical_optical_depth: (0.046, 0.108, 0.264),
             rayleigh_scale_height_m: 8000.0,

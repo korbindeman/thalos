@@ -14,7 +14,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-use crate::lighting::SceneLighting;
+use thalos_planet_lighting::SceneLighting;
 
 #[derive(Clone, ShaderType)]
 pub struct SolidPlanetParams {

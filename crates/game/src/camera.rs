@@ -1,11 +1,14 @@
 use bevy::camera::visibility::RenderLayers;
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy_egui::EguiContexts;
 use big_space::prelude::CellCoord;
 use thalos_input::game::GameInputIntent;
+use thalos_local_physics::TerrainSurfaceRegistry;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::space_camera_post_stack;
+use thalos_terrain::rendered_height_m;
 
 use crate::coords::{MAP_LAYER, RenderGhostFocus, SHIP_LAYER};
 use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, SimulationState};
@@ -16,7 +19,8 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BlockCameraInput>()
+        app.add_plugins(ExtractComponentPlugin::<ShipCamera>::default())
+            .init_resource::<BlockCameraInput>()
             .init_resource::<ShipCameraMode>()
             .insert_resource(CameraFocus::default())
             // Background is pure black — the forward-rendered
@@ -50,7 +54,11 @@ pub struct OrbitCamera;
 pub struct MapCamera;
 
 /// Marker for the ship-view camera (renders [`SHIP_LAYER`]).
-#[derive(Component)]
+///
+/// Extracted to the render world so the scene-depth-copy node
+/// (`rendering::scene_depth::CopySceneDepthNode`) can filter its
+/// `ViewQuery` to only the ship-view, skipping the map camera.
+#[derive(Component, Clone, ExtractComponent)]
 pub struct ShipCamera;
 
 /// Marker placed on whichever orbit camera is currently driving the
@@ -362,7 +370,16 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
     }
 
     let mut ship_cam = commands.spawn((
-        Camera3d::default(),
+        Camera3d {
+            // Add COPY_SRC so the scene-depth-copy render-graph node
+            // (`CopySceneDepthNode` in `rendering::scene_depth`) can copy
+            // the main depth attachment into our sampleable depth Image
+            // each frame.
+            depth_texture_usages: (bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT
+                | bevy::render::render_resource::TextureUsages::COPY_SRC)
+                .into(),
+            ..default()
+        },
         Camera {
             is_active: !map_active,
             order: 0,
@@ -565,6 +582,100 @@ pub fn focus_transition_progress(focus: &CameraFocus) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// Metres the camera is held above the rendered terrain surface so it never
+/// kisses geometry or trips the near plane.
+const CAMERA_TERRAIN_MARGIN_M: f64 = 0.5;
+
+/// Coarse-pass samples along the target→camera ray. Combined with
+/// `CAMERA_RAY_REFINEMENT_STEPS` binary halvings, the worst-case stop
+/// resolution is `ray_length / (CAMERA_RAY_SAMPLES · 2^CAMERA_RAY_REFINEMENT_STEPS)`.
+const CAMERA_RAY_SAMPLES: usize = 16;
+const CAMERA_RAY_REFINEMENT_STEPS: usize = 6;
+
+/// Spring-arm collision against the rendered heightfield: cast from `target_pos`
+/// toward `camera_pos`, find the first point where the ray dips within
+/// `CAMERA_TERRAIN_MARGIN_M` of the surface, and pull the camera back to just
+/// before that hit. Returns `None` when the boom is clear, the offset is
+/// sub-metre, or the dominant body has no rendered surface registered.
+///
+/// This is the same idea as KSP's vessel camera and the standard third-person
+/// orbit camera in most engines: the camera always retains line-of-sight to
+/// the target by shortening the boom, so it correctly dodges mountains and
+/// ridges between target and viewer — not just the radial column directly
+/// under the camera.
+///
+/// Camera and ship share a BigSpace cell, so `camera_pos - target_pos` is
+/// already the camera's metre offset from the ship (SHIP_SCALE = 1.0). We
+/// lift that small offset onto the ship's f64 physics position to do the
+/// comparison against the (millions-of-metres) body radius without losing
+/// precision, then convert the small residual back to cell-local f32.
+fn clamp_camera_above_terrain(
+    camera_pos: Vec3,
+    target_pos: Vec3,
+    body_states: &FrameBodyStates,
+    sim: &SimulationState,
+    surfaces: &TerrainSurfaceRegistry,
+) -> Option<Vec3> {
+    let states = body_states.states.as_deref()?;
+    let body_id = sim.simulation.dominant_body();
+    let surface = surfaces.get(body_id)?;
+    let body = &sim.system.bodies[body_id];
+    let body_state = &states[body_id];
+
+    let camera_offset = (camera_pos - target_pos).as_dvec3();
+    if camera_offset.length_squared() < 1.0 {
+        return None;
+    }
+    let ship_pos = sim.simulation.ship_state().position;
+    let body_inv = body_state.orientation.inverse();
+
+    // AGL of the point `t` of the way from target to camera. Negative = inside terrain.
+    let agl = |t: f64| -> f64 {
+        let p_physics = ship_pos + camera_offset * t;
+        let p_from_body = p_physics - body_state.position;
+        let p_dist = p_from_body.length();
+        if p_dist < 1.0 {
+            return f64::MAX;
+        }
+        let p_dir_body = (body_inv * (p_from_body / p_dist))
+            .as_vec3()
+            .normalize_or_zero();
+        let terrain_h = rendered_height_m(&surface.static_surface, p_dir_body) as f64;
+        p_dist - (body.radius_m + terrain_h)
+    };
+
+    // Coarse linear pass: find the first sample inside the safety margin.
+    // `t_safe` tracks the most recent above-margin sample; once we find a
+    // blocked one, refine between the two.
+    let n = CAMERA_RAY_SAMPLES;
+    let mut t_safe = 0.0;
+    let mut t_block: Option<f64> = None;
+    for i in 1..=n {
+        let t = i as f64 / n as f64;
+        if agl(t) < CAMERA_TERRAIN_MARGIN_M {
+            t_block = Some(t);
+            break;
+        }
+        t_safe = t;
+    }
+    let mut t_high = t_block?;
+
+    // Binary refinement. Invariant: agl(t_safe) ≥ margin > agl(t_high).
+    // Holds even when t_safe = 0 is itself below margin — the bisection just
+    // converges to 0, parking the camera on top of the target. That degenerate
+    // case (ship buried in terrain) has no good camera placement anyway.
+    for _ in 0..CAMERA_RAY_REFINEMENT_STEPS {
+        let t_mid = (t_safe + t_high) * 0.5;
+        if agl(t_mid) < CAMERA_TERRAIN_MARGIN_M {
+            t_high = t_mid;
+        } else {
+            t_safe = t_mid;
+        }
+    }
+
+    Some(target_pos + (camera_offset * t_safe).as_vec3())
+}
+
 /// Computes the camera [`Transform`] from [`CameraFocus`] and the target's world position.
 ///
 /// In **ship view**, the camera builds a local frame `(right, up, forward)`
@@ -586,6 +697,7 @@ pub fn camera_transform_system(
     mode: Res<ShipCameraMode>,
     sim: Option<Res<SimulationState>>,
     body_states: Res<FrameBodyStates>,
+    surfaces: Res<TerrainSurfaceRegistry>,
     body_targets: Query<(&CelestialBody, &Transform), Without<OrbitCamera>>,
     ship_targets: Query<
         (&Transform, Option<&CameraTargetOffset>, Option<&CellCoord>),
@@ -695,7 +807,20 @@ pub fn camera_transform_system(
     );
     let offset = (basis.right * local.x + basis.up * local.y + basis.forward * local.z) * distance;
 
-    let camera_pos = target_pos + offset;
+    let mut camera_pos = target_pos + offset;
+
+    // In ship view focused on the ship (and not mid focus-transition),
+    // prevent the camera from clipping into terrain.
+    if *view == ViewMode::Ship
+        && matches!(focus.target, CameraFocusTarget::Ship)
+        && focus.transition_origin_start.is_none()
+        && let Some(sim_ref) = sim.as_deref()
+        && let Some(corrected) =
+            clamp_camera_above_terrain(camera_pos, target_pos, &body_states, sim_ref, &surfaces)
+    {
+        camera_pos = corrected;
+    }
+
     if *view == ViewMode::Ship
         && let (Some(mut camera_cell), Some(target_cell)) = (camera_cell, target_cell)
     {

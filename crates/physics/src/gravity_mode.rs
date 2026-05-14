@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::patched_conics::PatchedConics;
 use crate::ship_propagator::{KeplerianPropagator, ShipPropagator};
+use crate::terrain_provider::{FlatTerrain, TerrainProvider};
 use crate::types::SolarSystemDefinition;
 
 /// Named gravity strategies. Pinned per simulation (and, eventually, per
@@ -40,11 +41,27 @@ pub struct GravityImpls {
 }
 
 impl GravityMode {
+    /// Build with a flat (mean-radius) terrain provider — used by tests and
+    /// any caller that doesn't have a real surface registry available.
     pub fn build(&self, system: &SolarSystemDefinition, time_span: f64) -> GravityImpls {
+        self.build_with_terrain(system, time_span, Arc::new(FlatTerrain))
+    }
+
+    /// Build with a custom terrain provider. The provider is shared with the
+    /// ship propagator so live `Simulation::step` and trajectory prediction
+    /// collide against the same surface.
+    pub fn build_with_terrain(
+        &self,
+        system: &SolarSystemDefinition,
+        time_span: f64,
+        terrain: Arc<dyn TerrainProvider>,
+    ) -> GravityImpls {
         match self {
             Self::PatchedConics => GravityImpls {
                 body_trajectory: Arc::new(PatchedConics::new(system, time_span)),
-                ship_propagator: Arc::new(KeplerianPropagator::default()),
+                ship_propagator: Arc::new(
+                    KeplerianPropagator::default().with_terrain(terrain),
+                ),
             },
         }
     }

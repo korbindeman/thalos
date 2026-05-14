@@ -74,6 +74,10 @@
         ],
     )),
     terrestrial_atmosphere: Some((
+        // Kármán line at 60 km — thinner shell than Thalos's 80 km,
+        // matching the thinner physical column. Still well above the
+        // ~40 km tail of the raymarch contribution.
+        karman_line_m: 60000.0,
         // Cold-desert atmosphere — thinner than Thalos's, warm/red
         // tinted. Rayleigh per-channel τ skews strongly red (R = 7×
         // B) so any in-scatter shifts orange/butterscotch instead of

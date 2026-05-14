@@ -6,6 +6,7 @@ members = [
     "crates/atmosphere_gen",
     "crates/celestial",
     "crates/input",
+    "crates/planet_lighting",
     "crates/planet_rendering",
     "crates/planet_editor",
     "crates/game",
@@ -13,6 +14,8 @@ members = [
     "crates/shipyard",
     "crates/bake_dump",
     "crates/terrain",
+    "crates/bevy_terrain",
+    "crates/local_physics",
 ]
 
 [workspace.package]
@@ -22,7 +25,7 @@ edition = "2024"
 # Optimize dependencies in dev builds for runtime performance without
 # sacrificing incremental compile speed on our own crates.
 [workspace.dependencies]
-bevy_terrain = { git = "https://github.com/korbindeman/bevy_terrain", branch = "main", features = ["high_precision"] }
+bevy_terrain = { path = "crates/bevy_terrain", features = ["high_precision"] }
 
 [profile.dev]
 opt-level = 1

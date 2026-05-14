@@ -38,7 +38,8 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-use crate::lighting::SceneLighting;
+use thalos_planet_lighting::SceneLighting;
+
 use crate::rings::MAX_RING_STOPS;
 
 /// Maximum palette stops the shader supports. Ten covers Saturn's

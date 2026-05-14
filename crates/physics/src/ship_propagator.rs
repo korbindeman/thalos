@@ -28,7 +28,9 @@
 //! or collision with the current SOI body. Callers handle re-entry into the
 //! propagator with the new SOI body.
 
-use glam::DVec3;
+use std::sync::Arc;
+
+use glam::{DQuat, DVec3};
 
 use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::maneuver::delta_v_to_world;
@@ -36,6 +38,7 @@ use crate::orbital_math::{
     cartesian_to_elements, eccentric_from_true_elliptic, hyperbolic_from_true, propagate_kepler,
     solve_kepler_elliptic, solve_kepler_hyperbolic,
 };
+use crate::terrain_provider::{FlatTerrain, TerrainProvider};
 use crate::types::{BodyDefinition, BodyId, BodyState, G, StateVector, TrajectorySample};
 
 // ---------------------------------------------------------------------------
@@ -174,7 +177,7 @@ pub trait ShipPropagator: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Default Keplerian patched-conics propagator.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeplerianPropagator {
     /// RK4 substep size for finite burns, seconds. Default 1.0 — accurate
     /// enough for typical chemical-burn magnitudes without flooding the
@@ -187,6 +190,13 @@ pub struct KeplerianPropagator {
     /// Soft cap on coast samples per segment. Default 512. Guards against
     /// absurdly long coasts with dense sampling hints.
     pub max_coast_samples: usize,
+    /// Surface elevation source for terrain-aware collision detection. The
+    /// default is [`FlatTerrain`] (zero elevation everywhere), which collides
+    /// against mean radius exactly like the pre-terrain behaviour. The game
+    /// crate plugs in a [`crate::terrain_provider::SharedTerrainRegistry`] at
+    /// construction time so live propagation and prediction collide against
+    /// the same surface.
+    terrain: Arc<dyn TerrainProvider>,
 }
 
 impl Default for KeplerianPropagator {
@@ -195,7 +205,16 @@ impl Default for KeplerianPropagator {
             burn_substep_s: 1.0,
             min_coast_samples: 2,
             max_coast_samples: 512,
+            terrain: Arc::new(FlatTerrain),
         }
+    }
+}
+
+impl KeplerianPropagator {
+    /// Builder: install a terrain provider for surface-aware collisions.
+    pub fn with_terrain(mut self, terrain: Arc<dyn TerrainProvider>) -> Self {
+        self.terrain = terrain;
+        self
     }
 }
 
@@ -245,20 +264,33 @@ impl KeplerianPropagator {
             velocity: state.velocity - body_t0.velocity,
         };
 
-        // Stable-orbit detection: a bound orbit whose apoapsis fits inside the
-        // SOI and whose periapsis clears the surface can be visualised as a
-        // closed loop over exactly one period. We always detect the closure;
-        // the `stop_on_stable_orbit` flag only controls whether the segment
+        // Stable-orbit detection: any bound orbit whose apoapsis fits inside
+        // the SOI gets sampled over exactly one period. Whether the orbit
+        // physically clears or impacts is left to the per-direction terrain
+        // check inside the sample loop — if the orbit really hits a peak
+        // within this revolution, that loop terminates with `Collision` and
+        // overrides the `StableOrbit` terminator. Capping to one period is
+        // the load-bearing fix here: without it, a bound orbit with periapsis
+        // anywhere in the `[body_radius, body_radius + max_elevation_m]` band
+        // would propagate to `target_time = ephemeris_end` (≈ 10 kyr) and
+        // burn billions of subdivided samples in the loop below.
+        //
+        // Known limitation: orbits don't precess under Kepler, but the body
+        // rotates underneath, so a peak may roll into a future revolution's
+        // ground track. We sample one period only — a peak that comes up on
+        // revolution 2 is not reflected in the rendered trajectory. The live
+        // `Simulation::step` propagator catches it the moment it occurs.
+        //
+        // The `stop_on_stable_orbit` flag controls whether the segment
         // truncates at the period (final-leg coast) or extends a single
         // analytical sample past the loop to the requested `target_time`
-        // (intermediate-leg coast — without this, sampling 50 revolutions
-        // uniformly in time produces a polygonal mess at ~2 samples/period).
+        // (intermediate-leg coast — without that straggler, sampling 50
+        // revolutions uniformly in time produces a polygonal mess).
         let original_target_time = target_time;
         let mut is_stable_orbit = false;
         if mu > 0.0
             && let Some(el) = cartesian_to_elements(rel0, mu)
         {
-            let body_radius = bodies.get(soi_body).map(|b| b.radius_m).unwrap_or(0.0);
             let soi_radius = bodies
                 .get(soi_body)
                 .map(|b| b.soi_radius_m)
@@ -266,7 +298,6 @@ impl KeplerianPropagator {
             if el.eccentricity < 1.0
                 && el.semi_major_axis_m.is_finite()
                 && el.apoapsis_m < soi_radius
-                && el.periapsis_m > body_radius
             {
                 let period = std::f64::consts::TAU * (el.semi_major_axis_m.powi(3) / mu).sqrt();
                 let period_end = time + period;
@@ -393,6 +424,7 @@ impl KeplerianPropagator {
                 &threat_bodies,
                 ephemeris,
                 bodies,
+                self.terrain.as_ref(),
             );
 
             // Resolve crossings in `exit > collision > enter` order. Exit
@@ -415,7 +447,7 @@ impl KeplerianPropagator {
                 return SegmentResult::exit(samples, cross_state, t_cross, soi_body, bodies);
             }
             if xings.collision
-                && let Some(t_cross) = refine_crossing(
+                && let Some(t_cross) = refine_collision(
                     prev_t,
                     t,
                     soi_body,
@@ -423,8 +455,8 @@ impl KeplerianPropagator {
                     rel0,
                     mu,
                     time,
-                    soi_body,
                     ephemeris,
+                    self.terrain.as_ref(),
                 )
             {
                 let cross_state = eval_at(t_cross);
@@ -573,6 +605,7 @@ impl KeplerianPropagator {
                 &threat_bodies,
                 ephemeris,
                 bodies,
+                self.terrain.as_ref(),
             );
 
             // Pick the refinement fraction. When endpoints bracket the
@@ -636,6 +669,33 @@ impl KeplerianPropagator {
                     d >= target_distance
                 };
 
+            // Terrain-aware collision refinement for the burn path. RK4
+            // sub-steps are non-analytical so we can't bisect for free;
+            // inv_lerp the per-direction altitudes at the endpoints and
+            // verify the refined state actually sits below the surface.
+            let terrain = self.terrain.as_ref();
+            let collision_frac = || -> f64 {
+                let prev_body = ephemeris.state(soi_body, crate::canonical::Epoch(cur_time));
+                let next_body = ephemeris.state(soi_body, crate::canonical::Epoch(next_time));
+                let prev_q = cur_state.position - prev_body.position;
+                let next_q = next_state.position - next_body.position;
+                let prev_alt =
+                    altitude_at_q(prev_q, body_radius, prev_body.orientation, soi_body, terrain);
+                let next_alt =
+                    altitude_at_q(next_q, body_radius, next_body.orientation, soi_body, terrain);
+                if prev_alt > 0.0 && next_alt <= 0.0 {
+                    inv_lerp(prev_alt, next_alt, 0.0)
+                } else {
+                    0.5
+                }
+            };
+            let crossed_into_terrain =
+                |state: StateVector, t: f64, target_body: BodyId, target_radius: f64| -> bool {
+                    let body = ephemeris.state(target_body, crate::canonical::Epoch(t));
+                    let q = state.position - body.position;
+                    altitude_at_q(q, target_radius, body.orientation, target_body, terrain) <= 0.0
+                };
+
             // Resolve crossings in the same `exit > collision > enter`
             // order as `coast_segment_impl`; see the comment there for the
             // rationale. Verification rejects Hermite false positives.
@@ -648,9 +708,9 @@ impl KeplerianPropagator {
                 }
             }
             if xings.collision {
-                let frac = pick_inward_frac(soi_body, body_radius);
+                let frac = collision_frac();
                 let (t_cross, cross_state) = refine_burn_crossing(cur_state, cur_time, h, frac);
-                if crossed_inward(cross_state, t_cross, soi_body, body_radius) {
+                if crossed_into_terrain(cross_state, t_cross, soi_body, body_radius) {
                     samples.push(build_sample(t_cross, cross_state, soi_body, ephemeris));
                     return SegmentResult::collision(samples, cross_state, t_cross, soi_body);
                 }
@@ -943,6 +1003,106 @@ struct StepCrossings {
     enter: Option<BodyId>,
 }
 
+/// Altitude of `q` above the per-direction surface, in metres. Negative
+/// values mean below terrain. `q` is the ship position relative to the
+/// body's centre in the inertial frame; the body's instantaneous
+/// orientation rotates it into the body-fixed frame the terrain cubemap is
+/// authored in. A point at the body's centre returns −body_radius so the
+/// degenerate case still has a well-defined sign.
+#[inline]
+fn altitude_at_q(
+    q: DVec3,
+    body_radius: f64,
+    body_orientation: DQuat,
+    body_id: BodyId,
+    terrain: &dyn TerrainProvider,
+) -> f64 {
+    let len = q.length();
+    if len < 1e-9 {
+        return -body_radius;
+    }
+    let dir_inertial = q / len;
+    let dir_body = body_orientation.inverse() * dir_inertial;
+    let elev = terrain.surface_elevation_m(body_id, dir_body);
+    len - body_radius - elev
+}
+
+/// Minimum altitude across three interior Hermite samples between
+/// `(q0, qv0)` and `(q1, qv1)`. Body orientation is slerped between
+/// endpoints — at typical step sizes the body rotates by well under a
+/// degree, so a linear interpolation of the quaternion is accurate enough
+/// for "did we dip below terrain" detection.
+#[allow(clippy::too_many_arguments)]
+fn interior_min_altitude(
+    q0: DVec3,
+    qv0: DVec3,
+    q1: DVec3,
+    qv1: DVec3,
+    h: f64,
+    body_radius: f64,
+    body_orient_prev: DQuat,
+    body_orient_next: DQuat,
+    body_id: BodyId,
+    terrain: &dyn TerrainProvider,
+) -> f64 {
+    let mut min_alt = f64::INFINITY;
+    for s in [0.25_f64, 0.5, 0.75] {
+        let q = hermite_cubic(q0, qv0, q1, qv1, h, s);
+        let orient = body_orient_prev.slerp(body_orient_next, s);
+        let alt = altitude_at_q(q, body_radius, orient, body_id, terrain);
+        if alt < min_alt {
+            min_alt = alt;
+        }
+    }
+    min_alt
+}
+
+/// Coast-path collision refinement. Mirrors [`refine_crossing`] but roots
+/// `altitude(t) = |q(t)| − body_radius − terrain(dir_body(t))` instead of
+/// `distance − constant`, so the impact lands on the actual terrain rather
+/// than the mean radius. Returns `None` when an apparent crossing turns
+/// out to be a Hermite false positive (no real root in the interval).
+#[allow(clippy::too_many_arguments)]
+fn refine_collision(
+    t_lo: f64,
+    t_hi: f64,
+    body_id: BodyId,
+    body_radius: f64,
+    rel0: StateVector,
+    mu: f64,
+    time0: f64,
+    ephemeris: &dyn BodyTrajectoryProvider,
+    terrain: &dyn TerrainProvider,
+) -> Option<f64> {
+    let f = |t: f64| -> f64 {
+        let rel = propagate_kepler(rel0, mu, t - time0);
+        let body_state = ephemeris.state(body_id, crate::canonical::Epoch(t));
+        altitude_at_q(rel.position, body_radius, body_state.orientation, body_id, terrain)
+    };
+    let f_lo = f(t_lo);
+    let f_hi = f(t_hi);
+
+    if f_lo.signum() != f_hi.signum() {
+        return Some(bisect_signs(t_lo, t_hi, &f, f_lo));
+    }
+
+    if f_lo == 0.0 {
+        return Some(t_lo);
+    }
+    // Both endpoints above terrain: hunt for an interior dip. Both endpoints
+    // already below shouldn't occur in normal flow (the propagator wouldn't
+    // have advanced past the previous impact), but treat as degenerate.
+    if f_lo > 0.0 {
+        let t_extremum = golden_section_extremum(t_lo, t_hi, &f, true);
+        let f_ext = f(t_extremum);
+        if f_ext.signum() == f_lo.signum() {
+            return None;
+        }
+        return Some(bisect_signs(t_lo, t_extremum, &f, f_lo));
+    }
+    Some(t_lo)
+}
+
 /// Detect SOI/surface crossings on the segment between two propagator
 /// samples.
 ///
@@ -955,6 +1115,12 @@ struct StepCrossings {
 ///    endpoints sit outside, we still flag the crossing. This catches the
 ///    "skip-over-periapsis" failure mode where uniform-time sampling misses
 ///    a brief sub-surface dip.
+///
+/// Collision uses per-direction terrain elevation rather than a single mean
+/// radius: altitude(t) = |q(t)| − body_radius − terrain(dir_body(t)).
+/// A conservative outer-envelope test (body_radius + max_elevation_m)
+/// fast-paths the common high-altitude case so the per-sample terrain query
+/// only runs when the trajectory dips into the terrain band.
 ///
 /// SOI exit only uses the endpoint test — a swept-max excursion outside the
 /// SOI that returns inside isn't physically an exit (the ship is still
@@ -971,6 +1137,7 @@ fn detect_step_crossings(
     threat_bodies: &[BodyId],
     ephemeris: &dyn BodyTrajectoryProvider,
     bodies: &[BodyDefinition],
+    terrain: &dyn TerrainProvider,
 ) -> StepCrossings {
     let mut out = StepCrossings::default();
     let h = next_t - prev_t;
@@ -984,7 +1151,6 @@ fn detect_step_crossings(
     let prev_d_sq = q0.length_squared();
     let next_d_sq = q1.length_squared();
     let (interior_min_sq, _) = swept_dist_sq_extremes(q0, qv0, q1, qv1, h);
-    let segment_min_sq = prev_d_sq.min(next_d_sq).min(interior_min_sq);
 
     if soi_radius.is_finite() {
         let r_sq = soi_radius * soi_radius;
@@ -994,9 +1160,41 @@ fn detect_step_crossings(
     }
 
     if body_radius > 0.0 {
-        let r_sq = body_radius * body_radius;
-        if prev_d_sq > r_sq && (next_d_sq <= r_sq || segment_min_sq <= r_sq) {
-            out.collision = true;
+        // Fast path: when every probe sits above the tallest possible
+        // terrain (mean radius + maximum elevation), no collision is
+        // possible and the per-direction terrain query is skipped.
+        let outer = body_radius + terrain.max_elevation_m(soi_body);
+        let outer_sq = outer * outer;
+        if prev_d_sq <= outer_sq || next_d_sq <= outer_sq || interior_min_sq <= outer_sq {
+            let prev_alt = altitude_at_q(
+                q0,
+                body_radius,
+                prev_soi_bs.orientation,
+                soi_body,
+                terrain,
+            );
+            let next_alt = altitude_at_q(
+                q1,
+                body_radius,
+                next_soi_bs.orientation,
+                soi_body,
+                terrain,
+            );
+            let interior_min_alt = interior_min_altitude(
+                q0,
+                qv0,
+                q1,
+                qv1,
+                h,
+                body_radius,
+                prev_soi_bs.orientation,
+                next_soi_bs.orientation,
+                soi_body,
+                terrain,
+            );
+            if prev_alt > 0.0 && (next_alt <= 0.0 || interior_min_alt <= 0.0) {
+                out.collision = true;
+            }
         }
     }
 

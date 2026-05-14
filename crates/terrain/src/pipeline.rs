@@ -49,7 +49,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevy_terrain::math::TileCoordinate;
 use bevy_terrain::prelude::*;
 use bevy_terrain::terrain_data::AttachmentData;
-use thalos_terrain_gen::{cubemap::dir_to_face_uv, PlanetSurface, StaticSurfaceData};
+use thalos_terrain_gen::{PlanetSurface, StaticSurfaceData, cubemap::dir_to_face_uv};
 
 /// `bevy_terrain` `TileProvider` backed by the Thalos synthesis pipeline.
 pub struct PipelineTileProvider {
@@ -85,7 +85,8 @@ impl TileProvider for PipelineTileProvider {
         AsyncComputeTaskPool::get().spawn(async move {
             let mut datas = Vec::with_capacity(attachments.len());
             for cfg in &attachments {
-                let data = synthesize_attachment(&surface.static_surface, coord, &model, cfg, &body_name);
+                let data =
+                    synthesize_attachment(&surface.static_surface, coord, &model, cfg, &body_name);
                 datas.push(data);
             }
             Ok(datas)
@@ -132,6 +133,21 @@ fn synthesize_attachment(
                 }
             }
             AttachmentData::Rgba8(out)
+        }
+        (AttachmentFormat::R16, "roughness") => {
+            // Source cubemap stores roughness as u8 in [0, 255]. bevy_terrain
+            // exposes single-channel attachments only as R16Unorm, so we
+            // upscale to u16 by multiplying by 257 (= 65535 / 255) — the
+            // exact integer scale that preserves every source value.
+            let mut out = Vec::with_capacity(count);
+            for y in 0..size {
+                for x in 0..size {
+                    let dir = pixel_direction(coord, UVec2::new(x, y), size, border, model);
+                    let r = cubemap_texel_nearest(&body.roughness_cubemap, dir);
+                    out.push((r as u16) * 257);
+                }
+            }
+            AttachmentData::R16(out)
         }
         _ => {
             warn!(

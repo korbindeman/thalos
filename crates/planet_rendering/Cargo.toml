@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 thalos_terrain_gen = { path = "../terrain_gen" }
 thalos_atmosphere_gen = { path = "../atmosphere_gen" }
+thalos_planet_lighting = { path = "../planet_lighting" }
 bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 bevy_erosion_filter = "0.1.1"
 bytemuck = { version = "1", features = ["derive"] }

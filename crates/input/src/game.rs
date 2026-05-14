@@ -460,9 +460,18 @@ fn collect_attitude_intent(
 
 fn collect_throttle_axis_intent(
     mut intent: ResMut<GameInputIntent>,
+    keys: Res<ButtonInput<KeyCode>>,
     throttle_up: Query<&Action<ThrottleRampPositiveAction>>,
     throttle_down: Query<&Action<ThrottleRampNegativeAction>>,
 ) {
+    // Keep Shift/Ctrl available as throttle controls during normal flight, but
+    // do not let OS command chords like cmd+shift-click or cmd+shift+2 leak
+    // into gameplay as throttle input.
+    if command_modifier_held(&keys) {
+        intent.throttle_up = false;
+        intent.throttle_down = false;
+        return;
+    }
     intent.throttle_up = held(&throttle_up);
     intent.throttle_down = held(&throttle_down);
 }
@@ -531,6 +540,10 @@ fn held_with_events<A: InputAction<Output = bool>>(
 
 fn held<A: InputAction<Output = bool>>(query: &Query<&Action<A>>) -> bool {
     query.single().map(|action| **action).unwrap_or(false)
+}
+
+fn command_modifier_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight])
 }
 
 fn axis_value<P, N>(positive: &Query<&Action<P>>, negative: &Query<&Action<N>>) -> f32
@@ -620,5 +633,24 @@ mod tests {
         let intent = app.world().resource::<GameInputIntent>();
         assert!(intent.throttle_up);
         assert!(!intent.precision_fine);
+    }
+
+    #[test]
+    fn command_shift_does_not_emit_throttle_ramp() {
+        let mut app = input_app();
+
+        press_key(&mut app, KeyCode::SuperLeft);
+        press_key(&mut app, KeyCode::ShiftLeft);
+        app.update();
+        {
+            let intent = app.world().resource::<GameInputIntent>();
+            assert!(!intent.throttle_up);
+            assert!(!intent.throttle_down);
+        }
+
+        release_key(&mut app, KeyCode::SuperLeft);
+        app.update();
+        let intent = app.world().resource::<GameInputIntent>();
+        assert!(intent.throttle_up);
     }
 }

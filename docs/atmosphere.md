@@ -17,7 +17,7 @@ remaining frontier.
 | Area | Today | Future |
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
-| Rocky-body sky | **Single-scattering Rayleigh + Mie raymarch** (`atmosphere.wgsl::integrate_atmosphere`). Per-body Rayleigh β + Mie β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 LUTs once in-atmosphere flight justifies the precompute step; multi-scatter approximation. |
+| Rocky-body sky | **Rayleigh + Mie raymarch with multi-scatter LUT** (`atmosphere.wgsl::integrate_atmosphere`, `integrate_atmosphere_multiscatter`). Per-body β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. A 32×32 multi-scatter LUT (Hillaire 2020 §5.2, CPU-baked per body at spawn by `thalos_planet_lighting::bake_multi_scatter_lut`) supplies the second-order in-scatter term — required so the midday sky reads blue (not warm-residual) and reaches the luminance headroom needed to drown out stars perceptually. Sky pass also boosts alpha from local in-scatter luminance on sky-only pixels so bright sky crushes stars even where physical transmittance is high. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 LUTs once in-atmosphere flight justifies the precompute step; full geometric-series multi-scatter (currently one-bounce approx) if the one-bounce model proves too dim. |
 | Cloud rendering | Reference equirectangular cloud overlays projected into cubemaps, with shader-side differential rotation (16 latitude bands), shadow probe, and Beer-Lambert opacity. Bodies without a registered overlay bind a blank cube. Gas-giant cloud deck is part of the impostor. | Revisit procedural terrestrial clouds; volumetric layer for orbital cinematic moments; surface-shadow projection from clouds onto terrain LOD. |
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
@@ -103,92 +103,160 @@ consumes `AtmosphereParams` and feeds
 
 ## Rocky atmospheres (shipping)
 
-Single-scattering Rayleigh + Mie raymarch. Per-fragment integration
-of an exponential-density atmospheric shell, with per-channel
-Rayleigh (Bucholtz 1995 sea-level coefficients) and scalar Mie
-(Henyey-Greenstein phase function). One integral, called once per
-body fragment and once per halo fragment, yields the rim halo, the
-lit-disk haze, the terminator orange band, and the surface aerial
-perspective from the same physics.
+Single-scattering Rayleigh + Mie raymarch, per-channel Rayleigh
+(Bucholtz 1995 sea-level coefficients) and scalar Mie
+(Henyey-Greenstein phase function). The integral runs **once per
+fragment in a single fullscreen pass per body** — the same shader
+produces the rim halo, the lit-disk haze, the terminator orange
+band, and the surface aerial perspective at every altitude from
+orbit to ground.
 
-### Why this approach (not Bruneton, not the prior stand-ins)
+### Architecture: one pass, three regimes
 
-The prior implementation had five separate stand-in helpers
-(`apply_rayleigh_ground_transmission`, `apply_rayleigh_inscatter`,
-`rim_halo_contribution`, `apply_terminator_warmth`,
-`apply_fresnel_rim`) each parameterising a different visual cue. They
-worked, but each carried its own author-tuned constants and the
-relationships between them were not physical — tweaking one
-unbalanced the others. Replacing them with a single physical integral
-collapses the parameter surface and makes per-body authoring
-straightforward.
+The atmosphere is a fullscreen quad per body (`BodySkyMaterial` in
+`crates/terrain/src/sky_material.rs`, shader at
+`crates/terrain/src/sky_dome.wgsl`). It renders in `Transparent3d`
+with `depth_compare = Always` so it rasterizes on every pixel, then
+clips the raymarch with two intersections:
 
-Bruneton 2008 is the canonical "right" answer for in-atmosphere
-flight (KSP2 / Scatterer / O'Neil GPU Gems), but its 4D LUT
-precompute is overkill when the only viewing geometry is "from
-outside, looking in." The single-scattering raymarch with per-pixel
-sample jitter delivers ~95% of the visual quality at a fraction of
-the implementation cost and zero load-time precompute. When
-in-atmosphere flight lands, the integration helper is the swap
-point: replace its body with LUT lookups, leave the call sites
-untouched.
+- **Atmosphere shell** — `radius + karman_line_m`. Rays missing the
+  shell `discard` (cheap early-out covers most off-body pixels).
+- **Scene depth** — sampled from a per-frame copy of the main pass's
+  depth attachment (see "Scene-depth coupling" below). Clips the
+  raymarch at terrain, the impostor body, the ship hull, or any
+  other opaque geometry.
 
-### Authoring (`AtmosphericScattering`)
+Three viewing regimes fall out of one shader:
 
-Per-body parameters in `assets/bodies/<name>.ron::scattering`:
+1. **Far** (impostor visible at > 4× radius). Most rays miss the
+   shell → `discard`. Rim pixels graze the shell → halo. Rays that
+   hit the impostor body get aerial perspective clipped at the body
+   surface depth.
+2. **Mid** (camera outside karman shell, terrain visible). Same
+   shader, slightly larger silhouette. The previous architecture had
+   a multi-million-metre "naked planet" gap here because the
+   impostor halo turned off at 4× radius and the sky dome only
+   spawned inside the karman shell; the always-on fullscreen pass
+   closes that gap by construction.
+3. **Near** (camera inside karman shell). Ray segments either
+   terminate at terrain (aerial perspective on terrain) or exit the
+   shell into the void (sky color).
 
-- `vertical_optical_depth: [R, G, B]` — Rayleigh τ_v at zenith.
-  Earth sea level: `(0.046, 0.108, 0.264)`. Dust-loaded atmospheres
-  invert the slope (red dominant — see Vaelen).
-- `rayleigh_scale_height_m` — Earth: 8000.
-- `mie_optical_depth` — scalar (Mie ≈ spectrally white in the
-  visible). Earth clean: 0.02; hazy: 0.10; dust storm: 0.30+.
-- `mie_scale_height_m` — Earth aerosols: 1200.
-- `mie_asymmetry` — Henyey-Greenstein `g` ∈ [-1, 1]. Earth: 0.76
-  forward-peaked.
-- `atmosphere_top_m` — optional. Default = 5 × max(scale heights),
-  which clips at 1% of sea-level density. Authoring an explicit
-  value beyond this wastes raymarch samples.
-- `strength` — overall artistic multiplier (1.0 = physical).
+### Why this approach (not Bruneton)
+
+Bruneton 2008 is the canonical "right" answer for high-fidelity
+in-atmosphere flight (KSP2 / Scatterer / O'Neil GPU Gems), but its
+4D LUT precompute is overkill at our current fidelity. The
+single-scattering raymarch with per-pixel sample jitter delivers
+~95% of the visual quality at a fraction of the implementation cost
+and zero load-time precompute. When fidelity warrants it, the
+`integrate_atmosphere` helper is the swap point: replace its body
+with LUT lookups, leave the call sites untouched.
+
+### Scene-depth coupling
+
+WebGPU forbids sampling the live depth attachment from a fragment
+shader, and our forked `bevy_terrain` does not queue into
+`Opaque3dPrepass` (the standard prepass-depth path), so the built-in
+prepass-depth texture is terrain-blind. The workaround lives in
+`crates/game/src/rendering/scene_depth.rs`:
+
+- A `SceneDepthImage` resource owns a `Handle<Image>` whose GPU
+  texture (`Depth32Float`, `COPY_DST | TEXTURE_BINDING`) is sized to
+  the camera viewport.
+- A render-graph node `CopySceneDepthNode` runs between
+  `Node3d::MainOpaquePass` and `Node3d::MainTransparentPass` and
+  issues `copy_texture_to_texture` from the main pass's
+  `ViewDepthTexture` (which has terrain depth written by then) into
+  the Image.
+- `BodySkyMaterial` binds the Image as `texture_depth_2d` at
+  `@group(3) @binding(2)`; `sky_dome.wgsl` reads it via
+  `textureLoad` and reconstructs view-space distance with
+  `view.view_from_clip`.
+- The ship camera carries `depth_texture_usages = RENDER_ATTACHMENT
+  | COPY_SRC` so the copy is legal, plus `Msaa::Off` so source and
+  destination sample counts match. The `ShipCamera` component is
+  extracted to the render world via `ExtractComponentPlugin` so the
+  node's `ViewQuery` filters to that view only (the map camera and
+  any future light / shadow views don't carry it).
+
+Cost: one fullscreen depth copy per frame. Trivial on M2 Pro at
+typical resolutions.
+
+### Authoring (`AtmosphericScattering` + `TerrestrialAtmosphere`)
+
+The Kármán line lives on the parent `TerrestrialAtmosphere`, not on
+the scattering substructure — it's the rendering integration cutoff
+AND the gameplay boundary for drag / heating / "in atmosphere"
+state, independent of whether scattering is configured.
+
+```ron
+terrestrial_atmosphere: Some((
+    // Single source of truth for atmosphere top. Replaces the old
+    // implicit `5 × max(rayleigh, mie)` default that capped Earth at
+    // ~40 km. Author generously — well above 5 × scale-height so the
+    // raymarch captures the full column.
+    karman_line_m: 80000.0,
+    scattering: Some((
+        vertical_optical_depth: (R, G, B),  // Rayleigh τ_v at zenith.
+        rayleigh_scale_height_m: 8000.0,
+        mie_optical_depth: 0.021,           // scalar (white).
+        mie_scale_height_m: 1200.0,
+        mie_asymmetry: 0.76,                // Henyey-Greenstein g ∈ [-1, 1].
+        strength: 1.0,                      // artistic multiplier; 0 disables.
+    )),
+    clouds: ...,
+    limb_darkening: ...,
+))
+```
+
+Earth-like Rayleigh sea-level (Bucholtz 1995): `(0.046, 0.108,
+0.264)`. Dust-loaded atmospheres invert the slope (red dominant —
+see Vaelen). Mie: clean 0.02, hazy 0.10, dust storm 0.30+. Karman
+line: Thalos 80 km, Pelagos 90 km, Vaelen 60 km.
 
 ### Visual targets achieved
 
+- ✓ **Continuity from orbit to ground.** One shader, one integration
+  path, no LOD seams between sky and terrain.
 - ✓ **Soft terminator** with red/orange wedge from Rayleigh sun-column
   attenuation.
-- ✓ **Limb glow extends beyond the geometric edge.** The halo pass
-  raymarches the chord through the atmosphere shell on miss rays;
-  the result is the physical Rayleigh + Mie scattering halo, not a
-  fresnel ring stand-in.
-- ✓ **Aerial perspective** dims and tints distant terrain via the
-  per-channel transmittance.
-- ✓ **Mie forward-peak haze** on the night-side rim where the sun
-  sits behind the body — the warm crescent visible on real
-  back-lit photographs.
+- ✓ **Limb glow extends beyond the geometric edge** — graze rays
+  through the atmosphere shell.
+- ✓ **Aerial perspective** on terrain and impostor body via
+  scene-depth clipping.
+- ✓ **Mie forward-peak haze** on the night-side rim — warm crescent
+  on back-lit bodies.
 - ✓ **Knife-edge terminator** preserved on airless bodies (Mira,
-  Selva, asteroids — `TerrestrialAtmosphere::default` early-outs
-  the entire raymarch via the strength-zero gate).
-
-### Coupling to terrain
-
-The raymarch reads only the smooth sphere as the optical lower
-boundary. Once ground LOD lands (M3), aerial perspective should read
-against the live tile heights so distant peaks atmospheric-shadow
-correctly; the integration helper takes a planet-radius argument so
-this swap is a one-line change at the call site.
+  Selva, asteroids — `karman_line_m == 0` or absent
+  `TerrestrialAtmosphere` skips both spawn and raymarch).
 
 ### Backlog
 
+- **Strip impostor's vestigial atmosphere bake.** `planet_impostor.wgsl`
+  still calls `integrate_atmosphere` on its hit pixels and runs a
+  separate halo pass — both redundant with the unified fullscreen
+  pass and producing double-counted scattering at orbital distances.
+  Gate via a `UNIFIED_ATMOSPHERE` shader-def so the map-view
+  impostor (no fullscreen pass on `MAP_LAYER`) keeps its baked
+  atmosphere.
+- **MSAA path.** Currently `Msaa::Off` on the ship camera —
+  `copy_texture_to_texture` requires matching sample counts, and
+  binding a multisampled depth as `texture_depth_2d` would force
+  every consumer onto a `MULTISAMPLED` shader-def fork. Re-enable
+  with a resolve pass + `texture_depth_multisampled_2d` if jaggies
+  become the bottleneck.
 - **Ozone absorption.** Two extra parameters (band altitude + per-
   channel absorption coefficient); per-sample multiplier on
   transmittance. Produces Earth's blue-purple twilight wedge.
-  Cheap; defer until visual budget calls for it.
 - **Multi-scatter approximation.** Below visual threshold for
-  orbital impostors. Matters once we're flying in-atmosphere.
+  orbital views. Matters at low altitudes if ground-scattered light
+  becomes noticeable.
 - **Sample-count LOD.** 8 view × 6 sun samples is comfortable on
-  M2 Pro at impostor scale; profile and tune if budget bites.
-  Apparent body size is a natural LOD knob.
-- **Bruneton swap.** When in-atmosphere flight lands, replace the
-  raymarch body with LUT lookups; integration call sites stay
+  M2 Pro; tune if budget bites. Apparent body size is the natural
+  LOD knob.
+- **Bruneton swap.** When in-atmosphere flight fidelity demands it,
+  replace the raymarch body with LUT lookups; call sites stay
   unchanged.
 
 ---

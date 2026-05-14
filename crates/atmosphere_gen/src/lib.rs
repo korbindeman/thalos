@@ -379,29 +379,12 @@ pub struct AtmosphericScattering {
     #[serde(default = "default_mie_asymmetry")]
     pub mie_asymmetry: f32,
 
-    /// Atmosphere top altitude in meters. The view raymarch terminates
-    /// here; beyond ~5 × scale_height the contribution is negligible.
-    /// Default = 5 × max(rayleigh_scale_height_m, mie_scale_height_m),
-    /// resolved when the field is omitted at parse time. Authoring an
-    /// explicit value above this is wasted samples.
-    #[serde(default)]
-    pub atmosphere_top_m: Option<f32>,
-
     /// Overall artistic multiplier on both in-scatter and surface
     /// transmittance. 0 disables the scattering model entirely (the
     /// impostor renders with unattenuated white sunlight); 1 = physical;
     /// > 1 exaggerates haze and sunsets at the cost of accuracy.
     #[serde(default = "default_one")]
     pub strength: f32,
-}
-
-impl AtmosphericScattering {
-    /// Resolve the atmosphere top altitude, falling back to `5 × max
-    /// scale height` when the author left it unset.
-    pub fn resolved_top_m(&self) -> f32 {
-        self.atmosphere_top_m
-            .unwrap_or_else(|| 5.0 * self.rayleigh_scale_height_m.max(self.mie_scale_height_m))
-    }
 }
 
 /// Per-channel Minnaert-style limb darkening.
@@ -545,11 +528,24 @@ fn default_ringlet_octaves() -> u32 {
 /// when the raymarch landed — those signals now fall out of the
 /// physics and don't need parallel parameters.
 ///
-/// Every field is optional. A body with `TerrestrialAtmosphere::default`
-/// renders identically to a body with no atmosphere — the shader gates
-/// each layer on its own scalar.
+/// `karman_line_m` is the canonical atmosphere top: the altitude above
+/// the body surface where atmospheric effects (rendering and gameplay)
+/// cut off. It serves as the scattering raymarch integration cutoff,
+/// the visibility shell for any in-atmosphere render passes, and the
+/// gameplay boundary for drag / heating / "in atmosphere" state. A
+/// `TerrestrialAtmosphere` with `karman_line_m == 0` is equivalent to
+/// a vacuum body regardless of which sub-layers are populated.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TerrestrialAtmosphere {
+    /// Kármán-line altitude in meters above the body's mean surface.
+    /// Single source of truth for "where atmosphere ends" — read by
+    /// rendering for shell intersection and integration, by gameplay
+    /// for drag/heating gates, and by the LOD swap for sky-pass
+    /// visibility. Authoring guidance: pick a value comfortably above
+    /// `5 × max(rayleigh, mie)` scale height so the raymarch sees the
+    /// full contribution; below that the integral truncates visibly.
+    pub karman_line_m: f32,
+
     /// Per-channel Minnaert limb darkening on the lit surface. Pure
     /// artistic knob — most terrestrial bodies leave this None and
     /// rely on the scattering raymarch for limb shading.

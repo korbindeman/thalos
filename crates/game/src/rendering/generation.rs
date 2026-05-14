@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::ecs::system::SystemParam;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{block_on, poll_once};
 use bevy_terrain::prelude::{TerrainViewComponents, TileTree};
+use thalos_local_physics::TerrainSurfaceRegistry;
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
     AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
@@ -17,13 +19,23 @@ use thalos_planet_rendering::{
 use thalos_terrain::BodyTerrainMaterial;
 use thalos_terrain_gen::DynamicSurfaceState;
 
-use super::ground_terrain::{spawn_body_terrain, RealSpaceImpostor};
+use super::ground_terrain::{BodyHalo, RealSpaceImpostor, spawn_body_terrain};
 use super::types::{
     BodyMesh, CloudBandState, PendingPlanetGeneration, PlanetDynamicSurface, PlanetMaterials,
     PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh, SimulationState,
 };
 use crate::camera::ShipCamera;
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
+
+/// Bundles the material-asset registries `finalize_planet_generation`
+/// writes into. Kept as a `SystemParam` to stay under Bevy 0.18's 16-param
+/// limit.
+#[derive(SystemParam)]
+pub(super) struct PlanetMaterialAssets<'w> {
+    pub(super) planet: ResMut<'w, Assets<PlanetMaterial>>,
+    pub(super) planet_halo: ResMut<'w, Assets<PlanetHaloMaterial>>,
+    pub(super) body_terrain: ResMut<'w, Assets<BodyTerrainMaterial>>,
+}
 
 // ---------------------------------------------------------------------------
 // Per-frame: finalise async terrain generation
@@ -60,12 +72,12 @@ pub(super) fn finalize_planet_generation(
     mut pending_q: Query<(Entity, &mut PendingPlanetGeneration)>,
     sim: Res<SimulationState>,
     shared: Res<SharedPlanetMeshes>,
-    mut planet_materials: ResMut<Assets<PlanetMaterial>>,
-    mut planet_halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
-    mut body_terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
+    mut mats: PlanetMaterialAssets,
     mut images: ResMut<Assets<Image>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
+    mut terrain_surfaces: ResMut<TerrainSurfaceRegistry>,
+    terrain_registry: Res<crate::GameTerrainRegistry>,
     reference_clouds: Res<ReferenceClouds>,
     mut planetshine: ResMut<PlanetshineTints>,
     ship_camera_q: Query<Entity, With<ShipCamera>>,
@@ -91,6 +103,13 @@ pub(super) fn finalize_planet_generation(
         let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
 
         let body = &sim.system.bodies[pending.body_id];
+        terrain_surfaces.insert(pending.body_id, surface.clone());
+        // Mirror into the propagator's terrain registry so prediction and
+        // live propagation collide against the same surface. Both registries
+        // hold `Arc<PlanetSurface>` clones of the same data — `local_physics`
+        // builds colliders from it, `thalos_physics` queries the height
+        // cubemap for collision detection.
+        terrain_registry.0.insert(pending.body_id, surface.clone());
         let detail =
             PlanetDetailParams::from_body(&baked.detail_params, baked.cubemap_bake_threshold_m);
         let height_range = baked.height_range;
@@ -156,10 +175,10 @@ pub(super) fn finalize_planet_generation(
 
         let map_material = make_material(map_radius, map_atmosphere);
         let ship_material = make_material(ship_radius, ship_atmosphere);
-        let map_halo_handle = planet_halo_materials.add(PlanetHaloMaterial::from(&map_material));
-        let ship_halo_handle = planet_halo_materials.add(PlanetHaloMaterial::from(&ship_material));
-        let map_handle = planet_materials.add(map_material);
-        let ship_handle = planet_materials.add(ship_material);
+        let map_halo_handle = mats.planet_halo.add(PlanetHaloMaterial::from(&map_material));
+        let ship_halo_handle = mats.planet_halo.add(PlanetHaloMaterial::from(&ship_material));
+        let map_handle = mats.planet.add(map_material);
+        let ship_handle = mats.planet.add(ship_material);
 
         let mesh_entity = pending.mesh_entity;
         commands
@@ -211,6 +230,16 @@ pub(super) fn finalize_planet_generation(
             NoFrustumCulling,
             NotShadowCaster,
             NotShadowReceiver,
+            // Visibility is owned by `sync_body_render_lod`: shown when the
+            // camera is outside the atmosphere shell (it provides the rim
+            // halo around the impostor / terrain silhouette), hidden when
+            // inside (the `BodySky` fullscreen pass takes over). Start
+            // hidden so it doesn't double-contribute on frame 0 if the
+            // first camera position lands inside the shell.
+            Visibility::Hidden,
+            BodyHalo {
+                body_id: pending.body_id,
+            },
             ChildOf(pending.ship_parent_entity),
             Name::new(format!("{} Halo (Ship)", body.name)),
         ));
@@ -262,9 +291,10 @@ pub(super) fn finalize_planet_generation(
                     body,
                     surface.clone(),
                     pending.ship_parent_entity,
-                    &mut body_terrain_materials,
+                    &mut mats.body_terrain,
                     &mut tile_trees,
                     ship_camera,
+                    ship_atmosphere,
                 );
             }
             Err(e) => {

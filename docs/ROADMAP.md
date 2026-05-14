@@ -18,8 +18,9 @@ Working today:
 - Maneuver nodes with synchronous in-frame trajectory rebuild.
 - Time warp with ghost-body preview.
 - Canonical `CraftState` + `AuthorityMode` shell; `Simulation` owns one
-  canonical craft and one authority book (`OnRails`/`WarpIntegrated`
-  exercised; other variants reserved for M5).
+  canonical craft and one authority book. `OnRails`, `WarpIntegrated`,
+  the first `LocalRigidBody` bubble, and `BodyFixed` landed-state
+  evaluation are wired.
 - Map view decoupled: `MapSnapshot` + `MapProjection` are the only
   inputs to map rendering, ghost bodies, and maneuver UI.
 - Real-space scene under a single `BigSpace` root; ship camera carries
@@ -36,10 +37,10 @@ Working today:
 Hard limits today:
 
 - Thalos and Pelagos render via the flat-water `Ocean` placeholder.
-- No surface LOD — you cannot meaningfully descend below orbit.
 - No rocky-atmosphere scattering.
-- No Avian local bubble; authority handoffs to `LocalRigidBody` /
-  `BodyFixed` / `Docked` are reserved for M5.
+- M5 first slice is aggregate-only and Thalos-only: no aero, part-level
+  joints, docking, debris, rover wheels, or persistence of live Avian
+  state beyond canonical readback/collapse.
 - `WorldPreset::Realistic` (N-body ephemeris backend) is unwired and
   rejected by `validate_supported` — deferred to M7.
 
@@ -122,6 +123,22 @@ Hydration, sampling, collapse. Body-fixed sleep for landed craft.
 Authority transitions between rails / warp-integrated /
 local-rigidbody / body-fixed / docked.
 
+- **First slice status:** Implemented for Thalos landing validation.
+  The game hydrates `ships/apollo.ron` as one aggregate Avian
+  rigidbody using blueprint-derived primitive compound colliders and
+  existing aggregate mass/inertia. It builds one terrain collider patch
+  from the same rendered R16 cubemap height path that
+  `PipelineTileProvider` uses for UDLOD, reads Avian state back into
+  canonical state, and collapses stable landed craft to `BodyFixed`.
+- **Current thresholds:** enter in ship view, dominant body Thalos,
+  any explicit target body Thalos, surface available, warp 0x/1x, AGL
+  below 20 km. Patch half extent 4096 m, resolution 129 x 129, rebuild
+  after 1024 m lateral drift.
+  Collapse after 2.0 s terrain contact, linear speed <0.5 m/s,
+  angular speed <0.05 rad/s, throttle zero.
+- **Out of scope for first slice:** aero/drag/lift/heating, part-level
+  joints, docking, debris, rover wheels, and save/load persistence of
+  live local rigidbody state.
 - **Spec preview:** [simulation.md](simulation.md), Implementation
   Phases 4, 5, 7.
 

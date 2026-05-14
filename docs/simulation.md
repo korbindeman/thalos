@@ -164,6 +164,11 @@ The architecture should not depend on exact minor APIs. Wrap both crates
 behind local adapter modules so changes in either dependency do not
 bleed through the rest of the game.
 
+As of the M5 first slice, `crates/local_physics` is the concrete
+Bevy/Avian boundary. It depends on `avian3d 0.6.1` with default f32
+features disabled and `3d`, `f64`, `parry-f64`, and `parallel` enabled.
+`thalos_physics` remains Avian-free.
+
 ## Crate boundaries
 
 Target crate split:
@@ -494,18 +499,75 @@ pub enum AuthorityMode {
 
 Authority meaning:
 
-- `OnRails`: no active continuous forces. State is evaluated from a
-  cached or analytical trajectory.
+- `OnRails`: canonical state is evaluated from a patched-conic coast.
+  Used both at warp and at 1× when the ship is coasting under gravity
+  alone. Kepler is analytically exact under two-body gravity, so AP/PE
+  do not drift across pause/unpause cycles or just from elapsed sim
+  time. Avian's pos/vel are snapped from canonical each frame so
+  render and trajectory queries stay coherent.
 - `WarpIntegrated`: pure deterministic integration owns translation,
   attitude, resources, and events. Used for burns under warp,
   atmosphere, perturbations, spin propagation, and non-contact dynamics.
-- `LocalRigidBody`: Avian owns detailed local rigidbody motion for the
-  active bubble. Canonical state is sampled from Avian after physics
-  steps.
+- `LocalRigidBody`: Avian owns the ship's translation, rotation, and
+  thrust integration at 1× warp. Activated when there is a non-gravity
+  force to integrate: throttle is active, or the terrain collider is
+  attached (the ship is inside the AGL handoff band, currently 20 km,
+  so contact resolution may need to fire). Canonical state is sampled
+  from Avian after the physics step. Terrain colliders attach when the
+  ship is within the handoff band; they detach with hysteresis when the
+  ship climbs back out.
 - `BodyFixed`: craft is anchored to a rotating body frame. Used for
-  stable landed or parked surface objects when local physics is asleep.
+  stable landed or parked surface objects, and for the debug launch
+  clamp until throttle-up releases. Avian's body is snapped from the
+  canonical pose each frame.
 - `Docked`: craft is part of a larger assembly. The assembly owns the
   aggregate state.
+
+`Simulation::step` no longer integrates attitude or live thrust. The
+canonical step keeps `sim_time` and `epoch` advancing under warp,
+evaluates the `BodyFixed` pose, and propagates the rails coast for
+`OnRails` / `WarpIntegrated` / `Docked` (including coasting flight at
+1× warp under `OnRails`). Δv delivered by Avian-driven thrust is
+accumulated into `Simulation::delivered_dv` via
+`apply_external_mass_flow`, so the autopilot's burn-completion check
+keeps working without re-running thrust on the canonical side.
+
+### Avian's three roles
+
+The Avian rigid body persists for the lifetime of the player ship, but
+*what role it plays* each frame is a three-way decision driven by
+`AvianAuthority` / `AvianRole` (`crates/game/src/local_physics.rs`).
+The split is necessary because two questions need independent answers:
+
+1. *Should Avian's `PhysicsSchedule` step at all?* Needed for rotation
+   integration (player attitude commands, SAS damping) and for keeping
+   the contact graph live.
+2. *Should Avian's translation be authoritative?* Only when a
+   non-gravity force is present (thrust, contact). Otherwise canonical
+   Kepler propagation owns translation, drift-free.
+
+The three roles:
+
+- **`Paused`** (warp ≠ 1× or `BodyFixed`): Avian's clock is paused;
+  canonical owns everything. The snap (`snap_avian_from_canonical`)
+  pushes canonical state into Avian's components each frame so render
+  / contact queries stay coherent.
+- **`AttitudeOnly`** (1× coast in vacuum): Avian's clock runs but
+  Kepler owns translation. The snap pushes canonical pos/vel into
+  Avian each frame (with `linear_accel = 0` so Avian's step doesn't
+  perturb translation); rotation/angular_velocity are left alone for
+  Avian to integrate under `apply_local_forces`. Readback installs
+  attitude only — translation stays Kepler-driven.
+- **`Full`** (1× with thrust active or terrain collider attached):
+  Avian owns both translation and rotation. The snap fires once on
+  the role-transition edge to align Avian to fresh Kepler-evolved
+  canonical state, then suppresses itself while Avian owns. Readback
+  installs both translation and attitude.
+
+`manage_authority` flips `LocalRigidBody` ↔ `OnRails` based on
+`AvianAuthority::owns_translation()` (i.e., role `== Full`); warp is
+not denied while Avian is active, and Avian does not drive translation
+in `AttitudeOnly` or `Paused`.
 
 Authority changes are events and must be logged.
 
@@ -830,9 +892,52 @@ a magical transform setter.
 Avian should be used for local rigidbody dynamics, not for long-horizon
 orbital truth.
 
+Current M5 first slice:
+
+- Target body is Thalos only.
+- The active craft hydrates as one aggregate dynamic rigidbody, not
+  part-level bodies. Collider primitives are derived from
+  `ships/apollo.ron` + `assets/parts.ron`; mass and principal inertia
+  come from the existing aggregate ship stats.
+- The local bubble frame is body-centered inertial — the origin tracks
+  the dominant body's centre, but the axes are the parent inertial axes
+  (they do not rotate with the body). Canonical inertial state converts
+  through `thalos_physics::body_centered` helpers, which just subtract
+  the body's centre-of-mass translation. Gravity in the bubble is the
+  textbook two-body `−μr/r³`; no Coriolis, no centrifugal — those were
+  the cause of the apo/peri fluctuation that earlier body-fixed designs
+  produced. The body's own translational acceleration (orbital motion
+  around its parent) is treated as inertial and the residual is tidal
+  only; acceptable for M5 surface/landing work.
+- Terrain collision is one `Kinematic` trimesh patch whose vertices are
+  authored in body-fixed coordinates. Each frame the collider's
+  `Rotation` is set to `body.orientation` and its `AngularVelocity` to
+  `body.angular_velocity`, so its body-fixed vertices land in the right
+  body-centered-inertial positions and contact resolution sees the
+  correct surface velocity at the contact point. The patch samples the
+  rendered R16 cubemap height path, not the fuller
+  `sample_static_surface` detail path.
+- Patch defaults: 4096 m half extent, 129 x 129 vertices, rebuild after
+  1024 m lateral movement from the patch center.
+- Automatic entry requires ship view, dominant body Thalos, any
+  explicit target body Thalos, resolved terrain surface, warp paused or
+  1x, and AGL below 20 km.
+- Avian integration is active at 1× warp. Higher warps transition the
+  ship to `OnRails` so canonical Kepler propagation owns translation
+  while the bubble persists. Pause↔1× transitions snap (no smooth
+  lerp) — lerping through 0 would freeze translation for the duration
+  and drop sim-time underneath, losing ~1 km of LEO motion per pause
+  cycle.
+- Stable landing collapse requires continuous terrain contact for
+  2.0 s, linear speed below 0.5 m/s, angular speed below 0.05 rad/s,
+  and throttle zero. Collapse writes `AuthorityMode::BodyFixed`.
+- A dev-only F9 surface-drop places the craft 250 m above rendered
+  Thalos terrain at a deterministic location with 5 m/s downward
+  surface-relative velocity.
+
 Recommended configuration:
 
-- Use `avian3d` with f64 physics if performance allows.
+- Use `avian3d` with f64 physics.
 - Enable `parry-f64` when using f64 colliders.
 - Consider `enhanced-determinism` for replay, multiplayer, or
   cross-platform exactness.

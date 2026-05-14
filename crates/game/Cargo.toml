@@ -9,6 +9,7 @@ thalos_input = { path = "../input" }
 thalos_planet_rendering = { path = "../planet_rendering" }
 thalos_terrain = { path = "../terrain" }
 thalos_terrain_gen = { path = "../terrain_gen" }
+thalos_local_physics = { path = "../local_physics" }
 thalos_celestial = { path = "../celestial" }
 thalos_shipyard = { path = "../shipyard" }
 thalos_ship_rendering = { path = "../ship_rendering" }
