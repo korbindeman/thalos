@@ -92,8 +92,8 @@ pub(super) fn sync_film_grain_to_exposure(
     // focus) doesn't add noise in a real sensor.
     let push_ev = exposure.ev.max(0.0);
     let normalized = (push_ev / EXPOSURE_EV_GRAIN_MAX).clamp(0.0, 1.0);
-    const BASE_INTENSITY: f32 = 0.020;
-    const MAX_EXTRA: f32 = 0.030;
+    const BASE_INTENSITY: f32 = 0.006;
+    const MAX_EXTRA: f32 = 0.010;
     let target = BASE_INTENSITY + normalized * MAX_EXTRA;
     for mut grain in &mut grains {
         grain.intensity = target;
