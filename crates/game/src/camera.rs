@@ -137,6 +137,7 @@ pub enum CameraFocusTarget {
     None,
     Body(BodyId),
     Ship,
+    PlayerController,
     /// Map-only transient focus for future encounter projections.
     Ghost(RenderGhostFocus),
 }
@@ -494,6 +495,7 @@ pub fn camera_input_system(
     view: Res<ViewMode>,
     input: Res<GameInputIntent>,
     freecam: Res<FreeCam>,
+    debug_surface_teleport: Option<Res<crate::debug::DebugSurfaceTeleport>>,
     mut focus: ResMut<CameraFocus>,
 ) {
     if freecam.active {
@@ -509,11 +511,15 @@ pub fn camera_input_system(
     // also block the camera so clicking a button doesn't double up as a
     // camera drag/zoom.
     let ui_pointer_busy = egui_wants_pointer || ui_pointer_gate.hovered;
+    let debug_surface_armed = debug_surface_teleport
+        .as_deref()
+        .and_then(|teleport| teleport.armed_body)
+        .is_some();
 
     // --- Rotation -----------------------------------------------------------
     // Suppressed while a maneuver element is hovered or being dragged, or
     // while egui is handling the pointer (e.g. dragging a panel).
-    if input.primary_pressed && !block.0 && !ui_pointer_busy {
+    if input.primary_pressed && !block.0 && !ui_pointer_busy && !debug_surface_armed {
         let delta = input.camera_motion;
         if delta != Vec2::ZERO {
             focus.azimuth += delta.x * ROTATION_SENSITIVITY;
@@ -576,6 +582,10 @@ fn camera_min_distance_system(
             .map(|ghost| (ghost.radius_m * SURFACE_MARGIN).max(DISTANCE_MIN_DEFAULT))
             .unwrap_or(DISTANCE_MIN_DEFAULT),
         CameraFocusTarget::Ship => match *view {
+            ViewMode::Map => SHIP_MAP_MIN_DISTANCE_M,
+            ViewMode::Ship => SHIP_MIN_DISTANCE_M,
+        },
+        CameraFocusTarget::PlayerController => match *view {
             ViewMode::Map => SHIP_MAP_MIN_DISTANCE_M,
             ViewMode::Ship => SHIP_MIN_DISTANCE_M,
         },
@@ -977,6 +987,13 @@ pub fn camera_transform_system(
         (&Transform, Option<&CameraTargetOffset>, Option<&CellCoord>),
         (With<PlayerShip>, Without<OrbitCamera>),
     >,
+    player_targets: Query<
+        (&Transform, Option<&CellCoord>),
+        (
+            With<crate::player_controller::PlayerControllerVisual>,
+            Without<OrbitCamera>,
+        ),
+    >,
     ghost_targets: Query<
         (&crate::flight_plan_view::GhostBody, &Transform),
         (
@@ -1040,6 +1057,20 @@ pub fn camera_transform_system(
                             target_cell = cell.copied();
                             let local = offset.copied().unwrap_or_default().0;
                             t.translation + t.rotation * local
+                        })
+                        .unwrap_or(Vec3::ZERO)
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            CameraFocusTarget::PlayerController => {
+                if *view == ViewMode::Ship {
+                    player_targets
+                        .single()
+                        .ok()
+                        .map(|(t, cell)| {
+                            target_cell = cell.copied();
+                            t.translation
                         })
                         .unwrap_or(Vec3::ZERO)
                 } else {

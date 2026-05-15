@@ -1,19 +1,19 @@
 use crate::{
     terrain::TerrainComponents,
     terrain_data::{
+        AttachmentData, AttachmentFormat,
         tile_atlas::{
             AtlasAttachment, AtlasTileAttachment, AtlasTileAttachmentWithData, TileAtlas,
         },
-        AttachmentData, AttachmentFormat,
     },
     util::StaticBuffer,
 };
 use bevy::{
     prelude::*,
     render::{
+        Extract, MainWorld,
         render_resource::{binding_types::*, *},
         renderer::{RenderDevice, RenderQueue},
-        Extract, MainWorld,
     },
     tasks::{AsyncComputeTaskPool, Task},
 };

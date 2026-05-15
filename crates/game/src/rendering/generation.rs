@@ -186,7 +186,8 @@ pub(super) fn install_baked_planet(
     // builds colliders from it, `thalos_physics` queries the height
     // cubemap for collision detection.
     terrain_registry.0.insert(body_id, surface.clone());
-    let detail = PlanetDetailParams::from_body(&baked.detail_params, baked.cubemap_bake_threshold_m);
+    let detail =
+        PlanetDetailParams::from_body(&baked.detail_params, baked.cubemap_bake_threshold_m);
     let height_range = baked.height_range;
     assets
         .planetshine

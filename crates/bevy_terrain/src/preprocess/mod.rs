@@ -2,23 +2,23 @@ use crate::{
     formats::tiff::TiffLoader,
     preprocess::{
         gpu_preprocessor::{
-            downsample_layout_descriptor, split_layout_descriptor, stitch_layout_descriptor,
-            GpuPreprocessor,
+            GpuPreprocessor, downsample_layout_descriptor, split_layout_descriptor,
+            stitch_layout_descriptor,
         },
-        preprocessor::{preprocessor_load_tile, select_ready_tasks, PreprocessTaskType},
+        preprocessor::{PreprocessTaskType, preprocessor_load_tile, select_ready_tasks},
     },
-    shaders::{load_preprocess_shaders, DOWNSAMPLE_SHADER, SPLIT_SHADER, STITCH_SHADER},
+    shaders::{DOWNSAMPLE_SHADER, SPLIT_SHADER, STITCH_SHADER, load_preprocess_shaders},
     terrain::TerrainComponents,
-    terrain_data::gpu_tile_atlas::{attachment_layout_descriptor, GpuTileAtlas},
+    terrain_data::gpu_tile_atlas::{GpuTileAtlas, attachment_layout_descriptor},
 };
 use bevy::{
     prelude::*,
     render::{
+        Render, RenderApp, RenderStartup, RenderSystems,
         graph::CameraDriverLabel,
         render_graph::{self, RenderGraph, RenderLabel},
         render_resource::*,
         renderer::RenderContext,
-        Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
 

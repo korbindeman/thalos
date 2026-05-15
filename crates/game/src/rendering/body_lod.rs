@@ -254,9 +254,18 @@ pub(super) fn double_click_focus_system(
     sim: Res<SimulationState>,
     scale: Res<WorldScale>,
     origin: Res<RenderOrigin>,
+    debug_surface_teleport: Option<Res<crate::debug::DebugSurfaceTeleport>>,
     mut focus: ResMut<CameraFocus>,
     mut last_click: ResMut<LastClick>,
 ) {
+    if debug_surface_teleport
+        .as_deref()
+        .and_then(|teleport| teleport.armed_body)
+        .is_some()
+    {
+        return;
+    }
+
     let focus_target = focus.target;
     let focus_render_dist = (focus.distance * scale.0) as f32;
     let neighborhood_radius = focus_render_dist * BILLBOARD_NEIGHBORHOOD;

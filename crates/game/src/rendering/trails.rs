@@ -130,6 +130,7 @@ pub(super) fn draw_orbits(
     focus: Res<CameraFocus>,
     bodies: Query<(&CelestialBody, &Transform)>,
     sim: Option<Res<SimulationState>>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     camera_query: Query<&Transform, (With<ActiveCamera>, With<OrbitCamera>)>,
 ) {
     let Some(orbit_lines) = orbit_lines else {
@@ -151,6 +152,12 @@ pub(super) fn draw_orbits(
             sim.simulation.bodies(),
             states,
         )),
+        CameraFocusTarget::PlayerController => player
+            .as_deref()
+            .and_then(|state| state.active_position_m())
+            .map(|position| {
+                crate::camera::find_reference_body(position, sim.simulation.bodies(), states)
+            }),
         _ => None,
     };
     let focus_parent_id = focus_body_id.and_then(|id| sim.simulation.bodies()[id].parent);
@@ -158,6 +165,10 @@ pub(super) fn draw_orbits(
     // Determine the camera focus position in metres.
     let focus_pos = match focus.target {
         CameraFocusTarget::Ship => sim.simulation.ship_state().position,
+        CameraFocusTarget::PlayerController => player
+            .as_deref()
+            .and_then(|state| state.active_position_m())
+            .unwrap_or_else(|| sim.simulation.ship_state().position),
         CameraFocusTarget::Ghost(_) => origin.position,
         _ => focus_body_id
             .and_then(|id| states.get(id))

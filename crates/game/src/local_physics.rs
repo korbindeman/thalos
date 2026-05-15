@@ -24,6 +24,7 @@ use thalos_terrain::rendered_height_m;
 use crate::SimStage;
 use crate::debug::{DebugLaunchMount, DebugMode};
 use crate::fuel::ThrottleState;
+use crate::player_controller::{PlayerControllerBody, PlayerControllerState};
 use crate::rendering::{PlayerShip, SimulationState};
 use crate::view::ViewMode;
 
@@ -209,12 +210,17 @@ fn compute_avian_authority(
 fn sync_avian_time(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
+    player: Option<Res<PlayerControllerState>>,
     mut physics_time: ResMut<Time<Physics>>,
 ) {
     // Avian's clock runs both for `Full` (translation+rotation+contact) and
     // `AttitudeOnly` (rotation+contact while Kepler owns translation).
     // Only `Paused` halts the integrator entirely.
-    if active.bubble.is_some() && authority.integrator_active() {
+    let player_active = player
+        .as_deref()
+        .map(|state| state.is_active())
+        .unwrap_or(false);
+    if active.bubble.is_some() && (authority.integrator_active() || player_active) {
         physics_time.unpause();
     } else {
         physics_time.pause();
@@ -937,6 +943,8 @@ fn maintain_terrain_patch(
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
     craft_q: Query<&Position, With<LocalCraftBody>>,
+    player: Option<Res<PlayerControllerState>>,
+    player_q: Query<&Position, With<PlayerControllerBody>>,
 ) {
     let Some(current) = active.bubble.clone() else {
         return;
@@ -944,8 +952,17 @@ fn maintain_terrain_patch(
     if current.terrain_entity.is_none() {
         return;
     }
-    let Ok(position) = craft_q.get(current.craft_entity) else {
-        return;
+    let player_position = player
+        .as_deref()
+        .and_then(|state| state.is_active().then_some(()))
+        .and_then(|_| player_q.iter().next());
+    let position = if let Some(position) = player_position {
+        position
+    } else {
+        let Ok(position) = craft_q.get(current.craft_entity) else {
+            return;
+        };
+        position
     };
     // Avian's body is in body-centered inertial; the patch metadata
     // (`center_surface_body_m`, `center_dir_body`) is in body-fixed.
@@ -1036,6 +1053,12 @@ fn collapse_or_constrain_warp(
     let Some(mut bubble) = active.bubble.clone() else {
         return;
     };
+    if matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
+        bubble.stable_contact_s = 0.0;
+        bubble.stable_landed = false;
+        active.bubble = Some(bubble);
+        return;
+    }
     // Only track stable contact while a terrain patch is actually attached;
     // contact graph queries against `None` would be vacuously false anyway,
     // but skipping early keeps the timer from accumulating in deep space.

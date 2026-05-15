@@ -21,6 +21,12 @@ pub struct GameViewContext;
 pub struct GameCameraContext;
 
 #[derive(Component)]
+pub struct GameEvaContext;
+
+#[derive(Component)]
+pub struct GameEvaMoveContext;
+
+#[derive(Component)]
 pub struct GameManeuverContext;
 
 #[derive(Component)]
@@ -128,6 +134,26 @@ pub struct CameraWheelAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
+pub struct TogglePlayerControllerAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct PlayerForwardPositiveAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct PlayerForwardNegativeAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct PlayerStrafePositiveAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct PlayerStrafeNegativeAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
 pub struct TogglePlaceNodeAction;
 
 #[derive(InputAction)]
@@ -166,6 +192,8 @@ pub struct GameInputIntent {
     pub primary_released: bool,
     pub camera_motion: Vec2,
     pub camera_wheel: Vec2,
+    pub toggle_player_controller: bool,
+    pub player_move: Vec2,
     pub toggle_place_node: bool,
     pub delete_node: bool,
     pub precision_fine: bool,
@@ -181,6 +209,8 @@ impl Plugin for GameInputPlugin {
             .add_input_context::<GameFlightContext>()
             .add_input_context::<GameViewContext>()
             .add_input_context::<GameCameraContext>()
+            .add_input_context::<GameEvaContext>()
+            .add_input_context::<GameEvaMoveContext>()
             .add_input_context::<GameManeuverContext>()
             .add_input_context::<GameManeuverPrecisionContext>()
             .init_resource::<GameInputIntent>()
@@ -199,6 +229,7 @@ impl Plugin for GameInputPlugin {
                     collect_throttle_axis_intent,
                     collect_view_intent,
                     collect_camera_intent,
+                    collect_player_controller_intent,
                     collect_maneuver_intent,
                     collect_precision_intent,
                 )
@@ -373,6 +404,42 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
         ]),
     ));
     controller.insert((
+        GameEvaContext,
+        ContextPriority::<GameEvaContext>::new(35),
+        actions!(GameEvaContext[(
+            Action::<TogglePlayerControllerAction>::new(),
+            consume_input(),
+            Bindings::spawn(settings.game.eva.bindings("toggle_player_controller")),
+        ),]),
+    ));
+    controller.insert((
+        GameEvaMoveContext,
+        ContextPriority::<GameEvaMoveContext>::new(95),
+        ContextActivity::<GameEvaMoveContext>::INACTIVE,
+        actions!(GameEvaMoveContext[
+            (
+                Action::<PlayerForwardPositiveAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.eva_move.axis_positive("forward")),
+            ),
+            (
+                Action::<PlayerForwardNegativeAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.eva_move.axis_negative("forward")),
+            ),
+            (
+                Action::<PlayerStrafePositiveAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.eva_move.axis_positive("strafe")),
+            ),
+            (
+                Action::<PlayerStrafeNegativeAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.eva_move.axis_negative("strafe")),
+            ),
+        ]),
+    ));
+    controller.insert((
         GameManeuverContext,
         ContextPriority::<GameManeuverContext>::new(40),
         actions!(GameManeuverContext[
@@ -512,6 +579,22 @@ fn collect_camera_intent(
     intent.primary_released = completed(&primary);
     intent.camera_motion = vec2(&motion);
     intent.camera_wheel = crate::camera_scroll_delta(vec2(&wheel), scroll.unit);
+}
+
+fn collect_player_controller_intent(
+    mut intent: ResMut<GameInputIntent>,
+    toggle: Query<(&Action<TogglePlayerControllerAction>, &ActionEvents)>,
+    forward_pos: Query<&Action<PlayerForwardPositiveAction>>,
+    forward_neg: Query<&Action<PlayerForwardNegativeAction>>,
+    strafe_pos: Query<&Action<PlayerStrafePositiveAction>>,
+    strafe_neg: Query<&Action<PlayerStrafeNegativeAction>>,
+) {
+    intent.toggle_player_controller = started(&toggle);
+    intent.player_move = Vec2::new(
+        axis_value(&strafe_pos, &strafe_neg),
+        axis_value(&forward_pos, &forward_neg),
+    )
+    .clamp_length_max(1.0);
 }
 
 fn collect_maneuver_intent(

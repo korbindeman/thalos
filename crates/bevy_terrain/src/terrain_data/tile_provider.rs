@@ -24,7 +24,7 @@
 
 use crate::{
     math::{TerrainModel, TileCoordinate},
-    terrain_data::{tile_atlas::STORE_PNG, AttachmentConfig, AttachmentData, AttachmentFormat},
+    terrain_data::{AttachmentConfig, AttachmentData, AttachmentFormat, tile_atlas::STORE_PNG},
 };
 use anyhow::Result;
 use bevy::tasks::{AsyncComputeTaskPool, Task};

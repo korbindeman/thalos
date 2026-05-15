@@ -57,6 +57,7 @@ pub fn update_render_origin(
     focus: Res<CameraFocus>,
     flight_plan: Option<Res<FlightPlanView>>,
     sim: Res<SimulationState>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     mut origin: ResMut<RenderOrigin>,
 ) {
     let Some(ref states) = cache.states else {
@@ -69,6 +70,8 @@ pub fn update_render_origin(
             .map(|s| s.position)
             .unwrap_or(bevy::math::DVec3::ZERO),
         CameraFocusTarget::Ship => sim.simulation.ship_state().position,
+        CameraFocusTarget::PlayerController => player_controller_position(player.as_deref())
+            .unwrap_or_else(|| sim.simulation.ship_state().position),
         CameraFocusTarget::Ghost(ghost_focus) => {
             ghost_position(ghost_focus, flight_plan.as_deref(), states)
         }
@@ -103,6 +106,7 @@ pub fn update_render_frame(
     cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     sim: Res<SimulationState>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     mut frame: ResMut<RenderFrame>,
 ) {
     let Some(ref states) = cache.states else {
@@ -126,8 +130,28 @@ pub fn update_render_frame(
             ),
             focus_ghost: None,
         },
+        CameraFocusTarget::PlayerController => RenderFrame {
+            focus_body: player_controller_position(player.as_deref())
+                .map(|position| {
+                    crate::camera::find_reference_body(position, sim.simulation.bodies(), states)
+                })
+                .unwrap_or_else(|| {
+                    crate::camera::find_reference_body(
+                        sim.simulation.ship_state().position,
+                        sim.simulation.bodies(),
+                        states,
+                    )
+                }),
+            focus_ghost: None,
+        },
         CameraFocusTarget::None => RenderFrame::default(),
     };
+}
+
+fn player_controller_position(
+    state: Option<&crate::player_controller::PlayerControllerState>,
+) -> Option<bevy::math::DVec3> {
+    state.and_then(|state| state.active_position_m())
 }
 
 /// Drive each [`CelestialBody`] parent's translation at [`MAP_SCALE`].
@@ -204,6 +228,7 @@ fn ship_marker_visible_in_focus(
 ) -> bool {
     match focus_target {
         CameraFocusTarget::Ship => true,
+        CameraFocusTarget::PlayerController => true,
         CameraFocusTarget::Body(body_id) => same_local_system(body_id, ship_soi_body, bodies),
         CameraFocusTarget::Ghost(ghost_focus) => {
             same_local_system(ghost_focus.body_id, ship_soi_body, bodies)

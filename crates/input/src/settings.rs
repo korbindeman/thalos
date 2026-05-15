@@ -139,6 +139,12 @@ fn validate_file(file: &InputFile) -> Result<(), InputSettingsError> {
     validate_section_file("game.flight", &file.game.flight, &defaults.game.flight)?;
     validate_section_file("game.view", &file.game.view, &defaults.game.view)?;
     validate_section_file("game.camera", &file.game.camera, &defaults.game.camera)?;
+    validate_section_file("game.eva", &file.game.eva, &defaults.game.eva)?;
+    validate_section_file(
+        "game.eva_move",
+        &file.game.eva_move,
+        &defaults.game.eva_move,
+    )?;
     validate_section_file(
         "game.maneuver",
         &file.game.maneuver,
@@ -221,6 +227,8 @@ pub struct GameInputSettings {
     pub flight: BindingSection,
     pub view: BindingSection,
     pub camera: BindingSection,
+    pub eva: BindingSection,
+    pub eva_move: BindingSection,
     pub maneuver: BindingSection,
     pub maneuver_precision: BindingSection,
 }
@@ -232,6 +240,8 @@ impl Default for GameInputSettings {
             flight: defaults::game_flight(),
             view: defaults::game_view(),
             camera: defaults::game_camera(),
+            eva: defaults::game_eva(),
+            eva_move: defaults::game_eva_move(),
             maneuver: defaults::game_maneuver(),
             maneuver_precision: defaults::game_maneuver_precision(),
         }
@@ -244,6 +254,8 @@ impl GameInputSettings {
         self.flight.merge(file.flight);
         self.view.merge(file.view);
         self.camera.merge(file.camera);
+        self.eva.merge(file.eva);
+        self.eva_move.merge(file.eva_move);
         self.maneuver.merge(file.maneuver);
         self.maneuver_precision.merge(file.maneuver_precision);
     }
@@ -259,6 +271,10 @@ pub struct GameInputFile {
     pub view: BindingSectionFile,
     #[serde(default)]
     pub camera: BindingSectionFile,
+    #[serde(default)]
+    pub eva: BindingSectionFile,
+    #[serde(default)]
+    pub eva_move: BindingSectionFile,
     #[serde(default)]
     pub maneuver: BindingSectionFile,
     #[serde(default)]
@@ -454,6 +470,20 @@ pub mod defaults {
         )
     }
 
+    pub fn game_eva() -> BindingSection {
+        section([("toggle_player_controller", keys(["KeyF"]))], [])
+    }
+
+    pub fn game_eva_move() -> BindingSection {
+        section(
+            [],
+            [
+                ("forward", axis(["KeyW"], ["KeyS"])),
+                ("strafe", axis(["KeyD"], ["KeyA"])),
+            ],
+        )
+    }
+
     pub fn game_maneuver() -> BindingSection {
         section(
             [
@@ -548,6 +578,14 @@ mod tests {
         assert_eq!(settings.version, INPUT_SETTINGS_VERSION);
         assert!(!settings.game.system.bindings("escape").is_empty());
         assert!(!settings.game.flight.axis_positive("pitch").is_empty());
+        assert!(
+            !settings
+                .game
+                .eva
+                .bindings("toggle_player_controller")
+                .is_empty()
+        );
+        assert!(!settings.game.eva_move.axis_positive("forward").is_empty());
         assert!(!settings.planet_editor.bindings("camera_motion").is_empty());
         assert!(!settings.shipyard.bindings("primary").is_empty());
     }

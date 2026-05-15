@@ -270,14 +270,28 @@ fn sync_view_mode_changed(
     view: Res<ViewMode>,
     sim: Res<SimulationState>,
     body_states: Res<SolarSystemState>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     mut focus: ResMut<CameraFocus>,
     bodies: Query<&CelestialBody>,
 ) {
     match *view {
         ViewMode::Ship => {
-            focus.target = crate::camera::CameraFocusTarget::Ship;
-            focus.target_distance = SHIP_VIEW_INITIAL_DISTANCE_M;
-            focus.distance = focus.distance.min(SHIP_VIEW_INITIAL_DISTANCE_M * 10.0);
+            let player_active = player
+                .as_deref()
+                .map(|state| state.is_active())
+                .unwrap_or(false);
+            focus.target = if player_active {
+                crate::camera::CameraFocusTarget::PlayerController
+            } else {
+                crate::camera::CameraFocusTarget::Ship
+            };
+            let target_distance = if player_active {
+                6.0
+            } else {
+                SHIP_VIEW_INITIAL_DISTANCE_M
+            };
+            focus.target_distance = target_distance;
+            focus.distance = focus.distance.min(target_distance * 10.0);
             // Default view: behind the ship, slight tilt above the horizon.
             // Azimuth = π puts the camera at -forward, where `forward` is the
             // gravity-frame's horizon-projected prograde — KSP's chase angle.

@@ -44,6 +44,17 @@
                 "wheel": [MouseWheel],
             },
         ),
+        eva: (
+            bindings: {
+                "toggle_player_controller": [Key("KeyF")],
+            },
+        ),
+        eva_move: (
+            axes: {
+                "forward": (positive: [Key("KeyW")], negative: [Key("KeyS")]),
+                "strafe": (positive: [Key("KeyD")], negative: [Key("KeyA")]),
+            },
+        ),
         maneuver: (
             bindings: {
                 "toggle_place_node": [Key("KeyN")],

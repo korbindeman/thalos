@@ -17,9 +17,10 @@ use thalos_terrain_gen::{PlanetSurface, StaticSurfaceData};
 
 pub mod avian {
     pub use avian3d::prelude::{
-        AngularInertia, AngularVelocity, Collider, ConstantAngularAcceleration,
-        ConstantLinearAcceleration, ContactGraph, LinearVelocity, Mass, NoAutoAngularInertia,
-        NoAutoMass, Physics, PhysicsTime, Position, RigidBody, Rotation,
+        AngularInertia, AngularVelocity, CoefficientCombine, Collider, ConstantAngularAcceleration,
+        ConstantLinearAcceleration, ContactGraph, Friction, LinearVelocity, LockedAxes, Mass,
+        NoAutoAngularInertia, NoAutoMass, Physics, PhysicsTime, Position, Restitution, RigidBody,
+        Rotation, SleepingDisabled,
     };
 }
 

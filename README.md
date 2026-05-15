@@ -59,6 +59,8 @@ Controls:
 
 `Cmd` + left-click (Mac) or `Ctrl` + left-click (Windows) a body in the map-view navigator to move the ship into a low orbit around that body.
 
+Debug surface drop: click a body's `drop` button in the map-view navigator, aim the terrain cursor, then left-click the surface to mount the ship there.
+
 ## Project Status
 
 This project is in a very early stage. You're welcome to look through the code, but the internals are changing quickly and there is no public-facing documentation yet.

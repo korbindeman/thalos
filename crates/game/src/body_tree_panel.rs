@@ -9,33 +9,23 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
-use thalos_local_physics::{ActiveLocalBubble, TerrainSurfaceRegistry};
+use thalos_local_physics::ActiveLocalBubble;
+use thalos_physics::canonical::AuthorityMode;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyKind};
-use thalos_physics::{
-    body_fixed::body_fixed_pose_from_inertial,
-    canonical::{AuthorityMode, TranslationalState},
-};
-use thalos_terrain::rendered_height_m;
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
-use crate::debug::{
-    DebugLaunchMount, DebugLaunchMountState, DebugMode, low_orbit_state, subsolar_equator_dir_body,
-    surface_spawn_state,
-};
-use crate::fuel::ThrottleState;
+use crate::debug::{DebugLaunchMount, DebugMode, DebugSurfaceTeleport, low_orbit_state};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::pause_menu::not_game_paused;
 use crate::photo_mode::not_in_photo_mode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
-use crate::target::TargetBody;
-use crate::view::{ViewMode, in_map_view};
+use crate::view::in_map_view;
 
 /// Default framing distance (metres) when the ship row is clicked. Matches
 /// the value `sync_view_mode_changed` uses when entering map view, so
 /// picking the ship from the tree lands at the same zoom as switching to
 /// map view from ship view.
 const SHIP_TREE_FOCUS_DISTANCE_M: f64 = 2.0e7;
-const DEBUG_LAUNCH_MOUNT_HEIGHT_M: f64 = 18.0;
 
 pub struct BodyTreePanelPlugin;
 
@@ -57,14 +47,11 @@ fn body_tree_panel(
     origin: Res<RenderOrigin>,
     mut focus: ResMut<CameraFocus>,
     debug: Res<DebugMode>,
-    surfaces: Option<Res<TerrainSurfaceRegistry>>,
+    mut surface_teleport: ResMut<DebugSurfaceTeleport>,
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
     mut launch_mount: ResMut<DebugLaunchMount>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
-    mut target: ResMut<TargetBody>,
-    mut view: ResMut<ViewMode>,
-    mut throttle: ResMut<ThrottleState>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -86,7 +73,6 @@ fn body_tree_panel(
     let Some(root) = system.bodies.iter().find(|b| b.parent.is_none()) else {
         return;
     };
-    let star_id = root.id;
 
     // Anchor the ship row under whichever body's SOI currently contains
     // the ship — same rule the propagator uses, so the tree position
@@ -96,7 +82,7 @@ fn body_tree_panel(
 
     let mut clicked: Option<BodyId> = None;
     let mut cmd_clicked: Option<BodyId> = None;
-    let mut cmd_shift_clicked: Option<BodyId> = None;
+    let mut drop_clicked: Option<BodyId> = None;
     let mut clicked_ship = false;
 
     let initial_pos = ctx.available_rect().left_top() + egui::vec2(8.0, 8.0);
@@ -113,9 +99,11 @@ fn body_tree_panel(
                 root,
                 &body_entities,
                 focus.target,
+                debug.enabled,
+                surface_teleport.armed_body,
                 &mut clicked,
                 &mut cmd_clicked,
-                &mut cmd_shift_clicked,
+                &mut drop_clicked,
                 0,
             );
             if root.id == soi_id
@@ -131,9 +119,11 @@ fn body_tree_panel(
                         &children_of,
                         &body_entities,
                         focus.target,
+                        debug.enabled,
+                        surface_teleport.armed_body,
                         &mut clicked,
                         &mut cmd_clicked,
-                        &mut cmd_shift_clicked,
+                        &mut drop_clicked,
                         1,
                         ship,
                         soi_id,
@@ -157,9 +147,11 @@ fn body_tree_panel(
                             &children_of,
                             &body_entities,
                             focus.target,
+                            debug.enabled,
+                            surface_teleport.armed_body,
                             &mut clicked,
                             &mut cmd_clicked,
-                            &mut cmd_shift_clicked,
+                            &mut drop_clicked,
                             0,
                             ship,
                             soi_id,
@@ -204,89 +196,22 @@ fn body_tree_panel(
         }
     }
 
-    // Debug: cmd-shift-click spawns the ship near the rendered surface;
-    // cmd-click teleports it to a low circular orbit. Runs after the focus
-    // block so the immutable `system` borrow above is dropped before we
-    // mutate `sim`.
     if debug.enabled
-        && let Some(body_id) = cmd_shift_clicked
+        && let Some(body_id) = drop_clicked
     {
-        let body = sim.system.bodies[body_id].clone();
-        if matches!(body.kind, BodyKind::Star) {
-            warn!("surface spawn ignored for star {}", body.name);
-            return;
-        }
-        let sim_time = sim.simulation.sim_time();
-        let body_state = sim
-            .ephemeris
-            .state(body_id, thalos_physics::canonical::Epoch(sim_time));
-        let sun_state = sim
-            .ephemeris
-            .state(star_id, thalos_physics::canonical::Epoch(sim_time));
-        let spawn_dir_body = subsolar_equator_dir_body(&body_state, &sun_state);
-        let rendered_surface = surfaces
-            .as_deref()
-            .and_then(|registry| registry.get(body_id));
-        let surface_label = if rendered_surface.is_some() {
-            "rendered surface"
-        } else {
-            "spherical surface"
-        };
-        let surface_height_m = rendered_surface
-            .as_ref()
-            .map(|surface| rendered_height_m(&surface.static_surface, spawn_dir_body.as_vec3()))
-            .unwrap_or(0.0) as f64;
-        if rendered_surface.is_none() {
+        if matches!(sim.system.bodies[body_id].kind, BodyKind::Star) {
             warn!(
-                "surface spawn for {} used spherical radius; rendered terrain is not available",
-                body.name
+                "surface drop ignored for star {}",
+                sim.system.bodies[body_id].name
             );
+        } else {
+            surface_teleport.arm(body_id);
         }
-        clear_active_local_bubble(&mut commands, &mut active_bubble);
-        let (state, attitude) = surface_spawn_state(
-            &body,
-            &body_state,
-            spawn_dir_body,
-            surface_height_m,
-            DEBUG_LAUNCH_MOUNT_HEIGHT_M,
-        );
-        let pose =
-            body_fixed_pose_from_inertial(&body_state, TranslationalState::from(state), attitude);
-        sim.simulation
-            .transition_authority(AuthorityMode::BodyFixed {
-                body: body_id,
-                pose,
-            });
-        sim.simulation.set_ship_state(state);
-        sim.simulation.set_attitude(attitude);
-        sim.simulation.set_target_body(Some(body_id));
-        sim.simulation.set_throttle(0.0);
-        sim.simulation.warp.reset();
-        target.target = Some(body_id);
-        throttle.commanded = 0.0;
-        throttle.effective = 0.0;
-        launch_mount.active = Some(DebugLaunchMountState { body_id, pose });
-        clear_debug_teleport_maneuvers(&mut plan, &mut selected);
-        *view = ViewMode::Ship;
-        info!(
-            "mounted craft {:.0} m above {} {} (spawn_dir_body=({:.3},{:.3},{:.3}) h={:.1}m attitude.w={:.4} ω=({:.2e},{:.2e},{:.2e}) pose.pos=({:.1},{:.1},{:.1}) pose.ori.w={:.4})",
-            DEBUG_LAUNCH_MOUNT_HEIGHT_M,
-            body.name,
-            surface_label,
-            spawn_dir_body.x,
-            spawn_dir_body.y,
-            spawn_dir_body.z,
-            surface_height_m,
-            attitude.orientation.w,
-            attitude.angular_velocity.x,
-            attitude.angular_velocity.y,
-            attitude.angular_velocity.z,
-            pose.position_body_m.x,
-            pose.position_body_m.y,
-            pose.position_body_m.z,
-            pose.orientation_body.w,
-        );
-    } else if debug.enabled
+    }
+
+    // Debug: cmd-click teleports the ship to a low circular orbit. Surface
+    // placement is now explicit via each row's `drop` button and cursor.
+    if debug.enabled
         && let Some(body_id) = cmd_clicked
     {
         let sim_time = sim.simulation.sim_time();
@@ -346,9 +271,11 @@ fn render_subtree(
     children_of: &HashMap<BodyId, Vec<&BodyDefinition>>,
     body_entities: &HashMap<BodyId, Entity>,
     focused_target: CameraFocusTarget,
+    debug_enabled: bool,
+    armed_drop_body: Option<BodyId>,
     clicked: &mut Option<BodyId>,
     cmd_clicked: &mut Option<BodyId>,
-    cmd_shift_clicked: &mut Option<BodyId>,
+    drop_clicked: &mut Option<BodyId>,
     depth: u32,
     ship: Option<&str>,
     soi_id: BodyId,
@@ -359,9 +286,11 @@ fn render_subtree(
         body,
         body_entities,
         focused_target,
+        debug_enabled,
+        armed_drop_body,
         clicked,
         cmd_clicked,
-        cmd_shift_clicked,
+        drop_clicked,
         depth,
     );
     if body.id == soi_id
@@ -377,9 +306,11 @@ fn render_subtree(
                 children_of,
                 body_entities,
                 focused_target,
+                debug_enabled,
+                armed_drop_body,
                 clicked,
                 cmd_clicked,
-                cmd_shift_clicked,
+                drop_clicked,
                 depth + 1,
                 ship,
                 soi_id,
@@ -421,9 +352,11 @@ fn render_row(
     body: &BodyDefinition,
     body_entities: &HashMap<BodyId, Entity>,
     focused_target: CameraFocusTarget,
+    debug_enabled: bool,
+    armed_drop_body: Option<BodyId>,
     clicked: &mut Option<BodyId>,
     cmd_clicked: &mut Option<BodyId>,
-    cmd_shift_clicked: &mut Option<BodyId>,
+    drop_clicked: &mut Option<BodyId>,
     depth: u32,
 ) {
     let entity = body_entities.get(&body.id).copied();
@@ -448,15 +381,25 @@ fn render_row(
         );
         if label.clicked() {
             // `command` is cmd on macOS, ctrl on Windows/Linux — egui's
-            // standard cross-platform "primary modifier." A cmd-click
-            // or cmd-shift-click both teleport (handled below) and focus,
-            // so they always set `clicked`.
+            // standard cross-platform "primary modifier." Cmd-click
+            // teleports to low orbit (handled below) and focuses.
             *clicked = Some(body.id);
             let modifiers = ui.input(|i| i.modifiers);
-            if modifiers.command && modifiers.shift {
-                *cmd_shift_clicked = Some(body.id);
-            } else if modifiers.command {
+            if modifiers.command {
                 *cmd_clicked = Some(body.id);
+            }
+        }
+
+        if debug_enabled && !matches!(body.kind, BodyKind::Star) {
+            ui.add_space(4.0);
+            let armed = armed_drop_body == Some(body.id);
+            let text = if armed { "aim" } else { "drop" };
+            let drop = ui
+                .add_enabled(entity.is_some(), egui::Button::selectable(armed, text))
+                .on_hover_text("Arm terrain cursor");
+            if drop.clicked() {
+                *clicked = Some(body.id);
+                *drop_clicked = Some(body.id);
             }
         }
     });

@@ -1,13 +1,13 @@
 use crate::{
     math::TileCoordinate,
     terrain_data::{
-        tile_atlas::{AtlasTile, AtlasTileAttachment, TileAtlas},
         AttachmentFormat,
+        tile_atlas::{AtlasTile, AtlasTileAttachment, TileAtlas},
     },
     util::CollectArray,
 };
 use bevy::{image::ImageSampler, prelude::*};
-use itertools::{iproduct, Itertools};
+use itertools::{Itertools, iproduct};
 use std::{
     collections::VecDeque,
     fs,

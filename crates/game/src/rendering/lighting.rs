@@ -49,6 +49,7 @@ pub(super) fn update_camera_exposure(
     focus: Res<CameraFocus>,
     bodies: Query<&CelestialBody>,
     sim: Res<SimulationState>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     mut exposure: ResMut<CameraExposure>,
 ) {
     let Some(ref states) = cache.states else {
@@ -63,6 +64,11 @@ pub(super) fn update_camera_exposure(
             .and_then(|body| states.get(body.body_id))
             .map(|s| (s.position - star_pos).length()),
         CameraFocusTarget::Ship => Some((sim.simulation.ship_state().position - star_pos).length()),
+        CameraFocusTarget::PlayerController => player
+            .as_deref()
+            .and_then(|state| state.active_position_m())
+            .map(|position| (position - star_pos).length())
+            .or_else(|| Some((sim.simulation.ship_state().position - star_pos).length())),
         CameraFocusTarget::Ghost(ghost_focus) => states
             .get(ghost_focus.body_id)
             .map(|s| (s.position - star_pos).length()),
@@ -404,6 +410,7 @@ pub(super) fn update_sun_light(
     cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     sim: Res<SimulationState>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     mut light_query: Query<&mut Transform, With<SunLight>>,
 ) {
     let Some(ref states) = cache.states else {
@@ -416,6 +423,10 @@ pub(super) fn update_sun_light(
     let focus_pos = match focus.target {
         CameraFocusTarget::Body(body_id) => states.get(body_id).map(|s| s.position),
         CameraFocusTarget::Ship => Some(sim.simulation.ship_state().position),
+        CameraFocusTarget::PlayerController => player
+            .as_deref()
+            .and_then(|state| state.active_position_m())
+            .or_else(|| Some(sim.simulation.ship_state().position)),
         CameraFocusTarget::Ghost(ghost_focus) => {
             states.get(ghost_focus.body_id).map(|s| s.position)
         }

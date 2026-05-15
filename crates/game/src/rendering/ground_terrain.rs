@@ -275,12 +275,18 @@ pub(super) fn spawn_body_water(
         return;
     };
 
-    let water_radius_m =
-        (body.radius_m as f32 + sea_level_m + WATER_SURFACE_EPSILON_M).max(1.0);
+    let water_radius_m = (body.radius_m as f32 + sea_level_m + WATER_SURFACE_EPSILON_M).max(1.0);
 
     let color_depth = baked
         .water_appearance
-        .map(|w| Vec4::new(w.color_depth[0], w.color_depth[1], w.color_depth[2], w.color_depth[3]))
+        .map(|w| {
+            Vec4::new(
+                w.color_depth[0],
+                w.color_depth[1],
+                w.color_depth[2],
+                w.color_depth[3],
+            )
+        })
         .unwrap_or_else(|| {
             Vec4::new(
                 FALLBACK_WATER_COLOR_DEPTH[0],
@@ -634,8 +640,7 @@ pub(super) fn update_body_terrain_atmosphere(
         let Some(mat) = water_materials.get_mut(mat_handle) else {
             continue;
         };
-        mat.scene =
-            build_terrain_scene_lighting(water.body_id, states, &occluders, exposure.gain);
+        mat.scene = build_terrain_scene_lighting(water.body_id, states, &occluders, exposure.gain);
         let render_pos = body_render_pos
             .get(&water.body_id)
             .copied()

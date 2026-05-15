@@ -2,7 +2,8 @@ use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 use thalos_input::enhanced::{ActionSources, ContextActivity, EnhancedInputSystems};
 use thalos_input::game::{
-    GameFlightContext, GameManeuverContext, GameManeuverPrecisionContext, GameViewContext,
+    GameEvaContext, GameEvaMoveContext, GameFlightContext, GameManeuverContext,
+    GameManeuverPrecisionContext, GameViewContext,
 };
 
 pub struct GameInputGatePlugin;
@@ -22,8 +23,11 @@ fn gate_enhanced_input_sources(
     mut contexts: EguiContexts,
     ui_pointer_gate: Option<Res<crate::hud::UiPointerGate>>,
     freecam: Option<Res<crate::freecam::FreeCam>>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     flight: Query<(Entity, &ContextActivity<GameFlightContext>)>,
     view: Query<(Entity, &ContextActivity<GameViewContext>)>,
+    eva: Query<(Entity, &ContextActivity<GameEvaContext>)>,
+    eva_move: Query<(Entity, &ContextActivity<GameEvaMoveContext>)>,
     maneuver: Query<(Entity, &ContextActivity<GameManeuverContext>)>,
     precision: Query<(Entity, &ContextActivity<GameManeuverPrecisionContext>)>,
 ) {
@@ -45,9 +49,25 @@ fn gate_enhanced_input_sources(
     // disables gameplay contexts.
     thalos_input::gating::set_keyboard_source(&mut action_sources, true);
 
-    // Freecam suspends flight input so WASD/QE drive the camera, not the ship.
-    set_context_activity(&mut commands, &flight, !egui_keyboard_busy && !freecam_active);
+    let player_controller_active = player
+        .as_deref()
+        .map(|state| state.is_active())
+        .unwrap_or(false);
+
+    // Freecam suspends flight input so WASD/QE drive the camera; the EVA
+    // controller likewise owns WASD while active.
+    set_context_activity(
+        &mut commands,
+        &flight,
+        !egui_keyboard_busy && !freecam_active && !player_controller_active,
+    );
     set_context_activity(&mut commands, &view, !egui_keyboard_busy);
+    set_context_activity(&mut commands, &eva, !egui_keyboard_busy);
+    set_context_activity(
+        &mut commands,
+        &eva_move,
+        !egui_keyboard_busy && !freecam_active && player_controller_active,
+    );
     set_context_activity(&mut commands, &maneuver, !egui_keyboard_busy);
     if egui_keyboard_busy {
         set_context_activity(&mut commands, &precision, false);

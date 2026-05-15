@@ -256,12 +256,8 @@ pub(super) fn spawn_bodies(
                 crater_count_scale: BAKE_CRATER_COUNT_SCALE,
                 cubemap_resolution_override: None,
             };
-            let key = cache::terrain_cache_key(
-                &body.terrain,
-                body.tectonics.as_ref(),
-                &context,
-                options,
-            );
+            let key =
+                cache::terrain_cache_key(&body.terrain, body.tectonics.as_ref(), &context, options);
             let bake_dir = shipped_bake_dir();
             let path = cache::cache_path(&bake_dir, &body.name);
             let static_surface = match cache::load(&path, key) {
@@ -292,9 +288,7 @@ pub(super) fn spawn_bodies(
                 ),
             };
             let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
-                .unwrap_or_else(|e| {
-                    panic!("dynamic layer compile failed for {}: {e}", body.name)
-                });
+                .unwrap_or_else(|e| panic!("dynamic layer compile failed for {}: {e}", body.name));
             let tectonics_built = compile_tectonics_from_config(body.tectonics.as_ref(), &context);
             let surface = PlanetSurface {
                 static_surface,

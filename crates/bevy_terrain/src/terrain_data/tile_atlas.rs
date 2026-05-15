@@ -4,9 +4,9 @@ use crate::{
     prelude::{AttachmentConfig, AttachmentFormat},
     terrain::TerrainConfig,
     terrain_data::{
+        AttachmentData, INVALID_ATLAS_INDEX, INVALID_LOD,
         tile_provider::{DiskTileProvider, TileProvider},
         tile_tree::{TileLookup, TileTree, TileTreeEntry},
-        AttachmentData, INVALID_ATLAS_INDEX, INVALID_LOD,
     },
     terrain_view::TerrainViewComponents,
 };
@@ -15,7 +15,7 @@ use bevy::{
     platform::collections::{HashMap, HashSet},
     prelude::*,
     render::render_resource::*,
-    tasks::{futures_lite::future, AsyncComputeTaskPool, Task},
+    tasks::{AsyncComputeTaskPool, Task, futures_lite::future},
 };
 use image::{DynamicImage, ImageBuffer, Luma, LumaA, Rgb, Rgba};
 use itertools::Itertools;

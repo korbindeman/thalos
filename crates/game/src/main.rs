@@ -18,6 +18,7 @@ mod navball;
 mod navigation;
 mod pause_menu;
 mod photo_mode;
+mod player_controller;
 mod reflection_probe;
 mod rendering;
 mod screenshot;
@@ -68,6 +69,7 @@ use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use pause_menu::PauseMenuPlugin;
 use photo_mode::PhotoModePlugin;
+use player_controller::PlayerControllerPlugin;
 use rendering::RenderingPlugin;
 use screenshot::ScreenshotPlugin;
 use ship_view::ShipViewPlugin;
@@ -318,6 +320,7 @@ fn main() {
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(GameLocalPhysicsPlugin)
+        .add_plugins(PlayerControllerPlugin)
         .add_plugins(MapViewPlugin)
         .add_plugins(BridgePlugin)
         .add_plugins(FuelPlugin)
