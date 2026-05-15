@@ -28,10 +28,12 @@ use thalos_planet_rendering::{
     PlanetParams, PlanetWaterParams, ReferenceClouds, cloud_cover_image_for_body,
     prepare_planet_bake, upload_prepared_bake,
 };
-use thalos_terrain::{BodySkyMaterial, BodyTerrainMaterial};
+use thalos_terrain::{BodySkyMaterial, BodyTerrainMaterial, BodyWaterMaterial};
 use thalos_terrain_gen::{DynamicSurfaceState, PlanetSurface};
 
-use super::ground_terrain::{BodyHalo, BodySky, RealSpaceImpostor, spawn_body_terrain};
+use super::ground_terrain::{
+    BodyHalo, BodySky, RealSpaceImpostor, spawn_body_terrain, spawn_body_water,
+};
 use super::types::{
     BodyMesh, CelestialBody, PlanetMaterials, PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh,
 };
@@ -48,6 +50,7 @@ pub(super) struct PlanetMaterialAssets<'w> {
     pub(super) planet: ResMut<'w, Assets<PlanetMaterial>>,
     pub(super) planet_halo: ResMut<'w, Assets<PlanetHaloMaterial>>,
     pub(super) body_terrain: ResMut<'w, Assets<BodyTerrainMaterial>>,
+    pub(super) body_water: ResMut<'w, Assets<BodyWaterMaterial>>,
 }
 
 /// Storage / index / registry handles `spawn_bodies` needs when installing
@@ -102,6 +105,8 @@ pub(super) struct InstallAssets<'a> {
     pub planet_materials: &'a mut Assets<PlanetMaterial>,
     pub planet_halo_materials: &'a mut Assets<PlanetHaloMaterial>,
     pub body_terrain_materials: &'a mut Assets<BodyTerrainMaterial>,
+    pub body_water_materials: &'a mut Assets<BodyWaterMaterial>,
+    pub meshes: &'a mut Assets<Mesh>,
     pub images: &'a mut Assets<Image>,
     pub storage_buffers: &'a mut Assets<ShaderStorageBuffer>,
     pub tile_trees: &'a mut TerrainViewComponents<TileTree>,
@@ -346,6 +351,19 @@ pub(super) fn install_baked_planet(
         entities.ship_camera,
         ship_atmosphere,
         dynamic_state.clone(),
+    );
+
+    // Per-body water sphere. Ocean-only — `spawn_body_water` returns early
+    // when the baked surface has no `sea_level_m`. Visibility is paired with
+    // the terrain entity by `sync_body_render_lod` (impostor's inline water
+    // BRDF takes over outside the LOD swap radius).
+    spawn_body_water(
+        commands,
+        body,
+        &surface,
+        entities.ship_parent_entity,
+        assets.meshes,
+        assets.body_water_materials,
     );
 }
 

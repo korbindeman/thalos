@@ -31,6 +31,7 @@ mod playground_material;
 mod rendered_height;
 mod sky_material;
 mod synthetic;
+mod water_material;
 
 pub use body_material::{BodySkyExtra, BodyTerrainMaterial, BodyTerrainShadow};
 pub use pipeline::{PipelineTileProvider, rendered_height_range};
@@ -41,6 +42,7 @@ pub use rendered_height::{
 };
 pub use sky_material::BodySkyMaterial;
 pub use synthetic::SyntheticTileProvider;
+pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 
 pub struct ThalosTerrainPlugin;
 
@@ -55,11 +57,14 @@ impl Plugin for ThalosTerrainPlugin {
         }
         app.add_plugins(TerrainPlugin);
         app.add_plugins(TerrainMaterialPlugin::<BodyTerrainMaterial>::default());
-        // Sky uses the standard Bevy MaterialPlugin (renders fullscreen quads
-        // through the regular forward pipeline, not bevy_terrain's pipeline).
+        // Sky and water both use the standard Bevy MaterialPlugin — they
+        // render through the regular forward pipeline (fullscreen quad and
+        // icosphere mesh respectively), not bevy_terrain's UDLOD pipeline.
         app.add_plugins(MaterialPlugin::<BodySkyMaterial>::default());
+        app.add_plugins(MaterialPlugin::<BodyWaterMaterial>::default());
         body_material::embed_body_terrain_shader(app);
         sky_material::embed_sky_dome_shader(app);
+        water_material::embed_body_water_shader(app);
         playground_material::embed_playground_shader(app);
     }
 }

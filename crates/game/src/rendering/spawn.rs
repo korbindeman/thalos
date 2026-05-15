@@ -378,6 +378,8 @@ pub(super) fn spawn_bodies(
                     planet_materials: &mut planet_material_assets.planet,
                     planet_halo_materials: &mut planet_material_assets.planet_halo,
                     body_terrain_materials: &mut planet_material_assets.body_terrain,
+                    body_water_materials: &mut planet_material_assets.body_water,
+                    meshes: &mut meshes,
                     images: &mut images,
                     storage_buffers: &mut procedural_install_extras.storage_buffers,
                     tile_trees: &mut procedural_install_extras.tile_trees,

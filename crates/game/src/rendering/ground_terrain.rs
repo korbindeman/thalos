@@ -22,8 +22,8 @@ use big_space::grid::Grid;
 use thalos_physics::types::{BodyDefinition, BodyId};
 use thalos_planet_rendering::{AtmosphereBlock, SceneLighting};
 use thalos_terrain::{
-    BodySkyExtra, BodySkyMaterial, BodyTerrainMaterial, BodyTerrainShadow, PipelineTileProvider,
-    rendered_height_range,
+    BodySkyExtra, BodySkyMaterial, BodyTerrainMaterial, BodyTerrainShadow, BodyWaterMaterial,
+    BodyWaterParams, PipelineTileProvider, rendered_height_range,
 };
 use thalos_terrain_gen::{DynamicSurfaceState, PlanetSurface};
 
@@ -96,6 +96,15 @@ pub(super) struct BodySky {
 #[derive(Component, Debug)]
 pub(crate) struct BodyHalo {
     pub body_id: BodyId,
+}
+
+/// Marker on the per-body water sphere (ship layer). Only spawned when the
+/// baked surface has `sea_level_m = Some(_)`; visibility is paired with
+/// [`BodyTerrain`] so the impostor's inline water BRDF takes over outside
+/// the LOD swap radius.
+#[derive(Component, Debug)]
+pub(super) struct BodyWater {
+    pub(super) body_id: BodyId,
 }
 
 /// Camera-to-body-centre distance, expressed as a multiple of body radius,
@@ -229,6 +238,97 @@ pub(super) fn spawn_body_terrain(
     );
 }
 
+/// Icosphere subdivision for the water surface mesh.
+///
+/// 6 levels = 81,920 triangles. At a typical low-altitude view (~10 km up
+/// over a Mira-scale body) that puts ~30 triangles across the visible
+/// horizon disc — fine for wave-normal-dominated water shading. Bump to
+/// 7 if mesh facets start reading at the silhouette.
+const WATER_MESH_SUBDIVISIONS: u32 = 6;
+
+/// Tiny offset (in metres) lifting the water mesh above the bare body
+/// sphere. Resolves z-fighting between the water mesh and the seafloor
+/// terrain mesh at iso-height texels in favour of water. Sized at 2 m so
+/// it's comfortably above the f32 ULP near body-radius scale (~0.4 m at
+/// 3 Mm) on the bodies we currently ship.
+const WATER_SURFACE_EPSILON_M: f32 = 2.0;
+
+/// Default deep-water tint when the bake omits an explicit
+/// `WaterAppearance`. Matches `PlanetWaterParams::from_static_surface`'s
+/// fallback so the impostor and ground-LOD paths agree.
+const FALLBACK_WATER_COLOR_DEPTH: [f32; 4] = [0.012, 0.040, 0.090, 120.0];
+
+/// Spawn the per-body water sphere. No-op when the baked surface has no
+/// `sea_level_m` (airless bodies); otherwise creates a single icosphere
+/// entity parented to the body's grid, hidden at start so
+/// `sync_body_render_lod` can flip it in step with [`BodyTerrain`].
+pub(super) fn spawn_body_water(
+    commands: &mut Commands,
+    body: &BodyDefinition,
+    surface: &PlanetSurface,
+    ship_parent_entity: Entity,
+    meshes: &mut Assets<Mesh>,
+    water_materials: &mut Assets<BodyWaterMaterial>,
+) {
+    let baked = &surface.static_surface;
+    let Some(sea_level_m) = baked.sea_level_m else {
+        return;
+    };
+
+    let water_radius_m =
+        (body.radius_m as f32 + sea_level_m + WATER_SURFACE_EPSILON_M).max(1.0);
+
+    let color_depth = baked
+        .water_appearance
+        .map(|w| Vec4::new(w.color_depth[0], w.color_depth[1], w.color_depth[2], w.color_depth[3]))
+        .unwrap_or_else(|| {
+            Vec4::new(
+                FALLBACK_WATER_COLOR_DEPTH[0],
+                FALLBACK_WATER_COLOR_DEPTH[1],
+                FALLBACK_WATER_COLOR_DEPTH[2],
+                FALLBACK_WATER_COLOR_DEPTH[3],
+            )
+        });
+
+    let mesh = meshes.add(
+        Sphere::new(water_radius_m)
+            .mesh()
+            .ico(WATER_MESH_SUBDIVISIONS)
+            .expect("water mesh ico subdivision is within bevy's supported range"),
+    );
+
+    let params = BodyWaterParams {
+        color_depth,
+        // xyz populated each frame by `update_body_terrain_atmosphere` from
+        // the body's render-space grid origin; w is constant.
+        planet_center_radius: Vec4::new(0.0, 0.0, 0.0, water_radius_m),
+        time: Vec4::ZERO,
+    };
+    let material = BodyWaterMaterial {
+        scene: SceneLighting::default(),
+        params,
+    };
+
+    commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(water_materials.add(material)),
+        Transform::default(),
+        Visibility::Hidden,
+        RenderLayers::layer(SHIP_LAYER),
+        NotShadowCaster,
+        ChildOf(ship_parent_entity),
+        Name::new(format!("{} Water", body.name)),
+        BodyWater { body_id: body.id },
+    ));
+
+    info!(
+        "spawned water surface for '{}' (radius {:.0} km, sea level {:+.1} m)",
+        body.name,
+        body.radius_m / 1000.0,
+        sea_level_m,
+    );
+}
+
 /// Unified per-body render-LOD visibility.
 ///
 /// One pass over each body decides which of its four ship-layer render
@@ -268,11 +368,26 @@ pub(super) fn sync_body_render_lod(
             Without<RealSpaceImpostor>,
             Without<BodySky>,
             Without<BodyHalo>,
+            Without<BodyWater>,
         ),
     >,
     mut impostors: Query<
         (&RealSpaceImpostor, &mut Visibility),
-        (Without<BodyTerrain>, Without<BodySky>, Without<BodyHalo>),
+        (
+            Without<BodyTerrain>,
+            Without<BodySky>,
+            Without<BodyHalo>,
+            Without<BodyWater>,
+        ),
+    >,
+    mut waters: Query<
+        (&BodyWater, &mut Visibility),
+        (
+            Without<BodyTerrain>,
+            Without<RealSpaceImpostor>,
+            Without<BodySky>,
+            Without<BodyHalo>,
+        ),
     >,
     mut skies: Query<
         (&BodySky, &mut Visibility),
@@ -280,6 +395,7 @@ pub(super) fn sync_body_render_lod(
             Without<BodyTerrain>,
             Without<RealSpaceImpostor>,
             Without<BodyHalo>,
+            Without<BodyWater>,
         ),
     >,
     mut halos: Query<
@@ -288,6 +404,7 @@ pub(super) fn sync_body_render_lod(
             Without<BodyTerrain>,
             Without<RealSpaceImpostor>,
             Without<BodySky>,
+            Without<BodyWater>,
         ),
     >,
 ) {
@@ -357,6 +474,20 @@ pub(super) fn sync_body_render_lod(
         set_vis(&mut vis, want);
     }
 
+    // Water pairs with terrain: only visible inside the LOD swap radius.
+    // Outside it, the impostor's inline water BRDF takes over.
+    for (water, mut vis) in &mut waters {
+        let Some((dist, swap, _shell)) = body_metrics(water.body_id) else {
+            continue;
+        };
+        let want = if dist < swap {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        set_vis(&mut vis, want);
+    }
+
     for (sky, mut vis) in &mut skies {
         let Some((dist, swap, _shell)) = body_metrics(sky.body_id) else {
             continue;
@@ -382,12 +513,15 @@ pub(super) fn sync_body_render_lod(
     }
 }
 
-/// Update the per-frame dynamic data on every body's `BodyTerrainMaterial`
-/// and `BodySkyMaterial`:
+/// Update the per-frame dynamic data on every body's `BodyTerrainMaterial`,
+/// `BodyWaterMaterial`, and `BodySkyMaterial`:
 ///
 /// - terrain `planet_extra` (planet center + radius, terminator-wrap knob)
 /// - terrain `scene` (`SceneLighting`: primary star, eclipse occluders,
 ///   ambient; planetshine left zero for now)
+/// - water `scene` (same `SceneLighting` as terrain), water `params.time`
+///   (Time::elapsed_secs for wave scroll), water `params.planet_center_radius.xyz`
+///   (body render-space centre)
 /// - sky `atmosphere_extra` (sun dir + flux, planet center + radius)
 ///
 /// Must run after `sync_solar_system_state` (for sun direction from ephemeris),
@@ -396,12 +530,15 @@ pub(super) fn sync_body_render_lod(
 pub(super) fn update_body_terrain_atmosphere(
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
     terrain_q: Query<(&BodyTerrain, &MeshMaterial3d<BodyTerrainMaterial>)>,
+    water_q: Query<(&BodyWater, &MeshMaterial3d<BodyWaterMaterial>)>,
     sky_q: Query<(&BodySky, &MeshMaterial3d<BodySkyMaterial>)>,
     ship_q: Query<(&GlobalTransform, Option<&CameraTargetOffset>), With<PlayerShip>>,
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
+    time: Res<Time>,
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
+    mut water_materials: ResMut<Assets<BodyWaterMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
 ) {
     let Some(ref states) = cache.states else {
@@ -486,6 +623,29 @@ pub(super) fn update_body_terrain_atmosphere(
         mat.scene =
             build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
         mat.craft_shadow = craft_shadow;
+    }
+
+    // Use real (wall-clock) elapsed seconds for wave scroll — the simulation
+    // clock pauses under warp and ticks faster than wall time during it, both
+    // of which would make wave motion read as wrong against the visible
+    // motion of the body itself.
+    let wave_time = time.elapsed_secs();
+    for (water, mat_handle) in &water_q {
+        let Some(mat) = water_materials.get_mut(mat_handle) else {
+            continue;
+        };
+        mat.scene =
+            build_terrain_scene_lighting(water.body_id, states, &occluders, exposure.gain);
+        let render_pos = body_render_pos
+            .get(&water.body_id)
+            .copied()
+            .unwrap_or(Vec3::ZERO);
+        // Preserve the spawn-time `.w` (water surface radius) and only
+        // overwrite the centre + time fields.
+        let water_radius = mat.params.planet_center_radius.w;
+        mat.params.planet_center_radius =
+            Vec4::new(render_pos.x, render_pos.y, render_pos.z, water_radius);
+        mat.params.time.w = wave_time;
     }
 
     for (sky, mat_handle) in &sky_q {

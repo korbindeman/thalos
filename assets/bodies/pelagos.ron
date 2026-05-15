@@ -3,7 +3,11 @@
     terrain: Ocean((
         seed: 1250,
         cubemap_resolution: 64,
-        seabed_albedo: (0.02, 0.06, 0.09),
+        // Basaltic abyssal sediment. The water column is rendered by
+        // `BodyWaterMaterial` (terrain LOD) and the impostor's `shade_water`
+        // (orbital), so the bake's seabed must read as ocean floor — not
+        // pre-tinted water blue.
+        seabed_albedo: (0.04, 0.034, 0.026),
         water_roughness: 0.04,
         sea_level_m: 1.0,
     )),
