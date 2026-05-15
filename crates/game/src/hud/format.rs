@@ -1,9 +1,11 @@
 //! Formatters shared by HUD panels.
 
-/// Compact altitude string. `km` up to 9999, then `Mm`, then `Gm`.
+/// Compact altitude string. `m` below 10 km, then `km` up to 9999, then `Mm`, then `Gm`.
 pub fn altitude(meters: f64) -> String {
     let abs = meters.abs();
-    if abs < 9_999_500.0 {
+    if abs < 9_999.5 {
+        format!("{:.0} m", meters)
+    } else if abs < 9_999_500.0 {
         format!("{:.1} km", meters / 1_000.0)
     } else if abs < 9_999_500_000.0 {
         format!("{:.1} Mm", meters / 1_000_000.0)

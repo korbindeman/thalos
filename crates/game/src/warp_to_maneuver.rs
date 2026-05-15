@@ -43,13 +43,15 @@ pub struct ManeuverTarget {
 }
 
 impl ManeuverTarget {
-    /// Short HUD label such as "Maneuver in 1h 23m".
-    pub fn label(&self, now: f64) -> String {
+    /// Short label such as "Maneuver in 1h 23m".
+    #[cfg(test)]
+    fn label(&self, now: f64) -> String {
         let remaining = (self.epoch - now).max(0.0);
         format!("Maneuver in {}", format_duration(remaining))
     }
 }
 
+#[cfg(test)]
 fn format_duration(seconds: f64) -> String {
     if seconds < 60.0 {
         format!("{:.0}s", seconds)

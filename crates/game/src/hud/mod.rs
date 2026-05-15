@@ -63,6 +63,7 @@ impl Plugin for HudPlugin {
         app.add_plugins(UiMaterialPlugin::<flight_panel::ThrottleArcMaterial>::default())
             .init_resource::<UiPointerGate>()
             .init_resource::<TimeDisplayMode>()
+            .init_resource::<nav_panel::ManeuverPanelState>()
             .add_systems(Startup, theme::init_theme)
             .add_systems(bevy_egui::EguiPrimaryContextPass, theme::apply_egui_theme)
             .add_systems(Startup, setup_top_left_row.after(theme::init_theme))
@@ -102,6 +103,8 @@ impl Plugin for HudPlugin {
                     fps_overlay::update,
                     nav_panel::handle_clicks,
                     nav_panel::update_button_visuals,
+                    nav_panel::update_autopilot_visuals,
+                    nav_panel::update_maneuver_visuals,
                     nav_attitude::update_attitude,
                 )
                     .run_if(not_in_photo_mode),

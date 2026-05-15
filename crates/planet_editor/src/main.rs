@@ -67,11 +67,6 @@ const PREVIEW_CUBEMAP_RESOLUTION: u32 = 512;
 /// the full 2048² compile cost.
 const HALF_CUBEMAP_RESOLUTION: u32 = 1024;
 
-const SOLAR_SYSTEM_RON: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/solar_system.ron"
-));
-
 // ---------------------------------------------------------------------------
 // Body rendering mode
 // ---------------------------------------------------------------------------

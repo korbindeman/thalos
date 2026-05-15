@@ -25,6 +25,7 @@
 use bevy::prelude::*;
 use bevy::ui::Val2;
 
+use crate::autopilot::{Autopilot, AutopilotBurnSchedule, AutopilotState};
 use crate::controls::ControlLocks;
 use crate::hud::HudPanel;
 use crate::hud::nav_attitude::NavAttitudeRenderTarget;
@@ -32,7 +33,9 @@ use crate::hud::theme::HudTheme;
 use crate::maneuver::ManeuverPlan;
 use crate::navball::markers::{MarkerIconState, MarkerKind, marker_icon_image};
 use crate::navigation::{NavigationMode, NavigationState};
+use crate::rendering::SimulationState;
 use crate::target::TargetBody;
+use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
 
 /// Diameter of the circular panel (px).
 const PANEL_DIAMETER: f32 = 190.0;
@@ -52,6 +55,18 @@ const ASSIST_PANEL_BOTTOM_PX: f32 = PANEL_BOTTOM_PX + PANEL_DIAMETER + 8.0;
 const ASSIST_PANEL_HEIGHT: f32 = 38.0;
 const ASSIST_BUTTON_WIDTH: f32 = 72.0;
 const ASSIST_BUTTON_HEIGHT: f32 = 28.0;
+
+const TOP_RIGHT_PANEL_RIGHT_PX: f32 = 20.0;
+const AUTOPILOT_PANEL_TOP_PX: f32 = 60.0;
+const AUTOPILOT_PANEL_HEIGHT: f32 = 58.0;
+const AUTOPILOT_BUTTON_WIDTH: f32 = 92.0;
+const AUTOPILOT_BUTTON_HEIGHT: f32 = 30.0;
+
+const MANEUVER_PANEL_TOP_PX: f32 = AUTOPILOT_PANEL_TOP_PX + AUTOPILOT_PANEL_HEIGHT + 8.0;
+const MANEUVER_PANEL_HEIGHT: f32 = 104.0;
+const MANEUVER_BAR_HEIGHT: f32 = 8.0;
+const MANEUVER_WARP_BUTTON_WIDTH: f32 = 56.0;
+const MANEUVER_WARP_BUTTON_HEIGHT: f32 = 24.0;
 
 const UTILITY_PANEL_BOTTOM_PX: f32 = 20.0;
 const UTILITY_PANEL_HEIGHT: f32 = 44.0;
@@ -112,6 +127,45 @@ impl NavAssistKind {
 #[derive(Component, Debug, Clone, Copy)]
 pub(super) struct NavAssistButton {
     kind: NavAssistKind,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct AutopilotToggleButton;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct AutopilotToggleText;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverPanelRoot;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverBurnText;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverDeltaVText;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverStartText;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverProgressFill;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverWarpButton;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverWarpButtonText;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct ManeuverDismissButton;
+
+#[derive(Resource, Debug, Default)]
+pub(super) struct ManeuverPanelState {
+    sticky: bool,
+    dismissed: bool,
+    saw_node: bool,
+    executed: bool,
+    last_node_count: usize,
 }
 
 #[derive(Component, Debug, Clone)]
@@ -218,6 +272,9 @@ pub fn setup(
             spawn_assist_button(p, &theme, NavAssistKind::Rcs);
             spawn_assist_button(p, &theme, NavAssistKind::Sas);
         });
+
+    spawn_autopilot_panel(&mut commands, &theme);
+    spawn_maneuver_panel(&mut commands, &theme);
 
     commands
         .spawn((
@@ -345,6 +402,247 @@ fn utility_button_bundle(
     )
 }
 
+fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(TOP_RIGHT_PANEL_RIGHT_PX),
+                top: Val::Px(AUTOPILOT_PANEL_TOP_PX),
+                width: Val::Px(PANEL_DIAMETER),
+                height: Val::Px(AUTOPILOT_PANEL_HEIGHT),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(5.0),
+                align_items: AlignItems::FlexStart,
+                ..default()
+            },
+            BackgroundColor(theme.panel_bg),
+            BorderColor::all(theme.panel_border),
+            HudPanel,
+            Name::new("HudAutopilotPanel"),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new("AUTOPILOT"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(theme.text_subtitle),
+            ));
+            p.spawn((
+                Button,
+                Node {
+                    width: Val::Px(AUTOPILOT_BUTTON_WIDTH),
+                    height: Val::Px(AUTOPILOT_BUTTON_HEIGHT),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(theme.panel_bg_alt),
+                BorderColor::all(theme.panel_border),
+                Interaction::None,
+                AutopilotToggleButton,
+                Name::new("AutopilotToggleButton"),
+            ))
+            .with_children(|c| {
+                c.spawn((
+                    Text::new("MNVR"),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(theme.text_primary),
+                    AutopilotToggleText,
+                ));
+            });
+        });
+}
+
+fn spawn_maneuver_panel(commands: &mut Commands, theme: &HudTheme) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(TOP_RIGHT_PANEL_RIGHT_PX),
+                top: Val::Px(MANEUVER_PANEL_TOP_PX),
+                width: Val::Px(PANEL_DIAMETER),
+                height: Val::Px(MANEUVER_PANEL_HEIGHT),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            BackgroundColor(theme.panel_bg),
+            BorderColor::all(theme.panel_border),
+            Visibility::Hidden,
+            HudPanel,
+            ManeuverPanelRoot,
+            Name::new("HudManeuverPanel"),
+        ))
+        .with_children(|p| {
+            p.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    Text::new("MANEUVER"),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 11.0,
+                        ..default()
+                    },
+                    TextColor(theme.text_subtitle),
+                ));
+                row.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(4.0),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|buttons| {
+                    buttons
+                        .spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(MANEUVER_WARP_BUTTON_WIDTH),
+                                height: Val::Px(MANEUVER_WARP_BUTTON_HEIGHT),
+                                border: UiRect::all(Val::Px(1.0)),
+                                border_radius: BorderRadius::all(Val::Px(3.0)),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(theme.panel_bg_alt),
+                            BorderColor::all(theme.panel_border),
+                            Interaction::None,
+                            ManeuverWarpButton,
+                            Name::new("ManeuverWarpButton"),
+                        ))
+                        .with_children(|c| {
+                            c.spawn((
+                                Text::new("WARP"),
+                                TextFont {
+                                    font: theme.font.clone(),
+                                    font_size: 10.0,
+                                    ..default()
+                                },
+                                TextColor(theme.text_primary),
+                                ManeuverWarpButtonText,
+                            ));
+                        });
+
+                    buttons
+                        .spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(MANEUVER_WARP_BUTTON_HEIGHT),
+                                height: Val::Px(MANEUVER_WARP_BUTTON_HEIGHT),
+                                border: UiRect::all(Val::Px(1.0)),
+                                border_radius: BorderRadius::all(Val::Px(3.0)),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(theme.panel_bg_alt),
+                            BorderColor::all(theme.panel_border),
+                            Interaction::None,
+                            ManeuverDismissButton,
+                            Name::new("ManeuverDismissButton"),
+                        ))
+                        .with_children(|c| {
+                            c.spawn((
+                                Text::new("×"),
+                                TextFont {
+                                    font: theme.font.clone(),
+                                    font_size: 12.0,
+                                    ..default()
+                                },
+                                TextColor(theme.text_dim),
+                            ));
+                        });
+                });
+            });
+
+            spawn_maneuver_readout(p, theme, "Burn", ManeuverBurnText);
+            spawn_maneuver_readout(p, theme, "Δv", ManeuverDeltaVText);
+            spawn_maneuver_readout(p, theme, "Start", ManeuverStartText);
+
+            p.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(MANEUVER_BAR_HEIGHT),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(2.0)),
+                    ..default()
+                },
+                BackgroundColor(theme.panel_bg_alt),
+                BorderColor::all(theme.panel_border),
+            ))
+            .with_children(|bar| {
+                bar.spawn((
+                    Node {
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(theme.text_warn),
+                    ManeuverProgressFill,
+                ));
+            });
+        });
+}
+
+fn spawn_maneuver_readout<M: Component + Copy>(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    label: &'static str,
+    marker: M,
+) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Baseline,
+            column_gap: Val::Px(8.0),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(label),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 10.0,
+                    ..default()
+                },
+                TextColor(theme.text_dim),
+            ));
+            row.spawn((
+                Text::new("—"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 10.0,
+                    ..default()
+                },
+                TextColor(theme.text_primary),
+                marker,
+            ));
+        });
+}
+
 fn spawn_assist_button(
     parent: &mut ChildSpawnerCommands<'_>,
     theme: &HudTheme,
@@ -388,10 +686,20 @@ fn spawn_assist_button(
 pub fn handle_clicks(
     interactions: Query<(&Interaction, &NavModeButton), Changed<Interaction>>,
     assist_interactions: Query<(&Interaction, &NavAssistButton), Changed<Interaction>>,
+    autopilot_interactions: Query<
+        &Interaction,
+        (Changed<Interaction>, With<AutopilotToggleButton>),
+    >,
+    warp_interactions: Query<&Interaction, (Changed<Interaction>, With<ManeuverWarpButton>)>,
+    dismiss_interactions: Query<&Interaction, (Changed<Interaction>, With<ManeuverDismissButton>)>,
     locks: Res<ControlLocks>,
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
+    sim: Res<SimulationState>,
     mut nav: ResMut<NavigationState>,
+    mut autopilot: ResMut<Autopilot>,
+    mut warp_to: ResMut<WarpToManeuver>,
+    mut maneuver_panel: ResMut<ManeuverPanelState>,
 ) {
     for (interaction, button) in &interactions {
         if matches!(interaction, Interaction::Pressed)
@@ -403,6 +711,30 @@ pub fn handle_clicks(
             } else {
                 nav.mode = Some(button.mode);
             }
+        }
+    }
+
+    for interaction in &autopilot_interactions {
+        if matches!(interaction, Interaction::Pressed) {
+            autopilot.enabled = !autopilot.enabled;
+        }
+    }
+
+    for interaction in &warp_interactions {
+        if !matches!(interaction, Interaction::Pressed) {
+            continue;
+        }
+        if warp_to.active {
+            warp_to.cancel();
+        } else if find_next_maneuver(sim.simulation.sim_time(), &sim.simulation).is_some() {
+            warp_to.active = true;
+        }
+    }
+
+    for interaction in &dismiss_interactions {
+        if matches!(interaction, Interaction::Pressed) {
+            maneuver_panel.dismissed = true;
+            maneuver_panel.sticky = false;
         }
     }
 
@@ -508,6 +840,251 @@ pub fn update_button_visuals(
         if image.image != *target_handle {
             image.image = target_handle.clone();
         }
+    }
+}
+
+pub fn update_autopilot_visuals(
+    autopilot: Res<Autopilot>,
+    theme: Res<HudTheme>,
+    mut buttons: Query<
+        (&Interaction, &mut BorderColor, &mut BackgroundColor),
+        With<AutopilotToggleButton>,
+    >,
+    mut toggle_text: Query<(&mut Text, &mut TextColor), With<AutopilotToggleText>>,
+) {
+    for (interaction, mut border, mut bg) in &mut buttons {
+        let (border_color, bg_color) =
+            nav_button_colors(&theme, autopilot.enabled, true, false, interaction);
+        apply_button_colors(&mut border, &mut bg, border_color, bg_color);
+    }
+
+    let toggle_label = "MNVR";
+    let toggle_color = if autopilot.enabled {
+        theme.text_accent
+    } else {
+        theme.text_dim
+    };
+    for (mut text, mut color) in &mut toggle_text {
+        if text.0 != toggle_label {
+            text.0 = toggle_label.to_string();
+        }
+        if color.0 != toggle_color {
+            color.0 = toggle_color;
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub fn update_maneuver_visuals(
+    autopilot: Res<Autopilot>,
+    schedule: Res<AutopilotBurnSchedule>,
+    plan: Res<ManeuverPlan>,
+    sim: Res<SimulationState>,
+    warp_to: Res<WarpToManeuver>,
+    theme: Res<HudTheme>,
+    mut panel_state: ResMut<ManeuverPanelState>,
+    mut panel_roots: Query<&mut Visibility, With<ManeuverPanelRoot>>,
+    mut burn_text: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<ManeuverBurnText>,
+            Without<ManeuverDeltaVText>,
+            Without<ManeuverStartText>,
+            Without<ManeuverWarpButtonText>,
+        ),
+    >,
+    mut dv_text: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<ManeuverDeltaVText>,
+            Without<ManeuverBurnText>,
+            Without<ManeuverStartText>,
+            Without<ManeuverWarpButtonText>,
+        ),
+    >,
+    mut start_text: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<ManeuverStartText>,
+            Without<ManeuverBurnText>,
+            Without<ManeuverDeltaVText>,
+            Without<ManeuverWarpButtonText>,
+        ),
+    >,
+    mut progress_fill: Query<&mut Node, With<ManeuverProgressFill>>,
+    mut warp_buttons: Query<
+        (&Interaction, &mut BorderColor, &mut BackgroundColor),
+        With<ManeuverWarpButton>,
+    >,
+    mut warp_text: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<ManeuverWarpButtonText>,
+            Without<ManeuverBurnText>,
+            Without<ManeuverDeltaVText>,
+            Without<ManeuverStartText>,
+        ),
+    >,
+) {
+    let directive = schedule.next();
+    let has_node = !plan.nodes.is_empty();
+    let autopilot_executing = matches!(
+        autopilot.state(),
+        AutopilotState::Engaging { .. } | AutopilotState::Burn { .. }
+    );
+
+    let node_count = plan.nodes.len();
+    if has_node {
+        if node_count != panel_state.last_node_count {
+            panel_state.dismissed = false;
+            panel_state.executed = false;
+        }
+        panel_state.sticky = true;
+        panel_state.saw_node = true;
+        panel_state.last_node_count = node_count;
+    } else {
+        panel_state.last_node_count = 0;
+    }
+    if autopilot_executing {
+        panel_state.sticky = true;
+        panel_state.executed = true;
+    }
+    if panel_state.saw_node && !has_node && directive.is_none() && !panel_state.executed {
+        // The authored node disappeared before execution; treat that as an
+        // explicit deletion rather than a completed maneuver to keep around.
+        panel_state.sticky = false;
+        panel_state.dismissed = true;
+        panel_state.saw_node = false;
+    }
+
+    let panel_visible =
+        (has_node || directive.is_some() || panel_state.sticky) && !panel_state.dismissed;
+    for mut visibility in &mut panel_roots {
+        *visibility = if panel_visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+
+    let now = sim.simulation.sim_time();
+    let mut progress = 0.0;
+
+    let (burn, burn_color, dv, dv_color, start, start_color) = if let Some(directive) = directive {
+        let burn_start = directive.center_time - directive.duration_s / 2.0;
+        let mut delivered = 0.0;
+        if let AutopilotState::Burn {
+            directive_id,
+            anchor_delivered_dv,
+            ..
+        } = autopilot.state()
+            && directive_id == directive.id
+        {
+            delivered = (sim.simulation.delivered_dv() - anchor_delivered_dv).max(0.0);
+        }
+        progress = if directive.delta_v_magnitude > 0.0 {
+            (delivered / directive.delta_v_magnitude).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let remaining_dv = (directive.delta_v_magnitude - delivered).max(0.0);
+        let start_label = if matches!(autopilot.state(), AutopilotState::Burn { directive_id, .. } if directive_id == directive.id)
+        {
+            "BURNING".to_string()
+        } else {
+            format!("in {}", format_mission_time(burn_start - now))
+        };
+        (
+            format_duration_compact(directive.duration_s),
+            theme.text_primary,
+            format!("{:.0} m/s", remaining_dv),
+            theme.text_primary,
+            start_label,
+            if burn_start - now <= 0.0 {
+                theme.text_warn
+            } else {
+                theme.text_primary
+            },
+        )
+    } else {
+        (
+            "—".to_string(),
+            theme.text_dim,
+            "—".to_string(),
+            theme.text_dim,
+            "no node".to_string(),
+            theme.text_dim,
+        )
+    };
+
+    for (mut text, mut text_color) in &mut burn_text {
+        set_text(&mut text, &mut text_color, &burn, burn_color);
+    }
+    for (mut text, mut text_color) in &mut dv_text {
+        set_text(&mut text, &mut text_color, &dv, dv_color);
+    }
+    for (mut text, mut text_color) in &mut start_text {
+        set_text(&mut text, &mut text_color, &start, start_color);
+    }
+
+    for mut node in &mut progress_fill {
+        let target = Val::Percent((progress * 100.0) as f32);
+        if node.width != target {
+            node.width = target;
+        }
+    }
+
+    let warp_available = find_next_maneuver(now, &sim.simulation).is_some();
+    for (interaction, mut border, mut bg) in &mut warp_buttons {
+        let (border_color, bg_color) = nav_button_colors(
+            &theme,
+            warp_to.active,
+            warp_available || warp_to.active,
+            false,
+            interaction,
+        );
+        apply_button_colors(&mut border, &mut bg, border_color, bg_color);
+    }
+
+    let warp_label = if warp_to.active { "STOP" } else { "WARP" };
+    let warp_color = if !warp_available && !warp_to.active {
+        disabled_text_color()
+    } else if warp_to.active {
+        theme.text_accent
+    } else {
+        theme.text_primary
+    };
+    for (mut text, mut text_color) in &mut warp_text {
+        set_text(&mut text, &mut text_color, warp_label, warp_color);
+    }
+}
+
+fn set_text(text: &mut Text, text_color: &mut TextColor, value: &str, color: Color) {
+    if text.0 != value {
+        text.0 = value.to_string();
+    }
+    if text_color.0 != color {
+        text_color.0 = color;
+    }
+}
+
+fn format_mission_time(seconds_until_event: f64) -> String {
+    let rounded = seconds_until_event.round();
+    let marker = if rounded >= 0.0 { '-' } else { '+' };
+    format!("T{}{:.0}s", marker, rounded.abs())
+}
+
+fn format_duration_compact(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{:.1}s", seconds)
+    } else if seconds < 3600.0 {
+        let minutes = (seconds / 60.0).floor();
+        let secs = seconds - minutes * 60.0;
+        format!("{:.0}m {:02.0}s", minutes, secs)
+    } else {
+        let hours = (seconds / 3600.0).floor();
+        let minutes = ((seconds - hours * 3600.0) / 60.0).floor();
+        format!("{:.0}h {:02.0}m", hours, minutes)
     }
 }
 

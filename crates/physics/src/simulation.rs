@@ -1085,7 +1085,7 @@ mod tests {
             body: 0,
             pose: crate::canonical::BodyFixedPose {
                 position_body_m: DVec3::Y * 1000.0,
-                orientation_body: DQuat::IDENTITY,
+                orientation_body: glam::DQuat::IDENTITY,
             },
         });
 

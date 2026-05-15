@@ -9,17 +9,12 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
 use thalos_physics::maneuver::{delta_v_to_world, orbital_frame};
 use thalos_physics::simulation::Simulation;
 use thalos_physics::trajectory::Trajectory;
 use thalos_physics::types::ControlInput;
 
-use crate::autopilot::{Autopilot, AutopilotBurnSchedule, AutopilotState};
-use crate::controls::ControlLocks;
 use crate::maneuver::{GameNode, ManeuverPlan};
-use crate::photo_mode::not_in_photo_mode;
-use crate::rendering::SimulationState;
 use crate::target::TargetBody;
 
 /// Discrete ship-orientation modes the player can request.
@@ -49,23 +44,6 @@ pub enum NavigationMode {
     ManeuverNode,
 }
 
-impl NavigationMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Stability => "Stability",
-            Self::Prograde => "Prograde",
-            Self::Retrograde => "Retrograde",
-            Self::Normal => "Normal",
-            Self::AntiNormal => "Anti-Normal",
-            Self::RadialIn => "Radial-In",
-            Self::RadialOut => "Radial-Out",
-            Self::Target => "Target",
-            Self::AntiTarget => "Anti-Target",
-            Self::ManeuverNode => "Maneuver",
-        }
-    }
-}
-
 /// Currently requested orientation mode.
 ///
 /// `mode` selects the autopilot's pointing target (`None` = free
@@ -85,169 +63,6 @@ impl Plugin for NavigationPlugin {
         // bevy_ui `hud::nav_panel` cluster. We still need the
         // `NavigationState` resource so the autopilot/UI can communicate.
         app.init_resource::<NavigationState>();
-    }
-}
-
-fn navigation_panel(
-    mut contexts: EguiContexts,
-    mut nav: ResMut<NavigationState>,
-    mut autopilot: ResMut<Autopilot>,
-    burn_schedule: Res<AutopilotBurnSchedule>,
-    locks: Res<ControlLocks>,
-    sim: Res<SimulationState>,
-    target: Res<TargetBody>,
-    plan: Res<ManeuverPlan>,
-) {
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-
-    let has_target = target.target.is_some();
-    let has_node = !plan.nodes.is_empty();
-    // Mode buttons go read-only when the navigation_mode lock is set —
-    // the autopilot (or any future locker) is asserting a programmatic
-    // pointing target and a click would be ignored until control is
-    // released.
-    let modes_enabled = !locks.navigation_mode;
-
-    // Drop the selected mode if the precondition that justified it is gone
-    // (target deselected, last maneuver node deleted).
-    match nav.mode {
-        Some(NavigationMode::Target | NavigationMode::AntiTarget) if !has_target => {
-            nav.mode = None;
-        }
-        Some(NavigationMode::ManeuverNode) if !has_node => {
-            nav.mode = None;
-        }
-        _ => {}
-    }
-
-    let avail = ctx.available_rect();
-    let initial_pos = egui::pos2(avail.right() - 140.0, avail.center().y - 130.0);
-
-    egui::Window::new("Navigation")
-        .default_pos(initial_pos)
-        .resizable(false)
-        .show(ctx, |ui| {
-            ui.set_min_width(140.0);
-            // Checkbox stays interactive at all times — this is the
-            // only override path while the autopilot is locked on.
-            ui.checkbox(&mut autopilot.enabled, "Autopilot");
-            autopilot_status(ui, &autopilot, &burn_schedule, &sim);
-            ui.separator();
-            ui.add_enabled_ui(modes_enabled, |ui| {
-                mode_button(ui, &mut nav.mode, NavigationMode::Stability, true);
-                ui.separator();
-                mode_button(ui, &mut nav.mode, NavigationMode::Prograde, true);
-                mode_button(ui, &mut nav.mode, NavigationMode::Retrograde, true);
-                ui.separator();
-                mode_button(ui, &mut nav.mode, NavigationMode::Normal, true);
-                mode_button(ui, &mut nav.mode, NavigationMode::AntiNormal, true);
-                ui.separator();
-                mode_button(ui, &mut nav.mode, NavigationMode::RadialIn, true);
-                mode_button(ui, &mut nav.mode, NavigationMode::RadialOut, true);
-                ui.separator();
-                mode_button(ui, &mut nav.mode, NavigationMode::Target, has_target);
-                mode_button(ui, &mut nav.mode, NavigationMode::AntiTarget, has_target);
-                ui.separator();
-                mode_button(ui, &mut nav.mode, NavigationMode::ManeuverNode, has_node);
-            });
-        });
-}
-
-/// Render the autopilot's live status under the autopilot checkbox.
-///
-/// - `Idle`: collapses to nothing.
-/// - `Armed`: subtle gray "armed · T-XXs" — no lockout, just a hint
-///   the autopilot is waiting in the wings.
-/// - `Engaging`: yellow "ENGAGING · burn in T-XXs" — controls are
-///   locked, warp is being ramped, attitude is being settled.
-/// - `Burn`: bold red banner with delivered vs. planned Δv and a
-///   progress bar so the player can't miss that the engine is firing.
-fn autopilot_status(
-    ui: &mut egui::Ui,
-    autopilot: &Autopilot,
-    burn_schedule: &AutopilotBurnSchedule,
-    sim: &SimulationState,
-) {
-    let countdown_to_burn = |state: AutopilotState| -> Option<f64> {
-        let directive_id = match state {
-            AutopilotState::Armed { directive_id }
-            | AutopilotState::Engaging { directive_id, .. }
-            | AutopilotState::Burn { directive_id, .. } => directive_id,
-            AutopilotState::Idle => return None,
-        };
-        let directive = burn_schedule.next().filter(|d| d.id == directive_id)?;
-        let now = sim.simulation.sim_time();
-        let burn_start = directive.center_time - directive.duration_s / 2.0;
-        Some(burn_start - now)
-    };
-
-    match autopilot.state() {
-        AutopilotState::Idle => {}
-        state @ AutopilotState::Armed { .. } => {
-            let Some(t_minus) = countdown_to_burn(state) else {
-                return;
-            };
-            ui.add_space(4.0);
-            ui.colored_label(
-                egui::Color32::from_rgb(170, 170, 170),
-                format!("armed \u{00B7} {}", format_mission_time(t_minus)),
-            );
-        }
-        state @ AutopilotState::Engaging { .. } => {
-            let Some(t_minus) = countdown_to_burn(state) else {
-                return;
-            };
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("ENGAGING")
-                    .color(egui::Color32::from_rgb(255, 200, 60))
-                    .strong(),
-            );
-            ui.label(format!("burn in {}", format_mission_time(t_minus)));
-        }
-        AutopilotState::Burn {
-            planned_dv,
-            anchor_delivered_dv,
-            ..
-        } => {
-            let delivered = (sim.simulation.delivered_dv() - anchor_delivered_dv).max(0.0);
-            let progress = if planned_dv > 0.0 {
-                (delivered / planned_dv).clamp(0.0, 1.0) as f32
-            } else {
-                0.0
-            };
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("\u{25CF} BURNING")
-                    .color(egui::Color32::from_rgb(255, 80, 80))
-                    .strong()
-                    .size(16.0),
-            );
-            ui.label(format!(
-                "\u{0394}v {:.1} / {:.1} m/s",
-                delivered, planned_dv
-            ));
-            ui.add(egui::ProgressBar::new(progress).desired_width(130.0));
-        }
-    }
-}
-
-fn format_mission_time(seconds_until_event: f64) -> String {
-    let rounded = seconds_until_event.round();
-    let marker = if rounded >= 0.0 { '-' } else { '+' };
-    format!("T{}{:.0}s", marker, rounded.abs())
-}
-
-fn mode_button(
-    ui: &mut egui::Ui,
-    current: &mut Option<NavigationMode>,
-    mode: NavigationMode,
-    enabled: bool,
-) {
-    let active = *current == Some(mode);
-    let resp = ui.add_enabled(enabled, egui::Button::selectable(active, mode.label()));
-    if resp.clicked() {
-        *current = if active { None } else { Some(mode) };
     }
 }
 
@@ -536,6 +351,13 @@ fn safe_normalize(v: DVec3) -> Option<DVec3> {
     } else {
         Some(v.normalize())
     }
+}
+
+#[cfg(test)]
+fn format_mission_time(seconds_until_event: f64) -> String {
+    let rounded = seconds_until_event.round();
+    let marker = if rounded >= 0.0 { '-' } else { '+' };
+    format!("T{}{:.0}s", marker, rounded.abs())
 }
 
 #[cfg(test)]

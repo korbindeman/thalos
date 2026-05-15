@@ -117,13 +117,6 @@ impl ShipCameraMode {
             Self::Orbital => Self::Free,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Free => "Free",
-            Self::Orbital => "Orbital",
-        }
-    }
 }
 
 /// Semantic camera focus shared across map and ship views.
