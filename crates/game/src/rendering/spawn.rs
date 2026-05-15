@@ -7,7 +7,7 @@
 //! two: this system spawns the shell entities (root, optional
 //! tidal-lock tags, icon, `BodySky`) and dispatches an
 //! `AsyncComputeTaskPool` task that performs the heavy
-//! `assets/baked/<name>.bin` decode and `prepare_planet_bake`. The
+//! `target/bakes/<name>.bin` decode and `prepare_planet_bake`. The
 //! polling system in `super::generation::poll_planet_install_tasks`
 //! drains those tasks each frame and finishes the install (GPU upload,
 //! impostors, halos, terrain, water). Each completed install ticks the
@@ -57,17 +57,17 @@ use bevy::tasks::AsyncComputeTaskPool;
 /// match whatever `bake_dump` (and the editor's Full button) used when
 /// the bake was produced; mismatch fails load with `HashMismatch`.
 ///
-/// Shipped bakes always use 1.0 (full crater authoring), so the game
+/// Local bakes always use 1.0 (full crater authoring), so the game
 /// uses 1.0 unconditionally. The old `DEV_CRATER_SCALE` knob existed
 /// to speed up the game's own bake in dev — obsolete now that the game
 /// never compiles.
 const BAKE_CRATER_COUNT_SCALE: f32 = 1.0;
 
-/// Directory holding shipped bake artifacts. Mirror of
-/// `crates/bake_dump/src/main.rs::shipped_bake_dir` — both must resolve to
+/// Directory holding local bake artifacts. Mirror of
+/// `crates/bake_dump/src/main.rs::local_bake_dir` — both must resolve to
 /// the same workspace-relative path so producer and consumer agree.
-fn shipped_bake_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/baked")
+fn local_bake_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/bakes")
 }
 
 pub(super) fn spawn_bodies(
@@ -242,7 +242,7 @@ pub(super) fn spawn_bodies(
 
             body_entity
         } else if body.terrain.is_some() {
-            // Procedural body. The pre-baked surface (`assets/baked/<name>.bin`)
+            // Procedural body. The pre-baked surface (`target/bakes/<name>.bin`)
             // can be hundreds of MB and several seconds to decompress; loading
             // it on the main thread froze startup. Spawn the always-present
             // shell entities here (body root, optional tidal-lock tags, icon)
@@ -274,7 +274,7 @@ pub(super) fn spawn_bodies(
             };
             let key =
                 cache::terrain_cache_key(&body.terrain, body.tectonics.as_ref(), &context, options);
-            let bake_dir = shipped_bake_dir();
+            let bake_dir = local_bake_dir();
             let path = cache::cache_path(&bake_dir, &body_name);
 
             let body_entity = commands

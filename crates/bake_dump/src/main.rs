@@ -3,13 +3,13 @@
 //! Two modes:
 //!
 //! - **Default (full)**: runs the terrain compiler at the body's full
-//!   resolution and writes both the shipped bake (`assets/baked/<body>.bin`,
-//!   what the game loads) and equirectangular PNG previews
+//!   resolution and writes both the local game bake (`target/bakes/<body>.bin`,
+//!   what your local game loads) and equirectangular PNG previews
 //!   (`stage-bakes/<body>/full/*.png`).
 //! - **`--preview`**: runs at 512² for fast iteration. Writes ONLY the
 //!   PNG previews to `stage-bakes/<body>/preview/`. Never touches
-//!   `assets/baked/`, so iterating on the compiler doesn't risk shipping
-//!   an under-resolved bake.
+//!   `target/bakes/`, so iterating on the compiler doesn't invalidate
+//!   the local game bake.
 //!
 //! Per-bake PNG outputs: albedo, height (grayscale, normalized to the
 //! body's ± range), roughness, and object-space normal. Feature
@@ -29,8 +29,8 @@
 //! Body name matching is case-insensitive. Pass `all` to bake every
 //! body in the solar system that has terrain.
 //!
-//! In production (non-`--preview`) mode the shipped bake at
-//! `assets/baked/<body>.bin` is checked against the current cache key
+//! In production (non-`--preview`) mode the local bake at
+//! `target/bakes/<body>.bin` is checked against the current cache key
 //! before compiling; if the key matches the body is skipped (no
 //! recompile, no PNG re-dump). Pass `--force` to bypass the check and
 //! rebake unconditionally.
@@ -74,12 +74,12 @@ struct Args {
     out_dir: Option<PathBuf>,
     solar_system: PathBuf,
     /// Fast-iteration preview mode (`--preview`). 512² cubemap; PNG dumps
-    /// only, no shipped bake written. Default is full resolution + shipped
+    /// only, no local game bake written. Default is full resolution + local
     /// bake write.
     preview: bool,
     /// Bypass the on-disk hash check and rebake even if the existing
-    /// shipped bake's key matches. No-op in `--preview` mode (preview
-    /// never touches `assets/baked/`).
+    /// local bake's key matches. No-op in `--preview` mode (preview
+    /// never touches `target/bakes/`).
     force: bool,
     equirect_width: u32,
     /// Emit debug-only dumps (biome / suture / material-id) alongside the
@@ -93,7 +93,7 @@ struct Args {
 /// continental form clearly in equirect PNGs.
 const PREVIEW_CUBEMAP_RESOLUTION: u32 = 512;
 
-/// Result of writing the bake to `assets/baked/`. Surfaces the
+/// Result of writing the bake to `target/bakes/`. Surfaces the
 /// production / preview distinction plus an explicit failure case so the
 /// log message accurately reflects what happened on disk.
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +101,7 @@ enum StoreStatus {
     Stored,
     Failed,
     /// `--preview` was passed; the bake was compiled but intentionally
-    /// not written to `assets/baked/`. PNG dumps still flow.
+    /// not written to `target/bakes/`. PNG dumps still flow.
     SkippedPreview,
 }
 
@@ -324,10 +324,10 @@ fn bake_one(
         cubemap_resolution_override: preview.then_some(PREVIEW_CUBEMAP_RESOLUTION),
     };
 
-    // Production-mode skip: if the shipped bake's stored hash already
+    // Production-mode skip: if the local bake's stored hash already
     // matches what we'd compute now, the bake (and its PNG dumps) are
     // already current — re-baking would just rewrite identical bytes.
-    if !preview && !force && shipped_bake_is_up_to_date(body) {
+    if !preview && !force && local_bake_is_up_to_date(body) {
         bar.finish_with_message(format!("up-to-date · {route} · pass --force to rebake"));
         return Ok(());
     }
@@ -376,8 +376,8 @@ fn bake_one(
     let store_status = if preview {
         StoreStatus::SkippedPreview
     } else {
-        bar.set_message("writing shipped bake");
-        let bake_dir = shipped_bake_dir();
+        bar.set_message("writing local bake");
+        let bake_dir = local_bake_dir();
         let key = thalos_terrain_gen::cache::terrain_cache_key(
             &body.terrain,
             body.tectonics.as_ref(),
@@ -427,11 +427,11 @@ fn progress_style() -> ProgressStyle {
         .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✓")
 }
 
-/// Cheap staleness check: does `assets/baked/<body>.bin` already carry
+/// Cheap staleness check: does `target/bakes/<body>.bin` already carry
 /// the cache key we'd produce now? Returns `false` on any failure
 /// (missing file, decode error, mismatched key) so callers fall through
 /// to the full recompile + overwrite.
-fn shipped_bake_is_up_to_date(body: &thalos_physics::types::BodyDefinition) -> bool {
+fn local_bake_is_up_to_date(body: &thalos_physics::types::BodyDefinition) -> bool {
     let context = terrain_context(body);
     // Production options — must match the values `run_terrain` uses in
     // non-preview mode, otherwise the keys diverge and we'd never see a
@@ -447,7 +447,7 @@ fn shipped_bake_is_up_to_date(body: &thalos_physics::types::BodyDefinition) -> b
         &context,
         options,
     );
-    let path = thalos_terrain_gen::cache::cache_path(&shipped_bake_dir(), &body.name);
+    let path = thalos_terrain_gen::cache::cache_path(&local_bake_dir(), &body.name);
     matches!(
         thalos_terrain_gen::cache::peek_key(&path),
         Ok(stored) if stored == expected,
@@ -466,18 +466,18 @@ fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompi
     }
 }
 
-/// Output directory for shipped bakes (`<workspace>/assets/baked`). Mirror
+/// Output directory for local game bakes (`<workspace>/target/bakes`). Mirror
 /// of the same path resolved by the game and the editor's full-bake path,
-/// so all three producers + consumer agree on one location.
-fn shipped_bake_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/baked")
+/// so all producers + the local game agree on one location.
+fn local_bake_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/bakes")
 }
 
 fn store_status_label(status: StoreStatus) -> &'static str {
     match status {
-        StoreStatus::Stored => "wrote shipped bake",
+        StoreStatus::Stored => "wrote local bake",
         StoreStatus::Failed => "bake write failed",
-        StoreStatus::SkippedPreview => "preview only (no shipped bake)",
+        StoreStatus::SkippedPreview => "preview only (no local game bake)",
     }
 }
 

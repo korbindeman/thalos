@@ -18,12 +18,12 @@ just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics
 just clippy               # cargo clippy --workspace
 just trace                # cargo run --release -p thalos_game --features profile-tracy
-just bake Thalos          # full-res shipped bake → assets/baked/Thalos.bin
-                          #                       + stage-bakes/Thalos/full/*.png
+just bake Thalos          # full-res local bake → target/bakes/Thalos.bin
+                          #                    + stage-bakes/Thalos/full/*.png
 just bake Thalos --preview # fast 512² PNG previews → stage-bakes/Thalos/preview/
-                          #                          (no shipped bake)
+                          #                          (no local game bake)
 just bake all             # bake every body with a terrain block
-                          #   (skips bodies whose shipped bake hash is
+                          #   (skips bodies whose local bake hash is
                           #    already current; add --force to rebake)
 just clear-terrain-cache  # wipe target/terrain_cache/ (editor only — game and
                           # `just bake` no longer use this directory)
@@ -56,8 +56,10 @@ feedback instead.
 ## Bakes: production vs preview
 
 The game **loads pre-baked terrain only** — it never compiles. Bakes live
-at `assets/baked/<body>.bin` (LFS-tracked) and are produced by either
+at `target/bakes/<body>.bin` and are produced locally by either
 `just bake` (headless `bake_dump`) or the planet editor's Full button.
+Bakes are developer-local build artifacts: they are ignored by Git, are not
+tracked with Git LFS, and are not the distribution path for release assets.
 Missing or stale bakes are fatal at startup for any procedural body
 (`TerrainConfig::Feature` / `Ocean`). Bodies without authored terrain
 (`TerrainConfig::None` or no `terrain` field) fall through to a
@@ -69,17 +71,17 @@ ship with un-authored bodies still rendering.
 **Default (full-res):**
 
 - Runs the compiler at the body's full authored / radius-derived resolution.
-- Writes the shipped bake `assets/baked/<body>.bin` (this is what `just game` loads).
+- Writes the local bake `target/bakes/<body>.bin` (this is what `just game` loads).
 - Writes full-resolution equirect PNGs to `stage-bakes/<body>/full/`.
 - Slow — Thalos (3186 km, 4096² cubemap) takes several minutes.
 
 **Preview (`just bake <body> --preview`):**
 
-- 512² cubemap; PNG dumps only, **no shipped bake**.
+- 512² cubemap; PNG dumps only, **no local game bake**.
 - Writes to `stage-bakes/<body>/preview/`.
 - Fast — primary visual-feedback loop for iteration on the compiler.
-- Doesn't touch `assets/baked/`, so iterating doesn't risk shipping an
-  under-resolved bake or invalidating the loaded one in `just game`.
+- Doesn't touch `target/bakes/`, so iterating doesn't invalidate the loaded
+  local bake in `just game`.
 
 ### PNG outputs (per run, overwrites)
 
@@ -95,13 +97,13 @@ ship with un-authored bodies still rendering.
 
 - **Iterating on the compiler:** `just bake <body> --preview`, then `Read`
   the equirect PNG. No game launch needed, no display needed, fast loop.
-- **Producing a shipped bake:** `just bake <body>` (slow). Verifies the
-  full pipeline and produces the artifact the game will load.
+- **Producing a local game bake:** `just bake <body>` (slow). Verifies the
+  full pipeline and produces the artifact your local game will load.
 - **Hash invariant:** the cache key hashes the body config + a FNV walk of
   `crates/terrain_gen/src/**`. Any source edit there moves the key, so
-  yesterday's shipped bake is detected as stale. Re-bake before `just game`.
+  yesterday's local bake is detected as stale. Re-bake before `just game`.
 - **Up-to-date skip:** in production (non-`--preview`) mode, `just bake`
-  reads the stored key from `assets/baked/<body>.bin` via
+  reads the stored key from `target/bakes/<body>.bin` via
   `cache::peek_key` and skips recompile + PNG dump when the key already
   matches. `just bake all` becomes a no-op when nothing's changed. Pass
   `--force` to bypass and rebake unconditionally.

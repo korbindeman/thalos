@@ -1,9 +1,9 @@
 //! On-disk store for `StaticSurfaceData`.
 //!
-//! Terrain generation for a single body can take tens of seconds. Production
-//! bakes live at `assets/baked/<body>.bin` (LFS-tracked) and ship with the
-//! game; the editor and the headless `bake_dump` tool produce them. The game
-//! never compiles terrain — it loads only.
+//! Terrain generation for a single body can take tens of seconds. Local
+//! bakes live at `target/bakes/<body>.bin`; the editor and the headless
+//! `bake_dump` tool produce them. They are ignored by Git and are not the
+//! release distribution path. The game never compiles terrain — it loads only.
 //!
 //! Each blob stores `(key, StaticSurfaceData)`. The key hashes generation
 //! inputs plus a build-time signature of the `thalos_terrain_gen` source

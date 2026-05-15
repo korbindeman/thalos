@@ -1,8 +1,0 @@
-# Shipped terrain bakes are large (10s–100s of MB per body) and binary —
-# tracked via Git LFS so the repo stays cloneable.
-#
-# Setup once per clone: `git lfs install`
-# Produced by: `just bake <body>` (writes `assets/baked/<body>.bin`)
-# Consumed by: the game's startup loader. Missing or stale bakes are fatal
-# on launch (procedural bodies) — see `crates/game/src/rendering/spawn.rs`.
-assets/baked/*.bin filter=lfs diff=lfs merge=lfs -text

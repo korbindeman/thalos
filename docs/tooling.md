@@ -12,6 +12,12 @@ through personal Cargo config or one-off `cargo --config` flags. Do not check
 that setup into the repo unless Thalos deliberately moves back to a
 cross-platform Cranelift configuration.
 
+## Terrain bakes
+
+Full-resolution terrain bakes are developer-local build artifacts. `just bake <body>` writes the game-loadable binary to `target/bakes/<body>.bin` and PNG inspection outputs to `stage-bakes/<body>/full/`; `just bake <body> --preview` writes only fast PNG previews to `stage-bakes/<body>/preview/`.
+
+Do not track terrain bakes in Git or Git LFS. Developers should bake their own local maps, and release/distribution assets will use a separate pipeline when that exists. Git LFS may still be useful later for actual authored assets, but not for generated terrain bakes.
+
 ## `bevy_erosion_filter` Shader Source
 
 `thalos_bake_dump` uses `bevy_erosion_filter` from crates.io and needs the
