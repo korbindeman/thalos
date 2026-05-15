@@ -111,6 +111,12 @@ ship with un-authored bodies still rendering.
   for fast staleness checks that avoid decompressing the full payload.
   The game's spawn path panics on any `load` failure with a message
   pointing back at `just bake`.
+- **Erosion shader source:** `thalos_bake_dump` depends on
+  `bevy_erosion_filter` 0.1.2 from crates.io and imports the WGSL source
+  via the crate's public `EROSION_WGSL` constant (works with
+  `default-features = false`, no Bevy pull-in). Do not restore the old
+  sibling-checkout `../../../../bevy_erosion_filter/...` include or the
+  prior `build.rs` registry-source lookup. See `docs/tooling.md`.
 
 ## Profiling
 

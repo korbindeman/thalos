@@ -129,8 +129,8 @@ fn freecam_drive_system(
 
     // Scroll adjusts cruise speed in log-space.
     if input.camera_wheel.y != 0.0 {
-        let log = freecam.base_speed_m_s.ln()
-            + (input.camera_wheel.y as f64) * FREECAM_SCROLL_LOG_STEP;
+        let log =
+            freecam.base_speed_m_s.ln() + (input.camera_wheel.y as f64) * FREECAM_SCROLL_LOG_STEP;
         freecam.base_speed_m_s = log
             .exp()
             .clamp(FREECAM_MIN_SPEED_M_S, FREECAM_MAX_SPEED_M_S);

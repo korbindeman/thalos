@@ -2,13 +2,21 @@
 //! system: a `CelestialBody` root with impostor billboard, halo, icon,
 //! ground-LOD terrain, and (where applicable) ring children.
 //!
-//! Procedural bodies load their pre-baked surface from
-//! `assets/baked/<name>.bin` synchronously and call
-//! [`install_baked_planet`] inline. The game never compiles terrain — if
-//! the bake is missing or stale, this system panics with a message
-//! pointing at `just bake <name>`. Bodies with no authored terrain
-//! (`TerrainConfig::None`) fall through to the [`SolidPlanetMaterial`]
-//! impostor tinted with `body.color`.
+//! Stars, gas giants, and solid-impostor bodies spawn fully here.
+//! Procedural bodies (`body.terrain.is_some()`) split their setup in
+//! two: this system spawns the shell entities (root, optional
+//! tidal-lock tags, icon, `BodySky`) and dispatches an
+//! `AsyncComputeTaskPool` task that performs the heavy
+//! `assets/baked/<name>.bin` decode and `prepare_planet_bake`. The
+//! polling system in `super::generation::poll_planet_install_tasks`
+//! drains those tasks each frame and finishes the install (GPU upload,
+//! impostors, halos, terrain, water). Each completed install ticks the
+//! [`crate::loading::LoadingProgress`] counter that drives the startup
+//! loading screen. Missing or stale bakes still panic with a message
+//! pointing at `just bake <name>` — just from the task instead of the
+//! main thread. Bodies with no authored terrain (`TerrainConfig::None`)
+//! fall through to the [`SolidPlanetMaterial`] impostor tinted with
+//! `body.color`.
 
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::Image;
@@ -21,17 +29,16 @@ use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
     AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, ReferenceClouds, RingLayers,
     RingMaterial, RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams,
-    build_ring_mesh, cloud_cover_image_for_body,
+    build_ring_mesh, cloud_cover_image_for_body, prepare_planet_bake,
 };
 use thalos_terrain::{BodySkyExtra, BodySkyMaterial};
 use thalos_terrain_gen::{
-    PlanetSurface, TerrainCompileContext, TerrainCompileOptions, TerrainConfig, cache,
-    compile_dynamic_surface_layers, compile_tectonics_from_config,
+    DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
+    TerrainConfig, cache, compile_dynamic_surface_layers, compile_tectonics_from_config,
 };
 
 use super::generation::{
-    InstallAssets, InstallEntities, PlanetMaterialAssets, ProceduralInstallExtras,
-    WorldStateAssets, install_baked_planet,
+    PendingPlanetInstall, PendingPlanetInstalls, PlanetBakeOutput, WorldStateAssets,
 };
 use super::ground_terrain::BodySky;
 use super::real_space::{RealSpaceRoot, real_space_grid};
@@ -42,7 +49,9 @@ use super::types::{
     SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
+use crate::loading::LoadingProgress;
 use crate::view::HideInShipView;
+use bevy::tasks::AsyncComputeTaskPool;
 
 /// Crater-count scale factor used in the cache-key computation. Must
 /// match whatever `bake_dump` (and the editor's Full button) used when
@@ -74,8 +83,8 @@ pub(super) fn spawn_bodies(
     real_root: Res<RealSpaceRoot>,
     scene_depth: Res<SceneDepthImage>,
     reference_clouds: Res<ReferenceClouds>,
-    mut planet_material_assets: PlanetMaterialAssets,
-    mut procedural_install_extras: ProceduralInstallExtras,
+    mut pending_installs: ResMut<PendingPlanetInstalls>,
+    mut loading_progress: ResMut<LoadingProgress>,
     mut world_state: WorldStateAssets,
 ) {
     let bodies = &sim.system.bodies;
@@ -233,10 +242,17 @@ pub(super) fn spawn_bodies(
 
             body_entity
         } else if body.terrain.is_some() {
-            // Procedural body: synchronously load the pre-baked surface
-            // from `assets/baked/<name>.bin` and install it. The game
-            // never compiles terrain; missing or stale bakes are fatal.
-            let radius_m = body.radius_m as f32;
+            // Procedural body. The pre-baked surface (`assets/baked/<name>.bin`)
+            // can be hundreds of MB and several seconds to decompress; loading
+            // it on the main thread froze startup. Spawn the always-present
+            // shell entities here (body root, optional tidal-lock tags, icon)
+            // and dispatch the bake load + `prepare_planet_bake` to
+            // `AsyncComputeTaskPool`. The polling system
+            // (`poll_planet_install_tasks`) finishes the install when each
+            // task resolves: GPU upload, impostor billboards, halo, ground
+            // terrain, water sphere. The loading screen counts these tasks.
+            let body_name = body.name.clone();
+            let body_radius_m = body.radius_m as f32;
             let gravity_m_s2 = (body.gm / (body.radius_m * body.radius_m)) as f32;
             // Tidally-locked moons get their local +Z axis as the parent
             // direction, matching the editor.
@@ -244,8 +260,8 @@ pub(super) fn spawn_bodies(
             let axial_tilt_rad = body.axial_tilt_rad as f32;
 
             let context = TerrainCompileContext {
-                body_name: body.name.clone(),
-                radius_m,
+                body_name: body_name.clone(),
+                radius_m: body_radius_m,
                 gravity_m_s2,
                 rotation_hours: None,
                 obliquity_deg: Some(axial_tilt_rad.to_degrees()),
@@ -259,42 +275,7 @@ pub(super) fn spawn_bodies(
             let key =
                 cache::terrain_cache_key(&body.terrain, body.tectonics.as_ref(), &context, options);
             let bake_dir = shipped_bake_dir();
-            let path = cache::cache_path(&bake_dir, &body.name);
-            let static_surface = match cache::load(&path, key) {
-                Ok(s) => s,
-                Err(cache::LoadError::Missing { path }) => panic!(
-                    "missing bake for body '{name}' at {path} (key {key:016x}). \
-                     Run `just bake {name}` (or `just bake all`) to produce it.",
-                    name = body.name,
-                    path = path.display(),
-                ),
-                Err(cache::LoadError::HashMismatch {
-                    path,
-                    expected,
-                    found,
-                }) => panic!(
-                    "stale bake for body '{name}' at {path}: stored key {found:016x}, \
-                     expected {expected:016x}. The body config or `thalos_terrain_gen` \
-                     source has changed since the bake was produced. \
-                     Run `just bake {name}` to regenerate.",
-                    name = body.name,
-                    path = path.display(),
-                ),
-                Err(cache::LoadError::Decode { path, message }) => panic!(
-                    "corrupt bake for body '{name}' at {path}: {message}. \
-                     Delete and run `just bake {name}` to regenerate.",
-                    name = body.name,
-                    path = path.display(),
-                ),
-            };
-            let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
-                .unwrap_or_else(|e| panic!("dynamic layer compile failed for {}: {e}", body.name));
-            let tectonics_built = compile_tectonics_from_config(body.tectonics.as_ref(), &context);
-            let surface = PlanetSurface {
-                static_surface,
-                dynamic_layers,
-                tectonics: tectonics_built,
-            };
+            let path = cache::cache_path(&bake_dir, &body_name);
 
             let body_entity = commands
                 .spawn((
@@ -306,7 +287,7 @@ pub(super) fn spawn_bodies(
                         render_radius,
                         radius_m: body.radius_m,
                     },
-                    Name::new(body.name.clone()),
+                    Name::new(body_name.clone()),
                 ))
                 .id();
 
@@ -326,7 +307,7 @@ pub(super) fn spawn_bodies(
             }
 
             // Icon child — visible at far distance, crossfaded with the
-            // impostor by `sync_body_icons`.
+            // impostor by `sync_body_icons` once it spawns.
             commands.spawn((
                 Mesh3d(icon_mesh.clone()),
                 MeshMaterial3d(icon_material),
@@ -339,49 +320,69 @@ pub(super) fn spawn_bodies(
                 ChildOf(body_entity),
             ));
 
-            // Look up the ship camera once. Outside the loop would be
-            // tidier but `Query::single()` returns a guarded reference;
-            // grabbing the entity per body is cheap.
-            let ship_camera = procedural_install_extras
-                .ship_camera_q
-                .single()
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "no unique ShipCamera entity available when installing '{}' terrain: {e}",
-                        body.name,
-                    )
-                });
+            // Off-thread half: disk I/O + zstd decompress + bincode decode
+            // + dynamic-layer / tectonics compile + CPU bake prep. Owns
+            // clones of the body's terrain/tectonics config so the task
+            // outlives the borrow on `sim.system.bodies`.
+            let terrain_cfg = body.terrain.clone();
+            let tectonics_cfg = body.tectonics.clone();
+            let task = AsyncComputeTaskPool::get().spawn(async move {
+                let static_surface = match cache::load(&path, key) {
+                    Ok(s) => s,
+                    Err(cache::LoadError::Missing { path }) => panic!(
+                        "missing bake for body '{name}' at {path} (key {key:016x}). \
+                         Run `just bake {name}` (or `just bake all`) to produce it.",
+                        name = body_name,
+                        path = path.display(),
+                    ),
+                    Err(cache::LoadError::HashMismatch {
+                        path,
+                        expected,
+                        found,
+                    }) => panic!(
+                        "stale bake for body '{name}' at {path}: stored key {found:016x}, \
+                         expected {expected:016x}. The body config or `thalos_terrain_gen` \
+                         source has changed since the bake was produced. \
+                         Run `just bake {name}` to regenerate.",
+                        name = body_name,
+                        path = path.display(),
+                    ),
+                    Err(cache::LoadError::Decode { path, message }) => panic!(
+                        "corrupt bake for body '{name}' at {path}: {message}. \
+                         Delete and run `just bake {name}` to regenerate.",
+                        name = body_name,
+                        path = path.display(),
+                    ),
+                };
+                let dynamic_layers = compile_dynamic_surface_layers(&terrain_cfg, &context)
+                    .unwrap_or_else(|e| {
+                        panic!("dynamic layer compile failed for {}: {e}", body_name)
+                    });
+                let tectonics_built =
+                    compile_tectonics_from_config(tectonics_cfg.as_ref(), &context);
+                let surface = PlanetSurface {
+                    static_surface,
+                    dynamic_layers,
+                    tectonics: tectonics_built,
+                };
+                let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+                let prepared = prepare_planet_bake(&surface, &dynamic_state);
+                PlanetBakeOutput {
+                    surface,
+                    dynamic_state,
+                    prepared,
+                }
+            });
 
-            install_baked_planet(
-                &mut commands,
-                body,
-                body.id,
+            loading_progress.total += 1;
+            pending_installs.0.push(PendingPlanetInstall {
+                body_id: body.id,
+                body_name: body.name.clone(),
+                body_entity,
+                real_body_entity,
                 render_radius,
-                surface,
-                &SharedPlanetMeshes {
-                    billboard: billboard_mesh.clone(),
-                },
-                &reference_clouds,
-                &procedural_install_extras.terrain_registry,
-                InstallEntities {
-                    body_entity,
-                    ship_parent_entity: real_body_entity,
-                    ship_camera,
-                },
-                InstallAssets {
-                    planet_materials: &mut planet_material_assets.planet,
-                    planet_halo_materials: &mut planet_material_assets.planet_halo,
-                    body_terrain_materials: &mut planet_material_assets.body_terrain,
-                    body_water_materials: &mut planet_material_assets.body_water,
-                    meshes: &mut meshes,
-                    images: &mut images,
-                    storage_buffers: &mut procedural_install_extras.storage_buffers,
-                    tile_trees: &mut procedural_install_extras.tile_trees,
-                    terrain_surfaces: &mut procedural_install_extras.terrain_surfaces,
-                    planetshine: &mut world_state.planetshine,
-                    solar_system: &mut world_state.solar_system,
-                },
-            );
+                task,
+            });
 
             body_entity
         } else if let Some(atmos) = &body.atmosphere {
@@ -722,4 +723,10 @@ pub(super) fn spawn_bodies(
         brightness: 50.0,
         ..default()
     });
+
+    // Tell the loading screen the totals are final. Without this the
+    // `advance_to_running` system would fire on frame 0 (when
+    // `completed == total == 0` is trivially true) and the state would
+    // tick over before any bake had been dispatched.
+    loading_progress.seeded = true;
 }

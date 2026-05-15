@@ -652,10 +652,12 @@ fn dispatch_terrain_bake(
         // shows continental relief without mid-freq detail. Producing a
         // production-quality shipped bake still requires `just bake`.
         let mid_freq = None;
-        let data = match compile_terrain_config(&terrain, tectonics.as_ref(), &context, options, mid_freq) {
-            Ok(data) => data,
-            Err(e) => return Err(format!("terrain compile failed for {body_name}: {e}")),
-        };
+        let data =
+            match compile_terrain_config(&terrain, tectonics.as_ref(), &context, options, mid_freq)
+            {
+                Ok(data) => data,
+                Err(e) => return Err(format!("terrain compile failed for {body_name}: {e}")),
+            };
         if is_full_bake {
             let key = thalos_terrain_gen::cache::terrain_cache_key(
                 &terrain,

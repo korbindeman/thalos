@@ -250,17 +250,22 @@ fn face_uv_to_dir(face: u32, uv: vec2<f32>) -> vec3<f32> {
 // Entry point
 // ---------------------------------------------------------------------------
 
-// Build an orthonormal tangent basis around a unit surface normal,
-// branchless (Duff et al. 2017, "Building an Orthonormal Basis,
-// Revisited"). Same construction the impostor's normal-perturbation
-// uses, so the basis is consistent across bake + impostor.
-fn orthonormal_basis(n: vec3<f32>) -> array<vec3<f32>, 2> {
-    let s = select(-1.0, 1.0, n.z >= 0.0);
-    let a = -1.0 / (s + n.z);
-    let b = n.x * n.y * a;
-    let tangent = vec3<f32>(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
-    let bitangent = vec3<f32>(b, s + n.y * n.y * a, -n.y);
-    return array<vec3<f32>, 2>(tangent, bitangent);
+// Per-face constant tangent basis. Mirrors `face_tangent_basis` in
+// `crates/terrain/src/pipeline.rs` — both render paths must project the
+// 3D noise gradient onto the same basis or the eroded surface differs
+// between bake and runtime detail cascade.
+fn face_tangent_basis(face: u32) -> array<vec3<f32>, 2> {
+    var tx: vec3<f32>;
+    var ty: vec3<f32>;
+    switch face {
+        case 0u: { tx = vec3<f32>( 0.0, 0.0, -1.0); ty = vec3<f32>(0.0, -1.0,  0.0); } // +X
+        case 1u: { tx = vec3<f32>( 0.0, 0.0,  1.0); ty = vec3<f32>(0.0, -1.0,  0.0); } // −X
+        case 2u: { tx = vec3<f32>( 1.0, 0.0,  0.0); ty = vec3<f32>(0.0,  0.0,  1.0); } // +Y
+        case 3u: { tx = vec3<f32>( 1.0, 0.0,  0.0); ty = vec3<f32>(0.0,  0.0, -1.0); } // −Y
+        case 4u: { tx = vec3<f32>( 1.0, 0.0,  0.0); ty = vec3<f32>(0.0, -1.0,  0.0); } // +Z
+        default: { tx = vec3<f32>(-1.0, 0.0,  0.0); ty = vec3<f32>(0.0, -1.0,  0.0); } // −Z (5)
+    }
+    return array<vec3<f32>, 2>(tx, ty);
 }
 
 // Bake-time erosion params. Hardcoded for now; if a body needs custom
@@ -323,11 +328,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base_h = textureLoad(height, coord, i32(face)).r;
     let combined_h = base_h + noise_h;
 
-    // Tangent basis at this surface point — feeds erosion_filter_surface3d's
-    // internal 2D projection.
-    let basis = orthonormal_basis(dir);
+    // Per-face constant tangent basis — same projection as the runtime
+    // detail cascade in `crates/terrain/src/pipeline.rs`. The face_uv
+    // scaled to arc-length metres becomes the 2D `p` coordinate; the
+    // 3D noise gradient projects onto the basis to become 2D slope.
+    let basis = face_tangent_basis(face);
     let tangent_x = basis[0];
     let tangent_y = basis[1];
+    let noise_grad_2d = vec2<f32>(
+        dot(noise_grad, tangent_x),
+        dot(noise_grad, tangent_y),
+    );
+
+    // face_size_m = arc length of a face edge = (π/2) * radius. Matches
+    // `pipeline.rs:289` so the bake and runtime cascade sample erosion
+    // at the same physical scale.
+    let face_size_m = 1.57079632679 * params.body_radius_m;
+    let p_2d = uv * face_size_m;
 
     // Fade target keeps erosion contributions bounded as height grows;
     // ~ ±max_relief_m maps to ±1. Continental highs sit in ±3.5 km
@@ -335,19 +352,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_relief_m = 5000.0;
     let fade_target = clamp(combined_h / max_relief_m, -1.0, 1.0);
 
-    let erosion_input = SurfaceErosionInput(
-        pos,
-        dir,
-        tangent_x,
-        tangent_y,
-        combined_h,
-        noise_grad,
-        fade_target,
-    );
     let erosion_params = bake_erosion_params(params.base_wl_m);
-    let erosion = erosion_filter_surface3d(erosion_input, erosion_params);
+    let erosion = erosion_filter(
+        p_2d,
+        vec3<f32>(combined_h, noise_grad_2d.x, noise_grad_2d.y),
+        fade_target,
+        erosion_params,
+    );
 
-    let final_h = combined_h + erosion.delta_height;
+    let final_h = combined_h + erosion.delta.x;
     textureStore(
         height,
         coord,

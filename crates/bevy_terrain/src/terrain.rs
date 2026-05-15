@@ -5,7 +5,7 @@ use crate::big_space::{GridCell, GridTransformOwned, ReferenceFrame};
 
 use crate::{
     math::TerrainModel,
-    terrain_data::{AttachmentConfig, tile_atlas::TileAtlas},
+    terrain_data::{tile_atlas::TileAtlas, AttachmentConfig},
 };
 use bevy::{camera::visibility::NoFrustumCulling, ecs::entity::EntityHashMap, prelude::*};
 

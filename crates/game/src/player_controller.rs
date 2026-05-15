@@ -64,7 +64,7 @@ impl Plugin for PlayerControllerPlugin {
                 )
                     .chain()
                     .in_set(SimStage::Sync)
-                    .after(crate::rendering::cache_body_states),
+                    .after(crate::solar_system_state::sync_solar_system_state),
             );
     }
 }

@@ -89,6 +89,5 @@ impl Default for MidFreqDetailParams {
 /// `Send` so it can cross rayon worker threads in `bake_dump`'s
 /// `par_iter` bake-all loop. `FnOnce` because each body's pipeline calls
 /// it exactly once.
-pub type MidFreqRunner = Box<
-    dyn FnOnce(&mut Cubemap<f32>, f32, &MidFreqDetailParams) -> Result<(), String> + Send,
->;
+pub type MidFreqRunner =
+    Box<dyn FnOnce(&mut Cubemap<f32>, f32, &MidFreqDetailParams) -> Result<(), String> + Send>;

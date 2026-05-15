@@ -1,12 +1,13 @@
 //! Installs a loaded [`PlanetSurface`] into the scene.
 //!
-//! This file used to host an async `finalize_planet_generation` system that
-//! polled an in-flight terrain bake and swapped a placeholder sphere for the
-//! real impostor when the task completed. With load-only bake architecture
-//! (`assets/baked/<body>.bin` + `thalos_terrain_gen::cache::load`) there is
-//! no async path: `spawn_bodies` loads the bake synchronously and calls
-//! [`install_baked_planet`] inline. The resulting body is fully rendered on
-//! frame 1, no placeholder ever shown.
+//! Procedural bodies' bakes (hundreds of MB compressed) are loaded off the
+//! main thread by an async task dispatched in [`super::spawn::spawn_bodies`].
+//! [`poll_planet_install_tasks`] runs every frame, drains tasks that have
+//! finished their disk I/O + decompress + [`prepare_planet_bake`] CPU work,
+//! and calls [`install_baked_planet`] to run the main-thread half
+//! (`upload_prepared_bake`, impostor + halo + ground-terrain spawn). Each
+//! completed install ticks the [`LoadingProgress`] counter that drives the
+//! startup loading-screen overlay.
 //!
 //! [`patch_reference_cloud_covers`] remains a per-frame system because the
 //! reference-cloud cubemap loads asynchronously from disk (image decoding,
@@ -20,16 +21,19 @@ use bevy::image::Image;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
+use bevy::tasks::{Task, block_on, poll_once};
 use bevy_terrain::prelude::{TerrainViewComponents, TileTree};
 use thalos_local_physics::TerrainSurfaceRegistry;
 use thalos_physics::types::{BodyDefinition, BodyKind};
 use thalos_planet_rendering::{
     AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
-    PlanetParams, PlanetWaterParams, ReferenceClouds, cloud_cover_image_for_body,
-    prepare_planet_bake, upload_prepared_bake,
+    PlanetParams, PlanetWaterParams, PreparedPlanetBake, ReferenceClouds,
+    cloud_cover_image_for_body, upload_prepared_bake,
 };
 use thalos_terrain::{BodySkyMaterial, BodyTerrainMaterial, BodyWaterMaterial};
 use thalos_terrain_gen::{DynamicSurfaceState, PlanetSurface};
+
+use crate::loading::LoadingProgress;
 
 use super::ground_terrain::{
     BodyHalo, BodySky, RealSpaceImpostor, spawn_body_terrain, spawn_body_water,
@@ -132,15 +136,17 @@ pub(super) struct InstallEntities {
 /// `PlanetMaterials` component, and seeds the ground-LOD terrain entity
 /// via [`spawn_body_terrain`].
 ///
-/// Called once per procedural body, synchronously during the
-/// [`super::spawn::spawn_bodies`] startup system. No async, no
-/// placeholder swap, no per-frame poll.
+/// `surface`, `prepared`, and `dynamic_state` are produced off the main
+/// thread by the task dispatched in `spawn_bodies`; this function is the
+/// main-thread half that does GPU upload + entity spawn.
 pub(super) fn install_baked_planet(
     commands: &mut Commands,
     body: &BodyDefinition,
     body_id: usize,
     render_radius: f32,
     surface: PlanetSurface,
+    prepared: PreparedPlanetBake,
+    dynamic_state: DynamicSurfaceState,
     shared: &SharedPlanetMeshes,
     reference_clouds: &ReferenceClouds,
     terrain_registry: &crate::GameTerrainRegistry,
@@ -148,11 +154,6 @@ pub(super) fn install_baked_planet(
     assets: InstallAssets<'_>,
 ) {
     let _span = tracing::info_span!("install_baked_planet", body = %body.name).entered();
-    let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
-    // CPU half of the bake (dune-overlay synthesis, cubemap byte copies,
-    // SSBO packing). Ran on a task pool in the old async path; now part of
-    // the synchronous startup load.
-    let prepared = prepare_planet_bake(&surface, &dynamic_state);
 
     // Wrap in Arc so the same `PlanetSurface` can back both the impostor
     // (which only borrows) and the ground-LOD `PipelineTileProvider`
@@ -366,6 +367,117 @@ pub(super) fn install_baked_planet(
         assets.meshes,
         assets.body_water_materials,
     );
+}
+
+/// Output of the off-thread bake-load task. Owns everything the main
+/// thread needs to call [`install_baked_planet`]: the decoded surface,
+/// the GPU-ready `PreparedPlanetBake`, and the seeded dynamic state.
+pub(super) struct PlanetBakeOutput {
+    pub surface: PlanetSurface,
+    pub dynamic_state: DynamicSurfaceState,
+    pub prepared: PreparedPlanetBake,
+}
+
+/// A single procedural body whose bake is loading. `spawn_bodies` pushes
+/// one of these per procedural body, [`poll_planet_install_tasks`] drains
+/// completed entries each frame.
+pub(super) struct PendingPlanetInstall {
+    pub body_id: usize,
+    pub body_name: String,
+    pub body_entity: Entity,
+    pub real_body_entity: Entity,
+    pub render_radius: f32,
+    pub task: Task<PlanetBakeOutput>,
+}
+
+/// Resource holding all in-flight bake loads. Drained as tasks complete.
+#[derive(Resource, Default)]
+pub(super) struct PendingPlanetInstalls(pub Vec<PendingPlanetInstall>);
+
+/// Per-frame poll: any task whose load + prepare has finished is handed
+/// off to [`install_baked_planet`] (main-thread asset upload + entity
+/// spawn). Each install ticks `LoadingProgress.completed`; once the
+/// counter matches `total`, the loading overlay hides itself.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poll_planet_install_tasks(
+    mut commands: Commands,
+    mut pending: ResMut<PendingPlanetInstalls>,
+    mut progress: ResMut<LoadingProgress>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    reference_clouds: Res<ReferenceClouds>,
+    sim: Res<super::types::SimulationState>,
+    shared: Option<Res<SharedPlanetMeshes>>,
+    mut planet_material_assets: PlanetMaterialAssets,
+    mut procedural_install_extras: ProceduralInstallExtras,
+    mut world_state: WorldStateAssets,
+) {
+    if pending.0.is_empty() {
+        return;
+    }
+    let Some(shared) = shared else {
+        // `SharedPlanetMeshes` is inserted by `spawn_bodies`; if it isn't
+        // here yet the startup system hasn't run, which means no tasks are
+        // in flight either. Defensive in case ordering ever changes.
+        return;
+    };
+
+    let ship_camera = match procedural_install_extras.ship_camera_q.single() {
+        Ok(e) => e,
+        Err(_) => {
+            // Camera not spawned yet on the first frame; wait one tick.
+            return;
+        }
+    };
+
+    // Drain completed tasks in place. `block_on(poll_once(..))` is a
+    // non-blocking check on the AsyncCompute thread pool's task handle —
+    // returns `Some(output)` only when the task has finished.
+    let mut i = 0;
+    while i < pending.0.len() {
+        let Some(output) = block_on(poll_once(&mut pending.0[i].task)) else {
+            i += 1;
+            continue;
+        };
+        // `swap_remove` is safe here: we don't increment `i`, so the entry
+        // moved into slot `i` will be polled on the next iteration.
+        let entry = pending.0.swap_remove(i);
+        let body = &sim.system.bodies[entry.body_id];
+
+        install_baked_planet(
+            &mut commands,
+            body,
+            entry.body_id,
+            entry.render_radius,
+            output.surface,
+            output.prepared,
+            output.dynamic_state,
+            &shared,
+            &reference_clouds,
+            &procedural_install_extras.terrain_registry,
+            InstallEntities {
+                body_entity: entry.body_entity,
+                ship_parent_entity: entry.real_body_entity,
+                ship_camera,
+            },
+            InstallAssets {
+                planet_materials: &mut planet_material_assets.planet,
+                planet_halo_materials: &mut planet_material_assets.planet_halo,
+                body_terrain_materials: &mut planet_material_assets.body_terrain,
+                body_water_materials: &mut planet_material_assets.body_water,
+                meshes: &mut meshes,
+                images: &mut images,
+                storage_buffers: &mut procedural_install_extras.storage_buffers,
+                tile_trees: &mut procedural_install_extras.tile_trees,
+                terrain_surfaces: &mut procedural_install_extras.terrain_surfaces,
+                planetshine: &mut world_state.planetshine,
+                solar_system: &mut world_state.solar_system,
+            },
+        );
+
+        progress.completed += 1;
+        progress.label = entry.body_name;
+    }
 }
 
 #[derive(Component)]

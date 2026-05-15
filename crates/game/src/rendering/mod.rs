@@ -24,7 +24,7 @@ mod types;
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
-use generation::patch_reference_cloud_covers;
+use generation::{PendingPlanetInstalls, patch_reference_cloud_covers, poll_planet_install_tasks};
 use ground_terrain::{sync_body_render_lod, update_body_terrain_atmosphere};
 use lighting::{
     sync_film_grain_to_exposure, update_camera_exposure, update_planet_light_dirs,
@@ -78,6 +78,7 @@ impl Plugin for RenderingPlugin {
             .insert_resource(CameraExposure::default())
             .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()
+            .init_resource::<PendingPlanetInstalls>()
             .add_systems(
                 Startup,
                 (
@@ -105,13 +106,16 @@ impl Plugin for RenderingPlugin {
                 Update,
                 (
                     convert_reference_clouds_when_ready,
-                    patch_reference_cloud_covers.after(convert_reference_clouds_when_ready),
                     update_render_origin.after(sync_solar_system_state),
                     update_render_frame.after(sync_solar_system_state),
                     update_body_positions
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),
                     update_real_space_body_positions.after(sync_solar_system_state),
+                    poll_planet_install_tasks.after(update_real_space_body_positions),
+                    patch_reference_cloud_covers
+                        .after(convert_reference_clouds_when_ready)
+                        .after(poll_planet_install_tasks),
                     update_sun_light.after(sync_solar_system_state),
                     update_camera_exposure.after(sync_solar_system_state),
                     sync_film_grain_to_exposure.after(update_camera_exposure),

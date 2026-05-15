@@ -11,6 +11,7 @@ mod freecam;
 mod fuel;
 mod hud;
 mod input;
+mod loading;
 mod local_physics;
 mod maneuver;
 mod map_view;
@@ -62,6 +63,7 @@ use freecam::FreeCamPlugin;
 use fuel::FuelPlugin;
 use hud::HudPlugin;
 use input::GameInputGatePlugin;
+use loading::LoadingScreenPlugin;
 use local_physics::GameLocalPhysicsPlugin;
 use maneuver::ManeuverPlugin;
 use map_view::MapViewPlugin;
@@ -220,12 +222,6 @@ fn main() {
                     primary_window: Some(Window {
                         title: "Thalos".into(),
                         mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-                        // Start hidden; `reveal_window_after_first_frame` flips
-                        // this to true once the first real frame has rendered.
-                        // Without it, macOS's borderless-fullscreen transition
-                        // briefly shows the Metal swapchain's uninitialised
-                        // contents — a single magenta frame on this hardware.
-                        visible: false,
                         ..default()
                     }),
                     ..default()
@@ -318,6 +314,7 @@ fn main() {
         .add_plugins(reflection_probe::ReflectionProbePlugin)
         .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
+        .add_plugins(LoadingScreenPlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(GameLocalPhysicsPlugin)
         .add_plugins(PlayerControllerPlugin)
@@ -341,23 +338,5 @@ fn main() {
         .add_plugins(ShipViewPlugin)
         .add_plugins(BodyTreePanelPlugin)
         .add_plugins(DebugPlugin)
-        .add_systems(Update, reveal_window_after_first_frame)
         .run();
-}
-
-/// Show the primary window once the renderer has had a chance to fill the
-/// swapchain. Without this delay, macOS shows the Metal swapchain's
-/// uninitialised contents during the borderless-fullscreen entry animation
-/// (a single full-screen magenta frame).
-fn reveal_window_after_first_frame(mut frame: Local<u32>, mut windows: Query<&mut Window>) {
-    if *frame > 2 {
-        return;
-    }
-    *frame += 1;
-    if *frame == 2
-        && let Ok(mut window) = windows.single_mut()
-        && !window.visible
-    {
-        window.visible = true;
-    }
 }

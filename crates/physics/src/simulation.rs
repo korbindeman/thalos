@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use glam::{DMat3, DQuat, DVec3};
+use glam::{DMat3, DVec3};
 
 use crate::body_fixed::evaluate_body_fixed_pose;
 use crate::body_trajectory_provider::BodyTrajectoryProvider;

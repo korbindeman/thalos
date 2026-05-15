@@ -11,3 +11,15 @@ local iteration, they can install `rustc-codegen-cranelift-preview` and opt in
 through personal Cargo config or one-off `cargo --config` flags. Do not check
 that setup into the repo unless Thalos deliberately moves back to a
 cross-platform Cranelift configuration.
+
+## `bevy_erosion_filter` Shader Source
+
+`thalos_bake_dump` uses `bevy_erosion_filter` from crates.io and needs the
+erosion compute WGSL as a raw `&str` because the bake CLI runs `wgpu` directly,
+outside Bevy's asset/shader loader.
+
+`bevy_erosion_filter` 0.1.2 ships its WGSL source as the public
+`EROSION_WGSL: &'static str` constant, available with `default-features = false`
+so the bake CLI doesn't pull in Bevy. `crates/bake_dump/src/gpu.rs` imports it
+directly and strips the one `#define_import_path` naga_oil directive before
+handing the source to `wgpu`.

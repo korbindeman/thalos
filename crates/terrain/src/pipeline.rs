@@ -325,7 +325,8 @@ fn compute_tile_pixels(
         .enumerate()
         .for_each(|(y, row)| {
             for x in 0..size as usize {
-                let dir = pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
+                let dir =
+                    pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
                 row[x] = evaluate_pixel(PixelContext {
                     surface,
                     dynamic_state,
@@ -374,8 +375,7 @@ fn evaluate_pixel(ctx: PixelContext<'_>) -> TilePixel {
     // sampler whenever we need linear-space components — for the detail
     // path we always need the linear albedo, even on bodies without dynamic
     // layers.
-    let need_linear =
-        ctx.has_dynamic_layers || ctx.uses_expanded_height_range || ctx.do_detail;
+    let need_linear = ctx.has_dynamic_layers || ctx.uses_expanded_height_range || ctx.do_detail;
 
     let (base_h, base_albedo, base_roughness) = if need_linear {
         let (mut h, mut a, mut r) = static_sample_components(ctx.body, ctx.dir);
@@ -441,10 +441,8 @@ fn evaluate_pixel(ctx: PixelContext<'_>) -> TilePixel {
     // = amp * freq * grad(noise) — apply that to the basis.
     let (face_tx_3d, face_ty_3d) = face_tangent_basis(face);
     let scale = ctx.noise_amp_m * freq;
-    let noise_grad_2d = Vec2::new(
-        nd.derivative.dot(face_tx_3d),
-        nd.derivative.dot(face_ty_3d),
-    ) * scale;
+    let noise_grad_2d =
+        Vec2::new(nd.derivative.dot(face_tx_3d), nd.derivative.dot(face_ty_3d)) * scale;
 
     // 2D erosion. `params.strength` already has the LOD fade applied.
     let combined_h = base_h + noise_h;
@@ -460,8 +458,7 @@ fn evaluate_pixel(ctx: PixelContext<'_>) -> TilePixel {
     // the colour cascade's slope mask. `slope_mag` is the magnitude of the
     // final 2D gradient (in metres-per-metre); a flat surface has 0 →
     // normal.y = 1; vertical → ∞ → normal.y = 0.
-    let final_grad_2d =
-        noise_grad_2d + Vec2::new(result.delta.y, result.delta.z);
+    let final_grad_2d = noise_grad_2d + Vec2::new(result.delta.y, result.delta.z);
     let slope_mag = final_grad_2d.length();
     let detail_normal_y = (1.0 / (1.0 + slope_mag * slope_mag).sqrt()).clamp(0.0, 1.0);
 
@@ -542,10 +539,7 @@ fn terrain_color_cascade(
         smoothstep_down(water_unit, water_unit + 0.005, h),
     );
 
-    let grass_mix = GRASS_COLOR1.lerp(
-        GRASS_COLOR2,
-        smoothstep(0.4, 0.6, h - erosion_delta * 0.05),
-    );
+    let grass_mix = GRASS_COLOR1.lerp(GRASS_COLOR2, smoothstep(0.4, 0.6, h - erosion_delta * 0.05));
     let grass_height_mask = smoothstep_down(
         GRASS_HEIGHT + 0.02,
         GRASS_HEIGHT + 0.05,

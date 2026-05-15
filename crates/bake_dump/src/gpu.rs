@@ -18,19 +18,19 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bevy_erosion_filter::EROSION_WGSL;
 use bytemuck::{Pod, Zeroable};
 use thalos_terrain_gen::cubemap::{Cubemap, CubemapFace};
 use thalos_terrain_gen::stages::MidFreqDetailParams;
 use wgpu::{
-    Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, Buffer, BufferAddress, BufferBindingType,
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
-    ComputePipelineDescriptor, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor,
-    MapMode, Origin3d, PipelineLayoutDescriptor, PollType, PowerPreference,
-    RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess,
-    TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension,
+    Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+    BindingType, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor, DeviceDescriptor,
+    Extent3d, Features, Instance, InstanceDescriptor, MapMode, Origin3d, PipelineLayoutDescriptor,
+    PollType, PowerPreference, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource,
+    ShaderStages, StorageTextureAccess, TexelCopyBufferInfo, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureViewDescriptor, TextureViewDimension,
 };
 
 /// A live wgpu Instance/Adapter/Device/Queue tuple, owned for the
@@ -153,20 +153,19 @@ pub fn smoke_test(ctx: &GpuContext, n: u32) -> Result<Vec<u32>> {
     });
 
     // Single bind group: one read-write storage buffer at @binding(0).
-    let bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("smoke bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("smoke bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
 
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("smoke pl"),
@@ -295,9 +294,7 @@ pub fn upload_cubemap_f32(
         sample_count: 1,
         dimension: TextureDimension::D2,
         format: TextureFormat::R32Float,
-        usage: TextureUsages::STORAGE_BINDING
-            | TextureUsages::COPY_SRC
-            | TextureUsages::COPY_DST,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC | TextureUsages::COPY_DST,
         view_formats: &[],
     });
 
@@ -343,7 +340,10 @@ pub fn download_cubemap_f32(
 ) -> Result<Cubemap<f32>> {
     let extent = texture.size();
     let res = extent.width;
-    assert_eq!(extent.height, res, "cubemap download: texture is not square");
+    assert_eq!(
+        extent.height, res,
+        "cubemap download: texture is not square"
+    );
     assert_eq!(
         extent.depth_or_array_layers, 6,
         "cubemap download: expected 6 array layers"
@@ -455,16 +455,12 @@ impl MidFreqParamsGpu {
 
 /// WGSL source for the mid-frequency-detail kernel. Loaded at compile
 /// time so the binary is self-contained.
-const MID_FREQ_DETAIL_WGSL: &str =
-    include_str!("../../terrain_gen/shaders/mid_freq_detail.wgsl");
+const MID_FREQ_DETAIL_WGSL: &str = include_str!("../../terrain_gen/shaders/mid_freq_detail.wgsl");
 
-/// WGSL source for the bevy_erosion_filter erosion kernel. Workspace
-/// `bevy_erosion_filter` lives at `~/dev/bevy_erosion_filter`; we point
-/// directly at its asset shader. The file uses one naga_oil directive
-/// (`#define_import_path ...`) that raw wgpu/naga doesn't understand —
-/// stripped at runtime by `strip_naga_oil_directives` below.
-const EROSION_WGSL: &str =
-    include_str!("../../../../bevy_erosion_filter/assets/shaders/erosion.wgsl");
+// WGSL source for the bevy_erosion_filter erosion kernel comes from the
+// crate's `EROSION_WGSL` constant. The file uses one naga_oil directive
+// (`#define_import_path ...`) that raw wgpu/naga doesn't understand, so
+// `strip_naga_oil_directives` removes it below.
 
 /// Strip naga_oil preprocessor directives (`#define_import_path ...`,
 /// `#import ...`) so raw wgpu/naga can compile a shader that was

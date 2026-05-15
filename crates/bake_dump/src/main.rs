@@ -328,9 +328,7 @@ fn bake_one(
     // matches what we'd compute now, the bake (and its PNG dumps) are
     // already current — re-baking would just rewrite identical bytes.
     if !preview && !force && shipped_bake_is_up_to_date(body) {
-        bar.finish_with_message(format!(
-            "up-to-date · {route} · pass --force to rebake"
-        ));
+        bar.finish_with_message(format!("up-to-date · {route} · pass --force to rebake"));
         return Ok(());
     }
 
@@ -358,8 +356,7 @@ fn bake_one(
               radius_m: f32,
               params: &thalos_terrain_gen::stages::MidFreqDetailParams|
               -> Result<(), String> {
-            gpu::run_mid_freq(&device, &queue, height, radius_m, params)
-                .map_err(|e| e.to_string())
+            gpu::run_mid_freq(&device, &queue, height, radius_m, params).map_err(|e| e.to_string())
         },
     ));
     let static_surface = match compile_static_terrain_config(
@@ -597,27 +594,23 @@ fn dump_all_in_parallel(
             // orbit at typical equirect resolutions; narrow enough that
             // interior cells stay clean.
             let threshold_m = tectonics.body_radius_m * 0.08;
-            write_equirect(
-                out.join("boundary-type-equirect.png"),
-                equirect_w,
-                |dir| {
-                    let sample = tectonics.sample(dir);
-                    let Some(kind) = sample.boundary_kind else {
-                        return [10, 10, 14];
-                    };
-                    let d = sample.boundary_distance_m;
-                    if d > threshold_m {
-                        return [10, 10, 14];
-                    }
-                    let intensity = 1.0 - (d / threshold_m).clamp(0.0, 1.0);
-                    let base = boundary_kind_linear(kind);
-                    [
-                        linear_to_srgb8(base[0] * intensity),
-                        linear_to_srgb8(base[1] * intensity),
-                        linear_to_srgb8(base[2] * intensity),
-                    ]
-                },
-            );
+            write_equirect(out.join("boundary-type-equirect.png"), equirect_w, |dir| {
+                let sample = tectonics.sample(dir);
+                let Some(kind) = sample.boundary_kind else {
+                    return [10, 10, 14];
+                };
+                let d = sample.boundary_distance_m;
+                if d > threshold_m {
+                    return [10, 10, 14];
+                }
+                let intensity = 1.0 - (d / threshold_m).clamp(0.0, 1.0);
+                let base = boundary_kind_linear(kind);
+                [
+                    linear_to_srgb8(base[0] * intensity),
+                    linear_to_srgb8(base[1] * intensity),
+                    linear_to_srgb8(base[2] * intensity),
+                ]
+            });
         }
         DumpKind::Material => {
             let mat = &static_surface.material_cubemap;
