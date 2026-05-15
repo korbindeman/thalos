@@ -73,7 +73,7 @@ fn update_selected_node_view(
     selected: Res<SelectedNode>,
     plan: Res<ManeuverPlan>,
     sim: Option<Res<crate::rendering::SimulationState>>,
-    body_states: Res<crate::rendering::FrameBodyStates>,
+    body_states: Res<crate::rendering::SolarSystemState>,
     origin: Res<crate::coords::RenderOrigin>,
     scale: Res<crate::coords::WorldScale>,
     flight_plan_view: Res<crate::flight_plan_view::FlightPlanView>,

@@ -190,3 +190,38 @@ pub fn fbm3(
     }
     sum / norm
 }
+
+/// [`fbm3`] with analytic derivatives.
+///
+/// Stacks [`value_noise_3d_derivative`] across octaves; the scalar `value`
+/// is bit-identical to [`fbm3`] (same hash, same sub-seeding, same f32
+/// ordering). The derivative applies the chain rule for the per-octave
+/// frequency scaling: `∇(f(αp)) = α∇f(αp)`.
+pub fn fbm3_derivative(
+    x: f32,
+    y: f32,
+    z: f32,
+    seed: u32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+) -> NoiseDerivative3 {
+    let mut sum_value = 0.0;
+    let mut sum_grad = Vec3::ZERO;
+    let mut amp = 1.0;
+    let mut freq = 1.0;
+    let mut norm = 0.0;
+    for o in 0..octaves {
+        let osubseed = pcg_u32(seed.wrapping_add(o));
+        let nd = value_noise_3d_derivative(x * freq, y * freq, z * freq, osubseed);
+        sum_value += amp * nd.value;
+        sum_grad += (amp * freq) * nd.derivative;
+        norm += amp;
+        amp *= persistence;
+        freq *= lacunarity;
+    }
+    NoiseDerivative3 {
+        value: sum_value / norm,
+        derivative: sum_grad / norm,
+    }
+}

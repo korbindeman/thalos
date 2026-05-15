@@ -1276,7 +1276,15 @@ fn perturb_normal_from_height(n: vec3<f32>) -> vec3<f32> {
         return n;
     }
 
-    let relief_normal_strength = select(1.0, 0.42, params.sea_level_m > -1.0e8);
+    // Per-fragment land/water differentiation. The legacy global 0.42
+    // damp was put in to smooth oceans at orbital distance, but it
+    // killed land relief too once the cubemap started carrying mid-
+    // frequency detail (drainage, ridges). Sample center height once
+    // and pick: water-side stays smooth (0.42), land-side gets full
+    // gradient strength so the bake's relief actually reads.
+    let h_center = sample_height_normal_m(n);
+    let is_water = params.sea_level_m > -1.0e8 && h_center < params.sea_level_m;
+    let relief_normal_strength = select(1.0, 0.42, is_water);
     let dh_dt = (h_e - h_w) / ds * relief_normal_strength;
     let dh_db = (h_n - h_s) / ds * relief_normal_strength;
 
@@ -1645,7 +1653,7 @@ fn atmosphere_shell_hit(
 /// the body-local +Y axis. We fetch the cube at both rotated directions
 /// and blend the scalar densities by the fragment's fractional
 /// position between the bands. Because each band's phase wraps
-/// independently mod TAU on the CPU (see `CloudBandState`), there is
+/// independently mod TAU on the CPU (see `CloudBandEnvironmentState`), there is
 /// no discontinuity anywhere on the sphere — rotation is seamless
 /// forever, at every latitude, across save/load boundaries.
 fn sample_cloud_banded(dir_local: vec3<f32>) -> f32 {

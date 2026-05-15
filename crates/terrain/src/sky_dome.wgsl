@@ -5,30 +5,38 @@
 // ray. The integration interval is clipped by both the body's atmosphere
 // shell and the scene depth from `scene_depth_texture` (a per-frame copy
 // of the main pass's depth attachment maintained by `CopySceneDepthNode`
-// on the game crate's side). This gives one shader three regimes for free:
+// on the game crate's side). It also draws the same reference cloud cover
+// used by the impostor on a fixed-altitude shell. The game keeps this pass
+// visible while real terrain LOD is active:
 //
-//   * Far  — body occupies a small disc, most rays miss the shell entirely
-//     (`disc < 0` → discard). Rim pixels graze the shell and produce halo.
-//   * Mid  — same as Far, but with larger silhouette. Halo still comes from
-//     the fullscreen pass; no separate impostor halo pass needed.
-//   * Near — camera inside the shell. The integral runs from cam to the
-//     terrain depth (aerial perspective) or to the shell exit on sky
-//     pixels.
+//   * Mid  — camera outside the shell but terrain is visible. The pass
+//     produces in-front haze/clouds on terrain pixels and halo on rim pixels.
+//   * Near — camera inside the shell. The integral runs from cam to terrain
+//     depth (aerial perspective) or to the shell exit on sky pixels.
 //
 // Depth-compare is disabled (`Always` in `sky_material.rs::specialize`), so
 // the quad rasterizes on every pixel, including terrain. The integration
 // length comes from scene_depth, not from the depth attachment.
 
 #import bevy_pbr::mesh_view_bindings::view
-#import thalos::atmosphere::{AtmosphereBlock, integrate_atmosphere_multiscatter}
+#import thalos::atmosphere::{
+    AtmosphereBlock,
+    CLOUD_BAND_COUNT,
+    atmosphere_jitter,
+    cloud_band_phase,
+    integrate_atmosphere,
+    rotate_around_y,
+}
+#import thalos::lighting::SCENE_FLUX_SCALE
 
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3 (group 2 is the
 // material-indices storage buffer used by the bindless material allocator).
 @group(3) @binding(0) var<uniform> sky_atmos: AtmosphereBlock;
 
 struct SkyAtmosExtra {
-    sun_dir_flux:         vec4<f32>,  // xyz = sun dir (normalized), w = flux
-    planet_center_radius: vec4<f32>,  // xyz = planet center (render-space), w = radius
+    sun_dir_flux:              vec4<f32>,  // xyz = sun dir (normalized), w = flux
+    planet_center_radius:      vec4<f32>,  // xyz = planet center (render-space), w = radius
+    world_to_body_orientation: vec4<f32>,  // render-space direction -> body-local cubemap direction
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 
@@ -38,11 +46,11 @@ struct SkyAtmosExtra {
 // unfiltered exact texel reads at fragment coordinates.
 @group(3) @binding(2) var scene_depth_texture: texture_depth_2d;
 
-// Multi-scatter LUT for this body's atmosphere. Indexed by
-// `(u = (μ_s + 1) / 2, v = h / atmos_top)`; baked once on body spawn by
-// `thalos_planet_lighting::bake_multi_scatter_lut`.
-@group(3) @binding(3) var multi_scatter_lut: texture_2d<f32>;
-@group(3) @binding(4) var multi_scatter_sampler: sampler;
+// Reference cloud-cover cubemap. Matches `PlanetMaterial`'s cloud binding
+// semantically, but lives on this material because the terrain path needs the
+// cloud shell in the fullscreen pass rather than in the terrain material.
+@group(3) @binding(3) var cloud_cover_tex: texture_cube<f32>;
+@group(3) @binding(4) var cloud_cover_sampler: sampler;
 
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
@@ -63,6 +71,110 @@ fn vertex(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4(in.position.x, in.position.y, 1.0, 1.0);
     return out;
+}
+
+fn rotate_quat(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let u = q.xyz;
+    let s = q.w;
+    return 2.0 * dot(u, v) * u + (s * s - dot(u, u)) * v + 2.0 * s * cross(u, v);
+}
+
+fn sample_cloud_banded(dir_local: vec3<f32>) -> f32 {
+    let sin2 = clamp(dir_local.y * dir_local.y, 0.0, 1.0);
+    let bf = sin2 * f32(CLOUD_BAND_COUNT - 1u);
+    let lo = u32(floor(bf));
+    let hi = min(lo + 1u, CLOUD_BAND_COUNT - 1u);
+    let alpha = bf - floor(bf);
+    let phase_lo = cloud_band_phase(lo, sky_atmos);
+    let phase_hi = cloud_band_phase(hi, sky_atmos);
+    let dir_lo = rotate_around_y(dir_local, phase_lo);
+    let dir_hi = rotate_around_y(dir_local, phase_hi);
+    let s_lo = textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, dir_lo, 0.0).r;
+    let s_hi = textureSampleLevel(cloud_cover_tex, cloud_cover_sampler, dir_hi, 0.0).r;
+    return mix(s_lo, s_hi, alpha);
+}
+
+struct CloudOverlay {
+    premul_rgb: vec3<f32>,
+    opacity: f32,
+}
+
+fn no_cloud_overlay() -> CloudOverlay {
+    return CloudOverlay(vec3<f32>(0.0), 0.0);
+}
+
+fn cloud_shell_overlay(
+    cam_pos: vec3<f32>,
+    ray_dir: vec3<f32>,
+    planet_center: vec3<f32>,
+    planet_radius: f32,
+    t_min: f32,
+    t_max: f32,
+    surface_fade: f32,
+) -> CloudOverlay {
+    let coverage = sky_atmos.cloud_albedo_coverage.w;
+    if coverage <= 0.0 || t_max <= t_min || surface_fade <= 0.0 {
+        return no_cloud_overlay();
+    }
+
+    // Same fixed shell as the impostor: ~0.15% of body radius, about 9 km
+    // on a 6000 km world. The terrain path uses this as a detached overlay
+    // rather than painting clouds into the surface material.
+    let cloud_altitude = planet_radius * 0.0015;
+    let cloud_r = planet_radius + cloud_altitude;
+    let oc = cam_pos - planet_center;
+    let half_b = dot(oc, ray_dir);
+    let c_cloud = dot(oc, oc) - cloud_r * cloud_r;
+    let disc_cloud = half_b * half_b - c_cloud;
+    if disc_cloud <= 0.0 {
+        return no_cloud_overlay();
+    }
+
+    let sq = sqrt(disc_cloud);
+    let t0 = -half_b - sq;
+    let t1 = -half_b + sq;
+    var t_cloud = 1.0e30;
+    if t0 > t_min && t0 < t_max {
+        t_cloud = t0;
+    } else if t1 > t_min && t1 < t_max {
+        t_cloud = t1;
+    } else {
+        return no_cloud_overlay();
+    }
+
+    let cloud_hit = cam_pos + t_cloud * ray_dir;
+    let cloud_normal_ws = normalize(cloud_hit - planet_center);
+    let cloud_dir_local = rotate_quat(
+        sky_atmos_extra.world_to_body_orientation,
+        cloud_normal_ws,
+    );
+    let main_density = sample_cloud_banded(cloud_dir_local);
+
+    let density = clamp(main_density * 2.0 * coverage, 0.0, 1.0);
+    if density < 1.0e-3 {
+        return no_cloud_overlay();
+    }
+
+    let sun_dir = sky_atmos_extra.sun_dir_flux.xyz;
+    let raw_ndl = dot(cloud_normal_ws, sun_dir);
+    let night_suppress = smoothstep(-0.15, 0.10, raw_ndl);
+    if night_suppress <= 0.0 {
+        return no_cloud_overlay();
+    }
+
+    let wrap = 0.15;
+    let n_dot_l = clamp((raw_ndl + wrap) / (1.0 + wrap), 0.0, 1.0);
+    let core = smoothstep(0.75, 1.00, density);
+    let self_shadow = mix(1.0, 0.80, core);
+    let cloud_lit = sky_atmos.cloud_albedo_coverage.xyz
+        * n_dot_l
+        * self_shadow
+        * sky_atmos_extra.sun_dir_flux.w
+        * SCENE_FLUX_SCALE;
+
+    let tau = density * density * 3.0;
+    let opacity = clamp(1.0 - exp(-tau), 0.0, 1.0) * night_suppress * surface_fade;
+    return CloudOverlay(cloud_lit * night_suppress * opacity, opacity);
 }
 
 @fragment
@@ -113,10 +225,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // scene depth is unavailable.
     let c_planet    = oc_len_sq - planet_radius * planet_radius;
     let disc_planet = b * b - c_planet;
+    var surface_fade: f32 = 0.0;
     if disc_planet > 0.0 {
-        let t_planet = -b - sqrt(disc_planet);
+        let sqrt_disc_planet = sqrt(disc_planet);
+        let t_planet = -b - sqrt_disc_planet;
         if t_planet > 0.0 {
             t_exit = min(t_exit, t_planet);
+            // Fade cloud compositing in across the geometric horizon.
+            // Without this, an observer above the fixed cloud deck sees a
+            // hard tangent band where sky-only rays begin hitting the cloud
+            // shell. The fade is in metres because ship space is 1 unit = 1 m.
+            surface_fade = smoothstep(0.0, 20000.0, sqrt_disc_planet);
         }
     }
 
@@ -133,18 +252,29 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let view_pos   = view_pos_h.xyz / view_pos_h.w;
         let t_scene    = length(view_pos);
         t_exit = min(t_exit, t_scene);
+        surface_fade = 1.0;
     }
 
     if t_exit <= t_enter {
         discard;
     }
 
-    let scatter = integrate_atmosphere_multiscatter(
+    let jitter = atmosphere_jitter(in.clip_position.xy);
+    let scatter = integrate_atmosphere(
         cam_pos, ray_dir, planet_center,
         sky_atmos_extra.sun_dir_flux.xyz,
-        sky_atmos_extra.sun_dir_flux.w,
-        t_enter, t_exit, planet_radius, sky_atmos, 0.5,
-        multi_scatter_lut, multi_scatter_sampler,
+        sky_atmos_extra.sun_dir_flux.w * SCENE_FLUX_SCALE,
+        t_enter, t_exit, planet_radius, sky_atmos, jitter,
+    );
+
+    let cloud = cloud_shell_overlay(
+        cam_pos,
+        ray_dir,
+        planet_center,
+        planet_radius,
+        t_enter,
+        t_exit,
+        surface_fade,
     );
 
     // Premultiplied: `rgb` is already weighted by sun flux and β coefficients
@@ -164,13 +294,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // is to crush them whenever the local in-scatter radiance is high enough
     // that a real observer's eye would adapt away from them. Restricted to
     // sky pixels (no opaque hit) so terrain aerial perspective stays driven
-    // by physical transmittance only.
+    // by physical transmittance only. The analytic planet-sphere fallback
+    // also counts as a surface hit; otherwise the horizon flips between
+    // boosted sky opacity and physical surface transmittance as a hard band.
     var opacity = physical_opacity;
-    if depth_sample <= 0.0 {
+    if surface_fade <= 0.0 {
         let sky_lum = max(scatter.in_scatter.r,
                           max(scatter.in_scatter.g, scatter.in_scatter.b));
         let lum_opacity = smoothstep(0.03, 0.20, sky_lum);
         opacity = max(opacity, lum_opacity);
     }
-    return vec4(scatter.in_scatter, opacity);
+    let combined_opacity = clamp(
+        1.0 - (1.0 - opacity) * (1.0 - cloud.opacity),
+        0.0,
+        1.0,
+    );
+    return vec4(scatter.in_scatter + cloud.premul_rgb, combined_opacity);
 }

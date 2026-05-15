@@ -21,6 +21,7 @@ fn gate_enhanced_input_sources(
     mut action_sources: ResMut<ActionSources>,
     mut contexts: EguiContexts,
     ui_pointer_gate: Option<Res<crate::hud::UiPointerGate>>,
+    freecam: Option<Res<crate::freecam::FreeCam>>,
     flight: Query<(Entity, &ContextActivity<GameFlightContext>)>,
     view: Query<(Entity, &ContextActivity<GameViewContext>)>,
     maneuver: Query<(Entity, &ContextActivity<GameManeuverContext>)>,
@@ -34,6 +35,7 @@ fn gate_enhanced_input_sources(
         .as_deref()
         .map(|gate| gate.hovered)
         .unwrap_or(false);
+    let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
 
     thalos_input::gating::set_mouse_sources(
         &mut action_sources,
@@ -43,7 +45,8 @@ fn gate_enhanced_input_sources(
     // disables gameplay contexts.
     thalos_input::gating::set_keyboard_source(&mut action_sources, true);
 
-    set_context_activity(&mut commands, &flight, !egui_keyboard_busy);
+    // Freecam suspends flight input so WASD/QE drive the camera, not the ship.
+    set_context_activity(&mut commands, &flight, !egui_keyboard_busy && !freecam_active);
     set_context_activity(&mut commands, &view, !egui_keyboard_busy);
     set_context_activity(&mut commands, &maneuver, !egui_keyboard_busy);
     if egui_keyboard_busy {

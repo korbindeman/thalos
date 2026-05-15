@@ -32,8 +32,8 @@ mod rendered_height;
 mod sky_material;
 mod synthetic;
 
-pub use body_material::{BodySkyExtra, BodyTerrainMaterial};
-pub use pipeline::PipelineTileProvider;
+pub use body_material::{BodySkyExtra, BodyTerrainMaterial, BodyTerrainShadow};
+pub use pipeline::{PipelineTileProvider, rendered_height_range};
 pub use playground_material::PlaygroundMaterial;
 pub use rendered_height::{
     TerrainPatchBasis, TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch,

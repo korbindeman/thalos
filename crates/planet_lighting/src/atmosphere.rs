@@ -57,8 +57,8 @@ pub struct AtmosphereBlock {
     /// Cloud main-deck band phases 0..=3. 16 total phases packed into
     /// four `Vec4`s carry the per-latitude-strip rotation state for
     /// the banded cloud decomposition. See `CLOUD_BAND_COUNT` /
-    /// `CloudBandState` on the CPU side and `sample_cloud_banded` in
-    /// `planet_impostor.wgsl` for usage.
+    /// `CloudBandEnvironmentState` on the CPU side and
+    /// `sample_cloud_banded` in `planet_impostor.wgsl` for usage.
     pub cloud_bands_a: Vec4,
     /// Cloud main-deck band phases 4..=7.
     pub cloud_bands_b: Vec4,

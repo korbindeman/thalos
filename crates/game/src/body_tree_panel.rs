@@ -270,12 +270,20 @@ fn body_tree_panel(
         *view = ViewMode::Ship;
         info!(
             "mounted craft {:.0} m above {} {} (spawn_dir_body=({:.3},{:.3},{:.3}) h={:.1}m attitude.w={:.4} ω=({:.2e},{:.2e},{:.2e}) pose.pos=({:.1},{:.1},{:.1}) pose.ori.w={:.4})",
-            DEBUG_LAUNCH_MOUNT_HEIGHT_M, body.name, surface_label,
-            spawn_dir_body.x, spawn_dir_body.y, spawn_dir_body.z,
+            DEBUG_LAUNCH_MOUNT_HEIGHT_M,
+            body.name,
+            surface_label,
+            spawn_dir_body.x,
+            spawn_dir_body.y,
+            spawn_dir_body.z,
             surface_height_m,
             attitude.orientation.w,
-            attitude.angular_velocity.x, attitude.angular_velocity.y, attitude.angular_velocity.z,
-            pose.position_body_m.x, pose.position_body_m.y, pose.position_body_m.z,
+            attitude.angular_velocity.x,
+            attitude.angular_velocity.y,
+            attitude.angular_velocity.z,
+            pose.position_body_m.x,
+            pose.position_body_m.y,
+            pose.position_body_m.z,
             pose.orientation_body.w,
         );
     } else if debug.enabled

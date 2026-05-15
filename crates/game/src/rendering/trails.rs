@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 
 use super::screen_marker_radius;
-use super::types::{CelestialBody, FrameBodyStates, SimulationState};
+use super::types::{CelestialBody, SimulationState, SolarSystemState};
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{RenderOrigin, WorldScale, to_render_pos};
 
@@ -124,7 +124,7 @@ pub(super) fn recompute_orbit_trails(
 pub(super) fn draw_orbits(
     mut gizmos: Gizmos,
     orbit_lines: Option<Res<OrbitLines>>,
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
     focus: Res<CameraFocus>,

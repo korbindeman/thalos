@@ -36,17 +36,11 @@ pub struct BodySkyMaterial {
     /// which is what produces aerial perspective on terrain pixels.
     #[texture(2, sample_type = "depth")]
     pub scene_depth: Handle<Image>,
-    /// CPU-baked multi-scatter LUT for this body's atmosphere. Indexed by
-    /// `(μ_s = cos(sun_zenith), h_norm = h / atmos_top)` and sampled once
-    /// per view step in `integrate_atmosphere` to add the second-order
-    /// in-scatter term that pure single-scattering can't produce — the
-    /// physical source of the daytime sky's blue cast and the
-    /// luminance-headroom over star brightness. Baked once at body spawn
-    /// (`thalos_planet_lighting::bake_multi_scatter_lut`); never reuploaded
-    /// at runtime.
-    #[texture(3, sample_type = "float", dimension = "2d")]
+    /// Reference cloud-cover cubemap shared with the impostor material.
+    /// Bodies without a registered overlay bind the same blank cube fallback.
+    #[texture(3, dimension = "cube")]
     #[sampler(4)]
-    pub multi_scatter_lut: Handle<Image>,
+    pub cloud_cover: Handle<Image>,
 }
 
 impl Material for BodySkyMaterial {
@@ -76,10 +70,9 @@ impl Material for BodySkyMaterial {
         // Fullscreen quad — no culling.
         descriptor.primitive.cull_mode = None;
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            // The unified atmosphere pass renders on every pixel (terrain
-            // + impostor body + sky) and clips the raymarch with the
-            // sampled scene depth instead of via depth-compare. Disable
-            // both depth write and depth test.
+            // The terrain atmosphere pass renders on every pixel and clips
+            // the raymarch with sampled scene depth instead of via
+            // depth-compare. Disable both depth write and depth test.
             depth.depth_write_enabled = false;
             depth.depth_compare = CompareFunction::Always;
         }

@@ -1,17 +1,21 @@
-//! On-disk cache for `StaticSurfaceData`.
+//! On-disk store for `StaticSurfaceData`.
 //!
-//! Terrain generation for a single body can take tens of seconds. This
-//! module persists a finished `StaticSurfaceData` blob and loads it on subsequent
-//! runs when the inputs are unchanged.
+//! Terrain generation for a single body can take tens of seconds. Production
+//! bakes live at `assets/baked/<body>.bin` (LFS-tracked) and ship with the
+//! game; the editor and the headless `bake_dump` tool produce them. The game
+//! never compiles terrain — it loads only.
 //!
-//! Cache validity is decided by key only: the key hashes generation inputs plus
-//! a build-time signature of the terrain_gen source tree. In development, code
-//! edits automatically move bakes to a new cache key while unchanged inputs can
-//! still reuse cached `StaticSurfaceData`.
+//! Each blob stores `(key, StaticSurfaceData)`. The key hashes generation
+//! inputs plus a build-time signature of the `thalos_terrain_gen` source
+//! tree (see `crates/terrain_gen/build.rs`). On `load`, the stored key is
+//! checked against the expected key and a mismatch is surfaced as
+//! [`LoadError::HashMismatch`] so callers can choose between hard-error
+//! (the game) and recompile-on-miss (tools).
 
+use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use glam::Vec3;
@@ -107,8 +111,13 @@ fn hash_optional_vec3(h: &mut impl Hasher, value: Option<Vec3>) {
     }
 }
 
-/// Cache file path: `<dir>/<sanitized body>-<hex key>.bin`.
-pub fn cache_path(dir: &Path, body_name: &str, key: u64) -> PathBuf {
+/// Bake file path: `<dir>/<sanitized body>.bin`.
+///
+/// Stable filename. The key lives inside the blob and is checked on
+/// [`load`] — a mismatch is surfaced as [`LoadError::HashMismatch`] rather
+/// than producing a separate file per input variant. Tools may overwrite
+/// the file freely (bake regenerates it); the game errors on mismatch.
+pub fn cache_path(dir: &Path, body_name: &str) -> PathBuf {
     let safe: String = body_name
         .chars()
         .map(|c| {
@@ -119,7 +128,7 @@ pub fn cache_path(dir: &Path, body_name: &str, key: u64) -> PathBuf {
             }
         })
         .collect();
-    dir.join(format!("{safe}-{key:016x}.bin"))
+    dir.join(format!("{safe}.bin"))
 }
 
 // File layout after magic: zstd-compressed bincode of (key, StaticSurfaceData).
@@ -136,20 +145,144 @@ struct PayloadOwned {
     data: StaticSurfaceData,
 }
 
-/// Try to load a cached `StaticSurfaceData` from `path`. Returns `None` for any
-/// failure (missing file, wrong magic, key mismatch, decode error).
-pub fn load(path: &Path, key: u64) -> Option<StaticSurfaceData> {
-    let bytes = fs::read(path).ok()?;
+/// Reason a [`load`] call did not return a usable [`StaticSurfaceData`].
+///
+/// The game treats every variant as fatal; tools may treat any variant as
+/// "recompile and overwrite". Errors carry enough detail for an actionable
+/// log message — the path of the bake file and, for [`HashMismatch`], both
+/// the expected and stored keys.
+#[derive(Debug)]
+pub enum LoadError {
+    /// The file does not exist (or could not be opened for reading).
+    Missing { path: PathBuf },
+    /// The file exists and decodes, but its stored key disagrees with the
+    /// expected key. Indicates a stale bake: the body's terrain config or
+    /// the `thalos_terrain_gen` source tree has moved since the bake was
+    /// produced.
+    HashMismatch {
+        path: PathBuf,
+        expected: u64,
+        found: u64,
+    },
+    /// The file exists but is corrupt, was written by a different format
+    /// version, or otherwise failed to decode.
+    Decode { path: PathBuf, message: String },
+}
+
+impl fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing { path } => write!(f, "bake file not found: {}", path.display()),
+            Self::HashMismatch {
+                path,
+                expected,
+                found,
+            } => write!(
+                f,
+                "stale bake at {}: stored key {:016x}, expected {:016x}",
+                path.display(),
+                found,
+                expected,
+            ),
+            Self::Decode { path, message } => {
+                write!(f, "could not decode bake at {}: {message}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+/// Read only the stored cache key from a bake file, without decompressing
+/// the full `StaticSurfaceData`. Returns the same error variants as
+/// [`load`] (`Missing` / `Decode`), but never `HashMismatch` — the caller
+/// compares the returned key against its expected key.
+///
+/// Implementation note: `PayloadRef { key: u64, data: … }` serializes with
+/// bincode's fixed-int LE encoding, so the key is the first 8 bytes of
+/// the decompressed stream. Reading them via streaming zstd avoids
+/// inflating the entire blob (hundreds of MB for high-resolution bakes).
+pub fn peek_key(path: &Path) -> Result<u64, LoadError> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(LoadError::Missing {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(e) => {
+            return Err(LoadError::Decode {
+                path: path.to_path_buf(),
+                message: format!("read failed: {e}"),
+            });
+        }
+    };
     if bytes.len() < FORMAT_MAGIC.len() || &bytes[..FORMAT_MAGIC.len()] != FORMAT_MAGIC {
-        return None;
+        return Err(LoadError::Decode {
+            path: path.to_path_buf(),
+            message: "magic mismatch (not a Thalos bake file)".into(),
+        });
     }
-    let decompressed = zstd::decode_all(&bytes[FORMAT_MAGIC.len()..]).ok()?;
+    let mut decoder =
+        zstd::stream::read::Decoder::new(&bytes[FORMAT_MAGIC.len()..]).map_err(|e| {
+            LoadError::Decode {
+                path: path.to_path_buf(),
+                message: format!("zstd init failed: {e}"),
+            }
+        })?;
+    let mut key_buf = [0u8; 8];
+    decoder
+        .read_exact(&mut key_buf)
+        .map_err(|e| LoadError::Decode {
+            path: path.to_path_buf(),
+            message: format!("zstd read failed: {e}"),
+        })?;
+    Ok(u64::from_le_bytes(key_buf))
+}
+
+/// Load a `StaticSurfaceData` blob from `path` and validate its stored key
+/// against `expected_key`. See [`LoadError`] for failure modes.
+pub fn load(path: &Path, expected_key: u64) -> Result<StaticSurfaceData, LoadError> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(LoadError::Missing {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(e) => {
+            return Err(LoadError::Decode {
+                path: path.to_path_buf(),
+                message: format!("read failed: {e}"),
+            });
+        }
+    };
+    if bytes.len() < FORMAT_MAGIC.len() || &bytes[..FORMAT_MAGIC.len()] != FORMAT_MAGIC {
+        return Err(LoadError::Decode {
+            path: path.to_path_buf(),
+            message: "magic mismatch (not a Thalos bake file)".into(),
+        });
+    }
+    let decompressed =
+        zstd::decode_all(&bytes[FORMAT_MAGIC.len()..]).map_err(|e| LoadError::Decode {
+            path: path.to_path_buf(),
+            message: format!("zstd decode failed: {e}"),
+        })?;
     let (payload, _): (PayloadOwned, usize) =
-        bincode::serde::decode_from_slice(&decompressed, bincode_config()).ok()?;
-    if payload.key != key {
-        return None;
+        bincode::serde::decode_from_slice(&decompressed, bincode_config()).map_err(|e| {
+            LoadError::Decode {
+                path: path.to_path_buf(),
+                message: format!("bincode decode failed: {e}"),
+            }
+        })?;
+    if payload.key != expected_key {
+        return Err(LoadError::HashMismatch {
+            path: path.to_path_buf(),
+            expected: expected_key,
+            found: payload.key,
+        });
     }
-    Some(payload.data)
+    Ok(payload.data)
 }
 
 /// Write `data` to `path`. Creates parent directories; writes atomically
@@ -235,6 +368,18 @@ mod tests {
             terrain_cache_key(&base, None, &context, TerrainCompileOptions::default()),
             terrain_cache_key(&changed, None, &context, TerrainCompileOptions::default())
         );
+    }
+
+    /// `peek_key` assumes bincode (with fixed-int LE encoding) writes
+    /// `PayloadRef`'s `key: u64` as 8 LE bytes at the start of the
+    /// serialized payload. Pin that assumption — if a future bincode bump
+    /// breaks it, the staleness check would read garbage and silently
+    /// re-bake everything (or worse, accept a stale bake).
+    #[test]
+    fn bincode_u64_encodes_as_eight_le_bytes_at_offset_zero() {
+        let key: u64 = 0x0123_4567_89AB_CDEF;
+        let encoded = bincode::serde::encode_to_vec(key, bincode_config()).unwrap();
+        assert_eq!(&encoded[..8], &key.to_le_bytes());
     }
 
     #[test]

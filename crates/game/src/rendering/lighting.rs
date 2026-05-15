@@ -10,8 +10,8 @@ use thalos_planet_rendering::{
 };
 
 use super::types::{
-    CameraExposure, CelestialBody, FrameBodyStates, PlanetMaterials, PlanetshineTints,
-    SimulationState, SolidPlanetMaterials, SunLight,
+    CameraExposure, CelestialBody, PlanetMaterials, PlanetshineTints, SimulationState,
+    SolarSystemState, SolidPlanetMaterials, SunLight,
 };
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::coords::{MAP_SCALE, RenderOrigin, SHIP_SCALE};
@@ -43,9 +43,9 @@ const EXPOSURE_EV_GRAIN_MAX: f32 = 6.0;
 /// Update the `CameraExposure` resource from the current focus body. This is
 /// the single source of truth for how much gain the "camera" applies to the
 /// raw inverse-square solar flux each body sees. Runs once per frame after
-/// `cache_body_states`, before any consumer reads `CameraExposure`.
+/// `sync_solar_system_state`, before any consumer reads `CameraExposure`.
 pub(super) fn update_camera_exposure(
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     bodies: Query<&CelestialBody>,
     sim: Res<SimulationState>,
@@ -176,12 +176,12 @@ pub(super) fn collect_occluders<'a>(
 }
 
 /// Updates each planet material's `light_dir` uniform to point from the body
-/// toward the star.  Must run after `cache_body_states`.
+/// toward the star.  Must run after `sync_solar_system_state`.
 pub(super) fn update_planet_light_dirs(
     query: Query<(&CelestialBody, &PlanetMaterials)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
     mut halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
@@ -219,18 +219,28 @@ pub(super) fn update_planet_light_dirs(
         body_iter(),
     );
 
-    // Cloud layer drift: wrap sim time at the body's equatorial cloud
-    // period (`TAU / scroll_rate`) so the equator rotates seamlessly
-    // across the wrap. Falls back to one sim-day when `scroll_rate` is
-    // zero (no drift). Polar latitudes with non-zero differential
-    // rotation still seam at each wrap (`TAU * lat_factor` jump), but
-    // at a slow multi-day cadence.
+    // Legacy cloud time uniform: kept in sync from canonical cloud-band
+    // state for materials/shaders that still read `cloud_dynamics.y`.
     let sim_time = sim.simulation.sim_time();
 
     let map_slice: &[(usize, Vec3, f32)] = &map_occluders;
     let ship_slice: &[(usize, Vec3, f32)] = &ship_occluders;
     for (body, mats) in &query {
         let body_def = &body_defs[body.body_id];
+        let cloud_time = cache
+            .environment
+            .get(body.body_id)
+            .and_then(|env| env.cloud_bands.as_ref())
+            .map(|clouds| {
+                let scroll = clouds.scroll_rate_rad_s.abs();
+                let period = if scroll > 1.0e-9 {
+                    std::f64::consts::TAU / scroll
+                } else {
+                    86_400.0
+                };
+                sim_time.rem_euclid(period) as f32
+            })
+            .unwrap_or(0.0);
         // Same scale-independent inputs feed both materials; only the
         // scale-dependent fields (radius, occluders, planetshine pos)
         // differ.
@@ -266,17 +276,6 @@ pub(super) fn update_planet_light_dirs(
                     scene.planetshine_tint_flag = Vec4::new(tint[0], tint[1], tint[2], 1.0);
                 }
             }
-
-            let scroll = materials
-                .get(handle)
-                .map(|mat| mat.atmosphere.cloud_dynamics.x.abs() as f64)
-                .unwrap_or(0.0);
-            let period = if scroll > 1e-9 {
-                std::f64::consts::TAU / scroll
-            } else {
-                86_400.0
-            };
-            let cloud_time = (sim_time - (sim_time / period).floor() * period) as f32;
 
             // Peek before mutating: `get_mut` flags the asset changed and
             // triggers a full re-extract in the render world, so skip it
@@ -322,7 +321,7 @@ pub(super) fn update_planet_light_dirs(
 pub(super) fn update_solid_planet_params(
     query: Query<(&CelestialBody, &SolidPlanetMaterials)>,
     mut materials: ResMut<Assets<SolidPlanetMaterial>>,
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
@@ -402,7 +401,7 @@ pub(super) fn update_solid_planet_params(
 
 /// Point the directional sun light from the star toward the camera's focus body.
 pub(super) fn update_sun_light(
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     sim: Res<SimulationState>,
     mut light_query: Query<&mut Transform, With<SunLight>>,

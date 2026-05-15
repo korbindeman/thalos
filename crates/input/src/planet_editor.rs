@@ -1,3 +1,4 @@
+use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
@@ -108,6 +109,7 @@ fn collect_planet_editor_intent(
     primary: Query<(&Action<PrimaryAction>, &ActionEvents)>,
     motion: Query<&Action<CameraMotionAction>>,
     wheel: Query<&Action<CameraWheelAction>>,
+    scroll: Res<AccumulatedMouseScroll>,
     fullbright: Query<(&Action<ToggleFullbrightAction>, &ActionEvents)>,
     suppress: Query<&Action<OverlaySuppressAction>>,
 ) {
@@ -121,7 +123,10 @@ fn collect_planet_editor_intent(
             .map(|(_, events)| events.contains(ActionEvents::START))
             .unwrap_or(false),
         camera_motion: motion.single().map(|action| **action).unwrap_or(Vec2::ZERO),
-        camera_wheel: wheel.single().map(|action| **action).unwrap_or(Vec2::ZERO),
+        camera_wheel: crate::camera_scroll_delta(
+            wheel.single().map(|action| **action).unwrap_or(Vec2::ZERO),
+            scroll.unit,
+        ),
         toggle_fullbright: fullbright
             .single()
             .map(|(_, events)| events.contains(ActionEvents::START))

@@ -65,6 +65,13 @@ This single premise explains the system's core flavor:
 - The belt is rich in metals, water-bearing minerals, and carbon compounds.
 - Outer small bodies preserve volatile-rich primordial material.
 
+A wide-orbit companion star, Aetheros, formed in the same stellar nursery
+and settled into a ~2,500 AU semi-major-axis orbit around Pyros during
+the cluster's dispersal. Aetheros is a single old M-dwarf with its own
+planetary system reserved for a later expansion. Its visible presence in
+Thalos's sky has shaped the civilization's cosmic imagination since
+prehistory.
+
 ## Pyros
 
 | Property | Value |
@@ -83,24 +90,73 @@ follow familiar expectations.
 
 | Property | Value |
 |---|---:|
-| Role | Inner-system hard mode |
+| Role | Inner-system hard mode, sulfur world |
 | Semi-major axis | 0.65 AU |
 | Orbital period | ~191 days |
 | Radius | 4,035 km |
 | Surface gravity | 1.09 g |
 | Escape velocity | 9.3 km/s |
-| Atmosphere | ~50 atm, CO2-dominant |
-| Surface temperature | ~700 K |
-| Rotation | Slow retrograde |
+| Atmosphere | ~80 atm, CO2 dominant with significant SO2 and H2SO4 clouds |
+| Surface temperature | ~720 K |
+| Rotation | Slow prograde (~80-day day) |
+| Surface signature | Yellow sulfur deposits over dark basalt, active volcanism |
 
-Ashara is the system's single inner hazard world. It is not merely hot; it
-is hard to operate from. The gravity well is deeper than Thalos's, the
-atmosphere is crushing, and ascent from the lower atmosphere is a serious
-engineering problem.
+Ashara is the system's single inner hazard world. It is not merely hot;
+it is hard to operate from. The gravity well is deeper than Thalos's,
+the atmosphere is crushing, and ascent from the lower atmosphere is a
+serious engineering problem.
+
+Visually, Ashara is the sulfur planet. The supernova that enriched
+Pyros's nursery seeded sulfur and other volatiles into the inner zone
+alongside iron. On Thalos and Vaelen the sulfur is buried or chemically
+locked; on Ashara the heat and active geology have brought it to the
+surface in massive quantities. From space the disk reads muddy yellow
+to ochre with cream upper-atmosphere haze bands. The surface is dark
+basaltic plains streaked with yellow sulfur deposits, ringed by active
+outgassing vents and fresh lava flows, with highland regions where
+sulfur vapor freezes out as pale sulfur snow. Yellow plumes of sulfur
+ejecta and glowing lava seams are visible from orbit, especially
+against the night side.
+
+The atmospheric chemistry adds operational hazards beyond pressure and
+heat. Sulfuric acid clouds at multiple altitudes attack metals — landers
+need acid-resistant alloys, aerostats must fight chemical corrosion on
+top of pressure. The sky from the surface is yellow-orange and hazy,
+with acid drizzle at certain altitude bands. The night horizon glows
+faintly with lava-light from active flows.
 
 Arrival can be forgiving because the thick atmosphere enables aggressive
 aerobraking. Departure is the punishment. Long-term presence means high
 altitude aerostat infrastructure, not casual surface bases.
+
+### Khalkos
+
+| Property | Value |
+|---|---:|
+| Role | Captured metal moon |
+| Orbital radius | ~25,000 km |
+| Orbital period | ~17 hours |
+| Radius | ~120 km |
+| Surface gravity | ~0.02 g |
+| Escape velocity | ~0.2 km/s |
+| Atmosphere | None |
+| Surface | Irregular, heavily cratered metallic regolith, iron-nickel-sulfide composition |
+
+Khalkos is Ashara's only natural satellite: a captured metal-rich
+asteroid in a tight orbit. As Pyros's nursery dispersed, several
+iron-rich fragments fell toward the inner system; most were swallowed
+by Ashara's deep gravity well, but Khalkos stayed in orbit.
+
+Visually, Khalkos is irregular and dark gunmetal grey — similar in
+composition to Lyssos but on a much smaller scale and without the
+heavy space-weathering history. The Ashara-facing hemisphere is
+scorched darker by Ashara's infrared radiation; the outward-facing
+side reads slightly lighter.
+
+Gameplay-wise, Khalkos is a low-stakes target near Ashara: a staging
+point for descent missions, a metal-extraction target without
+atmospheric hazards, and an observation platform for surveying
+Ashara's surface and plume activity from above the acid clouds.
 
 ## II. Thalos
 
@@ -115,11 +171,18 @@ altitude aerostat infrastructure, not casual surface bases.
 | Delta-v to low orbit | ~6.5 km/s |
 | Atmosphere | ~0.85 atm, N2/O2 |
 | Hydrosphere | ~65 percent ocean |
+| Land cover | Heavy vegetation on iron-rich lateritic soils |
 | Axial tilt | 23 deg |
 
 Thalos is the inhabited homeworld: smaller than Earth, dense, metal-rich,
 and geologically old. Its oversized iron core gives it a strong magnetic
 field and a resource-rich surface history.
+
+From orbit the 35 percent land area reads deep green: heavy native
+vegetation on iron-rich lateritic soils, with rust-red ground showing
+through where forest cover thins or breaks. Thalos looks lush. The soil
+chemistry still resists cultivated agriculture, which is what keeps the
+civilization coastal and ocean-fed (see `civilization.md`).
 
 Thalos is not an easy launch site. Reaching orbit remains the first major
 skill gate, but the planet is small enough that spaceflight is practical
@@ -153,14 +216,22 @@ and basic surface operations.
 | Radius | 190 km |
 | Surface gravity | Very low |
 | Inclination | 3 deg |
-| Character | Small greenish olivine-rich moon |
+| Surface | Pale olivine-rich regolith, heavily cratered with sharp relief |
 
 Selva is the early-game optional moon. It is easier to land on than Mira,
 but less obvious to target: farther out, smaller, slightly inclined, and
 less forgiving for sloppy encounters.
 
-It gives players a low-gravity playground and a reason to practice precise
-transfers before leaving the Thalos system.
+Visually, Selva is the system's small high-relief body. The surface is
+pale green-grey olivine-rich regolith over an ancient cratered substrate;
+billions of years of impacts have sharpened the topography into pronounced
+crater rims, central peaks, and saw-toothed ridges between overlapping
+basins. The body is too small to have eroded its impact history into the
+smooth shapes typical of larger moons, so every crater is preserved in
+high relief and the terminator reads jagged against the sky.
+
+It gives players a low-gravity playground and a reason to practice
+precise transfers before leaving the Thalos system.
 
 ## III. Auron
 
@@ -171,7 +242,8 @@ transfers before leaving the Thalos system.
 | Orbital period | ~547 days |
 | Mass | ~40 Earth masses |
 | Radius | 44,600 km |
-| Atmosphere | H2/He, gold and cream bands |
+| Atmosphere | H2/He, peach and coral base with cream high-altitude bands |
+| Banding style | Saturn-style smooth diffuse zones, low contrast |
 | Rings | Moderate icy ring system |
 
 Auron is close on purpose. Its presence in the Thalos sky is a core identity
@@ -179,9 +251,42 @@ feature of the setting. At favorable conjunctions the disk and rings are
 naked-eye objects, making it the first interplanetary target many players
 will want to visit.
 
+Visually, Auron is the warm giant: a peach-to-coral base with cream
+high-altitude haze bands. Trace organic compounds and warmer upper-
+atmosphere chemistry give the warm cast; a thick haze layer damps band
+contrast Saturn-style, so the zones read as soft latitudinal transitions
+rather than Jupiter's hard stripes. The rings are icy and read distinctly
+cool-blue against the warm body — a photogenic complement that defines
+Auron's silhouette.
+
 Reaching Auron is not the same as conquering its moon system. A flyby or
 high orbit is an early spectacle; serious operations around Pelagos are a
-later milestone.
+later milestone. Auron also shares its orbit with Lyssos, a Mercury-class
+metallic world locked at the L4 Lagrange point 60 degrees ahead. Lyssos
+is described separately below.
+
+### Pagos
+
+| Property | Value |
+|---|---:|
+| Role | Inner Auron moon, water-ice depot |
+| Orbital radius | ~310,000 km |
+| Orbital period | ~3.1 days |
+| Radius | 540 km |
+| Surface gravity | 0.05 g |
+| Escape velocity | 0.8 km/s |
+| Atmosphere | None |
+| Surface | Heavily cratered water ice, bright bluish-white |
+
+Pagos is the practical first stop in the Auron system: an airless ice moon
+inside Pelagos's orbit, bright enough to read as a visible morning crescent
+from Pelagos's surface. No atmosphere, no biosphere, straightforward
+water-ice extraction for propellant, with sunlight still strong enough for
+solar power to be viable.
+
+It gives players a low-stakes intermediate before committing to Pelagos's
+ocean-world landing campaign: arrive in the Auron system, refuel and stage
+at Pagos, then descend through the blue haze.
 
 ### Pelagos
 
@@ -215,27 +320,91 @@ requirements.
 
 | Property | Value |
 |---|---:|
-| Role | Accessible captured moon |
+| Role | Captured contact binary |
 | Orbital radius | ~799,000 km |
-| Radius | 180 km |
-| Character | Battered silicate body |
+| Extent | ~220 km long, two fused lobes (~100 km each) |
+| Surface | Two-toned: sulfur-yellow lobe and clean grey silicate lobe |
+| Atmosphere | None |
 
-Carpo is Auron's practical small moon. It is a convenient mining, refueling,
-and staging target once the player can reach the Auron system.
+Carpo is not one body but two — a peanut-shaped contact binary captured
+into Auron's orbit. The two lobes have visibly different compositions
+and surface histories, suggesting they originated as separate bodies
+that later coalesced under low-velocity contact and never fully merged.
+One lobe reads sulfur-yellow from UV and radiation processing of
+volatile-rich material; the other is clean grey silicate, the remnant
+of a more refractory progenitor. The neck between them is dust-pooled
+and slightly brighter.
+
+Visually, Carpo is the system's distinctive small body: lumpy,
+two-toned, identifiable from any approach geometry. Real-world analogs
+are 486958 Arrokoth and comet 67P, scaled up.
+
+Gameplay-wise, Carpo remains a convenient staging target. Landing
+operations are easy (negligible gravity), the two-lobe geometry adds
+visual interest, and the compositional split gives a reason to sample
+both ends.
 
 ### Theron
 
 | Property | Value |
 |---|---:|
-| Role | Advanced Auron-system moon |
+| Role | Captured tholin-coated outer moon |
 | Orbital radius | ~2,094,000 km |
 | Radius | 120 km |
 | Orbit | Inclined retrograde |
-| Character | Very dark carbonaceous body |
+| Surface | Pinkish-cream tholin coating, mottled regional variations |
 
-Theron is the local challenge moon: distant, inclined, retrograde, and dark.
-It gives the Auron system a high-skill navigation target without crowding
-the main progression.
+Theron is the local challenge moon of the Auron system: distant,
+inclined, retrograde, and visually distinctive. The surface is coated
+in tholins — pinkish-cream organic compounds formed by UV processing
+of methane and nitrogen on a captured icy substrate. Regional color
+variations show as mottled patches: cream highlands, salmon mid-tones,
+deeper red-brown around impact features and tectonic fractures.
+
+The orbit and surface chemistry tell the story together: Theron was
+captured from the outer system, probably from the trans-Nereus zone,
+and brings its outer-system surface chemistry inward with it. It gives
+the Auron system a high-skill navigation target and a sample of
+distant-origin material without crowding the main progression.
+
+## Lyssos (Auron L4 Co-orbital)
+
+| Property | Value |
+|---|---:|
+| Role | Co-orbital Mercury-class destination |
+| Semi-major axis | 1.31 AU (same as Auron, 60 deg ahead at L4) |
+| Orbital period | ~547 days (matches Auron) |
+| Radius | ~2,400 km |
+| Surface gravity | ~0.42 g |
+| Escape velocity | ~3.9 km/s |
+| Atmosphere | None |
+| Surface | Burnished metallic regolith, heavy cratering |
+
+Lyssos co-orbits Auron at the L4 Lagrange point, 60 degrees ahead of
+Auron in their shared orbit around Pyros. Both bodies have the same
+~547-day year. Hohmann transfer windows from Thalos to Lyssos are offset
+by roughly a quarter-orbit from Thalos-to-Auron windows, so Lyssos is
+not a body you fold into an Auron campaign — it is its own dedicated
+trip.
+
+Visually, Lyssos is a stripped, metal-rich Mercury-class world: bare
+iron-nickel regolith, heavy cratering from 4.6 Gyr of impacts, no
+atmosphere or water to oxidize the surface. The base reads dark
+gunmetal grey from solar-wind sputtering and micrometeorite weathering,
+with bright radial crater rays where recent impacts have exposed
+fresher metal. Subtle color variation from sulfide and silicate
+inclusions: greys, deep browns, occasional copper-toned regions. The
+closest real-world analog is the M-type asteroid 16 Psyche.
+
+Lore: Lyssos is the iron-rich proto-Auron material that did not make it
+into Auron's core. During the protoplanetary disk's dispersal it pooled
+at the L4 Lagrange point and stabilized there. Composition-wise it is
+genetically related to Auron's interior — chemically what Auron's deep
+core is presumed to be — in solid, accessible form.
+
+Lyssos is a mid-to-late game destination. The Δv is modest (1.31 AU,
+no atmosphere, low surface gravity), but the orbital offset means
+timing is its own discipline.
 
 ## IV. Vaelen
 
@@ -249,7 +418,8 @@ the main progression.
 | Surface gravity | 0.21 g |
 | Escape velocity | 2.2 km/s |
 | Delta-v to low orbit | ~1.7 km/s |
-| Atmosphere | Thin CO2 |
+| Atmosphere | Thin CO2, iron-oxide dust-loaded |
+| Sky color | Rust-red (Mie-dominant from suspended dust) |
 
 Vaelen is the Mars-role world, but tuned for gameplay clarity. Auron may be
 closer and more spectacular, but Vaelen is the first serious interplanetary
@@ -259,9 +429,23 @@ Its eccentric orbit creates meaningful transfer-window variation without
 letting the planet live in Auron's shadow. Favorable windows are cheap;
 unfavorable windows teach players to wait.
 
-Vaelen's surface records a wetter past: ancient channels, evaporites,
-sedimentary basins, and buried ice. It is strategically useful as a staging
-world between the inner system, Auron, the belt, and Teros.
+The surface tells one story in two halves. Roughly half the planet is a
+single continent-scale dune sea: a planet-scale erg of linear dunes, star
+dunes, and barchan margins, pooled into the long topographic low that
+records Vaelen's ancient ocean basin. The other half is rust-red cratered
+terrain (Mars-like crater density) cut by dried channel networks, with
+cyan evaporite floors (gypsum, sulfates, chloride pans) lining the
+ancient lake beds and salt plains. Buried ice persists in scarps and
+near the poles.
+
+The thin atmosphere is loaded with iron-oxide fines mobilized off the
+dune sea. The sky reads rust-red from the surface, the limb glows
+ferrous-orange from orbit, and aerial perspective warms distant terrain
+toward red. The dune basin is not just a feature, it sources the
+atmospheric color; the two together are Vaelen's visual signature.
+
+Vaelen is strategically useful as a staging world between the inner
+system, Auron, the belt, and Teros.
 
 ### Kael
 
@@ -316,14 +500,25 @@ because the belt demands planning, windows, and infrastructure.
 | Orbital period | ~11.2 years |
 | Mass | ~1.2 Jupiter masses |
 | Radius | 74,000 km |
-| Atmosphere | Ammonia bands, ochre and white |
+| Atmosphere | H2/He with NH3 / NH4SH / H2O cloud decks; deep sienna and burnt-orange bands with bone-white zones |
+| Banding style | Jupiter-style high-contrast turbulent bands, planet-scale cyclones |
+| Signature feature | Great Dark Spot — slow-rotating mid-southern cyclone, ~15,000 km across |
 | Rings | Faint dusty rings |
-| Hazard | Intense radiation belts |
+| Hazard | Intense radiation belts; vivid polar auroras driven by the active magnetosphere |
 
 Teros is the first true outer-system expedition. It is massive, dangerous,
 and operationally different from Auron. The player should feel the jump in
 scale: long cruise, weak sunlight, radiation planning, and complex moon
 encounters.
+
+Visually, Teros is the stormy giant. Where Auron is calm peach with soft
+banding, Teros reads as deep sienna and burnt-orange zones cut by
+bone-white belts, with chaotic turbulent boundaries and planet-scale
+cyclones. A permanent Great Dark Spot — a slow-rotating cyclone ~15,000
+km across at mid-southern latitudes — is visible from most approach
+trajectories and gives Teros a one-glance silhouette. Vivid auroras
+flicker at the polar regions, driven by the active magnetosphere that
+also produces the radiation belts.
 
 ### Pyrith
 
@@ -332,11 +527,26 @@ encounters.
 | Role | Volcanic inner moon |
 | Orbital radius | ~422,000 km |
 | Radius | 910 km |
-| Character | Io-like, sulfur-rich, tidally tortured |
+| Surface | Multicolored sulfur palette over dark basalt, active volcanism |
+| Hazard | Deep in Teros's radiation belts |
 
-Pyrith is visually loud and mechanically hostile. It sits deep in Teros's
-radiation environment and rewards players who can plan short, efficient,
-high-risk operations.
+Pyrith is the system's volcanic spectacle. Tidal heating from Teros
+drives the most active surface vulcanism anywhere outside Ashara, and
+the surface chemistry is a rich palette of sulfur compounds in different
+oxidation states: yellow sulfur plains, orange and brown sulfur deposits,
+red rings of sulfur compounds around hot volcanic centers, and white
+sulfur-dioxide frost in cooler regions. Dark basalt shows through where
+recent flows have not yet been re-coated. Visible eruption plumes and
+glowing magma seams stand out at any zoom level.
+
+Pyrith pairs thematically with Ashara: both are sulfur worlds, but
+Pyrith's sulfur is mobilized by tidal heating rather than solar. Pyros's
+metal-rich nursery seeded sulfur into both the inner zone and the
+condensing outer disk, and Pyrith is its outer-system expression.
+
+Pyrith is visually loud and mechanically hostile. It sits deep in
+Teros's radiation environment and rewards players who can plan short,
+efficient, high-risk operations.
 
 ### Glacis
 
@@ -351,18 +561,58 @@ high-risk operations.
 Glacis is the science prize of Teros. Exploration means radiation shielding,
 plume sampling, ice drilling, or carefully timed low-altitude passes.
 
+### Khalin
+
+| Property | Value |
+|---|---:|
+| Role | Titan-analog hydrocarbon moon |
+| Orbital radius | ~1,300,000 km |
+| Radius | 2,700 km |
+| Surface gravity | 0.16 g |
+| Escape velocity | 2.5 km/s |
+| Atmosphere | ~1.5 bar N2/CH4 with thick tholin haze |
+| Surface temperature | ~90 K |
+| Surface | Methane/ethane lakes (polar), cryovolcanic flows; obscured from orbit by haze |
+
+Khalin is Teros's Titan analog: a major moon wrapped in an opaque amber
+tholin haze. From orbit the surface is invisible — radar and infrared
+are the only ways to image what is underneath. The haze gives Khalin a
+distinctive sunset-orange disk visible against the deep sienna of Teros.
+
+Beneath the haze, the surface is cold (~90 K), with methane and ethane
+lakes pooling in the polar regions and cryovolcanic flows scarring the
+mid-latitudes. Organic chemistry is rich: the hydrocarbon inventory
+across Khalin is the late-game organic feedstock for the civilization's
+industrial supply chain.
+
+Khalin is operationally distinct from Teros's other moons. The
+atmosphere makes arrival forgiving (aerobraking, parachutes), but the
+cold and the surface chemistry require specialized hardware. Pyrith is
+hot and irradiated; Glacis is icy and biologically protected; Calyx is
+the practical staging point. Khalin is the chemistry mission.
+
 ### Calyx
 
 | Property | Value |
 |---|---:|
-| Role | Safer outer Teros moon |
+| Role | Safer outer Teros moon, two-tone surface |
 | Orbital radius | ~1,880,000 km |
 | Radius | 1,205 km |
-| Character | Mixed ice-rock, dark ancient surface |
+| Surface | Two-toned: bright water ice on the trailing hemisphere, dark carbonaceous on the leading hemisphere |
 
-Calyx is the practical moon of the Teros system: farther from the worst
-radiation, easier to operate around, and useful as a staging point for the
-more dangerous inner moons.
+Calyx is Teros's distinctive outer moon: a body whose two hemispheres
+read as visibly different worlds. The leading hemisphere is coated in
+dark organic and carbonaceous material that Calyx has swept up moving
+through Teros's outer system over geological time; the trailing
+hemisphere preserves the original bright water-ice surface. From orbit
+the boundary between the two is sharp enough to be visible at silhouette
+range — a one-glance identifier from any approach trajectory.
+
+Calyx is also the practical moon of the Teros system: farther from the
+worst radiation, easier to operate around, and useful as a staging
+point for the more dangerous inner moons. The two-tone surface makes
+landing site selection a real choice — bright ice for water harvesting
+versus the dark organic-rich terrain for surface chemistry.
 
 ## VII. Nereus
 
@@ -394,11 +644,27 @@ times, cold thermal design, and sparse rescue options.
 | Orbital radius | ~900,000 km |
 | Radius | ~950 km |
 | Orbit | Inclined retrograde |
-| Surface | Icy crust, nitrogen frost, cryovolcanic scars |
+| Surface | Cantaloupe terrain, mottled greenish-tan-pinkish, nitrogen frost, cryovolcanic features |
+| Signature feature | Dark reddish polar cap (tholin-deposited) |
 
-Orias gives Nereus a local objective. It is a captured moon on an awkward
-orbit, useful as both a science target and a navigation test in the outer
-system.
+Orias gives Nereus a local objective: a captured moon on an awkward
+retrograde orbit, useful as both a science target and a navigation
+test in the outer system.
+
+Visually, Orias is the system's most chromatically distinctive moon.
+The surface shows characteristic "cantaloupe terrain" — densely packed
+shallow depressions in a regular pattern, formed by ice diapirism over
+geological time — colored in mottled greenish-tan-pinkish hues from
+organic surface processing. Bright patches of nitrogen frost migrate
+seasonally across the surface as Nereus moves around Pyros over its
+~42-year year.
+
+A distinctive permanent feature anchors Orias's silhouette: a dark
+reddish polar cap. Methane and nitrogen escaping Nereus's upper
+atmosphere migrate to Orias's cold polar trap and accumulate there
+over geological timescales, processed by UV into deep red tholin
+deposits. The cap reads as a permanent dark crown visible from any
+approach trajectory — *the moon with the bloody crown*.
 
 ## VIII. Erebos
 
@@ -451,6 +717,43 @@ and a collisional-family backstory.
 The appeal is not distance alone. Erebos already handles the resonant
 icy-frontier achievement. Vorra is the weird precision mission after that.
 
+## Aetheros (Companion Star)
+
+| Property | Value |
+|---|---:|
+| Type | Old M-dwarf, gravitationally bound to Pyros |
+| Spectral class | M3V |
+| Mass | ~0.25 M_sun |
+| Luminosity | ~0.041 L_sun |
+| Age | ~8-10 Gyr (older than Pyros) |
+| Semi-major axis from Pyros | ~2,500 AU |
+| Orbital period around Pyros | ~110,000 years |
+| Apparent magnitude from Thalos | ~-6.3 (naked-eye in daylight) |
+
+Aetheros is the second star in Thalos's sky. Its wide orbit around Pyros
+completes once every ~110,000 years, so on any human timescale it is a
+fixed bright point against the background stars. Spectroscopy identified
+its spectral class long before spaceflight; the species has known it as
+a small old red companion for centuries. Being significantly older than
+Pyros gives Aetheros a settled, low-flare temperament despite being an
+M-dwarf.
+
+**Expansion content, not base game.** Aetheros has its own planetary
+system reserved for a later expansion, bundled with a new propulsion
+tier (fusion torch or beyond) capable of crossing the ~2,500 AU gap on
+multi-year timescales. Specifics of Aetheros's planets are intentionally
+left vague at this stage so the expansion has room to design them. The
+base game's tech tree stops short of the required propulsion ceiling by
+design.
+
+In the base game, Aetheros is a physically simulated body and a
+prominent visible star, but it is not reachable.
+
+**N-body note.** Once the simulation moves from patched conics to full
+N-body, Aetheros's wide orbit around Pyros is propagated as a slow drift
+over centuries; until then it is treated as a fixed point with no
+operational consequence.
+
 ## System Summary
 
 ### Core Destinations
@@ -458,23 +761,29 @@ icy-frontier achievement. Vorra is the weird precision mission after that.
 | Zone | Bodies | Purpose |
 |---|---|---|
 | Home system | Thalos, Mira, Selva | Training, first landings, low-gravity practice. |
-| Inner system | Ashara | Punishing atmosphere and high-gravity challenge. |
-| Nearby giant | Auron, Pelagos, Carpo, Theron | Spectacle, ocean life, local moon operations. |
+| Inner system | Ashara, Khalkos | Sulfur-world hard mode and its small metal moon. |
+| Nearby giant | Auron, Pagos, Pelagos, Carpo, Theron | Spectacle, ice depot, ocean life, local moon operations. |
+| Auron co-orbital | Lyssos | Mercury-class metallic world, timing-discipline mission. |
 | Mars analogue | Vaelen, Kael, Xxirt | First practical interplanetary surface campaign. |
 | Belt | Ceryx | Midgame resources, depots, logistics. |
-| Outer giant | Teros, Pyrith, Glacis, Calyx | Radiation, outer science, moon-system mastery. |
+| Outer giant | Teros, Pyrith, Glacis, Khalin, Calyx | Radiation, outer science, hydrocarbon harvesting, moon-system mastery. |
 | Ice giant | Nereus, Orias | Deep-space operations and ice-giant moon geometry. |
 | Icy frontier | Erebos, Nyx | Late-game binary-world achievement. |
 | Advanced optional | Vorra | Survey-gated precision challenge. |
+| Companion star | Aetheros | Expansion target: visible since prehistory, reachable only with post-game propulsion. |
 
 ### Surface Difficulty
 
 | Body | Character | Relative difficulty |
 |---|---|---:|
 | Selva | Tiny low-gravity moon | Very low |
+| Pagos | Airless ice moon (Auron system) | Very low |
+| Khalkos | Tiny metal moon (Ashara system) | Very low |
 | Mira | First real moon | Low |
+| Lyssos | Airless Mercury-class metal world | Low |
 | Ceryx | Belt dwarf | Low landing, moderate logistics |
-| Vaelen | Low-gravity planet | Moderate |
+| Vaelen | Low-gravity planet with dust storms | Moderate |
+| Khalin | Cryogenic hydrocarbon moon with thick atmosphere | High |
 | Pelagos | Ocean moon with atmosphere | High |
 | Thalos | Homeworld launch site | High |
 | Ashara | Venus-like hard mode | Extreme |

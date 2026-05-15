@@ -73,6 +73,16 @@ Thalos should have three separate worlds:
 The map and real-space scene are clients of the simulation. They are not
 the simulation.
 
+Between orbital truth and every Bevy-side projection is one evaluated
+runtime resource: `SolarSystemState` in `crates/game/src/solar_system_state.rs`.
+`SimulationState` owns the long-lived simulation, system definition, and
+`BodyTrajectoryProvider`; `sync_solar_system_state` evaluates it once per
+frame into `SolarSystemState`. Map snapshots, real-space body grids, planet
+impostors, ground terrain, halo/sky passes, material animation, and future
+weather/tide/wind systems consume or mutate that resource. They may cache
+derived render data, but they must not independently own an equivalent
+per-body physical or environment state.
+
 ## World presets
 
 Each save slot chooses one world preset at creation time. The preset is
@@ -1277,8 +1287,8 @@ SimClock
 Authority
   decide authority transitions
 
-Ephemeris
-  cache body states for current epoch and prediction jobs
+SolarSystemState
+  evaluate body states for current epoch and own per-body environment state
 
 WarpIntegration
   step pure Rust warp-integrated craft

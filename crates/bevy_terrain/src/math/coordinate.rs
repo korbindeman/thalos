@@ -198,20 +198,17 @@ impl TileCoordinate {
     /// so that values agree exactly across tile borders. Pixels in the border
     /// region (outside `[border_size, texture_size - border_size)`) will lie
     /// outside the tile's logical extent and overlap a neighbouring tile.
-    pub fn pixel_coordinate(
-        self,
-        pixel: UVec2,
-        texture_size: u32,
-        border_size: u32,
-    ) -> Coordinate {
+    pub fn pixel_coordinate(self, pixel: UVec2, texture_size: u32, border_size: u32) -> Coordinate {
         let inner = (texture_size - 2 * border_size) as f64;
-        let in_tile_uv = (DVec2::new(pixel.x as f64, pixel.y as f64) + 0.5
-            - border_size as f64)
-            / inner;
+        let in_tile_uv =
+            (DVec2::new(pixel.x as f64, pixel.y as f64) + 0.5 - border_size as f64) / inner;
         let face_uv =
             (DVec2::new(self.x as f64, self.y as f64) + in_tile_uv) / Self::count(self.lod) as f64;
 
-        Coordinate { side: self.side, uv: face_uv }
+        Coordinate {
+            side: self.side,
+            uv: face_uv,
+        }
     }
 
     pub fn parent(self) -> Self {

@@ -115,7 +115,6 @@ impl AtlasTileAttachmentWithData {
             self.tile
         })
     }
-
 }
 
 /// An attachment of a [`TileAtlas`].
@@ -331,15 +330,17 @@ impl TileAtlasState {
                     for (attachment_index, mut data) in datas.into_iter().enumerate() {
                         let attachment = &mut attachments[attachment_index];
                         data.generate_mipmaps(attachment.texture_size, attachment.mip_level_count);
-                        attachment.uploading_tiles.push(AtlasTileAttachmentWithData {
-                            tile: AtlasTileAttachment {
-                                coordinate: coord,
-                                atlas_index,
-                                attachment_index: attachment_index as u32,
-                            },
-                            data: data.clone(),
-                            texture_size: attachment.texture_size,
-                        });
+                        attachment
+                            .uploading_tiles
+                            .push(AtlasTileAttachmentWithData {
+                                tile: AtlasTileAttachment {
+                                    coordinate: coord,
+                                    atlas_index,
+                                    attachment_index: attachment_index as u32,
+                                },
+                                data: data.clone(),
+                                texture_size: attachment.texture_size,
+                            });
                         attachment.data[atlas_index as usize] = data;
                     }
                     trace!("loaded tile {coord} into atlas slot {atlas_index}");
@@ -659,8 +660,10 @@ impl TileAtlas {
             // isn't in use. Log at `debug` so it's discoverable without
             // spamming stdout on every terrain creation.
             Err(_) => {
-                debug!("no preprocessed tile config at assets/{path}/config.tc; \
-                        using empty existing-tile set (expected for synthesised providers)");
+                debug!(
+                    "no preprocessed tile config at assets/{path}/config.tc; \
+                        using empty existing-tile set (expected for synthesised providers)"
+                );
                 HashSet::default()
             }
         }

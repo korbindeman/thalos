@@ -4,45 +4,17 @@
 //! their respective modules; this file holds only types touched by more
 //! than one rendering concern.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use bevy::prelude::*;
-use bevy::tasks::Task;
-use thalos_physics::{
-    body_trajectory_provider::BodyTrajectoryProvider,
-    canonical::WorldPhysicsConfig,
-    simulation::Simulation,
-    types::{BodyStates, SolarSystemDefinition},
-};
+use std::collections::HashMap;
 use thalos_planet_rendering::{
-    CLOUD_BAND_COUNT, GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, PreparedPlanetBake,
-    RingMaterial, SolidPlanetMaterial,
+    GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial, SolidPlanetMaterial,
 };
-use thalos_terrain_gen::{DynamicSurfaceLayers, DynamicSurfaceState};
+
+pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
-
-/// Central simulation state.
-#[derive(Resource)]
-pub struct SimulationState {
-    pub simulation: Simulation,
-    pub system: SolarSystemDefinition,
-    pub ephemeris: Arc<dyn BodyTrajectoryProvider>,
-    #[allow(dead_code)]
-    pub world_config: WorldPhysicsConfig,
-}
-
-/// Per-frame cache of all body states at the current sim time. Populated once
-/// per frame by `cache_body_states` and read by multiple rendering systems to
-/// avoid redundant ephemeris queries.
-#[derive(Resource, Default)]
-pub struct FrameBodyStates {
-    pub states: Option<BodyStates>,
-    pub time: f64,
-}
 
 /// Linear-RGB tint to use as a body's planetshine emission. Populated when
 /// the body's surface info first becomes known: at bake completion for
@@ -103,8 +75,9 @@ pub struct CelestialBody {
 }
 
 /// Marks a body whose baked surface is tidally locked to its parent. Each
-/// frame the orientation uniform is recomputed so the baked near-side (local
-/// +Z, where the mare/tidal asymmetry lives) keeps facing the parent body.
+/// frame the shared surface orientation keeps the baked near-side (local +Z,
+/// where the mare/tidal asymmetry lives) facing the parent body; impostors use
+/// the world→body form and real-space terrain uses the inverse body→world form.
 #[derive(Component)]
 pub(super) struct TidallyLocked {
     pub(super) parent_id: usize,
@@ -160,18 +133,6 @@ pub struct PlanetMaterials {
     pub ship_halo: Handle<PlanetHaloMaterial>,
 }
 
-/// Runtime-owned dynamic surface state for a generated terrain body.
-///
-/// Static cubemaps live in the material textures. These layer definitions and
-/// mutable state are kept on the body root so a future climate/wind/editor
-/// system can rebuild only the dynamic SSBOs without touching the static bake.
-#[allow(dead_code)]
-#[derive(Component, Clone)]
-pub struct PlanetDynamicSurface {
-    pub layers: DynamicSurfaceLayers,
-    pub state: DynamicSurfaceState,
-}
-
 /// Same idea as [`PlanetMaterials`] but for [`SolidPlanetMaterial`] —
 /// the placeholder used by bodies that don't have a terrain pipeline.
 #[derive(Component)]
@@ -197,49 +158,13 @@ pub(super) struct MapRingMaterial(pub(super) Handle<RingMaterial>);
 #[derive(Component)]
 pub(super) struct ShipRingMaterial(pub(super) Handle<RingMaterial>);
 
-/// In-flight terrain generation task for a procedural body.
-///
-/// While this component is attached to the parent `CelestialBody` entity, the
-/// body renders with a plain placeholder sphere. Once the background task
-/// completes, `finalize_planet_generation` bakes the result into GPU textures,
-/// swaps the child mesh to the impostor billboard with a `PlanetMaterial`, and
-/// removes this component.
-#[derive(Component)]
-pub(super) struct PendingPlanetGeneration {
-    /// Returns both the `PlanetSurface` (consumed by the ground-LOD
-    /// `PipelineTileProvider`) and the CPU-prepared bake (cubemap byte
-    /// buffers + SSBOs ready for `Assets::add`). Synthesising the bake
-    /// inside the task keeps the dune-overlay loop and cubemap byte
-    /// copies off the main thread; finalize only does cheap inserts.
-    pub(super) task: Task<PendingPlanetBake>,
-    pub(super) body_id: usize,
-    pub(super) render_radius: f32,
-    /// Map-view child holding the placeholder mesh; gets swapped to the
-    /// impostor billboard when the task finishes.
-    pub(super) mesh_entity: Entity,
-    /// Ship-view child holding the placeholder mesh; mirrored swap.
-    pub(super) ship_mesh_entity: Entity,
-    /// Real-space parent for ship-layer children.
-    pub(super) ship_parent_entity: Entity,
-}
-
-/// Off-thread task output: both the surface (kept long-term for ground LOD
-/// tile streaming via `Arc<PlanetSurface>`) and the prepared bake (consumed
-/// once during finalize to seed the impostor material).
-pub(super) struct PendingPlanetBake {
-    pub(super) surface: thalos_terrain_gen::PlanetSurface,
-    pub(super) prepared: PreparedPlanetBake,
-}
+// `PendingPlanetGeneration` and `PendingPlanetBake` were removed when the
+// game switched to synchronous bake loading. Procedural bodies now spawn
+// directly with their final `PlanetMaterial` impostor via
+// `super::generation::install_baked_planet`; there is no async task to
+// poll. See `crates/game/src/rendering/generation.rs`.
 
 #[derive(Component)]
 pub struct RealSpaceBody {
     pub body_id: usize,
-}
-
-/// Per-body cloud-rotation state. Advanced by `update_cloud_bands` each
-/// frame and uploaded into the material's `cloud_band_phases_*` fields.
-/// Attached to any body whose `terrestrial_atmosphere.clouds` is `Some`.
-#[derive(Component, Default, Clone)]
-pub struct CloudBandState {
-    pub phases: [f64; CLOUD_BAND_COUNT],
 }

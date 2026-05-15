@@ -360,6 +360,7 @@ fn try_parse_key_code(value: &str) -> Result<KeyCode, String> {
         "ControlRight" => Ok(KeyCode::ControlRight),
         "Delete" => Ok(KeyCode::Delete),
         "Escape" => Ok(KeyCode::Escape),
+        "F1" => Ok(KeyCode::F1),
         "F12" => Ok(KeyCode::F12),
         "KeyA" => Ok(KeyCode::KeyA),
         "KeyD" => Ok(KeyCode::KeyD),
@@ -398,7 +399,11 @@ pub mod defaults {
 
     pub fn game_system() -> BindingSection {
         section(
-            [("escape", keys(["Escape"])), ("screenshot", keys(["F12"]))],
+            [
+                ("escape", keys(["Escape"])),
+                ("screenshot", keys(["F12"])),
+                ("toggle_free_cam", keys(["F1"])),
+            ],
             [],
         )
     }

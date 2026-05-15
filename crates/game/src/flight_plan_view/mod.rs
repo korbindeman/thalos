@@ -44,7 +44,7 @@ impl Plugin for FlightPlanViewPlugin {
                         .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
                 )
                     .chain()
-                    .after(crate::rendering::cache_body_states)
+                    .after(crate::solar_system_state::sync_solar_system_state)
                     .after(crate::rendering::update_render_frame)
                     .in_set(crate::SimStage::Sync),
             );

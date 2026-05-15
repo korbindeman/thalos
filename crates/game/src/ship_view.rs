@@ -31,7 +31,7 @@ use thalos_shipyard::{
 
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
-use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, ShipMarker, SimulationState};
+use crate::rendering::{CelestialBody, PlayerShip, ShipMarker, SimulationState, SolarSystemState};
 use crate::view::{HideInMapView, HideInShipView, ViewMode};
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
@@ -269,7 +269,7 @@ fn update_player_ship_world_position(
 fn sync_view_mode_changed(
     view: Res<ViewMode>,
     sim: Res<SimulationState>,
-    body_states: Res<FrameBodyStates>,
+    body_states: Res<SolarSystemState>,
     mut focus: ResMut<CameraFocus>,
     bodies: Query<&CelestialBody>,
 ) {

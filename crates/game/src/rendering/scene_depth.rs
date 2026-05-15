@@ -17,6 +17,7 @@
 //! is multisampled and the copy would need a resolve pass — fix when MSAA
 //! lands, not before.
 
+use crate::camera::ShipCamera;
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
 use bevy::camera::Camera;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
@@ -25,6 +26,7 @@ use bevy::ecs::query::QueryItem;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::{
+    RenderApp,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
     render_graph::{
@@ -34,9 +36,7 @@ use bevy::render::{
     renderer::RenderContext,
     texture::GpuImage,
     view::ViewDepthTexture,
-    RenderApp,
 };
-use crate::camera::ShipCamera;
 
 // `ShipCamera` is extracted to the render world by
 // `ExtractComponentPlugin::<ShipCamera>` (added in `CameraPlugin::build`)
@@ -116,10 +116,7 @@ impl Plugin for SceneDepthPlugin {
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
-                .add_render_graph_node::<ViewNodeRunner<CopySceneDepthNode>>(
-                    Core3d,
-                    CopySceneDepth,
-                )
+                .add_render_graph_node::<ViewNodeRunner<CopySceneDepthNode>>(Core3d, CopySceneDepth)
                 .add_render_graph_edges(
                     Core3d,
                     (
@@ -139,10 +136,7 @@ impl Plugin for SceneDepthPlugin {
 /// forbids for depth formats. The GPU texture is allocated empty in the
 /// render-asset extract pass and overwritten each frame by
 /// [`CopySceneDepthNode`].
-pub(crate) fn setup_scene_depth_image(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-) {
+pub(crate) fn setup_scene_depth_image(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let mut image = Image::new_uninit(
         Extent3d {
             width: 1,

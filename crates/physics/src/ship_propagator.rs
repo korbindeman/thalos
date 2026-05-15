@@ -679,10 +679,20 @@ impl KeplerianPropagator {
                 let next_body = ephemeris.state(soi_body, crate::canonical::Epoch(next_time));
                 let prev_q = cur_state.position - prev_body.position;
                 let next_q = next_state.position - next_body.position;
-                let prev_alt =
-                    altitude_at_q(prev_q, body_radius, prev_body.orientation, soi_body, terrain);
-                let next_alt =
-                    altitude_at_q(next_q, body_radius, next_body.orientation, soi_body, terrain);
+                let prev_alt = altitude_at_q(
+                    prev_q,
+                    body_radius,
+                    prev_body.orientation,
+                    soi_body,
+                    terrain,
+                );
+                let next_alt = altitude_at_q(
+                    next_q,
+                    body_radius,
+                    next_body.orientation,
+                    soi_body,
+                    terrain,
+                );
                 if prev_alt > 0.0 && next_alt <= 0.0 {
                     inv_lerp(prev_alt, next_alt, 0.0)
                 } else {
@@ -1077,7 +1087,13 @@ fn refine_collision(
     let f = |t: f64| -> f64 {
         let rel = propagate_kepler(rel0, mu, t - time0);
         let body_state = ephemeris.state(body_id, crate::canonical::Epoch(t));
-        altitude_at_q(rel.position, body_radius, body_state.orientation, body_id, terrain)
+        altitude_at_q(
+            rel.position,
+            body_radius,
+            body_state.orientation,
+            body_id,
+            terrain,
+        )
     };
     let f_lo = f(t_lo);
     let f_hi = f(t_hi);
@@ -1166,20 +1182,10 @@ fn detect_step_crossings(
         let outer = body_radius + terrain.max_elevation_m(soi_body);
         let outer_sq = outer * outer;
         if prev_d_sq <= outer_sq || next_d_sq <= outer_sq || interior_min_sq <= outer_sq {
-            let prev_alt = altitude_at_q(
-                q0,
-                body_radius,
-                prev_soi_bs.orientation,
-                soi_body,
-                terrain,
-            );
-            let next_alt = altitude_at_q(
-                q1,
-                body_radius,
-                next_soi_bs.orientation,
-                soi_body,
-                terrain,
-            );
+            let prev_alt =
+                altitude_at_q(q0, body_radius, prev_soi_bs.orientation, soi_body, terrain);
+            let next_alt =
+                altitude_at_q(q1, body_radius, next_soi_bs.orientation, soi_body, terrain);
             let interior_min_alt = interior_min_altitude(
                 q0,
                 qv0,

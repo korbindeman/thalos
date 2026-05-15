@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use bevy::camera::visibility::RenderLayers;
-use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::light::NotShadowCaster;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_terrain::prelude::*;
@@ -22,19 +22,25 @@ use big_space::grid::Grid;
 use thalos_physics::types::{BodyDefinition, BodyId};
 use thalos_planet_rendering::{AtmosphereBlock, SceneLighting};
 use thalos_terrain::{
-    BodySkyExtra, BodySkyMaterial, BodyTerrainMaterial, PipelineTileProvider,
+    BodySkyExtra, BodySkyMaterial, BodyTerrainMaterial, BodyTerrainShadow, PipelineTileProvider,
+    rendered_height_range,
 };
-use thalos_terrain_gen::PlanetSurface;
+use thalos_terrain_gen::{DynamicSurfaceState, PlanetSurface};
 
-use crate::camera::ShipCamera;
+use crate::camera::{CameraTargetOffset, ShipCamera};
 use crate::coords::SHIP_LAYER;
 
 use super::real_space::REAL_SPACE_CELL_SIZE_M;
-use super::types::{CameraExposure, FrameBodyStates, RealSpaceBody, SimulationState};
+use super::types::{CameraExposure, PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
 
 /// Sun irradiance constant matching the impostor lighting system.
 const LIGHT_AT_1AU: f32 = 10.0;
 const AU_M: f64 = 1.496e11;
+const CRAFT_SHADOW_RADIUS_M: f32 = 2.5;
+const CRAFT_SHADOW_MIN_HALF_LENGTH_M: f32 = 4.0;
+const CRAFT_SHADOW_STRENGTH: f32 = 0.88;
+const CRAFT_SHADOW_PENUMBRA_M: f32 = 0.75;
+const CRAFT_SHADOW_MAX_DISTANCE_M: f32 = 25_000.0;
 
 /// LOD depth for body terrains. 16 LODs over a Mira-scale body
 /// (~10.7 Mm circumference) gives ~1.3 m at the deepest tile texel — well
@@ -74,20 +80,19 @@ pub(crate) struct RealSpaceImpostor {
     pub body_id: BodyId,
 }
 
-/// Marker on the per-body fullscreen sky-dome entity. Hidden whenever the
-/// camera sits outside the body's atmosphere shell (i.e. the player is in
-/// space, not on the surface), so it only contributes a fullscreen pass on
-/// the body whose atmosphere currently surrounds the camera.
+/// Marker on the per-body fullscreen sky-dome entity. Visible while the
+/// body's real terrain LOD is active, so the ground path gets the same
+/// atmosphere/cloud layer in front of the surface that the impostor path
+/// composites inline.
 #[derive(Component, Debug)]
 pub(super) struct BodySky {
     pub(super) body_id: BodyId,
 }
 
 /// Marker on the per-body `PlanetHaloMaterial` billboard (ship layer).
-/// Mutually exclusive with [`BodySky`]: when the camera is outside the
-/// atmosphere shell the halo provides the rim-glow on the impostor's
-/// silhouette; when inside, the fullscreen sky pass takes over and the
-/// halo would double-contribute, so it's hidden.
+/// Mutually exclusive with [`BodySky`]: when the impostor is active the halo
+/// provides the rim-glow outside the billboard's solid sphere; while terrain
+/// is active, the fullscreen sky pass covers rim, haze, and cloud overlay.
 #[derive(Component, Debug)]
 pub(crate) struct BodyHalo {
     pub body_id: BodyId,
@@ -130,9 +135,10 @@ pub(super) fn spawn_body_terrain(
     tile_trees: &mut TerrainViewComponents<TileTree>,
     ship_camera: Entity,
     atmosphere: AtmosphereBlock,
+    dynamic_state: DynamicSurfaceState,
 ) {
     let radius_m = body.radius_m as f32;
-    let height_range = surface.static_surface.height_range;
+    let height_range = rendered_height_range(&surface, &dynamic_state);
 
     let model = TerrainModel::sphere(DVec3::ZERO, body.radius_m, -height_range, height_range);
 
@@ -167,7 +173,8 @@ pub(super) fn spawn_body_terrain(
         format: AttachmentFormat::R16,
     });
 
-    let provider = PipelineTileProvider::new(body.name.clone(), surface);
+    let provider =
+        PipelineTileProvider::new(body.name.clone(), surface, dynamic_state, height_range);
     let tile_atlas = TileAtlas::with_provider(&config, Box::new(provider));
     let view_config = TerrainViewConfig::default();
     let tile_tree = TileTree::new(&tile_atlas, &view_config);
@@ -192,6 +199,7 @@ pub(super) fn spawn_body_terrain(
     let material = BodyTerrainMaterial {
         atmosphere,
         scene: SceneLighting::default(),
+        craft_shadow: BodyTerrainShadow::default(),
     };
 
     let terrain_entity = commands
@@ -199,12 +207,11 @@ pub(super) fn spawn_body_terrain(
             bundle,
             MeshMaterial3d(materials.add(material)),
             RenderLayers::layer(SHIP_LAYER),
-            // The scene's `SunLight` cascade is sized for the ship's local
-            // neighbourhood (≤500 m); rendering a planet into it would be
-            // wasteful and produce artefacts. Shadow infrastructure is
-            // reworked alongside atmospheres in M4.
+            // The scene's `SunLight` cascade is sized for standard local
+            // meshes. Ground terrain receives craft shadows through an
+            // analytic proxy; rendering the planet itself into the shadow map
+            // would be wasteful and noisy.
             NotShadowCaster,
-            NotShadowReceiver,
             ChildOf(ship_parent_entity),
             Name::new(format!("{} Terrain", body.name)),
             BodyTerrain { body_id: body.id },
@@ -231,23 +238,18 @@ pub(super) fn spawn_body_terrain(
 /// * **Surface LOD** — `dist < TERRAIN_HANDOFF_RADIUS_FACTOR × radius`
 ///   selects the 3-D terrain mesh; otherwise the flat impostor billboard.
 ///   Logically the same body at two projections; never draw both.
-/// * **Atmosphere LOD** — `dist < radius + karman_line` selects the
-///   `BodySky` fullscreen volumetric pass (camera is inside the shell);
-///   otherwise the `BodyHalo` billboard rim-glow (camera is outside).
-///   The two integrate the same scattering, just with different geometries
-///   — `BodySky` covers every screen pixel and clips at scene depth, the
-///   halo covers only the shell silhouette. Drawing both at once is what
-///   produces the visible "band" the user reported, because their
-///   integrations double on sky pixels but the halo discards on rays that
-///   hit the planet sphere.
+/// * **Atmosphere LOD** — terrain uses `BodySky`, impostor uses `BodyHalo`.
+///   `BodySky` covers every screen pixel and clips at scene depth, which is
+///   what gives ground LOD terrain aerial perspective and the detached cloud
+///   shell. `BodyHalo` covers only the billboard shell silhouette, matching
+///   the impostor body's inline atmosphere/cloud composite.
 ///
 /// Three altitude bands fall out for a body with an atmosphere:
 ///
-/// | distance                          | surface  | atmosphere |
-/// |-----------------------------------|----------|------------|
-/// | `d < radius + karman`             | terrain  | BodySky    |
-/// | `radius + karman ≤ d < 4 × radius`| terrain  | halo       |
-/// | `d ≥ 4 × radius`                  | impostor | halo       |
+/// | distance           | surface  | atmosphere |
+/// |--------------------|----------|------------|
+/// | `d < 4 × radius`   | terrain  | BodySky    |
+/// | `d ≥ 4 × radius`   | impostor | halo       |
 ///
 /// Airless bodies skip the BodySky entity entirely (never spawned) and
 /// the halo's shader early-outs to a no-op; we still toggle its visibility
@@ -304,10 +306,10 @@ pub(super) fn sync_body_render_lod(
     }
 
     // Returns (distance, swap_threshold, shell_radius) for one body, or
-    // None if the body or its render-space position is missing.
-    // `shell_radius == radius` for airless bodies (no atmosphere shell),
-    // which makes the `inside_shell` test below false for any camera
-    // outside the planet — the correct degenerate behaviour.
+    // None if the body or its render-space position is missing. The shell
+    // radius is kept here for diagnostics / future atmosphere-specific LOD
+    // tuning; today's visibility choice keys atmosphere to the surface LOD
+    // so terrain always gets the fullscreen in-front pass.
     let body_metrics = |body_id: BodyId| -> Option<(f32, f32, f32)> {
         let body = sim.system.bodies.get(body_id)?;
         let body_pos = body_pos_by_id.get(&body_id)?;
@@ -318,7 +320,11 @@ pub(super) fn sync_body_render_lod(
             .map(|a| a.karman_line_m)
             .unwrap_or(0.0);
         let dist = (cam_pos - *body_pos).length();
-        Some((dist, TERRAIN_HANDOFF_RADIUS_FACTOR * radius, radius + karman))
+        Some((
+            dist,
+            TERRAIN_HANDOFF_RADIUS_FACTOR * radius,
+            radius + karman,
+        ))
     };
 
     let set_vis = |vis: &mut Visibility, want: Visibility| {
@@ -352,10 +358,10 @@ pub(super) fn sync_body_render_lod(
     }
 
     for (sky, mut vis) in &mut skies {
-        let Some((dist, _swap, shell)) = body_metrics(sky.body_id) else {
+        let Some((dist, swap, _shell)) = body_metrics(sky.body_id) else {
             continue;
         };
-        let want = if dist < shell {
+        let want = if dist < swap {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -364,10 +370,10 @@ pub(super) fn sync_body_render_lod(
     }
 
     for (halo, mut vis) in &mut halos {
-        let Some((dist, _swap, shell)) = body_metrics(halo.body_id) else {
+        let Some((dist, swap, _shell)) = body_metrics(halo.body_id) else {
             continue;
         };
-        let want = if dist >= shell {
+        let want = if dist >= swap {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -384,15 +390,16 @@ pub(super) fn sync_body_render_lod(
 ///   ambient; planetshine left zero for now)
 /// - sky `atmosphere_extra` (sun dir + flux, planet center + radius)
 ///
-/// Must run after `cache_body_states` (for sun direction from ephemeris),
+/// Must run after `sync_solar_system_state` (for sun direction from ephemeris),
 /// `update_camera_exposure` (for exposure gain), and
 /// `update_real_space_body_positions` (for up-to-date body grid transforms).
 pub(super) fn update_body_terrain_atmosphere(
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
     terrain_q: Query<(&BodyTerrain, &MeshMaterial3d<BodyTerrainMaterial>)>,
     sky_q: Query<(&BodySky, &MeshMaterial3d<BodySkyMaterial>)>,
+    ship_q: Query<(&GlobalTransform, Option<&CameraTargetOffset>), With<PlayerShip>>,
     sim: Res<SimulationState>,
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
@@ -400,21 +407,29 @@ pub(super) fn update_body_terrain_atmosphere(
     let Some(ref states) = cache.states else {
         return;
     };
+    let craft_shadow = craft_shadow_from_player_ship(&ship_q);
 
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
 
-    // Planet center in render space from each body's grid transform.
+    // Planet center and orientation in render space from each body's grid
+    // transform. The real-space grid rotation is body-local → world, so the
+    // cloud cubemap sampler wants its inverse.
     let mut body_render_pos: std::collections::HashMap<BodyId, Vec3> =
+        std::collections::HashMap::with_capacity(sim.system.bodies.len());
+    let mut world_to_body_orientation: std::collections::HashMap<BodyId, Quat> =
         std::collections::HashMap::with_capacity(sim.system.bodies.len());
     for (rsb, xform) in &body_q {
         body_render_pos.insert(rsb.body_id, xform.translation());
+        world_to_body_orientation.insert(
+            rsb.body_id,
+            xform.compute_transform().rotation.inverse().normalize(),
+        );
     }
 
     // Eclipse occluders at SHIP_SCALE. The terrain lives in the BigSpace
     // SHIP_LAYER where 1 render unit = 1 m, so we can use the body grid
     // translations directly without an extra origin/scale transform.
-    let mut occluders: Vec<(BodyId, Vec3, f32)> =
-        Vec::with_capacity(sim.system.bodies.len());
+    let mut occluders: Vec<(BodyId, Vec3, f32)> = Vec::with_capacity(sim.system.bodies.len());
     for (i, body) in sim.system.bodies.iter().enumerate() {
         if matches!(body.kind, thalos_physics::types::BodyKind::Star) || body.radius_m < 1.0 {
             continue;
@@ -445,6 +460,10 @@ pub(super) fn update_body_terrain_atmosphere(
         let au_over_d = (AU_M / dist.max(1.0)) as f32;
         let flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
         let planet_radius = body.radius_m as f32;
+        let q = world_to_body_orientation
+            .get(&i)
+            .copied()
+            .unwrap_or(Quat::IDENTITY);
         sky_by_body.insert(
             i,
             BodySkyExtra {
@@ -455,6 +474,7 @@ pub(super) fn update_body_terrain_atmosphere(
                     render_pos.z,
                     planet_radius,
                 ),
+                world_to_body_orientation: Vec4::new(q.x, q.y, q.z, q.w),
             },
         );
     }
@@ -463,12 +483,9 @@ pub(super) fn update_body_terrain_atmosphere(
         let Some(mat) = terrain_materials.get_mut(mat_handle) else {
             continue;
         };
-        mat.scene = build_terrain_scene_lighting(
-            terrain.body_id,
-            states,
-            &occluders,
-            exposure.gain,
-        );
+        mat.scene =
+            build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
+        mat.craft_shadow = craft_shadow;
     }
 
     for (sky, mat_handle) in &sky_q {
@@ -479,6 +496,29 @@ pub(super) fn update_body_terrain_atmosphere(
             continue;
         };
         mat.atmosphere_extra = *extra;
+        if let Some(clouds) = cache
+            .environment
+            .get(sky.body_id)
+            .and_then(|env| env.cloud_bands.as_ref())
+        {
+            let p = clouds.phases;
+            mat.atmosphere.cloud_bands_a =
+                Vec4::new(p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32);
+            mat.atmosphere.cloud_bands_b =
+                Vec4::new(p[4] as f32, p[5] as f32, p[6] as f32, p[7] as f32);
+            mat.atmosphere.cloud_bands_c =
+                Vec4::new(p[8] as f32, p[9] as f32, p[10] as f32, p[11] as f32);
+            mat.atmosphere.cloud_bands_d =
+                Vec4::new(p[12] as f32, p[13] as f32, p[14] as f32, p[15] as f32);
+
+            let scroll = clouds.scroll_rate_rad_s.abs();
+            let period = if scroll > 1.0e-9 {
+                std::f64::consts::TAU / scroll
+            } else {
+                86_400.0
+            };
+            mat.atmosphere.cloud_dynamics.y = sim.simulation.sim_time().rem_euclid(period) as f32;
+        }
     }
 }
 
@@ -492,9 +532,7 @@ fn build_terrain_scene_lighting(
     occluders: &[(BodyId, Vec3, f32)],
     gain: f32,
 ) -> thalos_planet_rendering::SceneLighting {
-    use thalos_planet_rendering::{
-        MAX_ECLIPSE_OCCLUDERS, SceneLighting, StarLight,
-    };
+    use thalos_planet_rendering::{MAX_ECLIPSE_OCCLUDERS, SceneLighting, StarLight};
 
     let mut scene = SceneLighting::default();
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
@@ -534,4 +572,38 @@ fn build_terrain_scene_lighting(
     // swap happens far enough from the body that planetshine contributes
     // little to the direct-light path; revisit when we drop the swap radius.
     scene
+}
+
+fn craft_shadow_from_player_ship(
+    ship_q: &Query<(&GlobalTransform, Option<&CameraTargetOffset>), With<PlayerShip>>,
+) -> BodyTerrainShadow {
+    let Ok((ship_xform, offset)) = ship_q.single() else {
+        return BodyTerrainShadow::default();
+    };
+
+    let ship_transform = ship_xform.compute_transform();
+    let local_center = offset.map(|offset| offset.0).unwrap_or(Vec3::ZERO);
+    let center = ship_transform.translation + ship_transform.rotation * local_center;
+    let mut axis = ship_transform.rotation * Vec3::Y;
+    if axis.length_squared() <= 1.0e-6 {
+        axis = Vec3::Y;
+    } else {
+        axis = axis.normalize();
+    }
+
+    BodyTerrainShadow {
+        caster_pos_radius: Vec4::new(center.x, center.y, center.z, CRAFT_SHADOW_RADIUS_M),
+        caster_axis_half_len: Vec4::new(
+            axis.x,
+            axis.y,
+            axis.z,
+            (local_center.y.abs() * 1.35).max(CRAFT_SHADOW_MIN_HALF_LENGTH_M),
+        ),
+        params: Vec4::new(
+            CRAFT_SHADOW_STRENGTH,
+            CRAFT_SHADOW_PENUMBRA_M,
+            CRAFT_SHADOW_MAX_DISTANCE_M,
+            1.0,
+        ),
+    }
 }

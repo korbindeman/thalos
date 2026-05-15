@@ -5,7 +5,7 @@ use thalos_physics::trajectory::{Encounter, FlightPlan, Trajectory, TrajectoryBr
 use thalos_physics::types::{BodyDefinition, BodyId, BodyState, BodyStates};
 
 use crate::coords::{RenderOrigin, WorldScale};
-use crate::rendering::{FrameBodyStates, SimulationState};
+use crate::rendering::{SimulationState, SolarSystemState};
 use crate::target::TargetBody;
 
 #[allow(dead_code)]
@@ -103,7 +103,7 @@ pub struct ProjectedBodyState {
 
 pub fn update_map_snapshot(
     sim: Res<SimulationState>,
-    body_cache: Res<FrameBodyStates>,
+    body_cache: Res<SolarSystemState>,
     target: Res<TargetBody>,
     mut snapshot: ResMut<MapSnapshot>,
 ) {
@@ -224,7 +224,7 @@ impl Plugin for MapViewPlugin {
         app.insert_resource(MapSnapshot::default()).add_systems(
             Update,
             update_map_snapshot
-                .after(crate::rendering::cache_body_states)
+                .after(crate::solar_system_state::sync_solar_system_state)
                 .in_set(crate::SimStage::Sync),
         );
     }

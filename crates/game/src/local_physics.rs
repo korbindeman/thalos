@@ -860,9 +860,21 @@ fn compute_angular_acceleration(
     };
 
     let inv_i = DVec3::new(
-        if inertia_body.x > 0.0 { 1.0 / inertia_body.x } else { 0.0 },
-        if inertia_body.y > 0.0 { 1.0 / inertia_body.y } else { 0.0 },
-        if inertia_body.z > 0.0 { 1.0 / inertia_body.z } else { 0.0 },
+        if inertia_body.x > 0.0 {
+            1.0 / inertia_body.x
+        } else {
+            0.0
+        },
+        if inertia_body.y > 0.0 {
+            1.0 / inertia_body.y
+        } else {
+            0.0
+        },
+        if inertia_body.z > 0.0 {
+            1.0 / inertia_body.z
+        } else {
+            0.0
+        },
     );
     let accel_body = torque_body * inv_i;
     rotation * accel_body
@@ -1104,17 +1116,27 @@ fn debug_log_body_fixed_state(
             "BodyFixed frame {}: canon ori.w={:.5} canon ω=({:.2e},{:.2e},{:.2e}) | avian pos.y={:.1} rot.w={:.5} ω=({:.2e},{:.2e},{:.2e}) | body.ori.w={:.5} body.ω=({:.2e},{:.2e},{:.2e})",
             *frames_in_mode,
             attitude.orientation.w,
-            attitude.angular_velocity.x, attitude.angular_velocity.y, attitude.angular_velocity.z,
-            pos.y, rot.w, av.x, av.y, av.z,
+            attitude.angular_velocity.x,
+            attitude.angular_velocity.y,
+            attitude.angular_velocity.z,
+            pos.y,
+            rot.w,
+            av.x,
+            av.y,
+            av.z,
             body_state.orientation.w,
-            body_state.angular_velocity.x, body_state.angular_velocity.y, body_state.angular_velocity.z,
+            body_state.angular_velocity.x,
+            body_state.angular_velocity.y,
+            body_state.angular_velocity.z,
         );
     } else {
         info!(
             "BodyFixed frame {}: canon ori.w={:.5} canon ω=({:.2e},{:.2e},{:.2e}) | no avian | body.ori.w={:.5}",
             *frames_in_mode,
             attitude.orientation.w,
-            attitude.angular_velocity.x, attitude.angular_velocity.y, attitude.angular_velocity.z,
+            attitude.angular_velocity.x,
+            attitude.angular_velocity.y,
+            attitude.angular_velocity.z,
             body_state.orientation.w,
         );
     }

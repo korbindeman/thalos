@@ -59,9 +59,7 @@ impl GravityMode {
         match self {
             Self::PatchedConics => GravityImpls {
                 body_trajectory: Arc::new(PatchedConics::new(system, time_span)),
-                ship_propagator: Arc::new(
-                    KeplerianPropagator::default().with_terrain(terrain),
-                ),
+                ship_propagator: Arc::new(KeplerianPropagator::default().with_terrain(terrain)),
             },
         }
     }

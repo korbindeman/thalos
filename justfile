@@ -47,22 +47,31 @@ clippy:
 trace:
     cargo run --release -p thalos_game --features profile-tracy
 
-# Wipe the on-disk terrain cache. Run this after changing stage code;
-# stage param changes invalidate the cache key automatically.
+# Wipe the editor's on-disk terrain cache. The game and `just bake`
+# don't use this directory — only the planet editor does, for
+# iteration speed. Source-tree edits already invalidate cached entries
+# via the build-time hash key in `crates/terrain_gen/src/cache.rs`, so
+# you rarely need to wipe manually.
 clear-terrain-cache:
     rm -rf target/terrain_cache
 
-# Headless terrain bake + PNG dump. Writes to `stage-bakes/<body>/`.
+# Headless terrain bake.
+#
+# Default (full): writes the shipped bake to `assets/baked/<body>.bin`
+# (LFS-tracked, what the game loads) plus full-resolution equirect PNGs
+# to `stage-bakes/<body>/full/`. Slow.
+#
+# `--preview`: 512² preview run. PNGs only at
+# `stage-bakes/<body>/preview/`, no shipped bake. Fast iteration loop —
+# read the PNG to inspect compiler output without launching the game.
+#
 # Body name is case-insensitive; pass `all` to bake every body with a
-# terrain block. Default resolution is 512² for fast iteration; pass
-# `--full` for the body's authored/derived resolution, or
-# `--cubemap-resolution N` to force a specific size.
+# terrain block.
 #
 # Examples:
-#   just bake Thalos
-#   just bake thalos
+#   just bake Thalos              # full-res shipped bake + PNGs
+#   just bake Thalos --preview    # fast preview PNGs, no shipped bake
 #   just bake all
-#   just bake Thalos --full
-#   just bake Mira --cubemap-resolution 2048
+#   just bake all --preview
 bake body *args:
     cargo run --release -p thalos_bake_dump -- {{body}} {{args}}

@@ -15,7 +15,7 @@ use super::super::state::{
 use crate::camera::ActiveCamera;
 use crate::coords::{RenderOrigin, WorldScale};
 use crate::flight_plan_view::FlightPlanView;
-use crate::rendering::{FrameBodyStates, SimulationState};
+use crate::rendering::{SimulationState, SolarSystemState};
 
 /// Main input system for maneuver nodes.
 pub(in crate::maneuver) fn maneuver_input(
@@ -24,7 +24,7 @@ pub(in crate::maneuver) fn maneuver_input(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
     sim: Option<Res<SimulationState>>,
-    body_states: Res<FrameBodyStates>,
+    body_states: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     scale: Res<WorldScale>,
     flight_plan_view: Res<FlightPlanView>,

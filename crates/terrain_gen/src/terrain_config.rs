@@ -175,6 +175,7 @@ pub fn compile_terrain_config(
     tectonics: Option<&TectonicConfig>,
     context: &TerrainCompileContext,
     options: TerrainCompileOptions,
+    mid_freq: Option<crate::stages::MidFreqRunner>,
 ) -> Result<PlanetSurface, TerrainCompileError> {
     // Build the tectonic system once; downstream consumers (the static-
     // surface compile and the editor's `PreviewSurfaceOverlays` component) read
@@ -182,7 +183,7 @@ pub fn compile_terrain_config(
     // radius + body-name-derived seed, both of which live in `context`.
     let tectonics = compile_tectonics_from_config(tectonics, context);
     let static_surface =
-        compile_static_terrain_config(terrain, tectonics.as_ref(), context, options)?;
+        compile_static_terrain_config(terrain, tectonics.as_ref(), context, options, mid_freq)?;
     let dynamic_layers = compile_dynamic_surface_layers(terrain, context)?;
     Ok(PlanetSurface {
         static_surface,
@@ -212,6 +213,7 @@ pub fn compile_static_terrain_config(
     tectonics: Option<&TectonicSystem>,
     context: &TerrainCompileContext,
     options: TerrainCompileOptions,
+    mid_freq: Option<crate::stages::MidFreqRunner>,
 ) -> Result<StaticSurfaceData, TerrainCompileError> {
     match terrain {
         TerrainConfig::None => Err(TerrainCompileError::UnsupportedNone),
@@ -228,14 +230,21 @@ pub fn compile_static_terrain_config(
                     projection: feature.projection.clone(),
                     cold_desert_style: feature.cold_desert_style.clone().unwrap_or_default(),
                 },
+                mid_freq,
             )
             .map_err(Into::into)
         }
-        TerrainConfig::Ocean(config) => Ok(compile_ocean(
-            config,
-            context,
-            options.cubemap_resolution_override,
-        )),
+        TerrainConfig::Ocean(config) => {
+            // Ocean bodies don't run the mid-frequency cascade — they're
+            // a flat-water placeholder and there's no continental detail
+            // to perturb. Drop the runner if one was provided.
+            drop(mid_freq);
+            Ok(compile_ocean(
+                config,
+                context,
+                options.cubemap_resolution_override,
+            ))
+        }
     }
 }
 

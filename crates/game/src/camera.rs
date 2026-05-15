@@ -1,5 +1,5 @@
 use bevy::camera::visibility::RenderLayers;
-use bevy::math::DVec3;
+use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy_egui::EguiContexts;
@@ -9,9 +9,11 @@ use thalos_local_physics::TerrainSurfaceRegistry;
 use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::space_camera_post_stack;
 use thalos_terrain::rendered_height_m;
+use thalos_terrain_gen::StaticSurfaceData;
 
 use crate::coords::{MAP_LAYER, RenderGhostFocus, SHIP_LAYER};
-use crate::rendering::{CelestialBody, FrameBodyStates, PlayerShip, SimulationState};
+use crate::freecam::FreeCam;
+use crate::rendering::{CelestialBody, PlayerShip, SimulationState, SolarSystemState};
 use crate::view::ViewMode;
 
 /// Plugin that registers the orbit camera systems and spawns the camera entity.
@@ -22,6 +24,7 @@ impl Plugin for CameraPlugin {
         app.add_plugins(ExtractComponentPlugin::<ShipCamera>::default())
             .init_resource::<BlockCameraInput>()
             .init_resource::<ShipCameraMode>()
+            .init_resource::<CameraCollisionState>()
             .insert_resource(CameraFocus::default())
             // Background is pure black — the forward-rendered
             // `SkyRenderPlugin` draws stars additively on top.
@@ -82,6 +85,13 @@ pub struct CameraTargetOffset(pub Vec3);
 /// Camera rotation is suppressed while this is set.
 #[derive(Resource, Default)]
 pub struct BlockCameraInput(pub bool);
+
+#[derive(Resource, Default)]
+pub(crate) struct CameraCollisionState {
+    ship_boom_m: Option<f64>,
+    target: CameraFocusTarget,
+    view: ViewMode,
+}
 
 /// KSP-style camera modes for ship view. `V` cycles between them.
 ///
@@ -315,6 +325,7 @@ const SHIP_MIN_DISTANCE_M: f64 = 5.0;
 /// The ship is represented as a screen-stable marker in map view, so the
 /// ship-view hull clamp is far too close for the orbit-scale camera.
 const SHIP_MAP_MIN_DISTANCE_M: f64 = DISTANCE_MIN_DEFAULT;
+const CAMERA_ELEVATION_MAX: f32 = 89.0_f32.to_radians();
 /// Duration of a focus-switch transition, regardless of distance between
 /// bodies. Tuned for snappy-but-not-jarring camera handoff.
 pub const FOCUS_TRANSITION_DURATION_S: f64 = 0.8;
@@ -323,6 +334,21 @@ pub const FOCUS_TRANSITION_DURATION_S: f64 = 0.8;
 /// frame without dominating it. Must stay above [`SURFACE_MARGIN`] so
 /// `camera_min_distance_system` doesn't clamp the framing back up.
 const FOCUS_FRAMING_RADII: f64 = 10.0;
+/// Log-distance change per logical scroll line.
+///
+/// This is deliberately a log-space step instead of a per-frame multiplier:
+/// wheel / trackpad deltas are frame-accumulated input, so applying them in
+/// log space makes the result independent of how many frames the OS batches
+/// the same physical scroll across.
+const ZOOM_LOG_STEP_PER_LINE: f64 = 0.26;
+/// Base log-space catch-up speed for small zoom gaps.
+const ZOOM_SMOOTHING_SPEED_MIN: f64 = 28.0;
+/// Catch-up speed for large zoom gaps. This makes sustained scrolls feel
+/// punchy instead of dragging through a uniform interpolation tail.
+const ZOOM_SMOOTHING_SPEED_MAX: f64 = 90.0;
+/// Log-distance error that reaches the fast smoothing speed. `ln(2)` means
+/// a target one octave away or more closes at the aggressive rate.
+const ZOOM_FAST_ERROR: f64 = std::f64::consts::LN_2;
 
 fn max_distance_for_view(view: ViewMode) -> f64 {
     match view {
@@ -335,6 +361,29 @@ fn distance_bounds_for_view(view: ViewMode, min_distance: f64) -> (f64, f64) {
     let min = min_distance.max(f64::MIN_POSITIVE);
     let max = max_distance_for_view(view).max(min);
     (min, max)
+}
+
+fn zoom_target_after_scroll(
+    target_distance: f64,
+    min_distance: f64,
+    max_distance: f64,
+    scroll_lines: f64,
+) -> f64 {
+    let log_min = min_distance.ln();
+    let log_max = max_distance.ln();
+    let log_new = target_distance.ln() - ZOOM_LOG_STEP_PER_LINE * scroll_lines;
+    if log_new <= log_min {
+        min_distance
+    } else if log_new >= log_max {
+        max_distance
+    } else {
+        log_new.exp()
+    }
+}
+
+fn zoom_smoothing_speed(log_error: f64) -> f64 {
+    let t = (log_error.abs() / ZOOM_FAST_ERROR).clamp(0.0, 1.0);
+    ZOOM_SMOOTHING_SPEED_MIN + (ZOOM_SMOOTHING_SPEED_MAX - ZOOM_SMOOTHING_SPEED_MIN) * t.sqrt()
 }
 
 // ---------------------------------------------------------------------------
@@ -444,12 +493,13 @@ pub fn camera_input_system(
     ui_pointer_gate: Res<crate::hud::UiPointerGate>,
     view: Res<ViewMode>,
     input: Res<GameInputIntent>,
+    freecam: Res<FreeCam>,
     mut focus: ResMut<CameraFocus>,
 ) {
+    if freecam.active {
+        return;
+    }
     const ROTATION_SENSITIVITY: f32 = 0.005; // rad per pixel
-    const ZOOM_FACTOR_MIN: f64 = 0.005; // near surface / local system
-    const ZOOM_FACTOR_MAX: f64 = 0.01; // interplanetary scale
-    const ELEVATION_MAX: f32 = 89.0_f32.to_radians();
 
     let egui_wants_pointer = contexts
         .ctx_mut()
@@ -468,29 +518,21 @@ pub fn camera_input_system(
         if delta != Vec2::ZERO {
             focus.azimuth += delta.x * ROTATION_SENSITIVITY;
             focus.elevation -= delta.y * ROTATION_SENSITIVITY;
-            focus.elevation = focus.elevation.clamp(-ELEVATION_MAX, ELEVATION_MAX);
+            focus.elevation = focus
+                .elevation
+                .clamp(-CAMERA_ELEVATION_MAX, CAMERA_ELEVATION_MAX);
         }
     }
 
     // --- Zoom ---------------------------------------------------------------
-    // Zoom factor scales with distance: gentle near the surface, faster at
-    // interplanetary range. We lerp in log-space between min and max distance.
     let (min_distance, max_distance) = distance_bounds_for_view(*view, focus.min_distance);
-    let log_min = min_distance.ln();
-    let log_max = max_distance.ln();
-    let log_cur = focus.target_distance.ln();
-    let t = if log_max > log_min {
-        ((log_cur - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let zoom_factor = ZOOM_FACTOR_MIN + (ZOOM_FACTOR_MAX - ZOOM_FACTOR_MIN) * t;
-
     if !ui_pointer_busy && input.camera_wheel.y != 0.0 {
-        let ticks = input.camera_wheel.y as f64 * 25.0;
-        let multiplier = (1.0 - zoom_factor * ticks).max(0.01);
-        focus.target_distance =
-            (focus.target_distance * multiplier).clamp(min_distance, max_distance);
+        focus.target_distance = zoom_target_after_scroll(
+            focus.target_distance,
+            min_distance,
+            max_distance,
+            input.camera_wheel.y as f64,
+        );
     }
 }
 
@@ -504,13 +546,11 @@ fn camera_zoom_interpolation_system(
     view: Res<ViewMode>,
     mut focus: ResMut<CameraFocus>,
 ) {
-    const SMOOTHING_SPEED: f64 = 10.0; // higher = snappier
-
     let dt = time.delta_secs_f64();
-    let t = (1.0 - (-SMOOTHING_SPEED * dt).exp()).clamp(0.0, 1.0);
-
     let log_current = focus.distance.ln();
     let log_target = focus.target_distance.ln();
+    let speed = zoom_smoothing_speed(log_target - log_current);
+    let t = (1.0 - (-speed * dt).exp()).clamp(0.0, 1.0);
     let log_new = log_current + (log_target - log_current) * t;
     let (min_distance, max_distance) = distance_bounds_for_view(*view, focus.min_distance);
     focus.distance = log_new.exp().clamp(min_distance, max_distance);
@@ -582,9 +622,17 @@ pub fn focus_transition_progress(focus: &CameraFocus) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// Metres the camera is held above the rendered terrain surface so it never
-/// kisses geometry or trips the near plane.
-const CAMERA_TERRAIN_MARGIN_M: f64 = 0.5;
+/// Metres the camera spring arm stays away from the blocking surface.
+/// Keep this small; large probe radii turn shallow ground hits into violent
+/// zoom-ins instead of a modest line-of-sight correction.
+const CAMERA_TERRAIN_MARGIN_M: f64 = 8.0;
+/// Cinemachine-style "minimum distance from target": do not let near-target
+/// terrain collapse the spring arm into a useless extreme close-up.
+const CAMERA_COLLISION_MIN_TARGET_DISTANCE_M: f64 = 180.0;
+/// How quickly the collision arm pulls inward when the view is obstructed.
+const CAMERA_COLLISION_OCCLUDED_SPEED: f64 = 18.0;
+/// How quickly the arm returns to the user's requested zoom once clear.
+const CAMERA_COLLISION_RECOVERY_SPEED: f64 = 6.0;
 
 /// Coarse-pass samples along the target→camera ray. Combined with
 /// `CAMERA_RAY_REFINEMENT_STEPS` binary halvings, the worst-case stop
@@ -592,11 +640,120 @@ const CAMERA_TERRAIN_MARGIN_M: f64 = 0.5;
 const CAMERA_RAY_SAMPLES: usize = 16;
 const CAMERA_RAY_REFINEMENT_STEPS: usize = 6;
 
-/// Spring-arm collision against the rendered heightfield: cast from `target_pos`
+#[derive(Debug, Clone, Copy)]
+struct TerrainClearance {
+    agl_m: f64,
+    radial_inertial: DVec3,
+    surface_radius_m: f64,
+}
+
+fn blocking_surface_height_m(surface: &StaticSurfaceData, dir_body: Vec3) -> f64 {
+    let terrain_height_m = rendered_height_m(surface, dir_body) as f64;
+    surface
+        .sea_level_m
+        .map(|sea_level_m| terrain_height_m.max(sea_level_m as f64))
+        .unwrap_or(terrain_height_m)
+}
+
+fn terrain_clearance_at_physics_pos(
+    body_position: DVec3,
+    body_inv_orientation: DQuat,
+    body_radius_m: f64,
+    surface: Option<&StaticSurfaceData>,
+    position: DVec3,
+) -> Option<TerrainClearance> {
+    let from_body = position - body_position;
+    let distance = from_body.length();
+    if distance < 1.0 {
+        return None;
+    }
+
+    let radial_inertial = from_body / distance;
+    let dir_body = (body_inv_orientation * radial_inertial)
+        .as_vec3()
+        .normalize_or_zero();
+    if dir_body == Vec3::ZERO {
+        return None;
+    }
+
+    let surface_height_m = surface
+        .map(|surface| blocking_surface_height_m(surface, dir_body))
+        .unwrap_or(0.0);
+    let surface_radius_m = body_radius_m + surface_height_m;
+    Some(TerrainClearance {
+        agl_m: distance - surface_radius_m,
+        radial_inertial,
+        surface_radius_m,
+    })
+}
+
+fn clamp_physics_pos_above_terrain(
+    body_position: DVec3,
+    body_inv_orientation: DQuat,
+    body_radius_m: f64,
+    surface: Option<&StaticSurfaceData>,
+    position: DVec3,
+) -> Option<DVec3> {
+    let clearance = terrain_clearance_at_physics_pos(
+        body_position,
+        body_inv_orientation,
+        body_radius_m,
+        surface,
+        position,
+    )?;
+    if clearance.agl_m >= CAMERA_TERRAIN_MARGIN_M {
+        return None;
+    }
+
+    Some(
+        body_position
+            + clearance.radial_inertial * (clearance.surface_radius_m + CAMERA_TERRAIN_MARGIN_M),
+    )
+}
+
+/// Final surface floor for the camera point itself. This catches body-focused
+/// cameras and any ship-camera case where the desired endpoint is below the
+/// heightfield even after the boom pass has shortened the line of sight. If a
+/// rendered surface is not registered yet, falls back to the authored sphere
+/// so the camera still cannot enter the body.
+fn clamp_camera_position_above_body_terrain(
+    camera_pos: Vec3,
+    target_pos: Vec3,
+    target_physics_pos: DVec3,
+    render_scale: f64,
+    body_id: BodyId,
+    body_states: &SolarSystemState,
+    sim: &SimulationState,
+    surfaces: &TerrainSurfaceRegistry,
+) -> Option<Vec3> {
+    if render_scale <= 0.0 {
+        return None;
+    }
+
+    let states = body_states.states.as_deref()?;
+    let surface = surfaces.get(body_id);
+    let body = &sim.system.bodies[body_id];
+    let body_state = states.get(body_id)?;
+
+    let offset_m = (camera_pos - target_pos).as_dvec3() / render_scale;
+    let camera_physics_pos = target_physics_pos + offset_m;
+    let corrected_physics_pos = clamp_physics_pos_above_terrain(
+        body_state.position,
+        body_state.orientation.inverse(),
+        body.radius_m,
+        surface.as_ref().map(|surface| &surface.static_surface),
+        camera_physics_pos,
+    )?;
+
+    Some(target_pos + ((corrected_physics_pos - target_physics_pos) * render_scale).as_vec3())
+}
+
+/// Spring-arm collision length against the rendered heightfield, or the
+/// authored sphere before a surface is available: cast from `target_pos`
 /// toward `camera_pos`, find the first point where the ray dips within
-/// `CAMERA_TERRAIN_MARGIN_M` of the surface, and pull the camera back to just
-/// before that hit. Returns `None` when the boom is clear, the offset is
-/// sub-metre, or the dominant body has no rendered surface registered.
+/// `CAMERA_TERRAIN_MARGIN_M` of the surface, and return the corrected boom
+/// length. Returns `None` when the boom is clear, the offset is sub-metre, or
+/// the body state is not available.
 ///
 /// This is the same idea as KSP's vessel camera and the standard third-person
 /// orbit camera in most engines: the camera always retains line-of-sight to
@@ -604,76 +761,190 @@ const CAMERA_RAY_REFINEMENT_STEPS: usize = 6;
 /// ridges between target and viewer — not just the radial column directly
 /// under the camera.
 ///
-/// Camera and ship share a BigSpace cell, so `camera_pos - target_pos` is
-/// already the camera's metre offset from the ship (SHIP_SCALE = 1.0). We
-/// lift that small offset onto the ship's f64 physics position to do the
-/// comparison against the (millions-of-metres) body radius without losing
-/// precision, then convert the small residual back to cell-local f32.
-fn clamp_camera_above_terrain(
+/// The render positions are converted back to metres via `render_scale` so
+/// this can be reused by any metre-derived view.
+fn camera_boom_collision_length_m(
     camera_pos: Vec3,
     target_pos: Vec3,
-    body_states: &FrameBodyStates,
+    target_physics_pos: DVec3,
+    render_scale: f64,
+    body_id: BodyId,
+    body_states: &SolarSystemState,
     sim: &SimulationState,
     surfaces: &TerrainSurfaceRegistry,
-) -> Option<Vec3> {
-    let states = body_states.states.as_deref()?;
-    let body_id = sim.simulation.dominant_body();
-    let surface = surfaces.get(body_id)?;
-    let body = &sim.system.bodies[body_id];
-    let body_state = &states[body_id];
+) -> Option<f64> {
+    if render_scale <= 0.0 {
+        return None;
+    }
 
-    let camera_offset = (camera_pos - target_pos).as_dvec3();
+    let states = body_states.states.as_deref()?;
+    let surface = surfaces.get(body_id);
+    let body = &sim.system.bodies[body_id];
+    let body_state = states.get(body_id)?;
+
+    let camera_offset = (camera_pos - target_pos).as_dvec3() / render_scale;
     if camera_offset.length_squared() < 1.0 {
         return None;
     }
-    let ship_pos = sim.simulation.ship_state().position;
     let body_inv = body_state.orientation.inverse();
 
     // AGL of the point `t` of the way from target to camera. Negative = inside terrain.
     let agl = |t: f64| -> f64 {
-        let p_physics = ship_pos + camera_offset * t;
-        let p_from_body = p_physics - body_state.position;
-        let p_dist = p_from_body.length();
-        if p_dist < 1.0 {
-            return f64::MAX;
-        }
-        let p_dir_body = (body_inv * (p_from_body / p_dist))
-            .as_vec3()
-            .normalize_or_zero();
-        let terrain_h = rendered_height_m(&surface.static_surface, p_dir_body) as f64;
-        p_dist - (body.radius_m + terrain_h)
+        terrain_clearance_at_physics_pos(
+            body_state.position,
+            body_inv,
+            body.radius_m,
+            surface.as_ref().map(|surface| &surface.static_surface),
+            target_physics_pos + camera_offset * t,
+        )
+        .map(|clearance| clearance.agl_m)
+        .unwrap_or(f64::MAX)
     };
 
-    // Coarse linear pass: find the first sample inside the safety margin.
-    // `t_safe` tracks the most recent above-margin sample; once we find a
-    // blocked one, refine between the two.
-    let n = CAMERA_RAY_SAMPLES;
-    let mut t_safe = 0.0;
-    let mut t_block: Option<f64> = None;
-    for i in 1..=n {
-        let t = i as f64 / n as f64;
-        if agl(t) < CAMERA_TERRAIN_MARGIN_M {
-            t_block = Some(t);
-            break;
-        }
-        t_safe = t;
-    }
-    let mut t_high = t_block?;
+    let boom_length_m = camera_offset.length();
 
-    // Binary refinement. Invariant: agl(t_safe) ≥ margin > agl(t_high).
-    // Holds even when t_safe = 0 is itself below margin — the bisection just
-    // converges to 0, parking the camera on top of the target. That degenerate
-    // case (ship buried in terrain) has no good camera placement anyway.
-    for _ in 0..CAMERA_RAY_REFINEMENT_STEPS {
-        let t_mid = (t_safe + t_high) * 0.5;
-        if agl(t_mid) < CAMERA_TERRAIN_MARGIN_M {
-            t_high = t_mid;
-        } else {
-            t_safe = t_mid;
+    let find_safe_t = |margin_m: f64| -> Option<f64> {
+        let min_t = (CAMERA_COLLISION_MIN_TARGET_DISTANCE_M / boom_length_m).clamp(0.0, 1.0);
+        if min_t >= 1.0 {
+            return None;
         }
+        if agl(min_t) < margin_m {
+            return Some(min_t);
+        }
+
+        // Coarse linear pass: find the first sample inside the requested
+        // surface margin. `t_safe` tracks the most recent above-margin sample;
+        // once we find a blocked one, refine between the two.
+        let n = CAMERA_RAY_SAMPLES;
+        let mut t_safe = min_t;
+        let mut t_block: Option<f64> = None;
+        for i in 1..=n {
+            let t = (i as f64 / n as f64).max(min_t);
+            if agl(t) < margin_m {
+                t_block = Some(t);
+                break;
+            }
+            t_safe = t;
+        }
+        let mut t_high = t_block?;
+
+        // Binary refinement. Invariant: agl(t_safe) ≥ margin > agl(t_high).
+        // Holds even when t_safe = 0 is itself below margin — the bisection just
+        // converges to 0, parking the camera on top of the target. That degenerate
+        // case (ship buried in terrain) has no good camera placement anyway.
+        for _ in 0..CAMERA_RAY_REFINEMENT_STEPS {
+            let t_mid = (t_safe + t_high) * 0.5;
+            if agl(t_mid) < margin_m {
+                t_high = t_mid;
+            } else {
+                t_safe = t_mid;
+            }
+        }
+
+        Some(t_safe)
+    };
+
+    let t_safe = find_safe_t(CAMERA_TERRAIN_MARGIN_M)?;
+    Some(t_safe * boom_length_m)
+}
+
+fn damped_camera_collision_boom(current_m: f64, target_m: f64, dt_s: f64) -> f64 {
+    let speed = if target_m < current_m {
+        CAMERA_COLLISION_OCCLUDED_SPEED
+    } else {
+        CAMERA_COLLISION_RECOVERY_SPEED
+    };
+    let t = (1.0 - (-speed * dt_s.max(0.0)).exp()).clamp(0.0, 1.0);
+    current_m + (target_m - current_m) * t
+}
+
+fn clamp_ship_camera_against_terrain(
+    camera_pos: Vec3,
+    target_pos: Vec3,
+    scale: f64,
+    body_states: &SolarSystemState,
+    sim: &SimulationState,
+    surfaces: &TerrainSurfaceRegistry,
+    time: &Time,
+    collision: &mut CameraCollisionState,
+) -> Vec3 {
+    let body_id = sim.simulation.dominant_body();
+    let ship_pos = sim.simulation.ship_state().position;
+    let desired_offset_m = (camera_pos - target_pos).as_dvec3() / scale;
+    let desired_boom_m = desired_offset_m.length();
+    if desired_boom_m < 1.0 {
+        collision.ship_boom_m = None;
+        return camera_pos;
     }
 
-    Some(target_pos + (camera_offset * t_safe).as_vec3())
+    let target_boom_m = camera_boom_collision_length_m(
+        camera_pos,
+        target_pos,
+        ship_pos,
+        scale,
+        body_id,
+        body_states,
+        sim,
+        surfaces,
+    )
+    .unwrap_or(desired_boom_m)
+    .clamp(0.0, desired_boom_m);
+
+    let current_boom_m = collision
+        .ship_boom_m
+        .unwrap_or(desired_boom_m)
+        .min(desired_boom_m);
+    let next_boom_m =
+        damped_camera_collision_boom(current_boom_m, target_boom_m, time.delta_secs_f64())
+            .clamp(0.0, desired_boom_m);
+    collision.ship_boom_m = Some(next_boom_m);
+
+    let dir = desired_offset_m / desired_boom_m;
+    let corrected = target_pos + (dir * next_boom_m * scale).as_vec3();
+
+    // Damping avoids visual snaps. This final endpoint floor keeps the
+    // camera's own position outside terrain even while the boom length is
+    // easing toward the collision-corrected value.
+    clamp_camera_position_above_body_terrain(
+        corrected,
+        target_pos,
+        ship_pos,
+        scale,
+        body_id,
+        body_states,
+        sim,
+        surfaces,
+    )
+    .unwrap_or(corrected)
+}
+
+fn clamp_body_focus_camera_against_terrain(
+    camera_pos: Vec3,
+    target_pos: Vec3,
+    scale: f64,
+    body_id: BodyId,
+    body_states: &SolarSystemState,
+    sim: &SimulationState,
+    surfaces: &TerrainSurfaceRegistry,
+) -> Vec3 {
+    let Some(states) = body_states.states.as_deref() else {
+        return camera_pos;
+    };
+    let Some(body_state) = states.get(body_id) else {
+        return camera_pos;
+    };
+
+    clamp_camera_position_above_body_terrain(
+        camera_pos,
+        target_pos,
+        body_state.position,
+        scale,
+        body_id,
+        body_states,
+        sim,
+        surfaces,
+    )
+    .unwrap_or(camera_pos)
 }
 
 /// Computes the camera [`Transform`] from [`CameraFocus`] and the target's world position.
@@ -695,9 +966,12 @@ pub fn camera_transform_system(
     focus: Res<CameraFocus>,
     view: Res<ViewMode>,
     mode: Res<ShipCameraMode>,
+    time: Res<Time>,
+    freecam: Res<FreeCam>,
     sim: Option<Res<SimulationState>>,
-    body_states: Res<FrameBodyStates>,
+    body_states: Res<SolarSystemState>,
     surfaces: Res<TerrainSurfaceRegistry>,
+    mut collision: ResMut<CameraCollisionState>,
     body_targets: Query<(&CelestialBody, &Transform), Without<OrbitCamera>>,
     ship_targets: Query<
         (&Transform, Option<&CameraTargetOffset>, Option<&CellCoord>),
@@ -715,9 +989,18 @@ pub fn camera_transform_system(
         (With<OrbitCamera>, With<ActiveCamera>),
     >,
 ) {
+    if freecam.active {
+        return;
+    }
     let Ok((mut camera_transform, camera_cell)) = camera_query.single_mut() else {
         return;
     };
+
+    if collision.target != focus.target || collision.view != *view {
+        collision.ship_boom_m = None;
+        collision.target = focus.target;
+        collision.view = *view;
+    }
 
     let scale = match *view {
         ViewMode::Map => crate::coords::MAP_SCALE,
@@ -809,16 +1092,37 @@ pub fn camera_transform_system(
 
     let mut camera_pos = target_pos + offset;
 
-    // In ship view focused on the ship (and not mid focus-transition),
-    // prevent the camera from clipping into terrain.
-    if *view == ViewMode::Ship
-        && matches!(focus.target, CameraFocusTarget::Ship)
-        && focus.transition_origin_start.is_none()
+    // Once the target is settled in render space, keep cameras outside the
+    // rendered heightfield. Ship focus gets a KSP-style spring arm plus a
+    // final endpoint floor; body focus gets the endpoint floor so terrain
+    // close-ups cannot place the camera inside a mountain or crater wall.
+    if focus.transition_origin_start.is_none()
         && let Some(sim_ref) = sim.as_deref()
-        && let Some(corrected) =
-            clamp_camera_above_terrain(camera_pos, target_pos, &body_states, sim_ref, &surfaces)
     {
-        camera_pos = corrected;
+        camera_pos = match focus.target {
+            CameraFocusTarget::Ship if *view == ViewMode::Ship => {
+                clamp_ship_camera_against_terrain(
+                    camera_pos,
+                    target_pos,
+                    scale,
+                    &body_states,
+                    sim_ref,
+                    &surfaces,
+                    &time,
+                    &mut collision,
+                )
+            }
+            CameraFocusTarget::Body(body_id) => clamp_body_focus_camera_against_terrain(
+                camera_pos,
+                target_pos,
+                scale,
+                body_id,
+                &body_states,
+                sim_ref,
+                &surfaces,
+            ),
+            _ => camera_pos,
+        };
     }
 
     if *view == ViewMode::Ship
@@ -936,5 +1240,56 @@ mod tests {
         let (min, max) = distance_bounds_for_view(ViewMode::Ship, DISTANCE_MIN_DEFAULT);
         assert_eq!(min, DISTANCE_MIN_DEFAULT);
         assert_eq!(max, DISTANCE_MIN_DEFAULT);
+    }
+
+    #[test]
+    fn scroll_zoom_is_independent_of_frame_batching() {
+        let min = DISTANCE_MIN_DEFAULT;
+        let max = MAP_DISTANCE_MAX;
+        let start = 1.0e9;
+
+        let batched = zoom_target_after_scroll(start, min, max, 2.0);
+        let split = zoom_target_after_scroll(
+            zoom_target_after_scroll(start, min, max, 1.0),
+            min,
+            max,
+            1.0,
+        );
+
+        assert!((batched - split).abs() / start <= 1.0e-12);
+    }
+
+    #[test]
+    fn scroll_zoom_clamps_to_view_bounds() {
+        let min = DISTANCE_MIN_DEFAULT;
+        let max = MAP_DISTANCE_MAX;
+
+        assert_eq!(zoom_target_after_scroll(min, min, max, 1000.0), min);
+        assert_eq!(zoom_target_after_scroll(max, min, max, -1000.0), max);
+    }
+
+    #[test]
+    fn zoom_smoothing_accelerates_for_large_errors() {
+        assert_eq!(zoom_smoothing_speed(0.0), ZOOM_SMOOTHING_SPEED_MIN);
+        assert_eq!(
+            zoom_smoothing_speed(ZOOM_FAST_ERROR),
+            ZOOM_SMOOTHING_SPEED_MAX
+        );
+        assert!(zoom_smoothing_speed(ZOOM_FAST_ERROR * 0.25) > ZOOM_SMOOTHING_SPEED_MIN);
+    }
+
+    #[test]
+    fn collision_boom_damps_instead_of_snapping() {
+        let next = damped_camera_collision_boom(1_000.0, 180.0, 1.0 / 60.0);
+        assert!(next < 1_000.0);
+        assert!(next > 180.0);
+    }
+
+    #[test]
+    fn collision_boom_recovers_slowly() {
+        let next = damped_camera_collision_boom(180.0, 1_000.0, 1.0 / 60.0);
+        assert!(next > 180.0);
+        assert!(next < 1_000.0);
+        assert!(next < damped_camera_collision_boom(1_000.0, 180.0, 1.0 / 60.0));
     }
 }

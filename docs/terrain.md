@@ -424,6 +424,16 @@ Impostor contract (consumed directly by `planet_impostor.wgsl`):
   hash that walks them. Crater LOD fades sub-pixel features at far
   zoom.
 
+Runtime upload policy: the flat impostor caps its uploaded cubemap
+faces at `1024×1024`, even when `StaticSurfaceData` keeps a higher
+source resolution for ground terrain and colliders. The ship-view
+handoff to terrain is currently `4 × body.radius_m`; at that distance
+the body is ~29° tall, or roughly 695 px on a 1080p viewport and 927
+px on a 1440p viewport with Bevy's 45° vertical FOV. A 1024 face is
+therefore the right current target for the orbital impostor. Move this
+to 2048 only if 4K orbital inspection becomes a hard target before the
+handoff distance changes.
+
 Build-time provenance fields may feed the final albedo/height bake
 without becoming renderer resources. For airless moons, `MareFlood`
 writes `mare_coverage_cubemap`, a continuous 0..1 resurfacing mask:
@@ -460,7 +470,10 @@ Dynamic surface layers are deliberately not part of `StaticSurfaceData`:
   uses a prefiltered dynamic dune texture layer plus a transform uniform
   for slow migration, rather than evaluating dune-wave noise per fragment.
 - `DynamicSurfaceState`: mutable runtime/editor state keyed by stable
-  layer IDs. The default state reproduces authored appearance.
+  layer IDs. The default state reproduces authored appearance. Runtime game
+  state owns this in `SolarSystemState`, not on renderer entities, so the
+  impostor, ground terrain, collider source, editor overlays, and later
+  weather/tide/wind systems read one shared per-body environment state.
 
 The shared Rust sampling entry points are:
 
@@ -1054,15 +1067,22 @@ into Thalos and wiring it to the revamped feature compiler.
 - `body_terrain.wgsl` samples height + albedo + roughness from the
   bevy_terrain attachment atlases, derives a perturbed normal via
   `sample_normal` (height finite-difference), and calls
-  `thalos::lighting::shade_hapke_surface` with `external_shadow = 1.0`
-  (no crater shadow / self-shadow on the terrain path today).
+  `thalos::lighting::shade_hapke_surface` with `external_shadow =
+  local_craft_shadow` from a sun-ray capsule test against the player's
+  craft proxy. This lets the craft cast stable local shadows onto ground
+  LOD terrain while keeping crater shadow / terrain self-shadow deferred.
 - The impostor (`planet_impostor.wgsl`) calls the same
   `shade_hapke_surface` with
   `external_shadow = crater_shadow * self_shadow_term`. Atmosphere
   transmittance, cloud composite, water BRDF, and limb darkening are
-  applied post-call on the impostor side because the LOD swap happens
-  outside the Kármán line — at that distance the impostor handles
-  aerial perspective; the terrain-LOD path is hidden.
+  applied post-call on the impostor side.
+- The terrain LOD path keeps atmosphere and clouds out of
+  `body_terrain.wgsl`; `BodySkyMaterial` draws the in-front layer as a
+  fullscreen pass while terrain is visible, clipping the raymarch at
+  copied scene depth and sampling the same reference cloud cubemap on a
+  fixed-altitude shell. Terrain-side cloud shadows and water BRDF remain
+  deferred, but orbital/mid-altitude haze and cloud coverage match the
+  impostor handoff.
 - **Implementation:**
   [crates/planet_lighting/src/shaders/lighting.wgsl](../crates/planet_lighting/src/shaders/lighting.wgsl),
   [crates/terrain/src/body_terrain.wgsl](../crates/terrain/src/body_terrain.wgsl),
@@ -1128,7 +1148,7 @@ updated together.
   PBR + atmospheric optics in M4.
 - **Exit criterion (met):** every procedural body renders ground LOD
   alongside its impostor (one visible at a time per camera distance);
-  atmospheric optics + cascaded shadowing land in M4.
+  atmospheric optics + terrain-as-caster cascaded shadowing land in M4.
 
 Other Pyros bodies (Auron's moon system, Ceryx, outer-system worlds)
 follow incrementally — same pipeline, no separate stage.
@@ -1223,9 +1243,12 @@ Carried from both source docs; remain undecided.
    interplanetary to surface scale of a target body — what's the
    seamless handoff? Probably a separate "approach" mode that
    progressively refines the target body's tile residency.
-7. **Shadow casting from terrain.** Cascaded shadow maps with
-   terrain-LOD-aware cascades is the likely answer. Bevy 0.18's
-   atmospheric scattering improvements may help frame this.
+7. **Shadow casting from terrain.** Ground LOD can receive local craft
+   shadows from an analytic craft proxy, but terrain itself still does
+   not render into shadow maps. Cascaded shadow maps with
+   terrain-LOD-aware cascades is the likely answer for terrain-as-caster
+   shadows. Bevy 0.18's atmospheric scattering improvements may help
+   frame this.
 
 ---
 

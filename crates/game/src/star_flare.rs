@@ -17,7 +17,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::camera::ActiveCamera;
 use crate::coords::{MAP_SCALE, SHIP_SCALE};
-use crate::rendering::{CelestialBody, FrameBodyStates, RenderOrigin};
+use crate::rendering::{CelestialBody, RenderOrigin, SolarSystemState};
 use crate::view::ViewMode;
 
 pub struct LensFlarePlugin;
@@ -265,7 +265,7 @@ fn spawn_lens_flare_ghosts(
 fn update_lens_flare(
     cameras: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
     bodies: Query<&CelestialBody>,
-    body_states: Res<FrameBodyStates>,
+    body_states: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     view: Res<ViewMode>,
     windows: Query<&Window, With<PrimaryWindow>>,

@@ -30,6 +30,9 @@ use crate::{
     terrain::TerrainComponents,
     terrain_data::{gpu_tile_atlas::GpuTileAtlas, tile_atlas::TileAtlas},
 };
+use bevy::pbr::{PreparedMaterial, RenderMaterialInstances};
+use bevy::render::erased_render_asset::ErasedRenderAssets;
+use bevy::render::renderer::RenderDevice;
 use bevy::{
     core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
     ecs::system::SystemChangeTick,
@@ -50,9 +53,6 @@ use bevy::{
     },
     shader::{ShaderDefVal, ShaderRef},
 };
-use bevy::pbr::{PreparedMaterial, RenderMaterialInstances};
-use bevy::render::erased_render_asset::ErasedRenderAssets;
-use bevy::render::renderer::RenderDevice;
 use std::{any::TypeId, hash::Hash, marker::PhantomData};
 
 pub struct TerrainPipelineKey<M: Material> {
@@ -528,8 +528,10 @@ where
                 .init_resource::<SpecializedRenderPipelines<TerrainRenderPipeline<M>>>()
                 .add_render_command::<Opaque3d, DrawTerrain>()
                 .add_systems(RenderStartup, init_terrain_render_pipeline::<M>)
-                .add_systems(Render, queue_terrain::<M>.in_set(RenderSystems::QueueMeshes));
+                .add_systems(
+                    Render,
+                    queue_terrain::<M>.in_set(RenderSystems::QueueMeshes),
+                );
         }
     }
 }
-

@@ -598,8 +598,11 @@ const DEV_CRATER_SCALE: f32 = 0.1;
 #[cfg(not(debug_assertions))]
 const DEV_CRATER_SCALE: f32 = 1.0;
 
-fn terrain_cache_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/terrain_cache")
+/// Output directory for the editor's "Full" bake. Same location the game
+/// loads from and `bake_dump` writes to — so pressing Full here produces
+/// the shipped artifact directly.
+fn shipped_bake_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/baked")
 }
 
 fn dispatch_terrain_bake(
@@ -623,7 +626,7 @@ fn dispatch_terrain_bake(
         }
     }
     AsyncComputeTaskPool::get().spawn(async move {
-        let cache_dir = terrain_cache_dir();
+        let bake_dir = shipped_bake_dir();
         let route = terrain.route_label();
         let context = TerrainCompileContext {
             body_name: body_name.clone(),
@@ -638,12 +641,18 @@ fn dispatch_terrain_bake(
             crater_count_scale: DEV_CRATER_SCALE,
             cubemap_resolution_override: None,
         };
-        // The editor never reads from the cache so edits and compile changes
-        // always show up; only full-res bakes write, producing artifacts for
-        // downstream consumers.
+        // The editor never reads from the bake store so edits and compile
+        // changes always show up; only full-res bakes write, producing the
+        // shipped artifact downstream consumers (the game) load from.
         let is_full_bake = cubemap_resolution_override.is_none();
         info!("baking {body_name} via {route}");
-        let data = match compile_terrain_config(&terrain, tectonics.as_ref(), &context, options) {
+        // The editor's compile path doesn't wire up a GPU mid-frequency
+        // runner yet (would need the Bevy `RenderDevice` plumbed into the
+        // async task pool). Skip the stage for now — the editor preview
+        // shows continental relief without mid-freq detail. Producing a
+        // production-quality shipped bake still requires `just bake`.
+        let mid_freq = None;
+        let data = match compile_terrain_config(&terrain, tectonics.as_ref(), &context, options, mid_freq) {
             Ok(data) => data,
             Err(e) => return Err(format!("terrain compile failed for {body_name}: {e}")),
         };
@@ -654,10 +663,10 @@ fn dispatch_terrain_bake(
                 &context,
                 options,
             );
-            let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
+            let path = thalos_terrain_gen::cache::cache_path(&bake_dir, &body_name);
             match thalos_terrain_gen::cache::store(&path, key, &data.static_surface) {
-                Ok(()) => info!("terrain cache wrote: {body_name}"),
-                Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
+                Ok(()) => info!("wrote shipped bake: {body_name} → {}", path.display()),
+                Err(e) => warn!("shipped-bake write failed for {body_name}: {e}"),
             }
         }
         Ok(data)

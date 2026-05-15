@@ -130,7 +130,18 @@ fn bake_cell(
             continue;
         }
         l_2 += single_scatter_integral(
-            p, s_dir, sun_dir, 0.0, t_exit, planet_r, atmos_top_r, beta_r, beta_m, h_r, h_m, g,
+            p,
+            s_dir,
+            sun_dir,
+            0.0,
+            t_exit,
+            planet_r,
+            atmos_top_r,
+            beta_r,
+            beta_m,
+            h_r,
+            h_m,
+            g,
         );
     }
     // Isotropic-phase average: ∫_sphere L_1(ω) · (1 / 4π) dω
@@ -209,7 +220,11 @@ fn single_scatter_integral(
         od_m += rho_m * ds;
 
         let tau_view = beta_r * od_r + Vec3::splat(beta_m) * od_m;
-        let trans_view = Vec3::new((-tau_view.x).exp(), (-tau_view.y).exp(), (-tau_view.z).exp());
+        let trans_view = Vec3::new(
+            (-tau_view.x).exp(),
+            (-tau_view.y).exp(),
+            (-tau_view.z).exp(),
+        );
 
         let tau_sun = sun_optical_depth(
             p_pt,

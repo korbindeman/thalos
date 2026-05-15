@@ -429,11 +429,7 @@ pub struct GpuTileAtlas {
 
 impl GpuTileAtlas {
     /// Creates a new gpu tile atlas and initializes its attachment textures.
-    fn new(
-        device: &RenderDevice,
-        pipeline_cache: &PipelineCache,
-        tile_atlas: &TileAtlas,
-    ) -> Self {
+    fn new(device: &RenderDevice, pipeline_cache: &PipelineCache, tile_atlas: &TileAtlas) -> Self {
         let attachments = tile_atlas
             .attachments
             .iter()

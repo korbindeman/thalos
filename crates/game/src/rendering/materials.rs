@@ -8,14 +8,12 @@
 
 use bevy::prelude::*;
 use thalos_physics::types::BodyStates;
-use thalos_planet_rendering::{
-    CLOUD_BAND_COUNT, GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial,
-};
+use thalos_planet_rendering::{GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial};
 
 use super::lighting::{build_scene_lighting, collect_occluders};
 use super::types::{
-    CameraExposure, CelestialBody, CloudBandState, FrameBodyStates, GasGiantMaterials,
-    MapRingMaterial, PlanetMaterials, ShipRingMaterial, SimulationState,
+    CameraExposure, CelestialBody, GasGiantMaterials, MapRingMaterial, PlanetMaterials,
+    ShipRingMaterial, SimulationState, SolarSystemState,
 };
 use crate::coords::{MAP_SCALE, RenderOrigin, SHIP_SCALE};
 use crate::view::ViewMode;
@@ -30,7 +28,7 @@ pub(super) fn update_gas_giant_params(
     query: Query<(&CelestialBody, &GasGiantMaterials)>,
     all_bodies: Query<&CelestialBody>,
     mut materials: ResMut<Assets<GasGiantMaterial>>,
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     sim: Res<SimulationState>,
     exposure: Res<CameraExposure>,
@@ -127,7 +125,7 @@ pub(super) fn update_ring_params(
     body_query: Query<&CelestialBody>,
     mut materials: ResMut<Assets<RingMaterial>>,
     origin: Res<RenderOrigin>,
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
     view: Res<ViewMode>,
     mut occluder_buf: Local<Vec<(usize, Vec3, f32)>>,
@@ -243,7 +241,8 @@ pub(super) struct LastCloudBandUpdate(Option<f64>);
 pub(super) fn update_cloud_bands(
     mut last_time: ResMut<LastCloudBandUpdate>,
     sim: Res<SimulationState>,
-    mut query: Query<(&PlanetMaterials, &mut CloudBandState)>,
+    mut solar_system: ResMut<SolarSystemState>,
+    query: Query<(&CelestialBody, &PlanetMaterials)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
     mut halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
     view: Res<ViewMode>,
@@ -260,30 +259,19 @@ pub(super) fn update_cloud_bands(
     let do_map = force_both || matches!(*view, ViewMode::Map);
     let do_ship = force_both || matches!(*view, ViewMode::Ship);
 
-    for (mats, mut state) in &mut query {
-        // Scroll rate and differential coefficient are scale-independent
-        // (rad/s on the unit sphere) — read once from the map material,
-        // advance the per-band phase, then mirror the result to both.
-        let Some(map_mat) = materials.get(&mats.map) else {
+    for (body, mats) in &query {
+        // Cloud drift is physical runtime state, not a render-material
+        // side effect. Advance the canonical body environment once, then
+        // mirror the packed phases to every projection material.
+        let Some(clouds) = solar_system
+            .environment_mut(body.body_id)
+            .and_then(|env| env.cloud_bands.as_mut())
+        else {
             continue;
         };
-        let scroll = map_mat.atmosphere.cloud_dynamics.x as f64;
-        let diff = map_mat.atmosphere.cloud_shape.w.clamp(0.0, 1.0) as f64;
-        if scroll.abs() < 1e-12 {
-            continue;
-        }
+        clouds.advance(dt);
+        let p = clouds.phases;
 
-        for i in 0..CLOUD_BAND_COUNT {
-            // Bands evenly spaced in sin²(lat) ∈ [0, 1] so the shader's
-            // `sin²(lat) · (K − 1)` band index is an integer-stepped
-            // linear mapping — no special casing at the poles.
-            let sin2 = i as f64 / (CLOUD_BAND_COUNT - 1) as f64;
-            let lat_factor = 1.0 - diff * sin2;
-            let omega = scroll * lat_factor;
-            state.phases[i] = (state.phases[i] + omega * dt).rem_euclid(std::f64::consts::TAU);
-        }
-
-        let p = &state.phases;
         let bands_a = Vec4::new(p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32);
         let bands_b = Vec4::new(p[4] as f32, p[5] as f32, p[6] as f32, p[7] as f32);
         let bands_c = Vec4::new(p[8] as f32, p[9] as f32, p[10] as f32, p[11] as f32);

@@ -49,7 +49,11 @@ impl TerrainPreprocessItem {
     fn pipelines<'a>(
         &'a self,
         pipeline_cache: &'a PipelineCache,
-    ) -> Option<(&'a ComputePipeline, &'a ComputePipeline, &'a ComputePipeline)> {
+    ) -> Option<(
+        &'a ComputePipeline,
+        &'a ComputePipeline,
+        &'a ComputePipeline,
+    )> {
         Some((
             pipeline_cache.get_compute_pipeline(self.split_pipeline)?,
             pipeline_cache.get_compute_pipeline(self.stitch_pipeline)?,
@@ -75,10 +79,7 @@ pub struct TerrainPreprocessPipelines {
 
 /// Initializes the [`TerrainPreprocessPipelines`] resource. Runs as a [`RenderStartup`] system
 /// (consistent with the rest of `bevy_pbr`'s 0.18+ pipeline initialization).
-pub fn init_terrain_preprocess_pipelines(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+pub fn init_terrain_preprocess_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(TerrainPreprocessPipelines {
         attachment_layout: attachment_layout_descriptor(),
         split_layout: split_layout_descriptor(),

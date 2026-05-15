@@ -94,8 +94,7 @@ mod tests {
             position: body.position + DVec3::X * 1000.0,
             velocity: body.velocity,
         };
-        let state =
-            inertial_to_body_centered(&body, translation, AttitudeState::default());
+        let state = inertial_to_body_centered(&body, translation, AttitudeState::default());
         assert!((state.translation_bc.position - DVec3::X * 1000.0).length() < 1e-12);
         assert!(state.translation_bc.velocity.length() < 1e-12);
     }
@@ -113,8 +112,7 @@ mod tests {
             position: body.position + surface_offset,
             velocity: surface_world_vel,
         };
-        let state =
-            inertial_to_body_centered(&body, translation, AttitudeState::default());
+        let state = inertial_to_body_centered(&body, translation, AttitudeState::default());
         let expected_vel = body.angular_velocity.cross(surface_offset);
         assert!((state.translation_bc.velocity - expected_vel).length() < 1e-12);
     }

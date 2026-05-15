@@ -19,10 +19,6 @@ pub use gas_giant::{
 };
 // Re-export shared planet lighting types so existing call sites continue to
 // resolve. Canonical definitions live in `thalos_planet_lighting`.
-pub use thalos_planet_lighting::{
-    MAX_STARS, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, SceneLighting, StarLight,
-    bake_multi_scatter_lut,
-};
 pub use material::{
     AtmosphereBlock, CLOUD_BAND_COUNT, MAX_ECLIPSE_OCCLUDERS, PlanetCoastlineParams,
     PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle, PlanetMaterial,
@@ -40,6 +36,10 @@ pub use rings::{
 pub use shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature};
 pub use solid_planet::{SolidPlanetMaterial, SolidPlanetParams};
 pub use texture::PlanetTextures;
+pub use thalos_planet_lighting::{
+    MAX_STARS, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, SceneLighting, StarLight,
+    bake_multi_scatter_lut,
+};
 
 use bevy::prelude::*;
 

@@ -1423,6 +1423,10 @@ pub enum FeatureCompileError {
     /// Archetype requires a tectonic system but none was provided. Author
     /// a `tectonics: (...)` block in the body's RON detail file.
     MissingTectonics,
+    /// The caller-supplied mid-frequency-detail runner returned an error
+    /// (e.g. the GPU dispatch failed). String for forward-compat with
+    /// whatever the closure decides to surface.
+    MidFreqDetail(String),
 }
 
 impl std::fmt::Display for FeatureCompileError {
@@ -1442,6 +1446,7 @@ impl std::fmt::Display for FeatureCompileError {
                 f,
                 "archetype requires a tectonic system; author a `tectonics:` block on the body"
             ),
+            Self::MidFreqDetail(msg) => write!(f, "mid-frequency detail stage failed: {msg}"),
         }
     }
 }
@@ -1455,7 +1460,7 @@ pub fn compile_initial_planet_surface(
     options: FeatureCompileOptions,
 ) -> Result<PlanetSurface, FeatureCompileError> {
     let dynamic_layers = dynamic_surface_layers_for(spec, &options.cold_desert_style);
-    let static_surface = compile_initial_static_surface(spec, None, options)?;
+    let static_surface = compile_initial_static_surface(spec, None, options, None)?;
     Ok(PlanetSurface {
         static_surface,
         dynamic_layers,
@@ -1474,13 +1479,28 @@ pub fn compile_initial_planet_surface(
 /// only consumed by archetypes that need it (currently `AgingOceanicHomeworld`);
 /// other archetypes ignore it. Seeds and feature placement come from the
 /// feature manifest.
+///
+/// `mid_freq` is the mid-frequency-detail closure described in
+/// [`crate::stages::mid_freq_detail`]. The caller (bake_dump) supplies a
+/// GPU-backed implementation. Passing `None` skips the stage — used by
+/// archetypes that don't run it (anything except `AgingOceanicHomeworld`
+/// today) and by callers that aren't wired up to dispatch compute yet
+/// (the editor, until its `RenderDevice` is plumbed in).
 pub fn compile_initial_static_surface(
     spec: &PlanetTerrainSpec,
     tectonics: Option<&crate::tectonics::TectonicSystem>,
     options: FeatureCompileOptions,
+    mid_freq: Option<crate::stages::MidFreqRunner>,
 ) -> Result<StaticSurfaceData, FeatureCompileError> {
     let plan = plan_initial_compilation(spec);
-    compile_manifest_to_static_surface(spec, &plan.manifest, &plan.prior, tectonics, options)
+    compile_manifest_to_static_surface(
+        spec,
+        &plan.manifest,
+        &plan.prior,
+        tectonics,
+        options,
+        mid_freq,
+    )
 }
 
 pub fn compile_manifest_to_static_surface(
@@ -1489,19 +1509,25 @@ pub fn compile_manifest_to_static_surface(
     prior: &TerrainPrior,
     tectonics: Option<&crate::tectonics::TectonicSystem>,
     options: FeatureCompileOptions,
+    mid_freq: Option<crate::stages::MidFreqRunner>,
 ) -> Result<StaticSurfaceData, FeatureCompileError> {
     match spec.archetype {
         BodyArchetype::AirlessImpactMoon => {
+            drop(mid_freq);
             compile_airless_impact_moon(spec, manifest, prior, options)
         }
         BodyArchetype::ColdDesertFormerlyWet => {
+            drop(mid_freq);
             compile_cold_desert_formerly_wet(spec, manifest, prior, options)
         }
         BodyArchetype::AgingOceanicHomeworld => {
             let tectonics = tectonics.ok_or(FeatureCompileError::MissingTectonics)?;
-            compile_aging_oceanic_homeworld(spec, manifest, prior, tectonics, options)
+            compile_aging_oceanic_homeworld(spec, manifest, prior, tectonics, options, mid_freq)
         }
-        archetype => Err(FeatureCompileError::UnsupportedArchetype(archetype)),
+        archetype => {
+            drop(mid_freq);
+            Err(FeatureCompileError::UnsupportedArchetype(archetype))
+        }
     }
 }
 
@@ -1946,6 +1972,7 @@ fn compile_aging_oceanic_homeworld(
     prior: &TerrainPrior,
     tectonics: &crate::tectonics::TectonicSystem,
     options: FeatureCompileOptions,
+    mid_freq: Option<crate::stages::MidFreqRunner>,
 ) -> Result<StaticSurfaceData, FeatureCompileError> {
     let FeatureCompileOptions {
         cubemap_resolution,
@@ -1999,6 +2026,25 @@ fn compile_aging_oceanic_homeworld(
 
     let field = AgingOceanicField::new(tectonics.clone(), spec.root_seed, prior.ocean_fraction);
     bake_surface_field_into_builder(&mut builder, &field);
+
+    // Mid-frequency detail. Adds the ~5 km → ~600 m wavelength band on
+    // top of the continental shape from [`AgingOceanicField`]. Runs
+    // *before* sea-level percentile selection so the chosen sea level
+    // reflects the perturbed surface — otherwise mid-freq ridges would
+    // push patches of seabed above the line, producing a stippled
+    // coastline. The runner is GPU-backed in `bake_dump`; consumers
+    // that pass `None` (currently the editor) skip the stage and end
+    // up with continent-only relief.
+    if let Some(runner) = mid_freq {
+        let params = crate::stages::MidFreqDetailParams::default();
+        runner(
+            &mut builder.height_contributions.height,
+            builder.radius_m,
+            &params,
+        )
+        .map_err(FeatureCompileError::MidFreqDetail)?;
+    }
+
     let sea_level_m = sea_level_for_ocean_fraction(&builder, prior.ocean_fraction);
     enforce_single_connected_ocean(&mut builder, sea_level_m);
     field.repaint_baked_surface(&mut builder, sea_level_m);

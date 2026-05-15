@@ -8,7 +8,7 @@ use crate::camera::ActiveCamera;
 use crate::coords::{RenderOrigin, WorldScale};
 use crate::flight_plan_view::FlightPlanView;
 use crate::photo_mode::HideInPhotoMode;
-use crate::rendering::{FrameBodyStates, SimulationState, screen_marker_radius};
+use crate::rendering::{SimulationState, SolarSystemState, screen_marker_radius};
 use crate::view::HideInShipView;
 
 /// Spawn the snap indicator (hidden by default).
@@ -84,7 +84,7 @@ pub(in crate::maneuver) fn manage_node_markers(
     plan: Res<ManeuverPlan>,
     selected: Res<SelectedNode>,
     sim: Option<Res<SimulationState>>,
-    body_states: Res<FrameBodyStates>,
+    body_states: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     flight_plan_view: Res<FlightPlanView>,
     scale: Res<WorldScale>,

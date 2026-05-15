@@ -31,7 +31,9 @@ pub use cubemap::{Cubemap, CubemapAccumulator, CubemapFace, default_resolution};
 pub use feature_compiler::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
-pub use sample::{SurfaceSample, sample_static_surface, sample_surface};
+pub use sample::{
+    SurfaceSample, apply_dynamic_surface_layers, sample_static_surface, sample_surface,
+};
 pub use seeding::{Rng, sub_seed};
 pub use spatial_index::{FeatureRef, IcoBuckets};
 pub use stage::Stage;

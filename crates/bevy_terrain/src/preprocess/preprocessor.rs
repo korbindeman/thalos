@@ -6,7 +6,7 @@ use crate::{
     },
     util::CollectArray,
 };
-use bevy::{prelude::*, image::ImageSampler};
+use bevy::{image::ImageSampler, prelude::*};
 use itertools::{iproduct, Itertools};
 use std::{
     collections::VecDeque,

@@ -2,7 +2,8 @@ use bevy::prelude::*;
 use big_space::prelude::*;
 use thalos_physics::types::BodyState;
 
-use super::types::{FrameBodyStates, PlayerShip, RealSpaceBody};
+use super::transforms::surface_body_to_world_orientation;
+use super::types::{PlayerShip, RealSpaceBody, SolarSystemState, TidallyLocked};
 
 pub const REAL_SPACE_CELL_SIZE_M: f32 = 1_000.0;
 
@@ -64,9 +65,14 @@ pub(super) fn attach_player_ship_to_big_space(
 }
 
 pub(super) fn update_real_space_body_positions(
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     grid: Query<&Grid, With<BigSpace>>,
-    mut bodies: Query<(&RealSpaceBody, &mut CellCoord, &mut Transform)>,
+    mut bodies: Query<(
+        &RealSpaceBody,
+        Option<&TidallyLocked>,
+        &mut CellCoord,
+        &mut Transform,
+    )>,
 ) {
     let Some(states) = cache.states.as_deref() else {
         return;
@@ -75,16 +81,18 @@ pub(super) fn update_real_space_body_positions(
         return;
     };
 
-    for (body, mut cell, mut transform) in &mut bodies {
+    for (body, lock, mut cell, mut transform) in &mut bodies {
         let Some(state) = states.get(body.body_id) else {
             continue;
         };
-        write_body_transform(state, root_grid, &mut cell, &mut transform);
+        write_body_transform(state, lock, states, root_grid, &mut cell, &mut transform);
     }
 }
 
 fn write_body_transform(
     state: &BodyState,
+    lock: Option<&TidallyLocked>,
+    states: &[BodyState],
     grid: &Grid,
     cell: &mut CellCoord,
     transform: &mut Transform,
@@ -92,7 +100,14 @@ fn write_body_transform(
     let (next_cell, local) = grid.translation_to_grid(state.position);
     *cell = next_cell;
     transform.translation = local;
-    transform.rotation = state.orientation.as_quat();
+    transform.rotation =
+        surface_body_to_world_orientation(state.id, lock, states).unwrap_or_else(|| {
+            warn!(
+                "could not resolve surface orientation for body {}; falling back to ephemeris orientation",
+                state.id,
+            );
+            state.orientation.as_quat().normalize()
+        });
 }
 
 #[cfg(test)]
@@ -122,7 +137,7 @@ mod tests {
         let mut cell = CellCoord::ZERO;
         let mut transform = Transform::default();
 
-        write_body_transform(&state, &grid, &mut cell, &mut transform);
+        write_body_transform(&state, None, &[state], &grid, &mut cell, &mut transform);
 
         assert!(cell.x != 0);
         assert!(transform.translation.length() <= REAL_SPACE_CELL_SIZE_M);

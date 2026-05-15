@@ -22,8 +22,9 @@ mod trails;
 mod transforms;
 mod types;
 
+pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
-use generation::{finalize_planet_generation, patch_reference_cloud_covers};
+use generation::patch_reference_cloud_covers;
 use ground_terrain::{sync_body_render_lod, update_body_terrain_atmosphere};
 use lighting::{
     sync_film_grain_to_exposure, update_camera_exposure, update_planet_light_dirs,
@@ -41,17 +42,14 @@ use spawn::spawn_bodies;
 use trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_planet_orientations, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
-pub use types::{
-    CameraExposure, CelestialBody, FrameBodyStates, PlanetshineTints, PlayerShip, ShipMarker,
-    SimulationState,
-};
+pub use types::{CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, ShipMarker};
 
 use bevy::prelude::*;
-use thalos_physics::canonical::Epoch;
 pub use thalos_planet_rendering::ReferenceClouds;
 use thalos_planet_rendering::{convert_reference_clouds_when_ready, load_reference_cloud_sources};
 
 use crate::SimStage;
+use crate::solar_system_state::sync_solar_system_state;
 // Re-export so existing `use crate::rendering::{RenderFrame, RenderOrigin}` sites keep working.
 pub use crate::coords::{RenderFrame, RenderOrigin};
 
@@ -68,21 +66,6 @@ pub(crate) fn screen_marker_radius(world_pos: Vec3, camera_pos: Vec3) -> f32 {
     (world_pos - camera_pos).length().max(1.0) * SCREEN_MARKER_RADIUS
 }
 
-pub fn cache_body_states(sim: Res<SimulationState>, mut cache: ResMut<FrameBodyStates>) {
-    let t = sim.simulation.sim_time();
-    if cache.states.is_some() && (t - cache.time).abs() < f64::EPSILON {
-        return;
-    }
-    if let Some(states) = cache.states.as_mut() {
-        sim.ephemeris.states_into(Epoch(t), states);
-    } else {
-        let mut states = Vec::with_capacity(sim.ephemeris.body_count());
-        sim.ephemeris.states_into(Epoch(t), &mut states);
-        cache.states = Some(states);
-    }
-    cache.time = t;
-}
-
 pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
@@ -91,7 +74,6 @@ impl Plugin for RenderingPlugin {
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())
-            .insert_resource(FrameBodyStates::default())
             .insert_resource(PlanetshineTints::default())
             .insert_resource(CameraExposure::default())
             .init_resource::<ReferenceClouds>()
@@ -124,35 +106,29 @@ impl Plugin for RenderingPlugin {
                 (
                     convert_reference_clouds_when_ready,
                     patch_reference_cloud_covers.after(convert_reference_clouds_when_ready),
-                    finalize_planet_generation,
-                    cache_body_states,
-                    update_render_origin.after(cache_body_states),
-                    update_render_frame.after(cache_body_states),
+                    update_render_origin.after(sync_solar_system_state),
+                    update_render_frame.after(sync_solar_system_state),
                     update_body_positions
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),
-                    update_real_space_body_positions.after(cache_body_states),
-                    update_sun_light.after(cache_body_states),
-                    update_camera_exposure.after(cache_body_states),
+                    update_real_space_body_positions.after(sync_solar_system_state),
+                    update_sun_light.after(sync_solar_system_state),
+                    update_camera_exposure.after(sync_solar_system_state),
                     sync_film_grain_to_exposure.after(update_camera_exposure),
+                    // Planet materials are inserted synchronously by
+                    // `spawn_bodies` (no more async finalize), so these
+                    // per-frame updaters no longer need to order against a
+                    // generation system.
                     update_planet_light_dirs
-                        .after(cache_body_states)
-                        .after(update_camera_exposure)
-                        .after(finalize_planet_generation),
-                    update_planet_orientations
-                        .after(cache_body_states)
-                        .after(finalize_planet_generation),
+                        .after(sync_solar_system_state)
+                        .after(update_camera_exposure),
+                    update_planet_orientations.after(sync_solar_system_state),
                     // Unified per-body render-LOD: one pass toggles
                     // terrain ↔ impostor (surface LOD) and BodySky ↔ halo
                     // (atmosphere vantage) from a single camera-to-body
                     // distance. Must run after `update_real_space_body_positions`
-                    // (for current body world positions) and
-                    // `finalize_planet_generation` (so new render entities
-                    // are present), and ideally before the render extract
-                    // picks up `Visibility`.
-                    sync_body_render_lod
-                        .after(update_real_space_body_positions)
-                        .after(finalize_planet_generation),
+                    // (for current body world positions).
+                    sync_body_render_lod.after(update_real_space_body_positions),
                     // `update_body_terrain_atmosphere` moved to PostUpdate
                     // (see below) so it reads body GlobalTransforms after
                     // big_space's `TransformSystems::Propagate` finishes
@@ -162,16 +138,16 @@ impl Plugin for RenderingPlugin {
                     // the unified atmosphere shader then saw the camera as
                     // "outside the shell" and discarded every pixel.
                     update_gas_giant_params
-                        .after(cache_body_states)
+                        .after(sync_solar_system_state)
                         .after(update_camera_exposure),
                     update_solid_planet_params
-                        .after(cache_body_states)
+                        .after(sync_solar_system_state)
                         .after(update_camera_exposure),
                     update_ring_params
-                        .after(cache_body_states)
+                        .after(sync_solar_system_state)
                         .after(update_camera_exposure),
                     update_ship_position.after(update_render_origin),
-                    recompute_orbit_trails.after(cache_body_states),
+                    recompute_orbit_trails.after(sync_solar_system_state),
                 )
                     .in_set(SimStage::Sync),
             )
@@ -186,14 +162,13 @@ impl Plugin for RenderingPlugin {
                     double_click_focus_system
                         .after(update_ship_position)
                         .run_if(crate::view::in_map_view),
-                    update_cloud_bands.after(finalize_planet_generation),
+                    update_cloud_bands.after(sync_solar_system_state),
                 )
                     .in_set(SimStage::Sync),
             )
             .add_systems(
                 bevy::app::PostUpdate,
-                update_body_terrain_atmosphere
-                    .after(bevy::transform::TransformSystems::Propagate),
+                update_body_terrain_atmosphere.after(bevy::transform::TransformSystems::Propagate),
             );
     }
 }

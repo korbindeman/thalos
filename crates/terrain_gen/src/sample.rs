@@ -125,7 +125,7 @@ pub fn sample_surface(
     let mut albedo = sample_albedo(body, dir);
     let material_id = body.material_cubemap.sample_nearest(dir) as u32;
     let mut roughness = sample_roughness(body, dir, material_id);
-    apply_dynamic_layers(
+    apply_dynamic_surface_layers(
         surface,
         state,
         dir,
@@ -238,7 +238,14 @@ fn sample_roughness(body: &StaticSurfaceData, dir: Vec3, material_id: u32) -> f3
     }
 }
 
-fn apply_dynamic_layers(
+/// Apply terrain-owned dynamic overlays to an existing static sample.
+///
+/// `height` is in metres above the reference sphere, `albedo` is linear RGB,
+/// and `roughness` is normalized 0..1. This deliberately does not evaluate
+/// the static crater/detail stack; callers that already have a cheap static
+/// cubemap sample can use this to keep dynamic ice and dune overlays shared
+/// with the full [`sample_surface`] path.
+pub fn apply_dynamic_surface_layers(
     surface: &PlanetSurface,
     state: &DynamicSurfaceState,
     dir: Vec3,
@@ -297,7 +304,7 @@ fn dynamic_height_delta(
     let mut height = 0.0;
     let mut albedo = Vec3::ZERO;
     let mut roughness = 0.0;
-    apply_dynamic_layers(
+    apply_dynamic_surface_layers(
         surface,
         state,
         dir,

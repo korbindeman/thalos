@@ -88,7 +88,9 @@ pub struct DiskTileProvider {
 
 impl DiskTileProvider {
     pub fn new(terrain_path: impl Into<String>) -> Self {
-        Self { terrain_path: terrain_path.into() }
+        Self {
+            terrain_path: terrain_path.into(),
+        }
     }
 }
 

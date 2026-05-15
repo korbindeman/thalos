@@ -7,6 +7,7 @@ mod coords;
 mod debug;
 mod engine;
 mod flight_plan_view;
+mod freecam;
 mod fuel;
 mod hud;
 mod input;
@@ -22,6 +23,7 @@ mod rendering;
 mod screenshot;
 mod ship_view;
 mod sky_render;
+mod solar_system_state;
 mod star_flare;
 mod target;
 mod view;
@@ -55,6 +57,7 @@ use controls::ControlLocksPlugin;
 use debug::DebugPlugin;
 use engine::EnginePlugin;
 use flight_plan_view::FlightPlanViewPlugin;
+use freecam::FreeCamPlugin;
 use fuel::FuelPlugin;
 use hud::HudPlugin;
 use input::GameInputGatePlugin;
@@ -65,9 +68,10 @@ use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use pause_menu::PauseMenuPlugin;
 use photo_mode::PhotoModePlugin;
-use rendering::{RenderingPlugin, SimulationState};
+use rendering::RenderingPlugin;
 use screenshot::ScreenshotPlugin;
 use ship_view::ShipViewPlugin;
+use solar_system_state::{SimulationState, SolarSystemStatePlugin};
 use target::TargetPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
 use view::ViewPlugin;
@@ -227,6 +231,20 @@ fn main() {
                 .set(AssetPlugin {
                     file_path: "../../assets".to_string(),
                     ..default()
+                })
+                .set(bevy::log::LogPlugin {
+                    // Keep our own crates at INFO; silence Bevy's chatty
+                    // startup-info categories so the terrain diagnostic and
+                    // other game logs aren't buried. Override via RUST_LOG.
+                    filter: "info,\
+                             wgpu=error,naga=warn,bevy_app=warn,\
+                             bevy_render=warn,bevy_diagnostic=warn,\
+                             bevy_winit=warn,bevy_egui=warn,\
+                             bevy_pbr=warn,bevy_asset=warn,\
+                             cosmic_text=warn,gilrs_core=warn,gilrs=warn,\
+                             offset_allocator=warn"
+                        .to_string(),
+                    ..default()
                 }),
         )
         // `ThalosTerrainPlugin` wraps `bevy_terrain::TerrainPlugin`, which
@@ -279,6 +297,7 @@ fn main() {
             }
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))
+        .add_plugins(SolarSystemStatePlugin)
         .add_plugins(bevy::prelude::MeshPickingPlugin)
         // Opt-in picking: body meshes (and any other Pickable-less mesh) would
         // otherwise absorb rays before the maneuver arrows, since the hover-map
@@ -293,6 +312,7 @@ fn main() {
         .add_plugins(GameInputPlugin)
         .add_plugins(GameInputGatePlugin)
         .add_plugins(CameraPlugin)
+        .add_plugins(FreeCamPlugin)
         .add_plugins(reflection_probe::ReflectionProbePlugin)
         .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
@@ -326,10 +346,7 @@ fn main() {
 /// swapchain. Without this delay, macOS shows the Metal swapchain's
 /// uninitialised contents during the borderless-fullscreen entry animation
 /// (a single full-screen magenta frame).
-fn reveal_window_after_first_frame(
-    mut frame: Local<u32>,
-    mut windows: Query<&mut Window>,
-) {
+fn reveal_window_after_first_frame(mut frame: Local<u32>, mut windows: Query<&mut Window>) {
     if *frame > 2 {
         return;
     }

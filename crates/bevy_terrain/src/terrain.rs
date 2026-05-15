@@ -7,9 +7,7 @@ use crate::{
     math::TerrainModel,
     terrain_data::{tile_atlas::TileAtlas, AttachmentConfig},
 };
-use bevy::{
-    camera::visibility::NoFrustumCulling, ecs::entity::EntityHashMap, prelude::*,
-};
+use bevy::{camera::visibility::NoFrustumCulling, ecs::entity::EntityHashMap, prelude::*};
 
 /// Resource that stores components that are associated to a terrain entity.
 /// This is used to persist components in the render world.

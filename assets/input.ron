@@ -6,6 +6,7 @@
             bindings: {
                 "escape": [Key("Escape")],
                 "screenshot": [Key("F12")],
+                "toggle_free_cam": [Key("F1")],
             },
         ),
         flight: (

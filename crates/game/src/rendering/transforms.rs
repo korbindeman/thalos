@@ -8,7 +8,7 @@ use thalos_planet_rendering::{PlanetHaloMaterial, PlanetMaterial};
 
 use super::screen_marker_radius;
 use super::types::{
-    CelestialBody, FrameBodyStates, PlanetMaterials, ShipMarker, SimulationState, TidallyLocked,
+    CelestialBody, PlanetMaterials, ShipMarker, SimulationState, SolarSystemState, TidallyLocked,
 };
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{
@@ -53,7 +53,7 @@ fn ghost_position(
 /// otherwise shows up as scene-wide jitter when transitioning between
 /// distant bodies.
 pub fn update_render_origin(
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     flight_plan: Option<Res<FlightPlanView>>,
     sim: Res<SimulationState>,
@@ -100,7 +100,7 @@ pub fn update_render_origin(
 /// — a deliberate decoupling so the trajectory's *shape* reads in the
 /// SOI body's frame even while the camera tracks the ship.
 pub fn update_render_frame(
-    cache: Res<FrameBodyStates>,
+    cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     sim: Res<SimulationState>,
     mut frame: ResMut<RenderFrame>,
@@ -245,7 +245,10 @@ fn tangent_axis(seed: Vec3, normal: Vec3) -> Option<Vec3> {
     (tangent.length_squared() > 1.0e-8).then(|| tangent.normalize())
 }
 
-fn tidal_lock_orientation(body_state: &BodyState, parent_state: &BodyState) -> Option<Quat> {
+fn tidal_lock_world_to_body_orientation(
+    body_state: &BodyState,
+    parent_state: &BodyState,
+) -> Option<Quat> {
     let to_parent = parent_state.position - body_state.position;
     let len = to_parent.length();
     if len < 1.0 {
@@ -277,28 +280,49 @@ fn tidal_lock_orientation(body_state: &BodyState, parent_state: &BodyState) -> O
     Some(Quat::from_mat3(&body_to_world).inverse().normalize())
 }
 
+pub(super) fn surface_body_to_world_orientation(
+    body_id: BodyId,
+    lock: Option<&TidallyLocked>,
+    states: &[BodyState],
+) -> Option<Quat> {
+    if let Some(lock) = lock {
+        let body_state = states.get(body_id)?;
+        let parent_state = states.get(lock.parent_id)?;
+        return tidal_lock_world_to_body_orientation(body_state, parent_state)
+            .map(|q| q.inverse().normalize());
+    }
+
+    states
+        .get(body_id)
+        .map(|state| state.orientation.as_quat().normalize())
+}
+
+fn surface_world_to_body_orientation(
+    body_id: BodyId,
+    lock: Option<&TidallyLocked>,
+    states: &[BodyState],
+) -> Option<Quat> {
+    surface_body_to_world_orientation(body_id, lock, states).map(|q| q.inverse().normalize())
+}
+
 /// Rewrite each baked planet's material `orientation` quaternion every frame.
 ///
 /// Tidally-locked bodies point their baked +Z axis at the parent (mare /
 /// tidal asymmetry baked into `BodyBuilder::tidal_axis`) while their local
-/// +Y stays tied to the orbit plane. Free-spinning bodies compose
-/// `Ry(phase) * Rx(tilt)` so the surface spins under a tilted axis — this
-/// mirrors the gas-giant pipeline, where the shader applies `rotation_phase`
-/// post-orientation; for the impostor shader there is no such uniform, so
-/// spin must be baked into the single orientation quat.
+/// +Y stays tied to the orbit plane. Free-spinning bodies use the same
+/// [`BodyState::orientation`] that drives the real-space terrain entity.
+/// The shader expects world-space → body-local, so this material uniform is
+/// the inverse of the terrain entity's body-local → world rotation.
 pub(super) fn update_planet_orientations(
     query: Query<(&CelestialBody, Option<&TidallyLocked>, &PlanetMaterials)>,
     mut materials: ResMut<Assets<PlanetMaterial>>,
     mut halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
-    cache: Res<FrameBodyStates>,
-    sim: Res<SimulationState>,
+    cache: Res<SolarSystemState>,
     view: Res<ViewMode>,
 ) {
     let Some(ref states) = cache.states else {
         return;
     };
-    let body_defs = sim.simulation.bodies();
-    let sim_time = sim.simulation.sim_time();
 
     // See note on `update_planet_light_dirs` — gate inactive scale.
     let force_both = view.is_changed();
@@ -306,30 +330,8 @@ pub(super) fn update_planet_orientations(
     let do_ship = force_both || matches!(*view, ViewMode::Ship);
 
     for (body, lock, mats) in &query {
-        let q = if let Some(lock) = lock {
-            let Some(body_state) = states.get(body.body_id) else {
-                continue;
-            };
-            let Some(parent_state) = states.get(lock.parent_id) else {
-                continue;
-            };
-            let Some(q) = tidal_lock_orientation(body_state, parent_state) else {
-                continue;
-            };
-            q
-        } else {
-            let body_def = &body_defs[body.body_id];
-            let period = body_def.rotation_period_s;
-            // Negative periods are retrograde: Rust's `a % b` keeps the sign
-            // of `a`, so (positive sim_time) % (negative period) is positive
-            // and the subsequent division flips the phase sign.
-            let phase = if period.abs() > 1.0 {
-                ((sim_time % period) / period) as f32 * std::f32::consts::TAU
-            } else {
-                0.0
-            };
-            let tilt = body_def.axial_tilt_rad as f32;
-            Quat::from_rotation_y(phase) * Quat::from_rotation_x(tilt)
+        let Some(q) = surface_world_to_body_orientation(body.body_id, lock, states) else {
+            continue;
         };
 
         // Orientation is scale-independent — same value for both materials.
@@ -398,7 +400,7 @@ mod tests {
         let parent = body_state(DVec3::ZERO, DVec3::ZERO);
         let body = body_state(DVec3::X, DVec3::Z);
 
-        let orientation = tidal_lock_orientation(&body, &parent).unwrap();
+        let orientation = tidal_lock_world_to_body_orientation(&body, &parent).unwrap();
 
         assert_vec3_near(orientation * Vec3::NEG_X, Vec3::Z);
         assert_vec3_near(orientation * Vec3::Y, Vec3::Y);
@@ -415,17 +417,48 @@ mod tests {
 
         let parent = body_state(DVec3::ZERO, DVec3::ZERO);
         let epsilon = 1.0e-4;
-        let before = tidal_lock_orientation(
+        let before = tidal_lock_world_to_body_orientation(
             &circular_state(std::f64::consts::FRAC_PI_2 - epsilon),
             &parent,
         )
         .unwrap();
-        let after = tidal_lock_orientation(
+        let after = tidal_lock_world_to_body_orientation(
             &circular_state(std::f64::consts::FRAC_PI_2 + epsilon),
             &parent,
         )
         .unwrap();
 
         assert_axes_close(before, after, 1.0e-3);
+    }
+
+    #[test]
+    fn free_spinning_surface_orientations_are_inverse_pairs() {
+        let body = BodyState {
+            orientation: bevy::math::DQuat::from_rotation_y(0.7)
+                * bevy::math::DQuat::from_rotation_x(-0.2),
+            ..body_state(DVec3::ZERO, DVec3::ZERO)
+        };
+        let states = vec![body];
+
+        let body_to_world = surface_body_to_world_orientation(0, None, &states).unwrap();
+        let world_to_body = surface_world_to_body_orientation(0, None, &states).unwrap();
+
+        let local = Vec3::new(0.3, 0.8, -0.2).normalize();
+        let world = body_to_world * local;
+        assert_vec3_near(world_to_body * world, local);
+    }
+
+    #[test]
+    fn tidal_surface_orientations_are_inverse_pairs() {
+        let parent = body_state(DVec3::ZERO, DVec3::ZERO);
+        let moon = body_state(DVec3::X, DVec3::Z);
+        let states = vec![parent, moon];
+        let lock = TidallyLocked { parent_id: 0 };
+
+        let body_to_world = surface_body_to_world_orientation(1, Some(&lock), &states).unwrap();
+        let world_to_body = surface_world_to_body_orientation(1, Some(&lock), &states).unwrap();
+
+        assert_vec3_near(body_to_world * Vec3::Z, Vec3::NEG_X);
+        assert_vec3_near(world_to_body * Vec3::NEG_X, Vec3::Z);
     }
 }

@@ -26,6 +26,15 @@ use thalos_terrain_gen::{Cubemap, DynamicSurfaceState, PlanetSurface};
 use crate::shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature};
 use crate::texture::PlanetTextures;
 
+/// Maximum face resolution uploaded for the flat planet impostor.
+///
+/// Ship-view terrain takes over at 4× body radius, where the impostor's
+/// closest possible footprint is ~29° across. With Bevy's 45° vertical FOV
+/// that is ~695 px on a 1080p viewport and ~927 px on a 1440p viewport, so
+/// 1024² cube faces are enough for the current orbital view. Higher-resolution
+/// `StaticSurfaceData` is still kept for the ground terrain path.
+const IMPOSTOR_MAX_CUBEMAP_RESOLUTION: u32 = 1024;
+
 // ---------------------------------------------------------------------------
 // SSBO cell hash — CONTRACT WITH `planet_impostor.wgsl`.
 //
@@ -332,6 +341,15 @@ fn linear_to_srgb8(linear: f32) -> u8 {
     quantize_unit_to_u8(srgb)
 }
 
+fn srgb8_to_linear(srgb: u8) -> f32 {
+    let srgb = f32::from(srgb) / 255.0;
+    if srgb <= 0.04045 {
+        srgb / 12.92
+    } else {
+        ((srgb + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// CPU-side bake products, ready for main-thread asset insertion.
 ///
 /// Produced by [`prepare_planet_bake`] off the main thread (heavy CPU work:
@@ -362,38 +380,13 @@ pub fn prepare_planet_bake(
 ) -> PreparedPlanetBake {
     let body = &surface.static_surface;
     // --- Layer 1: cubemaps -------------------------------------------------
-    let albedo = cubemap_image(
-        &body.albedo_cubemap,
-        body.albedo_cubemap.resolution(),
-        TextureFormat::Rgba8UnormSrgb,
-        4,
-    );
-    let height = cubemap_image(
-        &body.height_cubemap,
-        body.height_cubemap.resolution(),
-        TextureFormat::R16Unorm,
-        2,
-    );
-    let roughness = cubemap_image(
-        &body.roughness_cubemap,
-        body.roughness_cubemap.resolution(),
-        TextureFormat::R8Unorm,
-        1,
-    );
+    let albedo = impostor_cubemap_image(&body.albedo_cubemap, TextureFormat::Rgba8UnormSrgb);
+    let height = impostor_cubemap_image(&body.height_cubemap, TextureFormat::R16Unorm);
+    let roughness = impostor_cubemap_image(&body.roughness_cubemap, TextureFormat::R8Unorm);
     let (active_dune_height_cube, active_dune_albedo_cube) =
         bake_active_dune_overlay(surface, state);
-    let active_dune_height = cubemap_image(
-        &active_dune_height_cube,
-        active_dune_height_cube.resolution(),
-        TextureFormat::R16Unorm,
-        2,
-    );
-    let active_dune_albedo = cubemap_image(
-        &active_dune_albedo_cube,
-        active_dune_albedo_cube.resolution(),
-        TextureFormat::Rgba8UnormSrgb,
-        4,
-    );
+    let active_dune_height = cubemap_image(&active_dune_height_cube, TextureFormat::R16Unorm);
+    let active_dune_albedo = cubemap_image(&active_dune_albedo_cube, TextureFormat::Rgba8UnormSrgb);
     // Note: `body.normal_cubemap` is intentionally NOT uploaded to the
     // impostor's bind group. 8-bit object-space encoding crushes shallow
     // slope angles (terminator depth, crater rim falloff), so the shader
@@ -594,11 +587,9 @@ pub fn bake_from_planet_surface(
 
 /// Serialize the 6 faces of a `Cubemap<T>` into a contiguous byte buffer in
 /// `CubemapFace::ALL` order.
-fn cubemap_to_bytes<T: Copy + Default>(
-    cubemap: &thalos_terrain_gen::Cubemap<T>,
-    resolution: u32,
-    bytes_per_texel: usize,
-) -> Vec<u8> {
+fn cubemap_to_bytes<T: Copy + Default>(cubemap: &thalos_terrain_gen::Cubemap<T>) -> Vec<u8> {
+    let resolution = cubemap.resolution();
+    let bytes_per_texel = std::mem::size_of::<T>();
     let mut data = Vec::with_capacity((resolution * resolution) as usize * bytes_per_texel * 6);
     for face in CubemapFace::ALL {
         let face_data = cubemap.face_data(face);
@@ -612,11 +603,10 @@ fn cubemap_to_bytes<T: Copy + Default>(
 /// Create a Bevy `Image` from a `Cubemap<T>` with a cube view descriptor.
 fn cubemap_image<T: Copy + Default>(
     cubemap: &thalos_terrain_gen::Cubemap<T>,
-    resolution: u32,
     format: TextureFormat,
-    bytes_per_texel: usize,
 ) -> Image {
-    let data = cubemap_to_bytes(cubemap, resolution, bytes_per_texel);
+    let resolution = cubemap.resolution();
+    let data = cubemap_to_bytes(cubemap);
     let mut image = Image::new(
         Extent3d {
             width: resolution,
@@ -637,12 +627,107 @@ fn cubemap_image<T: Copy + Default>(
 
 fn create_cubemap_image<T: Copy + Default>(
     cubemap: &thalos_terrain_gen::Cubemap<T>,
-    resolution: u32,
     format: TextureFormat,
-    bytes_per_texel: usize,
     images: &mut Assets<Image>,
 ) -> Handle<Image> {
-    images.add(cubemap_image(cubemap, resolution, format, bytes_per_texel))
+    images.add(cubemap_image(cubemap, format))
+}
+
+trait AverageTexel: Copy + Default {
+    type Sum: Default;
+
+    fn add(sum: &mut Self::Sum, value: Self);
+    fn average(sum: Self::Sum, count: u32) -> Self;
+}
+
+impl AverageTexel for u8 {
+    type Sum = u64;
+
+    fn add(sum: &mut Self::Sum, value: Self) {
+        *sum += u64::from(value);
+    }
+
+    fn average(sum: Self::Sum, count: u32) -> Self {
+        ((sum + u64::from(count / 2)) / u64::from(count)).min(u64::from(u8::MAX)) as u8
+    }
+}
+
+impl AverageTexel for u16 {
+    type Sum = u64;
+
+    fn add(sum: &mut Self::Sum, value: Self) {
+        *sum += u64::from(value);
+    }
+
+    fn average(sum: Self::Sum, count: u32) -> Self {
+        ((sum + u64::from(count / 2)) / u64::from(count)).min(u64::from(u16::MAX)) as u16
+    }
+}
+
+impl AverageTexel for [u8; 4] {
+    type Sum = [f32; 4];
+
+    fn add(sum: &mut Self::Sum, value: Self) {
+        sum[0] += srgb8_to_linear(value[0]);
+        sum[1] += srgb8_to_linear(value[1]);
+        sum[2] += srgb8_to_linear(value[2]);
+        sum[3] += f32::from(value[3]) / 255.0;
+    }
+
+    fn average(sum: Self::Sum, count: u32) -> Self {
+        let inv_count = 1.0 / count as f32;
+        [
+            linear_to_srgb8(sum[0] * inv_count),
+            linear_to_srgb8(sum[1] * inv_count),
+            linear_to_srgb8(sum[2] * inv_count),
+            quantize_unit_to_u8(sum[3] * inv_count),
+        ]
+    }
+}
+
+fn impostor_cubemap_image<T: AverageTexel>(
+    cubemap: &thalos_terrain_gen::Cubemap<T>,
+    format: TextureFormat,
+) -> Image {
+    if cubemap.resolution() <= IMPOSTOR_MAX_CUBEMAP_RESOLUTION {
+        return cubemap_image(cubemap, format);
+    }
+
+    let downsampled = downsample_cubemap(cubemap, IMPOSTOR_MAX_CUBEMAP_RESOLUTION);
+    cubemap_image(&downsampled, format)
+}
+
+fn downsample_cubemap<T: AverageTexel>(
+    source: &thalos_terrain_gen::Cubemap<T>,
+    resolution: u32,
+) -> thalos_terrain_gen::Cubemap<T> {
+    debug_assert!(resolution > 0);
+    debug_assert!(resolution <= source.resolution());
+
+    let source_res = source.resolution();
+    let mut output = thalos_terrain_gen::Cubemap::<T>::new(resolution);
+    for face in CubemapFace::ALL {
+        let src = source.face_data(face);
+        let dst = output.face_data_mut(face);
+        for y in 0..resolution {
+            let y0 = y * source_res / resolution;
+            let y1 = ((y + 1) * source_res).div_ceil(resolution).max(y0 + 1);
+            for x in 0..resolution {
+                let x0 = x * source_res / resolution;
+                let x1 = ((x + 1) * source_res).div_ceil(resolution).max(x0 + 1);
+                let mut sum = T::Sum::default();
+                let mut count = 0;
+                for sy in y0..y1.min(source_res) {
+                    for sx in x0..x1.min(source_res) {
+                        T::add(&mut sum, src[(sy * source_res + sx) as usize]);
+                        count += 1;
+                    }
+                }
+                dst[(y * resolution + x) as usize] = T::average(sum, count);
+            }
+        }
+    }
+    output
 }
 
 /// Project an equirectangular 2D image into an R8Unorm cubemap used as
@@ -710,7 +795,7 @@ pub(crate) fn equirect_to_cloud_cover_image_with_rotation(
             }
         }
     }
-    cubemap_image(&cover, resolution, TextureFormat::R8Unorm, 1)
+    cubemap_image(&cover, TextureFormat::R8Unorm)
 }
 
 /// 1×1 black cubemap used when a body has no cloud layer. Binding slots
@@ -719,7 +804,7 @@ pub(crate) fn equirect_to_cloud_cover_image_with_rotation(
 /// coverage.
 pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
     let blank = Cubemap::<u8>::new(1);
-    create_cubemap_image(&blank, 1, TextureFormat::R8Unorm, 1, images)
+    create_cubemap_image(&blank, TextureFormat::R8Unorm, images)
 }
 
 /// Pack a slice of Pod data into a [`ShaderStorageBuffer`] without

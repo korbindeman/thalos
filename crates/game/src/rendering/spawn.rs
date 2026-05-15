@@ -1,56 +1,64 @@
 //! Startup system that spawns one entity tree per body in the solar
-//! system: a CelestialBody root with map-layer mesh, ship-layer mesh,
-//! flat icon, and (where applicable) ring children. Procedural bodies
-//! are seeded with a placeholder sphere; `finalize_planet_generation`
-//! later swaps in the impostor billboard once the background terrain
-//! task finishes.
+//! system: a `CelestialBody` root with impostor billboard, halo, icon,
+//! ground-LOD terrain, and (where applicable) ring children.
+//!
+//! Procedural bodies load their pre-baked surface from
+//! `assets/baked/<name>.bin` synchronously and call
+//! [`install_baked_planet`] inline. The game never compiles terrain — if
+//! the bake is missing or stale, this system panics with a message
+//! pointing at `just bake <name>`. Bodies with no authored terrain
+//! (`TerrainConfig::None`) fall through to the [`SolidPlanetMaterial`]
+//! impostor tinted with `body.color`.
 
-use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::Image;
 use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::tasks::AsyncComputeTaskPool;
 use big_space::prelude::Grid;
 use thalos_physics::canonical::Epoch;
 use thalos_physics::types::BodyKind;
 use thalos_planet_rendering::{
-    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, MULTI_SCATTER_LUT_HEIGHT,
-    MULTI_SCATTER_LUT_WIDTH, RingLayers, RingMaterial, RingParams, SceneLighting,
-    SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut, build_ring_mesh,
+    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, ReferenceClouds, RingLayers,
+    RingMaterial, RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams,
+    build_ring_mesh, cloud_cover_image_for_body,
 };
-use thalos_planet_rendering::prepare_planet_bake;
 use thalos_terrain::{BodySkyExtra, BodySkyMaterial};
 use thalos_terrain_gen::{
-    DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
-    TerrainConfig, compile_dynamic_surface_layers, compile_static_terrain_config,
-    compile_tectonics_from_config,
+    PlanetSurface, TerrainCompileContext, TerrainCompileOptions, TerrainConfig, cache,
+    compile_dynamic_surface_layers, compile_tectonics_from_config,
 };
 
+use super::generation::{
+    InstallAssets, InstallEntities, PlanetMaterialAssets, ProceduralInstallExtras,
+    WorldStateAssets, install_baked_planet,
+};
 use super::ground_terrain::BodySky;
 use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::scene_depth::SceneDepthImage;
 use super::types::{
-    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, PendingPlanetBake,
-    PendingPlanetGeneration, PlanetshineTints, RealSpaceBody, SharedPlanetMeshes, ShipBodyMesh,
-    ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight, TidallyLocked,
+    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, RealSpaceBody,
+    SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials,
+    SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::view::HideInShipView;
 
-/// Dev-mode crater-count scale factor. Cratering + space_weather together
-/// dominate the terrain bake and both scale linearly with crater count, so
-/// cutting the authored count by 10× in dev brings bakes from minutes to
-/// ~20 s. Release builds keep the full authored counts.
-#[cfg(debug_assertions)]
-const DEV_CRATER_SCALE: f32 = 0.1;
-#[cfg(not(debug_assertions))]
-const DEV_CRATER_SCALE: f32 = 1.0;
+/// Crater-count scale factor used in the cache-key computation. Must
+/// match whatever `bake_dump` (and the editor's Full button) used when
+/// the bake was produced; mismatch fails load with `HashMismatch`.
+///
+/// Shipped bakes always use 1.0 (full crater authoring), so the game
+/// uses 1.0 unconditionally. The old `DEV_CRATER_SCALE` knob existed
+/// to speed up the game's own bake in dev — obsolete now that the game
+/// never compiles.
+const BAKE_CRATER_COUNT_SCALE: f32 = 1.0;
 
-fn terrain_cache_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/terrain_cache")
+/// Directory holding shipped bake artifacts. Mirror of
+/// `crates/bake_dump/src/main.rs::shipped_bake_dir` — both must resolve to
+/// the same workspace-relative path so producer and consumer agree.
+fn shipped_bake_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/baked")
 }
 
 pub(super) fn spawn_bodies(
@@ -65,7 +73,10 @@ pub(super) fn spawn_bodies(
     sim: Res<SimulationState>,
     real_root: Res<RealSpaceRoot>,
     scene_depth: Res<SceneDepthImage>,
-    mut planetshine: ResMut<PlanetshineTints>,
+    reference_clouds: Res<ReferenceClouds>,
+    mut planet_material_assets: PlanetMaterialAssets,
+    mut procedural_install_extras: ProceduralInstallExtras,
+    mut world_state: WorldStateAssets,
 ) {
     let bodies = &sim.system.bodies;
     let initial_states = sim.ephemeris.states(Epoch::ZERO);
@@ -75,10 +86,11 @@ pub(super) fn spawn_bodies(
     // Unit rectangle (corners at ±1) shared across all planet billboards.
     // The vertex shader scales it by params.radius each frame.
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
-    // Unit icosphere — each `BodyMesh` / `ShipBodyMesh` child uses
-    // `Transform::scale` to size it for its layer.
+    // Star icosphere — emissive star meshes still use a real sphere
+    // (no impostor). Procedural bodies and gas giants render as
+    // camera-facing quads (`billboard_mesh`); solid-impostor bodies
+    // likewise. No body needs an icosphere any more.
     let unit_sphere_star = meshes.add(Sphere::new(1.0).mesh().ico(5).unwrap());
-    let unit_sphere_body = meshes.add(Sphere::new(1.0).mesh().ico(4).unwrap());
     commands.insert_resource(SharedPlanetMeshes {
         billboard: billboard_mesh.clone(),
     });
@@ -113,36 +125,14 @@ pub(super) fn spawn_bodies(
             .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
             .unwrap_or_default();
         if ship_atmosphere.atmos_geom.z > 0.0 {
-            // Bake the multi-scatter LUT once at spawn. Atmosphere parameters
-            // are loaded from the body's RON and never mutated at runtime, so
-            // the LUT stays valid for the session — no rebake path needed.
-            let planet_radius_render = (body.radius_m * SHIP_SCALE) as f32;
-            let lut_bytes = bake_multi_scatter_lut(
-                &ship_atmosphere,
-                planet_radius_render,
-                MULTI_SCATTER_LUT_WIDTH,
-                MULTI_SCATTER_LUT_HEIGHT,
-            );
-            // Default sampler is linear-filtered in Bevy 0.18, which is what
-            // we want for smooth blends across LUT cells.
-            let lut_image = Image::new(
-                Extent3d {
-                    width: MULTI_SCATTER_LUT_WIDTH,
-                    height: MULTI_SCATTER_LUT_HEIGHT,
-                    depth_or_array_layers: 1,
-                },
-                TextureDimension::D2,
-                lut_bytes,
-                TextureFormat::Rgba32Float,
-                RenderAssetUsages::RENDER_WORLD,
-            );
-            let lut_handle = images.add(lut_image);
+            let (sky_cloud_cover, _) =
+                cloud_cover_image_for_body(&body.name, &reference_clouds, &mut images);
 
             let sky_material = BodySkyMaterial {
                 atmosphere: ship_atmosphere,
                 atmosphere_extra: BodySkyExtra::default(),
                 scene_depth: scene_depth.handle.clone(),
-                multi_scatter_lut: lut_handle,
+                cloud_cover: sky_cloud_cover,
             };
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),
@@ -152,7 +142,7 @@ pub(super) fn spawn_bodies(
                 NotShadowCaster,
                 NotShadowReceiver,
                 // Start hidden — the visibility-culling system flips it on
-                // as soon as the camera crosses the atmosphere shell.
+                // while the body's ground terrain LOD is active.
                 Visibility::Hidden,
                 ChildOf(real_body_entity),
                 Name::new(format!("{} Sky", body.name)),
@@ -243,95 +233,74 @@ pub(super) fn spawn_bodies(
 
             body_entity
         } else if body.terrain.is_some() {
-            // Procedural body: dispatch the terrain_gen pipeline to a background
-            // task so startup isn't blocked. Meanwhile show a plain placeholder
-            // sphere; `finalize_planet_generation` swaps in the impostor
-            // billboard with a baked `PlanetMaterial` once the task completes.
-            let terrain = body.terrain.clone();
-            let tectonics = body.tectonics.clone();
+            // Procedural body: synchronously load the pre-baked surface
+            // from `assets/baked/<name>.bin` and install it. The game
+            // never compiles terrain; missing or stale bakes are fatal.
             let radius_m = body.radius_m as f32;
             let gravity_m_s2 = (body.gm / (body.radius_m * body.radius_m)) as f32;
             // Tidally-locked moons get their local +Z axis as the parent
             // direction, matching the editor.
             let tidal_axis = matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z);
             let axial_tilt_rad = body.axial_tilt_rad as f32;
-            let body_name = body.name.clone();
 
-            let task = AsyncComputeTaskPool::get().spawn(async move {
-                let cache_dir = terrain_cache_dir();
-                let context = TerrainCompileContext {
-                    body_name: body_name.clone(),
-                    radius_m,
-                    gravity_m_s2,
-                    rotation_hours: None,
-                    obliquity_deg: Some(axial_tilt_rad.to_degrees()),
-                    tidal_axis,
-                    axial_tilt_rad,
-                };
-                let options = TerrainCompileOptions {
-                    crater_count_scale: DEV_CRATER_SCALE,
-                    cubemap_resolution_override: None,
-                };
-                let key = thalos_terrain_gen::cache::terrain_cache_key(
-                    &terrain,
-                    tectonics.as_ref(),
-                    &context,
-                    options,
-                );
-                let path = thalos_terrain_gen::cache::cache_path(&cache_dir, &body_name, key);
-                let dynamic_layers = compile_dynamic_surface_layers(&terrain, &context)
-                    .unwrap_or_else(|e| {
-                        panic!("dynamic layer compile failed for {body_name}: {e}")
-                    });
-                // Tectonics is regenerated on each load (it's not cached); build
-                // on both the cache-hit and cache-miss paths so downstream
-                // archetypes that read the tectonic graph see the same instance.
-                let tectonics_built = compile_tectonics_from_config(tectonics.as_ref(), &context);
-                let surface = if let Some(static_surface) =
-                    thalos_terrain_gen::cache::load(&path, key)
-                {
-                    info!("terrain cache hit: {body_name}");
-                    PlanetSurface {
-                        static_surface,
-                        dynamic_layers,
-                        tectonics: tectonics_built,
-                    }
-                } else {
-                    info!("terrain cache miss, baking: {body_name}");
-                    let static_surface = compile_static_terrain_config(
-                        &terrain,
-                        tectonics_built.as_ref(),
-                        &context,
-                        options,
-                    )
-                    .unwrap_or_else(|e| panic!("terrain compile failed for {body_name}: {e}"));
-                    match thalos_terrain_gen::cache::store(&path, key, &static_surface) {
-                        Ok(()) => info!("terrain cache wrote: {body_name}"),
-                        Err(e) => warn!("terrain cache write failed for {body_name}: {e}"),
-                    }
-                    PlanetSurface {
-                        static_surface,
-                        dynamic_layers,
-                        tectonics: tectonics_built,
-                    }
-                };
-                // Run the heavy CPU half of the bake (dune-overlay synthesis,
-                // cubemap byte copies, SSBO packing) here on the task pool so
-                // `finalize_planet_generation` only has to insert assets.
-                let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
-                let prepared = prepare_planet_bake(&surface, &dynamic_state);
-                PendingPlanetBake { surface, prepared }
-            });
-
-            // Placeholder: same plain-sphere look as the non-procedural branch
-            // so the body is visible immediately at roughly the right size and
-            // colour while the terrain pipeline runs in the background.
-            let placeholder_mat = std_materials.add(StandardMaterial {
-                base_color: Color::srgb(r, g, b),
-                perceptual_roughness: 0.9,
-                metallic: 0.0,
-                ..default()
-            });
+            let context = TerrainCompileContext {
+                body_name: body.name.clone(),
+                radius_m,
+                gravity_m_s2,
+                rotation_hours: None,
+                obliquity_deg: Some(axial_tilt_rad.to_degrees()),
+                tidal_axis,
+                axial_tilt_rad,
+            };
+            let options = TerrainCompileOptions {
+                crater_count_scale: BAKE_CRATER_COUNT_SCALE,
+                cubemap_resolution_override: None,
+            };
+            let key = cache::terrain_cache_key(
+                &body.terrain,
+                body.tectonics.as_ref(),
+                &context,
+                options,
+            );
+            let bake_dir = shipped_bake_dir();
+            let path = cache::cache_path(&bake_dir, &body.name);
+            let static_surface = match cache::load(&path, key) {
+                Ok(s) => s,
+                Err(cache::LoadError::Missing { path }) => panic!(
+                    "missing bake for body '{name}' at {path} (key {key:016x}). \
+                     Run `just bake {name}` (or `just bake all`) to produce it.",
+                    name = body.name,
+                    path = path.display(),
+                ),
+                Err(cache::LoadError::HashMismatch {
+                    path,
+                    expected,
+                    found,
+                }) => panic!(
+                    "stale bake for body '{name}' at {path}: stored key {found:016x}, \
+                     expected {expected:016x}. The body config or `thalos_terrain_gen` \
+                     source has changed since the bake was produced. \
+                     Run `just bake {name}` to regenerate.",
+                    name = body.name,
+                    path = path.display(),
+                ),
+                Err(cache::LoadError::Decode { path, message }) => panic!(
+                    "corrupt bake for body '{name}' at {path}: {message}. \
+                     Delete and run `just bake {name}` to regenerate.",
+                    name = body.name,
+                    path = path.display(),
+                ),
+            };
+            let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
+                .unwrap_or_else(|e| {
+                    panic!("dynamic layer compile failed for {}: {e}", body.name)
+                });
+            let tectonics_built = compile_tectonics_from_config(body.tectonics.as_ref(), &context);
+            let surface = PlanetSurface {
+                static_surface,
+                dynamic_layers,
+                tectonics: tectonics_built,
+            };
 
             let body_entity = commands
                 .spawn((
@@ -347,40 +316,23 @@ pub(super) fn spawn_bodies(
                 ))
                 .id();
 
-            // Moons with a tidal axis and a parent body are rendered tidally
-            // locked: `update_planet_orientations` rewrites the material's
-            // orientation quaternion each frame so the baked near-side keeps
-            // facing the parent.
+            // Moons with a tidal axis and a parent body render tidally
+            // locked: the map/ship impostor material uploads world→body,
+            // while the real-space body grid (and therefore ground terrain)
+            // uses the inverse body→world rotation.
             if tidal_axis.is_some()
                 && let Some(parent_id) = body.parent
             {
                 commands
                     .entity(body_entity)
                     .insert(TidallyLocked { parent_id });
+                commands
+                    .entity(real_body_entity)
+                    .insert(TidallyLocked { parent_id });
             }
 
-            let mesh_entity = commands
-                .spawn((
-                    Mesh3d(unit_sphere_body.clone()),
-                    MeshMaterial3d(placeholder_mat.clone()),
-                    Transform::from_scale(Vec3::splat(render_radius)),
-                    BodyMesh,
-                    bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
-                    ChildOf(body_entity),
-                ))
-                .id();
-
-            let ship_mesh_entity = commands
-                .spawn((
-                    Mesh3d(unit_sphere_body.clone()),
-                    MeshMaterial3d(placeholder_mat),
-                    Transform::from_scale(Vec3::splat(ship_render_radius)),
-                    ShipBodyMesh,
-                    bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
-                    ChildOf(real_body_entity),
-                ))
-                .id();
-
+            // Icon child — visible at far distance, crossfaded with the
+            // impostor by `sync_body_icons`.
             commands.spawn((
                 Mesh3d(icon_mesh.clone()),
                 MeshMaterial3d(icon_material),
@@ -393,16 +345,47 @@ pub(super) fn spawn_bodies(
                 ChildOf(body_entity),
             ));
 
-            commands
-                .entity(body_entity)
-                .insert(PendingPlanetGeneration {
-                    task,
-                    body_id: body.id,
-                    render_radius,
-                    mesh_entity,
-                    ship_mesh_entity,
-                    ship_parent_entity: real_body_entity,
+            // Look up the ship camera once. Outside the loop would be
+            // tidier but `Query::single()` returns a guarded reference;
+            // grabbing the entity per body is cheap.
+            let ship_camera = procedural_install_extras
+                .ship_camera_q
+                .single()
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "no unique ShipCamera entity available when installing '{}' terrain: {e}",
+                        body.name,
+                    )
                 });
+
+            install_baked_planet(
+                &mut commands,
+                body,
+                body.id,
+                render_radius,
+                surface,
+                &SharedPlanetMeshes {
+                    billboard: billboard_mesh.clone(),
+                },
+                &reference_clouds,
+                &procedural_install_extras.terrain_registry,
+                InstallEntities {
+                    body_entity,
+                    ship_parent_entity: real_body_entity,
+                    ship_camera,
+                },
+                InstallAssets {
+                    planet_materials: &mut planet_material_assets.planet,
+                    planet_halo_materials: &mut planet_material_assets.planet_halo,
+                    body_terrain_materials: &mut planet_material_assets.body_terrain,
+                    images: &mut images,
+                    storage_buffers: &mut procedural_install_extras.storage_buffers,
+                    tile_trees: &mut procedural_install_extras.tile_trees,
+                    terrain_surfaces: &mut procedural_install_extras.terrain_surfaces,
+                    planetshine: &mut world_state.planetshine,
+                    solar_system: &mut world_state.solar_system,
+                },
+            );
 
             body_entity
         } else if let Some(atmos) = &body.atmosphere {
@@ -432,7 +415,7 @@ pub(super) fn spawn_bodies(
                 let n = palette.len() as f32;
                 [sum[0] / n, sum[1] / n, sum[2] / n]
             };
-            planetshine.by_body.insert(body.id, mean_cloud);
+            world_state.planetshine.by_body.insert(body.id, mean_cloud);
 
             let map_layers =
                 GasGiantLayers::from_params(atmos, body.rings.as_ref(), (1.0 / MAP_SCALE) as f32);

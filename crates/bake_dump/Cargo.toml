@@ -12,3 +12,12 @@ thalos_physics = { path = "../physics" }
 thalos_terrain_gen = { path = "../terrain_gen" }
 glam = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
+rayon = "1.10"
+indicatif = "0.17"
+# GPU compute for the new mid-frequency-detail stage. Versions pinned to
+# match Bevy's wgpu in the workspace so the compiled artifact is shared
+# (otherwise wgpu links twice and build time roughly doubles).
+wgpu = "27.0.1"
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "0.4"
+anyhow = "1.0"

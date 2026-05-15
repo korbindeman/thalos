@@ -14,19 +14,17 @@
 //! centre — by construction the craft's nose always points there, so
 //! it doesn't need projection.
 
+use crate::maneuver::ManeuverPlan;
+use crate::navball::attitude::NavballFrame;
+use crate::navball::ui::NavballUiRoot;
+use crate::navigation::maneuver_burn_direction;
+use crate::rendering::{SimulationState, SolarSystemState};
+use crate::target::TargetBody;
 use bevy::asset::RenderAssetUsages;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use resvg::{tiny_skia, usvg};
-use thalos_physics::canonical::Epoch;
-
-use crate::maneuver::ManeuverPlan;
-use crate::navball::attitude::NavballFrame;
-use crate::navball::ui::NavballUiRoot;
-use crate::navigation::maneuver_burn_direction;
-use crate::rendering::SimulationState;
-use crate::target::TargetBody;
 
 const ICON_SIZE: u32 = 32;
 const ORIENTATION_ICON_WIDTH: u32 = 40;
@@ -209,6 +207,7 @@ pub fn image_from_rgba8(width: u32, height: u32, pixels: Vec<u8>) -> Image {
 pub fn update_navball_markers(
     frame: Res<NavballFrame>,
     sim_state: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
     mut markers: Query<(
@@ -219,7 +218,7 @@ pub fn update_navball_markers(
         &mut Visibility,
     )>,
 ) {
-    let directions = compute_marker_directions(&sim_state, &target, &plan);
+    let directions = compute_marker_directions(&sim_state, &solar_system, &target, &plan);
     let icon_half = ICON_SIZE as f32 * 0.5;
 
     for (kind, variants, mut image, mut node, mut visibility) in &mut markers {
@@ -274,14 +273,31 @@ impl MarkerDirections {
 
 fn compute_marker_directions(
     sim_state: &SimulationState,
+    solar_system: &SolarSystemState,
     target: &TargetBody,
     plan: &ManeuverPlan,
 ) -> MarkerDirections {
     let sim = &sim_state.simulation;
     let craft = sim.craft_state();
-    let sim_time = sim.sim_time();
     let soi_body_id = sim.dominant_body();
-    let body_state = sim_state.ephemeris.state(soi_body_id, Epoch(sim_time));
+    let Some(states) = solar_system.states.as_ref() else {
+        return MarkerDirections {
+            prograde: None,
+            normal: None,
+            radial_out: None,
+            target_dir: None,
+            maneuver: maneuver_burn_direction(sim, plan),
+        };
+    };
+    let Some(body_state) = states.get(soi_body_id) else {
+        return MarkerDirections {
+            prograde: None,
+            normal: None,
+            radial_out: None,
+            target_dir: None,
+            maneuver: maneuver_burn_direction(sim, plan),
+        };
+    };
 
     let rel_pos = craft.translation.position - body_state.position;
     let rel_vel = craft.translation.velocity - body_state.velocity;
@@ -290,10 +306,10 @@ fn compute_marker_directions(
     let radial_out = rel_pos.try_normalize();
     let normal = rel_pos.cross(rel_vel).try_normalize();
 
-    let target_dir = target.target.and_then(|target_id| {
-        let state = sim_state.ephemeris.state(target_id, Epoch(sim_time));
-        (state.position - craft.translation.position).try_normalize()
-    });
+    let target_dir = target
+        .target
+        .and_then(|target_id| states.get(target_id))
+        .and_then(|state| (state.position - craft.translation.position).try_normalize());
 
     let maneuver = maneuver_burn_direction(sim, plan);
 

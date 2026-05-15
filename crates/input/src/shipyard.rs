@@ -1,3 +1,4 @@
+use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
@@ -99,6 +100,7 @@ fn collect_shipyard_intent(
     primary: Query<(&Action<PrimaryAction>, &ActionEvents)>,
     motion: Query<&Action<CameraMotionAction>>,
     wheel: Query<&Action<CameraWheelAction>>,
+    scroll: Res<AccumulatedMouseScroll>,
     precision: Query<&Action<PrecisionSlowAction>>,
 ) {
     *intent = ShipyardInputIntent {
@@ -115,7 +117,10 @@ fn collect_shipyard_intent(
             .map(|(_, events)| events.contains(ActionEvents::COMPLETE))
             .unwrap_or(false),
         camera_motion: motion.single().map(|action| **action).unwrap_or(Vec2::ZERO),
-        camera_wheel: wheel.single().map(|action| **action).unwrap_or(Vec2::ZERO),
+        camera_wheel: crate::camera_scroll_delta(
+            wheel.single().map(|action| **action).unwrap_or(Vec2::ZERO),
+            scroll.unit,
+        ),
         precision_slow: precision.single().map(|action| **action).unwrap_or(false),
     };
 }

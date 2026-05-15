@@ -90,6 +90,11 @@ pub struct StaticSurfaceData {
     pub sea_level_m: Option<f32>,
     /// Explicit water appearance for ocean-bearing bodies. This replaces the
     /// old renderer behavior of deriving deep-water color from mean albedo.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Do **not** mark this `skip_serializing_if = "Option::is_none"`:
+    /// bincode is positional, so a skipped field at encode time leaves
+    /// the decoder one byte short of the expected `Option` tag and the
+    /// load fails with `UnexpectedEnd`. Always serialize.
+    #[serde(default)]
     pub water_appearance: Option<WaterAppearance>,
 }

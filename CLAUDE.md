@@ -18,11 +18,15 @@ just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics
 just clippy               # cargo clippy --workspace
 just trace                # cargo run --release -p thalos_game --features profile-tracy
-just bake Thalos          # headless terrain bake → PNGs in stage-bakes/Thalos/
-just bake thalos          # body name is case-insensitive
+just bake Thalos          # full-res shipped bake → assets/baked/Thalos.bin
+                          #                       + stage-bakes/Thalos/full/*.png
+just bake Thalos --preview # fast 512² PNG previews → stage-bakes/Thalos/preview/
+                          #                          (no shipped bake)
 just bake all             # bake every body with a terrain block
-just bake Thalos --full   # use the body's authored/derived resolution
-just clear-terrain-cache  # wipe target/terrain_cache/ after stage code changes
+                          #   (skips bodies whose shipped bake hash is
+                          #    already current; add --force to rebake)
+just clear-terrain-cache  # wipe target/terrain_cache/ (editor only — game and
+                          # `just bake` no longer use this directory)
 
 # Run a single test
 cargo test -p thalos_physics -- test_name
@@ -46,29 +50,67 @@ Planet generation is in an iterative development phase. Do not add or run
 planet/terrain generation tests for now, including per-body generation
 tests. This applies anywhere a test compiles or validates generated planet
 data, even outside `thalos_terrain_gen`; these tests slow down the visual
-iteration loop. Use the headless terrain bake workflow below for feedback
-instead.
+iteration loop. Use `just bake <body> --preview` (see below) for visual
+feedback instead.
 
-## Headless terrain bake (`bake_dump`)
+## Bakes: production vs preview
 
-`just bake <body>` runs a body's terrain compiler headlessly (no Bevy, no
-window) and writes cubemap layers as PNGs to `stage-bakes/<body>/`. Body
-name matching is case-insensitive; pass `all` to bake every body with a
-terrain block. This is Claude Code's primary visual-feedback loop for
-terrain work — read the PNGs directly as images to inspect output without
-launching the editor.
+The game **loads pre-baked terrain only** — it never compiles. Bakes live
+at `assets/baked/<body>.bin` (LFS-tracked) and are produced by either
+`just bake` (headless `bake_dump`) or the planet editor's Full button.
+Missing or stale bakes are fatal at startup for any procedural body
+(`TerrainConfig::Feature` / `Ocean`). Bodies without authored terrain
+(`TerrainConfig::None` or no `terrain` field) fall through to a
+solid-color impostor tinted with `body.color` — that lets release builds
+ship with un-authored bodies still rendering.
 
-**Outputs** (overwrites each run):
+### `just bake` — two modes
+
+**Default (full-res):**
+
+- Runs the compiler at the body's full authored / radius-derived resolution.
+- Writes the shipped bake `assets/baked/<body>.bin` (this is what `just game` loads).
+- Writes full-resolution equirect PNGs to `stage-bakes/<body>/full/`.
+- Slow — Thalos (3186 km, 4096² cubemap) takes several minutes.
+
+**Preview (`just bake <body> --preview`):**
+
+- 512² cubemap; PNG dumps only, **no shipped bake**.
+- Writes to `stage-bakes/<body>/preview/`.
+- Fast — primary visual-feedback loop for iteration on the compiler.
+- Doesn't touch `assets/baked/`, so iterating doesn't risk shipping an
+  under-resolved bake or invalidating the loaded one in `just game`.
+
+### PNG outputs (per run, overwrites)
+
 - `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection.
 - `height-equirect.png` — grayscale height normalized to the body's
   encoded ± range (range reported in `info.txt`).
 - `roughness-equirect.png` — grayscale roughness (R8Unorm).
 - `normal-equirect.png` — object-space normal map (RGBA8).
 - `info.txt` — range, resolution, route (Feature/Ocean/None), feature counts.
+- (Tectonic and debug overlays when `--debug` is passed or the body has tectonics.)
 
-**Workflow:** after touching the compiler, run `just bake <body>`, then
-`Read` the equirect PNG to check the result. Faster than the editor and
-doesn't need a display.
+### Workflow
+
+- **Iterating on the compiler:** `just bake <body> --preview`, then `Read`
+  the equirect PNG. No game launch needed, no display needed, fast loop.
+- **Producing a shipped bake:** `just bake <body>` (slow). Verifies the
+  full pipeline and produces the artifact the game will load.
+- **Hash invariant:** the cache key hashes the body config + a FNV walk of
+  `crates/terrain_gen/src/**`. Any source edit there moves the key, so
+  yesterday's shipped bake is detected as stale. Re-bake before `just game`.
+- **Up-to-date skip:** in production (non-`--preview`) mode, `just bake`
+  reads the stored key from `assets/baked/<body>.bin` via
+  `cache::peek_key` and skips recompile + PNG dump when the key already
+  matches. `just bake all` becomes a no-op when nothing's changed. Pass
+  `--force` to bypass and rebake unconditionally.
+- **Loading from the bake** is read-only: `crates/terrain_gen/src/cache.rs`
+  provides `load(path, key) -> Result<_, LoadError>` with explicit
+  `Missing` / `HashMismatch` / `Decode` variants, plus `peek_key(path)`
+  for fast staleness checks that avoid decompressing the full payload.
+  The game's spawn path panics on any `load` failure with a message
+  pointing back at `just bake`.
 
 ## Profiling
 
@@ -189,6 +231,15 @@ Key modules:
 - Semantic player input is read from `thalos_input::game::GameInputIntent`.
   Keep raw Bevy input only for cursor positions, picking spatial data, and UI
   internals. See `docs/input.md`.
+- `solar_system_state` — canonical game-level per-frame source for evaluated
+  solar-system state. `SimulationState` owns the long-lived simulation,
+  ephemeris, and authored system definition; `SolarSystemState` is refreshed
+  once per frame from it and owns the `BodyState` vector plus per-body
+  environment state (`DynamicSurfaceState`, cloud-band dynamics/phases, and
+  later wind, storms, tides, dune movement). Map, real-space, impostor,
+  terrain, halo/sky, and material systems are projections of this resource;
+  they may cache derived data but must not independently own body/environment
+  state.
 - `bridge` — Core adapter. Calls `Simulation::step()` each frame,
   recomputes trajectory prediction *synchronously* on the main thread
   when the cached plan is dirty/stale, syncs maneuver edits, handles
@@ -201,9 +252,11 @@ Key modules:
   state.
 - `rendering/` — Every system that turns simulation state into
   rendered geometry. Submodules:
-  - `types` — shared resources (`SimulationState`, `FrameBodyStates`,
-    `CameraExposure`) and components (`CelestialBody`, `PlayerShip`,
-    `PlanetMaterials`, `SolidPlanetMaterials`, etc.).
+  - `types` — rendering-shared resources (`CameraExposure`,
+    `PlanetshineTints`) and components (`CelestialBody`, `PlayerShip`,
+    `PlanetMaterials`, `SolidPlanetMaterials`, etc.). It re-exports
+    `SimulationState` / `SolarSystemState` for compatibility, but their
+    definitions live in `solar_system_state`.
   - `real_space` — BigSpace root and per-body real-space grids. The
     ship camera carries `FloatingOrigin`; UI and map entities stay
     outside the BigSpace hierarchy.
@@ -369,6 +422,8 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   → [parsing] SolarSystemDefinition (physical + orbit + TerrainConfig + TectonicConfig)
   → [PatchedConics] body positions at any epoch t
   → [Simulation::step] per frame → canonical CraftState + authority, consumes ManeuverNodes
+  → [solar_system_state::sync_solar_system_state] canonical per-frame BodyStates
+       + per-body environment state (dynamic surface, clouds; later wind/tides)
   → [propagate_flight_plan / propagate_branch_stack] synchronous prediction
        → FlightPlan / TrajectoryBranchStack (Actual + Projected branches)
   → [map_view] MapSnapshot → map rendering, maneuver UI, collision warnings
@@ -389,6 +444,12 @@ assets/solar_system.ron + assets/bodies/<body>.ron
 - **One craft state, one authority.** Each craft has one `CraftState`
   and one `AuthorityMode`; presentation code reads snapshots or
   accessors, not parallel transform-owned state.
+- **One solar-system state between projections.** `SolarSystemState` is the
+  frame-local source for evaluated `BodyState`s and mutable per-body
+  environment state. Render entities, map snapshots, impostor materials,
+  terrain grids, sky/halo passes, and future weather/tide/wind systems are
+  projections or mutators of this resource, not separate owners of equivalent
+  state.
 - **`BodyTrajectoryProvider` is the abstraction boundary.** Body
   positions are always queried through this trait. `PatchedConics`
   is the current impl; a precomputed ephemeris could replace it

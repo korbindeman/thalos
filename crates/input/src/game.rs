@@ -1,3 +1,4 @@
+use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
@@ -32,6 +33,10 @@ pub struct EscapeAction;
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct ScreenshotAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct ToggleFreeCamAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
@@ -141,6 +146,7 @@ pub struct PrecisionUltraAction;
 pub struct GameInputIntent {
     pub escape: bool,
     pub screenshot: bool,
+    pub toggle_free_cam: bool,
     pub toggle_sas: bool,
     pub warp_to_maneuver: bool,
     pub warp_pause: bool,
@@ -221,6 +227,11 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<ScreenshotAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.system.bindings("screenshot")),
+            ),
+            (
+                Action::<ToggleFreeCamAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.system.bindings("toggle_free_cam")),
             ),
         ]),
     ));
@@ -411,9 +422,11 @@ fn collect_system_intent(
     mut intent: ResMut<GameInputIntent>,
     escape: Query<(&Action<EscapeAction>, &ActionEvents)>,
     screenshot: Query<(&Action<ScreenshotAction>, &ActionEvents)>,
+    toggle_free_cam: Query<(&Action<ToggleFreeCamAction>, &ActionEvents)>,
 ) {
     intent.escape = started(&escape);
     intent.screenshot = started(&screenshot);
+    intent.toggle_free_cam = started(&toggle_free_cam);
 }
 
 fn collect_flight_toggle_intent(
@@ -492,12 +505,13 @@ fn collect_camera_intent(
     primary: Query<(&Action<CameraPrimaryAction>, &ActionEvents)>,
     motion: Query<&Action<CameraMotionAction>>,
     wheel: Query<&Action<CameraWheelAction>>,
+    scroll: Res<AccumulatedMouseScroll>,
 ) {
     intent.primary_pressed = held_with_events(&primary);
     intent.primary_started = started(&primary);
     intent.primary_released = completed(&primary);
     intent.camera_motion = vec2(&motion);
-    intent.camera_wheel = vec2(&wheel);
+    intent.camera_wheel = crate::camera_scroll_delta(vec2(&wheel), scroll.unit);
 }
 
 fn collect_maneuver_intent(

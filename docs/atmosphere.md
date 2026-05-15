@@ -6,19 +6,19 @@ clouds, ocean rendering, and image-based lighting (IBL / reflection
 probe).
 
 What runs today: gas-giant materials, a single-scattering Rayleigh +
-Mie atmosphere on terrestrial impostors, reference cloud-cover overlays
-with shader-side differential rotation, an in-impostor water BRDF,
-and a CPU-painted reflection probe. The terrestrial atmosphere is
-production-ready for orbital views; in-atmosphere flight is the
-remaining frontier.
+Mie atmosphere on terrestrial impostors and terrain LOD, reference
+cloud-cover overlays with shader-side differential rotation, an
+in-impostor water BRDF, and a CPU-painted reflection probe. The
+terrestrial atmosphere is production-ready for orbital views;
+in-atmosphere flight is the remaining frontier.
 
 ## Status
 
 | Area | Today | Future |
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
-| Rocky-body sky | **Rayleigh + Mie raymarch with multi-scatter LUT** (`atmosphere.wgsl::integrate_atmosphere`, `integrate_atmosphere_multiscatter`). Per-body β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. A 32×32 multi-scatter LUT (Hillaire 2020 §5.2, CPU-baked per body at spawn by `thalos_planet_lighting::bake_multi_scatter_lut`) supplies the second-order in-scatter term — required so the midday sky reads blue (not warm-residual) and reaches the luminance headroom needed to drown out stars perceptually. Sky pass also boosts alpha from local in-scatter luminance on sky-only pixels so bright sky crushes stars even where physical transmittance is high. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 LUTs once in-atmosphere flight justifies the precompute step; full geometric-series multi-scatter (currently one-bounce approx) if the one-bounce model proves too dim. |
-| Cloud rendering | Reference equirectangular cloud overlays projected into cubemaps, with shader-side differential rotation (16 latitude bands), shadow probe, and Beer-Lambert opacity. Bodies without a registered overlay bind a blank cube. Gas-giant cloud deck is part of the impostor. | Revisit procedural terrestrial clouds; volumetric layer for orbital cinematic moments; surface-shadow projection from clouds onto terrain LOD. |
+| Rocky-body sky | **Single-scattering Rayleigh + Mie raymarch** (`atmosphere.wgsl::integrate_atmosphere`). Per-body β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, and aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. The terrain `BodySky` pass and the impostor path both use this orbital model so the surface stays readable and haze concentrates toward the limb instead of washing the whole disk blue. Sky pixels still boost alpha from local in-scatter luminance so bright sky crushes stars where an observer's eye would adapt away from them. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 / Hillaire-style multi-scatter LUTs once in-atmosphere flight justifies the precompute step. |
+| Cloud rendering | Reference equirectangular cloud overlays projected into cubemaps, with shader-side differential rotation (16 latitude bands) and Beer-Lambert opacity. The impostor path also uses a shadow probe; the terrain path draws the same cube as a fixed-altitude shell in `BodySkyMaterial`, with terrain cloud shadows deferred. Bodies without a registered overlay bind a blank cube. Gas-giant cloud deck is part of the impostor. | Revisit procedural terrestrial clouds; volumetric layer for orbital cinematic moments; surface-shadow projection from clouds onto terrain LOD. |
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
@@ -111,13 +111,14 @@ produces the rim halo, the lit-disk haze, the terminator orange
 band, and the surface aerial perspective at every altitude from
 orbit to ground.
 
-### Architecture: one pass, three regimes
+### Architecture: shared optics, two render paths
 
 The atmosphere is a fullscreen quad per body (`BodySkyMaterial` in
 `crates/terrain/src/sky_material.rs`, shader at
-`crates/terrain/src/sky_dome.wgsl`). It renders in `Transparent3d`
-with `depth_compare = Always` so it rasterizes on every pixel, then
-clips the raymarch with two intersections:
+`crates/terrain/src/sky_dome.wgsl`) while the real terrain LOD is
+visible. It renders in `Transparent3d` with `depth_compare = Always`
+so it rasterizes on every pixel, then clips the raymarch with two
+intersections:
 
 - **Atmosphere shell** — `radius + karman_line_m`. Rays missing the
   shell `discard` (cheap early-out covers most off-body pixels).
@@ -126,21 +127,18 @@ clips the raymarch with two intersections:
   raymarch at terrain, the impostor body, the ship hull, or any
   other opaque geometry.
 
-Three viewing regimes fall out of one shader:
+The ship-view LOD split is:
 
-1. **Far** (impostor visible at > 4× radius). Most rays miss the
-   shell → `discard`. Rim pixels graze the shell → halo. Rays that
-   hit the impostor body get aerial perspective clipped at the body
-   surface depth.
-2. **Mid** (camera outside karman shell, terrain visible). Same
-   shader, slightly larger silhouette. The previous architecture had
-   a multi-million-metre "naked planet" gap here because the
-   impostor halo turned off at 4× radius and the sky dome only
-   spawned inside the karman shell; the always-on fullscreen pass
-   closes that gap by construction.
-3. **Near** (camera inside karman shell). Ray segments either
-   terminate at terrain (aerial perspective on terrain) or exit the
-   shell into the void (sky color).
+1. **Far** (impostor visible at ≥ 4× radius). The impostor shader
+   composites surface transmittance, in-scatter, and clouds inline;
+   its paired halo material draws the shell outside the solid sphere.
+2. **Mid** (camera outside karman shell, terrain visible). `BodySky`
+   is active even though the camera is in space, so terrain gets the
+   same in-front atmospheric haze and a fixed-altitude reference cloud
+   shell instead of a naked terrain disk with only a rim halo.
+3. **Near** (camera inside karman shell). `BodySky` ray segments
+   either terminate at terrain (aerial perspective on terrain) or exit
+   the shell into the void (sky color).
 
 ### Why this approach (not Bruneton)
 
@@ -173,6 +171,12 @@ prepass-depth texture is terrain-blind. The workaround lives in
   `@group(3) @binding(2)`; `sky_dome.wgsl` reads it via
   `textureLoad` and reconstructs view-space distance with
   `view.view_from_clip`.
+- The same material binds the reference cloud cubemap at bindings
+  `3/4`; the shader intersects a fixed-altitude cloud shell before
+  scene depth so terrain LOD receives the same detached cloud layer as
+  the impostor path. The cloud overlay is gated to body/terrain-hit
+  rays and faded in across the geometric horizon, avoiding a visible
+  fixed-altitude cloud-shell tangent band on sky-only pixels.
 - The ship camera carries `depth_texture_usages = RENDER_ATTACHMENT
   | COPY_SRC` so the copy is legal, plus `Msaa::Off` so source and
   destination sample counts match. The `ShipCamera` component is
@@ -233,13 +237,12 @@ line: Thalos 80 km, Pelagos 90 km, Vaelen 60 km.
 
 ### Backlog
 
-- **Strip impostor's vestigial atmosphere bake.** `planet_impostor.wgsl`
-  still calls `integrate_atmosphere` on its hit pixels and runs a
-  separate halo pass — both redundant with the unified fullscreen
-  pass and producing double-counted scattering at orbital distances.
-  Gate via a `UNIFIED_ATMOSPHERE` shader-def so the map-view
-  impostor (no fullscreen pass on `MAP_LAYER`) keeps its baked
-  atmosphere.
+- **Unify impostor and terrain cloud shadows.** `planet_impostor.wgsl`
+  still owns the full surface-side cloud composite, including the
+  shadow probe and water BRDF. `BodySkyMaterial` now matches the
+  visible cloud layer for terrain LOD, but terrain cloud shadows are
+  still deferred until the ground path has an explicit receiver-side
+  shadow term.
 - **MSAA path.** Currently `Msaa::Off` on the ship camera —
   `copy_texture_to_texture` requires matching sample counts, and
   binding a multisampled depth as `texture_depth_2d` would force

@@ -84,11 +84,8 @@ impl CullingBindGroup {
         );
 
         let layout = pipeline_cache.get_bind_group_layout(&culling_layout_descriptor());
-        let bind_group = device.create_bind_group(
-            None,
-            &layout,
-            &BindGroupEntries::single(&culling_buffer),
-        );
+        let bind_group =
+            device.create_bind_group(None, &layout, &BindGroupEntries::single(&culling_buffer));
 
         Self(bind_group)
     }

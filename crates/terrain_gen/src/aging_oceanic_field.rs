@@ -1052,7 +1052,14 @@ impl AgingOceanicField {
         let desert_shape = smoothstep(0.42, 0.80, dry_lobes + interior * 0.22);
         let forest_shape = smoothstep(0.28, 0.78, wet_lobes + coastal * 0.16);
         let slope_t = smoothstep(0.005, 0.020, slope);
-        let altitude_gate = smoothstep(850.0, 1550.0, relative_height_m);
+        // Used to gate slope→rock weighting at > 850 m elevation; was
+        // correct when the cubemap only had continental relief and
+        // there were no real slopes at low elevations to read as rock
+        // anyway. With mid-freq + erosion in the cubemap, slopes exist
+        // at every elevation — drainage cuts, ridge structures, eroded
+        // hills — and gating high suppresses rock biome where it
+        // should appear. Drop the gate to "any land elevation".
+        let altitude_gate = smoothstep(-50.0, 200.0, relative_height_m);
 
         let forest_w = sharpen_biome_weight(
             smoothstep(0.48, 0.78, moisture)
@@ -1299,7 +1306,14 @@ impl AgingOceanicField {
         let desert_shape = smoothstep(0.42, 0.80, dry_lobes + interior * 0.22);
         let forest_shape = smoothstep(0.28, 0.78, wet_lobes + coastal * 0.16);
         let slope_t = smoothstep(0.005, 0.020, slope);
-        let altitude_gate = smoothstep(850.0, 1550.0, relative_height_m);
+        // Used to gate slope→rock weighting at > 850 m elevation; was
+        // correct when the cubemap only had continental relief and
+        // there were no real slopes at low elevations to read as rock
+        // anyway. With mid-freq + erosion in the cubemap, slopes exist
+        // at every elevation — drainage cuts, ridge structures, eroded
+        // hills — and gating high suppresses rock biome where it
+        // should appear. Drop the gate to "any land elevation".
+        let altitude_gate = smoothstep(-50.0, 200.0, relative_height_m);
 
         let forest_w = sharpen_biome_weight(
             smoothstep(0.30, 0.66, moisture)
