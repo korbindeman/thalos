@@ -21,6 +21,10 @@ pub struct HudTheme {
     pub text_label_alt: Color,
     /// Muted metal subtitle colour used for panel sub-labels (e.g. "ORBITAL").
     pub text_subtitle: Color,
+    /// Cool blue used for the SEA altitude datum label.
+    pub text_datum_sea: Color,
+    /// Warm earth tone used for the GND altitude datum label.
+    pub text_datum_gnd: Color,
 }
 
 pub fn init_theme(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -35,6 +39,8 @@ pub fn init_theme(mut commands: Commands, asset_server: Res<AssetServer>) {
         text_warn: Color::srgba(0.95, 0.42, 0.26, 1.0),
         text_label_alt: Color::srgba(0.88, 0.43, 0.30, 1.0),
         text_subtitle: Color::srgba(0.66, 0.68, 0.60, 1.0),
+        text_datum_sea: Color::srgba(0.42, 0.74, 0.88, 1.0),
+        text_datum_gnd: Color::srgba(0.86, 0.62, 0.32, 1.0),
     });
 }
 

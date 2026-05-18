@@ -197,7 +197,7 @@ pub(in crate::maneuver) fn maneuver_input(
                         // would otherwise resolve onto a different leg.
                         let body = sim.ephemeris.state(
                             closest.anchor_body,
-                            thalos_physics::canonical::Epoch(closest.time),
+                            thalos_physics_canonical::canonical::Epoch(closest.time),
                         );
                         let frame = orbital_frame_mat3(
                             closest.sample_position,

@@ -21,7 +21,7 @@ use bevy::math::Vec3;
 use bytemuck::{Pod, Zeroable};
 
 /// A discrete mid-frequency crater feature. Mirrors `Crater` in
-/// `thalos_terrain_gen::types` but with a fixed GPU-compatible layout.
+/// `thalos_terrain::types` but with a fixed GPU-compatible layout.
 ///
 /// WGSL layout (std430):
 /// ```wgsl

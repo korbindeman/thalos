@@ -12,12 +12,13 @@
 
 mod body_lod;
 mod generation;
-mod ground_terrain;
+pub(crate) mod ground_terrain;
 mod lighting;
 mod materials;
 pub(crate) mod real_space;
 mod scene_depth;
 mod spawn;
+mod terrain_residency;
 mod trails;
 mod transforms;
 mod types;
@@ -39,6 +40,7 @@ use real_space::{
 };
 use scene_depth::{SceneDepthPlugin, setup_scene_depth_image};
 use spawn::spawn_bodies;
+use terrain_residency::TerrainResidencyPlugin;
 use trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_planet_orientations, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
@@ -71,11 +73,13 @@ pub struct RenderingPlugin;
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(SceneDepthPlugin)
+            .add_plugins(TerrainResidencyPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())
             .insert_resource(PlanetshineTints::default())
             .insert_resource(CameraExposure::default())
+            .register_type::<CameraExposure>()
             .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()
             .init_resource::<PendingPlanetInstalls>()

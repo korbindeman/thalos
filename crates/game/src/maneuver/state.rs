@@ -1,6 +1,6 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::types::{BodyId, StateVector, TrajectorySample};
+use thalos_physics_canonical::types::{BodyId, StateVector, TrajectorySample};
 
 /// Unique identifier for a game-side maneuver node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -8,11 +8,13 @@
 //! Serialization goes through a flat `ShipBlueprint` struct so that the ECS
 //! representation stays query-friendly while the on-disk format stays stable.
 
+use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 
 pub mod attach;
 pub mod blueprint;
 pub mod catalog;
+pub mod material;
 pub mod part;
 pub mod recompute;
 pub mod resource;
@@ -25,6 +27,7 @@ pub use catalog::{
     AdapterSpec, CatalogEntry, CatalogError, CatalogId, CatalogRef, DecouplerSpec,
     EngineOptimization, EngineSpec, PartCatalog, PodSpec, TankSpec,
 };
+pub use material::{ShipPartExtension, ShipPartMaterial, ShipPartParams, stainless_steel_base};
 pub use part::{
     Adapter, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust, EngineValidationError,
     FuelCrossfeed, FuelTank, MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel,
@@ -40,17 +43,18 @@ pub struct ShipyardPlugin;
 
 impl Plugin for ShipyardPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                sizing::propagate_node_sizes,
-                // Catalog-driven mass + capacity recompute. Run after
-                // sizing so a parent-diameter propagation that mutates
-                // a child's `diameter` lands in the same frame.
-                recompute::recompute_decoupler_state.after(sizing::propagate_node_sizes),
-                recompute::recompute_adapter_state.after(sizing::propagate_node_sizes),
-                recompute::recompute_tank_state.after(sizing::propagate_node_sizes),
-            ),
-        );
+        app.add_plugins(MaterialPlugin::<ShipPartMaterial>::default())
+            .add_systems(
+                Update,
+                (
+                    sizing::propagate_node_sizes,
+                    // Catalog-driven mass + capacity recompute. Run after
+                    // sizing so a parent-diameter propagation that mutates
+                    // a child's `diameter` lands in the same frame.
+                    recompute::recompute_decoupler_state.after(sizing::propagate_node_sizes),
+                    recompute::recompute_adapter_state.after(sizing::propagate_node_sizes),
+                    recompute::recompute_tank_state.after(sizing::propagate_node_sizes),
+                ),
+            );
     }
 }

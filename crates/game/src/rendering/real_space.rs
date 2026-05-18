@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use big_space::prelude::*;
-use thalos_physics::types::BodyState;
+use thalos_physics_canonical::types::BodyState;
 
 use super::transforms::surface_body_to_world_orientation;
 use super::types::{PlayerShip, RealSpaceBody, SolarSystemState, TidallyLocked};
@@ -113,10 +113,10 @@ fn write_body_transform(
 #[cfg(test)]
 mod tests {
     use bevy::math::{DQuat, DVec3};
-    use thalos_physics::body_trajectory_provider::BodyTrajectoryProvider;
-    use thalos_physics::canonical::Epoch;
-    use thalos_physics::parsing::load_solar_system_from_dir;
-    use thalos_physics::patched_conics::PatchedConics;
+    use thalos_physics_canonical::body_trajectory_provider::BodyTrajectoryProvider;
+    use thalos_physics_canonical::canonical::Epoch;
+    use thalos_physics_canonical::parsing::load_solar_system_from_dir;
+    use thalos_physics_canonical::patched_conics::PatchedConics;
 
     use super::*;
 

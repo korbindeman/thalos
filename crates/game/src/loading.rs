@@ -33,6 +33,16 @@ pub enum AppState {
 /// `completed` is incremented by `rendering::generation::
 /// poll_planet_install_tasks` each time an install finishes on the main
 /// thread.
+///
+/// The transition to `AppState::Running` also waits on
+/// `initial_terrain_done`. Bake installation only spawns each body's
+/// impostor; the ground-LOD terrain entity (the thing the player
+/// actually stands on) is spawned lazily by
+/// `rendering::terrain_residency`. Holding the loading screen until
+/// that residency has fired ensures the player's first frame in
+/// `Running` already has a `BodyTerrain` under their feet, so the
+/// visibility-swap system at `4 × radius` does not briefly fall back
+/// to the flat impostor billboard.
 #[derive(Resource, Default)]
 pub struct LoadingProgress {
     pub total: usize,
@@ -41,6 +51,10 @@ pub struct LoadingProgress {
     /// state transition needs this so it does not fire on frame 0 when
     /// `total == completed == 0` is the trivially-satisfied initial state.
     pub seeded: bool,
+    /// `true` once the initial-wanted bodies in `BodyTerrainResidency`
+    /// have terrain entities spawned (or have no authored terrain).
+    /// Flipped by `terrain_residency::initial_residency_loading_gate`.
+    pub initial_terrain_done: bool,
     /// Human-readable line under the progress bar — the most recently
     /// installed body's name.
     pub label: String,
@@ -209,8 +223,12 @@ fn update_loading_progress_ui(
 fn advance_to_running(progress: Res<LoadingProgress>, mut next_state: ResMut<NextState<AppState>>) {
     // Wait for `spawn_bodies` to have seeded the totals — otherwise the
     // first frame's trivially-satisfied `0 >= 0` would fire the
-    // transition before any work has started.
-    if progress.seeded && progress.completed >= progress.total {
+    // transition before any work has started. Also wait for the initial
+    // residency planner pass to spawn the ground-LOD terrain entity for
+    // the body the player is starting on; otherwise the first `Running`
+    // frame falls back to the flat impostor billboard until the lazy
+    // residency executor catches up.
+    if progress.seeded && progress.completed >= progress.total && progress.initial_terrain_done {
         next_state.set(AppState::Running);
     }
 }

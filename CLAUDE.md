@@ -15,7 +15,7 @@ just game                 # cargo run -p thalos_game
 just edit <body>          # cargo run -p thalos_planet_editor -- <body>
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
-just test                 # cargo test -p thalos_physics
+just test                 # cargo test -p thalos_physics_canonical
 just clippy               # cargo clippy --workspace
 just trace                # cargo run --release -p thalos_game --features profile-tracy
 just bake Thalos          # full-res local bake → target/bakes/Thalos.bin
@@ -27,9 +27,10 @@ just bake all             # bake every body with a terrain block
                           #    already current; add --force to rebake)
 just clear-terrain-cache  # wipe target/terrain_cache/ (editor only — game and
                           # `just bake` no longer use this directory)
+just release patch        # bump version, commit, tag, and push (patch|minor|major|x.y.z)
 
 # Run a single test
-cargo test -p thalos_physics -- test_name
+cargo test -p thalos_physics_canonical -- test_name
 ```
 
 ## Toolchain
@@ -49,7 +50,7 @@ flags. Keep that opt-in local so Windows and Linux continue to use LLVM.
 Planet generation is in an iterative development phase. Do not add or run
 planet/terrain generation tests for now, including per-body generation
 tests. This applies anywhere a test compiles or validates generated planet
-data, even outside `thalos_terrain_gen`; these tests slow down the visual
+data, even outside `thalos_terrain`; these tests slow down the visual
 iteration loop. Use `just bake <body> --preview` (see below) for visual
 feedback instead.
 
@@ -60,11 +61,16 @@ at `target/bakes/<body>.bin` and are produced locally by either
 `just bake` (headless `bake_dump`) or the planet editor's Full button.
 Bakes are developer-local build artifacts: they are ignored by Git, are not
 tracked with Git LFS, and are not the distribution path for release assets.
-Missing or stale bakes are fatal at startup for any procedural body
-(`TerrainConfig::Feature` / `Ocean`). Bodies without authored terrain
-(`TerrainConfig::None` or no `terrain` field) fall through to a
-solid-color impostor tinted with `body.color` — that lets release builds
-ship with un-authored bodies still rendering.
+Missing or stale bakes are auto-repaired at startup: `crates/game/src/bake_check.rs`
+runs a `peek_key`-only pre-flight against every procedural body and, on
+any mismatch, shells out to `cargo run --quiet --release -p thalos_bake_dump -- all`
+(inherits stdio so the indicatif progress bars render normally) before
+launching Bevy. The game still panics if a bake is somehow invalid
+*after* auto-repair, which would indicate a bake_dump bug worth
+surfacing. Bodies without authored terrain (`TerrainConfig::None` or no
+`terrain` field) fall through to a solid-color impostor tinted with
+`body.color`, so release builds ship with un-authored bodies still
+rendering.
 
 ### `just bake` — two modes
 
@@ -100,25 +106,42 @@ ship with un-authored bodies still rendering.
 - **Producing a local game bake:** `just bake <body>` (slow). Verifies the
   full pipeline and produces the artifact your local game will load.
 - **Hash invariant:** the cache key hashes the body config + a FNV walk of
-  `crates/terrain_gen/src/**`. Any source edit there moves the key, so
+  `crates/terrain/src/**`. Any source edit there moves the key, so
   yesterday's local bake is detected as stale. Re-bake before `just game`.
 - **Up-to-date skip:** in production (non-`--preview`) mode, `just bake`
   reads the stored key from `target/bakes/<body>.bin` via
   `cache::peek_key` and skips recompile + PNG dump when the key already
   matches. `just bake all` becomes a no-op when nothing's changed. Pass
   `--force` to bypass and rebake unconditionally.
-- **Loading from the bake** is read-only: `crates/terrain_gen/src/cache.rs`
+- **Loading from the bake** is read-only: `crates/terrain/src/cache.rs`
   provides `load(path, key) -> Result<_, LoadError>` with explicit
   `Missing` / `HashMismatch` / `Decode` variants, plus `peek_key(path)`
   for fast staleness checks that avoid decompressing the full payload.
-  The game's spawn path panics on any `load` failure with a message
-  pointing back at `just bake`.
+  `crates/game/src/bake_check.rs` uses `peek_key` as a startup
+  pre-flight and auto-bakes any mismatch via `thalos_bake_dump`
+  before Bevy boots; the spawn-path `load` panics remain as
+  defense-in-depth assertions that should be unreachable in practice.
 - **Erosion shader source:** `thalos_bake_dump` depends on
   `bevy_erosion_filter` 0.1.2 from crates.io and imports the WGSL source
   via the crate's public `EROSION_WGSL` constant (works with
   `default-features = false`, no Bevy pull-in). Do not restore the old
   sibling-checkout `../../../../bevy_erosion_filter/...` include or the
   prior `build.rs` registry-source lookup. See `docs/tooling.md`.
+
+## Agent-driven inspection (bevy_brp)
+
+`just game` always exposes Bevy's Remote Protocol on `localhost:15702`
+via `BrpExtrasPlugin`. A project-local `.mcp.json` wires
+`bevy_brp_mcp` (install once with `cargo install bevy_brp_mcp`) as an
+MCP server, so an agent can query/mutate live ECS state, watch
+components, screenshot, send key/mouse input, and read FPS without
+restarting the game.
+
+Only `Reflect`-registered types are visible to BRP. Keep the set
+small and grow on demand — see `docs/tooling.md` for the registration
+policy and the canonical→Bevy mirror pattern used at the bridge
+(`CraftStateMirror`). Do not derive `Reflect` in `thalos_physics_canonical`;
+mirror into a Bevy-side resource at the bridge instead.
 
 ## Profiling
 
@@ -149,29 +172,29 @@ name, and prints a top-N table to identify hot spots. Custom
 Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 (edition 2024, Bevy 0.18, glam 0.30). Workspace crates:
 
-- **`thalos_physics`** — pure Rust library, zero Bevy dependency, fully testable in isolation
+- **`thalos_physics_canonical`** — pure Rust library, zero Bevy dependency, fully testable in isolation
 - **`thalos_input`** — Bevy enhanced-input contexts, RON binding loader, and per-binary input intent resources
 - **`thalos_game`** — Bevy consumer of physics + terrain outputs
-- **`thalos_terrain_gen`** — procedural terrain generation pipeline (no Bevy dependency)
-- **`thalos_atmosphere_gen`** — gas giant atmosphere definitions (cloud decks, hazes, rings; no Bevy dependency)
+- **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
+- **`thalos_atmosphere`** — gas giant atmosphere definitions (cloud decks, hazes, rings; no Bevy dependency)
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
-- **`thalos_local_physics`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`.
-- **`thalos_planet_lighting`** — shared planet lighting types (`SceneLighting`, `StarLight`, `AtmosphereBlock`, `CLOUD_BAND_COUNT`) + WGSL libraries (`thalos::lighting`, `thalos::atmosphere`) + the Hapke surface shading helper (`shade_hapke_surface`). Both `thalos_planet_rendering` and `thalos_terrain` depend on it.
+- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`.
+- **`thalos_planet_lighting`** — shared planet lighting types (`SceneLighting`, `StarLight`, `AtmosphereBlock`, `CLOUD_BAND_COUNT`) + WGSL libraries (`thalos::lighting`, `thalos::atmosphere`) + the Hapke surface shading helper (`shade_hapke_surface`). Both `thalos_planet_rendering` and `thalos_terrain_render` depend on it.
 - **`thalos_planet_rendering`** — Bevy materials for planets, gas giants, rings, solid bodies
 - **`thalos_planet_editor`** — interactive planet editor tool
-- **`bevy_terrain`** — vendored UDLOD terrain renderer (forked from `kurtkuehnert/bevy_terrain`, lives at `crates/bevy_terrain/`). Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here.
-- **`thalos_terrain`** — Bevy integration of the in-tree `bevy_terrain` UDLOD renderer; ships `ThalosTerrainPlugin`, `PipelineTileProvider`, and rendered-height terrain patch utilities used by M5 colliders
+- **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
+- **`thalos_terrain_render`** — Bevy integration of the in-tree `thalos_udlod` UDLOD renderer; ships `ThalosTerrainPlugin`, `PipelineTileProvider`, and rendered-height terrain patch utilities used by M5 colliders
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
 
-Core separation: `physics`, `terrain_gen`, `atmosphere_gen`, and `celestial`
+Core separation: `physics`, `terrain`, `atmosphere`, and `celestial`
 are pure Rust libraries; `input`, `game`, `planet_lighting`,
-`planet_rendering`, `terrain`, `local_physics`, `planet_editor`, and
+`planet_rendering`, `terrain_render`, `physics_local`, `planet_editor`, and
 `shipyard` are Bevy consumers. `planet_lighting` sits below
 `planet_rendering` and `terrain` so both render paths share one source
 of truth for `SceneLighting`, `AtmosphereBlock`, and the surface BRDF;
 no field-by-field mirror types between crates. Avian lives behind
-`thalos_local_physics`; do not add Avian to `thalos_physics`.
+`thalos_physics_local`; do not add Avian to `thalos_physics_canonical`.
 Semantic input for the Bevy binaries flows through `thalos_input`
 contexts and intent resources, with checked-in defaults at
 `assets/input.ron`.
@@ -236,6 +259,21 @@ Key modules:
 
 ### Game crate (`crates/game/`)
 
+- **Default spawn = EVA on Thalos surface.** KSP-style: the canonical
+  `CraftState` is the player on foot, tagged `VesselKind::Eva` with
+  `ShipParameters::eva()` (90 kg, no thrust, no torque). `main.rs`
+  places the player ~500 m above the body radius at a fixed body-fixed
+  direction; `local_physics::spawn_player_avian_body` branches on
+  `VesselKind` to spawn a 1.8 m capsule (rotation-locked, walking
+  friction) with both `LocalCraftBody` and `PlayerControllerBody` on
+  the same entity. `apply_local_forces`, `snap_avian_from_canonical`,
+  and the snap side of `readback_local_craft` short-circuit for EVA —
+  the controller systems in `player_controller.rs` own gravity,
+  walking velocity, and the canonical readback. `ship_view::spawn_player_ship`
+  early-returns in EVA mode (no rocket loaded). Re-boarding a ship is
+  not implemented yet; the `toggle_player_controller` input is unwired.
+  Switch defaults by setting `VesselKind::Ship` and orbital `ship_state`
+  in `main.rs`.
 - Semantic player input is read from `thalos_input::game::GameInputIntent`.
   Keep raw Bevy input only for cursor positions, picking spatial data, and UI
   internals. See `docs/input.md`.
@@ -312,7 +350,7 @@ Systems run in `SimStage` order: `Physics → Sync → Camera`
 frame. Enhanced input intent collection runs in `PreUpdate` before these
 sets.
 
-### Terrain gen crate (`crates/terrain_gen/`)
+### Terrain gen crate (`crates/terrain/`)
 
 Cubemap-based procedural surface generation. No Bevy dependency.
 
@@ -387,7 +425,7 @@ materials.
   (Rayleigh + Mie + cloud bands + Minnaert limb).
 - `shaders/lighting.wgsl` — WGSL mirror of `SceneLighting` plus the
   `eclipse_factor`, `planetshine_sample`, `hapke_brdf`, and
-  `shade_hapke_surface` helpers. Both the impostor and the bevy_terrain
+  `shade_hapke_surface` helpers. Both the impostor and the thalos_udlod
   ground LOD route through the same `shade_hapke_surface` function so
   shading matches across the LOD swap.
 - `shaders/atmosphere.wgsl` — WGSL mirror of `AtmosphereBlock`,
@@ -412,7 +450,7 @@ Thin Bevy rendering layer. No generation logic.
   `assets/shaders/gas_giant.wgsl`.
 - `RingMaterial` — ring system rendering. Uses
   `assets/shaders/ring.wgsl`.
-- `bake_from_body_data()` — consumes `terrain_gen::PlanetSurface` →
+- `bake_from_body_data()` — consumes `terrain::PlanetSurface` →
   `PlanetTextures` for upload into a `PlanetMaterial`.
 
 ### Planet editor (`crates/planet_editor/`)
@@ -437,7 +475,7 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   → [map_view] MapSnapshot → map rendering, maneuver UI, collision warnings
   → [rendering::real_space] BigSpace grids → ship-view body / camera transforms
 
-[terrain_gen::compile_terrain_config]
+[terrain::compile_terrain_config]
   → PlanetSurface { static_surface, dynamic_layers, tectonics }
   → [planet_rendering::bake_from_body_data] PlanetTextures
   → PlanetMaterial uploaded to GPU; impostor billboard renders
@@ -463,7 +501,7 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   is the current impl; a precomputed ephemeris could replace it
   without touching simulation or rendering.
 - **Physics crate has no Bevy.** All physics logic must remain in
-  `thalos_physics`. `thalos_game` is only presentation and input.
+  `thalos_physics_canonical`. `thalos_game` is only presentation and input.
 - **Map view is decoupled.** Map systems read `MapSnapshot`, projected
   body states, and trajectories. They do not share or mutate
   real-space rendering entities.

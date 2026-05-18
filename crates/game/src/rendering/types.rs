@@ -42,7 +42,8 @@ pub struct PlanetshineTints {
 /// shader is `exposure.gain = focus_d / 1 AU`. Combined with the raw
 /// `(AU/body_d)^2` falloff baked into `update_planet_light_dirs`, this
 /// yields the focus-relative display flux above.
-#[derive(Resource, Default, Clone, Copy, Debug)]
+#[derive(Resource, Reflect, Default, Clone, Copy, Debug)]
+#[reflect(Resource)]
 pub struct CameraExposure {
     /// Camera focus body's distance from the star, in meters.
     pub focus_dist_m: f64,

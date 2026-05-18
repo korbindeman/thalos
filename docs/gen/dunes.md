@@ -124,7 +124,7 @@ This already gives smoothly varying, latitude-dependent prevailing winds with th
 
 Two viable approaches, both common in real engines:
 
-**(i) Solid noise in 3-D** — sample 3-D simplex/Worley/Gabor at the *world position* `p` (or `p · R_planet`). No UV unwrapping, no seams. This is what `bevy_terrain` and most planet-shader projects do. Drawback: 3-D Gabor noise is more expensive than 2-D, and it's harder to align kernels to a 2-D wind vector. **Solution:** for the asymmetric-ridge step, project locally into the tangent plane (using `east`/`north` from §C.1), evaluate a 2-D oriented noise in the tangent plane parameterization, then add to the height. This is exactly Lagae's "setup-free surface noise" idea (Gabor surface noise) — locally evaluate 2-D noise in the tangent frame.
+**(i) Solid noise in 3-D** — sample 3-D simplex/Worley/Gabor at the *world position* `p` (or `p · R_planet`). No UV unwrapping, no seams. This is what `thalos_udlod` and most planet-shader projects do. Drawback: 3-D Gabor noise is more expensive than 2-D, and it's harder to align kernels to a 2-D wind vector. **Solution:** for the asymmetric-ridge step, project locally into the tangent plane (using `east`/`north` from §C.1), evaluate a 2-D oriented noise in the tangent plane parameterization, then add to the height. This is exactly Lagae's "setup-free surface noise" idea (Gabor surface noise) — locally evaluate 2-D noise in the tangent frame.
 
 **(ii) Cube-sphere face-local UVs** — bake/evaluate per-face. Works but introduces seams across cube edges, which is exactly where dunes look terrible. Not recommended.
 

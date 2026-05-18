@@ -30,7 +30,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-use thalos_atmosphere_gen::RingSystem;
+use thalos_atmosphere::RingSystem;
 
 use thalos_planet_lighting::SceneLighting;
 

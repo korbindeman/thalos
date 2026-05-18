@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-thalos_physics = { path = "../physics" }
+thalos_physics_canonical = { path = "../physics_canonical" }
 thalos_input = { path = "../input" }
-thalos_terrain_gen = { path = "../terrain_gen" }
+thalos_terrain = { path = "../terrain" }
 thalos_planet_rendering = { path = "../planet_rendering" }
 thalos_celestial = { path = "../celestial" }
 bevy = { version = "0.18", features = ["wayland", "jpeg"] }

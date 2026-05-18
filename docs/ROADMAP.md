@@ -84,7 +84,7 @@ from orbit.
 
 ### M3 — Ground LOD rendering
 
-Surface-scale rendering of the four main bodies. The `bevy_terrain`
+Surface-scale rendering of the four main bodies. The `thalos_udlod`
 fork is already done (Bevy 0.18 port + `TileProvider` trait added,
 lives at `~/dev/bevy_terrain`); M3 is wiring it into the Thalos
 workspace, implementing `PipelineTileProvider` against the revamped
@@ -140,7 +140,9 @@ local-rigidbody / body-fixed / docked.
   joints, docking, debris, rover wheels, and save/load persistence of
   live local rigidbody state.
 - **Spec preview:** [simulation.md](simulation.md), Implementation
-  Phases 4, 5, 7.
+  Phases 4, 5, 7. On-foot / EVA surface gameplay is specced in
+  [surface_gameplay.md](surface_gameplay.md), which extends M5's
+  authority + height-source machinery to the player-character case.
 
 ### M6 — Aero regime, warp force integration, advanced ships
 
@@ -192,6 +194,7 @@ M1 and M2 can run in parallel; both feed M3.
 | Terrain generation + ground LOD | [terrain.md](terrain.md) | M2, M3 | — |
 | Atmospheres, oceans, IBL | [atmosphere.md](atmosphere.md) | M4 | — |
 | Celestial sky | [celestial.md](celestial.md) | (done) | — |
+| Surface gameplay (on-foot, BodyFixed, height source) | [surface_gameplay.md](surface_gameplay.md) | M5 | M6, M8 |
 
 Lore: [lore/solar_system.md](lore/solar_system.md),
 [lore/civilization.md](lore/civilization.md).

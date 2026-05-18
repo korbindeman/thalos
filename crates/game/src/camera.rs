@@ -5,11 +5,18 @@ use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy_egui::EguiContexts;
 use big_space::prelude::CellCoord;
 use thalos_input::game::GameInputIntent;
-use thalos_local_physics::TerrainSurfaceRegistry;
-use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyState};
+use thalos_physics_local::TerrainSurfaceRegistry;
 use thalos_planet_rendering::space_camera_post_stack;
-use thalos_terrain::rendered_height_m;
-use thalos_terrain_gen::StaticSurfaceData;
+use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_terrain_render::rendered_height_m;
+
+/// `tile_lod_m` passed to `rendered_height_m` for the camera boom's
+/// ray-vs-terrain check. The boom rarely runs in tight sub-metre proximity
+/// to the ground, so 1 m is a sensible LOD floor — it engages the same
+/// 5-octave detail as the renderer at fine LOD without paying for sub-metre
+/// over-sampling.
+const CAMERA_HEIGHT_QUERY_TILE_LOD_M: f32 = 1.0;
 
 use crate::coords::{MAP_LAYER, RenderGhostFocus, SHIP_LAYER};
 use crate::freecam::FreeCam;
@@ -541,10 +548,12 @@ pub fn camera_input_system(
 /// change at every scale — zooming from 1 AU to 0.5 AU feels the same as
 /// zooming from 1000 km to 500 km.
 fn camera_zoom_interpolation_system(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     view: Res<ViewMode>,
     mut focus: ResMut<CameraFocus>,
 ) {
+    // Wall-clock so smoothing continues under sim pause (Time<Virtual>
+    // pause); the camera is a view affordance, not part of the sim.
     let dt = time.delta_secs_f64();
     let log_current = focus.distance.ln();
     let log_target = focus.target_distance.ln();
@@ -600,11 +609,12 @@ fn camera_min_distance_system(
 /// Fixed duration (rather than an exponential decay) means near and
 /// distant focus switches feel equally responsive: a Sun↔Acheron jump
 /// completes in the same 0.8 s as a Moon↔Earth jump.
-fn camera_focus_transition_system(time: Res<Time>, mut focus: ResMut<CameraFocus>) {
+fn camera_focus_transition_system(time: Res<Time<Real>>, mut focus: ResMut<CameraFocus>) {
     if focus.transition_origin_start.is_none() {
         return;
     }
 
+    // Wall-clock so the focus lerp completes during sim pause.
     focus.transition_elapsed_s += time.delta_secs_f64();
     if focus.transition_elapsed_s >= FOCUS_TRANSITION_DURATION_S {
         focus.transition_origin_start = None;
@@ -650,9 +660,19 @@ struct TerrainClearance {
     surface_radius_m: f64,
 }
 
-fn blocking_surface_height_m(surface: &StaticSurfaceData, dir_body: Vec3) -> f64 {
-    let terrain_height_m = rendered_height_m(surface, dir_body) as f64;
+fn blocking_surface_height_m(
+    surface: &PlanetSurface,
+    dynamic_state: &DynamicSurfaceState,
+    dir_body: Vec3,
+) -> f64 {
+    let terrain_height_m = rendered_height_m(
+        surface,
+        dynamic_state,
+        dir_body,
+        CAMERA_HEIGHT_QUERY_TILE_LOD_M,
+    ) as f64;
     surface
+        .static_surface
         .sea_level_m
         .map(|sea_level_m| terrain_height_m.max(sea_level_m as f64))
         .unwrap_or(terrain_height_m)
@@ -662,7 +682,7 @@ fn terrain_clearance_at_physics_pos(
     body_position: DVec3,
     body_inv_orientation: DQuat,
     body_radius_m: f64,
-    surface: Option<&StaticSurfaceData>,
+    surface: Option<(&PlanetSurface, &DynamicSurfaceState)>,
     position: DVec3,
 ) -> Option<TerrainClearance> {
     let from_body = position - body_position;
@@ -680,7 +700,7 @@ fn terrain_clearance_at_physics_pos(
     }
 
     let surface_height_m = surface
-        .map(|surface| blocking_surface_height_m(surface, dir_body))
+        .map(|(surface, dynamic_state)| blocking_surface_height_m(surface, dynamic_state, dir_body))
         .unwrap_or(0.0);
     let surface_radius_m = body_radius_m + surface_height_m;
     Some(TerrainClearance {
@@ -694,7 +714,7 @@ fn clamp_physics_pos_above_terrain(
     body_position: DVec3,
     body_inv_orientation: DQuat,
     body_radius_m: f64,
-    surface: Option<&StaticSurfaceData>,
+    surface: Option<(&PlanetSurface, &DynamicSurfaceState)>,
     position: DVec3,
 ) -> Option<DVec3> {
     let clearance = terrain_clearance_at_physics_pos(
@@ -735,6 +755,9 @@ fn clamp_camera_position_above_body_terrain(
 
     let states = body_states.states.as_deref()?;
     let surface = surfaces.get(body_id);
+    let dynamic_state = surface
+        .as_ref()
+        .map(|surface| body_states.dynamic_surface_for(body_id, surface));
     let body = &sim.system.bodies[body_id];
     let body_state = states.get(body_id)?;
 
@@ -744,7 +767,7 @@ fn clamp_camera_position_above_body_terrain(
         body_state.position,
         body_state.orientation.inverse(),
         body.radius_m,
-        surface.as_ref().map(|surface| &surface.static_surface),
+        surface.as_deref().zip(dynamic_state.as_ref()),
         camera_physics_pos,
     )?;
 
@@ -782,6 +805,9 @@ fn camera_boom_collision_length_m(
 
     let states = body_states.states.as_deref()?;
     let surface = surfaces.get(body_id);
+    let dynamic_state = surface
+        .as_ref()
+        .map(|surface| body_states.dynamic_surface_for(body_id, surface));
     let body = &sim.system.bodies[body_id];
     let body_state = states.get(body_id)?;
 
@@ -791,13 +817,15 @@ fn camera_boom_collision_length_m(
     }
     let body_inv = body_state.orientation.inverse();
 
+    let surface_with_state = surface.as_deref().zip(dynamic_state.as_ref());
+
     // AGL of the point `t` of the way from target to camera. Negative = inside terrain.
     let agl = |t: f64| -> f64 {
         terrain_clearance_at_physics_pos(
             body_state.position,
             body_inv,
             body.radius_m,
-            surface.as_ref().map(|surface| &surface.static_surface),
+            surface_with_state,
             target_physics_pos + camera_offset * t,
         )
         .map(|clearance| clearance.agl_m)
@@ -868,7 +896,7 @@ fn clamp_ship_camera_against_terrain(
     body_states: &SolarSystemState,
     sim: &SimulationState,
     surfaces: &TerrainSurfaceRegistry,
-    time: &Time,
+    time: &Time<Real>,
     collision: &mut CameraCollisionState,
 ) -> Vec3 {
     let body_id = sim.simulation.dominant_body();
@@ -969,7 +997,10 @@ pub fn camera_transform_system(
     focus: Res<CameraFocus>,
     view: Res<ViewMode>,
     mode: Res<ShipCameraMode>,
-    time: Res<Time>,
+    // Wall-clock so the collision-boom damper keeps smoothing during
+    // sim pause; this system only consumes `delta` for that damper, so a
+    // single `Time<Real>` covers it.
+    time: Res<Time<Real>>,
     freecam: Res<FreeCam>,
     sim: Option<Res<SimulationState>>,
     body_states: Res<SolarSystemState>,

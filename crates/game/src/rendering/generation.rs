@@ -22,51 +22,52 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{Task, block_on, poll_once};
-use bevy_terrain::prelude::{TerrainViewComponents, TileTree};
-use thalos_local_physics::TerrainSurfaceRegistry;
-use thalos_physics::types::{BodyDefinition, BodyKind};
+use thalos_physics_canonical::types::{BodyDefinition, BodyKind};
+use thalos_physics_local::HeightSourceRegistry;
+use thalos_physics_local::TerrainSurfaceRegistry;
 use thalos_planet_rendering::{
     AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
     PlanetParams, PlanetWaterParams, PreparedPlanetBake, ReferenceClouds,
     cloud_cover_image_for_body, upload_prepared_bake,
 };
-use thalos_terrain::{BodySkyMaterial, BodyTerrainMaterial, BodyWaterMaterial};
-use thalos_terrain_gen::{DynamicSurfaceState, PlanetSurface};
+use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_terrain_render::{BodySkyMaterial, ConstantHeightSource};
 
 use crate::loading::LoadingProgress;
 
 use super::ground_terrain::{
-    BodyHalo, BodySky, RealSpaceImpostor, spawn_body_terrain, spawn_body_water,
+    BodyHalo, BodySky, RealSpaceImpostor, TerrainTileProviderMode, terrain_tile_provider_mode,
 };
 use super::types::{
     BodyMesh, CelestialBody, PlanetMaterials, PlanetshineTints, SharedPlanetMeshes, ShipBodyMesh,
 };
-use crate::camera::ShipCamera;
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::solar_system_state::{CloudBandEnvironmentState, SolarSystemState};
 
 /// Bundles the material-asset registries [`install_baked_planet`]
 /// writes into. Kept as a `SystemParam` so `spawn_bodies` can pass these
-/// three handles through one argument and stay under Bevy 0.18's 16-param
+/// handles through one argument and stay under Bevy 0.18's 16-param
 /// limit.
+///
+/// Note: `body_terrain` and `body_water` material assets are *not* here —
+/// `install_baked_planet` no longer spawns the ground-LOD terrain or water
+/// entities; those are spawned on demand by
+/// [`crate::rendering::terrain_residency`].
 #[derive(SystemParam)]
 pub(super) struct PlanetMaterialAssets<'w> {
     pub(super) planet: ResMut<'w, Assets<PlanetMaterial>>,
     pub(super) planet_halo: ResMut<'w, Assets<PlanetHaloMaterial>>,
-    pub(super) body_terrain: ResMut<'w, Assets<BodyTerrainMaterial>>,
-    pub(super) body_water: ResMut<'w, Assets<BodyWaterMaterial>>,
 }
 
 /// Storage / index / registry handles `spawn_bodies` needs when installing
 /// each procedural body's bake. Same 16-param-limit motivation as
 /// [`PlanetMaterialAssets`].
 #[derive(SystemParam)]
-pub(super) struct ProceduralInstallExtras<'w, 's> {
+pub(super) struct ProceduralInstallExtras<'w> {
     pub(super) storage_buffers: ResMut<'w, Assets<ShaderStorageBuffer>>,
-    pub(super) tile_trees: ResMut<'w, TerrainViewComponents<TileTree>>,
     pub(super) terrain_surfaces: ResMut<'w, TerrainSurfaceRegistry>,
+    pub(super) height_sources: ResMut<'w, HeightSourceRegistry>,
     pub(super) terrain_registry: Res<'w, crate::GameTerrainRegistry>,
-    pub(super) ship_camera_q: Query<'w, 's, Entity, With<ShipCamera>>,
 }
 
 /// World-level state the install path writes into. Bundled to stay under
@@ -108,13 +109,10 @@ fn body_surface_roughness(body: &BodyDefinition) -> f32 {
 pub(super) struct InstallAssets<'a> {
     pub planet_materials: &'a mut Assets<PlanetMaterial>,
     pub planet_halo_materials: &'a mut Assets<PlanetHaloMaterial>,
-    pub body_terrain_materials: &'a mut Assets<BodyTerrainMaterial>,
-    pub body_water_materials: &'a mut Assets<BodyWaterMaterial>,
-    pub meshes: &'a mut Assets<Mesh>,
     pub images: &'a mut Assets<Image>,
     pub storage_buffers: &'a mut Assets<ShaderStorageBuffer>,
-    pub tile_trees: &'a mut TerrainViewComponents<TileTree>,
     pub terrain_surfaces: &'a mut TerrainSurfaceRegistry,
+    pub height_sources: &'a mut HeightSourceRegistry,
     pub planetshine: &'a mut PlanetshineTints,
     pub solar_system: &'a mut SolarSystemState,
 }
@@ -125,16 +123,20 @@ pub(super) struct InstallAssets<'a> {
 pub(super) struct InstallEntities {
     pub body_entity: Entity,
     pub ship_parent_entity: Entity,
-    pub ship_camera: Entity,
 }
 
 /// Install a freshly-loaded [`PlanetSurface`] into the scene.
 ///
 /// Uploads cubemaps + SSBOs, builds map-layer and ship-layer
 /// `PlanetMaterial`s and halo materials, spawns the impostor billboards
-/// under `body_entity` / `ship_parent_entity`, attaches a
-/// `PlanetMaterials` component, and seeds the ground-LOD terrain entity
-/// via [`spawn_body_terrain`].
+/// under `body_entity` / `ship_parent_entity`, and attaches a
+/// `PlanetMaterials` component. Writes the surface into the local-physics
+/// and propagator terrain registries so collision detection has it.
+///
+/// Does NOT spawn the ground-LOD terrain or water-sphere entities —
+/// those allocate ~192 MB of GPU vRAM per body for the `TileAtlas` and
+/// are spawned lazily by [`crate::rendering::terrain_residency`] based
+/// on the player's predicted trajectory.
 ///
 /// `surface`, `prepared`, and `dynamic_state` are produced off the main
 /// thread by the task dispatched in `spawn_bodies`; this function is the
@@ -181,12 +183,37 @@ pub(super) fn install_baked_planet(
         );
     }
     assets.terrain_surfaces.insert(body_id, surface.clone());
+    let provider_mode = terrain_tile_provider_mode();
+    match provider_mode {
+        TerrainTileProviderMode::Flat => {
+            assets
+                .height_sources
+                .insert(body_id, Arc::new(ConstantHeightSource::zero()));
+        }
+        TerrainTileProviderMode::Pipeline | TerrainTileProviderMode::Analytic3d => {
+            assets.height_sources.insert_gpu_mirror_source(
+                body_id,
+                thalos_terrain_render::GpuAtlasMirrorHeightSource::new(
+                    surface.clone(),
+                    dynamic_state.clone(),
+                ),
+            );
+        }
+    }
     // Mirror into the propagator's terrain registry so prediction and
-    // live propagation collide against the same surface. Both registries
-    // hold `Arc<PlanetSurface>` clones of the same data — `local_physics`
-    // builds colliders from it, `thalos_physics` queries the height
-    // cubemap for collision detection.
-    terrain_registry.0.insert(body_id, surface.clone());
+    // live propagation collide against the same authored surface in the
+    // production path. Local gameplay physics uses `HeightSourceRegistry`
+    // above; the pure-Rust propagator still consumes `PlanetSurface`
+    // cubemaps through `SharedTerrainRegistry`.
+    if provider_mode == TerrainTileProviderMode::Flat {
+        info!(
+            "using flat terrain provider override for '{}'; trajectory collision treats the \
+             rendered surface as the body's reference sphere",
+            body.name
+        );
+    } else {
+        terrain_registry.0.insert(body_id, surface.clone());
+    }
     let detail =
         PlanetDetailParams::from_body(&baked.detail_params, baked.cubemap_bake_threshold_m);
     let height_range = baked.height_range;
@@ -341,32 +368,12 @@ pub(super) fn install_baked_planet(
         }
     }
 
-    // Spawn the ground-LOD terrain entity alongside the impostor. The same
-    // `PlanetSurface` backs both via `Arc`.
-    spawn_body_terrain(
-        commands,
-        body,
-        surface.clone(),
-        entities.ship_parent_entity,
-        assets.body_terrain_materials,
-        assets.tile_trees,
-        entities.ship_camera,
-        ship_atmosphere,
-        dynamic_state.clone(),
-    );
-
-    // Per-body water sphere. Ocean-only — `spawn_body_water` returns early
-    // when the baked surface has no `sea_level_m`. Visibility is paired with
-    // the terrain entity by `sync_body_render_lod` (impostor's inline water
-    // BRDF takes over outside the LOD swap radius).
-    spawn_body_water(
-        commands,
-        body,
-        &surface,
-        entities.ship_parent_entity,
-        assets.meshes,
-        assets.body_water_materials,
-    );
+    // Ground-LOD terrain + water sphere are NOT spawned here. The trajectory-
+    // driven residency planner (`crate::rendering::terrain_residency`) decides
+    // which bodies' UDLOD entities should be resident based on
+    // `Simulation::dominant_body()` plus the flight-plan's predicted
+    // encounters. The impostor (above) covers every body at all distances and
+    // is the visible form for non-resident bodies.
 }
 
 /// Output of the off-thread bake-load task. Owns everything the main
@@ -403,7 +410,6 @@ pub(super) fn poll_planet_install_tasks(
     mut commands: Commands,
     mut pending: ResMut<PendingPlanetInstalls>,
     mut progress: ResMut<LoadingProgress>,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     reference_clouds: Res<ReferenceClouds>,
     sim: Res<super::types::SimulationState>,
@@ -420,14 +426,6 @@ pub(super) fn poll_planet_install_tasks(
         // here yet the startup system hasn't run, which means no tasks are
         // in flight either. Defensive in case ordering ever changes.
         return;
-    };
-
-    let ship_camera = match procedural_install_extras.ship_camera_q.single() {
-        Ok(e) => e,
-        Err(_) => {
-            // Camera not spawned yet on the first frame; wait one tick.
-            return;
-        }
     };
 
     // Drain completed tasks in place. `block_on(poll_once(..))` is a
@@ -458,18 +456,14 @@ pub(super) fn poll_planet_install_tasks(
             InstallEntities {
                 body_entity: entry.body_entity,
                 ship_parent_entity: entry.real_body_entity,
-                ship_camera,
             },
             InstallAssets {
                 planet_materials: &mut planet_material_assets.planet,
                 planet_halo_materials: &mut planet_material_assets.planet_halo,
-                body_terrain_materials: &mut planet_material_assets.body_terrain,
-                body_water_materials: &mut planet_material_assets.body_water,
-                meshes: &mut meshes,
                 images: &mut images,
                 storage_buffers: &mut procedural_install_extras.storage_buffers,
-                tile_trees: &mut procedural_install_extras.tile_trees,
                 terrain_surfaces: &mut procedural_install_extras.terrain_surfaces,
+                height_sources: &mut procedural_install_extras.height_sources,
                 planetshine: &mut world_state.planetshine,
                 solar_system: &mut world_state.solar_system,
             },

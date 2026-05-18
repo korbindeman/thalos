@@ -12,11 +12,6 @@
         flight: (
             bindings: {
                 "toggle_sas": [Key("KeyT")],
-                "warp_to_maneuver": [Key("KeyG")],
-                "warp_pause": [Key("Space")],
-                "warp_increase": [Key("Period")],
-                "warp_decrease": [Key("Comma")],
-                "warp_reset": [Key("Backslash")],
                 "throttle_full": [Key("KeyZ")],
                 "throttle_cut": [Key("KeyX")],
             },
@@ -28,6 +23,15 @@
                     positive: [Key("ShiftLeft"), Key("ShiftRight")],
                     negative: [Key("ControlLeft"), Key("ControlRight")],
                 ),
+            },
+        ),
+        warp: (
+            bindings: {
+                "warp_to_maneuver": [Key("KeyG")],
+                "warp_pause": [Key("Space")],
+                "warp_increase": [Key("Period")],
+                "warp_decrease": [Key("Comma")],
+                "warp_reset": [Key("Backslash")],
             },
         ),
         view: (

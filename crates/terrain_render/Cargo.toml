@@ -1,0 +1,14 @@
+[package]
+name = "thalos_terrain_render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_terrain = { path = "../terrain" }
+thalos_planet_lighting = { path = "../planet_lighting" }
+bevy = { version = "0.18", features = ["wayland", "jpeg"] }
+thalos_udlod = { workspace = true }
+bevy_erosion_filter = { version = "0.1.1", default-features = false }
+big_space = { version = "0.12", features = ["i64"] }
+anyhow = "1.0"
+rayon = "1.10"

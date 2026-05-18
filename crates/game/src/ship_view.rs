@@ -20,13 +20,11 @@ use bevy::math::DVec3;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
-use thalos_physics::types::ShipParameters;
-use thalos_ship_rendering::{
-    ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
-};
+use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
     Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part, PartCatalog,
-    PartMaterial, Ship, ShipBlueprint, ShipyardPlugin,
+    PartMaterial, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams,
+    ShipyardPlugin, stainless_steel_base,
 };
 
 use crate::SimStage;
@@ -60,7 +58,6 @@ impl Plugin for ShipViewPlugin {
         };
         app.insert_resource(catalog)
             .add_plugins(ShipyardPlugin)
-            .add_plugins(ShipRenderingPlugin)
             .add_systems(Startup, spawn_player_ship)
             .add_systems(
                 Update,
@@ -97,6 +94,14 @@ pub(crate) fn spawn_player_ship(
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // KSP-style vessel split: `VesselKind::Eva` means the player is on
+    // foot, controlling a single-part "EVA vessel" instead of a rocket.
+    // The ship visual and ship-derived collider belong only to the
+    // `Ship` path; the EVA path spawns its own capsule body in
+    // `local_physics::spawn_player_avian_body`.
+    if sim.simulation.vessel_kind() == thalos_physics_canonical::types::VesselKind::Eva {
+        return;
+    }
     let ron_path = PathBuf::from("ships/apollo.ron");
     let text = match std::fs::read_to_string(&ron_path) {
         Ok(t) => t,

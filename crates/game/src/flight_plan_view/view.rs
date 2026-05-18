@@ -36,8 +36,8 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::trajectory::{FlightPlan, Trajectory};
-use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, BodyState};
+use thalos_physics_canonical::trajectory::{FlightPlan, Trajectory};
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind, BodyState};
 
 use crate::coords::{RenderFrame, RenderGhostFocus};
 use crate::map_view::MapSnapshot;
@@ -418,7 +418,7 @@ fn flight_plan_body_state(flight_plan: &FlightPlan, body_id: BodyId, epoch: f64)
         .find(|approach| approach.body == body_id && (approach.epoch - epoch).abs() <= 1.0)
         .map(|approach| BodyState {
             id: body_id,
-            epoch: thalos_physics::canonical::Epoch(epoch),
+            epoch: thalos_physics_canonical::canonical::Epoch(epoch),
             position: approach.body_state.position,
             velocity: approach.body_state.velocity,
             orientation: bevy::math::DQuat::IDENTITY,
@@ -429,7 +429,7 @@ fn flight_plan_body_state(flight_plan: &FlightPlan, body_id: BodyId, epoch: f64)
         })
         .unwrap_or(BodyState {
             id: body_id,
-            epoch: thalos_physics::canonical::Epoch(epoch),
+            epoch: thalos_physics_canonical::canonical::Epoch(epoch),
             position: DVec3::ZERO,
             velocity: DVec3::ZERO,
             orientation: bevy::math::DQuat::IDENTITY,

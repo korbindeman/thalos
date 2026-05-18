@@ -372,10 +372,18 @@ pub fn handle_time_mode_click(
 
 pub fn handle_warp_level_click(
     interactions: Query<(&Interaction, &WarpLevelButton), Changed<Interaction>>,
+    limits: Res<crate::bridge::WarpLimits>,
     mut sim: ResMut<SimulationState>,
 ) {
     for (interaction, button) in &interactions {
         if !matches!(interaction, Interaction::Pressed) {
+            continue;
+        }
+        // Same gate as the keyboard handler: refuse clicks that would
+        // escalate past the altitude cap. The enforcement system would
+        // clamp it back next frame anyway, but refusing the input keeps
+        // the button feedback honest.
+        if button.index > limits.max_level {
             continue;
         }
         let Some(&target) = sim.simulation.warp.levels().get(button.index) else {

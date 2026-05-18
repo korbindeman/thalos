@@ -3,7 +3,7 @@
 //! placement, and per-planet orientation (tidal lock + spin).
 
 use bevy::prelude::*;
-use thalos_physics::types::{BodyDefinition, BodyId, BodyState};
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::{PlanetHaloMaterial, PlanetMaterial};
 
 use super::screen_marker_radius;
@@ -21,7 +21,7 @@ use crate::view::ViewMode;
 fn ghost_position(
     focus: RenderGhostFocus,
     view: Option<&FlightPlanView>,
-    states: &[thalos_physics::types::BodyState],
+    states: &[thalos_physics_canonical::types::BodyState],
 ) -> bevy::math::DVec3 {
     if let Some(view) = view {
         return view.pin_for_ghost_focus(focus, states);
@@ -382,7 +382,7 @@ pub(super) fn update_planet_orientations(
 mod tests {
     use super::*;
     use bevy::math::DVec3;
-    use thalos_physics::canonical::Epoch;
+    use thalos_physics_canonical::canonical::Epoch;
 
     fn body_state(position: DVec3, velocity: DVec3) -> BodyState {
         BodyState {

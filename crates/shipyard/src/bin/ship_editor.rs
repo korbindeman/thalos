@@ -39,9 +39,6 @@ use thalos_celestial::generate::{DefaultGenParams, generate_default};
 use thalos_input::enhanced::{ActionSources, EnhancedInputSystems};
 use thalos_input::settings::InputSettings;
 use thalos_input::shipyard::{ShipyardInputIntent, ShipyardInputPlugin};
-use thalos_ship_rendering::{
-    ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipRenderingPlugin, stainless_steel_base,
-};
 use thalos_shipyard::blueprint::default_params_for;
 use thalos_shipyard::sizing::propagate_node_sizes;
 use thalos_shipyard::*;
@@ -277,7 +274,6 @@ fn main() {
             ray_cast_visibility: RayCastVisibility::VisibleInView,
         })
         .add_plugins(ShipyardPlugin)
-        .add_plugins(ShipRenderingPlugin)
         .add_plugins(SkyBackdropPlugin)
         .init_resource::<EditorState>()
         .init_resource::<TankResizeDrag>()

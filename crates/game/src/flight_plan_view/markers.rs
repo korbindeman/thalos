@@ -1,6 +1,6 @@
 //! Trajectory markers (apoapsis, periapsis, …).
 //!
-//! Markers are derived from [`thalos_physics::trajectory::TrajectoryEvent`]s in
+//! Markers are derived from [`thalos_physics_canonical::trajectory::TrajectoryEvent`]s in
 //! the active flight plan. The system is intentionally generic: adding a new
 //! marker kind (ascending/descending node, SOI entry, closest approach) means
 //! extending [`MarkerKind`] + the visual table — no plumbing changes.
@@ -14,10 +14,10 @@
 use std::collections::HashSet;
 
 use bevy::prelude::*;
-use thalos_physics::trajectory::{
+use thalos_physics_canonical::trajectory::{
     EncounterId, FlightPlan, NumericSegment, Trajectory, TrajectoryEventKind,
 };
-use thalos_physics::types::BodyId;
+use thalos_physics_canonical::types::BodyId;
 
 use crate::camera::ActiveCamera;
 use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
@@ -449,7 +449,7 @@ fn derived_apsis_epoch(segment: &NumericSegment, kind: MarkerKind) -> Option<f64
     Some(selected.time)
 }
 
-fn apsis_radius_sq(sample: &thalos_physics::types::TrajectorySample) -> f64 {
+fn apsis_radius_sq(sample: &thalos_physics_canonical::types::TrajectorySample) -> f64 {
     (sample.position - sample.ref_pos).length_squared()
 }
 
@@ -732,11 +732,11 @@ fn spawn_marker(
 #[cfg(test)]
 mod tests {
     use bevy::math::{DQuat, DVec3};
-    use thalos_physics::canonical::Epoch;
-    use thalos_physics::trajectory::{
+    use thalos_physics_canonical::canonical::Epoch;
+    use thalos_physics_canonical::trajectory::{
         CaptureStatus, ClosestApproach, Encounter, Leg, TrajectoryEvent,
     };
-    use thalos_physics::types::{BodyState, StateVector, TrajectorySample};
+    use thalos_physics_canonical::types::{BodyState, StateVector, TrajectorySample};
 
     use crate::coords::RenderGhostFocus;
     use crate::map_view::ProjectedBodyState;

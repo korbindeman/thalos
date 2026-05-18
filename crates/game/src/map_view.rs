@@ -1,8 +1,10 @@
 use bevy::math::{DVec3, Vec2, Vec3};
 use bevy::prelude::*;
-use thalos_physics::canonical::{CraftState, Epoch};
-use thalos_physics::trajectory::{Encounter, FlightPlan, Trajectory, TrajectoryBranchStack};
-use thalos_physics::types::{BodyDefinition, BodyId, BodyState, BodyStates};
+use thalos_physics_canonical::canonical::{CraftState, Epoch};
+use thalos_physics_canonical::trajectory::{
+    Encounter, FlightPlan, Trajectory, TrajectoryBranchStack,
+};
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyState, BodyStates};
 
 use crate::coords::{RenderOrigin, WorldScale};
 use crate::rendering::{SimulationState, SolarSystemState};
@@ -233,8 +235,10 @@ impl Plugin for MapViewPlugin {
 #[cfg(test)]
 mod tests {
     use bevy::math::{DMat3, DQuat, DVec3};
-    use thalos_physics::canonical::{AuthorityMode, MassState, ResourceState, TranslationalState};
-    use thalos_physics::types::AttitudeState;
+    use thalos_physics_canonical::canonical::{
+        AuthorityMode, MassState, ResourceState, TranslationalState,
+    };
+    use thalos_physics_canonical::types::AttitudeState;
 
     use super::*;
 

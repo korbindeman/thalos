@@ -3,7 +3,7 @@ use bevy_egui::EguiContexts;
 use thalos_input::enhanced::{ActionSources, ContextActivity, EnhancedInputSystems};
 use thalos_input::game::{
     GameEvaContext, GameEvaMoveContext, GameFlightContext, GameManeuverContext,
-    GameManeuverPrecisionContext, GameViewContext,
+    GameManeuverPrecisionContext, GameViewContext, GameWarpContext,
 };
 
 pub struct GameInputGatePlugin;
@@ -25,6 +25,7 @@ fn gate_enhanced_input_sources(
     freecam: Option<Res<crate::freecam::FreeCam>>,
     player: Option<Res<crate::player_controller::PlayerControllerState>>,
     flight: Query<(Entity, &ContextActivity<GameFlightContext>)>,
+    warp: Query<(Entity, &ContextActivity<GameWarpContext>)>,
     view: Query<(Entity, &ContextActivity<GameViewContext>)>,
     eva: Query<(Entity, &ContextActivity<GameEvaContext>)>,
     eva_move: Query<(Entity, &ContextActivity<GameEvaMoveContext>)>,
@@ -61,6 +62,10 @@ fn gate_enhanced_input_sources(
         &flight,
         !egui_keyboard_busy && !freecam_active && !player_controller_active,
     );
+    // Warp controls (pause, speed up/down, warp-to-maneuver) are sim-time
+    // meta-controls — they must remain available in every mode, including
+    // EVA and freecam. Only text-input focus suppresses them.
+    set_context_activity(&mut commands, &warp, !egui_keyboard_busy);
     set_context_activity(&mut commands, &view, !egui_keyboard_busy);
     set_context_activity(&mut commands, &eva, !egui_keyboard_busy);
     set_context_activity(

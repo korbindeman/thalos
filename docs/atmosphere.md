@@ -154,7 +154,7 @@ with LUT lookups, leave the call sites untouched.
 ### Scene-depth coupling
 
 WebGPU forbids sampling the live depth attachment from a fragment
-shader, and our forked `bevy_terrain` does not queue into
+shader, and our forked `thalos_udlod` does not queue into
 `Opaque3dPrepass` (the standard prepass-depth path), so the built-in
 prepass-depth texture is terrain-blind. The workaround lives in
 `crates/game/src/rendering/scene_depth.rs`:

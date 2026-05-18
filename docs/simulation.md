@@ -177,7 +177,7 @@ bleed through the rest of the game.
 As of the M5 first slice, `crates/local_physics` is the concrete
 Bevy/Avian boundary. It depends on `avian3d 0.6.1` with default f32
 features disabled and `3d`, `f64`, `parry-f64`, and `parallel` enabled.
-`thalos_physics` remains Avian-free.
+`thalos_physics_canonical` remains Avian-free.
 
 ## Crate boundaries
 
@@ -912,7 +912,7 @@ Current M5 first slice:
 - The local bubble frame is body-centered inertial — the origin tracks
   the dominant body's centre, but the axes are the parent inertial axes
   (they do not rotate with the body). Canonical inertial state converts
-  through `thalos_physics::body_centered` helpers, which just subtract
+  through `thalos_physics_canonical::body_centered` helpers, which just subtract
   the body's centre-of-mass translation. Gravity in the bubble is the
   textbook two-body `−μr/r³`; no Coriolis, no centrifugal — those were
   the cause of the apo/peri fluctuation that earlier body-fixed designs

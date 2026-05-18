@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
-use thalos_physics::canonical::Epoch;
+use thalos_physics_canonical::canonical::Epoch;
 
 use crate::fuel::ThrottleState;
 use crate::hud::HudPanel;

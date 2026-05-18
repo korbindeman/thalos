@@ -24,18 +24,18 @@ use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use big_space::prelude::Grid;
-use thalos_physics::canonical::Epoch;
-use thalos_physics::types::BodyKind;
+use thalos_physics_canonical::canonical::Epoch;
+use thalos_physics_canonical::types::BodyKind;
 use thalos_planet_rendering::{
     AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, ReferenceClouds, RingLayers,
     RingMaterial, RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams,
     build_ring_mesh, cloud_cover_image_for_body, prepare_planet_bake,
 };
-use thalos_terrain::{BodySkyExtra, BodySkyMaterial};
-use thalos_terrain_gen::{
+use thalos_terrain::{
     DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
     TerrainConfig, cache, compile_dynamic_surface_layers, compile_tectonics_from_config,
 };
+use thalos_terrain_render::{BodySkyExtra, BodySkyMaterial};
 
 use super::generation::{
     PendingPlanetInstall, PendingPlanetInstalls, PlanetBakeOutput, WorldStateAssets,
@@ -320,46 +320,60 @@ pub(super) fn spawn_bodies(
                 ChildOf(body_entity),
             ));
 
-            // Off-thread half: disk I/O + zstd decompress + bincode decode
-            // + dynamic-layer / tectonics compile + CPU bake prep. Owns
-            // clones of the body's terrain/tectonics config so the task
-            // outlives the borrow on `sim.system.bodies`.
+            // Off-thread half: disk I/O + bincode decode + dynamic-layer /
+            // tectonics compile + CPU bake prep. Owns clones of the body's
+            // terrain/tectonics config so the task outlives the borrow on
+            // `sim.system.bodies`. The cache load and the two pure-CPU
+            // compiles only share `context` immutably and have no data
+            // dependency, so they run concurrently via `rayon::join`.
             let terrain_cfg = body.terrain.clone();
             let tectonics_cfg = body.tectonics.clone();
             let task = AsyncComputeTaskPool::get().spawn(async move {
-                let static_surface = match cache::load(&path, key) {
-                    Ok(s) => s,
-                    Err(cache::LoadError::Missing { path }) => panic!(
-                        "missing bake for body '{name}' at {path} (key {key:016x}). \
-                         Run `just bake {name}` (or `just bake all`) to produce it.",
-                        name = body_name,
-                        path = path.display(),
-                    ),
-                    Err(cache::LoadError::HashMismatch {
-                        path,
-                        expected,
-                        found,
-                    }) => panic!(
-                        "stale bake for body '{name}' at {path}: stored key {found:016x}, \
-                         expected {expected:016x}. The body config or `thalos_terrain_gen` \
-                         source has changed since the bake was produced. \
-                         Run `just bake {name}` to regenerate.",
-                        name = body_name,
-                        path = path.display(),
-                    ),
-                    Err(cache::LoadError::Decode { path, message }) => panic!(
-                        "corrupt bake for body '{name}' at {path}: {message}. \
-                         Delete and run `just bake {name}` to regenerate.",
-                        name = body_name,
-                        path = path.display(),
-                    ),
-                };
-                let dynamic_layers = compile_dynamic_surface_layers(&terrain_cfg, &context)
-                    .unwrap_or_else(|e| {
-                        panic!("dynamic layer compile failed for {}: {e}", body_name)
-                    });
-                let tectonics_built =
-                    compile_tectonics_from_config(tectonics_cfg.as_ref(), &context);
+                let body_name_for_panics = body_name.clone();
+                let load_path = path.clone();
+                let (static_surface, (dynamic_layers, tectonics_built)) = rayon::join(
+                    || match cache::load(&load_path, key) {
+                        Ok(s) => s,
+                        Err(cache::LoadError::Missing { path }) => panic!(
+                            "missing bake for body '{name}' at {path} (key {key:016x}). \
+                             Run `just bake {name}` (or `just bake all`) to produce it.",
+                            name = body_name_for_panics,
+                            path = path.display(),
+                        ),
+                        Err(cache::LoadError::HashMismatch {
+                            path,
+                            expected,
+                            found,
+                        }) => panic!(
+                            "stale bake for body '{name}' at {path}: stored key {found:016x}, \
+                             expected {expected:016x}. The body config or `thalos_terrain` \
+                             source has changed since the bake was produced. \
+                             Run `just bake {name}` to regenerate.",
+                            name = body_name_for_panics,
+                            path = path.display(),
+                        ),
+                        Err(cache::LoadError::Decode { path, message }) => panic!(
+                            "corrupt bake for body '{name}' at {path}: {message}. \
+                             Delete and run `just bake {name}` to regenerate.",
+                            name = body_name_for_panics,
+                            path = path.display(),
+                        ),
+                    },
+                    || {
+                        rayon::join(
+                            || {
+                                compile_dynamic_surface_layers(&terrain_cfg, &context)
+                                    .unwrap_or_else(|e| {
+                                        panic!(
+                                            "dynamic layer compile failed for {}: {e}",
+                                            body_name
+                                        )
+                                    })
+                            },
+                            || compile_tectonics_from_config(tectonics_cfg.as_ref(), &context),
+                        )
+                    },
+                );
                 let surface = PlanetSurface {
                     static_surface,
                     dynamic_layers,

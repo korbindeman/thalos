@@ -20,6 +20,8 @@
 //!   bail early, leaving the camera transform under freecam control.
 //! - [`GameFlightContext`] is suspended so movement keys don't simultaneously
 //!   pitch/yaw/roll the ship.
+//! - Sim time is paused through `pause_menu::sync_virtual_time_pause`, while
+//!   camera motion continues on wall-clock time.
 //! - No terrain collision — flying through a planet is the point.
 
 use bevy::math::DVec3;
@@ -109,7 +111,7 @@ fn toggle_freecam_system(
 }
 
 fn freecam_drive_system(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     input: Res<GameInputIntent>,
     mut freecam: ResMut<FreeCam>,
@@ -168,6 +170,8 @@ fn freecam_drive_system(
     if keys.pressed(KeyCode::KeyE) {
         roll_input -= 1.0;
     }
+    // Freecam is a view/debug affordance, so it keeps moving while sim-time
+    // is paused. The escape pause menu still gates the whole camera stage.
     let dt_f32 = time.delta_secs();
     if roll_input != 0.0 {
         let roll = Quat::from_rotation_z(roll_input * FREECAM_ROLL_RATE_RAD_S * dt_f32);

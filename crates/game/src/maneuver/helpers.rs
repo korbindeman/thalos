@@ -1,9 +1,11 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::body_trajectory_provider::BodyTrajectoryProvider;
-use thalos_physics::maneuver::{delta_v_to_world, orbital_frame};
-use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory, TrajectoryBranchStack};
-use thalos_physics::types::{BodyId, BodyState, SolarSystemDefinition, TrajectorySample};
+use thalos_physics_canonical::body_trajectory_provider::BodyTrajectoryProvider;
+use thalos_physics_canonical::maneuver::{delta_v_to_world, orbital_frame};
+use thalos_physics_canonical::trajectory::{
+    FlightPlan, NumericSegment, Trajectory, TrajectoryBranchStack,
+};
+use thalos_physics_canonical::types::{BodyId, BodyState, SolarSystemDefinition, TrajectorySample};
 
 use super::state::{GameNode, ManeuverPlan, NodeId, RailFrame, TrajectoryRail};
 use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
@@ -74,7 +76,7 @@ pub(super) fn node_world_pos_and_frame(
 
     let ref_state = ephemeris.state(
         reference_body,
-        thalos_physics::canonical::Epoch(sample.time),
+        thalos_physics_canonical::canonical::Epoch(sample.time),
     );
     let render_sample = TrajectorySample {
         anchor_body: reference_body,
@@ -114,7 +116,7 @@ fn actual_sample_at(
     branch_stack: Option<&TrajectoryBranchStack>,
     time: f64,
     ephemeris: &dyn BodyTrajectoryProvider,
-) -> Option<thalos_physics::types::TrajectorySample> {
+) -> Option<thalos_physics_canonical::types::TrajectorySample> {
     let actual = &branch_stack?.actual.plan;
     let (start, end) = actual.epoch_range();
     if time < start - 1.0e-6 || time > end + 1.0e-6 {
@@ -122,8 +124,8 @@ fn actual_sample_at(
     }
     let state = actual.state_at(time)?;
     let anchor = actual.anchor_body_at(time)?;
-    let body_state = ephemeris.state(anchor, thalos_physics::canonical::Epoch(time));
-    Some(thalos_physics::types::TrajectorySample {
+    let body_state = ephemeris.state(anchor, thalos_physics_canonical::canonical::Epoch(time));
+    Some(thalos_physics_canonical::types::TrajectorySample {
         time,
         position: state.position,
         velocity: state.velocity,
@@ -157,7 +159,8 @@ fn rail_world_position_for_state(
 
     match rail.frame {
         RailFrame::Body { body_id } => {
-            let body_state = ephemeris.state(body_id, thalos_physics::canonical::Epoch(time));
+            let body_state =
+                ephemeris.state(body_id, thalos_physics_canonical::canonical::Epoch(time));
             let sample = TrajectorySample {
                 time,
                 position,
@@ -310,7 +313,10 @@ pub(super) fn orbit_sensitivity_scale(
     if body.gm <= 0.0 {
         return None;
     }
-    let body_state = ephemeris.state(reference_body, thalos_physics::canonical::Epoch(node_time));
+    let body_state = ephemeris.state(
+        reference_body,
+        thalos_physics_canonical::canonical::Epoch(node_time),
+    );
 
     let dv_world = delta_v_to_world(
         node_delta_v,
@@ -470,7 +476,10 @@ fn rail_from_segment_interval(
         let Some(state) = segment.state_at(time) else {
             continue;
         };
-        let reference = ephemeris.state(reference_body, thalos_physics::canonical::Epoch(time));
+        let reference = ephemeris.state(
+            reference_body,
+            thalos_physics_canonical::canonical::Epoch(time),
+        );
         samples.push(TrajectorySample {
             time,
             position: state.position,
@@ -924,7 +933,7 @@ fn ghost_local_world_pos_at_pin(
     scale: &WorldScale,
     ephemeris: &dyn BodyTrajectoryProvider,
 ) -> Vec3 {
-    let body = ephemeris.state(body_id, thalos_physics::canonical::Epoch(time));
+    let body = ephemeris.state(body_id, thalos_physics_canonical::canonical::Epoch(time));
     let relative = craft_position - body.position;
     let display_relative =
         if soi_radius.is_finite() && soi_radius > 0.0 && relative.length() > soi_radius {
@@ -953,8 +962,8 @@ pub(super) fn overlay_marker_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thalos_physics::trajectory::{BranchKind, Leg, TrajectoryBranch};
-    use thalos_physics::types::StateVector;
+    use thalos_physics_canonical::trajectory::{BranchKind, Leg, TrajectoryBranch};
+    use thalos_physics_canonical::types::StateVector;
 
     fn sample(time: f64) -> TrajectorySample {
         TrajectorySample {

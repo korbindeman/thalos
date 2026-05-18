@@ -1,7 +1,7 @@
 //! Procedural catalog generators.
 //!
 //! Each submodule is a pure function `(&mut Universe, seed)` —
-//! analogous to terrain_gen stages. Generators are additive and
+//! analogous to terrain stages. Generators are additive and
 //! order-independent where possible, so a caller can mix and match.
 
 pub mod galaxies;

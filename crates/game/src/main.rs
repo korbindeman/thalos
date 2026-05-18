@@ -1,4 +1,5 @@
 mod autopilot;
+mod bake_check;
 mod body_tree_panel;
 mod bridge;
 mod camera;
@@ -34,22 +35,21 @@ mod warp_to_maneuver;
 use std::sync::Arc;
 
 use bevy::asset::AssetPlugin;
-use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, WindowMode};
 use thalos_input::game::GameInputPlugin;
 use thalos_input::settings::InputSettings;
-use thalos_physics::{
+use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider,
-    canonical::{Epoch, WorldPhysicsConfig},
+    canonical::{AuthorityMode, Epoch, WorldPhysicsConfig},
     gravity_mode::GravityMode,
     parsing::load_solar_system_from_dir,
     simulation::{Simulation, SimulationConfig},
     terrain_provider::SharedTerrainRegistry,
-    types::{AttitudeState, StateVector},
+    types::{AttitudeState, ShipParameters, StateVector, VesselKind},
 };
-use thalos_terrain::ThalosTerrainPlugin;
+use thalos_terrain_render::ThalosTerrainPlugin;
 
 use autopilot::AutopilotPlugin;
 use body_tree_panel::BodyTreePanelPlugin;
@@ -108,7 +108,7 @@ const RUNTIME_TIME_SPAN: f64 = 3.156e11;
 /// `Arc<RwLock<...>>` as the propagator's terrain provider — inserting a
 /// surface here is immediately visible to the propagator's collision
 /// detection. The wrapper exists because `Resource` is a Bevy derive and
-/// `SharedTerrainRegistry` lives in the pure-Rust `thalos_physics` crate.
+/// `SharedTerrainRegistry` lives in the pure-Rust `thalos_physics_canonical` crate.
 #[derive(Resource, Clone)]
 pub struct GameTerrainRegistry(pub SharedTerrainRegistry);
 
@@ -122,6 +122,17 @@ fn main() {
     // ------------------------------------------------------------------
     let system = load_solar_system_from_dir(std::path::Path::new("assets"))
         .expect("Failed to load solar system from assets/");
+
+    // ------------------------------------------------------------------
+    // 1a. Pre-flight: ensure every procedural body has a current bake.
+    //
+    // Missing or stale bakes are auto-repaired by shelling out to
+    // `thalos_bake_dump all` before Bevy boots, so a source edit under
+    // `crates/terrain_gen/` doesn't require the user to remember
+    // `just bake all` between iterations. When all bakes are current
+    // the check is microseconds (per-body `peek_key` only).
+    // ------------------------------------------------------------------
+    bake_check::ensure_bakes_or_exit(&system.bodies);
 
     // ------------------------------------------------------------------
     // 2. Print a startup banner.
@@ -162,10 +173,18 @@ fn main() {
     let ephemeris: Arc<dyn BodyTrajectoryProvider> = Arc::clone(&gravity_impls.body_trajectory);
 
     // ------------------------------------------------------------------
-    // 4. Resolve the ship's absolute initial state.
+    // 4. Resolve the player's absolute initial state.
     //
-    //    ShipDefinition.initial_state is relative to the homeworld.
-    //    Add the homeworld's t=0 ephemeris state to get heliocentric coords.
+    //    Default vessel is EVA (player on foot) standing on the Thalos
+    //    surface. The canonical CraftState is the player — KSP-style:
+    //    one craft, EVA or Ship, distinguished by `VesselKind`.
+    //
+    //    Spawn pose is a fixed body-fixed direction over Thalos plus a
+    //    safe drop margin above the body radius. Terrain heights aren't
+    //    known at this point (the registry is populated later by the
+    //    rendering crate as bakes load), so we err above the worst-case
+    //    elevation and let local physics resolve the few-metre drop to
+    //    the rendered surface.
     // ------------------------------------------------------------------
     let homeworld_name = "Thalos";
     let homeworld_id = system
@@ -182,18 +201,32 @@ fn main() {
                 .expect("No non-star body found to use as homeworld fallback")
         });
 
+    let homeworld = &system.bodies[homeworld_id];
     let homeworld_state = ephemeris.state(homeworld_id, Epoch::ZERO);
-    let rel = system.ship.initial_state;
+
+    // Spawn at the sub-stellar point so the player wakes up in
+    // daylight. The direction from Thalos toward Pyros (origin in
+    // heliocentric inertial) is `-homeworld_state.position`; expressed
+    // in body-fixed coordinates that's the body-fixed direction
+    // pointing at the star right now.
+    let sun_dir_inertial = (-homeworld_state.position).normalize();
+    let spawn_dir_inertial = sun_dir_inertial;
+    // Drop margin above the body radius. Has to clear Thalos's max
+    // peaks (~±8 km from body radius) since the terrain registry isn't
+    // loaded yet — anything less spawns inside a mountain. The local
+    // physics bubble will pin us to the rendered surface within the
+    // first few frames once the surface arrives.
+    let spawn_drop_height_m = 12_000.0;
+    let spawn_offset = spawn_dir_inertial * (homeworld.radius_m + spawn_drop_height_m);
+    let surface_velocity = homeworld_state.angular_velocity.cross(spawn_offset);
     let ship_state = StateVector {
-        position: homeworld_state.position + rel.position,
-        velocity: homeworld_state.velocity + rel.velocity,
+        position: homeworld_state.position + spawn_offset,
+        velocity: homeworld_state.velocity + surface_velocity,
     };
 
-    let homeworld = &system.bodies[homeworld_id];
-    let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
     println!(
-        "  Ship:            {:.0} km orbit around {}",
-        altitude_km, homeworld.name,
+        "  Player (EVA):    standing on {} (daylight side)",
+        homeworld.name
     );
 
     // ------------------------------------------------------------------
@@ -245,12 +278,19 @@ fn main() {
                     ..default()
                 }),
         )
-        // `ThalosTerrainPlugin` wraps `bevy_terrain::TerrainPlugin`, which
+        // `ThalosTerrainPlugin` wraps `thalos_udlod::TerrainPlugin`, which
         // adds `BigSpaceDefaultPlugins` itself when the `high_precision`
         // feature is enabled. Adding the plugin again here would panic on
         // duplicate registration.
         .add_plugins(ThalosTerrainPlugin)
-        .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        // BRP server (port 15702) for agent-driven inspection / mutation.
+        // Always on in dev; the listener is idle when no client is
+        // connected. See docs/tooling.md for the MCP workflow.
+        //
+        // `BrpExtrasPlugin` adds `FrameTimeDiagnosticsPlugin` itself
+        // (its `diagnostics` feature backs the `brp_extras/get_diagnostics`
+        // method), so we do not add it separately here.
+        .add_plugins(bevy_brp_extras::BrpExtrasPlugin)
         .add_plugins(bevy_egui::EguiPlugin::default())
         // The dedicated UI camera in `view::spawn_ui_camera` owns the
         // primary egui context; disable auto-attach so it doesn't bind
@@ -267,26 +307,34 @@ fn main() {
                 system.bodies.clone(),
                 SimulationConfig::default(),
             );
-            // Spawn in level orbital flight: body +Y (nose) along prograde,
-            // body +Z (dorsal) along local-up (radial-out from the
-            // homeworld). This is the convention shared by the navball
-            // (which puts the zenith of the local frame at the top of
-            // the sphere texture) and the controls (pitch around the
-            // wing axis, yaw around dorsal, roll around the nose), so
-            // all three stay aligned when the craft is "upright".
-            let prograde = rel.velocity.normalize();
-            let radial_raw = rel.position.normalize();
-            // Project radial perpendicular to prograde — for circular
-            // orbits these are already orthogonal, but for eccentric
-            // ones the velocity has a radial component.
-            let dorsal = (radial_raw - radial_raw.dot(prograde) * prograde).normalize();
-            // Right wing: body +X = body +Y × body +Z (right-hand rule).
-            let right = prograde.cross(dorsal);
-            let basis = bevy::math::DMat3::from_cols(right, prograde, dorsal);
+            // Mark the player as EVA before anything else reads vessel
+            // kind. `set_ship_params` then pushes the EVA parameter
+            // preset (90 kg, no thrust, no torque) — the throttle and
+            // attitude-command pipes are still wired up but produce no
+            // motion, so HUD readouts stay coherent.
+            simulation.set_vessel_kind(VesselKind::Eva);
+            simulation.set_ship_params(ShipParameters::eva());
+            // Stand upright at the spawn point: body +Z (dorsal) along
+            // local-up (radial-out from the homeworld), body +Y (nose)
+            // tangent to the surface roughly along the body's eastward
+            // direction. Matches the convention used by the EVA
+            // controller's `level_orientation`, so the player faces
+            // forward when they start walking.
+            let up = spawn_dir_inertial;
+            let east_seed = homeworld_state.orientation * DVec3::Y;
+            let east_tangent = (east_seed - up * east_seed.dot(up)).normalize();
+            let right = up.cross(east_tangent).normalize();
+            let basis = bevy::math::DMat3::from_cols(right, east_tangent, up);
             simulation.set_attitude(AttitudeState {
                 orientation: DQuat::from_mat3(&basis),
                 angular_velocity: DVec3::ZERO,
             });
+            // Start in `OnRails`: the brief Kepler arc holds the player
+            // up until `attach_terrain_patch_when_close` fires (the
+            // 500 m drop puts us well inside the AGL handoff band), at
+            // which point `manage_authority` hands translation to Avian
+            // and the terrain collider catches the fall.
+            simulation.transition_authority(AuthorityMode::OnRails { trajectory: 0 });
             SimulationState {
                 simulation,
                 system,

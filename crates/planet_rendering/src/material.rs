@@ -7,7 +7,7 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 use thalos_planet_lighting::SceneLighting;
-use thalos_terrain_gen::StaticSurfaceData;
+use thalos_terrain::StaticSurfaceData;
 
 /// Re-export so existing call sites resolve unchanged.
 pub use thalos_planet_lighting::{AtmosphereBlock, CLOUD_BAND_COUNT, MAX_ECLIPSE_OCCLUDERS};
@@ -223,10 +223,10 @@ impl Default for PlanetDetailParams {
 }
 
 impl PlanetDetailParams {
-    /// Build from terrain_gen's DetailNoiseParams plus the Cratering stage's
+    /// Build from terrain's DetailNoiseParams plus the Cratering stage's
     /// cubemap bake threshold. Both come from `StaticSurfaceData` — pass both.
     pub fn from_body(
-        detail: &thalos_terrain_gen::DetailNoiseParams,
+        detail: &thalos_terrain::DetailNoiseParams,
         cubemap_bake_threshold_m: f32,
     ) -> Self {
         Self {

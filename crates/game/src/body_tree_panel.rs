@@ -9,9 +9,9 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
-use thalos_local_physics::ActiveLocalBubble;
-use thalos_physics::canonical::AuthorityMode;
-use thalos_physics::types::{BodyDefinition, BodyId, BodyKind};
+use thalos_physics_canonical::canonical::AuthorityMode;
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind};
+use thalos_physics_local::ActiveLocalBubble;
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::debug::{DebugLaunchMount, DebugMode, DebugSurfaceTeleport, low_orbit_state};
@@ -215,9 +215,10 @@ fn body_tree_panel(
         && let Some(body_id) = cmd_clicked
     {
         let sim_time = sim.simulation.sim_time();
-        let body_state = sim
-            .ephemeris
-            .state(body_id, thalos_physics::canonical::Epoch(sim_time));
+        let body_state = sim.ephemeris.state(
+            body_id,
+            thalos_physics_canonical::canonical::Epoch(sim_time),
+        );
         clear_active_local_bubble(&mut commands, &mut active_bubble);
         let (state, attitude) = low_orbit_state(&sim.system.bodies[body_id], &body_state);
         sim.simulation

@@ -12,8 +12,8 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use thalos_input::planet_editor::PlanetEditorInputIntent;
-use thalos_terrain_gen::cubemap::face_uv_to_dir;
-use thalos_terrain_gen::{
+use thalos_terrain::cubemap::face_uv_to_dir;
+use thalos_terrain::{
     BiomeMixTexel, Cubemap, CubemapFace, PlateKind, TectonicActivity, TectonicSystem,
 };
 
@@ -376,7 +376,7 @@ fn dominant_biome_in_block(
 }
 
 fn plate_color(kind: PlateKind, plate_id: u32) -> Color {
-    let h = thalos_terrain_gen::seeding::splitmix64(plate_id as u64 ^ 0xB1ADE0FF);
+    let h = thalos_terrain::seeding::splitmix64(plate_id as u64 ^ 0xB1ADE0FF);
     let hue_unit = ((h & 0xFFFF) as f32) / 65535.0;
     let (hue_deg, sat, val) = match kind {
         PlateKind::Continental => {
@@ -416,7 +416,7 @@ fn biome_color(biome_id: u8) -> Color {
         return color_from_srgb8(*rgb);
     }
 
-    let h = thalos_terrain_gen::seeding::splitmix64(biome_id as u64 ^ 0xB10B_1A5E);
+    let h = thalos_terrain::seeding::splitmix64(biome_id as u64 ^ 0xB10B_1A5E);
     let hue = ((h & 0xFFFF) as f32) / 65535.0 * 360.0;
     Color::hsv(hue, 0.72, 0.88)
 }

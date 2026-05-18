@@ -6,7 +6,7 @@
 //
 // Surface detail comes from two layered sources (the sample.rs LOD contract):
 //
-//   1. Cubemap textures from `thalos_terrain_gen` — albedo (sRGB RGBA8),
+//   1. Cubemap textures from `thalos_terrain` — albedo (sRGB RGBA8),
 //      height (R16Unorm displacement), and material ID (R8Uint palette index).
 //      These hold the low-frequency baked features: primordial topography,
 //      basins, mare flooding, and the regional material palette. One fetch
@@ -124,7 +124,7 @@ struct PlanetParams {
     // domain warp (perturbs the cubemap sample direction) AND adds a
     // height-jitter fbm — both defined in
     // `crates/planet_rendering/src/shaders/noise.wgsl`, mirrored
-    // bit-exact by `crates/terrain_gen/src/noise.rs`.
+    // bit-exact by `crates/terrain/src/noise.rs`.
     //
     // The warp is what breaks the cubemap-texel staircase visible
     // from orbit: a few-texel arc displacement on the sphere shifts
@@ -1873,7 +1873,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // contributes its impostor-specific shadow terms (SSBO crater shadow,
     // cubemap self-shadow); eclipse, planetshine, ambient, and the
     // Hapke + headroom math all live in the shared helper so the
-    // bevy_terrain ground-LOD path shades identically. Atmosphere /
+    // thalos_udlod ground-LOD path shades identically. Atmosphere /
     // clouds / water / limb darkening still happen on the impostor side
     // (they have no terrain-LOD equivalent).
     let view_dir = normalize(cam_pos - hit);

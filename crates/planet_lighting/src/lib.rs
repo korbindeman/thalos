@@ -3,7 +3,7 @@
 //! Holds the data structures and WGSL libraries every planet-surface
 //! material reads from: scene lighting (stars, eclipse occluders,
 //! planetshine), per-body atmosphere parameters, and the shared Hapke
-//! BRDF helper. Lives in its own crate so [`thalos_terrain`] and
+//! BRDF helper. Lives in its own crate so [`thalos_terrain_render`] and
 //! [`thalos_planet_rendering`] can both depend on a single source of
 //! truth without one having to depend on the other.
 //!
@@ -11,7 +11,7 @@
 //!
 //! [`PlanetLightingPlugin`] registers the two shader libraries
 //! ([`thalos::lighting`] and [`thalos::atmosphere`]). Bring it in once
-//! per app — `thalos_planet_rendering` and `thalos_terrain` both rely
+//! per app — `thalos_planet_rendering` and `thalos_terrain_render` both rely
 //! on the libraries being available globally.
 
 mod atmosphere;

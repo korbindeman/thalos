@@ -1,6 +1,6 @@
 // Canonical 3D value noise + fBm shader library.
 //
-// Mirrors `crates/terrain_gen/src/noise.rs` bit-for-bit. Every operation
+// Mirrors `crates/terrain/src/noise.rs` bit-for-bit. Every operation
 // — the u32 PCG mixer, the quintic fade, the trilinear interpolation,
 // the per-octave sub-seed — has the same form on both sides so the
 // impostor's high-frequency terrain band agrees with anything the

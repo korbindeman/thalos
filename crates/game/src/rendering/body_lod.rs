@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
 use thalos_input::game::GameInputIntent;
-use thalos_physics::types::BodyKind;
+use thalos_physics_canonical::types::BodyKind;
 
 use super::screen_marker_radius;
 use super::types::{BodyIcon, BodyMesh, CelestialBody, ShipMarker, SimulationState};

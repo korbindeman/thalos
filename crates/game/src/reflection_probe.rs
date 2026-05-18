@@ -278,12 +278,13 @@ fn derive_environment(sim: &SimulationState) -> EnvParams {
         });
 
     let sim_time = sim.simulation.sim_time();
-    let planet_state = sim
-        .ephemeris
-        .state(home_id, thalos_physics::canonical::Epoch(sim_time));
+    let planet_state = sim.ephemeris.state(
+        home_id,
+        thalos_physics_canonical::canonical::Epoch(sim_time),
+    );
     let sun_state = sim
         .ephemeris
-        .state(0, thalos_physics::canonical::Epoch(sim_time));
+        .state(0, thalos_physics_canonical::canonical::Epoch(sim_time));
 
     let to_planet = (planet_state.position - ship_pos).as_vec3();
     let to_sun = (sun_state.position - ship_pos).as_vec3();

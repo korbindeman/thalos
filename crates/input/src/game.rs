@@ -14,6 +14,14 @@ pub struct GameSystemContext;
 #[derive(Component)]
 pub struct GameFlightContext;
 
+/// Sim-time controls (pause, warp speed, warp-to-maneuver). Split from
+/// `GameFlightContext` because these must remain available in every mode —
+/// EVA, freecam, photo — not only when the player is flying a ship. Gated
+/// only on egui text-input focus so typing in a text field doesn't trip
+/// pause.
+#[derive(Component)]
+pub struct GameWarpContext;
+
 #[derive(Component)]
 pub struct GameViewContext;
 
@@ -207,6 +215,7 @@ impl Plugin for GameInputPlugin {
         app.add_plugins(EnhancedInputPlugin)
             .add_input_context::<GameSystemContext>()
             .add_input_context::<GameFlightContext>()
+            .add_input_context::<GameWarpContext>()
             .add_input_context::<GameViewContext>()
             .add_input_context::<GameCameraContext>()
             .add_input_context::<GameEvaContext>()
@@ -267,6 +276,37 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
         ]),
     ));
     controller.insert((
+        GameWarpContext,
+        ContextPriority::<GameWarpContext>::new(50),
+        actions!(GameWarpContext[
+            (
+                Action::<WarpToManeuverAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.warp.bindings("warp_to_maneuver")),
+            ),
+            (
+                Action::<WarpPauseAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.warp.bindings("warp_pause")),
+            ),
+            (
+                Action::<WarpIncreaseAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.warp.bindings("warp_increase")),
+            ),
+            (
+                Action::<WarpDecreaseAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.warp.bindings("warp_decrease")),
+            ),
+            (
+                Action::<WarpResetAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.warp.bindings("warp_reset")),
+            ),
+        ]),
+    ));
+    controller.insert((
         GameFlightContext,
         ContextPriority::<GameFlightContext>::new(20),
         actions!(GameFlightContext[
@@ -274,31 +314,6 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<ToggleSasAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.flight.bindings("toggle_sas")),
-            ),
-            (
-                Action::<WarpToManeuverAction>::new(),
-                consume_input(),
-                Bindings::spawn(settings.game.flight.bindings("warp_to_maneuver")),
-            ),
-            (
-                Action::<WarpPauseAction>::new(),
-                consume_input(),
-                Bindings::spawn(settings.game.flight.bindings("warp_pause")),
-            ),
-            (
-                Action::<WarpIncreaseAction>::new(),
-                consume_input(),
-                Bindings::spawn(settings.game.flight.bindings("warp_increase")),
-            ),
-            (
-                Action::<WarpDecreaseAction>::new(),
-                consume_input(),
-                Bindings::spawn(settings.game.flight.bindings("warp_decrease")),
-            ),
-            (
-                Action::<WarpResetAction>::new(),
-                consume_input(),
-                Bindings::spawn(settings.game.flight.bindings("warp_reset")),
             ),
             (
                 Action::<ThrottleFullAction>::new(),
@@ -749,5 +764,30 @@ mod tests {
         app.update();
         let intent = app.world().resource::<GameInputIntent>();
         assert!(intent.throttle_up);
+    }
+
+    #[test]
+    fn eva_w_walks_forward_when_eva_move_context_active() {
+        let mut app = input_app();
+        // EVA move context starts INACTIVE; the game's gating system would
+        // activate it when the player controller is alive. Simulate that.
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<GameEvaMoveContext>>()
+            .single(app.world())
+            .expect("eva move context should exist");
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(ContextActivity::<GameEvaMoveContext>::new(true));
+        app.update();
+
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        let intent = app.world().resource::<GameInputIntent>();
+        assert_eq!(
+            intent.player_move,
+            Vec2::new(0.0, 1.0),
+            "KeyW with active EVA move context should produce forward axis",
+        );
     }
 }

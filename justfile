@@ -36,7 +36,7 @@ release kind="patch":
 
 # Run tests
 test:
-    cargo test -p thalos_physics
+    cargo test -p thalos_physics_canonical
 
 # Lint
 clippy:
@@ -50,7 +50,7 @@ trace:
 # Wipe the editor's on-disk terrain cache. The game and `just bake`
 # don't use this directory — only the planet editor does, for
 # iteration speed. Source-tree edits already invalidate cached entries
-# via the build-time hash key in `crates/terrain_gen/src/cache.rs`, so
+# via the build-time hash key in `crates/terrain/src/cache.rs`, so
 # you rarely need to wipe manually.
 clear-terrain-cache:
     rm -rf target/terrain_cache

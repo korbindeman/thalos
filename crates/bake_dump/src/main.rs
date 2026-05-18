@@ -52,9 +52,9 @@ use glam::Vec3;
 use image::{ImageBuffer, RgbImage};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use thalos_physics::parsing::load_solar_system_from_dir;
-use thalos_terrain_gen::cubemap::{CubemapFace, dir_to_face_uv};
-use thalos_terrain_gen::{
+use thalos_physics_canonical::parsing::load_solar_system_from_dir;
+use thalos_terrain::cubemap::{CubemapFace, dir_to_face_uv};
+use thalos_terrain::{
     BodyArchetype, BoundaryKind, ColdDesertField, DynamicSurfaceState, FeatureId,
     FeatureProjectionConfig, PlanetSurface, PlateKind, TerrainCompileContext,
     TerrainCompileOptions, TerrainConfig, compile_dynamic_surface_layers,
@@ -193,7 +193,7 @@ fn main() {
         .unwrap_or_else(|| std::path::Path::new("assets"));
     let system = load_solar_system_from_dir(root_path).expect("parsing solar system");
 
-    let targets: Vec<&thalos_physics::types::BodyDefinition> =
+    let targets: Vec<&thalos_physics_canonical::types::BodyDefinition> =
         if args.body_arg.eq_ignore_ascii_case("all") {
             let mut v: Vec<_> = system
                 .bodies
@@ -242,7 +242,7 @@ fn main() {
 
     if is_all {
         // Bounded in-process parallelism. The pool caps simultaneous body
-        // compiles at half the core count; `terrain_gen`'s internal
+        // compiles at half the core count; `terrain`'s internal
         // `par_iter` calls inherit this pool while we're inside
         // `pool.install`, so total CPU usage stays at the cap and the
         // box remains responsive during `bake all`.
@@ -302,7 +302,7 @@ fn main() {
 /// the user-facing failure message, so no further output is needed here.
 #[allow(clippy::too_many_arguments)]
 fn bake_one(
-    body: &thalos_physics::types::BodyDefinition,
+    body: &thalos_physics_canonical::types::BodyDefinition,
     out_dir: &Path,
     preview: bool,
     force: bool,
@@ -351,10 +351,10 @@ fn bake_one(
     // are cheap — wgpu Device/Queue are internally refcounted.
     let device = gpu.device.clone();
     let queue = gpu.queue.clone();
-    let mid_freq: Option<thalos_terrain_gen::stages::MidFreqRunner> = Some(Box::new(
-        move |height: &mut thalos_terrain_gen::cubemap::Cubemap<f32>,
+    let mid_freq: Option<thalos_terrain::stages::MidFreqRunner> = Some(Box::new(
+        move |height: &mut thalos_terrain::cubemap::Cubemap<f32>,
               radius_m: f32,
-              params: &thalos_terrain_gen::stages::MidFreqDetailParams|
+              params: &thalos_terrain::stages::MidFreqDetailParams|
               -> Result<(), String> {
             gpu::run_mid_freq(&device, &queue, height, radius_m, params).map_err(|e| e.to_string())
         },
@@ -378,14 +378,14 @@ fn bake_one(
     } else {
         bar.set_message("writing local bake");
         let bake_dir = local_bake_dir();
-        let key = thalos_terrain_gen::cache::terrain_cache_key(
+        let key = thalos_terrain::cache::terrain_cache_key(
             &body.terrain,
             body.tectonics.as_ref(),
             &context,
             options,
         );
-        let path = thalos_terrain_gen::cache::cache_path(&bake_dir, &body.name);
-        match thalos_terrain_gen::cache::store(&path, key, &static_surface) {
+        let path = thalos_terrain::cache::cache_path(&bake_dir, &body.name);
+        match thalos_terrain::cache::store(&path, key, &static_surface) {
             Ok(()) => StoreStatus::Stored,
             Err(e) => {
                 let _ = multi.println(format!(
@@ -431,7 +431,7 @@ fn progress_style() -> ProgressStyle {
 /// the cache key we'd produce now? Returns `false` on any failure
 /// (missing file, decode error, mismatched key) so callers fall through
 /// to the full recompile + overwrite.
-fn local_bake_is_up_to_date(body: &thalos_physics::types::BodyDefinition) -> bool {
+fn local_bake_is_up_to_date(body: &thalos_physics_canonical::types::BodyDefinition) -> bool {
     let context = terrain_context(body);
     // Production options — must match the values `run_terrain` uses in
     // non-preview mode, otherwise the keys diverge and we'd never see a
@@ -441,27 +441,30 @@ fn local_bake_is_up_to_date(body: &thalos_physics::types::BodyDefinition) -> boo
         crater_count_scale: 1.0,
         cubemap_resolution_override: None,
     };
-    let expected = thalos_terrain_gen::cache::terrain_cache_key(
+    let expected = thalos_terrain::cache::terrain_cache_key(
         &body.terrain,
         body.tectonics.as_ref(),
         &context,
         options,
     );
-    let path = thalos_terrain_gen::cache::cache_path(&local_bake_dir(), &body.name);
+    let path = thalos_terrain::cache::cache_path(&local_bake_dir(), &body.name);
     matches!(
-        thalos_terrain_gen::cache::peek_key(&path),
+        thalos_terrain::cache::peek_key(&path),
         Ok(stored) if stored == expected,
     )
 }
 
-fn terrain_context(body: &thalos_physics::types::BodyDefinition) -> TerrainCompileContext {
+fn terrain_context(
+    body: &thalos_physics_canonical::types::BodyDefinition,
+) -> TerrainCompileContext {
     TerrainCompileContext {
         body_name: body.name.clone(),
         radius_m: body.radius_m as f32,
         gravity_m_s2: (body.gm / (body.radius_m * body.radius_m)) as f32,
         rotation_hours: None,
         obliquity_deg: Some((body.axial_tilt_rad as f32).to_degrees()),
-        tidal_axis: matches!(body.kind, thalos_physics::types::BodyKind::Moon).then_some(Vec3::Z),
+        tidal_axis: matches!(body.kind, thalos_physics_canonical::types::BodyKind::Moon)
+            .then_some(Vec3::Z),
         axial_tilt_rad: body.axial_tilt_rad as f32,
     }
 }
@@ -494,7 +497,7 @@ fn store_status_label(status: StoreStatus) -> &'static str {
 /// Debug set (`--debug`): material-id, plus biome/suture for cold-desert bodies.
 fn dump_all_in_parallel(
     surface: &PlanetSurface,
-    body_def: &thalos_physics::types::BodyDefinition,
+    body_def: &thalos_physics_canonical::types::BodyDefinition,
     out: &Path,
     equirect_w: u32,
     debug: bool,
@@ -654,7 +657,7 @@ fn normal_to_u8(v: f32) -> u8 {
 }
 
 fn cold_desert_biome_field(
-    body: &thalos_physics::types::BodyDefinition,
+    body: &thalos_physics_canonical::types::BodyDefinition,
 ) -> Option<ColdDesertField> {
     let TerrainConfig::Feature(feature) = &body.terrain else {
         return None;
@@ -687,7 +690,7 @@ fn cold_desert_biome_field(
 /// cool blue-greens at lower brightness so the land/sea split reads at a
 /// glance.
 fn plate_color_srgb(plate_id: u32, kind: PlateKind) -> [u8; 3] {
-    let h = thalos_terrain_gen::seeding::splitmix64(plate_id as u64 ^ 0xB1ADE0FF);
+    let h = thalos_terrain::seeding::splitmix64(plate_id as u64 ^ 0xB1ADE0FF);
     let hue_unit = ((h & 0xFFFF) as f32) / 65535.0;
     let (hue_deg, sat, val) = match kind {
         // Land: warm wedge, hue ∈ [0°, 60°] ∪ [300°, 360°] mapped from a
@@ -880,7 +883,7 @@ fn hash_color(id: u32) -> [u8; 3] {
     if id == 0 {
         return [60, 60, 60];
     }
-    let h = thalos_terrain_gen::seeding::splitmix64(id as u64 ^ 0xD3ADBEEF);
+    let h = thalos_terrain::seeding::splitmix64(id as u64 ^ 0xD3ADBEEF);
     [
         (h & 0xFF) as u8,
         ((h >> 8) & 0xFF) as u8,

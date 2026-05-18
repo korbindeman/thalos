@@ -47,7 +47,10 @@ Each binary spawns one controller entity with layered contexts.
 Game:
 
 - `GameSystemContext` for Escape and screenshot
-- `GameFlightContext` for attitude, SAS, throttle, and warp
+- `GameFlightContext` for attitude, SAS, and throttle
+- `GameWarpContext` for sim-time meta-controls (pause, warp speed,
+  warp-to-maneuver) — always active except during egui text input, so
+  pause is reachable from EVA, freecam, etc.
 - `GameViewContext` for view and camera mode toggles
 - `GameCameraContext` for orbit drag and zoom
 - `GameManeuverContext` for node placement and deletion

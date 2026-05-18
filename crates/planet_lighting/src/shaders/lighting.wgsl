@@ -125,7 +125,7 @@ fn planetshine_sample(
 // ── Hapke surface BRDF and unified direct-lighting helper ─────────────────
 //
 // `shade_hapke_surface` is the one surface-shading routine every planet
-// material consumes — the impostor billboard and the bevy_terrain ground
+// material consumes — the impostor billboard and the thalos_udlod ground
 // LOD both call into this same function, so the two render paths shade
 // identically at the LOD swap. Material-specific effects (atmospheric
 // scattering, cloud compositing, water BRDF, limb darkening) live in

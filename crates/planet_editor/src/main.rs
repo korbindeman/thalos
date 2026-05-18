@@ -13,11 +13,11 @@ use bevy_egui::egui;
 use thalos_input::enhanced::{ActionSources, EnhancedInputSystems};
 use thalos_input::planet_editor::{PlanetEditorInputIntent, PlanetEditorInputPlugin};
 use thalos_input::settings::InputSettings;
-use thalos_physics::body_trajectory_provider::BodyTrajectoryProvider;
-use thalos_physics::canonical::Epoch;
-use thalos_physics::parsing::load_solar_system_from_dir;
-use thalos_physics::patched_conics::PatchedConics;
-use thalos_physics::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
+use thalos_physics_canonical::body_trajectory_provider::BodyTrajectoryProvider;
+use thalos_physics_canonical::canonical::Epoch;
+use thalos_physics_canonical::parsing::load_solar_system_from_dir;
+use thalos_physics_canonical::patched_conics::PatchedConics;
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
     AtmosphereBlock, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle,
     GasGiantParams, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial,
@@ -27,7 +27,7 @@ use thalos_planet_rendering::{
     build_ring_mesh, cloud_cover_image_for_body, convert_reference_clouds_when_ready,
     load_reference_cloud_sources,
 };
-use thalos_terrain_gen::{
+use thalos_terrain::{
     AirlessImpactProjectionConfig, AtmosphereSpec, AuthoredFeatureConfig, BodyArchetype,
     BoundaryKind, ColdDesertProjectionConfig, CompositionClass, DynamicSurfaceLayers,
     DynamicSurfaceState, FeatureId, FeatureLock, FeatureManifest, FeatureParamValue,
@@ -251,7 +251,7 @@ struct ResolvedBody {
 
 fn build_params_for_body(
     system: &SolarSystemDefinition,
-    body: &thalos_physics::types::BodyDefinition,
+    body: &thalos_physics_canonical::types::BodyDefinition,
 ) -> ResolvedBody {
     let mode = if body.kind == BodyKind::Star {
         BodyMode::Star
@@ -312,7 +312,7 @@ fn placeholder_terrain_config() -> TerrainConfig {
 
 fn heliocentric_sma(
     system: &SolarSystemDefinition,
-    start: &thalos_physics::types::BodyDefinition,
+    start: &thalos_physics_canonical::types::BodyDefinition,
 ) -> f64 {
     let mut current = start;
     for _ in 0..32 {
@@ -341,7 +341,7 @@ fn light_intensity_at(distance_m: f64) -> f32 {
 
 fn orbital_sun_elevation(
     system: &SolarSystemDefinition,
-    body: &thalos_physics::types::BodyDefinition,
+    body: &thalos_physics_canonical::types::BodyDefinition,
 ) -> f32 {
     if body.kind == BodyKind::Star {
         return 0.0;
@@ -654,14 +654,14 @@ fn dispatch_terrain_bake(
                 Err(e) => return Err(format!("terrain compile failed for {body_name}: {e}")),
             };
         if is_full_bake {
-            let key = thalos_terrain_gen::cache::terrain_cache_key(
+            let key = thalos_terrain::cache::terrain_cache_key(
                 &terrain,
                 tectonics.as_ref(),
                 &context,
                 options,
             );
-            let path = thalos_terrain_gen::cache::cache_path(&bake_dir, &body_name);
-            match thalos_terrain_gen::cache::store(&path, key, &data.static_surface) {
+            let path = thalos_terrain::cache::cache_path(&bake_dir, &body_name);
+            match thalos_terrain::cache::store(&path, key, &data.static_surface) {
                 Ok(()) => info!("wrote local bake: {body_name} → {}", path.display()),
                 Err(e) => warn!("local bake write failed for {body_name}: {e}"),
             }

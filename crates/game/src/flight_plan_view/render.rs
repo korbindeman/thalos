@@ -1,7 +1,7 @@
 //! Trajectory line rendering for the predicted ship path.
 //!
 //! Each leg has a single anchor body (set by the per-leg relock in
-//! [`thalos_physics::trajectory::propagate_flight_plan`]), so we
+//! [`thalos_physics_canonical::trajectory::propagate_flight_plan`]), so we
 //! compute the rendering pin once per leg via
 //! [`FlightPlanView::pin_for_body`] and reuse it for every sample in
 //! that leg. `sample_render_pos` then applies the standard
@@ -20,8 +20,11 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics::trajectory::{FlightPlan, NumericSegment, Trajectory, TrajectoryBranch};
-use thalos_physics::types::{BodyDefinition, BodyId, TrajectorySample};
+use thalos_physics_canonical::canonical::AuthorityMode;
+use thalos_physics_canonical::trajectory::{
+    FlightPlan, NumericSegment, Trajectory, TrajectoryBranch,
+};
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, TrajectorySample};
 
 use crate::coords::{RenderGhostFocus, RenderOrigin, WorldScale, sample_render_pos};
 use crate::map_view::MapSnapshot;
@@ -39,6 +42,14 @@ pub(super) fn render_trajectory(
     view: Res<FlightPlanView>,
     mut gizmos: Gizmos,
 ) {
+    // BodyFixed crafts have no live orbital prediction — any cached
+    // flight plan is frozen at the pre-collapse state. Drawing it would
+    // show an orbit the craft is no longer on.
+    if let Some(craft) = snapshot.crafts.first()
+        && matches!(craft.authority, AuthorityMode::BodyFixed { .. })
+    {
+        return;
+    }
     let Some(prediction) = snapshot.flight_plan.as_ref() else {
         return;
     };
@@ -151,14 +162,14 @@ fn render_branch(
     hidden_interval: Option<HiddenEpochInterval>,
     view: &FlightPlanView,
     system: &[BodyDefinition],
-    body_states: &[thalos_physics::types::BodyState],
+    body_states: &[thalos_physics_canonical::types::BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
 ) {
     let clip_start = match branch.kind {
-        thalos_physics::trajectory::BranchKind::Actual => None,
-        thalos_physics::trajectory::BranchKind::Projected => Some(branch.fork_time),
+        thalos_physics_canonical::trajectory::BranchKind::Actual => None,
+        thalos_physics_canonical::trajectory::BranchKind::Projected => Some(branch.fork_time),
     };
     render_plan_segments(
         &branch.plan,
@@ -182,7 +193,7 @@ fn render_plan_segments(
     hidden_interval: Option<HiddenEpochInterval>,
     view: &FlightPlanView,
     system: &[BodyDefinition],
-    body_states: &[thalos_physics::types::BodyState],
+    body_states: &[thalos_physics_canonical::types::BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,
@@ -265,7 +276,7 @@ fn render_plan_segments(
 fn segment_pin(
     segment: &NumericSegment,
     view: &FlightPlanView,
-    body_states: &[thalos_physics::types::BodyState],
+    body_states: &[thalos_physics_canonical::types::BodyState],
 ) -> DVec3 {
     segment
         .samples
@@ -590,7 +601,7 @@ fn render_ghost_encounter_windows(
     view: &FlightPlanView,
     snapshot: &MapSnapshot,
     system: &[BodyDefinition],
-    body_states: &[thalos_physics::types::BodyState],
+    body_states: &[thalos_physics_canonical::types::BodyState],
     origin: &RenderOrigin,
     scale: &WorldScale,
     gizmos: &mut Gizmos,

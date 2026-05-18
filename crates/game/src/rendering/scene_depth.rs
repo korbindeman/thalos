@@ -4,7 +4,7 @@
 //! geometry (terrain, impostor body, ship hull) so the in-scatter raymarch
 //! can clip at the surface and produce aerial-perspective continuity from
 //! sky to ground. WebGPU disallows sampling the live depth attachment from
-//! a fragment shader, and our forked `bevy_terrain` does not queue into
+//! a fragment shader, and our forked `thalos_udlod` does not queue into
 //! `Opaque3dPrepass`, so the standard prepass-depth texture is terrain-blind.
 //!
 //! Workaround: insert a render-graph node between [`Node3d::MainOpaquePass`]

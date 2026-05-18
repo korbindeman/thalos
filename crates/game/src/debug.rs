@@ -6,15 +6,15 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
 use thalos_input::game::GameInputIntent;
-use thalos_local_physics::{ActiveLocalBubble, TerrainSurfaceRegistry};
-use thalos_physics::{
+use thalos_physics_canonical::{
     body_fixed::body_fixed_pose_from_inertial,
     body_fixed::body_fixed_surface_velocity,
     canonical::{AuthorityMode, BodyFixedPose, TranslationalState},
     debug_orbits::debug_parking_orbit_state,
     types::{AttitudeState, BodyDefinition, BodyId, BodyKind, BodyState, StateVector},
 };
-use thalos_terrain::rendered_height_m;
+use thalos_physics_local::{ActiveLocalBubble, TerrainSurfaceRegistry};
+use thalos_terrain_render::rendered_height_m;
 
 use crate::camera::{ActiveCamera, MapCamera};
 use crate::coords::MAP_SCALE;
@@ -255,9 +255,10 @@ fn commit_debug_surface_teleport(
     }
 
     let sim_time = sim.simulation.sim_time();
-    let body_state = sim
-        .ephemeris
-        .state(hit.body_id, thalos_physics::canonical::Epoch(sim_time));
+    let body_state = sim.ephemeris.state(
+        hit.body_id,
+        thalos_physics_canonical::canonical::Epoch(sim_time),
+    );
     clear_active_local_bubble(&mut commands, &mut active_bubble);
     let (state, attitude) = surface_spawn_state(
         &body,
@@ -344,8 +345,9 @@ fn raycast_debug_surface_cursor(
     let dir_world = dir_render.as_dvec3().normalize();
     let dir_body = (body_state.orientation.inverse() * dir_world).normalize();
     let (surface_height_m, used_rendered_surface) = if let Some(surface) = surfaces.get(body_id) {
+        let dynamic_state = body_states.dynamic_surface_for(body_id, &surface);
         (
-            rendered_height_m(&surface.static_surface, dir_body.as_vec3()) as f64,
+            rendered_height_m(&surface, &dynamic_state, dir_body.as_vec3(), 1.0) as f64,
             true,
         )
     } else {
@@ -446,8 +448,8 @@ fn clear_debug_teleport_maneuvers(plan: &mut ManeuverPlan, selected: &mut Select
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thalos_physics::canonical::Epoch;
-    use thalos_physics::types::BodyKind;
+    use thalos_physics_canonical::canonical::Epoch;
+    use thalos_physics_canonical::types::BodyKind;
 
     fn body_definition() -> BodyDefinition {
         BodyDefinition {
@@ -463,7 +465,7 @@ mod tests {
             gm: 1.0,
             soi_radius_m: 100_000.0,
             orbital_elements: None,
-            terrain: thalos_terrain_gen::TerrainConfig::None,
+            terrain: thalos_terrain::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,

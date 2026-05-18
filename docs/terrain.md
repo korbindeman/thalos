@@ -14,7 +14,7 @@ references.
 
 Two halves, one contract:
 
-1. **Generation** (`thalos_terrain_gen`, pure Rust, no Bevy). A
+1. **Generation** (`thalos_terrain`, pure Rust, no Bevy). A
    feature-first compiler. Inputs: a `PlanetTerrainSpec`. Outputs:
    `PlanetSurface`, split into immutable `StaticSurfaceData` (cubemap
    textures + analytic feature buffers) and `DynamicSurfaceLayers`
@@ -23,7 +23,7 @@ Two halves, one contract:
 2. **Rendering**. Today: a flat impostor renderer
    (`planet_impostor.wgsl`) consumes static cubemaps plus dynamic layer
    buffers built from `PlanetSurface + DynamicSurfaceState`. Future (M3):
-   a forked `bevy_terrain` provides UDLOD on an ellipsoidal cubesphere,
+   a forked `thalos_udlod` provides UDLOD on an ellipsoidal cubesphere,
    with the same sampling pipeline plugged in via a runtime `TileProvider`
    trait.
 
@@ -39,7 +39,7 @@ pair once ground LOD lands.
 | Feature compiler | `AirlessImpactMoon` and `ColdDesertFormerlyWet` archetypes wired (Mira, Vaelen). v1 has no first-class hydrology, no layered substrate, no climate fields. | Revamped compiler with v2 backlog landed; all four main bodies through it (M2) |
 | Terrestrial bodies | Thalos, Pelagos use `Ocean` flat-water placeholder | `AgingOceanicHomeworld`, `GenericTerrestrial` archetypes (M2) |
 | Renderer (orbital) | Flat impostor reads `StaticSurfaceData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
-| Renderer (surface) | `bevy_terrain` fork (github.com/korbindeman/bevy_terrain, Bevy 0.18 + `TileProvider`) pulled into the workspace; `PipelineTileProvider` reads baked cubemap/R16 height directly for UDLOD tiles. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
+| Renderer (surface) | `thalos_udlod` fork (github.com/korbindeman/bevy_terrain, Bevy 0.18 + `TileProvider`) pulled into the workspace; `PipelineTileProvider` reads baked cubemap/R16 height directly for UDLOD tiles. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
 | Big-space hierarchy | Not present | Per-body grids parented to system grid (M1, M3) |
 
 ## Goals
@@ -718,7 +718,7 @@ a pipeline they slot into, not a milestone gate.
 ## Rendering: ground LOD (M3)
 
 Almost everything we need for surface-scale rendering is upstream in
-Kurt Kühnert's `bevy_terrain`. The single missing piece — a way to
+Kurt Kühnert's `thalos_udlod`. The single missing piece — a way to
 feed runtime-synthesized tile data into the renderer instead of
 disk-loaded preprocessed tiles — is added in our fork.
 
@@ -733,14 +733,14 @@ onboarding Mira, Vaelen, Thalos, and Pelagos.
 
 ### Repository landscape
 
-- **`bevy_terrain`** — the library. Pinned, actively developed.
+- **`thalos_udlod`** — the library. Pinned, actively developed.
   Contains the entire terrain rendering stack including UDLOD,
   Chunked Clipmap, three terrain models (planar / spherical /
   ellipsoidal), cubesphere projection, Taylor-series GPU precision
   approximation, optional `big_space` integration, multi-view
   rendering, debug tooling. **This is the fork target.**
 - **`planetary_terrain_renderer`** — Master's thesis demo app. Uses
-  `bevy_terrain` to render real-world Earth from GeoTIFF datasets.
+  `thalos_udlod` to render real-world Earth from GeoTIFF datasets.
   **Reference only.** Its `examples/spherical.rs` and debug controls
   are useful templates for our integration; we do not depend on or
   fork the app itself.
@@ -748,7 +748,7 @@ onboarding Mira, Vaelen, Thalos, and Pelagos.
   format-specific. Not relevant for procedural use.
 
 The Master's thesis novelties (ellipsoid model, Taylor-series GPU
-precision) were merged into `bevy_terrain` itself during Kurt's two
+precision) were merged into `thalos_udlod` itself during Kurt's two
 years of professional work at Argeo (Oct 2023 – Jul 2025), where he
 was paid to build production geospatial visualization on top of the
 library. This means the thesis tech is in well-tested production
@@ -756,7 +756,7 @@ code.
 
 ### big_space role for terrain
 
-`bevy_terrain` already handles surface-scale precision via
+`thalos_udlod` already handles surface-scale precision via
 Taylor-series approximation of ellipsoid coordinates relative to the
 viewer. Within the surface of a single planet, the renderer maintains
 GPU precision down to centimeter scale without needing big_space
@@ -789,13 +789,15 @@ a single body. The terrain renderer handles that internally.
     barycenter.
   - One `Grid` per orbiting body. Position updated each frame from
     patched-conics integrator. Rotation from spin state.
-  - Terrain entity (the `bevy_terrain` setup for that body) is
+  - Terrain entity (the `thalos_udlod` setup for that body) is
     parented to the body's grid. It inherits orbital and rotational
     motion automatically.
-  - The `high_precision` feature in `bevy_terrain` wires the floating
-    origin into the Taylor approximation — the renderer knows where
-    the camera is in big_space coords and computes its Taylor
-    coefficients accordingly.
+  - `thalos_udlod` wires the floating origin into the Taylor
+    approximation unconditionally — the renderer knows where the camera
+    is in big_space coords and computes its Taylor coefficients
+    accordingly. The upstream `high_precision` Cargo feature that gated
+    this path has been removed; it's the only viable precision path at
+    planet scale.
 
 #### Caveats
 
@@ -828,8 +830,10 @@ a single body. The terrain renderer handles that internally.
   resolution and format per channel: R16 (height), RG16 (normals),
   RGBA8 (albedo / splat / custom). 1px borders for seamless
   filtering.
-- **`high_precision` feature** for `big_space` integration. Wired to
-  the camera and floating origin.
+- **`big_space` integration** (unconditional; the upstream
+  `high_precision` Cargo feature was removed). Wired to the camera and
+  floating origin so the Taylor-series relative-position path is always
+  active.
 - **Multi-view rendering, custom material plugin system, debug
   visualization tools.**
 
@@ -877,7 +881,7 @@ pub trait TileProvider: Send + Sync {
     ) -> TileRequest;
 }
 
-// `TileCoordinate` is upstream — already exists in bevy_terrain, with
+// `TileCoordinate` is upstream — already exists in thalos_udlod, with
 // face/lod/x/y.
 ```
 
@@ -927,7 +931,7 @@ avoid pole singularities and to make the determinism property easier
 to maintain.
 
 The conversion math (cubesphere face/UV → ellipsoid position) is
-already implemented in upstream `bevy_terrain::math` and can be
+already implemented in upstream `thalos_udlod::math` and can be
 called from the provider.
 
 #### Latency
@@ -999,15 +1003,15 @@ into Thalos and wiring it to the revamped feature compiler.
 
 #### Stage 1: pull the fork into the workspace
 
-- Add the `bevy_terrain` fork as a workspace dependency, pinned to the
+- Add the `thalos_udlod` fork as a workspace dependency, pinned to the
   github remote on `main`.
-- Stand up a `thalos_terrain` crate that owns the integration: registers
-  `bevy_terrain::TerrainPlugin`, exposes a deterministic
+- Stand up a `thalos_terrain_render` crate that owns the integration: registers
+  `thalos_udlod::TerrainPlugin`, exposes a deterministic
   `SyntheticTileProvider` (pure function of `Coordinate::world_position`
   so tile borders are bit-identical), and ships a `playground` example
   binary that drives the fork end-to-end against the synthetic provider
   on a Mira-scale sphere.
-- **Exit criterion:** `cargo run -p thalos_terrain --example playground`
+- **Exit criterion:** `cargo run -p thalos_terrain_render --example playground`
   renders a UDLOD sphere using `SyntheticTileProvider`, validating that
   the fork compiles and runs inside the Thalos workspace.
 
@@ -1036,20 +1040,40 @@ into Thalos and wiring it to the revamped feature compiler.
   `R16`, albedo into sRGB-encoded `Rgba8`, roughness into linear `R16`
   upscaled from the source u8 cubemap by 257).
 - The current height path is deliberately the rendered cubemap/R16
-  source, not `thalos_terrain_gen::sample_static_surface()`. The full
+  source, not `thalos_terrain::sample_static_surface()`. The full
   sampler includes SSBO crater iteration and statistical detail that
   UDLOD does not render yet; using it for tiles or colliders would make
   physics disagree with the visible surface.
 - Border determinism is automatic: directions come from
-  `TileCoordinate::pixel_coordinate` → `Coordinate::world_position`,
-  the same mapping the renderer samples with.
+  `TileCoordinate::stitched_pixel_coordinate` → `Coordinate::world_position`,
+  the same mapping the renderer samples with after applying the same
+  neighbour-border orientation as UDLOD's offline `stitch.wgsl` pass.
+- Diagnostic override: run `THALOS_TERRAIN_PROVIDER=analytic3d just game`
+  to replace the game ground-LOD tile data with the face-independent
+  `SyntheticTileProvider` analytic 3D field. This is a visual seam test:
+  it bypasses baked cubemap sampling and dynamic layers, so CPU height
+  queries and terrain colliders still follow the normal rendered-height
+  path rather than the analytic surface. The local craft-shadow proxy is
+  off by default because the projected capsule shadow can read as a
+  terrain seam; use `THALOS_TERRAIN_CRAFT_SHADOW=on|off|auto` to override
+  that behavior when isolating material/shadow issues. If the real body's
+  height range makes the analytic field look flat, set
+  `THALOS_TERRAIN_ANALYTIC_RANGE_M=500` (or another positive metre value)
+  to widen the visual-only diagnostic height range.
+- Fully flat diagnostic: run `THALOS_TERRAIN_PROVIDER=flat just game` to
+  force constant-height terrain vertices and constant albedo/roughness. If
+  a hole remains here, the defect is in UDLOD geometry selection, strip
+  assembly, culling, or transform precision rather than terrain data.
+  Gameplay height queries also use a zero-height source in this mode, so
+  EVA spawn, walking, terrain-collider patches, and trajectory collision
+  all agree with the rendered reference sphere from the first frame.
 - The provider holds the `PlanetSurface` behind an `Arc` so it shares
   data with the impostor billboard's `PlanetMaterial` and there is one
   copy of the cubemap-heavy `StaticSurfaceData` per body.
-- In-memory LRU tile cache is provided by `bevy_terrain`'s
+- In-memory LRU tile cache is provided by `thalos_udlod`'s
   `TileAtlas`; an explicit Thalos-side cache is deferred unless tile
   latency proves to be a problem.
-- **Implementation:** [crates/terrain/src/pipeline.rs](../crates/terrain/src/pipeline.rs).
+- **Implementation:** [crates/terrain_render/src/pipeline.rs](../crates/terrain_render/src/pipeline.rs).
 - **Exit criterion (met):** body terrain entities are spawned by
   `crates/game/src/rendering/ground_terrain.rs` from
   `finalize_planet_generation` once the body's `PlanetSurface` task
@@ -1065,7 +1089,7 @@ into Thalos and wiring it to the revamped feature compiler.
   the same ephemeris snapshot the impostor's per-frame writer uses,
   so primary-star direction and flux match across the LOD swap.
 - `body_terrain.wgsl` samples height + albedo + roughness from the
-  bevy_terrain attachment atlases, derives a perturbed normal via
+  thalos_udlod attachment atlases, derives a perturbed normal via
   `sample_normal` (height finite-difference), and calls
   `thalos::lighting::shade_hapke_surface` with `external_shadow =
   local_craft_shadow` from a sun-ray capsule test against the player's
@@ -1085,7 +1109,7 @@ into Thalos and wiring it to the revamped feature compiler.
   impostor handoff.
 - **Implementation:**
   [crates/planet_lighting/src/shaders/lighting.wgsl](../crates/planet_lighting/src/shaders/lighting.wgsl),
-  [crates/terrain/src/body_terrain.wgsl](../crates/terrain/src/body_terrain.wgsl),
+  [crates/terrain_render/src/body_terrain.wgsl](../crates/terrain_render/src/body_terrain.wgsl),
   [crates/game/src/rendering/ground_terrain.rs](../crates/game/src/rendering/ground_terrain.rs).
 - **Exit criterion (met):** terrain ground-LOD pixels go through
   Hapke + eclipse + planetshine + ambient via the shared helper, with
@@ -1094,7 +1118,7 @@ into Thalos and wiring it to the revamped feature compiler.
 ### M5 rendered-height terrain colliders
 
 The first landing slice exposes rendered-height helpers from
-`thalos_terrain`:
+`thalos_terrain_render`:
 
 ```rust
 rendered_height_m(surface: &StaticSurfaceData, dir: Vec3) -> f32
@@ -1111,9 +1135,72 @@ and rebuild after the craft moves more than 1024 m laterally from the
 patch center.
 
 This is a fidelity choice: collision matches the visible UDLOD
-surface. When mid/high-frequency terrain detail becomes visible in
-ground LOD, both `PipelineTileProvider` and the collider source must be
-updated together.
+surface. When the HMF detail cascade (below) is engaged, both
+`PipelineTileProvider` and the collider source route the same
+`rendered_height_m` call so they stay in lockstep.
+
+### Procedural-detail cascade (HMF + domain warp)
+
+UDLOD tile data is the macro cubemap plus a runtime detail cascade
+evaluated by `PipelineTileProvider` per tile pixel.
+
+The macro is the baked cubemap: at Thalos's 4096² resolution and
+3186 km radius, ~1.2 km per equator texel. Without procedural detail
+above this, deep-LOD tiles are bilinear upsamples of the macro —
+smooth within a macro texel, with normal discontinuities at every
+boundary, producing the characteristic "huge flat panels with sharp
+creases" appearance.
+
+The cascade in
+[crates/terrain_render/src/pipeline.rs](../crates/terrain_render/src/pipeline.rs)
+adds high-frequency detail on top of the macro:
+
+- **Musgrave ridged hybrid multifractal** (`hmf_ridged_3d` in
+  [crates/terrain/src/noise.rs](../crates/terrain/src/noise.rs))
+  evaluated in body-local 3D so the field is sphere-continuous —
+  the same physical point returns the same value regardless of which
+  cube face is generating it. The HMF's self-modulating weight
+  (`weight *= signal` each octave) produces "rough peaks, smooth
+  valleys" without any external biome mask, and the ridged shape
+  concentrates signal at noise zero-crossings → ridge crests rather
+  than dome tops.
+- **Domain warping** via `fbm3_vec3` offsets the position before HMF
+  sampling. Breaks the lattice-aligned look of plain ridged noise.
+- **Continuous octave count.** `detail_plan_for_lod` returns a
+  fractional octave count from the tile's Nyquist resolution; HMF
+  weights its top octave by the fractional part so tiles cascading
+  N → N+1 across an LOD boundary blend smoothly. At the deepest LOD,
+  11 octaves from a 1 km base wavelength bottom out at ~0.49 m, with
+  ~12 cm amplitude at the deepest octave (decimetre-scale displacement
+  at sub-metre wavelength).
+- **Positive-only contribution.** HMF is normalised to `[0, 1]` and
+  scaled by `DETAIL_AMP_M`; the macro acts as the sediment / tectonic
+  floor, with HMF orogeny accumulating in rough regions. The R16
+  encoding budgets `DETAIL_HEIGHT_MARGIN_M` (currently 250 m) above
+  the static + dynamic envelope.
+
+Known limitation: **CPU/GPU bilinear stand-off.** Tile R16 data is
+bilinearly sampled by the GPU; `rendered_height_m` evaluates the
+cascade pointwise at the requested `dir`. Off pixel centres the two
+values disagree by up to one peak-to-trough of the resolved detail —
+O(10–20 cm) at sub-metre wavelength. Acceptable for v1; fixing it
+means threading `TerrainModel` into the height query and bilinear-
+mixing four texel-centre evaluations using UDLOD's stretched-cube
+projection (`Coordinate::world_position`). Tracked separately.
+
+v2 candidates the cascade does not address today:
+
+- Per-region character (biome-driven blend of two or more HMF
+  profiles). Single profile applied uniformly means roughness varies
+  with altitude (HMF's natural behavior) but every region has the
+  same character. Hooking into the macro `biome_weights_cubemap` is a
+  drop-in change to `compute_detail_height`.
+- Anisotropic ridges aligned to tectonic stress vectors. Requires
+  threading `TectonicSystem` directions into the per-pixel evaluator.
+- Drainage networks. Erosion adds geological character at high CPU
+  cost and is sphere-discontinuous in 2D; a 3D-continuous variant is
+  available in `bevy_erosion_filter` if drainage detail proves
+  necessary.
 
 #### Stage 3: onboard Mira, Vaelen, Thalos, Pelagos
 

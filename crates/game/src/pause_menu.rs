@@ -1,8 +1,22 @@
-//! Game-level pause menu.
+//! Game-level pause menu, plus the single owner of `Time<Virtual>`'s pause
+//! state.
 //!
-//! This is deliberately separate from simulation warp pause. Escape opens
-//! a modal overlay and freezes game time; the current warp level is left
-//! untouched so Resume returns to exactly the same simulation mode.
+//! Three distinct pause sources fold into one piece of Bevy state — and that
+//! folding is structural, not by per-system checks:
+//!
+//! - **Escape menu** (`GamePause`): opens a modal overlay and stops sim
+//!   time. The current warp level is left untouched so Resume returns to
+//!   exactly the same simulation mode.
+//! - **Warp pause** (`warp.speed() == 0`): the player-facing "pause" key.
+//! - **Freecam** (`FreeCam::active`): freezes sim time while leaving the
+//!   debug camera able to move on wall-clock time.
+//!
+//! [`sync_virtual_time_pause`] is the sole writer of `Time<Virtual>`'s
+//! pause state. Whenever any source asks for a pause, `time.delta` is
+//! zero everywhere — every system that respects the Bevy time idiom
+//! freezes automatically with no per-system gating. Any future pause
+//! source must be added to that one system so the architectural property
+//! survives.
 
 use bevy::app::AppExit;
 use bevy::input::InputSystems;
@@ -12,6 +26,7 @@ use bevy::window::{PrimaryWindow, WindowCloseRequested};
 
 use crate::hud::theme::{HudTheme, panel_frame};
 use crate::maneuver::InteractionMode;
+use crate::rendering::SimulationState;
 use crate::target::TargetBody;
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
@@ -43,7 +58,13 @@ impl Plugin for PauseMenuPlugin {
                     update_button_visuals,
                 )
                     .chain(),
-            );
+            )
+            // Run last so it observes this frame's `GamePause` toggle and
+            // last frame's warp speed. The one-frame lag on warp transitions
+            // is harmless: pause still freezes everything because canonical
+            // `step` multiplies `real_dt` by `warp.speed()` which is already
+            // zero by then.
+            .add_systems(Last, sync_virtual_time_pause);
     }
 }
 
@@ -204,7 +225,6 @@ fn spawn_menu_button(
 fn handle_escape_input(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut pause: ResMut<GamePause>,
-    mut time: ResMut<Time<Virtual>>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
@@ -214,7 +234,7 @@ fn handle_escape_input(
     keys.clear_just_pressed(KeyCode::Escape);
 
     if pause.active {
-        set_pause_active(&mut pause, &mut time, false);
+        pause.active = false;
         return;
     }
 
@@ -233,14 +253,13 @@ fn handle_escape_input(
         return;
     }
 
-    set_pause_active(&mut pause, &mut time, true);
+    pause.active = true;
 }
 
 fn handle_button_clicks(
     interactions: Query<(&Interaction, &PauseMenuAction), Changed<Interaction>>,
     primary_window: Query<Entity, With<PrimaryWindow>>,
     mut pause: ResMut<GamePause>,
-    mut time: ResMut<Time<Virtual>>,
     mut close_requested: MessageWriter<WindowCloseRequested>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -249,9 +268,9 @@ fn handle_button_clicks(
             continue;
         }
         match action {
-            PauseMenuAction::Resume => set_pause_active(&mut pause, &mut time, false),
+            PauseMenuAction::Resume => pause.active = false,
             PauseMenuAction::Quit => {
-                set_pause_active(&mut pause, &mut time, false);
+                pause.active = false;
                 if let Ok(window) = primary_window.single() {
                     close_requested.write(WindowCloseRequested { window });
                 } else {
@@ -316,14 +335,23 @@ fn update_button_visuals(
     }
 }
 
-fn set_pause_active(pause: &mut GamePause, time: &mut Time<Virtual>, active: bool) {
-    if pause.active == active {
-        return;
-    }
-    pause.active = active;
-    if active {
-        time.pause();
-    } else {
+/// Sole writer of `Time<Virtual>`'s pause state. All pause sources —
+/// escape-menu (`GamePause`), freecam, and warp pause (`warp.speed() == 0`)
+/// — fold in here. Any future pause source must be added to this predicate
+/// so the "everything is paused under a single switch" property survives.
+fn sync_virtual_time_pause(
+    pause: Res<GamePause>,
+    freecam: Option<Res<crate::freecam::FreeCam>>,
+    sim: Res<SimulationState>,
+    mut time: ResMut<Time<Virtual>>,
+) {
+    let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
+    let should_pause = pause.active || freecam_active || sim.simulation.warp.speed() == 0.0;
+    if should_pause {
+        if !time.is_paused() {
+            time.pause();
+        }
+    } else if time.is_paused() {
         time.unpause();
     }
 }

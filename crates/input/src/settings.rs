@@ -225,6 +225,7 @@ pub struct InputFile {
 pub struct GameInputSettings {
     pub system: BindingSection,
     pub flight: BindingSection,
+    pub warp: BindingSection,
     pub view: BindingSection,
     pub camera: BindingSection,
     pub eva: BindingSection,
@@ -238,6 +239,7 @@ impl Default for GameInputSettings {
         Self {
             system: defaults::game_system(),
             flight: defaults::game_flight(),
+            warp: defaults::game_warp(),
             view: defaults::game_view(),
             camera: defaults::game_camera(),
             eva: defaults::game_eva(),
@@ -252,6 +254,7 @@ impl GameInputSettings {
     fn merge(&mut self, file: GameInputFile) {
         self.system.merge(file.system);
         self.flight.merge(file.flight);
+        self.warp.merge(file.warp);
         self.view.merge(file.view);
         self.camera.merge(file.camera);
         self.eva.merge(file.eva);
@@ -267,6 +270,8 @@ pub struct GameInputFile {
     pub system: BindingSectionFile,
     #[serde(default)]
     pub flight: BindingSectionFile,
+    #[serde(default)]
+    pub warp: BindingSectionFile,
     #[serde(default)]
     pub view: BindingSectionFile,
     #[serde(default)]
@@ -428,11 +433,6 @@ pub mod defaults {
         section(
             [
                 ("toggle_sas", keys(["KeyT"])),
-                ("warp_to_maneuver", keys(["KeyG"])),
-                ("warp_pause", keys(["Space"])),
-                ("warp_increase", keys(["Period"])),
-                ("warp_decrease", keys(["Comma"])),
-                ("warp_reset", keys(["Backslash"])),
                 ("throttle_full", keys(["KeyZ"])),
                 ("throttle_cut", keys(["KeyX"])),
             ],
@@ -445,6 +445,19 @@ pub mod defaults {
                     axis(["ShiftLeft", "ShiftRight"], ["ControlLeft", "ControlRight"]),
                 ),
             ],
+        )
+    }
+
+    pub fn game_warp() -> BindingSection {
+        section(
+            [
+                ("warp_to_maneuver", keys(["KeyG"])),
+                ("warp_pause", keys(["Space"])),
+                ("warp_increase", keys(["Period"])),
+                ("warp_decrease", keys(["Comma"])),
+                ("warp_reset", keys(["Backslash"])),
+            ],
+            [],
         )
     }
 
@@ -599,7 +612,7 @@ mod tests {
             Some(&vec![BindingSpec::key("KeyF")])
         );
         assert_eq!(
-            settings.game.flight.bindings.get("warp_pause"),
+            settings.game.warp.bindings.get("warp_pause"),
             Some(&vec![BindingSpec::key("Space")])
         );
     }

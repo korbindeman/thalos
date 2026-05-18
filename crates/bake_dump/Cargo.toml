@@ -8,8 +8,8 @@ name = "bake_dump"
 path = "src/main.rs"
 
 [dependencies]
-thalos_physics = { path = "../physics" }
-thalos_terrain_gen = { path = "../terrain_gen" }
+thalos_physics_canonical = { path = "../physics_canonical" }
+thalos_terrain = { path = "../terrain" }
 bevy_erosion_filter = { version = "0.1.2", default-features = false }
 glam = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -18,7 +18,7 @@
 
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
-use thalos_physics::canonical::Epoch;
+use thalos_physics_canonical::canonical::Epoch;
 
 use crate::navball::render::NavballSphere;
 use crate::rendering::SimulationState;

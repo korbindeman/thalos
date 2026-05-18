@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use thalos_physics::{
+use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::{Epoch, WorldPhysicsConfig},
     simulation::Simulation,
     types::{BodyId, BodyStates, SolarSystemDefinition},
 };
 use thalos_planet_rendering::CLOUD_BAND_COUNT;
-use thalos_terrain_gen::DynamicSurfaceState;
+use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 
 use crate::SimStage;
 
@@ -99,6 +99,23 @@ impl SolarSystemState {
     pub fn install_cloud_band_state(&mut self, body_id: BodyId, state: CloudBandEnvironmentState) {
         self.ensure_body_capacity(body_id + 1);
         self.environment[body_id].cloud_bands = Some(state);
+    }
+
+    /// Return the dynamic-surface state for `body_id`, falling back to a
+    /// freshly seeded state matching the surface's authored layers when the
+    /// bake hasn't installed runtime state yet. This is the canonical companion
+    /// to [`thalos_terrain_render::rendered_height_m`]; pair it with
+    /// `TerrainSurfaceRegistry::get` so every height query sees the same
+    /// dynamic overlays that the renderer baked into its atlas.
+    pub fn dynamic_surface_for(
+        &self,
+        body_id: BodyId,
+        surface: &PlanetSurface,
+    ) -> DynamicSurfaceState {
+        self.environment
+            .get(body_id)
+            .and_then(|env| env.dynamic_surface.clone())
+            .unwrap_or_else(|| DynamicSurfaceState::for_layers(&surface.dynamic_layers))
     }
 }
 

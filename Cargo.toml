@@ -1,21 +1,20 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/physics",
-    "crates/terrain_gen",
-    "crates/atmosphere_gen",
+    "crates/physics_canonical",
+    "crates/terrain",
+    "crates/atmosphere",
     "crates/celestial",
     "crates/input",
     "crates/planet_lighting",
     "crates/planet_rendering",
     "crates/planet_editor",
     "crates/game",
-    "crates/ship_rendering",
     "crates/shipyard",
     "crates/bake_dump",
-    "crates/terrain",
-    "crates/bevy_terrain",
-    "crates/local_physics",
+    "crates/terrain_render",
+    "crates/udlod",
+    "crates/physics_local",
 ]
 
 [workspace.package]
@@ -25,7 +24,7 @@ edition = "2024"
 # Optimize dependencies in dev builds for runtime performance without
 # sacrificing incremental compile speed on our own crates.
 [workspace.dependencies]
-bevy_terrain = { path = "crates/bevy_terrain", features = ["high_precision"] }
+thalos_udlod = { path = "crates/udlod" }
 
 [profile.dev]
 opt-level = 1

@@ -1,4 +1,4 @@
-//! Bake a [`thalos_terrain_gen::PlanetSurface`] into GPU resources.
+//! Bake a [`thalos_terrain::PlanetSurface`] into GPU resources.
 //!
 //! Three layers are produced:
 //! - **Cubemaps** (layer 1, always): albedo (`Rgba8UnormSrgb`), height
@@ -11,7 +11,7 @@
 //!   and active-dune cubemaps. These can be rebuilt or transform-sampled
 //!   without touching the static terrain cubemaps.
 //!
-//! See `crates/terrain_gen/src/sample.rs` for the full LOD contract.
+//! See `crates/terrain/src/sample.rs` for the full LOD contract.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
@@ -19,9 +19,10 @@ use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
 use bevy::render::storage::ShaderStorageBuffer;
+use rayon::prelude::*;
 
-use thalos_terrain_gen::cubemap::{CubemapFace, face_uv_to_dir};
-use thalos_terrain_gen::{Cubemap, DynamicSurfaceState, PlanetSurface};
+use thalos_terrain::cubemap::{CubemapFace, face_uv_to_dir};
+use thalos_terrain::{Cubemap, DynamicSurfaceState, PlanetSurface};
 
 use crate::shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature};
 use crate::texture::PlanetTextures;
@@ -90,7 +91,7 @@ fn hash_cell(ix: i32, iy: i32, iz: i32, seed_lo: u32, seed_hi: u32) -> u32 {
 /// into `feature_ids`. The table is always exactly `CELL_TABLE_SIZE` entries
 /// long; empty slots have `count = 0` and the shader loops zero iterations.
 fn build_ssbo_cell_table(
-    craters: &[thalos_terrain_gen::types::Crater],
+    craters: &[thalos_terrain::types::Crater],
     bake_threshold_m: f32,
     seed_lo: u32,
     seed_hi: u32,
@@ -170,27 +171,34 @@ fn bake_active_dune_overlay(
 
     let inv = 1.0 / resolution as f32;
     let pixel_size_m = (std::f32::consts::TAU * body.radius_m / (resolution as f32 * 4.0)).max(1.0);
+    let row_len = resolution as usize;
+    let height_range = body.height_range.max(1.0);
+    // Parallelize per-row within each face. `active_dune_overlay_at` reads
+    // `surface` and `state` immutably, so rayon can split rows freely; output
+    // chunks are non-overlapping per-face buffer slices.
     for face in CubemapFace::ALL {
         let height_face = height.face_data_mut(face);
         let albedo_face = albedo.face_data_mut(face);
-        for y in 0..resolution {
-            let v = (y as f32 + 0.5) * inv;
-            for x in 0..resolution {
-                let u = (x as f32 + 0.5) * inv;
-                let dir = face_uv_to_dir(face, u, v).normalize();
-                let overlay = active_dune_overlay_at(surface, state, dir, pixel_size_m);
-                let idx = (y * resolution + x) as usize;
-                height_face[idx] = ((overlay.height_m / body.height_range.max(1.0)).clamp(0.0, 1.0)
-                    * 65535.0
-                    + 0.5) as u16;
-                albedo_face[idx] = [
-                    linear_to_srgb8(overlay.albedo.x),
-                    linear_to_srgb8(overlay.albedo.y),
-                    linear_to_srgb8(overlay.albedo.z),
-                    quantize_unit_to_u8(overlay.albedo_strength),
-                ];
-            }
-        }
+        height_face
+            .par_chunks_mut(row_len)
+            .zip(albedo_face.par_chunks_mut(row_len))
+            .enumerate()
+            .for_each(|(y, (height_row, albedo_row))| {
+                let v = (y as f32 + 0.5) * inv;
+                for x in 0..row_len {
+                    let u = (x as f32 + 0.5) * inv;
+                    let dir = face_uv_to_dir(face, u, v).normalize();
+                    let overlay = active_dune_overlay_at(surface, state, dir, pixel_size_m);
+                    height_row[x] =
+                        ((overlay.height_m / height_range).clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+                    albedo_row[x] = [
+                        linear_to_srgb8(overlay.albedo.x),
+                        linear_to_srgb8(overlay.albedo.y),
+                        linear_to_srgb8(overlay.albedo.z),
+                        quantize_unit_to_u8(overlay.albedo_strength),
+                    ];
+                }
+            });
     }
 
     (height, albedo)
@@ -220,7 +228,7 @@ fn active_dune_overlay_at(
         let dune_state = state
             .active_dune_state(index, layer)
             .cloned()
-            .unwrap_or_else(|| thalos_terrain_gen::ActiveDuneState {
+            .unwrap_or_else(|| thalos_terrain::ActiveDuneState {
                 id: layer.id.clone(),
                 mobility: layer.mobility,
                 ..Default::default()
@@ -454,7 +462,7 @@ pub fn prepare_planet_bake(
         .map(|(i, layer)| {
             let cap = layer.spec;
             let cap_state = state.ice_cap_state(i, layer).cloned().unwrap_or_else(|| {
-                thalos_terrain_gen::IceCapState {
+                thalos_terrain::IceCapState {
                     id: layer.id.clone(),
                     ..Default::default()
                 }
@@ -504,7 +512,7 @@ pub fn prepare_planet_bake(
             let dune_state = state
                 .active_dune_state(i, layer)
                 .cloned()
-                .unwrap_or_else(|| thalos_terrain_gen::ActiveDuneState {
+                .unwrap_or_else(|| thalos_terrain::ActiveDuneState {
                     id: layer.id.clone(),
                     mobility: layer.mobility,
                     ..Default::default()
@@ -587,7 +595,7 @@ pub fn bake_from_planet_surface(
 
 /// Serialize the 6 faces of a `Cubemap<T>` into a contiguous byte buffer in
 /// `CubemapFace::ALL` order.
-fn cubemap_to_bytes<T: Copy + Default>(cubemap: &thalos_terrain_gen::Cubemap<T>) -> Vec<u8> {
+fn cubemap_to_bytes<T: Copy + Default>(cubemap: &thalos_terrain::Cubemap<T>) -> Vec<u8> {
     let resolution = cubemap.resolution();
     let bytes_per_texel = std::mem::size_of::<T>();
     let mut data = Vec::with_capacity((resolution * resolution) as usize * bytes_per_texel * 6);
@@ -602,7 +610,7 @@ fn cubemap_to_bytes<T: Copy + Default>(cubemap: &thalos_terrain_gen::Cubemap<T>)
 
 /// Create a Bevy `Image` from a `Cubemap<T>` with a cube view descriptor.
 fn cubemap_image<T: Copy + Default>(
-    cubemap: &thalos_terrain_gen::Cubemap<T>,
+    cubemap: &thalos_terrain::Cubemap<T>,
     format: TextureFormat,
 ) -> Image {
     let resolution = cubemap.resolution();
@@ -626,7 +634,7 @@ fn cubemap_image<T: Copy + Default>(
 }
 
 fn create_cubemap_image<T: Copy + Default>(
-    cubemap: &thalos_terrain_gen::Cubemap<T>,
+    cubemap: &thalos_terrain::Cubemap<T>,
     format: TextureFormat,
     images: &mut Assets<Image>,
 ) -> Handle<Image> {
@@ -686,7 +694,7 @@ impl AverageTexel for [u8; 4] {
 }
 
 fn impostor_cubemap_image<T: AverageTexel>(
-    cubemap: &thalos_terrain_gen::Cubemap<T>,
+    cubemap: &thalos_terrain::Cubemap<T>,
     format: TextureFormat,
 ) -> Image {
     if cubemap.resolution() <= IMPOSTOR_MAX_CUBEMAP_RESOLUTION {
@@ -698,14 +706,14 @@ fn impostor_cubemap_image<T: AverageTexel>(
 }
 
 fn downsample_cubemap<T: AverageTexel>(
-    source: &thalos_terrain_gen::Cubemap<T>,
+    source: &thalos_terrain::Cubemap<T>,
     resolution: u32,
-) -> thalos_terrain_gen::Cubemap<T> {
+) -> thalos_terrain::Cubemap<T> {
     debug_assert!(resolution > 0);
     debug_assert!(resolution <= source.resolution());
 
     let source_res = source.resolution();
-    let mut output = thalos_terrain_gen::Cubemap::<T>::new(resolution);
+    let mut output = thalos_terrain::Cubemap::<T>::new(resolution);
     for face in CubemapFace::ALL {
         let src = source.face_data(face);
         let dst = output.face_data_mut(face);
@@ -776,7 +784,7 @@ pub(crate) fn equirect_to_cloud_cover_image_with_rotation(
             for x in 0..resolution {
                 let u = (x as f32 + 0.5) * inv;
                 let dir = source_from_output_rotation
-                    * thalos_terrain_gen::cubemap::face_uv_to_dir(face, u, v);
+                    * thalos_terrain::cubemap::face_uv_to_dir(face, u, v);
                 // Equirectangular: longitude from atan2(x, z), latitude
                 // from asin(y). Maps to [0, 1] UV matching source image
                 // layout (longitude → x, latitude → y, north pole at top).

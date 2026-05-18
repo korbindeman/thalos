@@ -31,7 +31,7 @@
 //!
 //! Burns are centered on `center_time`: the throttle opens at
 //! `center_time − duration/2`. The trajectory predictor in
-//! [`thalos_physics::trajectory`] uses the same convention for maneuver
+//! [`thalos_physics_canonical::trajectory`] uses the same convention for maneuver
 //! burns, so the displayed flight plan matches what the autopilot flies
 //! for maneuver-provided directives.
 //!
@@ -239,7 +239,7 @@ pub enum AutopilotState {
         direction: DVec3,
         /// Magnitude of the planned Δv, m/s.
         planned_dv: f64,
-        /// Value of [`thalos_physics::simulation::Simulation::delivered_dv`]
+        /// Value of [`thalos_physics_canonical::simulation::Simulation::delivered_dv`]
         /// captured at the moment the burn started; subtracted from the
         /// live value each frame to get "Δv delivered since burn start."
         anchor_delivered_dv: f64,
@@ -320,7 +320,7 @@ pub(crate) fn lead_seconds_for(burn_duration_s: f64) -> f64 {
 }
 
 /// Worst-case real-frame budget — must match
-/// [`thalos_physics::simulation::SimulationConfig::max_real_delta`] so
+/// [`thalos_physics_canonical::simulation::SimulationConfig::max_real_delta`] so
 /// our look-ahead captures the largest sim-time advance the upcoming
 /// step might apply.
 const FRAME_DT_BUDGET_S: f64 = 0.1;
@@ -426,7 +426,7 @@ pub(crate) fn consume_completed_maneuver_directives(
 /// [`POINTING_OMEGA_TOL`]. Both clauses are needed: the dot test alone
 /// passes momentarily during a fast slew through the target.
 fn pointing_converged(
-    sim: &thalos_physics::simulation::Simulation,
+    sim: &thalos_physics_canonical::simulation::Simulation,
     target_dir: bevy::math::DVec3,
 ) -> bool {
     let attitude = sim.attitude();
@@ -440,7 +440,10 @@ fn pointing_converged(
 /// slowest pitch/yaw axis, with the safety margin and cap applied. PD's
 /// small-angle tail is *not* included here — `lead_seconds_for` already
 /// covers it via `AUTOPILOT_SETTLE_S * 1.5`.
-fn slew_time_for_angle(angle_rad: f64, sim: &thalos_physics::simulation::Simulation) -> f64 {
+fn slew_time_for_angle(
+    angle_rad: f64,
+    sim: &thalos_physics_canonical::simulation::Simulation,
+) -> f64 {
     if angle_rad < 1e-3 {
         return 0.0;
     }
@@ -453,14 +456,17 @@ fn slew_time_for_angle(angle_rad: f64, sim: &thalos_physics::simulation::Simulat
 
 fn slew_time_estimate(
     target_dir: bevy::math::DVec3,
-    sim: &thalos_physics::simulation::Simulation,
+    sim: &thalos_physics_canonical::simulation::Simulation,
 ) -> f64 {
     let nose_world = sim.attitude().orientation * SHIP_NOSE_BODY;
     let angle = nose_world.dot(target_dir).clamp(-1.0, 1.0).acos();
     slew_time_for_angle(angle, sim)
 }
 
-fn burn_duration_for(dv_mag: f64, sim: &thalos_physics::simulation::Simulation) -> Option<f64> {
+fn burn_duration_for(
+    dv_mag: f64,
+    sim: &thalos_physics_canonical::simulation::Simulation,
+) -> Option<f64> {
     if dv_mag <= 0.0 {
         return None;
     }
@@ -470,7 +476,7 @@ fn burn_duration_for(dv_mag: f64, sim: &thalos_physics::simulation::Simulation) 
 
 fn lead_for_directive(
     directive: AutopilotBurnDirective,
-    sim: &thalos_physics::simulation::Simulation,
+    sim: &thalos_physics_canonical::simulation::Simulation,
 ) -> f64 {
     lead_seconds_for(directive.duration_s) + slew_time_estimate(directive.direction, sim)
 }

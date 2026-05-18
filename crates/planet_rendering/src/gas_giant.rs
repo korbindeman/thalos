@@ -245,8 +245,8 @@ impl GasGiantLayers {
     /// `atmosphere`, not a child of it). When present, its inner/outer
     /// radii feed the cloud-deck shadow term.
     pub fn from_params(
-        atmos: &thalos_atmosphere_gen::AtmosphereParams,
-        rings: Option<&thalos_atmosphere_gen::RingSystem>,
+        atmos: &thalos_atmosphere::AtmosphereParams,
+        rings: Option<&thalos_atmosphere::RingSystem>,
         meters_per_render_unit: f32,
     ) -> Self {
         let mut layers = Self::default();

@@ -13,7 +13,7 @@
 
 use bevy::math::Vec4;
 use bevy::render::render_resource::ShaderType;
-use thalos_atmosphere_gen::TerrestrialAtmosphere;
+use thalos_atmosphere::TerrestrialAtmosphere;
 
 /// Atmosphere uniform consumed by every body-surface material that
 /// integrates atmospheric scattering, cloud bands, or limb darkening.

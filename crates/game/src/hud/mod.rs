@@ -64,6 +64,7 @@ impl Plugin for HudPlugin {
             .init_resource::<UiPointerGate>()
             .init_resource::<TimeDisplayMode>()
             .init_resource::<nav_panel::ManeuverPanelState>()
+            .init_resource::<orbital_panel::AltitudeDisplay>()
             .add_systems(Startup, theme::init_theme)
             .add_systems(bevy_egui::EguiPrimaryContextPass, theme::apply_egui_theme)
             .add_systems(Startup, setup_top_left_row.after(theme::init_theme))
@@ -98,6 +99,7 @@ impl Plugin for HudPlugin {
                     view_mode_panel::handle_clicks,
                     view_mode_panel::update_button_visuals,
                     orbital_panel::update,
+                    orbital_panel::handle_click,
                     delta_v_panel::update,
                     flight_panel::update,
                     fps_overlay::update,

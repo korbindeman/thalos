@@ -4,22 +4,23 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-thalos_physics = { path = "../physics" }
+thalos_physics_canonical = { path = "../physics_canonical" }
 thalos_input = { path = "../input" }
 thalos_planet_rendering = { path = "../planet_rendering" }
+thalos_terrain_render = { path = "../terrain_render" }
 thalos_terrain = { path = "../terrain" }
-thalos_terrain_gen = { path = "../terrain_gen" }
-thalos_local_physics = { path = "../local_physics" }
+thalos_physics_local = { path = "../physics_local" }
 thalos_celestial = { path = "../celestial" }
 thalos_shipyard = { path = "../shipyard" }
-thalos_ship_rendering = { path = "../ship_rendering" }
-bevy = { version = "0.18", features = ["wayland", "jpeg"] }
-bevy_terrain = { workspace = true }
+bevy = { version = "0.18", features = ["wayland", "jpeg", "bevy_remote"] }
+bevy_brp_extras = "0.18"
+thalos_udlod = { workspace = true }
 bevy_egui = "0.39"
 big_space = { version = "0.12", features = ["i64"] }
 tracing = "0.1"
 ab_glyph = "0.2"
 resvg = { version = "0.45", default-features = false }
+rayon = "1.10"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

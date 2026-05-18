@@ -7,7 +7,7 @@
 //!   the CPU and uploaded to the planet material each frame)
 
 use bevy::prelude::*;
-use thalos_physics::types::BodyStates;
+use thalos_physics_canonical::types::BodyStates;
 use thalos_planet_rendering::{GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial};
 
 use super::lighting::{build_scene_lighting, collect_occluders};

@@ -19,7 +19,7 @@
 
 use bevy::prelude::*;
 
-use thalos_physics::simulation::Simulation;
+use thalos_physics_canonical::simulation::Simulation;
 
 use crate::SimStage;
 use crate::autopilot::{autopilot_system, lead_seconds_for};
@@ -28,7 +28,7 @@ use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
 
 /// Worst-case real-frame budget — must match
-/// [`thalos_physics::simulation::SimulationConfig::max_real_delta`] so
+/// [`thalos_physics_canonical::simulation::SimulationConfig::max_real_delta`] so
 /// a single frame at the chosen level can't advance past the safe
 /// target.
 const FRAME_DT_BUDGET_S: f64 = 0.1;
@@ -114,6 +114,7 @@ pub(crate) fn warp_to_maneuver_system(
     mut state: ResMut<WarpToManeuver>,
     mut sim: ResMut<SimulationState>,
     locks: Res<ControlLocks>,
+    limits: Res<crate::bridge::WarpLimits>,
 ) {
     if !state.active {
         state.current = None;
@@ -141,8 +142,21 @@ pub(crate) fn warp_to_maneuver_system(
         return;
     }
 
+    // Cap auto-warp to the altitude-aware limit so it cannot bypass the
+    // gate that the player-driven path already respects. Without this,
+    // pressing G near a planet would happily ramp to 1M× and phase the
+    // surface on the way to the maneuver node.
     let max_speed = (remaining / FRAME_DT_BUDGET_S).max(1.0);
-    sim.simulation.warp.set_speed(max_speed);
+    let level_cap_speed = sim
+        .simulation
+        .warp
+        .levels()
+        .get(limits.max_level)
+        .copied()
+        .unwrap_or(f64::INFINITY);
+    sim.simulation
+        .warp
+        .set_speed(max_speed.min(level_cap_speed));
     state.current = Some(target);
 }
 

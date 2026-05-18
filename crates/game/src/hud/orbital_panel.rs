@@ -7,18 +7,46 @@
 //! Node the same width as the orbital panel, which makes the row
 //! symmetric around altitude — so altitude lands exactly at screen
 //! centre while orbital floats to its right.
+//!
+//! Altitude datum (SEA vs GND) auto-picks from regime: GND while the
+//! local bubble has a terrain collider attached over the dominant
+//! body, SEA otherwise. Clicking the panel installs a sticky override
+//! that survives until the next auto-state transition (i.e. when the
+//! regime changes on its own, the override clears and auto takes over
+//! again).
 
 use std::f64::consts::{PI, TAU};
 
 use bevy::prelude::*;
-use thalos_physics::canonical::Epoch;
-use thalos_physics::orbital_math::{OsculatingElements, cartesian_to_elements};
-use thalos_physics::types::StateVector;
+use thalos_physics_canonical::canonical::Epoch;
+use thalos_physics_canonical::orbital_math::{OsculatingElements, cartesian_to_elements};
+use thalos_physics_canonical::types::StateVector;
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
 use crate::hud::HudPanel;
 use crate::hud::format;
 use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
 use crate::rendering::SimulationState;
+
+use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AltitudeDatum {
+    Sea,
+    Ground,
+}
+
+#[derive(Resource, Default, Debug)]
+pub(super) struct AltitudeDisplay {
+    /// Sticky user override; cleared when `last_auto` changes.
+    override_choice: Option<AltitudeDatum>,
+    /// Auto-picked datum from the previous frame, used to detect
+    /// regime transitions that should clear the override.
+    last_auto: Option<AltitudeDatum>,
+}
+
+#[derive(Component)]
+pub(super) struct AltitudePanel;
 
 #[derive(Component)]
 pub(super) struct AltitudeText;
@@ -41,7 +69,6 @@ pub(super) struct PeriapsisTimeText;
 /// Width of the orbital-info panel. The left balancer matches this so
 /// the row is symmetric around the altitude panel.
 const ORBITAL_PANEL_WIDTH: f32 = 310.0;
-const ALTITUDE_DATUM_LABEL: &str = "SEA";
 
 pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {
     let wrapper = Node {
@@ -81,28 +108,37 @@ fn spawn_altitude(p: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
     root.align_items = AlignItems::Center;
     let (bg, border) = panel_frame(theme);
 
-    p.spawn((root, bg, border, HudPanel, Name::new("HudAltitude")))
-        .with_children(|c| {
-            c.spawn((label(theme, "—"), AnchorBodyText));
-            c.spawn((emphasis(theme, "—"), AltitudeText));
-            c.spawn(Node {
-                height: Val::Px(2.0),
-                ..default()
-            });
-            c.spawn((
-                Text::new("ALTITUDE"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: 11.0,
-                    ..default()
-                },
-                TextColor(theme.text_subtitle),
-                Node {
-                    align_self: AlignSelf::Center,
-                    ..default()
-                },
-            ));
+    p.spawn((
+        Button,
+        root,
+        bg,
+        border,
+        Interaction::None,
+        AltitudePanel,
+        HudPanel,
+        Name::new("HudAltitude"),
+    ))
+    .with_children(|c| {
+        c.spawn((label(theme, "—"), AnchorBodyText));
+        c.spawn((emphasis(theme, "—"), AltitudeText));
+        c.spawn(Node {
+            height: Val::Px(2.0),
+            ..default()
         });
+        c.spawn((
+            Text::new("ALTITUDE"),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(theme.text_subtitle),
+            Node {
+                align_self: AlignSelf::Center,
+                ..default()
+            },
+        ));
+    });
 }
 
 fn spawn_orbital_info(p: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
@@ -198,10 +234,15 @@ fn countdown_cell(theme: &HudTheme) -> impl Bundle {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     sim: Res<SimulationState>,
+    active: Res<ActiveLocalBubble>,
+    height_sources: Res<HeightSourceRegistry>,
+    theme: Res<HudTheme>,
+    mut display: ResMut<AltitudeDisplay>,
     mut alt_q: Query<&mut Text, With<AltitudeText>>,
-    mut anchor_q: Query<&mut Text, (With<AnchorBodyText>, Without<AltitudeText>)>,
+    mut anchor_q: Query<(&mut Text, &mut TextColor), (With<AnchorBodyText>, Without<AltitudeText>)>,
     mut ap_alt_q: Query<
         &mut Text,
         (
@@ -253,9 +294,10 @@ pub fn update(
         velocity: ship.velocity - body_state.velocity,
     };
 
-    let altitude_m = rel.position.length() - body.radius_m;
+    let asl_m = rel.position.length() - body.radius_m;
     let elements = cartesian_to_elements(rel, body.gm);
 
+    // AP/PE are radius-relative (sea-level / datum), independent of GND/SEA toggle.
     let (ap_str, pe_str) = match elements {
         Some(el) => {
             let ap = if el.apoapsis_m.is_finite() {
@@ -277,15 +319,94 @@ pub fn update(
         None => ("—".to_string(), "—".to_string()),
     };
 
-    set_text(&mut alt_q, format::altitude(altitude_m));
-    set_text(
-        &mut anchor_q,
-        format!("{} {}", body.name, ALTITUDE_DATUM_LABEL),
-    );
+    // Auto-pick: GND while the local bubble has terrain attached over
+    // the dominant body and we have a height source to sample. Falls
+    // back to SEA otherwise (deep space, transitional gaps, missing bake).
+    let height_source = height_sources.get(anchor_id);
+    let bubble_grounded = active
+        .bubble
+        .as_ref()
+        .is_some_and(|b| b.body_id == anchor_id && b.terrain_entity.is_some());
+    let auto = if bubble_grounded && height_source.is_some() {
+        AltitudeDatum::Ground
+    } else {
+        AltitudeDatum::Sea
+    };
+
+    // Clear sticky override on auto-state transition.
+    if let Some(prev) = display.last_auto
+        && prev != auto
+    {
+        display.override_choice = None;
+    }
+    display.last_auto = Some(auto);
+
+    // Honor override unless GND was chosen with no height source available.
+    let chosen = display.override_choice.unwrap_or(auto);
+    let chosen = match chosen {
+        AltitudeDatum::Ground if height_source.is_none() => AltitudeDatum::Sea,
+        other => other,
+    };
+
+    let (alt_value, datum_label, datum_color) = match chosen {
+        AltitudeDatum::Sea => (asl_m, "SEA", theme.text_datum_sea),
+        AltitudeDatum::Ground => {
+            let height_source = height_source
+                .as_ref()
+                .expect("height source presence checked above");
+            let position_body =
+                body_state.orientation.inverse() * (ship.position - body_state.position);
+            let dir = position_body.try_normalize();
+            let agl = match dir {
+                Some(d) => {
+                    let terrain_h = height_source
+                        .sample_height_m(d.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+                        .unwrap_or(0.0) as f64;
+                    position_body.length() - body.radius_m - terrain_h
+                }
+                None => asl_m,
+            };
+            (agl, "GND", theme.text_datum_gnd)
+        }
+    };
+
+    set_text(&mut alt_q, format::altitude(alt_value));
+
+    let anchor_str = format!("{} {}", body.name, datum_label);
+    if let Ok((mut text, mut color)) = anchor_q.single_mut() {
+        if text.0 != anchor_str {
+            text.0 = anchor_str;
+        }
+        if color.0 != datum_color {
+            color.0 = datum_color;
+        }
+    }
+
     set_text(&mut ap_alt_q, ap_str);
     set_text(&mut ap_time_q, ap_time);
     set_text(&mut pe_alt_q, pe_str);
     set_text(&mut pe_time_q, pe_time);
+}
+
+pub fn handle_click(
+    interactions: Query<&Interaction, (With<AltitudePanel>, Changed<Interaction>)>,
+    mut display: ResMut<AltitudeDisplay>,
+) {
+    for interaction in &interactions {
+        if !matches!(interaction, Interaction::Pressed) {
+            continue;
+        }
+        // Toggle from whatever is currently displayed (override if any,
+        // otherwise the last auto pick, otherwise SEA as a safe default).
+        let current = display
+            .override_choice
+            .or(display.last_auto)
+            .unwrap_or(AltitudeDatum::Sea);
+        display.override_choice = Some(match current {
+            AltitudeDatum::Sea => AltitudeDatum::Ground,
+            AltitudeDatum::Ground => AltitudeDatum::Sea,
+        });
+    }
 }
 
 fn set_text<F: bevy::ecs::query::QueryFilter>(query: &mut Query<&mut Text, F>, new_value: String) {

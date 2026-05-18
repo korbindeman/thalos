@@ -3,7 +3,7 @@
 //! Called from `generation::finalize_planet_generation` once a body's
 //! `PlanetSurface` task resolves. The terrain entity is parented to the
 //! body's real-space `Grid` so it inherits orbital + rotational motion
-//! automatically (`bevy_terrain`'s `high_precision` integration handles
+//! automatically (`thalos_udlod`'s `high_precision` integration handles
 //! surface-scale precision via its Taylor-series approximation; we don't
 //! nest any additional cells).
 //!
@@ -17,15 +17,17 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use bevy_terrain::prelude::*;
 use big_space::grid::Grid;
-use thalos_physics::types::{BodyDefinition, BodyId};
+use thalos_physics_canonical::types::{BodyDefinition, BodyId};
 use thalos_planet_rendering::{AtmosphereBlock, SceneLighting};
-use thalos_terrain::{
-    BodySkyExtra, BodySkyMaterial, BodyTerrainMaterial, BodyTerrainShadow, BodyWaterMaterial,
-    BodyWaterParams, PipelineTileProvider, rendered_height_range,
+use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_terrain_render::{
+    BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
+    BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle,
+    PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, rendered_height_range,
 };
-use thalos_terrain_gen::{DynamicSurfaceState, PlanetSurface};
+use thalos_udlod::math::TileCoordinate;
+use thalos_udlod::prelude::*;
 
 use crate::camera::{CameraTargetOffset, ShipCamera};
 use crate::coords::SHIP_LAYER;
@@ -50,7 +52,7 @@ const CRAFT_SHADOW_MAX_DISTANCE_M: f32 = 25_000.0;
 const LOD_COUNT: u32 = 16;
 
 /// Tile attachment resolution. 512 is the upstream default and matches what
-/// the playground example uses; bevy_terrain mandates power-of-two for
+/// the playground example uses; thalos_udlod mandates power-of-two for
 /// mipmap generation. Larger sizes trade tile latency for fewer LOD levels.
 const TILE_TEXTURE_SIZE: u32 = 512;
 const TILE_BORDER_SIZE: u32 = 2;
@@ -58,17 +60,22 @@ const TILE_MIP_LEVELS: u32 = 4;
 
 /// Resident tiles per body. Upstream defaults to 1024, which is tuned for
 /// one giant terrain. With four bodies the atlas memory adds up quickly
-/// (one slot at 512² is ~750 KB across height + albedo); 256 is enough to
-/// fit the typical visible-tile set of the focused body plus a few tiles
-/// per distant body.
-const ATLAS_SIZE: u32 = 256;
+/// (one slot at 512² is ~750 KB across height + albedo).
+///
+/// Sized to the focused-body request set with headroom for the 2:1 balance
+/// pass in `thalos_udlod::TileTree::balance_lod_gaps`. The balance pass adds
+/// a stair-step ring of forced cross-face requests at every active cube-face
+/// seam — under the worst-case viewpoint (player near a cube corner, three
+/// seams in near-field) this adds ~50–80 tiles on top of the in-window set.
+/// 384 leaves room without ballooning per-body memory.
+const ATLAS_SIZE: u32 = 384;
 
 /// Marker on the ground-LOD terrain entity spawned for a procedural body.
 /// Carries the body id so the impostor↔terrain LOD swap can pair it with the
 /// matching impostor without walking parents.
 #[derive(Component, Debug)]
-pub(super) struct BodyTerrain {
-    pub(super) body_id: BodyId,
+pub(crate) struct BodyTerrain {
+    pub(crate) body_id: BodyId,
 }
 
 /// Marker on the ship-layer impostor billboard for a procedural body. Set in
@@ -124,6 +131,150 @@ pub(super) struct BodyWater {
 /// terrain-side PBR work.
 const TERRAIN_HANDOFF_RADIUS_FACTOR: f32 = 4.0;
 
+/// Selects which provider feeds tile data to the UDLOD renderer. `Pipeline` is
+/// the production path; `Analytic3d` and `Flat` are diagnostic stand-ins via
+/// `SyntheticTileProvider`.
+///
+/// **Flat verified seamless (2026-05-17).** Every R16 height = 0.5, decoding
+/// to 0 m, so the mesh is a smooth sphere at `body.radius_m`. No cross-tile
+/// seams at any LOD, which proves UDLOD's vertex stage produces consistent
+/// world positions across tile boundaries — the mesh-level baseline is clean.
+/// Skip re-testing flat unless vertex math in
+/// `crates/udlod/src/shaders/{vertex,functions}.wgsl` changes. Cross-tile
+/// seams seen in `Analytic3d` are therefore caused by height data, not by the
+/// vertex stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TerrainTileProviderMode {
+    Pipeline,
+    Analytic3d,
+    Flat,
+}
+
+impl TerrainTileProviderMode {
+    fn from_env() -> Self {
+        let Ok(value) = std::env::var("THALOS_TERRAIN_PROVIDER") else {
+            return Self::Pipeline;
+        };
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "pipeline" | "default" => Self::Pipeline,
+            "analytic" | "analytic3d" | "synthetic" => Self::Analytic3d,
+            "flat" | "constant" | "zero" => Self::Flat,
+            other => {
+                warn!("unknown THALOS_TERRAIN_PROVIDER={other:?}; using pipeline terrain provider");
+                Self::Pipeline
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pipeline => "pipeline",
+            Self::Analytic3d => "analytic3d",
+            Self::Flat => "flat",
+        }
+    }
+}
+
+pub(super) fn terrain_tile_provider_mode() -> TerrainTileProviderMode {
+    TerrainTileProviderMode::from_env()
+}
+
+fn terrain_craft_shadow_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let Ok(value) = std::env::var("THALOS_TERRAIN_CRAFT_SHADOW") else {
+            // Keep the projected proxy shadow opt-in until it is bounded by
+            // real ship dimensions. The current analytic capsule can produce a
+            // horizon-spanning black stripe that looks exactly like a terrain
+            // seam and contaminates renderer diagnostics.
+            return false;
+        };
+
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => false,
+            "1" | "on" | "true" | "yes" => true,
+            "0" | "off" | "false" | "no" => false,
+            other => {
+                warn!("unknown THALOS_TERRAIN_CRAFT_SHADOW={other:?}; disabling craft shadow");
+                false
+            }
+        }
+    })
+}
+
+fn analytic_provider_height_range() -> f32 {
+    // Mountain-scale relief regardless of the body's authored range. With
+    // the multi-octave fBm signal sharpened to favour peaks (see
+    // `synthetic.rs`), encoded ±2.5 km gives a usable mix of ~few-hundred-
+    // metre plains and 2 km-class mountains. Override per-launch via
+    // `THALOS_TERRAIN_ANALYTIC_RANGE_M` if a session needs more or less.
+    const ANALYTIC_DEFAULT_RANGE_M: f32 = 2500.0;
+
+    let Ok(value) = std::env::var("THALOS_TERRAIN_ANALYTIC_RANGE_M") else {
+        return ANALYTIC_DEFAULT_RANGE_M;
+    };
+
+    match value.trim().parse::<f32>() {
+        Ok(range) if range.is_finite() && range > 0.0 => range,
+        _ => {
+            warn!(
+                "invalid THALOS_TERRAIN_ANALYTIC_RANGE_M={value:?}; using analytic default range"
+            );
+            ANALYTIC_DEFAULT_RANGE_M
+        }
+    }
+}
+
+/// Per-vertex morph band width, expressed as a fraction of one LOD step.
+///
+/// `morph_range = 0.2` (UDLOD default, tuned for the upstream Earth-scale
+/// example) snaps fine-tile edge vertices onto coarse-tile vertex positions
+/// in the last 20% of the tile's render range. On a 3.2 Mm body with the
+/// camera close to the surface, this transition zone is too narrow — the
+/// player walks through it in a few steps and visibly pops between LODs.
+///
+/// 0.5 spreads the morph over half a LOD step (roughly 1.4× more visual
+/// distance per band), which makes the transition substantially smoother
+/// while staying under the morph-distance / range invariant the upstream
+/// docs call out (`morph_distance >= ~6 tile sizes`).
+const TERRAIN_MORPH_RANGE: f32 = 0.5;
+
+/// Same widening for the fragment / vertex height blend band so colours and
+/// heights cross-fade over the same window the geometry morphs across.
+const TERRAIN_BLEND_RANGE: f32 = 0.5;
+
+/// Distance at which the vertex shader switches from UDLOD's Taylor-series
+/// relative-position path (sub-mm precision near the view anchor) to the
+/// plain `position_local_to_world` path (f32 ulp ≈ 0.4 m at planet scale).
+/// Upstream's default of `0.001` (× body radius ≈ 3 km on Thalos) leaves
+/// most of the visible surface on the low-precision path, where the noise
+/// floor sits right at the size of the 1 m flat-mode debug checker.
+///
+/// 10 km is the sweet spot: well past the ~1 km range where 1 m cells
+/// are individually resolvable on screen, and short of the ~50 km where
+/// Taylor's 2nd-order truncation error (`R · Δst³ / 6`) starts climbing
+/// past the f32 direct-path floor. Cost is ~30 fmas per vertex on the
+/// high path; with O(10 k) visible vertices that's negligible.
+///
+/// `TerrainViewConfig::precision_threshold_distance` is a dimensionless
+/// multiplier of body radius (UDLOD multiplies by `scale` in
+/// `TileTree::new` before the value reaches the shader), so the conversion
+/// to a per-body ratio lives in [`body_terrain_view_config`].
+const TERRAIN_PRECISION_THRESHOLD_M: f64 = 10_000.0;
+
+/// UDLOD view config for body terrain. Wider morph + blend bands than the
+/// upstream default plus a much larger high-precision threshold so the
+/// Taylor branch actually fires; everything else stays at the upstream
+/// tuning.
+fn body_terrain_view_config(body_radius_m: f64) -> TerrainViewConfig {
+    TerrainViewConfig {
+        morph_range: TERRAIN_MORPH_RANGE,
+        blend_range: TERRAIN_BLEND_RANGE,
+        precision_threshold_distance: TERRAIN_PRECISION_THRESHOLD_M / body_radius_m.max(1.0),
+        ..TerrainViewConfig::default()
+    }
+}
+
 /// Spawn the UDLOD terrain for one procedural body.
 ///
 /// `ship_parent_entity` is the body's `RealSpaceBody` entity (the 1 km-cell
@@ -135,7 +286,7 @@ const TERRAIN_HANDOFF_RADIUS_FACTOR: f32 = 4.0;
 /// ship-view render units (same scale used by the impostor's `ship_atmosphere`).
 /// Airless bodies pass `AtmosphereBlock::default()` (all zeros) and no
 /// sky-dome entity is spawned.
-pub(super) fn spawn_body_terrain(
+pub(crate) fn spawn_body_terrain(
     commands: &mut Commands,
     body: &BodyDefinition,
     surface: Arc<PlanetSurface>,
@@ -145,11 +296,23 @@ pub(super) fn spawn_body_terrain(
     ship_camera: Entity,
     atmosphere: AtmosphereBlock,
     dynamic_state: DynamicSurfaceState,
-) {
+    height_mirror: Option<GpuAtlasMirrorHandle>,
+) -> Entity {
     let radius_m = body.radius_m as f32;
     let height_range = rendered_height_range(&surface, &dynamic_state);
+    let provider_mode = terrain_tile_provider_mode();
+    let terrain_height_range = match provider_mode {
+        TerrainTileProviderMode::Pipeline => height_range,
+        TerrainTileProviderMode::Analytic3d => analytic_provider_height_range(),
+        TerrainTileProviderMode::Flat => 0.0,
+    };
 
-    let model = TerrainModel::sphere(DVec3::ZERO, body.radius_m, -height_range, height_range);
+    let model = TerrainModel::sphere(
+        DVec3::ZERO,
+        body.radius_m,
+        -terrain_height_range,
+        terrain_height_range,
+    );
 
     let config = TerrainConfig {
         lod_count: LOD_COUNT,
@@ -177,15 +340,62 @@ pub(super) fn spawn_body_terrain(
         texture_size: TILE_TEXTURE_SIZE,
         border_size: TILE_BORDER_SIZE,
         mip_level_count: TILE_MIP_LEVELS,
-        // bevy_terrain has no single-channel 8-bit format; the source
+        // thalos_udlod has no single-channel 8-bit format; the source
         // cubemap is u8 and we upscale to u16 in the tile provider.
         format: AttachmentFormat::R16,
     });
 
-    let provider =
-        PipelineTileProvider::new(body.name.clone(), surface, dynamic_state, height_range);
-    let tile_atlas = TileAtlas::with_provider(&config, Box::new(provider));
-    let view_config = TerrainViewConfig::default();
+    let provider: Box<dyn TileProvider> = match provider_mode {
+        TerrainTileProviderMode::Pipeline => Box::new(PipelineTileProvider::new(
+            body.name.clone(),
+            surface,
+            dynamic_state,
+            height_range,
+        )),
+        TerrainTileProviderMode::Analytic3d => {
+            info!(
+                "using analytic 3D terrain provider override for '{}'; visible ground no longer \
+                 matches baked terrain or CPU height queries",
+                body.name
+            );
+            Box::new(SyntheticTileProvider::new(
+                -terrain_height_range,
+                terrain_height_range,
+            ))
+        }
+        TerrainTileProviderMode::Flat => {
+            info!(
+                "using flat terrain provider override for '{}'; visible ground is a constant \
+                 sphere; gameplay height queries use the same zero-height surface",
+                body.name
+            );
+            Box::new(SyntheticTileProvider::with_mode(
+                0.0,
+                0.0,
+                SyntheticTerrainMode::Flat,
+            ))
+        }
+    };
+    let mut tile_atlas = TileAtlas::with_provider(&config, provider);
+    // Pin LOD 0 on every cube face for the atlas's entire lifetime. This
+    // gives `get_best_tile` a guaranteed resident ancestor for any tile
+    // coordinate, so the GPU shader never samples `INVALID_ATLAS_INDEX`
+    // (which decodes to 0 → `min_height` → vertex sits at
+    // `-terrain_height_range` below the ellipsoid: visible "void" holes
+    // wherever a draw tile has no streamed ancestor).
+    //
+    // `is_spherical` is true for body terrain (`TerrainModel::sphere`),
+    // giving six faces; the planar fallback (single side) is harmless to
+    // pin defensively.
+    let side_count = if tile_atlas.model().is_spherical() {
+        6
+    } else {
+        1
+    };
+    for side in 0..side_count {
+        tile_atlas.pin_tile(TileCoordinate::new(side, 0, 0, 0));
+    }
+    let view_config = body_terrain_view_config(body.radius_m);
     let tile_tree = TileTree::new(&tile_atlas, &view_config);
 
     // The body's `real_body_entity` (`ship_parent_entity`) carries a
@@ -202,6 +412,22 @@ pub(super) fn spawn_body_terrain(
     let mut bundle = TerrainBundle::new(tile_atlas, &body_grid);
     bundle.visibility = Visibility::Hidden;
 
+    // Enable the per-fragment checkerboard for the flat debug provider —
+    // doing it in the texture is hopeless at this body's scale (1 m tiles
+    // alias into moiré at every reasonable viewing distance), so the
+    // shader synthesises the pattern from the geometric normal × radius.
+    let debug = match provider_mode {
+        // `view_phase` and `world_to_body_rot` are refreshed every frame
+        // by `update_body_terrain_atmosphere`; spawn-time values are
+        // placeholders that will be overwritten on the first tick.
+        // `params = (mode=1, _, cell_size_m=1, _)`.
+        TerrainTileProviderMode::Flat => BodyTerrainDebug {
+            params: Vec4::new(1.0, 0.0, 1.0, 0.0),
+            ..Default::default()
+        },
+        _ => BodyTerrainDebug::default(),
+    };
+
     // `scene` is zeroed here; `update_body_terrain_atmosphere` writes the
     // correct sun direction, flux, occluders, and ambient on the first Sync
     // tick after spawn.
@@ -209,42 +435,50 @@ pub(super) fn spawn_body_terrain(
         atmosphere,
         scene: SceneLighting::default(),
         craft_shadow: BodyTerrainShadow::default(),
+        debug,
     };
 
-    let terrain_entity = commands
-        .spawn((
-            bundle,
-            MeshMaterial3d(materials.add(material)),
-            RenderLayers::layer(SHIP_LAYER),
-            // The scene's `SunLight` cascade is sized for standard local
-            // meshes. Ground terrain receives craft shadows through an
-            // analytic proxy; rendering the planet itself into the shadow map
-            // would be wasteful and noisy.
-            NotShadowCaster,
-            ChildOf(ship_parent_entity),
-            Name::new(format!("{} Terrain", body.name)),
-            BodyTerrain { body_id: body.id },
-        ))
-        .id();
+    let mut terrain = commands.spawn((
+        bundle,
+        MeshMaterial3d(materials.add(material)),
+        RenderLayers::layer(SHIP_LAYER),
+        // The scene's `SunLight` cascade is sized for standard local
+        // meshes. Ground terrain receives craft shadows through an
+        // analytic proxy; rendering the planet itself into the shadow map
+        // would be wasteful and noisy.
+        NotShadowCaster,
+        ChildOf(ship_parent_entity),
+        Name::new(format!("{} Terrain", body.name)),
+        BodyTerrain { body_id: body.id },
+    ));
+    if let Some(mirror) = height_mirror {
+        terrain.insert(GpuAtlasHeightMirrorComponent::new(mirror));
+    }
+    let terrain_entity = terrain.id();
 
     tile_trees.insert((terrain_entity, ship_camera), tile_tree);
 
     info!(
-        "spawned ground terrain for '{}' (radius {:.0} km, height range ±{:.0} m, atlas size {})",
+        "spawned ground terrain for '{}' (provider {}, radius {:.0} km, height range ±{:.0} m, atlas size {})",
         body.name,
+        provider_mode.label(),
         radius_m / 1000.0,
-        height_range,
+        terrain_height_range,
         ATLAS_SIZE,
     );
+
+    terrain_entity
 }
 
 /// Icosphere subdivision for the water surface mesh.
 ///
-/// 6 levels = 81,920 triangles. At a typical low-altitude view (~10 km up
-/// over a Mira-scale body) that puts ~30 triangles across the visible
-/// horizon disc — fine for wave-normal-dominated water shading. Bump to
-/// 7 if mesh facets start reading at the silhouette.
-const WATER_MESH_SUBDIVISIONS: u32 = 6;
+/// 7 levels = 327,680 triangles. The on-foot EVA path renders the water
+/// mesh from a few metres away at the shoreline, where 6-level mesh
+/// facets read as polygonal seams between water and terrain. 7 keeps the
+/// shoreline tessellation tight enough that the water/terrain
+/// intersection looks like a continuous line at human scale; bump to 8 if
+/// it still aliases at sub-metre stand-off.
+const WATER_MESH_SUBDIVISIONS: u32 = 7;
 
 /// Tiny offset (in metres) lifting the water mesh above the bare body
 /// sphere. Resolves z-fighting between the water mesh and the seafloor
@@ -252,6 +486,10 @@ const WATER_MESH_SUBDIVISIONS: u32 = 6;
 /// it's comfortably above the f32 ULP near body-radius scale (~0.4 m at
 /// 3 Mm) on the bodies we currently ship.
 const WATER_SURFACE_EPSILON_M: f32 = 2.0;
+
+/// Temporary kill switch for ground-LOD water. The impostor path still renders
+/// its inline water BRDF outside the terrain handoff.
+const TERRAIN_PATH_WATER_ENABLED: bool = false;
 
 /// Default deep-water tint when the bake omits an explicit
 /// `WaterAppearance`. Matches `PlanetWaterParams::from_static_surface`'s
@@ -262,17 +500,21 @@ const FALLBACK_WATER_COLOR_DEPTH: [f32; 4] = [0.012, 0.040, 0.090, 120.0];
 /// `sea_level_m` (airless bodies); otherwise creates a single icosphere
 /// entity parented to the body's grid, hidden at start so
 /// `sync_body_render_lod` can flip it in step with [`BodyTerrain`].
-pub(super) fn spawn_body_water(
+pub(crate) fn spawn_body_water(
     commands: &mut Commands,
     body: &BodyDefinition,
     surface: &PlanetSurface,
     ship_parent_entity: Entity,
     meshes: &mut Assets<Mesh>,
     water_materials: &mut Assets<BodyWaterMaterial>,
-) {
+) -> Option<Entity> {
+    if !TERRAIN_PATH_WATER_ENABLED {
+        return None;
+    }
+
     let baked = &surface.static_surface;
     let Some(sea_level_m) = baked.sea_level_m else {
-        return;
+        return None;
     };
 
     let water_radius_m = (body.radius_m as f32 + sea_level_m + WATER_SURFACE_EPSILON_M).max(1.0);
@@ -315,17 +557,19 @@ pub(super) fn spawn_body_water(
         params,
     };
 
-    commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(water_materials.add(material)),
-        Transform::default(),
-        Visibility::Hidden,
-        RenderLayers::layer(SHIP_LAYER),
-        NotShadowCaster,
-        ChildOf(ship_parent_entity),
-        Name::new(format!("{} Water", body.name)),
-        BodyWater { body_id: body.id },
-    ));
+    let water_entity = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(water_materials.add(material)),
+            Transform::default(),
+            Visibility::Hidden,
+            RenderLayers::layer(SHIP_LAYER),
+            NotShadowCaster,
+            ChildOf(ship_parent_entity),
+            Name::new(format!("{} Water", body.name)),
+            BodyWater { body_id: body.id },
+        ))
+        .id();
 
     info!(
         "spawned water surface for '{}' (radius {:.0} km, sea level {:+.1} m)",
@@ -333,6 +577,8 @@ pub(super) fn spawn_body_water(
         body.radius_m / 1000.0,
         sea_level_m,
     );
+
+    Some(water_entity)
 }
 
 /// Unified per-body render-LOD visibility.
@@ -361,6 +607,14 @@ pub(super) fn spawn_body_water(
 /// the halo's shader early-outs to a no-op; we still toggle its visibility
 /// for consistency.
 ///
+/// **Terrain residency gate.** Ground-LOD terrain entities are spawned
+/// lazily by [`crate::rendering::terrain_residency`] only for bodies the
+/// player is plausibly going to encounter. For a body without a resident
+/// `BodyTerrain` entity, the impostor stays visible at all distances and
+/// the halo stays visible at all distances — otherwise the body would
+/// silently vanish when the camera passed inside `4 × radius` with no
+/// terrain to take over.
+///
 /// The map-layer impostor and map halo live on `MAP_LAYER` and are not
 /// touched here.
 #[allow(clippy::type_complexity)]
@@ -369,7 +623,7 @@ pub(super) fn sync_body_render_lod(
     ship_cam_q: Query<&GlobalTransform, With<ShipCamera>>,
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
     mut terrains: Query<
-        (&BodyTerrain, &mut Visibility),
+        (&BodyTerrain, &TileAtlas, &mut Visibility),
         (
             Without<RealSpaceImpostor>,
             Without<BodySky>,
@@ -428,6 +682,22 @@ pub(super) fn sync_body_render_lod(
         body_pos_by_id.insert(rsb.body_id, xform.translation());
     }
 
+    // Bodies with a resident ground-LOD terrain entity *whose pinned root
+    // LODs have finished loading*. With lazy residency (see
+    // `terrain_residency`), most bodies have no `BodyTerrain` at all — the
+    // impostor / halo must then stay visible at every distance, otherwise
+    // the body silently disappears inside `4 × radius`. The same applies
+    // briefly at spawn while LOD 0 streams: until the pinned tiles are
+    // ready, treat the body as non-resident so the impostor stays up; the
+    // terrain entity is only flipped to `Inherited` once it has a complete
+    // resident-ancestor chain (otherwise the GPU samples
+    // `INVALID_ATLAS_INDEX` → vertices drop to `min_height` → visible "void"
+    // holes during the load window).
+    let terrain_resident: std::collections::HashSet<BodyId> = terrains
+        .iter()
+        .filter_map(|(t, atlas, _)| atlas.pinned_tiles_ready().then_some(t.body_id))
+        .collect();
+
     // Returns (distance, swap_threshold, shell_radius) for one body, or
     // None if the body or its render-space position is missing. The shell
     // radius is kept here for diagnostics / future atmosphere-specific LOD
@@ -456,11 +726,17 @@ pub(super) fn sync_body_render_lod(
         }
     };
 
-    for (terrain, mut vis) in &mut terrains {
+    for (terrain, atlas, mut vis) in &mut terrains {
         let Some((dist, swap, _shell)) = body_metrics(terrain.body_id) else {
             continue;
         };
-        let want = if dist < swap {
+        // Stay hidden until the atlas's pinned root tiles (LOD 0 per face)
+        // have finished loading. Without this gate, a freshly-spawned
+        // terrain becomes `Inherited` the instant the camera enters the
+        // swap radius — but the atlas is still empty, so every vertex
+        // samples `INVALID_ATLAS_INDEX` and the mesh sits one full
+        // `terrain_height_range` below the ellipsoid (visible void).
+        let want = if dist < swap && atlas.pinned_tiles_ready() {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -472,7 +748,11 @@ pub(super) fn sync_body_render_lod(
         let Some((dist, swap, _shell)) = body_metrics(impostor.body_id) else {
             continue;
         };
-        let want = if dist < swap {
+        // Only hand off to terrain if a ground-LOD entity actually exists
+        // for this body. Non-resident bodies stay impostor-visible at every
+        // distance.
+        let resident = terrain_resident.contains(&impostor.body_id);
+        let want = if resident && dist < swap {
             Visibility::Hidden
         } else {
             Visibility::Inherited
@@ -480,13 +760,16 @@ pub(super) fn sync_body_render_lod(
         set_vis(&mut vis, want);
     }
 
-    // Water pairs with terrain: only visible inside the LOD swap radius.
-    // Outside it, the impostor's inline water BRDF takes over.
+    // Water pairs with terrain: only visible inside the LOD swap radius
+    // (and only if terrain is resident — water only spawns alongside
+    // terrain, so this is mainly a safety check). Outside the swap radius
+    // the impostor's inline water BRDF takes over.
     for (water, mut vis) in &mut waters {
         let Some((dist, swap, _shell)) = body_metrics(water.body_id) else {
             continue;
         };
-        let want = if dist < swap {
+        let resident = terrain_resident.contains(&water.body_id);
+        let want = if resident && dist < swap {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -498,7 +781,13 @@ pub(super) fn sync_body_render_lod(
         let Some((dist, swap, _shell)) = body_metrics(sky.body_id) else {
             continue;
         };
-        let want = if dist < swap {
+        // `BodySky` is always spawned at startup (per `spawn.rs`) for the
+        // cmd-shift-click-teleport-into-atmosphere case, so we can flip it
+        // independently of terrain residency. But it should only take over
+        // from the halo when a terrain entity is up — otherwise the halo
+        // is the body's atmosphere representation.
+        let resident = terrain_resident.contains(&sky.body_id);
+        let want = if resident && dist < swap {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -510,7 +799,11 @@ pub(super) fn sync_body_render_lod(
         let Some((dist, swap, _shell)) = body_metrics(halo.body_id) else {
             continue;
         };
-        let want = if dist >= swap {
+        // Halo is the atmosphere visual for the impostor. Show it whenever
+        // we're showing the impostor: outside `4 × radius`, OR at any
+        // distance if terrain isn't resident.
+        let resident = terrain_resident.contains(&halo.body_id);
+        let want = if !resident || dist >= swap {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -550,7 +843,11 @@ pub(super) fn update_body_terrain_atmosphere(
     let Some(ref states) = cache.states else {
         return;
     };
-    let craft_shadow = craft_shadow_from_player_ship(&ship_q);
+    let craft_shadow = if terrain_craft_shadow_enabled() {
+        craft_shadow_from_player_ship(&ship_q)
+    } else {
+        BodyTerrainShadow::default()
+    };
 
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
 
@@ -574,7 +871,9 @@ pub(super) fn update_body_terrain_atmosphere(
     // translations directly without an extra origin/scale transform.
     let mut occluders: Vec<(BodyId, Vec3, f32)> = Vec::with_capacity(sim.system.bodies.len());
     for (i, body) in sim.system.bodies.iter().enumerate() {
-        if matches!(body.kind, thalos_physics::types::BodyKind::Star) || body.radius_m < 1.0 {
+        if matches!(body.kind, thalos_physics_canonical::types::BodyKind::Star)
+            || body.radius_m < 1.0
+        {
             continue;
         }
         let Some(pos) = body_render_pos.get(&i) else {
@@ -622,6 +921,12 @@ pub(super) fn update_body_terrain_atmosphere(
         );
     }
 
+    // Camera position in heliocentric inertial coords (f64). The flat-mode
+    // debug checker reads this to compute `view_phase` — the camera's
+    // body-fixed position mod-(2 × cell_size) per axis — so the only
+    // body-scale magnitude in the parity chain stays in CPU precision
+    // and never has to round-trip through f32 at planet radius.
+    let camera_inertial = sim.simulation.ship_state().position;
     for (terrain, mat_handle) in &terrain_q {
         let Some(mat) = terrain_materials.get_mut(mat_handle) else {
             continue;
@@ -629,6 +934,37 @@ pub(super) fn update_body_terrain_atmosphere(
         mat.scene =
             build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
         mat.craft_shadow = craft_shadow;
+        // Debug overlay (flat-mode checkerboard): refresh `view_phase`
+        // and `world_to_body_rot` from canonical state. Skip when the
+        // overlay is off so production terrains pay nothing.
+        if mat.debug.params.x >= 0.5 {
+            let cell = mat.debug.params.z.max(1.0e-3) as f64;
+            let period = 2.0 * cell;
+            let (view_phase, world_to_body_q) = states
+                .get(terrain.body_id)
+                .map(|body_state| {
+                    // `body.orientation` is body-local → inertial; we
+                    // want the inverse to bring inertial deltas into
+                    // the body-fixed frame the checker grid lives in.
+                    let world_to_body = body_state.orientation.inverse();
+                    let delta_inertial = camera_inertial - body_state.position;
+                    let delta_body = world_to_body * delta_inertial;
+                    let phase = bevy::math::DVec3::new(
+                        delta_body.x.rem_euclid(period),
+                        delta_body.y.rem_euclid(period),
+                        delta_body.z.rem_euclid(period),
+                    );
+                    (phase.as_vec3(), world_to_body.as_quat().normalize())
+                })
+                .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
+            mat.debug.view_phase = Vec4::new(view_phase.x, view_phase.y, view_phase.z, 0.0);
+            mat.debug.world_to_body_rot = Vec4::new(
+                world_to_body_q.x,
+                world_to_body_q.y,
+                world_to_body_q.z,
+                world_to_body_q.w,
+            );
+        }
     }
 
     // Use real (wall-clock) elapsed seconds for wave scroll — the simulation
@@ -693,7 +1029,7 @@ pub(super) fn update_body_terrain_atmosphere(
 /// (1 m = 1 render unit) body grid positions cached above.
 fn build_terrain_scene_lighting(
     body_id: BodyId,
-    states: &thalos_physics::types::BodyStates,
+    states: &thalos_physics_canonical::types::BodyStates,
     occluders: &[(BodyId, Vec3, f32)],
     gain: f32,
 ) -> thalos_planet_rendering::SceneLighting {

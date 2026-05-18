@@ -21,10 +21,11 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
-use thalos_local_physics::{ActiveLocalBubble, avian::ContactGraph, craft_contacts_terrain};
-use thalos_physics::canonical::{AuthorityMode, Epoch};
-use thalos_physics::maneuver::ManeuverNode;
+use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
+use thalos_physics_canonical::maneuver::ManeuverNode;
+use thalos_physics_local::{ActiveLocalBubble, avian::ContactGraph, craft_contacts_terrain};
 
+use crate::GameTerrainRegistry;
 use crate::SimStage;
 use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
@@ -33,6 +34,7 @@ use crate::navigation::{NavigationState, compute_attitude_control};
 use crate::rendering::SimulationState;
 use crate::target::TargetBody;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
+use thalos_physics_canonical::terrain_provider::TerrainProvider;
 
 pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("advance_simulation").entered();
@@ -76,26 +78,36 @@ pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
         );
     }
 
-    // Scenario-C diagnostic: the propagator's terrain-aware collision check
-    // requires `prev_alt > 0` at every step boundary, so a state that's
-    // already at or below mean radius — typically warp-out from a deep
-    // valley, or Avian readback drift letting the ship sink a few cm into
-    // the collider — will silently run unbounded Kepler instead of
-    // terminating at impact. The propagator never reads back into terrain,
-    // so the failure is "trajectory flies through planet" rather than
-    // anything destructive; log it so we know if it ever happens in
-    // practice. 1 m tolerance keeps Avian's normal contact noise quiet.
+    // The propagator's terrain-aware collision check requires `prev_alt > 0`
+    // at every step boundary, so a state that's already at or below mean
+    // radius — typically warp-out from a deep valley, or Avian readback
+    // drift letting the ship sink a few cm into the collider — will
+    // silently run unbounded Kepler instead of terminating at impact and
+    // the trajectory flies through the planet. Forcing 1× warp here breaks
+    // the runaway: subsequent frames advance one sim-second at a time so
+    // the player notices, and the throttle gate already keeps any active
+    // burn off until they return to 1×. 1 m tolerance keeps Avian's
+    // normal contact noise quiet.
+    //
+    // Only kicks in for warp > 1×. Pause (0×) and 1× are both safe — pause
+    // doesn't advance sim time at all, and 1× advances one real-second per
+    // frame so any Kepler runaway is visible. Without this guard, a player
+    // on EVA in a valley below mean radius would have Space-pause stomped
+    // back to 1× every frame.
     let soi_body = sim.simulation.dominant_body();
-    let body_def = &sim.simulation.bodies()[soi_body];
-    if body_def.radius_m > 0.0 {
+    let (body_radius, body_name) = {
+        let body_def = &sim.simulation.bodies()[soi_body];
+        (body_def.radius_m, body_def.name.clone())
+    };
+    if body_radius > 0.0 && sim.simulation.warp.target_speed() > 1.0 {
         let body_state = sim.simulation.ephemeris().state(soi_body, Epoch(post_t));
-        let altitude_above_mean = (post_pos - body_state.position).length() - body_def.radius_m;
+        let altitude_above_mean = (post_pos - body_state.position).length() - body_radius;
         if altitude_above_mean < -1.0 && post_pos.is_finite() {
+            sim.simulation.warp.reset_immediate();
             warn!(
-                "ship sits {:.1}m below mean radius of {} (warp={:.0}x); terrain-aware coast \
-                 will not detect collision from this state — investigate Avian drift or \
-                 warp-from-valley transitions",
-                -altitude_above_mean, body_def.name, warp,
+                "ship sits {:.1}m below mean radius of {} (warp={:.0}x dropped to 1x); \
+                 terrain-aware coast cannot detect collision from a sub-surface state",
+                -altitude_above_mean, body_name, warp,
             );
         }
     }
@@ -197,6 +209,156 @@ pub fn handle_attitude_controls(
     sim.simulation.set_control(control);
 }
 
+/// Per-frame cap on warp level imposed by altitude above the dominant
+/// body. Computed by [`enforce_warp_altitude_limits`] each frame and read
+/// by [`handle_warp_controls`] to refuse manual escalation past the cap.
+///
+/// `max_level` is an index into `Simulation::warp.levels()`. The default
+/// `usize::MAX` means "no constraint" — used on the first frame before
+/// enforcement runs and whenever the craft is in a regime where canonical
+/// step does not propagate translation (landed, in the local-rigid-body
+/// bubble), so terrain phasing is impossible.
+#[derive(Resource, Debug, Clone)]
+pub struct WarpLimits {
+    pub max_level: usize,
+}
+
+impl Default for WarpLimits {
+    fn default() -> Self {
+        Self {
+            max_level: usize::MAX,
+        }
+    }
+}
+
+/// Hold-down hysteresis on the lookahead trajectory scan. A scan that
+/// drops the cap to N because of an upcoming periapsis dip will re-allow
+/// level N+1 the next frame as the dip falls out of the lookahead window;
+/// without hysteresis the warp button would flicker. Pad lookahead far
+/// enough that level transitions happen at most once per ~30s of sim
+/// time.
+const LOOKAHEAD_REAL_SECONDS: f64 = 2.0;
+
+/// Compute the highest warp level the craft can safely engage, clamp the
+/// current level if it exceeds that cap, and publish the cap as
+/// [`WarpLimits`] for the input handler and HUD.
+///
+/// Two checks combined:
+///
+/// 1. Worst-case altitude at the current craft state. The buffer
+///    `body_radius + max_terrain_elevation` is conservative — it treats
+///    the body as if every direction has the tallest authored peak,
+///    which avoids a per-direction cubemap sample on the hot path and is
+///    provably safe against any terrain feature.
+///
+/// 2. A scan of last frame's cached `FlightPlan` for the same buffer
+///    over the next [`LOOKAHEAD_REAL_SECONDS`] worth of sim time at the
+///    *target* warp speed. This catches the elliptical-orbit case: AP
+///    at high altitude, PE below the floor; a position-only check would
+///    permit warp from AP and the next Kepler step at high warp would
+///    skip the dip entirely, with the propagator's `prev_alt > 0`
+///    boundary check silently refusing to flag the collision.
+///
+/// Skipped only for `BodyFixed` (landed and stationary on the surface) —
+/// KSP convention allows unrestricted warp there. Every other regime
+/// gets the altitude gate, so flying low in the Avian bubble
+/// (`LocalRigidBody`) still drops to the pause/1× zone near terrain.
+pub fn enforce_warp_altitude_limits(
+    mut sim: ResMut<SimulationState>,
+    terrain: Res<GameTerrainRegistry>,
+    mut limits: ResMut<WarpLimits>,
+) {
+    if matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
+        limits.max_level = usize::MAX;
+        return;
+    }
+
+    let dominant = sim.simulation.dominant_body();
+    let bodies = sim.simulation.bodies();
+    if bodies[dominant].radius_m <= 0.0 {
+        limits.max_level = usize::MAX;
+        return;
+    }
+
+    // Worst-case altitude (as a fraction of the body's radius) over the
+    // current craft state plus the lookahead trajectory. Tracking the
+    // ratio rather than absolute metres lets the per-level threshold be
+    // a single body-radius fraction that's meaningful across the whole
+    // system — a 0.005-radius floor on Mira is hundreds of metres, on
+    // Thalos is ~16 km.
+    let sample_alt_radii = |body: usize, pos: bevy::math::DVec3, ref_pos: bevy::math::DVec3| {
+        let body_def = &bodies[body];
+        let r = body_def.radius_m;
+        if r <= 0.0 {
+            return f64::INFINITY;
+        }
+        let buffer = r + terrain.0.max_elevation_m(body);
+        let alt = (pos - ref_pos).length() - buffer;
+        alt.max(0.0) / r
+    };
+
+    let sim_time = sim.simulation.sim_time();
+    let body_pos = sim
+        .simulation
+        .ephemeris()
+        .state(dominant, Epoch(sim_time))
+        .position;
+    let mut min_alt_radii =
+        sample_alt_radii(dominant, sim.simulation.ship_state().position, body_pos);
+
+    // Trajectory lookahead: size the window to the *highest* configured
+    // level, not the currently-targeted level. The gate's whole job is
+    // to decide whether escalation is safe — using the current target
+    // would let a player at apoapsis with periapsis just outside a 1×
+    // lookahead escalate to 100×, then the next frame's coast segment
+    // skips the periapsis dip entirely. Sized to the top level, the same
+    // scan answers "is escalation to any level safe" for every level
+    // simultaneously. The scan honours each sample's own `anchor_body`
+    // so trajectories that cross into another SOI (transfer to another
+    // planet) gate against *that* body's radius — otherwise warping
+    // toward Vaelen from Thalos orbit would never see Vaelen's surface
+    // in the cap.
+    let lookahead_speed = sim
+        .simulation
+        .warp
+        .levels()
+        .last()
+        .copied()
+        .unwrap_or(1.0)
+        .max(1.0);
+    let lookahead_end = sim_time + LOOKAHEAD_REAL_SECONDS * lookahead_speed;
+    if let Some(plan) = sim.simulation.prediction() {
+        'scan: for seg in plan.segments() {
+            for sample in &seg.samples {
+                if sample.time > lookahead_end {
+                    break 'scan;
+                }
+                let r = sample_alt_radii(sample.anchor_body, sample.position, sample.ref_pos);
+                if r < min_alt_radii {
+                    min_alt_radii = r;
+                }
+            }
+        }
+    }
+
+    // Walk the levels in order; the highest one whose min-altitude
+    // requirement is still satisfied is the cap. min_alt_radii saturated
+    // at 0.0 means we're inside the conservative terrain envelope and
+    // only levels with `min_altitude_radii_for(i) == 0.0` qualify.
+    let levels = sim.simulation.warp.levels();
+    let mut max_level = 0usize;
+    for i in 0..levels.len() {
+        if sim.simulation.warp.min_altitude_radii_for(i) <= min_alt_radii {
+            max_level = i;
+        }
+    }
+    limits.max_level = max_level;
+
+    if sim.simulation.warp.level_index() > max_level {
+        sim.simulation.warp.clamp_to_level(max_level);
+    }
+}
+
 /// Handle keyboard input to adjust the warp multiplier.
 ///
 /// - `.`      -- increase to next warp level
@@ -219,6 +381,7 @@ pub fn handle_attitude_controls(
 pub fn handle_warp_controls(
     input: Res<GameInputIntent>,
     locks: Res<ControlLocks>,
+    limits: Res<WarpLimits>,
     mut sim: ResMut<SimulationState>,
     mut warp_to: ResMut<WarpToManeuver>,
 ) {
@@ -247,7 +410,13 @@ pub fn handle_warp_controls(
     }
 
     if input.warp_increase {
-        sim.simulation.warp.increase();
+        // Refuse escalation past the altitude cap. The enforcement
+        // system already clamps an over-cap current level downward;
+        // checking here avoids the visible single-frame flicker of the
+        // level going up and immediately back down.
+        if sim.simulation.warp.level_index() < limits.max_level {
+            sim.simulation.warp.increase();
+        }
     } else if input.warp_decrease {
         if sim.simulation.warp.level_index() > 1 {
             sim.simulation.warp.decrease();
@@ -308,6 +477,46 @@ fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<Simulation
 }
 
 // ---------------------------------------------------------------------------
+// CraftStateMirror — Reflect-friendly snapshot of canonical ship state for BRP
+// ---------------------------------------------------------------------------
+
+/// Reflect-registered mirror of the canonical `CraftState`, refreshed
+/// once per frame by [`refresh_craft_state_mirror`]. The canonical
+/// state lives in `thalos_physics_canonical` (no Bevy dependency), so it cannot
+/// derive `Reflect` directly; this resource is the read-only projection
+/// an agent inspects over BRP.
+#[derive(Resource, Reflect, Default, Clone, Debug)]
+#[reflect(Resource)]
+pub struct CraftStateMirror {
+    pub sim_time_s: f64,
+    pub warp_speed: f64,
+    pub position_m: [f64; 3],
+    pub velocity_m_s: [f64; 3],
+    pub mass_kg: f64,
+    pub dominant_body_id: u32,
+    /// Discriminant name of `AuthorityMode` (variant fields elided).
+    pub authority: String,
+}
+
+fn refresh_craft_state_mirror(sim: Res<SimulationState>, mut mirror: ResMut<CraftStateMirror>) {
+    let state = sim.simulation.ship_state();
+    mirror.sim_time_s = sim.simulation.sim_time();
+    mirror.warp_speed = sim.simulation.warp.speed();
+    mirror.position_m = [state.position.x, state.position.y, state.position.z];
+    mirror.velocity_m_s = [state.velocity.x, state.velocity.y, state.velocity.z];
+    mirror.mass_kg = sim.simulation.ship_mass_kg();
+    mirror.dominant_body_id = sim.simulation.dominant_body() as u32;
+    mirror.authority = match sim.simulation.authority() {
+        AuthorityMode::OnRails { .. } => "OnRails",
+        AuthorityMode::WarpIntegrated { .. } => "WarpIntegrated",
+        AuthorityMode::LocalRigidBody { .. } => "LocalRigidBody",
+        AuthorityMode::BodyFixed { .. } => "BodyFixed",
+        AuthorityMode::Docked { .. } => "Docked",
+    }
+    .to_string();
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
@@ -315,17 +524,22 @@ pub struct BridgePlugin;
 
 impl Plugin for BridgePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                handle_warp_controls,
-                handle_attitude_controls,
-                advance_simulation,
-                sync_maneuver_plan,
-                update_prediction,
-            )
-                .chain()
-                .in_set(SimStage::Physics),
-        );
+        app.init_resource::<CraftStateMirror>()
+            .init_resource::<WarpLimits>()
+            .register_type::<CraftStateMirror>()
+            .add_systems(
+                Update,
+                (
+                    enforce_warp_altitude_limits,
+                    handle_warp_controls,
+                    handle_attitude_controls,
+                    advance_simulation,
+                    sync_maneuver_plan,
+                    update_prediction,
+                    refresh_craft_state_mirror,
+                )
+                    .chain()
+                    .in_set(SimStage::Physics),
+            );
     }
 }

@@ -25,8 +25,8 @@ use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMod
 use bevy::math::{DMat3, DQuat};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use thalos_physics::canonical::Epoch;
-use thalos_physics::maneuver::orbital_frame;
+use thalos_physics_canonical::canonical::Epoch;
+use thalos_physics_canonical::maneuver::orbital_frame;
 
 use crate::rendering::SimulationState;
 

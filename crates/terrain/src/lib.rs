@@ -1,70 +1,50 @@
-//! Thalos integration of the forked `bevy_terrain` UDLOD renderer.
-//!
-//! M3 staging ([docs/terrain.md](../../docs/terrain.md), "Rendering: ground
-//! LOD"):
-//!
-//! - **Stage 1**: wire the fork into the workspace + run a deterministic
-//!   [`SyntheticTileProvider`] end-to-end via `examples/playground.rs`.
-//! - **Stage 2**: [`PipelineTileProvider`] forwards tile requests to
-//!   [`thalos_terrain_gen::sample_static_surface`], so the same `PlanetSurface`
-//!   the impostor billboard bakes also drives the UDLOD surface.
-//! - **Stage 3**: per-body wiring lives in `thalos_game`'s
-//!   `rendering::ground_terrain` module.
-//!
-//! ## Plugin layering
-//!
-//! [`ThalosTerrainPlugin`] adds [`bevy_terrain::prelude::TerrainPlugin`] +
-//! [`bevy::pbr::MaterialPlugin<BodyTerrainMaterial>`] and embeds the body
-//! terrain shader. `bevy_terrain::TerrainPlugin` in turn adds
-//! [`big_space::prelude::BigSpaceDefaultPlugins`] when the `high_precision`
-//! feature is enabled, so consumers that already register
-//! `BigSpaceDefaultPlugins` directly must drop that registration to avoid the
-//! duplicate-plugin panic.
+pub mod aeolian;
+pub mod aging_oceanic_field;
+pub mod biome_mask;
+pub mod body_builder;
+pub mod cache;
+pub mod cold_desert_field;
+pub(crate) mod crater_profile;
+pub mod cubemap;
+pub mod feature_compiler;
+pub mod height_generator;
+pub mod icosphere;
+pub mod noise;
+pub mod sample;
+pub mod seeding;
+pub mod spatial_index;
+pub mod stage;
+pub mod stages;
+pub mod static_surface;
+pub mod surface_color;
+pub mod surface_field;
+pub mod tectonics;
+pub mod terrain_config;
+pub mod types;
+pub mod vaelen_field;
 
-use bevy::pbr::MaterialPlugin;
-use bevy::prelude::*;
-use bevy_terrain::prelude::{TerrainMaterialPlugin, TerrainPlugin};
-
-mod body_material;
-mod pipeline;
-mod playground_material;
-mod rendered_height;
-mod sky_material;
-mod synthetic;
-mod water_material;
-
-pub use body_material::{BodySkyExtra, BodyTerrainMaterial, BodyTerrainShadow};
-pub use pipeline::{PipelineTileProvider, rendered_height_range};
-pub use playground_material::PlaygroundMaterial;
-pub use rendered_height::{
-    TerrainPatchBasis, TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch,
-    decode_rendered_height_m, rendered_height_m,
+pub use aging_oceanic_field::AgingOceanicField;
+pub use biome_mask::*;
+pub use body_builder::BodyBuilder;
+pub use cold_desert_field::*;
+pub use cubemap::{Cubemap, CubemapAccumulator, CubemapFace, default_resolution};
+pub use feature_compiler::*;
+pub use height_generator::*;
+pub use icosphere::Icosphere;
+pub use sample::{
+    SurfaceSample, apply_dynamic_surface_layers, sample_static_surface, sample_surface,
 };
-pub use sky_material::BodySkyMaterial;
-pub use synthetic::SyntheticTileProvider;
-pub use water_material::{BodyWaterMaterial, BodyWaterParams};
-
-pub struct ThalosTerrainPlugin;
-
-impl Plugin for ThalosTerrainPlugin {
-    fn build(&self, app: &mut App) {
-        // `thalos::lighting` and `thalos::atmosphere` shader libraries live in
-        // the shared `thalos_planet_lighting` crate. Add its plugin defensively
-        // so terrain works in apps that don't also load
-        // `PlanetRenderingPlugin` (e.g. headless examples).
-        if !app.is_plugin_added::<thalos_planet_lighting::PlanetLightingPlugin>() {
-            app.add_plugins(thalos_planet_lighting::PlanetLightingPlugin);
-        }
-        app.add_plugins(TerrainPlugin);
-        app.add_plugins(TerrainMaterialPlugin::<BodyTerrainMaterial>::default());
-        // Sky and water both use the standard Bevy MaterialPlugin — they
-        // render through the regular forward pipeline (fullscreen quad and
-        // icosphere mesh respectively), not bevy_terrain's UDLOD pipeline.
-        app.add_plugins(MaterialPlugin::<BodySkyMaterial>::default());
-        app.add_plugins(MaterialPlugin::<BodyWaterMaterial>::default());
-        body_material::embed_body_terrain_shader(app);
-        sky_material::embed_sky_dome_shader(app);
-        water_material::embed_body_water_shader(app);
-        playground_material::embed_playground_shader(app);
-    }
-}
+pub use seeding::{Rng, sub_seed};
+pub use spatial_index::{FeatureRef, IcoBuckets};
+pub use stage::Stage;
+pub use stages::*;
+pub use static_surface::{PlanetSurface, StaticSurfaceData};
+pub use surface_color::*;
+pub use surface_field::*;
+pub use tectonics::{
+    Boundary, BoundaryKind, Plate, PlateId, PlateKind, SphericalMesh, TectonicActivity,
+    TectonicConfig, TectonicFields, TectonicSample, TectonicSystem,
+};
+pub use terrain_config::*;
+pub use types::*;
+pub use vaelen_field::*;

@@ -20,8 +20,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bevy_erosion_filter::EROSION_WGSL;
 use bytemuck::{Pod, Zeroable};
-use thalos_terrain_gen::cubemap::{Cubemap, CubemapFace};
-use thalos_terrain_gen::stages::MidFreqDetailParams;
+use thalos_terrain::cubemap::{Cubemap, CubemapFace};
+use thalos_terrain::stages::MidFreqDetailParams;
 use wgpu::{
     Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingType, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages,
@@ -421,7 +421,7 @@ pub fn download_cubemap_f32(
 // Mid-frequency detail dispatch
 // ---------------------------------------------------------------------------
 
-/// GPU-side mirror of [`thalos_terrain_gen::stages::MidFreqDetailParams`].
+/// GPU-side mirror of [`thalos_terrain::stages::MidFreqDetailParams`].
 /// std140-compatible: 8 × 4 bytes = 32 bytes, all scalar fields naturally
 /// aligned, no padding holes other than the explicit `_pad` slot kept in
 /// sync with the WGSL struct.
@@ -455,7 +455,7 @@ impl MidFreqParamsGpu {
 
 /// WGSL source for the mid-frequency-detail kernel. Loaded at compile
 /// time so the binary is self-contained.
-const MID_FREQ_DETAIL_WGSL: &str = include_str!("../../terrain_gen/shaders/mid_freq_detail.wgsl");
+const MID_FREQ_DETAIL_WGSL: &str = include_str!("../../terrain/shaders/mid_freq_detail.wgsl");
 
 // WGSL source for the bevy_erosion_filter erosion kernel comes from the
 // crate's `EROSION_WGSL` constant. The file uses one naga_oil directive
