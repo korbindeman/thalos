@@ -41,12 +41,24 @@ const THALOS_NAME: &str = "Thalos";
 const DEBUG_DROP_KEY: KeyCode = KeyCode::F9;
 const DEBUG_LAUNCH_MOUNT_RELEASE_THROTTLE: f64 = 0.001;
 
+/// Position discontinuity above which a take-translation handoff is treated
+/// as a bug in debug builds. A healthy handoff residual is the distance
+/// Avian's integrator drifts from the snap source in one step (`~|accel|·dt²`,
+/// sub-centimetre). The frame-skew / SOI-race failure the snap guards against
+/// produces `~|relative_velocity|·dt` (~100 m at Thalos LEO), so 2 m cleanly
+/// separates the two regimes.
+const HANDOFF_RESIDUAL_TOLERANCE_M: f64 = 2.0;
+
 pub struct GameLocalPhysicsPlugin;
 
 impl Plugin for GameLocalPhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(LocalPhysicsPlugin)
             .init_resource::<AvianAuthority>()
+            .init_resource::<AvianHandoffDiagnostics>()
+            .register_type::<AvianRole>()
+            .register_type::<AvianAuthority>()
+            .register_type::<AvianHandoffDiagnostics>()
             .add_systems(
                 Update,
                 (
@@ -94,7 +106,7 @@ impl Plugin for GameLocalPhysicsPlugin {
 /// also paused rotation integration, which broke player rotation while
 /// coasting. The split here keeps Avian's clock alive for rotation/contact
 /// in coast mode while leaving translation to Kepler.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 pub enum AvianRole {
     /// Avian's clock is paused; canonical owns everything (translation,
     /// rotation, pose). Used at non-1× warp and under `BodyFixed`. The
@@ -122,7 +134,8 @@ pub enum AvianRole {
 /// [`compute_avian_authority`] from canonical state + throttle + terrain
 /// collider presence, so every downstream system reads a single
 /// authoritative value instead of recomputing the predicate.
-#[derive(Resource, Default, Debug, Clone, Copy)]
+#[derive(Resource, Default, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct AvianAuthority {
     pub role: AvianRole,
     pub previous_role: AvianRole,
@@ -148,6 +161,31 @@ impl AvianAuthority {
     pub fn just_took_translation(self) -> bool {
         matches!(self.role, AvianRole::Full) && !matches!(self.previous_role, AvianRole::Full)
     }
+}
+
+/// Observability for the canonical↔Avian translation handoff. Recorded at
+/// each authority transition by [`manage_authority`] (direction + time) and
+/// [`readback_local_craft`] (the residual measured when Avian first takes
+/// translation). Reflect-registered so an agent can read it over BRP without
+/// attaching a debugger.
+///
+/// `position_residual_m` / `velocity_residual_m_s` describe the **most recent
+/// take-translation** handoff: the gap between canonical's pre-handoff state
+/// and the state read back from Avian after its first integration step.
+/// Healthy values are sub-centimetre (`~|accel|·dt²`); a value approaching
+/// `|relative_velocity|·dt` (~100 m at Thalos LEO) flags the frame-skew /
+/// SOI-race bug the snap guards against. They persist unchanged across a
+/// release handoff, so `last_handoff_kind` may read `"ReleasedTranslation"`
+/// while the residual still describes the prior take.
+#[derive(Resource, Default, Debug, Clone, Reflect)]
+#[reflect(Resource)]
+pub struct AvianHandoffDiagnostics {
+    /// `"TookTranslation"` or `"ReleasedTranslation"`; empty before the
+    /// first handoff.
+    pub last_handoff_kind: String,
+    pub last_handoff_sim_time_s: f64,
+    pub position_residual_m: f64,
+    pub velocity_residual_m_s: f64,
 }
 
 /// Resource-aware shim that unpacks ECS state and delegates to
@@ -511,6 +549,7 @@ fn manage_authority(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
     mut sim: ResMut<SimulationState>,
+    mut diagnostics: ResMut<AvianHandoffDiagnostics>,
 ) {
     let Some(bubble) = active.bubble.as_ref() else {
         return;
@@ -519,6 +558,8 @@ fn manage_authority(
         (AuthorityMode::LocalRigidBody { .. }, false) => {
             sim.simulation
                 .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+            diagnostics.last_handoff_kind = "ReleasedTranslation".to_string();
+            diagnostics.last_handoff_sim_time_s = sim.simulation.sim_time();
         }
         (AuthorityMode::OnRails { .. }, true) => {
             sim.simulation
@@ -526,6 +567,10 @@ fn manage_authority(
                     bubble: bubble.id,
                     root_entity: EntityRef(bubble.craft_entity.to_bits()),
                 });
+            // `last_handoff_kind` / time and the residual for this take are
+            // finalized in `readback_local_craft` once Avian's converted
+            // state is available; recording here would only capture the
+            // pre-step canonical position.
         }
         _ => {}
     }
@@ -1076,6 +1121,7 @@ fn readback_local_craft(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
     mut sim: ResMut<SimulationState>,
+    mut diagnostics: ResMut<AvianHandoffDiagnostics>,
     craft_q: Query<(
         &Position,
         &Rotation,
@@ -1108,6 +1154,26 @@ fn readback_local_craft(
     // in `snap_avian_from_canonical`. For ships, fall back to the
     // role-driven split.
     if is_eva || authority.owns_translation() {
+        // On the take-translation frame, measure the gap between canonical's
+        // pre-handoff state and Avian's converted state. The snap re-ran with
+        // this frame's `body_state`, so a coherent handoff leaves this near
+        // zero; a large value means snap and readback disagreed on the body
+        // frame (the discontinuity the snap exists to prevent).
+        if !is_eva && authority.just_took_translation() {
+            let canonical = sim.simulation.craft_state().translation;
+            let position_residual_m = (translation.position - canonical.position).length();
+            let velocity_residual_m_s = (translation.velocity - canonical.velocity).length();
+            debug_assert!(
+                position_residual_m < HANDOFF_RESIDUAL_TOLERANCE_M,
+                "Avian↔canonical take-translation handoff position discontinuity: \
+                 {position_residual_m:.3} m (tolerance {HANDOFF_RESIDUAL_TOLERANCE_M} m) — \
+                 snap/readback body-frame skew or SOI race"
+            );
+            diagnostics.last_handoff_kind = "TookTranslation".to_string();
+            diagnostics.last_handoff_sim_time_s = sim.simulation.sim_time();
+            diagnostics.position_residual_m = position_residual_m;
+            diagnostics.velocity_residual_m_s = velocity_residual_m_s;
+        }
         sim.simulation
             .install_local_rigid_body_state(translation, attitude);
     } else {
@@ -1699,6 +1765,49 @@ mod tests {
         assert!((round_trip.linear_velocity_m_s - local_velocity).length() < 1e-9);
         assert!(round_trip.rotation.angle_between(local_rotation) < 1e-9);
         assert!((round_trip.angular_velocity_rad_s - local_angular_velocity).length() < 1e-9);
+    }
+
+    #[test]
+    fn handoff_round_trip_preserves_canonical_state() {
+        // The take-translation handoff direction: the snap converts canonical
+        // inertial → Avian bubble frame, the readback converts back. They must
+        // compose to identity at orbital magnitudes, otherwise a handoff
+        // injects a position/attitude jump (the `HANDOFF_RESIDUAL_TOLERANCE_M`
+        // assertion in `readback_local_craft` would fire). This covers the
+        // inertial→bubble→inertial direction; the test above covers the other.
+        let body = BodyState {
+            id: 0,
+            epoch: Epoch(0.0),
+            position: DVec3::new(-4.0e6, 1.2e6, 8.0e5),
+            velocity: DVec3::new(120.0, -30.0, 7.0),
+            orientation: DQuat::from_rotation_y(0.6) * DQuat::from_rotation_x(-0.2),
+            angular_velocity: DVec3::new(0.0, 0.0, 7.292e-5),
+            mass_kg: 5.0e22,
+            gm: 3.3e12,
+            radius_m: 1.6e6,
+        };
+        let translation = TranslationalState {
+            position: body.position + DVec3::new(1.0e5, -2.0e5, 5.0e4),
+            velocity: body.velocity + DVec3::new(-40.0, 60.0, -10.0),
+        };
+        let attitude = AttitudeState {
+            orientation: DQuat::from_rotation_z(0.9) * DQuat::from_rotation_x(0.3),
+            angular_velocity: DVec3::new(0.02, -0.01, 0.005),
+        };
+
+        let frame = inertial_to_bubble_frame(&body, translation, attitude);
+        let (rt_translation, rt_attitude) = bubble_frame_to_inertial(
+            &body,
+            frame.position_m,
+            frame.rotation,
+            frame.linear_velocity_m_s,
+            frame.angular_velocity_rad_s,
+        );
+
+        assert!((rt_translation.position - translation.position).length() < 1e-6);
+        assert!((rt_translation.velocity - translation.velocity).length() < 1e-9);
+        assert!(rt_attitude.orientation.angle_between(attitude.orientation) < 1e-9);
+        assert!((rt_attitude.angular_velocity - attitude.angular_velocity).length() < 1e-9);
     }
 
     fn on_rails() -> AuthorityMode {
