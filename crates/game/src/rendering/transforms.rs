@@ -2,6 +2,7 @@
 //! body parent translation, ship-layer mesh compensation, ship marker
 //! placement, and per-planet orientation (tidal lock + spin).
 
+use bevy::math::DQuat;
 use bevy::prelude::*;
 use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyState};
 use thalos_planet_rendering::{PlanetHaloMaterial, PlanetMaterial};
@@ -320,6 +321,32 @@ pub(super) fn surface_body_to_world_orientation(
     states
         .get(body_id)
         .map(|state| state.orientation.as_quat().normalize())
+}
+
+/// f64 body-fixed → world surface orientation — the precise source the
+/// real-space body grid's f32 `Transform.rotation` is derived from, and the
+/// value handed to udlod's high-precision Taylor path via
+/// [`thalos_udlod::prelude::PreciseRotation`]. At planet scale this rotation
+/// is applied to the camera→body vector (~radius), where f32 quaternion ULP
+/// is a flickering decimetre — see that component's docs.
+pub(super) fn surface_body_to_world_orientation_f64(
+    body_id: BodyId,
+    lock: Option<&TidallyLocked>,
+    states: &[BodyState],
+) -> Option<DQuat> {
+    if lock.is_some() {
+        // Tidal-lock orientation is still computed in f32 internally
+        // (`tidal_lock_world_to_body_orientation`); widen on the way out. This
+        // is the status quo, not a regression: no player stands on a tidally
+        // locked body, so the high-precision Taylor path — the only consumer
+        // that needs the extra precision — is never exercised for one. Port
+        // the tidal math to f64 when that changes.
+        return surface_body_to_world_orientation(body_id, lock, states).map(|q| q.as_dquat());
+    }
+
+    states
+        .get(body_id)
+        .map(|state| state.orientation.normalize())
 }
 
 fn surface_world_to_body_orientation(

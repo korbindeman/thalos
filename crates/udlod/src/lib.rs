@@ -60,7 +60,7 @@ pub mod prelude {
     //! `use thalos_udlod::prelude::*;` to import common components, bundles, and plugins.
     // #[doc(hidden)]
 
-    pub use crate::big_space::{BigSpaceCommands, ReferenceFrame};
+    pub use crate::big_space::{BigSpaceCommands, PreciseRotation, ReferenceFrame};
 
     pub use crate::{
         debug::{

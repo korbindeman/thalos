@@ -22,8 +22,10 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::Image;
 use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::math::DQuat;
 use bevy::prelude::*;
 use big_space::prelude::Grid;
+use thalos_udlod::prelude::PreciseRotation;
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::types::BodyKind;
 use thalos_planet_rendering::{
@@ -115,6 +117,11 @@ pub(super) fn spawn_bodies(
                 Grid::new(super::real_space::REAL_SPACE_CELL_SIZE_M, 0.0),
                 Visibility::Inherited,
                 RealSpaceBody { body_id: body.id },
+                // f64 companion to this grid's f32 `Transform.rotation`, read by
+                // udlod's high-precision Taylor vertex path. Set each frame
+                // alongside the f32 rotation in `update_real_space_body_positions`;
+                // identity until then matches the spawn-time f32 rotation.
+                PreciseRotation(DQuat::IDENTITY),
                 Name::new(format!("{} Real Space", body.name)),
                 ChildOf(real_root.entity),
             ))

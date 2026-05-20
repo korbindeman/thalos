@@ -5,7 +5,7 @@ use crate::{
     util::inverse_mix,
 };
 use bevy::{
-    math::{DVec2, DVec3},
+    math::{DQuat, DVec2, DVec3},
     platform::collections::HashSet,
     prelude::*,
 };
@@ -156,7 +156,15 @@ pub struct TileTree {
     pub(crate) morph_range: f32,
     pub(crate) blend_range: f32,
     pub(crate) origin_lod: u32,
+    /// Camera position in the terrain's **body-fixed** model frame (relative to
+    /// the body centre, model axes). All of the tile tree's LOD / coordinate
+    /// math is body-fixed, so this must be too — see [`Self::compute_requests`].
     pub(crate) view_world_position: DVec3,
+    /// Body-fixed → world rotation of the terrain's parent grid. The Taylor
+    /// coefficients are derived in the body-fixed model frame and rotated by
+    /// this into the world/render frame the shader's `view.world_position` lives
+    /// in. Identity when the terrain is not parented under a rotated grid.
+    pub(crate) view_world_rotation: DQuat,
     pub(crate) approximate_height: f32,
 }
 
@@ -183,6 +191,7 @@ impl TileTree {
             precision_threshold_distance: view_config.precision_threshold_distance * scale,
             origin_lod: view_config.origin_lod,
             view_world_position: default(),
+            view_world_rotation: DQuat::IDENTITY,
             approximate_height: (model.min_height + model.max_height) / 2.0,
             origins: Array2::default((model.side_count() as usize, tile_atlas.lod_count as usize)),
             data: Array4::default((
@@ -570,14 +579,52 @@ impl TileTree {
         tile_atlases: Query<&TileAtlas>,
         frames: crate::big_space::ReferenceFrames,
         view_transforms: Query<crate::big_space::GridTransformReadOnly>,
+        precise_rotations: Query<&crate::big_space::PreciseRotation>,
     ) {
         for (&(terrain, view), tile_tree) in tile_trees.iter_mut() {
             let tile_atlas = tile_atlases.get(terrain).unwrap();
             let view_transform = view_transforms.get(view).unwrap();
 
             let frame = frames.parent_grid(terrain).unwrap();
-            let view_position = view_transform.position_double(frame);
 
+            // Express the camera in the terrain's body-fixed model frame.
+            //
+            // `position_double` computes `cell * cell_size + translation` using
+            // the entity's *own* cell. The camera lives under the root grid, so
+            // `view.position_double(frame)` yields the camera relative to the
+            // *root*, not the body — wrong by the body's full orbital distance
+            // when the terrain is parented under a nested body grid. Subtract
+            // the parent grid's own root-relative position (computed the same
+            // way) to rebase the camera onto the body centre, then strip the
+            // grid's world rotation so the result is body-fixed. Every LOD /
+            // coordinate computation in the tile tree is body-fixed, and the
+            // Taylor approximation re-applies `view_world_rotation` to lift its
+            // coefficients back into world axes for the shader.
+            //
+            // The rotation must be f64: it is applied to the camera→body vector
+            // (~radius, 10⁶ m at planet scale), where the grid's f32
+            // `Transform.rotation` carries a flickering decimetre of error.
+            // Prefer the consumer's [`PreciseRotation`] override when present;
+            // fall back to the f32 transform otherwise.
+            let camera_world = view_transform.position_double(frame);
+            let (view_position, view_rotation) = match frames
+                .parent_grid_entity(terrain)
+                .and_then(|parent| view_transforms.get(parent).ok().map(|t| (parent, t)))
+            {
+                Some((parent, parent_transform)) => {
+                    let parent_world = parent_transform.position_double(frame);
+                    let rotation = precise_rotations
+                        .get(parent)
+                        .map(|precise| precise.0)
+                        .unwrap_or_else(|_| parent_transform.transform.rotation.as_dquat());
+                    (rotation.inverse() * (camera_world - parent_world), rotation)
+                }
+                // Terrain sits directly under the root grid (no nested body
+                // grid): the camera world position is already body-frame.
+                None => (camera_world, DQuat::IDENTITY),
+            };
+
+            tile_tree.view_world_rotation = view_rotation;
             tile_tree.update(view_position, tile_atlas);
         }
     }
@@ -811,6 +858,7 @@ mod tests {
             blend_range: 0.0,
             origin_lod: 0,
             view_world_position: DVec3::ZERO,
+            view_world_rotation: DQuat::IDENTITY,
             approximate_height: 0.0,
         }
     }

@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 use big_space::prelude::*;
 use thalos_physics_canonical::types::BodyState;
+use thalos_udlod::prelude::PreciseRotation;
 
-use super::transforms::surface_body_to_world_orientation;
+use super::transforms::surface_body_to_world_orientation_f64;
 use super::types::{PlayerShip, RealSpaceBody, SolarSystemState, TidallyLocked};
 
 pub const REAL_SPACE_CELL_SIZE_M: f32 = 1_000.0;
@@ -72,6 +73,7 @@ pub(super) fn update_real_space_body_positions(
         Option<&TidallyLocked>,
         &mut CellCoord,
         &mut Transform,
+        &mut PreciseRotation,
     )>,
 ) {
     let Some(states) = cache.states.as_deref() else {
@@ -81,11 +83,19 @@ pub(super) fn update_real_space_body_positions(
         return;
     };
 
-    for (body, lock, mut cell, mut transform) in &mut bodies {
+    for (body, lock, mut cell, mut transform, mut precise) in &mut bodies {
         let Some(state) = states.get(body.body_id) else {
             continue;
         };
-        write_body_transform(state, lock, states, root_grid, &mut cell, &mut transform);
+        write_body_transform(
+            state,
+            lock,
+            states,
+            root_grid,
+            &mut cell,
+            &mut transform,
+            &mut precise,
+        );
     }
 }
 
@@ -96,18 +106,26 @@ fn write_body_transform(
     grid: &Grid,
     cell: &mut CellCoord,
     transform: &mut Transform,
+    precise: &mut PreciseRotation,
 ) {
     let (next_cell, local) = grid.translation_to_grid(state.position);
     *cell = next_cell;
     transform.translation = local;
-    transform.rotation =
-        surface_body_to_world_orientation(state.id, lock, states).unwrap_or_else(|| {
-            warn!(
-                "could not resolve surface orientation for body {}; falling back to ephemeris orientation",
-                state.id,
-            );
-            state.orientation.as_quat().normalize()
-        });
+
+    // One f64 source feeds both rotations: the grid's f32 `Transform.rotation`
+    // (big_space / udlod's low-precision far vertex path) and the f64
+    // `PreciseRotation` (udlod's high-precision near Taylor path). Writing both
+    // from the same value in the same system keeps the two precision paths from
+    // slipping at the LOD swap.
+    let rotation = surface_body_to_world_orientation_f64(state.id, lock, states).unwrap_or_else(|| {
+        warn!(
+            "could not resolve surface orientation for body {}; falling back to ephemeris orientation",
+            state.id,
+        );
+        state.orientation.normalize()
+    });
+    transform.rotation = rotation.as_quat();
+    precise.0 = rotation;
 }
 
 #[cfg(test)]
@@ -136,8 +154,17 @@ mod tests {
         };
         let mut cell = CellCoord::ZERO;
         let mut transform = Transform::default();
+        let mut precise = PreciseRotation(DQuat::IDENTITY);
 
-        write_body_transform(&state, None, &[state], &grid, &mut cell, &mut transform);
+        write_body_transform(
+            &state,
+            None,
+            &[state],
+            &grid,
+            &mut cell,
+            &mut transform,
+            &mut precise,
+        );
 
         assert!(cell.x != 0);
         assert!(transform.translation.length() <= REAL_SPACE_CELL_SIZE_M);

@@ -18,6 +18,7 @@ use bevy::light::NotShadowCaster;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::grid::Grid;
+use big_space::prelude::CellCoord;
 use thalos_physics_canonical::types::{BodyDefinition, BodyId};
 use thalos_planet_rendering::{AtmosphereBlock, SceneLighting};
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
@@ -832,6 +833,7 @@ pub(super) fn update_body_terrain_atmosphere(
     water_q: Query<(&BodyWater, &MeshMaterial3d<BodyWaterMaterial>)>,
     sky_q: Query<(&BodySky, &MeshMaterial3d<BodySkyMaterial>)>,
     ship_q: Query<(&GlobalTransform, Option<&CameraTargetOffset>), With<PlayerShip>>,
+    ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
@@ -921,12 +923,23 @@ pub(super) fn update_body_terrain_atmosphere(
         );
     }
 
-    // Camera position in heliocentric inertial coords (f64). The flat-mode
-    // debug checker reads this to compute `view_phase` — the camera's
-    // body-fixed position mod-(2 × cell_size) per axis — so the only
-    // body-scale magnitude in the parity chain stays in CPU precision
-    // and never has to round-trip through f32 at planet radius.
-    let camera_inertial = sim.simulation.ship_state().position;
+    // Camera position in heliocentric inertial coords (f64), reconstructed from
+    // the ship camera's big_space cell + local translation so it stays
+    // f64-precise at planet radius. The flat-mode debug checker's `view_phase`
+    // is the camera's body-fixed position mod-(2 × cell_size) per axis; it must
+    // reference the *actual* render camera — the same `view.world_position` the
+    // shader differences fragments against — not the craft. Using the craft
+    // position slides the checker across the surface whenever the camera orbits
+    // a stationary player, because the phase reference and the shader's camera
+    // reference then disagree by the orbit offset.
+    let camera_inertial = ship_cam_q
+        .single()
+        .map(|(cell, transform)| {
+            DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
+                * REAL_SPACE_CELL_SIZE_M as f64
+                + transform.translation.as_dvec3()
+        })
+        .unwrap_or_else(|_| sim.simulation.ship_state().position);
     for (terrain, mat_handle) in &terrain_q {
         let Some(mat) = terrain_materials.get_mut(mat_handle) else {
             continue;

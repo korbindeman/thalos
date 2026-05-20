@@ -342,15 +342,24 @@ impl TerrainModelApproximation {
             let p_dst = m.transform_vector3(sm * DVec3::new(a_dst, b_dst, c_dst) / l.powi(3));
             let p_dtt = m.transform_vector3(sm * DVec3::new(a_dtt, b_dtt, c_dtt) / l.powi(3));
 
+            // `p` and the derivative vectors are in the terrain's body-fixed
+            // model frame (the model carries identity rotation; the body's
+            // orientation lives on its big_space grid). The shader adds the
+            // resulting relative position to `view.world_position`, which is in
+            // world/render axes — so lift every coefficient out of the
+            // body-fixed frame with the parent grid's rotation. `c` stays a
+            // difference (`p - view`), so the body-centre translation cancels
+            // and only the rotation is needed.
+            let r = tile_tree.view_world_rotation;
             sides[side] = SideParameter {
                 origin_xy: view_xy,
                 origin_uv: view_uv,
-                c: (p - tile_tree.view_world_position).as_vec3(),
-                c_s: p_ds.as_vec3(),
-                c_t: p_dt.as_vec3(),
-                c_ss: (p_dss / 2.0).as_vec3(),
-                c_st: p_dst.as_vec3(),
-                c_tt: (p_dtt / 2.0).as_vec3(),
+                c: (r * (p - tile_tree.view_world_position)).as_vec3(),
+                c_s: (r * p_ds).as_vec3(),
+                c_t: (r * p_dt).as_vec3(),
+                c_ss: (r * (p_dss / 2.0)).as_vec3(),
+                c_st: (r * p_dst).as_vec3(),
+                c_tt: (r * (p_dtt / 2.0)).as_vec3(),
             };
         }
 
