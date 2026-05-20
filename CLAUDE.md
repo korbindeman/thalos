@@ -502,6 +502,22 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   without touching simulation or rendering.
 - **Physics crate has no Bevy.** All physics logic must remain in
   `thalos_physics_canonical`. `thalos_game` is only presentation and input.
+  This extends to the other pure-Rust libraries (`thalos_terrain`,
+  `thalos_atmosphere`, `thalos_celestial`): none may pull in Bevy, even
+  transitively. The boundary is CI-guarded — `.github/workflows/ci.yml`
+  runs a `cargo tree` check on every push/PR and fails if a real Bevy
+  crate enters any of the four trees. (`bevy_erosion_filter` is allowed:
+  terrain uses its pure-glam `cpu` module with `default-features = false`,
+  so the crate is present by name but pulls no Bevy engine crate — keep
+  that flag.)
+- **Single-writer resources.** Frame-local projection/snapshot resources
+  have exactly one writing system, named in the resource's doc comment as
+  **Sole writer:**. Today: `SolarSystemState` ← `sync_solar_system_state`,
+  `MapSnapshot` ← `update_map_snapshot`, `CraftStateMirror` ←
+  `refresh_craft_state_mirror`, `AvianAuthority` ← `compute_avian_authority`.
+  Every other system reads. Don't add a second writer; if a resource needs
+  to be mutated from elsewhere, route through an accessor on the sole writer
+  or reconsider the ownership.
 - **Map view is decoupled.** Map systems read `MapSnapshot`, projected
   body states, and trajectories. They do not share or mutate
   real-space rendering entities.

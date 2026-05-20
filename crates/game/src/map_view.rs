@@ -36,6 +36,14 @@ impl MapProjection for LinearMapProjection {
     }
 }
 
+/// Read-only projection of canonical simulation state for map rendering.
+///
+/// Map systems consume this snapshot and never touch the live `Simulation` or
+/// real-space render entities. `body_states` is copied wholesale from
+/// [`SolarSystemState::states`], so it inherits the index-aligned
+/// `states[i].id == i` invariant the map's body lookups rely on.
+///
+/// **Sole writer:** [`update_map_snapshot`]. Every other map system reads it.
 #[derive(Resource, Default, Clone)]
 pub struct MapSnapshot {
     pub epoch: Epoch,

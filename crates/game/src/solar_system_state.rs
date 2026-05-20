@@ -70,6 +70,9 @@ pub struct BodyEnvironmentState {
 /// state. Future wind, storms, tides, and dune migration belong in
 /// [`BodyEnvironmentState`] so every projection reads the same runtime
 /// environment for a body.
+///
+/// **Sole writer:** [`sync_solar_system_state`] (in [`SimStage::Sync`]). All
+/// other systems read it; environment mutators go through `environment_mut`.
 #[derive(Resource, Debug, Default)]
 pub struct SolarSystemState {
     pub states: Option<BodyStates>,

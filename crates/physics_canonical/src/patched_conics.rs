@@ -473,6 +473,29 @@ mod tests {
     }
 
     #[test]
+    fn states_into_is_index_aligned_with_body_id() {
+        // Load-bearing invariant for every consumer downstream: both
+        // `SolarSystemState` and `MapSnapshot` read body states via
+        // `states.get(body_id)`, which is only correct if the produced Vec is
+        // index-aligned so that `states[i].id == i`. If `states_into` ever
+        // reorders or skips a body, that lookup silently returns the wrong
+        // body. Guard the contract at the source.
+        let system = make_two_body_system();
+        let provider = PatchedConics::new(&system, 2.0 * JULIAN_YEAR);
+        let mut all_states = Vec::new();
+        provider.states_into(crate::canonical::Epoch(0.4 * JULIAN_YEAR), &mut all_states);
+
+        assert_eq!(all_states.len(), provider.body_count());
+        for (index, state) in all_states.iter().enumerate() {
+            assert_eq!(
+                state.id, index,
+                "body state at index {index} carries id {}",
+                state.id
+            );
+        }
+    }
+
+    #[test]
     fn orbit_trail_uses_analytic_relative_motion() {
         let system = make_two_body_system();
         let provider = PatchedConics::new(&system, 2.0 * JULIAN_YEAR);
