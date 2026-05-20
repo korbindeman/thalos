@@ -1,4 +1,4 @@
-use bevy::math::{DVec3, Vec2, Vec3};
+use bevy::math::{DVec3, Vec3};
 use bevy::prelude::*;
 use thalos_physics_canonical::canonical::{CraftState, Epoch};
 use thalos_physics_canonical::trajectory::{
@@ -18,23 +18,9 @@ pub struct MapContext {
     pub focus_body: BodyId,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub struct DragInput {
-    pub screen_delta: Vec2,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MapEdit {
-    None,
-}
-
 pub trait MapProjection: Send + Sync {
     fn project_body(&self, body: &BodyState, ctx: &MapContext) -> Vec3;
     fn project_point(&self, point_inertial_m: DVec3, epoch: Epoch, ctx: &MapContext) -> Vec3;
-    #[allow(dead_code)]
-    fn unproject_drag(&self, drag: DragInput, ctx: &MapContext) -> MapEdit;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -47,10 +33,6 @@ impl MapProjection for LinearMapProjection {
 
     fn project_point(&self, point_inertial_m: DVec3, _epoch: Epoch, ctx: &MapContext) -> Vec3 {
         ((point_inertial_m - ctx.origin) * ctx.scale).as_vec3()
-    }
-
-    fn unproject_drag(&self, _drag: DragInput, _ctx: &MapContext) -> MapEdit {
-        MapEdit::None
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider,
-    canonical::{Epoch, WorldPhysicsConfig},
+    canonical::Epoch,
     simulation::Simulation,
     types::{BodyId, BodyStates, SolarSystemDefinition},
 };
@@ -19,8 +19,6 @@ pub struct SimulationState {
     pub simulation: Simulation,
     pub system: SolarSystemDefinition,
     pub ephemeris: Arc<dyn BodyTrajectoryProvider>,
-    #[allow(dead_code)]
-    pub world_config: WorldPhysicsConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

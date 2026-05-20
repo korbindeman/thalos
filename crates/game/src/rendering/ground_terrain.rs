@@ -20,7 +20,7 @@ use bevy::prelude::*;
 use big_space::grid::Grid;
 use big_space::prelude::CellCoord;
 use thalos_physics_canonical::types::{BodyDefinition, BodyId};
-use thalos_planet_rendering::{AtmosphereBlock, SceneLighting};
+use thalos_planet_rendering::{AtmosphereBlock, AU_M, LIGHT_AT_1AU, SceneLighting};
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_terrain_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
@@ -36,9 +36,6 @@ use crate::coords::SHIP_LAYER;
 use super::real_space::REAL_SPACE_CELL_SIZE_M;
 use super::types::{CameraExposure, PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
 
-/// Sun irradiance constant matching the impostor lighting system.
-const LIGHT_AT_1AU: f32 = 10.0;
-const AU_M: f64 = 1.496e11;
 const CRAFT_SHADOW_RADIUS_M: f32 = 2.5;
 const CRAFT_SHADOW_MIN_HALF_LENGTH_M: f32 = 4.0;
 const CRAFT_SHADOW_STRENGTH: f32 = 0.88;

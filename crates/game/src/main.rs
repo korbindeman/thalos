@@ -339,7 +339,6 @@ fn main() {
                 simulation,
                 system,
                 ephemeris,
-                world_config,
             }
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))

@@ -7,7 +7,7 @@
 // `planet_impostor.wgsl`, so the LOD swap is visually continuous.
 //
 // Atmospheric scattering is NOT applied here — it is composited on top
-// by `BodySky` (the fullscreen pass in `sky_dome.wgsl`) whenever this
+// by `BodySky` (the fullscreen pass in `body_sky.wgsl`) whenever this
 // ground terrain LOD is visible. Outside the terrain handoff distance,
 // the impostor handles the body and its own inline atmosphere/cloud path.
 

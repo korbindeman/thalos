@@ -2,7 +2,7 @@
 //!
 //! Renders an icosphere at `body_radius + sea_level_m + ε` as an opaque
 //! depth-writing pass. The water sits at the same iso-radius the BodySky
-//! pass clips at analytically (`sky_dome.wgsl::c_planet`), so aerial
+//! pass clips at analytically (`body_sky.wgsl::c_planet`), so aerial
 //! perspective composites correctly on water pixels without the water
 //! shader having to sample scene depth.
 //!

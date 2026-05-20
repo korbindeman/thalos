@@ -19,8 +19,9 @@ use thalos_physics_canonical::parsing::load_solar_system_from_dir;
 use thalos_physics_canonical::patched_conics::PatchedConics;
 use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
-    AtmosphereBlock, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle,
-    GasGiantParams, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial,
+    AtmosphereBlock, AU_M, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial,
+    GasGiantMaterialHandle, GasGiantParams, LIGHT_AT_1AU, PlanetCoastlineParams,
+    PlanetDetailParams, PlanetHaloMaterial,
     PlanetHaloMaterialHandle, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
     PlanetRenderingPlugin, PlanetWaterParams, ReferenceClouds, RingLayers, RingMaterial,
     RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_from_planet_surface,
@@ -50,9 +51,7 @@ use surface_overlay::{
 // Constants
 // ---------------------------------------------------------------------------
 
-const LIGHT_AT_1AU: f32 = 10.0;
 const AMBIENT_INTENSITY: f32 = 0.05;
-const AU_M: f64 = 1.496e11;
 const DEFAULT_BODY_NAME: &str = "Mira";
 const RENDER_RADIUS: f32 = 1.5;
 

@@ -220,11 +220,6 @@ pub fn in_map_view(view: Res<ViewMode>) -> bool {
     *view == ViewMode::Map
 }
 
-#[allow(dead_code)]
-pub fn in_ship_view(view: Res<ViewMode>) -> bool {
-    *view == ViewMode::Ship
-}
-
 fn toggle_view_input(
     input: Res<GameInputIntent>,
     mut contexts: EguiContexts,

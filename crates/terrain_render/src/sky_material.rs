@@ -45,11 +45,11 @@ pub struct BodySkyMaterial {
 
 impl Material for BodySkyMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://thalos_terrain_render/sky_dome.wgsl".into()
+        "embedded://thalos_terrain_render/body_sky.wgsl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://thalos_terrain_render/sky_dome.wgsl".into()
+        "embedded://thalos_terrain_render/body_sky.wgsl".into()
     }
 
     // Premultiplied: `rgb = in_scatter` is additive over the background, and
@@ -80,6 +80,6 @@ impl Material for BodySkyMaterial {
     }
 }
 
-pub(crate) fn embed_sky_dome_shader(app: &mut App) {
-    embedded_asset!(app, "sky_dome.wgsl");
+pub(crate) fn embed_body_sky_shader(app: &mut App) {
+    embedded_asset!(app, "body_sky.wgsl");
 }

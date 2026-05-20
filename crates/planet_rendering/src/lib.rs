@@ -37,8 +37,8 @@ pub use shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadial
 pub use solid_planet::{SolidPlanetMaterial, SolidPlanetParams};
 pub use texture::PlanetTextures;
 pub use thalos_planet_lighting::{
-    MAX_STARS, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, SceneLighting, StarLight,
-    bake_multi_scatter_lut,
+    AU_M, LIGHT_AT_1AU, MAX_STARS, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH,
+    SceneLighting, StarLight, bake_multi_scatter_lut,
 };
 
 use bevy::prelude::*;

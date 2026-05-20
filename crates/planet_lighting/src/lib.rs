@@ -26,6 +26,12 @@ pub use multi_scatter::{
 
 use bevy::prelude::*;
 
+/// Sun irradiance at 1 AU in shader units (W/m² scaled).
+pub const LIGHT_AT_1AU: f32 = 10.0;
+
+/// Meters per astronomical unit.
+pub const AU_M: f64 = 1.496e11;
+
 /// Bevy plugin that registers the shared `thalos::lighting` and
 /// `thalos::atmosphere` WGSL shader libraries. Must be added before
 /// any material that imports either module.

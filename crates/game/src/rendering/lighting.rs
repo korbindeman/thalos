@@ -5,8 +5,8 @@
 use bevy::prelude::*;
 use thalos_physics_canonical::types::BodyStates;
 use thalos_planet_rendering::{
-    FilmGrain, MAX_ECLIPSE_OCCLUDERS, PlanetHaloMaterial, PlanetMaterial, SceneLighting,
-    SolidPlanetMaterial, StarLight,
+    AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, PlanetHaloMaterial, PlanetMaterial,
+    SceneLighting, SolidPlanetMaterial, StarLight,
 };
 
 use super::types::{
@@ -17,16 +17,8 @@ use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::coords::{MAP_SCALE, RenderOrigin, SHIP_SCALE};
 use crate::view::ViewMode;
 
-/// Sun irradiance at 1 AU in shader units (W/m² scaled). Editor uses the same
-/// value — keep them in sync. Per-body intensity is scaled by focus-relative
-/// exposure (see `update_planet_light_dirs`) rather than by raw inverse-square
-/// falloff, so distant bodies stay legible when the camera focuses on them.
-const LIGHT_AT_1AU: f32 = 10.0;
-
 /// Ambient floor. Vacuum has no fill light — night sides are black.
 const PLANET_AMBIENT: f32 = 0.0;
-
-const AU_M: f64 = 1.496e11;
 
 /// Exposure exponent. 2.0 = full compensation (distant bodies look identical
 /// to focused Thalos — destroys distance cue). 0.0 = no compensation (Nyx is

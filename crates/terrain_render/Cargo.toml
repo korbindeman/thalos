@@ -3,6 +3,13 @@ name = "thalos_terrain_render"
 version.workspace = true
 edition.workspace = true
 
+[features]
+playground = []
+
+[[example]]
+name = "playground"
+required-features = ["playground"]
+
 [dependencies]
 thalos_terrain = { path = "../terrain" }
 thalos_planet_lighting = { path = "../planet_lighting" }

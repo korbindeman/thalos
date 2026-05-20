@@ -22,6 +22,7 @@ use bevy_erosion_filter::EROSION_WGSL;
 use bytemuck::{Pod, Zeroable};
 use thalos_terrain::cubemap::{Cubemap, CubemapFace};
 use thalos_terrain::stages::MidFreqDetailParams;
+use thalos_terrain::MID_FREQ_DETAIL_WGSL;
 use wgpu::{
     Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingType, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages,
@@ -451,10 +452,6 @@ impl MidFreqParamsGpu {
         }
     }
 }
-
-/// WGSL source for the mid-frequency-detail kernel. Loaded at compile
-/// time so the binary is self-contained.
-const MID_FREQ_DETAIL_WGSL: &str = include_str!("../../terrain/shaders/mid_freq_detail.wgsl");
 
 // WGSL source for the bevy_erosion_filter erosion kernel comes from the
 // crate's `EROSION_WGSL` constant. The file uses one naga_oil directive
