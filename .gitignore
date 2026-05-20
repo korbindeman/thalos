@@ -2,6 +2,9 @@
 /stage-bakes
 Cargo.lock
 .DS_Store
+.cargo/config
+.cargo/config.toml
+.env.just
 .thalos_dumps/
 .claude/
 .codex/

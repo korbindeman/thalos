@@ -1,9 +1,13 @@
 # Thalos — orbital mechanics sandbox
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+set dotenv-load := true
+set dotenv-filename := ".env.just"
+
+game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game")
 
 # Run the game
 game:
-    cargo run -p thalos_game
+    {{game_command}}
 
 # Edit a planet's terrain. Usage: just edit auron
 edit body:

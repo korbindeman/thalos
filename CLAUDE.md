@@ -11,7 +11,7 @@ the new shape, not the old one. No silent rewrites.
 ## Commands
 
 ```bash
-just game                 # cargo run -p thalos_game
+just game                 # cargo run -p thalos_game (local override via .env.just)
 just edit <body>          # cargo run -p thalos_planet_editor -- <body>
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
@@ -41,10 +41,13 @@ override, so Cargo uses its default LLVM backend on every platform. Do not add
 project config unless the project intentionally re-adopts Cranelift for all
 platforms.
 
-macOS developers who want Cranelift for local iteration can install and
-select it in their personal Cargo config or via one-off `cargo --config`
-flags. Keep that opt-in local so Windows and Linux continue to use LLVM.
-The full policy and the local-only macOS opt-in recipe live in
+Compiler/linker performance tuning that is platform-specific or finnicky
+belongs in local Cargo config, not committed workspace config. This includes
+incremental overrides, debug-info reductions, dynamic-linking aliases, custom
+linkers, and backend experiments. The normal Windows iteration path stays on
+LLVM and opts into Bevy dynamic linking only through local config. The workspace-local
+`.cargo/config.toml` and `.env.just` are ignored by Git for this purpose. The full policy plus
+Windows fast-incremental and macOS workaround examples live in
 `docs/tooling.md`.
 
 ## Planet generation iteration
@@ -556,6 +559,9 @@ status, dependency graph. Each major system has a unified spec doc.
 
 - `ROADMAP.md` — top-level roadmap. Phase 1 (M1-M4) = architectural +
   rendering; Phase 2 (M5-M6) = gameplay; M7-M8 deferred.
+- `tooling.md` — toolchain policy and local-only compiler tuning recipes
+  for Windows fast incremental builds, macOS incremental workarounds, and
+  backend/linker experiments.
 - `simulation.md` — simulation architecture (orbital mechanics,
   authority, time warp, map decoupling, big_space, Avian local
   bubble). Target design.
