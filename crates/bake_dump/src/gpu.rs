@@ -57,10 +57,9 @@ impl GpuContext {
     }
 
     async fn new_async() -> Result<Self> {
-        let instance = Instance::new(&InstanceDescriptor {
-            backends: Backends::all(),
-            ..Default::default()
-        });
+        let mut instance_descriptor = InstanceDescriptor::new_without_display_handle();
+        instance_descriptor.backends = Backends::all();
+        let instance = Instance::new(instance_descriptor);
 
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
@@ -169,8 +168,8 @@ pub fn smoke_test(ctx: &GpuContext, n: u32) -> Result<Vec<u32>> {
 
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("smoke pl"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
     });
 
     let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -567,8 +566,8 @@ pub fn run_mid_freq(
 
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("mid-freq pl"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
     });
 
     // Compose the WGSL: bevy_erosion_filter's erosion library

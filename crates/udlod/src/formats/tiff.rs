@@ -32,6 +32,10 @@ impl AssetLoader for TiffLoader {
             DecodingResult::U16(data) => cast_slice(&data).to_vec(),
             DecodingResult::U32(data) => cast_slice(&data).to_vec(),
             DecodingResult::U64(data) => cast_slice(&data).to_vec(),
+            DecodingResult::F16(data) => data
+                .iter()
+                .flat_map(|value| value.to_bits().to_ne_bytes())
+                .collect(),
             DecodingResult::F32(data) => cast_slice(&data).to_vec(),
             DecodingResult::F64(data) => cast_slice(&data).to_vec(),
             DecodingResult::I8(data) => cast_slice(&data).to_vec(),

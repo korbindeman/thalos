@@ -11,14 +11,13 @@ path = "src/main.rs"
 thalos_physics_canonical = { path = "../physics_canonical" }
 thalos_terrain = { path = "../terrain" }
 bevy_erosion_filter = { version = "0.1.2", default-features = false }
-glam = "0.30"
+glam = "0.30.10"
 image = { version = "0.25", default-features = false, features = ["png"] }
-rayon = "1.10"
-indicatif = "0.17"
-# GPU compute for the new mid-frequency-detail stage. Versions pinned to
-# match Bevy's wgpu in the workspace so the compiled artifact is shared
-# (otherwise wgpu links twice and build time roughly doubles).
-wgpu = "27.0.1"
+rayon = "1.12"
+indicatif = "0.18"
+# GPU compute for the mid-frequency-detail stage. This tool is headless and
+# stays on latest stable wgpu even when Bevy's renderer stack lags behind.
+wgpu = "29.0.3"
 bytemuck = { version = "1.25", features = ["derive"] }
 pollster = "0.4"
 anyhow = "1.0"

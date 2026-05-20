@@ -13,7 +13,7 @@
 //! backdrop of resolvable galaxies without a real catalog. Real
 //! data (NGC / PGC / SDSS) drops in later behind the same struct.
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::catalog::Universe;

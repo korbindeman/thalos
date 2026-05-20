@@ -25,7 +25,7 @@
 //! Every step is independent — swap the spectral-type distribution
 //! for a real catalog import without touching any other function.
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::catalog::Universe;

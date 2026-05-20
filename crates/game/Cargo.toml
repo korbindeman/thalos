@@ -13,14 +13,14 @@ thalos_physics_local = { path = "../physics_local" }
 thalos_celestial = { path = "../celestial" }
 thalos_shipyard = { path = "../shipyard" }
 bevy = { version = "0.18", features = ["wayland", "jpeg", "bevy_remote"] }
-bevy_brp_extras = "0.18"
+bevy_brp_extras = "0.19"
 thalos_udlod = { workspace = true }
 bevy_egui = "0.39"
 big_space = { version = "0.12", features = ["i64"] }
 tracing = "0.1"
 ab_glyph = "0.2"
-resvg = { version = "0.45", default-features = false }
-rayon = "1.10"
+resvg = { version = "0.47", default-features = false }
+rayon = "1.12"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -10,16 +10,16 @@ authors = ["Kurt Kühnert <kurt@kuehnert.dev>", "Korbin de Man <korbindeman4@gma
 
 [dependencies]
 bevy = "0.18"
-ndarray = "0.15"
-itertools = "0.12"
+ndarray = "0.17"
+itertools = "0.14"
 image = "0.25"
-tiff = "0.9"
-lru = "0.12"
-bitflags = "2.4"
-bytemuck = "1.14"
+tiff = "0.11"
+lru = "0.18"
+bitflags = "2.11"
+bytemuck = "1.25"
 anyhow = "1.0"
-bincode = "2.0"
-async-channel = "2.1"
+bincode = "2.0.1"
+async-channel = "2.5"
 big_space = "0.12"
 
 [[example]]

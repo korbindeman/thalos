@@ -176,11 +176,11 @@ impl PreprocessTask {
             .get_or_allocate_tile(tile_coordinate)
             .attachment(dataset.attachment_index);
 
-        let neighbour_tiles = tile
-            .coordinate
-            .neighbours(tile_atlas.model.is_spherical())
-            .map(|coordinate| tile_atlas.get_tile(coordinate))
-            .collect_array();
+        let neighbour_tiles = CollectArray::collect_array(
+            tile.coordinate
+                .neighbours(tile_atlas.model.is_spherical())
+                .map(|coordinate| tile_atlas.get_tile(coordinate)),
+        );
 
         Self {
             tile,
@@ -197,11 +197,11 @@ impl PreprocessTask {
             .get_or_allocate_tile(tile_coordinate)
             .attachment(dataset.attachment_index);
 
-        let child_tiles = tile
-            .coordinate
-            .children()
-            .map(|coordinate| tile_atlas.get_tile(coordinate))
-            .collect_array();
+        let child_tiles = CollectArray::collect_array(
+            tile.coordinate
+                .children()
+                .map(|coordinate| tile_atlas.get_tile(coordinate)),
+        );
 
         Self {
             tile,
