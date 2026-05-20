@@ -173,10 +173,17 @@ impl AvianAuthority {
 /// take-translation** handoff: the gap between canonical's pre-handoff state
 /// and the state read back from Avian after its first integration step.
 /// Healthy values are sub-centimetre (`~|accel|·dt²`); a value approaching
-/// `|relative_velocity|·dt` (~100 m at Thalos LEO) flags the frame-skew /
-/// SOI-race bug the snap guards against. They persist unchanged across a
-/// release handoff, so `last_handoff_kind` may read `"ReleasedTranslation"`
-/// while the residual still describes the prior take.
+/// `|relative_velocity|·dt` (~100 m at Thalos LEO) means snap and readback
+/// disagreed on the body frame at the take (conversion drift, a stale
+/// `body_state` between the two systems, or mid-frame state mutation).
+///
+/// Scope caveat: recording is gated on the same `just_took_translation`
+/// predicate the snap uses to do its fresh re-sync, so this can't catch a
+/// regression that makes *that predicate itself* go false (snap and recording
+/// would skip together). It verifies the handoff snap was coherent, not that
+/// the handoff was triggered. The residuals persist unchanged across a release
+/// handoff, so `last_handoff_kind` may read `"ReleasedTranslation"` while they
+/// still describe the prior take.
 #[derive(Resource, Default, Debug, Clone, Reflect)]
 #[reflect(Resource)]
 pub struct AvianHandoffDiagnostics {
