@@ -18,7 +18,6 @@
 use std::f64::consts::{PI, TAU};
 
 use bevy::prelude::*;
-use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::orbital_math::{OsculatingElements, cartesian_to_elements};
 use thalos_physics_canonical::types::StateVector;
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
@@ -26,7 +25,7 @@ use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use crate::hud::HudPanel;
 use crate::hud::format;
 use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
-use crate::rendering::SimulationState;
+use crate::rendering::{SimulationState, SolarSystemState};
 
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 
@@ -237,6 +236,7 @@ fn countdown_cell(theme: &HudTheme) -> impl Bundle {
 #[allow(clippy::too_many_arguments)]
 pub fn update(
     sim: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
     active: Res<ActiveLocalBubble>,
     height_sources: Res<HeightSourceRegistry>,
     theme: Res<HudTheme>,
@@ -285,10 +285,8 @@ pub fn update(
     let ship = sim.simulation.ship_state();
     let anchor_id = sim.simulation.dominant_body();
     let body = &sim.simulation.bodies()[anchor_id];
-    let body_state = sim
-        .simulation
-        .ephemeris()
-        .state(anchor_id, Epoch(sim.simulation.sim_time()));
+    let Some(states) = solar_system.states.as_deref() else { return; };
+    let Some(body_state) = states.get(anchor_id) else { return; };
     let rel = StateVector {
         position: ship.position - body_state.position,
         velocity: ship.velocity - body_state.velocity,

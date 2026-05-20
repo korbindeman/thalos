@@ -4,8 +4,6 @@
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
-use thalos_physics_canonical::canonical::Epoch;
-
 use crate::fuel::ThrottleState;
 use crate::hud::HudPanel;
 use crate::hud::format;
@@ -13,7 +11,7 @@ use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
 use crate::navball::ui::{
     FRAME_SIZE_PX, NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX, NavballFrameRoot,
 };
-use crate::rendering::SimulationState;
+use crate::rendering::{SimulationState, SolarSystemState};
 
 /// The navball cluster sits at the bottom-left (navball at x=40,
 /// nav panel just to its right). The flight readouts sit ABOVE the
@@ -138,6 +136,7 @@ pub fn setup(
 
 pub fn update(
     sim: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
     throttle: Res<ThrottleState>,
     mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
     mut vel_q: Query<&mut Text, With<VelocityText>>,
@@ -145,10 +144,8 @@ pub fn update(
 ) {
     let ship = sim.simulation.ship_state();
     let body = sim.simulation.dominant_body();
-    let body_state = sim
-        .simulation
-        .ephemeris()
-        .state(body, Epoch(sim.simulation.sim_time()));
+    let Some(states) = solar_system.states.as_deref() else { return; };
+    let Some(body_state) = states.get(body) else { return; };
     let rel_speed = (ship.velocity - body_state.velocity).length();
 
     if let Ok(mut t) = vel_q.single_mut() {

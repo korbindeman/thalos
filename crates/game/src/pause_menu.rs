@@ -19,10 +19,10 @@
 //! survives.
 
 use bevy::app::AppExit;
-use bevy::input::InputSystems;
 use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowCloseRequested};
+use thalos_input::game::GameInputIntent;
 
 use crate::hud::theme::{HudTheme, panel_frame};
 use crate::maneuver::InteractionMode;
@@ -49,7 +49,10 @@ impl Plugin for PauseMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GamePause>()
             .add_systems(Startup, setup.after(crate::hud::theme::init_theme))
-            .add_systems(PreUpdate, handle_escape_input.after(InputSystems))
+            .add_systems(
+                Update,
+                handle_escape_input.before(crate::SimStage::Physics),
+            )
             .add_systems(
                 Update,
                 (
@@ -223,15 +226,14 @@ fn spawn_menu_button(
 }
 
 fn handle_escape_input(
-    mut keys: ResMut<ButtonInput<KeyCode>>,
+    intent: Res<GameInputIntent>,
     mut pause: ResMut<GamePause>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
-    if !keys.just_pressed(KeyCode::Escape) {
+    if !intent.escape {
         return;
     }
-    keys.clear_just_pressed(KeyCode::Escape);
 
     if pause.active {
         pause.active = false;

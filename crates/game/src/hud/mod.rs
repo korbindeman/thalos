@@ -109,6 +109,7 @@ impl Plugin for HudPlugin {
                     nav_panel::update_maneuver_visuals,
                     nav_attitude::update_attitude,
                 )
+                    .after(crate::SimStage::Sync)
                     .run_if(not_in_photo_mode),
             )
             .add_systems(Update, input_gate::update_ui_pointer_gate)

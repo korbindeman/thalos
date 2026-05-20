@@ -25,10 +25,9 @@ use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMod
 use bevy::math::{DMat3, DQuat};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::maneuver::orbital_frame;
 
-use crate::rendering::SimulationState;
+use crate::rendering::{SimulationState, SolarSystemState};
 
 /// Render layer reserved for this module's mesh + camera.
 pub const NAV_ATTITUDE_LAYER: usize = 4;
@@ -161,6 +160,7 @@ pub fn setup(
 /// (prograde/normal/radial), reflecting the craft's current attitude.
 pub fn update_attitude(
     sim_state: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
     mut model: Query<&mut Transform, With<NavAttitudeModel>>,
 ) {
     let Ok(mut transform) = model.single_mut() else {
@@ -169,10 +169,9 @@ pub fn update_attitude(
 
     let sim = &sim_state.simulation;
     let craft = sim.craft_state();
-    let sim_time = sim.sim_time();
-    let body_state = sim_state
-        .ephemeris
-        .state(sim.dominant_body(), Epoch(sim_time));
+    let dominant = sim.dominant_body();
+    let Some(states) = solar_system.states.as_deref() else { return; };
+    let Some(body_state) = states.get(dominant) else { return; };
 
     let [prograde, normal, radial] = orbital_frame(
         craft.translation.position,

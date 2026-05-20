@@ -18,10 +18,8 @@
 
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
-use thalos_physics_canonical::canonical::Epoch;
-
 use crate::navball::render::NavballSphere;
-use crate::rendering::SimulationState;
+use crate::rendering::{SimulationState, SolarSystemState};
 
 /// Body axis pointing out of the nose. Matches `SHIP_NOSE_BODY` in
 /// `navigation.rs`.
@@ -58,6 +56,7 @@ impl Default for NavballFrame {
 
 pub fn drive_navball_attitude(
     sim_state: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
     mut sphere: Query<&mut Transform, With<NavballSphere>>,
     mut frame: ResMut<NavballFrame>,
 ) {
@@ -69,13 +68,10 @@ pub fn drive_navball_attitude(
     let craft = sim.craft_state();
     let craft_pos = craft.translation.position;
     let q_body_to_world = craft.attitude.orientation;
-    let sim_time = sim.sim_time();
 
     let soi_body_id = sim.dominant_body();
-    let soi_body_pos = sim_state
-        .ephemeris
-        .state(soi_body_id, Epoch(sim_time))
-        .position;
+    let Some(states) = solar_system.states.as_deref() else { return; };
+    let Some(soi_body_pos) = states.get(soi_body_id).map(|s| s.position) else { return; };
 
     let computed = compute_navball_frame(q_body_to_world, craft_pos, soi_body_pos);
     transform.rotation = computed.sphere_rotation;
