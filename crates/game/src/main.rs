@@ -279,9 +279,8 @@ fn main() {
                 }),
         )
         // `ThalosTerrainPlugin` wraps `thalos_udlod::TerrainPlugin`, which
-        // adds `BigSpaceDefaultPlugins` itself when the `high_precision`
-        // feature is enabled. Adding the plugin again here would panic on
-        // duplicate registration.
+        // adds `BigSpaceDefaultPlugins` unconditionally. Adding the plugin
+        // again here would panic on duplicate registration.
         .add_plugins(ThalosTerrainPlugin)
         // BRP server (port 15702) for agent-driven inspection / mutation.
         // Always on in dev; the listener is idle when no client is

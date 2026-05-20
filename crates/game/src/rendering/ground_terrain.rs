@@ -3,7 +3,7 @@
 //! Called from `generation::finalize_planet_generation` once a body's
 //! `PlanetSurface` task resolves. The terrain entity is parented to the
 //! body's real-space `Grid` so it inherits orbital + rotational motion
-//! automatically (`thalos_udlod`'s `high_precision` integration handles
+//! automatically (`thalos_udlod`'s `big_space` integration handles
 //! surface-scale precision via its Taylor-series approximation; we don't
 //! nest any additional cells).
 //!

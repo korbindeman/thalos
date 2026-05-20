@@ -44,6 +44,8 @@ platforms.
 macOS developers who want Cranelift for local iteration can install and
 select it in their personal Cargo config or via one-off `cargo --config`
 flags. Keep that opt-in local so Windows and Linux continue to use LLVM.
+The full policy and the local-only macOS opt-in recipe live in
+`docs/tooling.md`.
 
 ## Planet generation iteration
 

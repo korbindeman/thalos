@@ -16,10 +16,9 @@
 //! [`ThalosTerrainPlugin`] adds [`thalos_udlod::prelude::TerrainPlugin`] +
 //! [`bevy::pbr::MaterialPlugin<BodyTerrainMaterial>`] and embeds the body
 //! terrain shader. `thalos_udlod::TerrainPlugin` in turn adds
-//! [`big_space::prelude::BigSpaceDefaultPlugins`] when the `high_precision`
-//! feature is enabled, so consumers that already register
-//! `BigSpaceDefaultPlugins` directly must drop that registration to avoid the
-//! duplicate-plugin panic.
+//! [`big_space::prelude::BigSpaceDefaultPlugins`] unconditionally, so
+//! consumers that already register `BigSpaceDefaultPlugins` directly must
+//! drop that registration to avoid the duplicate-plugin panic.
 
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
