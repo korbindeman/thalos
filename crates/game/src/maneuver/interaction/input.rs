@@ -58,11 +58,11 @@ pub(in crate::maneuver) fn maneuver_input(
         }
     }
 
-    if intent.delete_node {
-        if let Some(id) = selected.id {
-            writer.write(ManeuverEvent::DeleteNode { id });
-            selected.id = None;
-        }
+    if intent.delete_node
+        && let Some(id) = selected.id
+    {
+        writer.write(ManeuverEvent::DeleteNode { id });
+        selected.id = None;
     }
 
     let Ok(window) = windows.single() else { return };
@@ -250,14 +250,14 @@ pub(in crate::maneuver) fn maneuver_input(
             *snap_world_pos = closest.as_ref().map(|p| p.world_pos);
             *snap_anchor_body = closest.as_ref().map(|p| p.anchor_body);
 
-            if intent.primary_started {
-                if let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_anchor_body) {
-                    writer.write(ManeuverEvent::PlaceNode {
-                        trail_time,
-                        reference_body,
-                    });
-                    *mode = InteractionMode::Idle;
-                }
+            if intent.primary_started
+                && let (Some(trail_time), Some(reference_body)) = (*snap_time, *snap_anchor_body)
+            {
+                writer.write(ManeuverEvent::PlaceNode {
+                    trail_time,
+                    reference_body,
+                });
+                *mode = InteractionMode::Idle;
             }
             return;
         }

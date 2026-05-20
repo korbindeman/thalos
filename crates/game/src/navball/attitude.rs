@@ -5,7 +5,7 @@
 //! 1. Read craft attitude (body→world) and world position from the sim.
 //! 2. Build a **right-handed** local ENU frame at the craft's position
 //!    around its current SOI body. Axes:
-//!      `+X = East`, `+Y = North`, `+Z = Up` (= radial-out).
+//!    `+X = East`, `+Y = North`, `+Z = Up` (= radial-out).
 //!    Up = radial; North = ecliptic-Y projected orthogonal to Up;
 //!    East = North × Up.
 //! 3. Express craft body axes (`+Y` nose, `+Z` dorsal, `+X` right) in
@@ -16,10 +16,10 @@
 //! 5. Compose with `world→local` to produce `world→navball`, used by
 //!    marker projection.
 
-use bevy::math::{DMat3, DQuat, DVec3};
-use bevy::prelude::*;
 use crate::navball::render::NavballSphere;
 use crate::rendering::{SimulationState, SolarSystemState};
+use bevy::math::{DMat3, DQuat, DVec3};
+use bevy::prelude::*;
 
 /// Body axis pointing out of the nose. Matches `SHIP_NOSE_BODY` in
 /// `navigation.rs`.
@@ -70,8 +70,12 @@ pub fn drive_navball_attitude(
     let q_body_to_world = craft.attitude.orientation;
 
     let soi_body_id = sim.dominant_body();
-    let Some(states) = solar_system.states.as_deref() else { return; };
-    let Some(soi_body_pos) = states.get(soi_body_id).map(|s| s.position) else { return; };
+    let Some(states) = solar_system.states.as_deref() else {
+        return;
+    };
+    let Some(soi_body_pos) = states.get(soi_body_id).map(|s| s.position) else {
+        return;
+    };
 
     let computed = compute_navball_frame(q_body_to_world, craft_pos, soi_body_pos);
     transform.rotation = computed.sphere_rotation;

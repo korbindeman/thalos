@@ -677,10 +677,8 @@ fn visual_extent(
     } else if let Some(t) = tank {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         Some((t.length, d * 0.5))
-    } else if let Some(e) = engine {
-        Some((e.diameter * 0.9, e.diameter * 0.5))
     } else {
-        None
+        engine.map(|e| (e.diameter * 0.9, e.diameter * 0.5))
     }
 }
 

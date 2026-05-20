@@ -185,13 +185,14 @@ impl TerrainData {
                     &device,
                     &pipeline_cache,
                     &fallback_image,
-                    tile_atlas.into(),
+                    tile_atlas,
                     gpu_tile_atlas,
                 ),
             );
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn extract(
         mut terrain_data: ResMut<TerrainComponents<TerrainData>>,
         terrains: Extract<

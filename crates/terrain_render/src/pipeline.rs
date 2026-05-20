@@ -326,10 +326,10 @@ fn compute_tile_pixels(
         .par_chunks_mut(size as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            for x in 0..size as usize {
+            for (x, pixel) in row.iter_mut().enumerate() {
                 let dir =
                     pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
-                row[x] = evaluate_pixel(PixelContext {
+                *pixel = evaluate_pixel(PixelContext {
                     surface,
                     dynamic_state,
                     dir,

@@ -175,7 +175,7 @@ fn freecam_drive_system(
     let dt_f32 = time.delta_secs();
     if roll_input != 0.0 {
         let roll = Quat::from_rotation_z(roll_input * FREECAM_ROLL_RATE_RAD_S * dt_f32);
-        transform.rotation = transform.rotation * roll;
+        transform.rotation *= roll;
     }
 
     // Translation keys. Read directly: this is a debug tool, and the flight

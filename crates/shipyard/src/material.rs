@@ -84,18 +84,10 @@ impl Default for ShipPartParams {
     }
 }
 
-#[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
+#[derive(Asset, AsBindGroup, TypePath, Clone, Debug, Default)]
 pub struct ShipPartExtension {
     #[uniform(100)]
     pub params: ShipPartParams,
-}
-
-impl Default for ShipPartExtension {
-    fn default() -> Self {
-        Self {
-            params: ShipPartParams::default(),
-        }
-    }
 }
 
 impl MaterialExtension for ShipPartExtension {

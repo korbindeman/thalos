@@ -273,20 +273,14 @@ pub fn assign_plates(
     let mut rng_flood = Rng::new(sub_seed(root_seed, STAGE_FLOOD));
     loop {
         let mut any_expansion = false;
-        for plate_idx in 0..plate_count {
+        for (plate_idx, frontier) in plate_frontiers.iter_mut().enumerate().take(plate_count) {
             let expansions = if Some(plate_idx) == primary_idx_for_growth {
                 1 + primary_extra_expansions
             } else {
                 1
             };
             for _ in 0..expansions {
-                if try_expand_plate(
-                    plate_idx,
-                    mesh,
-                    &mut plate_frontiers[plate_idx],
-                    &mut cell_plate,
-                    &mut rng_flood,
-                ) {
+                if try_expand_plate(plate_idx, mesh, frontier, &mut cell_plate, &mut rng_flood) {
                     any_expansion = true;
                 } else {
                     // Frontier exhausted — no point trying more expansions
@@ -349,9 +343,7 @@ fn mitchell_best_candidate(
     for _ in 0..n_candidates {
         let candidate = (rng.next_u64() % n_cells as u64) as u32;
         // Skip if already taken.
-        let already = existing
-            .iter()
-            .any(|slice| slice.iter().any(|&s| s == candidate));
+        let already = existing.iter().any(|slice| slice.contains(&candidate));
         if already {
             continue;
         }
@@ -381,9 +373,7 @@ fn mitchell_best_candidate(
     if !found {
         for i in 0..n_cells {
             let candidate = i as u32;
-            let already = existing
-                .iter()
-                .any(|slice| slice.iter().any(|&s| s == candidate));
+            let already = existing.iter().any(|slice| slice.contains(&candidate));
             if !already {
                 return candidate;
             }
@@ -452,9 +442,7 @@ fn pick_primary_seed(
     let mut found = false;
     for _ in 0..MITCHELL_CANDIDATES {
         let candidate = (rng.next_u64() % n_cells as u64) as u32;
-        let already = existing
-            .iter()
-            .any(|slice| slice.iter().any(|&s| s == candidate));
+        let already = existing.iter().any(|slice| slice.contains(&candidate));
         if already {
             continue;
         }
@@ -501,9 +489,7 @@ fn mitchell_in_cap(
     let mut found = false;
     for _ in 0..n_candidates {
         let candidate = sample_cell_in_cap(mesh, center, cos_min, rng);
-        let already = existing
-            .iter()
-            .any(|slice| slice.iter().any(|&s| s == candidate));
+        let already = existing.iter().any(|slice| slice.contains(&candidate));
         if already {
             continue;
         }

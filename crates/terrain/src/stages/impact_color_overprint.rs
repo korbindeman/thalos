@@ -64,9 +64,8 @@ impl Stage for ImpactColorOverprint {
         let strip_len = STRIP_ROWS as usize * res as usize;
         let albedo_faces = builder.albedo_contributions.albedo.faces_mut();
 
-        for face_idx in 0..CubemapFace::ALL.len() {
+        for (face_idx, albedo_face) in albedo_faces.iter_mut().enumerate() {
             let face = CubemapFace::ALL[face_idx];
-            let albedo_face = &mut albedo_faces[face_idx];
 
             albedo_face.par_chunks_mut(strip_len).enumerate().for_each(
                 |(strip_idx, albedo_strip)| {

@@ -232,6 +232,7 @@ pub fn terrain_patch_config(config: &LocalBubbleConfig) -> TerrainPatchConfig {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_terrain_collider_patch(
     commands: &mut Commands,
     body_id: BodyId,

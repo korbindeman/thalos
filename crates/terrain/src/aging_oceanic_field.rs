@@ -710,7 +710,7 @@ impl AgingOceanicField {
                 fine_p.x,
                 fine_p.y,
                 fine_p.z,
-                continent.edge_seed ^ 0xC0A57_011,
+                continent.edge_seed ^ 0xC0A5_7011,
                 3,
                 0.50,
                 2.1,
@@ -1579,7 +1579,7 @@ fn dry_fill_water_texel(builder: &mut BodyBuilder, index: usize, res: usize, sea
 }
 
 fn dry_fill_height_m(height_m: f32, sea_level_m: f32) -> f32 {
-    let depth = (sea_level_m - height_m).max(0.0).min(DRY_FILL_MAX_DEPTH_M);
+    let depth = (sea_level_m - height_m).clamp(0.0, DRY_FILL_MAX_DEPTH_M);
     sea_level_m + DRY_FILL_BASE_M + depth * DRY_FILL_DEPTH_RELIEF
 }
 

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 mod autopilot;
 mod bake_check;
 mod body_tree_panel;

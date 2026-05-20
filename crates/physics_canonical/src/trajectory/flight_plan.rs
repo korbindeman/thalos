@@ -122,10 +122,11 @@ impl Leg {
     pub fn state_at(&self, time: f64) -> Option<StateVector> {
         if let Some(burn) = &self.burn_segment {
             let (start, end) = burn.epoch_range();
-            if time >= start - 1e-9 && time <= end + 1e-9 {
-                if let Some(s) = burn.state_at(time) {
-                    return Some(s);
-                }
+            if time >= start - 1e-9
+                && time <= end + 1e-9
+                && let Some(s) = burn.state_at(time)
+            {
+                return Some(s);
             }
         }
         let (start, end) = self.coast_segment.epoch_range();

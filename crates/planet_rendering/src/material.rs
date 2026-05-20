@@ -107,10 +107,6 @@ impl PlanetWaterParams {
                     water.color_depth[3],
                 ),
             }
-        } else if body.sea_level_m.is_some() {
-            Self {
-                color_depth: Vec4::new(0.012, 0.040, 0.090, 120.0),
-            }
         } else {
             Self {
                 color_depth: Vec4::new(0.012, 0.040, 0.090, 120.0),
@@ -132,28 +128,13 @@ impl PlanetCoastlineParams {
             ^ ((body.detail_params.seed >> 32) as u32)
             ^ 0xC0A5_711E_u32;
 
-        let has_ocean = body.sea_level_m.is_some();
-        let flat_ocean_placeholder = has_ocean
-            && body.materials.is_empty()
-            && body.craters.is_empty()
-            && body.volcanoes.is_empty()
-            && body.channels.is_empty();
-
-        if has_ocean && !flat_ocean_placeholder {
-            Self {
-                // Coastline shape is baked into the terrain cubemap. Keep the
-                // runtime material from adding high-frequency shoreline fuzz
-                // that makes editor/runtime diverge from the bake.
-                warp_amp_radians: 0.0,
-                jitter_amp_m: 0.0,
-                seed,
-            }
-        } else {
-            Self {
-                warp_amp_radians: 0.0,
-                jitter_amp_m: 0.0,
-                seed,
-            }
+        Self {
+            // Coastline shape is baked into the terrain cubemap. Keep the
+            // runtime material from adding high-frequency shoreline fuzz
+            // that makes editor/runtime diverge from the bake.
+            warp_amp_radians: 0.0,
+            jitter_amp_m: 0.0,
+            seed,
         }
     }
 }

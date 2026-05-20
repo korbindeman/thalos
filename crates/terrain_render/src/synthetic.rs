@@ -183,7 +183,7 @@ fn synthesize_height(
     out.par_chunks_mut(size as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            for x in 0..size as usize {
+            for (x, texel) in row.iter_mut().enumerate() {
                 let mut sum = 0.0;
                 for_each_subsample(
                     coord,
@@ -197,7 +197,7 @@ fn synthesize_height(
                 );
                 let h = sum / sample_count;
                 let t = ((h - min_height) / span).clamp(0.0, 1.0);
-                row[x] = (t * u16::MAX as f32) as u16;
+                *texel = (t * u16::MAX as f32) as u16;
             }
         });
     AttachmentData::R16(out)
@@ -215,13 +215,13 @@ fn synthesize_albedo(
     let span = (max_height - min_height).max(1.0);
     let frequency = analytic_frequency(model);
     let octaves = octaves_for_lod(coord.lod);
-    let sample_count = (SUPERSAMPLE_FACTOR * SUPERSAMPLE_FACTOR) as u32;
+    let sample_count = SUPERSAMPLE_FACTOR * SUPERSAMPLE_FACTOR;
 
     let mut out: Vec<[u8; 4]> = vec![[0, 0, 0, 255]; (size * size) as usize];
     out.par_chunks_mut(size as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            for x in 0..size as usize {
+            for (x, texel) in row.iter_mut().enumerate() {
                 let mut r = 0u32;
                 let mut g = 0u32;
                 let mut b = 0u32;
@@ -242,7 +242,7 @@ fn synthesize_albedo(
                         b += c[2] as u32;
                     },
                 );
-                row[x] = [
+                *texel = [
                     (r / sample_count) as u8,
                     (g / sample_count) as u8,
                     (b / sample_count) as u8,

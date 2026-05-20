@@ -1,4 +1,5 @@
 # Thalos — orbital mechanics sandbox
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
 # Run the game
 game:

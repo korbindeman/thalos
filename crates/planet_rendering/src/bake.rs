@@ -494,7 +494,7 @@ pub fn prepare_planet_bake(
                 edge_offset_deg: cap_state.edge_offset_deg,
                 thickness_scale: cap_state.thickness_scale,
                 dustiness: cap_state.dustiness,
-                seed: feature_seed(body.detail_params.seed ^ 0x1CE_CAFE5_EA50_0001, i),
+                seed: feature_seed(body.detail_params.seed ^ 0x1CEC_AFE5_EA50_0001, i),
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,

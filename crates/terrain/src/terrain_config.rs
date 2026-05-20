@@ -21,6 +21,7 @@ use crate::tectonics::{TectonicConfig, TectonicSystem};
 use crate::types::{Composition, DynamicSurfaceLayers, IceCapSpec};
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum TerrainConfig {
     #[default]
     None,

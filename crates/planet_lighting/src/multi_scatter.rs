@@ -105,6 +105,7 @@ pub fn bake_multi_scatter_lut(
     data
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bake_cell(
     mu_s: f32,
     h: f32,

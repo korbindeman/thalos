@@ -289,14 +289,12 @@ fn combined_overlay_color(
 ) -> [f32; 4] {
     let mut acc = [0.0f32; 3];
     let mut count = 0u32;
-    if want_plate {
-        if let Some(sys) = tectonics {
-            let c = plate_overlay_rgb(sys, face, x, y, res);
-            acc[0] += c[0];
-            acc[1] += c[1];
-            acc[2] += c[2];
-            count += 1;
-        }
+    if want_plate && let Some(sys) = tectonics {
+        let c = plate_overlay_rgb(sys, face, x, y, res);
+        acc[0] += c[0];
+        acc[1] += c[1];
+        acc[2] += c[2];
+        count += 1;
     }
     if want_biome {
         let c = biome_overlay_rgb(biome_weights, face, x, y, res);

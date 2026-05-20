@@ -44,7 +44,7 @@ impl SideInfo {
     fn project_to_side(side: u32, other_side: u32) -> [SideInfo; 2] {
         let index = ((6 + other_side - side) % 6) as usize;
 
-        if side % 2 == 0 {
+        if side.is_multiple_of(2) {
             SideInfo::EVEN_LIST[index]
         } else {
             SideInfo::ODD_LIST[index]
@@ -312,12 +312,7 @@ impl TileCoordinate {
 
         if spherical {
             let edge_index = match neighbour_position {
-                IVec2 { x, y }
-                    if x < 0 && y < 0
-                        || x < 0 && y >= tile_count
-                        || x >= tile_count && y < 0
-                        || x >= tile_count && y >= tile_count =>
-                {
+                IVec2 { x, y } if (x < 0 || x >= tile_count) && (y < 0 || y >= tile_count) => {
                     return Self::INVALID;
                 }
                 IVec2 { x, .. } if x < 0 => 1,
@@ -478,7 +473,7 @@ fn project_border_pixel_to_side(
     ];
 
     let index = ((6 + projected_side - original_side) % 6) as usize;
-    let axes = if original_side % 2 == 0 {
+    let axes = if original_side.is_multiple_of(2) {
         EVEN_LIST[index]
     } else {
         ODD_LIST[index]

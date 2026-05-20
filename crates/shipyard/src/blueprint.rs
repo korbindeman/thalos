@@ -64,7 +64,7 @@ pub struct ShipBlueprint {
 
 impl ShipBlueprint {
     pub fn to_ron(&self) -> Result<String, ron::Error> {
-        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).map_err(Into::into)
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
     }
 
     pub fn from_ron(s: &str) -> Result<Self, ron::error::SpannedError> {

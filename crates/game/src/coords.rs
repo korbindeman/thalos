@@ -97,19 +97,10 @@ impl RenderGhostFocus {
 /// - `FlightPlanView::pin_for_body` uses it to decide whether the
 ///   focused body should resolve to the real body at `sim_time` or a
 ///   selected ghost at its future encounter epoch.
-#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct RenderFrame {
     pub focus_body: BodyId,
     pub focus_ghost: Option<RenderGhostFocus>,
-}
-
-impl Default for RenderFrame {
-    fn default() -> Self {
-        Self {
-            focus_body: 0,
-            focus_ghost: None,
-        }
-    }
 }
 
 /// Convert a physics DVec3 (metres, f64) to a Bevy Vec3 (render units,

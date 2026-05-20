@@ -20,7 +20,7 @@ use bevy::prelude::*;
 use big_space::grid::Grid;
 use big_space::prelude::CellCoord;
 use thalos_physics_canonical::types::{BodyDefinition, BodyId};
-use thalos_planet_rendering::{AtmosphereBlock, AU_M, LIGHT_AT_1AU, SceneLighting};
+use thalos_planet_rendering::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_terrain_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
@@ -511,9 +511,7 @@ pub(crate) fn spawn_body_water(
     }
 
     let baked = &surface.static_surface;
-    let Some(sea_level_m) = baked.sea_level_m else {
-        return None;
-    };
+    let sea_level_m = baked.sea_level_m?;
 
     let water_radius_m = (body.radius_m as f32 + sea_level_m + WATER_SURFACE_EPSILON_M).max(1.0);
 
@@ -932,8 +930,7 @@ pub(super) fn update_body_terrain_atmosphere(
     let camera_inertial = ship_cam_q
         .single()
         .map(|(cell, transform)| {
-            DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
-                * REAL_SPACE_CELL_SIZE_M as f64
+            DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64) * REAL_SPACE_CELL_SIZE_M as f64
                 + transform.translation.as_dvec3()
         })
         .unwrap_or_else(|_| sim.simulation.ship_state().position);

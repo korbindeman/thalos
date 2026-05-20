@@ -2,10 +2,10 @@ use crate::terrain_data::gpu_tile_tree::GpuTileTree;
 use crate::{
     debug::DebugTerrain,
     render::{
-        culling_bind_group::{culling_layout_descriptor, CullingBindGroup},
-        terrain_bind_group::{terrain_layout_descriptor, TerrainData},
+        culling_bind_group::culling_layout_descriptor,
+        terrain_bind_group::terrain_layout_descriptor,
         terrain_view_bind_group::{
-            prepare_indirect_layout_descriptor, refine_tiles_layout_descriptor, TerrainViewData,
+            prepare_indirect_layout_descriptor, refine_tiles_layout_descriptor,
         },
     },
     shaders::{PREPARE_PREPASS_SHADER, REFINE_TILES_SHADER},
@@ -79,6 +79,7 @@ impl TilingPrepassPipelineKey {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct TilingPrepassItem {
     refine_tiles_pipeline: CachedComputePipelineId,
     prepare_root_pipeline: CachedComputePipelineId,
@@ -86,6 +87,7 @@ pub(crate) struct TilingPrepassItem {
     prepare_render_pipeline: CachedComputePipelineId,
 }
 
+#[allow(dead_code)]
 impl TilingPrepassItem {
     fn pipelines<'a>(
         &'a self,

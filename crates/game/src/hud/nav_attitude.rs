@@ -170,8 +170,12 @@ pub fn update_attitude(
     let sim = &sim_state.simulation;
     let craft = sim.craft_state();
     let dominant = sim.dominant_body();
-    let Some(states) = solar_system.states.as_deref() else { return; };
-    let Some(body_state) = states.get(dominant) else { return; };
+    let Some(states) = solar_system.states.as_deref() else {
+        return;
+    };
+    let Some(body_state) = states.get(dominant) else {
+        return;
+    };
 
     let [prograde, normal, radial] = orbital_frame(
         craft.translation.position,

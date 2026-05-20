@@ -150,6 +150,7 @@ pub enum InteractionMode {
 
 /// Events for maneuver node operations.
 #[derive(Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ManeuverEvent {
     PlaceNode {
         trail_time: f64,

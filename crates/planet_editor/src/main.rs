@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -19,14 +21,13 @@ use thalos_physics_canonical::parsing::load_solar_system_from_dir;
 use thalos_physics_canonical::patched_conics::PatchedConics;
 use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 use thalos_planet_rendering::{
-    AtmosphereBlock, AU_M, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial,
+    AU_M, AtmosphereBlock, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial,
     GasGiantMaterialHandle, GasGiantParams, LIGHT_AT_1AU, PlanetCoastlineParams,
-    PlanetDetailParams, PlanetHaloMaterial,
-    PlanetHaloMaterialHandle, PlanetMaterial, PlanetMaterialHandle, PlanetParams,
-    PlanetRenderingPlugin, PlanetWaterParams, ReferenceClouds, RingLayers, RingMaterial,
-    RingMaterialHandle, RingParams, SceneLighting, StarLight, bake_from_planet_surface,
-    build_ring_mesh, cloud_cover_image_for_body, convert_reference_clouds_when_ready,
-    load_reference_cloud_sources,
+    PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle, PlanetMaterial,
+    PlanetMaterialHandle, PlanetParams, PlanetRenderingPlugin, PlanetWaterParams, ReferenceClouds,
+    RingLayers, RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight,
+    bake_from_planet_surface, build_ring_mesh, cloud_cover_image_for_body,
+    convert_reference_clouds_when_ready, load_reference_cloud_sources,
 };
 use thalos_terrain::{
     AirlessImpactProjectionConfig, AtmosphereSpec, AuthoredFeatureConfig, BodyArchetype,
@@ -70,6 +71,7 @@ const HALF_CUBEMAP_RESOLUTION: u32 = 1024;
 // Body rendering mode
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::large_enum_variant)]
 enum BodyMode {
     Terrain {
         terrain: TerrainConfig,

@@ -220,6 +220,12 @@ pub struct Preprocessor {
     loaded: bool,
 }
 
+impl Default for Preprocessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Preprocessor {
     pub fn new() -> Self {
         Self {
@@ -379,7 +385,7 @@ pub(crate) fn select_ready_tasks(
             if (tile_atlas.state.download_slots > 0)
                 && task_queue
                     .front()
-                    .map_or(false, |task| task.is_ready(&asset_server, &tile_atlas))
+                    .is_some_and(|task| task.is_ready(&asset_server, &tile_atlas))
             {
                 let task = task_queue.pop_front().unwrap();
 

@@ -122,6 +122,7 @@ impl TerrainViewConfigUniform {
     }
 }
 
+#[allow(dead_code)]
 pub struct TerrainViewData {
     view_config_buffer: StaticBuffer<TerrainViewConfigUniform>,
     terrain_model_approximation_buffer: StaticBuffer<TerrainModelApproximation>,
@@ -235,6 +236,7 @@ impl TerrainViewData {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn refinement_count(&self) -> u32 {
         self.view_config_buffer.value().refinement_count
     }

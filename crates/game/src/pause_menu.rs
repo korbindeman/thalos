@@ -49,10 +49,7 @@ impl Plugin for PauseMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GamePause>()
             .add_systems(Startup, setup.after(crate::hud::theme::init_theme))
-            .add_systems(
-                Update,
-                handle_escape_input.before(crate::SimStage::Physics),
-            )
+            .add_systems(Update, handle_escape_input.before(crate::SimStage::Physics))
             .add_systems(
                 Update,
                 (

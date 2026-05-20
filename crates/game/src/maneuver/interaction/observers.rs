@@ -62,10 +62,10 @@ pub(in crate::maneuver) fn arrow_drag_end(
     handles: Query<&ArrowHandle, With<ArrowHitbox>>,
     mut mode: ResMut<InteractionMode>,
 ) {
-    if handles.get(trigger.event().entity).is_ok() {
-        if matches!(*mode, InteractionMode::DraggingArrow { .. }) {
-            *mode = InteractionMode::Idle;
-        }
+    if handles.get(trigger.event().entity).is_ok()
+        && matches!(*mode, InteractionMode::DraggingArrow { .. })
+    {
+        *mode = InteractionMode::Idle;
     }
 }
 
@@ -94,12 +94,11 @@ pub(in crate::maneuver) fn slide_sphere_drag_end(
     mut plan: ResMut<ManeuverPlan>,
     mut slide_preview: ResMut<SlidePreview>,
 ) {
-    if spheres.get(trigger.event().entity).is_ok() {
-        if matches!(*mode, InteractionMode::SlidingNode) {
-            *mode = InteractionMode::Idle;
-            plan.dirty = true;
-            slide_preview.world_pos = None;
-            slide_preview.frame = None;
-        }
+    if spheres.get(trigger.event().entity).is_ok() && matches!(*mode, InteractionMode::SlidingNode)
+    {
+        *mode = InteractionMode::Idle;
+        plan.dirty = true;
+        slide_preview.world_pos = None;
+        slide_preview.frame = None;
     }
 }

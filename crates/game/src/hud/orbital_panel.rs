@@ -285,8 +285,12 @@ pub fn update(
     let ship = sim.simulation.ship_state();
     let anchor_id = sim.simulation.dominant_body();
     let body = &sim.simulation.bodies()[anchor_id];
-    let Some(states) = solar_system.states.as_deref() else { return; };
-    let Some(body_state) = states.get(anchor_id) else { return; };
+    let Some(states) = solar_system.states.as_deref() else {
+        return;
+    };
+    let Some(body_state) = states.get(anchor_id) else {
+        return;
+    };
     let rel = StateVector {
         position: ship.position - body_state.position,
         velocity: ship.velocity - body_state.velocity,
@@ -408,10 +412,10 @@ pub fn handle_click(
 }
 
 fn set_text<F: bevy::ecs::query::QueryFilter>(query: &mut Query<&mut Text, F>, new_value: String) {
-    if let Ok(mut t) = query.single_mut() {
-        if t.0 != new_value {
-            t.0 = new_value;
-        }
+    if let Ok(mut t) = query.single_mut()
+        && t.0 != new_value
+    {
+        t.0 = new_value;
     }
 }
 

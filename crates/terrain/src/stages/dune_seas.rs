@@ -3,12 +3,12 @@
 //!
 //! Per region:
 //! - membership: a smooth disc on the sphere (`region_weight`)
-//! - placement:  sparse barchanoid/crescent lobes in the local wind frame,
-//!               with fbm sand-sheet gating so regions do not read as
-//!               fixed-spacing contour lines
-//! - profile:    broad sand body plus a curved brink/crest mask
-//! - albedo:     direct grading toward darker interdune sand and brighter
-//!               active crests
+//! - placement: sparse barchanoid/crescent lobes in the local wind frame,
+//!   with fbm sand-sheet gating so regions do not read as fixed-spacing
+//!   contour lines
+//! - profile: broad sand body plus a curved brink/crest mask
+//! - albedo: direct grading toward darker interdune sand and brighter active
+//!   crests
 //!
 //! See `docs/gen/dunes.md` §B.2-B.3 for the math and §F.1 for placement.
 //! The dune-scale band (sub-km) is left for the impostor to synthesize

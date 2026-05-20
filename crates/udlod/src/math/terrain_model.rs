@@ -21,6 +21,7 @@ const SIDE_MATRICES: [DMat3; 6] = [
 ];
 
 #[derive(Clone)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum TerrainKind {
     PLANAR {
         side_length: f64,

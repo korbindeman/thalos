@@ -464,9 +464,7 @@ impl TileTree {
                             continue;
                         }
                         let ancestor = ascend_to_lod(nb, lod - 1);
-                        if self.try_request_in_window(ancestor) {
-                            changed = true;
-                        } else if next_forced.insert(ancestor) {
+                        if self.try_request_in_window(ancestor) || next_forced.insert(ancestor) {
                             changed = true;
                         }
                     }
@@ -753,7 +751,8 @@ impl TileTree {
             // Snapshot before mutating: splitting `cursor` invalidates the
             // iterator's view of `set` and we'd skip newly-added tiles
             // until the next sweep anyway. The outer loop catches them.
-            let snapshot: Vec<TileCoordinate> = set.iter().copied().collect();
+            let mut snapshot: Vec<TileCoordinate> = set.iter().copied().collect();
+            snapshot.sort_unstable_by_key(|tile| (tile.side, tile.lod, tile.x, tile.y));
             for tile in snapshot {
                 if !set.contains(&tile) {
                     // Already split out from under us by a prior step in
@@ -796,6 +795,7 @@ impl TileTree {
             }
         }
         tiles.extend(set);
+        tiles.sort_unstable_by_key(|tile| (tile.side, tile.lod, tile.x, tile.y));
     }
 
     /// Recomputes the draw set for every (terrain, view) pair after

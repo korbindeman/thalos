@@ -22,7 +22,7 @@ pub(in crate::maneuver) fn spawn_snap_indicator(
         base_color: Color::srgb(1.0, 1.0, 0.0),
         emissive: {
             let lin: LinearRgba = Color::srgb(1.0, 1.0, 0.0).into();
-            (lin * 2.0).into()
+            lin * 2.0
         },
         unlit: true,
         cull_mode: None,
@@ -118,8 +118,8 @@ pub(in crate::maneuver) fn manage_node_markers(
         }
 
         let node = plan.nodes.iter().find(|n| n.id == marker.node_id).unwrap();
-        if let (Some(pred), Some(states), Some(sim)) = (prediction, states, sim_ref) {
-            if let Some(world_pos) = node_world_position(
+        if let (Some(pred), Some(states), Some(sim)) = (prediction, states, sim_ref)
+            && let Some(world_pos) = node_world_position(
                 node,
                 pred,
                 sim.simulation.trajectory_branches(),
@@ -129,15 +129,15 @@ pub(in crate::maneuver) fn manage_node_markers(
                 &sim.system,
                 sim.ephemeris.as_ref(),
                 &flight_plan_view,
-            ) {
-                *vis = Visibility::Inherited;
-                *tf = overlay_marker_transform(
-                    world_pos,
-                    cam_rot,
-                    screen_marker_radius(world_pos, cam_pos),
-                );
-                continue;
-            }
+            )
+        {
+            *vis = Visibility::Inherited;
+            *tf = overlay_marker_transform(
+                world_pos,
+                cam_rot,
+                screen_marker_radius(world_pos, cam_pos),
+            );
+            continue;
         }
         *vis = Visibility::Hidden;
     }
@@ -158,7 +158,7 @@ pub(in crate::maneuver) fn manage_node_markers(
             base_color: Color::srgb(0.8, 0.6, 0.0),
             emissive: {
                 let lin: LinearRgba = Color::srgb(0.8, 0.6, 0.0).into();
-                (lin * 2.0).into()
+                lin * 2.0
             },
             unlit: true,
             cull_mode: None,

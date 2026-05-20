@@ -25,7 +25,6 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::math::DQuat;
 use bevy::prelude::*;
 use big_space::prelude::Grid;
-use thalos_udlod::prelude::PreciseRotation;
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::types::BodyKind;
 use thalos_planet_rendering::{
@@ -38,6 +37,7 @@ use thalos_terrain::{
     TerrainConfig, cache, compile_dynamic_surface_layers, compile_tectonics_from_config,
 };
 use thalos_terrain_render::{BodySkyExtra, BodySkyMaterial};
+use thalos_udlod::prelude::PreciseRotation;
 
 use super::generation::{
     PendingPlanetInstall, PendingPlanetInstalls, PlanetBakeOutput, WorldStateAssets,

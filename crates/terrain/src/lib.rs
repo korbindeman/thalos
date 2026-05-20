@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 /// WGSL source for the mid-frequency-detail GPU compute kernel.
 pub const MID_FREQ_DETAIL_WGSL: &str = include_str!("../shaders/mid_freq_detail.wgsl");
 

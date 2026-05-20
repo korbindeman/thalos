@@ -108,8 +108,10 @@ pub(super) fn build_scene_lighting(
     occluders: &[(usize, Vec3, f32)],
     gain: f32,
 ) -> SceneLighting {
-    let mut scene = SceneLighting::default();
-    scene.ambient_intensity = PLANET_AMBIENT;
+    let mut scene = SceneLighting {
+        ambient_intensity: PLANET_AMBIENT,
+        ..Default::default()
+    };
 
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     let body_pos = states.get(body_id).map(|s| s.position).unwrap_or_default();
@@ -432,7 +434,7 @@ pub(super) fn update_sun_light(
 
     // Star is always at index 0.
     let star_pos = states
-        .get(0)
+        .first()
         .map(|s| s.position)
         .unwrap_or(bevy::math::DVec3::ZERO);
 

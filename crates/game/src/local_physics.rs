@@ -846,15 +846,13 @@ fn debug_surface_drop(
     // so we teleport in place and let `maintain_terrain_patch` (or our
     // explicit terrain despawn below) rebuild the surface mesh around
     // the new position.
-    if !is_eva {
-        if let Some(bubble) = active.bubble.take() {
-            warn!(
-                "debug surface drop requested while local bubble {} is active; keeping current bubble",
-                bubble.id
-            );
-            active.bubble = Some(bubble);
-            return;
-        }
+    if !is_eva && let Some(bubble) = active.bubble.take() {
+        warn!(
+            "debug surface drop requested while local bubble {} is active; keeping current bubble",
+            bubble.id
+        );
+        active.bubble = Some(bubble);
+        return;
     }
 
     let body = sim.system.bodies[body_id].clone();

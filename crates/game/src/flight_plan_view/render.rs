@@ -204,7 +204,7 @@ fn render_plan_segments(
         if let Some(burn) = &leg.burn_segment {
             // Per-segment relock: burn and coast within one leg can
             // carry distinct anchors, so each gets its own pin.
-            let burn_pin = segment_pin(burn, &view, body_states);
+            let burn_pin = segment_pin(burn, view, body_states);
             let burn_anchor = segment_anchor(burn);
 
             // Bridge only within the same anchor frame. Across SOI
@@ -216,7 +216,7 @@ fn render_plan_segments(
                 && clip_start.is_none_or(|start| first.time >= start - 1.0e-6)
                 && hidden_interval.is_none()
             {
-                let first_pos = sample_render_pos(first, burn_pin, &origin, &scale);
+                let first_pos = sample_render_pos(first, burn_pin, origin, scale);
                 let color = style_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), style);
                 gizmos.line(prev, first_pos, color);
             }
@@ -236,7 +236,7 @@ fn render_plan_segments(
             prev_end = burn_end.zip(burn_anchor);
         }
 
-        let coast_pin = segment_pin(&leg.coast_segment, &view, body_states);
+        let coast_pin = segment_pin(&leg.coast_segment, view, body_states);
         let coast_anchor = segment_anchor(&leg.coast_segment);
         if let (Some((prev, prev_anchor)), Some(first), Some(anchor)) =
             (prev_end, leg.coast_segment.samples.first(), coast_anchor)
@@ -244,7 +244,7 @@ fn render_plan_segments(
             && clip_start.is_none_or(|start| first.time >= start - 1.0e-6)
             && hidden_interval.is_none()
         {
-            let first_pos = sample_render_pos(first, coast_pin, &origin, &scale);
+            let first_pos = sample_render_pos(first, coast_pin, origin, scale);
             let color = style_adjust(Color::srgba(1.0, 1.0, 1.0, 0.5), style);
             gizmos.line(prev, first_pos, color);
         }

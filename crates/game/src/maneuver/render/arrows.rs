@@ -58,8 +58,7 @@ pub(in crate::maneuver) fn manage_arrow_handles(
     });
     let hitbox_mesh = meshes.add(Capsule3d::new(HITBOX_CAPSULE_RADIUS, BASE_ARROW_LEN));
 
-    for axis in 0..3 {
-        let color = ARROW_COLORS[axis];
+    for (axis, color) in ARROW_COLORS.iter().copied().enumerate() {
         let base_bright: LinearRgba = color.into();
         let base_dim = LinearRgba::new(
             base_bright.red * 0.3,
@@ -78,7 +77,7 @@ pub(in crate::maneuver) fn manage_arrow_handles(
             let base_color = if positive { base_bright } else { base_dim };
             let arrow_material = materials.add(StandardMaterial {
                 base_color: base_color.into(),
-                emissive: base_color.into(),
+                emissive: base_color,
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
                 ..default()
@@ -262,7 +261,7 @@ pub(in crate::maneuver) fn update_arrow_transforms(
         if let Some(mat) = material_assets.get_mut(&visual.material) {
             let c = visual.base_color * opacity * brightness;
             mat.base_color = LinearRgba::new(c.red, c.green, c.blue, opacity).into();
-            mat.emissive = LinearRgba::new(c.red, c.green, c.blue, opacity).into();
+            mat.emissive = LinearRgba::new(c.red, c.green, c.blue, opacity);
         }
 
         pickable.is_hoverable = opacity > 0.3;
@@ -331,10 +330,10 @@ pub(in crate::maneuver) fn update_arrow_transforms(
             if let Some(mat) = material_assets.get_mut(&sphere_visual.material) {
                 if is_hovered {
                     mat.base_color = Color::srgb(1.0, 1.0, 0.5);
-                    mat.emissive = LinearRgba::from(Color::srgb(0.8, 0.7, 0.2)).into();
+                    mat.emissive = LinearRgba::from(Color::srgb(0.8, 0.7, 0.2));
                 } else {
                     mat.base_color = Color::srgb(1.0, 0.8, 0.0);
-                    mat.emissive = LinearRgba::from(Color::srgb(0.5, 0.4, 0.0)).into();
+                    mat.emissive = LinearRgba::from(Color::srgb(0.5, 0.4, 0.0));
                 }
             }
             *transform = Transform {

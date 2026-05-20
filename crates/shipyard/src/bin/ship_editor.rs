@@ -12,6 +12,8 @@
 //!   attach node, parts rendered as cylinders/frustums sized from their
 //!   attach-node diameters.
 
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
@@ -871,10 +873,10 @@ fn sync_self_nodes(
                 self_d
             } else {
                 let inherited = nodes.get("top").map(|n| n.diameter).unwrap_or(self_d);
-                if (self_d - inherited).abs() > f32::EPSILON {
-                    if let Some(m) = dec.as_mut() {
-                        m.diameter = inherited;
-                    }
+                if (self_d - inherited).abs() > f32::EPSILON
+                    && let Some(m) = dec.as_mut()
+                {
+                    m.diameter = inherited;
                 }
                 inherited
             };
@@ -888,10 +890,10 @@ fn sync_self_nodes(
                 self_d
             } else {
                 let inherited = nodes.get("top").map(|n| n.diameter).unwrap_or(self_d);
-                if (self_d - inherited).abs() > f32::EPSILON {
-                    if let Some(m) = adapter.as_mut() {
-                        m.diameter = inherited;
-                    }
+                if (self_d - inherited).abs() > f32::EPSILON
+                    && let Some(m) = adapter.as_mut()
+                {
+                    m.diameter = inherited;
                 }
                 inherited
             };
@@ -906,10 +908,10 @@ fn sync_self_nodes(
                 self_d
             } else {
                 let inherited = nodes.get("top").map(|n| n.diameter).unwrap_or(self_d);
-                if (self_d - inherited).abs() > f32::EPSILON {
-                    if let Some(m) = tank.as_mut() {
-                        m.diameter = inherited;
-                    }
+                if (self_d - inherited).abs() > f32::EPSILON
+                    && let Some(m) = tank.as_mut()
+                {
+                    m.diameter = inherited;
                 }
                 inherited
             };
@@ -1247,10 +1249,10 @@ fn update_part_shader_highlight(
         } else {
             Vec3::ONE
         };
-        if let Some(mat) = ship_materials.get_mut(&mesh_mat.0) {
-            if (mat.extension.params.tint - target).length_squared() > 1.0e-6 {
-                mat.extension.params.tint = target;
-            }
+        if let Some(mat) = ship_materials.get_mut(&mesh_mat.0)
+            && (mat.extension.params.tint - target).length_squared() > 1.0e-6
+        {
+            mat.extension.params.tint = target;
         }
     }
 }
@@ -1521,28 +1523,28 @@ fn process_commands(
     // ---- Save ---------------------------------------------------------
     if state.save_requested {
         state.save_requested = false;
-        if let Some(ship_entity) = state.ship_entity {
-            if let Ok(ship) = ships.get(ship_entity) {
-                match collect_blueprint(ship, &parts_q, &attachments) {
-                    Some(bp) => match bp.to_ron() {
-                        Ok(text) => {
-                            let path = ship_path_for_name(&bp.name);
-                            if let Err(e) = std::fs::create_dir_all(SHIPS_DIR) {
-                                state.status = format!("mkdir failed: {e}");
-                            } else {
-                                match std::fs::write(&path, text) {
-                                    Ok(()) => {
-                                        state.status = format!("Saved {}", path.display());
-                                        state.refresh_list = true;
-                                    }
-                                    Err(e) => state.status = format!("Save failed: {e}"),
+        if let Some(ship_entity) = state.ship_entity
+            && let Ok(ship) = ships.get(ship_entity)
+        {
+            match collect_blueprint(ship, &parts_q, &attachments) {
+                Some(bp) => match bp.to_ron() {
+                    Ok(text) => {
+                        let path = ship_path_for_name(&bp.name);
+                        if let Err(e) = std::fs::create_dir_all(SHIPS_DIR) {
+                            state.status = format!("mkdir failed: {e}");
+                        } else {
+                            match std::fs::write(&path, text) {
+                                Ok(()) => {
+                                    state.status = format!("Saved {}", path.display());
+                                    state.refresh_list = true;
                                 }
+                                Err(e) => state.status = format!("Save failed: {e}"),
                             }
                         }
-                        Err(e) => state.status = format!("Serialize failed: {e}"),
-                    },
-                    None => state.status = "Failed to collect blueprint".into(),
-                }
+                    }
+                    Err(e) => state.status = format!("Serialize failed: {e}"),
+                },
+                None => state.status = "Failed to collect blueprint".into(),
             }
         }
     }
@@ -1619,10 +1621,10 @@ fn process_commands(
         state.delete_selected = false;
         if let Some(sel) = state.selected {
             if Some(sel) == state.ship_root {
-                if let Some(se) = state.ship_entity {
-                    if let Ok(ship) = ships.get(se) {
-                        state.ship_name = ship.name.clone();
-                    }
+                if let Some(se) = state.ship_entity
+                    && let Ok(ship) = ships.get(se)
+                {
+                    state.ship_name = ship.name.clone();
                 }
                 for e in all_parts.iter() {
                     commands.entity(e).despawn();
@@ -1664,32 +1666,32 @@ fn process_commands(
     // branches follow their original subtree.
     if state.set_as_root {
         state.set_as_root = false;
-        if let Some(sel) = state.selected {
-            if Some(sel) != state.ship_root {
-                let att_map: HashMap<Entity, Attachment> =
-                    attachments.iter().map(|(e, a)| (e, a.clone())).collect();
-                let mut chain: Vec<(Entity, Attachment)> = Vec::new();
-                let mut current = sel;
-                while let Some(att) = att_map.get(&current) {
-                    chain.push((current, att.clone()));
-                    current = att.parent;
-                }
-                commands.entity(sel).remove::<Attachment>();
-                for (entity, att) in chain {
-                    commands.entity(att.parent).insert(Attachment {
-                        parent: entity,
-                        parent_node: att.my_node,
-                        my_node: att.parent_node,
-                    });
-                }
-                if let Some(ship_entity) = state.ship_entity {
-                    if let Ok(mut ship) = ships.get_mut(ship_entity) {
-                        ship.root = sel;
-                    }
-                }
-                state.ship_root = Some(sel);
-                state.status = "Re-rooted ship".into();
+        if let Some(sel) = state.selected
+            && Some(sel) != state.ship_root
+        {
+            let att_map: HashMap<Entity, Attachment> =
+                attachments.iter().map(|(e, a)| (e, a.clone())).collect();
+            let mut chain: Vec<(Entity, Attachment)> = Vec::new();
+            let mut current = sel;
+            while let Some(att) = att_map.get(&current) {
+                chain.push((current, att.clone()));
+                current = att.parent;
             }
+            commands.entity(sel).remove::<Attachment>();
+            for (entity, att) in chain {
+                commands.entity(att.parent).insert(Attachment {
+                    parent: entity,
+                    parent_node: att.my_node,
+                    my_node: att.parent_node,
+                });
+            }
+            if let Some(ship_entity) = state.ship_entity
+                && let Ok(mut ship) = ships.get_mut(ship_entity)
+            {
+                ship.root = sel;
+            }
+            state.ship_root = Some(sel);
+            state.status = "Re-rooted ship".into();
         }
     }
 
@@ -2585,10 +2587,10 @@ fn sync_shrouds(
         kept.insert(provider);
 
         // Reuse in-place if the cached spec still matches.
-        if let Some((_, current)) = current_by_provider.get(&provider) {
-            if spec_matches(current, &spec) {
-                continue;
-            }
+        if let Some((_, current)) = current_by_provider.get(&provider)
+            && spec_matches(current, &spec)
+        {
+            continue;
         }
         if let Some((old, _)) = current_by_provider.get(&provider) {
             commands.entity(*old).despawn();

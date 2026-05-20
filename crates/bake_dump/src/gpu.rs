@@ -20,9 +20,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bevy_erosion_filter::EROSION_WGSL;
 use bytemuck::{Pod, Zeroable};
+use thalos_terrain::MID_FREQ_DETAIL_WGSL;
 use thalos_terrain::cubemap::{Cubemap, CubemapFace};
 use thalos_terrain::stages::MidFreqDetailParams;
-use thalos_terrain::MID_FREQ_DETAIL_WGSL;
 use wgpu::{
     Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingType, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages,
@@ -278,7 +278,7 @@ pub fn upload_cubemap_f32(
 ) -> Texture {
     let res = cube.resolution();
     assert!(
-        (res * R32F_BPP) % 256 == 0,
+        (res * R32F_BPP).is_multiple_of(256),
         "cubemap upload: row stride {} bytes for res {res} is not a multiple of 256",
         res * R32F_BPP,
     );
@@ -355,7 +355,7 @@ pub fn download_cubemap_f32(
         texture.format()
     );
     assert!(
-        (res * R32F_BPP) % 256 == 0,
+        (res * R32F_BPP).is_multiple_of(256),
         "cubemap download: row stride for res {res} is not a multiple of 256",
     );
 

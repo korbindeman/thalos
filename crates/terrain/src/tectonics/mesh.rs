@@ -114,8 +114,8 @@ fn build_symmetric_knn(cells: &[Vec3], k: usize) -> Vec<Vec<u32>> {
     // `directed[j]` if missing. Use Vec contains() rather than HashSet to
     // keep iteration order deterministic.
     let mut neighbors = directed.clone();
-    for i in 0..n {
-        for &j in &directed[i] {
+    for (i, directed_edges) in directed.iter().enumerate().take(n) {
+        for &j in directed_edges {
             let row = &mut neighbors[j as usize];
             if !row.contains(&(i as u32)) {
                 row.push(i as u32);

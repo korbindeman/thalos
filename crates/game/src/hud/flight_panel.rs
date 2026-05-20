@@ -1,9 +1,6 @@
 //! Bottom-left HUD panel cluster: orbital velocity above the navball and
 //! a vector throttle arc along the navball's left side.
 
-use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
-use bevy::shader::ShaderRef;
 use crate::fuel::ThrottleState;
 use crate::hud::HudPanel;
 use crate::hud::format;
@@ -12,6 +9,9 @@ use crate::navball::ui::{
     FRAME_SIZE_PX, NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX, NavballFrameRoot,
 };
 use crate::rendering::{SimulationState, SolarSystemState};
+use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
 
 /// The navball cluster sits at the bottom-left (navball at x=40,
 /// nav panel just to its right). The flight readouts sit ABOVE the
@@ -144,8 +144,12 @@ pub fn update(
 ) {
     let ship = sim.simulation.ship_state();
     let body = sim.simulation.dominant_body();
-    let Some(states) = solar_system.states.as_deref() else { return; };
-    let Some(body_state) = states.get(body) else { return; };
+    let Some(states) = solar_system.states.as_deref() else {
+        return;
+    };
+    let Some(body_state) = states.get(body) else {
+        return;
+    };
     let rel_speed = (ship.velocity - body_state.velocity).length();
 
     if let Ok(mut t) = vel_q.single_mut() {
