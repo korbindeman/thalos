@@ -10,6 +10,19 @@ notes (`gen/vaelen_processes.md`) and the wider research surveys
 `gen/planet_aesthetics.md`, `gen/dunes.md`) remain as standalone
 references.
 
+> **Status (2026-05): generation half superseded.** The
+> generation architecture below (feature compiler: `PlanetTerrainSpec →
+> TerrainPrior → FeatureManifest → SurfaceField`, populations/promotion,
+> era ordering, the v2 backlog) is being replaced by the
+> [planet generation pipeline spec](planet-generation-pipeline-spec.md),
+> via the [migration plan](planet-generation-pipeline-migration.md).
+> Its concepts are folded into the new pipeline (archetypes → field
+> presets, manifest → feature catalog, v2 backlog → fields + feature
+> types + synthesisers), not discarded — keep this section as the
+> reference being ported until cutover completes. The **ground-LOD /
+> `TileProvider` half (M3) and the cross-renderer projection contract
+> remain current**, reframed by the migration as Query-API consumers.
+
 ## Overview
 
 Two halves, one contract:
@@ -1214,9 +1227,10 @@ also blends height-derived normals strongly back toward the geometric
 normal so residual bands read as smooth terrain rather than terraced
 contour steps.
 
-The cascade in
-[crates/terrain_render/src/pipeline.rs](../crates/terrain_render/src/pipeline.rs)
-adds high-frequency detail on top of the macro:
+The cascade — since migration P0, it lives in the Query API seam
+[crates/terrain/src/query.rs](../crates/terrain/src/query.rs) (moved out
+of `terrain_render::pipeline`, which now delegates to it) — adds
+high-frequency detail on top of the macro:
 
 - **Musgrave ridged hybrid multifractal** (`hmf_ridged_3d` in
   [crates/terrain/src/noise.rs](../crates/terrain/src/noise.rs))

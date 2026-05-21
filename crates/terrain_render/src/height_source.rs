@@ -3,13 +3,11 @@ use std::sync::{Arc, RwLock};
 
 use bevy::math::{DVec2, UVec2, Vec2, Vec3};
 use bevy::prelude::*;
-use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_terrain::{BakedSurface, DynamicSurfaceState, PlanetSurface, SurfaceQuery};
 use thalos_udlod::math::{Coordinate, TerrainModel, TileCoordinate};
 use thalos_udlod::prelude::TileAtlas;
 
-use crate::pipeline::rendered_height_m;
 use crate::rendered_height::{TerrainPatchBasis, TerrainPatchMesh};
-
 pub trait HeightSource: Send + Sync {
     /// Height in metres above the body's reference radius, evaluated at
     /// `dir` (a body-fixed unit direction). `tile_lod_m` is a scale hint for
@@ -44,27 +42,20 @@ pub trait HeightSource: Send + Sync {
 }
 
 pub struct CpuPipelineHeightSource {
-    surface: Arc<PlanetSurface>,
-    dynamic_state: DynamicSurfaceState,
+    surface: BakedSurface,
 }
 
 impl CpuPipelineHeightSource {
     pub fn new(surface: Arc<PlanetSurface>, dynamic_state: DynamicSurfaceState) -> Self {
         Self {
-            surface,
-            dynamic_state,
+            surface: BakedSurface::new(surface, dynamic_state),
         }
     }
 }
 
 impl HeightSource for CpuPipelineHeightSource {
     fn sample_height_m(&self, dir: Vec3, tile_lod_m: f32) -> Option<f32> {
-        Some(rendered_height_m(
-            &self.surface,
-            &self.dynamic_state,
-            dir,
-            tile_lod_m,
-        ))
+        Some(self.surface.sample_height_m(dir, tile_lod_m))
     }
 }
 

@@ -15,6 +15,8 @@ pub mod feature_compiler;
 pub mod height_generator;
 pub mod icosphere;
 pub mod noise;
+pub mod pipeline;
+pub mod query;
 pub mod sample;
 pub mod seeding;
 pub mod spatial_index;
@@ -36,6 +38,10 @@ pub use cubemap::{Cubemap, CubemapAccumulator, CubemapFace, default_resolution};
 pub use feature_compiler::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
+pub use query::{
+    BakedSurface, Region, SurfaceQuery, surface_height_m, surface_height_range_m, surface_normal,
+    surface_sample,
+};
 pub use sample::{
     SurfaceSample, apply_dynamic_surface_layers, sample_static_surface, sample_surface,
 };

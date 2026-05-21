@@ -67,20 +67,39 @@ hierarchy with the camera as floating origin.
 
 ### M2 — Terrain pipeline revamp
 
-General overhaul of the feature compiler. Lands the v2 backlog from
-the terrestrial-pipeline research (first-class hydrology features,
-layered material columns under each biome, climate-field inputs to
-`BiomeMaskPlan`, provenance API + seed-promotion state machine), and
-adds the missing archetypes (`AgingOceanicHomeworld`,
-`GenericTerrestrial`) so Thalos and Pelagos stop falling back to the
-flat-water placeholder. Goal of M2: Mira, Vaelen, Thalos, and Pelagos
-all render through the revamped pipeline at the right visual quality
-from orbit.
+Re-architecture of terrain generation toward the
+[planet generation pipeline spec](planet-generation-pipeline-spec.md):
+a field-DAG intent layer, declarative feature catalog with promotion,
+sparse quadtree storage, a two-band heightfield (one band-limited
+surface shared by mesh and collider), and a single Query API every
+renderer consumes. The migration is brownfield and incremental — see
+the [migration plan](planet-generation-pipeline-migration.md). The
+old terrain.md goals (missing `AgingOceanicHomeworld` /
+`GenericTerrestrial` archetypes so Thalos/Pelagos stop using the
+flat-water placeholder; the v2 backlog of hydrology, layered material
+columns, climate fields, provenance/promotion) fold into the new
+pipeline as fields, feature types, and synthesisers rather than a
+parallel "feature-compiler v2".
 
-- **Spec:** [terrain.md](terrain.md), generation half + "v2 backlog".
-- **Deps:** feature compiler v1 (done; Mira and Vaelen wired).
-- **Gates:** M3 needs the revamped pipeline producing tile-friendly
-  output; M4 needs ocean topology to render against.
+The migration's first step (P0) introduces the Query API seam and
+collapses today's two divergent surface synthesisers (impostor vs
+ground LOD) into one — the "streamline planet rendering" work — without
+changing generation. Generation is then rebuilt behind that seam and
+bodies cut over one at a time.
+
+- **Status:** P0 (Query API seam + unified surface synthesiser) and
+  P1 (spec Phase A: the field-DAG data model — fields/expr/DAG, stamps,
+  feature catalog + promotion, author overlay, sparse quadtree cache) are
+  landed in `thalos_terrain` behind the seam, foundation-only and
+  test-validated. Next: P2 — analytic two-band detail + per-body cutover.
+- **Spec:** [planet-generation-pipeline-spec.md](planet-generation-pipeline-spec.md)
+  (target) + [planet-generation-pipeline-migration.md](planet-generation-pipeline-migration.md)
+  (sequencing). [terrain.md](terrain.md)'s generation half is
+  superseded; its ground-LOD/`TileProvider` half remains current.
+- **Deps:** feature compiler v1 (done; Mira and Vaelen wired) — wrapped
+  behind the Query API during migration, retired per body.
+- **Gates:** M3's ground LOD becomes a Query-API consumer; M4 needs
+  ocean topology to render against.
 
 ### M3 — Ground LOD rendering
 
@@ -218,7 +237,8 @@ M1 and M2 can run in parallel; both feed M3.
 | System | Spec | Phase 1 milestones | Phase 2 |
 |---|---|---|---|
 | Simulation, physics, authority, time | [simulation.md](simulation.md) | M1 | M5, M6 |
-| Terrain generation + ground LOD | [terrain.md](terrain.md) | M2, M3 | — |
+| Terrain generation (target + migration) | [planet-generation-pipeline-spec.md](planet-generation-pipeline-spec.md), [planet-generation-pipeline-migration.md](planet-generation-pipeline-migration.md) | M2 | — |
+| Terrain ground LOD + `TileProvider` | [terrain.md](terrain.md) | M3 | — |
 | Atmospheres, oceans, IBL | [atmosphere.md](atmosphere.md) | M4 | — |
 | Celestial sky | [celestial.md](celestial.md) | (done) | — |
 | Surface gameplay (on-foot, BodyFixed, height source) | [surface_gameplay.md](surface_gameplay.md) | M5 | M6, M8 |

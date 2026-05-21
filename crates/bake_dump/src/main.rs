@@ -59,7 +59,7 @@ use thalos_terrain::{
     FeatureProjectionConfig, PlanetSurface, PlateKind, TerrainCompileContext,
     TerrainCompileOptions, TerrainConfig, compile_dynamic_surface_layers,
     compile_static_terrain_config, compile_tectonics_from_config, generate_initial_manifest,
-    sample_surface,
+    surface_normal, surface_sample,
 };
 
 // ---------------------------------------------------------------------------
@@ -504,9 +504,11 @@ fn dump_all_in_parallel(
 ) {
     let static_surface = &surface.static_surface;
     let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
-    let lod = ((std::f32::consts::TAU * static_surface.radius_m) / equirect_w.max(1) as f32)
-        .max(1.0)
-        .log2();
+    // Metres per equirect texel at the equator. The Query API seam takes a
+    // linear metres-per-sample LOD (not log2), so this drives the detail
+    // cascade directly.
+    let lod_m =
+        ((std::f32::consts::TAU * static_surface.radius_m) / equirect_w.max(1) as f32).max(1.0);
     let height_range = static_surface.height_range;
     // Precompute the cold-desert biome field here so the field outlives the
     // `par_iter` below — closures borrow it by reference inside the debug
@@ -549,33 +551,33 @@ fn dump_all_in_parallel(
 
     dumps.into_par_iter().for_each(|kind| match kind {
         DumpKind::Albedo => write_equirect(out.join("albedo-equirect.png"), equirect_w, |dir| {
-            let sample = sample_surface(surface, &state, dir, lod);
+            let sample = surface_sample(surface, &state, dir, lod_m);
             [
-                linear_to_srgb8(sample.albedo.x),
-                linear_to_srgb8(sample.albedo.y),
-                linear_to_srgb8(sample.albedo.z),
+                linear_to_srgb8(sample.albedo_linear.x),
+                linear_to_srgb8(sample.albedo_linear.y),
+                linear_to_srgb8(sample.albedo_linear.z),
             ]
         }),
         DumpKind::Height => write_equirect(out.join("height-equirect.png"), equirect_w, |dir| {
-            let sample = sample_surface(surface, &state, dir, lod);
-            let g = ((sample.height / height_range.max(1.0) * 0.5 + 0.5) * 255.0)
+            let sample = surface_sample(surface, &state, dir, lod_m);
+            let g = ((sample.height_m / height_range.max(1.0) * 0.5 + 0.5) * 255.0)
                 .clamp(0.0, 255.0)
                 .round() as u8;
             [g, g, g]
         }),
         DumpKind::Roughness => {
             write_equirect(out.join("roughness-equirect.png"), equirect_w, |dir| {
-                let sample = sample_surface(surface, &state, dir, lod);
+                let sample = surface_sample(surface, &state, dir, lod_m);
                 let g = (sample.roughness.clamp(0.0, 1.0) * 255.0).round() as u8;
                 [g, g, g]
             })
         }
         DumpKind::Normal => write_equirect(out.join("normal-equirect.png"), equirect_w, |dir| {
-            let sample = sample_surface(surface, &state, dir, lod);
+            let normal = surface_normal(surface, &state, dir, lod_m);
             [
-                normal_to_u8(sample.normal.x),
-                normal_to_u8(sample.normal.y),
-                normal_to_u8(sample.normal.z),
+                normal_to_u8(normal.x),
+                normal_to_u8(normal.y),
+                normal_to_u8(normal.z),
             ]
         }),
         DumpKind::PlateId => {
