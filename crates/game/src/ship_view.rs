@@ -22,15 +22,15 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
-    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part, PartCatalog,
-    PartMaterial, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams,
-    ShipyardPlugin, stainless_steel_base,
+    stainless_steel_base, Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine,
+    FuelTank, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint, ShipPartExtension,
+    ShipPartMaterial, ShipPartParams, ShipyardPlugin,
 };
 
-use crate::SimStage;
-use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
+use crate::camera::{find_reference_body, CameraFocus, CameraTargetOffset};
 use crate::rendering::{CelestialBody, PlayerShip, ShipMarker, SimulationState, SolarSystemState};
 use crate::view::{HideInMapView, HideInShipView, ViewMode};
+use crate::SimStage;
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
 /// editor's value so the two look identical side-by-side.
@@ -102,7 +102,7 @@ pub(crate) fn spawn_player_ship(
     if sim.simulation.vessel_kind() == thalos_physics_canonical::types::VesselKind::Eva {
         return;
     }
-    let ron_path = PathBuf::from("ships/saturn.ron");
+    let ron_path = PathBuf::from("ships/apollo.ron");
     let text = match std::fs::read_to_string(&ron_path) {
         Ok(t) => t,
         Err(e) => {
