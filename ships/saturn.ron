@@ -1,0 +1,32 @@
+// Two-stage test vehicle for staging.
+//
+// Stack, top → bottom:
+//   pod → upper tank → upper engine → DECOUPLER → lower tank → lower engine
+//
+// Auto-staging (decoupler topology) derives two stages:
+//   stage 0 (launch): ignite the lower engine (5)
+//   stage 1:          fire the decoupler (3), dropping {3,4,5}; ignite the
+//                     upper engine (2)
+//
+// Both engines are Boreas (4 m) so the stack stays single-diameter — this is
+// a mechanics test vehicle, not a realistic ascent profile. The lower tank is
+// longer than the upper so the staged mass drop is large and obvious.
+(
+    name: "Saturn",
+    root: 0,
+    parts: [
+        (catalog_id: "hyperion"),                                                // 0 command pod
+        (catalog_id: "tank_methalox", params: Tank(diameter: 4.0, length: 4.0)), // 1 upper tank
+        (catalog_id: "boreas"),                                                  // 2 upper engine
+        (catalog_id: "decoupler_std", params: Decoupler(diameter: 4.0)),         // 3 decoupler
+        (catalog_id: "tank_methalox", params: Tank(diameter: 4.0, length: 8.0)), // 4 lower tank
+        (catalog_id: "boreas"),                                                  // 5 lower engine
+    ],
+    connections: [
+        (parent: 0, parent_node: "bottom", child: 1, child_node: "top"),
+        (parent: 1, parent_node: "bottom", child: 2, child_node: "top"),
+        (parent: 2, parent_node: "bottom", child: 3, child_node: "top"),
+        (parent: 3, parent_node: "bottom", child: 4, child_node: "top"),
+        (parent: 4, parent_node: "bottom", child: 5, child_node: "top"),
+    ],
+)

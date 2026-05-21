@@ -384,6 +384,7 @@ fn try_parse_key_code(value: &str) -> Result<KeyCode, String> {
         "F1" => Ok(KeyCode::F1),
         "F12" => Ok(KeyCode::F12),
         "KeyA" => Ok(KeyCode::KeyA),
+        "KeyC" => Ok(KeyCode::KeyC),
         "KeyD" => Ok(KeyCode::KeyD),
         "KeyE" => Ok(KeyCode::KeyE),
         "KeyF" => Ok(KeyCode::KeyF),
@@ -435,6 +436,7 @@ pub mod defaults {
                 ("toggle_sas", keys(["KeyT"])),
                 ("throttle_full", keys(["KeyZ"])),
                 ("throttle_cut", keys(["KeyX"])),
+                ("stage", keys(["Space"])),
             ],
             [
                 ("pitch", axis(["KeyW"], ["KeyS"])),
@@ -452,7 +454,6 @@ pub mod defaults {
         section(
             [
                 ("warp_to_maneuver", keys(["KeyG"])),
-                ("warp_pause", keys(["Space"])),
                 ("warp_increase", keys(["Period"])),
                 ("warp_decrease", keys(["Comma"])),
                 ("warp_reset", keys(["Backslash"])),
@@ -612,8 +613,8 @@ mod tests {
             Some(&vec![BindingSpec::key("KeyF")])
         );
         assert_eq!(
-            settings.game.warp.bindings.get("warp_pause"),
-            Some(&vec![BindingSpec::key("Space")])
+            settings.game.warp.bindings.get("warp_increase"),
+            Some(&vec![BindingSpec::key("Period")])
         );
     }
 

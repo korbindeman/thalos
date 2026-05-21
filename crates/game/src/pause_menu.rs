@@ -7,7 +7,8 @@
 //! - **Escape menu** (`GamePause`): opens a modal overlay and stops sim
 //!   time. The current warp level is left untouched so Resume returns to
 //!   exactly the same simulation mode.
-//! - **Warp pause** (`warp.speed() == 0`): the player-facing "pause" key.
+//! - **Warp pause** (`warp.speed() == 0`): the bottom of the time-warp
+//!   ladder, reached by stepping `warp_decrease` (`,`) below 1×.
 //! - **Freecam** (`FreeCam::active`): freezes sim time while leaving the
 //!   debug camera able to move on wall-clock time.
 //!

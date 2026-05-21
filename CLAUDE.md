@@ -11,7 +11,8 @@ the new shape, not the old one. No silent rewrites.
 ## Commands
 
 ```bash
-just game                 # cargo run -p thalos_game (local override via .env.just)
+just game                 # cargo run -p thalos_game — ship in low Thalos orbit (default)
+just game eva             # spawn on foot (EVA) on the Thalos surface instead
 just edit <body>          # cargo run -p thalos_planet_editor -- <body>
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
@@ -43,9 +44,12 @@ platforms.
 
 Compiler/linker performance tuning that is platform-specific or finnicky
 belongs in local Cargo config, not committed workspace config. This includes
-incremental overrides, debug-info reductions, dynamic-linking aliases, custom
-linkers, and backend experiments. The normal Windows iteration path stays on
-LLVM and opts into Bevy dynamic linking only through local config. The workspace-local
+incremental overrides, debug-info reductions, custom linkers, and backend
+experiments. Bevy dynamic linking is the exception: it is cross-platform and not
+finnicky, so `just game` enables `bevy/dynamic_linking` by committed default (in
+the `justfile`'s `game_command`), scoped to the dev run so it never reaches
+`just build`/`just trace`/release. Override `game_command` in `.env.just` to opt
+out locally. The normal Windows iteration path stays on LLVM. The workspace-local
 `.cargo/config.toml` and `.env.just` are ignored by Git for this purpose. The full policy plus
 Windows fast-incremental and macOS workaround examples live in
 `docs/tooling.md`.
@@ -264,21 +268,38 @@ Key modules:
 
 ### Game crate (`crates/game/`)
 
-- **Default spawn = EVA on Thalos surface.** KSP-style: the canonical
-  `CraftState` is the player on foot, tagged `VesselKind::Eva` with
-  `ShipParameters::eva()` (90 kg, no thrust, no torque). `main.rs`
-  places the player ~500 m above the body radius at a fixed body-fixed
-  direction; `local_physics::spawn_player_avian_body` branches on
-  `VesselKind` to spawn a 1.8 m capsule (rotation-locked, walking
-  friction) with both `LocalCraftBody` and `PlayerControllerBody` on
-  the same entity. `apply_local_forces`, `snap_avian_from_canonical`,
-  and the snap side of `readback_local_craft` short-circuit for EVA —
-  the controller systems in `player_controller.rs` own gravity,
-  walking velocity, and the canonical readback. `ship_view::spawn_player_ship`
-  early-returns in EVA mode (no rocket loaded). Re-boarding a ship is
-  not implemented yet; the `toggle_player_controller` input is unwired.
-  Switch defaults by setting `VesselKind::Ship` and orbital `ship_state`
-  in `main.rs`.
+- **Spawn mode is a flag: ship in orbit (default) or EVA on the surface.**
+  `main.rs` reads `just game [mode]` (passed as a CLI arg — default
+  `orbit`; falls back to the `THALOS_SPAWN` env var for a direct
+  `cargo run`). The canonical `CraftState` is the player either way —
+  KSP-style: one craft, Ship or EVA, distinguished by `VesselKind`.
+  **`orbit`**: `VesselKind::Ship` in a low Thalos parking orbit
+  (`system.ship.initial_state`), nose along prograde;
+  `ship_view::spawn_player_ship` loads `apollo.ron` and pushes the real
+  ship params. **`eva`**: the player on foot, `VesselKind::Eva` with
+  `ShipParameters::eva()` (90 kg, no thrust, no torque), placed ~12 km
+  above the Thalos sub-stellar point;
+  `local_physics::spawn_player_avian_body` branches on `VesselKind` to
+  spawn a 1.8 m capsule (rotation-locked, walking friction) carrying both
+  `LocalCraftBody` and `PlayerControllerBody`, and `spawn_player_ship`
+  early-returns (no rocket). Re-boarding a ship is not implemented yet;
+  the `toggle_player_controller` input is unwired.
+- **EVA is a full craft, with a grounded/airborne split.** The
+  `EvaMode` resource (`player_controller.rs`, `Grounded` | `Airborne`,
+  defaults `Grounded`) picks which regime owns the capsule.
+  **`Grounded`**: `walk_eva_on_terrain` glues the capsule to the
+  rendered surface and `snap_avian_from_canonical` + the
+  `readback_local_craft` translation short-circuit so the controller
+  owns state. **`Airborne`**: Kepler owns translation, the snap drives
+  the capsule from canonical (exactly like a ship coasting in vacuum),
+  and `walk_eva_on_terrain` stands down. `apply_local_forces`
+  short-circuits for EVA in both modes — EVA has no thrust (coast-only;
+  a jetpack is the natural follow-up). The teleports mirror the ship's:
+  body-tree cmd-click sends EVA to a low orbit (→ `Airborne`), and a
+  row's `drop` button + map cursor (or F9) plants it on a surface point
+  (→ `Grounded`, in place via `local_physics::place_eva_on_surface` —
+  the bubble is never torn down, unlike ships). Mode flips only on these
+  explicit teleports; there is no automatic surface↔orbit transition yet.
 - Semantic player input is read from `thalos_input::game::GameInputIntent`.
   Keep raw Bevy input only for cursor positions, picking spatial data, and UI
   internals. See `docs/input.md`.
@@ -411,6 +432,12 @@ Parametric ship editor. Bevy + egui.
   `Adapter`
 - `ShipBlueprint` — RON serialization format for ship designs
 - `sizing` — parametric node sizing (adapters/tanks scale from parent)
+- `staging` — pure stage derivation from decoupler topology
+  (`derive_stages`) + per-stage Δv/fuel accounting
+  (`compute_stage_summaries`). Single home for the staging model: the
+  game's live ECS staging systems (`crates/game/src/staging.rs`) and the
+  editor's staging preview (`ShipBlueprint::stage_summaries`) both call it,
+  so stage boundaries never diverge. Like `stats`, no Bevy beyond glam math.
 
 ### Planet lighting crate (`crates/planet_lighting/`)
 

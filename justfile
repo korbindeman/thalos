@@ -3,11 +3,16 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 set dotenv-load := true
 set dotenv-filename := ".env.just"
 
-game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game")
+# Dev run defaults to Bevy dynamic linking (cross-platform iteration speedup;
+# dev-only, never reaches `just build`/`just trace`/release). Override the whole
+# command in `.env.just` to opt out locally.
+game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game --features bevy/dynamic_linking")
 
-# Run the game
-game:
-    {{game_command}}
+# Run the game. Defaults to a ship in low Thalos orbit; `just game eva`
+# spawns the player on foot on the Thalos surface. Set a persistent default
+# with THALOS_SPAWN in `.env.just`.
+game mode=env_var_or_default("THALOS_SPAWN", "orbit"):
+    {{game_command}} -- {{mode}}
 
 # Edit a planet's terrain. Usage: just edit auron
 edit body:

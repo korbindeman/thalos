@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
 use thalos_physics_canonical::canonical::AuthorityMode;
-use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind};
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind, VesselKind};
 use thalos_physics_local::ActiveLocalBubble;
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
@@ -18,6 +18,7 @@ use crate::debug::{DebugLaunchMount, DebugMode, DebugSurfaceTeleport, low_orbit_
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::pause_menu::not_game_paused;
 use crate::photo_mode::not_in_photo_mode;
+use crate::player_controller::EvaMode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
 use crate::view::in_map_view;
 
@@ -50,6 +51,7 @@ fn body_tree_panel(
     mut surface_teleport: ResMut<DebugSurfaceTeleport>,
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
     mut launch_mount: ResMut<DebugLaunchMount>,
+    mut eva_mode: ResMut<EvaMode>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
 ) {
@@ -209,17 +211,23 @@ fn body_tree_panel(
         }
     }
 
-    // Debug: cmd-click teleports the ship to a low circular orbit. Surface
+    // Debug: cmd-click teleports the craft to a low circular orbit. Surface
     // placement is now explicit via each row's `drop` button and cursor.
     if debug.enabled
         && let Some(body_id) = cmd_clicked
     {
+        let is_eva = sim.simulation.vessel_kind() == VesselKind::Eva;
         let sim_time = sim.simulation.sim_time();
         let body_state = sim.ephemeris.state(
             body_id,
             thalos_physics_canonical::canonical::Epoch(sim_time),
         );
-        clear_active_local_bubble(&mut commands, &mut active_bubble);
+        // EVA keeps its persistent bubble (in-place teleport); only ships tear
+        // down and respawn. Clearing the EVA bubble would despawn the capsule
+        // and the next spawn would re-ground it on the surface.
+        if !is_eva {
+            clear_active_local_bubble(&mut commands, &mut active_bubble);
+        }
         let (state, attitude) = low_orbit_state(&sim.system.bodies[body_id], &body_state);
         sim.simulation
             .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
@@ -227,6 +235,11 @@ fn body_tree_panel(
         sim.simulation.set_attitude(attitude);
         sim.simulation.warp.reset();
         launch_mount.active = None;
+        // Airborne: Kepler owns translation, the canonical→Avian snap drives
+        // the capsule, and `walk_eva_on_terrain` stands down.
+        if is_eva {
+            *eva_mode = EvaMode::Airborne;
+        }
 
         clear_debug_teleport_maneuvers(&mut plan, &mut selected);
     }

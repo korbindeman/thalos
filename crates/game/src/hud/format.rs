@@ -75,6 +75,15 @@ pub fn warp_panel_time(seconds: f64) -> WarpClockParts {
     }
 }
 
+/// Single mass figure. Tonnes at/above 1 t, otherwise kg.
+pub fn mass(kg: f64) -> String {
+    if kg.abs() >= 1_000.0 {
+        format!("{:.1} t", kg / 1_000.0)
+    } else {
+        format!("{:.0} kg", kg)
+    }
+}
+
 /// "current / max" mass readout, in the same unit on both sides.
 /// Tonnes once either side hits 1 t, otherwise kg.
 pub fn resource_ratio(current_kg: f64, max_kg: f64) -> String {
@@ -85,3 +94,4 @@ pub fn resource_ratio(current_kg: f64, max_kg: f64) -> String {
         format!("{:.0} / {:.0} kg", current_kg, max_kg)
     }
 }
+

@@ -231,33 +231,26 @@ impl Default for WarpLimits {
     }
 }
 
-/// Hold-down hysteresis on the lookahead trajectory scan. A scan that
-/// drops the cap to N because of an upcoming periapsis dip will re-allow
-/// level N+1 the next frame as the dip falls out of the lookahead window;
-/// without hysteresis the warp button would flicker. Pad lookahead far
-/// enough that level transitions happen at most once per ~30s of sim
-/// time.
-const LOOKAHEAD_REAL_SECONDS: f64 = 2.0;
-
 /// Compute the highest warp level the craft can safely engage, clamp the
 /// current level if it exceeds that cap, and publish the cap as
 /// [`WarpLimits`] for the input handler and HUD.
 ///
-/// Two checks combined:
+/// Gating is purely a function of the craft's *current* altitude above
+/// the dominant body, KSP-style: each warp level carries a minimum
+/// altitude (in body-radii) in `WarpController`'s ladder, and the cap is
+/// the highest level whose floor the craft currently clears.
 ///
-/// 1. Worst-case altitude at the current craft state. The buffer
-///    `body_radius + max_terrain_elevation` is conservative — it treats
-///    the body as if every direction has the tallest authored peak,
-///    which avoids a per-direction cubemap sample on the hot path and is
-///    provably safe against any terrain feature.
-///
-/// 2. A scan of last frame's cached `FlightPlan` for the same buffer
-///    over the next [`LOOKAHEAD_REAL_SECONDS`] worth of sim time at the
-///    *target* warp speed. This catches the elliptical-orbit case: AP
-///    at high altitude, PE below the floor; a position-only check would
-///    permit warp from AP and the next Kepler step at high warp would
-///    skip the dip entirely, with the propagator's `prev_alt > 0`
-///    boundary check silently refusing to flag the collision.
+/// There is deliberately no trajectory lookahead. Whether a future
+/// periapsis dips below the surface is not this gate's concern — a
+/// suborbital arc is fully warpable while you're high on it, and the cap
+/// steps back down on its own as the craft descends and re-evaluates
+/// each frame. Phasing through terrain at high warp is prevented
+/// downstream, not here: `coast_segment` adaptively subdivides and the
+/// swept-min Hermite check in `detect_step_crossings` flags a sub-surface
+/// dip even when both ends of a warp step sit above ground, at which
+/// point `Simulation::step` halts the ship at the impact and resets warp
+/// to 1×. The gate decides *where you may warp*; the propagator
+/// guarantees *you can't warp through the ground*.
 ///
 /// Skipped only for `BodyFixed` (landed and stationary on the surface) —
 /// KSP convention allows unrestricted warp there. Every other regime
@@ -280,75 +273,34 @@ pub fn enforce_warp_altitude_limits(
         return;
     }
 
-    // Worst-case altitude (as a fraction of the body's radius) over the
-    // current craft state plus the lookahead trajectory. Tracking the
-    // ratio rather than absolute metres lets the per-level threshold be
-    // a single body-radius fraction that's meaningful across the whole
-    // system — a 0.005-radius floor on Mira is hundreds of metres, on
-    // Thalos is ~16 km.
-    let sample_alt_radii = |body: usize, pos: bevy::math::DVec3, ref_pos: bevy::math::DVec3| {
-        let body_def = &bodies[body];
-        let r = body_def.radius_m;
-        if r <= 0.0 {
-            return f64::INFINITY;
-        }
-        let buffer = r + terrain.0.max_elevation_m(body);
-        let alt = (pos - ref_pos).length() - buffer;
-        alt.max(0.0) / r
-    };
-
+    // Current altitude above the dominant body, as a fraction of its
+    // radius. Tracking the ratio rather than absolute metres lets each
+    // level's floor be a single body-radius fraction that's meaningful
+    // across the whole system — a 0.05-radius floor is ~160 km on Thalos,
+    // a few hundred metres on a small moon. The conservative
+    // `body_radius + max_terrain_elevation` buffer treats every direction
+    // as the tallest authored peak, so the gate never over-reports
+    // altitude near terrain. The radius is known > 0 from the early
+    // return above.
     let sim_time = sim.simulation.sim_time();
     let body_pos = sim
         .simulation
         .ephemeris()
         .state(dominant, Epoch(sim_time))
         .position;
-    let mut min_alt_radii =
-        sample_alt_radii(dominant, sim.simulation.ship_state().position, body_pos);
+    let r = bodies[dominant].radius_m;
+    let buffer = r + terrain.0.max_elevation_m(dominant);
+    let altitude_m = (sim.simulation.ship_state().position - body_pos).length() - buffer;
+    let alt_radii = altitude_m.max(0.0) / r;
 
-    // Trajectory lookahead: size the window to the *highest* configured
-    // level, not the currently-targeted level. The gate's whole job is
-    // to decide whether escalation is safe — using the current target
-    // would let a player at apoapsis with periapsis just outside a 1×
-    // lookahead escalate to 100×, then the next frame's coast segment
-    // skips the periapsis dip entirely. Sized to the top level, the same
-    // scan answers "is escalation to any level safe" for every level
-    // simultaneously. The scan honours each sample's own `anchor_body`
-    // so trajectories that cross into another SOI (transfer to another
-    // planet) gate against *that* body's radius — otherwise warping
-    // toward Vaelen from Thalos orbit would never see Vaelen's surface
-    // in the cap.
-    let lookahead_speed = sim
-        .simulation
-        .warp
-        .levels()
-        .last()
-        .copied()
-        .unwrap_or(1.0)
-        .max(1.0);
-    let lookahead_end = sim_time + LOOKAHEAD_REAL_SECONDS * lookahead_speed;
-    if let Some(plan) = sim.simulation.prediction() {
-        'scan: for seg in plan.segments() {
-            for sample in &seg.samples {
-                if sample.time > lookahead_end {
-                    break 'scan;
-                }
-                let r = sample_alt_radii(sample.anchor_body, sample.position, sample.ref_pos);
-                if r < min_alt_radii {
-                    min_alt_radii = r;
-                }
-            }
-        }
-    }
-
-    // Walk the levels in order; the highest one whose min-altitude
-    // requirement is still satisfied is the cap. min_alt_radii saturated
-    // at 0.0 means we're inside the conservative terrain envelope and
-    // only levels with `min_altitude_radii_for(i) == 0.0` qualify.
+    // Walk the levels in order; the highest one whose min-altitude floor
+    // the craft currently clears is the cap. `alt_radii` saturated at 0.0
+    // means we're inside the conservative terrain envelope and only
+    // levels with `min_altitude_radii_for(i) == 0.0` qualify.
     let levels = sim.simulation.warp.levels();
     let mut max_level = 0usize;
     for i in 0..levels.len() {
-        if sim.simulation.warp.min_altitude_radii_for(i) <= min_alt_radii {
+        if sim.simulation.warp.min_altitude_radii_for(i) <= alt_radii {
             max_level = i;
         }
     }
@@ -394,15 +346,9 @@ pub fn handle_warp_controls(
         return;
     }
 
-    let manual_warp_key =
-        input.warp_pause || input.warp_increase || input.warp_decrease || input.warp_reset;
+    let manual_warp_key = input.warp_increase || input.warp_decrease || input.warp_reset;
     if manual_warp_key && warp_to.active {
         warp_to.cancel();
-    }
-
-    if input.warp_pause {
-        sim.simulation.warp.toggle_pause();
-        return;
     }
 
     if locks.warp {
@@ -418,7 +364,10 @@ pub fn handle_warp_controls(
             sim.simulation.warp.increase();
         }
     } else if input.warp_decrease {
-        if sim.simulation.warp.level_index() > 1 {
+        // Comma steps down the warp ladder and into pause at the bottom
+        // (level 0 = 0×), so pause is "in line with" time warp rather than a
+        // separate key. `.` / increase steps back up and unpauses.
+        if sim.simulation.warp.level_index() > 0 {
             sim.simulation.warp.decrease();
         }
     } else if input.warp_reset {

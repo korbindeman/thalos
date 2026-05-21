@@ -62,10 +62,6 @@ pub struct WarpToManeuverAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
-pub struct WarpPauseAction;
-
-#[derive(InputAction)]
-#[action_output(bool)]
 pub struct WarpIncreaseAction;
 
 #[derive(InputAction)]
@@ -83,6 +79,10 @@ pub struct ThrottleFullAction;
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct ThrottleCutAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct StageAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
@@ -183,12 +183,13 @@ pub struct GameInputIntent {
     pub toggle_free_cam: bool,
     pub toggle_sas: bool,
     pub warp_to_maneuver: bool,
-    pub warp_pause: bool,
     pub warp_increase: bool,
     pub warp_decrease: bool,
     pub warp_reset: bool,
     pub throttle_full: bool,
     pub throttle_cut: bool,
+    /// Edge-triggered: the player advanced to the next stage this frame.
+    pub stage: bool,
     pub throttle_up: bool,
     pub throttle_down: bool,
     pub attitude: Vec3,
@@ -285,11 +286,6 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Bindings::spawn(settings.game.warp.bindings("warp_to_maneuver")),
             ),
             (
-                Action::<WarpPauseAction>::new(),
-                consume_input(),
-                Bindings::spawn(settings.game.warp.bindings("warp_pause")),
-            ),
-            (
                 Action::<WarpIncreaseAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.warp.bindings("warp_increase")),
@@ -324,6 +320,11 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<ThrottleCutAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.flight.bindings("throttle_cut")),
+            ),
+            (
+                Action::<StageAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.flight.bindings("stage")),
             ),
             (
                 Action::<PitchPositiveAction>::new(),
@@ -515,14 +516,12 @@ fn collect_flight_toggle_intent(
     mut intent: ResMut<GameInputIntent>,
     toggle_sas: Query<(&Action<ToggleSasAction>, &ActionEvents)>,
     warp_to_maneuver: Query<(&Action<WarpToManeuverAction>, &ActionEvents)>,
-    warp_pause: Query<(&Action<WarpPauseAction>, &ActionEvents)>,
     warp_increase: Query<(&Action<WarpIncreaseAction>, &ActionEvents)>,
     warp_decrease: Query<(&Action<WarpDecreaseAction>, &ActionEvents)>,
     warp_reset: Query<(&Action<WarpResetAction>, &ActionEvents)>,
 ) {
     intent.toggle_sas = started(&toggle_sas);
     intent.warp_to_maneuver = started(&warp_to_maneuver);
-    intent.warp_pause = started(&warp_pause);
     intent.warp_increase = started(&warp_increase);
     intent.warp_decrease = started(&warp_decrease);
     intent.warp_reset = started(&warp_reset);
@@ -532,9 +531,11 @@ fn collect_throttle_command_intent(
     mut intent: ResMut<GameInputIntent>,
     throttle_full: Query<(&Action<ThrottleFullAction>, &ActionEvents)>,
     throttle_cut: Query<(&Action<ThrottleCutAction>, &ActionEvents)>,
+    stage: Query<(&Action<StageAction>, &ActionEvents)>,
 ) {
     intent.throttle_full = started(&throttle_full);
     intent.throttle_cut = started(&throttle_cut);
+    intent.stage = started(&stage);
 }
 
 fn collect_attitude_intent(

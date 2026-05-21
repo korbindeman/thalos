@@ -27,7 +27,7 @@ use thalos_terrain_render::HeightSource;
 use crate::SimStage;
 use crate::debug::{DebugLaunchMount, DebugMode};
 use crate::fuel::ThrottleState;
-use crate::player_controller::{PlayerControllerBody, PlayerControllerState};
+use crate::player_controller::{EvaMode, PlayerControllerBody, PlayerControllerState};
 use crate::rendering::{PlayerShip, SimulationState};
 use crate::view::ViewMode;
 
@@ -725,6 +725,7 @@ fn detach_terrain_patch_when_far(
 fn snap_avian_from_canonical(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
+    eva_mode: Res<EvaMode>,
     mut sim: ResMut<SimulationState>,
     mut craft_q: Query<
         (
@@ -738,12 +739,16 @@ fn snap_avian_from_canonical(
         With<LocalCraftBody>,
     >,
 ) {
-    // KSP-style EVA: the player owns Avian state outright via
+    // KSP-style EVA *while grounded*: the player owns Avian state outright via
     // `player_controller`'s motion + terrain-clamp systems. Snapping
     // canonical → Avian here would fight those writes (canonical is
     // refreshed from Avian by `readback_local_craft`, so the snap would
     // either no-op or revert a frame of input). Skip entirely.
-    if sim.simulation.vessel_kind() == VesselKind::Eva {
+    //
+    // Airborne (coasting) EVA is the mirror image: Kepler owns canonical
+    // translation, the walk controller stands down, and the snap below drives
+    // the capsule — exactly like a ship coasting in vacuum. So fall through.
+    if sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded() {
         return;
     }
     // `Full` mid-burn: Avian owns everything. No snap.
@@ -817,6 +822,7 @@ fn debug_surface_drop(
     config: Res<LocalBubbleConfig>,
     mut active: ResMut<ActiveLocalBubble>,
     mut launch_mount: ResMut<DebugLaunchMount>,
+    mut eva_mode: ResMut<EvaMode>,
     mut sim: ResMut<SimulationState>,
     mut craft_q: Query<
         (
@@ -893,33 +899,39 @@ fn debug_surface_drop(
         orientation: level_attitude_for_body_dir(body_state.orientation, dir),
         angular_velocity: DVec3::ZERO,
     };
-    sim.simulation
-        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
-    sim.simulation
-        .install_local_rigid_body_state(translation, attitude);
-    sim.simulation.warp.reset();
-    launch_mount.active = None;
 
     if is_eva {
-        // `snap_avian_from_canonical` short-circuits for EVA, so updating
-        // canonical alone wouldn't move the Avian capsule. Write Avian
-        // directly here and tear down the terrain patch so it rebuilds
-        // around the new spawn point on the next frame.
-        if let Some(bubble) = active.bubble.as_mut() {
-            let frame = inertial_to_bubble_frame(&body_state, translation, attitude);
-            if let Ok((mut position, mut rotation, mut linear_velocity, mut angular_velocity)) =
+        // Grounded EVA owns its Avian capsule directly (the canonical→Avian
+        // snap is short-circuited), so the shared helper writes canonical,
+        // marks the player grounded, and plants the capsule in one place.
+        if let Some(bubble) = active.bubble.as_mut()
+            && let Ok((mut position, mut rotation, mut linear_velocity, mut angular_velocity)) =
                 craft_q.get_mut(bubble.craft_entity)
-            {
-                position.0 = frame.position_m;
-                rotation.0 = frame.rotation;
-                linear_velocity.0 = frame.linear_velocity_m_s;
-                angular_velocity.0 = DVec3::ZERO;
-            }
-            if let Some(terrain_entity) = bubble.terrain_entity.take() {
-                commands.entity(terrain_entity).despawn();
-            }
+        {
+            place_eva_on_surface(
+                &mut commands,
+                &mut sim,
+                &mut eva_mode,
+                bubble,
+                (
+                    &mut position,
+                    &mut rotation,
+                    &mut linear_velocity,
+                    &mut angular_velocity,
+                ),
+                body_id,
+                translation,
+                attitude,
+            );
         }
+    } else {
+        sim.simulation
+            .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+        sim.simulation
+            .install_local_rigid_body_state(translation, attitude);
+        sim.simulation.warp.reset();
     }
+    launch_mount.active = None;
 
     info!(
         "debug surface drop placed {:?} {:.0} m above rendered {} terrain (day-side)",
@@ -1125,6 +1137,7 @@ fn compute_angular_acceleration(
 fn readback_local_craft(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
+    eva_mode: Res<EvaMode>,
     mut sim: ResMut<SimulationState>,
     mut diagnostics: ResMut<AvianHandoffDiagnostics>,
     craft_q: Query<(
@@ -1138,8 +1151,12 @@ fn readback_local_craft(
     let Some(bubble) = active.bubble.as_ref() else {
         return;
     };
-    let is_eva = sim.simulation.vessel_kind() == VesselKind::Eva;
-    if !is_eva && !authority.integrator_active() {
+    // Grounded EVA owns canonical translation outright (see
+    // `snap_avian_from_canonical`); airborne EVA coasts like a ship and falls
+    // through to the role-driven split below.
+    let eva_grounded =
+        sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded();
+    if !eva_grounded && !authority.integrator_active() {
         return;
     }
     let Ok((position, rotation, linear_velocity, angular_velocity, _)) =
@@ -1155,16 +1172,16 @@ fn readback_local_craft(
         linear_velocity.0,
         angular_velocity.0,
     );
-    // EVA always owns the canonical position outright — see the comment
-    // in `snap_avian_from_canonical`. For ships, fall back to the
-    // role-driven split.
-    if is_eva || authority.owns_translation() {
+    // Grounded EVA always owns the canonical position outright — see the
+    // comment in `snap_avian_from_canonical`. Ships (and airborne EVA) fall
+    // back to the role-driven split.
+    if eva_grounded || authority.owns_translation() {
         // On the take-translation frame, measure the gap between canonical's
         // pre-handoff state and Avian's converted state. The snap re-ran with
         // this frame's `body_state`, so a coherent handoff leaves this near
         // zero; a large value means snap and readback disagreed on the body
         // frame (the discontinuity the snap exists to prevent).
-        if !is_eva && authority.just_took_translation() {
+        if !eva_grounded && authority.just_took_translation() {
             let canonical = sim.simulation.craft_state().translation;
             let position_residual_m = (translation.position - canonical.position).length();
             let velocity_residual_m_s = (translation.velocity - canonical.velocity).length();
@@ -1563,6 +1580,64 @@ fn inertial_to_bubble_frame(
         linear_velocity_m_s: state.translation_bc.velocity,
         angular_velocity_rad_s: state.attitude.orientation * state.attitude.angular_velocity,
     }
+}
+
+/// Plant a grounded EVA player at a surface pose, in place.
+///
+/// EVA keeps its persistent bubble across teleports (KSP-on-foot never tears
+/// the capsule down), so a surface teleport is a rewrite rather than a
+/// respawn: set canonical, mark the EVA grounded, move the bubble onto the
+/// target body, drop the old terrain patch, and plant the Avian capsule. The
+/// grounded canonical→Avian snap is short-circuited, so this is the only
+/// thing that moves the capsule; [`crate::player_controller::walk_eva_on_terrain`]
+/// takes over next frame and glues it to the rendered surface.
+///
+/// Shared by the F9 sub-stellar drop and the map-cursor surface teleport so
+/// both place EVA the same way.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_eva_on_surface(
+    commands: &mut Commands,
+    sim: &mut SimulationState,
+    eva_mode: &mut EvaMode,
+    bubble: &mut LocalBubble,
+    avian: (
+        &mut Position,
+        &mut Rotation,
+        &mut LinearVelocity,
+        &mut AngularVelocity,
+    ),
+    body_id: BodyId,
+    translation: TranslationalState,
+    attitude: AttitudeState,
+) {
+    let (position, rotation, linear_velocity, angular_velocity) = avian;
+    let body_state = body_state_for(sim, body_id);
+
+    sim.simulation
+        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+    sim.simulation
+        .install_local_rigid_body_state(translation, attitude);
+    sim.simulation.warp.reset();
+    *eva_mode = EvaMode::Grounded;
+
+    // Move the bubble onto the target body and drop the old terrain patch so
+    // `attach_terrain_patch_when_close` rebuilds it around the new spot. When
+    // the body is unchanged (the common Thalos→Thalos case) these are no-ops.
+    if let Some(terrain_entity) = bubble.terrain_entity.take() {
+        commands.entity(terrain_entity).despawn();
+    }
+    bubble.body_id = body_id;
+    bubble.center_dir_body = DVec3::Y;
+    bubble.center_surface_body_m = DVec3::ZERO;
+    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
+    bubble.stable_contact_s = 0.0;
+    bubble.stable_landed = false;
+
+    let frame = inertial_to_bubble_frame(&body_state, translation, attitude);
+    position.0 = frame.position_m;
+    rotation.0 = frame.rotation;
+    linear_velocity.0 = frame.linear_velocity_m_s;
+    angular_velocity.0 = DVec3::ZERO;
 }
 
 fn bubble_frame_to_inertial(

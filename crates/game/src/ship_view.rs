@@ -102,7 +102,7 @@ pub(crate) fn spawn_player_ship(
     if sim.simulation.vessel_kind() == thalos_physics_canonical::types::VesselKind::Eva {
         return;
     }
-    let ron_path = PathBuf::from("ships/apollo.ron");
+    let ron_path = PathBuf::from("ships/saturn.ron");
     let text = match std::fs::read_to_string(&ron_path) {
         Ok(t) => t,
         Err(e) => {

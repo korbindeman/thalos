@@ -16,13 +16,31 @@ This includes:
 
 - `CARGO_INCREMENTAL` overrides for platform-specific incremental behavior.
 - Debug-info reductions for local iteration.
-- Bevy dynamic-linking aliases.
 - Local linker or backend experiments.
 - `rustc-codegen-cranelift-preview` / `codegen-backend = "cranelift"`.
 
 Do not commit a Cargo backend override unless the project intentionally adopts
 that backend for all supported platforms. The default checked-in backend is the
 Rust toolchain's normal LLVM backend.
+
+### Bevy dynamic linking (committed default for `just game`)
+
+`just game` defaults to `cargo run -p thalos_game --features bevy/dynamic_linking`
+on every platform (the default lives in the `justfile`'s `game_command`).
+Dynamic linking is a cross-platform dev-iteration speedup — Bevy links once into
+a shared `bevy_dylib` and subsequent rebuilds relink only our crates — and it is
+not platform-specific, so it belongs in committed config rather than each
+developer's `.env.just`.
+
+It is scoped to the dev run command only. `just build`, `just trace` (release),
+and the bakes do not enable it, so it never reaches a shipped/release build
+(where a missing `bevy_dylib` would crash the binary). To opt out locally —
+e.g. on a platform where the feature misbehaves — override the whole command in
+`.env.just`:
+
+```dotenv
+THALOS_GAME_COMMAND="cargo run -p thalos_game"
+```
 
 ### Windows fast incremental loop
 
@@ -46,18 +64,13 @@ linker = "rust-lld.exe"
 check-game = "check -p thalos_game"
 ```
 
-Then set the local `just game` command in `.env.just`:
-
-```dotenv
-THALOS_GAME_COMMAND="cargo run -p thalos_game --features bevy/dynamic_linking"
-```
-
-Use `just game` as the single app path on every platform. On this Windows
-machine, `.env.just` keeps the compiler backend on LLVM, uses LLD for faster
-MSVC-target linking through Cargo config, and enables Bevy's `dynamic_linking`
-feature only for the local dev run. Release commands stay on the checked-in
-defaults because neither `Cargo.toml` nor the default `just game` command
-enables `bevy/dynamic_linking`.
+Use `just game` as the single app path on every platform. Bevy's
+`dynamic_linking` is already the committed default for `just game` (see above),
+so `.env.just` only needs to carry Windows-specific bits if any — the Cargo
+config above keeps the compiler backend on LLVM and uses LLD for faster
+MSVC-target linking. Release commands stay on the checked-in defaults because
+neither `Cargo.toml` nor the release-path `just` recipes (`just build`,
+`just trace`) enable `bevy/dynamic_linking`.
 
 Use `cargo check-game` for fast type checking when no app launch is needed.
 Avoid adding a second local run alias unless the default Windows path changes

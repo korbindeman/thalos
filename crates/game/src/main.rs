@@ -29,6 +29,7 @@ mod screenshot;
 mod ship_view;
 mod sky_render;
 mod solar_system_state;
+mod staging;
 mod star_flare;
 mod target;
 mod view;
@@ -37,7 +38,7 @@ mod warp_to_maneuver;
 use std::sync::Arc;
 
 use bevy::asset::AssetPlugin;
-use bevy::math::{DQuat, DVec3};
+use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, WindowMode};
 use thalos_input::game::GameInputPlugin;
@@ -177,16 +178,18 @@ fn main() {
     // ------------------------------------------------------------------
     // 4. Resolve the player's absolute initial state.
     //
-    //    Default vessel is EVA (player on foot) standing on the Thalos
-    //    surface. The canonical CraftState is the player — KSP-style:
-    //    one craft, EVA or Ship, distinguished by `VesselKind`.
+    //    Two spawn modes, picked by `just game [mode]` (default `orbit`, or
+    //    `just game eva`). The canonical CraftState is the player either
+    //    way — KSP-style: one craft, Ship or EVA, distinguished by
+    //    `VesselKind`.
     //
-    //    Spawn pose is a fixed body-fixed direction over Thalos plus a
-    //    safe drop margin above the body radius. Terrain heights aren't
-    //    known at this point (the registry is populated later by the
-    //    rendering crate as bakes load), so we err above the worst-case
-    //    elevation and let local physics resolve the few-metre drop to
-    //    the rendered surface.
+    //    - `orbit` (default): the ship in a low Thalos parking orbit, the
+    //      authored `system.ship.initial_state`.
+    //    - `eva`: the player on foot at the Thalos sub-stellar point. The
+    //      pose is a body-fixed direction plus a safe drop margin above the
+    //      body radius; terrain heights aren't known yet (the registry is
+    //      populated later as bakes load), so we err above the worst-case
+    //      elevation and let local physics resolve the drop to the surface.
     // ------------------------------------------------------------------
     let homeworld_name = "Thalos";
     let homeworld_id = system
@@ -206,30 +209,81 @@ fn main() {
     let homeworld = &system.bodies[homeworld_id];
     let homeworld_state = ephemeris.state(homeworld_id, Epoch::ZERO);
 
-    // Spawn at the sub-stellar point so the player wakes up in
-    // daylight. The direction from Thalos toward Pyros (origin in
-    // heliocentric inertial) is `-homeworld_state.position`; expressed
-    // in body-fixed coordinates that's the body-fixed direction
-    // pointing at the star right now.
-    let sun_dir_inertial = (-homeworld_state.position).normalize();
-    let spawn_dir_inertial = sun_dir_inertial;
-    // Drop margin above the body radius. Has to clear Thalos's max
-    // peaks (~±8 km from body radius) since the terrain registry isn't
-    // loaded yet — anything less spawns inside a mountain. The local
-    // physics bubble will pin us to the rendered surface within the
-    // first few frames once the surface arrives.
-    let spawn_drop_height_m = 12_000.0;
-    let spawn_offset = spawn_dir_inertial * (homeworld.radius_m + spawn_drop_height_m);
-    let surface_velocity = homeworld_state.angular_velocity.cross(spawn_offset);
-    let ship_state = StateVector {
-        position: homeworld_state.position + spawn_offset,
-        velocity: homeworld_state.velocity + surface_velocity,
+    // Spawn mode arrives as a CLI arg from `just game [mode]` (works in any
+    // shell), falling back to the `THALOS_SPAWN` env var for a direct
+    // `cargo run`. Unset → ship orbit.
+    let spawn_request = std::env::args()
+        .nth(1)
+        .filter(|arg| !arg.trim().is_empty())
+        .or_else(|| std::env::var("THALOS_SPAWN").ok())
+        .unwrap_or_default();
+    let spawn_eva = match spawn_request.trim().to_ascii_lowercase().as_str() {
+        "eva" => true,
+        "" | "orbit" | "ship" => false,
+        other => {
+            eprintln!("  Unknown spawn mode '{other}'; defaulting to ship orbit.");
+            false
+        }
     };
 
-    println!(
-        "  Player (EVA):    standing on {} (daylight side)",
-        homeworld.name
-    );
+    let (ship_state, vessel_kind, ship_params, attitude) = if spawn_eva {
+        // Sub-stellar point so the player wakes up in daylight: the direction
+        // from Thalos toward Pyros (heliocentric origin) is
+        // `-homeworld_state.position`.
+        let up = (-homeworld_state.position).normalize();
+        // 12 km drop margin: has to clear Thalos's max peaks (~±8 km from
+        // body radius) since the terrain registry isn't loaded yet — anything
+        // less can spawn inside a mountain. `attach_terrain_patch_when_close`
+        // then hands translation to Avian and the collider catches the fall.
+        let spawn_offset = up * (homeworld.radius_m + 12_000.0);
+        let surface_velocity = homeworld_state.angular_velocity.cross(spawn_offset);
+        let state = StateVector {
+            position: homeworld_state.position + spawn_offset,
+            velocity: homeworld_state.velocity + surface_velocity,
+        };
+        // Stand upright: body +Z (dorsal) along local-up, body +Y (nose)
+        // tangent to the surface roughly eastward. Matches the EVA
+        // controller's `level_orientation` so the player faces forward.
+        let east_seed = homeworld_state.orientation * DVec3::Y;
+        let east_tangent = (east_seed - up * east_seed.dot(up)).normalize();
+        let right = up.cross(east_tangent).normalize();
+        let basis = DMat3::from_cols(right, east_tangent, up);
+        let attitude = AttitudeState {
+            orientation: DQuat::from_mat3(&basis),
+            angular_velocity: DVec3::ZERO,
+        };
+        println!(
+            "  Player (EVA):    standing on {} (daylight side)",
+            homeworld.name
+        );
+        (state, VesselKind::Eva, ShipParameters::eva(), attitude)
+    } else {
+        // Ship in low Thalos orbit — the authored parking orbit.
+        let rel = system.ship.initial_state;
+        let state = StateVector {
+            position: homeworld_state.position + rel.position,
+            velocity: homeworld_state.velocity + rel.velocity,
+        };
+        // Level orbital flight: body +Y (nose) along prograde, body +Z
+        // (dorsal) radial-out. Shared with the navball and control axes so
+        // "upright" stays aligned. Real ship params (MOI, torque, masses) are
+        // pushed in by `spawn_player_ship` once `apollo.ron` loads.
+        let prograde = rel.velocity.normalize();
+        let radial = rel.position.normalize();
+        let dorsal = (radial - radial.dot(prograde) * prograde).normalize();
+        let right = prograde.cross(dorsal);
+        let basis = DMat3::from_cols(right, prograde, dorsal);
+        let attitude = AttitudeState {
+            orientation: DQuat::from_mat3(&basis),
+            angular_velocity: DVec3::ZERO,
+        };
+        let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
+        println!(
+            "  Ship:            {:.0} km orbit around {}",
+            altitude_km, homeworld.name
+        );
+        (state, VesselKind::Ship, ShipParameters::default(), attitude)
+    };
 
     // ------------------------------------------------------------------
     // 5. Build and run the Bevy app.
@@ -308,33 +362,18 @@ fn main() {
                 system.bodies.clone(),
                 SimulationConfig::default(),
             );
-            // Mark the player as EVA before anything else reads vessel
-            // kind. `set_ship_params` then pushes the EVA parameter
-            // preset (90 kg, no thrust, no torque) — the throttle and
-            // attitude-command pipes are still wired up but produce no
-            // motion, so HUD readouts stay coherent.
-            simulation.set_vessel_kind(VesselKind::Eva);
-            simulation.set_ship_params(ShipParameters::eva());
-            // Stand upright at the spawn point: body +Z (dorsal) along
-            // local-up (radial-out from the homeworld), body +Y (nose)
-            // tangent to the surface roughly along the body's eastward
-            // direction. Matches the convention used by the EVA
-            // controller's `level_orientation`, so the player faces
-            // forward when they start walking.
-            let up = spawn_dir_inertial;
-            let east_seed = homeworld_state.orientation * DVec3::Y;
-            let east_tangent = (east_seed - up * east_seed.dot(up)).normalize();
-            let right = up.cross(east_tangent).normalize();
-            let basis = bevy::math::DMat3::from_cols(right, east_tangent, up);
-            simulation.set_attitude(AttitudeState {
-                orientation: DQuat::from_mat3(&basis),
-                angular_velocity: DVec3::ZERO,
-            });
-            // Start in `OnRails`: the brief Kepler arc holds the player
-            // up until `attach_terrain_patch_when_close` fires (the
-            // 500 m drop puts us well inside the AGL handoff band), at
-            // which point `manage_authority` hands translation to Avian
-            // and the terrain collider catches the fall.
+            // Vessel kind, parameters, and attitude were resolved per
+            // spawn mode above. For EVA, `ShipParameters::eva()` keeps the
+            // throttle / attitude-command pipes wired but motion-free so HUD
+            // readouts stay coherent; for a ship, the sentinel defaults are
+            // replaced by `spawn_player_ship` once `apollo.ron` loads.
+            simulation.set_vessel_kind(vessel_kind);
+            simulation.set_ship_params(ship_params);
+            simulation.set_attitude(attitude);
+            // Start in `OnRails` (the default coast authority). For an EVA
+            // surface spawn the brief Kepler arc holds the player up until
+            // `attach_terrain_patch_when_close` hands translation to Avian and
+            // the collider catches the fall; for a ship it is just the orbit.
             simulation.transition_authority(AuthorityMode::OnRails { trajectory: 0 });
             SimulationState {
                 simulation,
@@ -369,6 +408,7 @@ fn main() {
         .add_plugins(MapViewPlugin)
         .add_plugins(BridgePlugin)
         .add_plugins(FuelPlugin)
+        .add_plugins(staging::StagingPlugin)
         .add_plugins(EnginePlugin)
         .add_plugins(TargetPlugin)
         .add_plugins(FlightPlanViewPlugin)

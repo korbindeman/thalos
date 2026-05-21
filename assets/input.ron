@@ -14,6 +14,9 @@
                 "toggle_sas": [Key("KeyT")],
                 "throttle_full": [Key("KeyZ")],
                 "throttle_cut": [Key("KeyX")],
+                // KSP convention: Space stages. Time pause lives on the warp
+                // ladder instead — "," (warp_decrease) steps down into pause.
+                "stage": [Key("Space")],
             },
             axes: {
                 "pitch": (positive: [Key("KeyW")], negative: [Key("KeyS")]),
@@ -28,7 +31,6 @@
         warp: (
             bindings: {
                 "warp_to_maneuver": [Key("KeyG")],
-                "warp_pause": [Key("Space")],
                 "warp_increase": [Key("Period")],
                 "warp_decrease": [Key("Comma")],
                 "warp_reset": [Key("Backslash")],

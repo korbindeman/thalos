@@ -44,9 +44,11 @@ Controls:
 - `Z` full throttle
 - `X` cut throttle
 - `T` toggle SAS
-- `Space` pause or resume time
-- `.` / `,` increase or decrease time warp
+- `Space` stage (ignite the next stage's engines, jettison spent stages)
+- `.` increase time warp
+- `,` decrease time warp (steps down into pause below 1x)
 - `\` reset time warp to 1x
+- `Esc` pause menu
 - `M` toggle map view
 - `V` cycle ship camera mode
 - `F12` save a screenshot to `~/Desktop/thalos`

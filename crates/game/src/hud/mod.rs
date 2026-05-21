@@ -6,13 +6,12 @@
 //! - **Top-middle**: altitude + apoapsis / periapsis
 //! - **Bottom-left (navball cluster)**: navball + throttle arc
 //! - **Bottom-left (above navball)**: orbital velocity
-//! - **Bottom-right**: Δv estimate + fuel
+//! - **Bottom-right**: per-stage staging stack (Δv + fuel per stage)
 //! - **Bottom-left (beside navball)**: circular navigation panel
 //!
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
 
-mod delta_v_panel;
 mod flight_panel;
 mod format;
 mod fps_overlay;
@@ -20,6 +19,7 @@ pub mod input_gate;
 mod nav_attitude;
 mod nav_panel;
 mod orbital_panel;
+mod staging_panel;
 pub mod theme;
 mod view_mode_panel;
 mod warp_time_panel;
@@ -74,7 +74,7 @@ impl Plugin for HudPlugin {
                     nav_attitude::setup,
                     (warp_time_panel::setup, view_mode_panel::setup).chain(),
                     orbital_panel::setup,
-                    delta_v_panel::setup,
+                    staging_panel::setup,
                     flight_panel::setup.after(crate::navball::ui::setup_navball_ui),
                     fps_overlay::setup,
                 )
@@ -100,7 +100,7 @@ impl Plugin for HudPlugin {
                     view_mode_panel::update_button_visuals,
                     orbital_panel::update,
                     orbital_panel::handle_click,
-                    delta_v_panel::update,
+                    staging_panel::update,
                     flight_panel::update,
                     fps_overlay::update,
                     nav_panel::handle_clicks,

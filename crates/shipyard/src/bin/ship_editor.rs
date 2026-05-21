@@ -1768,11 +1768,10 @@ type InspectorQuery<'w, 's> = Query<
 >;
 
 fn draw_ship_stats(ui: &mut egui::Ui, stats: &ShipStats) {
+    // Δv is reported per-stage in the Staging panel (the whole-ship rocket
+    // equation is misleading for a multi-stage vessel), so it is not repeated
+    // here. `vacuum` is still used for the whole-ship burn-time line.
     let vacuum = stats.vacuum_delta_v();
-    ui.label(format!(
-        "Vacuum Δv: {}",
-        format_delta_v(vacuum.delta_v_m_per_s)
-    ));
     ui.label(format!("Wet mass: {}", format_mass_kg(stats.wet_mass_kg())));
     ui.label(format!("Dry mass: {}", format_mass_kg(stats.dry_mass_kg)));
     ui.label(format!(
@@ -1785,6 +1784,56 @@ fn draw_ship_stats(ui: &mut egui::Ui, stats: &ShipStats) {
     }
     if let Some(burn_s) = vacuum.burn_time_s {
         ui.label(format!("Full burn: {}", format_duration_s(burn_s)));
+    }
+}
+
+/// Per-stage Δv / fuel breakdown, one card per stage in firing order. Stages
+/// are derived from decoupler position (there is no authored stage list), so
+/// this is a readout — you reorder staging by moving decouplers in the part
+/// tree, not by dragging here. Tanks are previewed full.
+fn draw_staging(ui: &mut egui::Ui, summaries: &[StageSummary]) {
+    if summaries.is_empty() {
+        ui.label("(no stages)");
+        return;
+    }
+
+    let total_dv: f64 = summaries.iter().map(|s| s.delta_v_m_s).sum();
+    ui.label(format!("Total Δv: {}", format_delta_v(total_dv)));
+    ui.add_space(4.0);
+
+    for s in summaries {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong(format!("Stage {}", s.number));
+                ui.separator();
+                if s.has_engine {
+                    ui.label(format_delta_v(s.delta_v_m_s));
+                } else {
+                    ui.weak("drop only");
+                }
+            });
+            if s.fuel_kg > 0.0 {
+                ui.label(format!("Fuel: {}", format_mass_kg(s.fuel_kg)));
+            }
+            for res in thalos_shipyard::Resource::MASS_BEARING {
+                let Some(totals) = s.resources.get(&res) else {
+                    continue;
+                };
+                if totals.capacity <= 0.0 && totals.amount <= 0.0 {
+                    continue;
+                }
+                let frac = if totals.capacity > 0.0 {
+                    (totals.amount / totals.capacity).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .desired_height(8.0)
+                        .text(format!("{} {}", res.display_name(), format_mass_kg(totals.mass_kg))),
+                );
+            }
+        });
     }
 }
 
@@ -1846,18 +1895,20 @@ fn editor_ui(
     };
     let ctx = ctx.clone();
 
-    let ship_stats = {
+    // Collect the blueprint once; both the aggregate stats and the per-stage
+    // staging preview are projections of it.
+    let (ship_stats, stage_summaries) = {
         let collect_parts = part_queries.p1();
-        state
-            .ship_root
-            .and_then(|root| {
-                let ship = Ship {
-                    name: String::new(),
-                    root,
-                };
-                collect_blueprint(&ship, &collect_parts, &attachments)
-            })
-            .map(|bp| bp.stats(&catalog))
+        let blueprint = state.ship_root.and_then(|root| {
+            let ship = Ship {
+                name: String::new(),
+                root,
+            };
+            collect_blueprint(&ship, &collect_parts, &attachments)
+        });
+        let stats = blueprint.as_ref().map(|bp| bp.stats(&catalog));
+        let staging = blueprint.as_ref().map(|bp| bp.stage_summaries(&catalog));
+        (stats, staging)
     };
 
     // -------- Left palette --------
@@ -2113,6 +2164,29 @@ fn editor_ui(
             if ui.button("Delete part").clicked() {
                 state.delete_selected = true;
             }
+        });
+
+    // -------- Staging preview (right, left of the inspector) --------
+    egui::SidePanel::right("staging")
+        .resizable(true)
+        .default_width(210.0)
+        .show(&ctx, |ui| {
+            ui.heading("Staging");
+            ui.label(
+                egui::RichText::new("Derived from decoupler position")
+                    .small()
+                    .weak(),
+            );
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| match &stage_summaries {
+                Some(Ok(summaries)) => draw_staging(ui, summaries),
+                Some(Err(e)) => {
+                    ui.colored_label(egui::Color32::from_rgb(220, 110, 60), format!("{e}"));
+                }
+                None => {
+                    ui.label("(no ship)");
+                }
+            });
         });
 
     // -------- Bottom: ship hierarchy & placement picker --------

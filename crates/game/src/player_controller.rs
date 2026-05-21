@@ -47,6 +47,8 @@ pub struct PlayerControllerPlugin;
 impl Plugin for PlayerControllerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerControllerState>()
+            .init_resource::<EvaMode>()
+            .register_type::<EvaMode>()
             .add_systems(
                 Update,
                 (
@@ -99,6 +101,35 @@ pub struct PlayerControllerBody;
 
 #[derive(Component)]
 pub struct PlayerControllerVisual;
+
+/// Whether the EVA player is walking on terrain or coasting like a craft.
+///
+/// EVA is a full craft (KSP-style): it can stand on a surface or sit in
+/// orbit. The two regimes need opposite state flow, so this flag picks one:
+///
+/// - `Grounded`: [`walk_eva_on_terrain`] owns the capsule pose, gluing it to
+///   the rendered surface, and the canonical→Avian snap stands down.
+/// - `Airborne`: Kepler owns canonical translation and the snap drives the
+///   capsule from canonical (exactly like a ship coasting in vacuum); the
+///   walk controller stands down.
+///
+/// Set explicitly by the EVA teleport actions — surface teleports ground it,
+/// orbit teleports make it airborne. There is no automatic transition yet
+/// (walking off a cliff still snaps down the terrain as it always has).
+/// Defaults to `Grounded` to match the startup surface spawn.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[reflect(Resource)]
+pub enum EvaMode {
+    #[default]
+    Grounded,
+    Airborne,
+}
+
+impl EvaMode {
+    pub fn is_grounded(self) -> bool {
+        matches!(self, EvaMode::Grounded)
+    }
+}
 
 fn body_state_for(sim: &SimulationState, body_id: BodyId) -> BodyState {
     sim.ephemeris
@@ -190,6 +221,7 @@ fn register_eva_visual(
 fn refresh_player_controller_state(
     mut state: ResMut<PlayerControllerState>,
     sim: Res<SimulationState>,
+    active_bubble: Res<ActiveLocalBubble>,
     bodies: Query<&Position, With<PlayerControllerBody>>,
 ) {
     let Some(mut active) = state.active else {
@@ -199,6 +231,11 @@ fn refresh_player_controller_state(
         state.active = None;
         return;
     };
+    // Follow the bubble across SOI rebases and surface teleports so the
+    // height query and body-state lookup track the player to a new body.
+    if let Some(bubble) = active_bubble.bubble.as_ref() {
+        active.body_id = bubble.body_id;
+    }
     let body_state = body_state_for(&sim, active.body_id);
     active.inertial_position_m = body_state.position + position.0;
     state.active = Some(active);
@@ -235,6 +272,7 @@ fn walk_eva_on_terrain(
     time: Res<Time>,
     input: Res<GameInputIntent>,
     view: Res<ViewMode>,
+    eva_mode: Res<EvaMode>,
     state: Res<PlayerControllerState>,
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
@@ -249,6 +287,11 @@ fn walk_eva_on_terrain(
         With<PlayerControllerBody>,
     >,
 ) {
+    // Airborne (orbiting) EVA coasts on rails — `snap_avian_from_canonical`
+    // owns the capsule. Only the grounded controller walks on terrain.
+    if !eva_mode.is_grounded() {
+        return;
+    }
     let Some(active) = state.active else {
         return;
     };

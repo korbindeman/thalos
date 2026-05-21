@@ -11,18 +11,21 @@ use thalos_physics_canonical::{
     body_fixed::body_fixed_surface_velocity,
     canonical::{AuthorityMode, BodyFixedPose, TranslationalState},
     debug_orbits::debug_parking_orbit_state,
-    types::{AttitudeState, BodyDefinition, BodyId, BodyKind, BodyState, StateVector},
+    types::{AttitudeState, BodyDefinition, BodyId, BodyKind, BodyState, StateVector, VesselKind},
 };
-use thalos_physics_local::{ActiveLocalBubble, TerrainSurfaceRegistry};
+use thalos_physics_local::avian::{AngularVelocity, LinearVelocity, Position, Rotation};
+use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody, TerrainSurfaceRegistry};
 use thalos_terrain_render::rendered_height_m;
 
 use crate::camera::{ActiveCamera, MapCamera};
 use crate::coords::MAP_SCALE;
 use crate::fuel::ThrottleState;
+use crate::local_physics::place_eva_on_surface;
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::navigation::SHIP_NOSE_BODY;
 use crate::pause_menu::not_game_paused;
 use crate::photo_mode::not_in_photo_mode;
+use crate::player_controller::EvaMode;
 use crate::rendering::{CelestialBody, SimulationState, SolarSystemState};
 use crate::target::TargetBody;
 use crate::view::{ViewMode, in_map_view};
@@ -30,6 +33,11 @@ use crate::view::{ViewMode, in_map_view};
 /// Debug surface drops park the craft slightly above terrain, then hold it in
 /// body-fixed authority until the player throttles up.
 pub const DEBUG_LAUNCH_MOUNT_HEIGHT_M: f64 = 18.0;
+
+/// EVA surface teleports plant the capsule a couple of metres above the
+/// rendered terrain; `walk_eva_on_terrain` re-glues it exactly on the next
+/// frame, so this is just a safe initial clearance on steep terrain.
+const EVA_SURFACE_CLEARANCE_M: f64 = 2.0;
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct DebugMode {
@@ -214,11 +222,21 @@ fn commit_debug_surface_teleport(
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
     mut sim: ResMut<SimulationState>,
     mut launch_mount: ResMut<DebugLaunchMount>,
+    mut eva_mode: ResMut<EvaMode>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
     mut target: ResMut<TargetBody>,
     mut view: ResMut<ViewMode>,
     mut throttle: ResMut<ThrottleState>,
+    mut craft_q: Query<
+        (
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        With<LocalCraftBody>,
+    >,
 ) {
     if !debug.enabled || teleport.armed_body.is_none() {
         return;
@@ -259,34 +277,70 @@ fn commit_debug_surface_teleport(
         hit.body_id,
         thalos_physics_canonical::canonical::Epoch(sim_time),
     );
-    clear_active_local_bubble(&mut commands, &mut active_bubble);
-    let (state, attitude) = surface_spawn_state(
-        &body,
-        &body_state,
-        hit.dir_body,
-        hit.surface_height_m,
-        DEBUG_LAUNCH_MOUNT_HEIGHT_M,
-    );
-    let pose =
-        body_fixed_pose_from_inertial(&body_state, TranslationalState::from(state), attitude);
 
-    sim.simulation
-        .transition_authority(AuthorityMode::BodyFixed {
+    if sim.simulation.vessel_kind() == VesselKind::Eva {
+        // EVA keeps its persistent bubble: rewrite the capsule in place,
+        // ground it, and let `walk_eva_on_terrain` glue it to the surface.
+        let (state, attitude) = surface_spawn_state(
+            &body,
+            &body_state,
+            hit.dir_body,
+            hit.surface_height_m,
+            EVA_SURFACE_CLEARANCE_M,
+        );
+        if let Some(active) = active_bubble.as_mut()
+            && let Some(bubble) = active.bubble.as_mut()
+            && let Ok((mut position, mut rotation, mut linear_velocity, mut angular_velocity)) =
+                craft_q.get_mut(bubble.craft_entity)
+        {
+            place_eva_on_surface(
+                &mut commands,
+                &mut sim,
+                &mut eva_mode,
+                bubble,
+                (
+                    &mut position,
+                    &mut rotation,
+                    &mut linear_velocity,
+                    &mut angular_velocity,
+                ),
+                hit.body_id,
+                TranslationalState::from(state),
+                attitude,
+            );
+        }
+        launch_mount.active = None;
+    } else {
+        // Ships drop onto a launch clamp in body-fixed authority, respawning
+        // their bubble from scratch.
+        clear_active_local_bubble(&mut commands, &mut active_bubble);
+        let (state, attitude) = surface_spawn_state(
+            &body,
+            &body_state,
+            hit.dir_body,
+            hit.surface_height_m,
+            DEBUG_LAUNCH_MOUNT_HEIGHT_M,
+        );
+        let pose =
+            body_fixed_pose_from_inertial(&body_state, TranslationalState::from(state), attitude);
+        sim.simulation.transition_authority(AuthorityMode::BodyFixed {
             body: hit.body_id,
             pose,
         });
-    sim.simulation.set_ship_state(state);
-    sim.simulation.set_attitude(attitude);
+        sim.simulation.set_ship_state(state);
+        sim.simulation.set_attitude(attitude);
+        sim.simulation.warp.reset();
+        launch_mount.active = Some(DebugLaunchMountState {
+            body_id: hit.body_id,
+            pose,
+        });
+    }
+
     sim.simulation.set_target_body(Some(hit.body_id));
     sim.simulation.set_throttle(0.0);
-    sim.simulation.warp.reset();
     target.target = Some(hit.body_id);
     throttle.commanded = 0.0;
     throttle.effective = 0.0;
-    launch_mount.active = Some(DebugLaunchMountState {
-        body_id: hit.body_id,
-        pose,
-    });
     clear_debug_teleport_maneuvers(&mut plan, &mut selected);
     *view = ViewMode::Ship;
     teleport.cancel();

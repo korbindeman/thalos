@@ -19,6 +19,7 @@ pub mod part;
 pub mod recompute;
 pub mod resource;
 pub mod sizing;
+pub mod staging;
 pub mod stats;
 
 pub use attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
@@ -34,9 +35,13 @@ pub use part::{
     ShroudProvider, Shroudable,
 };
 pub use resource::{PartResources, Resource, ResourcePool};
+pub use staging::{
+    PartRole, StageIndices, StageSummary, SummaryEngine, SummaryPart, SummaryStageInput,
+    compute_stage_summaries, derive_stages,
+};
 pub use stats::{
     DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals, ShipStats,
-    aggregate_resource_totals, estimate_delta_v,
+    aggregate_resource_totals, cylinder_principal_inertia, estimate_delta_v, parallel_axis_inertia,
 };
 
 pub struct ShipyardPlugin;

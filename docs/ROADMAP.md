@@ -151,6 +151,21 @@ with warp clamping. Warp force integration for finite burns + drag +
 attitude. Plus ship complexity: staging, radial attachment,
 surface-to-orbit ascent vehicles, possibly atmospheric planes.
 
+- **Staging first slice (landed):** KSP-style staging in
+  `crates/game/src/staging.rs`, with stages auto-derived from decoupler
+  topology (no authored stage list). The stage key (default `C` —
+  `Space` is taken by warp-pause) ignites the current stage's engines
+  and fires its decouplers, dropping each one's attach subtree. Engines
+  start cold; staging owns ignition. Separation is **mass-drop only**:
+  the jettisoned subtree is despawned and the craft's aggregates heal
+  from the surviving live parts (mass/thrust via `fuel.rs`, inertia via
+  `recompute_ship_inertia`). It is modelled as a graph cut so the later
+  move to real debris / multi-craft control (a separated subtree
+  becoming a controllable craft with a command pod, else debris) reuses
+  the same computation. **Known gap:** the in-bubble Avian collider +
+  contact mass are not rebuilt after a low-altitude stage — motion stays
+  correct, but terrain contact after in-bubble staging sees a stale
+  shape. Test vehicle: `ships/saturn.ron`.
 - **Spec preview:** [simulation.md](simulation.md), Implementation
   Phase 6 + atmospheric regime section. Ship-parts spec spun out when
   the design is concrete.

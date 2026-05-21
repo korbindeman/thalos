@@ -357,21 +357,8 @@ impl ShipBlueprint {
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
             let m = part_total_mass(pb, entry);
             let (r, l) = part_cylinder_dims(entry, &pb.params, geo[i].diameter);
-            // Solid cylinder, long axis = body Y:
-            //   I_yy = m·r²/2
-            //   I_xx = I_zz = m·(3r² + L²)/12
-            let i_yy_self = m * r * r * 0.5;
-            let i_xz_self = m * (3.0 * r * r + l * l) / 12.0;
-
-            let d = geo[i].position - com;
-            let par = DVec3::new(
-                m * (d.y * d.y + d.z * d.z),
-                m * (d.x * d.x + d.z * d.z),
-                m * (d.x * d.x + d.y * d.y),
-            );
-
             moment_of_inertia_kg_m2 +=
-                DVec3::new(i_xz_self + par.x, i_yy_self + par.y, i_xz_self + par.z);
+                cylinder_principal_inertia(m, r, l) + parallel_axis_inertia(m, geo[i].position - com);
         }
 
         Ok(ShipStats {
@@ -603,6 +590,35 @@ fn part_cylinder_dims(entry: &CatalogEntry, params: &PartParams, effective_d: f3
     (r, l)
 }
 
+/// Principal-axis moment of inertia of a solid cylinder about its own
+/// centre of mass, with the long axis along body Y. Returned as the
+/// diagonal `(I_xx, I_yy, I_zz)` in kg·m²:
+///
+///   I_yy = m·r²/2            (about the long axis)
+///   I_xx = I_zz = m·(3r² + L²)/12
+///
+/// This is the single home for the per-part inertia model. Both the
+/// blueprint aggregation in [`ShipBlueprint::stats`] and the game's
+/// live, per-frame recompute after a stage drops feed it the same way,
+/// so spawn-time and post-staging MOI never disagree on the model.
+pub fn cylinder_principal_inertia(mass_kg: f64, radius_m: f64, length_m: f64) -> DVec3 {
+    let i_long = mass_kg * radius_m * radius_m * 0.5;
+    let i_trans = mass_kg * (3.0 * radius_m * radius_m + length_m * length_m) / 12.0;
+    DVec3::new(i_trans, i_long, i_trans)
+}
+
+/// Parallel-axis term for a part of mass `mass_kg` whose centre sits at
+/// body-frame `offset_m` from the ship CoM, in kg·m² on each principal
+/// axis. Add to [`cylinder_principal_inertia`] to shift a part's self
+/// inertia onto the ship axes.
+pub fn parallel_axis_inertia(mass_kg: f64, offset_m: DVec3) -> DVec3 {
+    DVec3::new(
+        mass_kg * (offset_m.y * offset_m.y + offset_m.z * offset_m.z),
+        mass_kg * (offset_m.x * offset_m.x + offset_m.z * offset_m.z),
+        mass_kg * (offset_m.x * offset_m.x + offset_m.y * offset_m.y),
+    )
+}
+
 fn part_total_mass(pb: &PartBlueprint, entry: &CatalogEntry) -> f64 {
     let dry = part_dry_mass(entry, &pb.params) as f64;
     // Compose pools to get capacities + amounts in step. Mass uses the
@@ -612,7 +628,7 @@ fn part_total_mass(pb: &PartBlueprint, entry: &CatalogEntry) -> f64 {
     dry + prop
 }
 
-fn part_dry_mass(entry: &CatalogEntry, params: &PartParams) -> f32 {
+pub(crate) fn part_dry_mass(entry: &CatalogEntry, params: &PartParams) -> f32 {
     match (entry, params) {
         (CatalogEntry::Pod(p), _) => p.dry_mass,
         (CatalogEntry::Engine(e), _) => e.dry_mass,
