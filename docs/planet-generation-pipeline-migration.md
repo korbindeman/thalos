@@ -274,6 +274,41 @@ per-body bakes). All five increments landed:
   tiebreak, range-queried by influence radius.
 - Land the **scatter** stream (fills the P0 stub) and a minimal scatter
   renderer in `terrain_render`.
+
+  > **Scope + pattern note (fernweh).** Scatter is *only*
+  > `SurfaceInstance` features — discrete objects resting **on** the
+  > surface (boulders, vegetation, debris, structures). Terrain-shaping
+  > features (craters, volcanoes, rifts, mesas) are `TerrainModification`
+  > and belong in the band-limited heightfield via the feature compositor
+  > in the bullet above — they are **never** spawned as entities (spawning
+  > them would duplicate geometry and break the one-surface mesh=collider
+  > invariant). Within scatter, two paths:
+  >
+  > - **Dense** (grass, pebbles) → GPU compute instancing, not ECS
+  >   entities (spec §11). The pattern below does *not* apply.
+  > - **Sparse, large, collidable** (boulders with colliders, structures)
+  >   → ECS entities. For these, and for per-instance collider windowing
+  >   (spec §9), lift the windowed-reconciliation pattern from
+  >   [fernweh](https://codeberg.org/glocq/fernweh) — the *pattern*, not
+  >   the dependency (it's Bevy-coupled, on a 0.19-rc vs our 0.18, and
+  >   ~110 lines; reimplement on our terms). Each frame: diff the desired
+  >   region set against (pending tasks ∪ spawned entities) → spawn
+  >   missing, despawn extra; **cancel an in-flight task by dropping it**
+  >   when its region leaves the window; hold pending tasks in a `Local`
+  >   map and `poll_once` them; the async task produces a spawnable
+  >   description and the main thread instantiates it; tag each spawned
+  >   root with its id.
+  >
+  > Adapt, don't copy the toy: our neighbourhoods are cube-sphere caps /
+  > resident-tile regions (not a flat grid); add **hysteresis** (outer
+  > despawn radius > inner spawn radius) so camera jitter at a boundary
+  > doesn't thrash; add scatter LOD (distance fade / instance-count); and
+  > watch the O(N)-per-frame full-set rebuild at high instance counts.
+  > Their "superchunk = enum variant" trick applies only to a *single
+  > entity* large enough to span scatter tiles (a multi-tile structure),
+  > never to terrain features. Runevision's **LayerProcGen** docs are a
+  > good read on layered generation before building this.
+
 - **Cut bodies over one at a time** behind the Query API: Mira →
   Vaelen → Thalos → Pelagos. Each cutover retires that body's old
   archetype stage and folds terrain.md's archetype/v2-backlog work
