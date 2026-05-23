@@ -627,14 +627,33 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let external_shadow = local_craft_shadow(hit_ws, sun_dir_ws);
     // P2A temporary terrain lighting: keep the ground LOD visually stable
     // while the full Hapke + aerial-perspective path is being reworked for
-    // near-surface views. Use mostly the atlas/detail normal with a moderate
-    // sky floor so terrain has readable relief without dropping back into the
-    // harsh Hapke grazing-angle bands that motivated this simpler path.
+    // near-surface views. Use mostly the atlas/detail normal with a sky fill
+    // that tracks the sun's elevation, so terrain has readable relief without
+    // dropping back into the harsh Hapke grazing-angle bands that motivated
+    // this simpler path.
     let stable_normal = normalize(mix(geo_normal, normal, 0.85));
+
+    // Direct sunlight: relief-aware, fades to zero across the terminator.
     let geo_n_dot_l = dot(stable_normal, sun_dir_ws);
     let direct = smoothstep(-0.10, 0.78, geo_n_dot_l) * external_shadow;
-    let sky_floor = 0.28;
-    let lit = albedo.rgb * (sky_floor * material.occlusion + direct * 0.64);
+
+    // Sky fill (diffuse skylight). A constant ambient floor used to light the
+    // night side as brightly as a hazy daytime shadow. Real skylight only
+    // exists while the sun illuminates the atmosphere, so drive the fill by the
+    // sun's elevation over the *macro* horizon (geometric normal, not the
+    // relief normal) and let it fade to a faint starlight floor at night. The
+    // daytime level is well under the old 0.28 floor so the overhead-sun case
+    // stops washing the flat ground out into the tonemapper's grey shoulder; a
+    // gentle cool tint stands in for blue-sky scatter and keeps daylight
+    // shadows from reading as flat grey.
+    let sun_elevation = dot(geo_normal, sun_dir_ws);
+    let daylight = smoothstep(-0.06, 0.12, sun_elevation);
+    let night_fill = 0.012;
+    let day_fill = 0.15;
+    let fill = mix(night_fill, day_fill, daylight) * material.occlusion;
+    let sky_tint = mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.74, 1.0), 0.25 * daylight);
+
+    let lit = albedo.rgb * (sky_tint * fill + direct * 0.62);
 
     var output: FragmentOutput;
     output.color = vec4<f32>(lit, albedo.a);

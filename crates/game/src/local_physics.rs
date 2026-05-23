@@ -391,11 +391,61 @@ fn spawn_player_avian_body(
         };
         let body = &sim.system.bodies[body_id];
         let sun_dir_inertial = (-body_state.position).normalize_or_zero();
-        let dir_body_fixed = if sun_dir_inertial == DVec3::ZERO {
+        let mut dir_body_fixed = if sun_dir_inertial == DVec3::ZERO {
             DVec3::Y
         } else {
             (body_state.orientation.inverse() * sun_dir_inertial).normalize()
         };
+        // EVA drop-site selection, searching the daylight hemisphere near the
+        // sub-stellar point:
+        //   default / `plain` → flattest usable plain (the intended on-foot start),
+        //   `relief`          → highest-relief hill site (terrain inspection),
+        //   `substellar`      → exact sub-stellar point (legacy behaviour).
+        let eva_site = std::env::var("THALOS_EVA_SITE").ok();
+        if eva_site.as_deref() != Some("substellar") {
+            let seek_hills = eva_site.as_deref() == Some("relief");
+            let up = if dir_body_fixed.y.abs() > 0.99 {
+                DVec3::X
+            } else {
+                DVec3::Y
+            };
+            let east = up.cross(dir_body_fixed).normalize();
+            let north = dir_body_fixed.cross(east);
+            let probe = 3_000.0 / body.radius_m; // ~3 km cross, in radians
+            let h = |d: DVec3| {
+                height_source
+                    .sample_height_m(d.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+                    .unwrap_or(0.0) as f64
+            };
+            let n = 24i32;
+            let mut best_dir = dir_body_fixed;
+            let mut best_score = f64::NEG_INFINITY;
+            let mut best_relief = 0.0f64;
+            for iy in -n..=n {
+                for ix in -n..=n {
+                    // Offsets within ~50° of the sub-stellar point keep the site lit.
+                    let ax = (ix as f64 / n as f64) * 0.9;
+                    let ay = (iy as f64 / n as f64) * 0.9;
+                    let cand = (dir_body_fixed + east * ax + north * ay).normalize();
+                    let relief = (h((cand + east * probe).normalize())
+                        - h((cand - east * probe).normalize()))
+                    .abs()
+                        + (h((cand + north * probe).normalize())
+                            - h((cand - north * probe).normalize()))
+                        .abs();
+                    // Maximise relief for hills, minimise it for a usable plain.
+                    let score = if seek_hills { relief } else { -relief };
+                    if score > best_score {
+                        best_score = score;
+                        best_relief = relief;
+                        best_dir = cand;
+                    }
+                }
+            }
+            dir_body_fixed = best_dir;
+            let kind = if seek_hills { "hill" } else { "plain" };
+            eprintln!("EVA {kind} site selected (relief proxy {best_relief:.0} m)");
+        }
         let terrain_h = height_source
             .sample_height_m(dir_body_fixed.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
             .unwrap_or(0.0) as f64;

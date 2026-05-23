@@ -8,7 +8,7 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use crate::noise::{fbm3, hmf_ridged_3d};
+use crate::noise::{eroded_ridged_3d, fbm3};
 use crate::seeding::splitmix64;
 use crate::surface_field::{
     BiomeMix, SurfaceField, SurfaceFieldSample, SurfaceMaterialMix, smoothstep,
@@ -98,6 +98,27 @@ impl SurfaceField for BasicContinentalField {
     }
 }
 
+/// Broad continental swell plus the `0..1` relief-control field that decides
+/// where the surface reads as flat plain (`0`) versus eroded hill country (`1`).
+///
+/// Shared by the height and roughness evaluators so they agree on the
+/// plains/hills split. The control field is its *own* low-frequency noise (not
+/// just an elevation threshold) so plains and hills interleave irregularly; a
+/// light elevation bias keeps uplands a touch rougher than basins without the
+/// split simply tracking altitude.
+fn continental_relief(params: BasicContinentalParams, p_m: Vec3, lod_m: f32) -> (f32, f32) {
+    let macro_n = fbm3_band(p_m, 1_250_000.0, params.seed_macro, 5, lod_m);
+    let regional_n = fbm3_band(p_m, 360_000.0, params.seed_regional, 5, lod_m);
+    let continent = macro_n * 0.62 + regional_n * 0.30;
+
+    let control_n = fbm3_band(p_m, 240_000.0, params.seed_hills, 4, lod_m);
+    // Bias the onset hard toward plains: most of the surface should be genuine,
+    // usable plains, with hill country a clear minority. The weak continental
+    // coupling keeps hills from blanketing every upland.
+    let relief_control = smoothstep(0.18, 0.55, control_n * 0.88 + continent * 0.18);
+    (continent, relief_control)
+}
+
 fn sample_basic_continental_height_m(
     params: BasicContinentalParams,
     radius_m: f32,
@@ -113,60 +134,44 @@ fn sample_basic_continental_height_m(
     let relief = params.relief_scale_m;
     let lod_m = sample_scale_m.max(1.0);
 
-    let macro_n = fbm3_band(p_m, 1_250_000.0, params.seed_macro, 5, lod_m);
-    let regional_n = fbm3_band(p_m, 360_000.0, params.seed_regional, 5, lod_m);
-    let hills_n = fbm3_band(p_m, 95_000.0, params.seed_hills, 4, lod_m);
+    // Broad continental shape + where the terrain is dissected vs flat.
+    let (continent, relief_control) = continental_relief(params, p_m, lod_m);
 
-    // Smooth ridge-lines for local mountains. This uses the same continuous
-    // noise primitive as the rest of the field; there is no stepped Voronoi or
-    // positive-only legacy uplift here.
-    let mountain_weight = band_weight(42_000.0, lod_m);
-    let ridge = hmf_ridged_3d(p_m / 42_000.0, params.seed_mountains, 4.0, 0.52, 2.0, 0.98);
-    let uplift_mask = smoothstep(-0.15, 0.58, macro_n * 0.65 + regional_n * 0.35);
-    let mountains = ridge * uplift_mask * mountain_weight;
+    // The visible relief is spent at *small* wavelengths so slopes actually
+    // read as hills/scarps rather than continental swells. Two eroded bands,
+    // both squared-ridge swiss turbulence (sharp crests, slope-damped flat
+    // valley floors), gated entirely by the relief control so plains stay flat:
+    //
+    // - a broad highland swell (~55 km) the hills sit on, and
+    // - steep hills (~3 km base, octaves down to ~40 m) that carry most of the
+    //   amplitude — this is the band that makes the terrain read as hill
+    //   country instead of a gentle dome.
+    let swell_wl_m = 55_000.0;
+    let swell = eroded_ridged_3d(p_m / swell_wl_m, params.seed_mountains, 5, 0.5, 2.0, 1.0)
+        * band_weight(swell_wl_m, lod_m);
 
-    let fine_weight = band_weight(9_000.0, lod_m);
-    let fine_n = fbm3(
-        p_m.x / 9_000.0,
-        p_m.y / 9_000.0,
-        p_m.z / 9_000.0,
-        params.seed_fine,
-        3,
-        0.50,
-        2.03,
-    ) * fine_weight;
+    let hill_wl_m = 3_200.0;
+    let hills = eroded_ridged_3d(
+        p_m / hill_wl_m,
+        params.seed_mountains ^ 0x5151_3737,
+        7,
+        0.5,
+        2.08,
+        1.6,
+    ) * band_weight(hill_wl_m, lod_m);
 
-    let undulation_weight = band_weight(1_800.0, lod_m);
-    let undulation_n = fbm3(
-        p_m.x / 1_800.0,
-        p_m.y / 1_800.0,
-        p_m.z / 1_800.0,
-        params.seed_fine ^ 0x8D27_6B45,
-        3,
-        0.48,
-        2.11,
-    ) * undulation_weight;
+    let hill_h = (swell * 0.28 + hills * 0.50) * relief_control;
 
-    let texture_weight = band_weight(420.0, lod_m);
-    let texture_n = fbm3(
-        p_m.x / 420.0,
-        p_m.y / 420.0,
-        p_m.z / 420.0,
-        params.seed_fine ^ 0xC36E_1A91,
-        2,
-        0.45,
-        2.17,
-    ) * texture_weight;
+    // Gentle rolling base — present everywhere (plains *and* hills) at low
+    // amplitude, so genuine plains read as softly rolling, usable ground rather
+    // than a dead-flat plane. Two wavelengths plus fine texture; slopes stay a
+    // few degrees so plains remain landable and walkable.
+    let roll_lo = fbm3_band(p_m, 4_000.0, params.seed_fine ^ 0x9E37_79B9, 3, lod_m);
+    let roll_hi = fbm3_band(p_m, 1_300.0, params.seed_fine ^ 0x2545_F491, 3, lod_m);
+    let texture_n = fbm3_band(p_m, 320.0, params.seed_fine ^ 0xC36E_1A91, 2, lod_m);
+    let rolling = roll_lo * 0.040 + roll_hi * 0.014 + texture_n * 0.006;
 
-    let height_m = relief
-        * (0.86
-            + macro_n * 0.42
-            + regional_n * 0.22
-            + hills_n * 0.10
-            + mountains * 0.50
-            + fine_n * 0.055
-            + undulation_n * 0.055
-            + texture_n * 0.014);
+    let height_m = relief * (0.92 + continent * 0.42 + hill_h + rolling);
     height_m.max(120.0)
 }
 
@@ -178,11 +183,10 @@ fn roughness_at(
 ) -> f32 {
     let p_m = dir.normalize_or_zero() * radius_m.max(1.0);
     let lod_m = sample_scale_m.max(1.0);
-    let hills = fbm3_band(p_m, 95_000.0, params.seed_hills, 4, lod_m).abs();
-    let ridge = hmf_ridged_3d(p_m / 42_000.0, params.seed_mountains, 4.0, 0.52, 2.0, 0.98);
+    let (_continent, relief_control) = continental_relief(params, p_m, lod_m);
     let local = fbm3_band(p_m, 1_800.0, params.seed_fine ^ 0x8D27_6B45, 3, lod_m).abs();
-    (0.76 + hills * 0.06 + ridge * band_weight(42_000.0, lod_m) * 0.08 + local * 0.04)
-        .clamp(0.62, 0.94)
+    // Hill country reads rougher than the plains.
+    (0.74 + relief_control * 0.12 + local * 0.04).clamp(0.62, 0.95)
 }
 
 fn fbm3_band(p_m: Vec3, wavelength_m: f32, seed: u32, octaves: u32, lod_m: f32) -> f32 {

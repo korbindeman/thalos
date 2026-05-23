@@ -314,3 +314,51 @@ pub fn hmf_ridged_3d(
     let norm = (1.0 - pf) / (1.0 - persistence) + frac * pf;
     if norm > 0.0 { result / norm } else { 0.0 }
 }
+
+/// "Swiss"/erosion-style ridged turbulence — an analytic stand-in for hydraulic
+/// erosion that runs per-point with no heightfield or neighbour lookups.
+///
+/// Two effects combine to break fBm's blobby symmetry:
+/// 1. **Squared ridges.** Each octave contributes `(1 - |noise|)²`, which
+///    concentrates signal at noise zero-crossings into sharp convex crests
+///    rather than rounded domes.
+/// 2. **Slope damping.** Each octave is scaled by `1 / (1 + strength · |∇|²)`
+///    using the *accumulated* gradient of the lower octaves, so detail
+///    collapses on already-steep faces. The result is sharp ridgelines with
+///    broad, flat valley floors — the asymmetry [`fbm3`] and [`hmf_ridged_3d`]
+///    lack, and the reason real eroded terrain reads differently from noise.
+///
+/// `p` is pre-divided by the base wavelength (octave 0 sees `p` directly).
+/// `erosion_strength` controls how aggressively slope suppresses detail: `0`
+/// recovers an undamped squared-ridge sum; `~1–4` give visibly eroded terrain.
+/// Output is normalised to roughly `[0, 1]` (0 = valley floor, 1 = crest), and
+/// the field is C⁰-continuous so tile borders agree bit-for-bit when sampled
+/// from either side.
+pub fn eroded_ridged_3d(
+    p: Vec3,
+    seed: u32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    erosion_strength: f32,
+) -> f32 {
+    let mut sum = 0.0f32;
+    let mut amp = 1.0f32;
+    let mut freq = 1.0f32;
+    let mut norm = 0.0f32;
+    let mut grad = Vec3::ZERO;
+    for o in 0..octaves {
+        let osub = pcg_u32(seed.wrapping_add(o));
+        let nd = value_noise_3d_derivative(p.x * freq, p.y * freq, p.z * freq, osub);
+        // Accumulate the value-noise gradient (chain rule for the per-octave
+        // frequency scaling) and damp this octave by the running slope.
+        grad += nd.derivative * (amp * freq);
+        let damp = 1.0 / (1.0 + erosion_strength * grad.length_squared());
+        let ridge = 1.0 - nd.value.abs();
+        sum += amp * ridge * ridge * damp;
+        norm += amp;
+        amp *= persistence;
+        freq *= lacunarity;
+    }
+    if norm > 0.0 { sum / norm } else { 0.0 }
+}

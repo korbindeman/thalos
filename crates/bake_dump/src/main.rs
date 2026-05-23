@@ -59,7 +59,7 @@ use thalos_terrain::{
     FeatureProjectionConfig, PlanetSurface, PlateKind, TerrainCompileContext,
     TerrainCompileOptions, TerrainConfig, compile_dynamic_surface_layers,
     compile_static_terrain_config, compile_tectonics_from_config, generate_initial_manifest,
-    surface_normal, surface_sample,
+    surface_height_m, surface_normal, surface_sample,
 };
 
 // ---------------------------------------------------------------------------
@@ -86,6 +86,15 @@ struct Args {
     /// production PBR set. Off by default — production bakes ship only the
     /// four cubemaps the impostor consumes.
     debug: bool,
+    /// Render ground-scale shaded-relief *patches* of the runtime walkable
+    /// height (`surface_height_m`) instead of the global cubemap dumps. Fast
+    /// iteration on the close-up terrain character that the equirect dumps are
+    /// too coarse to show. Writes to `stage-bakes/<body>/patch/`.
+    patch: bool,
+    /// Explicit patch centre `(lat_deg, lon_deg)`. When absent, the patch path
+    /// auto-scans for a high-relief, low-latitude spot so hill country is in
+    /// frame.
+    center: Option<(f32, f32)>,
 }
 
 /// Cubemap face resolution used in preview mode. Matches the long-standing
@@ -121,6 +130,8 @@ fn parse_args() -> Args {
     let mut force = false;
     let mut equirect_width: u32 = 512;
     let mut debug = false;
+    let mut patch = false;
+    let mut center: Option<(f32, f32)> = None;
 
     let mut i = 0;
     while i < raw.len() {
@@ -141,6 +152,13 @@ fn parse_args() -> Args {
                 equirect_width = raw[i].parse().expect("--equirect-width needs an integer");
             }
             "--debug" => debug = true,
+            "--patch" => patch = true,
+            "--center" => {
+                let lat = raw[i + 1].parse().expect("--center needs: lat_deg lon_deg");
+                let lon = raw[i + 2].parse().expect("--center needs: lat_deg lon_deg");
+                center = Some((lat, lon));
+                i += 2;
+            }
             s if s.starts_with("--") => panic!("unknown flag: {s}"),
             s if body_name.is_none() => body_name = Some(s.to_string()),
             s => panic!("unexpected positional arg: {s}"),
@@ -158,6 +176,8 @@ fn parse_args() -> Args {
         force,
         equirect_width,
         debug,
+        patch,
+        center,
     }
 }
 
@@ -192,6 +212,18 @@ fn main() {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("assets"));
     let system = load_solar_system_from_dir(root_path).expect("parsing solar system");
+
+    // Patch mode: ground-scale shaded-relief renders of a single body, then
+    // out. Does not touch the cubemap dumps or local bakes.
+    if args.patch {
+        let body = system
+            .bodies
+            .iter()
+            .find(|b| b.name.eq_ignore_ascii_case(&args.body_arg))
+            .unwrap_or_else(|| panic!("body '{}' not found", args.body_arg));
+        run_patch(body, &args, &gpu);
+        return;
+    }
 
     let targets: Vec<&thalos_physics_canonical::types::BodyDefinition> =
         if args.body_arg.eq_ignore_ascii_case("all") {
@@ -838,6 +870,205 @@ fn dump_info(surface: &PlanetSurface, route: &str, out: &Path) {
         }
     }
     fs::write(out.join("info.txt"), s).expect("writing info.txt");
+}
+
+// ---------------------------------------------------------------------------
+// Patch hillshade (ground-scale shaded relief)
+// ---------------------------------------------------------------------------
+
+/// Compile the body's surface at preview resolution. The runtime walkable
+/// height (`surface_height_m`) is analytic for `BasicContinental` bodies and
+/// doesn't read the cube, so preview resolution is plenty for patch renders.
+fn compile_surface_preview(
+    body: &thalos_physics_canonical::types::BodyDefinition,
+    gpu: &gpu::GpuContext,
+) -> PlanetSurface {
+    let context = terrain_context(body);
+    let options = TerrainCompileOptions {
+        crater_count_scale: 1.0,
+        cubemap_resolution_override: Some(PREVIEW_CUBEMAP_RESOLUTION),
+    };
+    let dynamic_layers =
+        compile_dynamic_surface_layers(&body.terrain, &context).expect("compiling dynamic layers");
+    let tectonics = compile_tectonics_from_config(body.tectonics.as_ref(), &context);
+    let device = gpu.device.clone();
+    let queue = gpu.queue.clone();
+    let mid_freq: Option<thalos_terrain::stages::MidFreqRunner> = Some(Box::new(
+        move |height: &mut thalos_terrain::cubemap::Cubemap<f32>,
+              radius_m: f32,
+              params: &thalos_terrain::stages::MidFreqDetailParams|
+              -> Result<(), String> {
+            gpu::run_mid_freq(&device, &queue, height, radius_m, params).map_err(|e| e.to_string())
+        },
+    ));
+    let static_surface = compile_static_terrain_config(
+        &body.terrain,
+        tectonics.as_ref(),
+        &context,
+        options,
+        mid_freq,
+    )
+    .expect("compiling static surface");
+    PlanetSurface {
+        static_surface,
+        dynamic_layers,
+        tectonics,
+    }
+}
+
+fn latlon_to_dir(lat_deg: f32, lon_deg: f32) -> Vec3 {
+    let (sl, cl) = lat_deg.to_radians().sin_cos();
+    let (sln, cln) = lon_deg.to_radians().sin_cos();
+    Vec3::new(cl * sln, sl, cl * cln).normalize()
+}
+
+fn dir_to_latlon(dir: Vec3) -> (f32, f32) {
+    (
+        dir.y.clamp(-1.0, 1.0).asin().to_degrees(),
+        dir.x.atan2(dir.z).to_degrees(),
+    )
+}
+
+/// East/north tangent unit vectors at a surface direction.
+fn tangent_basis(dir: Vec3) -> (Vec3, Vec3) {
+    let up_ref = if dir.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+    let east = up_ref.cross(dir).normalize();
+    let north = dir.cross(east);
+    (east, north)
+}
+
+/// Scan low-latitude directions and return the one with the highest local
+/// relief, so the auto-centred patch lands in hill country rather than on a
+/// plain. Relief proxy: max−min of `surface_height_m` over a small cross at
+/// ±`probe_m` around each candidate.
+fn auto_find_relief_center(surface: &PlanetSurface) -> Vec3 {
+    let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+    let radius = surface.static_surface.radius_m;
+    let probe_m = 4_000.0;
+    let n = 6000usize;
+    let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+
+    let (best, _) = (0..n)
+        .into_par_iter()
+        .map(|k| {
+            let lat = ((k as f32 + 0.5) / n as f32 - 0.5) * 2.0 * 45.0; // -45..45°
+            let lon = ((k as f32) * golden).to_degrees().rem_euclid(360.0) - 180.0;
+            let dir = latlon_to_dir(lat, lon);
+            let (east, north) = tangent_basis(dir);
+            let base = dir * radius;
+            let h = |off: Vec3| surface_height_m(surface, &state, (base + off).normalize(), 0.5);
+            let s = [
+                h(Vec3::ZERO),
+                h(east * probe_m),
+                h(-east * probe_m),
+                h(north * probe_m),
+                h(-north * probe_m),
+            ];
+            let lo = s.iter().cloned().fold(f32::MAX, f32::min);
+            let hi = s.iter().cloned().fold(f32::MIN, f32::max);
+            (dir, hi - lo)
+        })
+        .reduce(
+            || (Vec3::Z, -1.0),
+            |a, b| if b.1 > a.1 { b } else { a },
+        );
+    best
+}
+
+/// Render a `span_m × span_m` shaded-relief patch centred on `center`, sampling
+/// the runtime walkable height on a tangent-plane grid.
+fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, out_path: &Path) {
+    let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+    let radius = surface.static_surface.radius_m;
+    let center = center.normalize();
+    let (east, north) = tangent_basis(center);
+    let base = center * radius;
+    let n = res as usize;
+
+    let mut h = vec![0f32; n * n];
+    h.par_chunks_mut(n).enumerate().for_each(|(j, row)| {
+        let ny = (0.5 - (j as f32 + 0.5) / res as f32) * span_m; // +north at top
+        for (i, cell) in row.iter_mut().enumerate() {
+            let nx = ((i as f32 + 0.5) / res as f32 - 0.5) * span_m; // +east at right
+            let dir = (base + east * nx + north * ny).normalize();
+            *cell = surface_height_m(surface, &state, dir, 0.5);
+        }
+    });
+
+    let (hmin, hmax) = h
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let hrange = (hmax - hmin).max(1.0);
+    let ds = span_m / res as f32;
+    // Sun in local (east, up, north): from the NW, moderate elevation.
+    let sun = Vec3::new(-0.55, 0.62, 0.55).normalize();
+    let sample = |i: i32, j: i32| -> f32 {
+        let ii = i.clamp(0, n as i32 - 1) as usize;
+        let jj = j.clamp(0, n as i32 - 1) as usize;
+        h[jj * n + ii]
+    };
+
+    let mut data = vec![0u8; n * n * 3];
+    data.par_chunks_mut(n * 3).enumerate().for_each(|(j, row)| {
+        for i in 0..n {
+            let dh_de =
+                (sample(i as i32 + 1, j as i32) - sample(i as i32 - 1, j as i32)) / (2.0 * ds);
+            // North increases as j decreases (top row is +north).
+            let dh_dn =
+                (sample(i as i32, j as i32 - 1) - sample(i as i32, j as i32 + 1)) / (2.0 * ds);
+            let normal = Vec3::new(-dh_de, 1.0, -dh_dn).normalize();
+            let shade = 0.25 + 0.75 * normal.dot(sun).max(0.0);
+            // Height tint: green plains → tan highs.
+            let t = ((h[j * n + i] - hmin) / hrange).clamp(0.0, 1.0);
+            let tint = Vec3::new(0.27, 0.40, 0.18).lerp(Vec3::new(0.55, 0.47, 0.34), t);
+            let c = tint * shade;
+            let idx = i * 3;
+            row[idx] = linear_to_srgb8(c.x);
+            row[idx + 1] = linear_to_srgb8(c.y);
+            row[idx + 2] = linear_to_srgb8(c.z);
+        }
+    });
+
+    let img: RgbImage =
+        ImageBuffer::from_raw(res, res, data).expect("patch dimensions match buffer length");
+    img.save(out_path)
+        .unwrap_or_else(|e| panic!("writing {out_path:?}: {e}"));
+}
+
+fn run_patch(
+    body: &thalos_physics_canonical::types::BodyDefinition,
+    args: &Args,
+    gpu: &gpu::GpuContext,
+) {
+    eprintln!("patch: compiling {} surface…", body.name);
+    let surface = compile_surface_preview(body, gpu);
+
+    let center = match args.center {
+        Some((lat, lon)) => latlon_to_dir(lat, lon),
+        None => {
+            eprintln!("patch: scanning for a high-relief centre…");
+            auto_find_relief_center(&surface)
+        }
+    };
+    let (lat, lon) = dir_to_latlon(center);
+    eprintln!("patch: centre = lat {lat:.2}°, lon {lon:.2}°");
+
+    let out_dir = args
+        .out_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name).join("patch"));
+    fs::create_dir_all(&out_dir).expect("creating patch out dir");
+
+    let res = 1024;
+    for (span_km, name) in [
+        (120.0_f32, "context-120km"),
+        (12.0, "close-12km"),
+        (3.0, "micro-3km"),
+    ] {
+        let path = out_dir.join(format!("{name}.png"));
+        render_patch(&surface, center, span_km * 1000.0, res, &path);
+        eprintln!("patch: wrote {}", path.display());
+    }
 }
 
 // ---------------------------------------------------------------------------
