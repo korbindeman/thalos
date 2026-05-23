@@ -17,6 +17,7 @@ struct VertexOutput {
     @location(1)       coordinate_uv: vec2<f32>,
     @location(2)       world_position: vec4<f32>,
     @location(3)       world_normal: vec3<f32>,
+    @location(4)       view_vector: vec3<f32>,
 }
 
 struct VertexInfo {
@@ -24,6 +25,7 @@ struct VertexInfo {
     coordinate: Coordinate,
     world_position: vec3<f32>,
     world_normal: vec3<f32>,
+    view_vector: vec3<f32>,
     blend: Blend,
 }
 
@@ -39,7 +41,7 @@ fn vertex_info(input: VertexInput) -> VertexInfo {
 
     let high_precision = approximate_view_distance < view_config.precision_threshold_distance;
 
-    var coordinate: Coordinate; var world_position: vec3<f32>; var world_normal: vec3<f32>;
+    var coordinate: Coordinate; var world_position: vec3<f32>; var world_normal: vec3<f32>; var view_vector: vec3<f32>;
 
     if (high_precision) {
         let approximate_relative_position = compute_relative_position(approximate_coordinate);
@@ -49,11 +51,13 @@ fn vertex_info(input: VertexInput) -> VertexInfo {
         let relative_position = compute_relative_position(coordinate);
         world_position        = view.world_position + relative_position;
         world_normal          = approximate_world_normal;
+        view_vector           = -relative_position;
     } else {
         coordinate         = compute_morph(approximate_coordinate, approximate_view_distance);
         let local_position = compute_local_position(coordinate);
         world_position     = position_local_to_world(local_position);
         world_normal       = normal_local_to_world(local_position);
+        view_vector        = view.world_position - world_position;
     }
 
     var info: VertexInfo;
@@ -61,6 +65,7 @@ fn vertex_info(input: VertexInput) -> VertexInfo {
     info.coordinate     = coordinate;
     info.world_position = world_position;
     info.world_normal   = world_normal;
+    info.view_vector    = view_vector;
     info.blend          = compute_blend(approximate_view_distance);
 
     return info;
@@ -68,6 +73,7 @@ fn vertex_info(input: VertexInput) -> VertexInfo {
 
 fn vertex_output(info: ptr<function, VertexInfo>, height: f32) -> VertexOutput {
     let world_position = (*info).world_position + height * (*info).world_normal;
+    let view_vector = (*info).view_vector - height * (*info).world_normal;
 
     var output: VertexOutput;
     output.clip_position  = position_world_to_clip(world_position, view.clip_from_world);
@@ -75,6 +81,7 @@ fn vertex_output(info: ptr<function, VertexInfo>, height: f32) -> VertexOutput {
     output.coordinate_uv  = (*info).coordinate.uv;
     output.world_position = vec4<f32>(world_position, 1.0);
     output.world_normal   = (*info).world_normal;
+    output.view_vector    = view_vector;
     return output;
 }
 

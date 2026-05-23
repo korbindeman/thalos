@@ -94,4 +94,3 @@ pub fn resource_ratio(current_kg: f64, max_kg: f64) -> String {
         format!("{:.0} / {:.0} kg", current_kg, max_kg)
     }
 }
-

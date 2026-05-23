@@ -39,7 +39,7 @@ pub(in crate::maneuver) fn handle_maneuver_events(
     mut events: bevy::ecs::message::MessageReader<ManeuverEvent>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
 ) {
     for event in events.read() {
         match event.clone() {

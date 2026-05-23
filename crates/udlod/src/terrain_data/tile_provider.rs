@@ -8,15 +8,10 @@
 //! supplied [`AttachmentConfig`] slice. Mipmaps and uploads are handled
 //! downstream.
 //!
-//! Two impls live in this crate:
-//!
-//! - [`DiskTileProvider`] reads tiles produced by the offline preprocess
-//!   pipeline. It is the default and matches the previous tile-loading
-//!   behaviour exactly.
-//! - Custom impls can synthesize tile data at runtime — see
-//!   [`TileCoordinate::stitched_pixel_coordinate`](crate::math::TileCoordinate::stitched_pixel_coordinate)
-//!   for the canonical pixel→position mapping that keeps tile borders aligned
-//!   with neighbours.
+//! Runtime providers synthesize or fetch tile payloads on demand — see
+//! [`TileCoordinate::stitched_pixel_coordinate`](crate::math::TileCoordinate::stitched_pixel_coordinate)
+//! for the canonical pixel→position mapping that keeps tile borders aligned
+//! with neighbours.
 //!
 //! Tile latency is tolerated by the renderer via parent-LOD fallback. Failed
 //! requests leave the tile in a perpetual loading state — providers are
@@ -24,19 +19,22 @@
 
 use crate::{
     math::{TerrainModel, TileCoordinate},
-    terrain_data::{tile_atlas::STORE_PNG, AttachmentConfig, AttachmentData, AttachmentFormat},
+    terrain_data::{AttachmentConfig, AttachmentData, AttachmentFormat},
 };
 use anyhow::Result;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
-use image::ImageReader;
-use std::fs;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 /// Source of tile attachment data for a
 /// [`TileAtlas`](crate::terrain_data::tile_atlas::TileAtlas).
 ///
 /// Implementations are held behind `Box<dyn TileProvider>`, so different
-/// terrains in the same world can use different providers (disk-loaded,
-/// procedurally synthesized, test stubs, etc.).
+/// terrains in the same world can use different providers (procedurally
+/// synthesized, cache-backed, test stubs, etc.).
 ///
 /// # Border alignment
 ///
@@ -62,75 +60,306 @@ pub trait TileProvider: Send + Sync {
         model: &TerrainModel,
         attachments: &[AttachmentConfig],
     ) -> Task<Result<Vec<AttachmentData>>>;
+}
 
-    /// Returns `true` if the provider can synthesise data for any valid
-    /// [`TileCoordinate`] — i.e. it does not depend on a pre-existing tile set.
-    ///
-    /// Disk-backed providers leave this `false` (the default): the runtime
-    /// loader then gates tile requests on the `existing_tiles` set populated
-    /// from `assets/{path}/config.tc`, so we never request tiles that have no
-    /// file on disk. Synthesised providers override this to `true` so newly
-    /// requested coordinates are loaded on demand without preprocessing.
-    fn supports_all_tiles(&self) -> bool {
-        false
+/// In-memory frecency cache for CPU-produced tile payloads.
+///
+/// This is a provider wrapper, not part of [`TileAtlas`](crate::terrain_data::tile_atlas::TileAtlas).
+/// `TileAtlas` owns current residency; this wrapper owns reuse across
+/// visibility churn or repeated visits. The namespace is caller supplied so
+/// Thalos can key by body/source hash without making [`TerrainModel`] pretend
+/// to be a stable cache key.
+pub struct MemoryTileCacheProvider {
+    inner: Box<dyn TileProvider>,
+    namespace: u64,
+    capacity_tiles: usize,
+    cache: Arc<Mutex<MemoryTileCache>>,
+}
+
+impl MemoryTileCacheProvider {
+    /// Wrap `inner` with a cache that stores at most `capacity_tiles` tile
+    /// payloads. A capacity of zero disables caching and forwards requests.
+    pub fn new(inner: Box<dyn TileProvider>, namespace: u64, capacity_tiles: usize) -> Self {
+        Self {
+            inner,
+            namespace,
+            capacity_tiles,
+            cache: Arc::new(Mutex::new(MemoryTileCache::default())),
+        }
+    }
+
+    /// Number of tile payloads currently retained by this wrapper.
+    pub fn len(&self) -> usize {
+        self.lock_cache().entries.len()
+    }
+
+    /// Returns `true` when no tile payloads are retained.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Drops every retained tile payload.
+    pub fn clear(&self) {
+        self.lock_cache().entries.clear();
+    }
+
+    fn lock_cache(&self) -> MutexGuard<'_, MemoryTileCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
-/// [`TileProvider`] backed by tiles produced by the offline preprocess
-/// pipeline.
-///
-/// Tiles are read from `assets/{terrain_path}/data/{attachment_name}/{coord}.{ext}`,
-/// where the extension is `bin` (raw bytes) or `png` depending on the build's
-/// `STORE_PNG` constant.
-pub struct DiskTileProvider {
-    terrain_path: String,
+impl TileProvider for MemoryTileCacheProvider {
+    fn request_tile(
+        &self,
+        coord: TileCoordinate,
+        model: &TerrainModel,
+        attachments: &[AttachmentConfig],
+    ) -> Task<Result<Vec<AttachmentData>>> {
+        if self.capacity_tiles == 0 {
+            return self.inner.request_tile(coord, model, attachments);
+        }
+
+        let key = CachedTileKey::new(self.namespace, coord, attachments);
+        if let Some(data) = self.lock_cache().get(key) {
+            return AsyncComputeTaskPool::get().spawn(async move { Ok(data) });
+        }
+
+        let task = self.inner.request_tile(coord, model, attachments);
+        let cache = Arc::clone(&self.cache);
+        let capacity_tiles = self.capacity_tiles;
+
+        AsyncComputeTaskPool::get().spawn(async move {
+            let result = task.await;
+            if let Ok(data) = &result {
+                let mut cache = cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                cache.insert(key, data.clone(), capacity_tiles);
+            }
+            result
+        })
+    }
 }
 
-impl DiskTileProvider {
-    pub fn new(terrain_path: impl Into<String>) -> Self {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct CachedTileKey {
+    namespace: u64,
+    coord: TileCoordinate,
+    attachment_layout_hash: u64,
+}
+
+impl CachedTileKey {
+    fn new(namespace: u64, coord: TileCoordinate, attachments: &[AttachmentConfig]) -> Self {
         Self {
-            terrain_path: terrain_path.into(),
+            namespace,
+            coord,
+            attachment_layout_hash: hash_attachment_layout(attachments),
         }
     }
 }
 
-impl TileProvider for DiskTileProvider {
-    fn request_tile(
-        &self,
-        coord: TileCoordinate,
-        _model: &TerrainModel,
-        attachments: &[AttachmentConfig],
-    ) -> Task<Result<Vec<AttachmentData>>> {
-        let attachment_paths: Vec<(String, AttachmentFormat)> = attachments
+#[derive(Default)]
+struct MemoryTileCache {
+    entries: std::collections::HashMap<CachedTileKey, MemoryTileCacheEntry>,
+    clock: u64,
+}
+
+impl MemoryTileCache {
+    fn get(&mut self, key: CachedTileKey) -> Option<Vec<AttachmentData>> {
+        let now = self.tick();
+        let entry = self.entries.get_mut(&key)?;
+        entry.hits = entry.hits.saturating_add(1);
+        entry.last_access = now;
+        Some(entry.data.clone())
+    }
+
+    fn insert(&mut self, key: CachedTileKey, data: Vec<AttachmentData>, capacity_tiles: usize) {
+        if capacity_tiles == 0 {
+            return;
+        }
+
+        let now = self.tick();
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.data = data;
+            entry.hits = entry.hits.saturating_add(1).max(1);
+            entry.last_access = now;
+            return;
+        }
+
+        while self.entries.len() >= capacity_tiles {
+            let Some(victim) = self.victim(now) else {
+                break;
+            };
+            self.entries.remove(&victim);
+        }
+
+        self.entries.insert(
+            key,
+            MemoryTileCacheEntry {
+                data,
+                hits: 1,
+                last_access: now,
+            },
+        );
+    }
+
+    fn victim(&self, now: u64) -> Option<CachedTileKey> {
+        self.entries
             .iter()
-            .map(|a| {
-                (
-                    format!("assets/{}/data/{}", self.terrain_path, a.name),
-                    a.format,
-                )
+            .min_by_key(|(_, entry)| entry.frecency_score(now))
+            .map(|(key, _)| *key)
+    }
+
+    fn tick(&mut self) -> u64 {
+        self.clock = self.clock.wrapping_add(1).max(1);
+        self.clock
+    }
+}
+
+struct MemoryTileCacheEntry {
+    data: Vec<AttachmentData>,
+    hits: u64,
+    last_access: u64,
+}
+
+impl MemoryTileCacheEntry {
+    fn frecency_score(&self, now: u64) -> u64 {
+        let age = now.saturating_sub(self.last_access);
+        let recency = 1024 / (age + 1);
+        self.hits.saturating_mul(1024).saturating_add(recency)
+    }
+}
+
+fn hash_attachment_layout(attachments: &[AttachmentConfig]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    attachments.len().hash(&mut hasher);
+    for attachment in attachments {
+        attachment.name.hash(&mut hasher);
+        attachment.texture_size.hash(&mut hasher);
+        attachment.border_size.hash(&mut hasher);
+        attachment.mip_level_count.hash(&mut hasher);
+        attachment_format_hash(attachment.format).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn attachment_format_hash(format: AttachmentFormat) -> u8 {
+    match format {
+        AttachmentFormat::Rgb8 => 0,
+        AttachmentFormat::Rgba8 => 1,
+        AttachmentFormat::R16 => 2,
+        AttachmentFormat::Rg16 => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::DVec3;
+    use bevy::tasks::futures_lite::future;
+    use bevy::tasks::TaskPool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+        value: u16,
+    }
+
+    impl TileProvider for CountingProvider {
+        fn request_tile(
+            &self,
+            _coord: TileCoordinate,
+            _model: &TerrainModel,
+            attachments: &[AttachmentConfig],
+        ) -> Task<Result<Vec<AttachmentData>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let configs = attachments.to_vec();
+            let value = self.value;
+
+            AsyncComputeTaskPool::get().spawn(async move {
+                Ok(configs
+                    .iter()
+                    .map(|cfg| {
+                        let count = (cfg.texture_size * cfg.texture_size) as usize;
+                        match cfg.format {
+                            AttachmentFormat::R16 => AttachmentData::R16(vec![value; count]),
+                            AttachmentFormat::Rgba8 => {
+                                AttachmentData::Rgba8(vec![[value as u8, 0, 0, 255]; count])
+                            }
+                            AttachmentFormat::Rg16 => {
+                                AttachmentData::Rg16(vec![[value, value]; count])
+                            }
+                            AttachmentFormat::Rgb8 => AttachmentData::None,
+                        }
+                    })
+                    .collect())
             })
-            .collect();
+        }
+    }
 
-        AsyncComputeTaskPool::get().spawn(async move {
-            let mut datas = Vec::with_capacity(attachment_paths.len());
+    fn r16_attachment(name: &str, texture_size: u32) -> AttachmentConfig {
+        AttachmentConfig {
+            name: name.to_string(),
+            texture_size,
+            border_size: 1,
+            mip_level_count: 1,
+            format: AttachmentFormat::R16,
+        }
+    }
 
-            for (base_path, format) in attachment_paths {
-                let data = if STORE_PNG {
-                    let path = coord.path(&base_path, "png");
-                    let mut reader = ImageReader::open(path)?;
-                    reader.no_limits();
-                    let image = reader.decode().unwrap();
-                    AttachmentData::from_bytes(image.as_bytes(), format)
-                } else {
-                    let path = coord.path(&base_path, "bin");
-                    let bytes = fs::read(path)?;
-                    AttachmentData::from_bytes(&bytes, format)
-                };
+    fn init_task_pool() {
+        AsyncComputeTaskPool::get_or_init(TaskPool::default);
+    }
 
-                datas.push(data);
-            }
+    #[test]
+    fn memory_cache_returns_hits_without_calling_inner_provider() {
+        init_task_pool();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = MemoryTileCacheProvider::new(
+            Box::new(CountingProvider {
+                calls: Arc::clone(&calls),
+                value: 7,
+            }),
+            42,
+            8,
+        );
+        let model = TerrainModel::sphere(DVec3::ZERO, 1.0, 0.0, 1.0);
+        let attachments = vec![r16_attachment("height", 4)];
+        let coord = TileCoordinate::new(0, 1, 0, 0);
 
-            Ok(datas)
-        })
+        let first = future::block_on(provider.request_tile(coord, &model, &attachments)).unwrap();
+        let second = future::block_on(provider.request_tile(coord, &model, &attachments)).unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.len(), 1);
+        assert_eq!(first[0].as_r16().unwrap(), second[0].as_r16().unwrap());
+    }
+
+    #[test]
+    fn memory_cache_keys_include_attachment_layout() {
+        init_task_pool();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = MemoryTileCacheProvider::new(
+            Box::new(CountingProvider {
+                calls: Arc::clone(&calls),
+                value: 11,
+            }),
+            42,
+            8,
+        );
+        let model = TerrainModel::sphere(DVec3::ZERO, 1.0, 0.0, 1.0);
+        let coord = TileCoordinate::new(0, 1, 0, 0);
+
+        let small = vec![r16_attachment("height", 4)];
+        let large = vec![r16_attachment("height", 8)];
+
+        future::block_on(provider.request_tile(coord, &model, &small)).unwrap();
+        future::block_on(provider.request_tile(coord, &model, &large)).unwrap();
+        future::block_on(provider.request_tile(coord, &model, &small)).unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.len(), 2);
     }
 }

@@ -44,28 +44,34 @@ impl Default for BodySkyExtra {
     }
 }
 
-/// Local craft-shadow proxy consumed by `body_terrain.wgsl`.
+/// Maximum number of procedural craft parts projected onto terrain.
+///
+/// The Apollo starter stack has far fewer parts than this, and excess parts
+/// are ignored rather than growing the terrain material's uniform every frame.
+pub const MAX_TERRAIN_SHADOW_CASTERS: usize = 16;
+
+/// Local player-vessel shadow proxy consumed by `body_terrain.wgsl`.
 ///
 /// This is intentionally analytic rather than Bevy CSM state: the terrain
 /// pass is a custom UDLOD pipeline and the stock cascades are camera-sized,
 /// which makes tiny near-field craft shadows slide and vanish with zoom.
 #[derive(Clone, Copy, ShaderType)]
 pub struct BodyTerrainShadow {
-    /// xyz = craft proxy center in render-space metres, w = capsule radius.
-    pub caster_pos_radius: Vec4,
-    /// xyz = craft long axis, w = capsule half-length.
-    pub caster_axis_half_len: Vec4,
-    /// x = strength, y = penumbra width in metres, z = max receiver distance,
-    /// w = enabled flag.
+    /// x = strength, y = minimum penumbra width in metres,
+    /// z = max receiver distance, w = valid caster count.
     pub params: Vec4,
+    /// xyz = part top/near endpoint in render-space metres, w = endpoint radius.
+    pub caster_a_radius: [Vec4; MAX_TERRAIN_SHADOW_CASTERS],
+    /// xyz = part bottom/far endpoint in render-space metres, w = endpoint radius.
+    pub caster_b_radius: [Vec4; MAX_TERRAIN_SHADOW_CASTERS],
 }
 
 impl Default for BodyTerrainShadow {
     fn default() -> Self {
         Self {
-            caster_pos_radius: Vec4::ZERO,
-            caster_axis_half_len: Vec4::new(0.0, 1.0, 0.0, 0.0),
             params: Vec4::ZERO,
+            caster_a_radius: [Vec4::ZERO; MAX_TERRAIN_SHADOW_CASTERS],
+            caster_b_radius: [Vec4::ZERO; MAX_TERRAIN_SHADOW_CASTERS],
         }
     }
 }
@@ -125,9 +131,8 @@ impl Default for BodyTerrainDebug {
 pub struct BodyTerrainMaterial {
     /// Static Rayleigh + Mie atmosphere parameters. Set once at spawn from
     /// `TerrestrialAtmosphere`; zero for airless bodies (vacuum early-out).
-    /// Bound so the material stays self-contained — `body_terrain.wgsl`
-    /// doesn't currently read it, but the binding is in place for a
-    /// future inline transmittance path.
+    /// Bound so the material can add atmosphere-driven sky fill on nearby
+    /// terrain; `BodySky` still owns camera-path transmittance and haze.
     #[uniform(0)]
     pub atmosphere: AtmosphereBlock,
     /// Per-frame scene lighting: primary star direction + flux, eclipse

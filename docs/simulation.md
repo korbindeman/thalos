@@ -73,6 +73,24 @@ Thalos should have three separate worlds:
 The map and real-space scene are clients of the simulation. They are not
 the simulation.
 
+### Clock and pause boundary
+
+Simulation pause is not implemented by pausing Bevy's global
+`Time<Virtual>`. `crates/game/src/sim_clock.rs` owns the explicit
+`SimClock` resource, whose sole writer folds the Escape pause menu, the
+destruction scenario picker, freecam, and warp pause (`warp.speed() == 0`)
+into a zero simulation delta. Canonical stepping, local Avian ownership,
+resource burn, and grounded EVA motion consume `SimClock` instead of plain
+`Res<Time>`.
+
+Presentation systems are outside that boundary. Camera smoothing,
+freecam motion, UI hover/drag animation, film grain, reflection-probe
+refresh timers, and similar view affordances use `Time<Real>` so they
+continue to animate while the sim is paused. World/environment animation
+must choose deliberately: physical state should derive from canonical
+`sim_time()` or `SolarSystemState`, while purely perceptual shader motion
+may use wall-clock time.
+
 Between orbital truth and every Bevy-side projection is one evaluated
 runtime resource: `SolarSystemState` in `crates/game/src/solar_system_state.rs`.
 `SimulationState` owns the long-lived simulation, system definition, and

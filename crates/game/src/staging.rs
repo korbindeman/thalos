@@ -101,7 +101,15 @@ impl StagingPlan {
 fn build_staging_plan(
     mut commands: Commands,
     ships: Query<Entity, (With<PlayerShip>, Without<StagingPlan>)>,
-    parts: Query<(Entity, Option<&Attachment>, Option<&Decoupler>, Option<&Engine>), With<Part>>,
+    parts: Query<
+        (
+            Entity,
+            Option<&Attachment>,
+            Option<&Decoupler>,
+            Option<&Engine>,
+        ),
+        With<Part>,
+    >,
     mut engine_activations: Query<&mut EngineActivation>,
 ) {
     let Ok(ship) = ships.single() else {
@@ -144,7 +152,9 @@ fn build_staging_plan(
     }
 
     let stage_count = stages.len();
-    commands.entity(ship).insert(StagingPlan { stages, next: 0 });
+    commands
+        .entity(ship)
+        .insert(StagingPlan { stages, next: 0 });
     info!("derived staging plan: {stage_count} stage(s)");
 }
 
@@ -423,7 +433,11 @@ fn publish_staging_summaries(
         .enumerate()
         .map(|(k, s)| SummaryStageInput {
             number: k + 1,
-            engines: s.engines.iter().filter_map(|e| index.get(e).copied()).collect(),
+            engines: s
+                .engines
+                .iter()
+                .filter_map(|e| index.get(e).copied())
+                .collect(),
             decouplers: s
                 .decouplers
                 .iter()

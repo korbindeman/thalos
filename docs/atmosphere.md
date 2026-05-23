@@ -114,8 +114,8 @@ orbit to ground.
 ### Architecture: shared optics, two render paths
 
 The atmosphere is a fullscreen quad per body (`BodySkyMaterial` in
-`crates/terrain/src/sky_material.rs`, shader at
-`crates/terrain/src/sky_dome.wgsl`) while the real terrain LOD is
+`crates/terrain_render/src/sky_material.rs`, shader at
+`crates/terrain_render/src/body_sky.wgsl`) while the real terrain LOD is
 visible. It renders in `Transparent3d` with `depth_compare = Always`
 so it rasterizes on every pixel, then clips the raymarch with two
 intersections:
@@ -139,6 +139,14 @@ The ship-view LOD split is:
 3. **Near** (camera inside karman shell). `BodySky` ray segments
    either terminate at terrain (aerial perspective on terrain) or exit
    the shell into the void (sky color).
+
+The terrain surface shader itself still owns only surface-side light:
+direct Hapke sunlight, eclipse/craft shadow factors, and a small
+atmosphere-derived sky-diffuse fill computed from the bound
+`AtmosphereBlock`. `BodySky` owns camera-path haze/transmittance/clouds.
+That split keeps airless terrain vacuum-black while preventing daylight
+terrain under a blue atmosphere from turning pure black on sun-opposed
+nearby slopes.
 
 ### Why this approach (not Bruneton)
 
@@ -168,9 +176,13 @@ prepass-depth texture is terrain-blind. The workaround lives in
   `ViewDepthTexture` (which has terrain depth written by then) into
   the Image.
 - `BodySkyMaterial` binds the Image as `texture_depth_2d` at
-  `@group(3) @binding(2)`; `sky_dome.wgsl` reads it via
+  `@group(3) @binding(2)`; `body_sky.wgsl` reads it via
   `textureLoad` and reconstructs view-space distance with
-  `view.view_from_clip`.
+  `view.view_from_clip`. When a depth hit exists, that reconstructed
+  distance is the authoritative surface clip; the analytic mean-radius
+  sphere is only a fallback for pixels with no opaque depth. Ground LOD
+  relief can protrude over the reference-sphere horizon, and clipping it
+  to the fallback first produces a dark horizon band.
 - The same material binds the reference cloud cubemap at bindings
   `3/4`; the shader intersects a fixed-altitude cloud shell before
   scene depth so terrain LOD receives the same detached cloud layer as

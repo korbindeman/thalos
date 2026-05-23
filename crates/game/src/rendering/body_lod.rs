@@ -230,7 +230,7 @@ pub(super) fn focus_camera_on_homeworld(
 pub(super) fn double_click_focus_system(
     input: Res<GameInputIntent>,
     mut contexts: EguiContexts,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), (With<ActiveCamera>, With<OrbitCamera>)>,
     bodies: Query<(Entity, &CelestialBody, &Transform)>,

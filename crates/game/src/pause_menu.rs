@@ -1,23 +1,11 @@
-//! Game-level pause menu, plus the single owner of `Time<Virtual>`'s pause
-//! state.
+//! Game-level pause menu.
 //!
-//! Three distinct pause sources fold into one piece of Bevy state — and that
-//! folding is structural, not by per-system checks:
-//!
-//! - **Escape menu** (`GamePause`): opens a modal overlay and stops sim
-//!   time. The current warp level is left untouched so Resume returns to
-//!   exactly the same simulation mode.
-//! - **Warp pause** (`warp.speed() == 0`): the bottom of the time-warp
-//!   ladder, reached by stepping `warp_decrease` (`,`) below 1×.
-//! - **Freecam** (`FreeCam::active`): freezes sim time while leaving the
-//!   debug camera able to move on wall-clock time.
-//!
-//! [`sync_virtual_time_pause`] is the sole writer of `Time<Virtual>`'s
-//! pause state. Whenever any source asks for a pause, `time.delta` is
-//! zero everywhere — every system that respects the Bevy time idiom
-//! freezes automatically with no per-system gating. Any future pause
-//! source must be added to that one system so the architectural property
-//! survives.
+//! The menu itself owns only the Escape-modal state (`GamePause`) and its UI.
+//! Simulation pause aggregation lives in [`crate::sim_clock`], which folds the
+//! menu, destruction scenario picker, freecam, and warp pause into an explicit
+//! simulation clock. Bevy's default `Time`/`Time<Virtual>` remains an app clock
+//! so presentation effects can keep animating while canonical/local simulation
+//! is paused.
 
 use bevy::app::AppExit;
 use bevy::picking::prelude::Pickable;
@@ -27,7 +15,6 @@ use thalos_input::game::GameInputIntent;
 
 use crate::hud::theme::{HudTheme, panel_frame};
 use crate::maneuver::InteractionMode;
-use crate::rendering::SimulationState;
 use crate::target::TargetBody;
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
@@ -59,18 +46,15 @@ impl Plugin for PauseMenuPlugin {
                     update_button_visuals,
                 )
                     .chain(),
-            )
-            // Run last so it observes this frame's `GamePause` toggle and
-            // last frame's warp speed. The one-frame lag on warp transitions
-            // is harmless: pause still freezes everything because canonical
-            // `step` multiplies `real_dt` by `warp.speed()` which is already
-            // zero by then.
-            .add_systems(Last, sync_virtual_time_pause);
+            );
     }
 }
 
-pub fn not_game_paused(pause: Res<GamePause>) -> bool {
-    !pause.active
+pub fn not_game_paused(
+    pause: Res<GamePause>,
+    scenario: Res<crate::scenario_menu::ScenarioMenu>,
+) -> bool {
+    !pause.active && !scenario.open
 }
 
 fn setup(mut commands: Commands, theme: Res<HudTheme>) {
@@ -223,13 +207,20 @@ fn spawn_menu_button(
         });
 }
 
-fn handle_escape_input(
+pub(crate) fn handle_escape_input(
     intent: Res<GameInputIntent>,
+    scenario: Res<crate::scenario_menu::ScenarioMenu>,
     mut pause: ResMut<GamePause>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
     if !intent.escape {
+        return;
+    }
+
+    // The destruction scenario picker is a forced modal: Escape must not
+    // dismiss it or stack the pause menu on top. See `crate::scenario_menu`.
+    if scenario.open {
         return;
     }
 
@@ -332,26 +323,5 @@ fn update_button_visuals(
         {
             tc.0 = label_color;
         }
-    }
-}
-
-/// Sole writer of `Time<Virtual>`'s pause state. All pause sources —
-/// escape-menu (`GamePause`), freecam, and warp pause (`warp.speed() == 0`)
-/// — fold in here. Any future pause source must be added to this predicate
-/// so the "everything is paused under a single switch" property survives.
-fn sync_virtual_time_pause(
-    pause: Res<GamePause>,
-    freecam: Option<Res<crate::freecam::FreeCam>>,
-    sim: Res<SimulationState>,
-    mut time: ResMut<Time<Virtual>>,
-) {
-    let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
-    let should_pause = pause.active || freecam_active || sim.simulation.warp.speed() == 0.0;
-    if should_pause {
-        if !time.is_paused() {
-            time.pause();
-        }
-    } else if time.is_paused() {
-        time.unpause();
     }
 }

@@ -22,15 +22,15 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
-    stainless_steel_base, Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine,
-    FuelTank, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint, ShipPartExtension,
-    ShipPartMaterial, ShipPartParams, ShipyardPlugin,
+    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part, PartCatalog,
+    PartMaterial, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams,
+    ShipyardPlugin, stainless_steel_base,
 };
 
-use crate::camera::{find_reference_body, CameraFocus, CameraTargetOffset};
+use crate::SimStage;
+use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
 use crate::rendering::{CelestialBody, PlayerShip, ShipMarker, SimulationState, SolarSystemState};
 use crate::view::{HideInMapView, HideInShipView, ViewMode};
-use crate::SimStage;
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
 /// editor's value so the two look identical side-by-side.
@@ -40,7 +40,9 @@ const PART_RESOLUTION: u32 = 128;
 /// A terrain contact above this destroys the vessel. Forgiving first-slice
 /// constant — a future per-part model derives it from the contacting parts.
 /// See `docs/landing.md`.
-const SHIP_IMPACT_TOLERANCE_M_S: f64 = 12.0;
+// TEMP (camera-judder repro): survive a hard touchdown so the craft settles in
+// Full on the terrain instead of being destroyed. Restore to 12.0 after.
+const SHIP_IMPACT_TOLERANCE_M_S: f64 = 1.0e9;
 
 /// Initial orbital distance (metres) when switching into ship view. The
 /// camera snaps to this distance — close enough that a ~10 m ship fills

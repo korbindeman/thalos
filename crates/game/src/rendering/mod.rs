@@ -186,7 +186,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     config.line.width = 2.0;
     // All current gizmos (orbit lines, trajectory previews, ghost trails)
     // are map-view overlays. Restrict the default group to MAP_LAYER so
-    // the ship camera doesn't draw them. If ship-view gizmos are ever
-    // needed, register a separate gizmo group with SHIP_LAYER.
+    // the ship camera doesn't draw them. Ship-view debug overlays register
+    // separate gizmo groups with SHIP_LAYER.
     config.render_layers = bevy::camera::visibility::RenderLayers::layer(crate::coords::MAP_LAYER);
 }

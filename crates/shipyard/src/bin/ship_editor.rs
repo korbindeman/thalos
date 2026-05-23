@@ -1830,7 +1830,11 @@ fn draw_staging(ui: &mut egui::Ui, summaries: &[StageSummary]) {
                 ui.add(
                     egui::ProgressBar::new(frac)
                         .desired_height(8.0)
-                        .text(format!("{} {}", res.display_name(), format_mass_kg(totals.mass_kg))),
+                        .text(format!(
+                            "{} {}",
+                            res.display_name(),
+                            format_mass_kg(totals.mass_kg)
+                        )),
                 );
             }
         });

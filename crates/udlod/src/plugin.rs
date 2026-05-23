@@ -82,9 +82,6 @@ impl Plugin for TerrainPlugin {
                     )
                         .in_set(RenderSystems::Prepare),
                     queue_tiling_prepass.in_set(RenderSystems::Queue),
-                    GpuTileAtlas::cleanup
-                        .before(World::clear_entities)
-                        .in_set(RenderSystems::Cleanup),
                 ),
             );
     }

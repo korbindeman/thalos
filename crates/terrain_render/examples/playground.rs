@@ -49,7 +49,6 @@ fn setup(
     let config = TerrainConfig {
         lod_count: LOD_COUNT,
         model: TerrainModel::sphere(DVec3::ZERO, RADIUS, MIN_HEIGHT, MAX_HEIGHT),
-        path: "thalos_terrain_render/playground".to_string(),
         ..default()
     }
     .add_attachment(AttachmentConfig {

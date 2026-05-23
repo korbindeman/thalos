@@ -63,9 +63,17 @@ fn sample_normal(tile: AtlasTile, vertex_normal: vec3<f32>) -> vec3<f32> {
 
     let face_up = FACE_UP[tile.coordinate.side];
 
-    let normal    = normalize(vertex_normal);
-    let tangent   = cross(face_up, normal);
-    let bitangent = cross(normal, tangent);
+    let normal = normalize(vertex_normal);
+    var tangent = cross(face_up, normal);
+    if (dot(tangent, tangent) < 1.0e-8) {
+        var fallback_axis = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(normal.y) > 0.9) {
+            fallback_axis = vec3<f32>(1.0, 0.0, 0.0);
+        }
+        tangent = cross(fallback_axis, normal);
+    }
+    tangent = normalize(tangent);
+    let bitangent = normalize(cross(normal, tangent));
     let TBN       = mat3x3(tangent, bitangent, normal);
 
     let side_length = 3.14159265359 / 4.0 * config.scale;

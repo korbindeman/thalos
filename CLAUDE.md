@@ -13,6 +13,8 @@ the new shape, not the old one. No silent rewrites.
 ```bash
 just game                 # cargo run -p thalos_game — ship in low Thalos orbit (default)
 just game eva             # spawn on foot (EVA) on the Thalos surface instead
+just game landing         # powered-descent approach over dry Thalos land
+just game final           # low final approach over a flat dry Thalos patch
 just edit <body>          # cargo run -p thalos_planet_editor -- <body>
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
@@ -187,11 +189,11 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
 - **`thalos_atmosphere`** — gas giant atmosphere definitions (cloud decks, hazes, rings; no Bevy dependency)
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
-- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. Fast descents are kept from tunneling through the terrain trimesh by `SweptCcd` on the craft body, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`); see `docs/landing.md`.
+- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. Fast descents are kept from tunneling through the terrain trimesh by `SweptCcd` on the craft body, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/landing.md`.
 - **`thalos_planet_lighting`** — shared planet lighting types (`SceneLighting`, `StarLight`, `AtmosphereBlock`, `CLOUD_BAND_COUNT`) + WGSL libraries (`thalos::lighting`, `thalos::atmosphere`) + the Hapke surface shading helper (`shade_hapke_surface`). Both `thalos_planet_rendering` and `thalos_terrain_render` depend on it.
 - **`thalos_planet_rendering`** — Bevy materials for planets, gas giants, rings, solid bodies
 - **`thalos_planet_editor`** — interactive planet editor tool
-- **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
+- **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
 - **`thalos_terrain_render`** — Bevy integration of the in-tree `thalos_udlod` UDLOD renderer; ships `ThalosTerrainPlugin`, `PipelineTileProvider`, and rendered-height terrain patch utilities used by M5 colliders
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
@@ -269,10 +271,12 @@ Key modules:
 ### Game crate (`crates/game/`)
 
 - **Spawn situation is a flag: ship in orbit (default), EVA on the
-  surface, or a landing approach over land.** `main.rs` reads
+  surface, a landing approach over land, or a final approach over
+  flat land.** `main.rs` reads
   `just game [mode]` (passed as a CLI arg — default `orbit`; falls back
   to the `THALOS_SPAWN` env var for a direct `cargo run`) into a
-  `spawn::SpawnSituation` resource (`ShipOrbit` | `Eva` | `Landing`).
+  `spawn::SpawnSituation` resource (`ShipOrbit` | `Eva` | `Landing` |
+  `FinalApproach`).
   The canonical `CraftState` is the player either way — KSP-style: one
   craft, Ship or EVA, distinguished by `VesselKind`. **`orbit`**:
   `VesselKind::Ship` in a low Thalos parking orbit
@@ -290,13 +294,17 @@ Key modules:
   approach. Because placing it *over land* at a true above-ground
   altitude needs terrain heights (unknown until bakes load), `main.rs`
   seeds the parking orbit as a placeholder behind the loading screen and
-  `spawn::refine_landing_spawn` installs the real state on the first
+  `spawn::refine_descent_spawn` installs the real state on the first
   `AppState::Running` frame: it searches the daylight hemisphere for a
   dry-land, ice-free site (terrain height > `sea_level_m`, low latitude),
   then drops the ship ~25 km AGL over it, descending, nose retrograde,
   coasting `OnRails` until it crosses the 20 km local-physics handoff for
-  the powered touchdown. Thalos has no atmosphere yet, so the descent is
-  lunar-style — no aerobraking.
+  the powered touchdown. **`final`** (aliases `final-approach` /
+  `final_approach` / `approach`) uses the same deferred terrain-aware
+  path but scores daylight dry sites by local height relief, then starts
+  the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
+  patch (or the flattest dry fallback). Thalos has no atmosphere yet, so
+  both descents are lunar-style — no aerobraking.
 - **EVA is a full craft, with a grounded/airborne split.** The
   `EvaMode` resource (`player_controller.rs`, `Grounded` | `Airborne`,
   defaults `Grounded`) picks which regime owns the capsule.
@@ -387,7 +395,13 @@ Key modules:
 Systems run in `SimStage` order: `Physics → Sync → Camera`
 (configured in `main.rs`), ensuring deterministic state flow each
 frame. Enhanced input intent collection runs in `PreUpdate` before these
-sets.
+sets. Simulation pause is an explicit clock boundary, not a global Bevy
+clock pause: `crates/game/src/sim_clock.rs` owns `SimClock`, whose sole
+writer folds Escape pause, destruction scenario picker, freecam, and warp
+pause into a zero sim delta. Canonical stepping, local physics ownership,
+resource burn, and grounded EVA motion consume `SimClock`; presentation
+and UI animation use `Time<Real>` directly. Do not reintroduce pausing
+`Time<Virtual>`/plain `Res<Time>` as the game-wide sim pause switch.
 
 ### Terrain gen crate (`crates/terrain/`)
 

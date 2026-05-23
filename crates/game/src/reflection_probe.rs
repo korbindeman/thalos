@@ -172,7 +172,7 @@ fn attach_env_map_to_main_camera(
 ///    `get_mut` is the asset-changed trigger; not calling it skips the
 ///    downstream IBL prefilter pass entirely.
 fn refresh_cubemap(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut timer: ResMut<ProbeRefreshTimer>,
     probe: Option<Res<ReflectionProbe>>,
     mut images: ResMut<Assets<Image>>,

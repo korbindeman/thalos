@@ -1,10 +1,9 @@
 use crate::{
-    formats::TC,
     math::{TerrainModel, TileCoordinate},
     prelude::{AttachmentConfig, AttachmentFormat},
     terrain::TerrainConfig,
     terrain_data::{
-        tile_provider::{DiskTileProvider, TileProvider},
+        tile_provider::TileProvider,
         tile_tree::{TileLookup, TileTree, TileTreeEntry},
         AttachmentData, INVALID_ATLAS_INDEX, INVALID_LOD,
     },
@@ -12,21 +11,13 @@ use crate::{
 };
 use anyhow::Result;
 use bevy::{
-    platform::collections::{HashMap, HashSet},
+    platform::collections::HashMap,
     prelude::*,
     render::render_resource::*,
-    tasks::{futures_lite::future, AsyncComputeTaskPool, Task},
+    tasks::{futures_lite::future, Task},
 };
-use image::{DynamicImage, ImageBuffer, Luma, LumaA, Rgb, Rgba};
 use itertools::Itertools;
-use std::{collections::VecDeque, fs, ops::DerefMut};
-
-pub type Rgb8Image = ImageBuffer<Rgb<u8>, Vec<u8>>;
-pub type Rgba8Image = ImageBuffer<Rgba<u8>, Vec<u8>>;
-pub type R16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
-pub type Rg16Image = ImageBuffer<LumaA<u16>, Vec<u16>>;
-
-pub(crate) const STORE_PNG: bool = false;
+use std::{collections::VecDeque, ops::DerefMut};
 
 #[derive(Copy, Clone, Debug, Default, ShaderType)]
 pub struct AtlasTile {
@@ -40,13 +31,6 @@ impl AtlasTile {
         Self {
             coordinate: tile_coordinate,
             atlas_index,
-        }
-    }
-    pub fn attachment(self, attachment_index: u32) -> AtlasTileAttachment {
-        AtlasTileAttachment {
-            coordinate: self.coordinate,
-            atlas_index: self.atlas_index,
-            attachment_index,
         }
     }
 }
@@ -64,63 +48,17 @@ impl From<AtlasTileAttachment> for AtlasTile {
 pub struct AtlasTileAttachment {
     pub(crate) coordinate: TileCoordinate,
     pub(crate) atlas_index: u32,
-    pub(crate) attachment_index: u32,
 }
 
 #[derive(Clone)]
 pub(crate) struct AtlasTileAttachmentWithData {
     pub(crate) tile: AtlasTileAttachment,
     pub(crate) data: AttachmentData,
-    pub(crate) texture_size: u32,
-}
-
-impl AtlasTileAttachmentWithData {
-    pub(crate) fn start_saving(self, path: String) -> Task<AtlasTileAttachment> {
-        AsyncComputeTaskPool::get().spawn(async move {
-            if STORE_PNG {
-                let path = self.tile.coordinate.path(&path, "png");
-
-                let image = match self.data {
-                    AttachmentData::Rgba8(data) => {
-                        let data = data.into_iter().flatten().collect_vec();
-                        DynamicImage::from(
-                            Rgba8Image::from_raw(self.texture_size, self.texture_size, data)
-                                .unwrap(),
-                        )
-                    }
-                    AttachmentData::R16(data) => DynamicImage::from(
-                        R16Image::from_raw(self.texture_size, self.texture_size, data).unwrap(),
-                    ),
-                    AttachmentData::Rg16(data) => {
-                        let data = data.into_iter().flatten().collect_vec();
-                        DynamicImage::from(
-                            Rg16Image::from_raw(self.texture_size, self.texture_size, data)
-                                .unwrap(),
-                        )
-                    }
-                    AttachmentData::None => panic!("Attachment has not data."),
-                };
-
-                image.save(&path).unwrap();
-
-                println!("Finished saving tile: {path}");
-            } else {
-                let path = self.tile.coordinate.path(&path, "bin");
-
-                fs::write(path, self.data.bytes()).unwrap();
-
-                // println!("Finished saving tile: {path}");
-            }
-
-            self.tile
-        })
-    }
 }
 
 /// An attachment of a [`TileAtlas`].
 pub struct AtlasAttachment {
     pub(crate) name: String,
-    pub(crate) path: String,
     pub(crate) texture_size: u32,
     pub(crate) center_size: u32,
     pub(crate) border_size: u32,
@@ -132,20 +70,16 @@ pub struct AtlasAttachment {
     revisions: Vec<u64>,
     next_revision: u64,
 
-    pub(crate) saving_tiles: Vec<Task<AtlasTileAttachment>>,
     pub(crate) uploading_tiles: Vec<AtlasTileAttachmentWithData>,
-    pub(crate) downloading_tiles: Vec<Task<AtlasTileAttachmentWithData>>,
 }
 
 impl AtlasAttachment {
-    fn new(config: &AttachmentConfig, tile_atlas_size: u32, path: &str) -> Self {
+    fn new(config: &AttachmentConfig, tile_atlas_size: u32) -> Self {
         let name = config.name.clone();
-        let path = format!("assets/{path}/data/{name}");
         let center_size = config.texture_size - 2 * config.border_size;
 
         Self {
             name,
-            path,
             texture_size: config.texture_size,
             center_size,
             border_size: config.border_size,
@@ -156,9 +90,7 @@ impl AtlasAttachment {
             data: vec![AttachmentData::None; tile_atlas_size as usize],
             revisions: vec![0; tile_atlas_size as usize],
             next_revision: 1,
-            saving_tiles: default(),
             uploading_tiles: default(),
-            downloading_tiles: default(),
         }
     }
 
@@ -167,38 +99,6 @@ impl AtlasAttachment {
         self.data[index] = data;
         self.revisions[index] = self.next_revision;
         self.next_revision = self.next_revision.wrapping_add(1).max(1);
-    }
-
-    fn update(&mut self, atlas_state: &mut TileAtlasState) {
-        let mut downloaded_tiles = Vec::new();
-        self.downloading_tiles.retain_mut(|tile| {
-            future::block_on(future::poll_once(tile)).is_none_or(|tile| {
-                downloaded_tiles.push(tile);
-                false
-            })
-        });
-        for tile in downloaded_tiles {
-            atlas_state.downloaded_tile_attachment(tile.tile);
-            self.set_data(tile.tile.atlas_index, tile.data);
-        }
-
-        self.saving_tiles.retain_mut(|task| {
-            future::block_on(future::poll_once(task)).is_none_or(|tile| {
-                atlas_state.saved_tile_attachment(tile);
-                false
-            })
-        });
-    }
-
-    fn save(&mut self, tile: AtlasTileAttachment) {
-        self.saving_tiles.push(
-            AtlasTileAttachmentWithData {
-                tile,
-                data: self.data[tile.atlas_index as usize].clone(),
-                texture_size: self.texture_size,
-            }
-            .start_saving(self.path.clone()),
-        );
     }
 
     fn sample(&self, lookup: TileLookup) -> Vec4 {
@@ -260,14 +160,6 @@ pub(crate) struct TileAtlasState {
     /// slot is allocated to a new coordinate so stale async loads can be
     /// discarded instead of overwriting the new owner's texture data.
     slot_generations: Vec<u64>,
-    pub(crate) existing_tiles: HashSet<TileCoordinate>,
-    /// When `true`, the [`TileProvider`] can synthesise data for any
-    /// [`TileCoordinate`]; tile requests bypass the `existing_tiles` gate
-    /// (which exists to keep disk providers from chasing missing `.bin`/`.png`
-    /// files). Set once at construction from
-    /// [`TileProvider::supports_all_tiles`].
-    supports_all_tiles: bool,
-
     /// Tiles pinned by [`TileAtlas::pin_tile`]: each pin contributes one
     /// extra refcount that the atlas never releases for the lifetime of the
     /// atlas. Used to keep `LOD 0` (and any other ancestors the renderer
@@ -278,22 +170,10 @@ pub(crate) struct TileAtlasState {
     to_load: VecDeque<QueuedTileLoad>,
     loading_tiles: Vec<LoadingTile>,
     load_slots: u32,
-    to_save: VecDeque<AtlasTileAttachment>,
-    pub(crate) save_slots: u32,
-    pub(crate) max_save_slots: u32,
-
-    pub(crate) download_slots: u32,
-    pub(crate) max_download_slots: u32,
-
-    pub(crate) max_atlas_write_slots: u32,
 }
 
 impl TileAtlasState {
-    fn new(
-        atlas_size: u32,
-        existing_tiles: HashSet<TileCoordinate>,
-        supports_all_tiles: bool,
-    ) -> Self {
+    fn new(atlas_size: u32) -> Self {
         let unused_tiles = (0..atlas_size)
             .map(|atlas_index| AtlasTile::new(TileCoordinate::INVALID, atlas_index))
             .collect();
@@ -302,18 +182,10 @@ impl TileAtlasState {
             tile_states: default(),
             unused_tiles,
             slot_generations: vec![0; atlas_size as usize],
-            existing_tiles,
-            supports_all_tiles,
             pinned_tiles: default(),
-            to_save: default(),
             to_load: default(),
             loading_tiles: default(),
-            save_slots: 64,
-            max_save_slots: 64,
             load_slots: 64,
-            download_slots: 128,
-            max_download_slots: 128,
-            max_atlas_write_slots: 32,
         }
     }
 
@@ -341,15 +213,6 @@ impl TileAtlasState {
         attachment_configs: &[AttachmentConfig],
         attachments: &mut [AtlasAttachment],
     ) {
-        while self.save_slots > 0 {
-            if let Some(tile) = self.to_save.pop_front() {
-                attachments[tile.attachment_index as usize].save(tile);
-                self.save_slots -= 1;
-            } else {
-                break;
-            }
-        }
-
         while self.load_slots > 0 {
             let Some(queued) = self.to_load.pop_front() else {
                 break;
@@ -417,10 +280,8 @@ impl TileAtlasState {
                                 tile: AtlasTileAttachment {
                                     coordinate: coord,
                                     atlas_index,
-                                    attachment_index: attachment_index as u32,
                                 },
                                 data: data.clone(),
-                                texture_size: attachment.texture_size,
                             });
                         attachment.set_data(atlas_index, data);
                     }
@@ -457,14 +318,6 @@ impl TileAtlasState {
         }
     }
 
-    fn saved_tile_attachment(&mut self, _tile: AtlasTileAttachment) {
-        self.save_slots += 1;
-    }
-
-    fn downloaded_tile_attachment(&mut self, _tile: AtlasTileAttachment) {
-        self.download_slots += 1;
-    }
-
     fn get_tile(&mut self, tile_coordinate: TileCoordinate) -> AtlasTile {
         if tile_coordinate == TileCoordinate::INVALID {
             return AtlasTile::new(TileCoordinate::INVALID, INVALID_ATLAS_INDEX);
@@ -490,49 +343,7 @@ impl TileAtlasState {
         (unused_tile.atlas_index, *generation)
     }
 
-    fn get_or_allocate_tile(&mut self, tile_coordinate: TileCoordinate) -> AtlasTile {
-        if tile_coordinate == TileCoordinate::INVALID {
-            return AtlasTile::new(TileCoordinate::INVALID, INVALID_ATLAS_INDEX);
-        }
-
-        self.existing_tiles.insert(tile_coordinate);
-
-        let atlas_index = if let Some(tile) = self.tile_states.get(&tile_coordinate) {
-            tile.atlas_index
-        } else {
-            let (atlas_index, generation) = self.allocate_tile();
-
-            self.tile_states.insert(
-                tile_coordinate,
-                TileState {
-                    requests: 1,
-                    state: LoadingState::Loaded,
-                    atlas_index,
-                    generation,
-                },
-            );
-
-            atlas_index
-        };
-
-        AtlasTile::new(tile_coordinate, atlas_index)
-    }
-
     fn request_tile(&mut self, tile_coordinate: TileCoordinate) {
-        // Disk providers gate requests on `existing_tiles` (populated from
-        // `config.tc`) to avoid chasing missing files; synthesised providers
-        // set `supports_all_tiles` and skip the gate so any coordinate the
-        // tile tree asks for gets queued.
-        if !self.supports_all_tiles && !self.existing_tiles.contains(&tile_coordinate) {
-            return;
-        }
-        // Insert into `existing_tiles` so the (otherwise disk-oriented)
-        // `get_tile` lookup and `save_tile_config` enumeration both see the
-        // synthesised tiles too.
-        if self.supports_all_tiles {
-            self.existing_tiles.insert(tile_coordinate);
-        }
-
         // check if the tile is already present else start loading it
         if let Some(tile) = self.tile_states.get_mut(&tile_coordinate) {
             if tile.requests == 0 {
@@ -569,12 +380,6 @@ impl TileAtlasState {
     }
 
     fn release_tile(&mut self, tile_coordinate: TileCoordinate) {
-        // Same gate as `request_tile`: skip if the disk-mode gate is engaged
-        // and this coord was never registered.
-        if !self.supports_all_tiles && !self.existing_tiles.contains(&tile_coordinate) {
-            return;
-        }
-
         let tile = self
             .tile_states
             .get_mut(&tile_coordinate)
@@ -634,8 +439,8 @@ impl TileAtlasState {
 /// requested by any tile_tree. Then the tile atlas will start loading all of its attachments
 /// by storing the [`TileCoordinate`] (for one frame) in `load_events` for which
 /// attachment-loading-systems can listen.
-/// Tiles that are not being used by any tile_tree anymore are cached (LRU),
-/// until new atlas indices are required.
+/// Tiles that are not being used by any tile_tree anymore stay in the free
+/// slot queue until new atlas indices are required.
 ///
 /// The [`u32`] can be used for accessing the attached data in systems by the CPU
 /// and in shaders by the GPU.
@@ -653,39 +458,22 @@ pub struct TileAtlas {
     // stores the attachment data
     pub(crate) state: TileAtlasState,
     pub(crate) provider: Box<dyn TileProvider>,
-    pub(crate) path: String,
     pub(crate) atlas_size: u32,
     pub(crate) lod_count: u32,
     pub(crate) model: TerrainModel,
 }
 
 impl TileAtlas {
-    /// Creates a new [`TileAtlas`] backed by a [`DiskTileProvider`] reading
-    /// preprocessed tiles from `assets/{config.path}/data/`.
-    ///
-    /// New code should prefer [`TileAtlas::with_provider`], which makes the
-    /// data source explicit at the call site. This convenience constructor is
-    /// kept so existing users don't need to update call sites when upgrading.
-    pub fn new(config: &TerrainConfig) -> Self {
-        let provider = Box::new(DiskTileProvider::new(config.path.clone()));
-        Self::with_provider(config, provider)
-    }
-
     /// Creates a new [`TileAtlas`] using the given [`TileProvider`] as its
-    /// tile data source. This is the recommended constructor — passing the
-    /// provider explicitly makes the data source visible at the call site
-    /// and avoids the implicit disk dependency.
+    /// tile data source.
     pub fn with_provider(config: &TerrainConfig, provider: Box<dyn TileProvider>) -> Self {
         let attachments = config
             .attachments
             .iter()
-            .map(|attachment| AtlasAttachment::new(attachment, config.atlas_size, &config.path))
+            .map(|attachment| AtlasAttachment::new(attachment, config.atlas_size))
             .collect_vec();
 
-        let existing_tiles = Self::load_tile_config(&config.path);
-        let supports_all_tiles = provider.supports_all_tiles();
-
-        let state = TileAtlasState::new(config.atlas_size, existing_tiles, supports_all_tiles);
+        let state = TileAtlasState::new(config.atlas_size);
 
         Self {
             model: config.model.clone(),
@@ -693,7 +481,6 @@ impl TileAtlas {
             attachment_configs: config.attachments.clone(),
             state,
             provider,
-            path: config.path.to_string(),
             atlas_size: config.atlas_size,
             lod_count: config.lod_count,
         }
@@ -786,14 +573,6 @@ impl TileAtlas {
         self.state.get_tile(tile_coordinate)
     }
 
-    pub fn get_or_allocate_tile(&mut self, tile_coordinate: TileCoordinate) -> AtlasTile {
-        self.state.get_or_allocate_tile(tile_coordinate)
-    }
-
-    pub fn save(&mut self, tile: AtlasTileAttachment) {
-        self.state.to_save.push_back(tile);
-    }
-
     pub(super) fn get_best_tile(&self, tile_coordinate: TileCoordinate) -> TileTreeEntry {
         self.state.get_best_tile(tile_coordinate)
     }
@@ -818,10 +597,6 @@ impl TileAtlas {
             } = tile_atlas.deref_mut();
 
             state.update(provider.as_ref(), model, attachment_configs, attachments);
-
-            for attachment in attachments {
-                attachment.update(state);
-            }
         }
 
         for (&(terrain, _view), tile_tree) in tile_trees.iter_mut() {
@@ -836,36 +611,6 @@ impl TileAtlas {
             }
         }
     }
-
-    /// Saves the tile configuration of the terrain, which stores the [`TileCoordinate`]s of all the tiles
-    /// of the terrain.
-    pub(crate) fn save_tile_config(&self) {
-        let tc = TC {
-            tiles: self.state.existing_tiles.iter().copied().collect_vec(),
-        };
-
-        tc.save_file(format!("assets/{}/config.tc", &self.path))
-            .unwrap();
-    }
-
-    /// Loads the tile configuration of the terrain, which stores the [`TileCoordinate`]s of all the tiles
-    /// of the terrain.
-    pub(crate) fn load_tile_config(path: &str) -> HashSet<TileCoordinate> {
-        match TC::load_file(format!("assets/{}/config.tc", path)) {
-            Ok(tc) => tc.tiles.into_iter().collect(),
-            // Missing `config.tc` is the normal case for runtime-synthesised
-            // providers (e.g. `PipelineTileProvider`); the disk path simply
-            // isn't in use. Log at `debug` so it's discoverable without
-            // spamming stdout on every terrain creation.
-            Err(_) => {
-                debug!(
-                    "no preprocessed tile config at assets/{path}/config.tc; \
-                        using empty existing-tile set (expected for synthesised providers)"
-                );
-                HashSet::default()
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -873,7 +618,7 @@ mod tests {
     use super::*;
 
     fn synthetic_state(atlas_size: u32) -> TileAtlasState {
-        TileAtlasState::new(atlas_size, HashSet::default(), true)
+        TileAtlasState::new(atlas_size)
     }
 
     #[test]

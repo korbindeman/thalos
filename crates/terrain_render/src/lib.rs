@@ -34,7 +34,10 @@ mod sky_material;
 mod synthetic;
 mod water_material;
 
-pub use body_material::{BodySkyExtra, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow};
+pub use body_material::{
+    BodySkyExtra, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
+    MAX_TERRAIN_SHADOW_CASTERS,
+};
 pub use height_source::{
     ConstantHeightSource, CpuPipelineHeightSource, GpuAtlasHeightMirror,
     GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, GpuAtlasMirrorHeightSource, HeightSource,

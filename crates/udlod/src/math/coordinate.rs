@@ -3,7 +3,6 @@ use bevy::{
     math::{DVec2, DVec3, IVec2, UVec2},
     render::render_resource::ShaderType,
 };
-use bincode::{Decode, Encode};
 use std::fmt;
 
 const NEIGHBOURING_SIDES: [[u32; 5]; 6] = [
@@ -154,7 +153,7 @@ impl Coordinate {
 }
 
 /// The global coordinate and identifier of a tile.
-#[derive(Copy, Clone, Default, Debug, Hash, Eq, PartialEq, ShaderType, Encode, Decode)]
+#[derive(Copy, Clone, Default, Debug, Hash, Eq, PartialEq, ShaderType)]
 pub struct TileCoordinate {
     /// The side of the cube sphere the tile is located on.
     pub side: u32,
@@ -183,10 +182,6 @@ impl TileCoordinate {
         1 << lod
     }
 
-    pub fn path(self, path: &str, extension: &str) -> String {
-        format!("{path}/{self}.{extension}")
-    }
-
     /// Returns the cube-sphere [`Coordinate`] of the texel center for the given
     /// `pixel` index inside a tile texture of size `texture_size` with a
     /// `border_size`-pixel border.
@@ -212,7 +207,7 @@ impl TileCoordinate {
     }
 
     /// Returns the cube-sphere coordinate for a runtime-generated tile texel,
-    /// with border pixels stitched the same way as the offline preprocess
+    /// with border pixels stitched the same way as the former offline
     /// `stitch.wgsl` pass.
     ///
     /// For spherical terrain, border texels outside the tile's logical center

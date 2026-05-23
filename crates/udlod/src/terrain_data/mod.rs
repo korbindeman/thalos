@@ -20,7 +20,6 @@ use crate::{
     util::CollectArray,
 };
 use bevy::{math::DVec3, prelude::*, render::render_resource::*};
-use bincode::{Decode, Encode};
 use bytemuck::cast_slice;
 use itertools::iproduct;
 use std::iter;
@@ -31,13 +30,13 @@ pub mod tile_atlas;
 pub mod tile_provider;
 pub mod tile_tree;
 
-pub use tile_provider::{DiskTileProvider, TileProvider};
+pub use tile_provider::{MemoryTileCacheProvider, TileProvider};
 
 pub const INVALID_ATLAS_INDEX: u32 = u32::MAX;
 pub const INVALID_LOD: u32 = u32::MAX;
 
 /// The data format of an attachment.
-#[derive(Encode, Decode, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum AttachmentFormat {
     /// Three channels  8 bit
     Rgb8,
@@ -50,14 +49,6 @@ pub enum AttachmentFormat {
 }
 
 impl AttachmentFormat {
-    pub(crate) fn id(self) -> u32 {
-        match self {
-            AttachmentFormat::Rgb8 => 5,
-            AttachmentFormat::Rgba8 => 0,
-            AttachmentFormat::R16 => 1,
-            AttachmentFormat::Rg16 => 3,
-        }
-    }
     pub(crate) fn render_format(self) -> TextureFormat {
         match self {
             AttachmentFormat::Rgb8 => TextureFormat::Rgba8UnormSrgb,
@@ -87,7 +78,7 @@ impl AttachmentFormat {
 }
 
 /// Configures an attachment.
-#[derive(Encode, Decode, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct AttachmentConfig {
     /// The name of the attachment.
     pub name: String,

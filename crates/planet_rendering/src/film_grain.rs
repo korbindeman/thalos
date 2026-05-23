@@ -66,6 +66,7 @@ pub struct FilmGrainState {
     prev_forward: Vec3,
     still_elapsed: f32,
     factor: f32,
+    elapsed_s: f32,
 }
 
 impl Default for FilmGrainState {
@@ -74,6 +75,7 @@ impl Default for FilmGrainState {
             prev_forward: Vec3::ZERO,
             still_elapsed: 0.0,
             factor: 1.0,
+            elapsed_s: 0.0,
         }
     }
 }
@@ -84,6 +86,7 @@ impl Default for FilmGrainState {
 pub struct ExtractedFilmGrain {
     intensity: f32,
     shadow_bias: f32,
+    time: f32,
 }
 
 impl ExtractComponent for FilmGrain {
@@ -97,6 +100,7 @@ impl ExtractComponent for FilmGrain {
             Some(ExtractedFilmGrain {
                 intensity: scaled,
                 shadow_bias: grain.shadow_bias,
+                time: state.elapsed_s,
             })
         } else {
             None
@@ -231,11 +235,12 @@ impl SpecializedRenderPipeline for FilmGrainPipeline {
 }
 
 fn update_film_grain_stillness(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut q: Query<(&GlobalTransform, &FilmGrain, &mut FilmGrainState)>,
 ) {
     let dt = time.delta_secs();
     for (xf, grain, mut state) in &mut q {
+        state.elapsed_s += dt;
         let fwd = xf.forward().as_vec3();
         // Cosine distance between last and current forward vector. Rotation-
         // only: position drift from following an orbiting ship shouldn't
@@ -282,15 +287,13 @@ fn prepare_film_grain_uniforms(
     mut buffer: ResMut<FilmGrainUniformBuffer>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    time: Res<Time>,
     views: Query<(Entity, &ExtractedFilmGrain)>,
 ) {
     buffer.0.clear();
-    let t = time.elapsed_secs();
     for (entity, grain) in views.iter() {
         let offset = buffer.0.push(&FilmGrainUniform {
             intensity: grain.intensity,
-            time: t,
+            time: grain.time,
             shadow_bias: grain.shadow_bias,
             _pad: 0.0,
         });

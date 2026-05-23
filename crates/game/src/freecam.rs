@@ -20,8 +20,8 @@
 //!   bail early, leaving the camera transform under freecam control.
 //! - [`GameFlightContext`] is suspended so movement keys don't simultaneously
 //!   pitch/yaw/roll the ship.
-//! - Sim time is paused through `pause_menu::sync_virtual_time_pause`, while
-//!   camera motion continues on wall-clock time.
+//! - Sim time is paused through `sim_clock::SimClock`, while camera motion
+//!   continues on wall-clock time.
 //! - No terrain collision — flying through a planet is the point.
 
 use bevy::math::DVec3;

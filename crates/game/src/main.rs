@@ -25,8 +25,10 @@ mod photo_mode;
 mod player_controller;
 mod reflection_probe;
 mod rendering;
+mod scenario_menu;
 mod screenshot;
 mod ship_view;
+mod sim_clock;
 mod sky_render;
 mod solar_system_state;
 mod spawn;
@@ -78,8 +80,10 @@ use pause_menu::PauseMenuPlugin;
 use photo_mode::PhotoModePlugin;
 use player_controller::PlayerControllerPlugin;
 use rendering::RenderingPlugin;
+use scenario_menu::ScenarioMenuPlugin;
 use screenshot::ScreenshotPlugin;
 use ship_view::ShipViewPlugin;
+use sim_clock::SimClockPlugin;
 use solar_system_state::{SimulationState, SolarSystemStatePlugin};
 use spawn::{SpawnPlugin, SpawnSituation};
 use target::TargetPlugin;
@@ -181,10 +185,10 @@ fn main() {
     // ------------------------------------------------------------------
     // 4. Resolve the player's absolute initial state.
     //
-    //    Two spawn modes, picked by `just game [mode]` (default `orbit`, or
-    //    `just game eva`). The canonical CraftState is the player either
-    //    way — KSP-style: one craft, Ship or EVA, distinguished by
-    //    `VesselKind`.
+    //    Spawn modes are picked by `just game [mode]` (default `orbit`, or
+    //    `just game eva` / `landing` / `final`). The canonical CraftState is
+    //    the player either way — KSP-style: one craft, Ship or EVA,
+    //    distinguished by `VesselKind`.
     //
     //    - `orbit` (default): the ship in a low Thalos parking orbit, the
     //      authored `system.ship.initial_state`.
@@ -254,31 +258,23 @@ fn main() {
         );
         (state, VesselKind::Eva, ShipParameters::eva(), attitude)
     } else {
-        // Both `orbit` and `landing` start as a ship in the authored parking
-        // orbit. For `landing`, this is just the placeholder that sits behind
-        // the loading screen: `spawn::refine_landing_spawn` swaps it for the
-        // over-land descent state on the first `Running` frame, once terrain
+        // `orbit` starts in the authored parking orbit. Deferred descent modes
+        // (`landing`, `final`) use that orbit only as the placeholder behind
+        // the loading screen: `spawn::refine_descent_spawn` swaps in the
+        // terrain-aware approach state on the first `Running` frame, once
         // heights are available to place the ship above ground over land.
         let rel = system.ship.initial_state;
-        let state = StateVector {
-            position: homeworld_state.position + rel.position,
-            velocity: homeworld_state.velocity + rel.velocity,
-        };
-        // Level orbital flight: body +Y (nose) along prograde, body +Z
-        // (dorsal) radial-out. Shared with the navball and control axes so
-        // "upright" stays aligned. Real ship params (MOI, torque, masses) are
-        // pushed in by `spawn_player_ship` once `apollo.ron` loads.
-        let prograde = rel.velocity.normalize();
-        let radial = rel.position.normalize();
-        let dorsal = (radial - radial.dot(prograde) * prograde).normalize();
-        let right = prograde.cross(dorsal);
-        let basis = DMat3::from_cols(right, prograde, dorsal);
-        let attitude = AttitudeState {
-            orientation: DQuat::from_mat3(&basis),
-            angular_velocity: DVec3::ZERO,
-        };
-        if situation == SpawnSituation::Landing {
-            println!("  Ship:            landing approach on {} (over land)", homeworld.name);
+        // Level orbital flight: nose along prograde, dorsal radial-out, shared
+        // with the navball and control axes so "upright" stays aligned. Real
+        // ship params (MOI, torque, masses) are pushed in by `spawn_player_ship`
+        // once `apollo.ron` loads. The same helper rebuilds this orbit for a
+        // post-destruction respawn, so the two never drift.
+        let (state, attitude) = spawn::orbit_parking_state(rel, &homeworld_state);
+        if let Some(label) = situation.descent_label() {
+            println!(
+                "  Ship:            {label} on {} (over land)",
+                homeworld.name
+            );
         } else {
             let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
             println!(
@@ -387,6 +383,9 @@ fn main() {
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))
         .insert_resource(situation)
+        // The body the parking-orbit / on-foot scenarios anchor to, so the
+        // destruction scenario menu can rebuild them on respawn.
+        .insert_resource(spawn::Homeworld(homeworld_id))
         .add_plugins(SolarSystemStatePlugin)
         .add_plugins(bevy::prelude::MeshPickingPlugin)
         // Opt-in picking: body meshes (and any other Pickable-less mesh) would
@@ -401,6 +400,7 @@ fn main() {
         .add_plugins(PlanetRenderingPlugin)
         .add_plugins(GameInputPlugin)
         .add_plugins(GameInputGatePlugin)
+        .add_plugins(SimClockPlugin)
         .add_plugins(CameraPlugin)
         .add_plugins(FreeCamPlugin)
         .add_plugins(reflection_probe::ReflectionProbePlugin)
@@ -426,6 +426,7 @@ fn main() {
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)
+        .add_plugins(ScenarioMenuPlugin)
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ScreenshotPlugin)

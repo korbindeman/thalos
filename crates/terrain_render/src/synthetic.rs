@@ -75,10 +75,6 @@ impl SyntheticTileProvider {
 }
 
 impl TileProvider for SyntheticTileProvider {
-    fn supports_all_tiles(&self) -> bool {
-        true
-    }
-
     fn request_tile(
         &self,
         coord: TileCoordinate,

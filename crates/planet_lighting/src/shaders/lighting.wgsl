@@ -225,8 +225,14 @@ fn shade_hapke_surface(
     external_shadow: f32,
 ) -> vec3<f32> {
     let geo_n_dot_l = dot(geo_normal, sun_dir_ws);
+    let geo_n_dot_v = dot(geo_normal, view_dir);
     let headroom = mix(0.05, 0.30, smoothstep(0.15, 0.40, geo_n_dot_l));
-    let n_dot_v = max(dot(shading_normal, view_dir), 0.0);
+    // A height-derived micro-normal can point away from the camera at
+    // grazing angles even though the geometric surface is visible. Keep
+    // visibility anchored to the geometric normal so terrain does not fall
+    // into black contour bands at low altitude.
+    let view_visible_floor = select(0.0, max(geo_n_dot_v, 1.0e-3), geo_n_dot_v > 0.0);
+    let n_dot_v = max(dot(shading_normal, view_dir), view_visible_floor);
 
     // Primary: direct sunlight. Clamp the perturbed n·l against the
     // geometric n·l + headroom so a steep micro-normal can't out-light

@@ -354,10 +354,8 @@ impl TileTree {
 
                 // At low LODs `TileCoordinate::count(lod) < tree_size` (LOD 0
                 // has 1×1 tiles, LOD 1 has 2×2, …). The 8×8 sweep below would
-                // otherwise produce coordinates beyond the LOD's tile grid;
-                // disk providers used to drop those via the `existing_tiles`
-                // gate, but synthesised providers need an explicit bound or
-                // the atlas overflows on spurious LOD-0 requests.
+                // otherwise produce coordinates beyond the LOD's tile grid and
+                // overflow the runtime atlas with spurious LOD-0 requests.
                 let lod_count = TileCoordinate::count(lod);
 
                 for (x, y) in iproduct!(0..self.tree_size, 0..self.tree_size) {

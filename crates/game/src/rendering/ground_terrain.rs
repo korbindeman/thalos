@@ -21,26 +21,30 @@ use big_space::grid::Grid;
 use big_space::prelude::CellCoord;
 use thalos_physics_canonical::types::{BodyDefinition, BodyId};
 use thalos_planet_rendering::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
+use thalos_shipyard::{Adapter, AttachNodes, CommandPod, Decoupler, Engine, FuelTank, Part};
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_terrain_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
     BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle,
-    PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, rendered_height_range,
+    MAX_TERRAIN_SHADOW_CASTERS, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
+    rendered_height_range,
 };
 use thalos_udlod::math::TileCoordinate;
 use thalos_udlod::prelude::*;
 
-use crate::camera::{CameraTargetOffset, ShipCamera};
+use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
+use crate::player_controller::PlayerControllerVisual;
 
 use super::real_space::REAL_SPACE_CELL_SIZE_M;
 use super::types::{CameraExposure, PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
 
-const CRAFT_SHADOW_RADIUS_M: f32 = 2.5;
-const CRAFT_SHADOW_MIN_HALF_LENGTH_M: f32 = 4.0;
-const CRAFT_SHADOW_STRENGTH: f32 = 0.88;
-const CRAFT_SHADOW_PENUMBRA_M: f32 = 0.75;
-const CRAFT_SHADOW_MAX_DISTANCE_M: f32 = 25_000.0;
+const EVA_SHADOW_RADIUS_M: f32 = 0.42;
+const EVA_SHADOW_HALF_LENGTH_M: f32 = 0.72;
+const CRAFT_SHADOW_STRENGTH: f32 = 0.84;
+const SHIP_SHADOW_MIN_PENUMBRA_M: f32 = 0.08;
+const EVA_SHADOW_MIN_PENUMBRA_M: f32 = 0.06;
+const CRAFT_SHADOW_MAX_DISTANCE_M: f32 = 350.0;
 
 /// LOD depth for body terrains. 16 LODs over a Mira-scale body
 /// (~10.7 Mm circumference) gives ~1.3 m at the deepest tile texel — well
@@ -112,6 +116,28 @@ pub(super) struct BodyWater {
     pub(super) body_id: BodyId,
 }
 
+type ShadowPartQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static GlobalTransform,
+        &'static AttachNodes,
+        Option<&'static CommandPod>,
+        Option<&'static Decoupler>,
+        Option<&'static Adapter>,
+        Option<&'static FuelTank>,
+        Option<&'static Engine>,
+    ),
+    With<Part>,
+>;
+
+#[derive(Clone, Copy)]
+struct PartShadowShape {
+    height: f32,
+    radius_top: f32,
+    radius_bottom: f32,
+}
+
 /// Camera-to-body-centre distance, expressed as a multiple of body radius,
 /// at which the impostor billboard hands off to the ground-LOD terrain.
 ///
@@ -181,20 +207,16 @@ fn terrain_craft_shadow_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         let Ok(value) = std::env::var("THALOS_TERRAIN_CRAFT_SHADOW") else {
-            // Keep the projected proxy shadow opt-in until it is bounded by
-            // real ship dimensions. The current analytic capsule can produce a
-            // horizon-spanning black stripe that looks exactly like a terrain
-            // seam and contaminates renderer diagnostics.
-            return false;
+            return true;
         };
 
         match value.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" => false,
+            "" | "auto" => true,
             "1" | "on" | "true" | "yes" => true,
             "0" | "off" | "false" | "no" => false,
             other => {
-                warn!("unknown THALOS_TERRAIN_CRAFT_SHADOW={other:?}; disabling craft shadow");
-                false
+                warn!("unknown THALOS_TERRAIN_CRAFT_SHADOW={other:?}; enabling craft shadow");
+                true
             }
         }
     })
@@ -315,7 +337,6 @@ pub(crate) fn spawn_body_terrain(
     let config = TerrainConfig {
         lod_count: LOD_COUNT,
         model,
-        path: format!("thalos/{}", body.name.to_lowercase()),
         atlas_size: ATLAS_SIZE,
         ..Default::default()
     }
@@ -815,7 +836,7 @@ pub(super) fn sync_body_render_lod(
 /// - terrain `scene` (`SceneLighting`: primary star, eclipse occluders,
 ///   ambient; planetshine left zero for now)
 /// - water `scene` (same `SceneLighting` as terrain), water `params.time`
-///   (Time::elapsed_secs for wave scroll), water `params.planet_center_radius.xyz`
+///   (`Time<Real>::elapsed_secs` for wave scroll), water `params.planet_center_radius.xyz`
 ///   (body render-space centre)
 /// - sky `atmosphere_extra` (sun dir + flux, planet center + radius)
 ///
@@ -827,12 +848,14 @@ pub(super) fn update_body_terrain_atmosphere(
     terrain_q: Query<(&BodyTerrain, &MeshMaterial3d<BodyTerrainMaterial>)>,
     water_q: Query<(&BodyWater, &MeshMaterial3d<BodyWaterMaterial>)>,
     sky_q: Query<(&BodySky, &MeshMaterial3d<BodySkyMaterial>)>,
-    ship_q: Query<(&GlobalTransform, Option<&CameraTargetOffset>), With<PlayerShip>>,
+    ship_q: Query<(), With<PlayerShip>>,
+    eva_q: Query<&GlobalTransform, With<PlayerControllerVisual>>,
+    part_q: ShadowPartQuery,
     ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut water_materials: ResMut<Assets<BodyWaterMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
@@ -841,7 +864,7 @@ pub(super) fn update_body_terrain_atmosphere(
         return;
     };
     let craft_shadow = if terrain_craft_shadow_enabled() {
-        craft_shadow_from_player_ship(&ship_q)
+        local_craft_shadow(&ship_q, &eva_q, &part_q)
     } else {
         BodyTerrainShadow::default()
     };
@@ -974,9 +997,9 @@ pub(super) fn update_body_terrain_atmosphere(
         }
     }
 
-    // Use real (wall-clock) elapsed seconds for wave scroll — the simulation
-    // clock pauses under warp and ticks faster than wall time during it, both
-    // of which would make wave motion read as wrong against the visible
+    // Use real (wall-clock) elapsed seconds for wave scroll — canonical sim
+    // time pauses at warp-pause and ticks faster than wall time during warp,
+    // both of which would make wave motion read as wrong against the visible
     // motion of the body itself.
     let wave_time = time.elapsed_secs();
     for (water, mat_handle) in &water_q {
@@ -1082,36 +1105,140 @@ fn build_terrain_scene_lighting(
     scene
 }
 
-fn craft_shadow_from_player_ship(
-    ship_q: &Query<(&GlobalTransform, Option<&CameraTargetOffset>), With<PlayerShip>>,
+fn local_craft_shadow(
+    ship_q: &Query<(), With<PlayerShip>>,
+    eva_q: &Query<&GlobalTransform, With<PlayerControllerVisual>>,
+    part_q: &ShadowPartQuery,
 ) -> BodyTerrainShadow {
-    let Ok((ship_xform, offset)) = ship_q.single() else {
-        return BodyTerrainShadow::default();
-    };
+    if ship_q.single().is_ok() {
+        let mut shadow = BodyTerrainShadow::default();
+        let mut count = 0usize;
+        for (xform, nodes, pod, dec, adapter, tank, engine) in part_q.iter() {
+            let Some(shape) = part_shadow_shape(nodes, pod, dec, adapter, tank, engine) else {
+                continue;
+            };
+            let transform = xform.compute_transform();
+            let height_scale = transform.scale.y.abs().max(1.0e-4);
+            let radius_scale = transform
+                .scale
+                .x
+                .abs()
+                .max(transform.scale.z.abs())
+                .max(1.0e-4);
+            let top = transform.translation;
+            let bottom = transform.translation
+                + transform.rotation * Vec3::new(0.0, -shape.height * height_scale, 0.0);
+            push_shadow_caster(
+                &mut shadow,
+                &mut count,
+                top,
+                shape.radius_top * radius_scale,
+                bottom,
+                shape.radius_bottom * radius_scale,
+            );
+        }
 
-    let ship_transform = ship_xform.compute_transform();
-    let local_center = offset.map(|offset| offset.0).unwrap_or(Vec3::ZERO);
-    let center = ship_transform.translation + ship_transform.rotation * local_center;
-    let mut axis = ship_transform.rotation * Vec3::Y;
-    if axis.length_squared() <= 1.0e-6 {
-        axis = Vec3::Y;
-    } else {
-        axis = axis.normalize();
+        if count > 0 {
+            shadow.params = Vec4::new(
+                CRAFT_SHADOW_STRENGTH,
+                SHIP_SHADOW_MIN_PENUMBRA_M,
+                CRAFT_SHADOW_MAX_DISTANCE_M,
+                count as f32,
+            );
+            return shadow;
+        }
     }
 
-    BodyTerrainShadow {
-        caster_pos_radius: Vec4::new(center.x, center.y, center.z, CRAFT_SHADOW_RADIUS_M),
-        caster_axis_half_len: Vec4::new(
-            axis.x,
-            axis.y,
-            axis.z,
-            (local_center.y.abs() * 1.35).max(CRAFT_SHADOW_MIN_HALF_LENGTH_M),
-        ),
-        params: Vec4::new(
+    if let Ok(eva_xform) = eva_q.single() {
+        let eva_transform = eva_xform.compute_transform();
+        let axis = (eva_transform.rotation * Vec3::Y).normalize_or_zero();
+        let axis = if axis.length_squared() > 0.0 {
+            axis
+        } else {
+            Vec3::Y
+        };
+        let center = eva_transform.translation;
+        let mut shadow = BodyTerrainShadow::default();
+        let mut count = 0usize;
+        push_shadow_caster(
+            &mut shadow,
+            &mut count,
+            center + axis * EVA_SHADOW_HALF_LENGTH_M,
+            EVA_SHADOW_RADIUS_M,
+            center - axis * EVA_SHADOW_HALF_LENGTH_M,
+            EVA_SHADOW_RADIUS_M,
+        );
+        shadow.params = Vec4::new(
             CRAFT_SHADOW_STRENGTH,
-            CRAFT_SHADOW_PENUMBRA_M,
+            EVA_SHADOW_MIN_PENUMBRA_M,
             CRAFT_SHADOW_MAX_DISTANCE_M,
-            1.0,
-        ),
+            count as f32,
+        );
+        return shadow;
     }
+
+    BodyTerrainShadow::default()
+}
+
+fn part_shadow_shape(
+    nodes: &AttachNodes,
+    pod: Option<&CommandPod>,
+    dec: Option<&Decoupler>,
+    adapter: Option<&Adapter>,
+    tank: Option<&FuelTank>,
+    engine: Option<&Engine>,
+) -> Option<PartShadowShape> {
+    if let Some(pod) = pod {
+        let diameter = pod.diameter;
+        Some(PartShadowShape {
+            height: diameter * 0.9,
+            radius_top: diameter * 0.3,
+            radius_bottom: diameter * 0.5,
+        })
+    } else if dec.is_some() {
+        let radius = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
+        Some(PartShadowShape {
+            height: 0.2,
+            radius_top: radius,
+            radius_bottom: radius,
+        })
+    } else if let Some(adapter) = adapter {
+        let top_diameter = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
+        let bottom_diameter = adapter.target_diameter;
+        Some(PartShadowShape {
+            height: ((top_diameter + bottom_diameter) * 0.5).max(0.4),
+            radius_top: top_diameter * 0.5,
+            radius_bottom: bottom_diameter * 0.5,
+        })
+    } else if let Some(tank) = tank {
+        let radius = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
+        Some(PartShadowShape {
+            height: tank.length,
+            radius_top: radius,
+            radius_bottom: radius,
+        })
+    } else {
+        engine.map(|engine| PartShadowShape {
+            height: engine.diameter * 0.9,
+            radius_top: engine.diameter * 0.35,
+            radius_bottom: engine.diameter * 0.5,
+        })
+    }
+}
+
+fn push_shadow_caster(
+    shadow: &mut BodyTerrainShadow,
+    count: &mut usize,
+    a: Vec3,
+    radius_a: f32,
+    b: Vec3,
+    radius_b: f32,
+) {
+    if *count >= MAX_TERRAIN_SHADOW_CASTERS {
+        return;
+    }
+
+    shadow.caster_a_radius[*count] = Vec4::new(a.x, a.y, a.z, radius_a.max(0.0));
+    shadow.caster_b_radius[*count] = Vec4::new(b.x, b.y, b.z, radius_b.max(0.0));
+    *count += 1;
 }

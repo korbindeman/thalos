@@ -32,19 +32,22 @@ use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
 use crate::maneuver::ManeuverPlan;
 use crate::navigation::{NavigationState, compute_attitude_control};
-use crate::velocity_frame::VelocityFrameState;
+use crate::player_controller::EvaMode;
 use crate::rendering::SimulationState;
+use crate::sim_clock::SimClock;
 use crate::target::TargetBody;
+use crate::velocity_frame::VelocityFrameState;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
+use thalos_physics_canonical::types::VesselKind;
 
-pub fn advance_simulation(time: Res<Time>, mut sim: ResMut<SimulationState>) {
+pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("advance_simulation").entered();
 
     let pre_pos = sim.simulation.ship_state().position;
     let pre_t = sim.simulation.sim_time();
 
-    sim.simulation.step(time.delta_secs_f64());
+    sim.simulation.step(clock.delta_secs_f64());
 
     // Diagnostic: log anything that looks physically impossible so we can
     // catch state corruption the instant it happens instead of noticing it
@@ -273,8 +276,12 @@ pub fn enforce_warp_altitude_limits(
     mut sim: ResMut<SimulationState>,
     terrain: Res<GameTerrainRegistry>,
     mut limits: ResMut<WarpLimits>,
+    eva_mode: Res<EvaMode>,
 ) {
-    if matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
+    // Both BodyFixed (settled ship) and grounded EVA are stationary on the
+    // surface and cannot phase through terrain, so let them warp freely.
+    let eva_grounded = sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded();
+    if eva_grounded || matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
         limits.max_level = usize::MAX;
         return;
     }

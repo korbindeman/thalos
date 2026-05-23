@@ -241,12 +241,14 @@ fn active_nav_basis(
 ) -> Option<NavBasis> {
     let ship = sim.ship_state();
     let time = sim.sim_time();
-    let body_state = sim
-        .ephemeris()
-        .state(sim.dominant_body(), thalos_physics_canonical::canonical::Epoch(time));
-    let target_state = target
-        .target
-        .map(|id| sim.ephemeris().state(id, thalos_physics_canonical::canonical::Epoch(time)));
+    let body_state = sim.ephemeris().state(
+        sim.dominant_body(),
+        thalos_physics_canonical::canonical::Epoch(time),
+    );
+    let target_state = target.target.map(|id| {
+        sim.ephemeris()
+            .state(id, thalos_physics_canonical::canonical::Epoch(time))
+    });
     nav_basis(active, ship, &body_state, target_state.as_ref())
 }
 

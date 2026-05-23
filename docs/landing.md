@@ -39,7 +39,12 @@ implemented slice; §6 tracks open questions.
 within 20 km AGL, attaches a `Kinematic` trimesh terrain patch:
 
 - The ship is a `RigidBody::Dynamic` compound collider built from the
-  rendered parts (cones/cylinders) in
+  shipyard part graph in `build_ship_collider_primitives`: one primitive
+  per rendered part, positioned from `Attachment`/`AttachNodes` rather
+  than frame-late `GlobalTransform`s. Frustum-like pods, adapters, and
+  engines use full-radius cylinders that envelop the visible geometry;
+  tanks and decouplers use their native cylinder footprint.
+  The same primitive list is stored for the F8 collider outline.
   `build_ship_collider_primitives`
   ([local_physics.rs:1688](crates/game/src/local_physics.rs:1688)),
   spawned by `spawn_local_craft_body`
@@ -48,9 +53,12 @@ within 20 km AGL, attaches a `Kinematic` trimesh terrain patch:
   ([local_physics.rs:592](crates/game/src/local_physics.rs:592)) spawns
   a `RigidBody::Kinematic` trimesh patch (`spawn_terrain_collider_patch`,
   [lib.rs:236](crates/physics_local/src/lib.rs:236)) when AGL drops
-  below `handoff_agl_m` (20 km). Its `Rotation`/`AngularVelocity` track
-  the body each frame so its body-fixed vertices land in the right
-  body-centered-inertial positions.
+  below `handoff_agl_m` (20 km). The collider body sits at the patch
+  center, its mesh vertices are body-fixed offsets from that center, and
+  its `Position`/`Rotation`/velocities track the rotating body each frame
+  so `Position + Rotation * local_vertex` lands in the right
+  body-centered-inertial position with metre-scale narrow-phase
+  coordinates.
 - Avian's contact solver runs only when Avian *owns translation*, i.e.
   `AvianRole::Full` — throttle active **or** terrain patch attached
   (`avian_role_from_inputs`,
@@ -203,10 +211,10 @@ lives there (`detect_terrain_impact` in `local_physics.rs`). Method:
 
 - Each frame compute the craft's **surface-relative** speed in
   body-centered inertial: `v_rel = lin_vel − ω × r`, where `ω` is the
-  body's angular velocity and `r` the craft's position (the terrain
-  collider sits at the body centre and co-rotates, so this is the
-  speed the contact actually sees). Keep a short peak window (~6
-  frames).
+  body's angular velocity and `r` the craft's position. The terrain
+  collider is patch-centered, but its `LinearVelocity = ω × patch_origin`
+  and `AngularVelocity = ω` produce that same rotating-surface velocity
+  field at contact points. Keep a short peak window (~6 frames).
 - On the **rising edge** of contact between the craft body and the
   terrain patch (via `ContactPair`/`ContactGraph`,
   [contact_types/mod.rs](https://docs.rs/avian3d)), read the *peak
@@ -222,29 +230,45 @@ m/s tolerance the player reasons about. (Known approximation:
 speculative pre-damping can shave the last frame; the peak window and a
 slightly conservative tolerance absorb it. See §6.)
 
-### 3.5 Consequence: inert debris + locked control + clear signal
+### 3.5 Consequence: force-pause + locked control + scenario picker
 
 On destruction (per the chosen first-slice behaviour — lock + mark, no
 explosion FX yet):
 
 - **Control is locked.** `apply_local_forces`
   ([local_physics.rs:1000](crates/game/src/local_physics.rs:1000))
-  applies gravity only (no thrust, zero reaction-wheel torque), so the
-  craft becomes an inert rigid body that keeps falling and colliding —
-  reading naturally as debris that tumbles and settles. Input systems
-  (`handle_attitude_controls`, the throttle gate) short-circuit so SAS,
-  autopilot, and the throttle readout all go quiet.
-- **The signal is a HUD banner.** A prominent "⚠ VESSEL DESTROYED —
-  impact NN m/s" overlay (`hud/destroyed_banner.rs`) is the explicit
-  cue, plus a log line at destruction time. `destroyed` is mirrored
-  into `CraftStateMirror` so it is BRP-queryable.
-- **Recovery is the existing teleports.** F9 debug surface-drop and the
-  body-tree orbit teleport call `Simulation::repair()`, clearing the
-  flag and handing a fresh craft back. (No automatic respawn.)
+  applies gravity only (no thrust, zero reaction-wheel torque) and the
+  input systems (`handle_attitude_controls`, the throttle gate)
+  short-circuit, so SAS, autopilot, and the throttle readout all go
+  quiet. This is the canonical gate on `is_destroyed()`; in practice the
+  force-pause below freezes the whole `SimStage` anyway.
+- **The signal is a forced modal.** On destruction the game
+  **force-pauses**: `ScenarioMenu::open` folds into `SimClock`'s explicit
+  pause predicate and `pause_menu::not_game_paused`, zeroing canonical/local
+  sim delta and gating the `SimStage` system sets exactly like the escape
+  menu / warp / freecam. Bevy's global `Time<Virtual>` keeps running so
+  presentation effects can continue. A centered overlay (`scenario_menu.rs`)
+  shows "VESSEL DESTROYED — impact NN m/s" above the four start scenarios,
+  plus a log line at destruction time. `destroyed` is mirrored into
+  `CraftStateMirror` so it is BRP-queryable.
+- **Recovery is an in-place respawn.** Each scenario button repairs the
+  craft (`Simulation::repair()`) and rebuilds it for the chosen start
+  without relaunching the process: the authored Thalos parking orbit, a
+  landing / final-approach descent over daylight dry land, or a Ship→EVA
+  disembark. The three ship scenarios reuse `spawn::orbit_parking_state`
+  / `spawn::compute_descent_state` (shared with the startup spawn so the
+  two never drift); EVA swaps the vessel kind and lets
+  `spawn_player_avian_body` plant the on-foot capsule next frame. The
+  wreck's Avian bubble is torn down so a clean body respawns. The
+  existing debug teleports (F9 surface-drop, body-tree orbit) still call
+  `repair()` and close the picker automatically — `open` mirrors
+  `is_destroyed()`.
 
-A destroyed craft is still allowed to settle to `BodyFixed` via the
-existing stable-contact collapse — debris at rest is fine, and control
-stays locked regardless of authority.
+While the picker is up the wreck is held frozen by the force-pause (no
+debris settling — that is deferred to the explosion/debris FX pass);
+picking a scenario replaces it with a fresh craft. Re-boarding a ship
+from EVA via the picker is intentionally not wired, but EVA can't be
+destroyed, so the picker only ever opens on a wrecked ship.
 
 ### 3.6 Collider geometry: built from the rendered GPU tiles
 
@@ -291,6 +315,14 @@ and `maintain_terrain_patch` also rebuilds when the craft drifts past
 movement (a rover, a sliding touchdown), not just vertical descent. The
 coarse tangent-grid fallback keeps its km-scale global threshold.
 
+The terrain collider body is patch-centered, not planet-centered. The
+mesh stores `(vertex_body_fixed - patch_center_body_fixed)` offsets, the
+rigid body `Position` is `body_orientation * patch_center_body_fixed`,
+and its `LinearVelocity` is `ω × Position`. Together with
+`AngularVelocity = ω`, this gives contact points the same rotating-surface
+velocity as the old body-centered formulation while keeping the trimesh's
+local coordinates near zero for stable support contacts.
+
 ## 4. First implemented slice
 
 What this pass ships (scoped by the three product decisions: whole-craft
@@ -304,12 +336,19 @@ legs):
 4. `detect_terrain_impact` (`game`).
 5. Control lockout in `apply_local_forces` + input/throttle gates;
    `repair()` on respawn teleports.
-6. `hud/destroyed_banner.rs` + `CraftStateMirror.destroyed`.
+6. `scenario_menu.rs`: on destruction, force-pause + an in-place
+   scenario-respawn picker for the four start scenarios (this replaced
+   the original passive `hud/destroyed_banner.rs`); `Simulation::repair()`
+   on respawn; `CraftStateMirror.destroyed`.
 7. Collider built from the resident GPU tiles for by-construction
    alignment with the rendered surface
    (`HeightSource::build_collider_patch`), with tangent-grid fallback,
    and a window-relative rebuild so the small tile window follows the
    craft across the surface (§3.6).
+8. F8 craft-collider debug view, drawn in the ship camera from the same
+   compound collider primitives used by the local rigid body. It uses a
+   dedicated ship-layer gizmo group because the default gizmos are
+   intentionally map-only.
 
 Explicitly **not** in this slice: per-part crash tolerance and
 fragmentation; landing legs; explosion/debris VFX; an automatic
@@ -320,6 +359,13 @@ direct canonical state change for now, not an emitted event).
 
 - `ShipParameters::impact_tolerance_m_s` — crash speed threshold.
   Start forgiving (~12 m/s) and tighten.
+- Descent spawn profiles live in
+  [`crates/game/src/spawn.rs`](crates/game/src/spawn.rs). `just game
+  landing` starts ~25 km AGL over daylight dry land so the player sees
+  the on-rails-to-local-physics handoff. `just game final` (aliases
+  `final-approach`, `final_approach`, `approach`) starts ~1.5 km AGL,
+  low and slow, after scoring daylight dry sites by local height relief
+  to find a flat touchdown-practice patch.
 - `SweptCcd` mode (`NonLinear` vs `Linear`) and per-body
   `SpeculativeMargin` — if high-speed approaches produce "ghost"
   spinning from the unbounded default speculative margin, cap it on the
@@ -330,6 +376,10 @@ direct canonical state change for now, not an emitted event).
   trades contact-area coverage against rebuild cost at native
   resolution. For the tangent-grid fallback it is the patch grid
   resolution. `patch_half_extent_m` sizes the fallback patch only.
+- F8 toggles the ship-view craft-collider debug view. It draws the
+  compound collider primitives over the rendered ship using a high-contrast
+  outline, which is the first place to look when a part footprint or
+  collider orientation seems wrong.
 
 ## 6. Open questions
 

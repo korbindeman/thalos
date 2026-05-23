@@ -653,7 +653,8 @@ can't decide, for the live follow-up:
   mismatch would dominate per-frame motion.
 - Camera `Transform.rotation` source frame under BigSpace floating
   origin — cell hops could rotate the apparent forward direction.
-- `Time` resource source (Virtual vs Real) under pause/warp.
+- Time source under pause/warp is now explicit: canonical/local systems
+  consume `SimClock`, while camera/presentation systems use `Time<Real>`.
 
 Resolving item 2 needs `just game` running. Recovery path before
 re-launch: `cargo clean --release` to wipe the SIGKILL'd partial

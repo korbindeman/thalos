@@ -20,7 +20,7 @@ use crate::rendering::{SimulationState, SolarSystemState};
 /// Main input system for maneuver nodes.
 pub(in crate::maneuver) fn maneuver_input(
     intent: Res<GameInputIntent>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<ActiveCamera>>,
     sim: Option<Res<SimulationState>>,

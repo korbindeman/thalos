@@ -29,8 +29,6 @@ pub struct TerrainConfig {
     pub model: TerrainModel,
     /// The amount of tiles the can be loaded simultaneously in the tile atlas.
     pub atlas_size: u32,
-    /// The path to the terrain folder inside the assets directory.
-    pub path: String,
     /// The attachments of the terrain.
     pub attachments: Vec<AttachmentConfig>,
 }
@@ -41,7 +39,6 @@ impl Default for TerrainConfig {
             lod_count: 1,
             model: TerrainModel::sphere(default(), 1.0, 0.0, 1.0),
             atlas_size: 1024,
-            path: default(),
             attachments: default(),
         }
     }

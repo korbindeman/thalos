@@ -357,8 +357,8 @@ impl ShipBlueprint {
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
             let m = part_total_mass(pb, entry);
             let (r, l) = part_cylinder_dims(entry, &pb.params, geo[i].diameter);
-            moment_of_inertia_kg_m2 +=
-                cylinder_principal_inertia(m, r, l) + parallel_axis_inertia(m, geo[i].position - com);
+            moment_of_inertia_kg_m2 += cylinder_principal_inertia(m, r, l)
+                + parallel_axis_inertia(m, geo[i].position - com);
         }
 
         Ok(ShipStats {

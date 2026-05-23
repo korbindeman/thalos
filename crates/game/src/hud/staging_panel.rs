@@ -224,7 +224,12 @@ pub fn update(
     summaries: Res<StagingSummaries>,
     theme: Res<HudTheme>,
     mut card_q: Query<
-        (&StageCard, &mut Node, &mut BorderColor, &mut BackgroundColor),
+        (
+            &StageCard,
+            &mut Node,
+            &mut BorderColor,
+            &mut BackgroundColor,
+        ),
         (Without<StageResRow>, Without<StageResFill>),
     >,
     mut text_q: Query<(&StageText, &mut Text, &mut TextColor), Without<StageResAmount>>,

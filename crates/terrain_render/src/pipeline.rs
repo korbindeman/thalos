@@ -5,8 +5,9 @@
 //!
 //! 1. **Cubemap base + dynamic overlays** — sample baked
 //!    height/albedo/roughness from [`StaticSurfaceData`] for the pixel's
-//!    body-local direction, then apply terrain-owned time-varying layers
-//!    (seasonal ice, aeolian bedforms).
+//!    body-local direction, with a temporary macro low-pass to hide the
+//!    pre-rewrite Thalos terracing, then apply terrain-owned time-varying
+//!    layers (seasonal ice, aeolian bedforms).
 //! 2. **Procedural detail (LOD-adaptive)** — additively layer
 //!    Musgrave ridged hybrid multifractal noise on top of the cubemap base.
 //!    The cascade is sphere-continuous (3D position input, no cube-face
@@ -113,6 +114,15 @@ const WARP_OCTAVES: u32 = 2;
 /// Matches [`DETAIL_AMP_M`] so the R16 quantisation has room for the
 /// full positive HMF contribution above the static + dynamic envelope.
 const DETAIL_HEIGHT_MARGIN_M: f32 = DETAIL_AMP_M;
+
+/// Temporary macro low-pass over the baked height/color cubemaps.
+///
+/// Thalos's pre-rewrite terrestrial field contains visible contour-like
+/// bands. Blur the macro source before UDLOD tiles and CPU height queries see
+/// it so the surface reads like normal smooth game terrain while the terrain
+/// generator is being replaced.
+const MACRO_HEIGHT_SMOOTH_RADIUS_TEXELS: f32 = 4.0;
+const MACRO_MATERIAL_SMOOTH_RADIUS_TEXELS: f32 = 3.0;
 
 /// Per-tile detail plan: a continuous octave count. Fractional values
 /// blend the top octave in smoothly so a tile cascading from N → N+1
@@ -225,10 +235,6 @@ pub fn renderer_tile_lod_m_at(
 }
 
 impl TileProvider for PipelineTileProvider {
-    fn supports_all_tiles(&self) -> bool {
-        true
-    }
-
     fn request_tile(
         &self,
         coord: TileCoordinate,
@@ -350,7 +356,7 @@ struct PixelContext<'a> {
     plan: DetailPlan,
 }
 
-/// Stages 1+2 result: nearest-cubemap base sample with dynamic-layer overlays
+/// Stages 1+2 result: smoothed cubemap base sample with dynamic-layer overlays
 /// applied. Shared between [`evaluate_pixel`] and the public
 /// [`rendered_height_m`] so the renderer and physics agree on the same
 /// pre-detail surface.
@@ -368,16 +374,9 @@ fn sample_base_with_dynamic(
     dynamic_lod: f32,
 ) -> BaseSample {
     let body = &surface.static_surface;
-    // Bilinear height sampling: decode the 4 nearest u16 texels to f32
-    // metres and interpolate. With a ~1.2 km equator texel on Thalos the
-    // nearest-only path produced visible staircase seams as the GPU
-    // bilinearly interpolated stepped tile heights; sampling smoothly on
-    // the CPU side lets the bake (and the player's height query) match
-    // the GPU mesh inside one cubemap texel instead of jumping at every
-    // boundary.
-    let mut height = sample_height_bilinear(&body.height_cubemap, dir, body.height_range);
-    let mut albedo = srgb_rgba8_to_linear_rgb(cubemap_texel_nearest(&body.albedo_cubemap, dir));
-    let mut roughness = static_roughness(body, dir);
+    let mut height = sample_height_smoothed(&body.height_cubemap, dir, body.height_range);
+    let mut albedo = sample_albedo_smoothed(&body.albedo_cubemap, dir);
+    let mut roughness = static_roughness_smoothed(body, dir);
     if !surface.dynamic_layers.is_empty() {
         apply_dynamic_surface_layers(
             surface,
@@ -394,39 +393,6 @@ fn sample_base_with_dynamic(
         albedo_linear: albedo,
         roughness,
     }
-}
-
-/// Bilinear sampling on a R16 height cubemap. The base cubemap stores
-/// heights as `u16` quantised against `height_range`; this decodes the
-/// four texels surrounding `dir` and interpolates in metres.
-///
-/// Sampling stays within a single cube face — `dir_to_face_uv` picks the
-/// dominant axis. Near a face boundary the bilinear footprint falls back
-/// to the edge texels of that one face. Authored cubemaps must match
-/// across face seams for this to look continuous; the build-time
-/// stages already do that for the base height, so the rendered mesh is
-/// smooth across faces at the resolution the cubemap was authored at.
-fn sample_height_bilinear(cube: &Cubemap<u16>, dir: Vec3, height_range: f32) -> f32 {
-    let (face, u, v) = dir_to_face_uv(dir);
-    let res = cube.resolution();
-    let res_f = res as f32;
-    let px = (u * res_f - 0.5).clamp(0.0, res_f - 1.001);
-    let py = (v * res_f - 0.5).clamp(0.0, res_f - 1.001);
-    let x0 = px.floor() as u32;
-    let y0 = py.floor() as u32;
-    let x1 = (x0 + 1).min(res - 1);
-    let y1 = (y0 + 1).min(res - 1);
-    let fx = px - px.floor();
-    let fy = py - py.floor();
-
-    let h00 = decode_height(cube.get(face, x0, y0), height_range);
-    let h10 = decode_height(cube.get(face, x1, y0), height_range);
-    let h01 = decode_height(cube.get(face, x0, y1), height_range);
-    let h11 = decode_height(cube.get(face, x1, y1), height_range);
-
-    let top = h00 + (h10 - h00) * fx;
-    let bot = h01 + (h11 - h01) * fx;
-    top + (bot - top) * fy
 }
 
 /// Domain-warped ridged hybrid multifractal in metres. Evaluated in
@@ -506,7 +472,7 @@ fn combine_base_and_detail(base_height_m: f32, detail_h: f32, sea_level_m: Optio
 /// collider mesh so the mesh resolution matches the represented detail.
 ///
 /// Stages, in order:
-/// 1. Cubemap base, bilinearly sampled.
+/// 1. Cubemap base, low-pass sampled.
 /// 2. Dynamic layers (ice caps, aeolian bedforms).
 /// 3. LOD-adaptive procedural detail: domain-warped ridged HMF.
 ///
@@ -634,17 +600,134 @@ fn tile_lod_m(
     (body.radius_m * face_radians / inner_texels as f32).max(1.0)
 }
 
-fn static_roughness(body: &StaticSurfaceData, dir: Vec3) -> f32 {
-    let texel = cubemap_texel_nearest(&body.roughness_cubemap, dir);
-    if texel > 0 {
-        texel as f32 / 255.0
-    } else {
-        let material_id = cubemap_texel_nearest(&body.material_cubemap, dir) as usize;
-        body.materials
-            .get(material_id)
-            .map(|m| m.roughness)
-            .unwrap_or(0.5)
+fn sample_height_smoothed(cube: &Cubemap<u16>, dir: Vec3, height_range: f32) -> f32 {
+    smooth_cubemap_scalar(
+        cube.resolution(),
+        dir,
+        MACRO_HEIGHT_SMOOTH_RADIUS_TEXELS,
+        |face, x, y| decode_height(cube.get(face, x, y), height_range),
+    )
+}
+
+fn sample_albedo_smoothed(cube: &Cubemap<[u8; 4]>, dir: Vec3) -> Vec3 {
+    smooth_cubemap_vec3(
+        cube.resolution(),
+        dir,
+        MACRO_MATERIAL_SMOOTH_RADIUS_TEXELS,
+        |face, x, y| srgb_rgba8_to_linear_rgb(cube.get(face, x, y)),
+    )
+}
+
+fn static_roughness_smoothed(body: &StaticSurfaceData, dir: Vec3) -> f32 {
+    smooth_cubemap_scalar(
+        body.roughness_cubemap.resolution(),
+        dir,
+        MACRO_MATERIAL_SMOOTH_RADIUS_TEXELS,
+        |face, x, y| {
+            let texel = body.roughness_cubemap.get(face, x, y);
+            if texel > 0 {
+                texel as f32 / 255.0
+            } else {
+                let material_id = body.material_cubemap.get(face, x, y) as usize;
+                body.materials
+                    .get(material_id)
+                    .map(|m| m.roughness)
+                    .unwrap_or(0.5)
+            }
+        },
+    )
+}
+
+fn smooth_cubemap_scalar(
+    res: u32,
+    dir: Vec3,
+    radius_texels: f32,
+    mut sample: impl FnMut(thalos_terrain::cubemap::CubemapFace, u32, u32) -> f32,
+) -> f32 {
+    let (face, u, v) = dir_to_face_uv(dir);
+    let res_f = res as f32;
+    let px = (u * res_f - 0.5).clamp(0.0, res_f - 1.0);
+    let py = (v * res_f - 0.5).clamp(0.0, res_f - 1.0);
+    let support = radius_texels.ceil() as i32;
+    let center_x = px.floor() as i32;
+    let center_y = py.floor() as i32;
+    let max_i = res.saturating_sub(1) as i32;
+
+    let mut sum = 0.0;
+    let mut weight_sum = 0.0;
+    for dy in -support..=support {
+        let sy = (center_y + dy).clamp(0, max_i) as u32;
+        let wy = smooth_kernel((sy as f32 - py).abs(), radius_texels);
+        if wy <= 0.0 {
+            continue;
+        }
+        for dx in -support..=support {
+            let sx = (center_x + dx).clamp(0, max_i) as u32;
+            let wx = smooth_kernel((sx as f32 - px).abs(), radius_texels);
+            let weight = wx * wy;
+            if weight <= 0.0 {
+                continue;
+            }
+            sum += sample(face, sx, sy) * weight;
+            weight_sum += weight;
+        }
     }
+
+    if weight_sum > 0.0 {
+        sum / weight_sum
+    } else {
+        sample(face, px.round() as u32, py.round() as u32)
+    }
+}
+
+fn smooth_cubemap_vec3(
+    res: u32,
+    dir: Vec3,
+    radius_texels: f32,
+    mut sample: impl FnMut(thalos_terrain::cubemap::CubemapFace, u32, u32) -> Vec3,
+) -> Vec3 {
+    let (face, u, v) = dir_to_face_uv(dir);
+    let res_f = res as f32;
+    let px = (u * res_f - 0.5).clamp(0.0, res_f - 1.0);
+    let py = (v * res_f - 0.5).clamp(0.0, res_f - 1.0);
+    let support = radius_texels.ceil() as i32;
+    let center_x = px.floor() as i32;
+    let center_y = py.floor() as i32;
+    let max_i = res.saturating_sub(1) as i32;
+
+    let mut sum = Vec3::ZERO;
+    let mut weight_sum = 0.0;
+    for dy in -support..=support {
+        let sy = (center_y + dy).clamp(0, max_i) as u32;
+        let wy = smooth_kernel((sy as f32 - py).abs(), radius_texels);
+        if wy <= 0.0 {
+            continue;
+        }
+        for dx in -support..=support {
+            let sx = (center_x + dx).clamp(0, max_i) as u32;
+            let wx = smooth_kernel((sx as f32 - px).abs(), radius_texels);
+            let weight = wx * wy;
+            if weight <= 0.0 {
+                continue;
+            }
+            sum += sample(face, sx, sy) * weight;
+            weight_sum += weight;
+        }
+    }
+
+    if weight_sum > 0.0 {
+        sum / weight_sum
+    } else {
+        sample(face, px.round() as u32, py.round() as u32)
+    }
+}
+
+fn smooth_kernel(distance_texels: f32, radius_texels: f32) -> f32 {
+    if radius_texels <= 0.0 {
+        return if distance_texels <= 0.5 { 1.0 } else { 0.0 };
+    }
+    let t = (1.0 - distance_texels / radius_texels).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn decode_height(texel: u16, range: f32) -> f32 {
@@ -673,17 +756,6 @@ fn pixel_direction(
     let lifted = pix.world_position(model, 1.0);
     let dir: DVec3 = (lifted - surface).normalize();
     Vec3::new(dir.x as f32, dir.y as f32, dir.z as f32)
-}
-
-fn cubemap_texel_nearest<T>(cube: &Cubemap<T>, dir: Vec3) -> T
-where
-    T: Copy + Default,
-{
-    let (face, u, v) = dir_to_face_uv(dir);
-    let res = cube.resolution();
-    let x = ((u * res as f32) as u32).min(res - 1);
-    let y = ((v * res as f32) as u32).min(res - 1);
-    cube.get(face, x, y)
 }
 
 fn srgb_rgba8_to_linear_rgb(texel: [u8; 4]) -> Vec3 {

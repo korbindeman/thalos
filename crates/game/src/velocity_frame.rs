@@ -50,7 +50,10 @@ impl VelocityFrameState {
 
 /// Next frame in the click cycle: Orbit → Surface → Target → Orbit,
 /// skipping Target when no target is selected.
-pub fn next_frame(current: VelocityReferenceFrame, target_available: bool) -> VelocityReferenceFrame {
+pub fn next_frame(
+    current: VelocityReferenceFrame,
+    target_available: bool,
+) -> VelocityReferenceFrame {
     use VelocityReferenceFrame::*;
     match current {
         Orbit => Surface,

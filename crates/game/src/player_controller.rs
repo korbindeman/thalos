@@ -32,13 +32,17 @@ use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 use crate::rendering::real_space::RealSpaceRoot;
 use crate::rendering::{SimulationState, SolarSystemState};
+use crate::sim_clock::SimClock;
 use crate::view::{HideInMapView, ViewMode};
 
 const PLAYER_HEIGHT_M: f64 = 1.8;
 const PLAYER_RADIUS_M: f64 = 0.32;
 const PLAYER_CAPSULE_SEGMENT_M: f64 = PLAYER_HEIGHT_M - PLAYER_RADIUS_M * 2.0;
 const PLAYER_HALF_HEIGHT_M: f64 = PLAYER_HEIGHT_M * 0.5;
-const PLAYER_FOOT_CLEARANCE_M: f64 = 0.08;
+// The EVA mesh is a round-bottom capsule with no feet. A tangent placement
+// reads as hovering in third-person, so sink it a hair into the terrain like
+// most game character controllers do.
+const PLAYER_FOOT_CLEARANCE_M: f64 = -0.04;
 const PLAYER_WALK_SPEED_M_S: f64 = 1.4;
 const PLAYER_CAMERA_DISTANCE_M: f64 = 6.0;
 
@@ -269,7 +273,7 @@ fn refresh_player_controller_state(
 /// transitions need it.
 #[allow(clippy::too_many_arguments)]
 fn walk_eva_on_terrain(
-    time: Res<Time>,
+    clock: Res<SimClock>,
     input: Res<GameInputIntent>,
     view: Res<ViewMode>,
     eva_mode: Res<EvaMode>,
@@ -286,10 +290,19 @@ fn walk_eva_on_terrain(
         ),
         With<PlayerControllerBody>,
     >,
+    // Body-fixed direction the player occupies on the surface. Stored so
+    // co-rotation under warp is exact (no Euler ω×r×dt integration). Reset
+    // whenever the player transitions from airborne → grounded (i.e., on
+    // every teleport or initial surface spawn) by tracking the previous
+    // grounded state.
+    mut dir_body: Local<Option<DVec3>>,
+    mut prev_grounded: Local<bool>,
 ) {
     // Airborne (orbiting) EVA coasts on rails — `snap_avian_from_canonical`
     // owns the capsule. Only the grounded controller walks on terrain.
     if !eva_mode.is_grounded() {
+        *prev_grounded = false;
+        *dir_body = None;
         return;
     }
     let Some(active) = state.active else {
@@ -313,20 +326,7 @@ fn walk_eva_on_terrain(
 
     let body = &sim.system.bodies[active.body_id];
     let body_state = body_state_for(&sim, active.body_id);
-    // Two distinct time steps drive position changes:
-    //
-    // * **Co-rotation with the surface** uses **sim time**. The body's
-    //   `orientation` only evolves with sim time, so stepping co-rotation
-    //   by anything else would drift the player across a frozen world.
-    // * **Walking** uses **real time**, so at warp > 1× the player still
-    //   walks at a human pace even though the world is spinning faster.
-    //
-    // Pause handling is structural: `pause_menu::sync_virtual_time_pause`
-    // pauses `Time<Virtual>` whenever the player or warp asks for pause,
-    // so `real_dt` is zero and both terms below collapse to zero. No
-    // explicit per-system guard.
-    let real_dt = time.delta_secs_f64();
-    let sim_dt = real_dt * sim.simulation.warp.speed();
+    let real_dt = clock.delta_secs_f64();
 
     let move_input = if *view == ViewMode::Ship {
         input.player_move
@@ -338,13 +338,26 @@ fn walk_eva_on_terrain(
     let surface_velocity = body_state.angular_velocity.cross(position.0);
     let walking_velocity = walk_dir * PLAYER_WALK_SPEED_M_S;
 
-    // Step in inertial coords, then look up terrain at the new direction.
-    // Doing the height query at the *new* direction (not the current
-    // one) means the player crests bumps smoothly instead of skipping
-    // upward a frame late.
-    let stepped = position.0 + surface_velocity * sim_dt + walking_velocity * real_dt;
-    let new_dir_inertial = stepped.try_normalize().unwrap_or(current_up);
-    let new_dir_body_fixed = (body_state.orientation.inverse() * new_dir_inertial).normalize();
+    // Co-rotation: maintain a body-fixed direction rather than Euler-integrating
+    // ω×r×sim_dt. At high warp sim_dt is huge and the Euler step drifts badly.
+    // Instead: store the body-fixed direction, apply walking displacement in the
+    // body frame at sim-clock rate, then re-project under the body's current
+    // orientation. This pauses cleanly and is exact regardless of warp level.
+    //
+    // Reset the stored direction whenever we just became grounded (teleport or
+    // initial spawn), initialising from the Avian capsule's current position.
+    let just_grounded = !*prev_grounded;
+    *prev_grounded = true;
+    if just_grounded || dir_body.is_none() {
+        *dir_body = Some((body_state.orientation.inverse() * current_up).normalize());
+    }
+    let stored = dir_body.unwrap();
+    // Walking displacement in the body frame; zero when standing still.
+    let walk_body = body_state.orientation.inverse() * walk_dir;
+    let new_dir_body_fixed = (stored + walk_body * PLAYER_WALK_SPEED_M_S * real_dt)
+        .try_normalize()
+        .unwrap_or(stored);
+    *dir_body = Some(new_dir_body_fixed);
     let terrain_h = height_source
         .sample_height_m(new_dir_body_fixed.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
         .unwrap_or(0.0) as f64;

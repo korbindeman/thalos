@@ -41,6 +41,7 @@ use thalos_shipyard::{
 use crate::SimStage;
 use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
+use crate::sim_clock::SimClock;
 
 /// Per-engine flow recipe for an enabled engine. Stored separately from
 /// [`Engine`] so the drain reconciliation can use the recipe that was in
@@ -197,7 +198,7 @@ fn finish_with_throttle(
 /// publishes the locks.
 pub fn handle_throttle_input(
     input: Res<GameInputIntent>,
-    time: Res<Time>,
+    clock: Res<SimClock>,
     locks: Res<ControlLocks>,
     mut throttle: ResMut<ThrottleState>,
 ) {
@@ -214,7 +215,7 @@ pub fn handle_throttle_input(
         return;
     }
 
-    let dt = time.delta_secs_f64();
+    let dt = clock.delta_secs_f64();
     if input.throttle_up {
         throttle.commanded = (throttle.commanded + THROTTLE_RAMP_RATE * dt).min(1.0);
     }
@@ -563,7 +564,7 @@ fn reconcile_tanks_from_sim_drain(
 /// responsible for stepping warp down to 1× before opening the
 /// throttle on a scheduled maneuver.
 pub fn gate_throttle_on_fuel_availability(
-    time: Res<Time>,
+    clock: Res<SimClock>,
     active: Res<ActivePropulsion>,
     mut sim: ResMut<SimulationState>,
     mut throttle: ResMut<ThrottleState>,
@@ -574,7 +575,7 @@ pub fn gate_throttle_on_fuel_availability(
     mut refresh: Local<PredictionRefresh>,
 ) {
     let warp = sim.simulation.warp.speed();
-    let real_dt = time.delta_secs_f64();
+    let real_dt = clock.delta_secs_f64();
 
     // A destroyed craft can't burn — force throttle to zero so the HUD arc
     // and canonical throttle both read inert. See `docs/landing.md`.

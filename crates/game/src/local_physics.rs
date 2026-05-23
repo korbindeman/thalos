@@ -1,5 +1,7 @@
 //! Game-side orchestration for the M5 aggregate local-physics bubble.
 
+use std::collections::{HashMap, VecDeque};
+
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use thalos_physics_canonical::body_centered::{
@@ -19,9 +21,11 @@ use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalBubble, LocalBubbleConfig, LocalCraftBody,
     LocalCraftSpawn, LocalPhysicsPlugin, LocalPrimitiveCollider, LocalPrimitiveShape,
     TerrainColliderPatch, craft_contacts_terrain, spawn_local_craft_body,
-    spawn_terrain_collider_patch, stable_contact_reached,
+    spawn_terrain_collider_patch, stable_contact_reached, terrain_patch_pose,
 };
-use thalos_shipyard::{Adapter, AttachNodes, CommandPod, Decoupler, Engine, FuelTank, Part};
+use thalos_shipyard::{
+    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part,
+};
 use thalos_terrain_render::HeightSource;
 
 use crate::SimStage;
@@ -29,6 +33,7 @@ use crate::debug::{DebugLaunchMount, DebugMode};
 use crate::fuel::ThrottleState;
 use crate::player_controller::{EvaMode, PlayerControllerBody, PlayerControllerState};
 use crate::rendering::{PlayerShip, SimulationState};
+use crate::sim_clock::SimClock;
 use crate::view::ViewMode;
 
 /// `tile_lod_m` hint for queries that want the finest CPU-synthesizable
@@ -59,6 +64,12 @@ impl Plugin for GameLocalPhysicsPlugin {
             .register_type::<AvianRole>()
             .register_type::<AvianAuthority>()
             .register_type::<AvianHandoffDiagnostics>()
+            .add_systems(
+                Update,
+                hard_pause_avian_time
+                    .after(crate::sim_clock::sync_sim_clock)
+                    .before(SimStage::Physics),
+            )
             .add_systems(
                 Update,
                 (
@@ -263,7 +274,14 @@ fn compute_avian_authority(
     authority.role = avian_role_for(&sim, &throttle, &active);
 }
 
+fn hard_pause_avian_time(clock: Res<SimClock>, mut physics_time: ResMut<Time<Physics>>) {
+    if clock.is_paused() {
+        physics_time.pause();
+    }
+}
+
 fn sync_avian_time(
+    clock: Res<SimClock>,
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
     player: Option<Res<PlayerControllerState>>,
@@ -271,7 +289,13 @@ fn sync_avian_time(
 ) {
     // Avian's clock runs both for `Full` (translation+rotation+contact) and
     // `AttitudeOnly` (rotation+contact while Kepler owns translation).
-    // Only `Paused` halts the integrator entirely.
+    // `SimClock` is a hard pause over that role classifier so menu/freecam/warp
+    // pause stops local and canonical physics together.
+    if clock.is_paused() {
+        physics_time.pause();
+        return;
+    }
+
     let player_active = player
         .as_deref()
         .map(|state| state.is_active())
@@ -311,8 +335,9 @@ fn agl_above_rendered_surface(
 /// ready to host it. The body lives in body-centered inertial coordinates
 /// — origin at the dominant body's centre, axes are the parent inertial
 /// axes (no rotation). Gravity is a clean `−μr/r³` with no fictitious
-/// forces; the terrain collider (when attached later) carries `Rotation =
-/// body.orientation` so its body-fixed vertices land in the right place.
+/// forces; the terrain collider (when attached later) is centered on its
+/// patch and carries `Rotation = body.orientation` so its body-fixed
+/// vertex offsets land in the right place.
 ///
 /// Two vessel kinds spawn through this single seam, KSP-style:
 /// - `VesselKind::Ship`: waits for `PlayerShip` + ship params, then
@@ -390,7 +415,7 @@ fn spawn_player_avian_body(
             if player_ship.iter().next().is_none() {
                 return;
             }
-            let collider_primitives = build_ship_collider_primitives(&player_ship, &parts);
+            let collider_primitives = build_ship_collider_primitives(&parts);
             spawn_local_craft_body(
                 &mut commands,
                 LocalCraftSpawn {
@@ -587,10 +612,12 @@ fn manage_authority(
 
 /// Attach a terrain collider patch when the ship enters the AGL handoff
 /// band over a body whose surface is registered. The collider is
-/// [`RigidBody::Kinematic`] with `Rotation = body.orientation`, so its
-/// body-fixed vertices land at their inertial positions in the Avian rigid
-/// body's frame. [`sync_terrain_collider_pose`] re-poses it each frame as
-/// the body rotates.
+/// [`RigidBody::Kinematic`] centered on the patch's surface point. Its
+/// local vertices are body-fixed offsets from that center, so
+/// `Position + Rotation * local_vertex` lands at the correct
+/// body-centered-inertial position while the narrow phase solves against
+/// small local coordinates. [`sync_terrain_collider_pose`] re-poses it
+/// each frame as the body rotates.
 fn attach_terrain_patch_when_close(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
@@ -1004,7 +1031,7 @@ fn release_debug_launch_mount(
 /// In `Paused` we skip entirely; the snap zeroes both accumulators on
 /// the way out anyway.
 fn apply_local_forces(
-    time: Res<Time>,
+    clock: Res<SimClock>,
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
     mut sim: ResMut<SimulationState>,
@@ -1058,12 +1085,15 @@ fn apply_local_forces(
             let mut accel = gravity_accel;
             let throttle_eff = throttle.effective.clamp(0.0, 1.0);
             let mass = sim.simulation.ship_mass_kg();
-            if !destroyed && throttle_eff > 0.0 && params.thrust_n > 0.0 && mass > params.dry_mass_kg
+            if !destroyed
+                && throttle_eff > 0.0
+                && params.thrust_n > 0.0
+                && mass > params.dry_mass_kg
             {
                 let nose_world = rotation.0 * DVec3::Y;
                 accel += nose_world * (params.thrust_n / mass) * throttle_eff;
                 sim.simulation
-                    .apply_external_mass_flow(throttle_eff, time.delta_secs_f64());
+                    .apply_external_mass_flow(throttle_eff, clock.delta_secs_f64());
             }
             linear_accel.0 = accel;
         } else {
@@ -1085,7 +1115,7 @@ fn apply_local_forces(
             &params,
             rotation.0,
             angular_velocity.0,
-            time.delta_secs_f64(),
+            clock.delta_secs_f64(),
         )
     };
 }
@@ -1170,8 +1200,7 @@ fn readback_local_craft(
     // Grounded EVA owns canonical translation outright (see
     // `snap_avian_from_canonical`); airborne EVA coasts like a ship and falls
     // through to the role-driven split below.
-    let eva_grounded =
-        sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded();
+    let eva_grounded = sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded();
     if !eva_grounded && !authority.integrator_active() {
         return;
     }
@@ -1300,10 +1329,11 @@ fn detect_terrain_impact(
     };
 
     // Surface-relative approach speed in body-centered inertial. The terrain
-    // collider sits at the body centre and co-rotates, so the surface point
-    // under the craft moves at ω × r; subtracting it gives the relative
-    // speed the contact resolves against (a craft resting on the spinning
-    // surface reads ~0, not the surface's inertial speed).
+    // collider is centered on its local patch, but its velocity field is still
+    // the body's rotation field, so the surface point under the craft moves at
+    // ω × r. Subtracting it gives the relative speed the contact resolves
+    // against (a craft resting on the spinning surface reads ~0, not the
+    // surface's inertial speed).
     let body_state = body_state_for(&sim, bubble.body_id);
     let surface_velocity = body_state.angular_velocity.cross(position.0);
     let approach_speed = (linear_velocity.0 - surface_velocity).length();
@@ -1417,16 +1447,20 @@ fn maintain_terrain_patch(
 }
 
 /// Pose the kinematic terrain collider to match the dominant body's current
-/// orientation and angular velocity. The collider's local vertices are
-/// body-fixed; `Rotation = body.orientation` carries them into body-centered
-/// inertial each frame, and `AngularVelocity = body.angular_velocity` gives
-/// contact resolution the correct surface velocity at the contact point so
-/// a craft sitting on the spinning surface feels itself co-rotate.
+/// orientation and angular velocity. The collider's body origin sits at the
+/// patch center so its local mesh stays near zero; `LinearVelocity =
+/// ω × origin` plus `AngularVelocity = ω` gives every contact point the
+/// correct rotating-surface velocity.
 fn sync_terrain_collider_pose(
     active: Res<ActiveLocalBubble>,
     sim: Res<SimulationState>,
     mut terrain_q: Query<
-        (&mut Rotation, &mut AngularVelocity),
+        (
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
         (With<TerrainColliderPatch>, Without<LocalCraftBody>),
     >,
 ) {
@@ -1436,11 +1470,20 @@ fn sync_terrain_collider_pose(
     let Some(terrain_entity) = bubble.terrain_entity else {
         return;
     };
-    let Ok((mut rotation, mut angular_velocity)) = terrain_q.get_mut(terrain_entity) else {
+    let Ok((mut position, mut rotation, mut linear_velocity, mut angular_velocity)) =
+        terrain_q.get_mut(terrain_entity)
+    else {
         return;
     };
     let body_state = body_state_for(&sim, bubble.body_id);
+    let (patch_position, patch_velocity) = terrain_patch_pose(
+        bubble.center_surface_body_m,
+        body_state.orientation,
+        body_state.angular_velocity,
+    );
+    position.0 = patch_position;
     rotation.0 = body_state.orientation;
+    linear_velocity.0 = patch_velocity;
     angular_velocity.0 = body_state.angular_velocity;
 }
 
@@ -1451,7 +1494,7 @@ fn sync_terrain_collider_pose(
 /// bubble.
 fn collapse_or_constrain_warp(
     mut commands: Commands,
-    time: Res<Time>,
+    clock: Res<SimClock>,
     contact_graph: Res<ContactGraph>,
     config: Res<LocalBubbleConfig>,
     throttle: Res<ThrottleState>,
@@ -1489,7 +1532,7 @@ fn collapse_or_constrain_warp(
     let contact = craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity);
     bubble.stable_landed = stable_contact_reached(
         &mut bubble.stable_contact_s,
-        time.delta_secs_f64(),
+        clock.delta_secs_f64(),
         contact,
         linear_velocity.length(),
         angular_velocity.length(),
@@ -1603,7 +1646,7 @@ fn debug_log_body_fixed_state(
 ///   GPU-rendered surface is *above* the collider; the player will appear
 ///   embedded by this distance.
 fn debug_log_terrain_gap(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     active: Res<ActiveLocalBubble>,
     height_sources: Res<HeightSourceRegistry>,
     sim: Res<SimulationState>,
@@ -1811,8 +1854,9 @@ type PartColliderQuery<'w, 's> = Query<
     'w,
     's,
     (
-        &'static GlobalTransform,
+        Entity,
         &'static AttachNodes,
+        Option<&'static Attachment>,
         Option<&'static CommandPod>,
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
@@ -1822,25 +1866,21 @@ type PartColliderQuery<'w, 's> = Query<
     With<Part>,
 >;
 
-fn build_ship_collider_primitives(
-    player_ship: &Query<&GlobalTransform, With<PlayerShip>>,
-    parts: &PartColliderQuery,
-) -> Vec<LocalPrimitiveCollider> {
-    let Ok(root) = player_ship.single() else {
-        return vec![fallback_collider()];
-    };
-    let root_inv = root.affine().inverse();
+fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<LocalPrimitiveCollider> {
+    let part_positions = compute_part_collider_positions(parts);
     let mut primitives = Vec::new();
-    for (global, nodes, pod, dec, adapter, tank, engine) in parts.iter() {
-        let part_affine = root_inv * global.affine();
-        let (_, rotation, translation) = part_affine.to_scale_rotation_translation();
-        let rotation = rotation.as_dquat();
-        let Some((shape, local_offset)) = part_shape(nodes, pod, dec, adapter, tank, engine) else {
+    for (entity, nodes, _, pod, dec, adapter, tank, engine) in parts.iter() {
+        let Some(part_position) = part_positions.get(&entity).copied() else {
+            continue;
+        };
+        let Some((shape, local_offset)) =
+            part_collider_shape(nodes, pod, dec, adapter, tank, engine)
+        else {
             continue;
         };
         primitives.push(LocalPrimitiveCollider {
-            offset_m: translation.as_dvec3() + rotation * local_offset,
-            rotation,
+            offset_m: part_position + local_offset,
+            rotation: DQuat::IDENTITY,
             shape,
         });
     }
@@ -1848,6 +1888,58 @@ fn build_ship_collider_primitives(
         primitives.push(fallback_collider());
     }
     primitives
+}
+
+fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity, DVec3> {
+    let mut nodes_by_entity: HashMap<Entity, &AttachNodes> = HashMap::new();
+    let mut children_by_parent: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
+    let mut roots = Vec::new();
+
+    for (entity, nodes, attachment, ..) in parts.iter() {
+        nodes_by_entity.insert(entity, nodes);
+        if let Some(attachment) = attachment {
+            children_by_parent
+                .entry(attachment.parent)
+                .or_default()
+                .push((entity, attachment.clone()));
+        } else {
+            roots.push(entity);
+        }
+    }
+
+    let mut positions = HashMap::new();
+    let mut queue = VecDeque::new();
+    for root in roots {
+        positions.insert(root, DVec3::ZERO);
+        queue.push_back(root);
+    }
+
+    while let Some(parent) = queue.pop_front() {
+        let Some(parent_position) = positions.get(&parent).copied() else {
+            continue;
+        };
+        let Some(parent_nodes) = nodes_by_entity.get(&parent).copied() else {
+            continue;
+        };
+        let Some(children) = children_by_parent.get(&parent) else {
+            continue;
+        };
+        for (child, attachment) in children {
+            let Some(parent_node) = parent_nodes.get(&attachment.parent_node) else {
+                continue;
+            };
+            let child_offset = nodes_by_entity
+                .get(child)
+                .and_then(|nodes| nodes.get(&attachment.my_node))
+                .map(|node| node.offset)
+                .unwrap_or(Vec3::ZERO);
+            let child_position = parent_position + (parent_node.offset - child_offset).as_dvec3();
+            positions.insert(*child, child_position);
+            queue.push_back(*child);
+        }
+    }
+
+    positions
 }
 
 fn fallback_collider() -> LocalPrimitiveCollider {
@@ -1862,7 +1954,7 @@ fn fallback_collider() -> LocalPrimitiveCollider {
     }
 }
 
-fn part_shape(
+fn part_collider_shape(
     nodes: &AttachNodes,
     pod: Option<&CommandPod>,
     dec: Option<&Decoupler>,
@@ -1873,7 +1965,7 @@ fn part_shape(
     if let Some(pod) = pod {
         let height = pod.diameter * 0.9;
         Some((
-            LocalPrimitiveShape::Cone {
+            LocalPrimitiveShape::Cylinder {
                 radius: (pod.diameter * 0.5) as f64,
                 height: height as f64,
             },
@@ -1912,7 +2004,7 @@ fn part_shape(
     } else if let Some(engine) = engine {
         let height = engine.diameter * 0.9;
         Some((
-            LocalPrimitiveShape::Cone {
+            LocalPrimitiveShape::Cylinder {
                 radius: (engine.diameter * 0.5) as f64,
                 height: height as f64,
             },
@@ -2176,5 +2268,50 @@ mod tests {
                 "previous={previous:?} current={current:?}"
             );
         }
+    }
+
+    #[test]
+    fn pod_collider_uses_full_radius_cylinder() {
+        let nodes = AttachNodes::default();
+        let pod = CommandPod {
+            model: "test".to_string(),
+            diameter: 2.0,
+            dry_mass: 0.0,
+            reaction_wheel_torque: 0.0,
+        };
+
+        let (shape, offset) =
+            part_collider_shape(&nodes, Some(&pod), None, None, None, None).unwrap();
+
+        let LocalPrimitiveShape::Cylinder { radius, height } = shape else {
+            panic!("pod collider should be a cylinder");
+        };
+        assert!((radius - 1.0).abs() < 1e-12);
+        assert!((height - 1.8).abs() < 1e-6);
+        assert!((offset - DVec3::Y * -(height * 0.5)).length() < 1e-12);
+    }
+
+    #[test]
+    fn engine_collider_uses_full_radius_cylinder() {
+        let nodes = AttachNodes::default();
+        let engine = Engine {
+            model: "test".to_string(),
+            diameter: 2.0,
+            thrust: 0.0,
+            isp: 0.0,
+            dry_mass: 0.0,
+            reactants: Vec::new(),
+            power_draw_kw: 0.0,
+        };
+
+        let (shape, offset) =
+            part_collider_shape(&nodes, None, None, None, None, Some(&engine)).unwrap();
+
+        let LocalPrimitiveShape::Cylinder { radius, height } = shape else {
+            panic!("engine collider should be a cylinder");
+        };
+        assert!((radius - 1.0).abs() < 1e-12);
+        assert!((height - 1.8).abs() < 1e-6);
+        assert!((offset - DVec3::Y * -(height * 0.5)).length() < 1e-12);
     }
 }

@@ -7,10 +7,6 @@ pub const PREPARE_PREPASS_SHADER: &str =
     "embedded://thalos_udlod/shaders/tiling_prepass/prepare_prepass.wgsl";
 pub const REFINE_TILES_SHADER: &str =
     "embedded://thalos_udlod/shaders/tiling_prepass/refine_tiles.wgsl";
-pub(crate) const SPLIT_SHADER: &str = "embedded://thalos_udlod/shaders/preprocess/split.wgsl";
-pub(crate) const STITCH_SHADER: &str = "embedded://thalos_udlod/shaders/preprocess/stitch.wgsl";
-pub(crate) const DOWNSAMPLE_SHADER: &str =
-    "embedded://thalos_udlod/shaders/preprocess/downsample.wgsl";
 
 #[derive(Default, Resource)]
 pub(crate) struct InternalShaders(Vec<Handle<Shader>>);
@@ -49,17 +45,5 @@ pub(crate) fn load_terrain_shaders(app: &mut App) {
             "embedded://thalos_udlod/shaders/render/vertex.wgsl",
             "embedded://thalos_udlod/shaders/render/fragment.wgsl",
         ],
-    );
-}
-
-pub(crate) fn load_preprocess_shaders(app: &mut App) {
-    embedded_asset!(app, "preprocess/preprocessing.wgsl");
-    embedded_asset!(app, "preprocess/split.wgsl");
-    embedded_asset!(app, "preprocess/stitch.wgsl");
-    embedded_asset!(app, "preprocess/downsample.wgsl");
-
-    InternalShaders::load(
-        app,
-        &["embedded://thalos_udlod/shaders/preprocess/preprocessing.wgsl"],
     );
 }

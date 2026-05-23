@@ -15,6 +15,7 @@ struct FragmentInput {
     @location(1)           coordinate_uv: vec2<f32>,
     @location(2)           world_position: vec4<f32>,
     @location(3)           world_normal: vec3<f32>,
+    @location(4)           view_vector: vec3<f32>,
 }
 
 struct FragmentOutput {
@@ -28,6 +29,7 @@ struct FragmentInfo {
     clip_position: vec4<f32>,
     world_normal: vec3<f32>,
     world_position: vec4<f32>,
+    view_vector: vec3<f32>,
     color: vec4<f32>,
     normal: vec3<f32>,
 }
@@ -35,7 +37,7 @@ struct FragmentInfo {
 fn fragment_info(input: FragmentInput) -> FragmentInfo{
     let tile          = geometry_tiles[input.tile_index];
     let uv            = input.coordinate_uv;
-    let view_distance = distance(input.world_position.xyz, view.world_position);
+    let view_distance = length(input.view_vector);
 
     var info: FragmentInfo;
     info.coordinate     = Coordinate(tile.side, tile.lod, tile.xy, uv, dpdx(uv), dpdy(uv));
@@ -44,6 +46,7 @@ fn fragment_info(input: FragmentInput) -> FragmentInfo{
     info.clip_position  = input.clip_position;
     info.world_normal   = input.world_normal;
     info.world_position = input.world_position;
+    info.view_vector    = input.view_vector;
 
     return info;
 }

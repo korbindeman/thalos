@@ -127,10 +127,10 @@ impl TerrainSurfaceRegistry {
 /// The Avian body lives in **body-centered inertial** coordinates — the
 /// origin tracks the dominant body's centre but the axes do not rotate.
 /// Gravity in `apply_local_forces` is the textbook two-body `−μr/r³`;
-/// no fictitious forces. The terrain collider is `Kinematic` with
-/// `Rotation = body.orientation` so its vertices, authored in body-fixed
-/// coordinates, render into body-centered inertial each frame as the
-/// body spins.
+/// no fictitious forces. The terrain collider is `Kinematic`, centered on
+/// the local patch with body-fixed vertex offsets and `Rotation =
+/// body.orientation`, so `Position + Rotation * local_vertex` evaluates to
+/// the rendered body-centered inertial surface as the body spins.
 #[derive(Resource, Debug, Clone)]
 pub struct LocalBubble {
     pub id: u64,
@@ -184,6 +184,9 @@ pub struct TerrainColliderPatch {
     pub half_extent_m: f64,
     pub resolution: u32,
 }
+
+#[derive(Component, Debug, Clone)]
+pub struct LocalCraftColliderPrimitives(pub Vec<LocalPrimitiveCollider>);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LocalPrimitiveShape {
@@ -285,20 +288,27 @@ pub fn spawn_terrain_collider_patch(
                 terrain_patch_config(config),
             )
         });
-    // Vertices are body-fixed. The collider is Kinematic so its Rotation
-    // tracks the body's orientation each frame — body.orientation * vertex
-    // gives the body-centered inertial position of each vertex. The collider
-    // body itself stays at the origin (the dominant body's centre) and
-    // carries the body's angular velocity so contact resolution sees the
-    // correct surface velocity at the contact point.
-    let collider = Collider::trimesh(patch.vertices_body_m.clone(), patch.indices.clone());
+    // Keep the trimesh near its own origin. The source vertices are absolute
+    // body-fixed positions at planet radius; feeding those directly to the
+    // narrow phase makes every contact solve against million-metre local
+    // coordinates. Instead, put the kinematic body at the patch centre and
+    // store vertex offsets in body-fixed axes. `sync_terrain_collider_pose`
+    // advances the body origin around the planet while `Rotation =
+    // body.orientation` carries each local offset into body-centered inertial.
+    let local_vertices = terrain_patch_local_vertices(&patch);
+    let (patch_origin, patch_velocity) = terrain_patch_pose(
+        patch.center_surface_body_m,
+        body_orientation,
+        body_angular_velocity,
+    );
+    let collider = Collider::trimesh(local_vertices, patch.indices.clone());
     let entity = commands
         .spawn((
             RigidBody::Kinematic,
             collider,
-            Position(DVec3::ZERO),
+            Position(patch_origin),
             Rotation(body_orientation),
-            LinearVelocity(DVec3::ZERO),
+            LinearVelocity(patch_velocity),
             AngularVelocity(body_angular_velocity),
             TerrainColliderPatch {
                 body_id,
@@ -313,6 +323,24 @@ pub fn spawn_terrain_collider_patch(
         entity,
         mesh: patch,
     }
+}
+
+pub fn terrain_patch_pose(
+    center_surface_body_m: DVec3,
+    body_orientation: DQuat,
+    body_angular_velocity: DVec3,
+) -> (DVec3, DVec3) {
+    let patch_origin = body_orientation * center_surface_body_m;
+    let patch_velocity = body_angular_velocity.cross(patch_origin);
+    (patch_origin, patch_velocity)
+}
+
+fn terrain_patch_local_vertices(patch: &TerrainPatchMesh) -> Vec<DVec3> {
+    patch
+        .vertices_body_m
+        .iter()
+        .map(|vertex| *vertex - patch.center_surface_body_m)
+        .collect()
 }
 
 pub fn spawn_local_craft_body(commands: &mut Commands, spawn: LocalCraftSpawn) -> Entity {
@@ -332,9 +360,12 @@ pub fn spawn_local_craft_body(commands: &mut Commands, spawn: LocalCraftSpawn) -
             ConstantLinearAcceleration(DVec3::ZERO),
             ConstantAngularAcceleration(DVec3::ZERO),
             SleepingDisabled,
-            LocalCraftBody {
-                craft_id: spawn.craft_id,
-            },
+            (
+                LocalCraftBody {
+                    craft_id: spawn.craft_id,
+                },
+                LocalCraftColliderPrimitives(spawn.collider_primitives),
+            ),
             // Continuous Collision Detection so a fast descent stops at the
             // terrain trimesh instead of tunneling through it. Speculative
             // collision (Avian default) treats surfaces as infinite planes
@@ -462,5 +493,36 @@ mod tests {
             },
         ]);
         let _ = collider;
+    }
+
+    #[test]
+    fn terrain_patch_vertices_are_local_to_patch_origin() {
+        let patch = TerrainPatchMesh {
+            vertices_body_m: vec![
+                DVec3::new(10.0, 1000.0, -2.0),
+                DVec3::new(11.0, 1001.0, -4.0),
+            ],
+            indices: vec![[0, 1, 1]],
+            center_surface_body_m: DVec3::new(10.0, 1000.0, -2.0),
+            basis: TerrainPatchBasis::from_normal(DVec3::Y),
+            half_extent_m: 1.0,
+        };
+
+        let local = terrain_patch_local_vertices(&patch);
+
+        assert_eq!(local[0], DVec3::ZERO);
+        assert_eq!(local[1], DVec3::new(1.0, 1.0, -2.0));
+    }
+
+    #[test]
+    fn terrain_patch_pose_tracks_rotating_surface_velocity() {
+        let center_body = DVec3::new(0.0, 1000.0, 0.0);
+        let orientation = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        let angular_velocity = DVec3::Z * 0.1;
+
+        let (position, velocity) = terrain_patch_pose(center_body, orientation, angular_velocity);
+
+        assert!((position - DVec3::new(-1000.0, 0.0, 0.0)).length() < 1.0e-9);
+        assert!((velocity - angular_velocity.cross(position)).length() < 1.0e-9);
     }
 }

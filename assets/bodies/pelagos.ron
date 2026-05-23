@@ -29,11 +29,9 @@
             mie_asymmetry: 0.78,
             strength: 1.0,
         )),
-        clouds: Some((
-            coverage: 0.30,
-            albedo: (0.78, 0.80, 0.84),
-            scroll_rate: 1.5e-5,
-            differential_rotation: 0.40,
-        )),
+        // Temporarily disabled while the reference cloud layer is being revisited.
+        // Previous values: coverage 0.30, albedo (0.78, 0.80, 0.84),
+        // scroll_rate 1.5e-5, differential_rotation 0.40.
+        clouds: None,
     )),
 )

@@ -146,7 +146,7 @@ pub(in crate::maneuver) fn update_arrow_transforms(
     scale: Res<WorldScale>,
     mode: Res<InteractionMode>,
     hover_map: Res<HoverMap>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut stretch_state: ResMut<ArrowStretchState>,
     mut material_assets: ResMut<Assets<StandardMaterial>>,
     camera_q: Query<

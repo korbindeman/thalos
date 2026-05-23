@@ -39,7 +39,7 @@ pair once ground LOD lands.
 | Feature compiler | `AirlessImpactMoon` and `ColdDesertFormerlyWet` archetypes wired (Mira, Vaelen). v1 has no first-class hydrology, no layered substrate, no climate fields. | Revamped compiler with v2 backlog landed; all four main bodies through it (M2) |
 | Terrestrial bodies | Thalos, Pelagos use `Ocean` flat-water placeholder | `AgingOceanicHomeworld`, `GenericTerrestrial` archetypes (M2) |
 | Renderer (orbital) | Flat impostor reads `StaticSurfaceData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
-| Renderer (surface) | `thalos_udlod` fork (github.com/korbindeman/bevy_terrain, Bevy 0.18 + `TileProvider`) pulled into the workspace; `PipelineTileProvider` reads baked cubemap/R16 height directly for UDLOD tiles. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
+| Renderer (surface) | In-tree `thalos_udlod` fork (Bevy 0.18 + runtime `TileProvider`); `PipelineTileProvider` reads a temporary low-pass view of the baked cubemap/R16 height for UDLOD tiles and matching height queries. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
 | Big-space hierarchy | Not present | Per-body grids parented to system grid (M1, M3) |
 
 ## Goals
@@ -717,28 +717,39 @@ a pipeline they slot into, not a milestone gate.
 
 ## Rendering: ground LOD (M3)
 
-Almost everything we need for surface-scale rendering is upstream in
-Kurt Kühnert's `thalos_udlod`. The single missing piece — a way to
-feed runtime-synthesized tile data into the renderer instead of
-disk-loaded preprocessed tiles — is added in our fork.
+Thalos uses the in-tree `thalos_udlod` fork for surface-scale terrain
+rendering. The fork began as Kurt Kühnert's `bevy_terrain`, which was
+shaped around rendering finite preprocessed raster datasets. That was
+useful as a starting point, but it is the wrong primary model for
+Thalos: our terrain tiles are synthesized at runtime from body data,
+may later be cached opportunistically, and should eventually be
+generated directly on the GPU.
 
-**Fork status:** done. The fork is hosted at
-[github.com/korbindeman/bevy_terrain](https://github.com/korbindeman/bevy_terrain)
-(branch `main`) with the Bevy 0.18 port and the `TileProvider` trait
-already in place; the Thalos workspace pulls it in as a git dependency
-declared in the root `Cargo.toml`. M3 is no longer about producing the
-fork; it is about wiring it into the Thalos workspace, implementing
-`PipelineTileProvider` against the revamped feature compiler, and
-onboarding Mira, Vaelen, Thalos, and Pelagos.
+The fork is therefore **runtime-provider-first**. `TileAtlas` and
+`TileTree` own residency, fallback, LOD balancing, and shader-visible
+atlas state; `TileProvider` owns the source of tile contents. The
+offline GeoTIFF/preprocess/`DiskTileProvider` path has been removed.
+Persistent reuse should be implemented as a cache provider/wrapper
+around the runtime pipeline, keyed by body config + tile coordinate +
+attachment spec, not as an authored `assets/<terrain>/data` tree.
+
+**Fork status:** in-tree and divergent by design. The Bevy 0.18 port,
+unconditional `big_space` precision path, CPU-balanced draw tile
+selection, and runtime `TileProvider` path are already in place. M3 is
+no longer about proving an upstream-like preprocessed example; it is
+about making the Thalos tile pipeline agree with the impostor, collider,
+and gameplay height sources, then moving expensive tile production to
+GPU jobs.
 
 ### Repository landscape
 
-- **`thalos_udlod`** — the library. Pinned, actively developed.
+- **`thalos_udlod`** — the library. Forked in-tree and edited as part
+  of the Thalos workspace.
   Contains the entire terrain rendering stack including UDLOD,
   Chunked Clipmap, three terrain models (planar / spherical /
   ellipsoidal), cubesphere projection, Taylor-series GPU precision
-  approximation, optional `big_space` integration, multi-view
-  rendering, debug tooling. **This is the fork target.**
+  approximation, unconditional `big_space` integration, multi-view
+  rendering, debug tooling, and the runtime tile provider seam.
 - **`planetary_terrain_renderer`** — Master's thesis demo app. Uses
   `thalos_udlod` to render real-world Earth from GeoTIFF datasets.
   **Reference only.** Its `examples/spherical.rs` and debug controls
@@ -837,23 +848,34 @@ a single body. The terrain renderer handles that internally.
 - **Multi-view rendering, custom material plugin system, debug
   visualization tools.**
 
-#### Added by the fork
+#### Added/changed by the fork
 
 - **`TileProvider` trait.** The architectural seam. See
   *TileProvider interface* below.
-- **Refactored tile loading.** Decouples "where data comes from"
-  from "how it's stored / sampled / rendered." The original
-  disk-loading code is one impl of `TileProvider` (named
-  `DiskTileProvider` or similar), kept around as a regression check.
+- **Runtime-provider-first tile loading.** Decouples "where data comes
+  from" from "how it's stored / sampled / rendered." The original
+  disk-loading/preprocess code was removed because it assumed a finite
+  pre-authored dataset under `assets/`; Thalos needs arbitrary
+  generated or cached tiles.
+- **CPU-balanced draw tile selection.** The old GPU refine pass made
+  per-tile decisions and could emit LOD gaps across cube-face seams.
+  The current CPU draw-set pass enforces the 2:1 balance invariant
+  before uploading the tile list to the same buffer the vertex shader
+  consumes.
 - **Bevy 0.18 port.** Upstream's last main indexing was May 2025,
   likely on Bevy 0.16.
 
-#### Untouched
+#### Intended next divergence
 
-- The UDLOD shader pipeline, the Taylor approximation math, the bind
-  groups, and the rendering systems are unchanged. The fork is
-  data-source-only, which keeps merging upstream improvements
-  feasible.
+- **GPU tile production.** Keep CPU residency and draw balancing until
+  a GPU global-balance path is justified, but let providers enqueue GPU
+  jobs that write directly into atlas slots. The first GPU producer can
+  mirror the CPU `PipelineTileProvider`; later producers can run
+  diffusion or other heavier synthesis before marking the slot ready.
+- **Thalos cache provider.** If tile latency or repeated visits demand
+  persistence, add a cache wrapper around runtime providers. It should
+  store generated tile payloads by body/source hash and coordinate, not
+  restore the old preprocessed dataset model.
 
 ### TileProvider interface
 
@@ -877,17 +899,39 @@ pub trait TileProvider: Send + Sync {
     fn request_tile(
         &self,
         coord: TileCoordinate,
-        attachments: &[AttachmentSpec],
-    ) -> TileRequest;
+        model: &TerrainModel,
+        attachments: &[AttachmentConfig],
+    ) -> Task<Result<Vec<AttachmentData>>>;
 }
-
-// `TileCoordinate` is upstream — already exists in thalos_udlod, with
-// face/lod/x/y.
 ```
 
 The trait should be designed to allow async/eventual delivery; tile
 latency is not zero and the renderer must tolerate it gracefully (it
 already does, via parent-LOD fallback).
+
+The current trait returns CPU attachment buffers because that is the
+implemented path. CPU payloads can already be wrapped in
+`MemoryTileCacheProvider`, which keeps a bounded in-memory frecency
+cache outside `TileAtlas`. Use the wrapper with a namespace derived
+from body/source hash; the key also includes tile coordinate and
+attachment layout. This is deliberately a provider concern so atlas
+residency stays focused on currently visible slots.
+
+The next shape should separate atlas-slot residency from production
+backend:
+
+```rust
+enum TileProduction {
+    Cpu(Task<Result<Vec<AttachmentData>>>),
+    Gpu(GpuTileJob),
+}
+```
+
+`GpuTileJob` should carry tile coordinate, atlas slot/generation,
+attachment layout, and body/pipeline uniforms. Its compute pass writes
+the target atlas array layer directly, then reports the slot ready. The
+atlas should only care that the coordinate's current slot generation
+finished; it should not care whether bytes came from CPU, cache, or GPU.
 
 #### What the provider must produce per tile
 
@@ -944,8 +988,8 @@ terrain at close range.
 Rough budget: tiles available within a few hundred ms of being
 requested at typical traversal speeds. Hard real-time is not
 required. If the synthesis pipeline can't meet this, the provider
-can layer caching (LRU in-memory, optional disk cache for visited
-regions) on top.
+can layer a Thalos cache on top. That cache is a runtime
+optimization, not an authored terrain source.
 
 ### Per-body configuration
 
@@ -1003,8 +1047,7 @@ into Thalos and wiring it to the revamped feature compiler.
 
 #### Stage 1: pull the fork into the workspace
 
-- Add the `thalos_udlod` fork as a workspace dependency, pinned to the
-  github remote on `main`.
+- Add the `thalos_udlod` fork as an in-tree workspace crate.
 - Stand up a `thalos_terrain_render` crate that owns the integration: registers
   `thalos_udlod::TerrainPlugin`, exposes a deterministic
   `SyntheticTileProvider` (pure function of `Coordinate::world_position`
@@ -1021,9 +1064,9 @@ into Thalos and wiring it to the revamped feature compiler.
   trait existed and assumed validating the disk path was the cheapest
   proof. Now that the trait is in place, exercising the same seam Stage 2
   will reuse with a synthetic provider is a stronger Stage 1 deliverable
-  and skips authoring preprocessed disk assets we'd never ship. The
-  fork keeps `DiskTileProvider` around as the upstream-compatible code
-  path.
+  and skips authoring preprocessed disk assets we'd never ship. The old
+  upstream-compatible `DiskTileProvider` path has since been removed;
+  the synthetic playground is the fork sanity check.
 
   The big_space hierarchy validation moves to Stage 2 — the playground
   spawns its own `BigSpace` root rather than threading through the
@@ -1035,10 +1078,13 @@ into Thalos and wiring it to the revamped feature compiler.
 
 - Implement `PipelineTileProvider` wrapping the synthesis pipeline.
   Converts cubesphere `TileCoordinate` → body-local direction → reads
-  the matching baked cubemap texel directly from `StaticSurfaceData` →
-  copies the result into the configured tile attachments (height into
-  `R16`, albedo into sRGB-encoded `Rgba8`, roughness into linear `R16`
-  upscaled from the source u8 cubemap by 257).
+  a temporary low-pass sample of the baked height/albedo/roughness
+  cubemaps from `StaticSurfaceData` → copies the result into the
+  configured tile attachments (height into `R16`, albedo into
+  sRGB-encoded `Rgba8`, roughness into linear `R16` upscaled from the
+  source u8 cubemap by 257). This is deliberately a short-term visual
+  bridge for the current Thalos terracing; the terrain rewrite should
+  replace it with genuinely continuous local fields.
 - The current height path is deliberately the rendered cubemap/R16
   source, not `thalos_terrain::sample_static_surface()`. The full
   sampler includes SSBO crater iteration and statistical detail that
@@ -1054,10 +1100,13 @@ into Thalos and wiring it to the revamped feature compiler.
   it bypasses baked cubemap sampling and dynamic layers, so CPU height
   queries and terrain colliders still follow the normal rendered-height
   path rather than the analytic surface. The local craft-shadow proxy is
-  off by default because the projected capsule shadow can read as a
-  terrain seam; use `THALOS_TERRAIN_CRAFT_SHADOW=on|off|auto` to override
-  that behavior when isolating material/shadow issues. If the real body's
-  height range makes the analytic field look flat, set
+  on by default so nearby ships/EVA cast a stable sun-ray shadow onto the
+  custom UDLOD terrain receiver. Ships project per-part frustum/cylinder
+  silhouettes from the same procedural part dimensions as the visible mesh;
+  EVA keeps a small capsule proxy. Leave `THALOS_TERRAIN_CRAFT_SHADOW`
+  unset or set it to `on|auto` for the normal behavior, and set it to
+  `off` only when isolating material seams. If the real body's height range
+  makes the analytic field look flat, set
   `THALOS_TERRAIN_ANALYTIC_RANGE_M=500` (or another positive metre value)
   to widen the visual-only diagnostic height range.
 - Fully flat diagnostic: run `THALOS_TERRAIN_PROVIDER=flat just game` to
@@ -1070,8 +1119,8 @@ into Thalos and wiring it to the revamped feature compiler.
 - The provider holds the `PlanetSurface` behind an `Arc` so it shares
   data with the impostor billboard's `PlanetMaterial` and there is one
   copy of the cubemap-heavy `StaticSurfaceData` per body.
-- In-memory LRU tile cache is provided by `thalos_udlod`'s
-  `TileAtlas`; an explicit Thalos-side cache is deferred unless tile
+- In-memory tile reuse is provided by `thalos_udlod`'s `TileAtlas`;
+  an explicit Thalos-side persistent cache is deferred unless tile
   latency proves to be a problem.
 - **Implementation:** [crates/terrain_render/src/pipeline.rs](../crates/terrain_render/src/pipeline.rs).
 - **Exit criterion (met):** body terrain entities are spawned by
@@ -1089,18 +1138,30 @@ into Thalos and wiring it to the revamped feature compiler.
   the same ephemeris snapshot the impostor's per-frame writer uses,
   so primary-star direction and flux match across the LOD swap.
 - `body_terrain.wgsl` samples height + albedo + roughness from the
-  thalos_udlod attachment atlases, derives a perturbed normal via
-  `sample_normal` (height finite-difference), and calls
-  `thalos::lighting::shade_hapke_surface` with `external_shadow =
+  thalos_udlod attachment atlases, derives a height finite-difference
+  normal via `sample_normal`, then heavily damps it toward the geometric
+  sphere normal before calling `thalos::lighting::shade_hapke_surface`.
+  This is a temporary visual-smoothing choice for the pre-rewrite
+  terrestrial terrain: the current Thalos macro field has broad height
+  bands, and full-strength height normals make those bands read as dark
+  contour steps. The terrain vertex stage also passes a camera-relative
+  view vector into the fragment shader so low-altitude view terms do not
+  subtract large absolute render-space positions, and the shared Hapke
+  helper keeps surface visibility anchored to the geometric normal when
+  a height normal points away from the camera at grazing angles. On
+  atmospheric bodies, the terrain shader also derives a small
+  sky-diffuse fill term from `AtmosphereBlock`'s Rayleigh/Mie column so
+  nearby slopes under a daylight sky do not collapse to pure black when
+  they are not directly sun-facing; airless bodies keep the vacuum-black
+  floor. The local craft proxy still feeds `external_shadow =
   local_craft_shadow` from a sun-ray capsule test against the player's
-  craft proxy. This lets the craft cast stable local shadows onto ground
-  LOD terrain while keeping crater shadow / terrain self-shadow deferred.
+  craft, while crater shadow / terrain self-shadow remain deferred.
 - The impostor (`planet_impostor.wgsl`) calls the same
   `shade_hapke_surface` with
   `external_shadow = crater_shadow * self_shadow_term`. Atmosphere
   transmittance, cloud composite, water BRDF, and limb darkening are
   applied post-call on the impostor side.
-- The terrain LOD path keeps atmosphere and clouds out of
+- The terrain LOD path keeps camera-path atmosphere and clouds out of
   `body_terrain.wgsl`; `BodySkyMaterial` draws the in-front layer as a
   fullscreen pass while terrain is visible, clipping the raymarch at
   copied scene depth and sampling the same reference cloud cubemap on a
@@ -1145,11 +1206,13 @@ UDLOD tile data is the macro cubemap plus a runtime detail cascade
 evaluated by `PipelineTileProvider` per tile pixel.
 
 The macro is the baked cubemap: at Thalos's 4096² resolution and
-3186 km radius, ~1.2 km per equator texel. Without procedural detail
-above this, deep-LOD tiles are bilinear upsamples of the macro —
-smooth within a macro texel, with normal discontinuities at every
-boundary, producing the characteristic "huge flat panels with sharp
-creases" appearance.
+3186 km radius, ~1.2 km per equator texel. Until the revamped terrain
+generator provides better continuous local fields, `PipelineTileProvider`
+low-pass filters the macro height/color/roughness source before UDLOD
+tiles and rendered-height queries see it. The ground terrain material
+also blends height-derived normals strongly back toward the geometric
+normal so residual bands read as smooth terrain rather than terraced
+contour steps.
 
 The cascade in
 [crates/terrain_render/src/pipeline.rs](../crates/terrain_render/src/pipeline.rs)
@@ -1242,20 +1305,14 @@ follow incrementally — same pipeline, no separate stage.
 
 ### Fork relationship and upstream
 
-The fork is intended to be long-lived but not divergent. Goals:
+The fork is now a long-lived Thalos subsystem, not a thin upstream
+overlay. Keep the attribution and license lineage clear, but optimize
+the code for Thalos's runtime and GPU-generation path.
 
-- Track upstream Bevy version bumps by rebasing our changes onto
-  upstream's migrations.
-- Pull in upstream rendering improvements (mipmap fixes, tile loading
-  efficiency, etc.).
-- Eventually upstream the `TileProvider` abstraction itself if Kurt
-  is interested. It's a generally useful capability not specific to
-  Thalos — production geospatial users would benefit from
-  runtime-synthesized tiles too. Worth at least opening a Discord
-  conversation before we start the fork.
-
-We keep the diff against upstream small and well-organized. The fork
-is named and tagged so the relationship is clear.
+Useful upstream rendering fixes can still be cherry-picked or ported,
+especially around UDLOD math, mip handling, and Bevy version bumps.
+Do not preserve the old GeoTIFF/preprocess architecture just to keep a
+small diff; that model is no longer part of Thalos's terrain renderer.
 
 ---
 

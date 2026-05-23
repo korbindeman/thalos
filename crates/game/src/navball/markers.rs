@@ -21,12 +21,12 @@ use crate::navigation::maneuver_burn_direction;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::target::TargetBody;
 use crate::velocity_frame::VelocityFrameState;
-use thalos_physics_canonical::velocity_frame::{VelocityReferenceFrame, nav_basis};
 use bevy::asset::RenderAssetUsages;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use resvg::{tiny_skia, usvg};
+use thalos_physics_canonical::velocity_frame::{VelocityReferenceFrame, nav_basis};
 
 const ICON_SIZE: u32 = 32;
 const ORIENTATION_ICON_WIDTH: u32 = 40;
@@ -221,8 +221,13 @@ pub fn update_navball_markers(
         &mut Visibility,
     )>,
 ) {
-    let directions =
-        compute_marker_directions(velocity_frame.active, &sim_state, &solar_system, &target, &plan);
+    let directions = compute_marker_directions(
+        velocity_frame.active,
+        &sim_state,
+        &solar_system,
+        &target,
+        &plan,
+    );
     let icon_half = ICON_SIZE as f32 * 0.5;
 
     for (kind, variants, mut image, mut node, mut visibility) in &mut markers {

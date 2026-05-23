@@ -1,7 +1,9 @@
 //! Debug utilities. Hardcoded on for now; later this becomes an
 //! in-game settings toggle.
 
-use bevy::math::{DMat3, DQuat, DVec3};
+use bevy::gizmos::prelude::{GizmoConfigGroup, GizmoConfigStore, GizmoPrimitive3d};
+use bevy::math::primitives::{Capsule3d, Cone, Cuboid, Cylinder, Sphere};
+use bevy::math::{DMat3, DQuat, DVec3, Isometry3d, Quat, Vec3};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
@@ -14,11 +16,14 @@ use thalos_physics_canonical::{
     types::{AttitudeState, BodyDefinition, BodyId, BodyKind, BodyState, StateVector, VesselKind},
 };
 use thalos_physics_local::avian::{AngularVelocity, LinearVelocity, Position, Rotation};
-use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody, TerrainSurfaceRegistry};
+use thalos_physics_local::{
+    ActiveLocalBubble, LocalCraftBody, LocalCraftColliderPrimitives, LocalPrimitiveCollider,
+    LocalPrimitiveShape, TerrainSurfaceRegistry,
+};
 use thalos_terrain_render::rendered_height_m;
 
 use crate::camera::{ActiveCamera, MapCamera};
-use crate::coords::MAP_SCALE;
+use crate::coords::{MAP_SCALE, SHIP_LAYER};
 use crate::fuel::ThrottleState;
 use crate::local_physics::place_eva_on_surface;
 use crate::maneuver::{ManeuverPlan, SelectedNode};
@@ -26,7 +31,7 @@ use crate::navigation::SHIP_NOSE_BODY;
 use crate::pause_menu::not_game_paused;
 use crate::photo_mode::not_in_photo_mode;
 use crate::player_controller::EvaMode;
-use crate::rendering::{CelestialBody, SimulationState, SolarSystemState};
+use crate::rendering::{CelestialBody, PlayerShip, SimulationState, SolarSystemState};
 use crate::target::TargetBody;
 use crate::view::{ViewMode, in_map_view};
 
@@ -38,10 +43,12 @@ pub const DEBUG_LAUNCH_MOUNT_HEIGHT_M: f64 = 18.0;
 /// rendered terrain; `walk_eva_on_terrain` re-glues it exactly on the next
 /// frame, so this is just a safe initial clearance on steep terrain.
 const EVA_SURFACE_CLEARANCE_M: f64 = 2.0;
+const DEBUG_CRAFT_COLLIDERS_KEY: KeyCode = KeyCode::F8;
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct DebugMode {
     pub enabled: bool,
+    pub show_craft_colliders: bool,
 }
 
 /// Temporary debug-only launch clamp used by command-shift body-tree surface
@@ -96,18 +103,135 @@ pub struct DebugPlugin;
 
 impl Plugin for DebugPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(DebugMode { enabled: true })
-            .init_resource::<DebugLaunchMount>()
-            .init_resource::<DebugSurfaceTeleport>()
-            .add_systems(
-                Update,
-                (
-                    update_debug_surface_teleport_cursor,
-                    commit_debug_surface_teleport.after(update_debug_surface_teleport_cursor),
-                )
-                    .run_if(not_game_paused.and(not_in_photo_mode).and(in_map_view))
+        app.insert_resource(DebugMode {
+            enabled: true,
+            show_craft_colliders: false,
+        })
+        .init_gizmo_group::<CraftColliderGizmos>()
+        .init_resource::<DebugLaunchMount>()
+        .init_resource::<DebugSurfaceTeleport>()
+        .add_systems(Startup, configure_craft_collider_gizmos)
+        .add_systems(
+            Update,
+            (
+                toggle_debug_craft_colliders.run_if(not_game_paused.and(not_in_photo_mode)),
+                draw_debug_craft_colliders
+                    .run_if(not_game_paused.and(not_in_photo_mode))
                     .after(crate::SimStage::Camera),
-            );
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                update_debug_surface_teleport_cursor,
+                commit_debug_surface_teleport.after(update_debug_surface_teleport_cursor),
+            )
+                .run_if(not_game_paused.and(not_in_photo_mode).and(in_map_view))
+                .after(crate::SimStage::Camera),
+        );
+    }
+}
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+#[reflect(Default)]
+struct CraftColliderGizmos;
+
+fn configure_craft_collider_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
+    let (config, _) = config_store.config_mut::<CraftColliderGizmos>();
+    config.line.width = 4.0;
+    config.depth_bias = -1.0;
+    config.render_layers = bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER);
+}
+
+fn toggle_debug_craft_colliders(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugMode>) {
+    if !debug.enabled || !keys.just_pressed(DEBUG_CRAFT_COLLIDERS_KEY) {
+        return;
+    }
+    debug.show_craft_colliders = !debug.show_craft_colliders;
+    let state = if debug.show_craft_colliders {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    info!("craft collider debug {state}");
+}
+
+fn draw_debug_craft_colliders(
+    debug: Res<DebugMode>,
+    view: Res<ViewMode>,
+    active: Res<ActiveLocalBubble>,
+    ship_q: Query<&GlobalTransform, With<PlayerShip>>,
+    craft_q: Query<&LocalCraftColliderPrimitives, With<LocalCraftBody>>,
+    mut gizmos: Gizmos<CraftColliderGizmos>,
+) {
+    if !debug.enabled || !debug.show_craft_colliders || *view != ViewMode::Ship {
+        return;
+    }
+    let Some(bubble) = active.bubble.as_ref() else {
+        return;
+    };
+    let Ok(primitives) = craft_q.get(bubble.craft_entity) else {
+        return;
+    };
+    let Ok(root) = ship_q.single() else {
+        return;
+    };
+    let (_, root_rotation, root_translation) = root.affine().to_scale_rotation_translation();
+    let color = Color::srgba(0.0, 1.0, 0.75, 0.9);
+
+    for primitive in &primitives.0 {
+        draw_collider_primitive(
+            &mut gizmos,
+            root_translation,
+            root_rotation,
+            primitive,
+            color,
+        );
+    }
+}
+
+fn draw_collider_primitive(
+    gizmos: &mut Gizmos<CraftColliderGizmos>,
+    root_translation: Vec3,
+    root_rotation: Quat,
+    primitive: &LocalPrimitiveCollider,
+    color: Color,
+) {
+    let offset = primitive.offset_m.as_vec3();
+    let rotation = root_rotation * primitive.rotation.as_quat();
+    let isometry = Isometry3d::new(root_translation + root_rotation * offset, rotation);
+    match primitive.shape {
+        LocalPrimitiveShape::Cuboid { x, y, z } => {
+            gizmos.primitive_3d(&Cuboid::new(x as f32, y as f32, z as f32), isometry, color);
+        }
+        LocalPrimitiveShape::Cylinder { radius, height } => {
+            gizmos
+                .primitive_3d(
+                    &Cylinder::new(radius as f32, height as f32),
+                    isometry,
+                    color,
+                )
+                .resolution(24);
+        }
+        LocalPrimitiveShape::Cone { radius, height } => {
+            gizmos
+                .primitive_3d(&Cone::new(radius as f32, height as f32), isometry, color)
+                .resolution(24);
+        }
+        LocalPrimitiveShape::Sphere { radius } => {
+            gizmos
+                .primitive_3d(&Sphere::new(radius as f32), isometry, color)
+                .resolution(24);
+        }
+        LocalPrimitiveShape::Capsule { radius, length } => {
+            gizmos
+                .primitive_3d(
+                    &Capsule3d::new(radius as f32, length as f32),
+                    isometry,
+                    color,
+                )
+                .resolution(24);
+        }
     }
 }
 
@@ -323,10 +447,11 @@ fn commit_debug_surface_teleport(
         );
         let pose =
             body_fixed_pose_from_inertial(&body_state, TranslationalState::from(state), attitude);
-        sim.simulation.transition_authority(AuthorityMode::BodyFixed {
-            body: hit.body_id,
-            pose,
-        });
+        sim.simulation
+            .transition_authority(AuthorityMode::BodyFixed {
+                body: hit.body_id,
+                pose,
+            });
         sim.simulation.set_ship_state(state);
         sim.simulation.set_attitude(attitude);
         sim.simulation.warp.reset();

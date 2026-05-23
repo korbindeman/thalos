@@ -325,7 +325,10 @@ impl ShipBlueprint {
     /// active. Stage boundaries come from [`derive_stages`] over the same
     /// decoupler topology the live staging plan uses, so the editor preview
     /// and the in-flight HUD never disagree.
-    pub fn stage_summaries(&self, catalog: &PartCatalog) -> Result<Vec<StageSummary>, CatalogError> {
+    pub fn stage_summaries(
+        &self,
+        catalog: &PartCatalog,
+    ) -> Result<Vec<StageSummary>, CatalogError> {
         let entries: Vec<&CatalogEntry> = self
             .parts
             .iter()

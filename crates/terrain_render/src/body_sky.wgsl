@@ -219,23 +219,27 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Clip the raymarch at the body's solid surface (planet sphere) so the
-    // ground absorbs the integral on rays that hit it without going through
-    // depth sampling. Necessary on the impostor body and as a fallback when
-    // scene depth is unavailable.
+    // Fallback solid-sphere hit. Scene depth is authoritative when present:
+    // ground LOD terrain can sit above the mean-radius sphere, especially at
+    // low grazing angles where mountains peek over the geometric horizon. If
+    // the fallback sphere clips first, those depth-visible terrain pixels get
+    // composited as though the ray ended at the hidden reference sphere, which
+    // crushes the horizon into a dark band.
     let c_planet    = oc_len_sq - planet_radius * planet_radius;
     let disc_planet = b * b - c_planet;
+    var fallback_t_surface: f32 = 1.0e30;
+    var fallback_surface_fade: f32 = 0.0;
     var surface_fade: f32 = 0.0;
     if disc_planet > 0.0 {
         let sqrt_disc_planet = sqrt(disc_planet);
         let t_planet = -b - sqrt_disc_planet;
         if t_planet > 0.0 {
-            t_exit = min(t_exit, t_planet);
+            fallback_t_surface = t_planet;
             // Fade cloud compositing in across the geometric horizon.
             // Without this, an observer above the fixed cloud deck sees a
             // hard tangent band where sky-only rays begin hitting the cloud
             // shell. The fade is in metres because ship space is 1 unit = 1 m.
-            surface_fade = smoothstep(0.0, 20000.0, sqrt_disc_planet);
+            fallback_surface_fade = smoothstep(0.0, 20000.0, sqrt_disc_planet);
         }
     }
 
@@ -253,6 +257,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let t_scene    = length(view_pos);
         t_exit = min(t_exit, t_scene);
         surface_fade = 1.0;
+    } else if fallback_t_surface < 1.0e29 {
+        t_exit = min(t_exit, fallback_t_surface);
+        surface_fade = fallback_surface_fade;
     }
 
     if t_exit <= t_enter {

@@ -10,7 +10,8 @@ game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_g
 
 # Run the game. Defaults to a ship in low Thalos orbit; `just game eva`
 # spawns the player on foot on the Thalos surface; `just game landing`
-# starts a powered-descent approach coming down over Thalos land. Set a
+# starts a powered-descent approach coming down over Thalos land; `just game
+# final` starts very low over a flat dry patch for touchdown practice. Set a
 # persistent default with THALOS_SPAWN in `.env.just`.
 game mode=env_var_or_default("THALOS_SPAWN", "orbit"):
     {{game_command}} -- {{mode}}

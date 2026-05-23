@@ -141,9 +141,10 @@ local-rigidbody / body-fixed / docked.
   through it (speculative collision alone misses the thin mesh at
   speed). A whole-craft crash tolerance
   (`ShipParameters::impact_tolerance_m_s`) destroys the vessel on a
-  too-hard contact — control is locked and a HUD banner shows the
-  impact speed; recovery is the existing teleports. Specced in
-  [landing.md](landing.md).
+  too-hard contact — control is locked, the game force-pauses, and a
+  scenario picker (showing the impact speed) respawns the craft in place
+  into any of the four start scenarios; the debug teleports also recover.
+  Specced in [landing.md](landing.md).
 - **Out of scope for first slice:** aero/drag/lift/heating, part-level
   joints, docking, debris, rover wheels, per-part crash tolerance,
   landing legs, and save/load persistence of live local rigidbody
