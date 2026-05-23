@@ -84,6 +84,10 @@ pub struct TerrainPatchMesh {
     pub indices: Vec<[u32; 3]>,
     pub center_surface_body_m: DVec3,
     pub basis: TerrainPatchBasis,
+    /// Metric lateral half-extent of the patch, for window-relative collider
+    /// rebuild scheduling. For the tangent-grid builder this is the config
+    /// half-extent; the tile-based builder reports its texel-window extent.
+    pub half_extent_m: f64,
 }
 
 struct BorrowedRenderedHeightSource<'a> {
@@ -180,6 +184,7 @@ pub fn build_rendered_terrain_patch_from_source(
         indices,
         center_surface_body_m,
         basis,
+        half_extent_m: config.half_extent_m,
     }
 }
 

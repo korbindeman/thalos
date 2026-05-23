@@ -33,3 +33,4 @@ pub mod simulation;
 pub mod terrain_provider;
 pub mod trajectory;
 pub mod types;
+pub mod velocity_frame;

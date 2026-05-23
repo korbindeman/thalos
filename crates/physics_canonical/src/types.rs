@@ -64,6 +64,13 @@ pub struct ShipParameters {
     /// "Out of fuel" in physical units rather than an arbitrary numerical
     /// safety floor.
     pub dry_mass_kg: f64,
+    /// KSP-style crash tolerance: the surface-relative approach speed
+    /// (m/s) above which a terrain contact destroys the whole craft. The
+    /// game's `detect_terrain_impact` compares the pre-contact approach
+    /// speed against this. `f64::INFINITY` means "indestructible" — the
+    /// sentinel for a craft whose real stats haven't been pushed yet, and
+    /// for EVA (no Avian contact damage). See `docs/landing.md`.
+    pub impact_tolerance_m_s: f64,
 }
 
 impl Default for ShipParameters {
@@ -80,6 +87,9 @@ impl Default for ShipParameters {
             thrust_n: 0.0,
             mass_flow_kg_per_s: 0.0,
             dry_mass_kg: MIN_SHIP_MASS_KG,
+            // Indestructible until a real ship pushes its stats — same
+            // sentinel philosophy as the zero torque above.
+            impact_tolerance_m_s: f64::INFINITY,
         }
     }
 }
@@ -98,6 +108,9 @@ impl ShipParameters {
             thrust_n: 0.0,
             mass_flow_kg_per_s: 0.0,
             dry_mass_kg: 90.0,
+            // On-foot contact damage is out of scope (EVA doesn't use Avian
+            // contact resolution); never destroyed by terrain impact.
+            impact_tolerance_m_s: f64::INFINITY,
         }
     }
 }
@@ -186,6 +199,12 @@ pub struct BodyDefinition {
     /// ring-shadow is wired only for gas-giant bodies; surfaces of
     /// terrain-baked bodies don't yet receive a ring shadow.
     pub rings: Option<RingSystem>,
+    /// Altitude (m above the reference radius) at or below which the
+    /// navball auto-selects the Surface velocity frame. Bodies with a
+    /// `terrestrial_atmosphere` use the Kármán line at the call site;
+    /// this authored value is the airless fallback / explicit override.
+    /// `None` ⇒ the game derives a radius-fraction default.
+    pub surface_frame_ceiling_m: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

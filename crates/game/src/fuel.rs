@@ -576,6 +576,14 @@ pub fn gate_throttle_on_fuel_availability(
     let warp = sim.simulation.warp.speed();
     let real_dt = time.delta_secs_f64();
 
+    // A destroyed craft can't burn — force throttle to zero so the HUD arc
+    // and canonical throttle both read inert. See `docs/landing.md`.
+    if sim.simulation.is_destroyed() {
+        last_burn.engines.clear();
+        finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh);
+        return;
+    }
+
     if (warp - 1.0).abs() > f64::EPSILON {
         last_burn.engines.clear();
         finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh);

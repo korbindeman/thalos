@@ -136,13 +136,24 @@ local-rigidbody / body-fixed / docked.
   after 1024 m lateral drift.
   Collapse after 2.0 s terrain contact, linear speed <0.5 m/s,
   angular speed <0.05 rad/s, throttle zero.
+- **Descent + impact destruction:** `SweptCcd` on the aggregate craft
+  stops a fast descent at the terrain trimesh instead of tunneling
+  through it (speculative collision alone misses the thin mesh at
+  speed). A whole-craft crash tolerance
+  (`ShipParameters::impact_tolerance_m_s`) destroys the vessel on a
+  too-hard contact — control is locked and a HUD banner shows the
+  impact speed; recovery is the existing teleports. Specced in
+  [landing.md](landing.md).
 - **Out of scope for first slice:** aero/drag/lift/heating, part-level
-  joints, docking, debris, rover wheels, and save/load persistence of
-  live local rigidbody state.
+  joints, docking, debris, rover wheels, per-part crash tolerance,
+  landing legs, and save/load persistence of live local rigidbody
+  state.
 - **Spec preview:** [simulation.md](simulation.md), Implementation
   Phases 4, 5, 7. On-foot / EVA surface gameplay is specced in
   [surface_gameplay.md](surface_gameplay.md), which extends M5's
-  authority + height-source machinery to the player-character case.
+  authority + height-source machinery to the player-character case;
+  landed-ship descent, collision, and impact destruction are specced
+  in [landing.md](landing.md).
 
 ### M6 — Aero regime, warp force integration, advanced ships
 

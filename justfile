@@ -9,8 +9,9 @@ set dotenv-filename := ".env.just"
 game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game --features bevy/dynamic_linking")
 
 # Run the game. Defaults to a ship in low Thalos orbit; `just game eva`
-# spawns the player on foot on the Thalos surface. Set a persistent default
-# with THALOS_SPAWN in `.env.just`.
+# spawns the player on foot on the Thalos surface; `just game landing`
+# starts a powered-descent approach coming down over Thalos land. Set a
+# persistent default with THALOS_SPAWN in `.env.just`.
 game mode=env_var_or_default("THALOS_SPAWN", "orbit"):
     {{game_command}} -- {{mode}}
 

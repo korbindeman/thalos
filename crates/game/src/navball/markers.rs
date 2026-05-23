@@ -20,6 +20,8 @@ use crate::navball::ui::NavballUiRoot;
 use crate::navigation::maneuver_burn_direction;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::target::TargetBody;
+use crate::velocity_frame::VelocityFrameState;
+use thalos_physics_canonical::velocity_frame::{VelocityReferenceFrame, nav_basis};
 use bevy::asset::RenderAssetUsages;
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -210,6 +212,7 @@ pub fn update_navball_markers(
     solar_system: Res<SolarSystemState>,
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
+    velocity_frame: Res<VelocityFrameState>,
     mut markers: Query<(
         &MarkerKind,
         &MarkerVariants,
@@ -218,7 +221,8 @@ pub fn update_navball_markers(
         &mut Visibility,
     )>,
 ) {
-    let directions = compute_marker_directions(&sim_state, &solar_system, &target, &plan);
+    let directions =
+        compute_marker_directions(velocity_frame.active, &sim_state, &solar_system, &target, &plan);
     let icon_half = ICON_SIZE as f32 * 0.5;
 
     for (kind, variants, mut image, mut node, mut visibility) in &mut markers {
@@ -272,21 +276,24 @@ impl MarkerDirections {
 }
 
 fn compute_marker_directions(
+    active: VelocityReferenceFrame,
     sim_state: &SimulationState,
     solar_system: &SolarSystemState,
     target: &TargetBody,
     plan: &ManeuverPlan,
 ) -> MarkerDirections {
     let sim = &sim_state.simulation;
-    let craft = sim.craft_state();
+    let craft = sim.ship_state();
     let soi_body_id = sim.dominant_body();
+    let maneuver = maneuver_burn_direction(sim, plan);
+
     let Some(states) = solar_system.states.as_ref() else {
         return MarkerDirections {
             prograde: None,
             normal: None,
             radial_out: None,
             target_dir: None,
-            maneuver: maneuver_burn_direction(sim, plan),
+            maneuver,
         };
     };
     let Some(body_state) = states.get(soi_body_id) else {
@@ -295,28 +302,24 @@ fn compute_marker_directions(
             normal: None,
             radial_out: None,
             target_dir: None,
-            maneuver: maneuver_burn_direction(sim, plan),
+            maneuver,
         };
     };
 
-    let rel_pos = craft.translation.position - body_state.position;
-    let rel_vel = craft.translation.velocity - body_state.velocity;
+    let target_state = target.target.and_then(|id| states.get(id));
 
-    let prograde = rel_vel.try_normalize();
-    let radial_out = rel_pos.try_normalize();
-    let normal = rel_pos.cross(rel_vel).try_normalize();
+    // Prograde / normal / radial follow the active velocity frame.
+    let basis = nav_basis(active, craft, body_state, target_state);
 
-    let target_dir = target
-        .target
-        .and_then(|target_id| states.get(target_id))
-        .and_then(|state| (state.position - craft.translation.position).try_normalize());
-
-    let maneuver = maneuver_burn_direction(sim, plan);
+    // The pink Target / AntiTarget markers point AT the target (a
+    // direction-to), independent of the velocity frame.
+    let target_dir =
+        target_state.and_then(|state| (state.position - craft.position).try_normalize());
 
     MarkerDirections {
-        prograde,
-        normal,
-        radial_out,
+        prograde: basis.and_then(|b| b.prograde),
+        normal: basis.and_then(|b| b.normal),
+        radial_out: basis.and_then(|b| b.radial),
         target_dir,
         maneuver,
     }

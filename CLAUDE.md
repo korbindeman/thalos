@@ -187,7 +187,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
 - **`thalos_atmosphere`** — gas giant atmosphere definitions (cloud decks, hazes, rings; no Bevy dependency)
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
-- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`.
+- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. Fast descents are kept from tunneling through the terrain trimesh by `SweptCcd` on the craft body, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`); see `docs/landing.md`.
 - **`thalos_planet_lighting`** — shared planet lighting types (`SceneLighting`, `StarLight`, `AtmosphereBlock`, `CLOUD_BAND_COUNT`) + WGSL libraries (`thalos::lighting`, `thalos::atmosphere`) + the Hapke surface shading helper (`shade_hapke_surface`). Both `thalos_planet_rendering` and `thalos_terrain_render` depend on it.
 - **`thalos_planet_rendering`** — Bevy materials for planets, gas giants, rings, solid bodies
 - **`thalos_planet_editor`** — interactive planet editor tool
@@ -268,12 +268,14 @@ Key modules:
 
 ### Game crate (`crates/game/`)
 
-- **Spawn mode is a flag: ship in orbit (default) or EVA on the surface.**
-  `main.rs` reads `just game [mode]` (passed as a CLI arg — default
-  `orbit`; falls back to the `THALOS_SPAWN` env var for a direct
-  `cargo run`). The canonical `CraftState` is the player either way —
-  KSP-style: one craft, Ship or EVA, distinguished by `VesselKind`.
-  **`orbit`**: `VesselKind::Ship` in a low Thalos parking orbit
+- **Spawn situation is a flag: ship in orbit (default), EVA on the
+  surface, or a landing approach over land.** `main.rs` reads
+  `just game [mode]` (passed as a CLI arg — default `orbit`; falls back
+  to the `THALOS_SPAWN` env var for a direct `cargo run`) into a
+  `spawn::SpawnSituation` resource (`ShipOrbit` | `Eva` | `Landing`).
+  The canonical `CraftState` is the player either way — KSP-style: one
+  craft, Ship or EVA, distinguished by `VesselKind`. **`orbit`**:
+  `VesselKind::Ship` in a low Thalos parking orbit
   (`system.ship.initial_state`), nose along prograde;
   `ship_view::spawn_player_ship` loads `apollo.ron` and pushes the real
   ship params. **`eva`**: the player on foot, `VesselKind::Eva` with
@@ -283,7 +285,18 @@ Key modules:
   spawn a 1.8 m capsule (rotation-locked, walking friction) carrying both
   `LocalCraftBody` and `PlayerControllerBody`, and `spawn_player_ship`
   early-returns (no rocket). Re-boarding a ship is not implemented yet;
-  the `toggle_player_controller` input is unwired.
+  the `toggle_player_controller` input is unwired. **`land`** (aliases
+  `landing` / `descent`): `VesselKind::Ship` on a vacuum powered-descent
+  approach. Because placing it *over land* at a true above-ground
+  altitude needs terrain heights (unknown until bakes load), `main.rs`
+  seeds the parking orbit as a placeholder behind the loading screen and
+  `spawn::refine_landing_spawn` installs the real state on the first
+  `AppState::Running` frame: it searches the daylight hemisphere for a
+  dry-land, ice-free site (terrain height > `sea_level_m`, low latitude),
+  then drops the ship ~25 km AGL over it, descending, nose retrograde,
+  coasting `OnRails` until it crosses the 20 km local-physics handoff for
+  the powered touchdown. Thalos has no atmosphere yet, so the descent is
+  lunar-style — no aerobraking.
 - **EVA is a full craft, with a grounded/airborne split.** The
   `EvaMode` resource (`player_controller.rs`, `Grounded` | `Airborne`,
   defaults `Grounded`) picks which regime owns the capsule.
@@ -592,6 +605,13 @@ status, dependency graph. Each major system has a unified spec doc.
 - `simulation.md` — simulation architecture (orbital mechanics,
   authority, time warp, map decoupling, big_space, Avian local
   bubble). Target design.
+- `surface_gameplay.md` — on-foot / EVA surface gameplay: ground
+  physics, body-fixed pose, the `HeightSource` interface, surface map
+  view. Defers landed-*ship* mechanics to `landing.md`.
+- `landing.md` — landed-ship mechanics: descent, terrain collision
+  (`SweptCcd` anti-tunneling), and whole-craft impact destruction
+  (`ShipParameters::impact_tolerance_m_s` →
+  `Simulation::is_destroyed`).
 - `input.md` — enhanced-input context model, binding file rules, and
   per-binary intent resources.
 - `terrain.md` — terrain generation (feature compiler) + ground LOD

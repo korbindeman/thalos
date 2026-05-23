@@ -62,4 +62,9 @@
             )),
         ],
     )),
+    // Navball auto-switches to the Surface velocity mode at/below this
+    // altitude (metres above mean radius). Mira is airless, so this is the
+    // authored ceiling rather than a Kármán line — tune to taste. Omit the
+    // field to fall back to the radius-derived default (~0.5% of radius).
+    surface_frame_ceiling_m: 15000.0,
 )

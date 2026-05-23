@@ -9,10 +9,11 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_physics_canonical::maneuver::{delta_v_to_world, orbital_frame};
+use thalos_physics_canonical::maneuver::delta_v_to_world;
 use thalos_physics_canonical::simulation::Simulation;
 use thalos_physics_canonical::trajectory::Trajectory;
 use thalos_physics_canonical::types::ControlInput;
+use thalos_physics_canonical::velocity_frame::{NavBasis, VelocityReferenceFrame, nav_basis};
 
 use crate::maneuver::{GameNode, ManeuverPlan};
 use crate::target::TargetBody;
@@ -107,6 +108,7 @@ pub fn compute_attitude_control(
     player_torque: DVec3,
     nav_mode: Option<NavigationMode>,
     autopilot_target: Option<DVec3>,
+    active: VelocityReferenceFrame,
     target: &TargetBody,
     plan: &ManeuverPlan,
     sim: &Simulation,
@@ -151,7 +153,7 @@ pub fn compute_attitude_control(
         };
     }
 
-    let Some(target_dir) = compute_target_direction(mode, sim, target, plan) else {
+    let Some(target_dir) = compute_target_direction(mode, active, sim, target, plan) else {
         return ControlInput {
             torque_command: DVec3::ZERO,
             sas_enabled: sas_toggle_state,
@@ -178,6 +180,7 @@ pub fn compute_attitude_control(
 /// is handled by the caller — this fn never returns a target for it.
 fn compute_target_direction(
     mode: NavigationMode,
+    active: VelocityReferenceFrame,
     sim: &Simulation,
     target: &TargetBody,
     plan: &ManeuverPlan,
@@ -188,49 +191,26 @@ fn compute_target_direction(
     match mode {
         NavigationMode::Stability => None,
 
-        NavigationMode::Prograde | NavigationMode::Retrograde => {
-            let body = sim.dominant_body();
-            let body_state = sim
-                .ephemeris()
-                .state(body, thalos_physics_canonical::canonical::Epoch(time));
-            let rel_vel = ship.velocity - body_state.velocity;
-            let dir = safe_normalize(rel_vel)?;
-            Some(if mode == NavigationMode::Prograde {
-                dir
-            } else {
-                -dir
-            })
-        }
-
-        NavigationMode::Normal | NavigationMode::AntiNormal => {
-            let body = sim.dominant_body();
-            let body_state = sim
-                .ephemeris()
-                .state(body, thalos_physics_canonical::canonical::Epoch(time));
-            let [_, normal, _] = orbital_frame(
-                ship.position,
-                ship.velocity,
-                body_state.position,
-                body_state.velocity,
-            );
-            Some(if mode == NavigationMode::Normal {
-                normal
-            } else {
-                -normal
-            })
-        }
-
-        NavigationMode::RadialIn | NavigationMode::RadialOut => {
-            let body = sim.dominant_body();
-            let body_state = sim
-                .ephemeris()
-                .state(body, thalos_physics_canonical::canonical::Epoch(time));
-            let radial_out = safe_normalize(ship.position - body_state.position)?;
-            Some(if mode == NavigationMode::RadialOut {
-                radial_out
-            } else {
-                -radial_out
-            })
+        // Velocity-relative holds resolve through the active velocity frame,
+        // so "hold prograde" follows the navball speed mode — surface
+        // prograde while in Surface mode, target-relative prograde in Target
+        // mode, and so on.
+        NavigationMode::Prograde
+        | NavigationMode::Retrograde
+        | NavigationMode::Normal
+        | NavigationMode::AntiNormal
+        | NavigationMode::RadialIn
+        | NavigationMode::RadialOut => {
+            let basis = active_nav_basis(active, sim, target)?;
+            match mode {
+                NavigationMode::Prograde => basis.prograde,
+                NavigationMode::Retrograde => basis.prograde.map(|d| -d),
+                NavigationMode::Normal => basis.normal,
+                NavigationMode::AntiNormal => basis.normal.map(|d| -d),
+                NavigationMode::RadialOut => basis.radial,
+                NavigationMode::RadialIn => basis.radial.map(|d| -d),
+                _ => None,
+            }
         }
 
         NavigationMode::Target | NavigationMode::AntiTarget => {
@@ -248,6 +228,26 @@ fn compute_target_direction(
 
         NavigationMode::ManeuverNode => maneuver_burn_direction(sim, plan),
     }
+}
+
+/// Build the navball [`NavBasis`] for the active velocity frame at the
+/// ship's current state. Sources body/target states from the ephemeris:
+/// the SAS control path runs in `SimStage::Physics`, before the per-frame
+/// solar-system snapshot the navball/HUD path reads.
+fn active_nav_basis(
+    active: VelocityReferenceFrame,
+    sim: &Simulation,
+    target: &TargetBody,
+) -> Option<NavBasis> {
+    let ship = sim.ship_state();
+    let time = sim.sim_time();
+    let body_state = sim
+        .ephemeris()
+        .state(sim.dominant_body(), thalos_physics_canonical::canonical::Epoch(time));
+    let target_state = target
+        .target
+        .map(|id| sim.ephemeris().state(id, thalos_physics_canonical::canonical::Epoch(time)));
+    nav_basis(active, ship, &body_state, target_state.as_ref())
 }
 
 /// World-frame unit vector pointing along the next maneuver node's Δv.

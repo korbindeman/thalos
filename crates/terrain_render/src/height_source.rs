@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use bevy::math::{DVec2, Vec2, Vec3};
+use bevy::math::{DVec2, UVec2, Vec2, Vec3};
 use bevy::prelude::*;
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_udlod::math::{Coordinate, TerrainModel, TileCoordinate};
 use thalos_udlod::prelude::TileAtlas;
 
 use crate::pipeline::rendered_height_m;
+use crate::rendered_height::{TerrainPatchBasis, TerrainPatchMesh};
 
 pub trait HeightSource: Send + Sync {
     /// Height in metres above the body's reference radius, evaluated at
@@ -22,6 +23,23 @@ pub trait HeightSource: Send + Sync {
     /// advances. Static sources should return `0`.
     fn revision(&self) -> u64 {
         0
+    }
+
+    /// Build a collider patch directly from this source's native geometry —
+    /// e.g. the resident GPU atlas tiles the renderer meshes from — so the
+    /// collider lines up with the drawn surface by construction. `center_dir`
+    /// is the body-fixed unit direction to center the patch on; `max_resolution`
+    /// caps the vertex-grid side. Returns `None` for sources with no tile
+    /// geometry (procedural CPU pipeline, flat, baked cubemap) or when no tile
+    /// is resident yet; callers fall back to the tangent-grid resample in
+    /// [`crate::rendered_height::build_rendered_terrain_patch_from_source`].
+    fn build_collider_patch(
+        &self,
+        center_dir: Vec3,
+        max_resolution: u32,
+    ) -> Option<TerrainPatchMesh> {
+        let _ = (center_dir, max_resolution);
+        None
     }
 }
 
@@ -103,6 +121,17 @@ impl HeightSource for GpuAtlasMirrorHeightSource {
 
     fn revision(&self) -> u64 {
         self.mirror.read().map(|m| m.revision()).unwrap_or(0)
+    }
+
+    fn build_collider_patch(
+        &self,
+        center_dir: Vec3,
+        max_resolution: u32,
+    ) -> Option<TerrainPatchMesh> {
+        self.mirror
+            .read()
+            .ok()?
+            .build_collider_patch(center_dir, max_resolution)
     }
 }
 
@@ -233,6 +262,111 @@ impl GpuAtlasHeightMirror {
             }
         }
         None
+    }
+
+    /// Build a collider mesh from the finest resident tile under `center_dir`,
+    /// one vertex per height texel at the tile's native resolution, each placed
+    /// at the exact cube-sphere position the renderer uses
+    /// ([`Coordinate::world_position`] applied to [`TileCoordinate::pixel_coordinate`]).
+    /// The collider therefore lines up with the drawn surface by construction.
+    ///
+    /// A square window of up to `max_resolution` texels is centered on
+    /// `center_dir` and clamped to the tile's logical (border-excluded) region,
+    /// so every vertex is a real texel of this one tile — no cross-tile
+    /// stitching. Returns `None` when no tile is resident (caller falls back to
+    /// the tangent-grid resample).
+    pub fn build_collider_patch(
+        &self,
+        center_dir: Vec3,
+        max_resolution: u32,
+    ) -> Option<TerrainPatchMesh> {
+        let model = self.model.as_ref()?;
+        let dir = center_dir.normalize_or_zero();
+        if dir == Vec3::ZERO || self.lod_count == 0 || self.texture_size == 0 {
+            return None;
+        }
+        let texture_size = self.texture_size;
+        let border = self.border_size;
+        let inner = texture_size.saturating_sub(border * 2);
+        if inner < 2 {
+            return None;
+        }
+
+        // Finest resident tile under the center direction, plus the in-tile uv
+        // of that direction.
+        let sample_position = dir.as_dvec3() * model.scale();
+        let coordinate = Coordinate::from_world_position(sample_position, model);
+        let (tile_coord, tile_uv) = (0..self.lod_count).rev().find_map(|lod| {
+            let (tc, uv) = tile_lookup_at_lod(coordinate, lod);
+            self.tiles.contains_key(&tc).then_some((tc, uv))
+        })?;
+        let tile = self.tiles.get(&tile_coord)?;
+        let size = texture_size as usize;
+        if tile.texels.len() < size * size {
+            return None;
+        }
+
+        // Texel of `center_dir` within the tile's logical region — the inverse
+        // of `pixel_coordinate`'s `in_tile_uv = (pixel + 0.5 - border) / inner`.
+        let inner_f = inner as f64;
+        let center_px = (tile_uv.x as f64 * inner_f + border as f64 - 0.5).round() as i64;
+        let center_py = (tile_uv.y as f64 * inner_f + border as f64 - 0.5).round() as i64;
+
+        // Square texel window at native resolution, clamped so every vertex is
+        // a real texel inside the logical extent `[border, texture - border)`.
+        let res = max_resolution.clamp(2, inner);
+        let lo = border as i64;
+        let hi = (texture_size - border) as i64; // exclusive
+        let half = (res as i64 - 1) / 2;
+        let x0 = (center_px - half).clamp(lo, hi - res as i64);
+        let y0 = (center_py - half).clamp(lo, hi - res as i64);
+
+        let translation = model.translation();
+        let height_range = self.max_height_m - self.min_height_m;
+        let n = res as usize;
+        let mut vertices_body_m = Vec::with_capacity(n * n);
+        for j in 0..res {
+            let py = (y0 + j as i64) as u32;
+            for i in 0..res {
+                let px = (x0 + i as i64) as u32;
+                let encoded = tile.texels[py as usize * size + px as usize];
+                let height = self.min_height_m + height_range * (encoded as f32 / u16::MAX as f32);
+                let coord = tile_coord.pixel_coordinate(UVec2::new(px, py), texture_size, border);
+                // `translation` is zero for body-centered models, so this is the
+                // body-fixed vertex; subtracting it keeps us correct if a model
+                // is ever given a nonzero offset.
+                vertices_body_m.push(coord.world_position(model, height) - translation);
+            }
+        }
+
+        let mut indices = Vec::with_capacity((n - 1) * (n - 1) * 2);
+        for j in 0..(res - 1) {
+            for i in 0..(res - 1) {
+                let i0 = j * res + i;
+                let i1 = i0 + 1;
+                let i2 = i0 + res;
+                let i3 = i2 + 1;
+                indices.push([i0, i2, i1]);
+                indices.push([i1, i2, i3]);
+            }
+        }
+
+        let center_index = (res / 2) as usize * n + (res / 2) as usize;
+        let center_surface_body_m = vertices_body_m[center_index];
+
+        // Window's metric lateral half-extent (texel spacing × half the grid),
+        // for window-relative collider rebuild scheduling. `res >= 2` so the
+        // first two vertices (adjacent in x) always exist.
+        let texel_spacing_m = (vertices_body_m[1] - vertices_body_m[0]).length();
+        let half_extent_m = texel_spacing_m * (res as f64 - 1.0) * 0.5;
+
+        Some(TerrainPatchMesh {
+            vertices_body_m,
+            indices,
+            center_surface_body_m,
+            basis: TerrainPatchBasis::from_normal(dir.as_dvec3()),
+            half_extent_m,
+        })
     }
 }
 

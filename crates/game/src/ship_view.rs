@@ -36,6 +36,12 @@ use crate::SimStage;
 /// editor's value so the two look identical side-by-side.
 const PART_RESOLUTION: u32 = 128;
 
+/// Whole-craft crash tolerance (m/s of surface-relative approach speed).
+/// A terrain contact above this destroys the vessel. Forgiving first-slice
+/// constant — a future per-part model derives it from the contacting parts.
+/// See `docs/landing.md`.
+const SHIP_IMPACT_TOLERANCE_M_S: f64 = 12.0;
+
 /// Initial orbital distance (metres) when switching into ship view. The
 /// camera snaps to this distance — close enough that a ~10 m ship fills
 /// a reasonable fraction of the screen.
@@ -135,6 +141,10 @@ pub(crate) fn spawn_player_ship(
         thrust_n: 0.0,
         mass_flow_kg_per_s: 0.0,
         dry_mass_kg: stats.dry_mass_kg,
+        // Whole-craft crash tolerance (forgiving first-slice constant; a
+        // future per-part model derives this from the contacting parts).
+        // See docs/landing.md.
+        impact_tolerance_m_s: SHIP_IMPACT_TOLERANCE_M_S,
     });
     sim.simulation.set_ship_mass(stats.wet_mass_kg());
     info!(
@@ -253,6 +263,8 @@ pub(crate) fn spawn_player_ship(
 /// stays camera-aligned and is unaffected.
 fn update_player_ship_world_position(
     sim: Res<SimulationState>,
+    authority: Res<crate::local_physics::AvianAuthority>,
+    fixed_time: Res<Time<Fixed>>,
     grid: Query<&Grid, With<BigSpace>>,
     mut query: Query<(&mut CellCoord, &mut Transform), With<PlayerShip>>,
 ) {
@@ -262,7 +274,38 @@ fn update_player_ship_world_position(
     let Ok((mut cell, mut transform)) = query.single_mut() else {
         return;
     };
-    let (next_cell, local) = root_grid.translation_to_grid(sim.simulation.ship_state().position);
+    let ship = sim.simulation.ship_state();
+
+    // Render extrapolation for the Avian-owned regime (powered descent /
+    // landing). Avian integrates the craft at a fixed timestep, but this system
+    // and the renderer run at the (variable, usually higher) frame rate, so the
+    // canonical position read back from Avian each frame holds for several
+    // frames then jumps a step. The camera rigidly follows the ship, so that
+    // hold/jump shows up as the *terrain* stuttering at the viewer's feet
+    // (close-range parallax) while the ship and the parallax-free sky look
+    // steady — the "terrain jitter" bug. Advance the *rendered* position by the
+    // body-relative velocity across the fixed-step overstep so the ship (and
+    // hence the camera and terrain) move smoothly between physics steps.
+    //
+    // Only the relative velocity is extrapolated: the canonical velocity is
+    // heliocentric (~30 km/s orbital), but the orbital component already moves
+    // smoothly via the Kepler-evaluated body position in the readback — only the
+    // body-relative descent stutters. Physics, canonical state, and the terrain
+    // collider are untouched. Kepler-owned coast (`OnRails`/`AttitudeOnly`)
+    // already advances once per render frame, so it is left alone.
+    let position = if authority.owns_translation() {
+        let body_id = sim.simulation.dominant_body();
+        let body = sim.ephemeris.state(
+            body_id,
+            thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time()),
+        );
+        let rel_velocity = ship.velocity - body.velocity;
+        ship.position + rel_velocity * fixed_time.overstep().as_secs_f64()
+    } else {
+        ship.position
+    };
+
+    let (next_cell, local) = root_grid.translation_to_grid(position);
     *cell = next_cell;
     transform.translation = local;
     transform.rotation = sim.simulation.attitude().orientation.as_quat();

@@ -74,6 +74,7 @@ impl Plugin for GameLocalPhysicsPlugin {
                     snap_avian_from_canonical,
                     apply_local_forces,
                     readback_local_craft,
+                    detect_terrain_impact,
                     maintain_terrain_patch,
                     sync_terrain_collider_pose,
                     collapse_or_constrain_warp,
@@ -455,6 +456,7 @@ fn spawn_player_avian_body(
         center_dir_body: DVec3::Y,
         center_surface_body_m: DVec3::ZERO,
         basis: thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y),
+        patch_half_extent_m: 0.0,
         stable_contact_s: 0.0,
         stable_landed: false,
         terrain_built_at_revision: 0,
@@ -640,6 +642,7 @@ fn attach_terrain_patch_when_close(
     bubble.center_dir_body = center_dir;
     bubble.center_surface_body_m = patch.mesh.center_surface_body_m;
     bubble.basis = patch.mesh.basis;
+    bubble.patch_half_extent_m = patch.mesh.half_extent_m;
     bubble.terrain_built_at_revision = built_revision;
     info!(
         "attached terrain collider patch over {} at AGL {:.0} m (height-source revision {})",
@@ -685,6 +688,7 @@ fn detach_terrain_patch_when_far(
     bubble.center_dir_body = DVec3::Y;
     bubble.center_surface_body_m = DVec3::ZERO;
     bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
+    bubble.patch_half_extent_m = 0.0;
     info!(
         "detached terrain collider patch from {} at AGL {:.0} m",
         body.name, agl_m
@@ -931,6 +935,8 @@ fn debug_surface_drop(
             .install_local_rigid_body_state(translation, attitude);
         sim.simulation.warp.reset();
     }
+    // A fresh drop hands back a flyable craft — clear any structural failure.
+    sim.simulation.repair();
     launch_mount.active = None;
 
     info!(
@@ -1031,6 +1037,10 @@ fn apply_local_forces(
         return;
     };
     let params = *sim.simulation.ship_params();
+    // A destroyed craft is inert debris: gravity still acts (so it falls and
+    // settles), but thrust and reaction-wheel torque are cut. See
+    // `docs/landing.md`.
+    let destroyed = sim.simulation.is_destroyed();
 
     // Linear: gravity + thrust only when Avian owns translation. Otherwise
     // explicitly zero so a stale value from the previous `Full` frame
@@ -1048,7 +1058,8 @@ fn apply_local_forces(
             let mut accel = gravity_accel;
             let throttle_eff = throttle.effective.clamp(0.0, 1.0);
             let mass = sim.simulation.ship_mass_kg();
-            if throttle_eff > 0.0 && params.thrust_n > 0.0 && mass > params.dry_mass_kg {
+            if !destroyed && throttle_eff > 0.0 && params.thrust_n > 0.0 && mass > params.dry_mass_kg
+            {
                 let nose_world = rotation.0 * DVec3::Y;
                 accel += nose_world * (params.thrust_n / mass) * throttle_eff;
                 sim.simulation
@@ -1064,14 +1075,19 @@ fn apply_local_forces(
 
     // Angular accel always written when the integrator is active, in both
     // `AttitudeOnly` and `Full`. This is the system that lets the player
-    // rotate the ship while coasting.
-    angular_accel.0 = compute_angular_acceleration(
-        sim.simulation.control(),
-        &params,
-        rotation.0,
-        angular_velocity.0,
-        time.delta_secs_f64(),
-    );
+    // rotate the ship while coasting. A destroyed craft gets zero torque —
+    // no player input, no SAS damping — so it tumbles freely as debris.
+    angular_accel.0 = if destroyed {
+        DVec3::ZERO
+    } else {
+        compute_angular_acceleration(
+            sim.simulation.control(),
+            &params,
+            rotation.0,
+            angular_velocity.0,
+            time.delta_secs_f64(),
+        )
+    };
 }
 
 /// Convert player attitude command + SAS damping into a world-space angular
@@ -1204,6 +1220,113 @@ fn readback_local_craft(
     }
 }
 
+/// Short ring buffer of recent surface-relative approach speeds. The
+/// impact detector reads its **peak** at contact onset rather than the
+/// instantaneous speed because `SweptCcd` books the velocity arrest a frame
+/// or two after the geometric sweep, and speculative collision can shave
+/// the final approach frame — by contact-start the instantaneous speed is
+/// already damped, but the peak across the last ~8 frames is still the true
+/// approach speed (gravity changes it by only ~1 m/s over that window).
+#[derive(Default)]
+struct ImpactSpeedWindow {
+    samples: [f64; Self::LEN],
+    idx: usize,
+}
+
+impl ImpactSpeedWindow {
+    const LEN: usize = 8;
+
+    fn push(&mut self, speed_m_s: f64) {
+        self.samples[self.idx] = speed_m_s;
+        self.idx = (self.idx + 1) % Self::LEN;
+    }
+
+    fn peak(&self) -> f64 {
+        self.samples.iter().copied().fold(0.0, f64::max)
+    }
+
+    fn clear(&mut self) {
+        self.samples = [0.0; Self::LEN];
+        self.idx = 0;
+    }
+}
+
+/// Detect a destroying terrain impact and mark the craft destroyed.
+///
+/// Only meaningful while Avian owns translation (`AvianRole::Full`), which
+/// is exactly when a terrain patch is attached and contacts are being
+/// solved. Each frame we record the craft's surface-relative approach speed
+/// (`v − ω × r`, the speed the co-rotating terrain collider actually sees);
+/// on the **rising edge** of contact with the terrain patch we compare the
+/// windowed peak approach speed against [`ShipParameters::impact_tolerance_m_s`]
+/// and destroy the craft if it was coming in too hard.
+///
+/// EVA is exempt (the capsule has no collider, so no contacts). A craft that
+/// is already destroyed short-circuits so debris settling on the ground
+/// doesn't re-trigger. See `docs/landing.md`.
+fn detect_terrain_impact(
+    contact_graph: Res<ContactGraph>,
+    active: Res<ActiveLocalBubble>,
+    authority: Res<AvianAuthority>,
+    mut sim: ResMut<SimulationState>,
+    craft_q: Query<(&LinearVelocity, &Position), With<LocalCraftBody>>,
+    mut speed_window: Local<ImpactSpeedWindow>,
+    mut was_touching: Local<bool>,
+) {
+    // Only Full integrates contacts and owns the craft's velocity. Outside
+    // it (coast, warp/Paused, BodyFixed) there is nothing to detect, and the
+    // snapped canonical velocity would read as a false high-speed approach.
+    let owns_translation = authority.owns_translation();
+    let Some(bubble) = active.bubble.as_ref() else {
+        *was_touching = false;
+        speed_window.clear();
+        return;
+    };
+    if !owns_translation
+        || sim.simulation.vessel_kind() == VesselKind::Eva
+        || sim.simulation.is_destroyed()
+    {
+        *was_touching = false;
+        speed_window.clear();
+        return;
+    }
+    let Some(terrain_entity) = bubble.terrain_entity else {
+        *was_touching = false;
+        speed_window.clear();
+        return;
+    };
+    let Ok((linear_velocity, position)) = craft_q.get(bubble.craft_entity) else {
+        return;
+    };
+
+    // Surface-relative approach speed in body-centered inertial. The terrain
+    // collider sits at the body centre and co-rotates, so the surface point
+    // under the craft moves at ω × r; subtracting it gives the relative
+    // speed the contact resolves against (a craft resting on the spinning
+    // surface reads ~0, not the surface's inertial speed).
+    let body_state = body_state_for(&sim, bubble.body_id);
+    let surface_velocity = body_state.angular_velocity.cross(position.0);
+    let approach_speed = (linear_velocity.0 - surface_velocity).length();
+    speed_window.push(approach_speed);
+
+    let touching = craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity);
+    let contact_started = touching && !*was_touching;
+    *was_touching = touching;
+    if !contact_started {
+        return;
+    }
+
+    let impact_speed = speed_window.peak();
+    let tolerance = sim.simulation.ship_params().impact_tolerance_m_s;
+    if impact_speed > tolerance {
+        warn!(
+            "VESSEL DESTROYED: terrain impact at {:.1} m/s (tolerance {:.1} m/s)",
+            impact_speed, tolerance
+        );
+        sim.simulation.mark_destroyed(impact_speed);
+    }
+}
+
 fn maintain_terrain_patch(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
@@ -1244,7 +1367,20 @@ fn maintain_terrain_patch(
     let along = delta.dot(current.center_dir_body);
     let lateral = (delta - along * current.center_dir_body).length();
     let current_revision = height_source.revision();
-    let lateral_stale = lateral > config.patch_rebuild_distance_m;
+    // Re-center before the craft drifts off the patch edge. The tile-based
+    // collider window (docs/landing.md §3.6) is only tens of metres, so cap the
+    // global drift distance by a fraction of the patch's own half-extent; the
+    // coarse tangent-grid fallback (km-scale half-extent) keeps the global
+    // distance. `patch_half_extent_m` is 0 only with no patch attached, which
+    // the early return above already excludes.
+    let rebuild_distance_m = if current.patch_half_extent_m > 0.0 {
+        config
+            .patch_rebuild_distance_m
+            .min(0.45 * current.patch_half_extent_m)
+    } else {
+        config.patch_rebuild_distance_m
+    };
+    let lateral_stale = lateral > rebuild_distance_m;
     let source_stale = current_revision != current.terrain_built_at_revision;
     if !lateral_stale && !source_stale {
         return;
@@ -1272,6 +1408,7 @@ fn maintain_terrain_patch(
         center_dir_body: center_dir,
         center_surface_body_m: patch.mesh.center_surface_body_m,
         basis: patch.mesh.basis,
+        patch_half_extent_m: patch.mesh.half_extent_m,
         stable_contact_s: current.stable_contact_s,
         stable_landed: current.stable_landed,
         terrain_built_at_revision: current_revision,
@@ -1801,6 +1938,7 @@ mod tests {
             indices: Vec::new(),
             center_surface_body_m: DVec3::Y * 1000.0,
             basis,
+            half_extent_m: 0.0,
         };
         let bubble = LocalBubble {
             id: 1,
@@ -1810,6 +1948,7 @@ mod tests {
             center_dir_body: DVec3::Y,
             center_surface_body_m: patch.center_surface_body_m,
             basis,
+            patch_half_extent_m: 0.0,
             stable_contact_s: 0.0,
             stable_landed: false,
             terrain_built_at_revision: 0,

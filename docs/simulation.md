@@ -579,6 +579,21 @@ The three roles:
 not denied while Avian is active, and Avian does not drive translation
 in `AttitudeOnly` or `Paused`.
 
+**Canonical owns `Position`/`Rotation`; the Transform sync is one-way.**
+The snap writes Avian's `Position`/`Rotation` components directly, and the
+EVA walk controller and terrain-patch pose do the same. Nothing positions a
+physics body via Bevy `Transform`. Avian's reverse sync
+(`PhysicsTransformConfig::transform_to_position`) is therefore disabled in
+`LocalPhysicsPlugin` — leaving it on is a latent bug: while the physics
+clock is warp-paused, `position_to_transform` does not run, so a body's
+`Transform` goes stale relative to a freshly snapped `Rotation` (e.g. the
+landing spawn re-poses canonical *after* the bubble already spawned with the
+parking-orbit placeholder attitude). On unpause `transform_to_position`
+would copy that stale `Transform` back over the snapped rotation, snapping
+the ship off its commanded attitude (it manifested as a landing ship that
+spawned retrograde but flipped to the horizon the instant the sim resumed).
+Only `position_to_transform` stays on, so renderers/debug still see the pose.
+
 Authority changes are events and must be logged.
 
 ## Simulation regimes
@@ -926,7 +941,12 @@ Current M5 first slice:
   body-centered-inertial positions and contact resolution sees the
   correct surface velocity at the contact point. The patch samples the
   rendered R16 cubemap height path, not the fuller
-  `sample_static_surface` detail path.
+  `sample_static_surface` detail path. Its vertices are now meshed
+  directly from the resident GPU atlas tiles (one vertex per height
+  texel at the rendered LOD) so the collider lines up with the drawn
+  surface by construction, falling back to a coarse tangent-grid
+  resample before tiles are resident — see
+  [landing.md](landing.md) §3.6.
 - Patch defaults: 4096 m half extent, 129 x 129 vertices, rebuild after
   1024 m lateral movement from the patch center.
 - Automatic entry requires ship view, dominant body Thalos, any

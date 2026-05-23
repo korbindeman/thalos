@@ -205,6 +205,16 @@ impl TerrainModel {
         self.max_height
     }
 
+    /// World-space translation of the model's origin. For the game's body
+    /// terrain this is `DVec3::ZERO` (the model is body-centered and placed
+    /// via the big_space grid), so [`Coordinate::world_position`] already
+    /// returns body-fixed coordinates. Callers that need body-fixed
+    /// positions out of `world_position` subtract this to stay correct if a
+    /// model is ever constructed with a nonzero offset.
+    pub fn translation(&self) -> DVec3 {
+        self.translation
+    }
+
     pub(crate) fn grid_transform(
         &self,
         frame: &crate::big_space::ReferenceFrame,

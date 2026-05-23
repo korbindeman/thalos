@@ -29,9 +29,11 @@ mod screenshot;
 mod ship_view;
 mod sky_render;
 mod solar_system_state;
+mod spawn;
 mod staging;
 mod star_flare;
 mod target;
+mod velocity_frame;
 mod view;
 mod warp_to_maneuver;
 
@@ -79,6 +81,7 @@ use rendering::RenderingPlugin;
 use screenshot::ScreenshotPlugin;
 use ship_view::ShipViewPlugin;
 use solar_system_state::{SimulationState, SolarSystemStatePlugin};
+use spawn::{SpawnPlugin, SpawnSituation};
 use target::TargetPlugin;
 use thalos_planet_rendering::PlanetRenderingPlugin;
 use view::ViewPlugin;
@@ -217,16 +220,9 @@ fn main() {
         .filter(|arg| !arg.trim().is_empty())
         .or_else(|| std::env::var("THALOS_SPAWN").ok())
         .unwrap_or_default();
-    let spawn_eva = match spawn_request.trim().to_ascii_lowercase().as_str() {
-        "eva" => true,
-        "" | "orbit" | "ship" => false,
-        other => {
-            eprintln!("  Unknown spawn mode '{other}'; defaulting to ship orbit.");
-            false
-        }
-    };
+    let situation = SpawnSituation::from_request(&spawn_request);
 
-    let (ship_state, vessel_kind, ship_params, attitude) = if spawn_eva {
+    let (ship_state, vessel_kind, ship_params, attitude) = if situation == SpawnSituation::Eva {
         // Sub-stellar point so the player wakes up in daylight: the direction
         // from Thalos toward Pyros (heliocentric origin) is
         // `-homeworld_state.position`.
@@ -258,7 +254,11 @@ fn main() {
         );
         (state, VesselKind::Eva, ShipParameters::eva(), attitude)
     } else {
-        // Ship in low Thalos orbit — the authored parking orbit.
+        // Both `orbit` and `landing` start as a ship in the authored parking
+        // orbit. For `landing`, this is just the placeholder that sits behind
+        // the loading screen: `spawn::refine_landing_spawn` swaps it for the
+        // over-land descent state on the first `Running` frame, once terrain
+        // heights are available to place the ship above ground over land.
         let rel = system.ship.initial_state;
         let state = StateVector {
             position: homeworld_state.position + rel.position,
@@ -277,11 +277,15 @@ fn main() {
             orientation: DQuat::from_mat3(&basis),
             angular_velocity: DVec3::ZERO,
         };
-        let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
-        println!(
-            "  Ship:            {:.0} km orbit around {}",
-            altitude_km, homeworld.name
-        );
+        if situation == SpawnSituation::Landing {
+            println!("  Ship:            landing approach on {} (over land)", homeworld.name);
+        } else {
+            let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
+            println!(
+                "  Ship:            {:.0} km orbit around {}",
+                altitude_km, homeworld.name
+            );
+        }
         (state, VesselKind::Ship, ShipParameters::default(), attitude)
     };
 
@@ -382,6 +386,7 @@ fn main() {
             }
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))
+        .insert_resource(situation)
         .add_plugins(SolarSystemStatePlugin)
         .add_plugins(bevy::prelude::MeshPickingPlugin)
         // Opt-in picking: body meshes (and any other Pickable-less mesh) would
@@ -402,6 +407,7 @@ fn main() {
         .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(LoadingScreenPlugin)
+        .add_plugins(SpawnPlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(GameLocalPhysicsPlugin)
         .add_plugins(PlayerControllerPlugin)
@@ -411,6 +417,7 @@ fn main() {
         .add_plugins(staging::StagingPlugin)
         .add_plugins(EnginePlugin)
         .add_plugins(TargetPlugin)
+        .add_plugins(velocity_frame::VelocityFramePlugin)
         .add_plugins(FlightPlanViewPlugin)
         .add_plugins(ManeuverPlugin)
         .add_plugins(NavigationPlugin)

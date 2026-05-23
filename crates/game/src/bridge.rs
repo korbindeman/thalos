@@ -23,6 +23,7 @@ use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::maneuver::ManeuverNode;
+use thalos_physics_canonical::types::ControlInput;
 use thalos_physics_local::{ActiveLocalBubble, avian::ContactGraph, craft_contacts_terrain};
 
 use crate::GameTerrainRegistry;
@@ -31,6 +32,7 @@ use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
 use crate::maneuver::ManeuverPlan;
 use crate::navigation::{NavigationState, compute_attitude_control};
+use crate::velocity_frame::VelocityFrameState;
 use crate::rendering::SimulationState;
 use crate::target::TargetBody;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
@@ -180,9 +182,19 @@ pub fn handle_attitude_controls(
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
     autopilot: Res<Autopilot>,
+    velocity_frame: Res<VelocityFrameState>,
     mut sim: ResMut<SimulationState>,
     mut sas_enabled: Local<bool>,
 ) {
+    // A destroyed craft accepts no attitude input: kill the command, drop
+    // SAS, and skip the autopilot path so the wreck tumbles freely and the
+    // HUD reads inert. (`apply_local_forces` also zeroes torque on its side.)
+    if sim.simulation.is_destroyed() {
+        *sas_enabled = false;
+        sim.simulation.set_control(ControlInput::default());
+        return;
+    }
+
     if input.toggle_sas {
         *sas_enabled = !*sas_enabled;
     }
@@ -201,6 +213,7 @@ pub fn handle_attitude_controls(
         player_torque,
         nav.mode,
         autopilot_target,
+        velocity_frame.active,
         &target,
         &plan,
         &sim.simulation,
@@ -445,6 +458,12 @@ pub struct CraftStateMirror {
     pub dominant_body_id: u32,
     /// Discriminant name of `AuthorityMode` (variant fields elided).
     pub authority: String,
+    /// Whole-craft structural failure from a terrain impact. See
+    /// `docs/landing.md`.
+    pub destroyed: bool,
+    /// Surface-relative approach speed (m/s) of the destroying impact;
+    /// `0.0` unless `destroyed`.
+    pub last_impact_speed_m_s: f64,
 }
 
 fn refresh_craft_state_mirror(sim: Res<SimulationState>, mut mirror: ResMut<CraftStateMirror>) {
@@ -463,6 +482,8 @@ fn refresh_craft_state_mirror(sim: Res<SimulationState>, mut mirror: ResMut<Craf
         AuthorityMode::Docked { .. } => "Docked",
     }
     .to_string();
+    mirror.destroyed = sim.simulation.is_destroyed();
+    mirror.last_impact_speed_m_s = sim.simulation.last_impact_speed_m_s();
 }
 
 // ---------------------------------------------------------------------------

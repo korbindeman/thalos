@@ -9,9 +9,12 @@ use crate::navball::ui::{
     FRAME_SIZE_PX, NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX, NavballFrameRoot,
 };
 use crate::rendering::{SimulationState, SolarSystemState};
+use crate::target::TargetBody;
+use crate::velocity_frame::{VelocityFrameState, next_frame};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
+use thalos_physics_canonical::velocity_frame::nav_basis;
 
 /// The navball cluster sits at the bottom-left (navball at x=40,
 /// nav panel just to its right). The flight readouts sit ABOVE the
@@ -26,6 +29,13 @@ const THROTTLE_BORDER_WIDTH: f32 = 1.6;
 
 #[derive(Component)]
 pub(super) struct VelocityText;
+
+#[derive(Component)]
+pub(super) struct VelocityLabel;
+
+/// Marker on the clickable velocity-readout panel (cycles the speed mode).
+#[derive(Component)]
+pub(super) struct VelocityPanel;
 
 #[derive(Component)]
 pub(super) struct ThrottleBar {
@@ -100,9 +110,18 @@ pub fn setup(
 
     let (bg, border) = panel_frame(&theme);
     commands
-        .spawn((root, bg, border, HudPanel, Name::new("HudFlight")))
+        .spawn((
+            Button,
+            root,
+            bg,
+            border,
+            Interaction::None,
+            VelocityPanel,
+            HudPanel,
+            Name::new("HudFlight"),
+        ))
         .with_children(|p| {
-            p.spawn(label(&theme, "ORBITAL VELOCITY"));
+            p.spawn((label(&theme, "ORBITAL VELOCITY"), VelocityLabel));
             p.spawn((emphasis(&theme, "—"), VelocityText));
         });
 
@@ -138,22 +157,35 @@ pub fn update(
     sim: Res<SimulationState>,
     solar_system: Res<SolarSystemState>,
     throttle: Res<ThrottleState>,
+    velocity_frame: Res<VelocityFrameState>,
+    target: Res<TargetBody>,
     mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
-    mut vel_q: Query<&mut Text, With<VelocityText>>,
+    mut vel_q: Query<&mut Text, (With<VelocityText>, Without<VelocityLabel>)>,
+    mut label_q: Query<&mut Text, (With<VelocityLabel>, Without<VelocityText>)>,
     mut throttle_q: Query<(&mut ThrottleBar, &MaterialNode<ThrottleArcMaterial>)>,
 ) {
     let ship = sim.simulation.ship_state();
-    let body = sim.simulation.dominant_body();
+    let body_id = sim.simulation.dominant_body();
     let Some(states) = solar_system.states.as_deref() else {
         return;
     };
-    let Some(body_state) = states.get(body) else {
+    let Some(body_state) = states.get(body_id) else {
         return;
     };
-    let rel_speed = (ship.velocity - body_state.velocity).length();
+    let target_state = target.target.and_then(|id| states.get(id));
+    let basis = nav_basis(velocity_frame.active, ship, body_state, target_state);
 
     if let Ok(mut t) = vel_q.single_mut() {
-        let s = format::speed(rel_speed);
+        let s = match basis {
+            Some(b) => format::speed(b.speed),
+            None => "—".to_string(),
+        };
+        if t.0 != s {
+            t.0 = s;
+        }
+    }
+    if let Ok(mut t) = label_q.single_mut() {
+        let s = format!("{} VELOCITY", velocity_frame.active.label());
         if t.0 != s {
             t.0 = s;
         }
@@ -169,6 +201,21 @@ pub fn update(
             }
             bar.commanded = commanded;
             bar.effective = effective;
+        }
+    }
+}
+
+/// Cycle the navball speed mode when the readout panel is clicked:
+/// Orbit → Surface → Target → Orbit, skipping Target when none is set.
+pub fn handle_velocity_frame_click(
+    interactions: Query<&Interaction, (With<VelocityPanel>, Changed<Interaction>)>,
+    target: Res<TargetBody>,
+    mut velocity_frame: ResMut<VelocityFrameState>,
+) {
+    for interaction in &interactions {
+        if matches!(interaction, Interaction::Pressed) {
+            let next = next_frame(velocity_frame.active, target.target.is_some());
+            velocity_frame.set_override(next);
         }
     }
 }

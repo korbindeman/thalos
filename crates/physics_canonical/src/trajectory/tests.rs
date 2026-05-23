@@ -148,6 +148,7 @@ fn make_single_star_system() -> SolarSystemDefinition {
         atmosphere: None,
         terrestrial_atmosphere: None,
         rings: None,
+        surface_frame_ceiling_m: None,
     };
 
     let mut name_to_id = HashMap::new();
@@ -186,6 +187,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
         atmosphere: None,
         terrestrial_atmosphere: None,
         rings: None,
+        surface_frame_ceiling_m: None,
     };
 
     let thalos_mass = 1.378e24;
@@ -214,6 +216,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
         atmosphere: None,
         terrestrial_atmosphere: None,
         rings: None,
+        surface_frame_ceiling_m: None,
     };
 
     (sun, thalos, sun_mass)
@@ -977,6 +980,7 @@ fn make_thalos_mira_system() -> SolarSystemDefinition {
         atmosphere: None,
         terrestrial_atmosphere: None,
         rings: None,
+        surface_frame_ceiling_m: None,
     };
 
     let mut name_to_id = HashMap::new();

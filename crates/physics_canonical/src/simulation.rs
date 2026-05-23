@@ -488,6 +488,20 @@ pub struct Simulation {
     control: ControlInput,
     vessel_kind: crate::types::VesselKind,
 
+    /// Whole-craft structural failure. Set by the game's terrain-impact
+    /// detector (`detect_terrain_impact`) when a contact exceeds
+    /// [`ShipParameters::impact_tolerance_m_s`], cleared by [`Self::repair`]
+    /// on a respawn teleport. A destroyed craft is inert debris: the game
+    /// gates thrust, torque, and input on [`Self::is_destroyed`]. Transient
+    /// (not part of `CraftState`) because there is no save/load yet and it
+    /// would otherwise ripple through every `CraftState` constructor. See
+    /// `docs/landing.md`.
+    hull_destroyed: bool,
+    /// Surface-relative approach speed (m/s) of the impact that destroyed
+    /// the craft, for the HUD readout / log. Meaningless unless
+    /// `hull_destroyed`.
+    last_impact_speed_m_s: f64,
+
     pub warp: WarpController,
     pub prediction_state: PredictionState,
 }
@@ -545,6 +559,8 @@ impl Simulation {
             ship_params,
             control: ControlInput::default(),
             vessel_kind: crate::types::VesselKind::default(),
+            hull_destroyed: false,
+            last_impact_speed_m_s: 0.0,
             warp: WarpController::new(config.warp_levels, config.warp_min_altitude_radii),
             prediction_state: PredictionState::new(
                 config.prediction_config,
@@ -678,6 +694,40 @@ impl Simulation {
 
     pub fn set_vessel_kind(&mut self, kind: crate::types::VesselKind) {
         self.vessel_kind = kind;
+    }
+
+    /// True once the craft has suffered a destroying terrain impact. The
+    /// game gates thrust, torque, and player input on this. Cleared by
+    /// [`Self::repair`].
+    pub fn is_destroyed(&self) -> bool {
+        self.hull_destroyed
+    }
+
+    /// Surface-relative approach speed (m/s) of the destroying impact, for
+    /// the HUD / log. Zero unless [`Self::is_destroyed`].
+    pub fn last_impact_speed_m_s(&self) -> f64 {
+        self.last_impact_speed_m_s
+    }
+
+    /// Mark the craft destroyed by a terrain impact at `impact_speed_m_s`.
+    /// Idempotent — re-impacts while already destroyed keep the original
+    /// (first) impact speed so the HUD reports the crash, not the debris
+    /// settling. Invalidates the cached prediction so the map view drops
+    /// the now-meaningless trajectory.
+    pub fn mark_destroyed(&mut self, impact_speed_m_s: f64) {
+        if self.hull_destroyed {
+            return;
+        }
+        self.hull_destroyed = true;
+        self.last_impact_speed_m_s = impact_speed_m_s;
+        self.prediction_state.mark_dirty();
+    }
+
+    /// Clear structural failure — used by respawn teleports to hand the
+    /// player a fresh craft.
+    pub fn repair(&mut self) {
+        self.hull_destroyed = false;
+        self.last_impact_speed_m_s = 0.0;
     }
 
     pub fn set_ship_params(&mut self, params: ShipParameters) {
@@ -988,6 +1038,7 @@ mod tests {
             atmosphere: None,
             terrestrial_atmosphere: None,
             rings: None,
+            surface_frame_ceiling_m: None,
         }];
         let system = SolarSystemDefinition {
             name: "Test".to_string(),

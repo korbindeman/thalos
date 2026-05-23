@@ -46,6 +46,8 @@ pub struct BodyDetailsFile {
     pub terrestrial_atmosphere: Option<TerrestrialAtmosphere>,
     #[serde(default)]
     pub rings: Option<RingSystem>,
+    #[serde(default)]
+    pub surface_frame_ceiling_m: Option<f64>,
 }
 
 /// One body in the file. `parent` references another body by name. Bodies
@@ -67,6 +69,8 @@ pub struct BodyFile {
     pub terrestrial_atmosphere: Option<TerrestrialAtmosphere>,
     #[serde(default)]
     pub rings: Option<RingSystem>,
+    #[serde(default)]
+    pub surface_frame_ceiling_m: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,6 +171,9 @@ pub fn load_solar_system_with_bodies(
             if details.rings.is_some() {
                 body.rings = details.rings;
             }
+            if details.surface_frame_ceiling_m.is_some() {
+                body.surface_frame_ceiling_m = details.surface_frame_ceiling_m;
+            }
         }
     }
 
@@ -224,6 +231,7 @@ fn load_solar_system_impl(file: &SolarSystemFile) -> Result<SolarSystemDefinitio
             atmosphere: b.atmosphere.clone(),
             terrestrial_atmosphere: b.terrestrial_atmosphere.clone(),
             rings: b.rings.clone(),
+            surface_frame_ceiling_m: b.surface_frame_ceiling_m,
         });
     }
 

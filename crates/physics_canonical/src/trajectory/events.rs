@@ -693,6 +693,7 @@ mod tests {
             atmosphere: None,
             terrestrial_atmosphere: None,
             rings: None,
+            surface_frame_ceiling_m: None,
         }
     }
 

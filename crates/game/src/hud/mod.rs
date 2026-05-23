@@ -12,6 +12,7 @@
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
 
+mod destroyed_banner;
 mod flight_panel;
 mod format;
 mod fps_overlay;
@@ -77,6 +78,7 @@ impl Plugin for HudPlugin {
                     staging_panel::setup,
                     flight_panel::setup.after(crate::navball::ui::setup_navball_ui),
                     fps_overlay::setup,
+                    destroyed_banner::setup,
                 )
                     .after(theme::init_theme)
                     .after(setup_top_left_row),
@@ -102,6 +104,7 @@ impl Plugin for HudPlugin {
                     orbital_panel::handle_click,
                     staging_panel::update,
                     flight_panel::update,
+                    flight_panel::handle_velocity_frame_click,
                     fps_overlay::update,
                     nav_panel::handle_clicks,
                     nav_panel::update_button_visuals,
@@ -109,6 +112,14 @@ impl Plugin for HudPlugin {
                     nav_panel::update_maneuver_visuals,
                     nav_attitude::update_attitude,
                 )
+                    .after(crate::SimStage::Sync)
+                    .run_if(not_in_photo_mode),
+            )
+            // Standalone (not folded into the tuple above, which is already
+            // near Bevy's 20-element system-tuple limit).
+            .add_systems(
+                Update,
+                destroyed_banner::update
                     .after(crate::SimStage::Sync)
                     .run_if(not_in_photo_mode),
             )

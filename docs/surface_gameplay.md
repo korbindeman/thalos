@@ -567,7 +567,11 @@ address).
 - **Ship-on-surface physics.** Ships in BodyFixed today are
   numerically frozen pose; rover wheels, sliding craft, scaled-warp
   physics on the surface are all unaddressed. Touched here only
-  where the trajectory-suppression rule applies; needs its own spec.
+  where the trajectory-suppression rule applies. The landed-ship
+  redesign this doc defers now has its own spec —
+  [landing.md](landing.md) — which covers ship descent, terrain
+  collision (`SweptCcd` anti-tunneling), and impact destruction; rover
+  wheels / sliding / surface-warp remain open there.
 
 ### Phase A findings (2026-05-17, static)
 

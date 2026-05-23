@@ -233,6 +233,9 @@ fn body_tree_panel(
             .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
         sim.simulation.set_ship_state(state);
         sim.simulation.set_attitude(attitude);
+        // Teleporting to orbit hands the player a fresh craft — clear any
+        // structural failure so a wreck can be recovered. See docs/landing.md.
+        sim.simulation.repair();
         sim.simulation.warp.reset();
         launch_mount.active = None;
         // Airborne: Kepler owns translation, the canonical→Avian snap drives

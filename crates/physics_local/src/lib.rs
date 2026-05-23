@@ -21,7 +21,7 @@ pub mod avian {
         AngularInertia, AngularVelocity, CoefficientCombine, Collider, ConstantAngularAcceleration,
         ConstantLinearAcceleration, ContactGraph, CustomPositionIntegration, Friction,
         LinearVelocity, LockedAxes, Mass, NoAutoAngularInertia, NoAutoMass, Physics, PhysicsTime,
-        Position, Restitution, RigidBody, Rotation, SleepingDisabled,
+        Position, Restitution, RigidBody, Rotation, SleepingDisabled, SweptCcd,
     };
 }
 
@@ -140,6 +140,13 @@ pub struct LocalBubble {
     pub center_dir_body: DVec3,
     pub center_surface_body_m: DVec3,
     pub basis: TerrainPatchBasis,
+    /// Metric lateral half-extent of the attached collider patch. Drives a
+    /// window-relative rebuild so the small tile-based collider window
+    /// (`docs/landing.md` §3.6, only tens of metres) re-centers before the
+    /// craft drifts off its edge — the global `patch_rebuild_distance_m` is
+    /// too coarse for it. Zero when no patch is attached, and left at the
+    /// fallback patch's `half_extent_m` for the coarse tangent-grid path.
+    pub patch_half_extent_m: f64,
     pub stable_contact_s: f64,
     pub stable_landed: bool,
     /// `HeightSource::revision()` snapshot taken when `terrain_entity`
@@ -217,6 +224,23 @@ pub struct LocalPhysicsPlugin;
 impl Plugin for LocalPhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(PhysicsPlugins::default())
+            // Canonical state owns each craft body's `Position`/`Rotation`: the
+            // game writes them directly every frame (`snap_avian_from_canonical`,
+            // the EVA walk controller, terrain-patch pose). Nothing positions a
+            // physics body via `Transform`. Avian's reverse sync
+            // (`transform_to_position`) is therefore unused — and harmful: while
+            // the physics clock is warp-paused, `position_to_transform` doesn't
+            // run, so a body's `Transform` goes stale relative to a freshly
+            // snapped `Rotation` (e.g. the landing spawn re-poses canonical after
+            // the bubble already spawned with the parking-orbit placeholder). On
+            // unpause `transform_to_position` would clobber the snapped rotation
+            // with that stale `Transform`, snapping the ship off retrograde. Keep
+            // the one-way `position_to_transform` so renderers/debug still see the
+            // pose; drop the reverse direction. See `docs/landing.md`.
+            .insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
+                transform_to_position: false,
+                ..default()
+            })
             .insert_resource(Gravity::ZERO)
             .init_resource::<TerrainSurfaceRegistry>()
             .init_resource::<HeightSourceRegistry>()
@@ -243,14 +267,24 @@ pub fn spawn_terrain_collider_patch(
     body_angular_velocity: DVec3,
     config: &LocalBubbleConfig,
 ) -> SpawnedTerrainPatch {
-    let basis = TerrainPatchBasis::from_normal(center_dir_body);
-    let patch = build_rendered_terrain_patch_from_source(
-        height_source,
-        body_radius_m,
-        center_dir_body,
-        basis,
-        terrain_patch_config(config),
-    );
+    // Prefer a collider built from the source's native tile geometry — the GPU
+    // atlas tiles the renderer meshes from — so it lines up with the drawn
+    // surface by construction. Sources with no resident tile geometry (CPU
+    // pipeline, flat, baked cubemap) return `None`, as does the GPU mirror
+    // before a tile is resident, and we fall back to the coarser tangent-grid
+    // resample. See `docs/landing.md`.
+    let patch = height_source
+        .build_collider_patch(center_dir_body.as_vec3(), config.patch_resolution)
+        .unwrap_or_else(|| {
+            let basis = TerrainPatchBasis::from_normal(center_dir_body);
+            build_rendered_terrain_patch_from_source(
+                height_source,
+                body_radius_m,
+                center_dir_body,
+                basis,
+                terrain_patch_config(config),
+            )
+        });
     // Vertices are body-fixed. The collider is Kinematic so its Rotation
     // tracks the body's orientation each frame — body.orientation * vertex
     // gives the body-centered inertial position of each vertex. The collider
@@ -301,7 +335,20 @@ pub fn spawn_local_craft_body(commands: &mut Commands, spawn: LocalCraftSpawn) -
             LocalCraftBody {
                 craft_id: spawn.craft_id,
             },
-            Name::new("Local aggregate craft rigidbody"),
+            // Continuous Collision Detection so a fast descent stops at the
+            // terrain trimesh instead of tunneling through it. Speculative
+            // collision (Avian default) treats surfaces as infinite planes
+            // and misses thin meshes at speed; the geometric swept sweep is
+            // the documented backstop. `NonLinear` (the default) also covers
+            // a tumbling craft. `Restitution(0)` keeps touchdowns from
+            // bouncing. (The EVA path removes the collider after spawn, so
+            // these are inert there.) Grouped in a nested bundle to keep the
+            // outer tuple within Bevy's 15-element `Bundle` impl.
+            (
+                SweptCcd::default(),
+                Restitution::new(0.0),
+                Name::new("Local aggregate craft rigidbody"),
+            ),
         ))
         .id()
 }
