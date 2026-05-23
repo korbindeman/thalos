@@ -65,7 +65,13 @@ mod tests {
         // Interior points only: exact face edges/corners are shared by
         // multiple faces and are intentionally ambiguous.
         for face in 0..FACE_COUNT {
-            for &(u, v) in &[(0.5, 0.5), (0.1, 0.9), (0.25, 0.75), (0.3, 0.2), (0.7, 0.85)] {
+            for &(u, v) in &[
+                (0.5, 0.5),
+                (0.1, 0.9),
+                (0.25, 0.75),
+                (0.3, 0.2),
+                (0.7, 0.85),
+            ] {
                 let dir = face_uv_to_dir(face, u, v);
                 let (f2, u2, v2) = dir_to_face_uv(dir);
                 assert_eq!(f2, face, "face mismatch for {face} ({u},{v})");

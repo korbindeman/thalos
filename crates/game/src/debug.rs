@@ -40,8 +40,8 @@ use crate::view::{ViewMode, in_map_view};
 pub const DEBUG_LAUNCH_MOUNT_HEIGHT_M: f64 = 18.0;
 
 /// EVA surface teleports plant the capsule a couple of metres above the
-/// rendered terrain; `walk_eva_on_terrain` re-glues it exactly on the next
-/// frame, so this is just a safe initial clearance on steep terrain.
+/// rendered terrain; `step_eva_controller` re-seeds and snaps it onto the
+/// surface on the next frame, so this is just a safe initial clearance.
 const EVA_SURFACE_CLEARANCE_M: f64 = 2.0;
 const DEBUG_CRAFT_COLLIDERS_KEY: KeyCode = KeyCode::F8;
 
@@ -404,7 +404,7 @@ fn commit_debug_surface_teleport(
 
     if sim.simulation.vessel_kind() == VesselKind::Eva {
         // EVA keeps its persistent bubble: rewrite the capsule in place,
-        // ground it, and let `walk_eva_on_terrain` glue it to the surface.
+        // ground it, and let `step_eva_controller` snap it onto the surface.
         let (state, attitude) = surface_spawn_state(
             &body,
             &body_state,

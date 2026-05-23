@@ -42,6 +42,43 @@ e.g. on a platform where the feature misbehaves — override the whole command i
 THALOS_GAME_COMMAND="cargo run -p thalos_game"
 ```
 
+### Game window / renderer launch toggles
+
+`just game` normally starts borderless fullscreen with Bevy/wgpu's default
+backend selection. If Windows reports a swapchain/device-loss style panic while
+acquiring the next frame, the first local workaround is to take the display mode
+and backend choice out of the equation without changing source:
+
+```dotenv
+THALOS_WINDOW_MODE=windowed      # windowed | borderless | fullscreen
+THALOS_WINDOW_SIZE=1600x900      # optional, used for windowed mode
+THALOS_WGPU_BACKEND=vulkan       # auto | dx12 | vulkan | metal | gl
+```
+
+`THALOS_WGPU_BACKEND` is a Thalos-facing alias for the same class of wgpu
+backend selection that `WGPU_BACKEND` provides, but it is scoped to our game
+startup helper in `crates/game/src/main.rs` and is easy to keep in `.env.just`.
+Use `vulkan` on Windows when DX12 presents become unstable; remove the override
+again after driver/Bevy/wgpu updates.
+
+### Uncapping the framerate for profiling (`THALOS_VSYNC`)
+
+Frame time is the only meaningful performance signal, and vsync floors it at
+the monitor's refresh budget — so a change that shaves real GPU/CPU time below
+that floor shows no movement. Set `THALOS_VSYNC=off` (also accepts
+`0`/`false`/`no`) to launch with `PresentMode::AutoNoVsync` and read the true,
+uncapped frame time while still allowing wgpu to fall back to a supported
+non-vsync present mode; anything else keeps the vsync default. Read by
+`present_mode_from_env` in `crates/game/src/main.rs`.
+
+Pair it with the BRP MCP server (`bevy_brp_mcp`) for live, no-rebuild A/B
+profiling of a running session: `brp_extras_get_diagnostics` reports
+`frame_time_ms`; toggling the ship camera's `Camera.is_active` isolates
+GPU-vs-CPU bound (frame time unchanged with the 3D render off ⇒ CPU-bound);
+removing post-process components (`Bloom`, `Smaa`, …) or sending `Escape`
+(sim pause) attributes cost to specific subsystems. This is how the surface
+frame cost was traced to the Avian terrain collider (see `docs/landing.md`).
+
 ### Windows fast incremental loop
 
 A good Windows-local starting point is:

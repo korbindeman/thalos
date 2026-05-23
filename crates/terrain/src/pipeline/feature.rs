@@ -259,7 +259,9 @@ impl ScatterGenerator {
 
                     let mut params = FeatureParams::default();
                     for (k, (name, lo, hi)) in self.param_ranges.iter().enumerate() {
-                        let up = unit(pcg(h ^ (0xA24B_AED5u32.wrapping_add(k as u32 * 2_654_435_761))));
+                        let up = unit(pcg(
+                            h ^ (0xA24B_AED5u32.wrapping_add(k as u32 * 2_654_435_761))
+                        ));
                         params.set(name.clone(), lo + (hi - lo) * up);
                     }
 
@@ -483,7 +485,10 @@ mod tests {
         catalog.declare_type(FeatureType {
             name: "crater".into(),
             kind: FeatureKind::TerrainModification,
-            params: vec![FeatureParam::new("age", 0.0), FeatureParam::new("radius_m", 100.0)],
+            params: vec![
+                FeatureParam::new("age", 0.0),
+                FeatureParam::new("radius_m", 100.0),
+            ],
             composition: Some(FeatureComposition {
                 op: CompositionOp::SmoothMin { k: 50.0 },
                 influence_radius: InfluenceRadius::FromParam {
@@ -518,13 +523,18 @@ mod tests {
 
     #[test]
     fn density_gates_placement() {
-        let make_scatter = || {
-            ScatterGenerator::new(GeneratorId(1), "crater", 99, 8).with_density_field("d")
-        };
-        let none =
-            crater_catalog(make_scatter()).query_in_region(&planet_with_density(0.0), whole_sphere(), 1.0);
-        let all =
-            crater_catalog(make_scatter()).query_in_region(&planet_with_density(1.0), whole_sphere(), 1.0);
+        let make_scatter =
+            || ScatterGenerator::new(GeneratorId(1), "crater", 99, 8).with_density_field("d");
+        let none = crater_catalog(make_scatter()).query_in_region(
+            &planet_with_density(0.0),
+            whole_sphere(),
+            1.0,
+        );
+        let all = crater_catalog(make_scatter()).query_in_region(
+            &planet_with_density(1.0),
+            whole_sphere(),
+            1.0,
+        );
         assert!(none.is_empty(), "zero density places nothing");
         assert!(all.len() > none.len(), "full density places more");
     }
@@ -536,12 +546,16 @@ mod tests {
             center: Vec3::Z,
             angular_radius_rad: 0.3,
         };
-        let scatter = ScatterGenerator::new(GeneratorId(1), "crater", 5, 24).with_density_field("d");
+        let scatter =
+            ScatterGenerator::new(GeneratorId(1), "crater", 5, 24).with_density_field("d");
         let catalog = crater_catalog(scatter);
         let instances = catalog.query_in_region(&planet, region, 1.0);
         assert!(!instances.is_empty());
         for inst in &instances {
-            assert!(in_region(inst.position, region), "instance outside the queried cap");
+            assert!(
+                in_region(inst.position, region),
+                "instance outside the queried cap"
+            );
         }
     }
 
@@ -555,15 +569,23 @@ mod tests {
 
         let before = catalog.query_in_region(&planet, whole_sphere(), 1.0);
         let target = before[0].clone();
-        let new_id = catalog.promote(&target).expect("procedural instance promotes");
+        let new_id = catalog
+            .promote(&target)
+            .expect("procedural instance promotes");
 
         let after = catalog.query_in_region(&planet, whole_sphere(), 1.0);
         // Same total count: the procedural one is gone, the explicit one present.
         assert_eq!(after.len(), before.len());
         // The promoted instance is present with its new id at the same position.
-        let promoted = after.iter().find(|i| i.id == new_id).expect("promoted present");
+        let promoted = after
+            .iter()
+            .find(|i| i.id == new_id)
+            .expect("promoted present");
         assert_eq!(promoted.position, target.position);
-        assert!(matches!(promoted.origin, FeatureOrigin::PromotedFrom { .. }));
+        assert!(matches!(
+            promoted.origin,
+            FeatureOrigin::PromotedFrom { .. }
+        ));
         // The original procedural cell is no longer emitted.
         assert!(
             !after.iter().any(|i| i.origin == target.origin),

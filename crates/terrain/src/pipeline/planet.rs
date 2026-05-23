@@ -45,11 +45,7 @@ impl Planet {
     ///
     /// Returns a [`DagError`] if the fields contain a duplicate name, a
     /// reference to an unknown field, or a cycle.
-    pub fn new(
-        physical: PlanetPhysical,
-        seed: u64,
-        fields: Vec<Field>,
-    ) -> Result<Self, DagError> {
+    pub fn new(physical: PlanetPhysical, seed: u64, fields: Vec<Field>) -> Result<Self, DagError> {
         let dag = FieldDag::build(&fields)?;
         let index = fields
             .iter()
@@ -167,7 +163,9 @@ impl Planet {
         lod_m: f32,
         memo: &mut [Option<f32>],
     ) -> f32 {
-        let radius_m = self.resolve_scalar(&stamp.radius, dir, lod_m, memo).max(1e-3);
+        let radius_m = self
+            .resolve_scalar(&stamp.radius, dir, lod_m, memo)
+            .max(1e-3);
         let dist_m = stamp.geometry.distance_m(dir, self.physical.radius_m);
         let weight = stamp.falloff.weight(dist_m / radius_m);
         if weight <= 0.0 {
@@ -330,10 +328,7 @@ mod tests {
     fn sample_all_matches_individual_samples() {
         let p = planet(vec![
             Field::scalar("a", Expr::Const(2.0)),
-            Field::scalar(
-                "b",
-                Expr::Add(vec![Expr::field("a"), Expr::Const(5.0)]),
-            ),
+            Field::scalar("b", Expr::Add(vec![Expr::field("a"), Expr::Const(5.0)])),
         ]);
         let dir = Vec3::Y;
         let all = p.sample_all(dir, 1.0);
@@ -354,11 +349,16 @@ mod tests {
             falloff: Falloff::Smoothstep,
             composition: CompositionOp::Add,
         };
-        let p = planet(vec![Field::scalar("h", Expr::Const(0.0)).with_stamps(vec![stamp])]);
+        let p = planet(vec![
+            Field::scalar("h", Expr::Const(0.0)).with_stamps(vec![stamp]),
+        ]);
 
         // At the core, full weight → +100.
         let core = p.sample_field("h", Vec3::X, 1.0).unwrap();
-        assert!((core - 100.0).abs() < 1e-3, "core should be ~100, got {core}");
+        assert!(
+            (core - 100.0).abs() < 1e-3,
+            "core should be ~100, got {core}"
+        );
 
         // Far away (90°), outside the footprint → unchanged base.
         let far = p.sample_field("h", Vec3::Y, 1.0).unwrap();
@@ -411,17 +411,22 @@ mod tests {
     fn overlay_replaces_in_painted_region_only() {
         use crate::pipeline::field::AuthorOverlay;
         // Field is Replace; procedural = 10 everywhere; overlay paints 99 at +X.
-        let field = Field::scalar("h", Expr::Const(10.0))
-            .with_overlay(AuthorOverlay {
-                ops: vec![paint_at_x(99.0)],
-            });
+        let field = Field::scalar("h", Expr::Const(10.0)).with_overlay(AuthorOverlay {
+            ops: vec![paint_at_x(99.0)],
+        });
         let p = planet(vec![field]);
 
         let painted = p.sample_field("h", Vec3::X, 1.0).unwrap();
-        assert!((painted - 99.0).abs() < 1e-3, "painted core should read overlay, got {painted}");
+        assert!(
+            (painted - 99.0).abs() < 1e-3,
+            "painted core should read overlay, got {painted}"
+        );
 
         let unpainted = p.sample_field("h", Vec3::Y, 1.0).unwrap();
-        assert!((unpainted - 10.0).abs() < 1e-6, "unpainted should read procedural, got {unpainted}");
+        assert!(
+            (unpainted - 10.0).abs() < 1e-6,
+            "unpainted should read procedural, got {unpainted}"
+        );
     }
 
     #[test]
@@ -430,19 +435,22 @@ mod tests {
         // Two planets differing only in procedural value; a Replace overlay with
         // full coverage at +X must yield the same painted value in both —
         // demonstrating the overlay is materialised independently of procedural.
-        let with_10 = planet(vec![
-            Field::scalar("h", Expr::Const(10.0)).with_overlay(AuthorOverlay {
+        let with_10 = planet(vec![Field::scalar("h", Expr::Const(10.0)).with_overlay(
+            AuthorOverlay {
                 ops: vec![paint_at_x(99.0)],
-            }),
-        ]);
-        let with_20 = planet(vec![
-            Field::scalar("h", Expr::Const(20.0)).with_overlay(AuthorOverlay {
+            },
+        )]);
+        let with_20 = planet(vec![Field::scalar("h", Expr::Const(20.0)).with_overlay(
+            AuthorOverlay {
                 ops: vec![paint_at_x(99.0)],
-            }),
-        ]);
+            },
+        )]);
         let a = with_10.sample_field("h", Vec3::X, 1.0).unwrap();
         let b = with_20.sample_field("h", Vec3::X, 1.0).unwrap();
-        assert_eq!(a, b, "overlay value must not depend on procedural where coverage is full");
+        assert_eq!(
+            a, b,
+            "overlay value must not depend on procedural where coverage is full"
+        );
         assert!((a - 99.0).abs() < 1e-3);
     }
 
@@ -468,9 +476,15 @@ mod tests {
             .collect();
         let src_pos = order.iter().position(|n| *n == "src").unwrap();
         let h_pos = order.iter().position(|n| *n == "h").unwrap();
-        assert!(src_pos < h_pos, "overlay FromField must create a dependency edge");
+        assert!(
+            src_pos < h_pos,
+            "overlay FromField must create a dependency edge"
+        );
         let v = p.sample_field("h", Vec3::X, 1.0).unwrap();
-        assert!((v - 42.0).abs() < 1e-6, "overlay should paint src's value, got {v}");
+        assert!(
+            (v - 42.0).abs() < 1e-6,
+            "overlay should paint src's value, got {v}"
+        );
     }
 
     #[test]

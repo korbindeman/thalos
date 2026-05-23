@@ -74,7 +74,8 @@ pub struct StaticSurfaceData {
 
     /// Runtime geometric detail strategy used by the Query API. Legacy bodies
     /// still get the P0 HMF uplift; P2A `GenericTerrestrial` bodies evaluate
-    /// their own smooth continental field directly at the requested LOD.
+    /// their own smooth continental field directly at full detail so runtime
+    /// ground geometry is LOD-invariant during the vertical slice.
     #[serde(default)]
     pub runtime_detail: RuntimeTerrainDetail,
 

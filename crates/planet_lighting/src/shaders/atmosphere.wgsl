@@ -168,6 +168,25 @@ fn apply_limb_darkening(
 
 const ATMOS_VIEW_STEPS: u32 = 8u;
 const ATMOS_SUN_STEPS: u32 = 6u;
+// Minimum view samples for very short paths. The view-step count is scaled by
+// path length (see `adaptive_view_steps`): a full atmosphere-shell crossing
+// uses the full `ATMOS_VIEW_STEPS`, but a ground pixel — camera near the
+// surface looking at nearby terrain, the bulk of the screen on the surface —
+// has a path of a few metres and only needs a couple of samples. Without this
+// scaling those pixels paid 8 view steps × a 6-step sun column each for a
+// near-zero in-scatter contribution.
+const ATMOS_VIEW_STEPS_MIN: u32 = 2u;
+
+/// View-sample count for a raymarch segment of length `path`, scaled so the
+/// per-metre sample density matches a full-shell crossing at `ATMOS_VIEW_STEPS`
+/// and clamped to `[ATMOS_VIEW_STEPS_MIN, ATMOS_VIEW_STEPS]`. `shell_alt` is the
+/// atmosphere thickness (`atmos_geom.x`). Long sky paths keep full quality;
+/// short ground paths collapse to the minimum.
+fn adaptive_view_steps(path: f32, shell_alt: f32) -> u32 {
+    let step_len = max(shell_alt, 1.0) / f32(ATMOS_VIEW_STEPS);
+    let want = u32(ceil(path / max(step_len, 1e-3)));
+    return clamp(want, ATMOS_VIEW_STEPS_MIN, ATMOS_VIEW_STEPS);
+}
 
 struct ScatterResult {
     /// In-scattered radiance accumulated along `[t_enter, t_exit]`.
@@ -336,7 +355,7 @@ fn integrate_atmosphere(
     let p_r = phase_rayleigh(cos_theta);
     let p_m = phase_mie_hg(cos_theta, g);
 
-    let n = ATMOS_VIEW_STEPS;
+    let n = adaptive_view_steps(path, layers.atmos_geom.x);
     let ds = path / f32(n);
     let jitter = clamp(pixel_jitter, 0.0, 0.999);
 
@@ -433,7 +452,7 @@ fn integrate_atmosphere_multiscatter(
     let p_r = phase_rayleigh(cos_theta);
     let p_m = phase_mie_hg(cos_theta, g);
 
-    let n = ATMOS_VIEW_STEPS;
+    let n = adaptive_view_steps(path, atmos_top_alt);
     let ds = path / f32(n);
     let jitter = clamp(pixel_jitter, 0.0, 0.999);
 

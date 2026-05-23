@@ -90,13 +90,29 @@ geometry such as triangle meshes."
 
 Secondary contributors (not the headline):
 
-- The patch is coarse: `patch_resolution = 129`,
+- The patch is coarse: `patch_resolution = 65`,
   `patch_half_extent_m = 4096`
-  ([lib.rs:47](crates/physics_local/src/lib.rs:47)) → ~64 m vertex
-  spacing. Sub-64 m relief isn't in the collider.
-- A known collider-vs-rendered-surface gap exists; `debug_log_terrain_gap`
-  ([local_physics.rs:1468](crates/game/src/local_physics.rs:1468))
-  tracks it.
+  ([lib.rs](crates/physics_local/src/lib.rs)). Sub-patch relief isn't in
+  the collider.
+- A known collider-vs-rendered-surface gap exists between the coarse
+  collider patch and the GPU-rendered surface.
+
+> **Performance note.** The terrain collider is a `Kinematic` trimesh
+> whose pose is re-synced every frame (`sync_terrain_collider_pose`) so it
+> co-rotates with the planet inside the body-centered Avian bubble. Avian
+> therefore re-runs broad/narrow phase against every collider triangle each
+> frame, and this is the **dominant CPU cost while on the surface** —
+> measured at ~8 ms/frame (EVA on Thalos, 4K) with the old
+> `patch_resolution = 129` (~32k triangles). The window covered far more
+> ground than any resting craft contacts; `patch_resolution = 65`
+> (~8k triangles, native-texel density preserved in a still-generous window
+> around the craft) cuts that to ~2 ms with no gameplay change — the
+> grounded-EVA capsule is placed kinematically by `step_eva_controller`,
+> not by the collider. Diagnosed CPU-bound by toggling the ship camera's
+> `is_active` (frame time unchanged → not GPU) and the sim pause (frame
+> time dropped from ~18 ms to ~10 ms → the `SimStage::Physics` set, i.e.
+> Avian). If finer collision is ever needed under a craft, prefer a small
+> high-res window over a large one; the cost scales with triangle count.
 
 ### 2.3 There is no structural-integrity model
 

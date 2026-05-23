@@ -428,7 +428,10 @@ pub mod defaults {
 
     pub fn game_eva_move() -> BindingSection {
         section(
-            [],
+            [
+                ("jump", keys([KeyCode::Space])),
+                ("sprint", keys([KeyCode::ShiftLeft, KeyCode::ShiftRight])),
+            ],
             [
                 ("forward", axis([KeyCode::KeyW], [KeyCode::KeyS])),
                 ("strafe", axis([KeyCode::KeyD], [KeyCode::KeyA])),

@@ -111,6 +111,13 @@ impl TileProvider for SyntheticTileProvider {
                     },
                     AttachmentFormat::R16 => synthesize_constant_r16(cfg, 0.74),
                     AttachmentFormat::R32Float => synthesize_constant_r32_float(cfg, 0.74),
+                    AttachmentFormat::Rgba8 if cfg.name == "material" => {
+                        // Mostly grass, a little soil, no rock/wetness. The
+                        // BodyTerrainMaterial shader treats this attachment as
+                        // masks, not color, so don't feed synthetic albedo into
+                        // this slot.
+                        synthesize_constant_rgba8(cfg, [220, 35, 0, 0])
+                    }
                     AttachmentFormat::Rgba8 => match mode {
                         SyntheticTerrainMode::Analytic3d => {
                             synthesize_albedo(&model, coord, cfg, min_height, max_height)

@@ -56,6 +56,10 @@
             },
         ),
         eva_move: (
+            bindings: {
+                "jump": [Key(Space)],
+                "sprint": [Key(ShiftLeft), Key(ShiftRight)],
+            },
             axes: {
                 "forward": (positive: [Key(KeyW)], negative: [Key(KeyS)]),
                 "strafe": (positive: [Key(KeyD)], negative: [Key(KeyA)]),

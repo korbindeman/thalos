@@ -91,11 +91,13 @@ bodies cut over one at a time.
   P1 (spec Phase A: the field-DAG data model — fields/expr/DAG, stamps,
   feature catalog + promotion, author overlay, sparse quadtree cache) are
   landed in `thalos_terrain` behind the seam, foundation-only and
-  test-validated. Current next slice: P2A — a basic all-continental,
-  single-biome Thalos vertical slice via `GenericTerrestrial`, with direct
-  LOD-invariant `RuntimeTerrainDetail::BasicContinental` ground-height
-  evaluation before the Mira crater/feature compositor and the fuller per-body
-  cutovers.
+  test-validated. P2A — basic all-continental, single-biome Thalos via
+  `GenericTerrestrial` with direct LOD-invariant
+  `RuntimeTerrainDetail::BasicContinental` ground-height evaluation — is
+  landed. Current slice: P2B Mira crater/feature compositor; first increment
+  composes unbaked crater features through the Query API so Mira ground tiles
+  and colliders see the same sub-threshold crater geometry as the terrain
+  surface contract.
 - **Spec:** [planet-generation-pipeline-spec.md](planet-generation-pipeline-spec.md)
   (target) + [planet-generation-pipeline-migration.md](planet-generation-pipeline-migration.md)
   (sequencing). [terrain.md](terrain.md)'s generation half is

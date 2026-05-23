@@ -252,7 +252,10 @@ mod tests {
         let mid = (a + b).normalize();
         let g = StampGeometry::Capsule { a, b };
         // A point exactly on the arc has ~zero distance.
-        assert!(g.distance_m(mid, 1000.0) < 1.0, "midpoint should lie on arc");
+        assert!(
+            g.distance_m(mid, 1000.0) < 1.0,
+            "midpoint should lie on arc"
+        );
     }
 
     #[test]

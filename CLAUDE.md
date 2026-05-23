@@ -305,22 +305,50 @@ Key modules:
   the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
   patch (or the flattest dry fallback). Thalos has no atmosphere yet, so
   both descents are lunar-style — no aerobraking.
-- **EVA is a full craft, with a grounded/airborne split.** The
-  `EvaMode` resource (`player_controller.rs`, `Grounded` | `Airborne`,
-  defaults `Grounded`) picks which regime owns the capsule.
-  **`Grounded`**: `walk_eva_on_terrain` glues the capsule to the
-  rendered surface and `snap_avian_from_canonical` + the
-  `readback_local_craft` translation short-circuit so the controller
-  owns state. **`Airborne`**: Kepler owns translation, the snap drives
-  the capsule from canonical (exactly like a ship coasting in vacuum),
-  and `walk_eva_on_terrain` stands down. `apply_local_forces`
-  short-circuits for EVA in both modes — EVA has no thrust (coast-only;
-  a jetpack is the natural follow-up). The teleports mirror the ship's:
-  body-tree cmd-click sends EVA to a low orbit (→ `Airborne`), and a
-  row's `drop` button + map cursor (or F9) plants it on a surface point
-  (→ `Grounded`, in place via `local_physics::place_eva_on_surface` —
-  the bubble is never torn down, unlike ships). Mode flips only on these
-  explicit teleports; there is no automatic surface↔orbit transition yet.
+- **EVA is a full craft with a real character controller and a
+  grounded/airborne split.** The `EvaMode` resource
+  (`player_controller.rs`, `Grounded` | `Airborne`, defaults `Grounded`)
+  is the coarse surface↔orbit switch. **`Grounded`**: `step_eva_controller`
+  runs a kinematic character controller in the body's **body-fixed
+  (rotating) frame** — it tracks a body-fixed position + surface-relative
+  velocity and runs a grounded/airborne state machine with surface gravity
+  (`g = μ/r²`): camera-relative walking (Shift = sprint), jumping (Space),
+  walking off ledges into a ballistic fall, and landing. Working in the
+  body-fixed frame (not body-centred inertial) is the key fix: surface
+  velocity is the player's walking speed (m/s), not the inertial
+  co-rotation drag `ω×r` (hundreds of m/s → km/s). That keeps warp from
+  exploding the integrator, and the terrain height query never
+  sea-level-teleports (a `None`/missing-tile sample holds altitude instead
+  of snapping to the reference radius). `snap_avian_from_canonical`,
+  `apply_local_forces`, and the `readback_local_craft` translation all
+  short-circuit for grounded EVA so the controller owns the capsule pose
+  outright; canonical authority is pinned to `LocalRigidBody` by
+  `manage_authority` (not `OnRails`) since grounded EVA co-rotates with the
+  surface and `Simulation::step` must only advance sim-time.
+  `sync_avian_time` still pauses Avian's clock under warp (the controller
+  writes `Position` directly each frame; no integrator is needed and the
+  km/s-scaled integration that broke it is gone).
+  **Rest detection + warp gating (KSP-style):** the controller publishes
+  `grounded` / `at_rest` / `surface_speed_m_s` on `PlayerControllerState`.
+  `enforce_warp_altitude_limits` lets on-foot warp climb above 1× only once
+  the player is *at rest* (standing, stopped); while walking / jumping /
+  falling it clamps to 1×, and movement input drops warp back to 1×
+  immediately. At rest it caps at `SURFACE_WARP_MAX_SPEED` = 100× (above
+  that the UDLOD tile streamer can't follow the body rotating under the
+  camera — a UDLOD limitation, not a sim one). The on-foot HUD pill
+  (`hud/eva_panel.rs`) surfaces `MOVING` / `FALLING` / `STANDING — warp
+  ready`. **`Airborne`**: Kepler owns translation, the snap drives the
+  capsule from canonical (exactly like a ship coasting in vacuum), and
+  `step_eva_controller` stands down. `apply_local_forces` short-circuits
+  for EVA in both modes — EVA has no thrust yet (coast-only; a jetpack is
+  the natural follow-up). The teleports mirror the ship's: body-tree
+  cmd-click sends EVA to a low orbit (→ `Airborne`), and a row's `drop`
+  button + map cursor (or F9) plants it on a surface point (→ `Grounded`,
+  in place via `local_physics::place_eva_on_surface` — the bubble is never
+  torn down, unlike ships). `EvaMode` flips only on these explicit
+  teleports; suborbital ballistic flight (jump, walk off a cliff) stays
+  *within* `Grounded`, switching the controller's internal grounded/airborne
+  state, not `EvaMode`.
 - Semantic player input is read from `thalos_input::game::GameInputIntent`.
   Keep raw Bevy input only for cursor positions, picking spatial data, and UI
   internals. See `docs/input.md`.

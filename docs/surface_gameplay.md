@@ -11,6 +11,24 @@ out the target architecture and the migration order. Open questions
 are tracked in §7 and must be resolved before the corresponding work
 items move from "research" to "implement."
 
+> **Update (2026-05): EVA controller reimplemented.** The naive
+> "kinematic terrain follower" described in §2.1 has been replaced by a
+> real kinematic **character controller** (`step_eva_controller` in
+> `crates/game/src/player_controller.rs`). It simulates the player in the
+> body's **body-fixed (rotating) frame** — tracking a body-fixed position
+> + surface-relative velocity — and runs a grounded/airborne state machine
+> with surface gravity (`g = μ/r²`): camera-relative walk/sprint (WASD +
+> Shift), jump (Space), walking off ledges into a ballistic fall, and
+> landing. The body-fixed frame is the core fix — surface velocity is the
+> player's walking speed (m/s) instead of the inertial co-rotation drag
+> `ω×r` (km/s) — which eliminated the walk freeze, the height-query
+> sea-level teleport, and the warp explosion. Rest detection
+> (`PlayerControllerState::is_at_rest`) gates time warp KSP-style (warp
+> above 1× only when standing still; movement drops warp; 100× surface
+> cap) and drives the on-foot HUD pill (`hud/eva_panel.rs`). §2.1 below is
+> retained as the pre-rewrite diagnosis; §§4–6 record the design intent
+> this implementation follows.
+
 Scope: on-foot gameplay only. In-cockpit / interior IVA is not in
 scope for this pass — the EVA capsule is the only character system
 covered. Ship-on-surface physics is touched only where it intersects
@@ -145,11 +163,6 @@ distance ([ground_terrain.rs:125](crates/game/src/rendering/ground_terrain.rs:12
 Each body's UDLOD `TerrainConfig` has `LOD_COUNT=16` with 512²
 tiles ([ground_terrain.rs:50–56](crates/game/src/rendering/ground_terrain.rs:50)),
 atlas capacity 256 tiles ([ground_terrain.rs:64](crates/game/src/rendering/ground_terrain.rs:64)).
-The `should_log_tile()` diagnostic
-([pipeline.rs:144](crates/terrain_render/src/pipeline.rs:144))
-logs the LOD level and `tile_lod_m` of the first ~32 tiles produced
-per session — useful for confirming what LOD UDLOD is actually
-selecting at the camera.
 
 ## 3. Diagnosed issues
 

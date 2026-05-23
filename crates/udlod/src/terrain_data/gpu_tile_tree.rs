@@ -6,9 +6,9 @@ use crate::{
 use bevy::{
     prelude::*,
     render::{
+        Extract,
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
-        Extract,
     },
 };
 use bytemuck::cast_slice;
@@ -72,8 +72,12 @@ impl GpuTileTree {
         mut gpu_tile_trees: ResMut<TerrainViewComponents<GpuTileTree>>,
         tile_trees: Extract<Res<TerrainViewComponents<TileTree>>>,
     ) {
+        gpu_tile_trees.retain(|key, _| tile_trees.contains_key(key));
+
         for (&(terrain, view), tile_tree) in tile_trees.iter() {
-            let gpu_tile_tree = gpu_tile_trees.get_mut(&(terrain, view)).unwrap();
+            let Some(gpu_tile_tree) = gpu_tile_trees.get_mut(&(terrain, view)) else {
+                continue;
+            };
 
             gpu_tile_tree.data = tile_tree.data.clone();
             gpu_tile_tree.origins = tile_tree.origins.clone();

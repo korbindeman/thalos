@@ -286,13 +286,7 @@ fn probe(ctx: &NodeCtx, face: u32, depth: u32, bounds: Bounds) -> (bool, f32) {
     let mu = 0.5 * (u0 + u1);
     let mv = 0.5 * (v0 + v1);
     let lod = node_lod_m(ctx, depth);
-    let pts = [
-        (u0, v0),
-        (u1, v0),
-        (u0, v1),
-        (u1, v1),
-        (mu, mv),
-    ];
+    let pts = [(u0, v0), (u1, v0), (u0, v1), (u1, v1), (mu, mv)];
     let mut min = f32::INFINITY;
     let mut max = f32::NEG_INFINITY;
     let mut sum = 0.0;

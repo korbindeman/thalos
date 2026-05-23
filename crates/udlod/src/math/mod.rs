@@ -5,7 +5,7 @@ mod terrain_model;
 pub use crate::math::{
     coordinate::{Coordinate, TileCoordinate},
     terrain_model::{
-        generate_terrain_model_approximation, TerrainModel, TerrainModelApproximation,
+        TerrainModel, TerrainModelApproximation, generate_terrain_model_approximation,
     },
 };
 

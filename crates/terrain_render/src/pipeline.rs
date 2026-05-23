@@ -30,7 +30,6 @@
 //! actual resident atlas tiles. Tracked separately.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
 use bevy::math::{DVec3, UVec2, Vec3};
@@ -44,15 +43,6 @@ use thalos_terrain::{
 use thalos_udlod::math::TileCoordinate;
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
-
-/// Log the first ~10k tile evaluations so we can confirm the LOD plan in the
-/// absence of a real-time profiler. Atomic counter; no allocation, no lock
-/// contention beyond the increment.
-fn should_log_tile() -> bool {
-    static COUNT: AtomicU32 = AtomicU32::new(0);
-    let n = COUNT.fetch_add(1, Ordering::Relaxed);
-    n < 10_000
-}
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -175,6 +165,10 @@ struct TilePixel {
     height_m: f32,
     albedo_linear: Vec3,
     roughness: f32,
+    /// Packed procedural material intent for the ground shader:
+    /// R = vegetation/grass, G = soil/peat/sediment, B = exposed rock,
+    /// A = wetness/cavity darkening. The channels are masks, not final color.
+    material_rgba: [u8; 4],
 }
 
 fn compute_tile_pixels(
@@ -188,15 +182,6 @@ fn compute_tile_pixels(
     let body = &surface.static_surface;
     let tile_lod_m = tile_lod_m(body, coord, size, border);
 
-    // Diagnostic: log the first few tiles so we can confirm the LOD plan is
-    // engaging. Throttled by a process-wide atomic counter.
-    if should_log_tile() {
-        info!(
-            "PipelineTileProvider tile lod={} ({}, {}, {}) tile_lod_m={:.1}",
-            coord.lod, coord.side, coord.x, coord.y, tile_lod_m,
-        );
-    }
-
     let count = (size * size) as usize;
     let mut pixels = vec![TilePixel::default(); count];
 
@@ -208,10 +193,13 @@ fn compute_tile_pixels(
                 let dir =
                     pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
                 let sample = surface_sample(surface, dynamic_state, dir, tile_lod_m);
+                let material_rgba =
+                    material_masks(surface, dynamic_state, dir, sample.height_m, tile_lod_m);
                 *pixel = TilePixel {
                     height_m: sample.height_m,
                     albedo_linear: sample.albedo_linear,
                     roughness: sample.roughness,
+                    material_rgba,
                 };
             }
         });
@@ -237,6 +225,94 @@ pub fn rendered_height_m(
     tile_lod_m: f32,
 ) -> f32 {
     surface_height_m(surface, dynamic_state, dir, tile_lod_m)
+}
+
+fn material_masks(
+    surface: &PlanetSurface,
+    dynamic_state: &DynamicSurfaceState,
+    dir: Vec3,
+    height_m: f32,
+    tile_lod_m: f32,
+) -> [u8; 4] {
+    let body = &surface.static_surface;
+    let radius_m = body.radius_m.max(1.0);
+    let step_m = tile_lod_m.clamp(2.0, 250.0);
+    let angular_step = step_m / radius_m;
+
+    let normal = dir.normalize_or_zero();
+    if normal == Vec3::ZERO {
+        return [128, 96, 32, 0];
+    }
+    let tangent_seed = if normal.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let tangent = tangent_seed.cross(normal).normalize_or_zero();
+    let bitangent = normal.cross(tangent).normalize_or_zero();
+
+    let h_l = surface_height_m(
+        surface,
+        dynamic_state,
+        rotate_dir(normal, tangent, -angular_step),
+        tile_lod_m,
+    );
+    let h_r = surface_height_m(
+        surface,
+        dynamic_state,
+        rotate_dir(normal, tangent, angular_step),
+        tile_lod_m,
+    );
+    let h_d = surface_height_m(
+        surface,
+        dynamic_state,
+        rotate_dir(normal, bitangent, -angular_step),
+        tile_lod_m,
+    );
+    let h_u = surface_height_m(
+        surface,
+        dynamic_state,
+        rotate_dir(normal, bitangent, angular_step),
+        tile_lod_m,
+    );
+
+    let grad_x = (h_r - h_l) / (2.0 * step_m);
+    let grad_y = (h_u - h_d) / (2.0 * step_m);
+    let slope = (grad_x * grad_x + grad_y * grad_y).sqrt();
+    let laplacian = ((h_l + h_r + h_d + h_u) * 0.25 - height_m) / step_m.max(1.0);
+
+    let slope_rock = smoothstep(0.20, 0.75, slope);
+    let high_rock = smoothstep(2_200.0, 6_000.0, height_m);
+    let convex_rock = smoothstep(0.04, 0.20, -laplacian);
+    let rock = (slope_rock * 0.82 + high_rock * 0.18 + convex_rock * 0.16).clamp(0.0, 0.95);
+
+    let hollow = smoothstep(0.035, 0.18, laplacian);
+    let wetness = (hollow * (1.0 - smoothstep(1_500.0, 4_500.0, height_m)) * (1.0 - rock * 0.7))
+        .clamp(0.0, 1.0);
+    let soil = (smoothstep(0.035, 0.28, slope) * (1.0 - smoothstep(0.45, 0.9, slope))
+        + hollow * 0.45
+        + wetness * 0.25)
+        .clamp(0.0, 1.0)
+        * (1.0 - rock * 0.65);
+    let grass = ((1.0 - rock) * (1.0 - soil * 0.45) * (1.0 - wetness * 0.25)).clamp(0.0, 1.0);
+
+    let sum = (grass + soil + rock).max(1.0e-4);
+    [
+        quantize_unit_to_u8(grass / sum),
+        quantize_unit_to_u8(soil / sum),
+        quantize_unit_to_u8(rock / sum),
+        quantize_unit_to_u8(wetness),
+    ]
+}
+
+fn rotate_dir(dir: Vec3, axis: Vec3, angle: f32) -> Vec3 {
+    (dir * angle.cos() + axis * axis.dot(dir) * (1.0 - angle.cos()) + axis.cross(dir) * angle.sin())
+        .normalize_or_zero()
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +356,9 @@ fn encode_attachment(
                 .map(|p| quantize_unit_to_u16(p.roughness))
                 .collect(),
         ),
+        (AttachmentFormat::Rgba8, "material") => {
+            AttachmentData::Rgba8(pixels.iter().map(|p| p.material_rgba).collect())
+        }
         _ => {
             warn!(
                 "PipelineTileProvider: unsupported attachment ({:?}, {:?}) on body {}; \

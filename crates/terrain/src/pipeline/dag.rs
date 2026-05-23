@@ -34,10 +34,9 @@ impl std::fmt::Display for DagError {
             Self::DuplicateField { name } => {
                 write!(f, "duplicate field name `{name}`")
             }
-            Self::UnknownReference { field, referenced } => write!(
-                f,
-                "field `{field}` references unknown field `{referenced}`"
-            ),
+            Self::UnknownReference { field, referenced } => {
+                write!(f, "field `{field}` references unknown field `{referenced}`")
+            }
             Self::Cycle { fields } => {
                 write!(f, "field reference cycle among: {}", fields.join(", "))
             }
@@ -160,10 +159,7 @@ mod tests {
     fn orders_dependencies_before_dependents() {
         // c = b + 1, b = a * 2, a = const. Order must be a, b, c.
         let fields = vec![
-            f(
-                "c",
-                Expr::Add(vec![Expr::field("b"), Expr::Const(1.0)]),
-            ),
+            f("c", Expr::Add(vec![Expr::field("b"), Expr::Const(1.0)])),
             f(
                 "b",
                 Expr::Scale {

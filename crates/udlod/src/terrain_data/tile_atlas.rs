@@ -3,9 +3,9 @@ use crate::{
     prelude::{AttachmentConfig, AttachmentFormat},
     terrain::TerrainConfig,
     terrain_data::{
+        AttachmentData, INVALID_ATLAS_INDEX, INVALID_LOD,
         tile_provider::TileProvider,
         tile_tree::{TileLookup, TileTree, TileTreeEntry},
-        AttachmentData, INVALID_ATLAS_INDEX, INVALID_LOD,
     },
     terrain_view::TerrainViewComponents,
 };
@@ -14,7 +14,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
     render::render_resource::*,
-    tasks::{futures_lite::future, Task},
+    tasks::{Task, futures_lite::future},
 };
 use itertools::Itertools;
 use std::{collections::VecDeque, ops::DerefMut};
@@ -193,7 +193,7 @@ impl TileAtlasState {
         if tile_coordinate == TileCoordinate::INVALID {
             return;
         }
-        self.request_tile(tile_coordinate);
+        let _ = self.request_tile(tile_coordinate);
         self.pinned_tiles.push(tile_coordinate);
     }
 
@@ -221,9 +221,7 @@ impl TileAtlasState {
             if !self.tile_load_is_current(queued.coord, queued.atlas_index, queued.generation) {
                 trace!(
                     "discarding stale queued tile load: {} -> atlas slot {} gen {}",
-                    queued.coord,
-                    queued.atlas_index,
-                    queued.generation
+                    queued.coord, queued.atlas_index, queued.generation
                 );
                 continue;
             }
@@ -332,18 +330,20 @@ impl TileAtlasState {
         AtlasTile::new(tile_coordinate, atlas_index)
     }
 
-    fn allocate_tile(&mut self) -> (u32, u64) {
-        let unused_tile = self.unused_tiles.pop_front().expect("Atlas out of indices");
+    fn allocate_tile(&mut self) -> Option<(u32, u64)> {
+        let Some(unused_tile) = self.unused_tiles.pop_front() else {
+            return None;
+        };
 
         self.tile_states.remove(&unused_tile.coordinate);
 
         let generation = &mut self.slot_generations[unused_tile.atlas_index as usize];
         *generation = generation.wrapping_add(1).max(1);
 
-        (unused_tile.atlas_index, *generation)
+        Some((unused_tile.atlas_index, *generation))
     }
 
-    fn request_tile(&mut self, tile_coordinate: TileCoordinate) {
+    fn request_tile(&mut self, tile_coordinate: TileCoordinate) -> bool {
         // check if the tile is already present else start loading it
         if let Some(tile) = self.tile_states.get_mut(&tile_coordinate) {
             if tile.requests == 0 {
@@ -353,11 +353,17 @@ impl TileAtlasState {
             }
 
             tile.requests += 1;
-            return;
+            return true;
         }
 
-        // Todo: implement better loading strategy
-        let (atlas_index, generation) = self.allocate_tile();
+        // If the request set temporarily exceeds the atlas capacity, keep
+        // rendering with already-resident ancestors instead of panicking the
+        // render world. The next release will free a slot and a later request
+        // pass can try again.
+        let Some((atlas_index, generation)) = self.allocate_tile() else {
+            trace!("terrain tile atlas is full; deferring request for {tile_coordinate}");
+            return false;
+        };
 
         self.tile_states.insert(
             tile_coordinate,
@@ -377,6 +383,7 @@ impl TileAtlasState {
             atlas_index,
             generation,
         });
+        true
     }
 
     fn release_tile(&mut self, tile_coordinate: TileCoordinate) {
@@ -606,9 +613,13 @@ impl TileAtlas {
                 tile_atlas.state.release_tile(tile_coordinate);
             }
 
+            let mut deferred_requests = Vec::new();
             for tile_coordinate in tile_tree.requested_tiles.drain(..) {
-                tile_atlas.state.request_tile(tile_coordinate);
+                if !tile_atlas.state.request_tile(tile_coordinate) {
+                    deferred_requests.push(tile_coordinate);
+                }
             }
+            tile_tree.requested_tiles.extend(deferred_requests);
         }
     }
 }

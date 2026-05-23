@@ -19,7 +19,8 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::grid::Grid;
 use big_space::prelude::CellCoord;
-use thalos_physics_canonical::types::{BodyDefinition, BodyId};
+use thalos_physics_canonical::canonical::AuthorityMode;
+use thalos_physics_canonical::types::{BodyDefinition, BodyId, VesselKind};
 use thalos_planet_rendering::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_shipyard::{Adapter, AttachNodes, CommandPod, Decoupler, Engine, FuelTank, Part};
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
@@ -34,7 +35,7 @@ use thalos_udlod::prelude::*;
 
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
-use crate::player_controller::PlayerControllerVisual;
+use crate::player_controller::{EvaMode, PlayerControllerState, PlayerControllerVisual};
 
 use super::real_space::REAL_SPACE_CELL_SIZE_M;
 use super::types::{CameraExposure, PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
@@ -282,6 +283,15 @@ const TERRAIN_BLEND_RANGE: f32 = 0.5;
 /// to a per-body ratio lives in [`body_terrain_view_config`].
 const TERRAIN_PRECISION_THRESHOLD_M: f64 = 10_000.0;
 
+/// Above this stationary surface-warp target, keep the current UDLOD request
+/// window instead of chasing the inertial camera motion every frame.
+///
+/// This replaces the old gameplay-level 100× cap: the player can now use the
+/// full warp ladder while standing still, and the terrain renderer avoids the
+/// one-time request storm/stall that used to happen as warp crossed into the
+/// high surface levels.
+const SURFACE_WARP_STREAMING_PAUSE_SPEED: f64 = 100.0;
+
 /// UDLOD view config for body terrain. Wider morph + blend bands than the
 /// upstream default plus a much larger high-precision threshold so the
 /// Taylor branch actually fires; everything else stays at the upstream
@@ -367,6 +377,16 @@ pub(crate) fn spawn_body_terrain(
         // thalos_udlod has no single-channel 8-bit format; the source
         // cubemap is u8 and we upscale to u16 in the tile provider.
         format: AttachmentFormat::R16,
+    })
+    .add_attachment(AttachmentConfig {
+        name: "material".to_string(),
+        texture_size: TILE_TEXTURE_SIZE,
+        border_size: TILE_BORDER_SIZE,
+        mip_level_count: TILE_MIP_LEVELS,
+        // R = grass/vegetation, G = soil/peat, B = exposed rock, A = wetness.
+        // These masks drive near-ground material blending; the albedo atlas
+        // remains the macro/body-colour anchor for orbital continuity.
+        format: AttachmentFormat::Rgba8,
     });
 
     let provider: Box<dyn TileProvider> = match provider_mode {
@@ -444,7 +464,7 @@ pub(crate) fn spawn_body_terrain(
         // `view_phase` and `world_to_body_rot` are refreshed every frame
         // by `update_body_terrain_atmosphere`; spawn-time values are
         // placeholders that will be overwritten on the first tick.
-        // `params = (mode=1, _, cell_size_m=1, _)`.
+        // `params = (checker_mode=1, _, checker_cell_size_m=1, _)`.
         TerrainTileProviderMode::Flat => BodyTerrainDebug {
             params: Vec4::new(1.0, 0.0, 1.0, 0.0),
             ..Default::default()
@@ -639,6 +659,39 @@ pub(crate) fn spawn_body_water(
 ///
 /// The map-layer impostor and map halo live on `MAP_LAYER` and are not
 /// touched here.
+pub(super) fn pause_surface_terrain_streaming_at_high_warp(
+    mut commands: Commands,
+    sim: Res<SimulationState>,
+    eva_mode: Res<EvaMode>,
+    player: Option<Res<PlayerControllerState>>,
+    terrains: Query<(Entity, &BodyTerrain, Option<&TerrainStreamingPaused>)>,
+) {
+    let surface_stationary = match sim.simulation.authority() {
+        AuthorityMode::BodyFixed { .. } => true,
+        _ if sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded() => player
+            .as_deref()
+            .map(|state| state.is_at_rest())
+            .unwrap_or(false),
+        _ => false,
+    };
+    let pause = surface_stationary
+        && sim.simulation.warp.target_speed() > SURFACE_WARP_STREAMING_PAUSE_SPEED;
+    let dominant = sim.simulation.dominant_body();
+
+    for (entity, terrain, paused) in &terrains {
+        let should_pause = pause && terrain.body_id == dominant;
+        match (should_pause, paused.is_some()) {
+            (true, false) => {
+                commands.entity(entity).insert(TerrainStreamingPaused);
+            }
+            (false, true) => {
+                commands.entity(entity).remove::<TerrainStreamingPaused>();
+            }
+            _ => {}
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub(super) fn sync_body_render_lod(
     sim: Res<SimulationState>,
@@ -969,37 +1022,37 @@ pub(super) fn update_body_terrain_atmosphere(
         mat.scene =
             build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
         mat.craft_shadow = craft_shadow;
-        // Debug overlay (flat-mode checkerboard): refresh `view_phase`
-        // and `world_to_body_rot` from canonical state. Skip when the
-        // overlay is off so production terrains pay nothing.
-        if mat.debug.params.x >= 0.5 {
-            let cell = mat.debug.params.z.max(1.0e-3) as f64;
-            let period = 2.0 * cell;
-            let (view_phase, world_to_body_q) = states
-                .get(terrain.body_id)
-                .map(|body_state| {
-                    // `body.orientation` is body-local → inertial; we
-                    // want the inverse to bring inertial deltas into
-                    // the body-fixed frame the checker grid lives in.
-                    let world_to_body = body_state.orientation.inverse();
-                    let delta_inertial = camera_inertial - body_state.position;
-                    let delta_body = world_to_body * delta_inertial;
-                    let phase = bevy::math::DVec3::new(
-                        delta_body.x.rem_euclid(period),
-                        delta_body.y.rem_euclid(period),
-                        delta_body.z.rem_euclid(period),
-                    );
-                    (phase.as_vec3(), world_to_body.as_quat().normalize())
-                })
-                .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
-            mat.debug.view_phase = Vec4::new(view_phase.x, view_phase.y, view_phase.z, 0.0);
-            mat.debug.world_to_body_rot = Vec4::new(
-                world_to_body_q.x,
-                world_to_body_q.y,
-                world_to_body_q.z,
-                world_to_body_q.w,
-            );
-        }
+        // Body-fixed camera phase for shader-side procedural detail and the
+        // optional flat-mode debug checker. The nearby terrain shader works in
+        // camera-relative render metres for precision, then adds this f64-
+        // computed body-fixed phase so metre-scale noise stays glued to the
+        // rotating planet instead of sliding with floating-origin shifts/time
+        // warp. Keep this period in sync with `DETAIL_COORD_PERIOD_M` in
+        // `body_terrain.wgsl`.
+        let period = 4000.0_f64;
+        let (view_phase, world_to_body_q) = states
+            .get(terrain.body_id)
+            .map(|body_state| {
+                // `body.orientation` is body-local → inertial; we want the
+                // inverse to bring inertial deltas into the body-fixed frame.
+                let world_to_body = body_state.orientation.inverse();
+                let delta_inertial = camera_inertial - body_state.position;
+                let delta_body = world_to_body * delta_inertial;
+                let phase = bevy::math::DVec3::new(
+                    delta_body.x.rem_euclid(period),
+                    delta_body.y.rem_euclid(period),
+                    delta_body.z.rem_euclid(period),
+                );
+                (phase.as_vec3(), world_to_body.as_quat().normalize())
+            })
+            .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
+        mat.debug.view_phase = Vec4::new(view_phase.x, view_phase.y, view_phase.z, 0.0);
+        mat.debug.world_to_body_rot = Vec4::new(
+            world_to_body_q.x,
+            world_to_body_q.y,
+            world_to_body_q.z,
+            world_to_body_q.w,
+        );
     }
 
     // Use real (wall-clock) elapsed seconds for wave scroll — canonical sim

@@ -98,11 +98,6 @@ pub(crate) struct CameraCollisionState {
     ship_boom_m: Option<f64>,
     target: CameraFocusTarget,
     view: ViewMode,
-    // === TEMP CAMERA-JUDDER DIAGNOSTIC STATE (remove after fix) ===
-    diag_last_cam: Option<Vec3>,
-    diag_last_fwd: Option<Vec3>,
-    diag_last_target: Option<Vec3>,
-    diag_frames: u64,
 }
 
 /// KSP-style camera modes for ship view. `V` cycles between them.
@@ -1010,8 +1005,6 @@ pub fn camera_transform_system(
     sim: Option<Res<SimulationState>>,
     body_states: Res<SolarSystemState>,
     surfaces: Res<TerrainSurfaceRegistry>,
-    // TEMP: AvianRole for the camera-judder diagnostic (remove after fix).
-    authority: Option<Res<crate::local_physics::AvianAuthority>>,
     mut collision: ResMut<CameraCollisionState>,
     body_targets: Query<(&CelestialBody, &Transform), Without<OrbitCamera>>,
     ship_targets: Query<
@@ -1191,66 +1184,6 @@ pub fn camera_transform_system(
         && let (Some(mut camera_cell), Some(target_cell)) = (camera_cell, target_cell)
     {
         *camera_cell = target_cell;
-    }
-
-    // === TEMP CAMERA-JUDDER DIAGNOSTIC (remove after fix) ===
-    // Logs, per frame in ship view focused on the craft: AvianRole, the craft's
-    // body-relative speed (`vrel`) and its horizon-projected part (`proj` — the
-    // quantity that decides whether `ship_camera_basis` can define `forward`),
-    // the frame-to-frame motion of the final camera point (`dcam`), the target
-    // (`dtgt`), and the basis forward direction (`dfwd`). Distinguishes
-    // basis.forward spin (small vrel/proj + large dfwd/dcam) from clamp
-    // amplification (stable forward + large dcam).
-    if *view == ViewMode::Ship
-        && matches!(
-            focus.target,
-            CameraFocusTarget::Ship | CameraFocusTarget::PlayerController
-        )
-        && let Some(sim_ref) = sim.as_deref()
-        && let Some(states) = body_states.states.as_deref()
-    {
-        let ship_state = sim_ref.simulation.ship_state();
-        let ref_id = find_reference_body(ship_state.position, sim_ref.simulation.bodies(), states);
-        let body = &states[ref_id];
-        let v_rel = ship_state.velocity - body.velocity;
-        let radial = (ship_state.position - body.position).normalize_or_zero();
-        let proj = v_rel - radial * v_rel.dot(radial);
-        let dcam = collision
-            .diag_last_cam
-            .map(|p| (camera_pos - p).length())
-            .unwrap_or(0.0);
-        let dfwd = collision
-            .diag_last_fwd
-            .map(|f| basis.forward.angle_between(f).to_degrees())
-            .unwrap_or(0.0);
-        let dtgt = collision
-            .diag_last_target
-            .map(|t| (target_pos - t).length())
-            .unwrap_or(0.0);
-        let role = authority
-            .as_deref()
-            .map(|a| format!("{:?}", a.role))
-            .unwrap_or_else(|| "n/a".to_string());
-        collision.diag_frames += 1;
-        if collision.diag_frames < 2400 {
-            info!(
-                "CAMDIAG f={} role={} vrel={:.3} proj={:.4} dcam={:.2} dtgt={:.3} dfwd={:.2}deg fwd=({:.3},{:.3},{:.3}) dist={:.1}",
-                collision.diag_frames,
-                role,
-                v_rel.length(),
-                proj.length(),
-                dcam,
-                dtgt,
-                dfwd,
-                basis.forward.x,
-                basis.forward.y,
-                basis.forward.z,
-                focus.distance,
-            );
-        }
-        collision.diag_last_cam = Some(camera_pos);
-        collision.diag_last_fwd = Some(basis.forward);
-        collision.diag_last_target = Some(target_pos);
     }
 
     *camera_transform = Transform::from_translation(camera_pos).looking_at(target_pos, basis.up);

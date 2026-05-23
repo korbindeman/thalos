@@ -12,7 +12,7 @@
 // the impostor handles the body and its own inline atmosphere/cloud path.
 
 #import thalos_udlod::types::AtlasTile
-#import thalos_udlod::bindings::{config, atlas_sampler, attachments, attachment2_atlas}
+#import thalos_udlod::bindings::{config, atlas_sampler, attachments, attachment2_atlas, attachment3_atlas}
 #import thalos_udlod::attachments::{sample_attachment1, sample_normal, attachment_uv}
 #import thalos_udlod::fragment::{FragmentInput, FragmentOutput, fragment_info}
 #import thalos_udlod::functions::lookup_tile
@@ -57,7 +57,7 @@ struct BodyTerrainDebug {
 // dark contour lines. Keep a little local slope detail, but let the sphere's
 // geometric normal carry most of the lighting until the terrain generator can
 // provide genuinely continuous close-up fields.
-const HEIGHT_NORMAL_WEIGHT: f32 = 0.0;
+const HEIGHT_NORMAL_WEIGHT: f32 = 0.35;
 
 // ── Naturalistic surface grading (Step 0 + Step 1) ────────────────────────
 // Applied to the baked macro albedo in-shader, so it iterates without a
@@ -73,8 +73,8 @@ const HEIGHT_NORMAL_WEIGHT: f32 = 0.0;
 // layer below, not from flattening the colour, so the macro tint can keep its
 // hue. Value is only lightly trimmed — the detail normal supplies the dark
 // micro-contrast that grounds the surface.
-const SURFACE_SATURATION: f32 = 0.78; // <1 desaturates toward grey
-const SURFACE_VALUE_GAIN: f32  = 0.82; // slight overall value trim
+const SURFACE_SATURATION: f32 = 0.96; // keep the grass/peat palette earthy, not neon
+const SURFACE_VALUE_GAIN: f32  = 0.86; // bring ground luminance back under the sky
 
 // Step 1 — slope-driven substrate. Local steepness is the deviation of the
 // terrain normal from the radial (geometric) normal: ~0 on ground that lies
@@ -95,8 +95,8 @@ const ROCK_STRENGTH: f32 = 0.0;
 // colour's value (plus a faint warm/cool hue drift) at the tens-of-metres
 // scale, so the ground stops reading as one flat tint.
 const BREAKUP_SCALE: f32 = 0.05;     // 1/period_m → ~20 m base patches
-const BREAKUP_VALUE_AMT: f32 = 0.16; // ± fractional value variation
-const BREAKUP_HUE_AMT: f32 = 0.06;   // ± warm/cool drift
+const BREAKUP_VALUE_AMT: f32 = 0.18; // ± fractional value variation
+const BREAKUP_HUE_AMT: f32 = 0.04;   // ± warm/cool drift
 
 // Step 3 — micro-relief normal. A detail height field whose gradient tilts the
 // lighting normal, giving the surface the light/dark micro-contrast under a
@@ -109,8 +109,9 @@ const DETAIL_NORMAL_STRENGTH: f32 = 0.5;  // facet-tilt amount
 // Both detail layers fade out with camera distance: their period goes
 // sub-pixel on the far field and would shimmer. The macro/slope colour carries
 // the distance instead.
-const DETAIL_FADE_NEAR: f32 = 80.0;  // full detail within this range (m)
-const DETAIL_FADE_FAR: f32  = 600.0; // no detail beyond this range (m)
+const DETAIL_FADE_NEAR: f32 = 180.0;  // full detail within this range (m)
+const DETAIL_FADE_FAR: f32  = 1800.0; // no detail beyond this range (m)
+const DETAIL_COORD_PERIOD_M: f32 = 4000.0;
 
 fn atmospheric_surface_fill(geo_n_dot_l: f32, sun_flux: f32) -> vec3<f32> {
     let atmosphere_strength = max(terrain_atmos.atmos_geom.z, 0.0);
@@ -159,6 +160,25 @@ fn sample_roughness(tile: AtlasTile) -> f32 {
 #endif
 #else
     return textureSampleLevel(attachment2_atlas, atlas_sampler, uv, tile.index, 0.0).x;
+#endif
+}
+
+// Material mask attachment packed by `PipelineTileProvider`:
+// R = vegetation/grass, G = soil/peat/sediment, B = exposed rock,
+// A = wetness/cavity darkening. Values are weights, not final albedo.
+fn sample_material_masks(tile: AtlasTile) -> vec4<f32> {
+    let uv = attachment_uv(tile.coordinate.uv, 3u);
+#ifdef FRAGMENT
+#ifdef SAMPLE_GRAD
+    return textureSampleGrad(
+        attachment3_atlas, atlas_sampler, uv, tile.index,
+        tile.coordinate.uv_dx, tile.coordinate.uv_dy,
+    );
+#else
+    return textureSampleLevel(attachment3_atlas, atlas_sampler, uv, tile.index, 0.0);
+#endif
+#else
+    return textureSampleLevel(attachment3_atlas, atlas_sampler, uv, tile.index, 0.0);
 #endif
 }
 
@@ -291,11 +311,50 @@ fn grade_surface(base: vec3<f32>, slope_t: f32) -> vec3<f32> {
     return c;
 }
 
+struct TerrainMaterialSample {
+    albedo: vec3<f32>,
+    normal_strength: f32,
+    occlusion: f32,
+};
+
+fn eval_material_stack(masks_in: vec4<f32>, macro_albedo: vec3<f32>) -> TerrainMaterialSample {
+    var masks = max(masks_in, vec4<f32>(0.0));
+    let weight_sum = max(masks.r + masks.g + masks.b, 1.0e-4);
+    let grass_w = masks.r / weight_sum;
+    let soil_w = masks.g / weight_sum;
+    let rock_w = masks.b / weight_sum;
+    let wet = clamp(masks.a, 0.0, 1.0);
+
+    // Earthy linear-space anchors. These are intentionally lower-value than
+    // the bake: atmosphere and direct sunlight lift them, while the material
+    // masks create the local grass/soil/rock separation missing from a single
+    // terrain albedo.
+    let grass = vec3<f32>(0.070, 0.135, 0.045);
+    let soil = vec3<f32>(0.105, 0.075, 0.045);
+    let rock = vec3<f32>(0.155, 0.145, 0.125);
+    let wet_soil = vec3<f32>(0.035, 0.060, 0.032);
+
+    var material_albedo = grass * grass_w + soil * soil_w + rock * rock_w;
+    material_albedo = mix(material_albedo, wet_soil, wet * (1.0 - rock_w * 0.55));
+
+    // Keep the baked albedo as broad climate/body identity, but make the
+    // material stack the local truth. This prevents a palette-only bake from
+    // flattening cliffs and hollows back into one color.
+    let macro_tint = desaturate(macro_albedo, 0.86);
+    var out: TerrainMaterialSample;
+    out.albedo = mix(material_albedo, macro_tint, 0.28);
+    out.normal_strength = mix(0.45, 0.85, rock_w) + soil_w * 0.12;
+    out.occlusion = 1.0 - wet * 0.18 - soil_w * 0.05 - rock_w * 0.04;
+    return out;
+}
+
 // ── Procedural surface detail (Step 2 + Step 3) ───────────────────────────
-// Cheap hash-based value noise / fBm, evaluated on the camera-relative world
-// position (sharpest underfoot thanks to floating-origin precision). The bake
-// supplies macro colour; this synthesises the metre-scale breakup and
-// micro-relief the ~1 km/texel atlas cannot carry up close.
+// Cheap hash-based value noise / fBm, evaluated in body-fixed metres so the
+// surface detail stays glued to the planet under time warp and floating-origin
+// shifts. The CPU supplies the camera's body-fixed phase modulo this period;
+// the noise itself wraps on the same period so crossing a period boundary is
+// seamless. Keep this a multiple of every base detail wavelength below
+// (20 m breakup, 1.25 m micro-relief).
 
 fn hash13(p_in: vec3<f32>) -> f32 {
     var p3 = fract(p_in * 0.1031);
@@ -303,18 +362,22 @@ fn hash13(p_in: vec3<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-fn value_noise_3d(x: vec3<f32>) -> f32 {
+fn wrap_lattice(p: vec3<f32>, period: f32) -> vec3<f32> {
+    return p - floor(p / period) * period;
+}
+
+fn value_noise_3d_periodic(x: vec3<f32>, period: f32) -> f32 {
     let i = floor(x);
     let f = fract(x);
     let u = f * f * (3.0 - 2.0 * f);
-    let n000 = hash13(i + vec3<f32>(0.0, 0.0, 0.0));
-    let n100 = hash13(i + vec3<f32>(1.0, 0.0, 0.0));
-    let n010 = hash13(i + vec3<f32>(0.0, 1.0, 0.0));
-    let n110 = hash13(i + vec3<f32>(1.0, 1.0, 0.0));
-    let n001 = hash13(i + vec3<f32>(0.0, 0.0, 1.0));
-    let n101 = hash13(i + vec3<f32>(1.0, 0.0, 1.0));
-    let n011 = hash13(i + vec3<f32>(0.0, 1.0, 1.0));
-    let n111 = hash13(i + vec3<f32>(1.0, 1.0, 1.0));
+    let n000 = hash13(wrap_lattice(i + vec3<f32>(0.0, 0.0, 0.0), period));
+    let n100 = hash13(wrap_lattice(i + vec3<f32>(1.0, 0.0, 0.0), period));
+    let n010 = hash13(wrap_lattice(i + vec3<f32>(0.0, 1.0, 0.0), period));
+    let n110 = hash13(wrap_lattice(i + vec3<f32>(1.0, 1.0, 0.0), period));
+    let n001 = hash13(wrap_lattice(i + vec3<f32>(0.0, 0.0, 1.0), period));
+    let n101 = hash13(wrap_lattice(i + vec3<f32>(1.0, 0.0, 1.0), period));
+    let n011 = hash13(wrap_lattice(i + vec3<f32>(0.0, 1.0, 1.0), period));
+    let n111 = hash13(wrap_lattice(i + vec3<f32>(1.0, 1.0, 1.0), period));
     let nx00 = mix(n000, n100, u.x);
     let nx10 = mix(n010, n110, u.x);
     let nx01 = mix(n001, n101, u.x);
@@ -324,22 +387,104 @@ fn value_noise_3d(x: vec3<f32>) -> f32 {
     return mix(nxy0, nxy1, u.z);
 }
 
-fn fbm3(p_in: vec3<f32>, octaves: i32) -> f32 {
+fn fbm3_periodic(p_in: vec3<f32>, octaves: i32, period_in: f32) -> f32 {
     var p = p_in;
+    var period = period_in;
     var amp = 0.5;
     var sum = 0.0;
     var norm = 0.0;
     for (var o = 0; o < octaves; o = o + 1) {
-        sum = sum + amp * value_noise_3d(p);
+        sum = sum + amp * value_noise_3d_periodic(p, period);
         norm = norm + amp;
         p = p * 2.0;
+        period = period * 2.0;
         amp = amp * 0.5;
     }
     return sum / max(norm, 1.0e-5);
 }
 
-fn detail_height(p_ws: vec3<f32>) -> f32 {
-    return fbm3(p_ws * DETAIL_SCALE, DETAIL_OCTAVES);
+fn detail_height(p_body: vec3<f32>) -> f32 {
+    return fbm3_periodic(
+        p_body * DETAIL_SCALE,
+        DETAIL_OCTAVES,
+        DETAIL_COORD_PERIOD_M * DETAIL_SCALE,
+    );
+}
+
+// Value noise plus its analytic gradient. The smoothstep weights
+// u = f²(3−2f) have derivative du = 6f(1−f); combined with the trilinear
+// corner deltas this is the exact gradient of `value_noise_3d_periodic` in a
+// single evaluation. Returns vec4(value, ∂value/∂x, ∂value/∂y, ∂value/∂z).
+fn value_noise_3d_periodic_grad(x: vec3<f32>, period: f32) -> vec4<f32> {
+    let i = floor(x);
+    let f = fract(x);
+    let u = f * f * (3.0 - 2.0 * f);
+    let du = 6.0 * f * (1.0 - f);
+
+    let n000 = hash13(wrap_lattice(i + vec3<f32>(0.0, 0.0, 0.0), period));
+    let n100 = hash13(wrap_lattice(i + vec3<f32>(1.0, 0.0, 0.0), period));
+    let n010 = hash13(wrap_lattice(i + vec3<f32>(0.0, 1.0, 0.0), period));
+    let n110 = hash13(wrap_lattice(i + vec3<f32>(1.0, 1.0, 0.0), period));
+    let n001 = hash13(wrap_lattice(i + vec3<f32>(0.0, 0.0, 1.0), period));
+    let n101 = hash13(wrap_lattice(i + vec3<f32>(1.0, 0.0, 1.0), period));
+    let n011 = hash13(wrap_lattice(i + vec3<f32>(0.0, 1.0, 1.0), period));
+    let n111 = hash13(wrap_lattice(i + vec3<f32>(1.0, 1.0, 1.0), period));
+
+    let k0 = n000;
+    let k1 = n100 - n000;
+    let k2 = n010 - n000;
+    let k3 = n001 - n000;
+    let k4 = n000 - n100 - n010 + n110;
+    let k5 = n000 - n010 - n001 + n011;
+    let k6 = n000 - n100 - n001 + n101;
+    let k7 = -n000 + n100 + n010 - n110 + n001 - n101 - n011 + n111;
+
+    let value = k0 + k1 * u.x + k2 * u.y + k3 * u.z
+        + k4 * u.x * u.y + k5 * u.y * u.z + k6 * u.z * u.x
+        + k7 * u.x * u.y * u.z;
+    let grad = vec3<f32>(
+        du.x * (k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z),
+        du.y * (k2 + k4 * u.x + k5 * u.z + k7 * u.x * u.z),
+        du.z * (k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y),
+    );
+    return vec4<f32>(value, grad);
+}
+
+// fBm value + analytic gradient (∂value/∂p_in), matching `fbm3_periodic`. Each
+// octave doubles frequency and halves amplitude; the chain rule scales each
+// octave's gradient by its frequency, tracked in `freq` (= 2^octave).
+fn fbm3_grad(p_in: vec3<f32>, octaves: i32, period_in: f32) -> vec4<f32> {
+    var p = p_in;
+    var period = period_in;
+    var amp = 0.5;
+    var freq = 1.0;
+    var sum = 0.0;
+    var grad = vec3<f32>(0.0);
+    var norm = 0.0;
+    for (var o = 0; o < octaves; o = o + 1) {
+        let vg = value_noise_3d_periodic_grad(p, period);
+        sum = sum + amp * vg.x;
+        grad = grad + amp * freq * vg.yzw;
+        norm = norm + amp;
+        p = p * 2.0;
+        period = period * 2.0;
+        amp = amp * 0.5;
+        freq = freq * 2.0;
+    }
+    let inv = 1.0 / max(norm, 1.0e-5);
+    return vec4<f32>(sum * inv, grad * inv);
+}
+
+// `detail_height` value and gradient w.r.t. body-space metres. The fBm runs in
+// scaled coordinates (`p_body * DETAIL_SCALE`), so one more `DETAIL_SCALE`
+// factor folds into the gradient by the chain rule.
+fn detail_height_grad(p_body: vec3<f32>) -> vec4<f32> {
+    let g = fbm3_grad(
+        p_body * DETAIL_SCALE,
+        DETAIL_OCTAVES,
+        DETAIL_COORD_PERIOD_M * DETAIL_SCALE,
+    );
+    return vec4<f32>(g.x, g.yzw * DETAIL_SCALE);
 }
 
 struct SurfaceDetail {
@@ -347,7 +492,7 @@ struct SurfaceDetail {
     normal_offset: vec3<f32>, // tangential perturbation for the lighting normal
 }
 
-fn surface_detail(p_ws: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> SurfaceDetail {
+fn surface_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> SurfaceDetail {
     var out: SurfaceDetail;
     out.tint = vec3<f32>(1.0);
     out.normal_offset = vec3<f32>(0.0);
@@ -360,7 +505,11 @@ fn surface_detail(p_ws: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> Surf
 
     // Step 2 — albedo breakup: patchy value variation + a subtle warm/cool
     // hue drift, so the macro colour stops reading as one flat tint.
-    let v = fbm3(p_ws * BREAKUP_SCALE, 3);
+    let v = fbm3_periodic(
+        p_body * BREAKUP_SCALE,
+        3,
+        DETAIL_COORD_PERIOD_M * BREAKUP_SCALE,
+    );
     let dv = (v - 0.5) * 2.0;
     let value_mul = 1.0 + dv * BREAKUP_VALUE_AMT;
     let hue = vec3<f32>(1.0 + dv * BREAKUP_HUE_AMT, 1.0, 1.0 - dv * BREAKUP_HUE_AMT);
@@ -369,13 +518,10 @@ fn surface_detail(p_ws: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> Surf
     // Step 3 — micro-relief normal from the gradient of a detail height field,
     // projected tangent to the sphere so it tilts facets without changing the
     // macro surface orientation. Magnitude is capped so a steep noise gradient
-    // can't fold the normal past the horizon.
-    let e = DETAIL_EPS;
-    let h  = detail_height(p_ws);
-    let hx = detail_height(p_ws + vec3<f32>(e, 0.0, 0.0));
-    let hy = detail_height(p_ws + vec3<f32>(0.0, e, 0.0));
-    let hz = detail_height(p_ws + vec3<f32>(0.0, 0.0, e));
-    let grad = (vec3<f32>(hx, hy, hz) - vec3<f32>(h)) / e;
+    // can't fold the normal past the horizon. The gradient is evaluated
+    // analytically in a single fBm pass (`detail_height_grad`) — the previous
+    // four finite-difference taps were the dominant per-fragment cost here.
+    let grad = detail_height_grad(p_body).yzw;
     let grad_t = grad - geo_normal * dot(grad, geo_normal);
     var off = -grad_t * (DETAIL_NORMAL_STRENGTH * fade);
     let off_len = length(off);
@@ -391,6 +537,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     var albedo        = sample_attachment1(tile);
     var height_normal = sample_normal(tile, info.world_normal);
     var roughness     = sample_roughness(tile);
+    var material_masks = sample_material_masks(tile);
 
     if (info.blend.ratio > 0.0) {
         let tile2 = lookup_tile(info.coordinate, info.blend, 1u);
@@ -401,6 +548,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
             info.blend.ratio,
         );
         roughness = mix(roughness, sample_roughness(tile2), info.blend.ratio);
+        material_masks = mix(material_masks, sample_material_masks(tile2), info.blend.ratio);
     }
 
     // Geometry shared by grading and lighting.
@@ -410,16 +558,17 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let debug_on = terrain_debug.params.x >= 0.5;
 
     // Procedural surface detail (Step 2 breakup + Step 3 micro-relief normal),
-    // synthesised from the camera-relative world position.
-    let detail = surface_detail(hit_ws, geo_normal, cam_dist);
+    // synthesised from body-fixed metres so it remains static under time warp.
+    let frag_relative_position = -info.view_vector;
+    let body_relative_position = quat_rotate(terrain_debug.world_to_body_rot, frag_relative_position);
+    let detail_p_body = terrain_debug.view_phase.xyz + body_relative_position;
+    let detail = surface_detail(detail_p_body, geo_normal, cam_dist);
 
-    // Naturalistic in-shader grading of the baked macro albedo. The P2A
-    // Thalos prototype has no authored continuous slope/material field yet,
-    // and deriving slope from the height atlas turns tiny quantization / tile
-    // filtering changes into visible contour ribbons. Keep slope grading off
-    // until terrain provides a smooth material intent field.
-    let slope_t = 0.0;
-    var surface_rgb = grade_surface(albedo.rgb, slope_t);
+    // Naturalistic material blending. The tile provider publishes continuous
+    // material intent masks, so grass, soil, rock, and wet hollows separate by
+    // terrain form instead of by one global albedo grade.
+    let material = eval_material_stack(material_masks, grade_surface(albedo.rgb, material_masks.b));
+    var surface_rgb = material.albedo;
     if (!debug_on) {
         surface_rgb = surface_rgb * detail.tint;
     }
@@ -446,8 +595,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // 1 m cell edges resolve cleanly. Derivatives are evaluated
     // unconditionally to keep them outside divergent control flow.
     let debug_cell = max(terrain_debug.params.z, 1e-3);
-    let frag_relative_position = -info.view_vector;
-    let debug_rel = quat_rotate(terrain_debug.world_to_body_rot, frag_relative_position);
+    let debug_rel = body_relative_position;
     let debug_p = (terrain_debug.view_phase.xyz + debug_rel) / debug_cell;
     let debug_w = max(abs(dpdx(debug_p)), abs(dpdy(debug_p)));
     let debug_checker = checker_3d_aa(debug_p, debug_w);
@@ -469,7 +617,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let height_n = normalize(mix(geo_normal, normalize(height_normal), HEIGHT_NORMAL_WEIGHT));
     var normal = height_n;
     if (!debug_on) {
-        normal = normalize(height_n + detail.normal_offset);
+        normal = normalize(height_n + detail.normal_offset * material.normal_strength);
     }
     let view_dir = normalize(info.view_vector);
 
@@ -479,16 +627,14 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let external_shadow = local_craft_shadow(hit_ws, sun_dir_ws);
     // P2A temporary terrain lighting: keep the ground LOD visually stable
     // while the full Hapke + aerial-perspective path is being reworked for
-    // near-surface views. The shared Hapke path over-darkens distant shallow
-    // terrain from low camera angles, making hills look like shadowed/noisy
-    // bands even with shadows and albedo variation disabled. Use the geometric
-    // normal only, with a high sky/ambient floor, so broad terrain reads as
-    // smooth until a continuous terrain-material/normal field exists.
-    let stable_normal = normalize(geo_normal + detail.normal_offset * 0.65);
+    // near-surface views. Use mostly the atlas/detail normal with a moderate
+    // sky floor so terrain has readable relief without dropping back into the
+    // harsh Hapke grazing-angle bands that motivated this simpler path.
+    let stable_normal = normalize(mix(geo_normal, normal, 0.85));
     let geo_n_dot_l = dot(stable_normal, sun_dir_ws);
-    let direct = smoothstep(-0.20, 0.80, geo_n_dot_l) * external_shadow;
-    let sky_floor = 0.58;
-    let lit = albedo.rgb * (sky_floor + direct * 0.42);
+    let direct = smoothstep(-0.10, 0.78, geo_n_dot_l) * external_shadow;
+    let sky_floor = 0.28;
+    let lit = albedo.rgb * (sky_floor * material.occlusion + direct * 0.64);
 
     var output: FragmentOutput;
     output.color = vec4<f32>(lit, albedo.a);

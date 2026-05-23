@@ -76,18 +76,19 @@ impl Default for BodyTerrainShadow {
     }
 }
 
-/// Debug-overlay parameters consumed by `body_terrain.wgsl`.
+/// Body-fixed phase/debug parameters consumed by `body_terrain.wgsl`.
 ///
-/// Today's only mode is a 3D anti-aliased checkerboard for the flat-mode
-/// debug terrain (a constant-radius sphere where an explicit scale
-/// reference is useful). The checkerboard is evaluated per fragment in
-/// body-fixed metres via three small-magnitude inputs, all kept well
-/// clear of the body-radius f32 noise floor:
+/// Production terrain uses these fields to anchor shader-synthesized albedo
+/// breakup and micro-normal detail in body-fixed metres, so the visible surface
+/// remains static under time warp and floating-origin shifts. The optional
+/// debug mode additionally renders a 3D anti-aliased checkerboard for flat-mode
+/// debug terrain. Both paths are evaluated per fragment via small-magnitude
+/// inputs, kept well clear of the body-radius f32 noise floor:
 ///
-/// - `view_phase.xyz`: the camera's body-fixed position taken `mod
-///   (2 × cell_size)` per axis, recomputed each frame on the CPU in f64
-///   before downcasting. This is the only term whose source value
-///   carries body-scale magnitude, and the mod happens before the cast.
+/// - `view_phase.xyz`: the camera's body-fixed position taken modulo the
+///   terrain-detail repeat period per axis, recomputed each frame on the CPU in
+///   f64 before downcasting. This is the only term whose source value carries
+///   body-scale magnitude, and the modulo happens before the cast.
 /// - The shader recovers the fragment's offset from the camera as
 ///   `info.world_position − view.world_position` (vertex-interpolated,
 ///   so the rasterizer takes care of smoothness across the triangle).
@@ -99,18 +100,17 @@ impl Default for BodyTerrainShadow {
 ///   body-fixed frame the cell grid lives in, so the pattern doesn't
 ///   drag under the player's feet as the body spins.
 ///
-/// `params.x`: mode flag — `0.0` disables the overlay, `>= 0.5` enables
-///             the checkerboard. CPU-side per-frame updates skip
-///             materials with the overlay disabled, so production paths
-///             pay nothing.
+/// `params.x`: mode flag — `0.0` disables the checkerboard overlay, `>= 0.5`
+///             enables it. Body-fixed detail anchoring is always active.
 /// `params.y`: unused (kept for `vec4` alignment).
 /// `params.z`: checker cell size in metres.
 /// `params.w`: unused.
 #[derive(Clone, Copy, ShaderType)]
 pub struct BodyTerrainDebug {
     pub params: Vec4,
-    /// Body-fixed camera position taken `mod (2 × cell_size)` per axis.
-    /// Updated each frame; w is unused but kept for `vec4` alignment.
+    /// Body-fixed camera position taken modulo the terrain-detail repeat
+    /// period per axis. Updated each frame; w is unused but kept for `vec4`
+    /// alignment.
     pub view_phase: Vec4,
     /// Render-space → body-fixed rotation as a quaternion `(x, y, z, w)`.
     /// Equal to the inverse of the body grid's render-space rotation.

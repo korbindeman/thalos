@@ -1,16 +1,16 @@
 use crate::{
     terrain::TerrainComponents,
     terrain_data::{
-        tile_atlas::{AtlasAttachment, AtlasTileAttachmentWithData, TileAtlas},
         AttachmentFormat,
+        tile_atlas::{AtlasAttachment, AtlasTileAttachmentWithData, TileAtlas},
     },
 };
 use bevy::{
     prelude::*,
     render::{
+        Extract, MainWorld,
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
-        Extract, MainWorld,
     },
 };
 use itertools::Itertools;
@@ -199,8 +199,12 @@ impl GpuTileAtlas {
     ) {
         let mut tile_atlases = main_world.query::<(Entity, &mut TileAtlas)>();
 
+        let mut live = Vec::new();
         for (terrain, mut tile_atlas) in tile_atlases.iter_mut(&mut main_world) {
-            let gpu_tile_atlas = gpu_tile_atlases.get_mut(&terrain).unwrap();
+            live.push(terrain);
+            let Some(gpu_tile_atlas) = gpu_tile_atlases.get_mut(&terrain) else {
+                continue;
+            };
 
             for (attachment, gpu_attachment) in
                 iter::zip(&mut tile_atlas.attachments, &mut gpu_tile_atlas.attachments)
@@ -211,6 +215,7 @@ impl GpuTileAtlas {
                 );
             }
         }
+        gpu_tile_atlases.retain(|terrain, _| live.contains(terrain));
     }
 
     /// Queues the attachments of the tiles that have finished loading to be copied into the

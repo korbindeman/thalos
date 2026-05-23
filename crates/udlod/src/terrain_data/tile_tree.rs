@@ -1,6 +1,6 @@
 use crate::{
     math::{Coordinate, TerrainModel, TileCoordinate},
-    terrain_data::{sample_height, tile_atlas::TileAtlas, INVALID_ATLAS_INDEX, INVALID_LOD},
+    terrain_data::{INVALID_ATLAS_INDEX, INVALID_LOD, sample_height, tile_atlas::TileAtlas},
     terrain_view::{TerrainViewComponents, TerrainViewConfig},
     util::inverse_mix,
 };
@@ -90,6 +90,17 @@ fn ascend_to_lod(coord: TileCoordinate, target_lod: u32) -> TileCoordinate {
     }
     cursor
 }
+
+/// Marker component that freezes tile request/release churn for a terrain.
+///
+/// The currently resident draw set keeps rendering, but [`TileTree::compute_requests`]
+/// stops moving the streaming window. Thalos uses this while a landed/EVA
+/// player is stationary at very high time warp: the camera's inertial pose can
+/// move by many kilometres per frame even though the desired local surface view
+/// is effectively unchanged, and chasing that with fresh UDLOD requests causes
+/// avoidable stalls and atlas pressure.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct TerrainStreamingPaused;
 
 /// A quadtree-like view of a terrain, that requests and releases tiles from the [`TileAtlas`]
 /// depending on the distance to the viewer.
@@ -573,6 +584,7 @@ impl TileTree {
     pub(crate) fn compute_requests(
         mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
         tile_atlases: Query<&TileAtlas>,
+        paused_terrains: Query<(), With<TerrainStreamingPaused>>,
         frames: crate::big_space::ReferenceFrames,
         view_transforms: Query<crate::big_space::GridTransformReadOnly>,
         precise_rotations: Query<&crate::big_space::PreciseRotation>,
@@ -620,7 +632,21 @@ impl TileTree {
                 None => (camera_world, DQuat::IDENTITY),
             };
 
+            tile_tree.view_world_position = view_position;
             tile_tree.view_world_rotation = view_rotation;
+
+            if paused_terrains.contains(terrain) {
+                // Keep the shader's high-precision basis current while
+                // freezing tile residency. If this pose update is skipped, the
+                // planet grid keeps rotating under high surface warp while the
+                // Taylor-series terrain basis remains stale, which visibly
+                // shears/deforms the ground until warp drops and streaming
+                // resumes.
+                tile_tree.requested_tiles.clear();
+                tile_tree.released_tiles.clear();
+                continue;
+            }
+
             tile_tree.update(view_position, tile_atlas);
         }
     }

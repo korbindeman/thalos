@@ -30,16 +30,17 @@ pub mod prelude {
 
     pub use crate::{
         debug::{
-            camera::{DebugCameraBundle, DebugCameraController},
             DebugTerrainMaterial, LoadingImages, TerrainDebugPlugin,
+            camera::{DebugCameraBundle, DebugCameraController},
         },
         math::TerrainModel,
         plugin::TerrainPlugin,
         render::terrain_material::TerrainMaterialPlugin,
         terrain::{TerrainBundle, TerrainConfig},
         terrain_data::{
-            tile_atlas::TileAtlas, tile_tree::TileTree, AttachmentConfig, AttachmentFormat,
-            MemoryTileCacheProvider, TileProvider,
+            AttachmentConfig, AttachmentFormat, MemoryTileCacheProvider, TileProvider,
+            tile_atlas::TileAtlas,
+            tile_tree::{TerrainStreamingPaused, TileTree},
         },
         terrain_view::{TerrainViewComponents, TerrainViewConfig},
     };

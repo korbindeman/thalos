@@ -266,24 +266,36 @@ per-body bakes). All five increments landed:
 
 ### P2 — Analytic two-band detail + per-body cutover *(spec Phase B)*
 
-**Current first slice: P2A — basic continental Thalos.** The cutover starts
-with Thalos intentionally simplified to an all-land, single-biome
-`GenericTerrestrial` prototype. This gives the game a playable end-to-end
-new-pipeline surface before tackling oceans, hydrology, scatter, or the full
-terrain-feature compositor. Its ground LOD uses
+**Current first slice: P2A — basic continental Thalos. ✅ Landed.** The
+cutover starts with Thalos intentionally simplified to an all-land,
+single-biome `GenericTerrestrial` prototype. This gives the game a playable
+end-to-end new-pipeline surface before tackling oceans, hydrology, scatter, or
+the full terrain-feature compositor. Its ground LOD uses
 `RuntimeTerrainDetail::BasicContinental`, which evaluates the same smooth
 continental field used by the bake instead of layering the legacy P0 HMF
 cascade on top. Runtime ground height is intentionally LOD-invariant for this
 slice so parent/child tile handoffs do not produce contour-like relief steps.
-The previous body order is therefore revised to: **basic
-Thalos → Mira crater/feature compositor → Vaelen → full Thalos → Pelagos**.
+Thalos' body config has been moved to this prototype route.
+
+**Current next slice: P2B — Mira crater/feature compositor. In progress.**
+The first compositor increment is wired into the Query API: unbaked crater
+features from `StaticSurfaceData::craters` are range-queried through
+`IcoBuckets`, deduplicated, sorted by crater array index (the cratering stage
+stores oldest-first), and folded into runtime height before the legacy HMF
+band. Craters at/above `cubemap_bake_threshold_m` stay skipped so the cubemap
+and runtime compositor do not double-count. This makes Mira's sub-threshold
+craters part of the same mesh/collider surface instead of impostor-only SSBO
+detail. Remaining P2B work is to promote this from crater-specific additive
+composition into the full `TerrainModification` compositor (carve / flood /
+preserve-erode / replace), then proceed to Vaelen, full Thalos, and Pelagos.
 
 - Implement the **two-band heightfield**: low band = intent output
   fields; mid band = analytic character conditioned on intent;
   **fine detail reclassified as non-geometric** (shader POM/normal/
   scatter). Implement ordered **feature composition** (additive / carve /
   flood / preserve-erode / replace), age-ordered with deterministic
-  tiebreak, range-queried by influence radius.
+  tiebreak, range-queried by influence radius. **Partial:** Mira craters now
+  compose through the Query API as runtime geometric features.
 - Land the **scatter** stream (fills the P0 stub) and a minimal scatter
   renderer in `terrain_render`.
 

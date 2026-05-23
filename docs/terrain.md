@@ -557,6 +557,109 @@ with compatible height, normal, color, roughness, and material response.
 Transitions should refine or fade detail in; they should never replace
 one terrain interpretation with another.
 
+### End-to-end runtime model
+
+The source of truth is the authored planet spec plus the compiled
+feature manifest, biome graph, static layer definitions, and dynamic
+surface state. Everything dense or renderer-specific is a projection or
+an acceleration artifact: impostor cubemaps, UDLOD tile attachments,
+GPU atlas slots, collider patches, editor overlays, scatter cells, and
+memory/disk caches must be reproducible from the same source state.
+They must not become independent terrain authorities.
+
+The long-term runtime shape is:
+
+```text
+PlanetTerrainSpec
+  -> TerrainPrior
+  -> FeatureManifest + BiomeGraph + DynamicSurfaceLayers
+  -> SurfaceField::sample(dir, sample_scale_m, dynamic_state)
+  -> projections:
+       - orbital impostor bake
+       - UDLOD tile provider attachments
+       - physics height queries
+       - rendered-height collider patches
+       - editor provenance
+       - scatter / vegetation instance fields
+```
+
+Keep ownership distinct:
+
+- **Features** are semantic terrain/process structures with stable IDs
+  and seed streams: craters, volcanoes, rifts, channels, basin fills,
+  dune seas, and other geology that can affect height, material,
+  roughness, provenance, and sometimes spawned child regions.
+- **Biomes** are broad substrate/process fields: height-generator
+  stacks, palette functions, feature budgets, and mask plans. They are
+  not only Earth climate classes; mare basalt, highland regolith,
+  evaporite basins, volcanic plains, and badlands are all biomes in
+  this sense.
+- **Dynamic layers** are mutable overlays whose default state reproduces
+  authored appearance but whose runtime state belongs to
+  `SolarSystemState`: seasonal ice, active dunes, later tracks, weather,
+  tide/wind state, or other mutable surface processes.
+- **Scatter populations** are object/detail instance fields driven by
+  stable population IDs and placement rules: boulders, rock clusters,
+  pebbles, grass blades, shrubs, and later trees. They may project into
+  albedo/roughness/normal/height at some scales, but individual tiny
+  scatter objects are not terrain-height authority by default.
+- **Caches** are disposable acceleration: GPU atlas residency for
+  currently drawable tiles, in-memory frecency caches for recent CPU
+  tile payloads, and optional future disk caches for persistent reuse.
+
+`SurfaceField::sample` must be scale-aware. A 2 km orbital sample should
+not evaluate pebble- or grass-scale detail; a 0.5 m ground tile sample
+may include those detail fields if their projection policy says they are
+representable at that resolution. `sample_scale_m` is both a quality and
+anti-aliasing contract: each layer or feature evaluates only the
+frequencies visible at the requested scale and folds smaller frequencies
+into palette/roughness/statistical detail or omits them entirely. This
+keeps orbit bakes stable, tile generation bounded, and physics queries
+from accidentally paying for visual-only microdetail.
+
+For performance, compiled terrain should build runtime acceleration
+structures from the semantic manifest before serving dense projections:
+spatial hashes or spherical quadtrees for craters and scatter cells,
+curve/BVH-style bounds for channels and rifts, compact runtime biome
+mask plans, and per-feature projection descriptors. Tile generation must
+query the tile footprint first and evaluate only features/layers that can
+affect that footprint at the requested scale; it must not scan the whole
+manifest per texel.
+
+The intended work split is:
+
+```text
+Per frame:
+  - update view-dependent TileTree state
+  - draw resident UDLOD tiles from the GPU atlas
+  - upload a bounded budget of completed tiles
+  - update local collider/scatter cells only under explicit budgets
+
+Async/background:
+  - synthesize requested tile attachments
+  - populate provider-level memory caches
+  - prepare scatter-cell payloads
+
+Offline/load/editor:
+  - infer prior and compile the feature manifest
+  - build runtime acceleration structures
+  - bake orbital impostor cubemaps and compact analytic buffers
+```
+
+Tile cache keys must include enough source state to make invalidation
+boring: body/source hash, generator version, dynamic layer epoch or hash
+when dynamic data contributes to the payload, tile coordinate, and
+attachment layout. Disk caching remains optional and measurement-driven;
+provider-level memory caching is the default runtime optimization.
+
+Dense scatter needs its own renderer and LOD policy. Grass blades,
+pebbles, and small rocks should be generated from deterministic
+surface-space cells keyed by body + population + cell, batched or
+GPU-driven, distance culled, and faded into material/detail textures at
+range. Only large scatter instances that gameplay can touch should
+become ECS entities or colliders; visual-only micro scatter should not
+inflate the terrain collider or per-frame ECS workload.
+
 ### Example bodies
 
 #### Mira

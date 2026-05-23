@@ -686,13 +686,23 @@ fn oceanic_homeworld_biomes(ocean_fraction: f32) -> Vec<TerrainBiomeSpec> {
 
 fn generic_terrestrial_biomes(spec: &PlanetTerrainSpec) -> Vec<TerrainBiomeSpec> {
     let relief = spec.physical.gravity_m_s2.recip().clamp(0.05, 0.5) * 1_800.0;
+    let homeworld_green = spec.intent.contains(&TerrainIntent::HomeworldIdentity);
+    let (albedo_linear, roughness) = if homeworld_green {
+        // P2A Thalos is currently an all-land prototype; bias its single
+        // biome toward damp grass/peat highlands instead of basaltic dust so
+        // the surface reads as a living homeworld while fuller biome routing is
+        // still parked.
+        ([0.12, 0.22, 0.075], 0.80)
+    } else {
+        ([0.30, 0.25, 0.22], 0.82)
+    };
     vec![
         TerrainBiomeSpec::new(
             "biome.basaltic_highland",
             TerrainBiomeRole::HighlandRegolith,
             SurfaceMaterialClass::BasalticHighland,
-            [0.30, 0.25, 0.22],
-            0.82,
+            albedo_linear,
+            roughness,
         )
         .with_height(fbm_height(relief, 3.0, 8))
         .with_feature_budget(FeatureBudget::new(FeatureKind::CrustalProvince, 8, 0.7))
@@ -1995,17 +2005,17 @@ fn compile_generic_terrestrial(
     );
 
     builder.materials = vec![Material {
-        albedo: [0.285, 0.255, 0.190],
-        roughness: 0.82,
+        albedo: [0.12, 0.22, 0.075],
+        roughness: 0.80,
     }];
     builder.biomes = vec![BiomeParams {
         name: "basic_continental".to_string(),
-        albedo: 0.285,
+        albedo: 0.19,
         fresh_albedo: None,
-        tint: [1.0, 1.0, 1.0],
-        tonal_amp: 0.14,
-        roughness: 0.82,
-        iron_visibility: 1.0,
+        tint: [0.72, 0.98, 0.52],
+        tonal_amp: 0.16,
+        roughness: 0.80,
+        iron_visibility: 0.55,
     }];
 
     let params = BasicContinentalParams::from_seed_parts(

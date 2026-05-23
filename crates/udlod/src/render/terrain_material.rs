@@ -21,9 +21,9 @@
 use crate::{
     debug::DebugTerrain,
     render::{
-        terrain_bind_group::{terrain_layout_descriptor, SetTerrainBindGroup},
+        terrain_bind_group::{SetTerrainBindGroup, terrain_layout_descriptor},
         terrain_view_bind_group::{
-            terrain_view_layout_descriptor, DrawTerrainCommand, SetTerrainViewBindGroup,
+            DrawTerrainCommand, SetTerrainViewBindGroup, terrain_view_layout_descriptor,
         },
     },
     shaders::{DEFAULT_FRAGMENT_SHADER, DEFAULT_VERTEX_SHADER},
@@ -43,13 +43,13 @@ use bevy::{
     },
     prelude::*,
     render::{
+        Render, RenderApp, RenderStartup, RenderSystems,
         render_phase::{
             AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex,
             SetItemPipeline, ViewBinnedRenderPhases,
         },
         render_resource::*,
         view::{ExtractedView, RenderVisibleEntities, ViewTarget},
-        Render, RenderApp, RenderStartup, RenderSystems,
     },
     shader::{ShaderDefVal, ShaderRef},
 };

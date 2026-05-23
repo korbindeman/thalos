@@ -1,5 +1,5 @@
 use crate::{
-    math::{coordinate::Coordinate, ellipsoid::project_point_ellipsoid, TileCoordinate, C_SQR},
+    math::{C_SQR, TileCoordinate, coordinate::Coordinate, ellipsoid::project_point_ellipsoid},
     terrain_data::tile_atlas::TileAtlas,
     terrain_data::tile_tree::TileTree,
     terrain_view::TerrainViewComponents,
@@ -174,11 +174,7 @@ impl TerrainModel {
     }
 
     pub(crate) fn side_count(&self) -> u32 {
-        if self.is_spherical() {
-            6
-        } else {
-            1
-        }
+        if self.is_spherical() { 6 } else { 1 }
     }
 
     /// "Characteristic" radius of the terrain model in metres. For a sphere
@@ -387,6 +383,8 @@ pub fn generate_terrain_model_approximation(
     tile_atlases: Query<&TileAtlas>,
     mut terrain_model_approximations: ResMut<TerrainViewComponents<TerrainModelApproximation>>,
 ) {
+    terrain_model_approximations.retain(|key, _| tile_trees.contains_key(key));
+
     for (&(terrain, view), tile_tree) in tile_trees.iter() {
         let tile_atlas = tile_atlases.get(terrain).unwrap();
 

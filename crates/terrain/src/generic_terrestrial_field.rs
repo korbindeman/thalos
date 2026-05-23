@@ -51,9 +51,11 @@ impl BasicContinentalParams {
 pub enum RuntimeTerrainDetail {
     /// P0 compatibility: baked cubemap + legacy runtime HMF uplift.
     LegacyHmf,
-    /// P2A: evaluate the basic continental terrain function directly at the
-    /// requested LOD. This is the same function used to bake the cubemap, so
-    /// the ground mesh no longer receives a separate old detail layer.
+    /// P2A: evaluate the basic continental terrain function directly. This is
+    /// the same function used to bake the cubemap, so the ground mesh no
+    /// longer receives a separate old detail layer. Runtime ground geometry
+    /// currently samples it at full detail regardless of tile LOD to avoid
+    /// parent/child handoff contouring during the vertical slice.
     BasicContinental(BasicContinentalParams),
 }
 
@@ -200,4 +202,59 @@ fn band_weight(wavelength_m: f32, lod_m: f32) -> f32 {
     // per wavelength. This keeps both cubemap bakes and UDLOD tiles smooth
     // instead of aliasing unresolved relief into steps.
     smoothstep(lod_m * 3.0, lod_m * 6.0, wavelength_m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> BasicContinentalParams {
+        BasicContinentalParams::from_seed_parts(1234, 5678, 4_500.0)
+    }
+
+    #[test]
+    fn basic_continental_sampling_is_deterministic() {
+        let params = params();
+        let dir = Vec3::new(0.31, -0.42, 0.85).normalize();
+        let a = params.sample_height_m(3_186_000.0, dir, 1.0);
+        let b = params.sample_height_m(3_186_000.0, dir, 1.0);
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+
+    #[test]
+    fn basic_continental_height_stays_inside_hint_for_representative_samples() {
+        let params = params();
+        let hint = params.height_range_hint_m();
+        let dirs = [
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            -Vec3::X,
+            -Vec3::Y,
+            -Vec3::Z,
+            Vec3::new(0.31, -0.42, 0.85).normalize(),
+            Vec3::new(-0.67, 0.22, 0.71).normalize(),
+        ];
+
+        for dir in dirs {
+            let height = params.sample_height_m(3_186_000.0, dir, 1.0);
+            assert!(height.is_finite(), "height must be finite for {dir:?}");
+            assert!(
+                height.abs() <= hint,
+                "height {height} exceeded hint ±{hint} for {dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn coarser_sample_scale_suppresses_unresolved_bands() {
+        let params = params();
+        let dir = Vec3::new(0.31, -0.42, 0.85).normalize();
+        let fine = params.sample_height_m(3_186_000.0, dir, 1.0);
+        let coarse = params.sample_height_m(3_186_000.0, dir, 1_000_000.0);
+
+        // The exact values are seed-dependent; this asserts the LOD parameter
+        // is wired into the evaluator instead of being ignored by the bake path.
+        assert_ne!(fine.to_bits(), coarse.to_bits());
+    }
 }

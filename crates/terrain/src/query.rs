@@ -24,7 +24,9 @@
 //! analytic detail cascade in this module ([`surface_sample`] /
 //! [`BakedSurface`]). P2A `GenericTerrestrial` bodies opt into a direct runtime
 //! evaluator for their smooth continental field, using the same terrain
-//! function that produced the bake. Later migration phases (field-DAG intent
+//! function that produced the bake. Runtime ground geometry currently samples
+//! that evaluator at full detail regardless of tile LOD to avoid parent/child
+//! handoff contouring during the vertical slice. Later migration phases (field-DAG intent
 //! layer + two-band detail stage) swap more backings behind the [`SurfaceQuery`]
 //! trait without consumers noticing.
 //!
@@ -41,6 +43,7 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use crate::cubemap::{Cubemap, dir_to_face_uv};
+use crate::feature_compositor::{compose_runtime_features_m, runtime_feature_height_margin_m};
 use crate::generic_terrestrial_field::RuntimeTerrainDetail;
 use crate::sample::apply_dynamic_surface_layers;
 use crate::static_surface::PlanetSurface;
@@ -224,9 +227,11 @@ impl SurfaceQuery for BakedSurface {
 /// Stages, in order:
 /// 1. Cubemap base, bilinearly sampled.
 /// 2. Dynamic layers (ice caps, aeolian bedforms).
-/// 3. Runtime geometric detail selected by the baked surface: legacy bodies
+/// 3. Runtime geometric feature composition: legacy crater-backed bodies fold
+///    unbaked crater features into height before procedural detail.
+/// 4. Runtime geometric detail selected by the baked surface: legacy bodies
 ///    get the P0 HMF cascade; P2A `GenericTerrestrial` bodies evaluate their
-///    smooth continental field directly at the requested LOD.
+///    smooth continental field directly at full detail for LOD-invariant runtime geometry.
 pub fn surface_sample(
     surface: &PlanetSurface,
     dynamic_state: &DynamicSurfaceState,
@@ -280,7 +285,10 @@ pub fn surface_height_m(
 pub fn surface_height_range_m(surface: &PlanetSurface, state: &DynamicSurfaceState) -> f32 {
     let base = surface.static_surface.height_range + dynamic_height_margin(surface, state);
     match surface.static_surface.runtime_detail {
-        RuntimeTerrainDetail::LegacyHmf => (base + DETAIL_HEIGHT_MARGIN_M).max(1.0),
+        RuntimeTerrainDetail::LegacyHmf => (base
+            + runtime_feature_height_margin_m(&surface.static_surface)
+            + DETAIL_HEIGHT_MARGIN_M)
+            .max(1.0),
         RuntimeTerrainDetail::BasicContinental(params) => {
             base.max(params.height_range_hint_m()).max(1.0)
         }
@@ -440,9 +448,11 @@ fn static_roughness(surface: &PlanetSurface, dir: Vec3) -> f32 {
 fn runtime_height_m(surface: &PlanetSurface, dir: Vec3, lod_m: f32, base_height_m: f32) -> f32 {
     match surface.static_surface.runtime_detail {
         RuntimeTerrainDetail::LegacyHmf => {
+            let feature_base_m =
+                compose_runtime_features_m(&surface.static_surface, dir, base_height_m);
             let plan = detail_plan_for_lod(lod_m, DETAIL_BASE_WL_M);
             let detail_h = compute_detail_height(dir, surface.static_surface.radius_m, plan);
-            combine_base_and_detail(base_height_m, detail_h, surface.static_surface.sea_level_m)
+            combine_base_and_detail(feature_base_m, detail_h, surface.static_surface.sea_level_m)
         }
         RuntimeTerrainDetail::BasicContinental(params) => {
             let _ = lod_m;

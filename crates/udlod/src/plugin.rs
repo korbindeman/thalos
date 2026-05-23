@@ -1,15 +1,15 @@
 use crate::{
-    math::{generate_terrain_model_approximation, TerrainModelApproximation},
+    math::{TerrainModelApproximation, generate_terrain_model_approximation},
     render::{
         culling_bind_group::CullingBindGroup,
         terrain_bind_group::TerrainData,
         terrain_view_bind_group::TerrainViewData,
         tiling_prepass::{
-            init_tiling_prepass_pipelines, queue_tiling_prepass, TilingPrepassItem,
-            TilingPrepassLabel, TilingPrepassNode, TilingPrepassPipelines,
+            TilingPrepassItem, TilingPrepassLabel, TilingPrepassNode, TilingPrepassPipelines,
+            init_tiling_prepass_pipelines, queue_tiling_prepass,
         },
     },
-    shaders::{load_terrain_shaders, InternalShaders},
+    shaders::{InternalShaders, load_terrain_shaders},
     terrain::TerrainComponents,
     terrain_data::{
         gpu_tile_atlas::GpuTileAtlas, gpu_tile_tree::GpuTileTree, tile_atlas::TileAtlas,
@@ -20,8 +20,8 @@ use crate::{
 use bevy::{
     prelude::*,
     render::{
-        graph::CameraDriverLabel, render_graph::RenderGraph, render_resource::*, Render, RenderApp,
-        RenderStartup, RenderSystems,
+        Render, RenderApp, RenderStartup, RenderSystems, graph::CameraDriverLabel,
+        render_graph::RenderGraph, render_resource::*,
     },
 };
 

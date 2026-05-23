@@ -26,7 +26,10 @@ mod types;
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
 use generation::{PendingPlanetInstalls, patch_reference_cloud_covers, poll_planet_install_tasks};
-use ground_terrain::{sync_body_render_lod, update_body_terrain_atmosphere};
+use ground_terrain::{
+    pause_surface_terrain_streaming_at_high_warp, sync_body_render_lod,
+    update_body_terrain_atmosphere,
+};
 use lighting::{
     sync_film_grain_to_exposure, update_camera_exposure, update_planet_light_dirs,
     update_solid_planet_params, update_sun_light,
@@ -136,7 +139,10 @@ impl Plugin for RenderingPlugin {
                     // (atmosphere vantage) from a single camera-to-body
                     // distance. Must run after `update_real_space_body_positions`
                     // (for current body world positions).
-                    sync_body_render_lod.after(update_real_space_body_positions),
+                    pause_surface_terrain_streaming_at_high_warp,
+                    sync_body_render_lod
+                        .after(update_real_space_body_positions)
+                        .after(pause_surface_terrain_streaming_at_high_warp),
                     // `update_body_terrain_atmosphere` moved to PostUpdate
                     // (see below) so it reads body GlobalTransforms after
                     // big_space's `TransformSystems::Propagate` finishes

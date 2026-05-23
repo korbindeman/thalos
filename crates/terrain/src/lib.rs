@@ -12,6 +12,7 @@ pub mod cold_desert_field;
 pub(crate) mod crater_profile;
 pub mod cubemap;
 pub mod feature_compiler;
+pub(crate) mod feature_compositor;
 pub mod generic_terrestrial_field;
 pub mod height_generator;
 pub mod icosphere;
