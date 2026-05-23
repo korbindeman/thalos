@@ -24,7 +24,7 @@
     CLOUD_BAND_COUNT,
     atmosphere_jitter,
     cloud_band_phase,
-    integrate_atmosphere,
+    integrate_atmosphere_multiscatter,
     rotate_around_y,
 }
 #import thalos::lighting::SCENE_FLUX_SCALE
@@ -51,6 +51,15 @@ struct SkyAtmosExtra {
 // cloud shell in the fullscreen pass rather than in the terrain material.
 @group(3) @binding(3) var cloud_cover_tex: texture_cube<f32>;
 @group(3) @binding(4) var cloud_cover_sampler: sampler;
+
+// Precomputed multi-scatter LUT (Rgba16Float, 32×32). Each cell stores the
+// average single-scattered radiance arriving at a point from every direction
+// (per unit sun flux × strength), indexed by (u = (sun·zenith + 1) / 2,
+// v = altitude / atmos_top). `integrate_atmosphere_multiscatter` samples it at
+// every view step and adds the second bounce, which is what gives the daytime
+// sky its blue luminance and lets the alpha boost below crush stars at noon.
+@group(3) @binding(5) var ms_lut_tex: texture_2d<f32>;
+@group(3) @binding(6) var ms_lut_sampler: sampler;
 
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
@@ -267,11 +276,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let jitter = atmosphere_jitter(in.clip_position.xy);
-    let scatter = integrate_atmosphere(
+    let scatter = integrate_atmosphere_multiscatter(
         cam_pos, ray_dir, planet_center,
         sky_atmos_extra.sun_dir_flux.xyz,
         sky_atmos_extra.sun_dir_flux.w * SCENE_FLUX_SCALE,
         t_enter, t_exit, planet_radius, sky_atmos, jitter,
+        ms_lut_tex, ms_lut_sampler,
     );
 
     let cloud = cloud_shell_overlay(

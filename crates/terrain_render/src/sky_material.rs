@@ -2,8 +2,8 @@
 //!
 //! Renders the in-scatter integral of `thalos::atmosphere` for every view
 //! ray, premultiplied with opacity. Blended over the celestial background so
-//! stars dim where the atmosphere is thick (near horizon, near sun) and
-//! remain visible at the zenith where the atmosphere is thin.
+//! stars dim where the daytime sky is bright (the in-scatter alpha boost
+//! crushes them) and re-emerge only as the sky darkens toward night/twilight.
 //!
 //! Reuses the same atmosphere uniforms as [`crate::BodyTerrainMaterial`] so a
 //! single per-frame update system writes both.
@@ -41,6 +41,18 @@ pub struct BodySkyMaterial {
     #[texture(3, dimension = "cube")]
     #[sampler(4)]
     pub cloud_cover: Handle<Image>,
+    /// Per-body multi-scatter LUT (32×32 `Rgba16Float`), baked once at spawn by
+    /// `thalos_planet_lighting::bake_multi_scatter_lut` and never updated — the
+    /// atmosphere parameters are static. `body_sky.wgsl` samples it at every
+    /// view step via `integrate_atmosphere_multiscatter` to add the
+    /// second-order in-scatter that single scattering omits. That term is what
+    /// gives the daytime dome its blue luminance and lifts the in-scatter into
+    /// the range where the sky-luminance alpha boost washes out stars at noon;
+    /// without it the midday sky is physically dim and the celestial backdrop
+    /// bleeds through. Indexed by `(u = (sun·zenith + 1) / 2, v = h / atmos_top)`.
+    #[texture(5)]
+    #[sampler(6)]
+    pub multi_scatter_lut: Handle<Image>,
 }
 
 impl Material for BodySkyMaterial {

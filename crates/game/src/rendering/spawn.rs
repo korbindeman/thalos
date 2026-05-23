@@ -28,8 +28,9 @@ use big_space::prelude::Grid;
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::types::BodyKind;
 use thalos_planet_rendering::{
-    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, ReferenceClouds, RingLayers,
-    RingMaterial, RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams,
+    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams,
+    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial,
+    RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut,
     build_ring_mesh, cloud_cover_image_for_body, prepare_planet_bake,
 };
 use thalos_terrain::{
@@ -70,6 +71,53 @@ const BAKE_CRATER_COUNT_SCALE: f32 = 1.0;
 /// the same workspace-relative path so producer and consumer agree.
 fn local_bake_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/bakes")
+}
+
+/// Bake the atmosphere's multi-scatter LUT and upload it as a small
+/// linear-sampled image for `BodySkyMaterial` / `body_sky.wgsl`.
+///
+/// The bake (`thalos_planet_lighting::bake_multi_scatter_lut`) emits RGBA f32,
+/// but f32 textures are not linear-filterable without the `FLOAT32_FILTERABLE`
+/// wgpu feature (which this project does not request). The LUT is a smooth,
+/// low-dynamic-range radiance field, so we repack to `Rgba16Float` — filterable
+/// everywhere and far more than enough precision at 32×32. Sampled with
+/// `ImageSampler::linear()` (linear filtering + clamp-to-edge), matching the
+/// `textureSampleLevel` lookup in `integrate_atmosphere_multiscatter`.
+fn build_multi_scatter_lut(
+    atmosphere: &AtmosphereBlock,
+    planet_radius_render: f32,
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::ImageSampler;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+    let f32_bytes = bake_multi_scatter_lut(
+        atmosphere,
+        planet_radius_render,
+        MULTI_SCATTER_LUT_WIDTH,
+        MULTI_SCATTER_LUT_HEIGHT,
+    );
+    // RGBA f32 little-endian → RGBA f16 little-endian.
+    let mut data = Vec::with_capacity(f32_bytes.len() / 2);
+    for chunk in f32_bytes.chunks_exact(4) {
+        let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        data.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: MULTI_SCATTER_LUT_WIDTH,
+            height: MULTI_SCATTER_LUT_HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba16Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::linear();
+    images.add(image)
 }
 
 pub(super) fn spawn_bodies(
@@ -144,11 +192,21 @@ pub(super) fn spawn_bodies(
             let (sky_cloud_cover, _) =
                 cloud_cover_image_for_body(&body.name, &reference_clouds, &mut images);
 
+            // Bake the multi-scatter LUT once from the static atmosphere block.
+            // SHIP_SCALE == 1 (1 render unit = 1 m), so the body's solid radius
+            // in render units is just `radius_m`; this must match the units of
+            // `ship_atmosphere.atmos_geom.x` (already scaled by `inv_m` in
+            // `from_terrestrial`), which it does at SHIP_SCALE.
+            let planet_radius_render = (body.radius_m * SHIP_SCALE) as f32;
+            let multi_scatter_lut =
+                build_multi_scatter_lut(&ship_atmosphere, planet_radius_render, &mut images);
+
             let sky_material = BodySkyMaterial {
                 atmosphere: ship_atmosphere,
                 atmosphere_extra: BodySkyExtra::default(),
                 scene_depth: scene_depth.handle.clone(),
                 cloud_cover: sky_cloud_cover,
+                multi_scatter_lut,
             };
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),

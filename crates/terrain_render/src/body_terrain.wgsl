@@ -59,6 +59,59 @@ struct BodyTerrainDebug {
 // provide genuinely continuous close-up fields.
 const HEIGHT_NORMAL_WEIGHT: f32 = 0.10;
 
+// ── Naturalistic surface grading (Step 0 + Step 1) ────────────────────────
+// Applied to the baked macro albedo in-shader, so it iterates without a
+// re-bake and stays resolution-independent. The bake stays the low-frequency
+// layer (which biome / broad climate); these knobs add the slope response and
+// take the harsh edge off the vegetation palette. Higher-frequency albedo
+// breakup and detail normals (Steps 2-3) land on top of this later.
+
+// Step 0 — de-harsh the palette. The baked vegetation anchors read as a
+// grating, over-bright chartreuse; pull them toward luminance and trim value.
+// Saturation is back up from the first pass (which over-bleached into a pale,
+// "ghostly" wash): the per-pixel variation now comes from the Step 2/3 detail
+// layer below, not from flattening the colour, so the macro tint can keep its
+// hue. Value is only lightly trimmed — the detail normal supplies the dark
+// micro-contrast that grounds the surface.
+const SURFACE_SATURATION: f32 = 0.78; // <1 desaturates toward grey
+const SURFACE_VALUE_GAIN: f32  = 0.82; // slight overall value trim
+
+// Step 1 — slope-driven substrate. Local steepness is the deviation of the
+// terrain normal from the radial (geometric) normal: ~0 on ground that lies
+// flat against the sphere, rising toward 1 on cliffs. Gentle slopes expose
+// soil, steep faces expose rock. Thresholds are kept high and strengths
+// modest so thin risers between coarse height texels don't trace grey contour
+// ribbons across otherwise flat ground.
+const SUBSTRATE_SOIL: vec3<f32> = vec3<f32>(0.160, 0.120, 0.080);
+const SUBSTRATE_ROCK: vec3<f32> = vec3<f32>(0.190, 0.180, 0.160);
+const SLOPE_SOIL_LO: f32 = 0.05;
+const SLOPE_SOIL_HI: f32 = 0.30;
+const SLOPE_ROCK_LO: f32 = 0.32;
+const SLOPE_ROCK_HI: f32 = 0.70;
+const SOIL_STRENGTH: f32 = 0.55;
+const ROCK_STRENGTH: f32 = 0.65;
+
+// Step 2 — albedo breakup. Multi-octave value noise modulating the macro
+// colour's value (plus a faint warm/cool hue drift) at the tens-of-metres
+// scale, so the ground stops reading as one flat tint.
+const BREAKUP_SCALE: f32 = 0.05;     // 1/period_m → ~20 m base patches
+const BREAKUP_VALUE_AMT: f32 = 0.16; // ± fractional value variation
+const BREAKUP_HUE_AMT: f32 = 0.06;   // ± warm/cool drift
+
+// Step 3 — micro-relief normal. A detail height field whose gradient tilts the
+// lighting normal, giving the surface the light/dark micro-contrast under a
+// grazing sun that separates "solid ground" from "luminous fog".
+const DETAIL_SCALE: f32 = 0.8;            // 1/period_m → ~1.25 m base relief
+const DETAIL_OCTAVES: i32 = 3;
+const DETAIL_EPS: f32 = 0.25;             // finite-difference step, metres
+const DETAIL_NORMAL_STRENGTH: f32 = 0.5;  // facet-tilt amount
+
+// Both detail layers fade out with camera distance: their period goes
+// sub-pixel on the far field and would shimmer. The macro/slope colour carries
+// the distance instead.
+const DETAIL_FADE_NEAR: f32 = 80.0;  // full detail within this range (m)
+const DETAIL_FADE_FAR: f32  = 600.0; // no detail beyond this range (m)
+
 fn atmospheric_surface_fill(geo_n_dot_l: f32, sun_flux: f32) -> vec3<f32> {
     let atmosphere_strength = max(terrain_atmos.atmos_geom.z, 0.0);
     if (atmosphere_strength <= 0.0 || sun_flux <= 0.0) {
@@ -211,6 +264,125 @@ fn checker_3d_aa(p: vec3<f32>, w: vec3<f32>) -> f32 {
     return 0.5 - 0.5 * i.x * i.y * i.z;
 }
 
+// Pull a linear-RGB colour toward its luminance. `sat` < 1 desaturates,
+// `sat` == 1 is a no-op. Rec.709 luminance weights.
+fn desaturate(c: vec3<f32>, sat: f32) -> vec3<f32> {
+    let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return mix(vec3<f32>(luma), c, sat);
+}
+
+// Local steepness in [0,1]: 0 where the terrain normal aligns with the
+// radial (sphere-outward) normal, rising as the surface tilts toward
+// vertical. Coarse because the height normal is coarse — fine for *colouring*
+// by slope, which is why it's kept separate from the lighting normal.
+fn surface_slope(terrain_normal: vec3<f32>, radial_normal: vec3<f32>) -> f32 {
+    return clamp(1.0 - dot(normalize(terrain_normal), radial_normal), 0.0, 1.0);
+}
+
+// Step 0 + Step 1: de-harsh the baked vegetation colour, then blend exposed
+// soil/rock by local steepness. Operates on the (already tile-blended) macro
+// albedo; higher-frequency detail composites on top downstream.
+fn grade_surface(base: vec3<f32>, slope_t: f32) -> vec3<f32> {
+    var c = desaturate(base, SURFACE_SATURATION) * SURFACE_VALUE_GAIN;
+    let soil_t = smoothstep(SLOPE_SOIL_LO, SLOPE_SOIL_HI, slope_t) * SOIL_STRENGTH;
+    c = mix(c, SUBSTRATE_SOIL, soil_t);
+    let rock_t = smoothstep(SLOPE_ROCK_LO, SLOPE_ROCK_HI, slope_t) * ROCK_STRENGTH;
+    c = mix(c, SUBSTRATE_ROCK, rock_t);
+    return c;
+}
+
+// ── Procedural surface detail (Step 2 + Step 3) ───────────────────────────
+// Cheap hash-based value noise / fBm, evaluated on the camera-relative world
+// position (sharpest underfoot thanks to floating-origin precision). The bake
+// supplies macro colour; this synthesises the metre-scale breakup and
+// micro-relief the ~1 km/texel atlas cannot carry up close.
+
+fn hash13(p_in: vec3<f32>) -> f32 {
+    var p3 = fract(p_in * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn value_noise_3d(x: vec3<f32>) -> f32 {
+    let i = floor(x);
+    let f = fract(x);
+    let u = f * f * (3.0 - 2.0 * f);
+    let n000 = hash13(i + vec3<f32>(0.0, 0.0, 0.0));
+    let n100 = hash13(i + vec3<f32>(1.0, 0.0, 0.0));
+    let n010 = hash13(i + vec3<f32>(0.0, 1.0, 0.0));
+    let n110 = hash13(i + vec3<f32>(1.0, 1.0, 0.0));
+    let n001 = hash13(i + vec3<f32>(0.0, 0.0, 1.0));
+    let n101 = hash13(i + vec3<f32>(1.0, 0.0, 1.0));
+    let n011 = hash13(i + vec3<f32>(0.0, 1.0, 1.0));
+    let n111 = hash13(i + vec3<f32>(1.0, 1.0, 1.0));
+    let nx00 = mix(n000, n100, u.x);
+    let nx10 = mix(n010, n110, u.x);
+    let nx01 = mix(n001, n101, u.x);
+    let nx11 = mix(n011, n111, u.x);
+    let nxy0 = mix(nx00, nx10, u.y);
+    let nxy1 = mix(nx01, nx11, u.y);
+    return mix(nxy0, nxy1, u.z);
+}
+
+fn fbm3(p_in: vec3<f32>, octaves: i32) -> f32 {
+    var p = p_in;
+    var amp = 0.5;
+    var sum = 0.0;
+    var norm = 0.0;
+    for (var o = 0; o < octaves; o = o + 1) {
+        sum = sum + amp * value_noise_3d(p);
+        norm = norm + amp;
+        p = p * 2.0;
+        amp = amp * 0.5;
+    }
+    return sum / max(norm, 1.0e-5);
+}
+
+fn detail_height(p_ws: vec3<f32>) -> f32 {
+    return fbm3(p_ws * DETAIL_SCALE, DETAIL_OCTAVES);
+}
+
+struct SurfaceDetail {
+    tint: vec3<f32>,          // multiplicative albedo breakup, ~1.0
+    normal_offset: vec3<f32>, // tangential perturbation for the lighting normal
+}
+
+fn surface_detail(p_ws: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> SurfaceDetail {
+    var out: SurfaceDetail;
+    out.tint = vec3<f32>(1.0);
+    out.normal_offset = vec3<f32>(0.0);
+
+    // Far field pays nothing: no derivatives here, so the early-out is safe.
+    let fade = 1.0 - smoothstep(DETAIL_FADE_NEAR, DETAIL_FADE_FAR, cam_dist);
+    if (fade <= 0.0) {
+        return out;
+    }
+
+    // Step 2 — albedo breakup: patchy value variation + a subtle warm/cool
+    // hue drift, so the macro colour stops reading as one flat tint.
+    let v = fbm3(p_ws * BREAKUP_SCALE, 3);
+    let dv = (v - 0.5) * 2.0;
+    let value_mul = 1.0 + dv * BREAKUP_VALUE_AMT;
+    let hue = vec3<f32>(1.0 + dv * BREAKUP_HUE_AMT, 1.0, 1.0 - dv * BREAKUP_HUE_AMT);
+    out.tint = mix(vec3<f32>(1.0), vec3<f32>(value_mul) * hue, fade);
+
+    // Step 3 — micro-relief normal from the gradient of a detail height field,
+    // projected tangent to the sphere so it tilts facets without changing the
+    // macro surface orientation. Magnitude is capped so a steep noise gradient
+    // can't fold the normal past the horizon.
+    let e = DETAIL_EPS;
+    let h  = detail_height(p_ws);
+    let hx = detail_height(p_ws + vec3<f32>(e, 0.0, 0.0));
+    let hy = detail_height(p_ws + vec3<f32>(0.0, e, 0.0));
+    let hz = detail_height(p_ws + vec3<f32>(0.0, 0.0, e));
+    let grad = (vec3<f32>(hx, hy, hz) - vec3<f32>(h)) / e;
+    let grad_t = grad - geo_normal * dot(grad, geo_normal);
+    var off = -grad_t * (DETAIL_NORMAL_STRENGTH * fade);
+    let off_len = length(off);
+    out.normal_offset = off * (0.8 / max(0.8, off_len));
+    return out;
+}
+
 @fragment
 fn fragment(input: FragmentInput) -> FragmentOutput {
     var info = fragment_info(input);
@@ -230,6 +402,28 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         );
         roughness = mix(roughness, sample_roughness(tile2), info.blend.ratio);
     }
+
+    // Geometry shared by grading and lighting.
+    let geo_normal = normalize(info.world_normal);
+    let hit_ws = info.world_position.xyz;
+    let cam_dist = length(info.view_vector);
+    let debug_on = terrain_debug.params.x >= 0.5;
+
+    // Procedural surface detail (Step 2 breakup + Step 3 micro-relief normal),
+    // synthesised from the camera-relative world position.
+    let detail = surface_detail(hit_ws, geo_normal, cam_dist);
+
+    // Naturalistic in-shader grading of the baked macro albedo. The coarse
+    // height normal feeds slope colour only (never lighting), so the macro
+    // texel kinks that forced the low HEIGHT_NORMAL_WEIGHT don't reappear as
+    // shading artefacts; Step 2's breakup multiplies on top. All of this runs
+    // before the debug overlay so the checkerboard still overrides it cleanly.
+    let slope_t = surface_slope(height_normal, geo_normal);
+    var surface_rgb = grade_surface(albedo.rgb, slope_t);
+    if (!debug_on) {
+        surface_rgb = surface_rgb * detail.tint;
+    }
+    albedo = vec4<f32>(surface_rgb, albedo.a);
 
     // Debug checkerboard overlay. The body-fixed position of this
     // fragment is recovered as:
@@ -268,10 +462,16 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let sun_dir_ws = primary.dir_flux.xyz;
     let sun_flux   = primary.dir_flux.w;
 
-    let geo_normal = normalize(info.world_normal);
-    let normal = normalize(mix(geo_normal, normalize(height_normal), HEIGHT_NORMAL_WEIGHT));
+    // Lighting normal: weak coarse height relief + Step 3 procedural micro-
+    // relief. The detail offset is tangent to the sphere, so it tilts facets
+    // toward/away from the low sun and supplies the light/dark micro-contrast
+    // that reads as solid ground rather than luminous fog.
+    let height_n = normalize(mix(geo_normal, normalize(height_normal), HEIGHT_NORMAL_WEIGHT));
+    var normal = height_n;
+    if (!debug_on) {
+        normal = normalize(height_n + detail.normal_offset);
+    }
     let view_dir = normalize(info.view_vector);
-    let hit_ws = info.world_position.xyz;
 
     // No crater-shadow or terrain self-shadow yet on the ground LOD path —
     // those are impostor-only today. The local craft proxy supplies a

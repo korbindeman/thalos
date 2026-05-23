@@ -21,6 +21,10 @@ tracing = "0.1"
 ab_glyph = "0.2"
 resvg = { version = "0.47", default-features = false }
 rayon = "1.12"
+# f32 → f16 packing for the multi-scatter LUT image (Rgba16Float is linear-
+# filterable without the FLOAT32_FILTERABLE wgpu feature). Already in the lock
+# graph transitively; pinned here for the explicit conversion in `spawn.rs`.
+half = "2"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
