@@ -345,7 +345,12 @@ pub(crate) fn spawn_body_terrain(
         texture_size: TILE_TEXTURE_SIZE,
         border_size: TILE_BORDER_SIZE,
         mip_level_count: TILE_MIP_LEVELS,
-        format: AttachmentFormat::R16,
+        // Height uses two filtered UNORM16 channels: x stores the coarse
+        // normalized height and y stores a residual decoded in the shader.
+        // Plain R16 made Thalos' broad, shallow slopes visible as contour /
+        // terrace rings; R32Float would need the optional FLOAT32_FILTERABLE
+        // wgpu feature that the game intentionally does not request.
+        format: AttachmentFormat::Rg16,
     })
     .add_attachment(AttachmentConfig {
         name: "albedo".to_string(),

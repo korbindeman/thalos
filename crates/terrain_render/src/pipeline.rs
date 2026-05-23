@@ -256,6 +256,18 @@ fn encode_attachment(
                 .map(|p| encode_height(p.height_m, height_range_m))
                 .collect(),
         ),
+        (AttachmentFormat::Rg16, "height") => AttachmentData::Rg16(
+            pixels
+                .iter()
+                .map(|p| encode_height_rg16(p.height_m, height_range_m))
+                .collect(),
+        ),
+        (AttachmentFormat::R32Float, "height") => AttachmentData::R32Float(
+            pixels
+                .iter()
+                .map(|p| encode_height_unit(p.height_m, height_range_m))
+                .collect(),
+        ),
         (AttachmentFormat::Rgba8, "albedo") => AttachmentData::Rgba8(
             pixels
                 .iter()
@@ -295,10 +307,24 @@ fn tile_lod_m(
 }
 
 fn encode_height(height_m: f32, range: f32) -> u16 {
+    (encode_height_unit(height_m, range) * 65535.0 + 0.5) as u16
+}
+
+fn encode_height_unit(height_m: f32, range: f32) -> f32 {
     if range <= f32::EPSILON {
-        return 32768;
+        return 0.5;
     }
-    (((height_m / range).clamp(-1.0, 1.0) * 0.5 + 0.5) * 65535.0 + 0.5) as u16
+    (height_m / range).clamp(-1.0, 1.0) * 0.5 + 0.5
+}
+
+fn encode_height_rg16(height_m: f32, range: f32) -> [u16; 2] {
+    let unit = encode_height_unit(height_m, range);
+    let coarse = (unit * u16::MAX as f32).floor() / u16::MAX as f32;
+    let residual = ((unit - coarse) * u16::MAX as f32).clamp(0.0, 1.0);
+    [
+        (coarse * u16::MAX as f32 + 0.5) as u16,
+        (residual * u16::MAX as f32 + 0.5) as u16,
+    ]
 }
 
 fn pixel_direction(
@@ -349,6 +375,7 @@ fn zero_attachment(cfg: &AttachmentConfig) -> AttachmentData {
     let count = (cfg.texture_size * cfg.texture_size) as usize;
     match cfg.format {
         AttachmentFormat::R16 => AttachmentData::R16(vec![0; count]),
+        AttachmentFormat::R32Float => AttachmentData::R32Float(vec![0.0; count]),
         AttachmentFormat::Rg16 => AttachmentData::Rg16(vec![[0, 0]; count]),
         AttachmentFormat::Rgba8 => AttachmentData::Rgba8(vec![[0, 0, 0, 255]; count]),
         AttachmentFormat::Rgb8 => AttachmentData::None,

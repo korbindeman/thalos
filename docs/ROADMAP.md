@@ -91,7 +91,11 @@ bodies cut over one at a time.
   P1 (spec Phase A: the field-DAG data model — fields/expr/DAG, stamps,
   feature catalog + promotion, author overlay, sparse quadtree cache) are
   landed in `thalos_terrain` behind the seam, foundation-only and
-  test-validated. Next: P2 — analytic two-band detail + per-body cutover.
+  test-validated. Current next slice: P2A — a basic all-continental,
+  single-biome Thalos vertical slice via `GenericTerrestrial`, with direct
+  LOD-invariant `RuntimeTerrainDetail::BasicContinental` ground-height
+  evaluation before the Mira crater/feature compositor and the fuller per-body
+  cutovers.
 - **Spec:** [planet-generation-pipeline-spec.md](planet-generation-pipeline-spec.md)
   (target) + [planet-generation-pipeline-migration.md](planet-generation-pipeline-migration.md)
   (sequencing). [terrain.md](terrain.md)'s generation half is

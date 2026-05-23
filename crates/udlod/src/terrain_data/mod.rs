@@ -42,9 +42,11 @@ pub enum AttachmentFormat {
     Rgb8,
     /// Four  channels  8 bit
     Rgba8,
-    /// One   channel  16 bit
+    /// One   channel  16 bit normalized
     R16,
-    /// Two   channels 16 bit
+    /// One   channel  32 bit float
+    R32Float,
+    /// Two   channels 16 bit normalized
     Rg16,
 }
 
@@ -54,6 +56,7 @@ impl AttachmentFormat {
             AttachmentFormat::Rgb8 => TextureFormat::Rgba8UnormSrgb,
             AttachmentFormat::Rgba8 => TextureFormat::Rgba8UnormSrgb,
             AttachmentFormat::R16 => TextureFormat::R16Unorm,
+            AttachmentFormat::R32Float => TextureFormat::R32Float,
             AttachmentFormat::Rg16 => TextureFormat::Rg16Unorm,
         }
     }
@@ -63,6 +66,7 @@ impl AttachmentFormat {
             AttachmentFormat::Rgb8 => TextureFormat::Rgba8Unorm,
             AttachmentFormat::Rgba8 => TextureFormat::Rgba8Unorm,
             AttachmentFormat::R16 => TextureFormat::R16Unorm,
+            AttachmentFormat::R32Float => TextureFormat::R32Float,
             AttachmentFormat::Rg16 => TextureFormat::Rg16Unorm,
         }
     }
@@ -72,6 +76,7 @@ impl AttachmentFormat {
             AttachmentFormat::Rgb8 => 3,
             AttachmentFormat::Rgba8 => 4,
             AttachmentFormat::R16 => 2,
+            AttachmentFormat::R32Float => 4,
             AttachmentFormat::Rg16 => 4,
         }
     }
@@ -114,9 +119,11 @@ pub enum AttachmentData {
     // Rgb8(Vec<(u8, u8, u8)>), Can not be represented currently
     /// Four  channels  8 bit
     Rgba8(Vec<[u8; 4]>),
-    /// One   channel  16 bit
+    /// One   channel  16 bit normalized
     R16(Vec<u16>),
-    /// Two   channels 16 bit
+    /// One   channel  32 bit float
+    R32Float(Vec<f32>),
+    /// Two   channels 16 bit normalized
     Rg16(Vec<[u16; 2]>),
 }
 
@@ -129,6 +136,22 @@ impl AttachmentData {
         }
     }
 
+    /// Return the base/mip chain texels for an RG16 attachment.
+    pub fn as_rg16(&self) -> Option<&[[u16; 2]]> {
+        match self {
+            AttachmentData::Rg16(data) => Some(data.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Return the base/mip chain texels for an R32Float attachment.
+    pub fn as_r32_float(&self) -> Option<&[f32]> {
+        match self {
+            AttachmentData::R32Float(data) => Some(data.as_slice()),
+            _ => None,
+        }
+    }
+
     /// Decodes a flat byte buffer into the variant matching `format`. The
     /// byte length must equal `texture_size * texture_size *
     /// format.pixel_size()`.
@@ -137,6 +160,7 @@ impl AttachmentData {
             AttachmentFormat::Rgb8 => unimplemented!(),
             AttachmentFormat::Rgba8 => Self::Rgba8(cast_slice(data).to_vec()),
             AttachmentFormat::R16 => Self::R16(cast_slice(data).to_vec()),
+            AttachmentFormat::R32Float => Self::R32Float(cast_slice(data).to_vec()),
             AttachmentFormat::Rg16 => Self::Rg16(cast_slice(data).to_vec()),
         }
     }
@@ -145,6 +169,7 @@ impl AttachmentData {
         match self {
             AttachmentData::Rgba8(data) => cast_slice(data),
             AttachmentData::R16(data) => cast_slice(data),
+            AttachmentData::R32Float(data) => cast_slice(data),
             AttachmentData::Rg16(data) => cast_slice(data),
             AttachmentData::None => panic!("Attachment has no data."),
         }
@@ -203,6 +228,47 @@ impl AttachmentData {
             }
         }
 
+        fn generate_mipmap_rg16(
+            data: &mut Vec<[u16; 2]>,
+            parent_size: usize,
+            child_size: usize,
+            start: usize,
+        ) {
+            for (child_y, child_x) in iproduct!(0..child_size, 0..child_size) {
+                let mut value = [0u64; 2];
+
+                for (parent_x, parent_y) in
+                    iproduct!(0..2, 0..2).map(|(x, y)| ((child_x << 1) + x, (child_y << 1) + y))
+                {
+                    let index = start + parent_y * parent_size + parent_x;
+                    value[0] += data[index][0] as u64;
+                    value[1] += data[index][1] as u64;
+                }
+
+                data.push([(value[0] / 4) as u16, (value[1] / 4) as u16]);
+            }
+        }
+
+        fn generate_mipmap_r32_float(
+            data: &mut Vec<f32>,
+            parent_size: usize,
+            child_size: usize,
+            start: usize,
+        ) {
+            for (child_y, child_x) in iproduct!(0..child_size, 0..child_size) {
+                let mut value = 0.0;
+
+                for (parent_x, parent_y) in
+                    iproduct!(0..2, 0..2).map(|(x, y)| ((child_x << 1) + x, (child_y << 1) + y))
+                {
+                    let index = start + parent_y * parent_size + parent_x;
+                    value += data[index];
+                }
+
+                data.push(value * 0.25);
+            }
+        }
+
         let mut start = 0;
         let mut parent_size = texture_size as usize;
 
@@ -215,6 +281,12 @@ impl AttachmentData {
                 }
                 AttachmentData::R16(data) => {
                     generate_mipmap_r16(data, parent_size, child_size, start)
+                }
+                AttachmentData::R32Float(data) => {
+                    generate_mipmap_r32_float(data, parent_size, child_size, start)
+                }
+                AttachmentData::Rg16(data) => {
+                    generate_mipmap_rg16(data, parent_size, child_size, start)
                 }
                 _ => {}
             }
@@ -249,6 +321,10 @@ impl AttachmentData {
                 AttachmentData::R16(data) => {
                     let value = data[index as usize];
                     Vec4::new(value as f32 / u16::MAX as f32, 0.0, 0.0, 0.0)
+                }
+                AttachmentData::R32Float(data) => {
+                    let value = data[index as usize];
+                    Vec4::new(value, 0.0, 0.0, 0.0)
                 }
                 AttachmentData::Rg16(data) => {
                     let value = data[index as usize];

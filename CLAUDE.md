@@ -65,15 +65,6 @@ data, even outside `thalos_terrain`; these tests slow down the visual
 iteration loop. Use `just bake <body> --preview` (see below) for visual
 feedback instead.
 
-**Exception — the new field-DAG pipeline (`thalos_terrain::pipeline`).** The
-spec's pipeline (migration P1+) is foundation-only, with no rendering, and is
-validated by fast sampling + determinism *unit* tests per the spec (Phase A).
-Those are allowed and encouraged: they run on hand-built toy field bags, don't
-bake per-body planet data, and don't touch the visual loop. The prohibition
-above targets per-body generation/bake tests, not the pipeline's
-data-model/DAG/sampling unit tests. See
-`docs/planet-generation-pipeline-migration.md`.
-
 ## Bakes: production vs preview
 
 The game **loads pre-baked terrain only** — it never compiles. Bakes live
@@ -419,7 +410,14 @@ Cubemap-based procedural surface generation. No Bevy dependency.
 - `TerrainConfig` — top-level enum in `terrain_config.rs`: `None`,
   `Feature(FeatureTerrainConfig)` for archetype-driven bodies (Mira,
   Vaelen, Thalos, Pelagos…), `Ocean(OceanTerrainConfig)` for
-  flat-water placeholders.
+  flat-water placeholders. Current P2A migration state: Thalos is
+  deliberately authored as a basic all-land, single-biome
+  `GenericTerrestrial` prototype; its ground LOD uses
+  `RuntimeTerrainDetail::BasicContinental` so the same smooth continental
+  evaluator defines runtime height instead of the legacy P0 HMF detail
+  cascade. Runtime ground height is LOD-invariant in this slice to avoid
+  contour-like parent/child tile handoff steps. The fuller oceanic/tectonic
+  Thalos route is parked for a later P2 slice.
 - `compile_terrain_config(...)` — single entry point. Builds the
   optional `TectonicSystem` from `TectonicConfig`, compiles the
   static surface (via `feature_compiler` or `compile_ocean`), and
@@ -440,44 +438,14 @@ Cubemap-based procedural surface generation. No Bevy dependency.
   `stage_seed` before each `apply()` so there's no ambient state.
 - `tectonics/` — plate graph (`Plate`, `PlateKind`, `Boundary`,
   `BoundaryKind`), spherical mesh, plate-derived fields. Currently
-  consumed by `AgingOceanicHomeworld` (Thalos) and
-  `ColdDesertFormerlyWet` (Vaelen).
+  consumed by `ColdDesertFormerlyWet` (Vaelen) and by the parked fuller
+  `AgingOceanicHomeworld` Thalos route; the active P2A Thalos prototype
+  omits tectonics.
 - `surface_field` / `aging_oceanic_field` / `cold_desert_field` /
   `vaelen_field` — continuous archetype surface fields sampled into
   the cubemap accumulators.
-- `query` — **the Query API seam** (`SurfaceQuery` trait + `BakedSurface`
-  impl + `surface_sample` / `surface_height_m` / `surface_height_range_m`).
-  The single band-limited surface evaluator shared by the impostor, the
-  UDLOD ground tiles, and the physics collider; the domain-warped ridged-HMF
-  detail cascade lives here (moved out of `thalos_terrain_render::pipeline`
-  in migration P0). New consumers go through this, not the legacy `sample`
-  path. `thalos_terrain_render`'s `rendered_height_m` / `rendered_height_range`
-  are now thin wrappers over it. See
-  `docs/planet-generation-pipeline-migration.md`.
-- `pipeline` — **the new field-DAG generation pipeline** (the spec's target
-  architecture; migration P1 = spec Phase A, **complete**). Foundation-only,
-  behind the `query` seam, no rendering wiring, coexisting with the legacy
-  `feature_compiler`/`stages` until per-body cutover (P2). Submodules:
-  `field`/`expr`/`dag` (named `Field`s with value `Expr`ession trees + an
-  auto-derived evaluation DAG with cycle/dangling-ref/duplicate rejection),
-  `planet` (`Planet` field bag + `sample_field`), `stamp` (geometry +
-  `Const`/`FromField` scalars + falloff + composition — the authored/generator
-  contribution unit), `feature` (declared `FeatureType`s + density-gated
-  `ScatterGenerator` + explicit instances + promotion exclusion index +
-  region queries), `field::AuthorOverlay` (separately-materialised paint-op
-  log, two-path composed onto procedural), `storage`/`cubesphere`
-  (`FieldCache`: lazy uniform-compressed cube-sphere quadtree, L2-over-L4).
-  Validated by fast sampling/determinism unit tests (see the
-  Planet-generation exception above), no per-body bakes.
-- `sample()` / `sample_static_surface()` / `SurfaceSample` — legacy
-  three-layer sampler (baked cubemap + crater SSBO + statistical noise).
-  No longer wired to any consumer (P0 converged `bake_dump` onto `query`);
-  retained as the crater feature-composition reference for P2 and as the
-  CPU mirror of the impostor shader's crater synthesis. NB: the seam
-  (`query`) does **not** synthesize SSBO/statistical craters — the ground
-  LOD has never rendered them — so converged dumps reflect the crater-less
-  ground surface, not the impostor's crater-rich one. Closing that
-  divergence is P2 feature composition.
+- `sample()` / `sample_static_surface()` / `SurfaceSample` — sampling
+  contracts for reading finished surface data.
 
 ### Celestial crate (`crates/celestial/`)
 
@@ -668,18 +636,8 @@ status, dependency graph. Each major system has a unified spec doc.
   `Simulation::is_destroyed`).
 - `input.md` — enhanced-input context model, binding file rules, and
   per-binary intent resources.
-- `planet-generation-pipeline-spec.md` — **target** architecture for
-  terrain generation (field-DAG intent layer, feature catalog, two-band
-  band-limited heightfield, Query API, quadtree storage, 4-tier cache).
-- `planet-generation-pipeline-migration.md` — brownfield migration from
-  today's pipeline to the spec; maps spec concepts onto the crates and
-  sequences the work (strangler-fig around a Query API). Also covers the
-  "streamline planet rendering" goal (one band-limited surface across
-  impostor / ground LOD / collider).
 - `terrain.md` — terrain generation (feature compiler) + ground LOD
-  rendering. **Generation half superseded** by the two docs above; its
-  ground-LOD/`TileProvider` half remains current. Includes v2 backlog
-  from terrestrial-pipeline research.
+  rendering. Includes v2 backlog from terrestrial-pipeline research.
 - `atmosphere.md` — gas giants, rocky-atmosphere single-scattering
   raymarch (unified per-body fullscreen pass with scene-depth
   coupling for aerial perspective), Kármán-line authoring, ocean

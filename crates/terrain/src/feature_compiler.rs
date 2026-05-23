@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::aging_oceanic_field::{AgingOceanicField, enforce_single_connected_ocean};
 use crate::body_builder::BodyBuilder;
 use crate::cold_desert_field::{ColdDesertField, ColdDesertStyle};
+use crate::generic_terrestrial_field::{
+    BasicContinentalField, BasicContinentalParams, RuntimeTerrainDetail,
+};
 use crate::height_generator::{
     ColdDesertBiomeHeightGenerators, HeightGenerator, HeightGeneratorStack, IqDerivativeFbmHeight,
 };
@@ -1524,9 +1527,12 @@ pub fn compile_manifest_to_static_surface(
             let tectonics = tectonics.ok_or(FeatureCompileError::MissingTectonics)?;
             compile_aging_oceanic_homeworld(spec, manifest, prior, tectonics, options, mid_freq)
         }
-        archetype => {
+        BodyArchetype::GenericTerrestrial => {
+            // P2A prototype route: all-land, one-biome continental Thalos.
+            // Keep the bake CPU-only for now; the mid-frequency GPU pass is
+            // still tuned for the oceanic-homeworld path.
             drop(mid_freq);
-            Err(FeatureCompileError::UnsupportedArchetype(archetype))
+            compile_generic_terrestrial(spec, manifest, prior, options)
         }
     }
 }
@@ -1956,6 +1962,71 @@ fn compile_cold_desert_formerly_wet(
 fn apply_projection_stage<S: Stage>(builder: &mut BodyBuilder, seed: u64, stage: S) {
     builder.stage_seed = seed;
     stage.apply(builder);
+}
+
+/// Compile the P2A `GenericTerrestrial` prototype: one all-land continental
+/// biome, no oceans, no tectonics, no feature compositor yet.
+fn compile_generic_terrestrial(
+    spec: &PlanetTerrainSpec,
+    manifest: &FeatureManifest,
+    prior: &TerrainPrior,
+    options: FeatureCompileOptions,
+) -> Result<StaticSurfaceData, FeatureCompileError> {
+    let FeatureCompileOptions {
+        cubemap_resolution,
+        crater_count_scale: _,
+        projection: _,
+        cold_desert_style: _,
+    } = options;
+
+    let body_id = &manifest.root;
+    let crust = manifest
+        .get(&body_id.child("crustal_provinces"))
+        .ok_or_else(|| FeatureCompileError::MissingFeature(body_id.child("crustal_provinces")))?;
+
+    let mut builder = BodyBuilder::new(
+        spec.physical.radius_m,
+        spec.root_seed,
+        composition_for(spec.physical.composition),
+        cubemap_resolution,
+        spec.physical.age_gyr,
+        None,
+        spec.physical.obliquity_deg.unwrap_or(0.0).to_radians(),
+    );
+
+    builder.materials = vec![Material {
+        albedo: [0.285, 0.255, 0.190],
+        roughness: 0.82,
+    }];
+    builder.biomes = vec![BiomeParams {
+        name: "basic_continental".to_string(),
+        albedo: 0.285,
+        fresh_albedo: None,
+        tint: [1.0, 1.0, 1.0],
+        tonal_amp: 0.14,
+        roughness: 0.82,
+        iron_visibility: 1.0,
+    }];
+
+    let params = BasicContinentalParams::from_seed_parts(
+        crust.seed.shape,
+        crust.seed.detail,
+        prior.relief_scale_m,
+    );
+    let field = BasicContinentalField::new(params, builder.radius_m);
+    bake_surface_field_into_builder(&mut builder, &field);
+    builder.runtime_detail = RuntimeTerrainDetail::BasicContinental(field.params());
+
+    // Keep the whole surface dry while still giving gameplay systems a sea
+    // level threshold for landing-site search. The generated field is biased
+    // safely above 0 m, so no water is visible in the prototype.
+    builder.sea_level_m = Some(0.0);
+    paint_surface_albedo(
+        &mut builder,
+        &SurfaceColorSpec::generic_terrestrial(spec.root_seed),
+    );
+
+    Ok(builder.build())
 }
 
 /// Compile an `AgingOceanicHomeworld` body. Reads the tectonic system to

@@ -1,6 +1,7 @@
 use glam::Vec3;
 
 use crate::cubemap::{Cubemap, CubemapAccumulator, default_resolution};
+use crate::generic_terrestrial_field::RuntimeTerrainDetail;
 use crate::spatial_index::IcoBuckets;
 use crate::stages::{BasinDef, MAT_HIGHLAND};
 use crate::static_surface::StaticSurfaceData;
@@ -78,6 +79,9 @@ pub struct BodyBuilder {
     /// Megabasin definitions written by the Megabasin stage and read by
     /// later stages (MareFlood selects flood targets from these).
     pub megabasins: Vec<BasinDef>,
+
+    /// Runtime geometric detail strategy used by the Query API.
+    pub runtime_detail: RuntimeTerrainDetail,
 
     /// High-frequency detail parameters.
     pub detail_params: DetailNoiseParams,
@@ -169,6 +173,7 @@ impl BodyBuilder {
             volcanoes: Vec::new(),
             channels: Vec::new(),
             megabasins: Vec::new(),
+            runtime_detail: RuntimeTerrainDetail::default(),
             detail_params: DetailNoiseParams {
                 body_radius_m: radius_m,
                 body_age_gyr,
@@ -223,6 +228,7 @@ impl BodyBuilder {
             volcanoes: self.volcanoes,
             channels: self.channels,
             feature_index,
+            runtime_detail: self.runtime_detail,
             detail_params: self.detail_params,
             materials: self.materials,
             mean_albedo,

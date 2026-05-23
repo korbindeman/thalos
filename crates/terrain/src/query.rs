@@ -20,11 +20,13 @@
 //!
 //! ## What backs it
 //!
-//! Today the only backing is the baked [`PlanetSurface`] plus the analytic
-//! detail cascade in this module ([`surface_sample`] / [`BakedSurface`]).
-//! Later migration phases (field-DAG intent layer + two-band detail stage)
-//! swap the backing behind the [`SurfaceQuery`] trait without consumers
-//! noticing.
+//! Today the default backing is the baked [`PlanetSurface`] plus the legacy
+//! analytic detail cascade in this module ([`surface_sample`] /
+//! [`BakedSurface`]). P2A `GenericTerrestrial` bodies opt into a direct runtime
+//! evaluator for their smooth continental field, using the same terrain
+//! function that produced the bake. Later migration phases (field-DAG intent
+//! layer + two-band detail stage) swap more backings behind the [`SurfaceQuery`]
+//! trait without consumers noticing.
 //!
 //! ## Reserved for later phases
 //!
@@ -39,6 +41,7 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use crate::cubemap::{Cubemap, dir_to_face_uv};
+use crate::generic_terrestrial_field::RuntimeTerrainDetail;
 use crate::sample::apply_dynamic_surface_layers;
 use crate::static_surface::PlanetSurface;
 use crate::types::DynamicSurfaceState;
@@ -221,7 +224,9 @@ impl SurfaceQuery for BakedSurface {
 /// Stages, in order:
 /// 1. Cubemap base, bilinearly sampled.
 /// 2. Dynamic layers (ice caps, aeolian bedforms).
-/// 3. LOD-adaptive procedural detail: domain-warped ridged HMF.
+/// 3. Runtime geometric detail selected by the baked surface: legacy bodies
+///    get the P0 HMF cascade; P2A `GenericTerrestrial` bodies evaluate their
+///    smooth continental field directly at the requested LOD.
 pub fn surface_sample(
     surface: &PlanetSurface,
     dynamic_state: &DynamicSurfaceState,
@@ -238,10 +243,7 @@ pub fn surface_sample(
     }
     let dynamic_lod = lod_m.max(1e-6).log2();
     let base = sample_base_with_dynamic(surface, dynamic_state, dir, dynamic_lod);
-    let plan = detail_plan_for_lod(lod_m, DETAIL_BASE_WL_M);
-    let detail_h = compute_detail_height(dir, surface.static_surface.radius_m, plan);
-    let height_m =
-        combine_base_and_detail(base.height_m, detail_h, surface.static_surface.sea_level_m);
+    let height_m = runtime_height_m(surface, dir, lod_m, base.height_m);
     SurfaceSample {
         height_m,
         albedo_linear: base.albedo_linear,
@@ -270,18 +272,19 @@ pub fn surface_height_m(
     }
     let dynamic_lod = lod_m.max(1e-6).log2();
     let base = sample_base_with_dynamic(surface, dynamic_state, dir, dynamic_lod);
-    let plan = detail_plan_for_lod(lod_m, DETAIL_BASE_WL_M);
-    let detail_h = compute_detail_height(dir, surface.static_surface.radius_m, plan);
-    combine_base_and_detail(base.height_m, detail_h, surface.static_surface.sea_level_m)
+    runtime_height_m(surface, dir, lod_m, base.height_m)
 }
 
 /// Vertical range (metres) the surface must encode: static + dynamic +
 /// procedural detail headroom.
 pub fn surface_height_range_m(surface: &PlanetSurface, state: &DynamicSurfaceState) -> f32 {
-    (surface.static_surface.height_range
-        + dynamic_height_margin(surface, state)
-        + DETAIL_HEIGHT_MARGIN_M)
-        .max(1.0)
+    let base = surface.static_surface.height_range + dynamic_height_margin(surface, state);
+    match surface.static_surface.runtime_detail {
+        RuntimeTerrainDetail::LegacyHmf => (base + DETAIL_HEIGHT_MARGIN_M).max(1.0),
+        RuntimeTerrainDetail::BasicContinental(params) => {
+            base.max(params.height_range_hint_m()).max(1.0)
+        }
+    }
 }
 
 /// Object-space surface normal at `dir`, via LOD-aware finite differences of
@@ -431,7 +434,29 @@ fn static_roughness(surface: &PlanetSurface, dir: Vec3) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Procedural detail cascade (domain-warped ridged HMF)
+// Runtime geometric detail
+// ---------------------------------------------------------------------------
+
+fn runtime_height_m(surface: &PlanetSurface, dir: Vec3, lod_m: f32, base_height_m: f32) -> f32 {
+    match surface.static_surface.runtime_detail {
+        RuntimeTerrainDetail::LegacyHmf => {
+            let plan = detail_plan_for_lod(lod_m, DETAIL_BASE_WL_M);
+            let detail_h = compute_detail_height(dir, surface.static_surface.radius_m, plan);
+            combine_base_and_detail(base_height_m, detail_h, surface.static_surface.sea_level_m)
+        }
+        RuntimeTerrainDetail::BasicContinental(params) => {
+            let _ = lod_m;
+            // For the P2A Thalos prototype, keep runtime geometry invariant
+            // across tile LODs. Otherwise the same world-space point receives
+            // a different height when a parent tile hands off to a child,
+            // which reads as contour-like terracing in the ground mesh.
+            params.sample_height_m(surface.static_surface.radius_m, dir, 1.0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy procedural detail cascade (domain-warped ridged HMF)
 // ---------------------------------------------------------------------------
 
 /// Domain-warped ridged hybrid multifractal in metres. Evaluated in body-local

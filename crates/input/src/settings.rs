@@ -169,45 +169,28 @@ fn validate_section_file(
     file: &BindingSectionFile,
     defaults: &BindingSection,
 ) -> Result<(), InputSettingsError> {
-    for (action, bindings) in &file.bindings {
+    for action in file.bindings.keys() {
         if !defaults.bindings.contains_key(action) {
             return Err(InputSettingsError::Validation(InputValidationError::new(
                 format!("{path}.bindings.{action}"),
                 "unknown action",
             )));
         }
-        for (index, binding) in bindings.iter().enumerate() {
-            validate_binding_spec(&format!("{path}.bindings.{action}[{index}]"), binding)?;
-        }
     }
+    // Binding values are validated by serde at parse time — KeyCode and
+    // MouseButton variants are real enum types, not loose strings.
 
-    for (axis, spec) in &file.axes {
+    for (axis, _spec) in &file.axes {
         if !defaults.axes.contains_key(axis) {
             return Err(InputSettingsError::Validation(InputValidationError::new(
                 format!("{path}.axes.{axis}"),
                 "unknown axis",
             )));
         }
-        for (index, binding) in spec.positive.iter().enumerate() {
-            validate_binding_spec(&format!("{path}.axes.{axis}.positive[{index}]"), binding)?;
-        }
-        for (index, binding) in spec.negative.iter().enumerate() {
-            validate_binding_spec(&format!("{path}.axes.{axis}.negative[{index}]"), binding)?;
-        }
+        // Axis sources are also validated by serde.
     }
 
     Ok(())
-}
-
-fn validate_binding_spec(path: &str, binding: &BindingSpec) -> Result<(), InputSettingsError> {
-    match binding {
-        BindingSpec::Key(key) => try_parse_key_code(key).map(|_| ()),
-        BindingSpec::MouseButton(button) => try_parse_mouse_button(button).map(|_| ()),
-        BindingSpec::MouseMotion | BindingSpec::MouseWheel => Ok(()),
-    }
-    .map_err(|message| {
-        InputSettingsError::Validation(InputValidationError::new(path.to_string(), message))
-    })
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -342,89 +325,41 @@ pub struct AxisSpec {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub enum BindingSpec {
-    Key(String),
-    MouseButton(String),
+    Key(KeyCode),
+    MouseButton(MouseButton),
     MouseMotion,
     MouseWheel,
 }
 
 impl BindingSpec {
-    pub fn key(key: impl Into<String>) -> Self {
-        Self::Key(key.into())
+    pub fn key(key: KeyCode) -> Self {
+        Self::Key(key)
     }
 
-    pub fn mouse_button(button: impl Into<String>) -> Self {
-        Self::MouseButton(button.into())
+    pub fn mouse_button(button: MouseButton) -> Self {
+        Self::MouseButton(button)
     }
 
     pub fn to_binding(&self) -> Binding {
         match self {
-            Self::Key(key) => Binding::from(
-                try_parse_key_code(key).expect("input key should have been validated at load time"),
-            ),
-            Self::MouseButton(button) => Binding::from(
-                try_parse_mouse_button(button)
-                    .expect("input mouse button should have been validated at load time"),
-            ),
+            Self::Key(key) => Binding::from(*key),
+            Self::MouseButton(button) => Binding::from(*button),
             Self::MouseMotion => Binding::mouse_motion(),
             Self::MouseWheel => Binding::mouse_wheel(),
         }
     }
 }
 
-fn try_parse_key_code(value: &str) -> Result<KeyCode, String> {
-    match value {
-        "Backslash" => Ok(KeyCode::Backslash),
-        "Backspace" => Ok(KeyCode::Backspace),
-        "Comma" => Ok(KeyCode::Comma),
-        "ControlLeft" => Ok(KeyCode::ControlLeft),
-        "ControlRight" => Ok(KeyCode::ControlRight),
-        "Delete" => Ok(KeyCode::Delete),
-        "Escape" => Ok(KeyCode::Escape),
-        "F1" => Ok(KeyCode::F1),
-        "F12" => Ok(KeyCode::F12),
-        "KeyA" => Ok(KeyCode::KeyA),
-        "KeyC" => Ok(KeyCode::KeyC),
-        "KeyD" => Ok(KeyCode::KeyD),
-        "KeyE" => Ok(KeyCode::KeyE),
-        "KeyF" => Ok(KeyCode::KeyF),
-        "KeyG" => Ok(KeyCode::KeyG),
-        "KeyM" => Ok(KeyCode::KeyM),
-        "KeyN" => Ok(KeyCode::KeyN),
-        "KeyP" => Ok(KeyCode::KeyP),
-        "KeyQ" => Ok(KeyCode::KeyQ),
-        "KeyS" => Ok(KeyCode::KeyS),
-        "KeyT" => Ok(KeyCode::KeyT),
-        "KeyV" => Ok(KeyCode::KeyV),
-        "KeyW" => Ok(KeyCode::KeyW),
-        "KeyX" => Ok(KeyCode::KeyX),
-        "KeyZ" => Ok(KeyCode::KeyZ),
-        "Period" => Ok(KeyCode::Period),
-        "ShiftLeft" => Ok(KeyCode::ShiftLeft),
-        "ShiftRight" => Ok(KeyCode::ShiftRight),
-        "Space" => Ok(KeyCode::Space),
-        other => Err(format!("unknown key code `{other}`")),
-    }
-}
-
-fn try_parse_mouse_button(value: &str) -> Result<MouseButton, String> {
-    match value {
-        "Left" => Ok(MouseButton::Left),
-        "Middle" => Ok(MouseButton::Middle),
-        "Right" => Ok(MouseButton::Right),
-        other => Err(format!("unknown mouse button `{other}`")),
-    }
-}
-
 pub mod defaults {
     use super::{AxisSpec, BindingSection, BindingSpec};
+    use bevy::prelude::{KeyCode, MouseButton};
 
     pub fn game_system() -> BindingSection {
         section(
             [
-                ("escape", keys(["Escape"])),
-                ("screenshot", keys(["F12"])),
-                ("toggle_free_cam", keys(["F1"])),
+                ("escape", keys([KeyCode::Escape])),
+                ("screenshot", keys([KeyCode::F2])),
+                ("toggle_free_cam", keys([KeyCode::F3])),
             ],
             [],
         )
@@ -433,18 +368,21 @@ pub mod defaults {
     pub fn game_flight() -> BindingSection {
         section(
             [
-                ("toggle_sas", keys(["KeyT"])),
-                ("throttle_full", keys(["KeyZ"])),
-                ("throttle_cut", keys(["KeyX"])),
-                ("stage", keys(["Space"])),
+                ("toggle_sas", keys([KeyCode::KeyT])),
+                ("throttle_full", keys([KeyCode::KeyZ])),
+                ("throttle_cut", keys([KeyCode::KeyX])),
+                ("stage", keys([KeyCode::Space])),
             ],
             [
-                ("pitch", axis(["KeyW"], ["KeyS"])),
-                ("yaw", axis(["KeyD"], ["KeyA"])),
-                ("roll", axis(["KeyE"], ["KeyQ"])),
+                ("pitch", axis([KeyCode::KeyW], [KeyCode::KeyS])),
+                ("yaw", axis([KeyCode::KeyD], [KeyCode::KeyA])),
+                ("roll", axis([KeyCode::KeyE], [KeyCode::KeyQ])),
                 (
                     "throttle_ramp",
-                    axis(["ShiftLeft", "ShiftRight"], ["ControlLeft", "ControlRight"]),
+                    axis(
+                        [KeyCode::ShiftLeft, KeyCode::ShiftRight],
+                        [KeyCode::ControlLeft, KeyCode::ControlRight],
+                    ),
                 ),
             ],
         )
@@ -453,10 +391,10 @@ pub mod defaults {
     pub fn game_warp() -> BindingSection {
         section(
             [
-                ("warp_to_maneuver", keys(["KeyG"])),
-                ("warp_increase", keys(["Period"])),
-                ("warp_decrease", keys(["Comma"])),
-                ("warp_reset", keys(["Backslash"])),
+                ("warp_to_maneuver", keys([KeyCode::KeyG])),
+                ("warp_increase", keys([KeyCode::Period])),
+                ("warp_decrease", keys([KeyCode::Comma])),
+                ("warp_reset", keys([KeyCode::Backslash])),
             ],
             [],
         )
@@ -465,9 +403,9 @@ pub mod defaults {
     pub fn game_view() -> BindingSection {
         section(
             [
-                ("toggle_view", keys(["KeyM"])),
-                ("toggle_photo_mode", keys(["KeyP"])),
-                ("cycle_ship_camera", keys(["KeyV"])),
+                ("toggle_view", keys([KeyCode::KeyM])),
+                ("toggle_photo_mode", keys([KeyCode::F1, KeyCode::KeyP])),
+                ("cycle_ship_camera", keys([KeyCode::KeyV])),
             ],
             [],
         )
@@ -476,7 +414,7 @@ pub mod defaults {
     pub fn game_camera() -> BindingSection {
         section(
             [
-                ("primary", mouse_buttons(["Left"])),
+                ("primary", mouse_buttons([MouseButton::Left])),
                 ("motion", vec![BindingSpec::MouseMotion]),
                 ("wheel", vec![BindingSpec::MouseWheel]),
             ],
@@ -485,15 +423,15 @@ pub mod defaults {
     }
 
     pub fn game_eva() -> BindingSection {
-        section([("toggle_player_controller", keys(["KeyF"]))], [])
+        section([("toggle_player_controller", keys([KeyCode::KeyF]))], [])
     }
 
     pub fn game_eva_move() -> BindingSection {
         section(
             [],
             [
-                ("forward", axis(["KeyW"], ["KeyS"])),
-                ("strafe", axis(["KeyD"], ["KeyA"])),
+                ("forward", axis([KeyCode::KeyW], [KeyCode::KeyS])),
+                ("strafe", axis([KeyCode::KeyD], [KeyCode::KeyA])),
             ],
         )
     }
@@ -501,8 +439,8 @@ pub mod defaults {
     pub fn game_maneuver() -> BindingSection {
         section(
             [
-                ("toggle_place_node", keys(["KeyN"])),
-                ("delete_node", keys(["Delete", "Backspace"])),
+                ("toggle_place_node", keys([KeyCode::KeyN])),
+                ("delete_node", keys([KeyCode::Delete, KeyCode::Backspace])),
             ],
             [],
         )
@@ -511,8 +449,8 @@ pub mod defaults {
     pub fn game_maneuver_precision() -> BindingSection {
         section(
             [
-                ("fine", keys(["ShiftLeft", "ShiftRight"])),
-                ("ultra", keys(["ControlLeft", "ControlRight"])),
+                ("fine", keys([KeyCode::ShiftLeft, KeyCode::ShiftRight])),
+                ("ultra", keys([KeyCode::ControlLeft, KeyCode::ControlRight])),
             ],
             [],
         )
@@ -521,11 +459,11 @@ pub mod defaults {
     pub fn planet_editor() -> BindingSection {
         section(
             [
-                ("primary", mouse_buttons(["Left"])),
+                ("primary", mouse_buttons([MouseButton::Left])),
                 ("camera_motion", vec![BindingSpec::MouseMotion]),
                 ("camera_wheel", vec![BindingSpec::MouseWheel]),
-                ("toggle_fullbright", keys(["KeyF"])),
-                ("overlay_suppress", keys(["Space"])),
+                ("toggle_fullbright", keys([KeyCode::KeyF])),
+                ("overlay_suppress", keys([KeyCode::Space])),
             ],
             [],
         )
@@ -534,10 +472,13 @@ pub mod defaults {
     pub fn shipyard() -> BindingSection {
         section(
             [
-                ("primary", mouse_buttons(["Left"])),
+                ("primary", mouse_buttons([MouseButton::Left])),
                 ("camera_motion", vec![BindingSpec::MouseMotion]),
                 ("camera_wheel", vec![BindingSpec::MouseWheel]),
-                ("precision_slow", keys(["ShiftLeft", "ShiftRight"])),
+                (
+                    "precision_slow",
+                    keys([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+                ),
             ],
             [],
         )
@@ -559,17 +500,17 @@ pub mod defaults {
         }
     }
 
-    fn keys<const N: usize>(keys: [&'static str; N]) -> Vec<BindingSpec> {
+    fn keys<const N: usize>(keys: [KeyCode; N]) -> Vec<BindingSpec> {
         keys.into_iter().map(BindingSpec::key).collect()
     }
 
-    fn mouse_buttons<const N: usize>(buttons: [&'static str; N]) -> Vec<BindingSpec> {
+    fn mouse_buttons<const N: usize>(buttons: [MouseButton; N]) -> Vec<BindingSpec> {
         buttons.into_iter().map(BindingSpec::mouse_button).collect()
     }
 
     fn axis<const P: usize, const N: usize>(
-        positive: [&'static str; P],
-        negative: [&'static str; N],
+        positive: [KeyCode; P],
+        negative: [KeyCode; N],
     ) -> AxisSpec {
         AxisSpec {
             positive: keys(positive),
@@ -581,6 +522,7 @@ pub mod defaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::prelude::KeyCode;
 
     #[test]
     fn assets_input_ron_parses() {
@@ -606,33 +548,34 @@ mod tests {
 
     #[test]
     fn missing_bindings_merge_with_defaults() {
-        let settings = InputSettings::from_ron_str("#![enable(implicit_some)]\n(version: 1, game: (flight: (bindings: {\"toggle_sas\": [Key(\"KeyF\")]},),),)")
+        let settings = InputSettings::from_ron_str("#![enable(implicit_some)]\n(version: 1, game: (flight: (bindings: {\"toggle_sas\": [Key(KeyF)]},),),)")
             .expect("settings should parse");
         assert_eq!(
             settings.game.flight.bindings.get("toggle_sas"),
-            Some(&vec![BindingSpec::key("KeyF")])
+            Some(&vec![BindingSpec::key(KeyCode::KeyF)])
         );
         assert_eq!(
             settings.game.warp.bindings.get("warp_increase"),
-            Some(&vec![BindingSpec::key("Period")])
+            Some(&vec![BindingSpec::key(KeyCode::Period)])
         );
     }
 
     #[test]
     fn invalid_action_source_reports_key_name() {
+        // Unknown action names are caught by validation, not serde.
         let error = InputSettings::from_ron_str(
-            "#![enable(implicit_some)]\n(version: 1, game: (system: (bindings: {\"escape\": [Key(\"Nope\")]},),),)",
+            "#![enable(implicit_some)]\n(version: 1, game: (system: (bindings: {\"escape\": [Key(Nope)]},),),)",
         )
-        .expect_err("settings should reject unknown keys")
-        .to_string();
-        assert!(error.contains("game.system.bindings.escape[0]"));
-        assert!(error.contains("unknown key code `Nope`"));
+        .expect_err("settings should reject unknown keys");
+        let msg = error.to_string();
+        // The RON parser catches Nope as an unknown KeyCode variant.
+        assert!(msg.contains("Nope"), "error should mention Nope: {msg}");
     }
 
     #[test]
     fn invalid_action_name_reports_path() {
         let error = InputSettings::from_ron_str(
-            "#![enable(implicit_some)]\n(version: 1, game: (system: (bindings: {\"bogus\": [Key(\"Escape\")]},),),)",
+            "#![enable(implicit_some)]\n(version: 1, game: (system: (bindings: {\"bogus\": [Key(Escape)]},),),)",
         )
         .expect_err("settings should reject unknown actions")
         .to_string();
@@ -650,7 +593,7 @@ mod tests {
                 .axes
                 .get("pitch")
                 .map(|axis| &axis.positive),
-            Some(&vec![BindingSpec::key("KeyW")])
+            Some(&vec![BindingSpec::key(KeyCode::KeyW)])
         );
         assert_eq!(
             settings
@@ -659,7 +602,7 @@ mod tests {
                 .axes
                 .get("pitch")
                 .map(|axis| &axis.negative),
-            Some(&vec![BindingSpec::key("KeyS")])
+            Some(&vec![BindingSpec::key(KeyCode::KeyS)])
         );
     }
 }

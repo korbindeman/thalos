@@ -42,10 +42,18 @@ fn sample_attachment1_gather0(tile: AtlasTile) -> vec4<f32> {
     return textureGather(0, attachment1_atlas, atlas_sampler, uv, tile.index);
 }
 
-fn sample_height(tile: AtlasTile) -> f32 {
-    let height = sample_attachment0(tile).x;
+fn decode_height_unit(height_sample: vec4<f32>) -> f32 {
+    // R16 stores normalized height in x. Packed RG16 height attachments store
+    // a filtered residual in y. R32Float height also works because y is zero.
+    return height_sample.x + height_sample.y / 65535.0;
+}
 
-    return mix(config.min_height, config.max_height, height);
+fn decode_height_m(height_sample: vec4<f32>) -> f32 {
+    return mix(config.min_height, config.max_height, decode_height_unit(height_sample));
+}
+
+fn sample_height(tile: AtlasTile) -> f32 {
+    return decode_height_m(sample_attachment0(tile));
 }
 
 fn sample_normal(tile: AtlasTile, vertex_normal: vec3<f32>) -> vec3<f32> {
@@ -92,21 +100,21 @@ fn sample_normal(tile: AtlasTile, vertex_normal: vec3<f32>) -> vec3<f32> {
 
 #ifdef FRAGMENT
 #ifdef SAMPLE_GRAD
-    let left  = mix(config.min_height, config.max_height, textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>(-offset,     0.0), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy).x);
-    let up    = mix(config.min_height, config.max_height, textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0, -offset), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy).x);
-    let right = mix(config.min_height, config.max_height, textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>( offset,     0.0), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy).x);
-    let down  = mix(config.min_height, config.max_height, textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0,  offset), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy).x);
+    let left  = decode_height_m(textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>(-offset,     0.0), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy));
+    let up    = decode_height_m(textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0, -offset), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy));
+    let right = decode_height_m(textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>( offset,     0.0), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy));
+    let down  = decode_height_m(textureSampleGrad(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0,  offset), tile.index, tile.coordinate.uv_dx, tile.coordinate.uv_dy));
 #else
-    let left  = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(-offset,     0.0), tile.index, 0.0).x);
-    let up    = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0, -offset), tile.index, 0.0).x);
-    let right = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>( offset,     0.0), tile.index, 0.0).x);
-    let down  = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0,  offset), tile.index, 0.0).x);
+    let left  = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(-offset,     0.0), tile.index, 0.0));
+    let up    = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0, -offset), tile.index, 0.0));
+    let right = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>( offset,     0.0), tile.index, 0.0));
+    let down  = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0,  offset), tile.index, 0.0));
 #endif
 #else
-    let left  = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(-offset,     0.0), tile.index, 0.0).x);
-    let up    = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0, -offset), tile.index, 0.0).x);
-    let right = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>( offset,     0.0), tile.index, 0.0).x);
-    let down  = mix(config.min_height, config.max_height, textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0,  offset), tile.index, 0.0).x);
+    let left  = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(-offset,     0.0), tile.index, 0.0));
+    let up    = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0, -offset), tile.index, 0.0));
+    let right = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>( offset,     0.0), tile.index, 0.0));
+    let down  = decode_height_m(textureSampleLevel(attachment0_atlas, atlas_sampler, uv + vec2<f32>(    0.0,  offset), tile.index, 0.0));
 #endif
 
     let surface_normal = normalize(vec3<f32>(left - right, down - up, distance_between_samples));
@@ -115,7 +123,7 @@ fn sample_normal(tile: AtlasTile, vertex_normal: vec3<f32>) -> vec3<f32> {
 }
 
 fn sample_color(tile: AtlasTile) -> vec4<f32> {
-    let height = sample_attachment0(tile).x;
+    let height = decode_height_unit(sample_attachment0(tile));
 
     return vec4<f32>(height * 0.5);
 }

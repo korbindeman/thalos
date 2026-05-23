@@ -12,6 +12,7 @@ pub mod cold_desert_field;
 pub(crate) mod crater_profile;
 pub mod cubemap;
 pub mod feature_compiler;
+pub mod generic_terrestrial_field;
 pub mod height_generator;
 pub mod icosphere;
 pub mod noise;
@@ -36,6 +37,7 @@ pub use body_builder::BodyBuilder;
 pub use cold_desert_field::*;
 pub use cubemap::{Cubemap, CubemapAccumulator, CubemapFace, default_resolution};
 pub use feature_compiler::*;
+pub use generic_terrestrial_field::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
 pub use query::{

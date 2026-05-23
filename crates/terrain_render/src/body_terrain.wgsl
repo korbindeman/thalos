@@ -57,7 +57,7 @@ struct BodyTerrainDebug {
 // dark contour lines. Keep a little local slope detail, but let the sphere's
 // geometric normal carry most of the lighting until the terrain generator can
 // provide genuinely continuous close-up fields.
-const HEIGHT_NORMAL_WEIGHT: f32 = 0.10;
+const HEIGHT_NORMAL_WEIGHT: f32 = 0.0;
 
 // ── Naturalistic surface grading (Step 0 + Step 1) ────────────────────────
 // Applied to the baked macro albedo in-shader, so it iterates without a
@@ -88,8 +88,8 @@ const SLOPE_SOIL_LO: f32 = 0.05;
 const SLOPE_SOIL_HI: f32 = 0.30;
 const SLOPE_ROCK_LO: f32 = 0.32;
 const SLOPE_ROCK_HI: f32 = 0.70;
-const SOIL_STRENGTH: f32 = 0.55;
-const ROCK_STRENGTH: f32 = 0.65;
+const SOIL_STRENGTH: f32 = 0.0;
+const ROCK_STRENGTH: f32 = 0.0;
 
 // Step 2 — albedo breakup. Multi-octave value noise modulating the macro
 // colour's value (plus a faint warm/cool hue drift) at the tens-of-metres
@@ -413,12 +413,12 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // synthesised from the camera-relative world position.
     let detail = surface_detail(hit_ws, geo_normal, cam_dist);
 
-    // Naturalistic in-shader grading of the baked macro albedo. The coarse
-    // height normal feeds slope colour only (never lighting), so the macro
-    // texel kinks that forced the low HEIGHT_NORMAL_WEIGHT don't reappear as
-    // shading artefacts; Step 2's breakup multiplies on top. All of this runs
-    // before the debug overlay so the checkerboard still overrides it cleanly.
-    let slope_t = surface_slope(height_normal, geo_normal);
+    // Naturalistic in-shader grading of the baked macro albedo. The P2A
+    // Thalos prototype has no authored continuous slope/material field yet,
+    // and deriving slope from the height atlas turns tiny quantization / tile
+    // filtering changes into visible contour ribbons. Keep slope grading off
+    // until terrain provides a smooth material intent field.
+    let slope_t = 0.0;
     var surface_rgb = grade_surface(albedo.rgb, slope_t);
     if (!debug_on) {
         surface_rgb = surface_rgb * detail.tint;
@@ -477,19 +477,18 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // those are impostor-only today. The local craft proxy supplies a
     // stable sun-ray shadow term for direct sunlight only.
     let external_shadow = local_craft_shadow(hit_ws, sun_dir_ws);
-    var lit = shade_hapke_surface(
-        albedo.rgb,
-        clamp(roughness, 0.0, 1.0),
-        normal,
-        geo_normal,
-        view_dir,
-        hit_ws,
-        sun_dir_ws,
-        sun_flux,
-        terrain_scene,
-        external_shadow,
-    );
-    lit = lit + albedo.rgb * atmospheric_surface_fill(dot(geo_normal, sun_dir_ws), sun_flux);
+    // P2A temporary terrain lighting: keep the ground LOD visually stable
+    // while the full Hapke + aerial-perspective path is being reworked for
+    // near-surface views. The shared Hapke path over-darkens distant shallow
+    // terrain from low camera angles, making hills look like shadowed/noisy
+    // bands even with shadows and albedo variation disabled. Use the geometric
+    // normal only, with a high sky/ambient floor, so broad terrain reads as
+    // smooth until a continuous terrain-material/normal field exists.
+    let stable_normal = normalize(geo_normal + detail.normal_offset * 0.65);
+    let geo_n_dot_l = dot(stable_normal, sun_dir_ws);
+    let direct = smoothstep(-0.20, 0.80, geo_n_dot_l) * external_shadow;
+    let sky_floor = 0.58;
+    let lit = albedo.rgb * (sky_floor + direct * 0.42);
 
     var output: FragmentOutput;
     output.color = vec4<f32>(lit, albedo.a);

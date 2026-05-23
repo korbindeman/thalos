@@ -689,6 +689,38 @@ fn pal(
 }
 
 impl SurfaceColorSpec {
+    pub fn generic_terrestrial(seed: u64) -> Self {
+        Self {
+            palettes: vec![pal(
+                "basic_continental",
+                [0.155, 0.135, 0.105],
+                [0.285, 0.255, 0.190],
+                [0.455, 0.385, 0.260],
+                [0.170, 0.135, 0.105],
+                [0.515, 0.435, 0.295],
+                [0.095, 0.125, 0.072],
+                [0.365, 0.300, 0.145],
+                [0.230, 0.285, 0.100],
+                [0.180, 0.315, 0.095],
+                [0.055, 0.185, 0.045],
+                0.46,
+                0.78,
+                0.72,
+            )],
+            seed,
+            broad_frequency: 1.25,
+            mottle_frequency: 13.0,
+            variation_strength: 0.62,
+            use_material_id_when_biome_empty: false,
+            sea_level_m: Some(0.0),
+            water: None,
+            saturation: 1.12,
+            contrast: 1.08,
+            gain: 0.98,
+            overprint: SurfaceColorOverprint::None,
+        }
+    }
+
     pub fn aging_oceanic_homeworld(seed: u64, sea_level_m: f32) -> Self {
         Self {
             palettes: vec![

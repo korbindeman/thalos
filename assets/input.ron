@@ -4,91 +4,91 @@
     game: (
         system: (
             bindings: {
-                "escape": [Key("Escape")],
-                "screenshot": [Key("F12")],
-                "toggle_free_cam": [Key("F1")],
+                "escape": [Key(Escape)],
+                "screenshot": [Key(F2)],
+                "toggle_free_cam": [Key(F3)],
             },
         ),
         flight: (
             bindings: {
-                "toggle_sas": [Key("KeyT")],
-                "throttle_full": [Key("KeyZ")],
-                "throttle_cut": [Key("KeyX")],
+                "toggle_sas": [Key(KeyT)],
+                "throttle_full": [Key(KeyZ)],
+                "throttle_cut": [Key(KeyX)],
                 // KSP convention: Space stages. Time pause lives on the warp
                 // ladder instead — "," (warp_decrease) steps down into pause.
-                "stage": [Key("Space")],
+                "stage": [Key(Space)],
             },
             axes: {
-                "pitch": (positive: [Key("KeyW")], negative: [Key("KeyS")]),
-                "yaw": (positive: [Key("KeyD")], negative: [Key("KeyA")]),
-                "roll": (positive: [Key("KeyE")], negative: [Key("KeyQ")]),
+                "pitch": (positive: [Key(KeyW)], negative: [Key(KeyS)]),
+                "yaw": (positive: [Key(KeyD)], negative: [Key(KeyA)]),
+                "roll": (positive: [Key(KeyE)], negative: [Key(KeyQ)]),
                 "throttle_ramp": (
-                    positive: [Key("ShiftLeft"), Key("ShiftRight")],
-                    negative: [Key("ControlLeft"), Key("ControlRight")],
+                    positive: [Key(ShiftLeft), Key(ShiftRight)],
+                    negative: [Key(ControlLeft), Key(ControlRight)],
                 ),
             },
         ),
         warp: (
             bindings: {
-                "warp_to_maneuver": [Key("KeyG")],
-                "warp_increase": [Key("Period")],
-                "warp_decrease": [Key("Comma")],
-                "warp_reset": [Key("Backslash")],
+                "warp_to_maneuver": [Key(KeyG)],
+                "warp_increase": [Key(Period)],
+                "warp_decrease": [Key(Comma)],
+                "warp_reset": [Key(Backslash)],
             },
         ),
         view: (
             bindings: {
-                "toggle_view": [Key("KeyM")],
-                "toggle_photo_mode": [Key("KeyP")],
-                "cycle_ship_camera": [Key("KeyV")],
+                "toggle_view": [Key(KeyM)],
+                "toggle_photo_mode": [Key(F1), Key(KeyP)],
+                "cycle_ship_camera": [Key(KeyV)],
             },
         ),
         camera: (
             bindings: {
-                "primary": [MouseButton("Left")],
+                "primary": [MouseButton(Left)],
                 "motion": [MouseMotion],
                 "wheel": [MouseWheel],
             },
         ),
         eva: (
             bindings: {
-                "toggle_player_controller": [Key("KeyF")],
+                "toggle_player_controller": [Key(KeyF)],
             },
         ),
         eva_move: (
             axes: {
-                "forward": (positive: [Key("KeyW")], negative: [Key("KeyS")]),
-                "strafe": (positive: [Key("KeyD")], negative: [Key("KeyA")]),
+                "forward": (positive: [Key(KeyW)], negative: [Key(KeyS)]),
+                "strafe": (positive: [Key(KeyD)], negative: [Key(KeyA)]),
             },
         ),
         maneuver: (
             bindings: {
-                "toggle_place_node": [Key("KeyN")],
-                "delete_node": [Key("Delete"), Key("Backspace")],
+                "toggle_place_node": [Key(KeyN)],
+                "delete_node": [Key(Delete), Key(Backspace)],
             },
         ),
         maneuver_precision: (
             bindings: {
-                "fine": [Key("ShiftLeft"), Key("ShiftRight")],
-                "ultra": [Key("ControlLeft"), Key("ControlRight")],
+                "fine": [Key(ShiftLeft), Key(ShiftRight)],
+                "ultra": [Key(ControlLeft), Key(ControlRight)],
             },
         ),
     ),
     planet_editor: (
         bindings: {
-            "primary": [MouseButton("Left")],
+            "primary": [MouseButton(Left)],
             "camera_motion": [MouseMotion],
             "camera_wheel": [MouseWheel],
-            "toggle_fullbright": [Key("KeyF")],
-            "overlay_suppress": [Key("Space")],
+            "toggle_fullbright": [Key(KeyF)],
+            "overlay_suppress": [Key(Space)],
         },
     ),
     shipyard: (
         bindings: {
-            "primary": [MouseButton("Left")],
+            "primary": [MouseButton(Left)],
             "camera_motion": [MouseMotion],
             "camera_wheel": [MouseWheel],
-            "precision_slow": [Key("ShiftLeft"), Key("ShiftRight")],
+            "precision_slow": [Key(ShiftLeft), Key(ShiftRight)],
         },
     ),
 )

@@ -250,7 +250,8 @@ fn attachment_format_hash(format: AttachmentFormat) -> u8 {
         AttachmentFormat::Rgb8 => 0,
         AttachmentFormat::Rgba8 => 1,
         AttachmentFormat::R16 => 2,
-        AttachmentFormat::Rg16 => 3,
+        AttachmentFormat::R32Float => 3,
+        AttachmentFormat::Rg16 => 4,
     }
 }
 
@@ -285,6 +286,9 @@ mod tests {
                         let count = (cfg.texture_size * cfg.texture_size) as usize;
                         match cfg.format {
                             AttachmentFormat::R16 => AttachmentData::R16(vec![value; count]),
+                            AttachmentFormat::R32Float => {
+                                AttachmentData::R32Float(vec![0.5; count])
+                            }
                             AttachmentFormat::Rgba8 => {
                                 AttachmentData::Rgba8(vec![[value as u8, 0, 0, 255]; count])
                             }

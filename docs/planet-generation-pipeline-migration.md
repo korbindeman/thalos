@@ -266,6 +266,18 @@ per-body bakes). All five increments landed:
 
 ### P2 — Analytic two-band detail + per-body cutover *(spec Phase B)*
 
+**Current first slice: P2A — basic continental Thalos.** The cutover starts
+with Thalos intentionally simplified to an all-land, single-biome
+`GenericTerrestrial` prototype. This gives the game a playable end-to-end
+new-pipeline surface before tackling oceans, hydrology, scatter, or the full
+terrain-feature compositor. Its ground LOD uses
+`RuntimeTerrainDetail::BasicContinental`, which evaluates the same smooth
+continental field used by the bake instead of layering the legacy P0 HMF
+cascade on top. Runtime ground height is intentionally LOD-invariant for this
+slice so parent/child tile handoffs do not produce contour-like relief steps.
+The previous body order is therefore revised to: **basic
+Thalos → Mira crater/feature compositor → Vaelen → full Thalos → Pelagos**.
+
 - Implement the **two-band heightfield**: low band = intent output
   fields; mid band = analytic character conditioned on intent;
   **fine detail reclassified as non-geometric** (shader POM/normal/
@@ -309,12 +321,12 @@ per-body bakes). All five increments landed:
   > never to terrain features. Runevision's **LayerProcGen** docs are a
   > good read on layered generation before building this.
 
-- **Cut bodies over one at a time** behind the Query API: Mira →
-  Vaelen → Thalos → Pelagos. Each cutover retires that body's old
-  archetype stage and folds terrain.md's archetype/v2-backlog work
-  (hydrology, layered material columns, climate fields) in as fields +
-  feature types + synthesisers. Old and new pipelines coexist until the
-  last body migrates.
+- **Cut bodies over one at a time** behind the Query API. Revised order:
+  basic Thalos vertical slice → Mira → Vaelen → full Thalos → Pelagos.
+  Each cutover retires that body's old archetype stage and folds
+  terrain.md's archetype/v2-backlog work (hydrology, layered material
+  columns, climate fields) in as fields + feature types + synthesisers.
+  Old and new pipelines coexist until the last body migrates.
 - **Band-limiting now holds** ⇒ colliders are cleanly walkable by
   construction, and the impostor's shader high-freq detail reconciles
   against the ground's non-geometric detail (closes the P0 caveat).

@@ -1,4 +1,4 @@
-//! Screenshot capture: F12 saves the primary window to ~/Desktop/thalos.
+//! Screenshot capture: F2 saves the primary window to ~/Desktop/thalos.
 
 use std::{
     env, fs,
@@ -17,11 +17,11 @@ pub struct ScreenshotPlugin;
 
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (screenshot_on_f12, screenshot_cursor));
+        app.add_systems(Update, (screenshot_on_f2, screenshot_cursor));
     }
 }
 
-fn screenshot_on_f12(
+fn screenshot_on_f2(
     mut commands: Commands,
     input: Res<GameInputIntent>,
     active_captures: Query<Entity, With<Capturing>>,

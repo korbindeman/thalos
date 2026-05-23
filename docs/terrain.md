@@ -52,7 +52,7 @@ pair once ground LOD lands.
 | Feature compiler | `AirlessImpactMoon` and `ColdDesertFormerlyWet` archetypes wired (Mira, Vaelen). v1 has no first-class hydrology, no layered substrate, no climate fields. | Revamped compiler with v2 backlog landed; all four main bodies through it (M2) |
 | Terrestrial bodies | Thalos, Pelagos use `Ocean` flat-water placeholder | `AgingOceanicHomeworld`, `GenericTerrestrial` archetypes (M2) |
 | Renderer (orbital) | Flat impostor reads `StaticSurfaceData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
-| Renderer (surface) | In-tree `thalos_udlod` fork (Bevy 0.18 + runtime `TileProvider`); `PipelineTileProvider` reads a temporary low-pass view of the baked cubemap/R16 height for UDLOD tiles and matching height queries. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
+| Renderer (surface) | In-tree `thalos_udlod` fork (Bevy 0.18 + runtime `TileProvider`); `PipelineTileProvider` reads the Query API surface into UDLOD tiles. Height tiles use packed `Rg16` for the game path because broad, shallow Thalos slopes made plain `R16Unorm` quantization visible as contour terraces; matching height queries mirror the resident atlas. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
 | Big-space hierarchy | Not present | Per-body grids parented to system grid (M1, M3) |
 
 ## Goals
@@ -851,9 +851,11 @@ a single body. The terrain renderer handles that internally.
 - **`TileAtlas` + `TileTree`.** GPU-side tile storage and
   hierarchical sampling with LOD blending.
 - **Attachment system.** Multi-channel tile data with configurable
-  resolution and format per channel: R16 (height), RG16 (normals),
-  RGBA8 (albedo / splat / custom). 1px borders for seamless
-  filtering.
+  resolution and format per channel: R16 / packed RG16 / R32Float
+    (height), RG16 (normals), RGBA8 (albedo / splat / custom). 1px
+    borders for seamless filtering. The game uses packed RG16 height
+    (coarse + residual) to avoid visible contouring on very low-slope
+    terrain without requiring filterable float textures.
 - **`big_space` integration** (unconditional; the upstream
   `high_precision` Cargo feature was removed). Wired to the camera and
   floating origin so the Taylor-series relative-position path is always
@@ -953,7 +955,7 @@ attachment's format. Defaults from upstream:
 
 | Attachment | Format | Default size | Purpose |
 |---|---|---|---|
-| `height` | R16 | 512×512 | Required. 16-bit unorm; 0..1 maps to `[min_height, max_height]` configured per body. |
+| `height` | packed RG16 in game (`R16` and `R32Float` still supported) | 512×512 | Required. Stored as normalized 0..1, mapping to `[min_height, max_height]` configured per body. Packed RG16 stores a residual in the second channel to avoid visible R16 contouring on broad shallow slopes without requesting filterable float textures. |
 | `normal` | RG16 | 512×512 | Optional. May be derived from height if not provided. |
 | `albedo` | RGBA8 | configurable | Optional surface color. |
 | `splat` | RGBA8 | configurable | Optional material weight masks for shader-side blending. |
@@ -1093,13 +1095,15 @@ into Thalos and wiring it to the revamped feature compiler.
   Converts cubesphere `TileCoordinate` → body-local direction → reads
   a temporary low-pass sample of the baked height/albedo/roughness
   cubemaps from `StaticSurfaceData` → copies the result into the
-  configured tile attachments (height into `R16`, albedo into
+  configured tile attachments (height into packed `Rg16` in the game path,
+    with `R16` / `R32Float` still supported by the provider; albedo into
   sRGB-encoded `Rgba8`, roughness into linear `R16` upscaled from the
   source u8 cubemap by 257). This is deliberately a short-term visual
   bridge for the current Thalos terracing; the terrain rewrite should
   replace it with genuinely continuous local fields.
-- The current height path is deliberately the rendered cubemap/R16
-  source, not `thalos_terrain::sample_static_surface()`. The full
+- The current height path is deliberately the rendered Query API/atlas
+  source, not an independent `thalos_terrain::sample_static_surface()`
+  detail path. The full
   sampler includes SSBO crater iteration and statistical detail that
   UDLOD does not render yet; using it for tiles or colliders would make
   physics disagree with the visible surface.

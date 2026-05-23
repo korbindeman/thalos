@@ -355,9 +355,11 @@ cost of `GpuAtlasMirrorHeightSource` is the one-time texel download
 per tile generation, not per-query lookup. Per-frame altitude query
 is bilinear texel fetch — negligible. Collider-patch rebuild (16K
 samples) is one parallel scan of mirror memory — sub-millisecond.
-Memory budget for height-only mirroring: R16 × 512² × 256 slots ≈
-128 MB worst case; halved by mirroring only the focused-body / nearest-LODs
-slice that physics actually queries. Tile-residency lag (~1 frame
+Memory budget for height-only mirroring: packed RG16 × 512² × 256 slots ≈
+256 MB worst case for the game height path (`R16` and `R32Float` remain
+supported for older/debug providers); reduced in practice by mirroring only the
+focused-body / nearest-LODs slice that physics actually queries. Tile-residency
+lag (~1 frame
 after GPU bake) is the only correctness gotcha; the fallback to
 `BakedCubemapHeightSource` covers it without a teleport.
 
@@ -749,9 +751,12 @@ Implementation shape:
   `rendered_height_m` implementation; `BakedCubemapHeightSource`
   is the detail-free fallback.
 - `GpuAtlasMirrorHeightSource` owns an `Arc<RwLock<GpuAtlasHeightMirror>>`
-  plus a baked fallback. The mirror stores resident R16 height tiles
-  keyed by `TileCoordinate`, samples them bilinearly in body-fixed
-  direction space, and falls back when no resident ancestor exists.
+  plus a baked fallback. The mirror stores resident R16, packed RG16, or
+  R32Float height tiles keyed by `TileCoordinate`, samples them bilinearly in
+  body-fixed direction space, and falls back when no resident ancestor exists.
+  The game path uses packed RG16 to avoid visible height-quantization
+  contouring on broad, shallow terrain without requesting filterable float
+  textures.
 - `THALOS_TERRAIN_PROVIDER=flat` installs a `ConstantHeightSource(0 m)`
   instead of a GPU mirror and leaves the propagator's baked surface
   registry empty for that body. The diagnostic flat mesh, EVA spawn,

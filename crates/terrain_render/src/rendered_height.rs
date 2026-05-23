@@ -214,6 +214,7 @@ mod tests {
             volcanoes: Vec::new(),
             channels: Vec::new(),
             feature_index: IcoBuckets::empty(),
+            runtime_detail: Default::default(),
             detail_params: DetailNoiseParams::default(),
             materials: vec![Material {
                 albedo: [0.5, 0.5, 0.5],
