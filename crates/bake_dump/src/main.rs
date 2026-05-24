@@ -583,7 +583,7 @@ fn dump_all_in_parallel(
 
     dumps.into_par_iter().for_each(|kind| match kind {
         DumpKind::Albedo => write_equirect(out.join("albedo-equirect.png"), equirect_w, |dir| {
-            let sample = surface_sample(surface, &state, dir, lod_m);
+            let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
             [
                 linear_to_srgb8(sample.albedo_linear.x),
                 linear_to_srgb8(sample.albedo_linear.y),
@@ -591,7 +591,7 @@ fn dump_all_in_parallel(
             ]
         }),
         DumpKind::Height => write_equirect(out.join("height-equirect.png"), equirect_w, |dir| {
-            let sample = surface_sample(surface, &state, dir, lod_m);
+            let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
             let g = ((sample.height_m / height_range.max(1.0) * 0.5 + 0.5) * 255.0)
                 .clamp(0.0, 255.0)
                 .round() as u8;
@@ -599,13 +599,13 @@ fn dump_all_in_parallel(
         }),
         DumpKind::Roughness => {
             write_equirect(out.join("roughness-equirect.png"), equirect_w, |dir| {
-                let sample = surface_sample(surface, &state, dir, lod_m);
+                let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
                 let g = (sample.roughness.clamp(0.0, 1.0) * 255.0).round() as u8;
                 [g, g, g]
             })
         }
         DumpKind::Normal => write_equirect(out.join("normal-equirect.png"), equirect_w, |dir| {
-            let normal = surface_normal(surface, &state, dir, lod_m);
+            let normal = surface_normal(surface, &state, dir.as_dvec3(), lod_m);
             [
                 normal_to_u8(normal.x),
                 normal_to_u8(normal.y),
@@ -937,11 +937,11 @@ fn tangent_basis(dir: Vec3) -> (Vec3, Vec3) {
     (east, north)
 }
 
-/// Scan low-latitude directions and return the one with the highest local
-/// relief, so the auto-centred patch lands in hill country rather than on a
-/// plain. Relief proxy: max−min of `surface_height_m` over a small cross at
-/// ±`probe_m` around each candidate.
-fn auto_find_relief_center(surface: &PlanetSurface) -> Vec3 {
+/// Scan low-latitude directions and return the highest-relief one (`seek_hills`)
+/// or the flattest one (`!seek_hills`), so patches can land in hill country or
+/// on the kind of usable plain the EVA spawn picks. Relief proxy: max−min of
+/// `surface_height_m` over a small cross at ±`probe_m` around each candidate.
+fn auto_find_relief_center(surface: &PlanetSurface, seek_hills: bool) -> Vec3 {
     let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
     let radius = surface.static_surface.radius_m;
     let probe_m = 4_000.0;
@@ -956,7 +956,8 @@ fn auto_find_relief_center(surface: &PlanetSurface) -> Vec3 {
             let dir = latlon_to_dir(lat, lon);
             let (east, north) = tangent_basis(dir);
             let base = dir * radius;
-            let h = |off: Vec3| surface_height_m(surface, &state, (base + off).normalize(), 0.5);
+            let h =
+                |off: Vec3| surface_height_m(surface, &state, (base + off).normalize().as_dvec3(), 0.5);
             let s = [
                 h(Vec3::ZERO),
                 h(east * probe_m),
@@ -966,10 +967,11 @@ fn auto_find_relief_center(surface: &PlanetSurface) -> Vec3 {
             ];
             let lo = s.iter().cloned().fold(f32::MAX, f32::min);
             let hi = s.iter().cloned().fold(f32::MIN, f32::max);
-            (dir, hi - lo)
+            let relief = hi - lo;
+            (dir, if seek_hills { relief } else { -relief })
         })
         .reduce(
-            || (Vec3::Z, -1.0),
+            || (Vec3::Z, f32::NEG_INFINITY),
             |a, b| if b.1 > a.1 { b } else { a },
         );
     best
@@ -991,7 +993,7 @@ fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, ou
         for (i, cell) in row.iter_mut().enumerate() {
             let nx = ((i as f32 + 0.5) / res as f32 - 0.5) * span_m; // +east at right
             let dir = (base + east * nx + north * ny).normalize();
-            *cell = surface_height_m(surface, &state, dir, 0.5);
+            *cell = surface_height_m(surface, &state, dir.as_dvec3(), 0.5);
         }
     });
 
@@ -1043,31 +1045,41 @@ fn run_patch(
     eprintln!("patch: compiling {} surface…", body.name);
     let surface = compile_surface_preview(body, gpu);
 
-    let center = match args.center {
-        Some((lat, lon)) => latlon_to_dir(lat, lon),
-        None => {
-            eprintln!("patch: scanning for a high-relief centre…");
-            auto_find_relief_center(&surface)
-        }
-    };
-    let (lat, lon) = dir_to_latlon(center);
-    eprintln!("patch: centre = lat {lat:.2}°, lon {lon:.2}°");
-
     let out_dir = args
         .out_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name).join("patch"));
     fs::create_dir_all(&out_dir).expect("creating patch out dir");
 
+    // With an explicit centre, render just that. Otherwise render both a hill
+    // site and the flattest (plain) site so the plains/hills balance and the
+    // gentle plain rolls are both visible without launching the game.
+    let sites: Vec<(String, Vec3)> = match args.center {
+        Some((lat, lon)) => vec![("center".to_string(), latlon_to_dir(lat, lon))],
+        None => {
+            eprintln!("patch: scanning for hill + plain centres…");
+            vec![
+                ("hill".to_string(), auto_find_relief_center(&surface, true)),
+                ("plain".to_string(), auto_find_relief_center(&surface, false)),
+            ]
+        }
+    };
+
     let res = 1024;
-    for (span_km, name) in [
-        (120.0_f32, "context-120km"),
-        (12.0, "close-12km"),
-        (3.0, "micro-3km"),
-    ] {
-        let path = out_dir.join(format!("{name}.png"));
-        render_patch(&surface, center, span_km * 1000.0, res, &path);
-        eprintln!("patch: wrote {}", path.display());
+    for (site, center) in &sites {
+        let (lat, lon) = dir_to_latlon(*center);
+        eprintln!("patch: {site} centre = lat {lat:.2}°, lon {lon:.2}°");
+        for (span_km, name) in [
+            (120.0_f32, "context-120km"),
+            (12.0, "close-12km"),
+            (3.0, "micro-3km"),
+            (0.3, "fine-300m"),
+            (0.06, "ultra-60m"),
+        ] {
+            let path = out_dir.join(format!("{site}-{name}.png"));
+            render_patch(&surface, *center, span_km * 1000.0, res, &path);
+            eprintln!("patch: wrote {}", path.display());
+        }
     }
 }
 

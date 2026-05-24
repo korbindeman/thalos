@@ -25,7 +25,7 @@
 //!
 //! Fade: Perlin's quintic `6t⁵ − 15t⁴ + 10t³`.
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 
 /// One step of a u32 PCG mixer. The constants are PCG-XSH-RR's `multiplier`
 /// and `increment`; the post-state shift / xor / final multiplier are from
@@ -359,6 +359,167 @@ pub fn eroded_ridged_3d(
         norm += amp;
         amp *= persistence;
         freq *= lacunarity;
+    }
+    if norm > 0.0 { sum / norm } else { 0.0 }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// f64-coordinate variants
+//
+// At planet scale the *sample position* (`dir * radius`, ~3.2e6 m on Thalos)
+// is the precision bottleneck: f32 has an ULP of ~0.25 m there, so every noise
+// band collapses onto a 0.25 m body-local lattice and the ground reads as
+// axis-aligned plateaus (invisible at orbit, glaring on foot). These variants
+// take the *coordinate* in f64 — the lattice floor and the fractional offset
+// are computed in f64, so the integer cell and the [0,1) weight stay exact at
+// any magnitude. The hash, fade, and interpolation stay f32 (the lattice value
+// field is unchanged); only the addressing is promoted. The f32 functions above
+// are kept verbatim for the impostor's WGSL mirror, which only ever evaluates
+// at orbital scale where f32 addressing is already exact.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// f64-coordinate [`value_noise_3d`]. Lattice + fract in f64; value field in f32.
+pub fn value_noise_3d_f64(x: f64, y: f64, z: f64, seed: u32) -> f32 {
+    let xf = x.floor();
+    let yf = y.floor();
+    let zf = z.floor();
+    let fx = fade((x - xf) as f32);
+    let fy = fade((y - yf) as f32);
+    let fz = fade((z - zf) as f32);
+    let xi = xf as i32;
+    let yi = yf as i32;
+    let zi = zf as i32;
+
+    let c000 = hash3(xi, yi, zi, seed);
+    let c100 = hash3(xi + 1, yi, zi, seed);
+    let c010 = hash3(xi, yi + 1, zi, seed);
+    let c110 = hash3(xi + 1, yi + 1, zi, seed);
+    let c001 = hash3(xi, yi, zi + 1, seed);
+    let c101 = hash3(xi + 1, yi, zi + 1, seed);
+    let c011 = hash3(xi, yi + 1, zi + 1, seed);
+    let c111 = hash3(xi + 1, yi + 1, zi + 1, seed);
+
+    let x00 = c000 + (c100 - c000) * fx;
+    let x10 = c010 + (c110 - c010) * fx;
+    let x01 = c001 + (c101 - c001) * fx;
+    let x11 = c011 + (c111 - c011) * fx;
+
+    let y0 = x00 + (x10 - x00) * fy;
+    let y1 = x01 + (x11 - x01) * fy;
+
+    y0 + (y1 - y0) * fz
+}
+
+/// f64-coordinate [`value_noise_3d_derivative`]. Lattice + fract in f64; the
+/// returned value and gradient are f32 (gradients are O(1), unaffected by the
+/// absolute magnitude once the fractional offset is exact).
+pub fn value_noise_3d_derivative_f64(x: f64, y: f64, z: f64, seed: u32) -> NoiseDerivative3 {
+    let xf = x.floor();
+    let yf = y.floor();
+    let zf = z.floor();
+
+    let wx = (x - xf) as f32;
+    let wy = (y - yf) as f32;
+    let wz = (z - zf) as f32;
+
+    let xi = xf as i32;
+    let yi = yf as i32;
+    let zi = zf as i32;
+
+    let ux = fade(wx);
+    let uy = fade(wy);
+    let uz = fade(wz);
+    let dux = fade_derivative(wx);
+    let duy = fade_derivative(wy);
+    let duz = fade_derivative(wz);
+
+    let a = hash3(xi, yi, zi, seed);
+    let b = hash3(xi + 1, yi, zi, seed);
+    let c = hash3(xi, yi + 1, zi, seed);
+    let d = hash3(xi + 1, yi + 1, zi, seed);
+    let e = hash3(xi, yi, zi + 1, seed);
+    let f = hash3(xi + 1, yi, zi + 1, seed);
+    let g = hash3(xi, yi + 1, zi + 1, seed);
+    let h = hash3(xi + 1, yi + 1, zi + 1, seed);
+
+    let k0 = a;
+    let k1 = b - a;
+    let k2 = c - a;
+    let k3 = e - a;
+    let k4 = a - b - c + d;
+    let k5 = a - c - e + g;
+    let k6 = a - b - e + f;
+    let k7 = -a + b + c - d + e - f - g + h;
+
+    let value = k0
+        + k1 * ux
+        + k2 * uy
+        + k3 * uz
+        + k4 * ux * uy
+        + k5 * uy * uz
+        + k6 * uz * ux
+        + k7 * ux * uy * uz;
+    let derivative = Vec3::new(
+        (k1 + k4 * uy + k6 * uz + k7 * uy * uz) * dux,
+        (k2 + k5 * uz + k4 * ux + k7 * uz * ux) * duy,
+        (k3 + k6 * ux + k5 * uy + k7 * ux * uy) * duz,
+    );
+
+    NoiseDerivative3 { value, derivative }
+}
+
+/// f64-coordinate [`fbm3`]. The per-octave frequency scaling (`coord * freq`)
+/// runs in f64 so the finest octaves stay precise at planet scale.
+pub fn fbm3_f64(
+    x: f64,
+    y: f64,
+    z: f64,
+    seed: u32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+) -> f32 {
+    let mut sum = 0.0f32;
+    let mut amp = 1.0f32;
+    let mut freq = 1.0f64;
+    let mut norm = 0.0f32;
+    let lac = lacunarity as f64;
+    for o in 0..octaves {
+        let osubseed = pcg_u32(seed.wrapping_add(o));
+        sum += amp * value_noise_3d_f64(x * freq, y * freq, z * freq, osubseed);
+        norm += amp;
+        amp *= persistence;
+        freq *= lac;
+    }
+    sum / norm
+}
+
+/// f64-coordinate [`eroded_ridged_3d`]. The sample coordinate is in f64; the
+/// accumulated gradient, slope damping, and ridge shaping stay f32.
+pub fn eroded_ridged_3d_f64(
+    p: DVec3,
+    seed: u32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    erosion_strength: f32,
+) -> f32 {
+    let mut sum = 0.0f32;
+    let mut amp = 1.0f32;
+    let mut freq = 1.0f64;
+    let mut norm = 0.0f32;
+    let mut grad = Vec3::ZERO;
+    let lac = lacunarity as f64;
+    for o in 0..octaves {
+        let osub = pcg_u32(seed.wrapping_add(o));
+        let nd = value_noise_3d_derivative_f64(p.x * freq, p.y * freq, p.z * freq, osub);
+        grad += nd.derivative * (amp * freq as f32);
+        let damp = 1.0 / (1.0 + erosion_strength * grad.length_squared());
+        let ridge = 1.0 - nd.value.abs();
+        sum += amp * ridge * ridge * damp;
+        norm += amp;
+        amp *= persistence;
+        freq *= lac;
     }
     if norm > 0.0 { sum / norm } else { 0.0 }
 }

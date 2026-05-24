@@ -13,9 +13,9 @@
 
 #import thalos_udlod::types::AtlasTile
 #import thalos_udlod::bindings::{config, atlas_sampler, attachments, attachment2_atlas, attachment3_atlas}
-#import thalos_udlod::attachments::{sample_attachment1, sample_normal, attachment_uv}
+#import thalos_udlod::attachments::{sample_attachment1, sample_normal, attachment_uv, sample_height_atlas_uv_m}
 #import thalos_udlod::fragment::{FragmentInput, FragmentOutput, fragment_info}
-#import thalos_udlod::functions::lookup_tile
+#import thalos_udlod::functions::{lookup_tile, tile_count}
 #import thalos::atmosphere::AtmosphereBlock
 #import thalos::lighting::{SceneLighting, SCENE_FLUX_SCALE, shade_hapke_surface}
 
@@ -50,13 +50,10 @@ struct BodyTerrainDebug {
 @group(3) @binding(2) var<uniform> terrain_shadow: BodyTerrainShadow;
 @group(3) @binding(3) var<uniform> terrain_debug: BodyTerrainDebug;
 
-// Temporary visual smoothing for the current Thalos ground-LOD path.
-//
-// The pre-rewrite terrain source still has large macro texels; sampling
-// height-derived normals at full strength turns those broad height bands into
-// dark contour lines. Keep a little local slope detail, but let the sphere's
-// geometric normal carry most of the lighting until the terrain generator can
-// provide genuinely continuous close-up fields.
+// Blend the atlas-derived macro height normal into the smooth geometric normal.
+// Height is sampled through decode-then-filter RG16 interpolation in
+// thalos_udlod::attachments, so this no longer turns packed-height residual
+// wrap points into contour bands.
 const HEIGHT_NORMAL_WEIGHT: f32 = 0.35;
 
 // ── Naturalistic surface grading (Step 0 + Step 1) ────────────────────────
@@ -104,7 +101,9 @@ const BREAKUP_HUE_AMT: f32 = 0.04;   // ± warm/cool drift
 const DETAIL_SCALE: f32 = 0.8;            // 1/period_m → ~1.25 m base relief
 const DETAIL_OCTAVES: i32 = 3;
 const DETAIL_EPS: f32 = 0.25;             // finite-difference step, metres
-const DETAIL_NORMAL_STRENGTH: f32 = 0.5;  // facet-tilt amount
+const DETAIL_NORMAL_STRENGTH: f32 = 0.0;  // facet-tilt amount — TEMP 0.0 to confirm
+                                          // this value-noise detail normal is the
+                                          // grid "weave" artifact (restore after).
 
 // Both detail layers fade out with camera distance: their period goes
 // sub-pixel on the far field and would shimmer. The macro/slope colour carries
@@ -259,6 +258,105 @@ fn local_craft_shadow(hit_ws: vec3<f32>, sun_dir_ws: vec3<f32>) -> f32 {
         );
     }
     return shadow;
+}
+
+// ── Terrain self-shadowing (render-time horizon march) ─────────────────────
+// Marches the resident height attachment along the sun's horizontal direction
+// and compares the steepest occluder slope against the sun's elevation. No
+// bake: the shadow always reflects whatever surface the Query API currently
+// materialises into the atlas (any backing, any LOD, dynamic layers included),
+// which is the architecturally honest fit for on-demand terrain. Range is
+// bounded by the resident tile footprint — long shadows from off-tile relief
+// are out of scope here (they would be a cached per-tile horizon channel
+// later, not a global bake).
+
+const TERRAIN_SHADOW_STEPS: u32 = 16u;
+const TERRAIN_SHADOW_STRENGTH: f32 = 1.0;
+// Initial step + geometric growth, in height texels. Dense near the receiver
+// (catches rims/dunes), sparse far out (catches large relief) for few taps.
+const TERRAIN_SHADOW_STEP0_TEXELS: f32 = 1.0;
+const TERRAIN_SHADOW_STEP_GROWTH: f32 = 1.4;
+// The height texture's v axis runs opposite the tile bitangent (see
+// `sample_normal`'s `down - up` gradient convention). Flip this sign if the
+// shadows visibly fall on the sun-facing side instead of away from the sun.
+const TERRAIN_SHADOW_V_SIGN: f32 = -1.0;
+
+// Rebuild the tile's tangent frame exactly as `sample_normal` does, so the
+// march direction in height-texture uv lines up with the atlas axes. Columns
+// are (tangent, bitangent, normal); +u ↔ tangent, +v ↔ -bitangent.
+fn tile_tangent_frame(side: u32, geo_normal: vec3<f32>) -> mat3x3<f32> {
+#ifdef SPHERICAL
+    var FACE_UP = array<vec3<f32>, 6>(
+        vec3<f32>( 0.0, 1.0,  0.0),
+        vec3<f32>( 0.0, 1.0,  0.0),
+        vec3<f32>( 0.0, 0.0, -1.0),
+        vec3<f32>( 0.0, 0.0, -1.0),
+        vec3<f32>(-1.0, 0.0,  0.0),
+        vec3<f32>(-1.0, 0.0,  0.0),
+    );
+    let normal = normalize(geo_normal);
+    var tangent = cross(FACE_UP[side], normal);
+    if (dot(tangent, tangent) < 1.0e-8) {
+        var fallback_axis = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(normal.y) > 0.9) { fallback_axis = vec3<f32>(1.0, 0.0, 0.0); }
+        tangent = cross(fallback_axis, normal);
+    }
+    tangent = normalize(tangent);
+    let bitangent = normalize(cross(normal, tangent));
+    return mat3x3<f32>(tangent, bitangent, normal);
+#else
+    return mat3x3<f32>(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+    );
+#endif
+}
+
+fn terrain_self_shadow(tile: AtlasTile, geo_normal: vec3<f32>, sun_dir_ws: vec3<f32>) -> f32 {
+    let frame = tile_tangent_frame(tile.coordinate.side, geo_normal);
+    // Sun in the tile tangent basis: x → tangent, y → bitangent, z → normal.
+    let sun_ts = transpose(frame) * sun_dir_ws;
+    let sin_elev = sun_ts.z;
+    if (sin_elev <= 1.0e-3) {
+        return 1.0; // sun on/below the local horizon: the terminator owns it
+    }
+    let horiz_len = length(sun_ts.xy);
+    if (horiz_len < 1.0e-4) {
+        return 1.0; // sun ~ straight up: nothing self-shadows
+    }
+    let tan_elev = sin_elev / horiz_len; // rise per horizontal metre
+
+    // March direction in height-texture uv (see the +u/+v note above).
+    let uv_dir = normalize(vec2<f32>(sun_ts.x, TERRAIN_SHADOW_V_SIGN * sun_ts.y));
+
+    let tex_size = attachments[0u].size;
+    let inv_size = 1.0 / tex_size;
+    let side_length = 3.14159265359 / 4.0 * config.scale;
+    let m_per_texel = side_length / (tex_size * tile_count(tile.coordinate.lod));
+
+    let base_uv = attachment_uv(tile.coordinate.uv, 0u);
+    let h0 = sample_height_atlas_uv_m(tile, base_uv);
+
+    // Track the steepest slope from the receiver to any occluder along the ray.
+    // If it exceeds the sun's elevation slope, the receiver is shadowed.
+    var max_slope = 0.0;
+    var dist_texels = 0.0;
+    var step = TERRAIN_SHADOW_STEP0_TEXELS;
+    for (var k = 0u; k < TERRAIN_SHADOW_STEPS; k = k + 1u) {
+        dist_texels = dist_texels + step;
+        let suv = base_uv + uv_dir * (dist_texels * inv_size);
+        let h = sample_height_atlas_uv_m(tile, suv);
+        let d_m = dist_texels * m_per_texel;
+        max_slope = max(max_slope, (h - h0) / max(d_m, 1.0e-3));
+        step = step * TERRAIN_SHADOW_STEP_GROWTH;
+    }
+
+    // Soft penumbra around the horizon crossing; widen a little as the sun
+    // climbs so high-noon micro-relief does not read as hard-edged.
+    let soft = max(0.03, 0.20 * tan_elev);
+    let occ = smoothstep(tan_elev - soft, tan_elev + soft, max_slope);
+    return 1.0 - occ * TERRAIN_SHADOW_STRENGTH;
 }
 
 // Standard quaternion rotation `v' = q * v * q⁻¹`, expanded into the
@@ -621,10 +719,16 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     }
     let view_dir = normalize(info.view_vector);
 
-    // No crater-shadow or terrain self-shadow yet on the ground LOD path —
-    // those are impostor-only today. The local craft proxy supplies a
-    // stable sun-ray shadow term for direct sunlight only.
-    let external_shadow = local_craft_shadow(hit_ws, sun_dir_ws);
+    // Render-time shadowing: the local craft proxy (analytic ship-part
+    // silhouettes) combined with a terrain self-shadow horizon march over the
+    // resident height atlas. Both fade only the direct sun term; the sky fill
+    // below stands in for skylight reaching shadowed ground.
+    let craft_shadow = local_craft_shadow(hit_ws, sun_dir_ws);
+    var self_shadow = 1.0;
+    if (!debug_on) {
+        self_shadow = terrain_self_shadow(tile, geo_normal, sun_dir_ws);
+    }
+    let external_shadow = craft_shadow * self_shadow;
     // P2A temporary terrain lighting: keep the ground LOD visually stable
     // while the full Hapke + aerial-perspective path is being reworked for
     // near-surface views. Use mostly the atlas/detail normal with a sky fill

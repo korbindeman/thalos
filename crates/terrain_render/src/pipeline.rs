@@ -224,29 +224,33 @@ pub fn rendered_height_m(
     dir: Vec3,
     tile_lod_m: f32,
 ) -> f32 {
-    surface_height_m(surface, dynamic_state, dir, tile_lod_m)
+    // f32-direction convenience for the trait/physics callers (camera ray-casts,
+    // HUD altitude, spawn-site search, the CPU height-source fallback). Near the
+    // player these read the resident atlas via the GPU mirror, which carries the
+    // f64-precise heights baked above; this CPU path is the far/coarse fallback.
+    surface_height_m(surface, dynamic_state, dir.as_dvec3(), tile_lod_m)
 }
 
 fn material_masks(
     surface: &PlanetSurface,
     dynamic_state: &DynamicSurfaceState,
-    dir: Vec3,
+    dir: DVec3,
     height_m: f32,
     tile_lod_m: f32,
 ) -> [u8; 4] {
     let body = &surface.static_surface;
     let radius_m = body.radius_m.max(1.0);
     let step_m = tile_lod_m.clamp(2.0, 250.0);
-    let angular_step = step_m / radius_m;
+    let angular_step = step_m as f64 / radius_m as f64;
 
     let normal = dir.normalize_or_zero();
-    if normal == Vec3::ZERO {
+    if normal == DVec3::ZERO {
         return [128, 96, 32, 0];
     }
     let tangent_seed = if normal.y.abs() < 0.9 {
-        Vec3::Y
+        DVec3::Y
     } else {
-        Vec3::X
+        DVec3::X
     };
     let tangent = tangent_seed.cross(normal).normalize_or_zero();
     let bitangent = normal.cross(tangent).normalize_or_zero();
@@ -305,7 +309,7 @@ fn material_masks(
     ]
 }
 
-fn rotate_dir(dir: Vec3, axis: Vec3, angle: f32) -> Vec3 {
+fn rotate_dir(dir: DVec3, axis: DVec3, angle: f64) -> DVec3 {
     (dir * angle.cos() + axis * axis.dot(dir) * (1.0 - angle.cos()) + axis.cross(dir) * angle.sin())
         .normalize_or_zero()
 }
@@ -412,15 +416,17 @@ fn pixel_direction(
     texture_size: u32,
     border_size: u32,
     model: &TerrainModel,
-) -> Vec3 {
+) -> DVec3 {
     // Differencing two heights along the same `Coordinate` lifts to a
-    // body-local surface normal regardless of `model.translation`.
+    // body-local surface normal regardless of `model.translation`. Kept in f64:
+    // the surface evaluator multiplies this by the body radius (~3.2e6 m on
+    // Thalos), where an f32 direction would quantise the sample position to a
+    // ~0.25 m body-local lattice and terrace the ground on foot.
     let pix =
         coord.stitched_pixel_coordinate(pixel, texture_size, border_size, model.is_spherical());
     let surface = pix.world_position(model, 0.0);
     let lifted = pix.world_position(model, 1.0);
-    let dir: DVec3 = (lifted - surface).normalize();
-    Vec3::new(dir.x as f32, dir.y as f32, dir.z as f32)
+    (lifted - surface).normalize()
 }
 
 fn linear_rgb_to_srgba8(linear: Vec3) -> [u8; 4] {

@@ -178,6 +178,34 @@ name, and prints a top-N table to identify hot spots. Custom
 `compute_preview_flight_plan`, `advance_simulation`, `update_prediction`,
 `sync_maneuver_plan`.
 
+## Bug fixing
+
+Diagnose before patching. The loop is:
+
+1. **Reason to a hypothesis set.** From the symptom, lay out the plausible
+   causes first — don't jump to the first plausible-looking fix.
+2. **Rule candidates out by testing for them.** Each test should be
+   targeted and falsifiable: it distinguishes between hypotheses rather
+   than merely confirming a guess. Narrow the set down one candidate at
+   a time, with the user, until the actual root cause is pinned and
+   agreed.
+3. **Fix the cause, not the symptom.** Once the cause is known, fix it
+   properly — structurally where applicable (remove the whole class of
+   bug), not a local band-aid that hides the symptom.
+
+A change that makes the symptom disappear without an explanation of *why*
+is not a fix. Don't ship a speculative fix before the cause is confirmed.
+
+## WGSL skill
+
+A project skill at `.claude/skills/wgsl-bevy/SKILL.md` collects
+WGSL / naga (Bevy) shader pitfalls — reserved words that can't be used
+as identifiers, the strict type rules, `naga_oil` import quirks, and so
+on. Treat it as a **living document**: whenever you hit a WGSL error
+worth remembering (a keyword you couldn't use as a variable name, a
+non-obvious error message, a Bevy-specific gotcha), add the case to the
+skill so the next agent doesn't rediscover it from scratch.
+
 ## Architecture
 
 Thalos is a planetary exploration / orbital mechanics sandbox in Rust

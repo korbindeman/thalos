@@ -5,10 +5,10 @@
 //! the bake (`SurfaceField`) and by the Query API's runtime height path, so the
 //! ground LOD does not inherit the legacy P0 HMF cascade.
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::noise::{eroded_ridged_3d, fbm3};
+use crate::noise::{eroded_ridged_3d_f64, fbm3_f64};
 use crate::seeding::splitmix64;
 use crate::surface_field::{
     BiomeMix, SurfaceField, SurfaceFieldSample, SurfaceMaterialMix, smoothstep,
@@ -42,8 +42,17 @@ impl BasicContinentalParams {
         self.relief_scale_m * 2.9
     }
 
+    /// f32-direction entry (bake path: cubemap texels, where f32 addressing is
+    /// already well below texel size). Promotes to the f64 evaluator.
     pub fn sample_height_m(self, radius_m: f32, dir: Vec3, sample_scale_m: f32) -> f32 {
-        sample_basic_continental_height_m(self, radius_m, dir, sample_scale_m)
+        sample_basic_continental_height_dm(self, radius_m as f64, dir.as_dvec3(), sample_scale_m)
+    }
+
+    /// f64-direction entry (runtime ground LOD). Keeps the sample position
+    /// precise at planet scale so the surface does not quantise into ~0.25 m
+    /// body-local plateaus when viewed on foot.
+    pub fn sample_height_dm(self, radius_m: f64, dir: DVec3, sample_scale_m: f32) -> f32 {
+        sample_basic_continental_height_dm(self, radius_m, dir, sample_scale_m)
     }
 }
 
@@ -106,7 +115,7 @@ impl SurfaceField for BasicContinentalField {
 /// just an elevation threshold) so plains and hills interleave irregularly; a
 /// light elevation bias keeps uplands a touch rougher than basins without the
 /// split simply tracking altitude.
-fn continental_relief(params: BasicContinentalParams, p_m: Vec3, lod_m: f32) -> (f32, f32) {
+fn continental_relief(params: BasicContinentalParams, p_m: DVec3, lod_m: f32) -> (f32, f32) {
     let macro_n = fbm3_band(p_m, 1_250_000.0, params.seed_macro, 5, lod_m);
     let regional_n = fbm3_band(p_m, 360_000.0, params.seed_regional, 5, lod_m);
     let continent = macro_n * 0.62 + regional_n * 0.30;
@@ -119,17 +128,20 @@ fn continental_relief(params: BasicContinentalParams, p_m: Vec3, lod_m: f32) -> 
     (continent, relief_control)
 }
 
-fn sample_basic_continental_height_m(
+fn sample_basic_continental_height_dm(
     params: BasicContinentalParams,
-    radius_m: f32,
-    dir: Vec3,
+    radius_m: f64,
+    dir: DVec3,
     sample_scale_m: f32,
 ) -> f32 {
     let dir = dir.normalize_or_zero();
-    if dir == Vec3::ZERO {
+    if dir == DVec3::ZERO {
         return 0.0;
     }
 
+    // Sample position in body-local metres, kept in f64: at planet scale the
+    // f32 ULP here is ~0.25 m, which is what quantised the surface into
+    // axis-aligned plateaus before. See `noise::*_f64`.
     let p_m = dir * radius_m.max(1.0);
     let relief = params.relief_scale_m;
     let lod_m = sample_scale_m.max(1.0);
@@ -147,12 +159,18 @@ fn sample_basic_continental_height_m(
     //   amplitude — this is the band that makes the terrain read as hill
     //   country instead of a gentle dome.
     let swell_wl_m = 55_000.0;
-    let swell = eroded_ridged_3d(p_m / swell_wl_m, params.seed_mountains, 5, 0.5, 2.0, 1.0)
-        * band_weight(swell_wl_m, lod_m);
+    let swell = eroded_ridged_3d_f64(
+        p_m / swell_wl_m as f64,
+        params.seed_mountains,
+        5,
+        0.5,
+        2.0,
+        1.0,
+    ) * band_weight(swell_wl_m, lod_m);
 
     let hill_wl_m = 3_200.0;
-    let hills = eroded_ridged_3d(
-        p_m / hill_wl_m,
+    let hills = eroded_ridged_3d_f64(
+        p_m / hill_wl_m as f64,
         params.seed_mountains ^ 0x5151_3737,
         7,
         0.5,
@@ -181,7 +199,7 @@ fn roughness_at(
     dir: Vec3,
     sample_scale_m: f32,
 ) -> f32 {
-    let p_m = dir.normalize_or_zero() * radius_m.max(1.0);
+    let p_m = dir.normalize_or_zero().as_dvec3() * radius_m.max(1.0) as f64;
     let lod_m = sample_scale_m.max(1.0);
     let (_continent, relief_control) = continental_relief(params, p_m, lod_m);
     let local = fbm3_band(p_m, 1_800.0, params.seed_fine ^ 0x8D27_6B45, 3, lod_m).abs();
@@ -189,11 +207,12 @@ fn roughness_at(
     (0.74 + relief_control * 0.12 + local * 0.04).clamp(0.62, 0.95)
 }
 
-fn fbm3_band(p_m: Vec3, wavelength_m: f32, seed: u32, octaves: u32, lod_m: f32) -> f32 {
-    fbm3(
-        p_m.x / wavelength_m,
-        p_m.y / wavelength_m,
-        p_m.z / wavelength_m,
+fn fbm3_band(p_m: DVec3, wavelength_m: f32, seed: u32, octaves: u32, lod_m: f32) -> f32 {
+    let wl = wavelength_m as f64;
+    fbm3_f64(
+        p_m.x / wl,
+        p_m.y / wl,
+        p_m.z / wl,
         seed,
         octaves,
         0.53,

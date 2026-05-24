@@ -27,13 +27,16 @@
         karman_line_m: 80000.0,
         // Earth-like single-scattering atmosphere. Rayleigh τ_v at sea
         // level matches Bucholtz 1995 (R/G/B ≈ 0.046/0.108/0.264, with
-        // β_R · H_R = τ_v and H_R = 8 km). Mie τ_v = 0.021 is "clean
-        // continental" Earth aerosol (g = 0.76 forward-peaked).
+        // β_R · H_R = τ_v and H_R = 8 km). Mie τ_v is the primary
+        // distance-haze knob: 0.021 is "clean continental", ~0.06 reads as a
+        // hazier, humid-continental day — more aerial perspective on distant
+        // terrain. Scale height raised to 1.6 km so the haze climbs the lower
+        // slopes of distant relief instead of hugging only the valley floors.
         scattering: Some((
             vertical_optical_depth: (0.046, 0.108, 0.264),
             rayleigh_scale_height_m: 8000.0,
-            mie_optical_depth: 0.021,
-            mie_scale_height_m: 1200.0,
+            mie_optical_depth: 0.06,
+            mie_scale_height_m: 1600.0,
             mie_asymmetry: 0.76,
             strength: 1.0,
         )),

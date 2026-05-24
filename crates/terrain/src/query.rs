@@ -40,7 +40,7 @@
 
 use std::sync::Arc;
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 
 use crate::cubemap::{Cubemap, dir_to_face_uv};
 use crate::feature_compositor::{compose_runtime_features_m, runtime_feature_height_margin_m};
@@ -198,12 +198,17 @@ impl BakedSurface {
 }
 
 impl SurfaceQuery for BakedSurface {
+    // The trait takes an f32 `dir` for its general consumers (physics, camera,
+    // HUD), which near the surface read the resident atlas anyway. The
+    // precision-critical render path calls the free `surface_*` functions
+    // directly with an f64 direction; here we promote so far/coarse trait
+    // queries still resolve.
     fn sample(&self, dir: Vec3, lod_m: f32) -> SurfaceSample {
-        surface_sample(&self.surface, &self.dynamic_state, dir, lod_m)
+        surface_sample(&self.surface, &self.dynamic_state, dir.as_dvec3(), lod_m)
     }
 
     fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {
-        surface_height_m(&self.surface, &self.dynamic_state, dir, lod_m)
+        surface_height_m(&self.surface, &self.dynamic_state, dir.as_dvec3(), lod_m)
     }
 
     fn radius_m(&self) -> f32 {
@@ -235,11 +240,11 @@ impl SurfaceQuery for BakedSurface {
 pub fn surface_sample(
     surface: &PlanetSurface,
     dynamic_state: &DynamicSurfaceState,
-    dir: Vec3,
+    dir: DVec3,
     lod_m: f32,
 ) -> SurfaceSample {
     let dir = dir.normalize_or_zero();
-    if dir == Vec3::ZERO {
+    if dir == DVec3::ZERO {
         return SurfaceSample {
             height_m: 0.0,
             albedo_linear: Vec3::ZERO,
@@ -268,11 +273,11 @@ pub fn surface_sample(
 pub fn surface_height_m(
     surface: &PlanetSurface,
     dynamic_state: &DynamicSurfaceState,
-    dir: Vec3,
+    dir: DVec3,
     lod_m: f32,
 ) -> f32 {
     let dir = dir.normalize_or_zero();
-    if dir == Vec3::ZERO {
+    if dir == DVec3::ZERO {
         return 0.0;
     }
     let dynamic_lod = lod_m.max(1e-6).log2();
@@ -306,35 +311,35 @@ pub fn surface_height_range_m(surface: &PlanetSurface, state: &DynamicSurfaceSta
 pub fn surface_normal(
     surface: &PlanetSurface,
     state: &DynamicSurfaceState,
-    dir: Vec3,
+    dir: DVec3,
     lod_m: f32,
 ) -> Vec3 {
     let dir = dir.normalize_or_zero();
-    if dir == Vec3::ZERO {
+    if dir == DVec3::ZERO {
         return Vec3::Y;
     }
-    let radius_m = surface.static_surface.radius_m.max(1.0);
-    let up = if dir.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+    let radius_m = surface.static_surface.radius_m.max(1.0) as f64;
+    let up = if dir.y.abs() > 0.99 { DVec3::X } else { DVec3::Y };
     let tangent = dir.cross(up).normalize();
     let bitangent = tangent.cross(dir);
 
     // LOD-aware offset: at least the cubemap texel scale, growing with lod_m so
     // the derivative reflects only the bands resolvable at that LOD.
-    let res = surface.static_surface.height_cubemap.resolution().max(1) as f32;
+    let res = surface.static_surface.height_cubemap.resolution().max(1) as f64;
     let texel_offset = 1.5 / res;
-    let pixel_offset = lod_m / radius_m;
+    let pixel_offset = lod_m as f64 / radius_m;
     let offset = texel_offset.max(pixel_offset);
 
-    let h_at = |probe: Vec3| surface_height_m(surface, state, probe.normalize(), lod_m);
+    let h_at = |probe: DVec3| surface_height_m(surface, state, probe.normalize(), lod_m);
     let h_east = h_at(dir + tangent * offset);
     let h_west = h_at(dir - tangent * offset);
     let h_north = h_at(dir + bitangent * offset);
     let h_south = h_at(dir - bitangent * offset);
 
-    let ds = radius_m * offset * 2.0;
+    let ds = (radius_m * offset * 2.0) as f32;
     let dh_dt = (h_east - h_west) / ds;
     let dh_db = (h_north - h_south) / ds;
-    (dir - tangent * dh_dt - bitangent * dh_db).normalize()
+    (dir.as_vec3() - tangent.as_vec3() * dh_dt - bitangent.as_vec3() * dh_db).normalize()
 }
 
 // ---------------------------------------------------------------------------
@@ -378,10 +383,13 @@ struct BaseSample {
 fn sample_base_with_dynamic(
     surface: &PlanetSurface,
     dynamic_state: &DynamicSurfaceState,
-    dir: Vec3,
+    dir: DVec3,
     dynamic_lod: f32,
 ) -> BaseSample {
     let body = &surface.static_surface;
+    // The base cubemap is low-resolution; f32 addressing is already far below
+    // its texel size, so the radial direction downcasts here without loss.
+    let dir = dir.as_vec3();
     let mut height = sample_height_bilinear(&body.height_cubemap, dir, body.height_range);
     let mut albedo = srgb_rgba8_to_linear_rgb(cubemap_texel_nearest(&body.albedo_cubemap, dir));
     let mut roughness = static_roughness(surface, dir);
@@ -445,13 +453,15 @@ fn static_roughness(surface: &PlanetSurface, dir: Vec3) -> f32 {
 // Runtime geometric detail
 // ---------------------------------------------------------------------------
 
-fn runtime_height_m(surface: &PlanetSurface, dir: Vec3, lod_m: f32, base_height_m: f32) -> f32 {
+fn runtime_height_m(surface: &PlanetSurface, dir: DVec3, lod_m: f32, base_height_m: f32) -> f32 {
     match surface.static_surface.runtime_detail {
         RuntimeTerrainDetail::LegacyHmf => {
+            // Legacy cascade is f32 (orbital-scale bake heritage); downcast here.
+            let dir_f = dir.as_vec3();
             let feature_base_m =
-                compose_runtime_features_m(&surface.static_surface, dir, base_height_m);
+                compose_runtime_features_m(&surface.static_surface, dir_f, base_height_m);
             let plan = detail_plan_for_lod(lod_m, DETAIL_BASE_WL_M);
-            let detail_h = compute_detail_height(dir, surface.static_surface.radius_m, plan);
+            let detail_h = compute_detail_height(dir_f, surface.static_surface.radius_m, plan);
             combine_base_and_detail(feature_base_m, detail_h, surface.static_surface.sea_level_m)
         }
         RuntimeTerrainDetail::BasicContinental(params) => {
@@ -459,8 +469,9 @@ fn runtime_height_m(surface: &PlanetSurface, dir: Vec3, lod_m: f32, base_height_
             // For the P2A Thalos prototype, keep runtime geometry invariant
             // across tile LODs. Otherwise the same world-space point receives
             // a different height when a parent tile hands off to a child,
-            // which reads as contour-like terracing in the ground mesh.
-            params.sample_height_m(surface.static_surface.radius_m, dir, 1.0)
+            // which reads as contour-like terracing in the ground mesh. The
+            // f64 direction keeps the sample position precise at planet scale.
+            params.sample_height_dm(surface.static_surface.radius_m as f64, dir, 1.0)
         }
     }
 }

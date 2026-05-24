@@ -228,24 +228,39 @@ impl AttachmentData {
             }
         }
 
+        // RG16 height stores a coarse normalized value in x and a sub-coarse-LSB
+        // residual in y (decoded as `x + y / 65535` — see `encode_height_rg16`).
+        // The mip filter must average the *decoded* value and re-split it, NOT
+        // box-filter the two channels independently: when a 2×2 block straddles a
+        // coarse step the residual wraps, so independent averages no longer
+        // reconstruct the mean height. That error is invisible in the geometry
+        // (the vertex stage only ever samples mip 0) but the fragment normal
+        // differentiates the corrupted coarse-mip height into relief/contour
+        // lines under a grazing sun. Decode → average → re-split keeps the full
+        // ~32-bit precision across the whole mip chain.
         fn generate_mipmap_rg16(
             data: &mut Vec<[u16; 2]>,
             parent_size: usize,
             child_size: usize,
             start: usize,
         ) {
+            const MAX: f64 = u16::MAX as f64;
             for (child_y, child_x) in iproduct!(0..child_size, 0..child_size) {
-                let mut value = [0u64; 2];
+                // Accumulate in coarse-LSB units, i.e. `coarse + residual / MAX`.
+                let mut sum = 0.0f64;
 
                 for (parent_x, parent_y) in
                     iproduct!(0..2, 0..2).map(|(x, y)| ((child_x << 1) + x, (child_y << 1) + y))
                 {
                     let index = start + parent_y * parent_size + parent_x;
-                    value[0] += data[index][0] as u64;
-                    value[1] += data[index][1] as u64;
+                    let texel = data[index];
+                    sum += texel[0] as f64 + texel[1] as f64 / MAX;
                 }
 
-                data.push([(value[0] / 4) as u16, (value[1] / 4) as u16]);
+                let avg = sum / 4.0;
+                let coarse = avg.floor().clamp(0.0, MAX);
+                let residual = ((avg - coarse) * MAX).round().clamp(0.0, MAX);
+                data.push([coarse as u16, residual as u16]);
             }
         }
 
