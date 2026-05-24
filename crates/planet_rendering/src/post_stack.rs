@@ -31,6 +31,9 @@ pub fn space_camera_post_stack() -> impl Bundle {
         },
         Hdr,
         Tonemapping::TonyMcMapface,
+        // Intentional post-process dithering. Do not disable this when
+        // investigating generic atmosphere/sky "noise" reports; it is part of
+        // the desired camera look and should only change when explicitly named.
         DebandDither::Enabled,
         space_camera_color_grading(),
         Bloom {
@@ -70,6 +73,9 @@ pub fn space_camera_post_stack() -> impl Bundle {
             max_samples: 8,
             color_lut: None,
         },
+        // Intentional exposure-driven sensor grain. Do not disable this when
+        // investigating generic atmosphere/sky "noise" reports; it is part of
+        // the desired camera look and should only change when explicitly named.
         FilmGrain::default(),
     )
 }

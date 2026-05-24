@@ -40,9 +40,22 @@
             mie_asymmetry: 0.76,
             strength: 1.0,
         )),
-        // Temporarily disabled while the reference cloud layer is being revisited.
-        // Previous values: coverage 0.25, albedo (0.74, 0.76, 0.80),
-        // scroll_rate 2.0e-5, differential_rotation 0.40.
+        // Volumetric cloud layer (Phase 1) — temporarily disabled. Re-enable
+        // by swapping `None` for the `Some((...))` below. The terrain
+        // `BodySky` pass raymarches a thin slab between `base_altitude_m` and
+        // `base_altitude_m + thickness_m`, using the reference coverage cube
+        // as the large-scale weather map eroded by 3-D detail noise; the
+        // orbital impostor still uses its own fixed reference shell.
+        //
+        // clouds: Some((
+        //     coverage: 0.55,                 // partly cloudy (cube × 2 × coverage, then noise threshold)
+        //     albedo: (0.92, 0.94, 0.97),     // bright near-neutral cloud tops
+        //     scroll_rate: 2.0e-5,
+        //     differential_rotation: 0.40,
+        //     base_altitude_m: 1500.0,
+        //     thickness_m: 5000.0,
+        //     density: 1.0,
+        // )),
         clouds: None,
     )),
 )

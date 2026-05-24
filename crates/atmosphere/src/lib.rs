@@ -603,6 +603,27 @@ pub struct CloudCover {
     /// terrestrial: 0.3–0.5.
     #[serde(default = "default_cloud_differential")]
     pub differential_rotation: f32,
+
+    /// Base altitude of the cloud layer above the surface, in meters.
+    /// The volumetric cloud raymarch in the terrain `BodySky` pass treats
+    /// the layer as a slab spanning `[base_altitude_m, base_altitude_m +
+    /// thickness_m]`. Earth's fair-weather cumulus base sits ~1–2 km. The
+    /// orbital impostor keeps its own fixed reference shell and ignores
+    /// this field.
+    #[serde(default = "default_cloud_base_altitude")]
+    pub base_altitude_m: f32,
+
+    /// Vertical thickness of the cloud slab, in meters — the depth the
+    /// volumetric raymarch integrates over. Thicker reads as puffier, more
+    /// occluding cloud; ~4–6 km is a good fair-weather cumulus deck.
+    #[serde(default = "default_cloud_thickness")]
+    pub thickness_m: f32,
+
+    /// Optical-density multiplier for the volumetric layer. Scales the
+    /// per-meter extinction the raymarch accumulates; 1.0 is the tuned
+    /// default, higher values give denser, more opaque cores.
+    #[serde(default = "default_cloud_density")]
+    pub density: f32,
 }
 fn default_cloud_albedo() -> [f32; 3] {
     [1.0, 1.0, 1.0]
@@ -612,4 +633,13 @@ fn default_cloud_scroll_rate() -> f32 {
 }
 fn default_cloud_differential() -> f32 {
     0.35
+}
+fn default_cloud_base_altitude() -> f32 {
+    1500.0
+}
+fn default_cloud_thickness() -> f32 {
+    5000.0
+}
+fn default_cloud_density() -> f32 {
+    1.0
 }

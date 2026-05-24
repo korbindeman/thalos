@@ -89,10 +89,16 @@ pub(super) fn update(
     } else if !state.is_grounded() {
         ("ON FOOT · FALLING".to_string(), theme.text_warn)
     } else if state.is_at_rest() {
-        ("ON FOOT · STANDING — warp ready".to_string(), Color::srgb(0.55, 0.9, 0.55))
+        (
+            "ON FOOT · STANDING — warp ready".to_string(),
+            Color::srgb(0.55, 0.9, 0.55),
+        )
     } else {
         let speed = state.surface_speed_m_s();
-        (format!("ON FOOT · MOVING {speed:.1} m/s"), theme.text_accent)
+        (
+            format!("ON FOOT · MOVING {speed:.1} m/s"),
+            theme.text_accent,
+        )
     };
 
     if let Ok((mut text, mut text_color)) = texts.single_mut() {

@@ -13,7 +13,7 @@
 
 #import thalos_udlod::types::AtlasTile
 #import thalos_udlod::bindings::{config, atlas_sampler, attachments, attachment2_atlas, attachment3_atlas}
-#import thalos_udlod::attachments::{sample_attachment1, sample_normal, attachment_uv, sample_height_atlas_uv_m}
+#import thalos_udlod::attachments::{sample_attachment1, sample_normal, attachment_uv, sample_height_atlas_uv_m, sample_height}
 #import thalos_udlod::fragment::{FragmentInput, FragmentOutput, fragment_info}
 #import thalos_udlod::functions::{lookup_tile, tile_count}
 #import thalos::atmosphere::AtmosphereBlock
@@ -94,6 +94,42 @@ const ROCK_STRENGTH: f32 = 0.0;
 const BREAKUP_SCALE: f32 = 0.05;     // 1/period_m → ~20 m base patches
 const BREAKUP_VALUE_AMT: f32 = 0.18; // ± fractional value variation
 const BREAKUP_HUE_AMT: f32 = 0.04;   // ± warm/cool drift
+
+// ── Altitude + slope material model (snow, treeline, scree) ───────────────
+// Realistic terrain reads as ecological bands stacked by elevation: lush
+// lowland → temperate grass → dry alpine grass above the treeline → bare scree
+// → snow on the gentle summits, with steep faces staying bare rock at every
+// altitude. We synthesise that here in the fragment so it iterates without a
+// re-bake. Heights are absolute metres above the body reference sphere (the
+// decoded height attachment); these thresholds are tuned to Thalos's land
+// envelope (basins ~1.4 km, plains ~2.4 km, peaks well past 5 km) and are the
+// primary knobs to nudge after a preview. A low-frequency noise jitters the
+// treeline/snowline so the bands don't read as clean contour rings, and the
+// snow gate excludes steep faces (snow sloughs off cliffs) — both standard
+// altitude/slope/noise snow-line practice (see sources in the summary).
+const LUSH_LO_M: f32 = 1800.0;       // full lowland lushness at/below here
+const LUSH_HI_M: f32 = 2900.0;       // lushness gone above here
+const TREELINE_LO_M: f32 = 3100.0;   // grass starts giving way to dry alpine
+const TREELINE_HI_M: f32 = 4000.0;   // fully dry alpine grass / tundra
+const SNOW_LINE_LO_M: f32 = 3700.0;  // snow begins (on gentle ground)
+const SNOW_LINE_HI_M: f32 = 4600.0;  // permanent snow cap
+const SNOW_LINE_NOISE_M: f32 = 400.0; // ± snow/treeline jitter from macro noise
+const SNOW_SLOPE_LO: f32 = 0.32;     // snow holds on slopes up to ~47°…
+const SNOW_SLOPE_HI: f32 = 0.62;     // …gone by ~68° (cliffs stay bare rock)
+const MACRO_VAR_SCALE: f32 = 0.004;  // 1/period_m → ~250 m biome-mottle patches
+const MACRO_VAR_AMT: f32 = 0.10;     // ± low-frequency value mottle
+
+// Earthy linear-space material anchors. Deliberately lower-value and less
+// saturated than neon grass; direct sun and sky fill lift them in the lighting
+// pass. Snow is kept well below 1.0 so a sunlit cap doesn't blow out.
+const C_FOREST: vec3<f32>   = vec3<f32>(0.040, 0.066, 0.030); // lowland lush (dark green)
+const C_GRASS: vec3<f32>    = vec3<f32>(0.078, 0.112, 0.052); // temperate grass (olive)
+const C_DRYGRASS: vec3<f32> = vec3<f32>(0.130, 0.132, 0.074); // alpine dry grass / tundra
+const C_SOIL: vec3<f32>     = vec3<f32>(0.092, 0.068, 0.044); // earthy soil / peat
+const C_ROCK_LO: vec3<f32>  = vec3<f32>(0.106, 0.094, 0.080); // lower rock (warm grey-brown)
+const C_ROCK_HI: vec3<f32>  = vec3<f32>(0.140, 0.138, 0.132); // alpine scree (cool grey)
+const C_SNOW: vec3<f32>     = vec3<f32>(0.600, 0.640, 0.720); // snow (faint blue)
+const C_WET: vec3<f32>      = vec3<f32>(0.030, 0.050, 0.028); // wet hollow (dark)
 
 // Step 3 — micro-relief normal. A detail height field whose gradient tilts the
 // lighting normal, giving the surface the light/dark micro-contrast under a
@@ -415,7 +451,18 @@ struct TerrainMaterialSample {
     occlusion: f32,
 };
 
-fn eval_material_stack(masks_in: vec4<f32>, macro_albedo: vec3<f32>) -> TerrainMaterialSample {
+// Build the local surface colour by stacking ecological bands by altitude and
+// slope on top of the tile provider's grass/soil/rock intent masks.
+//   altitude_m — metres above the body reference sphere (drives treeline / snow)
+//   slope_t    — geometric steepness in [0,1] (0 flat, 1 vertical)
+//   variation  — low-frequency value noise in [-1,1] (jitters bands, mottles)
+fn eval_material_stack(
+    masks_in: vec4<f32>,
+    macro_albedo: vec3<f32>,
+    altitude_m: f32,
+    slope_t: f32,
+    variation: f32,
+) -> TerrainMaterialSample {
     var masks = max(masks_in, vec4<f32>(0.0));
     let weight_sum = max(masks.r + masks.g + masks.b, 1.0e-4);
     let grass_w = masks.r / weight_sum;
@@ -423,25 +470,44 @@ fn eval_material_stack(masks_in: vec4<f32>, macro_albedo: vec3<f32>) -> TerrainM
     let rock_w = masks.b / weight_sum;
     let wet = clamp(masks.a, 0.0, 1.0);
 
-    // Earthy linear-space anchors. These are intentionally lower-value than
-    // the bake: atmosphere and direct sunlight lift them, while the material
-    // masks create the local grass/soil/rock separation missing from a single
-    // terrain albedo.
-    let grass = vec3<f32>(0.070, 0.135, 0.045);
-    let soil = vec3<f32>(0.105, 0.075, 0.045);
-    let rock = vec3<f32>(0.155, 0.145, 0.125);
-    let wet_soil = vec3<f32>(0.035, 0.060, 0.032);
+    // Steepness used to expose rock and keep snow off cliffs: the coarse
+    // geometric slope OR the provider's rock intent, whichever reads steeper, so
+    // a face stays bare even where the macro normal is too coarse to register.
+    let steep = clamp(max(slope_t, rock_w), 0.0, 1.0);
+    let jitter = variation * SNOW_LINE_NOISE_M;
 
-    var material_albedo = grass * grass_w + soil * soil_w + rock * rock_w;
-    material_albedo = mix(material_albedo, wet_soil, wet * (1.0 - rock_w * 0.55));
+    // Vegetation column: dark lush lowland → temperate grass → pale dry alpine
+    // grass approaching the treeline.
+    let lush = smoothstep(LUSH_HI_M, LUSH_LO_M, altitude_m + jitter); // 1 low, 0 high
+    let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m + jitter);
+    let grass_c = mix(C_GRASS, C_FOREST, lush * 0.6);
+    let veg = mix(grass_c, C_DRYGRASS, alpine);
 
-    // Keep the baked albedo as broad climate/body identity, but make the
-    // material stack the local truth. This prevents a palette-only bake from
-    // flattening cliffs and hollows back into one color.
+    // Rock cools and greys with altitude (warm soil-stained rock low down,
+    // lichen-free scree up high).
+    let rock_col = mix(C_ROCK_LO, C_ROCK_HI, alpine);
+
+    // Earthy substrate from the material masks, darkened in wet hollows.
+    var ground = veg * grass_w + C_SOIL * soil_w + rock_col * rock_w;
+    ground = mix(ground, C_WET, wet * (1.0 - rock_w * 0.55));
+
+    // Snow: above a noise-jittered snowline, only where the ground is not too
+    // steep. Permanent cap once well clear of the line.
+    let snow_alt = smoothstep(SNOW_LINE_LO_M + jitter, SNOW_LINE_HI_M + jitter, altitude_m);
+    let snow_hold = 1.0 - smoothstep(SNOW_SLOPE_LO, SNOW_SLOPE_HI, steep);
+    let snow = clamp(snow_alt * snow_hold, 0.0, 1.0);
+    ground = mix(ground, C_SNOW, snow);
+
+    // Low-frequency value mottle so even a single biome breaks into patches
+    // (snow stays clean).
+    ground = ground * (1.0 + variation * MACRO_VAR_AMT * (1.0 - snow));
+
+    // Keep a little of the baked macro albedo as broad climate/body identity,
+    // but the altitude/slope model is the local truth. Drop it under snow.
     let macro_tint = desaturate(macro_albedo, 0.86);
     var out: TerrainMaterialSample;
-    out.albedo = mix(material_albedo, macro_tint, 0.28);
-    out.normal_strength = mix(0.45, 0.85, rock_w) + soil_w * 0.12;
+    out.albedo = mix(ground, macro_tint, 0.16 * (1.0 - snow));
+    out.normal_strength = mix(mix(0.45, 0.85, rock_w) + soil_w * 0.12, 0.25, snow);
     out.occlusion = 1.0 - wet * 0.18 - soil_w * 0.05 - rock_w * 0.04;
     return out;
 }
@@ -664,8 +730,25 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
 
     // Naturalistic material blending. The tile provider publishes continuous
     // material intent masks, so grass, soil, rock, and wet hollows separate by
-    // terrain form instead of by one global albedo grade.
-    let material = eval_material_stack(material_masks, grade_surface(albedo.rgb, material_masks.b));
+    // terrain form; on top of that we stack altitude/slope ecological bands
+    // (treeline, alpine scree, snow caps) computed here from the height
+    // attachment and the geometric slope.
+    let altitude_m = sample_height(tile);
+    let geo_slope_t = surface_slope(height_normal, geo_normal);
+    // Low-frequency value variation in [-1,1]; jitters the treeline/snowline and
+    // mottles vegetation so the altitude bands don't read as clean contour rings.
+    let macro_var = (fbm3_periodic(
+        detail_p_body * MACRO_VAR_SCALE,
+        3,
+        DETAIL_COORD_PERIOD_M * MACRO_VAR_SCALE,
+    ) - 0.5) * 2.0;
+    let material = eval_material_stack(
+        material_masks,
+        grade_surface(albedo.rgb, material_masks.b),
+        altitude_m,
+        geo_slope_t,
+        macro_var,
+    );
     var surface_rgb = material.albedo;
     if (!debug_on) {
         surface_rgb = surface_rgb * detail.tint;
