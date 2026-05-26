@@ -297,6 +297,9 @@ pub fn surface_height_range_m(surface: &PlanetSurface, state: &DynamicSurfaceSta
         RuntimeTerrainDetail::BasicContinental(params) => {
             base.max(params.height_range_hint_m()).max(1.0)
         }
+        RuntimeTerrainDetail::OceanicContinental(params) => {
+            base.max(params.height_range_hint_m()).max(1.0)
+        }
     }
 }
 
@@ -319,7 +322,11 @@ pub fn surface_normal(
         return Vec3::Y;
     }
     let radius_m = surface.static_surface.radius_m.max(1.0) as f64;
-    let up = if dir.y.abs() > 0.99 { DVec3::X } else { DVec3::Y };
+    let up = if dir.y.abs() > 0.99 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
     let tangent = dir.cross(up).normalize();
     let bitangent = tangent.cross(dir);
 
@@ -471,6 +478,13 @@ fn runtime_height_m(surface: &PlanetSurface, dir: DVec3, lod_m: f32, base_height
             // a different height when a parent tile hands off to a child,
             // which reads as contour-like terracing in the ground mesh. The
             // f64 direction keeps the sample position precise at planet scale.
+            params.sample_height_dm(surface.static_surface.radius_m as f64, dir, 1.0)
+        }
+        RuntimeTerrainDetail::OceanicContinental(params) => {
+            let _ = lod_m;
+            // Same LOD-invariant rule as BasicContinental: the signed land / seabed
+            // evaluator is the geometric surface for mesh and collider, while the
+            // separate water renderer sits at `sea_level_m` above it.
             params.sample_height_dm(surface.static_surface.radius_m as f64, dir, 1.0)
         }
     }

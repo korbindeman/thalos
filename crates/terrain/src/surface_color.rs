@@ -5,6 +5,7 @@
 //! signals into the baked static albedo cubemap.
 
 use glam::Vec3;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::body_builder::BodyBuilder;
@@ -237,8 +238,27 @@ pub struct SurfaceColorContext {
     pub mottle_noise: f32,
 }
 
+/// Legacy per-biome palette painter (airless, cold-desert, generic routes).
 pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) {
-    if spec.palettes.is_empty() {
+    paint_surface_with(builder, spec, ColorMode::BiomePalette);
+}
+
+/// Materials-first painter (migration P2C): universal form materials
+/// (seabed/sand/rock/snow) plus biome-tinted ground cover. Same loop, grade,
+/// and overprint post-passes as [`paint_surface_albedo`]; only the per-texel
+/// colour function differs. The oceanic-terrestrial route uses this.
+pub fn paint_oceanic_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) {
+    paint_surface_with(builder, spec, ColorMode::OceanicMaterials);
+}
+
+#[derive(Clone, Copy)]
+enum ColorMode {
+    BiomePalette,
+    OceanicMaterials,
+}
+
+fn paint_surface_with(builder: &mut BodyBuilder, spec: &SurfaceColorSpec, mode: ColorMode) {
+    if spec.palettes.is_empty() && matches!(mode, ColorMode::BiomePalette) {
         return;
     }
 
@@ -258,7 +278,13 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
 
     for face in CubemapFace::ALL {
         let albedo = builder.albedo_contributions.albedo.face_data_mut(face);
-        for (i, texel) in albedo.iter_mut().enumerate() {
+        // Per-texel albedo is an independent read of the (already-cloned,
+        // immutable) height/biome/material/mare cubemaps, so the inner loop
+        // parallelises directly — same pattern as
+        // `bake_surface_field_into_builder`. The serial post-passes
+        // (`soften_mare_contacts`, crater overprints) run after this and are
+        // only used by the airless overprint path, not the oceanic route.
+        albedo.par_iter_mut().enumerate().for_each(|(i, texel)| {
             let x = i % res;
             let y = i / res;
             let u = (x as f32 + 0.5) / res as f32;
@@ -323,13 +349,16 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
 
             let mix_texel = biome_weights.get(face, x as u32, y as u32);
             let material_id = material_ids.get(face, x as u32, y as u32);
-            let mut color = evaluate_mix(mix_texel, material_id, spec, &context);
-            if matches!(spec.overprint, SurfaceColorOverprint::ColdDesert) {
-                color = cold_desert_grade(color);
-            }
-            color = apply_surface_grade(color, spec);
+            let color = match mode {
+                ColorMode::BiomePalette => {
+                    surface_color_at(spec, &context, mix_texel, material_id)
+                }
+                ColorMode::OceanicMaterials => {
+                    surface_color_at_materials(spec, &context, mix_texel)
+                }
+            };
             *texel = [color[0], color[1], color[2], 1.0];
-        }
+        });
     }
 
     if matches!(spec.overprint, SurfaceColorOverprint::AirlessImpact { .. }) {
@@ -356,6 +385,170 @@ pub fn paint_surface_albedo(builder: &mut BodyBuilder, spec: &SurfaceColorSpec) 
             },
         );
     }
+}
+
+/// The single per-direction surface-colour evaluator.
+///
+/// Given a fully-built [`SurfaceColorContext`] plus the texel's biome mix and
+/// dominant material id, return the final graded linear-RGB albedo. This is the
+/// **one place** surface colour is defined: [`paint_surface_albedo`] calls it
+/// per texel during the bake, and (migration P2C-B) the Query API / UDLOD tile
+/// provider call it per direction at tile resolution, so the orbital impostor
+/// and the ground LOD agree on colour by construction.
+///
+/// The caller owns context construction — the bake builds it from the baked
+/// cubemaps' neighbour samples; a runtime backing builds it analytically from
+/// its field. Equal contexts yield equal colour regardless of caller.
+pub fn surface_color_at(
+    spec: &SurfaceColorSpec,
+    context: &SurfaceColorContext,
+    mix_texel: BiomeMixTexel,
+    material_id: u8,
+) -> [f32; 3] {
+    let mut color = evaluate_mix(mix_texel, material_id, spec, context);
+    if matches!(spec.overprint, SurfaceColorOverprint::ColdDesert) {
+        color = cold_desert_grade(color);
+    }
+    apply_surface_grade(color, spec)
+}
+
+// ── Materials-first surface model (migration P2C) ─────────────────────────
+//
+// Materials are the substrate. Terrain *form* selects which material appears
+// where; the *biome* defines which materials are in a region's palette and
+// tints them. This is the one place that mapping lives, so the impostor bake,
+// the UDLOD ground tiles, and the editor preview agree. See
+// docs/planet-generation-pipeline-migration.md §P2C.
+
+/// BRDF / shading model a material is rendered with. The single shading
+/// dispatch in `thalos_planet_lighting` (P2C-C) switches on this; today it
+/// tags each material so that dispatch can consume it. Distinct from
+/// `feature_compiler::SurfaceMaterialClass`, which is geological provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShadingModel {
+    /// Airless regolith (Moon/Mercury-like): opposition surge + backscatter.
+    Hapke,
+    /// Rough dielectric — soil, grass, rock, sand. Lambert-ish diffuse.
+    RoughDielectric,
+    /// Translucent ice with a Fresnel specular lobe.
+    Ice,
+    /// Smooth dielectric glass (obsidian, vitrified surfaces).
+    Glass,
+    /// Conductor — metallic surfaces, tinted specular, no diffuse.
+    Metal,
+}
+
+/// One physical surface substance — the primary unit of the materials-first
+/// model. Renderers read albedo/roughness/shading produced from these.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SurfaceMaterial {
+    pub shading: ShadingModel,
+    /// Linear-RGB base albedo before biome tint / relief grading.
+    pub base_albedo: [f32; 3],
+    pub roughness: f32,
+    pub metalness: f32,
+}
+
+impl SurfaceMaterial {
+    pub const fn dielectric(base_albedo: [f32; 3], roughness: f32) -> Self {
+        Self {
+            shading: ShadingModel::RoughDielectric,
+            base_albedo,
+            roughness,
+            metalness: 0.0,
+        }
+    }
+}
+
+// Oceanic-terrestrial material library. The universal form materials
+// (seabed/sand/rock/snow) are shared across every biome; biome ground cover is
+// the canvas biomes tint. Base colours are seeded from the aging-oceanic
+// palette mids so the first materials-first bake stays close to the prior
+// impostor look — tune against `just bake Thalos --preview`.
+const OMAT_ABYSSAL: SurfaceMaterial = SurfaceMaterial::dielectric([0.030, 0.027, 0.022], 0.78);
+const OMAT_SHELF: SurfaceMaterial = SurfaceMaterial::dielectric([0.130, 0.108, 0.075], 0.64);
+const OMAT_SAND: SurfaceMaterial = SurfaceMaterial::dielectric([0.470, 0.400, 0.265], 0.72);
+const OMAT_ROCK: SurfaceMaterial = SurfaceMaterial::dielectric([0.300, 0.235, 0.175], 0.86);
+const OMAT_ROCK_ALPINE: [f32; 3] = [0.150, 0.145, 0.140];
+const OMAT_SNOW: SurfaceMaterial = SurfaceMaterial::dielectric([0.870, 0.875, 0.890], 0.42);
+
+/// Per-biome ground-cover base colour for the climate (vegetation) biomes.
+/// The biome defines the ground cover's identity; form decides where bare
+/// universal materials (rock/snow/sand) take over instead.
+fn oceanic_ground_cover(biome_id: u8) -> [f32; 3] {
+    match biome_id {
+        AGING_OCEANIC_BIOME_FOREST => [0.060, 0.145, 0.040],
+        AGING_OCEANIC_BIOME_GRASSLAND => [0.205, 0.315, 0.090],
+        AGING_OCEANIC_BIOME_STEPPE => [0.235, 0.265, 0.110],
+        AGING_OCEANIC_BIOME_DESERT => [0.610, 0.405, 0.170],
+        AGING_OCEANIC_BIOME_BOREAL => [0.090, 0.205, 0.080],
+        AGING_OCEANIC_BIOME_TUNDRA => [0.235, 0.260, 0.190],
+        _ => [0.150, 0.190, 0.085],
+    }
+}
+
+/// Linear-RGB colour contributed by one biome weight at this point,
+/// materials-first: universal form materials carry their own (form-graded)
+/// colour; the climate biomes contribute biome-tinted ground cover.
+fn oceanic_material_color(biome_id: u8, ctx: &SurfaceColorContext) -> [f32; 3] {
+    match biome_id {
+        AGING_OCEANIC_BIOME_OCEAN => {
+            let depth = (-ctx.relative_height_m).max(0.0);
+            mix3(
+                OMAT_SHELF.base_albedo,
+                OMAT_ABYSSAL.base_albedo,
+                smoothstep(0.0, 4_000.0, depth),
+            )
+        }
+        AGING_OCEANIC_BIOME_SHELF => OMAT_SHELF.base_albedo,
+        AGING_OCEANIC_BIOME_BEACH => OMAT_SAND.base_albedo,
+        AGING_OCEANIC_BIOME_ROCK => mix3(
+            OMAT_ROCK.base_albedo,
+            OMAT_ROCK_ALPINE,
+            smoothstep(1_500.0, 4_200.0, ctx.relative_height_m),
+        ),
+        AGING_OCEANIC_BIOME_SNOW => OMAT_SNOW.base_albedo,
+        _ => {
+            // Climate ground cover: drier/paler with elevation, broken up by
+            // the broad/mottle climate noise so a single biome isn't flat.
+            let base = oceanic_ground_cover(biome_id);
+            let dry = smoothstep(1_600.0, 3_200.0, ctx.relative_height_m);
+            let cover = mix3(base, OMAT_SAND.base_albedo, dry * 0.22);
+            let v = 1.0 + (ctx.broad_noise * 0.6 + ctx.mottle_noise * 0.4) * 0.10;
+            [cover[0] * v, cover[1] * v, cover[2] * v]
+        }
+    }
+}
+
+fn evaluate_oceanic_materials_first(mix_texel: BiomeMixTexel, ctx: &SurfaceColorContext) -> [f32; 3] {
+    if mix_texel.is_empty() {
+        return oceanic_material_color(AGING_OCEANIC_BIOME_GRASSLAND, ctx);
+    }
+    let mut color = [0.0_f32; 3];
+    let mut total = 0.0_f32;
+    for (biome_id, weight) in mix_texel.iter_weights() {
+        let c = oceanic_material_color(biome_id, ctx);
+        color[0] += c[0] * weight;
+        color[1] += c[1] * weight;
+        color[2] += c[2] * weight;
+        total += weight;
+    }
+    if total <= 1.0e-5 {
+        oceanic_material_color(AGING_OCEANIC_BIOME_GRASSLAND, ctx)
+    } else {
+        [color[0] / total, color[1] / total, color[2] / total]
+    }
+}
+
+/// Materials-first per-direction colour evaluator (P2C). The oceanic painter
+/// and (P2C-B) the Query API both call this so the impostor and the ground LOD
+/// agree on colour by construction.
+pub fn surface_color_at_materials(
+    spec: &SurfaceColorSpec,
+    context: &SurfaceColorContext,
+    mix_texel: BiomeMixTexel,
+) -> [f32; 3] {
+    apply_surface_grade(evaluate_oceanic_materials_first(mix_texel, context), spec)
 }
 
 fn evaluate_mix(
@@ -764,67 +957,67 @@ impl SurfaceColorSpec {
                 ),
                 pal(
                     "beach",
-                    [0.560, 0.455, 0.275],
-                    [0.690, 0.590, 0.390],
-                    [0.760, 0.685, 0.495],
-                    [0.430, 0.330, 0.210],
-                    [0.800, 0.720, 0.540],
-                    [0.500, 0.390, 0.245],
-                    [0.700, 0.555, 0.310],
-                    [0.590, 0.475, 0.275],
-                    [0.690, 0.610, 0.395],
-                    [0.550, 0.500, 0.330],
-                    0.46,
-                    0.80,
-                    0.70,
+                    [0.365, 0.310, 0.205],
+                    [0.470, 0.400, 0.265],
+                    [0.560, 0.500, 0.350],
+                    [0.300, 0.250, 0.180],
+                    [0.620, 0.555, 0.400],
+                    [0.330, 0.275, 0.190],
+                    [0.500, 0.410, 0.255],
+                    [0.410, 0.345, 0.225],
+                    [0.485, 0.435, 0.295],
+                    [0.385, 0.355, 0.245],
+                    0.32,
+                    0.78,
+                    0.48,
                 ),
                 pal(
                     "forest",
-                    [0.030, 0.105, 0.026],
-                    [0.052, 0.185, 0.032],
-                    [0.095, 0.255, 0.046],
-                    [0.026, 0.070, 0.026],
-                    [0.125, 0.300, 0.060],
-                    [0.014, 0.060, 0.016],
-                    [0.105, 0.230, 0.048],
-                    [0.030, 0.130, 0.024],
-                    [0.055, 0.245, 0.036],
-                    [0.010, 0.090, 0.014],
-                    0.92,
-                    0.16,
-                    1.18,
+                    [0.038, 0.095, 0.035],
+                    [0.060, 0.145, 0.040],
+                    [0.105, 0.195, 0.065],
+                    [0.030, 0.065, 0.032],
+                    [0.135, 0.230, 0.080],
+                    [0.018, 0.060, 0.020],
+                    [0.115, 0.180, 0.060],
+                    [0.045, 0.115, 0.035],
+                    [0.065, 0.175, 0.045],
+                    [0.020, 0.085, 0.022],
+                    0.70,
+                    0.20,
+                    0.82,
                 ),
                 pal(
                     "grassland",
-                    [0.135, 0.305, 0.060],
-                    [0.220, 0.430, 0.075],
-                    [0.330, 0.535, 0.115],
-                    [0.125, 0.220, 0.070],
-                    [0.390, 0.585, 0.145],
-                    [0.075, 0.225, 0.040],
-                    [0.385, 0.440, 0.105],
-                    [0.220, 0.360, 0.070],
-                    [0.165, 0.430, 0.060],
-                    [0.050, 0.250, 0.026],
-                    0.74,
-                    0.24,
-                    0.92,
+                    [0.145, 0.245, 0.075],
+                    [0.205, 0.315, 0.090],
+                    [0.300, 0.405, 0.135],
+                    [0.120, 0.185, 0.075],
+                    [0.350, 0.455, 0.160],
+                    [0.080, 0.175, 0.052],
+                    [0.350, 0.370, 0.125],
+                    [0.215, 0.295, 0.085],
+                    [0.170, 0.330, 0.075],
+                    [0.060, 0.200, 0.035],
+                    0.60,
+                    0.30,
+                    0.72,
                 ),
                 pal(
                     "steppe",
-                    [0.265, 0.265, 0.090],
-                    [0.410, 0.360, 0.105],
-                    [0.540, 0.485, 0.165],
-                    [0.235, 0.185, 0.095],
-                    [0.600, 0.545, 0.200],
-                    [0.200, 0.205, 0.075],
-                    [0.520, 0.405, 0.120],
-                    [0.350, 0.315, 0.088],
-                    [0.365, 0.410, 0.105],
-                    [0.210, 0.305, 0.065],
-                    0.68,
-                    0.38,
-                    0.92,
+                    [0.165, 0.200, 0.090],
+                    [0.235, 0.265, 0.110],
+                    [0.330, 0.350, 0.165],
+                    [0.155, 0.145, 0.085],
+                    [0.390, 0.405, 0.195],
+                    [0.125, 0.165, 0.070],
+                    [0.335, 0.310, 0.125],
+                    [0.235, 0.250, 0.095],
+                    [0.235, 0.300, 0.105],
+                    [0.130, 0.220, 0.065],
+                    0.54,
+                    0.44,
+                    0.62,
                 ),
                 pal(
                     "desert",
@@ -860,19 +1053,19 @@ impl SurfaceColorSpec {
                 ),
                 pal(
                     "tundra",
-                    [0.255, 0.300, 0.220],
-                    [0.335, 0.365, 0.255],
-                    [0.460, 0.450, 0.325],
-                    [0.220, 0.235, 0.180],
-                    [0.555, 0.535, 0.390],
-                    [0.190, 0.245, 0.175],
-                    [0.410, 0.390, 0.285],
-                    [0.300, 0.325, 0.235],
-                    [0.320, 0.375, 0.255],
-                    [0.215, 0.295, 0.205],
-                    0.58,
-                    0.70,
-                    0.70,
+                    [0.175, 0.205, 0.160],
+                    [0.235, 0.260, 0.190],
+                    [0.330, 0.335, 0.255],
+                    [0.150, 0.165, 0.135],
+                    [0.415, 0.410, 0.315],
+                    [0.130, 0.175, 0.135],
+                    [0.300, 0.300, 0.225],
+                    [0.215, 0.240, 0.175],
+                    [0.225, 0.275, 0.195],
+                    [0.155, 0.220, 0.160],
+                    0.44,
+                    0.72,
+                    0.50,
                 ),
                 pal(
                     "rock",
@@ -914,9 +1107,9 @@ impl SurfaceColorSpec {
             use_material_id_when_biome_empty: false,
             sea_level_m: Some(sea_level_m),
             water: Some(WaterAppearance::new([0.010, 0.055, 0.145], 140.0)),
-            saturation: 1.42,
-            contrast: 1.20,
-            gain: 0.96,
+            saturation: 1.08,
+            contrast: 1.08,
+            gain: 0.82,
             overprint: SurfaceColorOverprint::None,
         }
     }

@@ -483,6 +483,7 @@ pub(crate) fn spawn_body_terrain(
         scene: SceneLighting::default(),
         craft_shadow: BodyTerrainShadow::default(),
         debug,
+        inspection: Vec4::ZERO,
     };
 
     let mut terrain = commands.spawn((

@@ -49,6 +49,7 @@ struct BodyTerrainDebug {
 @group(3) @binding(1) var<uniform> terrain_scene: SceneLighting;
 @group(3) @binding(2) var<uniform> terrain_shadow: BodyTerrainShadow;
 @group(3) @binding(3) var<uniform> terrain_debug: BodyTerrainDebug;
+@group(3) @binding(4) var<uniform> terrain_inspection: vec4<f32>;
 
 // Blend the atlas-derived macro height normal into the smooth geometric normal.
 // Height is sampled through decode-then-filter RG16 interpolation in
@@ -784,6 +785,12 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         let dark = vec3<f32>(0.05, 0.05, 0.05);
         let light = vec3<f32>(0.80, 0.80, 0.80);
         albedo = vec4<f32>(mix(dark, light, debug_checker), 1.0);
+    }
+
+    if (terrain_inspection.x >= 0.5) {
+        var output_fullbright: FragmentOutput;
+        output_fullbright.color = vec4<f32>(albedo.rgb, albedo.a);
+        return output_fullbright;
     }
 
     // Primary star — single-star path matches the impostor.

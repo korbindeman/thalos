@@ -267,15 +267,52 @@ per-body bakes). All five increments landed:
 ### P2 — Analytic two-band detail + per-body cutover *(spec Phase B)*
 
 **Current first slice: P2A — basic continental Thalos. ✅ Landed.** The
-cutover starts with Thalos intentionally simplified to an all-land,
-single-biome `GenericTerrestrial` prototype. This gives the game a playable
+cutover started with Thalos intentionally simplified to an all-land,
+single-biome `GenericTerrestrial` prototype. This gave the game a playable
 end-to-end new-pipeline surface before tackling oceans, hydrology, scatter, or
 the full terrain-feature compositor. Its ground LOD uses
 `RuntimeTerrainDetail::BasicContinental`, which evaluates the same smooth
 continental field used by the bake instead of layering the legacy P0 HMF
 cascade on top. Runtime ground height is intentionally LOD-invariant for this
 slice so parent/child tile handoffs do not produce contour-like relief steps.
-Thalos' body config has been moved to this prototype route.
+
+**Current Thalos slice: P2A.5 — oceanic continents. ✅ Landed.** Thalos now
+uses `BodyArchetype::OceanicTerrestrial` and
+`RuntimeTerrainDetail::OceanicContinental`: a signed, ocean-bearing analytic
+field that produces domain-warped continents, noisy coastlines, continental
+shelves, seabed bathymetry, and deterministic archipelago bands. The bake and
+runtime Query API evaluate the same field, so the terrain mesh and collider
+continue to agree. `sea_level_m = 0` marks the water boundary, but water is not
+a terrain material: underwater terrain keeps seabed materials (basalt,
+sediment, shelf sand/carbonate), while ocean color/reflection/optical depth
+come from the separate water renderers (`BodyWaterMaterial` at ground LOD and
+the current impostor water branch as the far-LOD bridge). `just bake` writes
+both the raw substrate (`albedo-equirect.png`) and, for ocean worlds, a visual
+iteration aid (`orbit-color-equirect.png`) that composites the separate water
+layer over that substrate without changing the baked terrain data.
+
+**Iteration-speed slice: `FieldSurface` + continent intent cache. ✅ Landed.**
+The oceanic route now bakes through `thalos_terrain::FieldSurface` — the
+field-DAG-era live backing for the Query API seam. It owns the body's terrain
+params + a **reusable continent-intent cache** (`build_continent_intent_cache`)
+and produces both `StaticSurfaceData` (`bake`) and `SurfaceQuery` samples from
+one source. `compile_oceanic_terrestrial` is a thin wrapper over
+`FieldSurface::bake`. Motivation (measured): the Thalos bake is stage-free, and
+~91% of its cost is the field eval, ~80% of *that* being the LOD-independent
+12-shape continent kernel — re-run from scratch every bake. Splitting that into
+`continent_kernel_base` (cacheable intent) + `continent_shape_from_base`
+(LOD-gated coastline detail) and caching the base lets a re-bake after a
+*non-shape* edit (palette, sea level, ocean fraction) reuse it and skip the
+kernel: measured **1.48 s → 0.45 s (3.3×)** at 512² for cache reuse; a
+continent-shape edit rebuilds the cache. The cache is materialised at output
+resolution, so baked cubemaps stay bit-exact at texel centres — no new
+impostor/ground divergence. Also landed alongside: `paint_surface_albedo`
+parallelised (single-threaded → rayon, ~9×) and LOD band early-outs in the
+field evaluator (skip noise eval when a band's LOD weight is 0). **Still
+pending:** the editor holds a fresh config per edit, so it doesn't yet exploit
+cross-edit reuse — wiring a persistent `FieldSurface` into the editor (plus
+exposing shape/non-shape params) is the next step. The runtime/ground path keeps
+the direct (uncached) kernel — exact and unchanged.
 
 **Current next slice: P2B — Mira crater/feature compositor. In progress.**
 The first compositor increment is wired into the Query API: unbaked crater
@@ -343,6 +380,132 @@ preserve-erode / replace), then proceed to Vaelen, full Thalos, and Pelagos.
   construction, and the impostor's shader high-freq detail reconciles
   against the ground's non-geometric detail (closes the P0 caveat).
 
+#### P2C — Unified surface material model (colour + BRDF). In progress.
+
+The orbital impostor, the UDLOD ground LOD, and the editor preview must show the
+**same** surface coloration, material, and shading. Today they don't: a single
+point on Thalos is coloured **four** different ways —
+
+1. `surface_color.rs::paint_surface_albedo` grades biome palettes into the baked
+   albedo cubemap (impostor source);
+2. `generic_terrestrial_field.rs::sample_oceanic_continental` carries the field's
+   own `biome_mix` + `material_id`;
+3. `terrain_render::pipeline::material_masks` re-derives grass/soil/rock/wet from
+   slope/curvature and packs the tile `material` attachment;
+4. `body_terrain.wgsl::eval_material_stack` re-derives forest/grass/snow from
+   altitude/slope and largely discards the sampled albedo.
+
+The BRDF is forked too: the impostor calls the shared
+`thalos_planet_lighting::shade_hapke_surface`, while the ground LOD runs a
+hand-rolled "P2A temporary" diffuse+sky-fill path — violating the "one shading
+base" invariant (§8).
+
+**Target.** *One* per-direction surface evaluator in `thalos_terrain` defines
+albedo + roughness + a material identity (splat weights over a small per-body
+**material palette**, each entry tagged with a **shading model** — Hapke for
+airless regolith, rough-dielectric for soil/grass/rock, Fresnel-specular for
+ice/glass, metallic). Every consumer materialises or samples that one evaluator;
+no renderer invents colour. *One* shading dispatch in `thalos_planet_lighting`
+switches BRDF by shading model; every shader calls it. (The new shading-model
+tag is distinct from `feature_compiler::SurfaceMaterialClass`, which is
+geological provenance, not a BRDF.)
+
+**Materials-first (the load-bearing inversion).** Materials are the substrate —
+each a `SurfaceMaterial { shading, base_albedo, roughness, metalness }` in a
+body-wide library. The resolved hierarchy:
+
+1. **Climate → biome mix** (weighted; biomes blend at boundaries).
+2. **Biome → its ground-cover material set** (+ colour-grade params). *This is
+   the sense in which biomes "define the palette":* a desert biome's ground cover
+   is {sand, desert pavement, dry soil}, a forest biome's is {forest soil,
+   broadleaf vegetation, mossy rock}, tundra's is {tundra soil, lichen,
+   permafrost}.
+3. **Form → selects.** A small set of **universal, cross-cutting materials**
+   (exposed rock on steep/convex faces, snow on cold high gentle ground, coastal
+   sand, basalt/sediment below sea level) are selected by pure form regardless of
+   biome — the "mostly" caveat. Within a biome, form also picks among its
+   ground-cover materials (vegetation vs bare soil by moisture/flatness).
+4. **Blend + grade.** Fold each biome's form-selected ground cover with the
+   universal form materials, blend by biome weight, apply the biome's artistic
+   tint → final splat + albedo + roughness + dominant shading model.
+
+So the **biome both selects the candidate materials and tints them**; form
+selects which of those appears at each point. The biome is *not* a direct colour
+painter (today's `BiomeColorPalette` conflates per-biome identity *and*
+slope/height grading — that conflation is what this split removes). Both
+selection stages live in the **one evaluator**, fed by a context the bake builds
+from neighbour cubemap samples and the runtime builds analytically, so selection
+is identical in both. The field stops pre-deciding final colour; it supplies
+height plus cheap climate signals. Airless bodies are the degenerate case: one
+"biome" whose palette is Hapke regolith materials, so their look is preserved by
+the same machinery.
+
+**Biomes are the regional unit (the bigger frame).** A biome is the top of the
+dependency chain, classified from **macro climate** — latitude, continentalness,
+macro-elevation intent, temperature, moisture — *independent of local
+micro-relief*, so it can drive what is generated rather than being read back from
+it. A biome owns **three facets**:
+
+1. **Terrain generation** — the height-synthesis recipe for the region (rolling
+   plains vs montane ridges vs dune sea). Biome decides what shape generates.
+2. **Material palette** — which materials the ground cover draws from, the
+   form-selection rules, and the colour tint.
+3. **Scatter** — which objects spawn: trees, grass, pebbles, debris.
+
+Form (slope / curvature / micro-altitude) selects *within* the biome's palette;
+the universal materials (rock, snow, sand, ice, seabed) cross-cut every biome —
+so **snow and rock are materials, not biomes**. These three facets are
+**sequenced, not built at once**: facet 2 is this P2C slice; facet 1 is the
+field-DAG terrain-gen work (P2); facet 3 is the scatter stream (P2/P3 §6). To
+keep them one coherent unit instead of parallel systems, the material palette is
+modelled as **owned by a `BiomeDef`** now, with reserved slots for the
+terrain-gen recipe and the scatter set so facets 1 and 3 attach to the same
+structure later:
+
+```text
+BiomeDef {
+    ground_cover: Vec<BiomeMaterialRule>,  // facet 2 — library materials + form selector
+    tint: BiomeGrade,                      // facet 2 — artistic colour grade
+    // terrain_gen: TerrainRecipe,         // facet 1 — reserved (P2)
+    // scatter: Vec<ScatterClass>,         // facet 3 — reserved (P2/P3)
+}
+```
+
+Evaluator (facet 2): `climate → biome mix → each biome form-selects its
+ground_cover (+ universal materials) → tint → blend`.
+
+**Decisions (locked).** CPU evaluator is the single source of truth, GPU samples
+(avoids the bit-exact CPU↔WGSL mirror trap); material = splat weights over a
+per-body palette, each entry carrying a shading-model tag; the editor keeps its
+separate impostor and its heightfield tile preview is for iterating on a local
+slice (it does **not** need to be UDLOD — a displaced grid sampling the Query API
+is enough).
+
+**Increment ladder.**
+
+- **A — Single painter core.** Extract `paint_surface_albedo`'s per-texel logic
+  into a pure `surface_color_at(…) -> [f32; 3]` the bake loop calls per texel.
+  Behaviour-preserving: the bake stays bit-identical. (Landed.)
+- **B — Route the Query API through it.** The oceanic `SurfaceQuery::sample`
+  returns the graded albedo + material from the painter core (not the flat
+  material colour); the tile provider evaluates it per-direction at tile
+  resolution and bakes albedo + roughness + material-splat into the tile
+  attachments. Retires `pipeline::material_masks` (#3) — the field's `biome_mix`
+  is the intent. Impostor, ground, and collider then read identical colour.
+- **C — Single shading dispatch.** Add `shade_surface(shading_model, …)` to
+  `lighting.wgsl`; reroute `planet_impostor.wgsl` and `body_terrain.wgsl` through
+  it; delete `eval_material_stack` + the temporary ground lighting (#4).
+- **D — Shared non-geometric detail.** Lift the albedo breakup + detail-normal
+  into one WGSL lib both shaders import, closing the P0/§5 impostor-vs-ground
+  detail caveat.
+- **E — Editor heightfield preview.** Replace the UDLOD tile viewer in
+  `planet_editor` with a displaced-grid patch sampled from the Query API and
+  shaded with the same material shader.
+
+The altitude/slope/snow banding that lives only in `eval_material_stack` today
+moves CPU-side into the evaluator (the field's `biome_mix` already encodes most
+of it), so both near and far views inherit it.
+
 ### P3 — Authoring *(spec Phase C)*
 
 - Editor for fields, masks, and features in `planet_editor`: brush tools,
@@ -384,16 +547,25 @@ spec's own Open Questions (§13).
    stops being geometry. Must be expressible per-LOD and identical for
    mesh and collider. Today it's implicit in tile Nyquist; make it
    explicit in P2.
-4. **CPU vs GPU synthesis, and the Bevy boundary.** Spec §11 wants dense
+4. **Water is not a terrain material. — RESOLVED for Thalos P2A.5.** Sea
+   level is a renderer/physics boundary over signed terrain. Underwater
+   terrain remains ordinary terrain data with seabed material, roughness, and
+   collision height; it is not painted blue or replaced by an "ocean" material.
+   Water color, reflection, waves, and optical absorption belong only to ocean
+   renderers. The far impostor still carries an inline water branch as a
+   bridge, but the baked albedo below sea level must remain seabed albedo so a
+   later separate orbital-ocean material can consume the same height/albedo
+   substrate without repainting the terrain.
+5. **CPU vs GPU synthesis, and the Bevy boundary.** Spec §11 wants dense
    scatter generators on the GPU, but `terrain` must stay Bevy-free
    (CI-guarded crate-boundary invariant). Resolution: `terrain` emits
    deterministic **generator descriptors**; the **GPU dispatch lives on
    the consumer side** (`terrain_render`), with a CPU reference path in
    `terrain` for determinism tests. Lock this before scatter (P2).
-5. **Quadtree leaf size vs UDLOD tile size.** Spec §5 default 64 px,
+6. **Quadtree leaf size vs UDLOD tile size.** Spec §5 default 64 px,
    "tuned against the renderer's tile structure." Align so leaf tiles
    upload without resampling. Tune empirically in P1/P2.
-6. **How much of the feature-compiler vocabulary survives.** terrain.md's
+7. **How much of the feature-compiler vocabulary survives.** terrain.md's
    `TerrainPrior`/`FeatureManifest`/archetypes map onto the spec as:
    archetype = a preset bundle of fields + feature-type defaults; prior =
    generators reading physical params; manifest = the feature catalog +

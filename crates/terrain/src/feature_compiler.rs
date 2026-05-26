@@ -12,7 +12,7 @@ use crate::aging_oceanic_field::{AgingOceanicField, enforce_single_connected_oce
 use crate::body_builder::BodyBuilder;
 use crate::cold_desert_field::{ColdDesertField, ColdDesertStyle};
 use crate::generic_terrestrial_field::{
-    BasicContinentalField, BasicContinentalParams, RuntimeTerrainDetail,
+    BasicContinentalField, BasicContinentalParams, OceanicContinentalParams, RuntimeTerrainDetail,
 };
 use crate::height_generator::{
     ColdDesertBiomeHeightGenerators, HeightGenerator, HeightGeneratorStack, IqDerivativeFbmHeight,
@@ -151,6 +151,7 @@ pub enum BodyArchetype {
     ColdDesertFormerlyWet,
     AgingOceanicHomeworld,
     GenericTerrestrial,
+    OceanicTerrestrial,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +386,7 @@ impl TerrainPrior {
             BodyArchetype::ColdDesertFormerlyWet => Self::cold_desert_formerly_wet(spec),
             BodyArchetype::AgingOceanicHomeworld => Self::aging_oceanic_homeworld(spec),
             BodyArchetype::GenericTerrestrial => Self::generic_terrestrial(spec),
+            BodyArchetype::OceanicTerrestrial => Self::oceanic_terrestrial(spec),
         }
     }
 
@@ -491,6 +493,35 @@ impl TerrainPrior {
                 FeatureBudget::new(FeatureKind::ChannelNetwork, 20, 0.95),
                 FeatureBudget::new(FeatureKind::AeolianMantle, 4, 0.25),
             ],
+        }
+    }
+
+    fn oceanic_terrestrial(spec: &PlanetTerrainSpec) -> Self {
+        let ocean_fraction = match spec.physical.hydrosphere {
+            HydrosphereSpec::OceanFraction(f) => f,
+            _ => 0.62,
+        };
+        Self {
+            archetype: spec.archetype,
+            relief_scale_m: 4_800.0,
+            crater_retention: 0.04,
+            crater_density: 0.04,
+            large_basin_budget: 0.05,
+            volcanic_budget: 0.22,
+            tectonic_budget: 0.30,
+            erosion_strength: 0.70,
+            sediment_mobility: 0.72,
+            ice_stability: 0.30,
+            regolith_depth_m: 2.0,
+            aeolian_activity: 0.18,
+            ocean_fraction,
+            dominant_materials: vec![
+                SurfaceMaterialClass::ContinentalCrust,
+                SurfaceMaterialClass::OceanicBasalt,
+                SurfaceMaterialClass::RustSediment,
+            ],
+            biomes: oceanic_homeworld_biomes(ocean_fraction),
+            feature_budgets: vec![FeatureBudget::new(FeatureKind::CrustalProvince, 16, 0.8)],
         }
     }
 
@@ -1544,6 +1575,12 @@ pub fn compile_manifest_to_static_surface(
             drop(mid_freq);
             compile_generic_terrestrial(spec, manifest, prior, options)
         }
+        BodyArchetype::OceanicTerrestrial => {
+            // P2A.5 route: signed continents + seabed. Water remains a
+            // separate render surface; underwater texels keep seabed material.
+            drop(mid_freq);
+            compile_oceanic_terrestrial(spec, manifest, prior, options)
+        }
     }
 }
 
@@ -1555,7 +1592,9 @@ pub fn generate_initial_manifest(spec: &PlanetTerrainSpec) -> FeatureManifest {
             add_cold_desert_formerly_wet_features(&mut manifest, spec)
         }
         BodyArchetype::AgingOceanicHomeworld => add_homeworld_style_features(&mut manifest, spec),
-        BodyArchetype::GenericTerrestrial => add_generic_terrestrial_features(&mut manifest, spec),
+        BodyArchetype::GenericTerrestrial | BodyArchetype::OceanicTerrestrial => {
+            add_generic_terrestrial_features(&mut manifest, spec)
+        }
     }
 
     for authored in &spec.authored_features {
@@ -1625,7 +1664,7 @@ impl ImpostorProjectionPlan {
                 analytic_min_scale_m: 2_000.0,
                 excluded_below_scale_m: 1_000.0,
             },
-            BodyArchetype::GenericTerrestrial => Self {
+            BodyArchetype::GenericTerrestrial | BodyArchetype::OceanicTerrestrial => Self {
                 baked_layers: vec![
                     BakedTerrainLayer::Height,
                     BakedTerrainLayer::Albedo,
@@ -2037,6 +2076,43 @@ fn compile_generic_terrestrial(
     );
 
     Ok(builder.build())
+}
+
+/// Compile the P2A.5 `OceanicTerrestrial` route: a signed, ocean-bearing
+/// continental evaluator with real seabed materials. The water surface is not
+/// baked into terrain albedo; `sea_level_m` + `water_appearance` drive the
+/// separate ocean renderers.
+fn compile_oceanic_terrestrial(
+    spec: &PlanetTerrainSpec,
+    manifest: &FeatureManifest,
+    prior: &TerrainPrior,
+    options: FeatureCompileOptions,
+) -> Result<StaticSurfaceData, FeatureCompileError> {
+    let body_id = &manifest.root;
+    let crust = manifest
+        .get(&body_id.child("crustal_provinces"))
+        .ok_or_else(|| FeatureCompileError::MissingFeature(body_id.child("crustal_provinces")))?;
+
+    // P2 cutover: the oceanic route now bakes through `FieldSurface`, the
+    // field-DAG-era live backing. It owns the continent intent cache + the
+    // seabed/land material palette and produces the same `StaticSurfaceData`
+    // this function used to assemble inline (materials, field bake,
+    // `RuntimeTerrainDetail::OceanicContinental`, sea level, albedo paint).
+    let params = OceanicContinentalParams::from_seed_parts(
+        crust.seed.shape,
+        crust.seed.detail,
+        prior.relief_scale_m,
+        prior.ocean_fraction,
+    );
+    let mut field = crate::field_surface::FieldSurface::oceanic(
+        spec.physical.radius_m,
+        params,
+        composition_for(spec.physical.composition),
+        spec.physical.age_gyr,
+        spec.physical.obliquity_deg.unwrap_or(0.0).to_radians(),
+        spec.root_seed,
+    );
+    Ok(field.bake(options.cubemap_resolution))
 }
 
 /// Compile an `AgingOceanicHomeworld` body. Reads the tectonic system to

@@ -25,7 +25,7 @@
 //!
 //! Fade: Perlin's quintic `6t⁵ − 15t⁴ + 10t³`.
 
-use glam::{DVec3, Vec3};
+use glam::{DMat3, DVec3, Vec3};
 
 /// One step of a u32 PCG mixer. The constants are PCG-XSH-RR's `multiplier`
 /// and `increment`; the post-state shift / xor / final multiplier are from
@@ -378,6 +378,34 @@ pub fn eroded_ridged_3d(
 // at orbital scale where f32 addressing is already exact.
 // ───────────────────────────────────────────────────────────────────────────
 
+/// Fixed irrational rotation applied to the sample domain between octaves in the
+/// f64 fBm / ridged stackers.
+///
+/// Value noise floors onto an axis-aligned integer lattice. Advancing octaves by
+/// scaling alone (the textbook `freq *= lacunarity`) leaves every octave on that
+/// *same* orientation, so their cells line up across scales and the sum shows
+/// coherent straight diagonal creases — faint in plain fBm, glaring once ridged
+/// (the `1 − |n|` crease tracks the lattice) and amplified again by shaded
+/// relief. Rotating the domain a fixed, lattice-irrational amount each octave
+/// points every octave's lattice a different way, so the stacked detail reads as
+/// natural texture instead of a grid. This is iq's standard octave-decorrelation
+/// rotation; it is orthonormal, so it preserves frequency content and only
+/// reorients it.
+///
+/// CPU-only: applied solely in the f64 variants below, which have no WGSL mirror.
+/// The f32 [`fbm3`] / [`hmf_ridged_3d`] (impostor, orbital scale) are unchanged.
+#[inline]
+fn octave_rotation() -> DMat3 {
+    // Column-major; orthonormal (each column unit-length and mutually
+    // perpendicular). Transpose is also a rotation, so the exact convention is
+    // immaterial for decorrelation.
+    DMat3::from_cols_array(&[
+        0.00, 0.80, 0.60, //
+        -0.80, 0.36, -0.48, //
+        -0.60, -0.48, 0.64,
+    ])
+}
+
 /// f64-coordinate [`value_noise_3d`]. Lattice + fract in f64; value field in f32.
 pub fn value_noise_3d_f64(x: f64, y: f64, z: f64, seed: u32) -> f32 {
     let xf = x.floor();
@@ -484,12 +512,19 @@ pub fn fbm3_f64(
     let mut freq = 1.0f64;
     let mut norm = 0.0f32;
     let lac = lacunarity as f64;
+    // Per-octave domain rotation so octaves don't share lattice axes; see
+    // [`octave_rotation`].
+    let rotation = octave_rotation();
+    let p = DVec3::new(x, y, z);
+    let mut rot = DMat3::IDENTITY;
     for o in 0..octaves {
         let osubseed = pcg_u32(seed.wrapping_add(o));
-        sum += amp * value_noise_3d_f64(x * freq, y * freq, z * freq, osubseed);
+        let sp = rot * (p * freq);
+        sum += amp * value_noise_3d_f64(sp.x, sp.y, sp.z, osubseed);
         norm += amp;
         amp *= persistence;
         freq *= lac;
+        rot = rotation * rot;
     }
     sum / norm
 }
@@ -508,18 +543,29 @@ pub fn eroded_ridged_3d_f64(
     let mut amp = 1.0f32;
     let mut freq = 1.0f64;
     let mut norm = 0.0f32;
-    let mut grad = Vec3::ZERO;
+    let mut grad = DVec3::ZERO;
     let lac = lacunarity as f64;
+    // Per-octave domain rotation so ridge crests don't all snap to the same
+    // lattice axes (the dominant straight-line artifact); see [`octave_rotation`].
+    let rotation = octave_rotation();
+    let mut rot = DMat3::IDENTITY;
     for o in 0..octaves {
         let osub = pcg_u32(seed.wrapping_add(o));
-        let nd = value_noise_3d_derivative_f64(p.x * freq, p.y * freq, p.z * freq, osub);
-        grad += nd.derivative * (amp * freq as f32);
-        let damp = 1.0 / (1.0 + erosion_strength * grad.length_squared());
+        let sp = rot * (p * freq);
+        let nd = value_noise_3d_derivative_f64(sp.x, sp.y, sp.z, osub);
+        // The noise gradient comes out in this octave's rotated+scaled frame;
+        // rotate it back (rotation⁻¹ = transpose) so the accumulated erosion
+        // slope stays in the original domain and the damping is geometrically
+        // consistent across octaves. Magnitude is preserved, so the erosion
+        // character matches the pre-rotation behaviour.
+        grad += rot.transpose() * nd.derivative.as_dvec3() * (amp as f64 * freq);
+        let damp = 1.0 / (1.0 + erosion_strength * grad.length_squared() as f32);
         let ridge = 1.0 - nd.value.abs();
         sum += amp * ridge * ridge * damp;
         norm += amp;
         amp *= persistence;
         freq *= lac;
+        rot = rotation * rot;
     }
     if norm > 0.0 { sum / norm } else { 0.0 }
 }

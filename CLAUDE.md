@@ -89,25 +89,47 @@ rendering.
 
 - Runs the compiler at the body's full authored / radius-derived resolution.
 - Writes the local bake `target/bakes/<body>.bin` (this is what `just game` loads).
-- Writes full-resolution equirect PNGs to `stage-bakes/<body>/full/`.
+- Writes full-resolution equirect PNGs to `stage-bakes/<body>/full/`, plus the
+  ground-scale patch tile columns to `stage-bakes/<body>/full/patch/<biome>/`.
 - Slow — Thalos (3186 km, 4096² cubemap) takes several minutes.
 
 **Preview (`just bake <body> --preview`):**
 
 - 512² cubemap; PNG dumps only, **no local game bake**.
-- Writes to `stage-bakes/<body>/preview/`.
+- Writes equirects to `stage-bakes/<body>/preview/`.
+- Emits the equirect set **plus the ground-scale shaded-relief patch set** as
+  per-biome tile columns: `stage-bakes/<body>/preview/patch/<biome>/<span>.png`,
+  where each biome dir (`hill`, `plain`) holds the LOD cascade
+  (`context-120km.png`, `close-12km.png`, `micro-3km.png`, `fine-300m.png`,
+  `ultra-60m.png`). One preview run shows both orbital coloration and on-foot
+  relief. These patches *are* the tiles that exist on the planet — the same
+  thing the planet editor's tile view shows.
 - Fast — primary visual-feedback loop for iteration on the compiler.
 - Doesn't touch `target/bakes/`, so iterating doesn't invalidate the loaded
   local bake in `just game`.
 
 ### PNG outputs (per run, overwrites)
 
-- `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection.
+- `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection;
+  on ocean worlds this is still raw land/seabed albedo, not water-composited.
+- `orbit-color-equirect.png` — ocean worlds only: preview composite of the
+  separate water layer over the raw terrain substrate, for judging from-orbit
+  coloration without violating the "water is not terrain material" invariant.
 - `height-equirect.png` — grayscale height normalized to the body's
   encoded ± range (range reported in `info.txt`).
 - `roughness-equirect.png` — grayscale roughness (R8Unorm).
 - `normal-equirect.png` — object-space normal map (RGBA8).
 - `info.txt` — range, resolution, route (Feature/Ocean/None), feature counts.
+- `patch/<biome>/{context-120km…ultra-60m}.png` — ground-scale shaded-relief
+  patch tile columns of the runtime walkable height (`surface_height_m`),
+  emitted in both full and `--preview` runs. Each biome dir is one tile site:
+  `hill` = highest-relief, `plain` = flattest. Within a biome the five PNGs zoom
+  from a 120 km context down to a 60 m on-foot view. These read ground character
+  the equirects are far too coarse to show, and map directly to the planet
+  editor's tile view. The patch grid is built in **f64** (mirroring the game
+  tile path `pixel_direction`): an f32 grid would quantise sample positions to
+  the ~0.25 m f32 lattice at planet scale and render a grid/checkerboard moiré
+  the field doesn't contain.
 - (Tectonic and debug overlays when `--debug` is passed or the body has tectonics.)
 
 ### Workflow
@@ -466,14 +488,16 @@ Cubemap-based procedural surface generation. No Bevy dependency.
 - `TerrainConfig` — top-level enum in `terrain_config.rs`: `None`,
   `Feature(FeatureTerrainConfig)` for archetype-driven bodies (Mira,
   Vaelen, Thalos, Pelagos…), `Ocean(OceanTerrainConfig)` for
-  flat-water placeholders. Current P2A migration state: Thalos is
-  deliberately authored as a basic all-land, single-biome
-  `GenericTerrestrial` prototype; its ground LOD uses
-  `RuntimeTerrainDetail::BasicContinental` so the same smooth continental
-  evaluator defines runtime height instead of the legacy P0 HMF detail
-  cascade. Runtime ground height is LOD-invariant in this slice to avoid
-  contour-like parent/child tile handoff steps. The fuller oceanic/tectonic
-  Thalos route is parked for a later P2 slice.
+  flat-water placeholders. Current P2A.5 migration state: Thalos is
+  authored as an ocean-bearing `OceanicTerrestrial` prototype; its ground
+  LOD uses `RuntimeTerrainDetail::OceanicContinental` so the same signed
+  continent/seabed evaluator defines bake height, runtime mesh height, and
+  collider height instead of the legacy P0 HMF detail cascade. Runtime
+  ground height is LOD-invariant in this slice to avoid contour-like
+  parent/child tile handoff steps. Water is not a terrain material:
+  underwater terrain keeps seabed albedo/material/roughness, and ocean
+  color/reflection/optical absorption come from the separate water renderers.
+  The fuller tectonic/hydrology Thalos route is parked for a later P2 slice.
 - `compile_terrain_config(...)` — single entry point. Builds the
   optional `TectonicSystem` from `TectonicConfig`, compiles the
   static surface (via `feature_compiler` or `compile_ocean`), and

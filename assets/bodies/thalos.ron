@@ -3,16 +3,16 @@
     terrain: Feature((
         seed: 1003,
         body_age_gyr: 5.5,
-        // P2A prototype: start Thalos as one all-land, single-biome
-        // `GenericTerrestrial` surface. Oceans, polar caps, tectonic
-        // silhouettes, hydrology, and biome variety come back in later P2
-        // slices after the vertical path is playable.
-        archetype: GenericTerrestrial,
+        // P2A.5 prototype: Thalos now uses a signed ocean-bearing
+        // `OceanicTerrestrial` surface. The terrain bake keeps underwater
+        // seabed materials (sediment/basalt/shelf), while ocean color and
+        // reflection come from the separate water render surface.
+        archetype: OceanicTerrestrial,
         composition: IronRichSilicate,
         environment: (
             stellar_flux_earth: 1.0,
             atmosphere: Breathable(pressure_bar: 1.0),
-            hydrosphere: None,
+            hydrosphere: OceanFraction(0.62),
             ice_inventory: None,
         ),
         intent: [

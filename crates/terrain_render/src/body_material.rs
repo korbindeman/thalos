@@ -149,6 +149,10 @@ pub struct BodyTerrainMaterial {
     /// debug terrains.
     #[uniform(3)]
     pub debug: BodyTerrainDebug,
+    /// Inspection flags for editor/debug views.
+    /// x = fullbright albedo output, yzw reserved.
+    #[uniform(4)]
+    pub inspection: Vec4,
 }
 
 impl Material for BodyTerrainMaterial {

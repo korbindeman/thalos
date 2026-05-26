@@ -3,13 +3,16 @@
 //! Two modes:
 //!
 //! - **Default (full)**: runs the terrain compiler at the body's full
-//!   resolution and writes both the local game bake (`target/bakes/<body>.bin`,
-//!   what your local game loads) and equirectangular PNG previews
-//!   (`stage-bakes/<body>/full/*.png`).
-//! - **`--preview`**: runs at 512² for fast iteration. Writes ONLY the
-//!   PNG previews to `stage-bakes/<body>/preview/`. Never touches
-//!   `target/bakes/`, so iterating on the compiler doesn't invalidate
-//!   the local game bake.
+//!   resolution and writes the local game bake (`target/bakes/<body>.bin`,
+//!   what your local game loads), equirectangular PNG previews
+//!   (`stage-bakes/<body>/full/*.png`), and the ground-scale shaded-relief
+//!   patch set as per-biome tile columns
+//!   (`stage-bakes/<body>/full/patch/<biome>/*.png`).
+//! - **`--preview`**: runs at 512² for fast iteration. Writes the equirect PNG
+//!   previews *and* the same per-biome patch tile columns (hill + plain sites,
+//!   spans from 120 km down to 60 m) under
+//!   `stage-bakes/<body>/preview/patch/<biome>/`. Never touches `target/bakes/`,
+//!   so iterating on the compiler doesn't invalidate the local game bake.
 //!
 //! Per-bake PNG outputs: albedo, height (grayscale, normalized to the
 //! body's ± range), roughness, and object-space normal. Feature
@@ -48,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use image::{ImageBuffer, RgbImage};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -86,15 +89,6 @@ struct Args {
     /// production PBR set. Off by default — production bakes ship only the
     /// four cubemaps the impostor consumes.
     debug: bool,
-    /// Render ground-scale shaded-relief *patches* of the runtime walkable
-    /// height (`surface_height_m`) instead of the global cubemap dumps. Fast
-    /// iteration on the close-up terrain character that the equirect dumps are
-    /// too coarse to show. Writes to `stage-bakes/<body>/patch/`.
-    patch: bool,
-    /// Explicit patch centre `(lat_deg, lon_deg)`. When absent, the patch path
-    /// auto-scans for a high-relief, low-latitude spot so hill country is in
-    /// frame.
-    center: Option<(f32, f32)>,
 }
 
 /// Cubemap face resolution used in preview mode. Matches the long-standing
@@ -130,8 +124,6 @@ fn parse_args() -> Args {
     let mut force = false;
     let mut equirect_width: u32 = 512;
     let mut debug = false;
-    let mut patch = false;
-    let mut center: Option<(f32, f32)> = None;
 
     let mut i = 0;
     while i < raw.len() {
@@ -152,13 +144,6 @@ fn parse_args() -> Args {
                 equirect_width = raw[i].parse().expect("--equirect-width needs an integer");
             }
             "--debug" => debug = true,
-            "--patch" => patch = true,
-            "--center" => {
-                let lat = raw[i + 1].parse().expect("--center needs: lat_deg lon_deg");
-                let lon = raw[i + 2].parse().expect("--center needs: lat_deg lon_deg");
-                center = Some((lat, lon));
-                i += 2;
-            }
             s if s.starts_with("--") => panic!("unknown flag: {s}"),
             s if body_name.is_none() => body_name = Some(s.to_string()),
             s => panic!("unexpected positional arg: {s}"),
@@ -176,8 +161,6 @@ fn parse_args() -> Args {
         force,
         equirect_width,
         debug,
-        patch,
-        center,
     }
 }
 
@@ -212,18 +195,6 @@ fn main() {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("assets"));
     let system = load_solar_system_from_dir(root_path).expect("parsing solar system");
-
-    // Patch mode: ground-scale shaded-relief renders of a single body, then
-    // out. Does not touch the cubemap dumps or local bakes.
-    if args.patch {
-        let body = system
-            .bodies
-            .iter()
-            .find(|b| b.name.eq_ignore_ascii_case(&args.body_arg))
-            .unwrap_or_else(|| panic!("body '{}' not found", args.body_arg));
-        run_patch(body, &args, &gpu);
-        return;
-    }
 
     let targets: Vec<&thalos_physics_canonical::types::BodyDefinition> =
         if args.body_arg.eq_ignore_ascii_case("all") {
@@ -444,6 +415,18 @@ fn bake_one(
     dump_all_in_parallel(&surface, body, out_dir, equirect_width, debug);
     dump_info(&surface, &route, out_dir);
 
+    // Both full and preview emit the ground-scale patch set so each mode dir
+    // carries its `patch/<biome>/` tile columns alongside the equirects —
+    // orbital coloration (the equirects) plus on-foot relief (the patches),
+    // which the equirects are far too coarse to read. The surface is already
+    // compiled, so patches are CPU-cheap regardless of mode. Routed through
+    // `MultiProgress::println` so the per-site centre summaries don't garble
+    // the bars under `bake all`.
+    bar.set_message("rendering ground patches");
+    dump_patches(&surface, out_dir, &mut |s| {
+        let _ = multi.println(s);
+    });
+
     let elapsed = start.elapsed();
     bar.finish_with_message(format!(
         "done in {:.1}s · {route} · {} · {n_craters} craters",
@@ -525,6 +508,8 @@ fn store_status_label(status: StoreStatus) -> &'static str {
 /// two layers compose without manual scheduling.
 ///
 /// Production set (always): albedo, height, roughness, normal.
+/// Ocean bodies also get an orbit-color preview that composites the separate
+/// water layer over the raw seabed/land albedo for visual iteration.
 /// Tectonic set (when the body has tectonics): plate-id, boundary-type.
 /// Debug set (`--debug`): material-id, plus biome/suture for cold-desert bodies.
 fn dump_all_in_parallel(
@@ -556,6 +541,7 @@ fn dump_all_in_parallel(
         Height,
         Roughness,
         Normal,
+        OrbitColor,
         PlateId,
         BoundaryType,
         Material,
@@ -569,6 +555,9 @@ fn dump_all_in_parallel(
         DumpKind::Roughness,
         DumpKind::Normal,
     ];
+    if static_surface.sea_level_m.is_some() {
+        dumps.push(DumpKind::OrbitColor);
+    }
     if surface.tectonics.is_some() {
         dumps.push(DumpKind::PlateId);
         dumps.push(DumpKind::BoundaryType);
@@ -612,6 +601,27 @@ fn dump_all_in_parallel(
                 normal_to_u8(normal.z),
             ]
         }),
+        DumpKind::OrbitColor => {
+            write_equirect(out.join("orbit-color-equirect.png"), equirect_w, |dir| {
+                let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
+                let mut color = sample.albedo_linear;
+                if let Some(sea_level_m) = static_surface.sea_level_m {
+                    let depth_m = sea_level_m - sample.height_m;
+                    if depth_m > 0.0 {
+                        color = orbital_preview_water_color(
+                            sample.albedo_linear,
+                            depth_m,
+                            static_surface.water_appearance.map(|w| w.color_depth),
+                        );
+                    }
+                }
+                [
+                    linear_to_srgb8(color.x),
+                    linear_to_srgb8(color.y),
+                    linear_to_srgb8(color.z),
+                ]
+            })
+        }
         DumpKind::PlateId => {
             let tectonics = surface
                 .tectonics
@@ -688,6 +698,41 @@ fn linear_to_srgb8(linear: f32) -> u8 {
 
 fn normal_to_u8(v: f32) -> u8 {
     ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8
+}
+
+fn orbital_preview_water_color(
+    seabed_linear: Vec3,
+    depth_m: f32,
+    water_color_depth: Option<[f32; 4]>,
+) -> Vec3 {
+    let water = water_color_depth.unwrap_or([0.012, 0.040, 0.090, 120.0]);
+    let deep = Vec3::new(water[0], water[1], water[2]) * 1.05 + Vec3::new(0.0, 0.006, 0.018);
+    let min_depth_m = water[3].max(1.0);
+    let depth_m = depth_m.max(0.0);
+
+    // Preview only: approximate the separate ocean renderer's optical column
+    // so orbit equirects read like the game view while `albedo-equirect`
+    // remains the raw land/seabed substrate.
+    let absorption = Vec3::new(
+        (-0.018 * depth_m).exp(),
+        (-0.010 * depth_m).exp(),
+        (-0.004 * depth_m).exp(),
+    );
+    let transmitted_bottom = seabed_linear * absorption * 0.72;
+    let shallow_scatter = Vec3::new(0.006, 0.078, 0.105) * (1.0 - (-depth_m / 28.0).exp());
+    let shallow = transmitted_bottom + shallow_scatter;
+    let deep_t = smoothstep_scalar(18.0, min_depth_m * 1.35, depth_m);
+    shallow
+        .lerp(deep, deep_t)
+        .clamp(Vec3::splat(0.0), Vec3::splat(1.0))
+}
+
+fn smoothstep_scalar(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge0 == edge1 {
+        return (x >= edge1) as u8 as f32;
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn cold_desert_biome_field(
@@ -876,46 +921,6 @@ fn dump_info(surface: &PlanetSurface, route: &str, out: &Path) {
 // Patch hillshade (ground-scale shaded relief)
 // ---------------------------------------------------------------------------
 
-/// Compile the body's surface at preview resolution. The runtime walkable
-/// height (`surface_height_m`) is analytic for `BasicContinental` bodies and
-/// doesn't read the cube, so preview resolution is plenty for patch renders.
-fn compile_surface_preview(
-    body: &thalos_physics_canonical::types::BodyDefinition,
-    gpu: &gpu::GpuContext,
-) -> PlanetSurface {
-    let context = terrain_context(body);
-    let options = TerrainCompileOptions {
-        crater_count_scale: 1.0,
-        cubemap_resolution_override: Some(PREVIEW_CUBEMAP_RESOLUTION),
-    };
-    let dynamic_layers =
-        compile_dynamic_surface_layers(&body.terrain, &context).expect("compiling dynamic layers");
-    let tectonics = compile_tectonics_from_config(body.tectonics.as_ref(), &context);
-    let device = gpu.device.clone();
-    let queue = gpu.queue.clone();
-    let mid_freq: Option<thalos_terrain::stages::MidFreqRunner> = Some(Box::new(
-        move |height: &mut thalos_terrain::cubemap::Cubemap<f32>,
-              radius_m: f32,
-              params: &thalos_terrain::stages::MidFreqDetailParams|
-              -> Result<(), String> {
-            gpu::run_mid_freq(&device, &queue, height, radius_m, params).map_err(|e| e.to_string())
-        },
-    ));
-    let static_surface = compile_static_terrain_config(
-        &body.terrain,
-        tectonics.as_ref(),
-        &context,
-        options,
-        mid_freq,
-    )
-    .expect("compiling static surface");
-    PlanetSurface {
-        static_surface,
-        dynamic_layers,
-        tectonics,
-    }
-}
-
 fn latlon_to_dir(lat_deg: f32, lon_deg: f32) -> Vec3 {
     let (sl, cl) = lat_deg.to_radians().sin_cos();
     let (sln, cln) = lon_deg.to_radians().sin_cos();
@@ -956,8 +961,9 @@ fn auto_find_relief_center(surface: &PlanetSurface, seek_hills: bool) -> Vec3 {
             let dir = latlon_to_dir(lat, lon);
             let (east, north) = tangent_basis(dir);
             let base = dir * radius;
-            let h =
-                |off: Vec3| surface_height_m(surface, &state, (base + off).normalize().as_dvec3(), 0.5);
+            let h = |off: Vec3| {
+                surface_height_m(surface, &state, (base + off).normalize().as_dvec3(), 0.5)
+            };
             let s = [
                 h(Vec3::ZERO),
                 h(east * probe_m),
@@ -981,19 +987,33 @@ fn auto_find_relief_center(surface: &PlanetSurface, seek_hills: bool) -> Vec3 {
 /// the runtime walkable height on a tangent-plane grid.
 fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, out_path: &Path) {
     let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
-    let radius = surface.static_surface.radius_m;
-    let center = center.normalize();
-    let (east, north) = tangent_basis(center);
+    let radius = surface.static_surface.radius_m as f64;
+    // Build the tangent-plane sample grid in f64. At planet scale (~3.2e6 m on
+    // Thalos) an f32 grid quantises the body-local sample position to the
+    // ~0.25 m f32 lattice; for the sub-metre-per-pixel fine patches that beats
+    // against the pixel spacing and renders as a grid/checkerboard moiré the
+    // field never contains. The game's own tile path (`pixel_direction`) builds
+    // its sample directions in f64 for exactly this reason — the diagnostic must
+    // match it, or it shows precision artifacts the runtime does not have.
+    let center = center.normalize().as_dvec3();
+    let up_ref = if center.y.abs() > 0.99 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let east = up_ref.cross(center).normalize();
+    let north = center.cross(east);
     let base = center * radius;
+    let span_m = span_m as f64;
     let n = res as usize;
 
     let mut h = vec![0f32; n * n];
     h.par_chunks_mut(n).enumerate().for_each(|(j, row)| {
-        let ny = (0.5 - (j as f32 + 0.5) / res as f32) * span_m; // +north at top
+        let ny = (0.5 - (j as f64 + 0.5) / res as f64) * span_m; // +north at top
         for (i, cell) in row.iter_mut().enumerate() {
-            let nx = ((i as f32 + 0.5) / res as f32 - 0.5) * span_m; // +east at right
+            let nx = ((i as f64 + 0.5) / res as f64 - 0.5) * span_m; // +east at right
             let dir = (base + east * nx + north * ny).normalize();
-            *cell = surface_height_m(surface, &state, dir.as_dvec3(), 0.5);
+            *cell = surface_height_m(surface, &state, dir, 0.5);
         }
     });
 
@@ -1001,7 +1021,7 @@ fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, ou
         .iter()
         .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
     let hrange = (hmax - hmin).max(1.0);
-    let ds = span_m / res as f32;
+    let ds = (span_m / res as f64) as f32;
     // Sun in local (east, up, north): from the NW, moderate elevation.
     let sun = Vec3::new(-0.55, 0.62, 0.55).normalize();
     let sample = |i: i32, j: i32| -> f32 {
@@ -1037,38 +1057,32 @@ fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, ou
         .unwrap_or_else(|e| panic!("writing {out_path:?}: {e}"));
 }
 
-fn run_patch(
-    body: &thalos_physics_canonical::types::BodyDefinition,
-    args: &Args,
-    gpu: &gpu::GpuContext,
-) {
-    eprintln!("patch: compiling {} surface…", body.name);
-    let surface = compile_surface_preview(body, gpu);
-
-    let out_dir = args
-        .out_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT_ROOT).join(&body.name).join("patch"));
-    fs::create_dir_all(&out_dir).expect("creating patch out dir");
-
-    // With an explicit centre, render just that. Otherwise render both a hill
-    // site and the flattest (plain) site so the plains/hills balance and the
-    // gentle plain rolls are both visible without launching the game.
-    let sites: Vec<(String, Vec3)> = match args.center {
-        Some((lat, lon)) => vec![("center".to_string(), latlon_to_dir(lat, lon))],
-        None => {
-            eprintln!("patch: scanning for hill + plain centres…");
-            vec![
-                ("hill".to_string(), auto_find_relief_center(&surface, true)),
-                ("plain".to_string(), auto_find_relief_center(&surface, false)),
-            ]
-        }
-    };
+/// Render the standard ground-scale patch set into `out_dir/patch/<biome>/`.
+/// Each site becomes a biome tile column — its own subdir holding the LOD
+/// cascade (`context-120km.png` … `ultra-60m.png`). Renders both a hill site
+/// (highest relief) and the flattest plain site, so the plains/hills balance
+/// and the gentle plain rolls are both visible without launching the game.
+/// Called by both the full and preview bakes.
+///
+/// CPU-only — the surface is already compiled. `log` receives the per-site
+/// centre summaries via `MultiProgress::println` so the lines don't garble the
+/// progress bars.
+fn dump_patches(surface: &PlanetSurface, out_dir: &Path, log: &mut dyn FnMut(String)) {
+    let sites: Vec<(String, Vec3)> = vec![
+        ("hill".to_string(), auto_find_relief_center(surface, true)),
+        ("plain".to_string(), auto_find_relief_center(surface, false)),
+    ];
 
     let res = 1024;
     for (site, center) in &sites {
         let (lat, lon) = dir_to_latlon(*center);
-        eprintln!("patch: {site} centre = lat {lat:.2}°, lon {lon:.2}°");
+        log(format!("patch: {site} centre = lat {lat:.2}°, lon {lon:.2}°"));
+        // Each site is a "biome" tile column: its own `patch/<biome>/` subdir
+        // holding the LOD cascade as bare `<span>.png` files. This mirrors the
+        // planet editor's tile view, where one tile carries several zoom
+        // levels — the patches *are* the tiles that exist on the planet.
+        let biome_dir = out_dir.join("patch").join(site);
+        fs::create_dir_all(&biome_dir).expect("creating patch biome dir");
         for (span_km, name) in [
             (120.0_f32, "context-120km"),
             (12.0, "close-12km"),
@@ -1076,9 +1090,8 @@ fn run_patch(
             (0.3, "fine-300m"),
             (0.06, "ultra-60m"),
         ] {
-            let path = out_dir.join(format!("{site}-{name}.png"));
-            render_patch(&surface, *center, span_km * 1000.0, res, &path);
-            eprintln!("patch: wrote {}", path.display());
+            let path = biome_dir.join(format!("{name}.png"));
+            render_patch(surface, *center, span_km * 1000.0, res, &path);
         }
     }
 }
