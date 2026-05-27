@@ -45,11 +45,20 @@ struct BodyTerrainDebug {
 
 // Material bind group (group 3 in thalos_udlod's pipeline layout:
 //   0 = view, 1 = terrain, 2 = terrain-view, 3 = material).
+//
+// Slot 2 packs craft shadow + debug + inspection into one buffer; see
+// `BodyTerrainExtras` in `body_material.rs` for the slot-budget rationale
+// (Metal vertex stage caps at 16 buffers and AsBindGroup forces vertex
+// visibility on every `#[uniform(N)]`).
+struct BodyTerrainExtras {
+    craft_shadow: BodyTerrainShadow,
+    debug: BodyTerrainDebug,
+    inspection: vec4<f32>,
+}
+
 @group(3) @binding(0) var<uniform> terrain_atmos: AtmosphereBlock;
 @group(3) @binding(1) var<uniform> terrain_scene: SceneLighting;
-@group(3) @binding(2) var<uniform> terrain_shadow: BodyTerrainShadow;
-@group(3) @binding(3) var<uniform> terrain_debug: BodyTerrainDebug;
-@group(3) @binding(4) var<uniform> terrain_inspection: vec4<f32>;
+@group(3) @binding(2) var<uniform> terrain_extras: BodyTerrainExtras;
 
 // Blend the atlas-derived macro height normal into the smooth geometric normal.
 // Height is sampled through decode-then-filter RG16 interpolation in
@@ -259,20 +268,20 @@ fn tapered_segment_shadow(
         ray_t = 0.5 * (ray_t_a + ray_t_b);
     }
 
-    if ray_t <= 0.0 || ray_t > terrain_shadow.params.z {
+    if ray_t <= 0.0 || ray_t > terrain_extras.craft_shadow.params.z {
         return 1.0;
     }
 
     let silhouette_distance = length(closest);
-    let penumbra = max(terrain_shadow.params.y, max(radius * 0.18, 0.03));
+    let penumbra = max(terrain_extras.craft_shadow.params.y, max(radius * 0.18, 0.03));
     let coverage = 1.0 - smoothstep(radius, radius + penumbra, silhouette_distance);
-    let fade = 1.0 - smoothstep(terrain_shadow.params.z * 0.75, terrain_shadow.params.z, ray_t);
-    return 1.0 - terrain_shadow.params.x * coverage * fade;
+    let fade = 1.0 - smoothstep(terrain_extras.craft_shadow.params.z * 0.75, terrain_extras.craft_shadow.params.z, ray_t);
+    return 1.0 - terrain_extras.craft_shadow.params.x * coverage * fade;
 }
 
 fn local_craft_shadow(hit_ws: vec3<f32>, sun_dir_ws: vec3<f32>) -> f32 {
     let caster_count = min(
-        u32(max(terrain_shadow.params.w, 0.0)),
+        u32(max(terrain_extras.craft_shadow.params.w, 0.0)),
         MAX_TERRAIN_SHADOW_CASTERS,
     );
     if caster_count == 0u {
@@ -289,8 +298,8 @@ fn local_craft_shadow(hit_ws: vec3<f32>, sun_dir_ws: vec3<f32>) -> f32 {
             tapered_segment_shadow(
                 hit_ws,
                 sun_dir_ws,
-                terrain_shadow.caster_a_radius[i],
-                terrain_shadow.caster_b_radius[i],
+                terrain_extras.craft_shadow.caster_a_radius[i],
+                terrain_extras.craft_shadow.caster_b_radius[i],
             ),
         );
     }
@@ -720,13 +729,13 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let geo_normal = normalize(info.world_normal);
     let hit_ws = info.world_position.xyz;
     let cam_dist = length(info.view_vector);
-    let debug_on = terrain_debug.params.x >= 0.5;
+    let debug_on = terrain_extras.debug.params.x >= 0.5;
 
     // Procedural surface detail (Step 2 breakup + Step 3 micro-relief normal),
     // synthesised from body-fixed metres so it remains static under time warp.
     let frag_relative_position = -info.view_vector;
-    let body_relative_position = quat_rotate(terrain_debug.world_to_body_rot, frag_relative_position);
-    let detail_p_body = terrain_debug.view_phase.xyz + body_relative_position;
+    let body_relative_position = quat_rotate(terrain_extras.debug.world_to_body_rot, frag_relative_position);
+    let detail_p_body = terrain_extras.debug.view_phase.xyz + body_relative_position;
     let detail = surface_detail(detail_p_body, geo_normal, cam_dist);
 
     // Naturalistic material blending. The tile provider publishes continuous
@@ -776,18 +785,18 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // None of the terms ever has to span the planet radius in f32, so
     // 1 m cell edges resolve cleanly. Derivatives are evaluated
     // unconditionally to keep them outside divergent control flow.
-    let debug_cell = max(terrain_debug.params.z, 1e-3);
+    let debug_cell = max(terrain_extras.debug.params.z, 1e-3);
     let debug_rel = body_relative_position;
-    let debug_p = (terrain_debug.view_phase.xyz + debug_rel) / debug_cell;
+    let debug_p = (terrain_extras.debug.view_phase.xyz + debug_rel) / debug_cell;
     let debug_w = max(abs(dpdx(debug_p)), abs(dpdy(debug_p)));
     let debug_checker = checker_3d_aa(debug_p, debug_w);
-    if (terrain_debug.params.x >= 0.5) {
+    if (terrain_extras.debug.params.x >= 0.5) {
         let dark = vec3<f32>(0.05, 0.05, 0.05);
         let light = vec3<f32>(0.80, 0.80, 0.80);
         albedo = vec4<f32>(mix(dark, light, debug_checker), 1.0);
     }
 
-    if (terrain_inspection.x >= 0.5) {
+    if (terrain_extras.inspection.x >= 0.5) {
         var output_fullbright: FragmentOutput;
         output_fullbright.color = vec4<f32>(albedo.rgb, albedo.a);
         return output_fullbright;

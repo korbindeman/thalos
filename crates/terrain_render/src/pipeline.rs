@@ -35,7 +35,6 @@ use anyhow::Result;
 use bevy::math::{DVec3, UVec2, Vec3};
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
-use rayon::prelude::*;
 use thalos_terrain::{
     DynamicSurfaceState, PlanetSurface, StaticSurfaceData, surface_height_m,
     surface_height_range_m, surface_sample,
@@ -185,24 +184,20 @@ fn compute_tile_pixels(
     let count = (size * size) as usize;
     let mut pixels = vec![TilePixel::default(); count];
 
-    pixels
-        .par_chunks_mut(size as usize)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, pixel) in row.iter_mut().enumerate() {
-                let dir =
-                    pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
-                let sample = surface_sample(surface, dynamic_state, dir, tile_lod_m);
-                let material_rgba =
-                    material_masks(surface, dynamic_state, dir, sample.height_m, tile_lod_m);
-                *pixel = TilePixel {
-                    height_m: sample.height_m,
-                    albedo_linear: sample.albedo_linear,
-                    roughness: sample.roughness,
-                    material_rgba,
-                };
-            }
-        });
+    for (y, row) in pixels.chunks_mut(size as usize).enumerate() {
+        for (x, pixel) in row.iter_mut().enumerate() {
+            let dir = pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
+            let sample = surface_sample(surface, dynamic_state, dir, tile_lod_m);
+            *pixel = TilePixel {
+                height_m: sample.height_m,
+                albedo_linear: sample.albedo_linear,
+                roughness: sample.roughness,
+                material_rgba: [0, 0, 0, 255],
+            };
+        }
+    }
+
+    populate_material_masks(&mut pixels, size, tile_lod_m);
 
     pixels
 }
@@ -231,55 +226,39 @@ pub fn rendered_height_m(
     surface_height_m(surface, dynamic_state, dir.as_dvec3(), tile_lod_m)
 }
 
-fn material_masks(
-    surface: &PlanetSurface,
-    dynamic_state: &DynamicSurfaceState,
-    dir: DVec3,
-    height_m: f32,
-    tile_lod_m: f32,
-) -> [u8; 4] {
-    let body = &surface.static_surface;
-    let radius_m = body.radius_m.max(1.0);
-    let step_m = tile_lod_m.clamp(2.0, 250.0);
-    let angular_step = step_m as f64 / radius_m as f64;
-
-    let normal = dir.normalize_or_zero();
-    if normal == DVec3::ZERO {
-        return [128, 96, 32, 0];
+fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32) {
+    let size = size as usize;
+    if size == 0 {
+        return;
     }
-    let tangent_seed = if normal.y.abs() < 0.9 {
-        DVec3::Y
-    } else {
-        DVec3::X
-    };
-    let tangent = tangent_seed.cross(normal).normalize_or_zero();
-    let bitangent = normal.cross(tangent).normalize_or_zero();
+    let step_m = tile_lod_m.clamp(2.0, 250.0);
 
-    let h_l = surface_height_m(
-        surface,
-        dynamic_state,
-        rotate_dir(normal, tangent, -angular_step),
-        tile_lod_m,
-    );
-    let h_r = surface_height_m(
-        surface,
-        dynamic_state,
-        rotate_dir(normal, tangent, angular_step),
-        tile_lod_m,
-    );
-    let h_d = surface_height_m(
-        surface,
-        dynamic_state,
-        rotate_dir(normal, bitangent, -angular_step),
-        tile_lod_m,
-    );
-    let h_u = surface_height_m(
-        surface,
-        dynamic_state,
-        rotate_dir(normal, bitangent, angular_step),
-        tile_lod_m,
-    );
+    let heights: Vec<f32> = pixels.iter().map(|p| p.height_m).collect();
+    for y in 0..size {
+        let y_d = y.saturating_sub(1);
+        let y_u = (y + 1).min(size - 1);
+        for x in 0..size {
+            let x_l = x.saturating_sub(1);
+            let x_r = (x + 1).min(size - 1);
+            let idx = y * size + x;
+            let h_l = heights[y * size + x_l];
+            let h_r = heights[y * size + x_r];
+            let h_d = heights[y_d * size + x];
+            let h_u = heights[y_u * size + x];
+            pixels[idx].material_rgba =
+                material_masks_from_heights(heights[idx], h_l, h_r, h_d, h_u, step_m);
+        }
+    }
+}
 
+fn material_masks_from_heights(
+    height_m: f32,
+    h_l: f32,
+    h_r: f32,
+    h_d: f32,
+    h_u: f32,
+    step_m: f32,
+) -> [u8; 4] {
     let grad_x = (h_r - h_l) / (2.0 * step_m);
     let grad_y = (h_u - h_d) / (2.0 * step_m);
     let slope = (grad_x * grad_x + grad_y * grad_y).sqrt();
@@ -307,11 +286,6 @@ fn material_masks(
         quantize_unit_to_u8(rock / sum),
         quantize_unit_to_u8(wetness),
     ]
-}
-
-fn rotate_dir(dir: DVec3, axis: DVec3, angle: f64) -> DVec3 {
-    (dir * angle.cos() + axis * axis.dot(dir) * (1.0 - angle.cos()) + axis.cross(dir) * angle.sin())
-        .normalize_or_zero()
 }
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {

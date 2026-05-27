@@ -25,8 +25,9 @@ use thalos_planet_rendering::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting
 use thalos_shipyard::{Adapter, AttachNodes, CommandPod, Decoupler, Engine, FuelTank, Part};
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_terrain_render::{
-    BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
-    BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle,
+    BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
+    BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent,
+    GpuAtlasMirrorHandle,
     MAX_TERRAIN_SHADOW_CASTERS, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
     rendered_height_range,
 };
@@ -60,6 +61,13 @@ const LOD_COUNT: u32 = 16;
 const TILE_TEXTURE_SIZE: u32 = 512;
 const TILE_BORDER_SIZE: u32 = 2;
 const TILE_MIP_LEVELS: u32 = 4;
+/// CPU tile synthesis concurrency for Thalos' runtime terrain provider.
+///
+/// The production provider currently evaluates expensive oceanic terrain on
+/// CPU. Keep only a small number of provider tasks active so tile streaming
+/// does not starve Bevy/rendering/input while the sim is paused.
+const TILE_LOAD_SLOTS: u32 = 4;
+const TILE_LOAD_QUEUE_SIZE: u32 = TILE_LOAD_SLOTS * 4;
 
 /// Resident tiles per body. Upstream defaults to 1024, which is tuned for
 /// one giant terrain. With four bodies the atlas memory adds up quickly
@@ -348,6 +356,8 @@ pub(crate) fn spawn_body_terrain(
         lod_count: LOD_COUNT,
         model,
         atlas_size: ATLAS_SIZE,
+        max_concurrent_tile_loads: TILE_LOAD_SLOTS,
+        max_queued_tile_loads: TILE_LOAD_QUEUE_SIZE,
         ..Default::default()
     }
     .add_attachment(AttachmentConfig {
@@ -481,9 +491,11 @@ pub(crate) fn spawn_body_terrain(
     let material = BodyTerrainMaterial {
         atmosphere,
         scene: SceneLighting::default(),
-        craft_shadow: BodyTerrainShadow::default(),
-        debug,
-        inspection: Vec4::ZERO,
+        extras: BodyTerrainExtras {
+            craft_shadow: BodyTerrainShadow::default(),
+            debug,
+            inspection: Vec4::ZERO,
+        },
     };
 
     let mut terrain = commands.spawn((
@@ -1025,7 +1037,7 @@ pub(super) fn update_body_terrain_atmosphere(
         };
         mat.scene =
             build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
-        mat.craft_shadow = craft_shadow;
+        mat.extras.craft_shadow = craft_shadow;
         // Body-fixed camera phase for shader-side procedural detail and the
         // optional flat-mode debug checker. The nearby terrain shader works in
         // camera-relative render metres for precision, then adds this f64-
@@ -1050,8 +1062,8 @@ pub(super) fn update_body_terrain_atmosphere(
                 (phase.as_vec3(), world_to_body.as_quat().normalize())
             })
             .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
-        mat.debug.view_phase = Vec4::new(view_phase.x, view_phase.y, view_phase.z, 0.0);
-        mat.debug.world_to_body_rot = Vec4::new(
+        mat.extras.debug.view_phase = Vec4::new(view_phase.x, view_phase.y, view_phase.z, 0.0);
+        mat.extras.debug.world_to_body_rot = Vec4::new(
             world_to_body_q.x,
             world_to_body_q.y,
             world_to_body_q.z,

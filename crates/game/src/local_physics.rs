@@ -29,6 +29,7 @@ use thalos_shipyard::{
 use thalos_terrain_render::HeightSource;
 
 use crate::SimStage;
+use crate::bridge::WarpLimits;
 use crate::debug::{DebugLaunchMount, DebugMode};
 use crate::fuel::ThrottleState;
 use crate::player_controller::{EvaMode, PlayerControllerBody, PlayerControllerState};
@@ -260,6 +261,28 @@ fn avian_role_from_inputs(
     } else {
         AvianRole::AttitudeOnly
     }
+}
+
+/// Terrain colliders are the expensive near-ground contact path, not the
+/// general "local bubble exists" signal. Build and refresh them only once the
+/// altitude warp gate has forced the craft into the live 1x zone.
+fn terrain_colliders_allowed_by_warp(sim: &SimulationState, limits: &WarpLimits) -> bool {
+    let warp = &sim.simulation.warp;
+    terrain_colliders_allowed_by_warp_inputs(warp.speed(), warp.levels(), limits.max_level)
+}
+
+fn terrain_colliders_allowed_by_warp_inputs(
+    warp_speed: f64,
+    warp_levels: &[f64],
+    max_level: usize,
+) -> bool {
+    let Some(one_x_index) = warp_levels
+        .iter()
+        .position(|&speed| (speed - 1.0).abs() <= f64::EPSILON)
+    else {
+        return false;
+    };
+    (warp_speed - 1.0).abs() <= f64::EPSILON && max_level <= one_x_index
 }
 
 fn compute_avian_authority(
@@ -745,6 +768,7 @@ fn attach_terrain_patch_when_close(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
+    limits: Res<WarpLimits>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
 ) {
@@ -752,6 +776,9 @@ fn attach_terrain_patch_when_close(
         return;
     };
     if bubble.terrain_entity.is_some() {
+        return;
+    }
+    if !terrain_colliders_allowed_by_warp(&sim, &limits) {
         return;
     }
     // EVA never collides: its capsule's `Collider` is removed at spawn
@@ -818,6 +845,8 @@ fn detach_terrain_patch_when_far(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
+    limits: Res<WarpLimits>,
+    contact_graph: Res<ContactGraph>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
 ) {
@@ -827,6 +856,18 @@ fn detach_terrain_patch_when_far(
     let Some(terrain_entity) = bubble.terrain_entity else {
         return;
     };
+    if matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
+        clear_terrain_patch(&mut commands, bubble);
+        info!("detached terrain collider patch from BodyFixed craft");
+        return;
+    }
+    if !terrain_colliders_allowed_by_warp(&sim, &limits)
+        && !craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
+    {
+        clear_terrain_patch(&mut commands, bubble);
+        info!("detached terrain collider patch outside the 1x warp-lock zone");
+        return;
+    }
     let Some(height_source) = height_sources.get(bubble.body_id) else {
         return;
     };
@@ -845,16 +886,22 @@ fn detach_terrain_patch_when_far(
     if agl_m <= config.handoff_agl_m * 1.5 {
         return;
     }
-    commands.entity(terrain_entity).despawn();
-    bubble.terrain_entity = None;
-    bubble.center_dir_body = DVec3::Y;
-    bubble.center_surface_body_m = DVec3::ZERO;
-    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
-    bubble.patch_half_extent_m = 0.0;
+    clear_terrain_patch(&mut commands, bubble);
     info!(
         "detached terrain collider patch from {} at AGL {:.0} m",
         body.name, agl_m
     );
+}
+
+fn clear_terrain_patch(commands: &mut Commands, bubble: &mut LocalBubble) {
+    if let Some(terrain_entity) = bubble.terrain_entity.take() {
+        commands.entity(terrain_entity).despawn();
+    }
+    bubble.center_dir_body = DVec3::Y;
+    bubble.center_surface_body_m = DVec3::ZERO;
+    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
+    bubble.patch_half_extent_m = 0.0;
+    bubble.terrain_built_at_revision = 0;
 }
 
 /// Push canonical state into Avian's components, with what we push
@@ -1496,6 +1543,7 @@ fn maintain_terrain_patch(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
+    limits: Res<WarpLimits>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
     craft_q: Query<&Position, With<LocalCraftBody>>,
@@ -1506,6 +1554,9 @@ fn maintain_terrain_patch(
         return;
     };
     if current.terrain_entity.is_none() {
+        return;
+    }
+    if !terrain_colliders_allowed_by_warp(&sim, &limits) {
         return;
     }
     let Some(height_source) = height_sources.get(current.body_id) else {
@@ -2108,6 +2159,22 @@ mod tests {
                 orientation_body: DQuat::IDENTITY,
             },
         }
+    }
+
+    #[test]
+    fn terrain_colliders_wait_until_warp_gate_locks_to_one_x() {
+        let levels = [0.0, 1.0, 10.0, 100.0];
+
+        assert!(!terrain_colliders_allowed_by_warp_inputs(1.0, &levels, 2));
+        assert!(terrain_colliders_allowed_by_warp_inputs(1.0, &levels, 1));
+    }
+
+    #[test]
+    fn terrain_colliders_do_not_build_while_paused_or_high_warp() {
+        let levels = [0.0, 1.0, 10.0, 100.0];
+
+        assert!(!terrain_colliders_allowed_by_warp_inputs(0.0, &levels, 1));
+        assert!(!terrain_colliders_allowed_by_warp_inputs(10.0, &levels, 1));
     }
 
     #[test]

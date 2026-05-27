@@ -1309,9 +1309,13 @@ build_rendered_terrain_patch(surface, body_radius_m, center_dir, basis, config)
 
 These helpers decode the same R16 cubemap interpretation used by
 `PipelineTileProvider`: `real_meters = (texel / 65535 * 2 - 1) *
-height_range`. Local physics builds one tangent-plane patch around the
-active craft from this data and converts the mesh into an Avian static
-trimesh. Current defaults are 4096 m half extent, 129 x 129 vertices,
+height_range`. Local physics builds one patch around the active craft
+from this data and converts the mesh into an Avian static trimesh.
+Terrain colliders attach, stay attached, and refresh only in the 1x-only
+surface warp zone (`WarpLimits` caps the ladder at 1x), except for an
+already-contacting patch that is finishing the landed collapse. Manually
+switching to 1x higher in the descent keeps the collider absent. Current
+tangent-grid fallback defaults are 4096 m half extent, 65 x 65 vertices,
 and rebuild after the craft moves more than 1024 m laterally from the
 patch center.
 

@@ -182,9 +182,11 @@ pub(crate) fn update_tile_viewer_terrain(
             AtmosphereBlock::default()
         },
         scene: scene_lighting_for(&planet),
-        craft_shadow: BodyTerrainShadow::default(),
-        debug: Default::default(),
-        inspection: Vec4::new(if planet.full_bright { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+        extras: BodyTerrainExtras {
+            craft_shadow: BodyTerrainShadow::default(),
+            debug: Default::default(),
+            inspection: Vec4::new(if planet.full_bright { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+        },
     };
     let terrain = {
         let mut grid = commands.grid(root.0, ReferenceFrame::default());
@@ -231,7 +233,7 @@ pub(crate) fn update_tile_viewer_materials(
         };
         mat.scene = scene.clone();
         mat.atmosphere = atmosphere;
-        mat.inspection.x = if force_fullbright { 1.0 } else { 0.0 };
+        mat.extras.inspection.x = if force_fullbright { 1.0 } else { 0.0 };
     }
     let _ = active;
 }

@@ -127,6 +127,36 @@ impl Default for BodyTerrainDebug {
     }
 }
 
+/// Packed bag of terrain-specific per-frame uniforms.
+///
+/// Exists so the material lands a single uniform binding instead of three.
+/// Bevy 0.18's `AsBindGroup` derive hardcodes `VERTEX | FRAGMENT | COMPUTE`
+/// visibility for `#[uniform(N)]` (the `visibility(...)` annotation is
+/// silently ignored for that attribute), and the Metal backend caps a
+/// pipeline's vertex stage at `MAX_VERTEX_BUFFERS = 16` buffer slots
+/// (wgpu-hal). Each extra `#[uniform]` adds one buffer to *both* stages, so
+/// the previous five-uniform layout pushed `terrain_pipeline` to 17 vertex
+/// buffers and failed validation. Atmosphere and scene stay separate
+/// because they are shared `planet_lighting` types reused elsewhere; the
+/// three terrain-only knobs collapse here.
+#[derive(Clone, Copy, ShaderType)]
+pub struct BodyTerrainExtras {
+    pub craft_shadow: BodyTerrainShadow,
+    pub debug: BodyTerrainDebug,
+    /// x = fullbright albedo output, yzw reserved.
+    pub inspection: Vec4,
+}
+
+impl Default for BodyTerrainExtras {
+    fn default() -> Self {
+        Self {
+            craft_shadow: BodyTerrainShadow::default(),
+            debug: BodyTerrainDebug::default(),
+            inspection: Vec4::ZERO,
+        }
+    }
+}
+
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
 pub struct BodyTerrainMaterial {
     /// Static Rayleigh + Mie atmosphere parameters. Set once at spawn from
@@ -141,18 +171,11 @@ pub struct BodyTerrainMaterial {
     /// the impostor's shading path) so both render paths stay aligned.
     #[uniform(1)]
     pub scene: SceneLighting,
-    /// Analytic local craft shadow, evaluated per terrain fragment.
+    /// Terrain-specific per-frame state (craft shadow, debug overlay,
+    /// inspection flags). Packed into one uniform — see
+    /// [`BodyTerrainExtras`] for the slot-budget rationale.
     #[uniform(2)]
-    pub craft_shadow: BodyTerrainShadow,
-    /// Debug overlay parameters. Zeroed by default so production paths
-    /// pay nothing; the spawn code enables the checkerboard for flat-mode
-    /// debug terrains.
-    #[uniform(3)]
-    pub debug: BodyTerrainDebug,
-    /// Inspection flags for editor/debug views.
-    /// x = fullbright albedo output, yzw reserved.
-    #[uniform(4)]
-    pub inspection: Vec4,
+    pub extras: BodyTerrainExtras,
 }
 
 impl Material for BodyTerrainMaterial {

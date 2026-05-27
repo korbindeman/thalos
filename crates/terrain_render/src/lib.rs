@@ -36,7 +36,7 @@ mod synthetic;
 mod water_material;
 
 pub use body_material::{
-    BodySkyExtra, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
+    BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow,
     MAX_TERRAIN_SHADOW_CASTERS,
 };
 pub use height_source::{

@@ -42,8 +42,8 @@ use thalos_terrain::{
     plan_initial_compilation, sample_static_surface, sample_surface, sub_seed, surface_sample,
 };
 use thalos_terrain_render::{
-    BodyTerrainMaterial, BodyTerrainShadow, PipelineTileProvider, ThalosTerrainPlugin,
-    rendered_height_range,
+    BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow, PipelineTileProvider,
+    ThalosTerrainPlugin, rendered_height_range,
 };
 use thalos_udlod::big_space::{BigSpaceCommands, FloatingOrigin, GridCell, ReferenceFrame};
 use thalos_udlod::math::TileCoordinate;

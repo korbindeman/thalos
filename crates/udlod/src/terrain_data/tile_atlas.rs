@@ -170,13 +170,16 @@ pub(crate) struct TileAtlasState {
     to_load: VecDeque<QueuedTileLoad>,
     loading_tiles: Vec<LoadingTile>,
     load_slots: u32,
+    max_queued_loads: u32,
 }
 
 impl TileAtlasState {
-    fn new(atlas_size: u32) -> Self {
+    fn new(atlas_size: u32, max_concurrent_tile_loads: u32, max_queued_tile_loads: u32) -> Self {
         let unused_tiles = (0..atlas_size)
             .map(|atlas_index| AtlasTile::new(TileCoordinate::INVALID, atlas_index))
             .collect();
+        let load_slots = max_concurrent_tile_loads.max(1);
+        let max_queued_loads = max_queued_tile_loads.max(load_slots);
 
         Self {
             tile_states: default(),
@@ -185,7 +188,8 @@ impl TileAtlasState {
             pinned_tiles: default(),
             to_load: default(),
             loading_tiles: default(),
-            load_slots: 64,
+            load_slots,
+            max_queued_loads,
         }
     }
 
@@ -356,6 +360,15 @@ impl TileAtlasState {
             return true;
         }
 
+        self.prune_stale_queued_loads();
+        if self.to_load.len() >= self.max_queued_loads as usize {
+            trace!(
+                "terrain tile load queue is full ({} pending); deferring request for {tile_coordinate}",
+                self.to_load.len()
+            );
+            return false;
+        }
+
         // If the request set temporarily exceeds the atlas capacity, keep
         // rendering with already-resident ancestors instead of panicking the
         // render world. The next release will free a slot and a later request
@@ -384,6 +397,17 @@ impl TileAtlasState {
             generation,
         });
         true
+    }
+
+    fn prune_stale_queued_loads(&mut self) {
+        let states = &self.tile_states;
+        self.to_load.retain(|queued| {
+            states.get(&queued.coord).is_some_and(|state| {
+                matches!(state.state, LoadingState::Loading)
+                    && state.atlas_index == queued.atlas_index
+                    && state.generation == queued.generation
+            })
+        });
     }
 
     fn release_tile(&mut self, tile_coordinate: TileCoordinate) {
@@ -480,7 +504,11 @@ impl TileAtlas {
             .map(|attachment| AtlasAttachment::new(attachment, config.atlas_size))
             .collect_vec();
 
-        let state = TileAtlasState::new(config.atlas_size);
+        let state = TileAtlasState::new(
+            config.atlas_size,
+            config.max_concurrent_tile_loads,
+            config.max_queued_tile_loads,
+        );
 
         Self {
             model: config.model.clone(),
