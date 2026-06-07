@@ -4,6 +4,7 @@
 //!
 //! - **Top-left**: warp speed + mission time
 //! - **Top-middle**: altitude + apoapsis / periapsis
+//! - **Top-middle (below the bar)**: on-foot (EVA) status pill
 //! - **Bottom-left (navball cluster)**: navball + throttle arc
 //! - **Bottom-left (above navball)**: orbital velocity
 //! - **Bottom-right**: per-stage staging stack (Δv + fuel per stage)
@@ -12,6 +13,7 @@
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
 
+mod eva_panel;
 mod flight_panel;
 mod format;
 mod fps_overlay;
@@ -77,6 +79,7 @@ impl Plugin for HudPlugin {
                     staging_panel::setup,
                     flight_panel::setup.after(crate::navball::ui::setup_navball_ui),
                     fps_overlay::setup,
+                    eva_panel::setup,
                 )
                     .after(theme::init_theme)
                     .after(setup_top_left_row),
@@ -104,6 +107,7 @@ impl Plugin for HudPlugin {
                     flight_panel::update,
                     flight_panel::handle_velocity_frame_click,
                     fps_overlay::update,
+                    eva_panel::update,
                     nav_panel::handle_clicks,
                     nav_panel::update_button_visuals,
                     nav_panel::update_autopilot_visuals,

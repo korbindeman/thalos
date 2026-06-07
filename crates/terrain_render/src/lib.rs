@@ -5,9 +5,10 @@
 //!
 //! - **Stage 1**: wire the fork into the workspace + run a deterministic
 //!   [`SyntheticTileProvider`] end-to-end via `examples/playground.rs`.
-//! - **Stage 2**: [`PipelineTileProvider`] forwards tile requests to
-//!   [`thalos_terrain::sample_static_surface`], so the same `PlanetSurface`
-//!   the impostor billboard bakes also drives the UDLOD surface.
+//! - **Stage 2**: [`PipelineTileProvider`] forwards tile requests through
+//!   the `thalos_terrain::query` seam (`surface_sample` / `surface_height_m`),
+//!   so the same geometric surface drives the UDLOD mesh, terrain collider,
+//!   height sources, PNG dumps, and impostor bake substrate.
 //! - **Stage 3**: per-body wiring lives in `thalos_game`'s
 //!   `rendering::ground_terrain` module.
 //!
@@ -32,10 +33,11 @@ mod playground_material;
 mod rendered_height;
 mod sky_material;
 mod synthetic;
+mod tile_synthesis_pool;
 mod water_material;
 
 pub use body_material::{
-    BodySkyExtra, BodyTerrainDebug, BodyTerrainMaterial, BodyTerrainShadow,
+    BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow,
     MAX_TERRAIN_SHADOW_CASTERS,
 };
 pub use height_source::{
@@ -53,6 +55,7 @@ pub use rendered_height::{
 };
 pub use sky_material::BodySkyMaterial;
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
+pub use tile_synthesis_pool::tile_synthesis_pool;
 pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 
 pub struct ThalosTerrainPlugin;

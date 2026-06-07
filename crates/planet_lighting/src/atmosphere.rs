@@ -47,7 +47,10 @@ pub struct AtmosphereBlock {
     pub limb_exponents: Vec4,
     /// xyz = sunlit-cloud albedo, w = coverage fraction in [0, 1].
     pub cloud_albedo_coverage: Vec4,
-    /// xyz = reserved for future cloud shape controls,
+    /// Cloud layer shape.
+    /// x = layer base altitude above the surface (render units),
+    /// y = layer thickness (render units) — the volumetric slab depth,
+    /// z = optical-density multiplier (scales raymarch extinction),
     /// w = differential-rotation coefficient.
     pub cloud_shape: Vec4,
     /// x = equatorial scroll rate (rad/s), y = sim time seconds
@@ -159,7 +162,15 @@ impl AtmosphereBlock {
                 clouds.albedo[2],
                 clouds.coverage.clamp(0.0, 1.0),
             );
-            out.cloud_shape = Vec4::new(0.0, 0.0, 0.0, clouds.differential_rotation);
+            // Altitudes are authored in meters; convert to render units at
+            // this boundary so the volumetric raymarch in `body_sky.wgsl`
+            // never has to divide by the scale factor. `density` is unitless.
+            out.cloud_shape = Vec4::new(
+                clouds.base_altitude_m.max(0.0) * inv_m,
+                clouds.thickness_m.max(0.0) * inv_m,
+                clouds.density.max(0.0),
+                clouds.differential_rotation,
+            );
             out.cloud_dynamics = Vec4::new(clouds.scroll_rate, 0.0, 0.0, 0.0);
         }
         out

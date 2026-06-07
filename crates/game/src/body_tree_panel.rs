@@ -239,7 +239,7 @@ fn body_tree_panel(
         sim.simulation.warp.reset();
         launch_mount.active = None;
         // Airborne: Kepler owns translation, the canonical→Avian snap drives
-        // the capsule, and `walk_eva_on_terrain` stands down.
+        // the capsule, and `step_eva_controller` stands down.
         if is_eva {
             *eva_mode = EvaMode::Airborne;
         }

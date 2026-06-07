@@ -16,6 +16,7 @@ just game eva             # spawn on foot (EVA) on the Thalos surface instead
 just game landing         # powered-descent approach over dry Thalos land
 just game final           # low final approach over a flat dry Thalos patch
 just edit <body>          # cargo run -p thalos_planet_editor -- <body>
+just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics_canonical
@@ -63,7 +64,22 @@ planet/terrain generation tests for now, including per-body generation
 tests. This applies anywhere a test compiles or validates generated planet
 data, even outside `thalos_terrain`; these tests slow down the visual
 iteration loop. Use `just bake <body> --preview` (see below) for visual
-feedback instead.
+feedback against the real compiler.
+
+For faster speculative design, use `just terrain-lab` and open
+`http://127.0.0.1:8787/tools/terrain-lab/`. Terrain Lab is a dev-only static
+browser sketchpad with Google-Maps-style panning/zooming and lazily generated
+LOD tiles. It is for process-map exploration before porting good ideas into
+`crates/terrain`; the Rust terrain compiler and bake/query pipeline remain the
+source of truth for game output.
+
+Terrain fields should be process-first, not naked-noise-first. Smooth fBM,
+ridged noise, and domain warps may drive masks, placement, breakup, and
+small local texture, but broad visible height/albedo/bathymetry must come
+from named terrain processes/features (coast shelves, seamounts, fractures,
+mountain patches, basins, etc.) with explicit spatial windows. Do not write
+global macro fBM/ridged fields directly into visible terrain; they produce
+unrealistic smoky/streaky contours across the planet.
 
 ## Bakes: production vs preview
 
@@ -89,25 +105,47 @@ rendering.
 
 - Runs the compiler at the body's full authored / radius-derived resolution.
 - Writes the local bake `target/bakes/<body>.bin` (this is what `just game` loads).
-- Writes full-resolution equirect PNGs to `stage-bakes/<body>/full/`.
+- Writes full-resolution equirect PNGs to `stage-bakes/<body>/full/`, plus the
+  ground-scale patch tile columns to `stage-bakes/<body>/full/patch/<biome>/`.
 - Slow — Thalos (3186 km, 4096² cubemap) takes several minutes.
 
 **Preview (`just bake <body> --preview`):**
 
 - 512² cubemap; PNG dumps only, **no local game bake**.
-- Writes to `stage-bakes/<body>/preview/`.
+- Writes equirects to `stage-bakes/<body>/preview/`.
+- Emits the equirect set **plus the ground-scale shaded-relief patch set** as
+  per-biome tile columns: `stage-bakes/<body>/preview/patch/<biome>/<span>.png`,
+  where each biome dir (`hill`, `plain`) holds the LOD cascade
+  (`context-120km.png`, `close-12km.png`, `micro-3km.png`, `fine-300m.png`,
+  `ultra-60m.png`). One preview run shows both orbital coloration and on-foot
+  relief. These patches *are* the tiles that exist on the planet — the same
+  thing the planet editor's tile view shows.
 - Fast — primary visual-feedback loop for iteration on the compiler.
 - Doesn't touch `target/bakes/`, so iterating doesn't invalidate the loaded
   local bake in `just game`.
 
 ### PNG outputs (per run, overwrites)
 
-- `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection.
+- `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection;
+  on ocean worlds this is still raw land/seabed albedo, not water-composited.
+- `orbit-color-equirect.png` — ocean worlds only: preview composite of the
+  separate water layer over the raw terrain substrate, for judging from-orbit
+  coloration without violating the "water is not terrain material" invariant.
 - `height-equirect.png` — grayscale height normalized to the body's
   encoded ± range (range reported in `info.txt`).
 - `roughness-equirect.png` — grayscale roughness (R8Unorm).
 - `normal-equirect.png` — object-space normal map (RGBA8).
 - `info.txt` — range, resolution, route (Feature/Ocean/None), feature counts.
+- `patch/<biome>/{context-120km…ultra-60m}.png` — ground-scale shaded-relief
+  patch tile columns of the runtime walkable height (`surface_height_m`),
+  emitted in both full and `--preview` runs. Each biome dir is one tile site:
+  `hill` = highest-relief, `plain` = flattest. Within a biome the five PNGs zoom
+  from a 120 km context down to a 60 m on-foot view. These read ground character
+  the equirects are far too coarse to show, and map directly to the planet
+  editor's tile view. The patch grid is built in **f64** (mirroring the game
+  tile path `pixel_direction`): an f32 grid would quantise sample positions to
+  the ~0.25 m f32 lattice at planet scale and render a grid/checkerboard moiré
+  the field doesn't contain.
 - (Tectonic and debug overlays when `--debug` is passed or the body has tectonics.)
 
 ### Workflow
@@ -177,6 +215,57 @@ name, and prints a top-N table to identify hot spots. Custom
 `info_span!` markers live in `Simulation::step`, `propagate_flight_plan`,
 `compute_preview_flight_plan`, `advance_simulation`, `update_prediction`,
 `sync_maneuver_plan`.
+
+**Slow-frame log + windowed trace analysis.** `PerfLogPlugin`
+(`crates/game/src/perf_log.rs`) detects frames above
+`SlowFrameThresholdMs` (default 25 ms; override at startup with
+`THALOS_SLOW_FRAME_MS=…` or live via BRP `world_mutate_resources` on
+`thalos_game::perf_log::SlowFrameThresholdMs`), pushes a record into the
+`SlowFrameLog` resource (BRP-readable; ring of 64), and emits a
+`slow_frame` `info_span!` so the chrome trace contains a marker at the
+exact `ts`. An agent can:
+
+1. `world_get_resources` `thalos_game::perf_log::SlowFrameLog` while the
+   game runs to confirm spikes happened and grab their frame indices.
+2. After Ctrl-C, scope `analyze_trace.py` to just those windows:
+
+```bash
+python3 scripts/analyze_trace.py trace-<date>.json \
+    --around-name slow_frame --window-ms 200
+```
+
+This builds a union of ±100 ms windows around each `slow_frame` event
+and ranks spans within that union, instead of averaging the whole
+capture. A long session full of mostly-fine frames is still useful —
+the bad frames don't get washed out.
+
+## Bug fixing
+
+Diagnose before patching. The loop is:
+
+1. **Reason to a hypothesis set.** From the symptom, lay out the plausible
+   causes first — don't jump to the first plausible-looking fix.
+2. **Rule candidates out by testing for them.** Each test should be
+   targeted and falsifiable: it distinguishes between hypotheses rather
+   than merely confirming a guess. Narrow the set down one candidate at
+   a time, with the user, until the actual root cause is pinned and
+   agreed.
+3. **Fix the cause, not the symptom.** Once the cause is known, fix it
+   properly — structurally where applicable (remove the whole class of
+   bug), not a local band-aid that hides the symptom.
+
+A change that makes the symptom disappear without an explanation of *why*
+is not a fix. Don't ship a speculative fix before the cause is confirmed.
+
+## WGSL skill
+
+A project skill at `.claude/skills/wgsl-bevy/SKILL.md` collects
+WGSL / naga (Bevy) shader pitfalls — reserved words that can't be used
+as identifiers, the strict type rules, `naga_oil` import quirks, and so
+on. Treat it as a **living document**: whenever you hit a WGSL error
+worth remembering (a keyword you couldn't use as a variable name, a
+non-obvious error message, a Bevy-specific gotcha), add the case to the
+skill so the next agent doesn't rediscover it from scratch.
 
 ## Architecture
 
@@ -305,22 +394,50 @@ Key modules:
   the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
   patch (or the flattest dry fallback). Thalos has no atmosphere yet, so
   both descents are lunar-style — no aerobraking.
-- **EVA is a full craft, with a grounded/airborne split.** The
-  `EvaMode` resource (`player_controller.rs`, `Grounded` | `Airborne`,
-  defaults `Grounded`) picks which regime owns the capsule.
-  **`Grounded`**: `walk_eva_on_terrain` glues the capsule to the
-  rendered surface and `snap_avian_from_canonical` + the
-  `readback_local_craft` translation short-circuit so the controller
-  owns state. **`Airborne`**: Kepler owns translation, the snap drives
-  the capsule from canonical (exactly like a ship coasting in vacuum),
-  and `walk_eva_on_terrain` stands down. `apply_local_forces`
-  short-circuits for EVA in both modes — EVA has no thrust (coast-only;
-  a jetpack is the natural follow-up). The teleports mirror the ship's:
-  body-tree cmd-click sends EVA to a low orbit (→ `Airborne`), and a
-  row's `drop` button + map cursor (or F9) plants it on a surface point
-  (→ `Grounded`, in place via `local_physics::place_eva_on_surface` —
-  the bubble is never torn down, unlike ships). Mode flips only on these
-  explicit teleports; there is no automatic surface↔orbit transition yet.
+- **EVA is a full craft with a real character controller and a
+  grounded/airborne split.** The `EvaMode` resource
+  (`player_controller.rs`, `Grounded` | `Airborne`, defaults `Grounded`)
+  is the coarse surface↔orbit switch. **`Grounded`**: `step_eva_controller`
+  runs a kinematic character controller in the body's **body-fixed
+  (rotating) frame** — it tracks a body-fixed position + surface-relative
+  velocity and runs a grounded/airborne state machine with surface gravity
+  (`g = μ/r²`): camera-relative walking (Shift = sprint), jumping (Space),
+  walking off ledges into a ballistic fall, and landing. Working in the
+  body-fixed frame (not body-centred inertial) is the key fix: surface
+  velocity is the player's walking speed (m/s), not the inertial
+  co-rotation drag `ω×r` (hundreds of m/s → km/s). That keeps warp from
+  exploding the integrator, and the terrain height query never
+  sea-level-teleports (a `None`/missing-tile sample holds altitude instead
+  of snapping to the reference radius). `snap_avian_from_canonical`,
+  `apply_local_forces`, and the `readback_local_craft` translation all
+  short-circuit for grounded EVA so the controller owns the capsule pose
+  outright; canonical authority is pinned to `LocalRigidBody` by
+  `manage_authority` (not `OnRails`) since grounded EVA co-rotates with the
+  surface and `Simulation::step` must only advance sim-time.
+  `sync_avian_time` still pauses Avian's clock under warp (the controller
+  writes `Position` directly each frame; no integrator is needed and the
+  km/s-scaled integration that broke it is gone).
+  **Rest detection + warp gating (KSP-style):** the controller publishes
+  `grounded` / `at_rest` / `surface_speed_m_s` on `PlayerControllerState`.
+  `enforce_warp_altitude_limits` lets on-foot warp climb above 1× only once
+  the player is *at rest* (standing, stopped); while walking / jumping /
+  falling it clamps to 1×, and movement input drops warp back to 1×
+  immediately. At rest it caps at `SURFACE_WARP_MAX_SPEED` = 100× (above
+  that the UDLOD tile streamer can't follow the body rotating under the
+  camera — a UDLOD limitation, not a sim one). The on-foot HUD pill
+  (`hud/eva_panel.rs`) surfaces `MOVING` / `FALLING` / `STANDING — warp
+  ready`. **`Airborne`**: Kepler owns translation, the snap drives the
+  capsule from canonical (exactly like a ship coasting in vacuum), and
+  `step_eva_controller` stands down. `apply_local_forces` short-circuits
+  for EVA in both modes — EVA has no thrust yet (coast-only; a jetpack is
+  the natural follow-up). The teleports mirror the ship's: body-tree
+  cmd-click sends EVA to a low orbit (→ `Airborne`), and a row's `drop`
+  button + map cursor (or F9) plants it on a surface point (→ `Grounded`,
+  in place via `local_physics::place_eva_on_surface` — the bubble is never
+  torn down, unlike ships). `EvaMode` flips only on these explicit
+  teleports; suborbital ballistic flight (jump, walk off a cliff) stays
+  *within* `Grounded`, switching the controller's internal grounded/airborne
+  state, not `EvaMode`.
 - Semantic player input is read from `thalos_input::game::GameInputIntent`.
   Keep raw Bevy input only for cursor positions, picking spatial data, and UI
   internals. See `docs/input.md`.
@@ -410,7 +527,16 @@ Cubemap-based procedural surface generation. No Bevy dependency.
 - `TerrainConfig` — top-level enum in `terrain_config.rs`: `None`,
   `Feature(FeatureTerrainConfig)` for archetype-driven bodies (Mira,
   Vaelen, Thalos, Pelagos…), `Ocean(OceanTerrainConfig)` for
-  flat-water placeholders.
+  flat-water placeholders. Current P2A.5 migration state: Thalos is
+  authored as an ocean-bearing `OceanicTerrestrial` prototype; its ground
+  LOD uses `RuntimeTerrainDetail::OceanicContinental` so the same signed
+  continent/seabed evaluator defines bake height, runtime mesh height, and
+  collider height instead of the legacy P0 HMF detail cascade. Runtime
+  ground height is LOD-invariant in this slice to avoid contour-like
+  parent/child tile handoff steps. Water is not a terrain material:
+  underwater terrain keeps seabed albedo/material/roughness, and ocean
+  color/reflection/optical absorption come from the separate water renderers.
+  The fuller tectonic/hydrology Thalos route is parked for a later P2 slice.
 - `compile_terrain_config(...)` — single entry point. Builds the
   optional `TectonicSystem` from `TectonicConfig`, compiles the
   static surface (via `feature_compiler` or `compile_ocean`), and
@@ -431,8 +557,9 @@ Cubemap-based procedural surface generation. No Bevy dependency.
   `stage_seed` before each `apply()` so there's no ambient state.
 - `tectonics/` — plate graph (`Plate`, `PlateKind`, `Boundary`,
   `BoundaryKind`), spherical mesh, plate-derived fields. Currently
-  consumed by `AgingOceanicHomeworld` (Thalos) and
-  `ColdDesertFormerlyWet` (Vaelen).
+  consumed by `ColdDesertFormerlyWet` (Vaelen) and by the parked fuller
+  `AgingOceanicHomeworld` Thalos route; the active P2A Thalos prototype
+  omits tectonics.
 - `surface_field` / `aging_oceanic_field` / `cold_desert_field` /
   `vaelen_field` — continuous archetype surface fields sampled into
   the cubemap accumulators.

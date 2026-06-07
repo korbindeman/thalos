@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::cubemap::Cubemap;
+use crate::generic_terrestrial_field::RuntimeTerrainDetail;
 use crate::spatial_index::IcoBuckets;
 use crate::surface_color::WaterAppearance;
 use crate::surface_field::BiomeMixTexel;
@@ -70,6 +71,13 @@ pub struct StaticSurfaceData {
 
     /// Shared spatial index over all feature arrays.
     pub feature_index: IcoBuckets,
+
+    /// Runtime geometric detail strategy used by the Query API. Legacy bodies
+    /// still get the P0 HMF uplift; P2A `GenericTerrestrial` bodies evaluate
+    /// their own smooth continental field directly at full detail so runtime
+    /// ground geometry is LOD-invariant during the vertical slice.
+    #[serde(default)]
+    pub runtime_detail: RuntimeTerrainDetail,
 
     /// High-frequency statistical detail noise parameters.
     pub detail_params: DetailNoiseParams,

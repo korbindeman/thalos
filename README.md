@@ -51,7 +51,8 @@ Controls:
 - `Esc` pause menu
 - `M` toggle map view
 - `V` cycle ship camera mode
-- `F12` save a screenshot to `~/Desktop/thalos`
+- `F2` save a screenshot to `~/Desktop/thalos`
+- `F1` hide / show the HUD
 - Left drag rotates the camera
 - Scroll zooms the camera
 - Double-click a body or ship marker to focus it

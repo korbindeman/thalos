@@ -70,12 +70,15 @@ clear-terrain-cache:
 # Headless terrain bake.
 #
 # Default (full): writes the local bake to `target/bakes/<body>.bin`
-# (ignored by Git, what your local game loads) plus full-resolution
-# equirect PNGs to `stage-bakes/<body>/full/`. Slow.
+# (ignored by Git, what your local game loads), full-resolution equirect
+# PNGs to `stage-bakes/<body>/full/`, and the ground-scale patch tile
+# columns to `stage-bakes/<body>/full/patch/<biome>/`. Slow.
 #
-# `--preview`: 512² preview run. PNGs only at
-# `stage-bakes/<body>/preview/`, no local game bake. Fast iteration loop —
-# read the PNG to inspect compiler output without launching the game.
+# `--preview`: 512² preview run. Equirect PNGs plus the same ground-scale
+# shaded-relief patch tile columns (hill + plain biomes, 120 km → 60 m
+# spans) under `stage-bakes/<body>/preview/patch/<biome>/`, no local game
+# bake. Fast iteration loop — read the PNGs to inspect both orbital
+# coloration and on-foot relief without launching the game.
 #
 # Body name is case-insensitive; pass `all` to bake every body with a
 # terrain block.

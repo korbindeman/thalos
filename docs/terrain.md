@@ -10,6 +10,19 @@ notes (`gen/vaelen_processes.md`) and the wider research surveys
 `gen/planet_aesthetics.md`, `gen/dunes.md`) remain as standalone
 references.
 
+> **Status (2026-05): generation half superseded.** The
+> generation architecture below (feature compiler: `PlanetTerrainSpec →
+> TerrainPrior → FeatureManifest → SurfaceField`, populations/promotion,
+> era ordering, the v2 backlog) is being replaced by the
+> [planet generation pipeline spec](planet-generation-pipeline-spec.md),
+> via the [migration plan](planet-generation-pipeline-migration.md).
+> Its concepts are folded into the new pipeline (archetypes → field
+> presets, manifest → feature catalog, v2 backlog → fields + feature
+> types + synthesisers), not discarded — keep this section as the
+> reference being ported until cutover completes. The **ground-LOD /
+> `TileProvider` half (M3) and the cross-renderer projection contract
+> remain current**, reframed by the migration as Query-API consumers.
+
 ## Overview
 
 Two halves, one contract:
@@ -39,7 +52,7 @@ pair once ground LOD lands.
 | Feature compiler | `AirlessImpactMoon` and `ColdDesertFormerlyWet` archetypes wired (Mira, Vaelen). v1 has no first-class hydrology, no layered substrate, no climate fields. | Revamped compiler with v2 backlog landed; all four main bodies through it (M2) |
 | Terrestrial bodies | Thalos, Pelagos use `Ocean` flat-water placeholder | `AgingOceanicHomeworld`, `GenericTerrestrial` archetypes (M2) |
 | Renderer (orbital) | Flat impostor reads `StaticSurfaceData` cubemaps + crater SSBO | Same impostor remains the far-orbit projection |
-| Renderer (surface) | In-tree `thalos_udlod` fork (Bevy 0.18 + runtime `TileProvider`); `PipelineTileProvider` reads a temporary low-pass view of the baked cubemap/R16 height for UDLOD tiles and matching height queries. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
+| Renderer (surface) | In-tree `thalos_udlod` fork (Bevy 0.18 + runtime `TileProvider`); `PipelineTileProvider` reads the Query API surface into UDLOD tiles. Height tiles use packed `Rg16` for the game path because broad, shallow Thalos slopes made plain `R16Unorm` quantization visible as contour terraces; matching height queries mirror the resident atlas. | Mira/Vaelen/Thalos/Pelagos rendering at surface scale with future mid/high-frequency detail projection added to both renderer and collider source together |
 | Big-space hierarchy | Not present | Per-body grids parented to system grid (M1, M3) |
 
 ## Goals
@@ -64,6 +77,23 @@ pair once ground LOD lands.
 - Hard cache boundary: immutable substrate is cached as `StaticSurfaceData`;
   dynamic layer definitions/state rebuild only dynamic buffers and do not
   invalidate the static terrain cache unless they also alter substrate.
+
+## Process-first terrain invariant
+
+Visible macro and meso terrain must be authored as named terrain processes or
+features, not as raw smooth-noise fields. Smooth fBM, ridged noise, and domain
+warps are still useful for masks, feature breakup, stochastic placement, and
+small local texture, but they must not directly write broad visible height,
+albedo, roughness, or bathymetry. Global low-frequency fBM/ridged fields create
+continuous smoky or streaky contours that read as procedural noise rather than
+geology.
+
+When a terrain layer needs large visible structure, express it as a process with
+an explicit spatial window: continental shelves and slopes from coastline
+distance, seamount stamps, fracture-zone segments, mountain patches, basins,
+crater ejecta, dune seas, channels, etc. A helper may use noise internally only
+when its visible contribution is gated by that process window and documented by
+wavelength/amplitude intent.
 
 ## Non-goals (this doc)
 
@@ -544,6 +574,109 @@ with compatible height, normal, color, roughness, and material response.
 Transitions should refine or fade detail in; they should never replace
 one terrain interpretation with another.
 
+### End-to-end runtime model
+
+The source of truth is the authored planet spec plus the compiled
+feature manifest, biome graph, static layer definitions, and dynamic
+surface state. Everything dense or renderer-specific is a projection or
+an acceleration artifact: impostor cubemaps, UDLOD tile attachments,
+GPU atlas slots, collider patches, editor overlays, scatter cells, and
+memory/disk caches must be reproducible from the same source state.
+They must not become independent terrain authorities.
+
+The long-term runtime shape is:
+
+```text
+PlanetTerrainSpec
+  -> TerrainPrior
+  -> FeatureManifest + BiomeGraph + DynamicSurfaceLayers
+  -> SurfaceField::sample(dir, sample_scale_m, dynamic_state)
+  -> projections:
+       - orbital impostor bake
+       - UDLOD tile provider attachments
+       - physics height queries
+       - rendered-height collider patches
+       - editor provenance
+       - scatter / vegetation instance fields
+```
+
+Keep ownership distinct:
+
+- **Features** are semantic terrain/process structures with stable IDs
+  and seed streams: craters, volcanoes, rifts, channels, basin fills,
+  dune seas, and other geology that can affect height, material,
+  roughness, provenance, and sometimes spawned child regions.
+- **Biomes** are broad substrate/process fields: height-generator
+  stacks, palette functions, feature budgets, and mask plans. They are
+  not only Earth climate classes; mare basalt, highland regolith,
+  evaporite basins, volcanic plains, and badlands are all biomes in
+  this sense.
+- **Dynamic layers** are mutable overlays whose default state reproduces
+  authored appearance but whose runtime state belongs to
+  `SolarSystemState`: seasonal ice, active dunes, later tracks, weather,
+  tide/wind state, or other mutable surface processes.
+- **Scatter populations** are object/detail instance fields driven by
+  stable population IDs and placement rules: boulders, rock clusters,
+  pebbles, grass blades, shrubs, and later trees. They may project into
+  albedo/roughness/normal/height at some scales, but individual tiny
+  scatter objects are not terrain-height authority by default.
+- **Caches** are disposable acceleration: GPU atlas residency for
+  currently drawable tiles, in-memory frecency caches for recent CPU
+  tile payloads, and optional future disk caches for persistent reuse.
+
+`SurfaceField::sample` must be scale-aware. A 2 km orbital sample should
+not evaluate pebble- or grass-scale detail; a 0.5 m ground tile sample
+may include those detail fields if their projection policy says they are
+representable at that resolution. `sample_scale_m` is both a quality and
+anti-aliasing contract: each layer or feature evaluates only the
+frequencies visible at the requested scale and folds smaller frequencies
+into palette/roughness/statistical detail or omits them entirely. This
+keeps orbit bakes stable, tile generation bounded, and physics queries
+from accidentally paying for visual-only microdetail.
+
+For performance, compiled terrain should build runtime acceleration
+structures from the semantic manifest before serving dense projections:
+spatial hashes or spherical quadtrees for craters and scatter cells,
+curve/BVH-style bounds for channels and rifts, compact runtime biome
+mask plans, and per-feature projection descriptors. Tile generation must
+query the tile footprint first and evaluate only features/layers that can
+affect that footprint at the requested scale; it must not scan the whole
+manifest per texel.
+
+The intended work split is:
+
+```text
+Per frame:
+  - update view-dependent TileTree state
+  - draw resident UDLOD tiles from the GPU atlas
+  - upload a bounded budget of completed tiles
+  - update local collider/scatter cells only under explicit budgets
+
+Async/background:
+  - synthesize requested tile attachments
+  - populate provider-level memory caches
+  - prepare scatter-cell payloads
+
+Offline/load/editor:
+  - infer prior and compile the feature manifest
+  - build runtime acceleration structures
+  - bake orbital impostor cubemaps and compact analytic buffers
+```
+
+Tile cache keys must include enough source state to make invalidation
+boring: body/source hash, generator version, dynamic layer epoch or hash
+when dynamic data contributes to the payload, tile coordinate, and
+attachment layout. Disk caching remains optional and measurement-driven;
+provider-level memory caching is the default runtime optimization.
+
+Dense scatter needs its own renderer and LOD policy. Grass blades,
+pebbles, and small rocks should be generated from deterministic
+surface-space cells keyed by body + population + cell, batched or
+GPU-driven, distance culled, and faded into material/detail textures at
+range. Only large scatter instances that gameplay can touch should
+become ECS entities or colliders; visual-only micro scatter should not
+inflate the terrain collider or per-frame ECS workload.
+
 ### Example bodies
 
 #### Mira
@@ -838,9 +971,11 @@ a single body. The terrain renderer handles that internally.
 - **`TileAtlas` + `TileTree`.** GPU-side tile storage and
   hierarchical sampling with LOD blending.
 - **Attachment system.** Multi-channel tile data with configurable
-  resolution and format per channel: R16 (height), RG16 (normals),
-  RGBA8 (albedo / splat / custom). 1px borders for seamless
-  filtering.
+  resolution and format per channel: R16 / packed RG16 / R32Float
+    (height), RG16 (normals), RGBA8 (albedo / splat / custom). 1px
+    borders for seamless filtering. The game uses packed RG16 height
+    (coarse + residual) to avoid visible contouring on very low-slope
+    terrain without requiring filterable float textures.
 - **`big_space` integration** (unconditional; the upstream
   `high_precision` Cargo feature was removed). Wired to the camera and
   floating origin so the Taylor-series relative-position path is always
@@ -940,7 +1075,7 @@ attachment's format. Defaults from upstream:
 
 | Attachment | Format | Default size | Purpose |
 |---|---|---|---|
-| `height` | R16 | 512×512 | Required. 16-bit unorm; 0..1 maps to `[min_height, max_height]` configured per body. |
+| `height` | packed RG16 in game (`R16` and `R32Float` still supported) | 512×512 | Required. Stored as normalized 0..1, mapping to `[min_height, max_height]` configured per body. Packed RG16 stores a residual in the second channel to avoid visible R16 contouring on broad shallow slopes without requesting filterable float textures. |
 | `normal` | RG16 | 512×512 | Optional. May be derived from height if not provided. |
 | `albedo` | RGBA8 | configurable | Optional surface color. |
 | `splat` | RGBA8 | configurable | Optional material weight masks for shader-side blending. |
@@ -1080,13 +1215,15 @@ into Thalos and wiring it to the revamped feature compiler.
   Converts cubesphere `TileCoordinate` → body-local direction → reads
   a temporary low-pass sample of the baked height/albedo/roughness
   cubemaps from `StaticSurfaceData` → copies the result into the
-  configured tile attachments (height into `R16`, albedo into
+  configured tile attachments (height into packed `Rg16` in the game path,
+    with `R16` / `R32Float` still supported by the provider; albedo into
   sRGB-encoded `Rgba8`, roughness into linear `R16` upscaled from the
   source u8 cubemap by 257). This is deliberately a short-term visual
   bridge for the current Thalos terracing; the terrain rewrite should
   replace it with genuinely continuous local fields.
-- The current height path is deliberately the rendered cubemap/R16
-  source, not `thalos_terrain::sample_static_surface()`. The full
+- The current height path is deliberately the rendered Query API/atlas
+  source, not an independent `thalos_terrain::sample_static_surface()`
+  detail path. The full
   sampler includes SSBO crater iteration and statistical detail that
   UDLOD does not render yet; using it for tiles or colliders would make
   physics disagree with the visible surface.
@@ -1189,9 +1326,13 @@ build_rendered_terrain_patch(surface, body_radius_m, center_dir, basis, config)
 
 These helpers decode the same R16 cubemap interpretation used by
 `PipelineTileProvider`: `real_meters = (texel / 65535 * 2 - 1) *
-height_range`. Local physics builds one tangent-plane patch around the
-active craft from this data and converts the mesh into an Avian static
-trimesh. Current defaults are 4096 m half extent, 129 x 129 vertices,
+height_range`. Local physics builds one patch around the active craft
+from this data and converts the mesh into an Avian static trimesh.
+Terrain colliders attach, stay attached, and refresh only in the 1x-only
+surface warp zone (`WarpLimits` caps the ladder at 1x), except for an
+already-contacting patch that is finishing the landed collapse. Manually
+switching to 1x higher in the descent keeps the collider absent. Current
+tangent-grid fallback defaults are 4096 m half extent, 65 x 65 vertices,
 and rebuild after the craft moves more than 1024 m laterally from the
 patch center.
 
@@ -1214,9 +1355,10 @@ also blends height-derived normals strongly back toward the geometric
 normal so residual bands read as smooth terrain rather than terraced
 contour steps.
 
-The cascade in
-[crates/terrain_render/src/pipeline.rs](../crates/terrain_render/src/pipeline.rs)
-adds high-frequency detail on top of the macro:
+The cascade — since migration P0, it lives in the Query API seam
+[crates/terrain/src/query.rs](../crates/terrain/src/query.rs) (moved out
+of `terrain_render::pipeline`, which now delegates to it) — adds
+high-frequency detail on top of the macro:
 
 - **Musgrave ridged hybrid multifractal** (`hmf_ridged_3d` in
   [crates/terrain/src/noise.rs](../crates/terrain/src/noise.rs))

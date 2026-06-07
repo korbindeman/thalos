@@ -29,6 +29,7 @@ use thalos_shipyard::{
 use thalos_terrain_render::HeightSource;
 
 use crate::SimStage;
+use crate::bridge::WarpLimits;
 use crate::debug::{DebugLaunchMount, DebugMode};
 use crate::fuel::ThrottleState;
 use crate::player_controller::{EvaMode, PlayerControllerBody, PlayerControllerState};
@@ -89,8 +90,6 @@ impl Plugin for GameLocalPhysicsPlugin {
                     maintain_terrain_patch,
                     sync_terrain_collider_pose,
                     collapse_or_constrain_warp,
-                    debug_log_body_fixed_state,
-                    debug_log_terrain_gap,
                 )
                     .chain()
                     .in_set(SimStage::Physics)
@@ -264,6 +263,28 @@ fn avian_role_from_inputs(
     }
 }
 
+/// Terrain colliders are the expensive near-ground contact path, not the
+/// general "local bubble exists" signal. Build and refresh them only once the
+/// altitude warp gate has forced the craft into the live 1x zone.
+fn terrain_colliders_allowed_by_warp(sim: &SimulationState, limits: &WarpLimits) -> bool {
+    let warp = &sim.simulation.warp;
+    terrain_colliders_allowed_by_warp_inputs(warp.speed(), warp.levels(), limits.max_level)
+}
+
+fn terrain_colliders_allowed_by_warp_inputs(
+    warp_speed: f64,
+    warp_levels: &[f64],
+    max_level: usize,
+) -> bool {
+    let Some(one_x_index) = warp_levels
+        .iter()
+        .position(|&speed| (speed - 1.0).abs() <= f64::EPSILON)
+    else {
+        return false;
+    };
+    (warp_speed - 1.0).abs() <= f64::EPSILON && max_level <= one_x_index
+}
+
 fn compute_avian_authority(
     sim: Res<SimulationState>,
     throttle: Res<ThrottleState>,
@@ -284,6 +305,7 @@ fn sync_avian_time(
     clock: Res<SimClock>,
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
+    sim: Res<SimulationState>,
     player: Option<Res<PlayerControllerState>>,
     mut physics_time: ResMut<Time<Physics>>,
 ) {
@@ -296,10 +318,22 @@ fn sync_avian_time(
         return;
     }
 
-    let player_active = player
-        .as_deref()
-        .map(|state| state.is_active())
-        .unwrap_or(false);
+    // Never step Avian under time-warp. At warp ≠ 1× the role is `Paused`
+    // (`integrator_active()` false), so the only thing that would otherwise
+    // keep the integrator alive is `player_active` (grounded EVA). But Avian
+    // integrating the EVA capsule — which carries the body's surface
+    // co-rotation velocity (several km/s) — over the warp-scaled timestep
+    // explodes its position by tens of km per frame; `step_eva_controller`
+    // re-plants it analytically each frame, but the rendered/Avian state in
+    // between is garbage and crashes the UDLOD tile streamer. The grounded EVA
+    // controller writes `Position` directly and needs no integrator, so pausing
+    // here is safe and keeps surface time-warp stable.
+    let warping = (sim.simulation.warp.speed() - 1.0).abs() > f64::EPSILON;
+    let player_active = !warping
+        && player
+            .as_deref()
+            .map(|state| state.is_active())
+            .unwrap_or(false);
     if active.bubble.is_some() && (authority.integrator_active() || player_active) {
         physics_time.unpause();
     } else {
@@ -380,11 +414,61 @@ fn spawn_player_avian_body(
         };
         let body = &sim.system.bodies[body_id];
         let sun_dir_inertial = (-body_state.position).normalize_or_zero();
-        let dir_body_fixed = if sun_dir_inertial == DVec3::ZERO {
+        let mut dir_body_fixed = if sun_dir_inertial == DVec3::ZERO {
             DVec3::Y
         } else {
             (body_state.orientation.inverse() * sun_dir_inertial).normalize()
         };
+        // EVA drop-site selection, searching the daylight hemisphere near the
+        // sub-stellar point:
+        //   default / `plain` → flattest usable plain (the intended on-foot start),
+        //   `relief`          → highest-relief hill site (terrain inspection),
+        //   `substellar`      → exact sub-stellar point (legacy behaviour).
+        let eva_site = std::env::var("THALOS_EVA_SITE").ok();
+        if eva_site.as_deref() != Some("substellar") {
+            let seek_hills = eva_site.as_deref() == Some("relief");
+            let up = if dir_body_fixed.y.abs() > 0.99 {
+                DVec3::X
+            } else {
+                DVec3::Y
+            };
+            let east = up.cross(dir_body_fixed).normalize();
+            let north = dir_body_fixed.cross(east);
+            let probe = 3_000.0 / body.radius_m; // ~3 km cross, in radians
+            let h = |d: DVec3| {
+                height_source
+                    .sample_height_m(d.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+                    .unwrap_or(0.0) as f64
+            };
+            let n = 24i32;
+            let mut best_dir = dir_body_fixed;
+            let mut best_score = f64::NEG_INFINITY;
+            let mut best_relief = 0.0f64;
+            for iy in -n..=n {
+                for ix in -n..=n {
+                    // Offsets within ~50° of the sub-stellar point keep the site lit.
+                    let ax = (ix as f64 / n as f64) * 0.9;
+                    let ay = (iy as f64 / n as f64) * 0.9;
+                    let cand = (dir_body_fixed + east * ax + north * ay).normalize();
+                    let relief = (h((cand + east * probe).normalize())
+                        - h((cand - east * probe).normalize()))
+                    .abs()
+                        + (h((cand + north * probe).normalize())
+                            - h((cand - north * probe).normalize()))
+                        .abs();
+                    // Maximise relief for hills, minimise it for a usable plain.
+                    let score = if seek_hills { relief } else { -relief };
+                    if score > best_score {
+                        best_score = score;
+                        best_relief = relief;
+                        best_dir = cand;
+                    }
+                }
+            }
+            dir_body_fixed = best_dir;
+            let kind = if seek_hills { "hill" } else { "plain" };
+            eprintln!("EVA {kind} site selected (relief proxy {best_relief:.0} m)");
+        }
         let terrain_h = height_source
             .sample_height_m(dir_body_fixed.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
             .unwrap_or(0.0) as f64;
@@ -432,7 +516,7 @@ fn spawn_player_avian_body(
         }
         VesselKind::Eva => {
             // KSP-on-foot is a kinematic capsule whose position is set
-            // each frame by `walk_eva_on_terrain` from direct terrain
+            // each frame by `step_eva_controller` from direct terrain
             // heightmap queries — no Avian contact resolution. Spawn a
             // placeholder cuboid so `spawn_local_craft_body` is happy
             // (it falls back to a 1 m cube if the list is empty, which
@@ -574,6 +658,11 @@ fn rebase_bubble_to_dominant_body(
 /// `BodyFixed`, `WarpIntegrated`, and `Docked` are owned by other systems
 /// (landed-pose evaluation, warp integrators, docking) and left alone.
 ///
+/// Grounded EVA is special-cased ahead of the match: it is pinned to
+/// `LocalRigidBody` so warping on foot doesn't release it to `OnRails` and
+/// Kepler-coast its surface state into the ground (which tripped the
+/// collision warp-reset). See the inline comment for the failure mode.
+///
 /// Previously this function gated solely on warp level: at 1× warp, Avian
 /// always owned; warping up handed translation back to Kepler. The result
 /// was visible orbital drift any time the player paused/unpaused
@@ -582,12 +671,69 @@ fn rebase_bubble_to_dominant_body(
 fn manage_authority(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
+    eva_mode: Res<EvaMode>,
+    contact_graph: Res<ContactGraph>,
+    config: Res<LocalBubbleConfig>,
+    throttle: Res<ThrottleState>,
     mut sim: ResMut<SimulationState>,
     mut diagnostics: ResMut<AvianHandoffDiagnostics>,
+    craft_q: Query<(&LinearVelocity, &AngularVelocity), With<LocalCraftBody>>,
 ) {
     let Some(bubble) = active.bubble.as_ref() else {
         return;
     };
+
+    // Grounded EVA co-rotates with the surface, so it must never be
+    // Kepler-coasted. Pin it to `LocalRigidBody`, whose `Simulation::step` arm
+    // only advances sim-time (no coast, no surface-collision warp reset) and
+    // leaves translation to `step_eva_controller` + `readback_local_craft`.
+    //
+    // Without this pin, time-warp breaks on foot: warping flips the Avian role
+    // to `Paused`, the match below releases translation to `OnRails`, and the
+    // next `step()` coasts the player's slow surface-velocity state — a
+    // sub-surface trajectory — until `coast_segment` reports a collision and
+    // `warp.reset_immediate()` snaps warp back to 1×. (The altitude gate skips
+    // grounded EVA, so unlike a ship it isn't capped near terrain; nothing else
+    // stops the coast.) `LocalRigidBody` rather than `BodyFixed` because EVA can
+    // walk, which would leave an analytic `BodyFixed` pose stale.
+    if sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded() {
+        if !matches!(
+            sim.simulation.authority(),
+            AuthorityMode::LocalRigidBody { .. }
+        ) {
+            sim.simulation
+                .transition_authority(AuthorityMode::LocalRigidBody {
+                    bubble: bubble.id,
+                    root_entity: EntityRef(bubble.craft_entity.to_bits()),
+                });
+        }
+        return;
+    }
+
+    // Landed ships should behave like landed EVA under time warp: fixed to the
+    // rotating surface, not released to an inertial Kepler coast. If the player
+    // requests warp while the ship is already in quiet terrain contact, collapse
+    // to the same analytic `BodyFixed` authority before the generic
+    // `LocalRigidBody -> OnRails` release below can run. In freefall (no
+    // terrain contact, moving too fast, or throttle active) ships and EVA stay
+    // ordinary ballistic craft.
+    if sim.simulation.vessel_kind() == VesselKind::Ship
+        && sim.simulation.warp.target_speed() > 1.0
+        && matches!(
+            sim.simulation.authority(),
+            AuthorityMode::LocalRigidBody { .. }
+        )
+        && let Some(terrain_entity) = bubble.terrain_entity
+        && craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
+        && let Ok((linear_velocity, angular_velocity)) = craft_q.get(bubble.craft_entity)
+        && linear_velocity.length() < config.max_stable_speed_m_s
+        && angular_velocity.length() < config.max_stable_angular_speed_rad_s
+        && throttle.effective <= 1.0e-3
+    {
+        collapse_to_body_fixed(&mut sim, bubble);
+        return;
+    }
+
     match (sim.simulation.authority(), authority.owns_translation()) {
         (AuthorityMode::LocalRigidBody { .. }, false) => {
             sim.simulation
@@ -622,6 +768,7 @@ fn attach_terrain_patch_when_close(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
+    limits: Res<WarpLimits>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
 ) {
@@ -629,6 +776,21 @@ fn attach_terrain_patch_when_close(
         return;
     };
     if bubble.terrain_entity.is_some() {
+        return;
+    }
+    if !terrain_colliders_allowed_by_warp(&sim, &limits) {
+        return;
+    }
+    // EVA never collides: its capsule's `Collider` is removed at spawn
+    // (`spawn_player_avian_body`) and `step_eva_controller` plants it
+    // kinematically from direct height queries. A terrain collider patch would
+    // therefore collide with nothing — yet once attached, `maintain_terrain_patch`
+    // rebuilds its trimesh every frame as the GPU-atlas height-source
+    // `revision()` churns with tile streaming (the player co-rotates with the
+    // planet, so the streamer constantly loads/evicts tiles). That rebuild was
+    // ~11% of surface frame time and the cause of the EVA "unplayable stutter".
+    // Skip the patch entirely for EVA; ships still get it for real contact.
+    if sim.simulation.vessel_kind() == VesselKind::Eva {
         return;
     }
     let Some(body_id) = thalos_body_id(&sim) else {
@@ -683,6 +845,8 @@ fn detach_terrain_patch_when_far(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
+    limits: Res<WarpLimits>,
+    contact_graph: Res<ContactGraph>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
 ) {
@@ -692,6 +856,18 @@ fn detach_terrain_patch_when_far(
     let Some(terrain_entity) = bubble.terrain_entity else {
         return;
     };
+    if matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
+        clear_terrain_patch(&mut commands, bubble);
+        info!("detached terrain collider patch from BodyFixed craft");
+        return;
+    }
+    if !terrain_colliders_allowed_by_warp(&sim, &limits)
+        && !craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
+    {
+        clear_terrain_patch(&mut commands, bubble);
+        info!("detached terrain collider patch outside the 1x warp-lock zone");
+        return;
+    }
     let Some(height_source) = height_sources.get(bubble.body_id) else {
         return;
     };
@@ -710,16 +886,22 @@ fn detach_terrain_patch_when_far(
     if agl_m <= config.handoff_agl_m * 1.5 {
         return;
     }
-    commands.entity(terrain_entity).despawn();
-    bubble.terrain_entity = None;
-    bubble.center_dir_body = DVec3::Y;
-    bubble.center_surface_body_m = DVec3::ZERO;
-    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
-    bubble.patch_half_extent_m = 0.0;
+    clear_terrain_patch(&mut commands, bubble);
     info!(
         "detached terrain collider patch from {} at AGL {:.0} m",
         body.name, agl_m
     );
+}
+
+fn clear_terrain_patch(commands: &mut Commands, bubble: &mut LocalBubble) {
+    if let Some(terrain_entity) = bubble.terrain_entity.take() {
+        commands.entity(terrain_entity).despawn();
+    }
+    bubble.center_dir_body = DVec3::Y;
+    bubble.center_surface_body_m = DVec3::ZERO;
+    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
+    bubble.patch_half_extent_m = 0.0;
+    bubble.terrain_built_at_revision = 0;
 }
 
 /// Push canonical state into Avian's components, with what we push
@@ -1361,6 +1543,7 @@ fn maintain_terrain_patch(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
+    limits: Res<WarpLimits>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
     craft_q: Query<&Position, With<LocalCraftBody>>,
@@ -1371,6 +1554,9 @@ fn maintain_terrain_patch(
         return;
     };
     if current.terrain_entity.is_none() {
+        return;
+    }
+    if !terrain_colliders_allowed_by_warp(&sim, &limits) {
         return;
     }
     let Some(height_source) = height_sources.get(current.body_id) else {
@@ -1552,166 +1738,6 @@ fn collapse_or_constrain_warp(
     active.bubble = Some(bubble);
 }
 
-/// Temporary diagnostic: log canonical attitude + Avian state while
-/// [`AuthorityMode::BodyFixed`] is active, for ~60 frames per entry into
-/// the mode. Helps catch teleport-clamp drift without spamming the log
-/// once a session settles in.
-fn debug_log_body_fixed_state(
-    sim: Res<SimulationState>,
-    active: Res<ActiveLocalBubble>,
-    craft_q: Query<(&Position, &Rotation, &AngularVelocity), With<LocalCraftBody>>,
-    mut frames_in_mode: Local<u32>,
-    mut was_body_fixed: Local<bool>,
-) {
-    let is_body_fixed = matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. });
-    if !is_body_fixed {
-        *frames_in_mode = 0;
-        *was_body_fixed = false;
-        return;
-    }
-    if !*was_body_fixed {
-        *frames_in_mode = 0;
-        *was_body_fixed = true;
-    }
-    *frames_in_mode += 1;
-    if *frames_in_mode > 60 {
-        return;
-    }
-    let attitude = sim.simulation.attitude();
-    let body_id = sim.simulation.dominant_body();
-    let body_state = body_state_for(&sim, body_id);
-    let avian_state = active.bubble.as_ref().and_then(|b| {
-        craft_q
-            .get(b.craft_entity)
-            .ok()
-            .map(|(p, r, av)| (p.0, r.0, av.0))
-    });
-    if let Some((pos, rot, av)) = avian_state {
-        info!(
-            "BodyFixed frame {}: canon ori.w={:.5} canon ω=({:.2e},{:.2e},{:.2e}) | avian pos.y={:.1} rot.w={:.5} ω=({:.2e},{:.2e},{:.2e}) | body.ori.w={:.5} body.ω=({:.2e},{:.2e},{:.2e})",
-            *frames_in_mode,
-            attitude.orientation.w,
-            attitude.angular_velocity.x,
-            attitude.angular_velocity.y,
-            attitude.angular_velocity.z,
-            pos.y,
-            rot.w,
-            av.x,
-            av.y,
-            av.z,
-            body_state.orientation.w,
-            body_state.angular_velocity.x,
-            body_state.angular_velocity.y,
-            body_state.angular_velocity.z,
-        );
-    } else {
-        info!(
-            "BodyFixed frame {}: canon ori.w={:.5} canon ω=({:.2e},{:.2e},{:.2e}) | no avian | body.ori.w={:.5}",
-            *frames_in_mode,
-            attitude.orientation.w,
-            attitude.angular_velocity.x,
-            attitude.angular_velocity.y,
-            attitude.angular_velocity.z,
-            body_state.orientation.w,
-        );
-    }
-}
-
-/// Once per second, log the state needed to diagnose the
-/// embedded-player / collider-vs-visible-surface gap. Reports:
-///
-/// - `rev` — current `HeightSource::revision()` (0 means the GPU mirror
-///   has never received a tile; non-zero means it has updated `rev`
-///   times since boot).
-/// - `built_at_rev` — revision snapshot when the current patch was
-///   built. If `rev > built_at_rev` persistently, `maintain_terrain_patch`
-///   is failing to rebuild.
-/// - `player_alt_above_r` — player altitude above the body's reference
-///   radius (i.e. raw geometric altitude before any rendered-surface
-///   correction).
-/// - `h@64m` — what `height_source.sample_height_m(dir, 64.0)` returns
-///   at the player's direction. With the GPU mirror populated, this is
-///   the bilinear R16 read at the resident tile. With CPU fallback, the
-///   ~4-octave HMF cascade at 64 m vertex spacing.
-/// - `h@0.5m` — same query at `PHYSICS_QUERY_TILE_LOD_M`. Identical to
-///   `h@64m` when the mirror is populated (mirror ignores the lod
-///   hint); equal to the full ~11-octave cascade when CPU fallback
-///   fires. So a non-zero `h@0.5m - h@64m` is a smoking gun that the
-///   mirror is not serving this direction.
-/// - `patch_center_alt` — current `bubble.center_surface_body_m` length
-///   minus body radius. The altitude of the collider's centre vertex
-///   in body-fixed space, i.e. where the collider "thinks the ground
-///   is" right under the patch centre.
-/// - `gap` — `h@0.5m - patch_center_alt`. If positive, the visible
-///   GPU-rendered surface is *above* the collider; the player will appear
-///   embedded by this distance.
-fn debug_log_terrain_gap(
-    time: Res<Time<Real>>,
-    active: Res<ActiveLocalBubble>,
-    height_sources: Res<HeightSourceRegistry>,
-    sim: Res<SimulationState>,
-    player: Option<Res<PlayerControllerState>>,
-    player_q: Query<&Position, With<PlayerControllerBody>>,
-    craft_q: Query<&Position, With<LocalCraftBody>>,
-    mut accum: Local<f32>,
-) {
-    *accum += time.delta_secs();
-    if *accum < 1.0 {
-        return;
-    }
-    *accum = 0.0;
-
-    let Some(bubble) = active.bubble.as_ref() else {
-        return;
-    };
-    let Some(height_source) = height_sources.get(bubble.body_id) else {
-        return;
-    };
-    let player_active = player
-        .as_deref()
-        .map(|state| state.is_active())
-        .unwrap_or(false);
-    let position = if player_active {
-        player_q.iter().next()
-    } else {
-        craft_q.get(bubble.craft_entity).ok()
-    };
-    let Some(position) = position else {
-        return;
-    };
-
-    let body = &sim.system.bodies[bubble.body_id];
-    let body_state = body_state_for(&sim, bubble.body_id);
-    let radius = body.radius_m;
-
-    let player_body_fixed = body_state.orientation.inverse() * position.0;
-    let player_dir = player_body_fixed.normalize_or_zero();
-    if player_dir == DVec3::ZERO {
-        return;
-    }
-    let player_alt_above_r = player_body_fixed.length() - radius;
-
-    let dir_f32 = player_dir.as_vec3();
-    let h_at_64 = height_source.sample_height_m(dir_f32, 64.0);
-    let h_at_fine = height_source.sample_height_m(dir_f32, PHYSICS_QUERY_TILE_LOD_M);
-    let patch_center_alt = bubble.center_surface_body_m.length() - radius;
-    let gap = h_at_fine
-        .map(|h| h as f64 - patch_center_alt)
-        .unwrap_or(f64::NAN);
-
-    info!(
-        "TERRAIN DIAG | body={} | rev={} built_at_rev={} | player_alt_above_r={:.2} m | h@64m={:.2} m | h@0.5m={:.2} m | patch_center_alt={:.2} m | gap={:.2} m",
-        body.name,
-        height_source.revision(),
-        bubble.terrain_built_at_revision,
-        player_alt_above_r,
-        h_at_64.unwrap_or(f32::NAN),
-        h_at_fine.unwrap_or(f32::NAN),
-        patch_center_alt,
-        gap,
-    );
-}
-
 /// Transition canonical authority to `BodyFixed` once the ship has settled
 /// onto the terrain. The Avian body itself stays alive — Avian remains the
 /// universal rigid-body integrator, and [`snap_avian_from_canonical`] holds
@@ -1769,7 +1795,7 @@ fn inertial_to_bubble_frame(
 /// respawn: set canonical, mark the EVA grounded, move the bubble onto the
 /// target body, drop the old terrain patch, and plant the Avian capsule. The
 /// grounded canonical→Avian snap is short-circuited, so this is the only
-/// thing that moves the capsule; [`crate::player_controller::walk_eva_on_terrain`]
+/// thing that moves the capsule; [`crate::player_controller::step_eva_controller`]
 /// takes over next frame and glues it to the rendered surface.
 ///
 /// Shared by the F9 sub-stellar drop and the map-cursor surface teleport so
@@ -2133,6 +2159,22 @@ mod tests {
                 orientation_body: DQuat::IDENTITY,
             },
         }
+    }
+
+    #[test]
+    fn terrain_colliders_wait_until_warp_gate_locks_to_one_x() {
+        let levels = [0.0, 1.0, 10.0, 100.0];
+
+        assert!(!terrain_colliders_allowed_by_warp_inputs(1.0, &levels, 2));
+        assert!(terrain_colliders_allowed_by_warp_inputs(1.0, &levels, 1));
+    }
+
+    #[test]
+    fn terrain_colliders_do_not_build_while_paused_or_high_warp() {
+        let levels = [0.0, 1.0, 10.0, 100.0];
+
+        assert!(!terrain_colliders_allowed_by_warp_inputs(0.0, &levels, 1));
+        assert!(!terrain_colliders_allowed_by_warp_inputs(10.0, &levels, 1));
     }
 
     #[test]

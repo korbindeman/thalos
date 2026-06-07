@@ -36,7 +36,8 @@ implemented slice; §6 tracks open questions.
 ### 2.1 The local bubble already has collision geometry
 
 `thalos_physics_local` spins up one Avian rigid body per craft and,
-within 20 km AGL, attaches a `Kinematic` trimesh terrain patch:
+inside the 1x-only surface warp zone, attaches a `Kinematic` trimesh
+terrain patch:
 
 - The ship is a `RigidBody::Dynamic` compound collider built from the
   shipyard part graph in `build_ship_collider_primitives`: one primitive
@@ -52,11 +53,15 @@ within 20 km AGL, attaches a `Kinematic` trimesh terrain patch:
 - `attach_terrain_patch_when_close`
   ([local_physics.rs:592](crates/game/src/local_physics.rs:592)) spawns
   a `RigidBody::Kinematic` trimesh patch (`spawn_terrain_collider_patch`,
-  [lib.rs:236](crates/physics_local/src/lib.rs:236)) when AGL drops
-  below `handoff_agl_m` (20 km). The collider body sits at the patch
-  center, its mesh vertices are body-fixed offsets from that center, and
-  its `Position`/`Rotation`/velocities track the rotating body each frame
-  so `Position + Rotation * local_vertex` lands in the right
+  [lib.rs:236](crates/physics_local/src/lib.rs:236)) only when AGL is
+  below `handoff_agl_m` (20 km) **and** `WarpLimits` says 1x is the
+  highest legal warp level. Manually switching to 1x above that surface
+  warp-lock zone does not build the terrain collider, and any already
+  attached non-contact patch is detached when the craft leaves the zone.
+  The collider body sits at the patch center, its mesh vertices are
+  body-fixed offsets from that center, and its
+  `Position`/`Rotation`/velocities track the rotating body each frame so
+  `Position + Rotation * local_vertex` lands in the right
   body-centered-inertial position with metre-scale narrow-phase
   coordinates.
 - Avian's contact solver runs only when Avian *owns translation*, i.e.
@@ -90,13 +95,29 @@ geometry such as triangle meshes."
 
 Secondary contributors (not the headline):
 
-- The patch is coarse: `patch_resolution = 129`,
+- The patch is coarse: `patch_resolution = 65`,
   `patch_half_extent_m = 4096`
-  ([lib.rs:47](crates/physics_local/src/lib.rs:47)) → ~64 m vertex
-  spacing. Sub-64 m relief isn't in the collider.
-- A known collider-vs-rendered-surface gap exists; `debug_log_terrain_gap`
-  ([local_physics.rs:1468](crates/game/src/local_physics.rs:1468))
-  tracks it.
+  ([lib.rs](crates/physics_local/src/lib.rs)). Sub-patch relief isn't in
+  the collider.
+- A known collider-vs-rendered-surface gap exists between the coarse
+  collider patch and the GPU-rendered surface.
+
+> **Performance note.** The terrain collider is a `Kinematic` trimesh
+> whose pose is re-synced every frame (`sync_terrain_collider_pose`) so it
+> co-rotates with the planet inside the body-centered Avian bubble. Avian
+> therefore re-runs broad/narrow phase against every collider triangle each
+> frame, and this is the **dominant CPU cost while on the surface** —
+> measured at ~8 ms/frame (EVA on Thalos, 4K) with the old
+> `patch_resolution = 129` (~32k triangles). The window covered far more
+> ground than any resting craft contacts; `patch_resolution = 65`
+> (~8k triangles, native-texel density preserved in a still-generous window
+> around the craft) cuts that to ~2 ms with no gameplay change — the
+> grounded-EVA capsule is placed kinematically by `step_eva_controller`,
+> not by the collider. Diagnosed CPU-bound by toggling the ship camera's
+> `is_active` (frame time unchanged → not GPU) and the sim pause (frame
+> time dropped from ~18 ms to ~10 ms → the `SimStage::Physics` set, i.e.
+> Avian). If finer collision is ever needed under a craft, prefer a small
+> high-res window over a large one; the cost scales with triangle count.
 
 ### 2.3 There is no structural-integrity model
 
@@ -344,7 +365,12 @@ legs):
    alignment with the rendered surface
    (`HeightSource::build_collider_patch`), with tangent-grid fallback,
    and a window-relative rebuild so the small tile window follows the
-   craft across the surface (§3.6).
+   craft across the surface (§3.6). Attachment and stale-patch rebuilds
+   are gated by the surface warp-lock zone: effective warp must be 1x and
+   the altitude gate must cap the ladder at 1x, so a manual reset to 1x
+   higher in the descent does not allocate, keep, or refresh collider
+   geometry unless the existing patch is still needed to finish a contact
+   collapse.
 8. F8 craft-collider debug view, drawn in the ship camera from the same
    compound collider primitives used by the local rigid body. It uses a
    dedicated ship-layer gizmo group because the default gizmos are

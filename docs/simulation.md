@@ -958,7 +958,8 @@ Current M5 first slice:
   `body.angular_velocity`, so its body-fixed vertices land in the right
   body-centered-inertial positions and contact resolution sees the
   correct surface velocity at the contact point. The patch samples the
-  rendered R16 cubemap height path, not the fuller
+  rendered UDLOD height atlas path (packed RG16 in the game path, with R16 /
+  R32Float still supported for older/debug providers), not an independent
   `sample_static_surface` detail path. Its vertices are now meshed
   directly from the resident GPU atlas tiles (one vertex per height
   texel at the rendered LOD) so the collider lines up with the drawn

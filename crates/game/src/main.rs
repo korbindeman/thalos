@@ -21,6 +21,7 @@ mod map_view;
 mod navball;
 mod navigation;
 mod pause_menu;
+mod perf_log;
 mod photo_mode;
 mod player_controller;
 mod reflection_probe;
@@ -44,7 +45,13 @@ use std::sync::Arc;
 use bevy::asset::AssetPlugin;
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, WindowMode};
+use bevy::render::{
+    RenderPlugin,
+    settings::{Backends, RenderCreation, WgpuSettings},
+};
+use bevy::window::{
+    MonitorSelection, PresentMode, VideoModeSelection, WindowMode, WindowResolution,
+};
 use thalos_input::game::GameInputPlugin;
 use thalos_input::settings::InputSettings;
 use thalos_physics_canonical::{
@@ -77,6 +84,7 @@ use map_view::MapViewPlugin;
 use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use pause_menu::PauseMenuPlugin;
+use perf_log::PerfLogPlugin;
 use photo_mode::PhotoModePlugin;
 use player_controller::PlayerControllerPlugin;
 use rendering::RenderingPlugin;
@@ -125,6 +133,99 @@ pub struct GameTerrainRegistry(pub SharedTerrainRegistry);
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// Window present mode. `THALOS_VSYNC=off` (or `0`/`false`/`no`) selects
+/// `AutoNoVsync` so frame times run uncapped for profiling while still letting
+/// wgpu fall back to a supported non-vsync present mode; anything else keeps
+/// the vsync default (`AutoVsync`).
+fn present_mode_from_env() -> PresentMode {
+    match std::env::var("THALOS_VSYNC") {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" | "no" => PresentMode::AutoNoVsync,
+            _ => PresentMode::AutoVsync,
+        },
+        Err(_) => PresentMode::AutoVsync,
+    }
+}
+
+fn parse_window_size(value: &str) -> Option<(u32, u32)> {
+    let (width, height) = value
+        .trim()
+        .split_once(['x', 'X', ','])
+        .or_else(|| value.trim().split_once(' '))?;
+    let width = width.trim().parse().ok()?;
+    let height = height.trim().parse().ok()?;
+    Some((width, height))
+}
+
+/// Primary-window configuration. Borderless fullscreen remains the default,
+/// but `THALOS_WINDOW_MODE=windowed` is a useful Windows swapchain-stability
+/// fallback when a driver returns a generic surface-acquire error. Optional:
+/// `THALOS_WINDOW_SIZE=1600x900`.
+fn window_from_env() -> Window {
+    let present_mode = present_mode_from_env();
+    let size = std::env::var("THALOS_WINDOW_SIZE")
+        .ok()
+        .and_then(|value| parse_window_size(&value))
+        .unwrap_or((1600, 900));
+
+    let mode = match std::env::var("THALOS_WINDOW_MODE") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "windowed" | "window" => WindowMode::Windowed,
+            "exclusive" | "fullscreen" | "true-fullscreen" | "true_fullscreen" => {
+                WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current)
+            }
+            "borderless" | "borderless-fullscreen" | "borderless_fullscreen" | "" => {
+                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+            }
+            other => {
+                eprintln!(
+                    "Unknown THALOS_WINDOW_MODE={other:?}; using borderless fullscreen. \
+                     Expected windowed, borderless, or fullscreen."
+                );
+                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+            }
+        },
+        Err(_) => WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+    };
+
+    Window {
+        title: "Thalos".into(),
+        mode,
+        resolution: WindowResolution::new(size.0, size.1),
+        // Dev/perf hook: `THALOS_VSYNC=off` uncaps the framerate so
+        // frame-time deltas are observable when profiling. Default keeps
+        // vsync on.
+        present_mode,
+        ..default()
+    }
+}
+
+fn backends_from_env() -> Option<Backends> {
+    let value = std::env::var("THALOS_WGPU_BACKEND").ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" | "all" | "" => None,
+        "dx12" | "d3d12" => Some(Backends::DX12),
+        "vulkan" | "vk" => Some(Backends::VULKAN),
+        "metal" => Some(Backends::METAL),
+        "gl" | "opengl" => Some(Backends::GL),
+        other => {
+            eprintln!(
+                "Unknown THALOS_WGPU_BACKEND={other:?}; using Bevy/wgpu default. \
+                 Expected auto, dx12, vulkan, metal, or gl."
+            );
+            None
+        }
+    }
+}
+
+fn wgpu_settings_from_env() -> WgpuSettings {
+    let mut settings = WgpuSettings::default();
+    if let Some(backends) = backends_from_env() {
+        settings.backends = Some(backends);
+    }
+    settings
+}
 
 fn main() {
     // ------------------------------------------------------------------
@@ -288,6 +389,9 @@ fn main() {
     // ------------------------------------------------------------------
     // 5. Build and run the Bevy app.
     // ------------------------------------------------------------------
+    let window = window_from_env();
+    let wgpu_settings = wgpu_settings_from_env();
+
     App::new()
         .configure_sets(
             Update,
@@ -308,11 +412,11 @@ fn main() {
                 .build()
                 .disable::<bevy::transform::TransformPlugin>()
                 .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "Thalos".into(),
-                        mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-                        ..default()
-                    }),
+                    primary_window: Some(window),
+                    ..default()
+                })
+                .set(RenderPlugin {
+                    render_creation: RenderCreation::Automatic(wgpu_settings),
                     ..default()
                 })
                 .set(AssetPlugin {
@@ -426,6 +530,7 @@ fn main() {
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)
+        .add_plugins(PerfLogPlugin)
         .add_plugins(ScenarioMenuPlugin)
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)

@@ -1,4 +1,4 @@
-use crate::math::{TerrainModel, C_SQR};
+use crate::math::{C_SQR, TerrainModel};
 use bevy::{
     math::{DVec2, DVec3, IVec2, UVec2},
     render::render_resource::ShaderType,

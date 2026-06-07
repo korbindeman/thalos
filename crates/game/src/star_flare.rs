@@ -124,6 +124,10 @@ enum GhostShape {
 /// saturation — these are camera glass reflections, not decorative orbs;
 /// the spectral tint should come from the baked chromatic aberration at
 /// each ghost's rim, not from saturated base fills.
+///
+/// Intentional camera artifact: do not disable this flare chain when
+/// investigating generic atmosphere/sky "noise" reports. If lens flare is the
+/// problem, it will be called out explicitly.
 const GHOSTS: &[(f32, f32, Color, GhostShape)] = &[
     // Halo disabled — revisit once the rainbow blur feels right.
     // (0.0, 220.0, Color::srgba(1.00, 1.00, 1.00, 0.09),

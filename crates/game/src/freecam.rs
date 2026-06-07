@@ -1,6 +1,6 @@
 //! Debug-only free-fly camera (ship view).
 //!
-//! F1 toggles the camera off the orbit-focus pipeline. Bindings:
+//! F3 toggles the camera off the orbit-focus pipeline. Bindings:
 //!
 //! | Key            | Action                       |
 //! |----------------|------------------------------|

@@ -18,7 +18,7 @@ in-atmosphere flight is the remaining frontier.
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
 | Rocky-body sky | **Single-scattering Rayleigh + Mie raymarch** (`atmosphere.wgsl::integrate_atmosphere`). Per-body β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, and aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. The terrain `BodySky` pass and the impostor path both use this orbital model so the surface stays readable and haze concentrates toward the limb instead of washing the whole disk blue. Sky pixels still boost alpha from local in-scatter luminance so bright sky crushes stars where an observer's eye would adapt away from them. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 / Hillaire-style multi-scatter LUTs once in-atmosphere flight justifies the precompute step. |
-| Cloud rendering | Reference equirectangular cloud overlays projected into cubemaps, with shader-side differential rotation (16 latitude bands) and Beer-Lambert opacity. The impostor path also uses a shadow probe; the terrain path draws the same cube as a fixed-altitude shell in `BodySkyMaterial`, with terrain cloud shadows deferred. Bodies without a registered overlay bind a blank cube. Gas-giant cloud deck is part of the impostor. | Revisit procedural terrestrial clouds; volumetric layer for orbital cinematic moments; surface-shadow projection from clouds onto terrain LOD. |
+| Cloud rendering | **Terrain `BodySky` path: volumetric slab raymarch** (`body_sky.wgsl::cloud_volume_overlay`) between two concentric shells (`cloud_shape.x/y`). Density = reference coverage cube (16-band differential rotation) shaped by a vertical profile and 3-D detail noise; a short sun march gives self-shadow, a forward-scatter phase the silver lining, and a per-sample + segment terminator fade keeps the night side from punching black holes in the starfield. Camera-regime aware: clouds show over the disk from orbit and overhead from the surface. The impostor (orbital/far) still composites a flat lit reference shell + shadow probe. Bodies without a registered overlay bind a blank cube. Gas-giant cloud deck is part of the impostor. | Procedural coverage field (real weather patterns) to replace hand-picked equirects; half-res + temporal upscale for cost; surface-shadow projection from clouds onto terrain LOD; volumetric in the impostor for close orbital cinematics. |
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
@@ -278,20 +278,70 @@ line: Thalos 80 km, Pelagos 90 km, Vaelen 60 km.
 
 ## Cloud rendering (M4)
 
-Two layers, separate jobs:
+### Today: volumetric slab raymarch (terrain path)
 
-1. **Cloud shells** — 2D shell sphere slightly larger than the body
-   surface, textured with animated procedural noise. Latitude bands
-   (ITCZ near equator, descending zones at ~30° lat, mid-latitude
-   westerlies, polar caps). Cast shadows on the surface — without
-   shadows, clouds float as detached layers.
-2. **Volumetric layer** *(stretch goal)* — for cinematic atmospheric
-   shots. Raymarched with temporal upscaling, similar to Blackrack's
-   KSP1 volumetric clouds. Not required for M4 to ship.
+The terrain `BodySky` fullscreen pass (`crates/terrain_render/src/body_sky.wgsl`)
+raymarches a **volumetric cloud layer** as a thin slab between two
+concentric spheres — cloud base `radius + cloud_shape.x` and cloud top
+`base + cloud_shape.y`. This replaced the earlier fixed-altitude 2-D
+shell intersection. The march reuses everything the atmosphere pass
+already solved: the per-body fullscreen quad, the scene-depth clip (so
+terrain and the ship hull correctly occlude clouds), and the
+`AtmosphereBlock` cloud uniforms.
 
-Cloud parameters live alongside `TerrestrialAtmosphere` in the body
-RON. The cloud noise field is procedural; storm structure (vortices,
-fronts) is inferred from rotation rate + obliquity.
+Per sample, density is built from three factors:
+
+1. **Coverage** — the reference cloud-cover cubemap, sampled with the
+   existing 16-band differential rotation (`sample_cloud_banded`). This
+   is the large-scale weather map and the co-rotation source.
+2. **Vertical profile** — rounded base, eroded top, so the slab reads as
+   a deck rather than a uniform fog.
+3. **Detail noise** — a few octaves of animated 3-D value-noise fbm in
+   body-local space (so billows co-rotate with the surface), combined via
+   a coverage-threshold erosion (`n + cov − 1`) that carves clear sky
+   where coverage is low and keeps cloud where it is high.
+
+Lighting is a short secondary march toward the sun for self-shadow
+(Beer's law), a cheap forward-biased phase for the sun-facing silver
+lining, and an ambient floor so undersides aren't black. A per-sample
+and per-segment terminator fade keeps night-side clouds from occluding
+stars as black blobs. The result is premultiplied and composited over
+the atmosphere in-scatter exactly like the old overlay.
+
+The pass is **camera-regime aware**: above the layer (orbit) clouds are
+gated to the planet disk and faded across the geometric horizon to avoid
+a hard limb tangent band; below the layer (standing on the surface) the
+underside renders overhead on sky pixels too; inside the layer (descent)
+the march runs from the camera to the nearest shell. Step count is
+adaptive (target ~`thickness/16`, clamped 8–32) with per-pixel
+interleaved-gradient jitter to hide banding.
+
+The **orbital impostor** (≥ 4× radius) is unchanged — it still
+composites a flat lit reference shell + shadow probe
+(`planet_impostor.wgsl::composite_clouds`); a per-pixel volumetric march
+on a body that small on screen isn't worth it yet.
+
+Cloud parameters live on `CloudCover` alongside `TerrestrialAtmosphere`
+in the body RON (`coverage`, `albedo`, `scroll_rate`,
+`differential_rotation`, plus the new `base_altitude_m`, `thickness_m`,
+`density`). They convert to render units and pack into
+`AtmosphereBlock::cloud_shape` at the `from_terrestrial` boundary.
+
+### Next
+
+- **Procedural coverage field.** The coverage cube is still a hand-picked
+  equirectangular reference image per body (`reference_clouds.rs`).
+  Replace it with a procedural weather field (noise + the latitude bands
+  the environment model already carries) — this is the hook for real,
+  evolving weather patterns and storm structure inferred from rotation
+  rate + obliquity.
+- **Cost: half-res + temporal upscale.** The march currently runs
+  full-res; on surface views it touches the whole sky hemisphere. Drop to
+  half/quarter-res with temporal reprojection (Blackrack/HZD style) if it
+  bites.
+- **Surface cloud shadows.** Project the cloud layer onto terrain LOD —
+  the impostor already has a shadow probe; the terrain receiver side is
+  still deferred.
 
 For gas giants, "clouds" *are* the cloud deck and live inside
 `AtmosphereParams` already.

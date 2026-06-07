@@ -3,13 +3,16 @@
 //! Two modes:
 //!
 //! - **Default (full)**: runs the terrain compiler at the body's full
-//!   resolution and writes both the local game bake (`target/bakes/<body>.bin`,
-//!   what your local game loads) and equirectangular PNG previews
-//!   (`stage-bakes/<body>/full/*.png`).
-//! - **`--preview`**: runs at 512² for fast iteration. Writes ONLY the
-//!   PNG previews to `stage-bakes/<body>/preview/`. Never touches
-//!   `target/bakes/`, so iterating on the compiler doesn't invalidate
-//!   the local game bake.
+//!   resolution and writes the local game bake (`target/bakes/<body>.bin`,
+//!   what your local game loads), equirectangular PNG previews
+//!   (`stage-bakes/<body>/full/*.png`), and the ground-scale shaded-relief
+//!   patch set as per-biome tile columns
+//!   (`stage-bakes/<body>/full/patch/<biome>/*.png`).
+//! - **`--preview`**: runs at 512² for fast iteration. Writes the equirect PNG
+//!   previews *and* the same per-biome patch tile columns (hill + plain sites,
+//!   spans from 120 km down to 60 m) under
+//!   `stage-bakes/<body>/preview/patch/<biome>/`. Never touches `target/bakes/`,
+//!   so iterating on the compiler doesn't invalidate the local game bake.
 //!
 //! Per-bake PNG outputs: albedo, height (grayscale, normalized to the
 //! body's ± range), roughness, and object-space normal. Feature
@@ -48,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use image::{ImageBuffer, RgbImage};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -59,7 +62,7 @@ use thalos_terrain::{
     FeatureProjectionConfig, PlanetSurface, PlateKind, TerrainCompileContext,
     TerrainCompileOptions, TerrainConfig, compile_dynamic_surface_layers,
     compile_static_terrain_config, compile_tectonics_from_config, generate_initial_manifest,
-    sample_surface,
+    surface_height_m, surface_normal, surface_sample,
 };
 
 // ---------------------------------------------------------------------------
@@ -412,6 +415,18 @@ fn bake_one(
     dump_all_in_parallel(&surface, body, out_dir, equirect_width, debug);
     dump_info(&surface, &route, out_dir);
 
+    // Both full and preview emit the ground-scale patch set so each mode dir
+    // carries its `patch/<biome>/` tile columns alongside the equirects —
+    // orbital coloration (the equirects) plus on-foot relief (the patches),
+    // which the equirects are far too coarse to read. The surface is already
+    // compiled, so patches are CPU-cheap regardless of mode. Routed through
+    // `MultiProgress::println` so the per-site centre summaries don't garble
+    // the bars under `bake all`.
+    bar.set_message("rendering ground patches");
+    dump_patches(&surface, out_dir, &mut |s| {
+        let _ = multi.println(s);
+    });
+
     let elapsed = start.elapsed();
     bar.finish_with_message(format!(
         "done in {:.1}s · {route} · {} · {n_craters} craters",
@@ -493,6 +508,8 @@ fn store_status_label(status: StoreStatus) -> &'static str {
 /// two layers compose without manual scheduling.
 ///
 /// Production set (always): albedo, height, roughness, normal.
+/// Ocean bodies also get an orbit-color preview that composites the separate
+/// water layer over the raw seabed/land albedo for visual iteration.
 /// Tectonic set (when the body has tectonics): plate-id, boundary-type.
 /// Debug set (`--debug`): material-id, plus biome/suture for cold-desert bodies.
 fn dump_all_in_parallel(
@@ -504,9 +521,11 @@ fn dump_all_in_parallel(
 ) {
     let static_surface = &surface.static_surface;
     let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
-    let lod = ((std::f32::consts::TAU * static_surface.radius_m) / equirect_w.max(1) as f32)
-        .max(1.0)
-        .log2();
+    // Metres per equirect texel at the equator. The Query API seam takes a
+    // linear metres-per-sample LOD (not log2), so this drives the detail
+    // cascade directly.
+    let lod_m =
+        ((std::f32::consts::TAU * static_surface.radius_m) / equirect_w.max(1) as f32).max(1.0);
     let height_range = static_surface.height_range;
     // Precompute the cold-desert biome field here so the field outlives the
     // `par_iter` below — closures borrow it by reference inside the debug
@@ -522,6 +541,7 @@ fn dump_all_in_parallel(
         Height,
         Roughness,
         Normal,
+        OrbitColor,
         PlateId,
         BoundaryType,
         Material,
@@ -535,6 +555,9 @@ fn dump_all_in_parallel(
         DumpKind::Roughness,
         DumpKind::Normal,
     ];
+    if static_surface.sea_level_m.is_some() {
+        dumps.push(DumpKind::OrbitColor);
+    }
     if surface.tectonics.is_some() {
         dumps.push(DumpKind::PlateId);
         dumps.push(DumpKind::BoundaryType);
@@ -549,35 +572,56 @@ fn dump_all_in_parallel(
 
     dumps.into_par_iter().for_each(|kind| match kind {
         DumpKind::Albedo => write_equirect(out.join("albedo-equirect.png"), equirect_w, |dir| {
-            let sample = sample_surface(surface, &state, dir, lod);
+            let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
             [
-                linear_to_srgb8(sample.albedo.x),
-                linear_to_srgb8(sample.albedo.y),
-                linear_to_srgb8(sample.albedo.z),
+                linear_to_srgb8(sample.albedo_linear.x),
+                linear_to_srgb8(sample.albedo_linear.y),
+                linear_to_srgb8(sample.albedo_linear.z),
             ]
         }),
         DumpKind::Height => write_equirect(out.join("height-equirect.png"), equirect_w, |dir| {
-            let sample = sample_surface(surface, &state, dir, lod);
-            let g = ((sample.height / height_range.max(1.0) * 0.5 + 0.5) * 255.0)
+            let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
+            let g = ((sample.height_m / height_range.max(1.0) * 0.5 + 0.5) * 255.0)
                 .clamp(0.0, 255.0)
                 .round() as u8;
             [g, g, g]
         }),
         DumpKind::Roughness => {
             write_equirect(out.join("roughness-equirect.png"), equirect_w, |dir| {
-                let sample = sample_surface(surface, &state, dir, lod);
+                let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
                 let g = (sample.roughness.clamp(0.0, 1.0) * 255.0).round() as u8;
                 [g, g, g]
             })
         }
         DumpKind::Normal => write_equirect(out.join("normal-equirect.png"), equirect_w, |dir| {
-            let sample = sample_surface(surface, &state, dir, lod);
+            let normal = surface_normal(surface, &state, dir.as_dvec3(), lod_m);
             [
-                normal_to_u8(sample.normal.x),
-                normal_to_u8(sample.normal.y),
-                normal_to_u8(sample.normal.z),
+                normal_to_u8(normal.x),
+                normal_to_u8(normal.y),
+                normal_to_u8(normal.z),
             ]
         }),
+        DumpKind::OrbitColor => {
+            write_equirect(out.join("orbit-color-equirect.png"), equirect_w, |dir| {
+                let sample = surface_sample(surface, &state, dir.as_dvec3(), lod_m);
+                let mut color = sample.albedo_linear;
+                if let Some(sea_level_m) = static_surface.sea_level_m {
+                    let depth_m = sea_level_m - sample.height_m;
+                    if depth_m > 0.0 {
+                        color = orbital_preview_water_color(
+                            sample.albedo_linear,
+                            depth_m,
+                            static_surface.water_appearance.map(|w| w.color_depth),
+                        );
+                    }
+                }
+                [
+                    linear_to_srgb8(color.x),
+                    linear_to_srgb8(color.y),
+                    linear_to_srgb8(color.z),
+                ]
+            })
+        }
         DumpKind::PlateId => {
             let tectonics = surface
                 .tectonics
@@ -654,6 +698,41 @@ fn linear_to_srgb8(linear: f32) -> u8 {
 
 fn normal_to_u8(v: f32) -> u8 {
     ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8
+}
+
+fn orbital_preview_water_color(
+    seabed_linear: Vec3,
+    depth_m: f32,
+    water_color_depth: Option<[f32; 4]>,
+) -> Vec3 {
+    let water = water_color_depth.unwrap_or([0.012, 0.040, 0.090, 120.0]);
+    let deep = Vec3::new(water[0], water[1], water[2]) * 1.05 + Vec3::new(0.0, 0.006, 0.018);
+    let min_depth_m = water[3].max(1.0);
+    let depth_m = depth_m.max(0.0);
+
+    // Preview only: approximate the separate ocean renderer's optical column
+    // so orbit equirects read like the game view while `albedo-equirect`
+    // remains the raw land/seabed substrate.
+    let absorption = Vec3::new(
+        (-0.018 * depth_m).exp(),
+        (-0.010 * depth_m).exp(),
+        (-0.004 * depth_m).exp(),
+    );
+    let transmitted_bottom = seabed_linear * absorption * 0.72;
+    let shallow_scatter = Vec3::new(0.006, 0.078, 0.105) * (1.0 - (-depth_m / 28.0).exp());
+    let shallow = transmitted_bottom + shallow_scatter;
+    let deep_t = smoothstep_scalar(18.0, min_depth_m * 1.35, depth_m);
+    shallow
+        .lerp(deep, deep_t)
+        .clamp(Vec3::splat(0.0), Vec3::splat(1.0))
+}
+
+fn smoothstep_scalar(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge0 == edge1 {
+        return (x >= edge1) as u8 as f32;
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn cold_desert_biome_field(
@@ -836,6 +915,275 @@ fn dump_info(surface: &PlanetSurface, route: &str, out: &Path) {
         }
     }
     fs::write(out.join("info.txt"), s).expect("writing info.txt");
+}
+
+// ---------------------------------------------------------------------------
+// Patch hillshade (ground-scale shaded relief)
+// ---------------------------------------------------------------------------
+
+fn latlon_to_dir(lat_deg: f32, lon_deg: f32) -> Vec3 {
+    let (sl, cl) = lat_deg.to_radians().sin_cos();
+    let (sln, cln) = lon_deg.to_radians().sin_cos();
+    Vec3::new(cl * sln, sl, cl * cln).normalize()
+}
+
+fn dir_to_latlon(dir: Vec3) -> (f32, f32) {
+    (
+        dir.y.clamp(-1.0, 1.0).asin().to_degrees(),
+        dir.x.atan2(dir.z).to_degrees(),
+    )
+}
+
+/// East/north tangent unit vectors at a surface direction.
+fn tangent_basis(dir: Vec3) -> (Vec3, Vec3) {
+    let up_ref = if dir.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+    let east = up_ref.cross(dir).normalize();
+    let north = dir.cross(east);
+    (east, north)
+}
+
+/// Scan low-latitude directions and return either the highest-relief site
+/// (`seek_hills`) or the flattest usable land site (`!seek_hills`). Both must
+/// sit comfortably above sea level — otherwise "plain" lands on the abyssal
+/// basin floor (which is genuinely the flattest place on the planet) and
+/// "hill" can land on a continental swell with no real ridge content.
+///
+/// Probe geometry: 9-sample 3×3 stencil at ±`probe_m`, sized to the
+/// `hill_ridges` wavelength (~5 km) so the cross actually catches ridge crests
+/// rather than averaging through them. Score: max−min of `surface_height_m`
+/// across the stencil.
+fn auto_find_relief_center(surface: &PlanetSurface, seek_hills: bool) -> Vec3 {
+    let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+    let radius = surface.static_surface.radius_m;
+    let sea_level_m = surface.static_surface.sea_level_m.unwrap_or(0.0);
+    // Min altitude above sea level for either site. Keeps both hill and plain
+    // out of the wave zone / continental shelf so the picked tile is genuine
+    // land character, not waterline transition.
+    let min_land_m = sea_level_m + 60.0;
+    // Probe spacing ~ hill_ridges wavelength so the 3×3 stencil straddles a
+    // ridge crest at a hill site instead of averaging through it.
+    let probe_m = 5_500.0;
+    let n = 20_000usize;
+    let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+
+    let (best, _) = (0..n)
+        .into_par_iter()
+        .map(|k| {
+            let lat = ((k as f32 + 0.5) / n as f32 - 0.5) * 2.0 * 45.0; // -45..45°
+            let lon = ((k as f32) * golden).to_degrees().rem_euclid(360.0) - 180.0;
+            let dir = latlon_to_dir(lat, lon);
+            let (east, north) = tangent_basis(dir);
+            let base = dir * radius;
+            let h = |off: Vec3| {
+                surface_height_m(surface, &state, (base + off).normalize().as_dvec3(), 0.5)
+            };
+            let s = [
+                h(Vec3::ZERO),
+                h(east * probe_m),
+                h(-east * probe_m),
+                h(north * probe_m),
+                h(-north * probe_m),
+                h((east + north) * probe_m),
+                h((east - north) * probe_m),
+                h((-east + north) * probe_m),
+                h((-east - north) * probe_m),
+            ];
+            let lo = s.iter().cloned().fold(f32::MAX, f32::min);
+            let hi = s.iter().cloned().fold(f32::MIN, f32::max);
+            // Reject any candidate where the centre dips below the minimum land
+            // altitude. Plain candidates would happily settle on the abyssal
+            // basin (genuinely flatter than any continental plain); hill
+            // candidates picked on the shelf show no ridges either.
+            if s[0] < min_land_m {
+                return (dir, f32::NEG_INFINITY);
+            }
+            let relief = hi - lo;
+            (dir, if seek_hills { relief } else { -relief })
+        })
+        .reduce(
+            || (Vec3::Z, f32::NEG_INFINITY),
+            |a, b| if b.1 > a.1 { b } else { a },
+        );
+    best
+}
+
+/// Render a `span_m × span_m` shaded-relief patch centred on `center`, sampling
+/// the runtime walkable height on a tangent-plane grid.
+fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, out_path: &Path) {
+    let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+    let radius = surface.static_surface.radius_m as f64;
+    // Build the tangent-plane sample grid in f64. At planet scale (~3.2e6 m on
+    // Thalos) an f32 grid quantises the body-local sample position to the
+    // ~0.25 m f32 lattice; for the sub-metre-per-pixel fine patches that beats
+    // against the pixel spacing and renders as a grid/checkerboard moiré the
+    // field never contains. The game's own tile path (`pixel_direction`) builds
+    // its sample directions in f64 for exactly this reason — the diagnostic must
+    // match it, or it shows precision artifacts the runtime does not have.
+    let center = center.normalize().as_dvec3();
+    let up_ref = if center.y.abs() > 0.99 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let east = up_ref.cross(center).normalize();
+    let north = center.cross(east);
+    let base = center * radius;
+    let span_m = span_m as f64;
+    let n = res as usize;
+
+    let mut h = vec![0f32; n * n];
+    h.par_chunks_mut(n).enumerate().for_each(|(j, row)| {
+        let ny = (0.5 - (j as f64 + 0.5) / res as f64) * span_m; // +north at top
+        for (i, cell) in row.iter_mut().enumerate() {
+            let nx = ((i as f64 + 0.5) / res as f64 - 0.5) * span_m; // +east at right
+            let dir = (base + east * nx + north * ny).normalize();
+            *cell = surface_height_m(surface, &state, dir, 0.5);
+        }
+    });
+
+    let ds = (span_m / res as f64) as f32;
+    // Sun in local (east, up, north): from the NW, moderate elevation.
+    let sun = Vec3::new(-0.55, 0.62, 0.55).normalize();
+    let sample = |i: i32, j: i32| -> f32 {
+        let ii = i.clamp(0, n as i32 - 1) as usize;
+        let jj = j.clamp(0, n as i32 - 1) as usize;
+        h[jj * n + ii]
+    };
+    // Absolute tint keyed off sea level and an upland reference (~1500 m above
+    // sea level). This must NOT stretch per-patch the way the old `hmin..hmax`
+    // tint did — otherwise a 60 m patch with a millimetre of relief and a 120 km
+    // patch with a kilometre of relief both fill the full green→tan gamut, and
+    // every LOD looks identical from a colour perspective.
+    let sea_level_m = surface.static_surface.sea_level_m.unwrap_or(0.0);
+    let upland_m = sea_level_m + 1_500.0;
+    let beach = Vec3::new(0.74, 0.66, 0.45);
+    let lowland = Vec3::new(0.27, 0.40, 0.18);
+    let upland = Vec3::new(0.55, 0.47, 0.34);
+    let rock = Vec3::new(0.40, 0.36, 0.31);
+    let shallow_sea = Vec3::new(0.18, 0.32, 0.42);
+    let deep_sea = Vec3::new(0.06, 0.10, 0.18);
+    // Slope (rise/run) above which the surface reads as rock/cliff rather than
+    // soil. Tunes the cliff cutoff and the gradient between soil and exposed
+    // rock so steep coastlines render as cliffs, not sand.
+    let cliff_slope_lo = 0.18;
+    let cliff_slope_hi = 0.45;
+    // Beach band width above sea level. The old 25 m strip read as a fat ring
+    // around every continent; real beaches only occupy the surf zone (a few
+    // metres of altitude) on gentle-slope coasts.
+    let beach_max_m = 3.0;
+    let tint_for = |height_m: f32, slope: f32| -> Vec3 {
+        if height_m < sea_level_m {
+            // Water rendering. The field's seabed has real bathymetric
+            // structure (eroded_ridged at 180 km plus abyssal noise) with
+            // hundreds of metres of relief. Tinting by raw depth made those
+            // ridges project into the visible water colour as swirly contours
+            // at the shore/shallow/deep band edges. Real water absorbs light
+            // long before continental-shelf bathymetry registers from above, so
+            // the visible tint only varies over deep-scale depths — fine
+            // seabed structure stays invisible. No shore band: it was the
+            // single biggest source of artefacts, because the bathymetric
+            // ridge network always crossed the 0..18 m line at a wiggly contour.
+            let raw_depth = (sea_level_m - height_m).max(0.0);
+            // Gradient only kicks in below 800 m and saturates at 5000 m.
+            // Continental shelf (≤ ~380 m) and shelf bathymetric variance
+            // (±420 m) both fall below the start of the gradient, so they
+            // render as uniform shallow_sea regardless of local seabed
+            // structure. Only true abyssal depth modulates the visible tint.
+            let depth_t = smoothstep_scalar(800.0, 5_000.0, raw_depth);
+            shallow_sea.lerp(deep_sea, depth_t)
+        } else {
+            let rock_t = smoothstep_scalar(cliff_slope_lo, cliff_slope_hi, slope);
+            let upland_t = ((height_m - sea_level_m) / (upland_m - sea_level_m)).clamp(0.0, 1.0);
+            // Soil ramp: only the narrow surf-zone is sand, beyond that it
+            // grades from lowland to upland by absolute altitude.
+            let soil = if height_m < sea_level_m + beach_max_m && rock_t < 0.5 {
+                let beach_t = ((height_m - sea_level_m) / beach_max_m).clamp(0.0, 1.0);
+                beach.lerp(lowland, beach_t)
+            } else {
+                lowland.lerp(upland, upland_t)
+            };
+            soil.lerp(rock, rock_t)
+        }
+    };
+
+    let mut data = vec![0u8; n * n * 3];
+    data.par_chunks_mut(n * 3).enumerate().for_each(|(j, row)| {
+        for i in 0..n {
+            let height_here = h[j * n + i];
+            let dh_de =
+                (sample(i as i32 + 1, j as i32) - sample(i as i32 - 1, j as i32)) / (2.0 * ds);
+            // North increases as j decreases (top row is +north).
+            let dh_dn =
+                (sample(i as i32, j as i32 - 1) - sample(i as i32, j as i32 + 1)) / (2.0 * ds);
+            let shade = if height_here < sea_level_m {
+                // Underwater: skip terrain shading. The seabed has real
+                // bathymetric slope, but rendering it would expose seabed
+                // structure as swirly shaded contours on what should read as
+                // flat water. Use a constant, slightly-below-1 base.
+                0.95
+            } else {
+                let normal = Vec3::new(-dh_de, 1.0, -dh_dn).normalize();
+                // Sharper shading curve so micro-slopes are visible: amplify
+                // the signed slope component against the sun direction before
+                // mapping to brightness. The old `0.25 + 0.75·dot` washed
+                // sub-degree slopes into a flat tone, hiding the field's
+                // content at finer LODs.
+                let raw = normal.dot(sun);
+                let lit = (raw - 0.5).clamp(-1.0, 1.0);
+                (0.55 + 0.85 * lit).clamp(0.10, 1.20)
+            };
+            let slope = (dh_de * dh_de + dh_dn * dh_dn).sqrt();
+            let c = tint_for(height_here, slope) * shade;
+            let idx = i * 3;
+            row[idx] = linear_to_srgb8(c.x);
+            row[idx + 1] = linear_to_srgb8(c.y);
+            row[idx + 2] = linear_to_srgb8(c.z);
+        }
+    });
+
+    let img: RgbImage =
+        ImageBuffer::from_raw(res, res, data).expect("patch dimensions match buffer length");
+    img.save(out_path)
+        .unwrap_or_else(|e| panic!("writing {out_path:?}: {e}"));
+}
+
+/// Render the standard ground-scale patch set into `out_dir/patch/<biome>/`.
+/// Each site becomes a biome tile column — its own subdir holding the LOD
+/// cascade (`context-120km.png` … `ultra-60m.png`). Renders both a hill site
+/// (highest relief) and the flattest plain site, so the plains/hills balance
+/// and the gentle plain rolls are both visible without launching the game.
+/// Called by both the full and preview bakes.
+///
+/// CPU-only — the surface is already compiled. `log` receives the per-site
+/// centre summaries via `MultiProgress::println` so the lines don't garble the
+/// progress bars.
+fn dump_patches(surface: &PlanetSurface, out_dir: &Path, log: &mut dyn FnMut(String)) {
+    let sites: Vec<(String, Vec3)> = vec![
+        ("hill".to_string(), auto_find_relief_center(surface, true)),
+        ("plain".to_string(), auto_find_relief_center(surface, false)),
+    ];
+
+    let res = 1024;
+    for (site, center) in &sites {
+        let (lat, lon) = dir_to_latlon(*center);
+        log(format!("patch: {site} centre = lat {lat:.2}°, lon {lon:.2}°"));
+        // Each site is a "biome" tile column: its own `patch/<biome>/` subdir
+        // holding the LOD cascade as bare `<span>.png` files. This mirrors the
+        // planet editor's tile view, where one tile carries several zoom
+        // levels — the patches *are* the tiles that exist on the planet.
+        let biome_dir = out_dir.join("patch").join(site);
+        fs::create_dir_all(&biome_dir).expect("creating patch biome dir");
+        for (span_km, name) in [
+            (120.0_f32, "context-120km"),
+            (12.0, "close-12km"),
+            (3.0, "micro-3km"),
+            (0.3, "fine-300m"),
+            (0.06, "ultra-60m"),
+        ] {
+            let path = biome_dir.join(format!("{name}.png"));
+            render_patch(surface, *center, span_km * 1000.0, res, &path);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

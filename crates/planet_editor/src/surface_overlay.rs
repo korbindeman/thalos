@@ -1,10 +1,11 @@
-//! Editor surface overlays for compiled terrain metadata.
+//! On-planet overlay shell for the editor's selected field.
 //!
-//! Plate and biome overlays render through a single vertex-colored shell.
-//! Each overlay quad samples both compiled layers (subject to which are
-//! enabled) and emits an averaged color. A single mesh avoids the
-//! sort-order flicker that two alpha-blended shells produced when both
-//! were enabled.
+//! The overlay projects whatever field the field viewer has selected (albedo,
+//! height, material id, tectonic plates, biomes…) onto a single vertex-colored
+//! shell wrapping the impostor. A single mesh avoids the sort-order flicker
+//! that alpha-blended shells produced, and routing every field through the same
+//! [`crate::ui::field_overlay_rgb_linear`] sampler the equirect viewer uses
+//! keeps the on-planet overlay identical to the flattened preview.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
@@ -13,33 +14,18 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use thalos_input::planet_editor::PlanetEditorInputIntent;
 use thalos_terrain::cubemap::face_uv_to_dir;
-use thalos_terrain::{
-    BiomeMixTexel, Cubemap, CubemapFace, PlateKind, TectonicActivity, TectonicSystem,
-};
+use thalos_terrain::{CubemapFace, TectonicActivity};
 
-/// Edit-time component carrying compiled metadata for editor overlays.
-/// Inserted by `finalize_terrain_bake` when a terrain bake succeeds.
-#[derive(Component, Clone)]
-pub struct PreviewSurfaceOverlays {
-    pub tectonics: Option<TectonicSystem>,
-    pub biome_weights: Cubemap<BiomeMixTexel>,
-}
+use crate::state::{ActivePreviewSurface, EquirectFieldKind, EquirectViewerState, PreviewPlanet};
+use crate::ui::{equirect_lod, field_overlay_rgb_linear};
 
-/// Toggleable overlay layers. Disabled by default so the normal terrain
-/// preview remains unobstructed until explicitly requested.
-#[derive(Resource, Default)]
-pub struct SurfaceOverlayState {
-    pub show_plates: bool,
-    pub show_biomes: bool,
-}
-
-/// Plugin: registers overlay state and the shared mesh-sync system.
+/// Plugin: registers the overlay-sync system. Overlay enable/field selection
+/// live on [`EquirectViewerState`]; the data comes from [`ActivePreviewSurface`].
 pub struct SurfaceOverlayPlugin;
 
 impl Plugin for SurfaceOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SurfaceOverlayState>()
-            .add_systems(Update, sync_surface_overlays);
+        app.add_systems(Update, sync_surface_overlays);
     }
 }
 
@@ -51,63 +37,71 @@ struct SurfaceOverlayEntity;
 const OVERLAY_LIFT: f32 = 1.015;
 /// Overlay alpha. Tuned to keep the underlying terrain visible while the
 /// overlay color still reads dominantly. When the planet is forced
-/// fullbright (which the editor does whenever any overlay is on), this
+/// fullbright (which the editor does whenever the overlay is on), this
 /// blend rate lands somewhere around 60/40 overlay/terrain.
 const OVERLAY_ALPHA: f32 = 0.6;
 /// Overlay quads per cubemap face edge. Six faces × this², two triangles
-/// per quad. Picked to match the topology of the underlying biome /
-/// tectonic data (cubemap-aligned, no pole singularity) while keeping the
-/// mesh inside ~200k triangles for cheap rebuilds. When the source
-/// cubemap is finer than this, each overlay quad represents a
-/// `(cm_res / OVERLAY_FACE_RES)²` block and the dominant biome wins.
+/// per quad. Picked to match the topology of the underlying cubemap data
+/// (cubemap-aligned, no pole singularity) while keeping the mesh inside
+/// ~200k triangles for cheap rebuilds.
 const OVERLAY_FACE_RES: u32 = 128;
 
+#[allow(clippy::too_many_arguments)]
 fn sync_surface_overlays(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    state: Res<SurfaceOverlayState>,
+    equirect: Res<EquirectViewerState>,
+    active_surface: Res<ActivePreviewSurface>,
     render_radius: Res<SurfaceOverlayRenderRadius>,
     orientation: Res<SurfaceOverlayOrientation>,
     input: Res<PlanetEditorInputIntent>,
-    preview_q: Query<(Entity, Ref<PreviewSurfaceOverlays>)>,
+    preview_q: Query<Entity, With<PreviewPlanet>>,
     mut overlay_q: Query<(
         Entity,
         &SurfaceOverlayEntity,
         &mut Transform,
         &mut Visibility,
     )>,
-    mut last_state: Local<(bool, bool)>,
+    mut last_key: Local<Option<(bool, EquirectFieldKind, String)>>,
 ) {
-    let Ok((preview_entity, preview)) = preview_q.single() else {
+    let Ok(preview_entity) = preview_q.single() else {
         for (entity, _, _, _) in &mut overlay_q {
             commands.entity(entity).despawn();
         }
         return;
     };
 
-    let wants_plates = state.show_plates && preview.tectonics.is_some();
-    let wants_biomes = state.show_biomes;
-    let wants_overlay = wants_plates || wants_biomes;
-    // Space-held suppresses overlays without despawning them — a rebuild
-    // on each press/release would be ~50–100ms, but flipping Visibility
-    // is free.
+    let surface = active_surface.surface.as_ref();
+    let dynamic_state = active_surface.dynamic_state.as_ref();
+    let wants_overlay = equirect.overlay_on_planet && surface.is_some() && dynamic_state.is_some();
+
+    // Space-held suppresses overlays without despawning them — a rebuild on
+    // each press/release would be ~50–100ms, but flipping Visibility is free.
     let suppress = input.overlay_suppress;
     let target_visibility = if suppress {
         Visibility::Hidden
     } else {
         Visibility::Visible
     };
-    // Bevy's resource change detection fires whenever a system declares
-    // `ResMut<SurfaceOverlayState>` and mutably derefs it — which the egui
-    // panel does every frame even when the user isn't toggling anything.
-    // Track the last-observed values locally to detect real transitions.
-    let current_state = (wants_plates, wants_biomes);
-    let state_changed = *last_state != current_state;
-    if state_changed {
-        *last_state = current_state;
+
+    // Bevy resource change detection fires whenever the egui panel mutably
+    // derefs `EquirectViewerState`, which it does every frame. Track the
+    // overlay-relevant inputs locally to detect real transitions; the field
+    // selection and the active body both require a mesh rebuild.
+    let key = (
+        wants_overlay,
+        equirect.selected,
+        active_surface.body_name.clone(),
+    );
+    let key_changed = last_key.as_ref() != Some(&key);
+    if key_changed {
+        *last_key = Some(key);
     }
-    let rebuild = preview.is_changed() || render_radius.is_changed() || state_changed;
+    // A fresh bake of the same body changes the surface data without changing
+    // the key, so also rebuild when `ActivePreviewSurface` is written.
+    let rebuild = render_radius.is_changed() || key_changed || active_surface.is_changed();
+
     let body_to_world = orientation.0.inverse();
     let orientation_changed = orientation.is_changed();
     let mut has_overlay = false;
@@ -117,7 +111,6 @@ fn sync_surface_overlays(
             commands.entity(entity).despawn();
             continue;
         }
-
         if orientation_changed && transform.rotation != body_to_world {
             transform.rotation = body_to_world;
         }
@@ -128,19 +121,20 @@ fn sync_surface_overlays(
     }
 
     if wants_overlay && !has_overlay {
-        let tectonics = preview.tectonics.as_ref();
-        let biome_weights = &preview.biome_weights;
+        // Unwraps guarded by `wants_overlay`.
+        let surface = surface.unwrap();
+        let dynamic_state = dynamic_state.unwrap();
+        let field = equirect.selected;
+        // LOD matched to the overlay mesh density (≈ four faces around the
+        // equator) so field sampling reads at a comparable scale.
+        let lod = equirect_lod(surface, OVERLAY_FACE_RES * 4);
+
         let mesh = build_cube_overlay_mesh(render_radius.0 * OVERLAY_LIFT, |face, x, y, res| {
-            combined_overlay_color(
-                wants_plates,
-                wants_biomes,
-                tectonics,
-                biome_weights,
-                face,
-                x,
-                y,
-                res,
-            )
+            let u = (x as f32 + 0.5) / res as f32;
+            let v = (y as f32 + 0.5) / res as f32;
+            let dir = face_uv_to_dir(face, u, v);
+            let [r, g, b] = field_overlay_rgb_linear(surface, dynamic_state, field, dir, lod);
+            [r, g, b, OVERLAY_ALPHA]
         });
 
         spawn_overlay(
@@ -271,160 +265,6 @@ fn push_overlay_quad(
         normals.push(dir.to_array());
         colors.push(color);
     }
-}
-
-/// Mixes the active overlay layers into a single linear-RGB + alpha
-/// triple per quad. When only one layer is on its color passes through
-/// unchanged; when both are on the colors are averaged. Caller has
-/// already filtered out the plate layer if the body has no tectonics.
-fn combined_overlay_color(
-    want_plate: bool,
-    want_biome: bool,
-    tectonics: Option<&TectonicSystem>,
-    biome_weights: &Cubemap<BiomeMixTexel>,
-    face: CubemapFace,
-    x: u32,
-    y: u32,
-    res: u32,
-) -> [f32; 4] {
-    let mut acc = [0.0f32; 3];
-    let mut count = 0u32;
-    if want_plate && let Some(sys) = tectonics {
-        let c = plate_overlay_rgb(sys, face, x, y, res);
-        acc[0] += c[0];
-        acc[1] += c[1];
-        acc[2] += c[2];
-        count += 1;
-    }
-    if want_biome {
-        let c = biome_overlay_rgb(biome_weights, face, x, y, res);
-        acc[0] += c[0];
-        acc[1] += c[1];
-        acc[2] += c[2];
-        count += 1;
-    }
-    if count == 0 {
-        return [0.0, 0.0, 0.0, 0.0];
-    }
-    let inv = 1.0 / count as f32;
-    [acc[0] * inv, acc[1] * inv, acc[2] * inv, OVERLAY_ALPHA]
-}
-
-fn plate_overlay_rgb(
-    sys: &TectonicSystem,
-    face: CubemapFace,
-    x: u32,
-    y: u32,
-    res: u32,
-) -> [f32; 3] {
-    let u = (x as f32 + 0.5) / res as f32;
-    let v = (y as f32 + 0.5) / res as f32;
-    let sample = sys.sample(face_uv_to_dir(face, u, v));
-    let c = plate_color(sample.plate_kind, sample.plate_id.0).to_linear();
-    [c.red, c.green, c.blue]
-}
-
-fn biome_overlay_rgb(
-    weights: &Cubemap<BiomeMixTexel>,
-    face: CubemapFace,
-    x: u32,
-    y: u32,
-    res: u32,
-) -> [f32; 3] {
-    let biome_id = dominant_biome_in_block(weights, face, x, y, res);
-    let c = biome_color(biome_id).to_linear();
-    [c.red, c.green, c.blue]
-}
-
-/// Histogram the dominant biome id across the cubemap texels that fall
-/// under the given overlay quad. When the cubemap is coarser than the
-/// overlay (cm_res ≤ res) the block degenerates to a single texel.
-fn dominant_biome_in_block(
-    weights: &Cubemap<BiomeMixTexel>,
-    face: CubemapFace,
-    x: u32,
-    y: u32,
-    res: u32,
-) -> u8 {
-    let cm_res = weights.resolution();
-    let x_min = (x as u64 * cm_res as u64 / res as u64) as u32;
-    let x_max = (((x + 1) as u64 * cm_res as u64).div_ceil(res as u64) as u32).min(cm_res);
-    let y_min = (y as u64 * cm_res as u64 / res as u64) as u32;
-    let y_max = (((y + 1) as u64 * cm_res as u64).div_ceil(res as u64) as u32).min(cm_res);
-    let x_max = x_max.max(x_min + 1);
-    let y_max = y_max.max(y_min + 1);
-
-    let mut counts = [0u32; 256];
-    for cy in y_min..y_max {
-        for cx in x_min..x_max {
-            let texel = weights.get(face, cx, cy);
-            if texel.is_empty() {
-                continue;
-            }
-            counts[texel.biome_ids[0] as usize] += 1;
-        }
-    }
-
-    counts
-        .iter()
-        .enumerate()
-        .max_by_key(|&(_, c)| *c)
-        .map(|(i, _)| i as u8)
-        .unwrap_or(0)
-}
-
-fn plate_color(kind: PlateKind, plate_id: u32) -> Color {
-    let h = thalos_terrain::seeding::splitmix64(plate_id as u64 ^ 0xB1ADE0FF);
-    let hue_unit = ((h & 0xFFFF) as f32) / 65535.0;
-    let (hue_deg, sat, val) = match kind {
-        PlateKind::Continental => {
-            let hue = if hue_unit < 0.5 {
-                hue_unit * 120.0
-            } else {
-                300.0 + (hue_unit - 0.5) * 120.0
-            };
-            (hue, 0.65, 0.85)
-        }
-        PlateKind::Oceanic => (180.0 + hue_unit * 60.0, 0.70, 0.55),
-    };
-    Color::hsv(hue_deg, sat, val)
-}
-
-fn biome_color(biome_id: u8) -> Color {
-    const COLORS: [[u8; 3]; 16] = [
-        [214, 69, 80],
-        [45, 137, 239],
-        [62, 183, 98],
-        [244, 188, 66],
-        [158, 96, 214],
-        [33, 184, 169],
-        [239, 111, 47],
-        [218, 218, 230],
-        [132, 184, 64],
-        [215, 91, 167],
-        [86, 114, 214],
-        [180, 136, 72],
-        [89, 194, 219],
-        [185, 82, 72],
-        [124, 206, 144],
-        [166, 166, 166],
-    ];
-
-    if let Some(rgb) = COLORS.get(biome_id as usize) {
-        return color_from_srgb8(*rgb);
-    }
-
-    let h = thalos_terrain::seeding::splitmix64(biome_id as u64 ^ 0xB10B_1A5E);
-    let hue = ((h & 0xFFFF) as f32) / 65535.0 * 360.0;
-    Color::hsv(hue, 0.72, 0.88)
-}
-
-fn color_from_srgb8(rgb: [u8; 3]) -> Color {
-    Color::srgb(
-        rgb[0] as f32 / 255.0,
-        rgb[1] as f32 / 255.0,
-        rgb[2] as f32 / 255.0,
-    )
 }
 
 /// Activity-mode label for the editor sidebar. Doesn't strictly belong

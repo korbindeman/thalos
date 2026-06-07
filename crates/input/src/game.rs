@@ -162,6 +162,14 @@ pub struct PlayerStrafeNegativeAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
+pub struct PlayerJumpAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct PlayerSprintAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
 pub struct TogglePlaceNodeAction;
 
 #[derive(InputAction)]
@@ -203,6 +211,10 @@ pub struct GameInputIntent {
     pub camera_wheel: Vec2,
     pub toggle_player_controller: bool,
     pub player_move: Vec2,
+    /// Edge-triggered: the player pressed jump this frame (on foot).
+    pub player_jump: bool,
+    /// Held: the player is sprinting (on foot).
+    pub player_sprint: bool,
     pub toggle_place_node: bool,
     pub delete_node: bool,
     pub precision_fine: bool,
@@ -453,6 +465,19 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 consume_input(),
                 Bindings::spawn(settings.game.eva_move.axis_negative("strafe")),
             ),
+            (
+                Action::<PlayerJumpAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.eva_move.bindings("jump")),
+            ),
+            (
+                Action::<PlayerSprintAction>::new(),
+                ActionSettings {
+                    consume_input: false,
+                    ..default()
+                },
+                Bindings::spawn(settings.game.eva_move.bindings("sprint")),
+            ),
         ]),
     ));
     controller.insert((
@@ -597,6 +622,7 @@ fn collect_camera_intent(
     intent.camera_wheel = crate::camera_scroll_delta(vec2(&wheel), scroll.unit);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_player_controller_intent(
     mut intent: ResMut<GameInputIntent>,
     toggle: Query<(&Action<TogglePlayerControllerAction>, &ActionEvents)>,
@@ -604,6 +630,8 @@ fn collect_player_controller_intent(
     forward_neg: Query<&Action<PlayerForwardNegativeAction>>,
     strafe_pos: Query<&Action<PlayerStrafePositiveAction>>,
     strafe_neg: Query<&Action<PlayerStrafeNegativeAction>>,
+    jump: Query<(&Action<PlayerJumpAction>, &ActionEvents)>,
+    sprint: Query<&Action<PlayerSprintAction>>,
 ) {
     intent.toggle_player_controller = started(&toggle);
     intent.player_move = Vec2::new(
@@ -611,6 +639,8 @@ fn collect_player_controller_intent(
         axis_value(&forward_pos, &forward_neg),
     )
     .clamp_length_max(1.0);
+    intent.player_jump = started(&jump);
+    intent.player_sprint = held(&sprint);
 }
 
 fn collect_maneuver_intent(

@@ -4,7 +4,7 @@ use crate::big_space::{GridCell, GridTransformOwned, ReferenceFrame};
 
 use crate::{
     math::TerrainModel,
-    terrain_data::{tile_atlas::TileAtlas, AttachmentConfig},
+    terrain_data::{AttachmentConfig, tile_atlas::TileAtlas},
 };
 use bevy::{camera::visibility::NoFrustumCulling, ecs::entity::EntityHashMap, prelude::*};
 
@@ -29,6 +29,15 @@ pub struct TerrainConfig {
     pub model: TerrainModel,
     /// The amount of tiles the can be loaded simultaneously in the tile atlas.
     pub atlas_size: u32,
+    /// Maximum number of tile-provider tasks in flight for this terrain.
+    ///
+    /// Runtime providers may synthesize expensive tiles on CPU. Keeping this
+    /// configurable lets consumers avoid saturating the whole machine while
+    /// the renderer streams terrain.
+    pub max_concurrent_tile_loads: u32,
+    /// Maximum number of allocated tile loads waiting to be handed to the
+    /// provider. Requests beyond this are deferred and retried next frame.
+    pub max_queued_tile_loads: u32,
     /// The attachments of the terrain.
     pub attachments: Vec<AttachmentConfig>,
 }
@@ -39,6 +48,8 @@ impl Default for TerrainConfig {
             lod_count: 1,
             model: TerrainModel::sphere(default(), 1.0, 0.0, 1.0),
             atlas_size: 1024,
+            max_concurrent_tile_loads: 64,
+            max_queued_tile_loads: 256,
             attachments: default(),
         }
     }

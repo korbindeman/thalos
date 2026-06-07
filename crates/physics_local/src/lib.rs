@@ -43,7 +43,15 @@ impl Default for LocalBubbleConfig {
         Self {
             handoff_agl_m: 20_000.0,
             patch_half_extent_m: 4096.0,
-            patch_resolution: 129,
+            // Collider window resolution. The terrain collider is a static
+            // trimesh whose pose is re-synced every frame (it co-rotates with
+            // the planet in the body-centered bubble), so Avian re-evaluates
+            // broad/narrow phase against all its triangles each frame — the
+            // dominant surface-frame CPU cost. 129² (~32k tris) covered far
+            // more ground than any resting craft contacts; 65² (~8k tris)
+            // keeps native-texel density in a still-generous window around the
+            // craft at a quarter of the collision cost. See docs/landing.md.
+            patch_resolution: 65,
             patch_rebuild_distance_m: 1024.0,
             stable_contact_time_s: 2.0,
             max_stable_speed_m_s: 0.5,

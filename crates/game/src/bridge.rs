@@ -24,12 +24,17 @@ use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::maneuver::ManeuverNode;
 use thalos_physics_canonical::types::ControlInput;
-use thalos_physics_local::{ActiveLocalBubble, avian::ContactGraph, craft_contacts_terrain};
+use thalos_physics_local::{
+    ActiveLocalBubble, LocalBubbleConfig, LocalCraftBody,
+    avian::{AngularVelocity, ContactGraph, LinearVelocity},
+    craft_contacts_terrain,
+};
 
 use crate::GameTerrainRegistry;
 use crate::SimStage;
 use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
+use crate::fuel::ThrottleState;
 use crate::maneuver::ManeuverPlan;
 use crate::navigation::{NavigationState, compute_attitude_control};
 use crate::player_controller::EvaMode;
@@ -99,12 +104,28 @@ pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>
     // frame so any Kepler runaway is visible. Without this guard, a player
     // on EVA in a valley below mean radius would have Space-pause stomped
     // back to 1× every frame.
+    //
+    // Only meaningful while the craft is being Kepler-coasted — that is the
+    // only regime where `step()` propagates translation, so the only one where
+    // a sub-surface state can run away unbounded. A craft resting on terrain
+    // under `BodyFixed` (settled ship) or `LocalRigidBody` (grounded EVA, ship
+    // on its collider) is legitimately at or below mean radius wherever local
+    // terrain dips below it, and `step()` never coasts it. Stomping its warp
+    // here every frame was the surface time-warp bug: anywhere terrain sits
+    // below the mean radius, warp snapped back to 1× and the player could not
+    // fast-forward on the ground.
+    let coasting = matches!(
+        sim.simulation.authority(),
+        AuthorityMode::OnRails { .. }
+            | AuthorityMode::WarpIntegrated { .. }
+            | AuthorityMode::Docked { .. }
+    );
     let soi_body = sim.simulation.dominant_body();
     let (body_radius, body_name) = {
         let body_def = &sim.simulation.bodies()[soi_body];
         (body_def.radius_m, body_def.name.clone())
     };
-    if body_radius > 0.0 && sim.simulation.warp.target_speed() > 1.0 {
+    if coasting && body_radius > 0.0 && sim.simulation.warp.target_speed() > 1.0 {
         let body_state = sim.simulation.ephemeris().state(soi_body, Epoch(post_t));
         let altitude_above_mean = (post_pos - body_state.position).length() - body_radius;
         if altitude_above_mean < -1.0 && post_pos.is_finite() {
@@ -150,8 +171,19 @@ fn update_prediction(
     mut sim: ResMut<SimulationState>,
     active: Res<ActiveLocalBubble>,
     contact_graph: Res<ContactGraph>,
+    eva_mode: Res<EvaMode>,
 ) {
     let _span = tracing::info_span!("update_prediction").entered();
+
+    // Grounded EVA is analytically glued to the rotating surface by the
+    // body-fixed player controller. It has no ballistic flight plan; treating
+    // its collider-less LocalRigidBody as ballistic feeds a surface state into
+    // Kepler prediction at high warp, causing expensive bogus recomputes and
+    // terrain-residency churn from impossible encounters.
+    if sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded() {
+        sim.simulation.clear_prediction();
+        return;
+    }
 
     if !ship_is_ballistic(&sim, &active, &contact_graph) {
         sim.simulation.clear_prediction();
@@ -268,21 +300,78 @@ impl Default for WarpLimits {
 /// to 1×. The gate decides *where you may warp*; the propagator
 /// guarantees *you can't warp through the ground*.
 ///
-/// Skipped only for `BodyFixed` (landed and stationary on the surface) —
-/// KSP convention allows unrestricted warp there. Every other regime
-/// gets the altitude gate, so flying low in the Avian bubble
-/// (`LocalRigidBody`) still drops to the pause/1× zone near terrain.
+/// The altitude floor is skipped for the two surface-resting regimes —
+/// `BodyFixed` (settled ship) and grounded EVA — which instead get a flat
+/// `SURFACE_WARP_MAX_SPEED` ceiling, since they can't phase through terrain but
+/// do overrun the terrain streamer at very high warp. Every other regime gets
+/// the altitude gate, so flying low in the Avian bubble (`LocalRigidBody`)
+/// still drops to the pause/1× zone near terrain.
 pub fn enforce_warp_altitude_limits(
     mut sim: ResMut<SimulationState>,
     terrain: Res<GameTerrainRegistry>,
     mut limits: ResMut<WarpLimits>,
     eva_mode: Res<EvaMode>,
+    input: Res<GameInputIntent>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
+    active: Res<ActiveLocalBubble>,
+    contact_graph: Res<ContactGraph>,
+    config: Res<LocalBubbleConfig>,
+    throttle: Res<ThrottleState>,
+    craft_q: Query<(&LinearVelocity, &AngularVelocity), With<LocalCraftBody>>,
 ) {
     // Both BodyFixed (settled ship) and grounded EVA are stationary on the
-    // surface and cannot phase through terrain, so let them warp freely.
+    // surface and cannot phase through terrain, so they're exempt from the
+    // altitude floor below. Terrain streaming is separately frozen at very
+    // high stationary surface warp by `ground_terrain`, so the gameplay cap
+    // can be the top of the configured warp ladder instead of the old 100×
+    // renderer workaround.
+    const SURFACE_WARP_MAX_SPEED: f64 = f64::INFINITY;
     let eva_grounded = sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded();
-    if eva_grounded || matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
-        limits.max_level = usize::MAX;
+    let ship_grounded_stationary = sim.simulation.vessel_kind() == VesselKind::Ship
+        && matches!(
+            sim.simulation.authority(),
+            AuthorityMode::LocalRigidBody { .. }
+        )
+        && active.bubble.as_ref().is_some_and(|bubble| {
+            bubble.terrain_entity.is_some_and(|terrain_entity| {
+                craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
+                    && craft_q.get(bubble.craft_entity).is_ok_and(
+                        |(linear_velocity, angular_velocity)| {
+                            linear_velocity.length() < config.max_stable_speed_m_s
+                                && angular_velocity.length() < config.max_stable_angular_speed_rad_s
+                                && throttle.effective <= 1.0e-3
+                        },
+                    )
+            })
+        });
+    if eva_grounded
+        || ship_grounded_stationary
+        || matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. })
+    {
+        // KSP rule: you can only engage on-rails warp on foot once you've come
+        // to a complete stop ("landed and stationary"). While the player is
+        // walking, jumping, or falling, hold them at 1× (live). Movement intent
+        // is read directly from input so pressing a move key while warping
+        // drops warp immediately, rather than waiting on the rest debounce.
+        let at_rest = player.as_deref().map(|p| p.is_at_rest()).unwrap_or(false);
+        let wants_to_move = input.player_move.length_squared() > 1.0e-4 || input.player_jump;
+        let eva_can_warp = eva_grounded && at_rest && !wants_to_move;
+        let ceiling = if eva_grounded && !eva_can_warp {
+            1.0
+        } else {
+            SURFACE_WARP_MAX_SPEED
+        };
+        let cap = {
+            let levels = sim.simulation.warp.levels();
+            levels
+                .iter()
+                .rposition(|&speed| speed <= ceiling)
+                .unwrap_or(0)
+        };
+        limits.max_level = cap;
+        if sim.simulation.warp.level_index() > cap {
+            sim.simulation.warp.clamp_to_level(cap);
+        }
         return;
     }
 

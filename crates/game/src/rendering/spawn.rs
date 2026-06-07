@@ -28,10 +28,10 @@ use big_space::prelude::Grid;
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::types::BodyKind;
 use thalos_planet_rendering::{
-    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams,
-    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial,
-    RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut,
-    build_ring_mesh, cloud_cover_image_for_body, prepare_planet_bake,
+    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, MULTI_SCATTER_LUT_HEIGHT,
+    MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial, RingParams, SceneLighting,
+    SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut, build_ring_mesh,
+    cloud_cover_image_for_body, prepare_planet_bake,
 };
 use thalos_terrain::{
     DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,

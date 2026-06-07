@@ -11,9 +11,9 @@ use bevy::prelude::Component;
 
 pub use big_space::commands::BigSpaceCommands;
 pub use big_space::floating_origins::FloatingOrigin;
+pub use big_space::grid::Grid as ReferenceFrame;
 pub use big_space::grid::cell::CellCoord as GridCell;
 pub use big_space::grid::local_origin::Grids as ReferenceFrames;
-pub use big_space::grid::Grid as ReferenceFrame;
 pub use big_space::plugin::BigSpaceDefaultPlugins as BigSpacePlugin;
 pub use big_space::world_query::{
     CellTransform as GridTransform, CellTransformItem as GridTransformItem,

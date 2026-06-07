@@ -3,67 +3,23 @@
     terrain: Feature((
         seed: 1003,
         body_age_gyr: 5.5,
-        archetype: AgingOceanicHomeworld,
+        // P2A.5 prototype: Thalos now uses a signed ocean-bearing
+        // `OceanicTerrestrial` surface. The terrain bake keeps underwater
+        // seabed materials (sediment/basalt/shelf), while ocean color and
+        // reflection come from the separate water render surface.
+        archetype: OceanicTerrestrial,
         composition: IronRichSilicate,
         environment: (
             stellar_flux_earth: 1.0,
             atmosphere: Breathable(pressure_bar: 1.0),
-            hydrosphere: OceanFraction(0.6),
-            ice_inventory: Moderate,
+            hydrosphere: OceanFraction(0.62),
+            ice_inventory: None,
         ),
         intent: [
             HomeworldIdentity,
-        ],
-        // Earth-like polar caps. Both hemispheres covered by a single
-        // symmetric IceCapSpec — Antarctic (continental ice over land) and
-        // Arctic (sea ice over ocean) differ in reality but read the same
-        // from orbit at MVP fidelity. Edge starts ~68°, fully solid by 76°.
-        ice_caps: [
-            (
-                edge_latitude_deg: 68.0,
-                solid_latitude_deg: 76.0,
-                edge_noise_deg: 4.5,
-                edge_sharpness: 0.94,
-                noise_frequency: 3.5,
-                max_thickness_m: 1500.0,
-                albedo_linear: (0.94, 0.96, 0.98),
-                dust_albedo_linear: (0.55, 0.55, 0.50),
-                albedo_strength: 0.92,
-                roughness: 0.40,
-                roughness_strength: 0.86,
-            ),
+            ForgivingLandingTerrain,
         ],
     )),
-    // Legacy plate tectonics. Thalos is described as deeply ancient,
-    // geologically declining; StagnantLid mode keeps the historical
-    // motion in the Euler poles for editor/debug overlays and broad
-    // structural priors, but the final AgingOceanicHomeworld bake must
-    // bury the raw plate graph so boundary polygons do not survive as
-    // visible terrain linework.
-    tectonics: (
-        plate_count: 12,
-        mesh_cells: 2000,
-        activity: StagnantLid,
-        // 0.40 × 12 = 4.8 → 4 continental plates. The seeds no longer
-        // spread tetrahedrally: clustering + equatorial bias produce a
-        // dominant supercontinent with a small cluster nearby and one
-        // outlier in the far hemisphere. Earth-like distribution at MVP
-        // fidelity, easier to navigate from orbit than four equal blobs.
-        continental_fraction: 0.40,
-        seed: 91421,
-        // Tight cluster cap (~67°) so cluster seeds fuse with the primary
-        // into one Pangaea-style supercontinent. The outlier remains far
-        // from the cluster and reads as a separate Australia/Antarctica
-        // landmass.
-        continental_clustering: 0.75,
-        // Pull the primary toward the equator. Cluster seeds inherit via
-        // the cap; the outlier lands wherever Mitchell repulsion sends it.
-        equatorial_bias: 1.0,
-        // Primary gets two extra expansions per round → ~3× equal share,
-        // but small enough that the outlier plate still reaches a visible
-        // size after K-IDW smoothing.
-        primary_size_multiplier: 3.0,
-    ),
     terrestrial_atmosphere: Some((
         // Kármán line at 80 km — well above 5 × max(H_R, H_M) = 40 km so
         // the raymarch captures the full column, with a wide transition
@@ -71,19 +27,35 @@
         karman_line_m: 80000.0,
         // Earth-like single-scattering atmosphere. Rayleigh τ_v at sea
         // level matches Bucholtz 1995 (R/G/B ≈ 0.046/0.108/0.264, with
-        // β_R · H_R = τ_v and H_R = 8 km). Mie τ_v = 0.021 is "clean
-        // continental" Earth aerosol (g = 0.76 forward-peaked).
+        // β_R · H_R = τ_v and H_R = 8 km). Mie τ_v is the primary
+        // distance-haze knob: 0.021 is "clean continental", ~0.06 reads as a
+        // hazier, humid-continental day — more aerial perspective on distant
+        // terrain. Scale height raised to 1.6 km so the haze climbs the lower
+        // slopes of distant relief instead of hugging only the valley floors.
         scattering: Some((
             vertical_optical_depth: (0.046, 0.108, 0.264),
             rayleigh_scale_height_m: 8000.0,
-            mie_optical_depth: 0.021,
-            mie_scale_height_m: 1200.0,
+            mie_optical_depth: 0.06,
+            mie_scale_height_m: 1600.0,
             mie_asymmetry: 0.76,
             strength: 1.0,
         )),
-        // Temporarily disabled while the reference cloud layer is being revisited.
-        // Previous values: coverage 0.25, albedo (0.74, 0.76, 0.80),
-        // scroll_rate 2.0e-5, differential_rotation 0.40.
+        // Volumetric cloud layer (Phase 1) — temporarily disabled. Re-enable
+        // by swapping `None` for the `Some((...))` below. The terrain
+        // `BodySky` pass raymarches a thin slab between `base_altitude_m` and
+        // `base_altitude_m + thickness_m`, using the reference coverage cube
+        // as the large-scale weather map eroded by 3-D detail noise; the
+        // orbital impostor still uses its own fixed reference shell.
+        //
+        // clouds: Some((
+        //     coverage: 0.55,                 // partly cloudy (cube × 2 × coverage, then noise threshold)
+        //     albedo: (0.92, 0.94, 0.97),     // bright near-neutral cloud tops
+        //     scroll_rate: 2.0e-5,
+        //     differential_rotation: 0.40,
+        //     base_altitude_m: 1500.0,
+        //     thickness_m: 5000.0,
+        //     density: 1.0,
+        // )),
         clouds: None,
     )),
 )

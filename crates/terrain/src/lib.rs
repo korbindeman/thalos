@@ -12,9 +12,14 @@ pub mod cold_desert_field;
 pub(crate) mod crater_profile;
 pub mod cubemap;
 pub mod feature_compiler;
+pub(crate) mod feature_compositor;
+pub mod field_surface;
+pub mod generic_terrestrial_field;
 pub mod height_generator;
 pub mod icosphere;
 pub mod noise;
+pub mod pipeline;
+pub mod query;
 pub mod sample;
 pub mod seeding;
 pub mod spatial_index;
@@ -34,8 +39,14 @@ pub use body_builder::BodyBuilder;
 pub use cold_desert_field::*;
 pub use cubemap::{Cubemap, CubemapAccumulator, CubemapFace, default_resolution};
 pub use feature_compiler::*;
+pub use field_surface::FieldSurface;
+pub use generic_terrestrial_field::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
+pub use query::{
+    BakedSurface, Region, SurfaceQuery, surface_height_m, surface_height_range_m, surface_normal,
+    surface_sample,
+};
 pub use sample::{
     SurfaceSample, apply_dynamic_surface_layers, sample_static_surface, sample_surface,
 };

@@ -8,17 +8,17 @@ use bevy::{
     ecs::{
         query::ROQueryItem,
         system::{
-            lifetimeless::{Read, SRes},
             SystemParamItem,
+            lifetimeless::{Read, SRes},
         },
     },
     prelude::*,
     render::{
+        Extract,
         render_phase::{PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass},
         render_resource::{binding_types::*, *},
         renderer::{RenderDevice, RenderQueue},
         sync_world::MainEntity,
-        Extract,
     },
 };
 
@@ -253,7 +253,9 @@ impl TerrainViewData {
                 continue;
             }
 
-            let gpu_tile_tree = gpu_tile_trees.get(&(terrain, view)).unwrap();
+            let Some(gpu_tile_tree) = gpu_tile_trees.get(&(terrain, view)) else {
+                continue;
+            };
 
             terrain_view_data.insert(
                 (terrain, view),
@@ -269,21 +271,22 @@ impl TerrainViewData {
             Res<TerrainViewComponents<TerrainModelApproximation>>,
         >,
     ) {
+        terrain_view_data.retain(|key, _| tile_trees.contains_key(key));
+
         for (&(terrain, view), tile_tree) in tile_trees.iter() {
-            let terrain_view_data = terrain_view_data.get_mut(&(terrain, view)).unwrap();
+            let Some(terrain_view_data) = terrain_view_data.get_mut(&(terrain, view)) else {
+                continue;
+            };
 
             let config = TerrainViewConfigUniform::from_tile_tree(tile_tree);
             terrain_view_data.vertices_per_tile = config.vertices_per_tile;
             terrain_view_data.view_config_buffer.set_value(config);
 
-            terrain_view_data
-                .terrain_model_approximation_buffer
-                .set_value(
-                    terrain_model_approximations
-                        .get(&(terrain, view))
-                        .unwrap()
-                        .clone(),
-                );
+            if let Some(approximation) = terrain_model_approximations.get(&(terrain, view)) {
+                terrain_view_data
+                    .terrain_model_approximation_buffer
+                    .set_value(approximation.clone());
+            }
 
             // Pull the latest CPU-balanced draw set across the world
             // boundary. The vector is short (≪ atlas capacity in

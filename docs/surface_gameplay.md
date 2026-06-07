@@ -11,6 +11,24 @@ out the target architecture and the migration order. Open questions
 are tracked in §7 and must be resolved before the corresponding work
 items move from "research" to "implement."
 
+> **Update (2026-05): EVA controller reimplemented.** The naive
+> "kinematic terrain follower" described in §2.1 has been replaced by a
+> real kinematic **character controller** (`step_eva_controller` in
+> `crates/game/src/player_controller.rs`). It simulates the player in the
+> body's **body-fixed (rotating) frame** — tracking a body-fixed position
+> + surface-relative velocity — and runs a grounded/airborne state machine
+> with surface gravity (`g = μ/r²`): camera-relative walk/sprint (WASD +
+> Shift), jump (Space), walking off ledges into a ballistic fall, and
+> landing. The body-fixed frame is the core fix — surface velocity is the
+> player's walking speed (m/s) instead of the inertial co-rotation drag
+> `ω×r` (km/s) — which eliminated the walk freeze, the height-query
+> sea-level teleport, and the warp explosion. Rest detection
+> (`PlayerControllerState::is_at_rest`) gates time warp KSP-style (warp
+> above 1× only when standing still; movement drops warp; 100× surface
+> cap) and drives the on-foot HUD pill (`hud/eva_panel.rs`). §2.1 below is
+> retained as the pre-rewrite diagnosis; §§4–6 record the design intent
+> this implementation follows.
+
 Scope: on-foot gameplay only. In-cockpit / interior IVA is not in
 scope for this pass — the EVA capsule is the only character system
 covered. Ship-on-surface physics is touched only where it intersects
@@ -145,11 +163,6 @@ distance ([ground_terrain.rs:125](crates/game/src/rendering/ground_terrain.rs:12
 Each body's UDLOD `TerrainConfig` has `LOD_COUNT=16` with 512²
 tiles ([ground_terrain.rs:50–56](crates/game/src/rendering/ground_terrain.rs:50)),
 atlas capacity 256 tiles ([ground_terrain.rs:64](crates/game/src/rendering/ground_terrain.rs:64)).
-The `should_log_tile()` diagnostic
-([pipeline.rs:144](crates/terrain_render/src/pipeline.rs:144))
-logs the LOD level and `tile_lod_m` of the first ~32 tiles produced
-per session — useful for confirming what LOD UDLOD is actually
-selecting at the camera.
 
 ## 3. Diagnosed issues
 
@@ -355,9 +368,11 @@ cost of `GpuAtlasMirrorHeightSource` is the one-time texel download
 per tile generation, not per-query lookup. Per-frame altitude query
 is bilinear texel fetch — negligible. Collider-patch rebuild (16K
 samples) is one parallel scan of mirror memory — sub-millisecond.
-Memory budget for height-only mirroring: R16 × 512² × 256 slots ≈
-128 MB worst case; halved by mirroring only the focused-body / nearest-LODs
-slice that physics actually queries. Tile-residency lag (~1 frame
+Memory budget for height-only mirroring: packed RG16 × 512² × 256 slots ≈
+256 MB worst case for the game height path (`R16` and `R32Float` remain
+supported for older/debug providers); reduced in practice by mirroring only the
+focused-body / nearest-LODs slice that physics actually queries. Tile-residency
+lag (~1 frame
 after GPU bake) is the only correctness gotcha; the fallback to
 `BakedCubemapHeightSource` covers it without a teleport.
 
@@ -749,9 +764,12 @@ Implementation shape:
   `rendered_height_m` implementation; `BakedCubemapHeightSource`
   is the detail-free fallback.
 - `GpuAtlasMirrorHeightSource` owns an `Arc<RwLock<GpuAtlasHeightMirror>>`
-  plus a baked fallback. The mirror stores resident R16 height tiles
-  keyed by `TileCoordinate`, samples them bilinearly in body-fixed
-  direction space, and falls back when no resident ancestor exists.
+  plus a baked fallback. The mirror stores resident R16, packed RG16, or
+  R32Float height tiles keyed by `TileCoordinate`, samples them bilinearly in
+  body-fixed direction space, and falls back when no resident ancestor exists.
+  The game path uses packed RG16 to avoid visible height-quantization
+  contouring on broad, shallow terrain without requesting filterable float
+  textures.
 - `THALOS_TERRAIN_PROVIDER=flat` installs a `ConstantHeightSource(0 m)`
   instead of a GPU mirror and leaves the propagator's baked surface
   registry empty for that body. The diagnostic flat mesh, EVA spawn,

@@ -170,13 +170,16 @@ pub(crate) struct TileAtlasState {
     to_load: VecDeque<QueuedTileLoad>,
     loading_tiles: Vec<LoadingTile>,
     load_slots: u32,
+    max_queued_loads: u32,
 }
 
 impl TileAtlasState {
-    fn new(atlas_size: u32) -> Self {
+    fn new(atlas_size: u32, max_concurrent_tile_loads: u32, max_queued_tile_loads: u32) -> Self {
         let unused_tiles = (0..atlas_size)
             .map(|atlas_index| AtlasTile::new(TileCoordinate::INVALID, atlas_index))
             .collect();
+        let load_slots = max_concurrent_tile_loads.max(1);
+        let max_queued_loads = max_queued_tile_loads.max(load_slots);
 
         Self {
             tile_states: default(),
@@ -185,7 +188,8 @@ impl TileAtlasState {
             pinned_tiles: default(),
             to_load: default(),
             loading_tiles: default(),
-            load_slots: 64,
+            load_slots,
+            max_queued_loads,
         }
     }
 
@@ -193,7 +197,7 @@ impl TileAtlasState {
         if tile_coordinate == TileCoordinate::INVALID {
             return;
         }
-        self.request_tile(tile_coordinate);
+        let _ = self.request_tile(tile_coordinate);
         self.pinned_tiles.push(tile_coordinate);
     }
 
@@ -304,7 +308,8 @@ impl TileAtlasState {
         generation: u64,
     ) -> bool {
         self.tile_states.get(&coord).is_some_and(|state| {
-            matches!(state.state, LoadingState::Loading)
+            state.requests > 0
+                && matches!(state.state, LoadingState::Loading)
                 && state.atlas_index == atlas_index
                 && state.generation == generation
         })
@@ -332,18 +337,20 @@ impl TileAtlasState {
         AtlasTile::new(tile_coordinate, atlas_index)
     }
 
-    fn allocate_tile(&mut self) -> (u32, u64) {
-        let unused_tile = self.unused_tiles.pop_front().expect("Atlas out of indices");
+    fn allocate_tile(&mut self) -> Option<(u32, u64)> {
+        let Some(unused_tile) = self.unused_tiles.pop_front() else {
+            return None;
+        };
 
         self.tile_states.remove(&unused_tile.coordinate);
 
         let generation = &mut self.slot_generations[unused_tile.atlas_index as usize];
         *generation = generation.wrapping_add(1).max(1);
 
-        (unused_tile.atlas_index, *generation)
+        Some((unused_tile.atlas_index, *generation))
     }
 
-    fn request_tile(&mut self, tile_coordinate: TileCoordinate) {
+    fn request_tile(&mut self, tile_coordinate: TileCoordinate) -> bool {
         // check if the tile is already present else start loading it
         if let Some(tile) = self.tile_states.get_mut(&tile_coordinate) {
             if tile.requests == 0 {
@@ -353,11 +360,26 @@ impl TileAtlasState {
             }
 
             tile.requests += 1;
-            return;
+            return true;
         }
 
-        // Todo: implement better loading strategy
-        let (atlas_index, generation) = self.allocate_tile();
+        self.prune_stale_queued_loads();
+        if self.to_load.len() >= self.max_queued_loads as usize {
+            trace!(
+                "terrain tile load queue is full ({} pending); deferring request for {tile_coordinate}",
+                self.to_load.len()
+            );
+            return false;
+        }
+
+        // If the request set temporarily exceeds the atlas capacity, keep
+        // rendering with already-resident ancestors instead of panicking the
+        // render world. The next release will free a slot and a later request
+        // pass can try again.
+        let Some((atlas_index, generation)) = self.allocate_tile() else {
+            trace!("terrain tile atlas is full; deferring request for {tile_coordinate}");
+            return false;
+        };
 
         self.tile_states.insert(
             tile_coordinate,
@@ -376,6 +398,19 @@ impl TileAtlasState {
             coord: tile_coordinate,
             atlas_index,
             generation,
+        });
+        true
+    }
+
+    fn prune_stale_queued_loads(&mut self) {
+        let states = &self.tile_states;
+        self.to_load.retain(|queued| {
+            states.get(&queued.coord).is_some_and(|state| {
+                state.requests > 0
+                    && matches!(state.state, LoadingState::Loading)
+                    && state.atlas_index == queued.atlas_index
+                    && state.generation == queued.generation
+            })
         });
     }
 
@@ -473,7 +508,11 @@ impl TileAtlas {
             .map(|attachment| AtlasAttachment::new(attachment, config.atlas_size))
             .collect_vec();
 
-        let state = TileAtlasState::new(config.atlas_size);
+        let state = TileAtlasState::new(
+            config.atlas_size,
+            config.max_concurrent_tile_loads,
+            config.max_queued_tile_loads,
+        );
 
         Self {
             model: config.model.clone(),
@@ -602,13 +641,21 @@ impl TileAtlas {
         for (&(terrain, _view), tile_tree) in tile_trees.iter_mut() {
             let mut tile_atlas = tile_atlases.get_mut(terrain).unwrap();
 
-            for tile_coordinate in tile_tree.released_tiles.drain(..) {
+            let released_tiles: Vec<_> = tile_tree.released_tiles.drain(..).collect();
+            for tile_coordinate in released_tiles {
                 tile_atlas.state.release_tile(tile_coordinate);
             }
 
-            for tile_coordinate in tile_tree.requested_tiles.drain(..) {
-                tile_atlas.state.request_tile(tile_coordinate);
+            let mut deferred_requests = Vec::new();
+            let requested_tiles: Vec<_> = tile_tree.requested_tiles.drain(..).collect();
+            for tile_coordinate in requested_tiles {
+                if tile_atlas.state.request_tile(tile_coordinate) {
+                    tile_tree.mark_atlas_request_admitted(tile_coordinate);
+                } else {
+                    deferred_requests.push(tile_coordinate);
+                }
             }
+            tile_tree.requested_tiles.extend(deferred_requests);
         }
     }
 }
@@ -618,7 +665,7 @@ mod tests {
     use super::*;
 
     fn synthetic_state(atlas_size: u32) -> TileAtlasState {
-        TileAtlasState::new(atlas_size)
+        TileAtlasState::new(atlas_size, 1, 1)
     }
 
     #[test]

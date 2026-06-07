@@ -22,12 +22,14 @@
 
 use anyhow::Result;
 use bevy::math::{DVec2, DVec3, UVec2};
-use bevy::tasks::{AsyncComputeTaskPool, Task};
+use bevy::tasks::Task;
 use rayon::prelude::*;
 use thalos_terrain::noise::fbm3;
 use thalos_udlod::math::{Coordinate, TileCoordinate};
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
+
+use crate::tile_synthesis_pool::tile_synthesis_pool;
 
 /// Number of sub-samples per pixel side for area-averaging. UDLOD's atlas
 /// requires that a coarse-LOD pixel approximately equals the area-average of
@@ -87,17 +89,37 @@ impl TileProvider for SyntheticTileProvider {
         let max_height = self.max_height;
         let mode = self.mode;
 
-        AsyncComputeTaskPool::get().spawn(async move {
+        tile_synthesis_pool().spawn(async move {
             let mut datas = Vec::with_capacity(attachments.len());
             for cfg in &attachments {
                 let data = match cfg.format {
                     AttachmentFormat::R16 if cfg.name == "height" => match mode {
                         SyntheticTerrainMode::Analytic3d => {
-                            synthesize_height(&model, coord, cfg, min_height, max_height)
+                            synthesize_height_r16(&model, coord, cfg, min_height, max_height)
                         }
                         SyntheticTerrainMode::Flat => synthesize_constant_r16(cfg, 0.5),
                     },
+                    AttachmentFormat::Rg16 if cfg.name == "height" => match mode {
+                        SyntheticTerrainMode::Analytic3d => {
+                            synthesize_height_rg16(&model, coord, cfg, min_height, max_height)
+                        }
+                        SyntheticTerrainMode::Flat => synthesize_constant_rg16_height(cfg, 0.5),
+                    },
+                    AttachmentFormat::R32Float if cfg.name == "height" => match mode {
+                        SyntheticTerrainMode::Analytic3d => {
+                            synthesize_height_r32_float(&model, coord, cfg, min_height, max_height)
+                        }
+                        SyntheticTerrainMode::Flat => synthesize_constant_r32_float(cfg, 0.5),
+                    },
                     AttachmentFormat::R16 => synthesize_constant_r16(cfg, 0.74),
+                    AttachmentFormat::R32Float => synthesize_constant_r32_float(cfg, 0.74),
+                    AttachmentFormat::Rgba8 if cfg.name == "material" => {
+                        // Mostly grass, a little soil, no rock/wetness. The
+                        // BodyTerrainMaterial shader treats this attachment as
+                        // masks, not color, so don't feed synthetic albedo into
+                        // this slot.
+                        synthesize_constant_rgba8(cfg, [220, 35, 0, 0])
+                    }
                     AttachmentFormat::Rgba8 => match mode {
                         SyntheticTerrainMode::Analytic3d => {
                             synthesize_albedo(&model, coord, cfg, min_height, max_height)
@@ -161,13 +183,56 @@ fn for_each_subsample(
     }
 }
 
-fn synthesize_height(
+fn synthesize_height_r16(
     model: &TerrainModel,
     coord: TileCoordinate,
     cfg: &AttachmentConfig,
     min_height: f32,
     max_height: f32,
 ) -> AttachmentData {
+    let values = synthesize_height_unit_values(model, coord, cfg, min_height, max_height);
+    AttachmentData::R16(
+        values
+            .into_iter()
+            .map(|t| (t * u16::MAX as f32 + 0.5) as u16)
+            .collect(),
+    )
+}
+
+fn synthesize_height_rg16(
+    model: &TerrainModel,
+    coord: TileCoordinate,
+    cfg: &AttachmentConfig,
+    min_height: f32,
+    max_height: f32,
+) -> AttachmentData {
+    AttachmentData::Rg16(
+        synthesize_height_unit_values(model, coord, cfg, min_height, max_height)
+            .into_iter()
+            .map(encode_unit_rg16)
+            .collect(),
+    )
+}
+
+fn synthesize_height_r32_float(
+    model: &TerrainModel,
+    coord: TileCoordinate,
+    cfg: &AttachmentConfig,
+    min_height: f32,
+    max_height: f32,
+) -> AttachmentData {
+    AttachmentData::R32Float(synthesize_height_unit_values(
+        model, coord, cfg, min_height, max_height,
+    ))
+}
+
+fn synthesize_height_unit_values(
+    model: &TerrainModel,
+    coord: TileCoordinate,
+    cfg: &AttachmentConfig,
+    min_height: f32,
+    max_height: f32,
+) -> Vec<f32> {
     let size = cfg.texture_size;
     let border = cfg.border_size;
     let span = (max_height - min_height).max(1.0);
@@ -175,7 +240,7 @@ fn synthesize_height(
     let octaves = octaves_for_lod(coord.lod);
     let sample_count = (SUPERSAMPLE_FACTOR * SUPERSAMPLE_FACTOR) as f32;
 
-    let mut out: Vec<u16> = vec![0; (size * size) as usize];
+    let mut out: Vec<f32> = vec![0.0; (size * size) as usize];
     out.par_chunks_mut(size as usize)
         .enumerate()
         .for_each(|(y, row)| {
@@ -192,11 +257,10 @@ fn synthesize_height(
                     },
                 );
                 let h = sum / sample_count;
-                let t = ((h - min_height) / span).clamp(0.0, 1.0);
-                *texel = (t * u16::MAX as f32) as u16;
+                *texel = ((h - min_height) / span).clamp(0.0, 1.0);
             }
         });
-    AttachmentData::R16(out)
+    out
 }
 
 fn synthesize_albedo(
@@ -254,6 +318,26 @@ fn synthesize_constant_r16(cfg: &AttachmentConfig, value: f32) -> AttachmentData
     let count = (cfg.texture_size * cfg.texture_size) as usize;
     let value = (value.clamp(0.0, 1.0) * u16::MAX as f32 + 0.5) as u16;
     AttachmentData::R16(vec![value; count])
+}
+
+fn synthesize_constant_rg16_height(cfg: &AttachmentConfig, value: f32) -> AttachmentData {
+    let count = (cfg.texture_size * cfg.texture_size) as usize;
+    AttachmentData::Rg16(vec![encode_unit_rg16(value); count])
+}
+
+fn synthesize_constant_r32_float(cfg: &AttachmentConfig, value: f32) -> AttachmentData {
+    let count = (cfg.texture_size * cfg.texture_size) as usize;
+    AttachmentData::R32Float(vec![value.clamp(0.0, 1.0); count])
+}
+
+fn encode_unit_rg16(value: f32) -> [u16; 2] {
+    let unit = value.clamp(0.0, 1.0);
+    let coarse = (unit * u16::MAX as f32).floor() / u16::MAX as f32;
+    let residual = ((unit - coarse) * u16::MAX as f32).clamp(0.0, 1.0);
+    [
+        (coarse * u16::MAX as f32 + 0.5) as u16,
+        (residual * u16::MAX as f32 + 0.5) as u16,
+    ]
 }
 
 fn synthesize_zero_rg16(cfg: &AttachmentConfig) -> AttachmentData {

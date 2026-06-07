@@ -51,8 +51,10 @@ struct AtmosphereBlock {
     ///         layer entirely.
     cloud_albedo_coverage: vec4<f32>,
     /// Cloud layer shape parameters.
-    ///   xyz = reserved for future cloud shape controls,
-    ///   w   = differential rotation coefficient in [0, 1].
+    ///   x = layer base altitude above the surface (render units),
+    ///   y = layer thickness (render units) — volumetric slab depth,
+    ///   z = optical-density multiplier (scales raymarch extinction),
+    ///   w = differential rotation coefficient in [0, 1].
     cloud_shape: vec4<f32>,
     /// Cloud layer dynamics.
     ///   x = equatorial scroll rate (radians / second of sim time),
@@ -166,8 +168,27 @@ fn apply_limb_darkening(
 // is a queued M4 follow-up: cheap per-sample multiplier on transmittance,
 // adds two parameters; defer until the visual budget calls for it.
 
-const ATMOS_VIEW_STEPS: u32 = 8u;
-const ATMOS_SUN_STEPS: u32 = 6u;
+const ATMOS_VIEW_STEPS: u32 = 16u;
+const ATMOS_SUN_STEPS: u32 = 8u;
+// Minimum view samples for very short paths. The view-step count is scaled by
+// path length (see `adaptive_view_steps`): a full atmosphere-shell crossing
+// uses the full `ATMOS_VIEW_STEPS`, but a ground pixel — camera near the
+// surface looking at nearby terrain, the bulk of the screen on the surface —
+// has a path of a few metres and only needs a couple of samples. Without this
+// scaling those pixels paid 8 view steps × a 6-step sun column each for a
+// near-zero in-scatter contribution.
+const ATMOS_VIEW_STEPS_MIN: u32 = 4u;
+
+/// View-sample count for a raymarch segment of length `path`, scaled so the
+/// per-metre sample density matches a full-shell crossing at `ATMOS_VIEW_STEPS`
+/// and clamped to `[ATMOS_VIEW_STEPS_MIN, ATMOS_VIEW_STEPS]`. `shell_alt` is the
+/// atmosphere thickness (`atmos_geom.x`). Long sky paths keep full quality;
+/// short ground paths collapse to the minimum.
+fn adaptive_view_steps(path: f32, shell_alt: f32) -> u32 {
+    let step_len = max(shell_alt, 1.0) / f32(ATMOS_VIEW_STEPS);
+    let want = u32(ceil(path / max(step_len, 1e-3)));
+    return clamp(want, ATMOS_VIEW_STEPS_MIN, ATMOS_VIEW_STEPS);
+}
 
 struct ScatterResult {
     /// In-scattered radiance accumulated along `[t_enter, t_exit]`.
@@ -336,7 +357,7 @@ fn integrate_atmosphere(
     let p_r = phase_rayleigh(cos_theta);
     let p_m = phase_mie_hg(cos_theta, g);
 
-    let n = ATMOS_VIEW_STEPS;
+    let n = adaptive_view_steps(path, layers.atmos_geom.x);
     let ds = path / f32(n);
     let jitter = clamp(pixel_jitter, 0.0, 0.999);
 
@@ -433,7 +454,7 @@ fn integrate_atmosphere_multiscatter(
     let p_r = phase_rayleigh(cos_theta);
     let p_m = phase_mie_hg(cos_theta, g);
 
-    let n = ATMOS_VIEW_STEPS;
+    let n = adaptive_view_steps(path, atmos_top_alt);
     let ds = path / f32(n);
     let jitter = clamp(pixel_jitter, 0.0, 0.999);
 
@@ -493,26 +514,16 @@ fn integrate_atmosphere_multiscatter(
     return ScatterResult(in_scatter_single + in_scatter_multi, transmittance);
 }
 
-/// Per-pixel jitter ∈ [0, 1) for raymarch sample offsets.
+/// Sample offset for atmosphere raymarches.
 ///
-/// Interleaved Gradient Noise (Jorge Jimenez, "Next Generation Post
-/// Processing in Call of Duty Advanced Warfare", 2014). Gives a
-/// gradient-like high-frequency pattern that visually resolves to
-/// uniform mid-grey at the eye's perceptual scale, instead of the
-/// salt-and-pepper speckle a white-noise hash produces. Same
-/// statistical decorrelation across pixels, much smoother under
-/// the smooth-output integral; the jittered-sample variance lands
-/// below the perceptual threshold where white-noise jitter is
-/// visible as static.
-///
-/// Output is multiplied into `(f32(i) + jitter) * ds` in
-/// `integrate_atmosphere`, shifting each pixel's sample positions
-/// sub-step to break the regular sampling pattern that otherwise
-/// produces banded artifacts at the terminator (where the sun-column
-/// changes rapidly along the view ray).
+/// This used to return per-pixel interleaved-gradient noise to hide low-sample
+/// terminator banding, but the screen-space pattern was visible in smooth sky
+/// gradients. Keep the public helper so impostor and ground-sky paths stay in
+/// lockstep, but use centered samples and rely on the higher step counts above
+/// for smoothness instead of dithering.
 fn atmosphere_jitter(coord: vec2<f32>) -> f32 {
-    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
-    return fract(magic.z * fract(dot(coord, magic.xy)));
+    _ = coord;
+    return 0.5;
 }
 
 // ── Cloud layer ─────────────────────────────────────────────────────────────

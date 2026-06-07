@@ -3,13 +3,11 @@ use std::sync::{Arc, RwLock};
 
 use bevy::math::{DVec2, UVec2, Vec2, Vec3};
 use bevy::prelude::*;
-use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_terrain::{BakedSurface, DynamicSurfaceState, PlanetSurface, SurfaceQuery};
 use thalos_udlod::math::{Coordinate, TerrainModel, TileCoordinate};
 use thalos_udlod::prelude::TileAtlas;
 
-use crate::pipeline::rendered_height_m;
 use crate::rendered_height::{TerrainPatchBasis, TerrainPatchMesh};
-
 pub trait HeightSource: Send + Sync {
     /// Height in metres above the body's reference radius, evaluated at
     /// `dir` (a body-fixed unit direction). `tile_lod_m` is a scale hint for
@@ -44,27 +42,20 @@ pub trait HeightSource: Send + Sync {
 }
 
 pub struct CpuPipelineHeightSource {
-    surface: Arc<PlanetSurface>,
-    dynamic_state: DynamicSurfaceState,
+    surface: BakedSurface,
 }
 
 impl CpuPipelineHeightSource {
     pub fn new(surface: Arc<PlanetSurface>, dynamic_state: DynamicSurfaceState) -> Self {
         Self {
-            surface,
-            dynamic_state,
+            surface: BakedSurface::new(surface, dynamic_state),
         }
     }
 }
 
 impl HeightSource for CpuPipelineHeightSource {
     fn sample_height_m(&self, dir: Vec3, tile_lod_m: f32) -> Option<f32> {
-        Some(rendered_height_m(
-            &self.surface,
-            &self.dynamic_state,
-            dir,
-            tile_lod_m,
-        ))
+        Some(self.surface.sample_height_m(dir, tile_lod_m))
     }
 }
 
@@ -167,7 +158,43 @@ pub struct GpuAtlasHeightMirror {
 struct MirroredHeightTile {
     atlas_index: u32,
     revision: u64,
-    texels: Vec<u16>,
+    texels: MirroredHeightTexels,
+}
+
+#[derive(Clone)]
+enum MirroredHeightTexels {
+    R16(Vec<u16>),
+    Rg16(Vec<[u16; 2]>),
+    R32Float(Vec<f32>),
+}
+
+impl MirroredHeightTexels {
+    fn len(&self) -> usize {
+        match self {
+            Self::R16(texels) => texels.len(),
+            Self::Rg16(texels) => texels.len(),
+            Self::R32Float(texels) => texels.len(),
+        }
+    }
+
+    fn sample_unit(&self, texture_size: u32, border_size: u32, tile_uv: Vec2) -> Option<f32> {
+        match self {
+            Self::R16(texels) => sample_r16_tile(texels, texture_size, border_size, tile_uv)
+                .map(|encoded| encoded as f32 / u16::MAX as f32),
+            Self::Rg16(texels) => {
+                sample_rg16_height_tile(texels, texture_size, border_size, tile_uv)
+            }
+            Self::R32Float(texels) => sample_f32_tile(texels, texture_size, border_size, tile_uv),
+        }
+    }
+
+    fn unit_at(&self, index: usize) -> Option<f32> {
+        match self {
+            Self::R16(texels) => texels.get(index).map(|v| *v as f32 / u16::MAX as f32),
+            Self::Rg16(texels) => texels.get(index).map(|v| decode_rg16_height(*v)),
+            Self::R32Float(texels) => texels.get(index).copied(),
+        }
+    }
 }
 
 impl GpuAtlasHeightMirror {
@@ -222,7 +249,18 @@ impl GpuAtlasHeightMirror {
             }
             let Some(texels) = atlas
                 .attachment_data(height_index, atlas_index)
-                .and_then(|data| data.as_r16())
+                .and_then(|data| {
+                    data.as_r16()
+                        .map(|texels| MirroredHeightTexels::R16(texels.to_vec()))
+                        .or_else(|| {
+                            data.as_rg16()
+                                .map(|texels| MirroredHeightTexels::Rg16(texels.to_vec()))
+                        })
+                        .or_else(|| {
+                            data.as_r32_float()
+                                .map(|texels| MirroredHeightTexels::R32Float(texels.to_vec()))
+                        })
+                })
             else {
                 continue;
             };
@@ -231,7 +269,7 @@ impl GpuAtlasHeightMirror {
                 MirroredHeightTile {
                     atlas_index,
                     revision,
-                    texels: texels.to_vec(),
+                    texels,
                 },
             );
             changed = true;
@@ -255,9 +293,9 @@ impl GpuAtlasHeightMirror {
         for lod in (0..self.lod_count).rev() {
             let (tile_coord, tile_uv) = tile_lookup_at_lod(coordinate, lod);
             if let Some(tile) = self.tiles.get(&tile_coord) {
-                let encoded =
-                    sample_r16_tile(&tile.texels, self.texture_size, self.border_size, tile_uv)?;
-                let t = encoded as f32 / u16::MAX as f32;
+                let t = tile
+                    .texels
+                    .sample_unit(self.texture_size, self.border_size, tile_uv)?;
                 return Some(self.min_height_m + (self.max_height_m - self.min_height_m) * t);
             }
         }
@@ -329,8 +367,8 @@ impl GpuAtlasHeightMirror {
             let py = (y0 + j as i64) as u32;
             for i in 0..res {
                 let px = (x0 + i as i64) as u32;
-                let encoded = tile.texels[py as usize * size + px as usize];
-                let height = self.min_height_m + height_range * (encoded as f32 / u16::MAX as f32);
+                let t = tile.texels.unit_at(py as usize * size + px as usize)?;
+                let height = self.min_height_m + height_range * t;
                 let coord = tile_coord.pixel_coordinate(UVec2::new(px, py), texture_size, border);
                 // `translation` is zero for body-centered models, so this is the
                 // body-fixed vertex; subtracting it keeps us correct if a model
@@ -405,8 +443,46 @@ fn sample_r16_tile(
     border_size: u32,
     tile_uv: Vec2,
 ) -> Option<u16> {
+    sample_tile_unit(texture_size, border_size, tile_uv, |index| {
+        texels.get(index).map(|v| *v as f32)
+    })
+    .map(|v| v.round().clamp(0.0, u16::MAX as f32) as u16)
+}
+
+fn sample_rg16_height_tile(
+    texels: &[[u16; 2]],
+    texture_size: u32,
+    border_size: u32,
+    tile_uv: Vec2,
+) -> Option<f32> {
+    sample_tile_unit(texture_size, border_size, tile_uv, |index| {
+        texels.get(index).map(|v| decode_rg16_height(*v))
+    })
+}
+
+fn decode_rg16_height(texel: [u16; 2]) -> f32 {
+    texel[0] as f32 / u16::MAX as f32 + texel[1] as f32 / (u16::MAX as f32 * u16::MAX as f32)
+}
+
+fn sample_f32_tile(
+    texels: &[f32],
+    texture_size: u32,
+    border_size: u32,
+    tile_uv: Vec2,
+) -> Option<f32> {
+    sample_tile_unit(texture_size, border_size, tile_uv, |index| {
+        texels.get(index).copied()
+    })
+}
+
+fn sample_tile_unit(
+    texture_size: u32,
+    border_size: u32,
+    tile_uv: Vec2,
+    mut sample_at: impl FnMut(usize) -> Option<f32>,
+) -> Option<f32> {
     let size = texture_size as usize;
-    if texels.len() < size * size || size == 0 {
+    if size == 0 {
         return None;
     }
     let center_size = texture_size.saturating_sub(border_size * 2).max(1);
@@ -424,11 +500,11 @@ fn sample_r16_tile(
     let fx = px - px.floor();
     let fy = py - py.floor();
 
-    let h00 = texels[y0 * size + x0] as f32;
-    let h10 = texels[y0 * size + x1] as f32;
-    let h01 = texels[y1 * size + x0] as f32;
-    let h11 = texels[y1 * size + x1] as f32;
+    let h00 = sample_at(y0 * size + x0)?;
+    let h10 = sample_at(y0 * size + x1)?;
+    let h01 = sample_at(y1 * size + x0)?;
+    let h11 = sample_at(y1 * size + x1)?;
     let top = h00 + (h10 - h00) * fx;
     let bot = h01 + (h11 - h01) * fx;
-    Some((top + (bot - top) * fy).round().clamp(0.0, u16::MAX as f32) as u16)
+    Some(top + (bot - top) * fy)
 }

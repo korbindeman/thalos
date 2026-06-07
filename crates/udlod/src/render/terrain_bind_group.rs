@@ -5,16 +5,16 @@ use crate::{
 use bevy::{
     ecs::{
         query::ROQueryItem,
-        system::{lifetimeless::SRes, SystemParamItem},
+        system::{SystemParamItem, lifetimeless::SRes},
     },
     pbr::{MaterialBindGroupSlot, MeshTransforms, MeshUniform, PreviousGlobalTransform},
     prelude::*,
     render::{
+        Extract,
         render_phase::{PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass},
         render_resource::{binding_types::*, *},
         renderer::{RenderDevice, RenderQueue},
         texture::FallbackImage,
-        Extract,
     },
 };
 use itertools::Itertools;
@@ -177,7 +177,9 @@ impl TerrainData {
         tile_atlases: Extract<Query<(Entity, &TileAtlas), Added<TileAtlas>>>,
     ) {
         for (terrain, tile_atlas) in &tile_atlases {
-            let gpu_tile_atlas = gpu_tile_atlases.get(&terrain).unwrap();
+            let Some(gpu_tile_atlas) = gpu_tile_atlases.get(&terrain) else {
+                continue;
+            };
 
             terrain_data.insert(
                 terrain,
@@ -199,7 +201,9 @@ impl TerrainData {
             Query<(Entity, &GlobalTransform, Option<&PreviousGlobalTransform>), With<TileAtlas>>,
         >,
     ) {
+        let mut live = Vec::new();
         for (terrain, transform, previous_transform) in terrains.iter() {
+            live.push(terrain);
             let mesh_transforms = MeshTransforms {
                 world_from_local: (&transform.affine()).into(),
                 flags: 0,
@@ -217,9 +221,12 @@ impl TerrainData {
                 None,
             );
 
-            let terrain_data = terrain_data.get_mut(&terrain).unwrap();
+            let Some(terrain_data) = terrain_data.get_mut(&terrain) else {
+                continue;
+            };
             terrain_data.mesh_buffer.set_value(mesh_uniform);
         }
+        terrain_data.retain(|terrain, _| live.contains(terrain));
     }
 
     pub(crate) fn prepare(
