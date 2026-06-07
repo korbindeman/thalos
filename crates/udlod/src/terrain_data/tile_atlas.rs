@@ -3,9 +3,9 @@ use crate::{
     prelude::{AttachmentConfig, AttachmentFormat},
     terrain::TerrainConfig,
     terrain_data::{
-        AttachmentData, INVALID_ATLAS_INDEX, INVALID_LOD,
         tile_provider::TileProvider,
         tile_tree::{TileLookup, TileTree, TileTreeEntry},
+        AttachmentData, INVALID_ATLAS_INDEX, INVALID_LOD,
     },
     terrain_view::TerrainViewComponents,
 };
@@ -14,7 +14,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
     render::render_resource::*,
-    tasks::{Task, futures_lite::future},
+    tasks::{futures_lite::future, Task},
 };
 use itertools::Itertools;
 use std::{collections::VecDeque, ops::DerefMut};
@@ -225,7 +225,9 @@ impl TileAtlasState {
             if !self.tile_load_is_current(queued.coord, queued.atlas_index, queued.generation) {
                 trace!(
                     "discarding stale queued tile load: {} -> atlas slot {} gen {}",
-                    queued.coord, queued.atlas_index, queued.generation
+                    queued.coord,
+                    queued.atlas_index,
+                    queued.generation
                 );
                 continue;
             }
@@ -306,7 +308,8 @@ impl TileAtlasState {
         generation: u64,
     ) -> bool {
         self.tile_states.get(&coord).is_some_and(|state| {
-            matches!(state.state, LoadingState::Loading)
+            state.requests > 0
+                && matches!(state.state, LoadingState::Loading)
                 && state.atlas_index == atlas_index
                 && state.generation == generation
         })
@@ -403,7 +406,8 @@ impl TileAtlasState {
         let states = &self.tile_states;
         self.to_load.retain(|queued| {
             states.get(&queued.coord).is_some_and(|state| {
-                matches!(state.state, LoadingState::Loading)
+                state.requests > 0
+                    && matches!(state.state, LoadingState::Loading)
                     && state.atlas_index == queued.atlas_index
                     && state.generation == queued.generation
             })
@@ -637,13 +641,17 @@ impl TileAtlas {
         for (&(terrain, _view), tile_tree) in tile_trees.iter_mut() {
             let mut tile_atlas = tile_atlases.get_mut(terrain).unwrap();
 
-            for tile_coordinate in tile_tree.released_tiles.drain(..) {
+            let released_tiles: Vec<_> = tile_tree.released_tiles.drain(..).collect();
+            for tile_coordinate in released_tiles {
                 tile_atlas.state.release_tile(tile_coordinate);
             }
 
             let mut deferred_requests = Vec::new();
-            for tile_coordinate in tile_tree.requested_tiles.drain(..) {
-                if !tile_atlas.state.request_tile(tile_coordinate) {
+            let requested_tiles: Vec<_> = tile_tree.requested_tiles.drain(..).collect();
+            for tile_coordinate in requested_tiles {
+                if tile_atlas.state.request_tile(tile_coordinate) {
+                    tile_tree.mark_atlas_request_admitted(tile_coordinate);
+                } else {
                     deferred_requests.push(tile_coordinate);
                 }
             }
@@ -657,7 +665,7 @@ mod tests {
     use super::*;
 
     fn synthetic_state(atlas_size: u32) -> TileAtlasState {
-        TileAtlasState::new(atlas_size)
+        TileAtlasState::new(atlas_size, 1, 1)
     }
 
     #[test]

@@ -942,15 +942,28 @@ fn tangent_basis(dir: Vec3) -> (Vec3, Vec3) {
     (east, north)
 }
 
-/// Scan low-latitude directions and return the highest-relief one (`seek_hills`)
-/// or the flattest one (`!seek_hills`), so patches can land in hill country or
-/// on the kind of usable plain the EVA spawn picks. Relief proxy: max−min of
-/// `surface_height_m` over a small cross at ±`probe_m` around each candidate.
+/// Scan low-latitude directions and return either the highest-relief site
+/// (`seek_hills`) or the flattest usable land site (`!seek_hills`). Both must
+/// sit comfortably above sea level — otherwise "plain" lands on the abyssal
+/// basin floor (which is genuinely the flattest place on the planet) and
+/// "hill" can land on a continental swell with no real ridge content.
+///
+/// Probe geometry: 9-sample 3×3 stencil at ±`probe_m`, sized to the
+/// `hill_ridges` wavelength (~5 km) so the cross actually catches ridge crests
+/// rather than averaging through them. Score: max−min of `surface_height_m`
+/// across the stencil.
 fn auto_find_relief_center(surface: &PlanetSurface, seek_hills: bool) -> Vec3 {
     let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
     let radius = surface.static_surface.radius_m;
-    let probe_m = 4_000.0;
-    let n = 6000usize;
+    let sea_level_m = surface.static_surface.sea_level_m.unwrap_or(0.0);
+    // Min altitude above sea level for either site. Keeps both hill and plain
+    // out of the wave zone / continental shelf so the picked tile is genuine
+    // land character, not waterline transition.
+    let min_land_m = sea_level_m + 60.0;
+    // Probe spacing ~ hill_ridges wavelength so the 3×3 stencil straddles a
+    // ridge crest at a hill site instead of averaging through it.
+    let probe_m = 5_500.0;
+    let n = 20_000usize;
     let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
 
     let (best, _) = (0..n)
@@ -970,9 +983,20 @@ fn auto_find_relief_center(surface: &PlanetSurface, seek_hills: bool) -> Vec3 {
                 h(-east * probe_m),
                 h(north * probe_m),
                 h(-north * probe_m),
+                h((east + north) * probe_m),
+                h((east - north) * probe_m),
+                h((-east + north) * probe_m),
+                h((-east - north) * probe_m),
             ];
             let lo = s.iter().cloned().fold(f32::MAX, f32::min);
             let hi = s.iter().cloned().fold(f32::MIN, f32::max);
+            // Reject any candidate where the centre dips below the minimum land
+            // altitude. Plain candidates would happily settle on the abyssal
+            // basin (genuinely flatter than any continental plain); hill
+            // candidates picked on the shelf show no ridges either.
+            if s[0] < min_land_m {
+                return (dir, f32::NEG_INFINITY);
+            }
             let relief = hi - lo;
             (dir, if seek_hills { relief } else { -relief })
         })
@@ -1017,10 +1041,6 @@ fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, ou
         }
     });
 
-    let (hmin, hmax) = h
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-    let hrange = (hmax - hmin).max(1.0);
     let ds = (span_m / res as f64) as f32;
     // Sun in local (east, up, north): from the NW, moderate elevation.
     let sun = Vec3::new(-0.55, 0.62, 0.55).normalize();
@@ -1029,21 +1049,91 @@ fn render_patch(surface: &PlanetSurface, center: Vec3, span_m: f32, res: u32, ou
         let jj = j.clamp(0, n as i32 - 1) as usize;
         h[jj * n + ii]
     };
+    // Absolute tint keyed off sea level and an upland reference (~1500 m above
+    // sea level). This must NOT stretch per-patch the way the old `hmin..hmax`
+    // tint did — otherwise a 60 m patch with a millimetre of relief and a 120 km
+    // patch with a kilometre of relief both fill the full green→tan gamut, and
+    // every LOD looks identical from a colour perspective.
+    let sea_level_m = surface.static_surface.sea_level_m.unwrap_or(0.0);
+    let upland_m = sea_level_m + 1_500.0;
+    let beach = Vec3::new(0.74, 0.66, 0.45);
+    let lowland = Vec3::new(0.27, 0.40, 0.18);
+    let upland = Vec3::new(0.55, 0.47, 0.34);
+    let rock = Vec3::new(0.40, 0.36, 0.31);
+    let shallow_sea = Vec3::new(0.18, 0.32, 0.42);
+    let deep_sea = Vec3::new(0.06, 0.10, 0.18);
+    // Slope (rise/run) above which the surface reads as rock/cliff rather than
+    // soil. Tunes the cliff cutoff and the gradient between soil and exposed
+    // rock so steep coastlines render as cliffs, not sand.
+    let cliff_slope_lo = 0.18;
+    let cliff_slope_hi = 0.45;
+    // Beach band width above sea level. The old 25 m strip read as a fat ring
+    // around every continent; real beaches only occupy the surf zone (a few
+    // metres of altitude) on gentle-slope coasts.
+    let beach_max_m = 3.0;
+    let tint_for = |height_m: f32, slope: f32| -> Vec3 {
+        if height_m < sea_level_m {
+            // Water rendering. The field's seabed has real bathymetric
+            // structure (eroded_ridged at 180 km plus abyssal noise) with
+            // hundreds of metres of relief. Tinting by raw depth made those
+            // ridges project into the visible water colour as swirly contours
+            // at the shore/shallow/deep band edges. Real water absorbs light
+            // long before continental-shelf bathymetry registers from above, so
+            // the visible tint only varies over deep-scale depths — fine
+            // seabed structure stays invisible. No shore band: it was the
+            // single biggest source of artefacts, because the bathymetric
+            // ridge network always crossed the 0..18 m line at a wiggly contour.
+            let raw_depth = (sea_level_m - height_m).max(0.0);
+            // Gradient only kicks in below 800 m and saturates at 5000 m.
+            // Continental shelf (≤ ~380 m) and shelf bathymetric variance
+            // (±420 m) both fall below the start of the gradient, so they
+            // render as uniform shallow_sea regardless of local seabed
+            // structure. Only true abyssal depth modulates the visible tint.
+            let depth_t = smoothstep_scalar(800.0, 5_000.0, raw_depth);
+            shallow_sea.lerp(deep_sea, depth_t)
+        } else {
+            let rock_t = smoothstep_scalar(cliff_slope_lo, cliff_slope_hi, slope);
+            let upland_t = ((height_m - sea_level_m) / (upland_m - sea_level_m)).clamp(0.0, 1.0);
+            // Soil ramp: only the narrow surf-zone is sand, beyond that it
+            // grades from lowland to upland by absolute altitude.
+            let soil = if height_m < sea_level_m + beach_max_m && rock_t < 0.5 {
+                let beach_t = ((height_m - sea_level_m) / beach_max_m).clamp(0.0, 1.0);
+                beach.lerp(lowland, beach_t)
+            } else {
+                lowland.lerp(upland, upland_t)
+            };
+            soil.lerp(rock, rock_t)
+        }
+    };
 
     let mut data = vec![0u8; n * n * 3];
     data.par_chunks_mut(n * 3).enumerate().for_each(|(j, row)| {
         for i in 0..n {
+            let height_here = h[j * n + i];
             let dh_de =
                 (sample(i as i32 + 1, j as i32) - sample(i as i32 - 1, j as i32)) / (2.0 * ds);
             // North increases as j decreases (top row is +north).
             let dh_dn =
                 (sample(i as i32, j as i32 - 1) - sample(i as i32, j as i32 + 1)) / (2.0 * ds);
-            let normal = Vec3::new(-dh_de, 1.0, -dh_dn).normalize();
-            let shade = 0.25 + 0.75 * normal.dot(sun).max(0.0);
-            // Height tint: green plains → tan highs.
-            let t = ((h[j * n + i] - hmin) / hrange).clamp(0.0, 1.0);
-            let tint = Vec3::new(0.27, 0.40, 0.18).lerp(Vec3::new(0.55, 0.47, 0.34), t);
-            let c = tint * shade;
+            let shade = if height_here < sea_level_m {
+                // Underwater: skip terrain shading. The seabed has real
+                // bathymetric slope, but rendering it would expose seabed
+                // structure as swirly shaded contours on what should read as
+                // flat water. Use a constant, slightly-below-1 base.
+                0.95
+            } else {
+                let normal = Vec3::new(-dh_de, 1.0, -dh_dn).normalize();
+                // Sharper shading curve so micro-slopes are visible: amplify
+                // the signed slope component against the sun direction before
+                // mapping to brightness. The old `0.25 + 0.75·dot` washed
+                // sub-degree slopes into a flat tone, hiding the field's
+                // content at finer LODs.
+                let raw = normal.dot(sun);
+                let lit = (raw - 0.5).clamp(-1.0, 1.0);
+                (0.55 + 0.85 * lit).clamp(0.10, 1.20)
+            };
+            let slope = (dh_de * dh_de + dh_dn * dh_dn).sqrt();
+            let c = tint_for(height_here, slope) * shade;
             let idx = i * 3;
             row[idx] = linear_to_srgb8(c.x);
             row[idx + 1] = linear_to_srgb8(c.y);

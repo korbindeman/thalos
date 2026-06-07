@@ -16,6 +16,7 @@ just game eva             # spawn on foot (EVA) on the Thalos surface instead
 just game landing         # powered-descent approach over dry Thalos land
 just game final           # low final approach over a flat dry Thalos patch
 just edit <body>          # cargo run -p thalos_planet_editor -- <body>
+just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics_canonical
@@ -63,7 +64,22 @@ planet/terrain generation tests for now, including per-body generation
 tests. This applies anywhere a test compiles or validates generated planet
 data, even outside `thalos_terrain`; these tests slow down the visual
 iteration loop. Use `just bake <body> --preview` (see below) for visual
-feedback instead.
+feedback against the real compiler.
+
+For faster speculative design, use `just terrain-lab` and open
+`http://127.0.0.1:8787/tools/terrain-lab/`. Terrain Lab is a dev-only static
+browser sketchpad with Google-Maps-style panning/zooming and lazily generated
+LOD tiles. It is for process-map exploration before porting good ideas into
+`crates/terrain`; the Rust terrain compiler and bake/query pipeline remain the
+source of truth for game output.
+
+Terrain fields should be process-first, not naked-noise-first. Smooth fBM,
+ridged noise, and domain warps may drive masks, placement, breakup, and
+small local texture, but broad visible height/albedo/bathymetry must come
+from named terrain processes/features (coast shelves, seamounts, fractures,
+mountain patches, basins, etc.) with explicit spatial windows. Do not write
+global macro fBM/ridged fields directly into visible terrain; they produce
+unrealistic smoky/streaky contours across the planet.
 
 ## Bakes: production vs preview
 
@@ -199,6 +215,29 @@ name, and prints a top-N table to identify hot spots. Custom
 `info_span!` markers live in `Simulation::step`, `propagate_flight_plan`,
 `compute_preview_flight_plan`, `advance_simulation`, `update_prediction`,
 `sync_maneuver_plan`.
+
+**Slow-frame log + windowed trace analysis.** `PerfLogPlugin`
+(`crates/game/src/perf_log.rs`) detects frames above
+`SlowFrameThresholdMs` (default 25 ms; override at startup with
+`THALOS_SLOW_FRAME_MS=…` or live via BRP `world_mutate_resources` on
+`thalos_game::perf_log::SlowFrameThresholdMs`), pushes a record into the
+`SlowFrameLog` resource (BRP-readable; ring of 64), and emits a
+`slow_frame` `info_span!` so the chrome trace contains a marker at the
+exact `ts`. An agent can:
+
+1. `world_get_resources` `thalos_game::perf_log::SlowFrameLog` while the
+   game runs to confirm spikes happened and grab their frame indices.
+2. After Ctrl-C, scope `analyze_trace.py` to just those windows:
+
+```bash
+python3 scripts/analyze_trace.py trace-<date>.json \
+    --around-name slow_frame --window-ms 200
+```
+
+This builds a union of ±100 ms windows around each `slow_frame` event
+and ranks spans within that union, instead of averaging the whole
+capture. A long session full of mostly-fine frames is still useful —
+the bad frames don't get washed out.
 
 ## Bug fixing
 

@@ -34,7 +34,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use bevy::math::{DVec3, UVec2, Vec3};
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task};
+use bevy::tasks::Task;
 use thalos_terrain::{
     DynamicSurfaceState, PlanetSurface, StaticSurfaceData, surface_height_m,
     surface_height_range_m, surface_sample,
@@ -42,6 +42,8 @@ use thalos_terrain::{
 use thalos_udlod::math::TileCoordinate;
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
+
+use crate::tile_synthesis_pool::tile_synthesis_pool;
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -125,7 +127,7 @@ impl TileProvider for PipelineTileProvider {
         let attachments: Vec<AttachmentConfig> = attachments.to_vec();
         let body_name = self.body_name.clone();
 
-        AsyncComputeTaskPool::get().spawn(async move {
+        tile_synthesis_pool().spawn(async move {
             // All requested attachments share the same per-pixel evaluation,
             // so resolve the largest texture size once, evaluate, then encode
             // each attachment from the shared buffer. Different sizes would

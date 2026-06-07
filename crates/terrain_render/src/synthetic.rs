@@ -22,12 +22,14 @@
 
 use anyhow::Result;
 use bevy::math::{DVec2, DVec3, UVec2};
-use bevy::tasks::{AsyncComputeTaskPool, Task};
+use bevy::tasks::Task;
 use rayon::prelude::*;
 use thalos_terrain::noise::fbm3;
 use thalos_udlod::math::{Coordinate, TileCoordinate};
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
+
+use crate::tile_synthesis_pool::tile_synthesis_pool;
 
 /// Number of sub-samples per pixel side for area-averaging. UDLOD's atlas
 /// requires that a coarse-LOD pixel approximately equals the area-average of
@@ -87,7 +89,7 @@ impl TileProvider for SyntheticTileProvider {
         let max_height = self.max_height;
         let mode = self.mode;
 
-        AsyncComputeTaskPool::get().spawn(async move {
+        tile_synthesis_pool().spawn(async move {
             let mut datas = Vec::with_capacity(attachments.len());
             for cfg in &attachments {
                 let data = match cfg.format {

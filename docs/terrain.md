@@ -78,6 +78,23 @@ pair once ground LOD lands.
   dynamic layer definitions/state rebuild only dynamic buffers and do not
   invalidate the static terrain cache unless they also alter substrate.
 
+## Process-first terrain invariant
+
+Visible macro and meso terrain must be authored as named terrain processes or
+features, not as raw smooth-noise fields. Smooth fBM, ridged noise, and domain
+warps are still useful for masks, feature breakup, stochastic placement, and
+small local texture, but they must not directly write broad visible height,
+albedo, roughness, or bathymetry. Global low-frequency fBM/ridged fields create
+continuous smoky or streaky contours that read as procedural noise rather than
+geology.
+
+When a terrain layer needs large visible structure, express it as a process with
+an explicit spatial window: continental shelves and slopes from coastline
+distance, seamount stamps, fracture-zone segments, mountain patches, basins,
+crater ejecta, dune seas, channels, etc. A helper may use noise internally only
+when its visible contribution is gated by that process window and documented by
+wavelength/amplitude intent.
+
 ## Non-goals (this doc)
 
 - Atmospheric scattering, ocean rendering, gas-giant impostors, sun

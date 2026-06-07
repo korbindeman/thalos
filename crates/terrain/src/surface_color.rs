@@ -350,9 +350,7 @@ fn paint_surface_with(builder: &mut BodyBuilder, spec: &SurfaceColorSpec, mode: 
             let mix_texel = biome_weights.get(face, x as u32, y as u32);
             let material_id = material_ids.get(face, x as u32, y as u32);
             let color = match mode {
-                ColorMode::BiomePalette => {
-                    surface_color_at(spec, &context, mix_texel, material_id)
-                }
+                ColorMode::BiomePalette => surface_color_at(spec, &context, mix_texel, material_id),
                 ColorMode::OceanicMaterials => {
                     surface_color_at_materials(spec, &context, mix_texel)
                 }
@@ -520,7 +518,10 @@ fn oceanic_material_color(biome_id: u8, ctx: &SurfaceColorContext) -> [f32; 3] {
     }
 }
 
-fn evaluate_oceanic_materials_first(mix_texel: BiomeMixTexel, ctx: &SurfaceColorContext) -> [f32; 3] {
+fn evaluate_oceanic_materials_first(
+    mix_texel: BiomeMixTexel,
+    ctx: &SurfaceColorContext,
+) -> [f32; 3] {
     if mix_texel.is_empty() {
         return oceanic_material_color(AGING_OCEANIC_BIOME_GRASSLAND, ctx);
     }

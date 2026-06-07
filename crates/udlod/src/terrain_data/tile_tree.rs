@@ -1,6 +1,6 @@
 use crate::{
     math::{Coordinate, TerrainModel, TileCoordinate},
-    terrain_data::{INVALID_ATLAS_INDEX, INVALID_LOD, sample_height, tile_atlas::TileAtlas},
+    terrain_data::{sample_height, tile_atlas::TileAtlas, INVALID_ATLAS_INDEX, INVALID_LOD},
     terrain_view::{TerrainViewComponents, TerrainViewConfig},
     util::inverse_mix,
 };
@@ -141,6 +141,14 @@ pub struct TileTree {
     /// refcounted atlas — so each coord lands in those vectors at most once
     /// per frame.
     forced_requests: HashSet<TileCoordinate>,
+    /// Desired tiles whose atlas request has not been accepted yet.
+    ///
+    /// `TileAtlasState::request_tile` can defer when its load queue or atlas is
+    /// full. The tile tree still records the tile as desired, but it must not
+    /// emit a release until the atlas has accepted a refcount for this view.
+    pending_atlas_requests: HashSet<TileCoordinate>,
+    /// Tiles for which this view owns one atlas refcount.
+    admitted_atlas_requests: HashSet<TileCoordinate>,
     /// Flat list of tiles to draw this frame, after distance-driven
     /// refinement and 2:1 balance enforcement. Replaces the GPU
     /// `refine_tiles.wgsl` compute pass: the per-tile-independent GPU
@@ -220,8 +228,40 @@ impl TileTree {
             released_tiles: default(),
             requested_tiles: default(),
             forced_requests: HashSet::default(),
+            pending_atlas_requests: HashSet::default(),
+            admitted_atlas_requests: HashSet::default(),
             draw_set: Vec::new(),
         }
+    }
+
+    fn queue_atlas_request(&mut self, coord: TileCoordinate) {
+        if coord == TileCoordinate::INVALID
+            || self.admitted_atlas_requests.contains(&coord)
+            || !self.pending_atlas_requests.insert(coord)
+        {
+            return;
+        }
+        self.requested_tiles.push(coord);
+    }
+
+    fn queue_atlas_release(&mut self, coord: TileCoordinate) {
+        if coord == TileCoordinate::INVALID {
+            return;
+        }
+
+        if self.pending_atlas_requests.remove(&coord) {
+            self.requested_tiles.retain(|pending| *pending != coord);
+            return;
+        }
+
+        if self.admitted_atlas_requests.remove(&coord) {
+            self.released_tiles.push(coord);
+        }
+    }
+
+    pub(super) fn mark_atlas_request_admitted(&mut self, coord: TileCoordinate) {
+        self.pending_atlas_requests.remove(&coord);
+        self.admitted_atlas_requests.insert(coord);
     }
 
     fn compute_tree_xy(coordinate: Coordinate, tile_count: f64) -> DVec2 {
@@ -393,35 +433,45 @@ impl TileTree {
                         RequestState::Released
                     };
 
-                    let tile = &mut self.tiles[[
-                        side as usize,
-                        lod as usize,
-                        (tile_coordinate.x % self.tree_size) as usize,
-                        (tile_coordinate.y % self.tree_size) as usize,
-                    ]];
+                    let mut release_after_slot_update = None;
+                    let mut request_after_slot_update = None;
+                    {
+                        let tile = &mut self.tiles[[
+                            side as usize,
+                            lod as usize,
+                            (tile_coordinate.x % self.tree_size) as usize,
+                            (tile_coordinate.y % self.tree_size) as usize,
+                        ]];
 
-                    // check if tile_tree slot refers to a new tile
-                    if tile_coordinate != tile.coordinate {
-                        // release old tile
-                        if tile.state == RequestState::Requested {
-                            tile.state = RequestState::Released;
-                            self.released_tiles.push(tile.coordinate);
+                        // check if tile_tree slot refers to a new tile
+                        if tile_coordinate != tile.coordinate {
+                            // release old tile
+                            if tile.state == RequestState::Requested {
+                                tile.state = RequestState::Released;
+                                release_after_slot_update = Some(tile.coordinate);
+                            }
+
+                            tile.coordinate = tile_coordinate;
                         }
 
-                        tile.coordinate = tile_coordinate;
+                        // request or release tile based on its distance to the view
+                        match (tile.state, state) {
+                            (RequestState::Released, RequestState::Requested) => {
+                                tile.state = RequestState::Requested;
+                                request_after_slot_update = Some(tile.coordinate);
+                            }
+                            (RequestState::Requested, RequestState::Released) => {
+                                tile.state = RequestState::Released;
+                                release_after_slot_update = Some(tile.coordinate);
+                            }
+                            (_, _) => {}
+                        }
                     }
-
-                    // request or release tile based on its distance to the view
-                    match (tile.state, state) {
-                        (RequestState::Released, RequestState::Requested) => {
-                            tile.state = RequestState::Requested;
-                            self.requested_tiles.push(tile.coordinate);
-                        }
-                        (RequestState::Requested, RequestState::Released) => {
-                            tile.state = RequestState::Released;
-                            self.released_tiles.push(tile.coordinate);
-                        }
-                        (_, _) => {}
+                    if let Some(coord) = release_after_slot_update {
+                        self.queue_atlas_release(coord);
+                    }
+                    if let Some(coord) = request_after_slot_update {
+                        self.queue_atlas_request(coord);
                     }
                 }
             }
@@ -485,10 +535,12 @@ impl TileTree {
         // either `requested_tiles` or `released_tiles` (or neither) at most
         // once.
         for added in next_forced.difference(&prev_forced) {
-            self.requested_tiles.push(*added);
+            self.queue_atlas_request(*added);
         }
         for removed in prev_forced.difference(&next_forced) {
-            self.released_tiles.push(*removed);
+            if !self.is_slot_requested(*removed) {
+                self.queue_atlas_release(*removed);
+            }
         }
         self.forced_requests = next_forced;
     }
@@ -574,7 +626,7 @@ impl TileTree {
         }
         if slot.state == RequestState::Released {
             slot.state = RequestState::Requested;
-            self.requested_tiles.push(coord);
+            self.queue_atlas_request(coord);
         }
         true
     }
@@ -642,8 +694,6 @@ impl TileTree {
                 // Taylor-series terrain basis remains stale, which visibly
                 // shears/deforms the ground until warp drops and streaming
                 // resumes.
-                tile_tree.requested_tiles.clear();
-                tile_tree.released_tiles.clear();
                 continue;
             }
 
@@ -867,6 +917,8 @@ mod tests {
                 tree_size as usize,
             )),
             forced_requests: HashSet::default(),
+            pending_atlas_requests: HashSet::default(),
+            admitted_atlas_requests: HashSet::default(),
             draw_set: Vec::new(),
             lod_count,
             tree_size,
@@ -900,6 +952,51 @@ mod tests {
         ]];
         slot.coordinate = coord;
         slot.state = RequestState::Requested;
+    }
+
+    #[test]
+    fn deferred_request_can_be_cancelled_without_release() {
+        let mut tree = test_tree(/* lod_count */ 4, /* tree_size */ 4);
+        let coord = TileCoordinate::new(0, 2, 1, 1);
+
+        tree.queue_atlas_request(coord);
+        assert!(tree.pending_atlas_requests.contains(&coord));
+        assert_eq!(tree.requested_tiles, vec![coord]);
+
+        tree.queue_atlas_release(coord);
+
+        assert!(!tree.pending_atlas_requests.contains(&coord));
+        assert!(tree.requested_tiles.is_empty());
+        assert!(tree.released_tiles.is_empty());
+    }
+
+    #[test]
+    fn admitted_request_releases_exactly_once() {
+        let mut tree = test_tree(/* lod_count */ 4, /* tree_size */ 4);
+        let coord = TileCoordinate::new(0, 2, 1, 1);
+
+        tree.queue_atlas_request(coord);
+        tree.requested_tiles.clear();
+        tree.mark_atlas_request_admitted(coord);
+        tree.queue_atlas_release(coord);
+        tree.queue_atlas_release(coord);
+
+        assert_eq!(tree.released_tiles, vec![coord]);
+        assert!(!tree.admitted_atlas_requests.contains(&coord));
+    }
+
+    #[test]
+    fn forced_request_entering_window_keeps_admission() {
+        let mut tree = test_tree(/* lod_count */ 4, /* tree_size */ 4);
+        let coord = TileCoordinate::new(0, 2, 1, 1);
+        tree.forced_requests.insert(coord);
+        tree.admitted_atlas_requests.insert(coord);
+        seed_requested(&mut tree, coord);
+
+        tree.balance_lod_gaps(true);
+
+        assert!(tree.admitted_atlas_requests.contains(&coord));
+        assert!(!tree.released_tiles.contains(&coord));
     }
 
     /// Brute-force coverage walk independent of `is_covered`: returns true

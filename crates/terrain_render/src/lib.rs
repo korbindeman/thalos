@@ -33,6 +33,7 @@ mod playground_material;
 mod rendered_height;
 mod sky_material;
 mod synthetic;
+mod tile_synthesis_pool;
 mod water_material;
 
 pub use body_material::{
@@ -54,6 +55,7 @@ pub use rendered_height::{
 };
 pub use sky_material::BodySkyMaterial;
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
+pub use tile_synthesis_pool::tile_synthesis_pool;
 pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 
 pub struct ThalosTerrainPlugin;

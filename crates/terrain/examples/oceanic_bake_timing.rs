@@ -31,8 +31,12 @@ fn main() {
     // kernel (~80% of the field cost). Mimics the editor holding one
     // FieldSurface across slider drags.
     {
-        let params =
-            OceanicContinentalParams::from_seed_parts(seed, seed ^ 0x9999, relief_scale_m, ocean_fraction);
+        let params = OceanicContinentalParams::from_seed_parts(
+            seed,
+            seed ^ 0x9999,
+            relief_scale_m,
+            ocean_fraction,
+        );
         let mut field = FieldSurface::oceanic(
             radius_m,
             params,
@@ -75,8 +79,12 @@ fn main() {
             None,
             0.0,
         );
-        let params =
-            OceanicContinentalParams::from_seed_parts(seed, seed ^ 0x9999, relief_scale_m, ocean_fraction);
+        let params = OceanicContinentalParams::from_seed_parts(
+            seed,
+            seed ^ 0x9999,
+            relief_scale_m,
+            ocean_fraction,
+        );
         let field = OceanicContinentalField::new(params, radius_m);
         let t_setup = t0.elapsed();
 

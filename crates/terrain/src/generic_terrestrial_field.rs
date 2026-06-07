@@ -281,7 +281,16 @@ fn sample_basic_continental_height_dm(
     //   amplitude — this is the band that makes the terrain read as hill
     //   country instead of a gentle dome.
     let swell_wl_m = 55_000.0;
-    let swell = eroded_ridged_band(p_m, swell_wl_m, params.seed_mountains, 5, 0.5, 2.0, 1.0, lod_m);
+    let swell = eroded_ridged_band(
+        p_m,
+        swell_wl_m,
+        params.seed_mountains,
+        5,
+        0.5,
+        2.0,
+        1.0,
+        lod_m,
+    );
 
     let hill_wl_m = 3_200.0;
     let hills = eroded_ridged_band(
@@ -346,13 +355,12 @@ pub(crate) fn sample_oceanic_continental(
     let lod_m = sample_scale_m.max(1.0);
     let relief = params.relief_scale_m;
 
-    let warp_wl_m = 1_850_000.0;
-    let warp = DVec3::new(
-        fbm3_band(p_m, warp_wl_m, params.seed_warp, 4, lod_m) as f64,
-        fbm3_band(p_m, warp_wl_m, params.seed_warp ^ 0xA53A_9E21, 4, lod_m) as f64,
-        fbm3_band(p_m, warp_wl_m, params.seed_warp ^ 0xC2B2_AE35, 4, lod_m) as f64,
-    ) * 420_000.0;
-    let q_m = p_m + warp;
+    // No global domain warp on the macro bands. A previous 1.85 Mm / 420 km
+    // warp produced continent-spanning curl streamlines visible in both land
+    // relief and ocean depth contours. The continent kernel still applies
+    // per-shape `domain_warp_d` inside `continent_kernel_base` so continents
+    // keep organic outlines; we just don't imprint a single streamline field
+    // across the whole body.
 
     // Continent intent: read the cached coarse kernel when available, else
     // evaluate it directly. The cache is bit-exact at its own texel centres and
@@ -362,23 +370,36 @@ pub(crate) fn sample_oceanic_continental(
         None => continent_kernel_base(params, dir),
     };
     let continent_shape = continent_shape_from_base(params, dir, continent_base, lod_m);
-    let macro_n = fbm3_band(q_m, 1_100_000.0, params.seed_macro, 5, lod_m);
-    let regional_n = fbm3_band(q_m, 420_000.0, params.seed_macro ^ 0x6D2B_79F5, 5, lod_m);
-    let coast_n = fbm3_band(q_m, 125_000.0, params.seed_coast, 4, lod_m);
-    let island_n = fbm3_band(q_m, 190_000.0, params.seed_islands, 4, lod_m);
+    let macro_n = fbm3_band(p_m, 1_100_000.0, params.seed_macro, 5, lod_m);
+    let regional_n = fbm3_band(p_m, 420_000.0, params.seed_macro ^ 0x6D2B_79F5, 5, lod_m);
+    let coast_n = fbm3_band(p_m, 125_000.0, params.seed_coast, 4, lod_m);
+    let island_n = fbm3_band(p_m, 190_000.0, params.seed_islands, 4, lod_m);
 
     let archipelago = archipelago_chain_signal(params, dir, lod_m);
     let ocean_bias = (params.ocean_fraction - 0.62) * 0.45;
     let continent_edge = 1.0 - smoothstep(0.12, 0.42, continent_shape.abs());
-    let continent_potential = continent_shape
+
+    // Two separate continent fields with split responsibilities. Decide the
+    // coast first, then drive interior relief from a coast-independent
+    // gradient — coastline shaping must not leak into where mountains spawn.
+    //
+    // `land_boundary` carries all the coast-shaping bands (coast_n,
+    // archipelago, island chains). It decides land vs ocean, shelf vs
+    // abyssal, coastal-plain elevation, and `coastness`.
+    //
+    // `land_inland` is the bare continent gradient (kernel + macro band only).
+    // It drives `inland`, which gates hill/mountain amplitude — so the
+    // shoreline wiggle never modulates mountain placement or relief.
+    let land_boundary = continent_shape
         + macro_n * 0.08
         + regional_n * 0.18 * (0.35 + continent_edge * 0.65)
         + coast_n * 0.36 * continent_edge
         + archipelago
         + island_n.max(0.0) * 0.05 * smoothstep(-0.42, -0.05, continent_shape)
         - ocean_bias;
+    let land_inland = continent_shape + macro_n * 0.08 - ocean_bias;
 
-    let land = continent_potential;
+    let land = land_boundary;
     let coastness = 1.0 - smoothstep(0.018, 0.220, land.abs());
 
     let roll_lo = fbm3_band(p_m, 7_500.0, params.seed_fine ^ 0x9E37_79B9, 3, lod_m);
@@ -389,21 +410,22 @@ pub(crate) fn sample_oceanic_continental(
     if land <= 0.0 {
         let depth_t = smoothstep(0.0, 0.82, -land);
         let shelf_t = 1.0 - smoothstep(0.035, 0.23, -land);
-        let abyssal_noise = fbm3_band(p_m, 95_000.0, params.seed_hills ^ 0xA0A0_5151, 4, lod_m);
-        let ridge = eroded_ridged_band(
-            p_m,
-            180_000.0,
-            params.seed_mountains ^ 0x0CE4_1111,
-            4,
-            0.52,
-            2.0,
-            0.6,
-            lod_m,
-        );
         let shelf_depth_m = 18.0 + smoothstep(0.0, 0.18, -land) * 360.0;
         let abyssal_depth_m = 1_250.0 + depth_t * 3_900.0;
         let depth_m = shelf_depth_m * shelf_t + abyssal_depth_m * (1.0 - shelf_t);
-        let relief_m = abyssal_noise * 260.0 + ridge * 420.0;
+
+        // Seabed relief is feature/process-driven, not naked macro fBM. Broad
+        // smooth or ridged noise directly written into bathymetry creates the
+        // planet-wide smoky streaks visible from orbit. Keep abyssal plains
+        // plain, then add sparse seamounts and short fracture-zone lineaments
+        // with explicit spatial windows so no scalar noise field can paint the
+        // whole ocean.
+        let abyssal_plain_m = abyssal_plain_texture(params, p_m, lod_m) * (1.0 - shelf_t * 0.75);
+        let seamounts_m = seamount_field(params, dir, depth_t, lod_m);
+        let fractures_m = fracture_zone_field(params, dir, depth_t, lod_m);
+        let shelf_ripple_m =
+            fbm3_band(p_m, 18_000.0, params.seed_fine ^ 0xA0A0_5151, 3, lod_m) * 18.0 * shelf_t;
+        let relief_m = abyssal_plain_m + seamounts_m + fractures_m + shelf_ripple_m;
         let height_m = (-depth_m + relief_m).min(-2.0);
         let shelf = height_m > -520.0;
         return OceanicSample {
@@ -421,7 +443,15 @@ pub(crate) fn sample_oceanic_continental(
         };
     }
 
-    let inland = smoothstep(0.0, 0.62, land);
+    // Threshold range tuned to `land_inland`'s natural amplitude. Without
+    // the coast/regional bands, `land_inland` tops out near +0.48
+    // (continent_shape max ≈ 0.40 plus macro_n*0.08), so smoothstep(0..0.62)
+    // never saturates — `inland` caps around 0.87 deep inland and falls below
+    // 0.5 across most of the mid-continent, starving `mountain_control` and
+    // `continental_rise_m` of amplitude. Tightening the upper bound to 0.30
+    // restores full saturation a short way in from the coast without
+    // changing the coast-edge ramp.
+    let inland = smoothstep(0.0, 0.30, land_inland);
     let relief_control = smoothstep(
         0.12,
         0.58,
@@ -442,6 +472,18 @@ pub(crate) fn sample_oceanic_continental(
         1.25,
         lod_m,
     );
+    // Hill structure. Eroded_ridged noise is the standard tool for "mountain
+    // ridges", but it has a built-in bias: ridge crests are continuous
+    // (`1 − |noise|`) and form smooth flowing arcs at every scale where it's
+    // sampled. Used as the sole mountain shape this reads as "swirling"
+    // because the whole patch is filled with one coherent ridge network.
+    //
+    // Fix: blend ridged with fBM (`hill_lumps`) at the same wavelength so the
+    // smooth arcs are partly disrupted by random bumps, then multiply the
+    // ridge contribution by a 25 km "mountain country" patchwork envelope so
+    // ridges only appear in clusters and most of the field is interrupted by
+    // non-ridge ground. hill_spurs uses a separately-warped position so its
+    // crests don't line up with hill_ridges to extend the same arcs.
     let hill_ridges = eroded_ridged_band(
         p_m,
         5_200.0,
@@ -449,15 +491,91 @@ pub(crate) fn sample_oceanic_continental(
         6,
         0.50,
         2.08,
-        1.45,
+        1.7,
+        lod_m,
+    );
+    // hill_lumps with peak sharpening: raw fBM gives smooth round bumps; the
+    // `sign * abs^1.4` transform concentrates the result toward extreme values
+    // so peaks are taller relative to the surrounding swell, while the
+    // function still has no preferred arc direction (no |noise|=0 contours).
+    let hill_lumps_raw = fbm3_band(p_m, 5_200.0, params.seed_hills ^ 0x7C12_88BD, 6, lod_m);
+    let hill_lumps = hill_lumps_raw.signum() * hill_lumps_raw.abs().powf(1.4);
+    // Mountain-country mask: hard-edged via smoothstep so the field has true
+    // hill-rich and hill-empty regions instead of one uniform-amplitude
+    // network. Real mountain ranges occupy patches, not the whole continent.
+    let mountain_country_raw = fbm3_band(p_m, 28_000.0, params.seed_hills ^ 0x3E91_D204, 4, lod_m);
+    let mountain_country = smoothstep(-0.20, 0.30, mountain_country_raw);
+
+    // hill_spurs: warp the input position by ~1.5 km so the 1.2 km spur ridges
+    // don't trace the same crests as hill_ridges and extend the same arcs.
+    let spur_warp = DVec3::new(
+        fbm3_band(p_m, 4_500.0, params.seed_hills ^ 0xA98E_7711, 3, lod_m) as f64,
+        fbm3_band(p_m, 4_500.0, params.seed_hills ^ 0xA98E_7712, 3, lod_m) as f64,
+        fbm3_band(p_m, 4_500.0, params.seed_hills ^ 0xA98E_7713, 3, lod_m) as f64,
+    ) * 1_500.0;
+    let hill_spurs = eroded_ridged_band(
+        p_m + spur_warp,
+        1_200.0,
+        params.seed_hills ^ 0xA98E_7711,
+        4,
+        0.50,
+        2.10,
+        1.4,
         lod_m,
     );
 
     let coastal_plain_m = 18.0 + smoothstep(0.0, 0.20, land) * 210.0;
     let continental_rise_m = inland.powf(0.72) * relief * 0.30;
-    let hill_m = relief * relief_control * (hill_ridges * 0.28 + mountain_ridges * 0.08);
+    // Mix ridged + fBM at the same wavelength so the arc-network of pure
+    // ridges is mostly replaced by random bumps. Only a small ridged
+    // contribution (~25%) survives — enough to give hills a hint of peaked
+    // crest character, not enough to dominate the visible shape as continuous
+    // arcs. Gated by `mountain_country` so the field has hill-poor and
+    // hill-rich regions instead of one uniform network.
+    let hill_blend = hill_ridges * 0.25 + hill_lumps * 0.75;
+    // Hill amp bumped from 0.34 → 0.50 to compensate for fBM-dominant blend
+    // (fBM spreads energy more uniformly than ridged, so the same amplitude
+    // produces less visible peak relief).
+    let hill_m = relief
+        * relief_control
+        * mountain_country
+        * (hill_blend * 0.50 + hill_spurs * 0.07 + mountain_ridges * 0.08);
     let mountain_m = relief * mountain_control * (0.18 + mountain_ridges * 0.72);
-    let height_m = coastal_plain_m + continental_rise_m + hill_m + mountain_m + rolling;
+
+    // Sub-kilometre detail group. LOD-gated by `fbm3_band` so the cubemap bake
+    // (texel scale ≈ 700 m) skips these entirely and only the runtime /
+    // collider / patch path (`sample_scale_m = 1.0`) pays for them. Without
+    // these bands the field has nothing below ~500 m and the on-foot patches
+    // collapse to a smooth interpolation. All fBM (no eroded_ridged): natural
+    // sub-km relief is surface roughness, not ridge networks.
+    let slope_grain = fbm3_band(p_m, 380.0, params.seed_hills ^ 0xC2A4_1F0B, 5, lod_m);
+    let plain_swell = fbm3_band(p_m, 180.0, params.seed_fine ^ 0xE91E_63A2, 4, lod_m);
+    let rubble = fbm3_band(p_m, 65.0, params.seed_mountains ^ 0x9B7C_3300, 4, lod_m);
+    let surface_grain = fbm3_band(p_m, 18.0, params.seed_fine ^ 0x4D6A_2C71, 4, lod_m);
+    // Ultra-micro group: extra octaves so the on-foot patches don't show
+    // visible cell-tiling from the small octave count. Each band is fBM only.
+    let micro_grain = fbm3_band(p_m, 6.0, params.seed_fine ^ 0x71A2_C903, 4, lod_m);
+    let pebbles = fbm3_band(p_m, 2.0, params.seed_hills ^ 0x2E7B_A105, 4, lod_m);
+    let sub_metre = fbm3_band(p_m, 0.6, params.seed_fine ^ 0x9D5C_4E27, 4, lod_m);
+
+    // Amplitudes in metres, modulated by existing biome controls. `inland`
+    // damps near coasts so the shoreline doesn't gain sharp metre-scale spikes.
+    // The whole micro stack is texture, not relief: amplitudes are sized so
+    // the slope produced at each band's wavelength is modest, the on-foot
+    // patches read as rolling/rough ground, and no single band dominates a
+    // patch the way the old 65 m ridged talus did at 60 m span.
+    let coast_damp = 0.25 + 0.75 * inland;
+    let rough_terrain = 0.30 + relief_control * 0.55 + mountain_control * 0.40;
+    let micro_m = (slope_grain * 40.0 * relief_control
+        + plain_swell * 7.0 * (1.0 - relief_control * 0.50)
+        + rubble * 12.0 * (0.4 + mountain_control * 0.8)
+        + surface_grain * 2.4 * rough_terrain
+        + micro_grain * 1.0 * rough_terrain
+        + pebbles * 0.30 * rough_terrain
+        + sub_metre * 0.10 * rough_terrain)
+        * coast_damp;
+
+    let height_m = coastal_plain_m + continental_rise_m + hill_m + mountain_m + rolling + micro_m;
     let height_m = height_m.max(2.0);
 
     let latitude_abs = dir.y.clamp(-1.0, 1.0).asin().abs() as f32 / std::f32::consts::FRAC_PI_2;
@@ -592,36 +710,100 @@ fn continent_kernel_base(params: OceanicContinentalParams, dir: DVec3) -> f32 {
     (continentalness + macro_n).clamp(0.0, 1.0)
 }
 
-/// Compose the base/cached continentalness with the LOD-gated coastline-jitter
-/// detail (one warped fBM band at ~75 km, faded out at coarse LOD), then convert
+/// Compose the base/cached continentalness with LOD-gated coastline-jitter
+/// detail at three scales (macro ~75 km, meso ~22 km, fine ~6 km), then convert
 /// `0..1` continentalness to signed land potential. Cut a little above 0.5 so
 /// overlapping warped shapes form separate continents with flooded straits
-/// instead of one continuous equatorial belt.
+/// instead of one continuous equatorial belt. Multi-band jitter breaks the
+/// otherwise smooth single-band coastline into capes, peninsulas, inlets, and
+/// fjord-scale notches — without it the 0.5 contour reads as soft blobs.
 fn continent_shape_from_base(
     params: OceanicContinentalParams,
     dir: DVec3,
     base: f32,
     lod_m: f32,
 ) -> f32 {
-    let weight = band_weight(75_000.0, lod_m);
-    if weight <= 0.0 {
-        // Coastline-jitter band below the sample LOD's Nyquist → no detail.
-        return base - 0.60;
-    }
+    // Coast proximity: 1 right on the 0.5 contour, fading to 0 well inland or
+    // out in deep ocean. All jitter bands ride this, so they only deform the
+    // coastline — continental interiors and abyssal plains stay smooth.
     let d = base * 2.0 - 1.0;
     let coast_proximity = (1.0 - d * d).max(0.0);
-    let detail_warped = domain_warp_d(dir, params.seed_coast ^ 0xC0DE_7A11, 4.0, 0.12);
-    let detail = fbm3_f64(
-        detail_warped.x * 16.0,
-        detail_warped.y * 16.0,
-        detail_warped.z * 16.0,
-        params.seed_coast ^ 0xC0DE_7A12,
+    if coast_proximity <= 0.0 {
+        return base - 0.60;
+    }
+
+    // One coast jitter band. `freq` is in unit-sphere frequency (one radius =
+    // 2π/freq metres of underlying wavelength); `repr_wl_m` is the rough
+    // representative wavelength used to drive `band_weight`. Each band carries
+    // its own warp so the coast doesn't simply scale up an identical pattern at
+    // every scale.
+    fn jitter_band(
+        dir: DVec3,
+        coast_proximity: f32,
+        lod_m: f32,
+        freq: f64,
+        repr_wl_m: f32,
+        octaves: u32,
+        amplitude: f32,
+        warp_seed: u32,
+        warp_strength: f32,
+        noise_seed: u32,
+    ) -> f32 {
+        let weight = band_weight(repr_wl_m, lod_m);
+        if weight <= 0.0 {
+            return 0.0;
+        }
+        let warped = domain_warp_d(dir, warp_seed, freq as f32 * 0.25, warp_strength);
+        fbm3_f64(
+            warped.x * freq,
+            warped.y * freq,
+            warped.z * freq,
+            noise_seed,
+            octaves,
+            0.55,
+            2.0,
+        ) * amplitude
+            * coast_proximity
+            * weight
+    }
+
+    let macro_jitter = jitter_band(
+        dir,
+        coast_proximity,
+        lod_m,
+        16.0,
+        75_000.0,
         5,
-        0.55,
-        2.0,
-    ) * 0.42
-        * coast_proximity
-        * weight;
+        0.42,
+        params.seed_coast ^ 0xC0DE_7A11,
+        0.12,
+        params.seed_coast ^ 0xC0DE_7A12,
+    );
+    let meso_jitter = jitter_band(
+        dir,
+        coast_proximity,
+        lod_m,
+        56.0,
+        22_000.0,
+        4,
+        0.22,
+        params.seed_coast ^ 0x4F1B_C001,
+        0.06,
+        params.seed_coast ^ 0x4F1B_C002,
+    );
+    let fine_jitter = jitter_band(
+        dir,
+        coast_proximity,
+        lod_m,
+        220.0,
+        6_000.0,
+        4,
+        0.11,
+        params.seed_coast ^ 0xA7D2_E001,
+        0.025,
+        params.seed_coast ^ 0xA7D2_E002,
+    );
+    let detail = macro_jitter + meso_jitter + fine_jitter;
     (base + detail).clamp(0.0, 1.0) - 0.60
 }
 
@@ -648,6 +830,100 @@ pub fn build_continent_intent_cache(
         });
     }
     cache
+}
+
+fn abyssal_plain_texture(params: OceanicContinentalParams, p_m: DVec3, lod_m: f32) -> f32 {
+    // Low-amplitude, mid/small-scale undulation only. This is intentionally
+    // below the orbital-read band; large bathymetric form must come from named
+    // features such as seamounts/fractures, not from smooth global fields.
+    let broad = fbm3_band(p_m, 42_000.0, params.seed_fine ^ 0x5EAB_ED01, 3, lod_m) * 32.0;
+    let fine = fbm3_band(p_m, 9_000.0, params.seed_fine ^ 0x5EAB_ED02, 3, lod_m) * 9.0;
+    broad + fine
+}
+
+fn seamount_field(params: OceanicContinentalParams, dir: DVec3, depth_t: f32, lod_m: f32) -> f32 {
+    let mut relief = 0.0f32;
+    let visibility = band_weight(18_000.0, lod_m) * smoothstep(0.18, 0.72, depth_t);
+    if visibility <= 0.0 {
+        return 0.0;
+    }
+
+    for i in 0..22u32 {
+        let seed = params
+            .seed_islands
+            .wrapping_add(i.wrapping_mul(0x9E37_79B9))
+            ^ 0x51EA_0001;
+        let center = seeded_unit_vector(seed, i + 101);
+        let angle = dir.dot(center).clamp(-1.0, 1.0).acos() as f32;
+        let radius = 0.0045 + pseudo01(seed ^ 0xB529_7A4D) * 0.020;
+        let r = angle / radius;
+        if r >= 1.0 {
+            continue;
+        }
+
+        let cone = (1.0 - r).powf(2.4);
+        let summit_flatten = 1.0 - smoothstep(0.0, 0.18, r) * 0.18;
+        let height = 120.0 + pseudo01(seed ^ 0x68E3_1DA4) * 860.0;
+        relief += cone * summit_flatten * height;
+    }
+
+    relief * visibility
+}
+
+fn fracture_zone_field(
+    params: OceanicContinentalParams,
+    dir: DVec3,
+    depth_t: f32,
+    lod_m: f32,
+) -> f32 {
+    let mut relief = 0.0f32;
+    let visibility = band_weight(35_000.0, lod_m) * smoothstep(0.28, 0.86, depth_t);
+    if visibility <= 0.0 {
+        return 0.0;
+    }
+
+    for i in 0..10u32 {
+        let seed = params
+            .seed_mountains
+            .wrapping_add(i.wrapping_mul(0x85EB_CA6B))
+            ^ 0xF2AC_7001;
+        let center = seeded_unit_vector(seed, i + 211);
+        let raw_tangent = seeded_unit_vector(seed ^ 0x27D4_EB2D, i + 307);
+        let tangent = (raw_tangent - center * raw_tangent.dot(center)).normalize_or_zero();
+        if tangent == DVec3::ZERO {
+            continue;
+        }
+        let normal = center.cross(tangent).normalize_or_zero();
+        let along = dir.dot(tangent).asin() as f32;
+        let cross = dir.dot(normal).asin().abs() as f32;
+        let length = 0.045 + pseudo01(seed ^ 0xC13F_A9A9) * 0.115;
+        let width = 0.0035 + pseudo01(seed ^ 0xA53A_9E1D) * 0.0065;
+        let band = smoothstep(width * 2.2, width * 0.35, cross);
+        let window = smoothstep(length, length * 0.60, along.abs());
+        if band * window <= 0.0 {
+            continue;
+        }
+
+        let segment = fbm3_f64(
+            dir.x * 18.0 + i as f64 * 2.3,
+            dir.y * 18.0,
+            dir.z * 18.0,
+            seed ^ 0xC2B2_AE35,
+            3,
+            0.50,
+            2.0,
+        );
+        let broken = smoothstep(-0.35, 0.42, segment);
+        let sign = if pseudo01(seed ^ 0x68E3_1DA4) < 0.5 {
+            -1.0
+        } else {
+            1.0
+        };
+        let amp = 45.0 + pseudo01(seed ^ 0xB529_7A4D) * 115.0;
+        relief += sign * amp * band * window * broken;
+    }
+
+    relief * visibility
 }
 
 fn archipelago_chain_signal(params: OceanicContinentalParams, dir: DVec3, lod_m: f32) -> f32 {
@@ -831,7 +1107,15 @@ fn fbm3_band(p_m: DVec3, wavelength_m: f32, seed: u32, octaves: u32, lod_m: f32)
         return 0.0;
     }
     let wl = wavelength_m as f64;
-    fbm3_f64(p_m.x / wl, p_m.y / wl, p_m.z / wl, seed, octaves, 0.53, 2.03) * weight
+    fbm3_f64(
+        p_m.x / wl,
+        p_m.y / wl,
+        p_m.z / wl,
+        seed,
+        octaves,
+        0.53,
+        2.03,
+    ) * weight
 }
 
 /// [`eroded_ridged_3d_f64`] for one wavelength band, LOD-gated like

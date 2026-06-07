@@ -21,6 +21,7 @@ mod map_view;
 mod navball;
 mod navigation;
 mod pause_menu;
+mod perf_log;
 mod photo_mode;
 mod player_controller;
 mod reflection_probe;
@@ -83,6 +84,7 @@ use map_view::MapViewPlugin;
 use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use pause_menu::PauseMenuPlugin;
+use perf_log::PerfLogPlugin;
 use photo_mode::PhotoModePlugin;
 use player_controller::PlayerControllerPlugin;
 use rendering::RenderingPlugin;
@@ -528,6 +530,7 @@ fn main() {
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)
+        .add_plugins(PerfLogPlugin)
         .add_plugins(ScenarioMenuPlugin)
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
