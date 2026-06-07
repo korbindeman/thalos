@@ -2,21 +2,18 @@
 //!
 //! [`TerrainProvider`] mirrors the [`crate::body_trajectory_provider::BodyTrajectoryProvider`]
 //! pattern: a trait the [`crate::ship_propagator::ShipPropagator`] queries
-//! during collision detection, plus a concrete shared registry the game
-//! crate updates as planet surfaces finish baking. Live `Simulation::step`
-//! and trajectory prediction share the same propagator instance, so they
-//! collide against the same surface — matching the "one propagator
-//! everywhere" invariant in CLAUDE.md.
+//! during collision detection. Live `Simulation::step` and trajectory
+//! prediction share the same propagator instance, so they collide against the
+//! same surface — matching the "one propagator everywhere" invariant in
+//! CLAUDE.md.
 //!
-//! For tests and headless builds with no surface data, [`FlatTerrain`]
-//! reports zero elevation everywhere; the propagator falls back to mean
-//! radius and behaves as before.
+//! The concrete `PlanetSurface`-backed implementation lives in the game crate
+//! (it needs `thalos_terrain` runtime data); this crate stays free of a
+//! terrain dependency and ships only the trait plus a flat fallback. For tests
+//! and headless builds with no surface data, [`FlatTerrain`] reports zero
+//! elevation everywhere; the propagator falls back to mean radius.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-
-use glam::{DVec3, Vec3};
-use thalos_terrain::{Cubemap, PlanetSurface, cubemap::dir_to_face_uv};
+use glam::DVec3;
 
 use crate::types::BodyId;
 
@@ -53,69 +50,6 @@ impl TerrainProvider for FlatTerrain {
     }
 }
 
-/// Thread-safe registry of baked planet surfaces, keyed by [`BodyId`]. The
-/// game crate holds one of these, inserts an entry per body as its surface
-/// finishes baking, and hands the same handle to the propagator at
-/// construction time so prediction and live propagation see the same data.
-///
-/// Reads are taken behind an `RwLock`; the propagator's hot path runs
-/// hundreds of reads per frame, which is well below the cost of any
-/// realistic write rate (surfaces are inserted once at startup and only
-/// re-inserted on rare hot-reload).
-#[derive(Default, Clone)]
-pub struct SharedTerrainRegistry {
-    inner: Arc<RwLock<HashMap<BodyId, Arc<PlanetSurface>>>>,
-}
-
-impl SharedTerrainRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&self, body: BodyId, surface: Arc<PlanetSurface>) {
-        self.inner.write().unwrap().insert(body, surface);
-    }
-
-    pub fn contains(&self, body: BodyId) -> bool {
-        self.inner.read().unwrap().contains_key(&body)
-    }
-}
-
-impl TerrainProvider for SharedTerrainRegistry {
-    fn surface_elevation_m(&self, body: BodyId, dir_body: DVec3) -> f64 {
-        let guard = self.inner.read().unwrap();
-        let Some(surface) = guard.get(&body) else {
-            return 0.0;
-        };
-        let dir = dir_body.normalize_or_zero();
-        if dir.length_squared() < 0.5 {
-            return 0.0;
-        }
-        sample_height_cubemap_m(
-            &surface.static_surface.height_cubemap,
-            dir.as_vec3(),
-            surface.static_surface.height_range,
-        ) as f64
-    }
-
-    fn max_elevation_m(&self, body: BodyId) -> f64 {
-        let guard = self.inner.read().unwrap();
-        guard
-            .get(&body)
-            .map(|s| s.static_surface.height_range as f64)
-            .unwrap_or(0.0)
-    }
-}
-
-fn sample_height_cubemap_m(cubemap: &Cubemap<u16>, dir: Vec3, range_m: f32) -> f32 {
-    let (face, u, v) = dir_to_face_uv(dir);
-    let res = cubemap.resolution();
-    let x = ((u * res as f32) as u32).min(res - 1);
-    let y = ((v * res as f32) as u32).min(res - 1);
-    let texel = cubemap.get(face, x, y);
-    ((texel as f32 / u16::MAX as f32) * 2.0 - 1.0) * range_m
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,13 +60,5 @@ mod tests {
         assert_eq!(t.surface_elevation_m(0, DVec3::X), 0.0);
         assert_eq!(t.surface_elevation_m(7, -DVec3::Y), 0.0);
         assert_eq!(t.max_elevation_m(0), 0.0);
-    }
-
-    #[test]
-    fn shared_registry_reports_zero_for_unknown_body() {
-        let registry = SharedTerrainRegistry::new();
-        assert_eq!(registry.surface_elevation_m(0, DVec3::X), 0.0);
-        assert_eq!(registry.max_elevation_m(0), 0.0);
-        assert!(!registry.contains(0));
     }
 }

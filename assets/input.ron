@@ -78,7 +78,7 @@
             },
         ),
     ),
-    planet_editor: (
+    body_editor: (
         bindings: {
             "primary": [MouseButton(Left)],
             "camera_motion": [MouseMotion],

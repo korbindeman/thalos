@@ -388,7 +388,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::types::{BodyDefinition, BodyKind, G, ShipDefinition};
+    use crate::types::{BodyDefinition, BodyKind, G};
 
     const AU: f64 = 1.496e11;
     const SUN_GM: f64 = 1.327_124_4e20;
@@ -409,7 +409,7 @@ mod tests {
             gm: SUN_GM,
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
-            terrain: thalos_terrain::TerrainConfig::None,
+            terrain: thalos_world::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
@@ -437,7 +437,7 @@ mod tests {
                 arg_periapsis_rad: 0.0,
                 true_anomaly_rad: 0.0,
             }),
-            terrain: thalos_terrain::TerrainConfig::None,
+            terrain: thalos_world::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
@@ -452,13 +452,8 @@ mod tests {
         SolarSystemDefinition {
             name: "Test".to_string(),
             bodies: vec![sun, earth],
-            ship: ShipDefinition {
-                initial_state: StateVector {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                },
-            },
             name_to_id,
+            homeworld_id: 1,
         }
     }
 

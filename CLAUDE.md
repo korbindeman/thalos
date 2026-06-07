@@ -15,7 +15,7 @@ just game                 # cargo run -p thalos_game — ship in low Thalos orbi
 just game eva             # spawn on foot (EVA) on the Thalos surface instead
 just game landing         # powered-descent approach over dry Thalos land
 just game final           # low final approach over a flat dry Thalos patch
-just edit <body>          # cargo run -p thalos_planet_editor -- <body>
+just edit <body>          # cargo run -p thalos_body_editor -- <body>
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
 just build                # cargo build --workspace
@@ -269,32 +269,51 @@ skill so the next agent doesn't rediscover it from scratch.
 
 ## Architecture
 
+> **Crate-distillation refactor (see `docs/architecture.md`).**
+> Landed: (1) one authored source of truth for the world — `thalos_world`
+> (`BodyDefinition` + `OrbitalElements` + `StateVector` + the folded-in
+> atmosphere data schemas + RON parsing, extracted from `physics_canonical`,
+> which is now a true leaf depending on `world`); (2) a single celestial-body
+> render crate `thalos_body_render` (the former `planet_lighting`+
+> `planet_rendering`+`terrain_render` merged into `shading`/`impostor`/`ground`
+> modules behind one `BodyRenderPlugin`), which is also the sole consumer of the
+> vendored `thalos_udlod` (re-exported as `thalos_body_render::udlod`). Phases
+> 1–2 complete (compile-verified; not yet runtime-verified by a `just game`
+> launch). **Phase 3** — rename `planet_editor` → `body_editor` — is **done**.
+> Remaining: migrate "planet" → celestial-body terminology in the render layer.
+> Consult `docs/architecture.md` for phase status.
+
 Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 (edition 2024, Bevy 0.18, glam 0.30). Workspace crates:
 
-- **`thalos_physics_canonical`** — pure Rust library, zero Bevy dependency, fully testable in isolation
+- **`thalos_world`** — *(Phase 1, new)* authored source of truth for the system
+  and its bodies: `BodyDefinition`, `OrbitalElements`, `StateVector`, the RON
+  loader (`parsing`), and the body subsystem-config aggregate. Pure Rust, no
+  Bevy. Consumed by physics, terrain gen, and rendering.
+- **`thalos_physics_canonical`** — pure Rust orbital-mechanics algorithms +
+  runtime simulation state; depends on `thalos_world`. (Name contrasts with
+  `physics_local`/Avian, not a claim of being the foundation.)
 - **`thalos_input`** — Bevy enhanced-input contexts, RON binding loader, and per-binary input intent resources
 - **`thalos_game`** — Bevy consumer of physics + terrain outputs
 - **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
-- **`thalos_atmosphere`** — gas giant atmosphere definitions (cloud decks, hazes, rings; no Bevy dependency)
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
+
+  *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
 - **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. Fast descents are kept from tunneling through the terrain trimesh by `SweptCcd` on the craft body, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/landing.md`.
-- **`thalos_planet_lighting`** — shared planet lighting types (`SceneLighting`, `StarLight`, `AtmosphereBlock`, `CLOUD_BAND_COUNT`) + WGSL libraries (`thalos::lighting`, `thalos::atmosphere`) + the Hapke surface shading helper (`shade_hapke_surface`). Both `thalos_planet_rendering` and `thalos_terrain_render` depend on it.
-- **`thalos_planet_rendering`** — Bevy materials for planets, gas giants, rings, solid bodies
-- **`thalos_planet_editor`** — interactive planet editor tool
+- **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + two backends. Three modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render`. A backend chooses geometry, never its own lighting/atmosphere/cloud math.
+- **`thalos_body_editor`** — interactive celestial-body editor tool
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
-- **`thalos_terrain_render`** — Bevy integration of the in-tree `thalos_udlod` UDLOD renderer; ships `ThalosTerrainPlugin`, `PipelineTileProvider`, and rendered-height terrain patch utilities used by M5 colliders
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
 
-Core separation: `physics`, `terrain`, `atmosphere`, and `celestial`
-are pure Rust libraries; `input`, `game`, `planet_lighting`,
-`planet_rendering`, `terrain_render`, `physics_local`, `planet_editor`, and
-`shipyard` are Bevy consumers. `planet_lighting` sits below
-`planet_rendering` and `terrain` so both render paths share one source
-of truth for `SceneLighting`, `AtmosphereBlock`, and the surface BRDF;
-no field-by-field mirror types between crates. Avian lives behind
-`thalos_physics_local`; do not add Avian to `thalos_physics_canonical`.
+Core separation: `world`, `physics_canonical`, `terrain`, and
+`celestial` are pure Rust libraries; `input`, `game`, `body_render`,
+`physics_local`, `body_editor`, and `shipyard` are Bevy consumers. Within
+`body_render`, the `shading` module is the single source of truth for
+`SceneLighting`, `AtmosphereBlock`, and the surface BRDF that both the
+`impostor` and `ground` backends consume — no field-by-field mirror types.
+Avian lives behind `thalos_physics_local`; do not add Avian to
+`thalos_physics_canonical`.
 Semantic input for the Bevy binaries flows through `thalos_input`
 contexts and intent resources, with checked-in defaults at
 `assets/input.ron`.
@@ -352,10 +371,17 @@ Key modules:
 - `maneuver` — `ManeuverNode`: time, delta-v in local
   prograde/normal/radial frame, reference body. Plus frame-conversion
   helpers.
-- `parsing` — Loads `assets/solar_system.ron` plus per-body files at
+- `parsing` *(now in `thalos_world`; re-exported as
+  `thalos_physics_canonical::parsing` during the migration)* — Loads
+  `assets/solar_system.ron` plus per-body files at
   `assets/bodies/<lowercase_name>.ron` into `SolarSystemDefinition`.
   System-level file carries physical + orbital specs; per-body files
-  carry `terrain: TerrainConfig` and `tectonics: TectonicConfig`.
+  carry `terrain: TerrainConfig` and `tectonics: TectonicConfig`. The
+  authored `BodyDefinition`/`OrbitalElements`/`StateVector` types also
+  live in `thalos_world` now (see `docs/architecture.md`); the player's
+  debug spawn orbit is derived from `homeworld_id` via
+  `debug_orbits::debug_parking_orbit_relative_state`, not stored on
+  `SolarSystemDefinition`.
 
 ### Game crate (`crates/game/`)
 
@@ -593,55 +619,54 @@ Parametric ship editor. Bevy + egui.
   editor's staging preview (`ShipBlueprint::stage_summaries`) both call it,
   so stage boundaries never diverge. Like `stats`, no Bevy beyond glam math.
 
-### Planet lighting crate (`crates/planet_lighting/`)
+### Body render crate (`crates/body_render/`)
 
-Tiny shared crate that owns the data structures and WGSL libraries
-every planet-surface material reads from. No generation logic, no
-materials.
+Unified Bevy rendering for celestial bodies — one appearance model, two
+backends. No generation logic. Added via a single `BodyRenderPlugin`
+(which composes the three module sub-plugins). Three modules:
 
+**`shading`** — the single source of truth every body-surface material
+reads from. No materials of its own.
 - `PlanetLightingPlugin` — registers the `thalos::lighting` and
-  `thalos::atmosphere` shader libraries. Both `PlanetRenderingPlugin`
-  and `ThalosTerrainPlugin` add it defensively (no-op if already
-  added), so apps that pull only one of those still get the shared
-  libraries.
-- `SceneLighting` / `StarLight` / `MAX_STARS` / `MAX_ECLIPSE_OCCLUDERS`
-  — scene-level lighting (primary star, eclipse occluders, ambient,
-  planetshine parent).
-- `AtmosphereBlock` / `CLOUD_BAND_COUNT` — per-body atmosphere uniform
-  (Rayleigh + Mie + cloud bands + Minnaert limb).
-- `shaders/lighting.wgsl` — WGSL mirror of `SceneLighting` plus the
+  `thalos::atmosphere` shader libraries. The `impostor` and `ground`
+  sub-plugins also add it defensively (no-op if already added) so each
+  works standalone.
+- `SceneLighting` / `StarLight` / `MAX_STARS` / `MAX_ECLIPSE_OCCLUDERS`,
+  `AtmosphereBlock` / `CLOUD_BAND_COUNT` — scene + per-body uniforms.
+- `shaders/lighting.wgsl` — WGSL mirror of `SceneLighting` plus
   `eclipse_factor`, `planetshine_sample`, `hapke_brdf`, and
-  `shade_hapke_surface` helpers. Both the impostor and the thalos_udlod
-  ground LOD route through the same `shade_hapke_surface` function so
-  shading matches across the LOD swap.
+  `shade_hapke_surface`. Both backends route through the same
+  `shade_hapke_surface` so shading matches across the impostor↔ground
+  LOD swap.
 - `shaders/atmosphere.wgsl` — WGSL mirror of `AtmosphereBlock`,
-  `integrate_atmosphere`, `composite_clouds`, `apply_limb_darkening`,
-  and friends.
+  `integrate_atmosphere`, `composite_clouds`, `apply_limb_darkening`.
 
-`thalos_planet_rendering` re-exports `SceneLighting`, `AtmosphereBlock`,
-etc. so existing call sites in `thalos_game` and `thalos_planet_editor`
-keep resolving without churn.
-
-### Planet rendering crate (`crates/planet_rendering/`)
-
-Thin Bevy rendering layer. No generation logic.
-
+**`impostor`** — distant billboard materials.
 - `PlanetRenderingPlugin` — registers `PlanetMaterial`,
   `GasGiantMaterial`, `RingMaterial`, `SolidPlanetMaterial`.
-- `PlanetMaterial` — procedural-body impostor with cubemap
-  height/albedo textures. Uses `assets/shaders/planet_impostor.wgsl`.
-- `SolidPlanetMaterial` — solid-color billboard impostor for
-  non-procedural bodies. Uses `assets/shaders/solid_planet.wgsl`.
-- `GasGiantMaterial` — gas giant cloud/haze rendering. Uses
-  `assets/shaders/gas_giant.wgsl`.
-- `RingMaterial` — ring system rendering. Uses
-  `assets/shaders/ring.wgsl`.
+- `PlanetMaterial` (cubemap height/albedo, `assets/shaders/planet_impostor.wgsl`),
+  `SolidPlanetMaterial` (`solid_planet.wgsl`), `GasGiantMaterial`
+  (`gas_giant.wgsl`), `RingMaterial` (`ring.wgsl`). These four shaders
+  are AssetServer-loaded from the workspace `assets/shaders/` dir.
 - `bake_from_body_data()` — consumes `terrain::PlanetSurface` →
   `PlanetTextures` for upload into a `PlanetMaterial`.
 
-### Planet editor (`crates/planet_editor/`)
+**`ground`** — the `thalos_udlod`-backed terrain LOD (former
+`terrain_render`).
+- `ThalosTerrainPlugin` — adds `thalos_udlod::TerrainPlugin` +
+  `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, embedding
+  their `src/ground/*.wgsl` via `embedded://thalos_body_render/ground/…`.
+- `PipelineTileProvider`, `rendered_height_*`, the `HeightSource` family,
+  and rendered-height patch utilities used by M5 colliders.
 
-Standalone Bevy binary for interactive planet preview. Loads
+`body_render` is the **sole consumer** of the vendored `thalos_udlod`,
+re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no
+other crate depends on the fork directly. Replacing the ground backend stays
+localized to the `ground` module + that re-export.
+
+### Body editor (`crates/body_editor/`)
+
+Standalone Bevy binary for interactive celestial-body preview. Loads
 `solar_system.ron` + per-body files, selects a body, runs
 `compile_terrain_config`, renders with `PlanetMaterial` via billboard
 mesh. Uses `bevy_egui` for UI. Live rebake, sketch tool, tectonic
@@ -663,7 +688,7 @@ assets/solar_system.ron + assets/bodies/<body>.ron
 
 [terrain::compile_terrain_config]
   → PlanetSurface { static_surface, dynamic_layers, tectonics }
-  → [planet_rendering::bake_from_body_data] PlanetTextures
+  → [body_render::bake_from_body_data] PlanetTextures
   → PlanetMaterial uploaded to GPU; impostor billboard renders
 ```
 
@@ -688,11 +713,11 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   without touching simulation or rendering.
 - **Physics crate has no Bevy.** All physics logic must remain in
   `thalos_physics_canonical`. `thalos_game` is only presentation and input.
-  This extends to the other pure-Rust libraries (`thalos_terrain`,
-  `thalos_atmosphere`, `thalos_celestial`): none may pull in Bevy, even
+  This extends to the other pure-Rust libraries (`thalos_world`,
+  `thalos_terrain`, `thalos_celestial`): none may pull in Bevy, even
   transitively. The boundary is CI-guarded — `.github/workflows/ci.yml`
   runs a `cargo tree` check on every push/PR and fails if a real Bevy
-  crate enters any of the four trees. (`bevy_erosion_filter` is allowed:
+  crate enters any of those four trees. (`bevy_erosion_filter` is allowed:
   terrain uses its pure-glam `cpu` module with `default-features = false`,
   so the crate is present by name but pulls no Bevy engine crate — keep
   that flag.)
@@ -753,6 +778,12 @@ status, dependency graph. Each major system has a unified spec doc.
   (`SweptCcd` anti-tunneling), and whole-craft impact destruction
   (`ShipParameters::impact_tolerance_m_s` →
   `Simulation::is_destroyed`).
+- `construction.md` — next-gen shipyard / construction model design:
+  one Module primitive (end-node / footprint+morph / end-cap / host /
+  connector / reservation), stationed-loft fuselages and wings, a
+  separate internal/loadout layer (compartments, role-fills, cargo
+  doors), generalising the rocket-only shipyard to planes, ships, and
+  stations. Target: M6. Design-only, no code yet.
 - `input.md` — enhanced-input context model, binding file rules, and
   per-binary intent resources.
 - `terrain.md` — terrain generation (feature compiler) + ground LOD

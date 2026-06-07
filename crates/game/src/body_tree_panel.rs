@@ -10,7 +10,8 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
 use thalos_physics_canonical::canonical::AuthorityMode;
-use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyKind, VesselKind};
+use thalos_world::{BodyDefinition, BodyId, BodyKind};
+use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
 
 use crate::camera::{CameraFocus, CameraFocusTarget};

@@ -5,7 +5,8 @@ use thalos_physics_canonical::maneuver::{delta_v_to_world, orbital_frame};
 use thalos_physics_canonical::trajectory::{
     FlightPlan, NumericSegment, Trajectory, TrajectoryBranchStack,
 };
-use thalos_physics_canonical::types::{BodyId, BodyState, SolarSystemDefinition, TrajectorySample};
+use thalos_world::{BodyId, SolarSystemDefinition};
+use thalos_physics_canonical::types::{BodyState, TrajectorySample};
 
 use super::state::{GameNode, ManeuverPlan, NodeId, RailFrame, TrajectoryRail};
 use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
@@ -963,7 +964,7 @@ pub(super) fn overlay_marker_transform(
 mod tests {
     use super::*;
     use thalos_physics_canonical::trajectory::{BranchKind, Leg, TrajectoryBranch};
-    use thalos_physics_canonical::types::StateVector;
+    use thalos_world::StateVector;
 
     fn sample(time: f64) -> TrajectorySample {
         TrajectorySample {

@@ -18,7 +18,7 @@ game mode=env_var_or_default("THALOS_SPAWN", "orbit"):
 
 # Edit a planet's terrain. Usage: just edit auron
 edit body:
-    cargo run -p thalos_planet_editor -- {{body}}
+    cargo run -p thalos_body_editor -- {{body}}
 
 # Run the ship editor (shipyard crate)
 shipyard:

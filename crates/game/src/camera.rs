@@ -5,11 +5,12 @@ use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy_egui::EguiContexts;
 use big_space::prelude::CellCoord;
 use thalos_input::game::GameInputIntent;
-use thalos_physics_canonical::types::{BodyDefinition, BodyId, BodyState};
+use thalos_world::{BodyDefinition, BodyId};
+use thalos_physics_canonical::types::BodyState;
 use thalos_physics_local::TerrainSurfaceRegistry;
-use thalos_planet_rendering::space_camera_post_stack;
+use thalos_body_render::space_camera_post_stack;
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
-use thalos_terrain_render::rendered_height_m;
+use thalos_body_render::rendered_height_m;
 
 /// `tile_lod_m` passed to `rendered_height_m` for the camera boom's
 /// ray-vs-terrain check. The boom rarely runs in tight sub-metre proximity

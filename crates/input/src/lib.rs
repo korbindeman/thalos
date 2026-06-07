@@ -8,9 +8,9 @@
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::math::Vec2;
 
+pub mod body_editor;
 pub mod game;
 pub mod gating;
-pub mod planet_editor;
 pub mod settings;
 pub mod shipyard;
 

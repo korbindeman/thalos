@@ -26,7 +26,6 @@ pub mod debug_orbits;
 pub mod gravity_mode;
 pub mod maneuver;
 pub mod orbital_math;
-pub mod parsing;
 pub mod patched_conics;
 pub mod ship_propagator;
 pub mod simulation;

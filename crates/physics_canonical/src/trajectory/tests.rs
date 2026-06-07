@@ -21,8 +21,8 @@ use crate::maneuver::{ManeuverNode, ManeuverSequence};
 use crate::patched_conics::PatchedConics;
 use crate::ship_propagator::KeplerianPropagator;
 use crate::types::{
-    BodyDefinition, BodyKind, G, OrbitalElements, ShipDefinition, SolarSystemDefinition,
-    StateVector, TrajectorySample,
+    BodyDefinition, BodyKind, G, OrbitalElements, SolarSystemDefinition, StateVector,
+    TrajectorySample,
 };
 
 /// Local helper that mirrors the old `propagate_trajectory` convenience so the
@@ -143,7 +143,7 @@ fn make_single_star_system() -> SolarSystemDefinition {
         gm: G * star_mass,
         soi_radius_m: f64::INFINITY,
         orbital_elements: None,
-        terrain: thalos_terrain::TerrainConfig::None,
+        terrain: thalos_world::TerrainConfig::None,
         tectonics: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
@@ -157,13 +157,18 @@ fn make_single_star_system() -> SolarSystemDefinition {
     SolarSystemDefinition {
         name: "Test".to_string(),
         bodies: vec![star],
-        ship: ShipDefinition {
-            initial_state: StateVector {
-                position: DVec3::new(1.0e11, 0.0, 0.0),
-                velocity: DVec3::new(0.0, 1000.0, 0.0),
-            },
-        },
         name_to_id,
+        homeworld_id: 0,
+    }
+}
+
+/// The craft start state the single-star fixture used to carry on its
+/// `ShipDefinition`; kept as a fixture helper now that spawn state is no
+/// longer part of `SolarSystemDefinition`.
+fn single_star_ship_state() -> StateVector {
+    StateVector {
+        position: DVec3::new(1.0e11, 0.0, 0.0),
+        velocity: DVec3::new(0.0, 1000.0, 0.0),
     }
 }
 
@@ -182,7 +187,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
         gm: SUN_GM,
         soi_radius_m: f64::INFINITY,
         orbital_elements: None,
-        terrain: thalos_terrain::TerrainConfig::None,
+        terrain: thalos_world::TerrainConfig::None,
         tectonics: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
@@ -211,7 +216,7 @@ fn make_star_and_planet() -> (BodyDefinition, BodyDefinition, f64) {
             arg_periapsis_rad: 0.0,
             true_anomaly_rad: 0.0,
         }),
-        terrain: thalos_terrain::TerrainConfig::None,
+        terrain: thalos_world::TerrainConfig::None,
         tectonics: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
@@ -232,13 +237,8 @@ fn make_thalos_like_system() -> SolarSystemDefinition {
     SolarSystemDefinition {
         name: "ThalosTest".to_string(),
         bodies: vec![sun, thalos],
-        ship: ShipDefinition {
-            initial_state: StateVector {
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-            },
-        },
         name_to_id,
+        homeworld_id: 1,
     }
 }
 
@@ -413,8 +413,9 @@ fn maneuver_is_integrated_as_finite_burn() {
         reference_body: 0,
     });
 
+    let ship_start = single_star_ship_state();
     let prediction = propagate_trajectory(
-        system.ship.initial_state,
+        ship_start,
         0.0,
         &maneuvers,
         Arc::clone(&ephemeris),
@@ -436,7 +437,7 @@ fn maneuver_is_integrated_as_finite_burn() {
         .iter()
         .find(|s| s.time > 0.0)
         .expect("expected at least one post-start sample");
-    let delta_speed = (mid_sample.velocity - system.ship.initial_state.velocity).length();
+    let delta_speed = (mid_sample.velocity - ship_start.velocity).length();
 
     assert!(
         delta_speed < 2.0,
@@ -975,7 +976,7 @@ fn make_thalos_mira_system() -> SolarSystemDefinition {
             arg_periapsis_rad: 0.0,
             true_anomaly_rad: 0.0,
         }),
-        terrain: thalos_terrain::TerrainConfig::None,
+        terrain: thalos_world::TerrainConfig::None,
         tectonics: None,
         atmosphere: None,
         terrestrial_atmosphere: None,
@@ -991,13 +992,8 @@ fn make_thalos_mira_system() -> SolarSystemDefinition {
     SolarSystemDefinition {
         name: "ThalosMiraTest".to_string(),
         bodies: vec![sun, thalos, mira],
-        ship: ShipDefinition {
-            initial_state: StateVector {
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-            },
-        },
         name_to_id,
+        homeworld_id: 1,
     }
 }
 
@@ -1220,7 +1216,7 @@ fn encounter_enrichment_reports_flyby_for_hyperbolic_pass() {
 /// the surface must terminate in exactly one `StableOrbit` closure.
 #[test]
 fn game_default_state_produces_stable_orbit() {
-    use crate::parsing::load_solar_system_from_dir;
+    use thalos_world::parsing::load_solar_system_from_dir;
     let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
     let system = match load_solar_system_from_dir(&assets) {
         Ok(s) => s,
@@ -1230,7 +1226,7 @@ fn game_default_state_produces_stable_orbit() {
 
     let homeworld_id = system.name_to_id["Thalos"];
     let homeworld_state = ephemeris.state(homeworld_id, crate::canonical::Epoch(0.0));
-    let rel = system.ship.initial_state;
+    let rel = crate::debug_orbits::debug_parking_orbit_relative_state(&system.bodies[homeworld_id]);
     let ship_state = StateVector {
         position: homeworld_state.position + rel.position,
         velocity: homeworld_state.velocity + rel.velocity,

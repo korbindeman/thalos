@@ -36,6 +36,7 @@ mod spawn;
 mod staging;
 mod star_flare;
 mod target;
+mod terrain_registry;
 mod velocity_frame;
 mod view;
 mod warp_to_maneuver;
@@ -57,13 +58,14 @@ use thalos_input::settings::InputSettings;
 use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::{AuthorityMode, Epoch, WorldPhysicsConfig},
+    debug_orbits::debug_parking_orbit_relative_state,
     gravity_mode::GravityMode,
-    parsing::load_solar_system_from_dir,
     simulation::{Simulation, SimulationConfig},
-    terrain_provider::SharedTerrainRegistry,
-    types::{AttitudeState, ShipParameters, StateVector, VesselKind},
+    types::{AttitudeState, ShipParameters, VesselKind},
 };
-use thalos_terrain_render::ThalosTerrainPlugin;
+use thalos_body_render::BodyRenderPlugin;
+use thalos_world::StateVector;
+use thalos_world::parsing::load_solar_system_from_dir;
 
 use autopilot::AutopilotPlugin;
 use body_tree_panel::BodyTreePanelPlugin;
@@ -95,7 +97,7 @@ use sim_clock::SimClockPlugin;
 use solar_system_state::{SimulationState, SolarSystemStatePlugin};
 use spawn::{SpawnPlugin, SpawnSituation};
 use target::TargetPlugin;
-use thalos_planet_rendering::PlanetRenderingPlugin;
+use terrain_registry::SharedTerrainRegistry;
 use view::ViewPlugin;
 use warp_to_maneuver::WarpToManeuverPlugin;
 
@@ -126,7 +128,7 @@ const RUNTIME_TIME_SPAN: f64 = 3.156e11;
 /// `Arc<RwLock<...>>` as the propagator's terrain provider — inserting a
 /// surface here is immediately visible to the propagator's collision
 /// detection. The wrapper exists because `Resource` is a Bevy derive and
-/// `SharedTerrainRegistry` lives in the pure-Rust `thalos_physics_canonical` crate.
+/// `SharedTerrainRegistry` (in `terrain_registry`) is plain non-Bevy code.
 #[derive(Resource, Clone)]
 pub struct GameTerrainRegistry(pub SharedTerrainRegistry);
 
@@ -291,8 +293,8 @@ fn main() {
     //    the player either way — KSP-style: one craft, Ship or EVA,
     //    distinguished by `VesselKind`.
     //
-    //    - `orbit` (default): the ship in a low Thalos parking orbit, the
-    //      authored `system.ship.initial_state`.
+    //    - `orbit` (default): the ship in a low Thalos parking orbit, derived
+    //      from the homeworld via `debug_parking_orbit_relative_state`.
     //    - `eva`: the player on foot at the Thalos sub-stellar point. The
     //      pose is a body-fixed direction plus a safe drop margin above the
     //      body radius; terrain heights aren't known yet (the registry is
@@ -364,7 +366,9 @@ fn main() {
         // the loading screen: `spawn::refine_descent_spawn` swaps in the
         // terrain-aware approach state on the first `Running` frame, once
         // heights are available to place the ship above ground over land.
-        let rel = system.ship.initial_state;
+        // The parking orbit is derived from the homeworld (a debug spawn, not
+        // authored world data) rather than stored on `SolarSystemDefinition`.
+        let rel = debug_parking_orbit_relative_state(homeworld);
         // Level orbital flight: nose along prograde, dorsal radial-out, shared
         // with the navball and control axes so "upright" stays aligned. Real
         // ship params (MOI, torque, masses) are pushed in by `spawn_player_ship`
@@ -438,10 +442,12 @@ fn main() {
                     ..default()
                 }),
         )
-        // `ThalosTerrainPlugin` wraps `thalos_udlod::TerrainPlugin`, which
-        // adds `BigSpaceDefaultPlugins` unconditionally. Adding the plugin
-        // again here would panic on duplicate registration.
-        .add_plugins(ThalosTerrainPlugin)
+        // `BodyRenderPlugin` adds the ground terrain stack
+        // (`thalos_udlod::TerrainPlugin`, which adds `BigSpaceDefaultPlugins`
+        // unconditionally) plus impostor materials and shared shading
+        // libraries. Adding it again here would panic on duplicate
+        // registration.
+        .add_plugins(BodyRenderPlugin)
         // BRP server (port 15702) for agent-driven inspection / mutation.
         // Always on in dev; the listener is idle when no client is
         // connected. See docs/tooling.md for the MCP workflow.
@@ -501,7 +507,6 @@ fn main() {
             require_markers: true,
             ..default()
         })
-        .add_plugins(PlanetRenderingPlugin)
         .add_plugins(GameInputPlugin)
         .add_plugins(GameInputGatePlugin)
         .add_plugins(SimClockPlugin)

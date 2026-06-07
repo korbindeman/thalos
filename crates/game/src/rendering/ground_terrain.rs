@@ -20,19 +20,20 @@ use bevy::prelude::*;
 use big_space::grid::Grid;
 use big_space::prelude::CellCoord;
 use thalos_physics_canonical::canonical::AuthorityMode;
-use thalos_physics_canonical::types::{BodyDefinition, BodyId, VesselKind};
-use thalos_planet_rendering::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
+use thalos_world::{BodyDefinition, BodyId};
+use thalos_physics_canonical::types::VesselKind;
+use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_shipyard::{Adapter, AttachNodes, CommandPod, Decoupler, Engine, FuelTank, Part};
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
-use thalos_terrain_render::{
+use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
     BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent,
     GpuAtlasMirrorHandle,
     MAX_TERRAIN_SHADOW_CASTERS, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
     rendered_height_range,
 };
-use thalos_udlod::math::TileCoordinate;
-use thalos_udlod::prelude::*;
+use thalos_body_render::udlod::math::TileCoordinate;
+use thalos_body_render::udlod::prelude::*;
 
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
@@ -965,7 +966,7 @@ pub(super) fn update_body_terrain_atmosphere(
     // translations directly without an extra origin/scale transform.
     let mut occluders: Vec<(BodyId, Vec3, f32)> = Vec::with_capacity(sim.system.bodies.len());
     for (i, body) in sim.system.bodies.iter().enumerate() {
-        if matches!(body.kind, thalos_physics_canonical::types::BodyKind::Star)
+        if matches!(body.kind, thalos_world::BodyKind::Star)
             || body.radius_m < 1.0
         {
             continue;
@@ -1136,8 +1137,8 @@ fn build_terrain_scene_lighting(
     states: &thalos_physics_canonical::types::BodyStates,
     occluders: &[(BodyId, Vec3, f32)],
     gain: f32,
-) -> thalos_planet_rendering::SceneLighting {
-    use thalos_planet_rendering::{MAX_ECLIPSE_OCCLUDERS, SceneLighting, StarLight};
+) -> thalos_body_render::SceneLighting {
+    use thalos_body_render::{MAX_ECLIPSE_OCCLUDERS, SceneLighting, StarLight};
 
     let mut scene = SceneLighting::default();
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();

@@ -27,7 +27,8 @@ use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
 
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
-use thalos_physics_canonical::types::{BodyId, ShipParameters, VesselKind};
+use thalos_world::BodyId;
+use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
 
 use crate::debug::DebugLaunchMount;
@@ -398,18 +399,21 @@ fn respawn_into(
     info!("respawned into {situation:?}");
 }
 
-/// The authored Thalos parking orbit at the current epoch — the `just game`
+/// The Thalos debug parking orbit at the current epoch — the `just game`
 /// default start, rebuilt for a respawn.
 fn orbit_respawn_state(
     sim: &SimulationState,
     homeworld: BodyId,
 ) -> (
-    thalos_physics_canonical::types::StateVector,
+    thalos_world::StateVector,
     thalos_physics_canonical::types::AttitudeState,
 ) {
     let epoch = Epoch(sim.simulation.sim_time());
     let homeworld_state = sim.ephemeris.state(homeworld, epoch);
-    orbit_parking_state(sim.system.ship.initial_state, &homeworld_state)
+    let rel = thalos_physics_canonical::debug_orbits::debug_parking_orbit_relative_state(
+        &sim.system.bodies[homeworld],
+    );
+    orbit_parking_state(rel, &homeworld_state)
 }
 
 /// Despawn the active bubble's craft body (and any attached terrain patch) and

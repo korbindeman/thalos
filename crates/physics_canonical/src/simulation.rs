@@ -1012,7 +1012,7 @@ impl Simulation {
 mod tests {
     use super::*;
     use crate::gravity_mode::GravityMode;
-    use crate::types::{BodyDefinition, BodyKind, ShipDefinition, SolarSystemDefinition};
+    use crate::types::{BodyDefinition, BodyKind, SolarSystemDefinition};
     use std::collections::HashMap;
 
     fn ctrl() -> WarpController {
@@ -1033,31 +1033,25 @@ mod tests {
             gm: crate::types::G * 1.0e30,
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
-            terrain: thalos_terrain::TerrainConfig::None,
+            terrain: thalos_world::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
             rings: None,
             surface_frame_ceiling_m: None,
         }];
+        let ship_state = StateVector {
+            position: DVec3::X * 1.0e9,
+            velocity: DVec3::Z * 1000.0,
+        };
         let system = SolarSystemDefinition {
             name: "Test".to_string(),
             bodies: bodies.clone(),
-            ship: ShipDefinition {
-                initial_state: StateVector {
-                    position: DVec3::X * 1.0e9,
-                    velocity: DVec3::Z * 1000.0,
-                },
-            },
             name_to_id: HashMap::from([("Pyros".to_string(), 0)]),
+            homeworld_id: 0,
         };
         let impls = GravityMode::PatchedConics.build(&system, 1.0e6);
-        Simulation::new(
-            system.ship.initial_state,
-            impls,
-            bodies,
-            SimulationConfig::default(),
-        )
+        Simulation::new(ship_state, impls, bodies, SimulationConfig::default())
     }
 
     #[test]

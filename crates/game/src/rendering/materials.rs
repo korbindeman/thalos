@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 use thalos_physics_canonical::types::BodyStates;
-use thalos_planet_rendering::{GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial};
+use thalos_body_render::{GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial};
 
 use super::lighting::{build_scene_lighting, collect_occluders};
 use super::types::{

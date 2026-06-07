@@ -11,7 +11,7 @@ shipyard pinch gestures.
 `thalos_input` is a Bevy-facing workspace crate shared by:
 
 - `thalos_game`
-- `thalos_planet_editor`
+- `thalos_body_editor`
 - `thalos_shipyard`'s `ship_editor` binary
 
 The crate owns:
@@ -25,13 +25,13 @@ The crate owns:
 Gameplay systems consume intent resources, not `ButtonInput`:
 
 - `GameInputIntent`
-- `PlanetEditorInputIntent`
+- `BodyEditorInputIntent`
 - `ShipyardInputIntent`
 
 ## Binding File
 
 `assets/input.ron` is the editable source of default bindings. It uses
-`version: 1` and separate sections for `game`, `planet_editor`, and
+`version: 1` and separate sections for `game`, `body_editor`, and
 `shipyard`. Missing individual actions fall back to code defaults.
 Unknown action names, unknown axis names, and unknown source names fail
 load with an error that includes the binding path.

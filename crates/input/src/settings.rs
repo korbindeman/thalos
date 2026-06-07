@@ -12,7 +12,7 @@ pub const INPUT_SETTINGS_VERSION: u32 = 1;
 pub struct InputSettings {
     pub version: u32,
     pub game: GameInputSettings,
-    pub planet_editor: BindingSection,
+    pub body_editor: BindingSection,
     pub shipyard: BindingSection,
 }
 
@@ -21,7 +21,7 @@ impl Default for InputSettings {
         Self {
             version: INPUT_SETTINGS_VERSION,
             game: GameInputSettings::default(),
-            planet_editor: defaults::planet_editor(),
+            body_editor: defaults::body_editor(),
             shipyard: defaults::shipyard(),
         }
     }
@@ -52,7 +52,7 @@ impl InputSettings {
             ..Default::default()
         };
         settings.game.merge(file.game);
-        settings.planet_editor.merge(file.planet_editor);
+        settings.body_editor.merge(file.body_editor);
         settings.shipyard.merge(file.shipyard);
         Ok(settings)
     }
@@ -156,9 +156,9 @@ fn validate_file(file: &InputFile) -> Result<(), InputSettingsError> {
         &defaults.game.maneuver_precision,
     )?;
     validate_section_file(
-        "planet_editor",
-        &file.planet_editor,
-        &defaults.planet_editor,
+        "body_editor",
+        &file.body_editor,
+        &defaults.body_editor,
     )?;
     validate_section_file("shipyard", &file.shipyard, &defaults.shipyard)?;
     Ok(())
@@ -199,7 +199,7 @@ pub struct InputFile {
     #[serde(default)]
     pub game: GameInputFile,
     #[serde(default)]
-    pub planet_editor: BindingSectionFile,
+    pub body_editor: BindingSectionFile,
     #[serde(default)]
     pub shipyard: BindingSectionFile,
 }
@@ -459,7 +459,7 @@ pub mod defaults {
         )
     }
 
-    pub fn planet_editor() -> BindingSection {
+    pub fn body_editor() -> BindingSection {
         section(
             [
                 ("primary", mouse_buttons([MouseButton::Left])),
@@ -545,7 +545,7 @@ mod tests {
                 .is_empty()
         );
         assert!(!settings.game.eva_move.axis_positive("forward").is_empty());
-        assert!(!settings.planet_editor.bindings("camera_motion").is_empty());
+        assert!(!settings.body_editor.bindings("camera_motion").is_empty());
         assert!(!settings.shipyard.bindings("primary").is_empty());
     }
 

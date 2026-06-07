@@ -1,0 +1,14 @@
+[package]
+name = "thalos_body_editor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_physics_canonical = { path = "../physics_canonical" }
+thalos_world = { path = "../world" }
+thalos_input = { path = "../input" }
+thalos_terrain = { path = "../terrain" }
+thalos_body_render = { path = "../body_render" }
+thalos_celestial = { path = "../celestial" }
+bevy = { version = "0.18", features = ["wayland", "jpeg"] }
+bevy_egui = "0.39"

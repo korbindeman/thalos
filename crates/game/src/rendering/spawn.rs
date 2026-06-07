@@ -26,8 +26,8 @@ use bevy::math::DQuat;
 use bevy::prelude::*;
 use big_space::prelude::Grid;
 use thalos_physics_canonical::canonical::Epoch;
-use thalos_physics_canonical::types::BodyKind;
-use thalos_planet_rendering::{
+use thalos_world::BodyKind;
+use thalos_body_render::{
     AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, MULTI_SCATTER_LUT_HEIGHT,
     MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial, RingParams, SceneLighting,
     SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut, build_ring_mesh,
@@ -37,8 +37,8 @@ use thalos_terrain::{
     DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
     TerrainConfig, cache, compile_dynamic_surface_layers, compile_tectonics_from_config,
 };
-use thalos_terrain_render::{BodySkyExtra, BodySkyMaterial};
-use thalos_udlod::prelude::PreciseRotation;
+use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
+use thalos_body_render::udlod::prelude::PreciseRotation;
 
 use super::generation::{
     PendingPlanetInstall, PendingPlanetInstalls, PlanetBakeOutput, WorldStateAssets,
@@ -76,7 +76,7 @@ fn local_bake_dir() -> std::path::PathBuf {
 /// Bake the atmosphere's multi-scatter LUT and upload it as a small
 /// linear-sampled image for `BodySkyMaterial` / `body_sky.wgsl`.
 ///
-/// The bake (`thalos_planet_lighting::bake_multi_scatter_lut`) emits RGBA f32,
+/// The bake (`thalos_body_render::bake_multi_scatter_lut`) emits RGBA f32,
 /// but f32 textures are not linear-filterable without the `FLOAT32_FILTERABLE`
 /// wgpu feature (which this project does not request). The LUT is a smooth,
 /// low-dynamic-range radiance field, so we repack to `Rgba16Float` — filterable

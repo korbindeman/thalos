@@ -55,7 +55,7 @@ use glam::{DVec3, Vec3};
 use image::{ImageBuffer, RgbImage};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use thalos_physics_canonical::parsing::load_solar_system_from_dir;
+use thalos_world::parsing::load_solar_system_from_dir;
 use thalos_terrain::cubemap::{CubemapFace, dir_to_face_uv};
 use thalos_terrain::{
     BodyArchetype, BoundaryKind, ColdDesertField, DynamicSurfaceState, FeatureId,
@@ -196,7 +196,7 @@ fn main() {
         .unwrap_or_else(|| std::path::Path::new("assets"));
     let system = load_solar_system_from_dir(root_path).expect("parsing solar system");
 
-    let targets: Vec<&thalos_physics_canonical::types::BodyDefinition> =
+    let targets: Vec<&thalos_world::BodyDefinition> =
         if args.body_arg.eq_ignore_ascii_case("all") {
             let mut v: Vec<_> = system
                 .bodies
@@ -305,7 +305,7 @@ fn main() {
 /// the user-facing failure message, so no further output is needed here.
 #[allow(clippy::too_many_arguments)]
 fn bake_one(
-    body: &thalos_physics_canonical::types::BodyDefinition,
+    body: &thalos_world::BodyDefinition,
     out_dir: &Path,
     preview: bool,
     force: bool,
@@ -446,7 +446,7 @@ fn progress_style() -> ProgressStyle {
 /// the cache key we'd produce now? Returns `false` on any failure
 /// (missing file, decode error, mismatched key) so callers fall through
 /// to the full recompile + overwrite.
-fn local_bake_is_up_to_date(body: &thalos_physics_canonical::types::BodyDefinition) -> bool {
+fn local_bake_is_up_to_date(body: &thalos_world::BodyDefinition) -> bool {
     let context = terrain_context(body);
     // Production options — must match the values `run_terrain` uses in
     // non-preview mode, otherwise the keys diverge and we'd never see a
@@ -470,7 +470,7 @@ fn local_bake_is_up_to_date(body: &thalos_physics_canonical::types::BodyDefiniti
 }
 
 fn terrain_context(
-    body: &thalos_physics_canonical::types::BodyDefinition,
+    body: &thalos_world::BodyDefinition,
 ) -> TerrainCompileContext {
     TerrainCompileContext {
         body_name: body.name.clone(),
@@ -478,7 +478,7 @@ fn terrain_context(
         gravity_m_s2: (body.gm / (body.radius_m * body.radius_m)) as f32,
         rotation_hours: None,
         obliquity_deg: Some((body.axial_tilt_rad as f32).to_degrees()),
-        tidal_axis: matches!(body.kind, thalos_physics_canonical::types::BodyKind::Moon)
+        tidal_axis: matches!(body.kind, thalos_world::BodyKind::Moon)
             .then_some(Vec3::Z),
         axial_tilt_rad: body.axial_tilt_rad as f32,
     }
@@ -514,7 +514,7 @@ fn store_status_label(status: StoreStatus) -> &'static str {
 /// Debug set (`--debug`): material-id, plus biome/suture for cold-desert bodies.
 fn dump_all_in_parallel(
     surface: &PlanetSurface,
-    body_def: &thalos_physics_canonical::types::BodyDefinition,
+    body_def: &thalos_world::BodyDefinition,
     out: &Path,
     equirect_w: u32,
     debug: bool,
@@ -736,7 +736,7 @@ fn smoothstep_scalar(edge0: f32, edge1: f32, x: f32) -> f32 {
 }
 
 fn cold_desert_biome_field(
-    body: &thalos_physics_canonical::types::BodyDefinition,
+    body: &thalos_world::BodyDefinition,
 ) -> Option<ColdDesertField> {
     let TerrainConfig::Feature(feature) = &body.terrain else {
         return None;

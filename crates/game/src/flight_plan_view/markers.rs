@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use thalos_physics_canonical::trajectory::{
     EncounterId, FlightPlan, NumericSegment, Trajectory, TrajectoryEventKind,
 };
-use thalos_physics_canonical::types::BodyId;
+use thalos_world::BodyId;
 
 use crate::camera::ActiveCamera;
 use crate::coords::{RenderOrigin, WorldScale, sample_render_pos};
@@ -736,7 +736,8 @@ mod tests {
     use thalos_physics_canonical::trajectory::{
         CaptureStatus, ClosestApproach, Encounter, Leg, TrajectoryEvent,
     };
-    use thalos_physics_canonical::types::{BodyState, StateVector, TrajectorySample};
+    use thalos_world::StateVector;
+    use thalos_physics_canonical::types::{BodyState, TrajectorySample};
 
     use crate::coords::RenderGhostFocus;
     use crate::map_view::ProjectedBodyState;

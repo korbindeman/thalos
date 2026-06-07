@@ -73,7 +73,7 @@ mod tests {
             gm: EARTH_GM,
             soi_radius_m: 1.0e9,
             orbital_elements: None,
-            terrain: thalos_terrain::TerrainConfig::None,
+            terrain: thalos_world::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,

@@ -1,9 +1,0 @@
-[package]
-name = "thalos_planet_lighting"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-thalos_atmosphere = { path = "../atmosphere" }
-bevy = { version = "0.18", features = ["wayland", "jpeg"] }
-glam = "0.30.10"

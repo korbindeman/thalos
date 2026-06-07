@@ -50,8 +50,8 @@ pub use transforms::{update_render_frame, update_render_origin};
 pub use types::{CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, ShipMarker};
 
 use bevy::prelude::*;
-pub use thalos_planet_rendering::ReferenceClouds;
-use thalos_planet_rendering::{convert_reference_clouds_when_ready, load_reference_cloud_sources};
+pub use thalos_body_render::ReferenceClouds;
+use thalos_body_render::{convert_reference_clouds_when_ready, load_reference_cloud_sources};
 
 use crate::SimStage;
 use crate::solar_system_state::sync_solar_system_state;

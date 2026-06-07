@@ -1,8 +1,0 @@
-[package]
-name = "thalos_atmosphere"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-glam = { version = "0.30.10", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }

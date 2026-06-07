@@ -1,18 +1,16 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/world",
     "crates/physics_canonical",
     "crates/terrain",
-    "crates/atmosphere",
     "crates/celestial",
     "crates/input",
-    "crates/planet_lighting",
-    "crates/planet_rendering",
-    "crates/planet_editor",
+    "crates/body_render",
+    "crates/body_editor",
     "crates/game",
     "crates/shipyard",
     "crates/bake_dump",
-    "crates/terrain_render",
     "crates/udlod",
     "crates/physics_local",
 ]

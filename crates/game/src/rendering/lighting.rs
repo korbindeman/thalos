@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use thalos_physics_canonical::types::BodyStates;
-use thalos_planet_rendering::{
+use thalos_body_render::{
     AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, PlanetHaloMaterial, PlanetMaterial,
     SceneLighting, SolidPlanetMaterial, StarLight,
 };
@@ -262,7 +262,7 @@ pub(super) fn update_planet_light_dirs(
                 let parent_def = &body_defs[parent_id];
                 if !matches!(
                     parent_def.kind,
-                    thalos_physics_canonical::types::BodyKind::Star
+                    thalos_world::BodyKind::Star
                 ) && let Some(parent_state) = states.get(parent_id)
                     && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {
@@ -372,7 +372,7 @@ pub(super) fn update_solid_planet_params(
                 let parent_def = &body_defs[parent_id];
                 if !matches!(
                     parent_def.kind,
-                    thalos_physics_canonical::types::BodyKind::Star
+                    thalos_world::BodyKind::Star
                 ) && let Some(parent_state) = states.get(parent_id)
                     && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {

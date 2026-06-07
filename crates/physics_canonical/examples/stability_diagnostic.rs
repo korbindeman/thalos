@@ -7,8 +7,8 @@
 //! Run from the workspace root:
 //!     cargo run -p thalos_physics_canonical --example stability_diagnostic
 
-use thalos_physics_canonical::parsing::load_solar_system;
-use thalos_physics_canonical::types::{AU_TO_METERS, BodyDefinition, BodyKind};
+use thalos_world::parsing::load_solar_system;
+use thalos_world::{AU_TO_METERS, BodyDefinition, BodyKind};
 
 fn main() {
     let ron_src =

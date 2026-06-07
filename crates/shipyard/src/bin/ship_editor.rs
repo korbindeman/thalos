@@ -259,7 +259,7 @@ fn main() {
                 })
                 .set(bevy::asset::AssetPlugin {
                     // Resolve shaders from the workspace-root `assets/` dir,
-                    // matching `thalos_game` and `thalos_planet_editor`.
+                    // matching `thalos_game` and `thalos_body_editor`.
                     file_path: "../../assets".to_string(),
                     ..default()
                 }),

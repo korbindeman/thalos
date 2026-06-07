@@ -7,7 +7,8 @@ edition.workspace = true
 avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f64", "parry-f64", "parallel"] }
 bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 thalos_physics_canonical = { path = "../physics_canonical" }
-thalos_terrain_render = { path = "../terrain_render" }
+thalos_world = { path = "../world" }
+thalos_body_render = { path = "../body_render" }
 thalos_terrain = { path = "../terrain" }
 
 [dev-dependencies]

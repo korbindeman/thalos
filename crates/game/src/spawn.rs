@@ -23,9 +23,10 @@ use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
-use thalos_physics_canonical::types::{AttitudeState, BodyId, BodyState, StateVector};
+use thalos_world::{BodyId, StateVector};
+use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
-use thalos_terrain_render::HeightSource;
+use thalos_body_render::HeightSource;
 
 use crate::SimStage;
 use crate::loading::AppState;

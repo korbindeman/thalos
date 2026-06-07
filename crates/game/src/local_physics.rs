@@ -11,7 +11,8 @@ use thalos_physics_canonical::body_fixed::body_fixed_pose_from_inertial;
 use thalos_physics_canonical::canonical::{
     AuthorityMode, BodyFixedPose, EntityRef, TranslationalState,
 };
-use thalos_physics_canonical::types::{AttitudeState, BodyId, BodyState, VesselKind};
+use thalos_world::BodyId;
+use thalos_physics_canonical::types::{AttitudeState, BodyState, VesselKind};
 use thalos_physics_local::avian::{
     AngularVelocity, Collider, ConstantAngularAcceleration, ConstantLinearAcceleration,
     ContactGraph, CustomPositionIntegration, LinearVelocity, LockedAxes, Physics, PhysicsTime,
@@ -26,7 +27,7 @@ use thalos_physics_local::{
 use thalos_shipyard::{
     Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part,
 };
-use thalos_terrain_render::HeightSource;
+use thalos_body_render::HeightSource;
 
 use crate::SimStage;
 use crate::bridge::WarpLimits;
@@ -353,7 +354,7 @@ fn body_state_for(sim: &SimulationState, body_id: BodyId) -> BodyState {
 }
 
 fn agl_above_rendered_surface(
-    body: &thalos_physics_canonical::types::BodyDefinition,
+    body: &thalos_world::BodyDefinition,
     body_state: &BodyState,
     height_source: &dyn HeightSource,
     ship_position: DVec3,
@@ -564,7 +565,7 @@ fn spawn_player_avian_body(
         terrain_entity: None,
         center_dir_body: DVec3::Y,
         center_surface_body_m: DVec3::ZERO,
-        basis: thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y),
+        basis: thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y),
         patch_half_extent_m: 0.0,
         stable_contact_s: 0.0,
         stable_landed: false,
@@ -634,7 +635,7 @@ fn rebase_bubble_to_dominant_body(
     }
     bubble.center_dir_body = DVec3::Y;
     bubble.center_surface_body_m = DVec3::ZERO;
-    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
+    bubble.basis = thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y);
     bubble.stable_contact_s = 0.0;
     bubble.stable_landed = false;
     let old_body_id = bubble.body_id;
@@ -899,7 +900,7 @@ fn clear_terrain_patch(commands: &mut Commands, bubble: &mut LocalBubble) {
     }
     bubble.center_dir_body = DVec3::Y;
     bubble.center_surface_body_m = DVec3::ZERO;
-    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
+    bubble.basis = thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y);
     bubble.patch_half_extent_m = 0.0;
     bubble.terrain_built_at_revision = 0;
 }
@@ -1835,7 +1836,7 @@ pub(crate) fn place_eva_on_surface(
     bubble.body_id = body_id;
     bubble.center_dir_body = DVec3::Y;
     bubble.center_surface_body_m = DVec3::ZERO;
-    bubble.basis = thalos_terrain_render::TerrainPatchBasis::from_normal(DVec3::Y);
+    bubble.basis = thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y);
     bubble.stable_contact_s = 0.0;
     bubble.stable_landed = false;
 
@@ -1868,7 +1869,7 @@ fn bubble_frame_to_inertial(
 }
 
 fn level_attitude_for_body_dir(body_orientation: DQuat, up_body: DVec3) -> DQuat {
-    let basis = thalos_terrain_render::TerrainPatchBasis::from_normal(up_body);
+    let basis = thalos_body_render::TerrainPatchBasis::from_normal(up_body);
     let nose_body = basis.tangent_z;
     let dorsal_body = up_body.normalize();
     let right_body = nose_body.cross(dorsal_body).normalize();
@@ -2046,7 +2047,7 @@ mod tests {
     use super::*;
     use thalos_physics_canonical::canonical::Epoch;
     use thalos_physics_canonical::types::BodyState;
-    use thalos_terrain_render::{TerrainPatchBasis, TerrainPatchMesh};
+    use thalos_body_render::{TerrainPatchBasis, TerrainPatchMesh};
 
     #[test]
     fn bubble_frame_round_trip_preserves_aggregate_state() {

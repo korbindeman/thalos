@@ -204,8 +204,9 @@ surface-to-orbit ascent vehicles, possibly atmospheric planes.
   correct, but terrain contact after in-bubble staging sees a stale
   shape. Test vehicle: `ships/saturn.ron`.
 - **Spec preview:** [simulation.md](simulation.md), Implementation
-  Phase 6 + atmospheric regime section. Ship-parts spec spun out when
-  the design is concrete.
+  Phase 6 + atmospheric regime section. The advanced-ship construction
+  model (airframes/fuselages/wings/modules, generalising the rocket-only
+  shipyard) is designed in [construction.md](construction.md).
 
 ## Beyond Phase 2 (deferred)
 
@@ -248,6 +249,7 @@ M1 and M2 can run in parallel; both feed M3.
 | Atmospheres, oceans, IBL | [atmosphere.md](atmosphere.md) | M4 | — |
 | Celestial sky | [celestial.md](celestial.md) | (done) | — |
 | Surface gameplay (on-foot, BodyFixed, height source) | [surface_gameplay.md](surface_gameplay.md) | M5 | M6, M8 |
+| Construction (airframes, fuselages, modules, interiors) | [construction.md](construction.md) | — | M6 |
 
 Lore: [lore/solar_system.md](lore/solar_system.md),
 [lore/civilization.md](lore/civilization.md).

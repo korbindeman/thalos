@@ -1483,9 +1483,7 @@ fn inv_lerp(a: f64, b: f64, target: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::patched_conics::PatchedConics;
-    use crate::types::{
-        BodyDefinition, BodyKind, OrbitalElements, ShipDefinition, SolarSystemDefinition,
-    };
+    use crate::types::{BodyDefinition, BodyKind, OrbitalElements, SolarSystemDefinition};
     use std::collections::HashMap;
 
     const SUN_GM: f64 = 1.327_124_4e20;
@@ -1508,7 +1506,7 @@ mod tests {
             gm: SUN_GM,
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
-            terrain: thalos_terrain::TerrainConfig::None,
+            terrain: thalos_world::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
@@ -1535,7 +1533,7 @@ mod tests {
                 arg_periapsis_rad: 0.0,
                 true_anomaly_rad: 0.0,
             }),
-            terrain: thalos_terrain::TerrainConfig::None,
+            terrain: thalos_world::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
@@ -1548,13 +1546,8 @@ mod tests {
         let system = SolarSystemDefinition {
             name: "Test".into(),
             bodies: vec![sun, earth],
-            ship: ShipDefinition {
-                initial_state: StateVector {
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                },
-            },
             name_to_id,
+            homeworld_id: 1,
         };
         let pc = PatchedConics::new(&system, 3.156e9);
         (system, pc)
@@ -1817,7 +1810,7 @@ mod tests {
             gm: 0.0,
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
-            terrain: thalos_terrain::TerrainConfig::None,
+            terrain: thalos_world::TerrainConfig::None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
@@ -1830,13 +1823,8 @@ mod tests {
         let system = SolarSystemDefinition {
             name: "Massless".into(),
             bodies,
-            ship: ShipDefinition {
-                initial_state: StateVector {
-                    position: DVec3::new(1e9, 0.0, 0.0),
-                    velocity: DVec3::new(0.0, 0.0, 1.0),
-                },
-            },
             name_to_id,
+            homeworld_id: 0,
         };
         let pc = PatchedConics::new(&system, 3.156e9);
 

@@ -5,9 +5,10 @@ use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::Epoch,
     simulation::Simulation,
-    types::{BodyId, BodyStates, SolarSystemDefinition},
+    types::BodyStates,
 };
-use thalos_planet_rendering::CLOUD_BAND_COUNT;
+use thalos_world::{BodyId, SolarSystemDefinition};
+use thalos_body_render::CLOUD_BAND_COUNT;
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 
 use crate::SimStage;
@@ -105,7 +106,7 @@ impl SolarSystemState {
     /// Return the dynamic-surface state for `body_id`, falling back to a
     /// freshly seeded state matching the surface's authored layers when the
     /// bake hasn't installed runtime state yet. This is the canonical companion
-    /// to [`thalos_terrain_render::rendered_height_m`]; pair it with
+    /// to [`thalos_body_render::rendered_height_m`]; pair it with
     /// `TerrainSurfaceRegistry::get` so every height query sees the same
     /// dynamic overlays that the renderer baked into its atlas.
     pub fn dynamic_surface_for(

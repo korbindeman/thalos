@@ -1,0 +1,23 @@
+[package]
+name = "thalos_body_render"
+version.workspace = true
+edition.workspace = true
+
+[features]
+playground = []
+
+[[example]]
+name = "playground"
+required-features = ["playground"]
+
+[dependencies]
+thalos_terrain = { path = "../terrain" }
+thalos_world = { path = "../world" }
+thalos_udlod = { workspace = true }
+bevy = { version = "0.18", features = ["wayland", "jpeg"] }
+bevy_erosion_filter = "0.1.2"
+big_space = { version = "0.12", features = ["i64"] }
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30.10"
+rayon = "1.12"
+anyhow = "1.0"

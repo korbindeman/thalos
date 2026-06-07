@@ -13,14 +13,15 @@ use thalos_physics_canonical::{
     body_fixed::body_fixed_surface_velocity,
     canonical::{AuthorityMode, BodyFixedPose, TranslationalState},
     debug_orbits::debug_parking_orbit_state,
-    types::{AttitudeState, BodyDefinition, BodyId, BodyKind, BodyState, StateVector, VesselKind},
+    types::{AttitudeState, BodyState, VesselKind},
 };
+use thalos_world::{BodyDefinition, BodyId, BodyKind, StateVector};
 use thalos_physics_local::avian::{AngularVelocity, LinearVelocity, Position, Rotation};
 use thalos_physics_local::{
     ActiveLocalBubble, LocalCraftBody, LocalCraftColliderPrimitives, LocalPrimitiveCollider,
     LocalPrimitiveShape, TerrainSurfaceRegistry,
 };
-use thalos_terrain_render::rendered_height_m;
+use thalos_body_render::rendered_height_m;
 
 use crate::camera::{ActiveCamera, MapCamera};
 use crate::coords::{MAP_SCALE, SHIP_LAYER};
@@ -628,7 +629,7 @@ fn clear_debug_teleport_maneuvers(plan: &mut ManeuverPlan, selected: &mut Select
 mod tests {
     use super::*;
     use thalos_physics_canonical::canonical::Epoch;
-    use thalos_physics_canonical::types::BodyKind;
+    use thalos_world::BodyKind;
 
     fn body_definition() -> BodyDefinition {
         BodyDefinition {

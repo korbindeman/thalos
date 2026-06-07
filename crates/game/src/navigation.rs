@@ -277,7 +277,7 @@ pub(crate) fn maneuver_node_burn_direction(sim: &Simulation, node: &GameNode) ->
     let prediction_state = sim
         .prediction()
         .and_then(|p| p.pre_burn_state_at(node.time, sim.ephemeris(), sim.bodies()))
-        .map(|s| thalos_physics_canonical::types::StateVector {
+        .map(|s| thalos_world::StateVector {
             position: s.position,
             velocity: s.velocity,
         })

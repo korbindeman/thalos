@@ -6,7 +6,7 @@
 
 use bevy::prelude::*;
 use std::collections::HashMap;
-use thalos_planet_rendering::{
+use thalos_body_render::{
     GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial, SolidPlanetMaterial,
 };
 

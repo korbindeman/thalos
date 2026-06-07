@@ -6,10 +6,8 @@ edition.workspace = true
 [dependencies]
 glam = { version = "0.30.10", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-ron = "0.12"
 tracing = "0.1"
-thalos_terrain = { path = "../terrain" }
-thalos_atmosphere = { path = "../atmosphere" }
+thalos_world = { path = "../world" }
 
 [dev-dependencies]
 approx = "0.5"

@@ -9,9 +9,9 @@ use avian3d::prelude::*;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use thalos_physics_canonical::canonical::CraftId;
-use thalos_physics_canonical::types::BodyId;
+use thalos_world::BodyId;
 use thalos_terrain::PlanetSurface;
-use thalos_terrain_render::{
+use thalos_body_render::{
     GpuAtlasMirrorHandle, GpuAtlasMirrorHeightSource, HeightSource, TerrainPatchBasis,
     TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch_from_source,
 };
