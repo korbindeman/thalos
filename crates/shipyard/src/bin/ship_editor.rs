@@ -121,8 +121,9 @@ fn kind_order(entry: &CatalogEntry) -> u8 {
         CatalogEntry::Decoupler(_) => 3,
         CatalogEntry::Adapter(_) => 4,
         CatalogEntry::Tank(_) => 5,
-        CatalogEntry::Wing(_) => 6,
-        CatalogEntry::Gear(_) => 7,
+        CatalogEntry::Fuselage(_) => 6,
+        CatalogEntry::Wing(_) => 7,
+        CatalogEntry::Gear(_) => 8,
     }
 }
 
@@ -133,6 +134,7 @@ fn palette_category_order(entry: &CatalogEntry) -> u8 {
         CatalogEntry::Intake(_) => 2,
         CatalogEntry::Tank(_) => 3,
         CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) => 4,
+        CatalogEntry::Fuselage(_) => 4,
         CatalogEntry::Wing(_) => 4,
         CatalogEntry::Gear(_) => 5,
     }
@@ -144,7 +146,9 @@ fn palette_category_label(entry: &CatalogEntry) -> &'static str {
         CatalogEntry::Engine(_) => "Engines",
         CatalogEntry::Intake(_) => "Intakes",
         CatalogEntry::Tank(_) => "Propellant Tanks",
-        CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) => "Structure",
+        CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) | CatalogEntry::Fuselage(_) => {
+            "Structure"
+        }
         CatalogEntry::Wing(_) => "Aerodynamics",
         CatalogEntry::Gear(_) => "Landing Gear",
     }
@@ -204,6 +208,16 @@ fn palette_part_summary(entry: &CatalogEntry) -> String {
                 meters_label(length)
             ),
             _ => "Parametric diameter".into(),
+        },
+        CatalogEntry::Fuselage(_) => match default_params_for(entry) {
+            PartParams::Fuselage {
+                length, max_width, ..
+            } => format!(
+                "Loft body · default Ø{} · length {} · upswept tail",
+                meters_label(max_width),
+                meters_label(length)
+            ),
+            _ => "Stationed-loft fuselage".into(),
         },
         CatalogEntry::Wing(_) => match default_params_for(entry) {
             PartParams::Wing {
@@ -735,20 +749,36 @@ struct VisualSpec {
     height: f32,
 }
 
+/// `top` node diameter of a host part, or a sensible default. Single source
+/// for the surface-mount radius lookups so they stay consistent.
+fn host_top_diameter(nodes: &Query<&AttachNodes>, host: Entity) -> f32 {
+    nodes
+        .get(host)
+        .ok()
+        .and_then(|n| n.get("top").map(|nd| nd.diameter))
+        .unwrap_or(2.0)
+}
+
 fn visual_spec(
     nodes: &AttachNodes,
     pod: Option<&CommandPod>,
     dec: Option<&Decoupler>,
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
+    fuselage: Option<&Fuselage>,
     engine: Option<&Engine>,
     intake: Option<&AirIntake>,
 ) -> Option<VisualSpec> {
     if let Some(p) = pod {
+        // Inline cockpit: no body mesh (the fuselage nose is the nose).
+        if matches!(p.geometry, PodGeometry::Inline) {
+            return None;
+        }
         let (radius_top, radius_bottom, h) = pod_visual_profile(p.diameter, p.geometry);
         let mesh = match p.geometry {
             // Rounded ogive nose (airliner radome) vs the plain capsule cone.
             PodGeometry::AircraftCockpit => build_cockpit_mesh(p.diameter, h),
+            PodGeometry::Inline => unreachable!("handled above"),
             PodGeometry::Capsule => ConicalFrustum {
                 radius_top,
                 radius_bottom,
@@ -793,6 +823,14 @@ fn visual_spec(
                 .resolution(PART_RESOLUTION)
                 .into(),
             height: h,
+        })
+    } else if let Some(f) = fuselage {
+        // Barrel diameter inherits from the `top` node (parent-driven), like
+        // a tank; the loft generator scales the rest to it.
+        let d = nodes.get("top").map(|n| n.diameter).unwrap_or(f.max_width);
+        Some(VisualSpec {
+            mesh: build_fuselage_mesh(f, d),
+            height: f.length,
         })
     } else if let Some(e) = engine {
         match e.geometry {
@@ -843,6 +881,7 @@ fn engine_visual_profile(diameter: f32) -> (f32, f32, f32) {
 fn ship_part_params(
     nodes: &AttachNodes,
     tank: Option<&FuelTank>,
+    fuselage: Option<&Fuselage>,
     dec: Option<&Decoupler>,
     adapter: Option<&Adapter>,
     seed: u32,
@@ -852,6 +891,9 @@ fn ship_part_params(
     // from `top_r` at the mesh's +Y end to `target_diameter / 2` at -Y.
     let (radius_top, radius_bottom, length) = if let Some(t) = tank {
         (top_r, top_r, t.length)
+    } else if let Some(f) = fuselage {
+        // Near-cylindrical barrel: the panel shader treats it like a tank.
+        (top_r, top_r, f.length)
     } else if dec.is_some() {
         (top_r, top_r, 0.2)
     } else if let Some(a) = adapter {
@@ -882,6 +924,7 @@ type VisualQuery<'w, 's> = Query<
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
+        Option<&'static Fuselage>,
         Option<&'static Engine>,
         Option<&'static AirIntake>,
         Option<&'static SurfaceMount>,
@@ -908,6 +951,7 @@ fn rebuild_visuals(
         dec,
         adapter,
         tank,
+        fuselage,
         engine,
         intake,
         surface,
@@ -931,7 +975,7 @@ fn rebuild_visuals(
         }
 
         // ---- Body visual --------------------------------------------------
-        if let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine, intake) {
+        if let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, fuselage, engine, intake) {
             let mesh = meshes.add(spec.mesh);
 
             // Parts carrying `PartMaterial` render with `ShipPartMaterial`
@@ -940,7 +984,7 @@ fn rebuild_visuals(
             // on first rebuild and cached on the part entity so resizing
             // doesn't churn assets or drop per-part state (seed/tint).
             let body_id = if has_part_mat {
-                let params = ship_part_params(nodes, tank, dec, adapter, e.index_u32());
+                let params = ship_part_params(nodes, tank, fuselage, dec, adapter, e.index_u32());
                 let handle = match part_shader {
                     Some(h) => h.0.clone(),
                     None => {
@@ -1024,6 +1068,7 @@ fn rebuild_wing_visuals(
         Or<(Added<Wing>, Changed<Wing>, Changed<SurfaceMount>)>,
     >,
     host_nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     stale: Query<(), With<WingVisual>>,
 ) {
     for (e, wing, mount, children) in wings.iter() {
@@ -1034,11 +1079,9 @@ fn rebuild_wing_visuals(
                 }
             }
         }
-        let parent_radius = host_nodes
-            .get(mount.parent)
-            .ok()
-            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
-            .unwrap_or(1.0);
+        let top_d = host_top_diameter(&host_nodes, mount.parent);
+        let (parent_radius, _) =
+            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
         let mesh = meshes.add(build_wing_mesh(wing, mount.angle, parent_radius));
         let material = if Some(e) == state.selected {
             assets.selected_material.clone()
@@ -1080,6 +1123,7 @@ fn rebuild_nacelle_visuals(
     wings: Query<&Wing>,
     surface_mounts: Query<&SurfaceMount>,
     host_nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     stale: Query<(), With<NacelleVisual>>,
 ) {
     for (e, engine, mount, children) in engines.iter() {
@@ -1102,11 +1146,13 @@ fn rebuild_nacelle_visuals(
         let Ok(wing_mount) = surface_mounts.get(mount.parent) else {
             continue;
         };
-        let parent_radius = host_nodes
-            .get(wing_mount.parent)
-            .ok()
-            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
-            .unwrap_or(1.0);
+        let top_d = host_top_diameter(&host_nodes, wing_mount.parent);
+        let (parent_radius, _) = host_mount_geometry(
+            hosts.get(wing_mount.parent).ok(),
+            top_d,
+            wing_mount.station,
+            wing_mount.angle,
+        );
         let mesh = meshes.add(build_jet_nacelle_pylon_mesh(
             engine,
             JetNacelleMount {
@@ -1160,6 +1206,7 @@ fn rebuild_gear_visuals(
         Or<(Added<Gear>, Changed<Gear>, Changed<SurfaceMount>)>,
     >,
     host_nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     stale: Query<(), Or<(With<GearVisual>, With<GearBayVisual>)>>,
 ) {
     for (e, gear, mount, children) in gears.iter() {
@@ -1170,11 +1217,9 @@ fn rebuild_gear_visuals(
                 }
             }
         }
-        let parent_radius = host_nodes
-            .get(mount.parent)
-            .ok()
-            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
-            .unwrap_or(1.0);
+        let top_d = host_top_diameter(&host_nodes, mount.parent);
+        let (parent_radius, _) =
+            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
         let mesh = meshes.add(build_gear_mesh(gear, mount.angle, parent_radius));
         let material = if Some(e) == state.selected {
             assets.selected_material.clone()
@@ -1304,6 +1349,7 @@ fn update_part_transforms(
     attachments: Query<(Entity, &Attachment)>,
     surface_mounts: Query<(Entity, &SurfaceMount)>,
     nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     orientation: Res<BuildOrientation>,
     mut transforms: Query<&mut Transform, With<Part>>,
 ) {
@@ -1379,7 +1425,13 @@ fn update_part_transforms(
                     .ok()
                     .and_then(|n| n.get("bottom").map(|nd| -nd.offset.y))
                     .unwrap_or(0.0);
-                Vec3::new(0.0, -mount.station * host_height, 0.0)
+                // On a loft host the centerline rises toward the tail
+                // (upsweep) / drops at the nose (droop); the mount must follow
+                // it along +Z. Flat (zero) for a plain cylinder host.
+                let top_d = host_top_diameter(&nodes, mount.parent);
+                let (_, v_offset) =
+                    host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, 0.0);
+                Vec3::new(0.0, -mount.station * host_height, v_offset)
             }
             SurfaceMountKind::WingPylon => Vec3::ZERO,
         };
@@ -1861,22 +1913,24 @@ fn update_part_shader_params(
             &AttachNodes,
             &PartShaderHandle,
             Option<&FuelTank>,
+            Option<&Fuselage>,
             Option<&Decoupler>,
             Option<&Adapter>,
         ),
         Or<(
             Changed<FuelTank>,
+            Changed<Fuselage>,
             Changed<Decoupler>,
             Changed<Adapter>,
             Changed<AttachNodes>,
         )>,
     >,
 ) {
-    for (nodes, handle, tank, dec, adapter) in parts.iter() {
+    for (nodes, handle, tank, fuselage, dec, adapter) in parts.iter() {
         let Some(mat) = ship_materials.get_mut(&handle.0) else {
             continue;
         };
-        let params = ship_part_params(nodes, tank, dec, adapter, mat.extension.params.seed);
+        let params = ship_part_params(nodes, tank, fuselage, dec, adapter, mat.extension.params.seed);
         mat.extension.params.length = params.length;
         mat.extension.params.radius_top = params.radius_top;
         mat.extension.params.radius_bottom = params.radius_bottom;
@@ -2136,6 +2190,7 @@ type CollectQuery<'w, 's> = Query<
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
+        Option<&'static Fuselage>,
         Option<&'static Wing>,
         Option<&'static Gear>,
     ),
@@ -2173,7 +2228,7 @@ fn collect_blueprint(
 
     let mut part_blueprints = Vec::with_capacity(ordered.len());
     for e in &ordered {
-        let (_, cat_ref, res, dec, adapter, tank, wing, gear) = parts.get(*e).ok()?;
+        let (_, cat_ref, res, dec, adapter, tank, fuselage, wing, gear) = parts.get(*e).ok()?;
         let params = if let Some(d) = dec {
             PartParams::Decoupler {
                 diameter: d.diameter,
@@ -2187,6 +2242,19 @@ fn collect_blueprint(
             PartParams::Tank {
                 diameter: t.diameter,
                 length: t.length,
+            }
+        } else if let Some(f) = fuselage {
+            PartParams::Fuselage {
+                length: f.length,
+                max_width: f.max_width,
+                max_height: f.max_height,
+                roundness: f.roundness,
+                nose_fraction: f.nose_fraction,
+                nose_bluntness: f.nose_bluntness,
+                tail_fraction: f.tail_fraction,
+                nose_droop: f.nose_droop,
+                tail_upsweep: f.tail_upsweep,
+                tail_tip_diameter: f.tail_tip_diameter,
             }
         } else if let Some(w) = wing {
             PartParams::Wing {
@@ -2413,6 +2481,7 @@ fn update_placement_preview(
     wing_marker: Query<(), With<Wing>>,
     part_transforms: Query<&Transform, With<Part>>,
     host_nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     mut ghosts: Query<
         (&mut Transform, &mut Visibility, &mut Mesh3d),
         (With<PreviewGhost>, Without<Part>),
@@ -2458,9 +2527,9 @@ fn update_placement_preview(
             snap.enabled,
         );
         let host_n = host_nodes.get(host).ok();
-        let parent_radius = host_n
-            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
-            .unwrap_or(1.0);
+        let top_d = host_top_diameter(&host_nodes, host);
+        let (parent_radius, v_offset) =
+            host_mount_geometry(hosts.get(host).ok(), top_d, station, angle);
         let host_height = host_n
             .and_then(|n| n.get("bottom").map(|nd| -nd.offset.y))
             .unwrap_or(0.0);
@@ -2470,9 +2539,10 @@ fn update_placement_preview(
             .unwrap_or(Vec3::ZERO);
 
         // Match where `update_part_transforms` puts a body-skin part: the host
-        // (already post-layout-rotation) plus the rotated local station offset.
+        // (already post-layout-rotation) plus the rotated local station offset
+        // (including the loft's centerline upsweep along +Z).
         let r = orientation.rotation();
-        let translation = host_t + r * Vec3::new(0.0, -station * host_height, 0.0);
+        let translation = host_t + r * Vec3::new(0.0, -station * host_height, v_offset);
 
         let sig = PreviewSig {
             host,
@@ -2488,18 +2558,19 @@ fn update_placement_preview(
                     strut_length,
                     wheel_radius,
                 } => {
-                    let track_fraction = catalog
+                    let (track_fraction, wheels_per_leg) = catalog
                         .resolve(&pending.catalog_id)
                         .ok()
                         .and_then(|e| match e {
-                            CatalogEntry::Gear(g) => Some(g.track_fraction),
+                            CatalogEntry::Gear(g) => Some((g.track_fraction, g.wheels_per_leg)),
                             _ => None,
                         })
-                        .unwrap_or(0.0);
+                        .unwrap_or((0.0, 1));
                     let g = Gear {
                         strut_length: *strut_length,
                         wheel_radius: *wheel_radius,
                         track_fraction,
+                        wheels_per_leg,
                         dry_mass: 0.0,
                     };
                     build_gear_mesh(&g, angle, parent_radius)
@@ -2952,6 +3023,7 @@ type InspectorQuery<'w, 's> = Query<
         Option<&'static mut Decoupler>,
         Option<&'static mut Adapter>,
         Option<&'static mut FuelTank>,
+        Option<&'static mut Fuselage>,
         Option<&'static mut Engine>,
         Option<&'static mut AirIntake>,
         Option<&'static mut Wing>,
@@ -3086,6 +3158,7 @@ fn inspector_params(
     dec: Option<&Decoupler>,
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
+    fuselage: Option<&Fuselage>,
     wing: Option<&Wing>,
     gear: Option<&Gear>,
 ) -> PartParams {
@@ -3102,6 +3175,19 @@ fn inspector_params(
         PartParams::Tank {
             diameter: t.diameter,
             length: t.length,
+        }
+    } else if let Some(f) = fuselage {
+        PartParams::Fuselage {
+            length: f.length,
+            max_width: f.max_width,
+            max_height: f.max_height,
+            roundness: f.roundness,
+            nose_fraction: f.nose_fraction,
+            nose_bluntness: f.nose_bluntness,
+            tail_fraction: f.tail_fraction,
+            nose_droop: f.nose_droop,
+            tail_upsweep: f.tail_upsweep,
+            tail_tip_diameter: f.tail_tip_diameter,
         }
     } else if let Some(w) = wing {
         PartParams::Wing {
@@ -3348,6 +3434,7 @@ fn editor_ui(
                 mut dec,
                 mut adapter,
                 mut tank,
+                mut fuselage,
                 mut engine,
                 mut intake,
                 mut wing,
@@ -3407,6 +3494,26 @@ fn editor_ui(
                 // geometry via the catalog; recomputed by
                 // `recompute::recompute_tank_state` on every change.
                 ui.label(format!("Dry mass: {:.0} kg", t.dry_mass));
+            } else if let Some(f) = fuselage.as_deref_mut() {
+                ui.label("Kind: Fuselage (stationed loft)");
+                ui.add(egui::Slider::new(&mut f.length, 2.0..=60.0).text("Length"));
+                if is_root {
+                    ui.add(egui::Slider::new(&mut f.max_width, 0.5..=8.0).text("Width (Ø)"));
+                } else {
+                    ui.label(format!("Width: {:.2}m (from parent)", f.max_width));
+                }
+                ui.add(egui::Slider::new(&mut f.max_height, 0.5..=8.0).text("Height"));
+                ui.add(egui::Slider::new(&mut f.roundness, 0.0..=1.0).text("Roundness"));
+                ui.add(egui::Slider::new(&mut f.nose_fraction, 0.0..=0.45).text("Nose fraction"));
+                ui.add(egui::Slider::new(&mut f.nose_bluntness, 0.0..=1.0).text("Nose shape (cone→radome)"));
+                ui.add(egui::Slider::new(&mut f.tail_fraction, 0.0..=0.9).text("Tail fraction"));
+                ui.add(egui::Slider::new(&mut f.nose_droop, 0.0..=2.0).text("Nose droop"));
+                ui.add(egui::Slider::new(&mut f.tail_upsweep, 0.0..=3.0).text("Tail upsweep"));
+                ui.add(
+                    egui::Slider::new(&mut f.tail_tip_diameter, 0.0..=3.0).text("Tail tip Ø"),
+                );
+                // dry_mass tracks lofted skin area via `recompute_fuselage_state`.
+                ui.label(format!("Dry mass: {:.0} kg", f.dry_mass));
             } else if let Some(e) = engine.as_deref_mut() {
                 let optimized_for = catalog
                     .resolve(&catalog_ref.id)
@@ -3550,6 +3657,7 @@ fn editor_ui(
                     dec.as_deref(),
                     adapter.as_deref(),
                     tank.as_deref(),
+                    fuselage.as_deref(),
                     wing.as_deref(),
                     gear.as_deref(),
                 );
@@ -3724,7 +3832,7 @@ fn editor_ui(
                             .collect();
                         let mut rows: Vec<(Entity, String, f32)> = Vec::new();
                         let parts = part_queries.p0();
-                        for (e, _, nodes, _, _, _, _, _, _, _, _, _) in parts.iter() {
+                        for (e, _, nodes, _, _, _, _, _, _, _, _, _, _) in parts.iter() {
                             for (nid, node) in &nodes.nodes {
                                 if occupied.contains(&(e, nid.clone())) {
                                     continue;

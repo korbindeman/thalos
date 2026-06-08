@@ -23,8 +23,8 @@ use crate::blueprint::{
     check_resource_amounts_allowed, pools_for,
 };
 use crate::catalog::{
-    CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, gear_dry_mass,
-    tank_surface_area, wing_mean_aerodynamic_chord, wing_panel_area,
+    CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, fuselage_surface_area,
+    gear_dry_mass, tank_surface_area, wing_mean_aerodynamic_chord, wing_panel_area,
 };
 use crate::part::ReactantRatio;
 use crate::resource::{PartResources, Resource};
@@ -561,6 +561,7 @@ fn declared_diameter(entry: &CatalogEntry, params: &PartParams) -> f32 {
         (CatalogEntry::Decoupler(_), PartParams::Decoupler { diameter }) => *diameter,
         (CatalogEntry::Adapter(_), PartParams::Adapter { diameter, .. }) => *diameter,
         (CatalogEntry::Tank(_), PartParams::Tank { diameter, .. }) => *diameter,
+        (CatalogEntry::Fuselage(_), PartParams::Fuselage { max_width, .. }) => *max_width,
         _ => 0.0,
     }
 }
@@ -568,7 +569,10 @@ fn declared_diameter(entry: &CatalogEntry, params: &PartParams) -> f32 {
 fn is_parametric(entry: &CatalogEntry) -> bool {
     matches!(
         entry,
-        CatalogEntry::Tank(_) | CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_)
+        CatalogEntry::Tank(_)
+            | CatalogEntry::Adapter(_)
+            | CatalogEntry::Decoupler(_)
+            | CatalogEntry::Fuselage(_)
     )
 }
 
@@ -614,6 +618,16 @@ fn node_diameter(
         ) => match node {
             "top" => Some(effective_d),
             "bottom" => Some(*target_diameter),
+            _ => None,
+        },
+        (
+            CatalogEntry::Fuselage(_),
+            PartParams::Fuselage {
+                tail_tip_diameter, ..
+            },
+        ) => match node {
+            "top" => Some(effective_d),
+            "bottom" => Some(*tail_tip_diameter),
             _ => None,
         },
         _ => None,
@@ -665,6 +679,11 @@ fn node_offset(
             "bottom" => Some(Vec3::new(0.0, -*length, 0.0)),
             _ => None,
         },
+        (CatalogEntry::Fuselage(_), PartParams::Fuselage { length, .. }) => match node {
+            "top" => Some(Vec3::ZERO),
+            "bottom" => Some(Vec3::new(0.0, -*length, 0.0)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -686,6 +705,7 @@ fn part_cylinder_dims(entry: &CatalogEntry, params: &PartParams, effective_d: f3
             },
         ) => ((effective_d + *target_diameter) * 0.5).max(0.4) as f64,
         (CatalogEntry::Tank(_), PartParams::Tank { length, .. }) => *length as f64,
+        (CatalogEntry::Fuselage(_), PartParams::Fuselage { length, .. }) => *length as f64,
         _ => 0.0,
     };
     (r, l)
@@ -747,6 +767,15 @@ pub(crate) fn part_dry_mass(entry: &CatalogEntry, params: &PartParams) -> f32 {
         (CatalogEntry::Tank(t), PartParams::Tank { diameter, length }) => {
             t.wall_mass_per_m2 * tank_surface_area(*diameter, *length)
         }
+        (
+            CatalogEntry::Fuselage(f),
+            PartParams::Fuselage {
+                length,
+                max_width,
+                max_height,
+                ..
+            },
+        ) => f.wall_mass_per_m2 * fuselage_surface_area(*length, *max_width, *max_height),
         // Single-panel mass; a mirrored mount doubles it at the call site.
         (
             CatalogEntry::Wing(w),

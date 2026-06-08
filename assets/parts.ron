@@ -147,6 +147,19 @@
             storage: [],
             reactants: [],
         )),
+        // Stationed-loft fuselage (`docs/construction.md` §4.2): the advanced
+        // airframe body. Same stainless skin and diameter propagation as a
+        // structural tank, but a single continuous superellipse loft — barrel +
+        // curved, upswept tailcone in one mesh — instead of a cylinder + cone
+        // pair. The high-level shape (length, nose/tail fractions, droop,
+        // upsweep, tail-tip Ø) is per-instance; `wall_mass_per_m2` scales mass
+        // with the lofted skin area. Structure-only for now (empty storage);
+        // aircraft fuel still lives in the wet wings.
+        "fuselage_loft": Fuselage((
+            display_name: "Loft Fuselage",
+            wall_mass_per_m2: 12.0,
+            storage: [],
+        )),
         "wing_std": Wing((
             display_name: "Wing",
             // Spar + skin lifting surface: lighter per area than a sealed
@@ -210,6 +223,22 @@
                 (resource: Electricity, units: 5.0),
             ],
         )),
+        // Inline flight deck: an internal command module with no body mesh of
+        // its own. It surface-mounts inside a parametric fuselage near the nose
+        // (the fuselage's own nose is the visible nose) and supplies command /
+        // crew / reaction-wheel capability. A windshield region is morphed into
+        // the skin where it sits. The `diameter` is nominal (it drives no
+        // geometry); it auto-fits whatever fuselage nose it mounts on.
+        "cockpit_inline": Pod((
+            display_name: "Inline Flight Deck",
+            geometry: Inline,
+            diameter: 3.5,
+            dry_mass: 2200.0,
+            reaction_wheel_torque: 35000.0,
+            storage: [
+                (resource: Electricity, units: 5.0),
+            ],
+        )),
         "sirocco_turbofan": Engine((
             display_name: "Sirocco Turbofan",
             optimized_for: Atmosphere,
@@ -230,9 +259,14 @@
             display_name: "Heavy Main Landing Gear",
             strut_mass_per_m: 130.0,
             wheel_mass: 120.0,
-            track_fraction: 0.42,
+            // Wide track (±0.85·host radius ≈ the fuselage width) so a broad
+            // airliner sits stably, with a 2-wheel tandem bogie per leg. (A
+            // belly-mounted axle wider than the hull would float off the skin;
+            // a true wing/sponson mount comes with the morph work.)
+            track_fraction: 0.85,
             default_strut_length: 1.9,
             default_wheel_radius: 0.6,
+            wheels_per_leg: 2,
         )),
         "gear_nose_hd": Gear((
             display_name: "Heavy Nose Landing Gear",

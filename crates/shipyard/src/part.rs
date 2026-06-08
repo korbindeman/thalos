@@ -195,6 +195,9 @@ pub struct Gear {
     /// pair at `±track_fraction × host_radius`. Catalog-derived (copied from
     /// [`crate::GearSpec`] at spawn), so it is fixed per part kind.
     pub track_fraction: f32,
+    /// Wheels per leg, fore/aft (a tandem **bogie** when `> 1`). Catalog-derived
+    /// like `track_fraction`. The mesh draws this many wheels per leg.
+    pub wheels_per_leg: u8,
     /// Catalog-derived structural mass, kg (struts + wheels for every leg).
     pub dry_mass: f32,
 }
@@ -215,6 +218,54 @@ impl Gear {
 pub struct FuelTank {
     pub diameter: f32,
     pub length: f32,
+    pub dry_mass: f32,
+}
+
+/// A **stationed-loft fuselage** (`docs/construction.md` §4.2): the advanced
+/// airframe body that replaces a straight tank-cylinder + cone tailcone with
+/// one continuous, upswept superellipse loft. Parameterised by high-level
+/// airliner numbers; [`crate::fuselage_mesh`] generates the cross-section
+/// stations and the skin, and exposes the host-skin query
+/// ([`crate::fuselage_mesh::skin_radius`] / [`crate::fuselage_mesh::v_offset_at`])
+/// that surface mounts (wings, gear, nacelles) ride.
+///
+/// `max_width` is the declared barrel diameter; like [`FuelTank::diameter`]
+/// it is **overridden by the parent's mating-node diameter** when this part
+/// is node-stacked under another (`sizing::propagate_node_sizes`), and every
+/// other extent scales with it so the authored proportions are preserved.
+///
+/// **Future** (`docs/construction.md` §5): a wet/role-filled fuselage carries
+/// fuel/crew/cargo in its integrated volume; today the airliner body is
+/// structure-only (empty storage whitelist) and fuel lives in the wet wings.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Fuselage {
+    /// Overall body length along the axis, metres.
+    pub length: f32,
+    /// Barrel cross-section width (X) and height (Z), metres. `max_width` is
+    /// the declared/overridable diameter; `max_height` sets the section
+    /// aspect (equal → circular).
+    pub max_width: f32,
+    pub max_height: f32,
+    /// Superellipse roundness `∈ [0, 1]`: `1` → round, `0` → boxy belly.
+    pub roundness: f32,
+    /// Fraction of length spent on the parametric nose taper (`0` → no nose;
+    /// the barrel starts at full diameter). The fuselage owns its nose — there
+    /// is no separate nose-cone pod.
+    pub nose_fraction: f32,
+    /// Nose profile shape `∈ [0, 1]`: `0` → a straight cone (pointed), `1` → a
+    /// rounded radome (convex ellipsoidal, the airliner look). Blends between
+    /// the two. Tune directly alongside `nose_fraction`/`nose_droop` to dial in
+    /// any nose without presets.
+    pub nose_bluntness: f32,
+    /// Fraction of length spent on the tailcone neck.
+    pub tail_fraction: f32,
+    /// Nose centerline droop, metres (lowers the nose tip).
+    pub nose_droop: f32,
+    /// Tail centerline upsweep, metres (raises the tail — the airliner look).
+    pub tail_upsweep: f32,
+    /// Diameter the tailcone necks down to at the tip, metres.
+    pub tail_tip_diameter: f32,
+    /// Catalog-derived structural mass, kg.
     pub dry_mass: f32,
 }
 

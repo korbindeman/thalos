@@ -1,5 +1,5 @@
 use crate::attach::{AttachNodes, Attachment, NodeId, Ship};
-use crate::part::{Adapter, Decoupler, FuelTank};
+use crate::part::{Adapter, Decoupler, FuelTank, Fuselage};
 use bevy::prelude::*;
 use std::collections::{HashMap, VecDeque};
 
@@ -46,6 +46,7 @@ pub fn propagate_node_sizes(
     decouplers: Query<(), With<Decoupler>>,
     tanks: Query<&FuelTank>,
     adapters: Query<&Adapter>,
+    fuselages: Query<&Fuselage>,
 ) {
     let mut children: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
     for (child, att) in attachments.iter() {
@@ -94,6 +95,17 @@ pub fn propagate_node_sizes(
                         vec![
                             ("top".into(), input_d, Vec3::ZERO),
                             ("bottom".into(), bot_d, Vec3::new(0.0, -h, 0.0)),
+                        ]
+                    } else if let Ok(fus) = fuselages.get(*child) {
+                        // Barrel inherits the parent diameter; the tail tip
+                        // and length are the fuselage's own.
+                        vec![
+                            ("top".into(), input_d, Vec3::ZERO),
+                            (
+                                "bottom".into(),
+                                fus.tail_tip_diameter,
+                                Vec3::new(0.0, -fus.length, 0.0),
+                            ),
                         ]
                     } else {
                         Vec::new()

@@ -25,11 +25,11 @@ use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
-    FuelTank, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint,
+    FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint,
     ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipyardPlugin, SurfaceMount,
-    PodGeometry, SurfaceMountKind, Wing, build_cockpit_mesh, build_gear_mesh,
-    build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh, build_wing_mesh, jet_nacelle_length,
-    landing_gear_base, pod_visual_profile, stainless_steel_base,
+    PodGeometry, SurfaceMountKind, Wing, build_cockpit_mesh, build_fuselage_mesh, build_gear_mesh,
+    build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry,
+    jet_nacelle_length, landing_gear_base, pod_visual_profile, stainless_steel_base,
 };
 
 use crate::SimStage;
@@ -397,14 +397,21 @@ fn visual_spec(
     dec: Option<&Decoupler>,
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
+    fuselage: Option<&Fuselage>,
     engine: Option<&Engine>,
     intake: Option<&AirIntake>,
 ) -> Option<VisualSpec> {
     if let Some(p) = pod {
+        // An inline cockpit has no body of its own — the fuselage nose is the
+        // visible nose; it only supplies command/crew (+ a windshield morph).
+        if matches!(p.geometry, PodGeometry::Inline) {
+            return None;
+        }
         let (radius_top, radius_bottom, h) = pod_visual_profile(p.diameter, p.geometry);
         let mesh = match p.geometry {
             // Rounded ogive nose (airliner radome) vs the plain capsule cone.
             PodGeometry::AircraftCockpit => build_cockpit_mesh(p.diameter, h),
+            PodGeometry::Inline => unreachable!("handled above"),
             PodGeometry::Capsule => ConicalFrustum {
                 radius_top,
                 radius_bottom,
@@ -450,6 +457,12 @@ fn visual_spec(
                 .into(),
             height: h,
         })
+    } else if let Some(f) = fuselage {
+        let d = nodes.get("top").map(|n| n.diameter).unwrap_or(f.max_width);
+        Some(VisualSpec {
+            mesh: build_fuselage_mesh(f, d),
+            height: f.length,
+        })
     } else if let Some(e) = engine {
         match e.geometry {
             EngineGeometry::RocketBell => {
@@ -488,6 +501,7 @@ fn visual_spec(
 fn ship_part_params(
     nodes: &AttachNodes,
     tank: Option<&FuelTank>,
+    fuselage: Option<&Fuselage>,
     dec: Option<&Decoupler>,
     adapter: Option<&Adapter>,
     seed: u32,
@@ -495,6 +509,8 @@ fn ship_part_params(
     let top_r = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
     let (radius_top, radius_bottom, length) = if let Some(t) = tank {
         (top_r, top_r, t.length)
+    } else if let Some(f) = fuselage {
+        (top_r, top_r, f.length)
     } else if dec.is_some() {
         (top_r, top_r, 0.2)
     } else if let Some(a) = adapter {
@@ -515,6 +531,16 @@ fn ship_part_params(
     }
 }
 
+/// `top` node diameter of a host part, or a sensible default — the basis for
+/// surface-mount radius lookups (see [`host_mount_geometry`]).
+fn host_top_diameter(nodes: &Query<&AttachNodes>, host: Entity) -> f32 {
+    nodes
+        .get(host)
+        .ok()
+        .and_then(|n| n.get("top").map(|nd| nd.diameter))
+        .unwrap_or(2.0)
+}
+
 type VisualQuery<'w, 's> = Query<
     'w,
     's,
@@ -525,6 +551,7 @@ type VisualQuery<'w, 's> = Query<
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
+        Option<&'static Fuselage>,
         Option<&'static Engine>,
         Option<&'static AirIntake>,
         Option<&'static SurfaceMount>,
@@ -554,6 +581,7 @@ fn rebuild_ship_visuals(
         dec,
         adapter,
         tank,
+        fuselage,
         engine,
         intake,
         surface,
@@ -576,13 +604,14 @@ fn rebuild_ship_visuals(
             continue;
         }
 
-        let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine, intake) else {
+        let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, fuselage, engine, intake)
+        else {
             continue;
         };
         let mesh = meshes.add(spec.mesh);
 
         let body_id = if has_part_mat {
-            let params = ship_part_params(nodes, tank, dec, adapter, e.index_u32());
+            let params = ship_part_params(nodes, tank, fuselage, dec, adapter, e.index_u32());
             let handle = match part_shader {
                 Some(h) => h.0.clone(),
                 None => {
@@ -637,6 +666,7 @@ fn rebuild_ship_wing_visuals(
         Or<(Added<Wing>, Changed<Wing>, Changed<SurfaceMount>)>,
     >,
     host_nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     stale: Query<(), With<PartVisual>>,
 ) {
     for (e, wing, mount, children) in wings.iter() {
@@ -647,11 +677,9 @@ fn rebuild_ship_wing_visuals(
                 }
             }
         }
-        let parent_radius = host_nodes
-            .get(mount.parent)
-            .ok()
-            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
-            .unwrap_or(1.0);
+        let top_d = host_top_diameter(&host_nodes, mount.parent);
+        let (parent_radius, _) =
+            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
         let mesh = meshes.add(build_wing_mesh(wing, mount.angle, parent_radius));
         let mat = std_materials.add(StandardMaterial {
             double_sided: true,
@@ -683,6 +711,7 @@ fn rebuild_ship_nacelle_visuals(
     wings: Query<&Wing>,
     surface_mounts: Query<&SurfaceMount>,
     host_nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     stale: Query<(), With<PartVisual>>,
 ) {
     for (e, engine, mount, children) in engines.iter() {
@@ -704,11 +733,13 @@ fn rebuild_ship_nacelle_visuals(
         let Ok(wing_mount) = surface_mounts.get(mount.parent) else {
             continue;
         };
-        let parent_radius = host_nodes
-            .get(wing_mount.parent)
-            .ok()
-            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
-            .unwrap_or(1.0);
+        let top_d = host_top_diameter(&host_nodes, wing_mount.parent);
+        let (parent_radius, _) = host_mount_geometry(
+            hosts.get(wing_mount.parent).ok(),
+            top_d,
+            wing_mount.station,
+            wing_mount.angle,
+        );
         let mesh = meshes.add(build_jet_nacelle_pylon_mesh(
             engine,
             JetNacelleMount {
@@ -748,6 +779,7 @@ fn rebuild_ship_gear_visuals(
         Or<(Added<Gear>, Changed<Gear>, Changed<SurfaceMount>)>,
     >,
     host_nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     stale: Query<(), With<PartVisual>>,
 ) {
     for (e, gear, mount, children) in gears.iter() {
@@ -758,11 +790,9 @@ fn rebuild_ship_gear_visuals(
                 }
             }
         }
-        let parent_radius = host_nodes
-            .get(mount.parent)
-            .ok()
-            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
-            .unwrap_or(1.0);
+        let top_d = host_top_diameter(&host_nodes, mount.parent);
+        let (parent_radius, _) =
+            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
         let mesh = meshes.add(build_gear_mesh(gear, mount.angle, parent_radius));
         let mat = std_materials.add(StandardMaterial {
             double_sided: true,
@@ -791,6 +821,7 @@ fn update_ship_part_transforms(
     attachments: Query<(Entity, &Attachment)>,
     surface_mounts: Query<(Entity, &SurfaceMount)>,
     nodes: Query<&AttachNodes>,
+    hosts: Query<&Fuselage>,
     mut transforms: Query<&mut Transform, With<Part>>,
 ) {
     let mut children_map: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
@@ -856,7 +887,12 @@ fn update_ship_part_transforms(
                     .ok()
                     .and_then(|n| n.get("bottom").map(|nd| -nd.offset.y))
                     .unwrap_or(0.0);
-                Vec3::new(0.0, -mount.station * host_height, 0.0)
+                // Follow a loft host's centerline upsweep/droop along +Z;
+                // zero for a plain cylinder host.
+                let top_d = host_top_diameter(&nodes, mount.parent);
+                let (_, v_offset) =
+                    host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, 0.0);
+                Vec3::new(0.0, -mount.station * host_height, v_offset)
             }
             SurfaceMountKind::WingPylon => Vec3::ZERO,
         };
@@ -887,6 +923,7 @@ fn update_ship_camera_offset(
             Option<&Decoupler>,
             Option<&Adapter>,
             Option<&FuelTank>,
+            Option<&Fuselage>,
             Option<&Engine>,
             Option<&AirIntake>,
             Option<&Wing>,
@@ -904,13 +941,13 @@ fn update_ship_camera_offset(
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         let mut hits = 0;
         for child in children.iter() {
-            let Ok((t, nodes, pod, dec, adapter, tank, engine, intake, wing, gear)) =
+            let Ok((t, nodes, pod, dec, adapter, tank, fuselage, engine, intake, wing, gear)) =
                 parts.get(child)
             else {
                 continue;
             };
             let Some((height, radius)) =
-                visual_extent(nodes, pod, dec, adapter, tank, engine, intake, wing, gear)
+                visual_extent(nodes, pod, dec, adapter, tank, fuselage, engine, intake, wing, gear)
             else {
                 continue;
             };
@@ -947,12 +984,17 @@ fn visual_extent(
     dec: Option<&Decoupler>,
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
+    fuselage: Option<&Fuselage>,
     engine: Option<&Engine>,
     intake: Option<&AirIntake>,
     wing: Option<&Wing>,
     gear: Option<&Gear>,
 ) -> Option<(f32, f32)> {
     if let Some(p) = pod {
+        // An inline cockpit has no body mesh; it doesn't frame the camera.
+        if matches!(p.geometry, PodGeometry::Inline) {
+            return None;
+        }
         Some((p.diameter * p.geometry.length_factor(), p.diameter * 0.5))
     } else if dec.is_some() {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
@@ -965,6 +1007,10 @@ fn visual_extent(
     } else if let Some(t) = tank {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         Some((t.length, d * 0.5))
+    } else if let Some(f) = fuselage {
+        // Whole-body extent: length tall, widest cross-section radius.
+        let d = nodes.get("top").map(|n| n.diameter).unwrap_or(f.max_width);
+        Some((f.length, 0.5 * d.max(f.max_height)))
     } else if let Some(w) = wing {
         // Chord runs along the body axis; the span reaches outboard in X/Z.
         Some((w.root_chord, w.span + w.root_chord))
@@ -995,22 +1041,24 @@ fn update_ship_part_shader_params(
             &AttachNodes,
             &PartShaderHandle,
             Option<&FuelTank>,
+            Option<&Fuselage>,
             Option<&Decoupler>,
             Option<&Adapter>,
         ),
         Or<(
             Changed<FuelTank>,
+            Changed<Fuselage>,
             Changed<Decoupler>,
             Changed<Adapter>,
             Changed<AttachNodes>,
         )>,
     >,
 ) {
-    for (nodes, handle, tank, dec, adapter) in parts.iter() {
+    for (nodes, handle, tank, fuselage, dec, adapter) in parts.iter() {
         let Some(mat) = ship_materials.get_mut(&handle.0) else {
             continue;
         };
-        let params = ship_part_params(nodes, tank, dec, adapter, mat.extension.params.seed);
+        let params = ship_part_params(nodes, tank, fuselage, dec, adapter, mat.extension.params.seed);
         mat.extension.params.length = params.length;
         mat.extension.params.radius_top = params.radius_top;
         mat.extension.params.radius_bottom = params.radius_bottom;

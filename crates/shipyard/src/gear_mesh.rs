@@ -137,16 +137,37 @@ pub fn build_gear_mesh(gear: &Gear, angle: f32, parent_radius: f32) -> Mesh {
             &mut indices,
         );
 
-        // Wheel: a cylinder with its axle along the lateral axis (rolls
-        // fore/aft), hub at the strut end.
-        append_cylinder(
-            end,
-            frame.lateral,
-            gear.wheel_radius,
-            wheel_half_thickness,
-            &mut positions,
-            &mut indices,
-        );
+        // Wheels: one per leg, or a fore/aft **tandem bogie** of several. They
+        // hang at the strut end with their axles along the lateral axis (rolls
+        // fore/aft). The bogie wheels are spread along `fore`, with a short beam
+        // connecting them.
+        let wheels = gear.wheels_per_leg.max(1);
+        let pitch = gear.wheel_radius * 2.3; // fore/aft centre-to-centre spacing
+        let span = pitch * (wheels.saturating_sub(1)) as f32;
+        if wheels > 1 {
+            // Bogie beam linking the wheel hubs.
+            append_box(
+                end,
+                frame.lateral,
+                frame.fore,
+                frame.r_hat,
+                Vec3::new(strut_half * 0.8, span * 0.5 + strut_half, strut_half * 0.8),
+                &mut positions,
+                &mut indices,
+            );
+        }
+        for w in 0..wheels {
+            let t = w as f32 - (wheels - 1) as f32 * 0.5; // centred row
+            let hub = end + frame.fore * (t * pitch);
+            append_cylinder(
+                hub,
+                frame.lateral,
+                gear.wheel_radius,
+                wheel_half_thickness,
+                &mut positions,
+                &mut indices,
+            );
+        }
     }
 
     let mut mesh = Mesh::new(
@@ -345,6 +366,7 @@ mod tests {
             strut_length: 1.2,
             wheel_radius: 0.35,
             track_fraction: 0.6,
+            wheels_per_leg: 1,
             dry_mass: 0.0,
         }
     }
@@ -354,6 +376,7 @@ mod tests {
             strut_length: 1.0,
             wheel_radius: 0.3,
             track_fraction: 0.0,
+            wheels_per_leg: 1,
             dry_mass: 0.0,
         }
     }
@@ -395,6 +418,21 @@ mod tests {
         assert_eq!(pos.len(), 2 * (per_box + per_wheel));
         assert!(m.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
         assert!(m.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
+    }
+
+    #[test]
+    fn bogie_draws_multiple_wheels_spread_fore_aft() {
+        // A tandem bogie (wheels_per_leg > 1) renders more geometry than a
+        // single-wheel leg and spreads its wheels along the fore/aft (Y) axis.
+        let single = build_gear_mesh(&main_gear(), std::f32::consts::PI, 1.25);
+        let bogie = Gear { wheels_per_leg: 4, ..main_gear() };
+        let m = build_gear_mesh(&bogie, std::f32::consts::PI, 1.25);
+        let single_v = single.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap().len();
+        let bogie_v = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap().len();
+        assert!(bogie_v > single_v, "bogie adds wheels (+beam): {bogie_v} > {single_v}");
+        // Fore/aft spread (Y extent) is larger than a single wheel's thickness.
+        let (min, max) = extents(&m);
+        assert!(max.y - min.y > 2.0 * bogie.wheel_radius, "wheels spread fore/aft");
     }
 
     #[test]

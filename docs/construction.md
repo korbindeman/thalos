@@ -12,9 +12,10 @@ is the foundation this **generalises** — we extend the existing attach-node
 system, we do not fork it.
 
 **Slices 1–2 (parametric wing, wing-pylon jet nacelle, and scalar intake
-flow) have landed** — the rest of this spec is still forward-looking design.
-See **§0 Implementation status** for exactly what exists in code today and
-what is still on paper.
+flow), plus the airfoil-lofted wing and the stationed-loft fuselage, have
+landed** — the rest of this spec is still forward-looking design. See **§0
+Implementation status** for exactly what exists in code today and what is
+still on paper.
 
 ## 0. Implementation status
 
@@ -69,9 +70,12 @@ footprint placement** capability (§4.3) without forking the rocket path:
 
 Deliberate slice-1 simplifications, to revisit:
 
-- The wing cross-section is an **extruded box**, not a true airfoil loft
-  (`wing_mesh.rs`). Recognizable at editor/orbit distance; upgrade to an
-  airfoil section (and the control-surface fields below) later.
+- ~~The wing cross-section is an **extruded box**~~ **Done** — the wing is now
+  a true **airfoil loft**: a NACA 4-digit *symmetric* (00xx) section scaled to
+  the wing's t/c, sampled at root & tip with cosine spacing and lofted along
+  the span, with crisp end caps (`wing_mesh.rs`). Symmetric for now so the
+  mirror counterpart reflects with no camber sign to track; **camber + the
+  trailing-edge control-surface fields are still future work**.
 - Wing meshes rebuild on wing / mount change but **not** when the host
   diameter changes — re-touch a wing after resizing its fuselage to
   refit. Centreline-station mounting only (no fore/aft re-drag post-place;
@@ -166,6 +170,86 @@ non-cylindrical part:
   wings (tailplanes/fins stay dry). This is the airliner pattern — fuel in
   the wings, dry structural fuselage — and a step toward the §5.3 internal
   fuel-fill layer.
+
+### Landed — stationed-loft fuselage (the advanced airframe body)
+
+The §4.2 stationed loft is in code as a new **`Fuselage` part kind**, replacing
+the airliner's straight-cylinder body + straight-cone tailcone with one
+continuous, upswept superellipse loft:
+
+- **`Fuselage` part** (`part.rs`, `catalog.rs::FuselageSpec`,
+  `PartParams::Fuselage`, catalog `fuselage_loft`): a straight-axis loft of
+  superellipse cross-section **stations** with per-station **vertical offset**,
+  generated from high-level airliner params — `length`, `max_width`/
+  `max_height`, `roundness`, `nose_fraction`/`tail_fraction`, `nose_droop`,
+  `tail_upsweep`, `tail_tip_diameter`. The tailcone necks on a smooth ogive
+  while its centerline sweeps **up** (the airliner tail), instead of a straight
+  pencil-point. `fuselage_mesh.rs` owns the station generator, the skin mesh,
+  and the host-skin query; the editor and `crates/game/src/ship_view.rs` render
+  from the same builder. Straight-axis only (full 3-D spline still deferred,
+  §8); roundness handles circle → rounded-rectangle, but a true double-bubble
+  (control-loop sections) is future work.
+- **Host-skin query** (`fuselage_mesh::skin_radius` / `v_offset_at` /
+  `host_mount_geometry`): the §4.1 "host" capability for a loft. Surface mounts
+  (wings, gear, nacelles) ask the loft for the skin radius **and** centerline
+  offset *at their `(station, angle)`* instead of assuming a constant cylinder
+  radius, so the tailplane and fin sit on the necked, upswept tail and the main
+  wing on the full barrel. For a circular section / a plain tank host the query
+  reduces to the old constant radius, so every existing mount is unchanged.
+- **Diameter propagation**: like a tank, the loft's barrel `top` node inherits
+  the parent's mating diameter (`sizing.rs`), and the whole cross-section scales
+  to it — so a cockpit end-cap on top and the fuselage stay seam-matched. Mass
+  tracks the lofted skin area; a future wet/role-filled fuselage scales capacity
+  with the integrated loft volume (the schema is wired, the airliner body is
+  structure-only for now).
+- **Editor**: the `Fuselage` appears under *Structure* with inspector sliders
+  for every shape param; it node-stacks and hosts surface mounts like any hull,
+  and the placement preview follows the loft skin.
+- **A220** (`ships/a220.ron`): the body is now one `fuselage_loft` (barrel +
+  upswept tailcone) replacing the old `fuselage_structural` tank +
+  `adapter_std` cone pair; the flight-deck ogive provides the nose. `jet.ron` /
+  `skyhawk.ron` keep their straight `fuselage_structural` tubes.
+
+Deliberate simplifications, to revisit: straight axis only (no nose-to-tail
+spline); the near-circular barrel reuses the cylindrical `ship_part` panel
+shader (a non-circular loft needs loft-derived UVs, §2); mounts follow the
+loft's radius + vertical offset but not a local surface tilt; the interior
+volume feeds stats but no compartments/role-fills exist yet (§5).
+
+### Landed — parametric nose + inline cockpit (the nose pod retires)
+
+The fuselage now owns its **whole** skin, nose included, and command moves into
+an internal module — there is no separate nose-cone pod on a loft-bodied craft:
+
+- **Parametric nose**: the loft's nose is a first-class taper — `nose_fraction`
+  (length), `nose_droop`, and `nose_bluntness` (`0` straight cone → `1` rounded
+  radome). Tune them directly to shape any nose; no presets. (`fuselage_mesh.rs`,
+  `Fuselage`, `PartParams::Fuselage`.)
+- **Inline cockpit** (`PodGeometry::Inline`, catalog `cockpit_inline`): a command
+  module with **no body mesh of its own**. It surface-mounts inside the fuselage
+  near the nose and supplies command / crew / reaction-wheel capability via the
+  existing `CommandPod` plumbing; the fuselage's own nose is the visible nose. A
+  windshield region is the morph it will carve (next slice). Auto-fits the host
+  nose section, so "matched to the fuselage size" falls out by construction.
+  Feasible because attitude torque is summed from the capability (not the root),
+  and `PlayerShip` is a wrapper — so the **fuselage is the root** and the cockpit
+  a surface-mounted child.
+- **Camera framing fix**: `update_ship_camera_offset` / `visual_extent` now
+  include the fuselage body (previously omitted), so a loft-bodied aircraft
+  auto-frames on its whole hull.
+- **A220** (`ships/a220.ron`): rebuilt around this — `fuselage_loft` root with a
+  parametric nose + upswept tail, `cockpit_inline` near the nose, everything else
+  surface-mounted; `flightdeck` retired from this craft.
+
+### Landed — landing-gear bogies + wider track
+
+`GearSpec`/`Gear` gain `wheels_per_leg`: `1` is a single wheel, `2`+ a fore/aft
+**tandem bogie** (with a connecting beam), drawn by `gear_mesh`. Catalog-only
+like `track_fraction`, so no `PartParams` change. The A220's `gear_main_hd` is now
+a 2-wheel bogie on a wider (`±0.85·radius`) track for a stable, airliner-looking
+stance. *To revisit:* a belly-mounted axle can't exceed the hull width without
+floating — a true wing/sponson gear mount comes with the morph work; physics still
+uses one contact frame per leg (the bogie centre).
 
 ### Next (the stated goal: gear + control surfaces)
 

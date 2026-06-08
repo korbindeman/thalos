@@ -16,6 +16,7 @@ pub mod blueprint;
 pub mod catalog;
 pub mod cockpit_mesh;
 pub mod engine_mesh;
+pub mod fuselage_mesh;
 pub mod gear_mesh;
 pub mod material;
 pub mod part;
@@ -35,23 +36,28 @@ pub use blueprint::{
 };
 pub use catalog::{
     AdapterSpec, AmbientIntakeKind, CatalogEntry, CatalogError, CatalogId, CatalogRef,
-    DecouplerSpec, EngineGeometry, EngineOptimization, EngineSpec, GearSpec, IntakeCapture,
-    IntakeRequirement, IntakeSpec, PartCatalog, PodGeometry, PodSpec, ResourceStorageSpec, TankSpec,
-    WingSpec, gear_dry_mass, pod_visual_profile, wing_mean_aerodynamic_chord, wing_panel_area,
+    DecouplerSpec, EngineGeometry, EngineOptimization, EngineSpec, FuselageSpec, GearSpec,
+    IntakeCapture, IntakeRequirement, IntakeSpec, PartCatalog, PodGeometry, PodSpec,
+    ResourceStorageSpec, TankSpec, WingSpec, fuselage_surface_area, fuselage_volume, gear_dry_mass,
+    pod_visual_profile, wing_mean_aerodynamic_chord, wing_panel_area,
 };
 pub use engine_mesh::{
     JetNacelleMount, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
     jet_nacelle_centers, jet_nacelle_length,
 };
 pub use cockpit_mesh::build_cockpit_mesh;
+pub use fuselage_mesh::{
+    build_fuselage_mesh, host_mount_geometry, skin_radius as fuselage_skin_radius,
+    v_offset_at as fuselage_v_offset_at,
+};
 pub use gear_mesh::{GearLegFrame, build_gear_bay_mesh, build_gear_mesh, gear_leg_frames};
 pub use material::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, landing_gear_base, stainless_steel_base,
 };
 pub use part::{
     Adapter, AirIntake, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust,
-    EngineValidationError, FuelCrossfeed, FuelTank, Gear, MaterialKind, Part, PartMaterial,
-    ReactantRatio, ReactionWheel, ShroudProvider, Shroudable, Wing,
+    EngineValidationError, FuelCrossfeed, FuelTank, Fuselage, Gear, MaterialKind, Part,
+    PartMaterial, ReactantRatio, ReactionWheel, ShroudProvider, Shroudable, Wing,
 };
 pub use resource::{PartResources, Resource, ResourcePool};
 pub use staging::{
@@ -79,6 +85,7 @@ impl Plugin for ShipyardPlugin {
                     recompute::recompute_decoupler_state.after(sizing::propagate_node_sizes),
                     recompute::recompute_adapter_state.after(sizing::propagate_node_sizes),
                     recompute::recompute_tank_state.after(sizing::propagate_node_sizes),
+                    recompute::recompute_fuselage_state.after(sizing::propagate_node_sizes),
                     recompute::recompute_wing_state.after(sizing::propagate_node_sizes),
                     recompute::recompute_gear_state.after(sizing::propagate_node_sizes),
                 ),

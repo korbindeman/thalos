@@ -13,10 +13,10 @@
 
 use crate::blueprint::storage_capacity_for;
 use crate::catalog::{
-    CatalogEntry, CatalogRef, PartCatalog, adapter_surface_area, gear_dry_mass, tank_surface_area,
-    wing_panel_area,
+    CatalogEntry, CatalogRef, PartCatalog, adapter_surface_area, fuselage_surface_area,
+    gear_dry_mass, tank_surface_area, wing_panel_area,
 };
-use crate::part::{Adapter, Decoupler, FuelTank, Gear, Wing};
+use crate::part::{Adapter, Decoupler, FuelTank, Fuselage, Gear, Wing};
 use crate::resource::{PartResources, Resource};
 use bevy::prelude::*;
 
@@ -91,6 +91,50 @@ pub fn recompute_tank_state(
                     &mut res,
                     option.resource,
                     storage_capacity_for(&CatalogEntry::Tank(t.clone()), &params, option),
+                );
+            }
+        }
+    }
+}
+
+/// Fuselage dry mass tracks its lofted skin area as the inspector edits the
+/// body dimensions; a future wet/role-filled fuselage's capacity tracks its
+/// enclosed volume the same way a tank's does.
+pub fn recompute_fuselage_state(
+    catalog: Option<Res<PartCatalog>>,
+    mut q: Query<(&CatalogRef, &mut Fuselage, &mut PartResources), Changed<Fuselage>>,
+) {
+    let Some(catalog) = catalog else { return };
+    for (cat_ref, mut fus, mut res) in q.iter_mut() {
+        let Ok(CatalogEntry::Fuselage(f)) = catalog.resolve(&cat_ref.id) else {
+            continue;
+        };
+        let new_mass =
+            f.wall_mass_per_m2 * fuselage_surface_area(fus.length, fus.max_width, fus.max_height);
+        if (fus.dry_mass - new_mass).abs() > EPS {
+            fus.dry_mass = new_mass;
+        }
+
+        let params = crate::PartParams::Fuselage {
+            length: fus.length,
+            max_width: fus.max_width,
+            max_height: fus.max_height,
+            roundness: fus.roundness,
+            nose_fraction: fus.nose_fraction,
+            nose_bluntness: fus.nose_bluntness,
+            tail_fraction: fus.tail_fraction,
+            nose_droop: fus.nose_droop,
+            tail_upsweep: fus.tail_upsweep,
+            tail_tip_diameter: fus.tail_tip_diameter,
+        };
+        res.pools
+            .retain(|resource, _| f.storage.iter().any(|option| option.resource == *resource));
+        for option in &f.storage {
+            if res.pools.contains_key(&option.resource) {
+                rescale_pool(
+                    &mut res,
+                    option.resource,
+                    storage_capacity_for(&CatalogEntry::Fuselage(f.clone()), &params, option),
                 );
             }
         }

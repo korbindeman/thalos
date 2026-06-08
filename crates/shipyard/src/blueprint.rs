@@ -4,12 +4,13 @@ use crate::attach::{
 };
 use crate::catalog::{
     CatalogEntry, CatalogError, CatalogId, CatalogRef, PartCatalog, adapter_surface_area,
-    gear_dry_mass, tank_surface_area, tank_volume, wing_panel_area, wing_volume,
+    fuselage_surface_area, fuselage_volume, gear_dry_mass, tank_surface_area, tank_volume,
+    wing_panel_area, wing_volume,
 };
 use crate::part::{
     Adapter, AirIntake, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust,
-    FuelCrossfeed, FuelTank, Gear, Part, PartMaterial, ReactionWheel, ShroudProvider, Shroudable,
-    Wing,
+    FuelCrossfeed, FuelTank, Fuselage, Gear, Part, PartMaterial, ReactionWheel, ShroudProvider,
+    Shroudable, Wing,
 };
 use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
@@ -34,6 +35,27 @@ pub enum PartParams {
     Tank {
         diameter: f32,
         length: f32,
+    },
+    /// Stationed-loft fuselage (`docs/construction.md` §4.2). High-level
+    /// airliner params; [`crate::fuselage_mesh`] turns them into the skin.
+    Fuselage {
+        length: f32,
+        max_width: f32,
+        max_height: f32,
+        /// Superellipse roundness `∈ [0, 1]`: `1` round, `0` boxy.
+        roundness: f32,
+        /// Fraction of length spent on the parametric nose taper.
+        nose_fraction: f32,
+        /// Nose profile `∈ [0,1]`: `0` cone, `1` rounded radome.
+        nose_bluntness: f32,
+        /// Fraction of length spent on the tailcone neck.
+        tail_fraction: f32,
+        /// Nose centerline droop, metres.
+        nose_droop: f32,
+        /// Tail centerline upsweep, metres.
+        tail_upsweep: f32,
+        /// Diameter the tailcone necks to, metres.
+        tail_tip_diameter: f32,
     },
     Wing {
         span: f32,
@@ -250,6 +272,7 @@ pub fn check_params_match(
         (CatalogEntry::Decoupler(_), PartParams::Decoupler { .. }) => Ok(()),
         (CatalogEntry::Adapter(_), PartParams::Adapter { .. }) => Ok(()),
         (CatalogEntry::Tank(_), PartParams::Tank { .. }) => Ok(()),
+        (CatalogEntry::Fuselage(_), PartParams::Fuselage { .. }) => Ok(()),
         (CatalogEntry::Wing(_), PartParams::Wing { .. }) => Ok(()),
         (CatalogEntry::Gear(_), PartParams::Gear { .. }) => Ok(()),
         _ => Err(CatalogError::ParamMismatch {
@@ -409,6 +432,46 @@ fn insert_part(
             ));
         }
         (
+            CatalogEntry::Fuselage(f),
+            PartParams::Fuselage {
+                length,
+                max_width,
+                max_height,
+                roundness,
+                nose_fraction,
+                nose_bluntness,
+                tail_fraction,
+                nose_droop,
+                tail_upsweep,
+                tail_tip_diameter,
+            },
+        ) => {
+            let dry_mass =
+                f.wall_mass_per_m2 * fuselage_surface_area(*length, *max_width, *max_height);
+            // The airliner body is essentially circular, so the cylindrical
+            // ship_part panel shader maps cleanly — the fuselage flows through
+            // the standard body-of-revolution visual path with `PartMaterial`,
+            // like a tank. (A non-circular / double-bubble loft would need
+            // loft-derived UVs — `docs/construction.md` §2 — deferred.)
+            ec.insert((
+                Fuselage {
+                    length: *length,
+                    max_width: *max_width,
+                    max_height: *max_height,
+                    roundness: *roundness,
+                    nose_fraction: *nose_fraction,
+                    nose_bluntness: *nose_bluntness,
+                    tail_fraction: *tail_fraction,
+                    nose_droop: *nose_droop,
+                    tail_upsweep: *tail_upsweep,
+                    tail_tip_diameter: *tail_tip_diameter,
+                    dry_mass,
+                },
+                FuelCrossfeed::default(),
+                PartMaterial::default(),
+            ));
+        }
+        (
             CatalogEntry::Wing(w),
             PartParams::Wing {
                 span,
@@ -454,6 +517,7 @@ fn insert_part(
                 strut_length: *strut_length,
                 wheel_radius: *wheel_radius,
                 track_fraction: g.track_fraction,
+                wheels_per_leg: g.wheels_per_leg,
                 dry_mass,
             });
         }
@@ -563,6 +627,32 @@ pub fn nodes_for(entry: &CatalogEntry, params: &PartParams) -> HashMap<NodeId, A
                 },
             );
         }
+        (
+            CatalogEntry::Fuselage(_),
+            PartParams::Fuselage {
+                length,
+                max_width,
+                tail_tip_diameter,
+                ..
+            },
+        ) => {
+            // `top` is the barrel (overridable by the parent like a tank);
+            // `bottom` is the necked tail tip at −length.
+            nodes.insert(
+                "top".into(),
+                AttachNode {
+                    diameter: *max_width,
+                    offset: Vec3::ZERO,
+                },
+            );
+            nodes.insert(
+                "bottom".into(),
+                AttachNode {
+                    diameter: *tail_tip_diameter,
+                    offset: Vec3::new(0.0, -*length, 0.0),
+                },
+            );
+        }
         _ => {}
     }
     nodes
@@ -611,6 +701,17 @@ fn storage_volume_for(entry: &CatalogEntry, params: &PartParams) -> f32 {
         (CatalogEntry::Tank(_), PartParams::Tank { diameter, length }) => {
             tank_volume(*diameter, *length)
         }
+        // A future wet/role-filled fuselage scales capacity with its enclosed
+        // loft volume, just as a tank does with its cylinder.
+        (
+            CatalogEntry::Fuselage(_),
+            PartParams::Fuselage {
+                length,
+                max_width,
+                max_height,
+                ..
+            },
+        ) => fuselage_volume(*length, *max_width, *max_height),
         // Wet wings store fuel in the integral wing box; capacity scales with
         // the panel's internal volume just as a tank's does with its cylinder.
         (
@@ -632,19 +733,20 @@ mod tests {
     use super::*;
     use crate::catalog::PartCatalog;
 
-    /// The shipped demo aircraft must stay loadable: parse `ships/skyhawk.ron`
+    /// The shipped demo aircraft must stay loadable: parse `ships/a220.ron`
     /// against the catalog, confirm its KSP-symmetry surface mounts survive
     /// the round-trip, and that stats derive a positive wing area. Guards the
-    /// hand-authored RON (`surface_mounts` shape, `symmetry_group`) from drift.
+    /// hand-authored RON (`surface_mounts` shape, `symmetry_group`) from drift —
+    /// including the loft-fuselage-root + inline-cockpit layout.
     #[test]
-    fn skyhawk_sample_loads_with_wings() {
+    fn a220_sample_loads_with_wings() {
         let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
             .expect("parse parts.ron");
-        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/skyhawk.ron"))
-            .expect("parse skyhawk.ron");
-        // main wing ×2 + tailplane ×2 + fin + nacelle ×2 + nose gear + main
-        // gear = 9 surface mounts.
-        assert_eq!(bp.surface_mounts.len(), 9);
+        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/a220.ron"))
+            .expect("parse a220.ron");
+        // inline cockpit + main wing ×2 + tailplane ×2 + fin + nacelle ×2 +
+        // nose gear + main gear = 10 surface mounts (everything rides the loft).
+        assert_eq!(bp.surface_mounts.len(), 10);
         // Three linked groups: main wings, tailplanes, nacelles.
         let groups: std::collections::HashSet<u32> = bp
             .surface_mounts
@@ -652,8 +754,8 @@ mod tests {
             .filter_map(|m| m.symmetry_group)
             .collect();
         assert_eq!(groups.len(), 3, "main / tail / nacelle groups");
-        let s = bp.stats(&cat).expect("skyhawk stats");
-        assert!(s.wing_area_m2 > 0.0, "skyhawk should report wing area");
+        let s = bp.stats(&cat).expect("a220 stats");
+        assert!(s.wing_area_m2 > 0.0, "a220 should report wing area");
         assert!(s.mean_aerodynamic_chord_m > 0.0);
         assert!(s.dry_mass_kg > 0.0);
     }
@@ -703,26 +805,22 @@ mod tests {
         );
     }
 
-    /// Both shipped aircraft load with fuel in their wings and none in the
-    /// structural fuselage. Guards `ships/jet.ron` + `ships/a220.ron`.
+    /// The shipped airliner loads with fuel in its wings and none in the
+    /// structural body. Guards `ships/a220.ron`.
     #[test]
-    fn jet_and_a220_carry_wing_fuel() {
+    fn a220_carries_wing_fuel() {
         let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
             .expect("parse parts.ron");
-        for ron in [
-            include_str!("../../../ships/jet.ron"),
-            include_str!("../../../ships/a220.ron"),
-        ] {
-            let bp = ShipBlueprint::from_ron(ron).expect("parse aircraft ron");
-            let s = bp.stats(&cat).expect("aircraft stats");
-            let kero = s
-                .resources
-                .get(&Resource::Kerosene)
-                .expect("aircraft should carry kerosene");
-            assert!(kero.capacity > 0.0, "wet wings provide kerosene capacity");
-            assert!(kero.mass_kg > 0.0, "wet wings spawn full of kerosene");
-            assert!(s.wing_area_m2 > 0.0);
-        }
+        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/a220.ron"))
+            .expect("parse a220.ron");
+        let s = bp.stats(&cat).expect("aircraft stats");
+        let kero = s
+            .resources
+            .get(&Resource::Kerosene)
+            .expect("aircraft should carry kerosene");
+        assert!(kero.capacity > 0.0, "wet wings provide kerosene capacity");
+        assert!(kero.mass_kg > 0.0, "wet wings spawn full of kerosene");
+        assert!(s.wing_area_m2 > 0.0);
     }
 }
 
@@ -742,6 +840,20 @@ pub fn default_params_for(entry: &CatalogEntry) -> PartParams {
         CatalogEntry::Tank(_) => PartParams::Tank {
             diameter: 2.5,
             length: 3.0,
+        },
+        // A mid-size airliner barrel with an upswept tailcone — a sensible
+        // starting body the inspector then tunes.
+        CatalogEntry::Fuselage(_) => PartParams::Fuselage {
+            length: 14.0,
+            max_width: 2.5,
+            max_height: 2.5,
+            roundness: 1.0,
+            nose_fraction: 0.14,
+            nose_bluntness: 0.8,
+            tail_fraction: 0.34,
+            nose_droop: 0.1,
+            tail_upsweep: 0.9,
+            tail_tip_diameter: 0.5,
         },
         CatalogEntry::Wing(_) => PartParams::Wing {
             span: 5.0,

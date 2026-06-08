@@ -42,6 +42,7 @@ pub enum CatalogEntry {
     Decoupler(DecouplerSpec),
     Adapter(AdapterSpec),
     Tank(TankSpec),
+    Fuselage(FuselageSpec),
     Wing(WingSpec),
     Gear(GearSpec),
 }
@@ -78,6 +79,13 @@ pub enum PodGeometry {
     /// spike. A simple symmetric placeholder; a real nose-low model can replace
     /// it later.
     AircraftCockpit,
+    /// **Inline cockpit**: an internal command module with *no body mesh of its
+    /// own*. It surface-mounts inside a parametric fuselage near the nose and
+    /// supplies command / crew / reaction-wheel capability; the fuselage's own
+    /// parametric nose is the visible nose, and a windshield region is morphed
+    /// into the skin (see `docs/construction.md` §5.6). Used in place of a
+    /// nose-cone pod on loft-bodied aircraft.
+    Inline,
 }
 
 impl PodGeometry {
@@ -85,16 +93,19 @@ impl PodGeometry {
         match self {
             PodGeometry::Capsule => "Capsule",
             PodGeometry::AircraftCockpit => "Aircraft cockpit",
+            PodGeometry::Inline => "Inline cockpit",
         }
     }
 
     /// Body length as a multiple of the pod diameter. The single knob that
     /// keeps a cockpit cone longer than a capsule while every consumer
-    /// (node offset, inertia, collider, mesh) stays in agreement.
+    /// (node offset, inertia, collider, mesh) stays in agreement. An inline
+    /// cockpit has no body, so it contributes no length.
     pub fn length_factor(self) -> f32 {
         match self {
             PodGeometry::Capsule => 0.9,
             PodGeometry::AircraftCockpit => 1.0,
+            PodGeometry::Inline => 0.0,
         }
     }
 }
@@ -255,6 +266,20 @@ pub struct TankSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FuselageSpec {
+    pub display_name: String,
+    /// dry_mass = wall_mass_per_m2 × lofted skin surface area (see
+    /// [`fuselage_surface_area`]). Same stainless-skin recipe as a tank.
+    pub wall_mass_per_m2: f32,
+    /// Whitelisted resource storage. The airliner body is structure-only
+    /// (empty), but the schema supports a future wet/role-filled fuselage
+    /// whose capacity scales with the integrated loft volume
+    /// ([`fuselage_volume`]) — mirroring the wet-wing path.
+    #[serde(default)]
+    pub storage: Vec<ResourceStorageSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WingSpec {
     pub display_name: String,
     /// dry_mass = wall_mass_per_m2 × planform area (per panel; doubled for
@@ -291,6 +316,17 @@ pub struct GearSpec {
     /// Wheel radius a freshly-placed gear starts at, metres. See
     /// [`GearSpec::default_strut_length`] for the matched-set contract.
     pub default_wheel_radius: f32,
+    /// Wheels per leg, fore/aft along the strut end. `1` is a single wheel;
+    /// `2`+ is a tandem **bogie** (heavier main gear). Like `track_fraction`,
+    /// this defines the gear *kind*, so it lives on the catalog and is copied
+    /// to [`crate::Gear`] at spawn. Defaults to `1` so existing gear loads
+    /// unchanged.
+    #[serde(default = "default_wheels_per_leg")]
+    pub wheels_per_leg: u8,
+}
+
+fn default_wheels_per_leg() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +365,7 @@ impl CatalogEntry {
             CatalogEntry::Decoupler(d) => &d.display_name,
             CatalogEntry::Adapter(a) => &a.display_name,
             CatalogEntry::Tank(t) => &t.display_name,
+            CatalogEntry::Fuselage(f) => &f.display_name,
             CatalogEntry::Wing(w) => &w.display_name,
             CatalogEntry::Gear(g) => &g.display_name,
         }
@@ -342,6 +379,7 @@ impl CatalogEntry {
             CatalogEntry::Decoupler(_) => "Decoupler",
             CatalogEntry::Adapter(_) => "Adapter",
             CatalogEntry::Tank(_) => "Tank",
+            CatalogEntry::Fuselage(_) => "Fuselage",
             CatalogEntry::Wing(_) => "Wing",
             CatalogEntry::Gear(_) => "Gear",
         }
@@ -355,6 +393,7 @@ impl CatalogEntry {
             CatalogEntry::Decoupler(d) => &d.storage,
             CatalogEntry::Adapter(a) => &a.storage,
             CatalogEntry::Tank(t) => &t.storage,
+            CatalogEntry::Fuselage(f) => &f.storage,
             CatalogEntry::Wing(w) => &w.storage,
             // Landing gear stores nothing.
             CatalogEntry::Gear(_) => &[],
@@ -459,6 +498,8 @@ pub fn pod_visual_profile(diameter: f32, geometry: PodGeometry) -> (f32, f32, f3
         PodGeometry::Capsule => (0.3, 0.5),
         // Coarse cone proxy for the ogive (shadow / extent only).
         PodGeometry::AircraftCockpit => (0.15, 0.5),
+        // No body — zero extent (length_factor is also 0).
+        PodGeometry::Inline => (0.0, 0.0),
     };
     (
         diameter * top_frac,
@@ -481,6 +522,31 @@ pub fn tank_surface_area(diameter: f32, length: f32) -> f32 {
 pub fn tank_volume(diameter: f32, length: f32) -> f32 {
     let r = diameter * 0.5;
     std::f32::consts::PI * r * r * length
+}
+
+/// Approximate lofted skin surface area of a fuselage, m², for mass scaling.
+/// Treats the body as a cylinder of the mean barrel diameter over its length
+/// (the nose/tail tapers roughly cancel a true integral at this fidelity),
+/// plus two end caps. The barrel diameter is the effective (possibly
+/// inherited) one, with height folded in via the mean of width and height.
+pub fn fuselage_surface_area(length: f32, width: f32, height: f32) -> f32 {
+    let mean_d = (width + height) * 0.5;
+    let r = mean_d * 0.5;
+    let lateral = std::f32::consts::PI * mean_d * length;
+    let caps = 2.0 * std::f32::consts::PI * r * r;
+    lateral + caps
+}
+
+/// Approximate enclosed volume of a fuselage loft, m³ — the capacity basis
+/// for a future wet/role-filled fuselage's `units_per_m3` storage. A tapered
+/// body encloses less than its barrel cylinder; `FUSELAGE_FILL` captures the
+/// nose/tail taper plus unusable structure.
+pub fn fuselage_volume(length: f32, width: f32, height: f32) -> f32 {
+    /// Usable share of the barrel cylinder after nose/tail taper + structure.
+    const FUSELAGE_FILL: f32 = 0.75;
+    let a = width * 0.5;
+    let b = height * 0.5;
+    std::f32::consts::PI * a * b * length * FUSELAGE_FILL
 }
 
 /// Planform (top-down projected) area of one trapezoidal wing panel, m².
@@ -524,7 +590,8 @@ pub fn wing_mean_aerodynamic_chord(root_chord: f32, tip_chord: f32) -> f32 {
 /// stats aggregator.
 pub fn gear_dry_mass(spec: &GearSpec, strut_length: f32) -> f32 {
     let legs = if spec.track_fraction > 0.0 { 2.0 } else { 1.0 };
-    legs * (spec.strut_mass_per_m * strut_length + spec.wheel_mass)
+    let wheels = spec.wheels_per_leg.max(1) as f32;
+    legs * (spec.strut_mass_per_m * strut_length + wheels * spec.wheel_mass)
 }
 
 /// Lateral surface area of a frustum with the two given diameters and a
