@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+mod aero;
 mod autopilot;
 mod bake_check;
 mod body_tree_panel;
@@ -70,6 +71,7 @@ use thalos_physics_canonical::{
 use thalos_world::StateVector;
 use thalos_world::parsing::load_solar_system_from_dir;
 
+use aero::GameAeroPlugin;
 use autopilot::AutopilotPlugin;
 use body_tree_panel::BodyTreePanelPlugin;
 use bridge::BridgePlugin;
@@ -533,6 +535,7 @@ fn main() {
         .add_plugins(runway::RunwayPlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(GameLocalPhysicsPlugin)
+        .add_plugins(GameAeroPlugin)
         .add_plugins(PlayerControllerPlugin)
         .add_plugins(MapViewPlugin)
         .add_plugins(BridgePlugin)

@@ -48,6 +48,11 @@ const PART_RESOLUTION: u32 = 128;
 // TEMP (camera-judder repro): survive a hard touchdown so the craft settles in
 // Full on the terrain instead of being destroyed. Restore to 12.0 after.
 const SHIP_IMPACT_TOLERANCE_M_S: f64 = 1.0e9;
+/// Aggregate bluff-body drag coefficient for the player ship. Blunt
+/// capsule-topped stacks sit around 1.0; a future per-shape model can derive
+/// this from the nose part. The frontal area is per-vehicle
+/// (`ShipStats::frontal_area_m2`).
+const SHIP_DRAG_COEFFICIENT: f64 = 1.0;
 
 /// Initial orbital distance (metres) when switching into ship view. The
 /// camera snaps to this distance — close enough that a ~10 m ship fills
@@ -157,6 +162,10 @@ pub(crate) fn spawn_player_ship(
         // future per-part model derives this from the contacting parts).
         // See docs/surface.md.
         impact_tolerance_m_s: SHIP_IMPACT_TOLERANCE_M_S,
+        // Per-vehicle aerodynamic drag: frontal area from the actual part
+        // geometry, blunt-body Cd. See docs/aerodynamics.md.
+        reference_area_m2: stats.frontal_area_m2,
+        drag_coefficient: SHIP_DRAG_COEFFICIENT,
     });
     sim.simulation.set_ship_mass(stats.wet_mass_kg());
     info!(
@@ -168,6 +177,28 @@ pub(crate) fn spawn_player_ship(
         stats.dry_mass_kg,
         stats.wet_mass_kg(),
     );
+
+    // Aerodynamic zone layout from the blueprint's wing parts (lift, control
+    // surfaces, drag). Consumed by `aero::attach_ship_aero` when the Avian body
+    // spawns. A wingless craft yields just the bluff-body drag zone.
+    match blueprint.wing_aero_panels(&catalog) {
+        Ok(panels) => {
+            let layout = crate::aero::build_ship_aero_layout(
+                &panels,
+                stats.frontal_area_m2,
+                SHIP_DRAG_COEFFICIENT,
+            );
+            info!(
+                "aero layout: {} wing panel(s) -> {} zone(s), wing area {:.1} m², MAC {:.2} m",
+                panels.len(),
+                layout.zones.len(),
+                layout.reference_area_m2,
+                layout.reference_chord_m,
+            );
+            commands.insert_resource(layout);
+        }
+        Err(err) => error!("Failed to compute wing aero panels: {err}"),
+    }
 
     let ship_entity = match blueprint.spawn(&mut commands, &catalog) {
         Ok(e) => e,

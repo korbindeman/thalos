@@ -13,6 +13,7 @@
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
 
+mod atmo_panel;
 mod eva_panel;
 mod flight_panel;
 mod format;
@@ -82,6 +83,7 @@ impl Plugin for HudPlugin {
                     flight_panel::setup.after(crate::navball::ui::setup_navball_ui),
                     fps_overlay::setup,
                     eva_panel::setup,
+                    atmo_panel::setup,
                     system_map_panel::setup,
                 )
                     .after(theme::init_theme)
@@ -111,11 +113,16 @@ impl Plugin for HudPlugin {
                     flight_panel::handle_velocity_frame_click,
                     fps_overlay::update,
                     eva_panel::update,
-                    nav_panel::handle_clicks,
-                    nav_panel::update_button_visuals,
-                    nav_panel::update_autopilot_visuals,
-                    nav_panel::update_maneuver_visuals,
-                    nav_attitude::update_attitude,
+                    atmo_panel::update,
+                    // Nested tuple: keeps the outer system-tuple within Bevy's
+                    // 20-element `IntoScheduleConfigs` arity limit.
+                    (
+                        nav_panel::handle_clicks,
+                        nav_panel::update_button_visuals,
+                        nav_panel::update_autopilot_visuals,
+                        nav_panel::update_maneuver_visuals,
+                        nav_attitude::update_attitude,
+                    ),
                 )
                     .after(crate::SimStage::Sync)
                     .run_if(not_in_photo_mode),

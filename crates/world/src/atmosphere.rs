@@ -586,6 +586,124 @@ pub struct TerrestrialAtmosphere {
     /// perspective at composite time. None disables the layer.
     #[serde(default)]
     pub clouds: Option<CloudCover>,
+
+    /// Surface thermodynamics for the **physical** atmosphere used by
+    /// aerodynamic forces (drag, and later lift). Distinct from the
+    /// `scattering` render model above — `scattering` decides how the sky
+    /// *looks*, `profile` decides how the air *pushes* on a vehicle.
+    ///
+    /// The density profile itself (ρ vs altitude) is derived, not authored:
+    /// surface density ρ₀ = P₀/(R·T₀) and the density scale height H = R·T₀/g
+    /// both fall out of the surface pressure P₀ (supplied by the caller — Thalos
+    /// reuses the terrain `Breathable(pressure_bar)`), the surface temperature
+    /// and gas constant here, and the body's own surface gravity g. See
+    /// [`TerrestrialAtmosphere::sample_at_altitude_m`]. Optional: when omitted,
+    /// Earth-like surface conditions are assumed.
+    #[serde(default)]
+    pub profile: Option<AtmosphereProfile>,
+}
+
+/// Default surface temperature (K) when no [`AtmosphereProfile`] is authored.
+pub const DEFAULT_SURFACE_TEMPERATURE_K: f64 = 288.15;
+/// Default specific gas constant (J/(kg·K)) — Earth dry air.
+pub const DEFAULT_SPECIFIC_GAS_CONSTANT: f64 = 287.05;
+/// Default adiabatic index γ — diatomic gas (Earth air).
+pub const DEFAULT_GAMMA: f64 = 1.4;
+
+/// Surface thermodynamic parameters of a body's physical atmosphere.
+///
+/// These plus the surface pressure and the body's surface gravity fully define
+/// the isothermal-exponential atmosphere sampled by
+/// [`TerrestrialAtmosphere::sample_at_altitude_m`]. A fuller ISA-style layered
+/// model (lapse rate, tropopause) can be added later without changing the call
+/// site.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AtmosphereProfile {
+    /// Surface (mean-surface) air temperature T₀, in kelvin. Sets ρ₀ via the
+    /// ideal gas law, the scale height H = R·T₀/g, and the speed of sound.
+    pub surface_temperature_k: f32,
+    /// Specific gas constant R, in J/(kg·K). Earth dry air ≈ 287; CO₂ ≈ 189.
+    #[serde(default = "default_specific_gas_constant")]
+    pub specific_gas_constant: f32,
+    /// Adiabatic index γ for the speed of sound a = √(γ·R·T). Earth air ≈ 1.4.
+    #[serde(default = "default_gamma")]
+    pub gamma: f32,
+}
+
+/// Atmospheric state at a sampled altitude — the physical quantities aerodynamic
+/// force computation needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtmosphereSample {
+    /// Air density ρ, kg/m³.
+    pub density_kg_m3: f64,
+    /// Static pressure P, Pa.
+    pub pressure_pa: f64,
+    /// Temperature T, K.
+    pub temperature_k: f64,
+    /// Speed of sound a, m/s.
+    pub speed_of_sound_m_s: f64,
+}
+
+impl AtmosphereSample {
+    /// All-zero "vacuum here" sample.
+    pub const VACUUM: Self = Self {
+        density_kg_m3: 0.0,
+        pressure_pa: 0.0,
+        temperature_k: 0.0,
+        speed_of_sound_m_s: 0.0,
+    };
+}
+
+impl TerrestrialAtmosphere {
+    /// Physical atmospheric state at altitude `agl_m` (metres above the mean
+    /// surface), given the **surface pressure** `surface_pressure_pa` and the
+    /// body's **surface gravity** `surface_gravity_m_s2`.
+    ///
+    /// Isothermal-exponential model: with surface temperature T₀ and specific
+    /// gas constant R (from the authored [`profile`](Self::profile), or
+    /// Earth-like defaults), ρ₀ = P₀/(R·T₀), scale height H = R·T₀/g, and
+    /// ρ(h) = ρ₀·exp(−h/H). Temperature is constant at T₀; speed of sound is
+    /// √(γ·R·T₀). Returns [`AtmosphereSample::VACUUM`] at or above the Kármán
+    /// line and for any degenerate input (`karman_line_m`/pressure/gravity ≤ 0).
+    pub fn sample_at_altitude_m(
+        &self,
+        agl_m: f64,
+        surface_pressure_pa: f64,
+        surface_gravity_m_s2: f64,
+    ) -> AtmosphereSample {
+        if self.karman_line_m <= 0.0
+            || agl_m >= self.karman_line_m as f64
+            || surface_pressure_pa <= 0.0
+            || surface_gravity_m_s2 <= 0.0
+        {
+            return AtmosphereSample::VACUUM;
+        }
+        let (t0, r, gamma) = match &self.profile {
+            Some(p) => (
+                p.surface_temperature_k as f64,
+                p.specific_gas_constant as f64,
+                p.gamma as f64,
+            ),
+            None => (
+                DEFAULT_SURFACE_TEMPERATURE_K,
+                DEFAULT_SPECIFIC_GAS_CONSTANT,
+                DEFAULT_GAMMA,
+            ),
+        };
+        if t0 <= 0.0 || r <= 0.0 {
+            return AtmosphereSample::VACUUM;
+        }
+        let agl = agl_m.max(0.0);
+        let scale_height = r * t0 / surface_gravity_m_s2;
+        let falloff = (-agl / scale_height).exp();
+        let pressure_pa = surface_pressure_pa * falloff;
+        AtmosphereSample {
+            density_kg_m3: pressure_pa / (r * t0),
+            pressure_pa,
+            temperature_k: t0,
+            speed_of_sound_m_s: (gamma * r * t0).sqrt(),
+        }
+    }
 }
 
 /// Reference cloud overlay for a terrestrial impostor.
@@ -661,4 +779,94 @@ fn default_cloud_thickness() -> f32 {
 }
 fn default_cloud_density() -> f32 {
     1.0
+}
+fn default_specific_gas_constant() -> f32 {
+    DEFAULT_SPECIFIC_GAS_CONSTANT as f32
+}
+fn default_gamma() -> f32 {
+    DEFAULT_GAMMA as f32
+}
+
+#[cfg(test)]
+mod atmosphere_sample_tests {
+    use super::*;
+
+    // Earth-like reference: 1 bar surface pressure, Earth gravity.
+    const P0: f64 = 101_325.0;
+    const G: f64 = 9.80665;
+
+    fn atmo(karman: f32, profile: Option<AtmosphereProfile>) -> TerrestrialAtmosphere {
+        TerrestrialAtmosphere {
+            karman_line_m: karman,
+            profile,
+            ..Default::default()
+        }
+    }
+
+    fn earth_like() -> Option<AtmosphereProfile> {
+        Some(AtmosphereProfile {
+            surface_temperature_k: 288.15,
+            specific_gas_constant: 287.05,
+            gamma: 1.4,
+        })
+    }
+
+    #[test]
+    fn surface_density_matches_ideal_gas() {
+        let a = atmo(80_000.0, earth_like());
+        let s = a.sample_at_altitude_m(0.0, P0, G);
+        // ρ0 = P0 / (R·T0) ≈ 1.225 kg/m³ at ISA sea level. Expected uses the
+        // same f32→f64 conversion the profile fields undergo (else the ~1e-7
+        // f32 round-trip trips a tight tolerance).
+        let r = 287.05_f32 as f64;
+        let t0 = 288.15_f32 as f64;
+        assert!((s.density_kg_m3 - P0 / (r * t0)).abs() < 1e-9);
+        assert!((s.density_kg_m3 - 1.225).abs() < 1e-3);
+        assert!((s.pressure_pa - P0).abs() < 1e-6);
+        assert!((s.speed_of_sound_m_s - 340.3).abs() < 0.5);
+    }
+
+    #[test]
+    fn density_falls_off_by_scale_height() {
+        let a = atmo(80_000.0, earth_like());
+        let h = 287.05 * 288.15 / G; // scale height H = R·T0/g
+        let surface = a.sample_at_altitude_m(0.0, P0, G).density_kg_m3;
+        let one_h = a.sample_at_altitude_m(h, P0, G).density_kg_m3;
+        // One scale height up → 1/e of surface density.
+        assert!((one_h - surface * (-1.0f64).exp()).abs() < 1e-6);
+        assert!(
+            a.sample_at_altitude_m(20_000.0, P0, G).density_kg_m3
+                < a.sample_at_altitude_m(5_000.0, P0, G).density_kg_m3
+        );
+    }
+
+    #[test]
+    fn scale_height_tracks_gravity() {
+        // Halving gravity doubles the scale height, so density at a fixed
+        // altitude is higher on the lower-gravity body.
+        let a = atmo(80_000.0, earth_like());
+        let strong = a.sample_at_altitude_m(10_000.0, P0, G).density_kg_m3;
+        let weak = a.sample_at_altitude_m(10_000.0, P0, G * 0.5).density_kg_m3;
+        assert!(weak > strong);
+    }
+
+    #[test]
+    fn vacuum_above_karman_and_for_degenerate_inputs() {
+        let a = atmo(80_000.0, earth_like());
+        assert_eq!(a.sample_at_altitude_m(80_000.0, P0, G), AtmosphereSample::VACUUM);
+        assert_eq!(a.sample_at_altitude_m(120_000.0, P0, G), AtmosphereSample::VACUUM);
+        // No pressure / no gravity / airless body → vacuum.
+        assert_eq!(a.sample_at_altitude_m(0.0, 0.0, G), AtmosphereSample::VACUUM);
+        assert_eq!(a.sample_at_altitude_m(0.0, P0, 0.0), AtmosphereSample::VACUUM);
+        assert_eq!(atmo(0.0, earth_like()).sample_at_altitude_m(0.0, P0, G), AtmosphereSample::VACUUM);
+    }
+
+    #[test]
+    fn default_profile_is_earth_like() {
+        // No authored profile → Earth-like defaults still give sensible air.
+        let a = atmo(80_000.0, None);
+        let s = a.sample_at_altitude_m(0.0, P0, G);
+        assert!((s.density_kg_m3 - 1.225).abs() < 1e-3);
+        assert!(s.density_kg_m3 > a.sample_at_altitude_m(10_000.0, P0, G).density_kg_m3);
+    }
 }

@@ -413,6 +413,24 @@ pub fn enforce_warp_altitude_limits(
             max_level = i;
         }
     }
+
+    // Aerodynamic flight disallows time warp (KSP-style): inside the atmosphere
+    // shell, clamp to 1×. Atmospheric drag/lift run only in the live Avian
+    // bubble (`AvianRole::Full`), which is also pinned to 1×, so warping in
+    // atmosphere would silently skip those forces. `altitude_m` is measured from
+    // the conservative `radius + max_terrain_elevation` buffer above, so this
+    // engages slightly early — harmless for a warp gate.
+    if let Some(atmosphere) = bodies[dominant].terrestrial_atmosphere.as_ref()
+        && atmosphere.karman_line_m > 0.0
+        && altitude_m < atmosphere.karman_line_m as f64
+    {
+        let one_x = levels
+            .iter()
+            .position(|&speed| (speed - 1.0).abs() <= f64::EPSILON)
+            .unwrap_or(0);
+        max_level = max_level.min(one_x);
+    }
+
     limits.max_level = max_level;
 
     if sim.simulation.warp.level_index() > max_level {

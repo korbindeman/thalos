@@ -1,0 +1,57 @@
+# VENDORED (LGPL-3.0-or-later) — third-party fork of avian_fdm by
+# Víctor Cuadrado Juan <me@viccuad.me>, https://github.com/viccuad/avian_fdm
+#
+# Vendored in-tree (like crates/udlod) so Thalos can adapt its environment
+# assumptions to the body-centered, rotating-planet local-physics bubble:
+#   - atmosphere fed from Thalos per-body density (not Earth ISA / world-Y),
+#   - true airspeed via WindResource = omega x r (airmass co-rotation),
+#   - force-only use (Thalos owns mass/inertia/gravity).
+# See docs/aerodynamics.md for the model and the open-core exit path
+# (relicense-or-replace before any proprietary build). Thalos modifications
+# travel under LGPL-3.0-or-later; LICENSE is carried alongside this crate.
+[package]
+name = "avian_fdm"
+version = "0.1.0"
+edition = "2021"
+description = "6-DoF Flight Dynamics Model for Bevy + Avian 0.6 (vendored fork)"
+license = "LGPL-3.0-or-later"
+authors = ["Víctor Cuadrado Juan <me@viccuad.me>"]
+repository = "https://github.com/viccuad/avian_fdm"
+readme = "README.md"
+keywords = ["bevy", "avian", "fdm", "flight", "simulation"]
+categories = ["game-development", "simulation", "science"]
+
+[features]
+# Exactly one of `f32` or `f64` must be enabled. They select the avian3d
+# physics backend and are mutually exclusive: enabling both is a compile error.
+# Thalos runs the f64 backend, so that is the default here (upstream defaulted
+# to f32). `debug-plugin` is backend-agnostic in this fork (the gizmo systems
+# convert avian's f64 vectors to f32 for drawing), so Thalos enables both
+# `f64` + `debug-plugin` for the in-game FDM force-vector overlay.
+default = ["f64"]
+f32 = ["avian3d/default-collider", "avian3d/f32", "avian3d/parry-f32"]
+f64 = ["avian3d/default-collider", "avian3d/f64", "avian3d/parry-f64"]
+debug-plugin = ["dep:bevy_color", "dep:bevy_gizmos"]
+
+[dependencies]
+# collider-from-mesh is excluded: avian_fdm uses only analytic shapes (boxes, spheres,
+# capsules) for AeroZone colliders. Mesh-based colliders would require AssetPlugin +
+# MeshPlugin in headless apps, and are never needed for a flight dynamics library.
+avian3d = { version = "0.6", default-features = false, features = ["3d"] }
+bevy_app = { version = "0.18", default-features = false }
+bevy_ecs = { version = "0.18", default-features = false }
+bevy_math = { version = "0.18", default-features = false }
+bevy_transform = { version = "0.18", default-features = false }
+bevy_reflect = { version = "0.18", default-features = false }
+bevy_color = { version = "0.18", default-features = false, optional = true }
+bevy_gizmos = { version = "0.18", default-features = false, optional = true }
+bevy_log = { version = "0.18", default-features = false }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+bevy = { version = "0.18", features = [
+    "bevy_winit",
+    "bevy_pbr",
+    "bevy_gizmos",
+] }

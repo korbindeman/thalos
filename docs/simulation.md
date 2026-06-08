@@ -802,6 +802,20 @@ The exact entry rule is policy data, not hardcoded into the integrator.
 Initial implementation can use altitude and density thresholds; later
 versions can add dynamic pressure and heating.
 
+**Implemented (first slice, see `docs/aerodynamics.md`).** The
+*aerodynamic flight regime* now exists for spacecraft drag, implemented
+**bubble-side** via the vendored `avian_fdm` force model rather than as a
+canonical `ForceProvider`. The entry rule is the body's `karman_line_m`:
+below it, `crates/game/src/local_physics.rs` returns `AvianRole::Full`
+(Avian owns translation so drag acts across the whole column) and
+`enforce_warp_altitude_limits` clamps warp to 1× — matching the
+"high warp disallowed in aerodynamic flight" rule above. The *orbital
+drag regime* (decay under warp) and aero in **prediction** are still
+deferred: aero is not yet a `ForceProvider`, so predicted trajectories
+do not account for drag. Folding the force math into
+`thalos_physics_canonical` (the "replace" exit for the LGPL dependency)
+is the prerequisite for prediction-aware aero.
+
 ## Maneuver frames
 
 Maneuver reference frames are navigation/editing frames, not SOI

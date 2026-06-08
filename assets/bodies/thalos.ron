@@ -70,5 +70,15 @@
         //     density: 1.0,
         // )),
         clouds: None,
+        // Physical atmosphere for aerodynamic forces (drag). Surface pressure
+        // is reused from the terrain `atmosphere: Breathable(pressure_bar: 1.0)`
+        // above; here we author the thermodynamics. Density ρ0 = P0/(R·T0) and
+        // the scale height H = R·T0/g are derived (g from Thalos's own gravity,
+        // ~9.06 m/s²), so this is a proper per-body profile, not Earth defaults.
+        profile: Some((
+            surface_temperature_k: 288.0, // Earth-like (1 bar, flux ≈ 1)
+            specific_gas_constant: 287.0, // breathable ≈ dry air
+            gamma: 1.4,
+        )),
     )),
 )

@@ -307,6 +307,21 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
+- **`avian_fdm`** — vendored zone-based 6-DoF flight-dynamics model (lives at
+  `crates/avian_fdm/`). Forked from [`viccuad/avian_fdm`](https://github.com/viccuad/avian_fdm)
+  for atmospheric aerodynamics (drag now; lift + planes later). **LGPL-3.0-or-later**
+  (its GPL J-3 Cub preset crate is *not* depended on) — the sole copyleft entry on
+  an otherwise permissive stack. **Resolved by full-source distribution**: Thalos
+  is now fully source-available (code PolyForm Noncommercial, assets CC BY — see
+  `LICENSING.md`), so LGPL's relink requirement is satisfied for every build,
+  including the paid one. No relicense or replacement is needed. **Keep it
+  isolated and never add the GPL J-3 Cub preset crate (`avian_fdm_j3cub_jsbsim`)
+  or any other GPL/AGPL (non-LGPL) dependency** — GPL is viral across the whole
+  combined work and would void the noncommercial model; CI guards against this
+  (`.github/workflows/ci.yml`). Used **force-only** in the local bubble (Thalos
+  owns mass/inertia/gravity); only Bevy-side crates (`game`/`physics_local`) may
+  depend on it. See `docs/aerodynamics.md` for the model and environment
+  adaptations.
 - **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
   (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
   layer (Perlin-Worley atlas + 3-D Worley detail, dual-lobe HG; compute →
@@ -436,11 +451,13 @@ Key modules:
   `final_approach` / `approach`) uses the same deferred terrain-aware
   path but scores daylight dry sites by local height relief, then starts
   the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
-  patch (or the flattest dry fallback). Thalos now has a *visual*
+  patch (or the flattest dry fallback). Thalos now has both a *visual*
   atmosphere + volumetric clouds (`terrestrial_atmosphere` in
-  `assets/bodies/thalos.ron`; see `docs/atmosphere.md`) but no aerodynamic
-  model yet, so both descents are still dynamically lunar-style — no
-  aerobraking or drag. **`runway`** (alias
+  `assets/bodies/thalos.ron`; see `docs/atmosphere.md`) and a *physics*
+  atmosphere (per-body density below the Kármán line; see
+  `docs/aerodynamics.md`), so descents now experience aerodynamic **drag** —
+  a descending/reentering ship decelerates toward a terminal velocity rather
+  than free-falling lunar-style. **`runway`** (alias
   `rwy`) and **`runway-approach`** (aliases `rwy-approach` /
   `approach-runway`) put the `skyhawk.ron` aircraft on a fixed runway on
   the Thalos surface, owned by `crate::runway`. Like the descent modes
@@ -907,7 +924,13 @@ Each major system has a unified spec doc.
 - `atmosphere.md` — gas giants, rocky-atmosphere single-scattering
   raymarch (unified per-body fullscreen pass with scene-depth
   coupling for aerial perspective), Kármán-line authoring, ocean
-  rendering, IBL/reflection probe.
+  rendering, IBL/reflection probe. (Atmosphere *rendering*; the
+  *physics* density/drag model is in `aerodynamics.md`.)
+- `aerodynamics.md` — atmospheric flight forces (drag now; lift + planes
+  later) via the vendored `avian_fdm`: the per-body density model, the
+  body-centered/rotating-airmass adaptations, force-only bubble use, the
+  in-atmosphere `Full`-role trigger + warp clamp, and the LGPL story (satisfied
+  by full-source distribution; see `LICENSING.md`).
 - `celestial.md` — celestial sphere design: source model, spectrum,
   generation, rendering pipeline.
 - `tooling.md` — Rust toolchain policy and local developer tooling notes.

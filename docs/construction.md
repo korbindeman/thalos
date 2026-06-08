@@ -608,7 +608,13 @@ you can also author a bare nose and place a footprint cockpit behind it.
   vertical offset.
 - Decks / multi-deck interiors (§6.3) — bulkheads-only carries fighters,
   GA, landers, most cargo.
-- Aero *simulation* — M6; Thalos has no atmosphere yet.
+- Aero *simulation* for **planes** — the spacecraft-drag first slice now
+  exists (`docs/aerodynamics.md`, vendored `avian_fdm`), but lift / control
+  surfaces / full 6-DoF flight wait on this construction system's wing
+  geometry. The mapping is direct: **each airfoil-stationed wing /
+  control-surface Module becomes one `avian_fdm` `AeroZone`** (chord, area,
+  twist, deflection → coefficients), and the "free now" wing-area / MAC /
+  centre-of-lift feedback below is the same data the flight model consumes.
 - Runtime door/gear animation + payload deploy/load gameplay.
 
 **Free now (geometry-derived editor feedback, no flight model needed):**

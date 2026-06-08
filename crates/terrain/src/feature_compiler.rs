@@ -170,6 +170,20 @@ pub enum AtmosphereSpec {
     Other { pressure_bar: f32 },
 }
 
+impl AtmosphereSpec {
+    /// Surface pressure in bar (0.0 for [`AtmosphereSpec::None`]). The single
+    /// authored source of surface pressure, reused by the aerodynamic
+    /// atmosphere model (`thalos_world` derives ρ₀ from it).
+    pub fn pressure_bar(&self) -> f32 {
+        match self {
+            AtmosphereSpec::None => 0.0,
+            AtmosphereSpec::ThinCo2 { pressure_bar }
+            | AtmosphereSpec::Breathable { pressure_bar }
+            | AtmosphereSpec::Other { pressure_bar } => *pressure_bar,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HydrosphereSpec {
     None,
