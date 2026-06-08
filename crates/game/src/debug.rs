@@ -50,6 +50,12 @@ const DEBUG_CRAFT_COLLIDERS_KEY: KeyCode = KeyCode::F8;
 pub struct DebugMode {
     pub enabled: bool,
     pub show_craft_colliders: bool,
+    /// Debug hack: let air-breathing engines produce thrust even with no
+    /// atmosphere, so aircraft can taxi/fly on airless bodies like Thalos for
+    /// testing the ground/wheel physics. Contradicts the atmosphere model — a
+    /// stopgap until Thalos has air or the demo aircraft gets a non-jet drive.
+    /// Toggle live over BRP (`world_mutate_resources`).
+    pub jets_in_vacuum: bool,
 }
 
 /// Temporary debug-only launch clamp used by command-shift body-tree surface
@@ -107,6 +113,10 @@ impl Plugin for DebugPlugin {
         app.insert_resource(DebugMode {
             enabled: true,
             show_craft_colliders: false,
+            // On by default in dev so the airless-Thalos runway scenarios are
+            // actually drivable; flip off over BRP to feel the real (no-air)
+            // engine behaviour.
+            jets_in_vacuum: true,
         })
         .init_gizmo_group::<CraftColliderGizmos>()
         .init_resource::<DebugLaunchMount>()

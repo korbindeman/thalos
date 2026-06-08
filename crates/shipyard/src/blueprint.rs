@@ -642,8 +642,9 @@ mod tests {
             .expect("parse parts.ron");
         let bp = ShipBlueprint::from_ron(include_str!("../../../ships/skyhawk.ron"))
             .expect("parse skyhawk.ron");
-        // main wing ×2 + tailplane ×2 + fin + nacelle ×2 = 7 surface mounts.
-        assert_eq!(bp.surface_mounts.len(), 7);
+        // main wing ×2 + tailplane ×2 + fin + nacelle ×2 + nose gear + main
+        // gear = 9 surface mounts.
+        assert_eq!(bp.surface_mounts.len(), 9);
         // Three linked groups: main wings, tailplanes, nacelles.
         let groups: std::collections::HashSet<u32> = bp
             .surface_mounts

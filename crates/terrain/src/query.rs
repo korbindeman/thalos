@@ -38,7 +38,7 @@
 //! stubbed with throwaway types; [`SurfaceQuery`] gains them as
 //! default-method additions (backward-compatible) when their types exist.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use glam::{DVec3, Vec3};
 
@@ -264,6 +264,185 @@ impl SurfaceQuery for SurfaceRef<'_> {
 
     fn height_range_m(&self) -> f32 {
         surface_height_range_m(self.surface, self.dynamic_state)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local terrain flattening
+// ---------------------------------------------------------------------------
+
+/// A flat rectangular pad stamped into the terrain heightfield — used to level
+/// the ground under a runway (or any built site) without re-baking the body.
+///
+/// The pad is defined in the body-fixed frame: a rectangle of half-extents
+/// `(half_along_m, half_across_m)` on the tangent plane at `center_dir`, raised
+/// (or cut) to the constant elevation `elevation_m` above the reference radius.
+/// Outside the rectangle the flatten smoothstep-blends back to the natural
+/// terrain over `ramp_m` metres, so there is no cliff at the pad edge.
+///
+/// [`FlattenedSurface`] reads this through a shared handle when synthesising
+/// tiles, so the *rendered* terrain, the GPU-atlas height mirror (collider +
+/// height source), and any CPU height query through the wrapped surface all see
+/// the same flattened ground by construction.
+#[derive(Debug, Clone, Copy)]
+pub struct TerrainFlatten {
+    /// Unit body-fixed direction to the pad centre.
+    pub center_dir: DVec3,
+    /// Unit body-fixed tangent along the pad's long axis.
+    pub tangent_along: DVec3,
+    /// Unit body-fixed tangent across the pad's short axis.
+    pub tangent_across: DVec3,
+    /// Half-length of the flat region along `tangent_along`, metres.
+    pub half_along_m: f64,
+    /// Half-width of the flat region along `tangent_across`, metres.
+    pub half_across_m: f64,
+    /// Width of the blend-to-terrain ramp outside the flat region, metres.
+    pub ramp_m: f64,
+    /// Constant height (m above the reference radius) the pad is flattened to.
+    pub elevation_m: f64,
+    /// Body reference radius (m), used to convert directions to tangent-plane
+    /// offsets.
+    pub radius_m: f64,
+    /// `cos` of the largest angle from `center_dir` the flatten can reach
+    /// (rectangle diagonal + ramp). Precomputed for a cheap per-sample reject.
+    cos_max: f64,
+}
+
+impl TerrainFlatten {
+    pub fn new(
+        center_dir: DVec3,
+        tangent_along: DVec3,
+        tangent_across: DVec3,
+        half_along_m: f64,
+        half_across_m: f64,
+        ramp_m: f64,
+        elevation_m: f64,
+        radius_m: f64,
+    ) -> Self {
+        // Largest lateral reach: rectangle half-diagonal plus the ramp.
+        let reach = ((half_along_m * half_along_m + half_across_m * half_across_m).sqrt() + ramp_m)
+            .max(0.0);
+        // Tangent-plane reach → angle off the centre direction.
+        let cos_max = (reach / radius_m.max(1.0)).atan().cos();
+        Self {
+            center_dir: center_dir.normalize(),
+            tangent_along: tangent_along.normalize(),
+            tangent_across: tangent_across.normalize(),
+            half_along_m,
+            half_across_m,
+            ramp_m,
+            elevation_m,
+            radius_m,
+            cos_max,
+        }
+    }
+
+    /// Blend weight in `[0, 1]` at body-fixed unit direction `dir`: `1` inside
+    /// the flat pad, smoothstep down to `0` across `ramp_m`, `0` beyond.
+    pub fn weight(&self, dir: DVec3) -> f64 {
+        // Cheap angular reject so the 99.99% of tile pixels far from the pad pay
+        // only one dot product.
+        if dir.dot(self.center_dir) < self.cos_max {
+            return 0.0;
+        }
+        // Tangent-plane offset from the pad centre, in metres. For a region this
+        // small relative to the radius the chord matches the arc to well under a
+        // millimetre, so the simple projection is exact enough.
+        let offset = (dir - self.center_dir) * self.radius_m;
+        let along = offset.dot(self.tangent_along).abs() - self.half_along_m;
+        let across = offset.dot(self.tangent_across).abs() - self.half_across_m;
+        if along <= 0.0 && across <= 0.0 {
+            return 1.0;
+        }
+        // Distance from the rectangle's edge (exterior SDF).
+        let dist = (along.max(0.0) * along.max(0.0) + across.max(0.0) * across.max(0.0)).sqrt();
+        if dist >= self.ramp_m {
+            return 0.0;
+        }
+        let t = 1.0 - dist / self.ramp_m;
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Apply the flatten to a natural height (m above the reference radius).
+    fn apply_height(&self, dir: DVec3, natural_m: f32) -> f32 {
+        let w = self.weight(dir);
+        if w <= 0.0 {
+            return natural_m;
+        }
+        (natural_m as f64 * (1.0 - w) + self.elevation_m * w) as f32
+    }
+}
+
+/// Shared, runtime-settable flatten region. `None` means "no flattening", so a
+/// [`FlattenedSurface`] wrapping an empty handle is a transparent passthrough.
+/// The handle is read on every tile-pixel synthesis, so writing a region takes
+/// effect on tiles baked afterward without rebuilding the provider.
+pub type FlattenHandle = Arc<RwLock<Option<TerrainFlatten>>>;
+
+/// Create an empty [`FlattenHandle`] (no flattening).
+pub fn flatten_handle() -> FlattenHandle {
+    Arc::new(RwLock::new(None))
+}
+
+/// [`SurfaceQuery`] decorator that overlays an optional [`TerrainFlatten`] on a
+/// wrapped surface. Only the geometric height is modified; albedo/roughness and
+/// all metadata pass through unchanged.
+pub struct FlattenedSurface {
+    inner: Arc<dyn SurfaceQuery>,
+    flatten: FlattenHandle,
+}
+
+impl FlattenedSurface {
+    pub fn new(inner: Arc<dyn SurfaceQuery>, flatten: FlattenHandle) -> Self {
+        Self { inner, flatten }
+    }
+
+    fn flatten_height(&self, dir: DVec3, natural_m: f32) -> f32 {
+        match self.flatten.read() {
+            Ok(guard) => match guard.as_ref() {
+                Some(f) => f.apply_height(dir, natural_m),
+                None => natural_m,
+            },
+            Err(_) => natural_m,
+        }
+    }
+}
+
+impl SurfaceQuery for FlattenedSurface {
+    fn sample(&self, dir: Vec3, lod_m: f32) -> SurfaceSample {
+        let mut s = self.inner.sample(dir, lod_m);
+        s.height_m = self.flatten_height(dir.as_dvec3(), s.height_m);
+        s
+    }
+
+    fn sample_d(&self, dir: DVec3, lod_m: f32) -> SurfaceSample {
+        let mut s = self.inner.sample_d(dir, lod_m);
+        s.height_m = self.flatten_height(dir, s.height_m);
+        s
+    }
+
+    fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {
+        self.flatten_height(dir.as_dvec3(), self.inner.sample_height_m(dir, lod_m))
+    }
+
+    fn radius_m(&self) -> f32 {
+        self.inner.radius_m()
+    }
+
+    fn height_range_m(&self) -> f32 {
+        self.inner.height_range_m()
+    }
+
+    fn prewarm(&self, region: Region, lod_m: f32) {
+        self.inner.prewarm(region, lod_m);
+    }
+
+    fn query_features(
+        &self,
+        region: Region,
+        lod_m: f32,
+    ) -> Vec<crate::pipeline::feature::FeatureInstance> {
+        self.inner.query_features(region, lod_m)
     }
 }
 

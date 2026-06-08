@@ -37,6 +37,7 @@ mod solar_system_state;
 mod spawn;
 mod staging;
 mod star_flare;
+mod surface_settle;
 mod target;
 mod terrain_registry;
 mod velocity_frame;
@@ -528,6 +529,7 @@ fn main() {
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(LoadingScreenPlugin)
         .add_plugins(SpawnPlugin)
+        .add_plugins(surface_settle::SurfaceSettlePlugin)
         .add_plugins(runway::RunwayPlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(GameLocalPhysicsPlugin)

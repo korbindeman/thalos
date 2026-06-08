@@ -340,6 +340,7 @@ fn propulsion_config_changed(prev: &ActivePropulsion, next: &ActivePropulsion) -
 fn refresh_active_propulsion(
     mut sim: ResMut<SimulationState>,
     mut active: ResMut<ActivePropulsion>,
+    debug: Option<Res<crate::debug::DebugMode>>,
     engines: Query<(Entity, &Engine, Option<&EngineActivation>)>,
     intakes: Query<(Entity, &AirIntake, Option<&SurfaceMount>)>,
     parts: DryMassQuery,
@@ -364,7 +365,15 @@ fn refresh_active_propulsion(
     let mut per_resource_mdot: HashMap<Resource, f64> = HashMap::new();
     let mut active_engines = Vec::new();
 
-    let atmosphere_available = ship_in_atmosphere(&sim);
+    // Debug stopgap: pretend there's air so air-breathing jets fire (and their
+    // intakes capture) on airless bodies like Thalos — lets aircraft taxi for
+    // ground/wheel-physics testing until Thalos has an atmosphere or a non-jet
+    // drive exists. See `DebugMode::jets_in_vacuum`.
+    let force_atmosphere = debug
+        .as_deref()
+        .map(|d| d.enabled && d.jets_in_vacuum)
+        .unwrap_or(false);
+    let atmosphere_available = ship_in_atmosphere(&sim) || force_atmosphere;
     let mut intake_available: HashMap<AmbientIntakeKind, f64> = HashMap::new();
     if atmosphere_available {
         for (_, intake, surface_mount) in intakes.iter() {

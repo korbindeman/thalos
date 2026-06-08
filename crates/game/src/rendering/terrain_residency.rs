@@ -115,6 +115,7 @@ impl Plugin for TerrainResidencyPlugin {
         app.init_resource::<TerrainResidencyConfig>()
             .init_resource::<BodyTerrainResidency>()
             .init_resource::<WantedResidencySet>()
+            .init_resource::<super::ground_terrain::TerrainFlattenRegistry>()
             .add_systems(
                 Update,
                 (
@@ -179,6 +180,7 @@ struct ResidencySpawnParams<'w, 's> {
     tile_trees: ResMut<'w, TerrainViewComponents<TileTree>>,
     surfaces: Res<'w, TerrainSurfaceRegistry>,
     height_sources: Res<'w, HeightSourceRegistry>,
+    flatten: ResMut<'w, super::ground_terrain::TerrainFlattenRegistry>,
     solar_system: Res<'w, SolarSystemState>,
     bodies: Query<'w, 's, (&'static RealSpaceBody, Entity)>,
     ship_camera_q: Query<'w, 's, Entity, With<ShipCamera>>,
@@ -299,6 +301,7 @@ fn try_spawn(
         .unwrap_or_default();
     let dynamic_state = params.solar_system.dynamic_surface_for(body_id, &surface);
     let height_mirror = params.height_sources.gpu_mirror(body_id);
+    let flatten = params.flatten.handle(body_id);
 
     let terrain = spawn_body_terrain(
         commands,
@@ -311,6 +314,7 @@ fn try_spawn(
         atmosphere,
         dynamic_state,
         height_mirror,
+        flatten,
     );
 
     let water = spawn_body_water(

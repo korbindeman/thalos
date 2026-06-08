@@ -34,8 +34,13 @@ use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, CommandPod, Decoupler, Engine, EngineGeometry, FuelTank, Part,
     SurfaceMount, SurfaceMountKind,
 };
-use thalos_terrain::{BakedSurface, DynamicSurfaceState, PlanetSurface, SurfaceQuery};
+use thalos_terrain::{
+    BakedSurface, DynamicSurfaceState, FlattenHandle, FlattenedSurface, PlanetSurface,
+    SurfaceQuery, flatten_handle,
+};
 use thalos_world::{BodyDefinition, BodyId};
+
+use std::collections::HashMap;
 
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
@@ -43,6 +48,31 @@ use crate::player_controller::{EvaMode, PlayerControllerState, PlayerControllerV
 
 use super::real_space::REAL_SPACE_CELL_SIZE_M;
 use super::types::{CameraExposure, PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
+
+/// Per-body shared [`FlattenHandle`]s for local terrain flattening (e.g. the
+/// runway pad). The handle is created once per body and reused across terrain
+/// despawn/respawn churn, so a flatten region set by gameplay survives a
+/// residency reload: the next provider wraps the same handle and re-bakes the
+/// affected tiles flattened. Empty by default (no flattening).
+///
+/// **Writers:** [`crate::runway`] sets a body's region. **Readers:**
+/// [`spawn_body_terrain`] wraps the tile-provider surface with it.
+#[derive(Resource, Default)]
+pub struct TerrainFlattenRegistry {
+    handles: HashMap<BodyId, FlattenHandle>,
+}
+
+impl TerrainFlattenRegistry {
+    /// Fetch the body's flatten handle, creating an empty one on first use so a
+    /// writer and the terrain provider share the same object regardless of which
+    /// runs first.
+    pub fn handle(&mut self, body_id: BodyId) -> FlattenHandle {
+        self.handles
+            .entry(body_id)
+            .or_insert_with(flatten_handle)
+            .clone()
+    }
+}
 
 const EVA_SHADOW_RADIUS_M: f32 = 0.42;
 const EVA_SHADOW_HALF_LENGTH_M: f32 = 0.72;
@@ -66,11 +96,14 @@ const TILE_BORDER_SIZE: u32 = 2;
 const TILE_MIP_LEVELS: u32 = 4;
 /// CPU tile synthesis concurrency for Thalos' runtime terrain provider.
 ///
-/// The production provider currently evaluates expensive oceanic terrain on
-/// CPU. Keep only a small number of provider tasks active so tile streaming
-/// does not starve Bevy/rendering/input while the sim is paused.
+/// Each tile is now evaluated with rayon across all cores (see
+/// `PipelineTileProvider`), so the synthesis pool's worker count is the real
+/// concurrency limiter; this matches it (`tile_synthesis_pool` = 4 threads).
+/// The admission queue is kept deeper than the slot count so the
+/// nearest-view-first admission in `TileAtlas::update` has a wide candidate set
+/// to draw the immediate tiles from on a cold view.
 const TILE_LOAD_SLOTS: u32 = 4;
-const TILE_LOAD_QUEUE_SIZE: u32 = TILE_LOAD_SLOTS * 4;
+const TILE_LOAD_QUEUE_SIZE: u32 = TILE_LOAD_SLOTS * 8;
 
 /// Resident tiles per body. Upstream defaults to 1024, which is tuned for
 /// one giant terrain. With four bodies the atlas memory adds up quickly
@@ -340,13 +373,19 @@ pub(crate) fn spawn_body_terrain(
     atmosphere: AtmosphereBlock,
     dynamic_state: DynamicSurfaceState,
     height_mirror: Option<GpuAtlasMirrorHandle>,
+    flatten: FlattenHandle,
 ) -> Entity {
     let radius_m = body.radius_m as f32;
     // The construction site is the one place that names the concrete generation
     // type: wrap it as `Arc<dyn SurfaceQuery>` so the provider and the
-    // height-range query see only the black-box seam.
+    // height-range query see only the black-box seam. The flatten decorator sits
+    // on top so a runtime-set pad (the runway) levels the rendered tiles — and,
+    // via the GPU-atlas height mirror, the collider and CPU height queries too.
     let terrain_surface: Arc<dyn SurfaceQuery> =
-        Arc::new(BakedSurface::new(surface, dynamic_state));
+        Arc::new(FlattenedSurface::new(
+            Arc::new(BakedSurface::new(surface, dynamic_state)),
+            flatten,
+        ));
     let height_range = rendered_height_range(terrain_surface.as_ref());
     let provider_mode = terrain_tile_provider_mode();
     let terrain_height_range = match provider_mode {

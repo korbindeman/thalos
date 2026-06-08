@@ -503,7 +503,7 @@ pub mod defaults {
                 ("throttle_full", keys([KeyCode::KeyZ])),
                 ("throttle_cut", keys([KeyCode::KeyX])),
                 ("stage", keys([KeyCode::Space])),
-                ("wheel_brake", keys([KeyCode::KeyB])),
+                ("parking_brake", keys([KeyCode::KeyB])),
             ],
             [
                 ("pitch", axis([KeyCode::KeyW], [KeyCode::KeyS])),

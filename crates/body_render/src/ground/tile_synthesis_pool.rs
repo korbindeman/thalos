@@ -36,3 +36,32 @@ pub fn tile_synthesis_pool() -> &'static TaskPool {
             .build()
     })
 }
+
+static EVAL_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+
+/// Bounded rayon pool for the *inner* per-tile pixel evaluation
+/// ([`crate::ground::pipeline`]'s `compute_tile_pixels`).
+///
+/// A single Thalos tile is ~262 k expensive field samples; evaluating it on one
+/// thread leaves a cold view (e.g. a teleport straight to a runway, where only a
+/// handful of tiles are needed) sitting for tens of seconds while most cores
+/// idle. Spreading each tile across cores cuts that to a few seconds. But the
+/// whole reason tile synthesis has its own [`TaskPool`] (rather than
+/// `AsyncComputeTaskPool`) is to *not* starve the renderer/main thread — so the
+/// inner parallelism is bounded here too, leaving a couple of cores free, and
+/// every tile bake shares this one pool so N concurrent bakes can't collectively
+/// saturate every core. Using rayon's implicit global pool instead would defeat
+/// that isolation.
+pub fn tile_eval_pool() -> &'static rayon::ThreadPool {
+    EVAL_POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let threads = cores.saturating_sub(2).max(2);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("Tile Eval {i}"))
+            .build()
+            .expect("build tile-eval rayon pool")
+    })
+}

@@ -447,24 +447,33 @@ Key modules:
   these are deferred and terrain-aware: `runway::finish_runway_spawn`
   runs once on the first `AppState::Running` frame and picks a flat dry
   low-latitude site by a deterministic body-fixed search (epoch-
-  independent). The runway is a **flat raised platform, not a draped
-  ribbon**: it is built at a single fixed elevation `E = max(terrain over
-  the 3 km × 60 m footprint) + margin`, as a level (constant-radius) slab.
-  Its edges step out to a flat paved **shoulder** (still at `E`) and then a
-  graded **runoff** slope whose outer edge drapes onto the terrain, so the
-  platform blends smoothly into the ground instead of ending in a hard
-  cliff — plus markings and raised edge posts. To stay rock-steady at high
+  independent). **The terrain itself is flattened into a pad and the runway
+  sits flush on it** (replacing the former raised-slab + skirt/runoff
+  platform): a single fixed elevation `E = max(natural terrain over the pad)
+  + margin` is chosen, then a `thalos_terrain::TerrainFlatten` pad is
+  installed through the body's shared
+  `rendering::ground_terrain::TerrainFlattenRegistry` handle. The terrain
+  tile provider (`PipelineTileProvider`, wrapped in
+  `thalos_terrain::FlattenedSurface`) reads that handle as it bakes, so the
+  *rendered* ground — and, via the GPU-atlas height mirror, the collider and
+  CPU height queries — level out to `E` across the pad (runway + ~50 m
+  shoulder) and smoothstep-blend back to natural terrain over a ~150 m ramp.
+  The handle is read per tile-pixel, so setting the region affects tiles
+  baked afterward — no UDLOD tile-reload needed, because the pad is set
+  before the aircraft/camera jump to the site, so the tiles that stream in
+  there bake flattened from the start. The handle lives in a per-body
+  registry so it survives terrain despawn/respawn churn. On top of the
+  levelled ground the runway is just a paved strip + markings + posts (lifted
+  a few cm so the paving reads on the grass). To stay rock-steady at high
   warp the runway is positioned like the player ship: a **root** big_space
   grid child re-placed in f64 every frame (`update_runway_transform`),
   *not* a fixed-cell child of the rotating body grid — whose multi-Mm cell
   offset rotated by an f32 quaternion jitters as the body spins fast (only
-  the small child vertex offsets ride the f32 `Transform.rotation`). Because the platform — and the aircraft placed on it —
-  reference `E` rather than re-sampling the streaming terrain, the surface
-  stays perfectly flat and the aircraft never sinks or heaves as UDLOD
-  tiles load/refine. A **flat kinematic collider at `E`** (a trimesh posed
-  each frame by `sync_runway_collider_pose`, exactly like the terrain
-  collider patch via `terrain_patch_pose`) gives the aircraft a real flat
-  surface to rest on and land on, independent of the bumpy terrain below.
+  the small child vertex offsets ride the f32 `Transform.rotation`). A
+  **flat kinematic collider at `E`** (a trimesh posed each frame by
+  `sync_runway_collider_pose`, exactly like the terrain collider patch via
+  `terrain_patch_pose`) still backs the landing surface so it stays exactly
+  flat regardless of tile-streaming timing.
   `runway` parks the aircraft at rest on the threshold (`BodyFixed`
   authority, the launch-clamp pattern), lifted by its own measured ground
   clearance — `craft_ground_clearance` walks the part-visual meshes
@@ -472,7 +481,23 @@ Key modules:
   Bevy `Aabb`), finds the lowest point in the craft body frame, and offsets
   the spawn so *any* craft rests on the surface rather than a hardcoded
   constant; `runway-approach` starts it on short final (`OnRails` → bubble
-  handoff onto the flat collider).
+  handoff onto the flat collider). **The parked `runway` spawn happens *behind*
+  the loading screen.** `finish_runway_spawn` runs during `AppState::Loading`
+  (not the first `Running` frame), so the aircraft is parked + the flatten pad
+  installed + the camera at the surface while the screen is up; `surface_settle`
+  (`SurfaceSettlePlugin`) then holds the screen until the terrain under the view
+  has streamed flush (resident LOD at `tile_tree.view_position()` plateaus past a
+  target), so the first visible frame is already flush + settled instead of the
+  ground heaving up to the strip. Do **not** pause the sim during this window —
+  `readback_local_craft` stops following the craft when the integrator is idle,
+  so a pause strands the camera in the placeholder orbit and the tiles never
+  stream at the site. Only the *parked* runway is gated; the airborne approach
+  flies its descent during loading, so gating it would fly it past the threshold.
+  Cold tile streaming to a fresh surface site is slow (~15 s for Thalos) because
+  each tile is an expensive CPU field bake; `body_render`'s `compute_tile_pixels`
+  is rayon-parallelised on a bounded pool and `udlod`'s `TileAtlas::update`
+  admits tile loads nearest-view-first, which is what makes that wait tolerable
+  rather than minutes — see the cold-streaming memory note.
 - **EVA is a full craft with a real character controller and a
   grounded/airborne split.** The `EvaMode` resource
   (`player_controller.rs`, `Grounded` | `Airborne`, defaults `Grounded`)

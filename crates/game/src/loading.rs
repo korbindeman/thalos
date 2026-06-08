@@ -220,7 +220,11 @@ fn update_loading_progress_ui(
     }
 }
 
-fn advance_to_running(progress: Res<LoadingProgress>, mut next_state: ResMut<NextState<AppState>>) {
+fn advance_to_running(
+    progress: Res<LoadingProgress>,
+    settle: Res<crate::surface_settle::SurfaceSettle>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
     // Wait for `spawn_bodies` to have seeded the totals — otherwise the
     // first frame's trivially-satisfied `0 >= 0` would fire the
     // transition before any work has started. Also wait for the initial
@@ -228,7 +232,16 @@ fn advance_to_running(progress: Res<LoadingProgress>, mut next_state: ResMut<Nex
     // the body the player is starting on; otherwise the first `Running`
     // frame falls back to the flat impostor billboard until the lazy
     // residency executor catches up.
-    if progress.seeded && progress.completed >= progress.total && progress.initial_terrain_done {
+    //
+    // For near-surface spawns (runway, descents, EVA) also wait for the
+    // tile streamer to settle the ground at the site — otherwise the first
+    // visible frame shows tiles popping in and the runway pad heaving up to
+    // the strip. See `crate::surface_settle`.
+    if progress.seeded
+        && progress.completed >= progress.total
+        && progress.initial_terrain_done
+        && settle.ready()
+    {
         next_state.set(AppState::Running);
     }
 }

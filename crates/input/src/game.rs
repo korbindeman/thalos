@@ -86,7 +86,7 @@ pub struct StageAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
-pub struct WheelBrakeAction;
+pub struct ParkingBrakeAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
@@ -202,8 +202,8 @@ pub struct GameInputIntent {
     pub throttle_cut: bool,
     /// Edge-triggered: the player advanced to the next stage this frame.
     pub stage: bool,
-    /// Held: the player is holding the wheel brake (ground taxi / rollout).
-    pub wheel_brake: bool,
+    /// Edge-triggered: the player toggled the parking brake this frame.
+    pub parking_brake_toggle: bool,
     pub throttle_up: bool,
     pub throttle_down: bool,
     /// Absolute HOTAS throttle command in `[0, 1]`. `None` leaves the
@@ -349,9 +349,9 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Bindings::spawn(settings.game.flight.bindings("stage")),
             ),
             (
-                Action::<WheelBrakeAction>::new(),
+                Action::<ParkingBrakeAction>::new(),
                 consume_input(),
-                Bindings::spawn(settings.game.flight.bindings("wheel_brake")),
+                Bindings::spawn(settings.game.flight.bindings("parking_brake")),
             ),
             (
                 Action::<PitchPositiveAction>::new(),
@@ -599,9 +599,9 @@ fn collect_throttle_axis_intent(
     keys: Res<ButtonInput<KeyCode>>,
     throttle_up: Query<&Action<ThrottleRampPositiveAction>>,
     throttle_down: Query<&Action<ThrottleRampNegativeAction>>,
-    wheel_brake: Query<&Action<WheelBrakeAction>>,
+    parking_brake: Query<(&Action<ParkingBrakeAction>, &ActionEvents)>,
 ) {
-    intent.wheel_brake = held(&wheel_brake);
+    intent.parking_brake_toggle = started(&parking_brake);
     // Keep Shift/Ctrl available as throttle controls during normal flight, but
     // do not let OS command chords like cmd+shift-click or cmd+shift+2 leak
     // into gameplay as throttle input.

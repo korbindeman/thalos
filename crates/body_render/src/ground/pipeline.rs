@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bevy::math::{DVec3, UVec2, Vec3};
+use rayon::prelude::*;
 use bevy::prelude::*;
 use bevy::tasks::Task;
 use thalos_terrain::SurfaceQuery;
@@ -40,7 +41,7 @@ use thalos_udlod::math::TileCoordinate;
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
 
-use crate::ground::tile_synthesis_pool::tile_synthesis_pool;
+use crate::ground::tile_synthesis_pool::{tile_eval_pool, tile_synthesis_pool};
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -175,18 +176,33 @@ fn compute_tile_pixels(
     let count = (size * size) as usize;
     let mut pixels = vec![TilePixel::default(); count];
 
-    for (y, row) in pixels.chunks_mut(size as usize).enumerate() {
-        for (x, pixel) in row.iter_mut().enumerate() {
-            let dir = pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
-            let sample = surface.sample_d(dir, tile_lod_m);
-            *pixel = TilePixel {
-                height_m: sample.height_m,
-                albedo_linear: sample.albedo_linear,
-                roughness: sample.roughness,
-                material_rgba: [0, 0, 0, 255],
-            };
-        }
-    }
+    // Each pixel is an independent (and, for Thalos, expensive) field sample.
+    // Parallelise across rows with rayon: a cold view — e.g. a teleport straight
+    // to a runway — only needs a handful of tiles, so most cores would otherwise
+    // sit idle while one worker thread evaluates 262 k samples serially. Spreading
+    // each tile across all cores cuts its wall-clock latency roughly by the core
+    // count, which is what lets the ground under a fresh surface spawn resolve in
+    // a few seconds instead of tens. Under heavy streaming the synthesis pool's
+    // workers already saturate the cores, so rayon just load-balances — no
+    // throughput regression.
+    tile_eval_pool().install(|| {
+        pixels
+            .par_chunks_mut(size as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, pixel) in row.iter_mut().enumerate() {
+                    let dir =
+                        pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
+                    let sample = surface.sample_d(dir, tile_lod_m);
+                    *pixel = TilePixel {
+                        height_m: sample.height_m,
+                        albedo_linear: sample.albedo_linear,
+                        roughness: sample.roughness,
+                        material_rgba: [0, 0, 0, 255],
+                    };
+                }
+            });
+    });
 
     populate_material_masks(&mut pixels, size, tile_lod_m);
 

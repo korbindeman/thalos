@@ -282,6 +282,15 @@ impl TileTree {
             .as_uvec2()
     }
 
+    /// Distance from the view to the nearest point of `tile`, in the model's
+    /// world units. Used to order tile-load admission so the streamer bakes the
+    /// tiles nearest the camera first. Recomputes the view coordinate from the
+    /// cached view position, so callers only need the tile and model.
+    pub(crate) fn tile_view_distance(&self, tile: TileCoordinate, model: &TerrainModel) -> f64 {
+        let view_coordinate = Coordinate::from_world_position(self.view_world_position, model);
+        self.compute_tile_distance(tile, view_coordinate, model)
+    }
+
     fn compute_tile_distance(
         &self,
         tile: TileCoordinate,
@@ -370,6 +379,15 @@ impl TileTree {
     /// query while the GPU still shows a coarse parent tile produces a
     /// CPU/GPU height gap — characters appear to float above the visible
     /// terrain by the missing-octave amplitude.
+    /// The camera position this tile tree is currently streaming around,
+    /// expressed in the terrain model's body-fixed local frame (the same frame
+    /// [`Self::best_resident_atlas_lod`] expects). Exposed so a consumer can ask
+    /// "how settled is the ground directly under the view?" without re-deriving
+    /// the body-relative camera position itself.
+    pub fn view_position(&self) -> DVec3 {
+        self.view_world_position
+    }
+
     pub fn best_resident_atlas_lod(
         &self,
         world_position: DVec3,

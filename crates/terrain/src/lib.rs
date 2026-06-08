@@ -44,8 +44,9 @@ pub use generic_terrestrial_field::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
 pub use query::{
-    BakedSurface, Region, SurfaceQuery, SurfaceRef, surface_height_m, surface_height_range_m,
-    surface_normal, surface_sample,
+    BakedSurface, FlattenHandle, FlattenedSurface, Region, SurfaceQuery, SurfaceRef,
+    TerrainFlatten, flatten_handle, surface_height_m, surface_height_range_m, surface_normal,
+    surface_sample,
 };
 pub use sample::{
     SurfaceSample, apply_dynamic_surface_layers, sample_static_surface, sample_surface,

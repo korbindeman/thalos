@@ -1239,6 +1239,41 @@ direct canonical state change for now, not an emitted event).
   `SimEvent::Impact` instead of being a bare state mutation, so map
   warnings / mission logic can subscribe.
 
+## Ground physics frame: ships run body-fixed
+
+**The ship local-physics bubble runs in the body-*fixed* (rotating)
+frame, not body-centered inertial.** This is the load-bearing change that
+makes ground contact (and wheels) stable. In the body-centered *inertial*
+frame a craft "parked" on the surface is actually translating at the
+surface co-rotation speed (`ω×r` ≈ **256 m/s** on Thalos), and the
+terrain/runway collider is flung along with it and re-posed every frame —
+doing dynamic rigid-body contact between two bodies moving at 256 m/s
+against a thin trimesh jitters, spins the craft up, and tunnels it through
+the floor. In the body-fixed frame the craft and the ground are both
+~stationary (0–taxi speed), so the contact solver is stable. (Grounded EVA
+already worked this way; ships now match.)
+
+Implementation (`crates/game/src/local_physics.rs`):
+
+- **Conversion seam branches on `VesselKind`.** `inertial_to_ship_frame` /
+  `ship_frame_to_inertial` (wrapping `thalos_physics_canonical::body_fixed`)
+  convert canonical inertial ↔ body-fixed for **ships**; EVA keeps the
+  body-centered `inertial_to_bubble_frame`. `inertial_to_craft_frame` /
+  `craft_frame_to_inertial` dispatch by kind at the snap/readback/spawn/
+  rebase seams.
+- **Forces** in `apply_local_forces` are body-fixed: gravity `−μr/r³`
+  (radial form is rotation-invariant) **plus** centrifugal `−Ω×(Ω×r)` and
+  Coriolis `−2Ω×v`, with `Ω = orientation⁻¹ · body.angular_velocity`
+  (tiny on Thalos but keeps burns correct). Thrust is `rotation·ŷ` in the
+  body-fixed frame.
+- **Ground colliders are static** in this frame: `sync_terrain_collider_pose`
+  and `runway::sync_runway_collider_pose` set `Position =
+  center_surface_body_m`, identity rotation, zero velocity. No per-frame
+  re-pose, no co-rotation velocity.
+- Rendering is unaffected — it reads canonical (inertial) state, and
+  `readback_local_craft` converts the ship's body-fixed Avian state back to
+  inertial each frame.
+
 ## Functional landing gear (wheels)
 
 Landing gear are real wheels you can roll and taxi on, not cosmetic
@@ -1257,37 +1292,70 @@ acceleration accumulators.
   craft-local strut-top points and suspension/roll/axle axes. Collider
   wheels therefore sit exactly under the rendered wheels, for any craft,
   with no hand-placed constants.
-- **Per wheel, per frame.** A ray is cast from the strut top straight
-  down the suspension axis (`Rotation.0 * r̂`, belly-ward) against every
-  collider *except the craft* — which transparently finds the runway slab
-  or the terrain patch, whichever is closest, and reports nothing when the
-  wheel is airborne. From the hit: a one-way **spring + damper** along the
-  strut (using the contact-*point* velocity, ground-relative via
-  `ω_body × r`), **lateral grip** resisting sideways slip, and a
-  **longitudinal** force (rolling resistance + brake) — both clamped to a
-  friction circle so wheels only ever remove ground-relative speed, never
-  propel. Forward motion still comes from engine thrust.
-- **Steering & brake.** Nosewheel steering reuses the yaw axis (A/D,
-  KSP-style — no separate binding); it rotates the single-leg gear's
-  roll/axle directions about the strut, and the resulting off-CoM lateral
-  grip yaws the craft (emergent, friction-limited). The wheel brake is a
-  held key (`B`, `flight.wheel_brake`) scaling the longitudinal force.
+- **Rotate about the real CoM.** A geared craft also gets Avian
+  `CenterOfMass` set to the shipyard-computed CoM (`ShipParameters::
+  center_of_mass`) plus `NoAutoCenterOfMass`. Without it the body rotates
+  about the nose-pod origin, ahead of every wheel, and the upward wheel
+  forces have no balancing torque — the craft tips onto its nose. Wheel
+  torque arms are taken relative to this CoM.
+- **Per wheel, per frame.** A ray is cast from the strut top down the
+  suspension axis (`Rotation·r̂`, belly-ward) against every collider
+  *except the craft* — which transparently finds the runway slab or the
+  terrain patch, whichever is closest, and reports nothing when the wheel
+  is airborne. From the hit: a one-way **spring + damper** along the strut
+  (using the contact-*point* velocity; the ground is static in the
+  body-fixed frame so slip is just that velocity — **no `ω×r` term**),
+  **lateral grip** resisting sideways slip, and a **longitudinal** force
+  (rolling resistance + brake) — both clamped to a friction circle so
+  wheels only ever remove ground-relative speed, never propel. Forward
+  motion comes from engine thrust (or, later, powered wheels).
+- **Ride height (no clip).** The damper is sized from the craft's real
+  per-wheel mass for a near-critical settle, and `k_spring` is stiff enough
+  that the natural static sag `m·g/(n·k)` is ~cm-scale, so the rigid wheel
+  meshes don't visibly clip the ground. (A uniform spring *preload* to
+  cancel the sag was tried and reverted — it unbalances the per-wheel
+  torque and tips the craft; the suspension must find its own
+  load-balanced equilibrium.)
+- **Steering.** Nosewheel steering reuses the yaw axis (A/D, KSP-style —
+  no separate binding); it rotates the single-leg gear's roll/axle
+  directions about the strut, and the resulting off-CoM lateral grip yaws
+  the craft (emergent, friction-limited).
+- **Parking brake.** A latched toggle (`B`, `flight.parking_brake`),
+  **engaged at startup** (`ParkingBrake::default` → `engaged: true`) so a
+  spawned aircraft holds on the runway instead of creeping. When engaged,
+  the longitudinal channel switches from rolling resistance to a high-gain
+  fore/aft hold (`parking_brake_stiffness`, clamped to the friction
+  circle), pinning the craft against gravity, slopes, and the settle
+  residual — though full takeoff thrust still overpowers it. Tap `B` to
+  release and taxi. `toggle_parking_brake` flips the `ParkingBrake`
+  resource on the key edge.
+- **Wings are colliders too.** `build_ship_collider_primitives` gives each
+  `Wing` a thin oriented-cuboid collider matching its planform (via
+  `wing_panel_frame`), so a wingtip catches the ground on an over-banked
+  landing instead of passing through.
 - **Gating.** Only when Avian owns translation (`AvianRole::Full`) for a
   live, non-destroyed `Ship`. On the runway scenario the craft is already
   `Full` (a terrain patch attaches at AGL≈0), so taxiing works straight
-  from the parked state on throttle-up. At warp≠1× the role is `Paused`
-  and the system is inert, so no warp-scaled `dt` ever reaches the spring.
+  from the parked state. At warp≠1× the role is `Paused` and the system is
+  inert, so no warp-scaled `dt` ever reaches the spring.
 - **Belly colliders stay.** The compound fuselage/engine cylinder
   colliders are kept as the `SweptCcd`/impact backstop; with the craft
   spawned at gear-bottom clearance the belly rides above the surface and
   only engages on a gear-collapse/abnormal landing.
-- **Tuning.** `GearTuning` (spring/damper, friction `mu`, lateral
-  stiffness, rolling/brake coefficients, max steer, travel, ray margin) is
-  a Reflect-registered resource — live-tune over BRP while taxiing rather
-  than recompiling. Defaults target the ~10–20 t demo aircraft; the craft
-  settles to a static squat of `(m·g/N)/k_spring`.
+- **Tuning.** `GearTuning` (spring stiffness, damping ratio, friction
+  `mu`, lateral stiffness, rolling resistance, parking-brake stiffness,
+  max steer, travel, ray margin) is a Reflect-registered resource —
+  live-tune over BRP while taxiing rather than recompiling.
 
-Not yet covered: powered wheels (drive torque from a throttle — the user's
-intended later extension), gear retraction, and rolling friction that
-holds statically on a slope (the longitudinal force is viscous, so a
-parking brake on a grade creeps; add a static latch when needed).
+**Driving requires thrust, which requires staged + fuelled engines.** The
+demo aircraft's engines only produce thrust once *activated* (staging —
+Space); an unstaged craft sits still on its wheels with `thrust_n = 0`
+even at full throttle. (Thalos has an 80 km atmosphere, so its
+air-breathing jets work once staged; `DebugMode::jets_in_vacuum` can force
+air-breathers to fire on genuinely airless bodies.)
+
+Not yet covered: powered wheels (drive torque from a throttle — the
+eventual goal so airless-body rovers can drive without thrust) and gear
+retraction. The parking brake's hold is a high-gain damper rather than a
+true static-friction latch, so under a sustained force above the friction
+circle (e.g. full thrust) it slips rather than holding.

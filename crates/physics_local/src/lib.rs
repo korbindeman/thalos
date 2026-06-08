@@ -276,8 +276,6 @@ pub fn spawn_terrain_collider_patch(
     height_source: &dyn HeightSource,
     body_radius_m: f64,
     center_dir_body: DVec3,
-    body_orientation: DQuat,
-    body_angular_velocity: DVec3,
     config: &LocalBubbleConfig,
 ) -> SpawnedTerrainPatch {
     // Prefer a collider built from the source's native tile geometry — the GPU
@@ -302,24 +300,25 @@ pub fn spawn_terrain_collider_patch(
     // body-fixed positions at planet radius; feeding those directly to the
     // narrow phase makes every contact solve against million-metre local
     // coordinates. Instead, put the kinematic body at the patch centre and
-    // store vertex offsets in body-fixed axes. `sync_terrain_collider_pose`
-    // advances the body origin around the planet while `Rotation =
-    // body.orientation` carries each local offset into body-centered inertial.
+    // store vertex offsets in body-fixed axes.
+    //
+    // The craft (ship) Avian body lives in the **body-fixed (rotating) frame**,
+    // so the collider is held *static* in that frame: `Position =
+    // center_surface_body_m`, identity rotation, zero velocity. Each local
+    // offset then lands exactly on the rotating surface with no co-rotation
+    // speed, which is what keeps ground contact stable.
+    // `sync_terrain_collider_pose` maintains this each frame (cheap; only the
+    // patch-recenter changes it).
     let local_vertices = terrain_patch_local_vertices(&patch);
-    let (patch_origin, patch_velocity) = terrain_patch_pose(
-        patch.center_surface_body_m,
-        body_orientation,
-        body_angular_velocity,
-    );
     let collider = Collider::trimesh(local_vertices, patch.indices.clone());
     let entity = commands
         .spawn((
             RigidBody::Kinematic,
             collider,
-            Position(patch_origin),
-            Rotation(body_orientation),
-            LinearVelocity(patch_velocity),
-            AngularVelocity(body_angular_velocity),
+            Position(patch.center_surface_body_m),
+            Rotation(DQuat::IDENTITY),
+            LinearVelocity(DVec3::ZERO),
+            AngularVelocity(DVec3::ZERO),
             TerrainColliderPatch {
                 body_id,
                 center_dir: center_dir_body.normalize(),
@@ -333,16 +332,6 @@ pub fn spawn_terrain_collider_patch(
         entity,
         mesh: patch,
     }
-}
-
-pub fn terrain_patch_pose(
-    center_surface_body_m: DVec3,
-    body_orientation: DQuat,
-    body_angular_velocity: DVec3,
-) -> (DVec3, DVec3) {
-    let patch_origin = body_orientation * center_surface_body_m;
-    let patch_velocity = body_angular_velocity.cross(patch_origin);
-    (patch_origin, patch_velocity)
 }
 
 fn terrain_patch_local_vertices(patch: &TerrainPatchMesh) -> Vec<DVec3> {

@@ -29,7 +29,6 @@ use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
-use crate::loading::AppState;
 use crate::solar_system_state::SimulationState;
 
 /// Which scenario the player is dropped into. Selected once at startup in
@@ -82,6 +81,15 @@ impl SpawnSituation {
     /// the default rocket).
     pub fn is_runway(self) -> bool {
         matches!(self, Self::Runway | Self::RunwayApproach)
+    }
+
+    /// True when the surface state is installed by a *deferred*, terrain-aware
+    /// placement system ([`crate::runway`] for the runway scenarios,
+    /// [`refine_descent_spawn`] for the descents) rather than seeded directly in
+    /// `main.rs`. The settle gate must wait for that placement before judging
+    /// whether tiles at the (then-known) site have settled.
+    pub fn has_deferred_placement(self) -> bool {
+        self.is_runway() || self.descent_profile().is_some()
     }
 
     /// Ship blueprint to load for this scenario. The runway scenarios fly the
@@ -251,9 +259,11 @@ impl Plugin for SpawnPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            refine_descent_spawn
-                .run_if(in_state(AppState::Running))
-                .before(SimStage::Physics),
+            // Runs during `AppState::Loading` (not gated on `Running`) so the
+            // descent is placed and the camera reaches the approach altitude
+            // behind the loading screen, letting terrain stream in before the
+            // reveal. Self-gated by its `done` local + terrain residency.
+            refine_descent_spawn.before(SimStage::Physics),
         );
     }
 }
@@ -461,6 +471,7 @@ fn refine_descent_spawn(
     mut done: Local<bool>,
     situation: Res<SpawnSituation>,
     mut sim: ResMut<SimulationState>,
+    mut settle: ResMut<crate::surface_settle::SurfaceSettle>,
     height_sources: Res<HeightSourceRegistry>,
     surfaces: Res<TerrainSurfaceRegistry>,
 ) {
@@ -478,6 +489,8 @@ fn refine_descent_spawn(
     sim.simulation
         .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
     *done = true;
+    // Surface state installed: start the tile-settle timer at the site.
+    settle.mark_placed();
 }
 
 /// Build the descent state for `situation` (a `Landing` / `FinalApproach`

@@ -7,16 +7,22 @@
 //! aircraft state on the first `AppState::Running` frame, once the terrain
 //! height source is resident.
 //!
-//! **The runway is a flat raised platform, not a draped ribbon.** A coarse
-//! body-fixed search picks a flat dry low-latitude site; the platform is then
-//! built at a single fixed elevation `E = max(terrain over the footprint) +
-//! margin`, as a level (constant-radius) slab with skirt walls that bury into
-//! the surrounding terrain. Because the platform — and the aircraft placed on
-//! it — reference `E` and never re-sample the streaming terrain, the surface is
-//! perfectly flat and does not heave or let the aircraft sink as UDLOD tiles
-//! load and refine. A flat kinematic collider at `E` (posed each frame like the
-//! terrain collider patch) gives the aircraft a real flat surface to rest on
-//! and land on, independent of the bumpy terrain below.
+//! **The terrain itself is flattened into a pad; the runway sits flush on it.**
+//! A coarse body-fixed search picks a flat dry low-latitude site, then a single
+//! fixed elevation `E = max(natural terrain over the pad) + margin` is chosen.
+//! A [`thalos_terrain::TerrainFlatten`] pad is installed via the body's shared
+//! [`crate::rendering::ground_terrain::TerrainFlattenRegistry`] handle: the
+//! terrain tile provider reads it as it bakes, so the *rendered* ground — and,
+//! through the GPU-atlas height mirror, the collider and CPU height queries —
+//! level out to `E` across the pad and smoothstep-blend back to natural terrain
+//! over a ramp. The pad is set before the aircraft/camera move to the site, so
+//! the tiles that stream in there bake flattened from the start.
+//!
+//! On top of the levelled ground the runway is just a paved strip + markings +
+//! posts, lifted a few centimetres so the paving reads on the grass. A flat
+//! kinematic collider at `E` (posed each frame like the terrain collider patch)
+//! still backs the landing surface so it stays exactly flat regardless of tile
+//! residency timing.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
@@ -26,21 +32,24 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{HeightSource, TerrainPatchBasis};
-use thalos_physics_canonical::body_fixed::body_fixed_surface_velocity;
+use thalos_physics_canonical::body_fixed::{
+    body_fixed_pose_from_inertial, body_fixed_surface_velocity,
+};
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch, TranslationalState};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::avian::{
     AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation,
 };
-use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry, terrain_patch_pose};
-use thalos_terrain::{PlanetSurface, sample_static_surface};
+use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_terrain::TerrainFlatten;
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
-use crate::loading::AppState;
+use crate::debug::{DebugLaunchMount, DebugLaunchMountState};
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
+use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
@@ -55,21 +64,19 @@ const RUNWAY_HALF_LENGTH_M: f64 = RUNWAY_LENGTH_M * 0.5;
 const RUNWAY_WIDTH_M: f64 = 60.0;
 const RUNWAY_HALF_WIDTH_M: f64 = RUNWAY_WIDTH_M * 0.5;
 
-/// Platform top sits this far above the highest terrain in the footprint, so
-/// no terrain ever pokes through the flat slab.
+/// The flat terrain pad is levelled to this height above the highest natural
+/// terrain across the pad footprint, so nothing pokes through the paving.
 const RUNWAY_PLATFORM_MARGIN_M: f64 = 0.4;
-/// Flat paved shoulder extending straight out from the runway edge at the
-/// platform elevation, before the graded runoff begins ("a bit of straight
-/// extrusion from the runway").
-const RUNWAY_SHOULDER_M: f64 = 14.0;
-/// Width of the graded runoff slope that blends the shoulder down to the
-/// surrounding terrain (the smooth runoff replacing the harsh skirt cliff).
-const RUNWAY_RUNOFF_M: f64 = 55.0;
-/// Sink the runoff's outer edge this far into the terrain so it meets the
-/// ground with no gap, even as UDLOD tiles stream/refine the surface.
-const RUNWAY_RUNOFF_BURY_M: f64 = 2.0;
-/// Markings sit just above the platform top to avoid z-fighting.
-const RUNWAY_MARKING_LIFT_M: f64 = 0.05;
+/// Flat margin levelled around the painted strip (the "shoulder" of the pad).
+/// The terrain inside `runway + this` is flattened to `E`.
+const RUNWAY_PAD_MARGIN_M: f64 = 50.0;
+/// Width of the graded ramp that blends the flat pad back to natural terrain.
+const RUNWAY_PAD_RAMP_M: f64 = 150.0;
+/// Asphalt strip sits this far above the flat terrain pad so the paving reads
+/// as a surface on the ground (and never z-fights the flattened tiles).
+const RUNWAY_ASPHALT_LIFT_M: f64 = 0.12;
+/// Markings sit just above the asphalt to avoid z-fighting.
+const RUNWAY_MARKING_LIFT_M: f64 = 0.17;
 
 /// Top tessellation: segments along the length / across the width. The slab is
 /// flat, so this is only for lighting/curvature — it can be coarse.
@@ -182,9 +189,12 @@ impl Plugin for RunwayPlugin {
         app.add_systems(
             Update,
             (
-                finish_runway_spawn
-                    .run_if(in_state(AppState::Running))
-                    .before(SimStage::Physics),
+                // Runs during `AppState::Loading` (not gated on `Running`): the
+                // site selection + flatten install + aircraft placement happen
+                // behind the loading screen so the camera reaches the surface
+                // and the terrain streams/settles before the reveal. Self-gated
+                // by its `done` local + the height-source residency check.
+                finish_runway_spawn.before(SimStage::Physics),
                 update_runway_transform
                     .in_set(SimStage::Sync)
                     .after(crate::solar_system_state::sync_solar_system_state),
@@ -210,8 +220,11 @@ fn finish_runway_spawn(
     mut done: Local<bool>,
     situation: Res<SpawnSituation>,
     mut sim: ResMut<SimulationState>,
+    mut settle: ResMut<crate::surface_settle::SurfaceSettle>,
+    mut launch_mount: ResMut<DebugLaunchMount>,
     height_sources: Res<HeightSourceRegistry>,
     surfaces: Res<TerrainSurfaceRegistry>,
+    mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     root: Res<RealSpaceRoot>,
     ship_root_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
     children_q: Query<&Children>,
@@ -256,19 +269,44 @@ fn finish_runway_spawn(
     let heading_tangent = choose_runway_heading(hs, center_dir, body_radius_m, center_h);
     let across = center_dir.cross(heading_tangent).normalize();
 
-    // Colour the runoff embankment from the *actual* terrain albedo around the
-    // site (averaged over the grass the slope meets), so it blends in on any
-    // biome instead of a hand-tuned constant.
-    let runoff_color = surface
-        .as_ref()
-        .map(|s| sample_terrain_albedo(s, center_dir, heading_tangent, across, body_radius_m, center_h))
-        .map(|a| Color::linear_rgb(a.x, a.y, a.z))
-        .unwrap_or(Color::srgb(0.27, 0.34, 0.19));
+    // Flat pad half-extents: the painted strip plus the levelled shoulder.
+    let pad_half_along = RUNWAY_HALF_LENGTH_M + RUNWAY_PAD_MARGIN_M;
+    let pad_half_across = RUNWAY_HALF_WIDTH_M + RUNWAY_PAD_MARGIN_M;
 
-    // Flat platform elevation: above the highest terrain in the footprint so
-    // nothing pokes through. The runoff slope blends the edges back to grade.
-    let (max_h, min_h) = footprint_extremes(hs, center_dir, heading_tangent, across, body_radius_m, center_h);
+    // Flat pad elevation: above the highest natural terrain across the whole pad
+    // (computed from natural terrain, *before* the flatten is installed below) so
+    // the levelled ground never has to cut through a peak inside the pad.
+    let (max_h, min_h) = footprint_extremes(
+        hs,
+        center_dir,
+        heading_tangent,
+        across,
+        pad_half_along,
+        pad_half_across,
+        body_radius_m,
+        center_h,
+    );
     let elevation_m = max_h + RUNWAY_PLATFORM_MARGIN_M;
+
+    // Install the terrain flatten pad. The terrain provider reads this handle as
+    // it bakes tiles, so the rendered ground — and, via the GPU-atlas height
+    // mirror, the collider and CPU height queries — level out to `elevation_m`
+    // across the pad, smoothstep-blending back to natural terrain over the ramp.
+    // Set before placing the aircraft / moving the camera so the tiles that
+    // stream in at the site bake flattened from the start.
+    let flatten = TerrainFlatten::new(
+        center_dir,
+        heading_tangent,
+        across,
+        pad_half_along,
+        pad_half_across,
+        RUNWAY_PAD_RAMP_M,
+        elevation_m,
+        body_radius_m,
+    );
+    if let Ok(mut guard) = flatten_registry.handle(body_id).write() {
+        *guard = Some(flatten);
+    }
 
     let site = RunwaySite {
         body_id,
@@ -288,7 +326,7 @@ fn finish_runway_spawn(
     let lat_deg = center_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     let lon_deg = center_dir.z.atan2(center_dir.x).to_degrees();
     info!(
-        "runway: {} on {} at lat {:.1}°, lon {:.1}° — flat platform at {:.0} m (terrain {:.0}..{:.0} m, site relief {:.0} m), {:.0} m × {:.0} m",
+        "runway: {} on {} at lat {:.1}°, lon {:.1}° — flat pad at {:.0} m (terrain {:.0}..{:.0} m, site relief {:.0} m), {:.0} m × {:.0} m",
         if matches!(*situation, SpawnSituation::Runway) {
             "parked"
         } else {
@@ -313,9 +351,7 @@ fn finish_runway_spawn(
         &mut commands,
         &mut meshes,
         &mut materials,
-        hs,
         &frame,
-        runoff_color,
         (body_radius_m * RUNWAY_VIS_RADIUS_FACTOR) as f32,
         root.entity,
         &body_state,
@@ -323,9 +359,14 @@ fn finish_runway_spawn(
     spawn_runway_collider(&mut commands, &frame, &body_state);
 
     match *situation {
-        SpawnSituation::Runway => {
-            place_parked(&mut sim, &body_state, &site, body_radius_m, park_clearance_m)
-        }
+        SpawnSituation::Runway => place_parked(
+            &mut sim,
+            &mut launch_mount,
+            &body_state,
+            &site,
+            body_radius_m,
+            park_clearance_m,
+        ),
         SpawnSituation::RunwayApproach => {
             place_approach(&mut sim, &body_state, &site, body_radius_m)
         }
@@ -334,6 +375,9 @@ fn finish_runway_spawn(
 
     commands.insert_resource(site);
     *done = true;
+    // The surface state + flatten pad are installed and the aircraft is placed:
+    // let the settle gate start timing the tile stream at the (now-known) site.
+    settle.mark_placed();
 }
 
 // ---------------------------------------------------------------------------
@@ -445,13 +489,16 @@ fn choose_runway_heading(
     best.map(|(_, a)| a).unwrap_or(basis.tangent_x)
 }
 
-/// Max/min terrain height over the runway footprint (a bit wider than the
-/// painted strip), sampled at fine LOD.
+/// Max/min terrain height over the flat-pad footprint (the painted strip plus
+/// the levelled shoulder), sampled at fine LOD.
+#[allow(clippy::too_many_arguments)]
 fn footprint_extremes(
     hs: &dyn HeightSource,
     center_dir: DVec3,
     heading: DVec3,
     across: DVec3,
+    half_along_m: f64,
+    half_across_m: f64,
     body_radius_m: f64,
     center_h: f64,
 ) -> (f64, f64) {
@@ -459,10 +506,10 @@ fn footprint_extremes(
     let mut max_h = center_h;
     let mut min_h = center_h;
     for i in 0..=FOOTPRINT_SAMPLES_LEN {
-        let along = -RUNWAY_HALF_LENGTH_M + RUNWAY_LENGTH_M * (i as f64 / FOOTPRINT_SAMPLES_LEN as f64);
+        let along = -half_along_m + 2.0 * half_along_m * (i as f64 / FOOTPRINT_SAMPLES_LEN as f64);
         for j in 0..=FOOTPRINT_SAMPLES_W {
             let across_m =
-                -RUNWAY_HALF_WIDTH_M + RUNWAY_WIDTH_M * (j as f64 / FOOTPRINT_SAMPLES_W as f64);
+                -half_across_m + 2.0 * half_across_m * (j as f64 / FOOTPRINT_SAMPLES_W as f64);
             let dir = (center_point + heading * along + across * across_m).normalize();
             if let Some(h) = hs.sample_height_m(dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M) {
                 let h = h as f64;
@@ -474,44 +521,11 @@ fn footprint_extremes(
     (max_h, min_h)
 }
 
-/// Average the terrain's linear albedo over the grass around the runway site
-/// (centre plus the runoff zone and beyond the ends), so the runoff embankment
-/// can be coloured to blend into whatever ground the runway lands on. The
-/// albedo is read straight from the baked surface (LOD-independent), so no
-/// per-biome constant is needed.
-fn sample_terrain_albedo(
-    surface: &PlanetSurface,
-    center_dir: DVec3,
-    heading: DVec3,
-    across: DVec3,
-    body_radius_m: f64,
-    center_h: f64,
-) -> Vec3 {
-    let center_point = center_dir * (body_radius_m + center_h);
-    let reach = RUNWAY_SHOULDER_M + RUNWAY_RUNOFF_M;
-    let along_end = RUNWAY_HALF_LENGTH_M + reach;
-    let offsets: [(f64, f64); 7] = [
-        (0.0, 0.0),
-        (reach, reach),
-        (reach, -reach),
-        (-reach, reach),
-        (-reach, -reach),
-        (along_end, 0.0),
-        (-along_end, 0.0),
-    ];
-    let mut sum = Vec3::ZERO;
-    for (a, c) in offsets {
-        let dir = (center_point + heading * a + across * c).normalize();
-        sum += sample_static_surface(&surface.static_surface, dir.as_vec3(), 8.0).albedo;
-    }
-    (sum / offsets.len() as f32).clamp(Vec3::ZERO, Vec3::ONE)
-}
-
 // ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
 
-/// The body-fixed runway frame at the fixed platform elevation `E`. Projects a
+/// The body-fixed runway frame at the fixed pad elevation `E`. Projects a
 /// `(along, across)` runway coordinate onto a level (constant-radius) point.
 struct RunwayFrame {
     body_id: BodyId,
@@ -527,28 +541,14 @@ impl RunwayFrame {
         self.center_dir * (self.body_radius_m + self.elevation_m)
     }
 
-    /// Body-fixed offset (from the platform centre) of a runway coordinate at
-    /// radius `E + radius_offset`, plus the radial direction there. With
-    /// `radius_offset = 0` this is the flat (level) platform top.
+    /// Body-fixed offset (from the pad centre) of a runway coordinate at radius
+    /// `E + radius_offset`, plus the radial direction there. With
+    /// `radius_offset = 0` this is the flat (level) pad top.
     fn level(&self, along_m: f64, across_m: f64, radius_offset: f64) -> (DVec3, DVec3) {
         let cs = self.center_surface();
         let dir = (cs + self.heading * along_m + self.across * across_m).normalize();
         let pos = dir * (self.body_radius_m + self.elevation_m + radius_offset);
         (pos - cs, dir)
-    }
-
-    /// Body-fixed offset (from the platform centre) of a runway coordinate
-    /// draped onto the actual terrain (sunk `bury` metres so it meets the
-    /// ground with no gap), plus the radial direction and the sampled terrain
-    /// height there. Used for the runoff's outer edge so it blends to grade.
-    fn draped(&self, hs: &dyn HeightSource, along_m: f64, across_m: f64, bury: f64) -> (DVec3, DVec3, f64) {
-        let cs = self.center_surface();
-        let dir = (cs + self.heading * along_m + self.across * across_m).normalize();
-        let h = hs
-            .sample_height_m(dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
-            .unwrap_or(self.elevation_m as f32) as f64;
-        let pos = dir * (self.body_radius_m + h - bury);
-        (pos - cs, dir, h)
     }
 }
 
@@ -579,40 +579,31 @@ fn flat_runway_material(materials: &mut Assets<StandardMaterial>, color: Color, 
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_runway_geometry(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    hs: &dyn HeightSource,
     frame: &RunwayFrame,
-    runoff_color: Color,
     swap_radius_m: f32,
     parent: Entity,
     body_state: &BodyState,
 ) {
-    // --- Flat platform top + paved shoulder (asphalt) ---
+    // The terrain itself is flattened to `E` across the pad (see the
+    // `TerrainFlatten` installed in `finish_runway_spawn`), so the runway is just
+    // a paved strip sitting flush on the levelled ground — no skirt or runoff
+    // geometry. The asphalt is lifted a few cm so it reads as paving on the
+    // grass and never z-fights the flattened tiles.
     let top = meshes.add(build_top_mesh(frame));
     let asphalt = flat_runway_material(materials, Color::srgb(0.055, 0.055, 0.062), 0.95);
-
-    // Apron: a flat paved shoulder at `E` extending straight out from the
-    // runway edge, then a graded runoff slope blending down to the terrain.
-    let (shoulder_mesh, runoff_mesh) =
-        build_apron(frame, hs, RUNWAY_SHOULDER_M, RUNWAY_RUNOFF_M, RUNWAY_RUNOFF_BURY_M);
-    let shoulder = meshes.add(shoulder_mesh);
-    let runoff = meshes.add(runoff_mesh);
-    // The runoff is coloured from the actual terrain albedo at the site (see
-    // `sample_terrain_albedo`) so it blends into the surrounding ground.
-    let grass = flat_runway_material(materials, runoff_color, 1.0);
 
     // --- Markings (white, one mesh) ---
     let markings = meshes.add(build_markings_mesh(frame));
     let paint = flat_runway_material(materials, Color::srgb(0.85, 0.85, 0.85), 0.8);
 
-    // Anchor the platform centre via a root-grid big_space cell, positioned in
-    // f64 (heliocentric) so the multi-Mm surface offset never lands in an f32
+    // Anchor the pad centre via a root-grid big_space cell, positioned in f64
+    // (heliocentric) so the multi-Mm surface offset never lands in an f32
     // translation. `update_runway_transform` re-derives this every frame; this
-    // is just the first-frame value. The slab rides the f32 `Transform.rotation`
+    // is just the first-frame value. The strip rides the f32 `Transform.rotation`
     // (surface orientation) — fine, because only the small child vertex offsets
     // are rotated by it, not the planet-radius position.
     let orientation = body_state.orientation.normalize();
@@ -621,7 +612,7 @@ fn spawn_runway_geometry(
     let runway_entity = commands
         .spawn((
             Mesh3d(top),
-            MeshMaterial3d(asphalt.clone()),
+            MeshMaterial3d(asphalt),
             Transform {
                 translation: local,
                 rotation: orientation.as_quat(),
@@ -641,22 +632,16 @@ fn spawn_runway_geometry(
         ))
         .id();
 
-    for (mesh, material, name) in [
-        (shoulder, asphalt, "Runway Shoulder"),
-        (runoff, grass, "Runway Runoff"),
-        (markings, paint, "Runway Markings"),
-    ] {
-        commands.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::IDENTITY,
-            Visibility::Inherited,
-            RenderLayers::layer(SHIP_LAYER),
-            NotShadowCaster,
-            ChildOf(runway_entity),
-            Name::new(name),
-        ));
-    }
+    commands.spawn((
+        Mesh3d(markings),
+        MeshMaterial3d(paint),
+        Transform::IDENTITY,
+        Visibility::Inherited,
+        RenderLayers::layer(SHIP_LAYER),
+        NotShadowCaster,
+        ChildOf(runway_entity),
+        Name::new("Runway Markings"),
+    ));
 
     spawn_runway_posts(commands, meshes, materials, frame, runway_entity);
 }
@@ -674,7 +659,7 @@ fn build_top_mesh(frame: &RunwayFrame) -> Mesh {
         for j in 0..=nw {
             let across_m = -RUNWAY_HALF_WIDTH_M + RUNWAY_WIDTH_M * (j as f64 / nw as f64);
             let u = j as f32 / nw as f32;
-            let (off, up) = frame.level(along, across_m, 0.0);
+            let (off, up) = frame.level(along, across_m, RUNWAY_ASPHALT_LIFT_M);
             positions.push([off.x as f32, off.y as f32, off.z as f32]);
             normals.push([up.x as f32, up.y as f32, up.z as f32]);
             uvs.push([u, v]);
@@ -689,124 +674,6 @@ fn build_top_mesh(frame: &RunwayFrame) -> Mesh {
             let d = c + 1;
             indices.extend_from_slice(&[a, c, b, b, c, d]);
         }
-    }
-    build_mesh(positions, normals, uvs, indices)
-}
-
-/// One point on the runway-rectangle perimeter, with its outward direction in
-/// `(along, across)` runway coordinates (axis-aligned on the edges, diagonal at
-/// the corners).
-#[derive(Clone, Copy)]
-struct PerimPoint {
-    along: f64,
-    across: f64,
-    out_along: f64,
-    out_across: f64,
-}
-
-/// Walk the runway-rectangle perimeter as a closed loop (corners carry diagonal
-/// outward directions so the offset rings bevel cleanly).
-fn runway_perimeter_loop() -> Vec<PerimPoint> {
-    let hl = RUNWAY_HALF_LENGTH_M;
-    let hw = RUNWAY_HALF_WIDTH_M;
-    let d = std::f64::consts::FRAC_1_SQRT_2;
-    let seg_l = 60usize;
-    let seg_w = 4usize;
-    let mut pts = Vec::with_capacity(4 + 2 * (seg_l - 1) + 2 * (seg_w - 1));
-
-    pts.push(PerimPoint { along: -hl, across: -hw, out_along: -d, out_across: -d });
-    for k in 1..seg_l {
-        let along = -hl + RUNWAY_LENGTH_M * (k as f64 / seg_l as f64);
-        pts.push(PerimPoint { along, across: -hw, out_along: 0.0, out_across: -1.0 });
-    }
-    pts.push(PerimPoint { along: hl, across: -hw, out_along: d, out_across: -d });
-    for k in 1..seg_w {
-        let across = -hw + RUNWAY_WIDTH_M * (k as f64 / seg_w as f64);
-        pts.push(PerimPoint { along: hl, across, out_along: 1.0, out_across: 0.0 });
-    }
-    pts.push(PerimPoint { along: hl, across: hw, out_along: d, out_across: d });
-    for k in 1..seg_l {
-        let along = hl - RUNWAY_LENGTH_M * (k as f64 / seg_l as f64);
-        pts.push(PerimPoint { along, across: hw, out_along: 0.0, out_across: 1.0 });
-    }
-    pts.push(PerimPoint { along: -hl, across: hw, out_along: -d, out_across: d });
-    for k in 1..seg_w {
-        let across = hw - RUNWAY_WIDTH_M * (k as f64 / seg_w as f64);
-        pts.push(PerimPoint { along: -hl, across, out_along: -1.0, out_across: 0.0 });
-    }
-    pts
-}
-
-/// Build the apron around the runway: a flat paved **shoulder** band at `E`
-/// (straight extrusion) and a graded **runoff** band sloping from the shoulder
-/// edge down to the terrain (smooth blend with the ground). Returns the two
-/// meshes `(shoulder, runoff)`.
-fn build_apron(
-    frame: &RunwayFrame,
-    hs: &dyn HeightSource,
-    shoulder_m: f64,
-    runoff_m: f64,
-    bury_m: f64,
-) -> (Mesh, Mesh) {
-    let perim = runway_perimeter_loop();
-    let n = perim.len();
-    let mut inner = Vec::with_capacity(n);
-    let mut shoulder = Vec::with_capacity(n);
-    let mut outer = Vec::with_capacity(n);
-    let mut up_n = Vec::with_capacity(n);
-    let mut slope_n = Vec::with_capacity(n);
-
-    for p in &perim {
-        let (inner_off, up) = frame.level(p.along, p.across, 0.0);
-        let (shoulder_off, _) =
-            frame.level(p.along + p.out_along * shoulder_m, p.across + p.out_across * shoulder_m, 0.0);
-        let o_along = p.along + p.out_along * (shoulder_m + runoff_m);
-        let o_across = p.across + p.out_across * (shoulder_m + runoff_m);
-        let (outer_off, _, terrain_h) = frame.draped(hs, o_along, o_across, bury_m);
-
-        let outward = (frame.heading * p.out_along + frame.across * p.out_across).normalize();
-        let dh = (frame.elevation_m - terrain_h).max(0.0);
-        let slope = (up * runoff_m + outward * dh).normalize();
-
-        inner.push(inner_off);
-        shoulder.push(shoulder_off);
-        outer.push(outer_off);
-        up_n.push(up);
-        slope_n.push(slope);
-    }
-
-    let shoulder_mesh = build_band(&inner, &up_n, &shoulder, &up_n);
-    let runoff_mesh = build_band(&shoulder, &up_n, &outer, &slope_n);
-    (shoulder_mesh, runoff_mesh)
-}
-
-/// Build a closed triangle strip connecting ring A to ring B (matching indices,
-/// wrapping at the end). Vertex positions are body-fixed offsets from the
-/// platform centre; normals are body-fixed.
-fn build_band(a_pos: &[DVec3], a_n: &[DVec3], b_pos: &[DVec3], b_n: &[DVec3]) -> Mesh {
-    let n = a_pos.len();
-    let mut positions = Vec::with_capacity(2 * n);
-    let mut normals = Vec::with_capacity(2 * n);
-    let mut uvs = Vec::with_capacity(2 * n);
-    let mut indices = Vec::with_capacity(n * 6);
-    let push = |positions: &mut Vec<[f32; 3]>, normals: &mut Vec<[f32; 3]>, uvs: &mut Vec<[f32; 2]>, pos: DVec3, nm: DVec3, uv: [f32; 2]| {
-        positions.push([pos.x as f32, pos.y as f32, pos.z as f32]);
-        normals.push([nm.x as f32, nm.y as f32, nm.z as f32]);
-        uvs.push(uv);
-    };
-    for i in 0..n {
-        push(&mut positions, &mut normals, &mut uvs, a_pos[i], a_n[i], [0.0, i as f32]);
-    }
-    for i in 0..n {
-        push(&mut positions, &mut normals, &mut uvs, b_pos[i], b_n[i], [1.0, i as f32]);
-    }
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let a_i = i as u32;
-        let a_j = j as u32;
-        let b_i = (n + i) as u32;
-        let b_j = (n + j) as u32;
-        indices.extend_from_slice(&[a_i, b_i, a_j, a_j, b_i, b_j]);
     }
     build_mesh(positions, normals, uvs, indices)
 }
@@ -956,19 +823,24 @@ fn spawn_runway_posts(
 /// origin (body-fixed offsets from the platform centre) and posed each frame by
 /// [`sync_runway_collider_pose`], exactly like the terrain collider patch — so
 /// the aircraft rests/lands on a flat surface independent of the bumpy terrain.
-fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, body_state: &BodyState) {
+fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, _body_state: &BodyState) {
     let (vertices, indices) = build_collider_trimesh(frame);
     let center_surface = frame.center_surface();
-    let (origin, velocity) =
-        terrain_patch_pose(center_surface, body_state.orientation, body_state.angular_velocity);
+    // The ship Avian body lives in the **body-fixed (rotating) frame**, so the
+    // runway collider is held static there: `Position = center_surface` (the
+    // body-fixed platform centre), identity rotation, zero velocity. The
+    // trimesh vertices are body-fixed offsets from that centre, so they land
+    // on the level platform with no co-rotation speed — the aircraft rests and
+    // taxis at ~0 m/s instead of the ~256 m/s the old inertial frame imposed,
+    // which is what keeps ground contact stable. See `docs/surface.md`.
     let collider = Collider::trimesh(vertices, indices);
     commands.spawn((
         RigidBody::Kinematic,
         collider,
-        Position(origin),
-        Rotation(body_state.orientation),
-        LinearVelocity(velocity),
-        AngularVelocity(body_state.angular_velocity),
+        Position(center_surface),
+        Rotation(DQuat::IDENTITY),
+        LinearVelocity(DVec3::ZERO),
+        AngularVelocity(DVec3::ZERO),
         RunwayCollider {
             body_id: frame.body_id,
             center_surface_body_m: center_surface,
@@ -982,10 +854,10 @@ fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, body_stat
 fn build_collider_trimesh(frame: &RunwayFrame) -> (Vec<DVec3>, Vec<[u32; 3]>) {
     let nl = RUNWAY_COLLIDER_SEGMENTS_LEN;
     let nw = RUNWAY_COLLIDER_SEGMENTS_W;
-    // Cover the runway plus the flat paved shoulder so the aircraft can roll
-    // onto the shoulder without dropping off the edge of the collider.
-    let half_l = RUNWAY_HALF_LENGTH_M + RUNWAY_SHOULDER_M;
-    let half_w = RUNWAY_HALF_WIDTH_M + RUNWAY_SHOULDER_M;
+    // Cover the runway plus the levelled pad margin so the aircraft can roll
+    // off the strip onto the flat shoulder without dropping off the collider.
+    let half_l = RUNWAY_HALF_LENGTH_M + RUNWAY_PAD_MARGIN_M;
+    let half_w = RUNWAY_HALF_WIDTH_M + RUNWAY_PAD_MARGIN_M;
     let mut vertices = Vec::with_capacity((nl + 1) * (nw + 1));
     let mut indices = Vec::with_capacity(nl * nw * 2);
     for i in 0..=nl {
@@ -1010,10 +882,13 @@ fn build_collider_trimesh(frame: &RunwayFrame) -> (Vec<DVec3>, Vec<[u32; 3]>) {
     (vertices, indices)
 }
 
-/// Pose the kinematic runway collider so it co-rotates with the body (mirrors
-/// `local_physics::sync_terrain_collider_pose`).
+/// Hold the kinematic runway collider **static in the ship's body-fixed frame**
+/// (mirrors `local_physics::sync_terrain_collider_pose`): `Position =
+/// center_surface_body_m`, identity rotation, zero velocity. The collider's
+/// trimesh vertices are body-fixed offsets from that centre, so it stays
+/// exactly on the level platform with no co-rotation speed. Defensive each
+/// frame; the pose is constant, so this is effectively a no-op after spawn.
 fn sync_runway_collider_pose(
-    sim: Res<SimulationState>,
     mut q: Query<(
         &RunwayCollider,
         &mut Position,
@@ -1022,21 +897,11 @@ fn sync_runway_collider_pose(
         &mut AngularVelocity,
     )>,
 ) {
-    if q.is_empty() {
-        return;
-    }
-    let epoch = Epoch(sim.simulation.sim_time());
     for (rc, mut position, mut rotation, mut linear_velocity, mut angular_velocity) in &mut q {
-        let body_state = sim.ephemeris.state(rc.body_id, epoch);
-        let (origin, velocity) = terrain_patch_pose(
-            rc.center_surface_body_m,
-            body_state.orientation,
-            body_state.angular_velocity,
-        );
-        position.0 = origin;
-        rotation.0 = body_state.orientation;
-        linear_velocity.0 = velocity;
-        angular_velocity.0 = body_state.angular_velocity;
+        position.0 = rc.center_surface_body_m;
+        rotation.0 = DQuat::IDENTITY;
+        linear_velocity.0 = DVec3::ZERO;
+        angular_velocity.0 = DVec3::ZERO;
     }
 }
 
@@ -1113,18 +978,29 @@ fn craft_ground_clearance(
     found.then(|| (-min_z as f64).max(0.0))
 }
 
-/// Park the aircraft at rest on the flat platform, sitting on its gear under
-/// the local-physics bubble (no launch clamp). It is seeded `OnRails` with the
-/// local-rigid-body state installed, so the bubble takes over immediately and
-/// rests it on the flat [`RunwayCollider`]; Avian holds it stationary under
-/// gravity + friction until thrust rolls it. It does *not* re-collapse to
-/// `BodyFixed`: the runway collider is a separate body from the terrain patch
-/// that the landed-ship collapse watches, so quiet contact there never trips
-/// it. References the fixed elevation `E`, so it never sinks or heaves with
-/// terrain streaming. `clearance_m` lifts the craft origin so its lowest point
-/// rests on the surface (measured per-craft by [`craft_ground_clearance`]).
+/// Park the aircraft frozen, level, on the runway as a **`BodyFixed` launch
+/// clamp** — the documented "spawn stably, settle on the runway, go from there"
+/// behaviour, and the fix for the tip-over.
+///
+/// The clamp is the whole point. The parked spawn happens during loading, while
+/// the terrain under the craft is still streaming from coarse → fine and its
+/// collider is heaving up toward the flat pad height. If the craft were under
+/// the local-physics bubble (Avian) through that window it would integrate gear
+/// contacts against that moving ground and tip itself over (it lands on its tail
+/// by reveal). `BodyFixed` makes the pose analytic — Avian is held on it by
+/// [`crate::local_physics::snap_avian_from_canonical`] and never integrates — so
+/// the craft sits rock-steady, level, regardless of what the terrain is doing.
+/// References the fixed elevation `E`, so it never sinks or heaves.
+/// `clearance_m` lifts the origin so the lowest point rests on the surface.
+///
+/// Registering the clamp in [`DebugLaunchMount`] lets the existing
+/// [`crate::local_physics::release_debug_launch_mount`] release it to `OnRails`
+/// (→ bubble) when the player throttles up — i.e. the dynamic handoff to Avian
+/// happens *after* the terrain has settled and on the player's command, on flat
+/// ground, so it doesn't tip.
 fn place_parked(
     sim: &mut SimulationState,
+    launch_mount: &mut DebugLaunchMount,
     body_state: &BodyState,
     site: &RunwaySite,
     body_radius_m: f64,
@@ -1145,13 +1021,23 @@ fn place_parked(
     let state = StateVector { position, velocity };
     let attitude = level_heading_attitude(body_state, up_body, nose_body);
 
+    // Freeze as a body-fixed launch clamp at the level pose.
+    sim.simulation.set_ship_state(state);
+    sim.simulation.set_attitude(attitude);
+    let pose = body_fixed_pose_from_inertial(body_state, TranslationalState::from(state), attitude);
     sim.simulation
-        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
-    sim.simulation
-        .install_local_rigid_body_state(TranslationalState::from(state), attitude);
+        .transition_authority(AuthorityMode::BodyFixed {
+            body: site.body_id,
+            pose,
+        });
     sim.simulation.warp.reset();
     sim.simulation.set_throttle(0.0);
     sim.simulation.set_target_body(Some(site.body_id));
+    // Arm the throttle-up release so the player can taxi/take off from the clamp.
+    launch_mount.active = Some(DebugLaunchMountState {
+        body_id: site.body_id,
+        pose,
+    });
 }
 
 /// Put the aircraft on short final, lined up with the centreline and sinking,

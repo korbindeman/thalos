@@ -646,8 +646,19 @@ impl TileAtlas {
                 tile_atlas.state.release_tile(tile_coordinate);
             }
 
+            // Admit requests nearest-view-first so the tiles around the camera
+            // bake before far ones. (Coarse-before-fine within the queue is left
+            // to the natural request order: coarse tiles are cheap and give an
+            // immediate resident ancestor, while fine tiles are the most
+            // expensive to synthesise.)
             let mut deferred_requests = Vec::new();
-            let requested_tiles: Vec<_> = tile_tree.requested_tiles.drain(..).collect();
+            let mut requested_tiles: Vec<_> = tile_tree.requested_tiles.drain(..).collect();
+            let model = tile_atlas.model.clone();
+            requested_tiles.sort_by(|a, b| {
+                let da = tile_tree.tile_view_distance(*a, &model);
+                let db = tile_tree.tile_view_distance(*b, &model);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
             for tile_coordinate in requested_tiles {
                 if tile_atlas.state.request_tile(tile_coordinate) {
                     tile_tree.mark_atlas_request_admitted(tile_coordinate);
