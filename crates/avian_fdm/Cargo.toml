@@ -25,17 +25,13 @@ categories = ["game-development", "simulation", "science"]
 # Exactly one of `f32` or `f64` must be enabled. They select the avian3d
 # physics backend and are mutually exclusive: enabling both is a compile error.
 # Thalos runs the f64 backend, so that is the default here (upstream defaulted
-# to f32 + debug-plugin). `debug-plugin` pulls avian3d/f32 and is therefore
-# incompatible with `f64`; leave it disabled in the Thalos workspace.
+# to f32). `debug-plugin` is backend-agnostic in this fork (the gizmo systems
+# convert avian's f64 vectors to f32 for drawing), so Thalos enables both
+# `f64` + `debug-plugin` for the in-game FDM force-vector overlay.
 default = ["f64"]
 f32 = ["avian3d/default-collider", "avian3d/f32", "avian3d/parry-f32"]
 f64 = ["avian3d/default-collider", "avian3d/f64", "avian3d/parry-f64"]
-debug-plugin = [
-    "dep:bevy_color",
-    "dep:bevy_gizmos",
-    "avian3d/f32",
-    "avian3d/parry-f32",
-]
+debug-plugin = ["dep:bevy_color", "dep:bevy_gizmos"]
 
 [dependencies]
 # collider-from-mesh is excluded: avian_fdm uses only analytic shapes (boxes, spheres,

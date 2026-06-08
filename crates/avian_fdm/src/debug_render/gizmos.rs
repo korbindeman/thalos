@@ -7,13 +7,15 @@
 //! [`AircraftFdmDebugPlugin`]: super::AircraftFdmDebugPlugin
 
 use crate::_bevy::*;
+use avian3d::math::Quaternion;
 use avian3d::prelude::{
     ComputedCenterOfMass, ComputedMass, ConstantForce, ConstantTorque, Rotation,
 };
 
 use super::configuration::{FdmDebugRender, FdmGizmos};
 use crate::components::{
-    AeroZone, AircraftGeometry, Failure, FlightState, GizmoContours, GizmoShape, ZoneForce,
+    AeroFrame, AeroZone, AircraftGeometry, Failure, FlightState, GizmoContours, GizmoShape,
+    ZoneForce,
 };
 
 //
@@ -33,7 +35,7 @@ pub(super) fn debug_render_cg(
     let Some(color) = config.cg_color else { return };
 
     for (gt, rot, com) in &query {
-        let cg = gt.translation() + rot.0 * com.0;
+        let cg = gt.translation() + (rot.0 * com.0).as_vec3();
         gizmos.sphere(
             Isometry3d::from_translation(cg),
             config.marker_radius,
@@ -137,21 +139,22 @@ pub(super) fn debug_render_resultant(
     let config = store.config::<FdmGizmos>().1;
 
     for (tf, rot, cf, mass, com) in &query {
-        let cg = tf.translation + rot.0 * com.0;
+        let cg = tf.translation + (rot.0 * com.0).as_vec3();
         let scale = config.force_scale;
+        let force = cf.0.as_vec3();
 
         if let Some(color) = config.total_force_color {
-            gizmos.arrow(cg, cg + cf.0 * scale, color);
+            gizmos.arrow(cg, cg + force * scale, color);
         }
 
-        let weight = Vec3::new(0.0, -mass.value() * 9.806_65, 0.0);
+        let weight = Vec3::new(0.0, -(mass.value() as f32) * 9.806_65, 0.0);
 
         if let Some(color) = config.weight_color {
             gizmos.arrow(cg, cg + weight * scale, color);
         }
 
         if let Some(net_color) = config.resultant_color {
-            let net = cf.0 + weight;
+            let net = force + weight;
             if net.length_squared() > 1.0 {
                 gizmos.arrow(cg, cg + net * scale, net_color);
             }
@@ -178,27 +181,31 @@ pub(super) fn debug_render_moments(
             &Rotation,
             &ComputedCenterOfMass,
             &ConstantTorque,
+            Option<&AeroFrame>,
         ),
         With<AircraftGeometry>,
     >,
 ) {
     let config = store.config::<FdmGizmos>().1;
 
-    for (tf, rot, com, torque) in &query {
-        let cg = tf.translation + rot.0 * com.0;
+    for (tf, rot, com, torque, aero_frame) in &query {
+        let cg = tf.translation + (rot.0 * com.0).as_vec3();
         let scale = config.force_scale;
 
         // Decompose torque into body-frame components and draw each axis.
         // Torque is already in world frame; project onto body axes for display.
-        let t = torque.0;
+        let t = torque.0.as_vec3();
         if t.length_squared() < 1.0 {
             continue;
         }
 
-        // Body axes in world space.
-        let body_x = rot.0 * Vec3::X; // roll axis
-        let body_y = rot.0 * Vec3::Y; // pitch axis
-        let body_z = rot.0 * Vec3::Z; // yaw axis
+        // SAE body axes (roll = X = nose, pitch = Y = right, yaw = Z = down) in
+        // world space, accounting for the host entity frame via `AeroFrame`.
+        let q_eff =
+            (rot.0 * aero_frame.map_or(Quaternion::IDENTITY, |f| f.sae_to_entity)).as_quat();
+        let body_x = q_eff * Vec3::X; // roll axis
+        let body_y = q_eff * Vec3::Y; // pitch axis
+        let body_z = q_eff * Vec3::Z; // yaw axis
 
         let t_roll = t.dot(body_x);
         let t_pitch = t.dot(body_y);
@@ -388,7 +395,13 @@ pub(super) fn debug_render_wind(
     mut gizmos: Gizmos<FdmGizmos>,
     store: Res<GizmoConfigStore>,
     query: Query<
-        (&Transform, &Rotation, &ComputedCenterOfMass, &FlightState),
+        (
+            &Transform,
+            &Rotation,
+            &ComputedCenterOfMass,
+            &FlightState,
+            Option<&AeroFrame>,
+        ),
         With<AircraftGeometry>,
     >,
 ) {
@@ -397,15 +410,19 @@ pub(super) fn debug_render_wind(
         return;
     };
 
-    for (tf, rot, com, fs) in &query {
+    for (tf, rot, com, fs, aero_frame) in &query {
         if fs.airspeed_ms < 1.0 {
             continue;
         }
 
-        let cg = tf.translation + rot.0 * com.0;
+        let cg = tf.translation + (rot.0 * com.0).as_vec3();
+
+        // SAE body→world rotation accounting for the host entity frame.
+        let q_eff =
+            (rot.0 * aero_frame.map_or(Quaternion::IDENTITY, |f| f.sae_to_entity)).as_quat();
 
         // Body-frame forward (nose direction) in world space.
-        let nose_dir = rot.0 * Vec3::X;
+        let nose_dir = q_eff * Vec3::X;
 
         // Freestream direction: the wind comes from opposite the velocity vector.
         // Reconstruct velocity direction from alpha and beta in body frame, then
@@ -414,7 +431,7 @@ pub(super) fn debug_render_wind(
         let (sa, ca) = (fs.alpha_rad.sin() as f32, fs.alpha_rad.cos() as f32);
         let (sb, cb) = (fs.beta_rad.sin() as f32, fs.beta_rad.cos() as f32);
         let vel_body_dir = Vec3::new(ca * cb, sb, sa * cb); // unit vector
-        let vel_world_dir = rot.0 * vel_body_dir;
+        let vel_world_dir = q_eff * vel_body_dir;
 
         // Arrow scale: use a fixed 2 m length so it doesn't dwarf force arrows.
         let arm = 2.0_f32;

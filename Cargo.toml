@@ -26,7 +26,7 @@ thalos_udlod = { path = "crates/udlod" }
 # Vendored LGPL flight-dynamics model (force-only use in the local bubble).
 # default-features off so the f64 backend is selected explicitly and the
 # f32-pulling `debug-plugin` stays off. See crates/avian_fdm + docs/aerodynamics.md.
-avian_fdm = { path = "crates/avian_fdm", default-features = false, features = ["f64"] }
+avian_fdm = { path = "crates/avian_fdm", default-features = false, features = ["f64", "debug-plugin"] }
 
 # Shared dev defaults stay portable. Platform-specific compiler/linker
 # tuning belongs in local, ignored Cargo config; see `docs/tooling.md`.

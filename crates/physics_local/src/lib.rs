@@ -21,9 +21,9 @@ pub mod avian {
         AngularInertia, AngularVelocity, CenterOfMass, CoefficientCombine, Collider,
         ConstantAngularAcceleration, ConstantForce, ConstantLinearAcceleration, ConstantTorque,
         ContactGraph, CustomPositionIntegration, Friction, LinearVelocity, LockedAxes, Mass,
-        NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Physics, PhysicsSchedule, PhysicsTime,
-        Position, RayHitData, Restitution, RigidBody, Rotation, SleepingDisabled, SpatialQuery,
-        SpatialQueryFilter, SweptCcd,
+        NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Physics, PhysicsDebugPlugin,
+        PhysicsGizmos, PhysicsSchedule, PhysicsTime, Position, RayHitData, Restitution, RigidBody,
+        Rotation, SleepingDisabled, SpatialQuery, SpatialQueryFilter, SweptCcd,
     };
 }
 

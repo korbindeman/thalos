@@ -24,6 +24,7 @@
 //! constants need in-game tuning (see `docs/aerodynamics.md`).**
 
 use avian_fdm::components::WindResource;
+use avian_fdm::debug_render::{AircraftFdmDebugPlugin, FdmGizmos};
 use avian_fdm::prelude::{
     AeroCoeff, AeroFrame, AeroZone, AircraftFdmPlugin, AircraftFdmSystems, AircraftGeometry,
     AtmosphereState, ControlInputs, ControlSurfaceRole, FlightState,
@@ -36,7 +37,9 @@ use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
 use thalos_physics_local::LocalCraftBody;
-use thalos_physics_local::avian::{ConstantForce, ConstantTorque, PhysicsSchedule, Position};
+use thalos_physics_local::avian::{
+    ConstantForce, ConstantTorque, PhysicsDebugPlugin, PhysicsGizmos, PhysicsSchedule, Position,
+};
 use thalos_shipyard::WingAeroPanel;
 
 use crate::rendering::SimulationState;
@@ -93,18 +96,56 @@ pub struct GameAeroPlugin;
 
 impl Plugin for GameAeroPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(AircraftFdmPlugin {
-            validate_on_startup: false,
-            manage_atmosphere: false,
-        })
+        app.add_plugins((
+            AircraftFdmPlugin {
+                validate_on_startup: false,
+                manage_atmosphere: false,
+            },
+            // F3 debug overlay backends: FDM force/moment vectors + Avian
+            // collider wireframes. Both start disabled; `toggle_debug_overlay`
+            // gates them on the gizmo configs.
+            AircraftFdmDebugPlugin,
+            PhysicsDebugPlugin::default(),
+        ))
         .init_resource::<WindResource>()
         .init_resource::<ShipAeroLayout>()
+        .add_systems(Startup, init_debug_overlay)
         .add_systems(
             PhysicsSchedule,
             sync_aero_environment.in_set(AircraftFdmSystems::Atmosphere),
         )
-        .add_systems(Update, (attach_ship_aero, sync_flight_controls));
+        .add_systems(
+            Update,
+            (attach_ship_aero, sync_flight_controls, toggle_debug_overlay),
+        );
     }
+}
+
+/// Start both debug overlays disabled (toggled by F3), with a force-arrow scale
+/// suited to airliner-magnitude forces (the upstream default is sized for a
+/// light aircraft).
+fn init_debug_overlay(mut store: ResMut<GizmoConfigStore>) {
+    let (cfg, fdm) = store.config_mut::<FdmGizmos>();
+    cfg.enabled = false;
+    fdm.force_scale = 2.0e-4;
+    let (pcfg, _) = store.config_mut::<PhysicsGizmos>();
+    pcfg.enabled = false;
+}
+
+/// **F3** toggles the game-wide debug overlay: Avian collider wireframes (every
+/// physics body — ship, terrain patch, runway, EVA) plus the `avian_fdm`
+/// aerodynamic force / moment / lift / drag / weight / wind vectors on the
+/// aircraft.
+fn toggle_debug_overlay(keys: Res<ButtonInput<KeyCode>>, mut store: ResMut<GizmoConfigStore>) {
+    if !keys.just_pressed(KeyCode::F3) {
+        return;
+    }
+    let (cfg, _) = store.config_mut::<FdmGizmos>();
+    cfg.enabled = !cfg.enabled;
+    let on = cfg.enabled;
+    let (pcfg, _) = store.config_mut::<PhysicsGizmos>();
+    pcfg.enabled = on;
+    info!("debug overlay (F3): {}", if on { "ON" } else { "off" });
 }
 
 /// Build a [`Table1D`](AeroCoeff::Table1D) lift curve through three breakpoints

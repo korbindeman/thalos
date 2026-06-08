@@ -1,14 +1,18 @@
 # Aerodynamics
 
-Atmospheric flight forces (drag now; lift + control surfaces later) for
-spacecraft and, eventually, planes. This is the **consumer-side contract** and
-the integration story; the force *physics* is provided by the vendored
-[`avian_fdm`] crate (`crates/avian_fdm/`).
+Atmospheric flight forces (drag, lift, control surfaces) for spacecraft **and
+aircraft**. This is the **consumer-side contract** and the integration story;
+the force *physics* is provided by the vendored [`avian_fdm`] crate
+(`crates/avian_fdm/`).
 
-Status: **first slice — bubble-only spacecraft drag.** A single bluff-body drag
-zone on the player ship decelerates it in atmosphere (reentry / terminal
-velocity). Lift, control surfaces, and planes are designed-for but not yet
-implemented.
+Status: **bubble-side flight model.** Aircraft get a full set of lift + control
+zones derived from their wing parts (cambered main wing, symmetric
+stabiliser/fin; elevator/aileron/rudder control surfaces); spacecraft get a
+bluff-body drag zone. Flight controls (pitch/roll/yaw → elevator/aileron/rudder)
+are wired, and an F3 debug overlay draws colliders + force/moment vectors. The
+**airfoil and control-authority constants are a first cut that needs in-game
+tuning** (static margin, control sign/gain, stall, takeoff speed). The A220
+(`ships/a220.ron`) is the reference test aircraft on the runway scenarios.
 
 ## Why a vendored crate (and the LGPL story)
 
@@ -141,22 +145,47 @@ translation, at 1× warp. Two coupling points make that correct:
 EVA is excluded throughout (no aero zones attached), exactly as it is excluded
 from terrain contact.
 
+## Body-frame reconciliation (`AeroFrame`)
+
+`avian_fdm` works in **SAE** body axes (X = nose, Y = right, Z = down); Thalos
+ships are **Y = nose, X = right, Z = up**. The vendored crate gained an
+[`AeroFrame`] component carrying a fixed `sae_to_entity` rotation (a 180° turn
+about (1,1,0)/√2), threaded through `update_flight_state`, `compute_aero_forces`,
+and the debug gizmos. Thalos sets it on every aircraft, and **zone transforms are
+authored in the SAE frame** (`crates/game/src/aero.rs::entity_to_sae`). Without
+this, AoA and lift come out in the wrong frame and nothing flies.
+
 ## Scope and roadmap
 
-**Now (aggregate spacecraft — rockets, capsules):** one collider-less bluff-body
-drag zone on the player ship (`crates/game/src/aero.rs::attach_ship_aero`), drag
-opposing the airflow, ~zero lift. The reference area is **per-vehicle**, not a
-constant: `ShipStats::frontal_area_m2` = π·(widest propagated part diameter / 2)²,
-pushed into `ShipParameters::reference_area_m2` by `ship_view`, so a slim rocket
-and a blunt capsule drag differently. The drag coefficient is a blunt-body
-constant (~1.0) for now; a per-nose-shape model is the obvious next step.
+**Aircraft (implemented, first cut).** `aero.rs::build_ship_aero_layout` walks
+the blueprint's `Wing` parts via `ShipBlueprint::wing_aero_panels` (shipyard,
+which returns each panel's AC position + airfoil basis in the body frame) and
+emits, per panel: a **base lifting zone** (cambered for the main wing, symmetric
+for stabiliser/fin — provides stability + damping) plus a **control zone**
+(elevator on the aft surface, ailerons L/R on the main wing, rudder on the fin).
+A fuselage bluff-body drag zone is always present. `sync_flight_controls` maps
+`GameInputIntent` pitch/roll/yaw into `ControlInputs`. Engine thrust stays
+Thalos's nose-forward throttle (no `EngineZone`). **The airfoil / control
+constants at the top of `aero.rs` are tuned by eye and need in-game iteration**
+(elevator sign, control gain, static margin, stall, takeoff speed).
 
-**Planes (later, needs construction geometry — see `docs/construction.md`).**
-Each airfoil-stationed wing/control-surface **Module** maps to one `AeroZone`
-(the editor's planned "wing area / MAC / centre-of-lift" feedback comes from the
-same data). Control-surface deflection wires from input into `ControlInputs`.
-This is where lift / stall / spin / control authority pay off — all emergent from
-the zone model `avian_fdm` already provides.
+**Spacecraft (rockets, capsules).** A single bluff-body drag zone; reference area
+is per-vehicle (`ShipStats::frontal_area_m2`, pushed via
+`ShipParameters::reference_area_m2`), Cd a blunt-body constant.
+
+**Planes from the construction editor (future).** When `docs/construction.md`'s
+wing **Modules** exist, the same `wing_aero_panels` path generalises (control
+surfaces become wing parameters); the zone generator is already Module-shaped.
+
+## Debug view (F3)
+
+`F3` toggles a game-wide overlay: **Avian collider wireframes** (every physics
+body — ship, terrain patch, runway, EVA — via `PhysicsDebugPlugin`) plus the
+`avian_fdm` **force / moment vectors** (lift, drag, side force, thrust, weight,
+resultant, CG/AC markers, relative wind) via the FDM crate's `AircraftFdmDebugPlugin`
+(`FdmGizmos`). The FDM debug renderer was made f64-compatible (its `debug-plugin`
+feature no longer forces the avian3d f32 backend). Both start disabled; the force
+arrow scale is set for airliner-magnitude forces in `aero.rs::init_debug_overlay`.
 
 ## Deferred
 
@@ -178,7 +207,15 @@ the zone model `avian_fdm` already provides.
 ## File map
 
 - `crates/avian_fdm/**` — vendored LGPL force model. Thalos edits: the
-  `manage_atmosphere` plugin flag (`src/plugin.rs`).
+  `manage_atmosphere` plugin flag (`src/plugin.rs`), the `AeroFrame` component
+  (`src/components/aircraft.rs`) threaded through `kinematics.rs` /
+  `aerodynamics/mod.rs`, and an f64-compatible `debug-plugin`
+  (`src/debug_render/gizmos.rs`, `Cargo.toml`).
+- `crates/shipyard/src/stats.rs` — `ShipBlueprint::wing_aero_panels` +
+  `WingAeroPanel` (per-wing aerodynamic geometry).
+- `crates/game/src/aero.rs` — `entity_to_sae`, `build_ship_aero_layout`
+  (wing → lift/control zones), `attach_ship_aero`, `sync_flight_controls`,
+  `init_debug_overlay`/`toggle_debug_overlay` (F3).
 - `crates/world/src/atmosphere.rs` — `AtmosphereProfile` + `AtmosphereSample` +
   `TerrestrialAtmosphere::sample_at_altitude_m`.
 - `crates/world/src/body.rs` — `BodyDefinition::surface_pressure_pa` /
@@ -187,8 +224,8 @@ the zone model `avian_fdm` already provides.
 - `crates/shipyard/src/stats.rs` — `ShipStats::frontal_area_m2`;
   `crates/physics_canonical/src/types.rs` — `ShipParameters::reference_area_m2` /
   `drag_coefficient`; `crates/game/src/ship_view.rs` — pushes them.
-- `crates/game/src/aero.rs` — `GameAeroPlugin`, `attach_ship_aero` (ship zones +
-  root components), `sync_aero_environment` (atmosphere + co-rotation wind).
+- `crates/game/src/aero.rs` — `GameAeroPlugin`, `sync_aero_environment`
+  (atmosphere + co-rotation wind).
 - `crates/game/src/local_physics.rs` — `craft_in_atmosphere` + the in-atmosphere
   `Full`-role trigger.
 - `crates/game/src/bridge.rs` — atmosphere warp clamp in
