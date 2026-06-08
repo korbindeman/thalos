@@ -1,15 +1,13 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use thalos_body_render::CLOUD_BAND_COUNT;
 use thalos_physics_canonical::{
-    body_trajectory_provider::BodyTrajectoryProvider,
-    canonical::Epoch,
-    simulation::Simulation,
+    body_trajectory_provider::BodyTrajectoryProvider, canonical::Epoch, simulation::Simulation,
     types::BodyStates,
 };
-use thalos_world::{BodyId, SolarSystemDefinition};
-use thalos_body_render::CLOUD_BAND_COUNT;
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_world::{BodyId, SolarSystemDefinition};
 
 use crate::SimStage;
 

@@ -6,9 +6,9 @@ use crate::{
 use bevy::{
     prelude::*,
     render::{
-        Extract,
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
+        Extract,
     },
 };
 use bytemuck::cast_slice;

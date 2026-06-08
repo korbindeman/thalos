@@ -11,6 +11,7 @@
 //! ship-view meshes use 1.0 (1 unit = 1 m) inside BigSpace cells.
 
 mod body_lod;
+mod clouds;
 mod generation;
 pub(crate) mod ground_terrain;
 mod lighting;
@@ -47,7 +48,9 @@ use terrain_residency::TerrainResidencyPlugin;
 use trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_planet_orientations, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
-pub use types::{CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, ShipMarker};
+pub use types::{
+    CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, RealSpaceBody, ShipMarker,
+};
 
 use bevy::prelude::*;
 pub use thalos_body_render::ReferenceClouds;
@@ -77,6 +80,7 @@ impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(SceneDepthPlugin)
             .add_plugins(TerrainResidencyPlugin)
+            .add_plugins(clouds::CloudsRenderPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())

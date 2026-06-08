@@ -10,13 +10,13 @@
 //! `brdf_scale = 0.5`) matches `planet_impostor.wgsl::shade_water` so the
 //! ground-LOD ↔ impostor handoff reads continuously.
 
+use crate::shading::SceneLighting;
 use bevy::asset::embedded_asset;
 use bevy::math::Vec4;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use crate::shading::SceneLighting;
 
 /// Per-body water parameters.
 #[derive(Clone, Copy, ShaderType, Default)]

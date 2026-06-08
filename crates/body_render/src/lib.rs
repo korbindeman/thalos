@@ -1,13 +1,13 @@
 //! Unified celestial-body rendering: one appearance model, two backends.
 //! `shading` = shared lighting/atmosphere/BRDF libraries + uniforms;
 //! `impostor` = distant billboard materials; `ground` = udlod terrain LOD.
-pub mod shading;
-pub mod impostor;
 pub mod ground;
+pub mod impostor;
+pub mod shading;
 
-pub use shading::*;
-pub use impostor::*;
 pub use ground::*;
+pub use impostor::*;
+pub use shading::*;
 
 /// The vendored UDLOD terrain renderer, re-exported so the rest of the
 /// workspace depends on it *through* `body_render` — its single consumer —

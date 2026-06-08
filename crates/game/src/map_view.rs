@@ -4,8 +4,8 @@ use thalos_physics_canonical::canonical::{CraftState, Epoch};
 use thalos_physics_canonical::trajectory::{
     Encounter, FlightPlan, Trajectory, TrajectoryBranchStack,
 };
-use thalos_world::{BodyDefinition, BodyId};
 use thalos_physics_canonical::types::{BodyState, BodyStates};
+use thalos_world::{BodyDefinition, BodyId};
 
 use crate::coords::{RenderOrigin, WorldScale};
 use crate::rendering::{SimulationState, SolarSystemState};

@@ -6,7 +6,7 @@ use crate::{
 };
 use bevy::{
     prelude::*,
-    render::{Extract, RenderApp, render_resource::*},
+    render::{render_resource::*, Extract, RenderApp},
     transform::TransformSystems,
     window::{CursorOptions, PrimaryWindow},
 };

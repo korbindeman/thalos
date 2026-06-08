@@ -3,11 +3,11 @@
 //! material light updates, sun-light direction.
 
 use bevy::prelude::*;
-use thalos_physics_canonical::types::BodyStates;
 use thalos_body_render::{
     AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, PlanetHaloMaterial, PlanetMaterial,
     SceneLighting, SolidPlanetMaterial, StarLight,
 };
+use thalos_physics_canonical::types::BodyStates;
 
 use super::types::{
     CameraExposure, CelestialBody, PlanetMaterials, PlanetshineTints, SimulationState,
@@ -260,10 +260,8 @@ pub(super) fn update_planet_light_dirs(
             // resource hasn't been populated for contribute no shine.
             if let Some(parent_id) = body_def.parent {
                 let parent_def = &body_defs[parent_id];
-                if !matches!(
-                    parent_def.kind,
-                    thalos_world::BodyKind::Star
-                ) && let Some(parent_state) = states.get(parent_id)
+                if !matches!(parent_def.kind, thalos_world::BodyKind::Star)
+                    && let Some(parent_state) = states.get(parent_id)
                     && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {
                     let parent_render_pos =
@@ -370,10 +368,8 @@ pub(super) fn update_solid_planet_params(
 
             if let Some(parent_id) = body_def.parent {
                 let parent_def = &body_defs[parent_id];
-                if !matches!(
-                    parent_def.kind,
-                    thalos_world::BodyKind::Star
-                ) && let Some(parent_state) = states.get(parent_id)
+                if !matches!(parent_def.kind, thalos_world::BodyKind::Star)
+                    && let Some(parent_state) = states.get(parent_id)
                     && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {
                     let parent_render_pos =
@@ -403,13 +399,44 @@ pub(super) fn update_solid_planet_params(
     }
 }
 
-/// Point the directional sun light from the star toward the camera's focus body.
+/// Directional-light illuminance with the sun high over the local horizon.
+/// Hand-tuned daytime value retained from the original constant light.
+const SUN_DAY_ILLUMINANCE: f32 = 10_000.0;
+/// Ambient (sky-fill) brightness in full daylight and on the deep night side.
+/// The ratio mirrors the terrain shader's `day_fill = 0.15` / `night_fill =
+/// 0.012` so the Bevy-PBR ship + runway fade to the same faint starlight floor
+/// the ground does instead of staying lit when the sun is below the horizon.
+const AMBIENT_DAY_BRIGHTNESS: f32 = 50.0;
+const AMBIENT_NIGHT_BRIGHTNESS: f32 = 4.0;
+
+/// `smoothstep`, matching the WGSL builtin the terrain shader uses so the
+/// CPU-side day/night gate lines up with the ground's terminator exactly.
+fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Point the directional sun light from the star toward the camera's focus
+/// body, and modulate its illuminance + the global ambient floor by the sun's
+/// elevation over the craft's local horizon.
+///
+/// The ship hull and runway are Bevy `StandardMaterial`s lit by this one
+/// directional light, while the terrain is lit by its own shader that fades
+/// direct sun and sky-fill across the terminator (`body_terrain.wgsl`:
+/// `daylight = smoothstep(-0.06, 0.12, dot(local_up, sun_dir))`). With a
+/// constant-illuminance light the hull stayed brightly lit on the night side
+/// while the ground around it went dark. We evaluate the *same* day/night
+/// function here at the craft's position over its dominant (SOI) body and scale
+/// the light + ambient by it, so all surfaces dim together as the sun sets or
+/// the planet eclipses the craft. Deep space (dominant body is the star) keeps
+/// full illuminance — no planet to block the sun there.
 pub(super) fn update_sun_light(
     cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     sim: Res<SimulationState>,
     player: Option<Res<crate::player_controller::PlayerControllerState>>,
-    mut light_query: Query<&mut Transform, With<SunLight>>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut light_query: Query<(&mut Transform, &mut DirectionalLight), With<SunLight>>,
 ) {
     let Some(ref states) = cache.states else {
         return;
@@ -443,9 +470,50 @@ pub(super) fn update_sun_light(
         return; // Focus is on (or very near) the star; direction undefined.
     }
 
+    // Day/night gate, evaluated at the craft's position (not the camera focus,
+    // which may be a remote body in map view) over the body it's gravitationally
+    // bound to. `daylight` ∈ [0,1]: 1 with the sun high overhead, 0 on the deep
+    // night side. Falls back to full daylight when the craft sits in the star's
+    // SOI (interplanetary cruise) — there's no nearby horizon to occlude.
+    let craft_pos = player
+        .as_deref()
+        .and_then(|state| state.active_position_m())
+        .unwrap_or_else(|| sim.simulation.ship_state().position);
+    let dominant = sim.simulation.dominant_body();
+    let daylight = match states.get(dominant) {
+        Some(body) if dominant != 0 => {
+            let to_center = body.position - craft_pos;
+            let r = to_center.length();
+            let radius = sim.simulation.bodies()[dominant].radius_m;
+            let up = (-to_center).normalize_or_zero();
+            let to_sun = (star_pos - craft_pos).normalize_or_zero();
+            let sun_elevation = up.dot(to_sun);
+            // Slide the terminator to the geometric umbra entry for this
+            // altitude. The sun grazes the planet's limb (shadow-cylinder
+            // edge, sun treated as infinitely far) when
+            //   sun_elevation == -sqrt(1 - (R/r)^2).
+            // At the surface (r == R) that threshold is 0 and the whole
+            // expression reduces to the terrain shader's
+            // `smoothstep(-0.06, 0.12, sun_elevation)`, keeping the on-foot /
+            // landed terminator identical to the ground. As the craft climbs,
+            // the threshold slides toward -1 so only the true shadow cylinder
+            // behind the planet — the high-orbit umbra — darkens the hull,
+            // instead of the whole far hemisphere going dark.
+            let ratio = if r > 0.0 { (radius / r).min(1.0) } else { 1.0 };
+            let threshold = -(1.0 - ratio * ratio).max(0.0).sqrt();
+            smoothstep(threshold - 0.06, threshold + 0.12, sun_elevation) as f32
+        }
+        _ => 1.0,
+    };
+
     let dir_f32 = offset.normalize().as_vec3();
-    for mut transform in &mut light_query {
+    let illuminance = SUN_DAY_ILLUMINANCE * daylight;
+    for (mut transform, mut light) in &mut light_query {
         // DirectionalLight shines along its local -Z, so we look in the light's travel direction.
         transform.look_to(dir_f32, Vec3::Y);
+        light.illuminance = illuminance;
     }
+
+    ambient.brightness =
+        AMBIENT_NIGHT_BRIGHTNESS + (AMBIENT_DAY_BRIGHTNESS - AMBIENT_NIGHT_BRIGHTNESS) * daylight;
 }

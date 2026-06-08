@@ -19,6 +19,7 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::gestures::PinchGesture;
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::ecs::system::SystemParam;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::picking::Pickable;
 use bevy::picking::events::{Click, DragEnd, DragStart, Pointer};
@@ -116,9 +117,12 @@ fn kind_order(entry: &CatalogEntry) -> u8 {
     match entry {
         CatalogEntry::Pod(_) => 0,
         CatalogEntry::Engine(_) => 1,
-        CatalogEntry::Decoupler(_) => 2,
-        CatalogEntry::Adapter(_) => 3,
-        CatalogEntry::Tank(_) => 4,
+        CatalogEntry::Intake(_) => 2,
+        CatalogEntry::Decoupler(_) => 3,
+        CatalogEntry::Adapter(_) => 4,
+        CatalogEntry::Tank(_) => 5,
+        CatalogEntry::Wing(_) => 6,
+        CatalogEntry::Gear(_) => 7,
     }
 }
 
@@ -126,8 +130,11 @@ fn palette_category_order(entry: &CatalogEntry) -> u8 {
     match entry {
         CatalogEntry::Pod(_) => 0,
         CatalogEntry::Engine(_) => 1,
-        CatalogEntry::Tank(_) => 2,
-        CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) => 3,
+        CatalogEntry::Intake(_) => 2,
+        CatalogEntry::Tank(_) => 3,
+        CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) => 4,
+        CatalogEntry::Wing(_) => 4,
+        CatalogEntry::Gear(_) => 5,
     }
 }
 
@@ -135,8 +142,11 @@ fn palette_category_label(entry: &CatalogEntry) -> &'static str {
     match entry {
         CatalogEntry::Pod(_) => "Command Pods",
         CatalogEntry::Engine(_) => "Engines",
+        CatalogEntry::Intake(_) => "Intakes",
         CatalogEntry::Tank(_) => "Propellant Tanks",
         CatalogEntry::Adapter(_) | CatalogEntry::Decoupler(_) => "Structure",
+        CatalogEntry::Wing(_) => "Aerodynamics",
+        CatalogEntry::Gear(_) => "Landing Gear",
     }
 }
 
@@ -148,20 +158,28 @@ fn palette_part_summary(entry: &CatalogEntry) -> String {
     match entry {
         CatalogEntry::Pod(p) => {
             format!(
-                "Diameter {} · {:.1} t dry",
+                "{} · Diameter {} · {:.1} t dry",
+                p.geometry.label(),
                 meters_label(p.diameter),
                 p.dry_mass / 1000.0
             )
         }
         CatalogEntry::Engine(e) => {
             format!(
-                "{} · Diameter {} · {:.0} kN · {:.0} s",
+                "{} · {} · Diameter {} · {:.0} kN · {:.0} s",
                 e.optimized_for.label(),
+                e.geometry.label(),
                 meters_label(e.diameter),
                 e.thrust / 1000.0,
                 e.isp
             )
         }
+        CatalogEntry::Intake(i) => format!(
+            "Diameter {} · area {:.2} m² · {}",
+            meters_label(i.diameter),
+            i.capture.area_m2 * i.capture.efficiency,
+            i.capture.kind.label()
+        ),
         CatalogEntry::Decoupler(_) => match default_params_for(entry) {
             PartParams::Decoupler { diameter } => {
                 format!("Default diameter {} · staging", meters_label(diameter))
@@ -186,6 +204,36 @@ fn palette_part_summary(entry: &CatalogEntry) -> String {
                 meters_label(length)
             ),
             _ => "Parametric diameter".into(),
+        },
+        CatalogEntry::Wing(_) => match default_params_for(entry) {
+            PartParams::Wing {
+                span,
+                root_chord,
+                tip_chord,
+                ..
+            } => format!(
+                "Span {} · chord {}→{} · click a hull to mount",
+                meters_label(span),
+                meters_label(root_chord),
+                meters_label(tip_chord)
+            ),
+            _ => "Parametric wing".into(),
+        },
+        CatalogEntry::Gear(g) => match default_params_for(entry) {
+            PartParams::Gear {
+                strut_length,
+                wheel_radius,
+            } => format!(
+                "{} · strut {} · wheel Ø{} · click a belly to mount",
+                if g.track_fraction > 0.0 {
+                    "Main (L/R)"
+                } else {
+                    "Nose"
+                },
+                meters_label(strut_length),
+                meters_label(wheel_radius * 2.0)
+            ),
+            _ => "Parametric gear".into(),
         },
     }
 }
@@ -280,6 +328,11 @@ fn main() {
         .init_resource::<EditorState>()
         .init_resource::<TankResizeDrag>()
         .init_resource::<DeselectTracker>()
+        .init_resource::<BuildOrientation>()
+        .init_resource::<SymmetryMode>()
+        .init_resource::<NextSymmetryId>()
+        .init_resource::<PlacementSnap>()
+        .init_resource::<PlacementPreview>()
         .init_resource::<SkyBackdropEnabled>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -290,16 +343,33 @@ fn main() {
             Update,
             (
                 orbit_camera,
+                recenter_camera_on_orientation_change,
                 process_commands,
                 rebuild_visuals,
+                sync_symmetry_groups
+                    .before(rebuild_wing_visuals)
+                    .before(rebuild_nacelle_visuals),
+                rebuild_wing_visuals,
+                rebuild_nacelle_visuals,
+                rebuild_gear_visuals,
                 update_part_transforms.after(propagate_node_sizes),
+                update_placement_preview.after(update_part_transforms),
                 update_node_pin_style,
                 disable_egui_pointer_capture,
                 sync_self_nodes,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
                 spawn_tank_resize_arrow,
                 update_tank_resize_arrow.after(update_part_transforms),
                 update_tank_resize_drag,
-                update_selection_highlight.after(rebuild_visuals),
+                update_selection_highlight
+                    .after(rebuild_visuals)
+                    .after(rebuild_wing_visuals)
+                    .after(rebuild_nacelle_visuals)
+                    .after(rebuild_gear_visuals),
                 update_part_shader_params.after(rebuild_visuals),
                 update_part_shader_highlight.after(rebuild_visuals),
                 deselect_on_empty_click,
@@ -333,6 +403,10 @@ struct EditorState {
     selected: Option<Entity>,
     pending: Option<PendingPart>,
     place_at: Option<(Entity, String)>,
+    /// A pending surface-mount placement: `(host part, world hit point,
+    /// mount kind)`. Consumed by `process_commands` which derives the
+    /// mount-kind-specific `(station, angle)` pair.
+    place_surface_at: Option<(Entity, Vec3, SurfaceMountKind)>,
     delete_selected: bool,
     set_as_root: bool,
     save_requested: bool,
@@ -343,19 +417,125 @@ struct EditorState {
     status: String,
 }
 
+/// KSP-style editor symmetry mode. When `mirror` is on, placing a footprint
+/// part stamps a linked mirror counterpart across the host X = 0 plane.
+#[derive(Resource, Default)]
+struct SymmetryMode {
+    mirror: bool,
+}
+
+/// Magnetic angle snap for body-skin (cylinder) mounts. On by default — the
+/// mount azimuth rounds to [`BODY_SKIN_SNAP_STEP`] increments so gear/wings
+/// land dead-on the belly / sides as the cursor sweeps around the fuselage.
+#[derive(Resource)]
+struct PlacementSnap {
+    enabled: bool,
+}
+
+impl Default for PlacementSnap {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Placement-mode toggles bundled into one [`SystemParam`] so `process_commands`
+/// stays under Bevy's 16-argument system limit.
+#[derive(SystemParam)]
+struct PlacementModes<'w> {
+    symmetry: Res<'w, SymmetryMode>,
+    snap: Res<'w, PlacementSnap>,
+}
+
+/// Snap increment for body-skin mount azimuth — 15° (24 positions around the
+/// cylinder). The belly (π), top (0), and sides (±π/2) are all exact steps.
+const BODY_SKIN_SNAP_STEP: f32 = std::f32::consts::TAU / 24.0;
+
+fn snap_body_skin_angle(angle: f32) -> f32 {
+    (angle / BODY_SKIN_SNAP_STEP).round() * BODY_SKIN_SNAP_STEP
+}
+
+/// Live placement-preview state. Holds the one reused ghost entity plus the
+/// signature of the mesh currently on it, so the (small) ghost mesh is rebuilt
+/// only when the host / snapped angle / part params actually change, not every
+/// frame the cursor moves.
+#[derive(Resource, Default)]
+struct PlacementPreview {
+    entity: Option<Entity>,
+    sig: Option<PreviewSig>,
+}
+
+/// What the preview ghost mesh depends on. Station is excluded — it only moves
+/// the ghost along the body axis (the transform), it doesn't reshape the mesh.
+#[derive(Clone, PartialEq)]
+struct PreviewSig {
+    host: Entity,
+    angle: f32,
+    parent_radius: f32,
+    params: PartParams,
+}
+
+/// Monotonic source of [`SymmetryGroup`] ids for newly stamped groups.
+#[derive(Resource, Default)]
+struct NextSymmetryId(u32);
+
+impl NextSymmetryId {
+    fn next(&mut self) -> u32 {
+        let id = self.0;
+        self.0 += 1;
+        id
+    }
+}
+
 #[derive(Resource)]
 struct EditorAssets {
     part_material: Handle<StandardMaterial>,
+    /// Matte dark finish for landing gear bodies — distinct from the stainless
+    /// hull. The selection-highlight system falls back to this (not
+    /// `part_material`) for gear visuals so wheels never read as steel.
+    gear_material: Handle<StandardMaterial>,
     hover_material: Handle<StandardMaterial>,
     selected_material: Handle<StandardMaterial>,
     pending_node_material: Handle<StandardMaterial>,
     node_mesh: Handle<Mesh>,
     resize_arrow_mesh: Handle<Mesh>,
     resize_arrow_material: Handle<StandardMaterial>,
+    /// Translucent green ghost for the live placement preview.
+    preview_material: Handle<StandardMaterial>,
+    /// Translucent cyan x-ray ghost for the gear stow-bay box. High depth bias
+    /// so the reserved volume reads *through* the opaque fuselage skin.
+    gear_bay_material: Handle<StandardMaterial>,
 }
 
 #[derive(Component)]
 struct PartVisual;
+
+/// Marker on a wing's mesh child. Distinct from [`PartVisual`] so the
+/// body-of-revolution rebuild (`rebuild_visuals`) never despawns wing
+/// geometry — `rebuild_wing_visuals` owns it.
+#[derive(Component)]
+struct WingVisual;
+
+#[derive(Component)]
+struct NacelleVisual;
+
+/// Marker on a gearbox's mesh child. Distinct from [`PartVisual`] so
+/// `rebuild_visuals` (the body-of-revolution rebuild) never touches gear
+/// geometry — `rebuild_gear_visuals` owns it, like wings/nacelles.
+#[derive(Component)]
+struct GearVisual;
+
+/// Marker on a gearbox's **stow-bay** ghost child — the x-ray box showing the
+/// volume inside the fuselage that will house the gear when retracted. Rendered
+/// translucent and non-pickable; `rebuild_gear_visuals` owns it alongside
+/// [`GearVisual`].
+#[derive(Component)]
+struct GearBayVisual;
+
+/// Marker on the live placement-preview ghost — the translucent silhouette of
+/// the pending footprint part following the cursor across a host surface. One
+/// reused entity, tracked by [`PlacementPreview`].
+#[derive(Component)]
+struct PreviewGhost;
 
 #[derive(Component)]
 struct PartBody(Entity);
@@ -400,6 +580,30 @@ struct DeselectTracker {
     press_cursor: Option<Vec2>,
 }
 
+/// Vertical (rocket / VAB) vs horizontal (aircraft / SPH) build layout.
+/// Purely a display + interaction frame: parts are always authored along
+/// the body +Y axis; horizontal lays the whole assembly down so the body
+/// axis runs fore/aft and the dorsal (+Z) side faces up, like KSP's
+/// Spaceplane Hangar. The rotation is applied rigidly to every part in
+/// `update_part_transforms`; placement / resize convert pointer hits back
+/// through its inverse so building stays correct in either layout.
+#[derive(Resource, Default)]
+struct BuildOrientation {
+    horizontal: bool,
+}
+
+impl BuildOrientation {
+    fn rotation(&self) -> Quat {
+        if self.horizontal {
+            // Nose (+Y) → −Z (forward), dorsal (+Z) → +Y (up), span (X) stays
+            // level — the craft lies down facing away from the camera.
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+        } else {
+            Quat::IDENTITY
+        }
+    }
+}
+
 #[derive(Component)]
 struct OrbitCamera {
     focus: Vec3,
@@ -419,17 +623,29 @@ fn setup(
     mut state: ResMut<EditorState>,
 ) {
     commands.insert_resource(EditorAssets {
+        // Double-sided so a wing's thin slab (and its reflected panel) reads
+        // from both faces; closed bodies-of-revolution are unaffected.
         part_material: mats.add(StandardMaterial {
-            base_color: Color::srgb(0.75, 0.78, 0.82),
-            perceptual_roughness: 0.4,
-            metallic: 0.6,
-            ..default()
+            // Same stainless-steel base as the procedural `ShipPartMaterial`
+            // (fuel tank) so wings, nacelles, gear, and pod/engine bodies read
+            // as one material. Double-sided so a wing's thin slab reads from
+            // both faces; closed bodies-of-revolution are unaffected.
+            double_sided: true,
+            cull_mode: None,
+            ..stainless_steel_base()
+        }),
+        gear_material: mats.add(StandardMaterial {
+            double_sided: true,
+            cull_mode: None,
+            ..landing_gear_base()
         }),
         hover_material: mats.add(StandardMaterial {
             base_color: Color::srgb(0.82, 0.85, 0.88),
             perceptual_roughness: 0.4,
             metallic: 0.6,
             emissive: LinearRgba::rgb(0.08, 0.08, 0.08),
+            double_sided: true,
+            cull_mode: None,
             ..default()
         }),
         selected_material: mats.add(StandardMaterial {
@@ -437,6 +653,8 @@ fn setup(
             perceptual_roughness: 0.4,
             metallic: 0.6,
             emissive: LinearRgba::rgb(0.15, 0.35, 0.7),
+            double_sided: true,
+            cull_mode: None,
             ..default()
         }),
         pending_node_material: mats.add(StandardMaterial {
@@ -451,6 +669,26 @@ fn setup(
             emissive: LinearRgba::rgb(0.9, 0.5, 0.05),
             perceptual_roughness: 0.5,
             unlit: false,
+            ..default()
+        }),
+        preview_material: mats.add(StandardMaterial {
+            base_color: Color::srgba(0.4, 1.0, 0.5, 0.45),
+            emissive: LinearRgba::rgb(0.05, 0.3, 0.1),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        gear_bay_material: mats.add(StandardMaterial {
+            base_color: Color::srgba(0.2, 0.85, 1.0, 0.22),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            double_sided: true,
+            cull_mode: None,
+            // Large bias forces the ghost in front of the opaque hull so the
+            // reserved bay volume is visible through the fuselage (x-ray).
+            depth_bias: 1.0e9,
             ..default()
         }),
     });
@@ -504,21 +742,23 @@ fn visual_spec(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     engine: Option<&Engine>,
+    intake: Option<&AirIntake>,
 ) -> Option<VisualSpec> {
     if let Some(p) = pod {
-        let d = p.diameter;
-        let h = d * 0.9;
-        Some(VisualSpec {
-            mesh: ConicalFrustum {
-                radius_top: d * 0.3,
-                radius_bottom: d * 0.5,
+        let (radius_top, radius_bottom, h) = pod_visual_profile(p.diameter, p.geometry);
+        let mesh = match p.geometry {
+            // Rounded ogive nose (airliner radome) vs the plain capsule cone.
+            PodGeometry::AircraftCockpit => build_cockpit_mesh(p.diameter, h),
+            PodGeometry::Capsule => ConicalFrustum {
+                radius_top,
+                radius_bottom,
                 height: h,
             }
             .mesh()
             .resolution(PART_RESOLUTION)
             .into(),
-            height: h,
-        })
+        };
+        Some(VisualSpec { mesh, height: h })
     } else if dec.is_some() {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         let h = 0.2;
@@ -555,17 +795,33 @@ fn visual_spec(
             height: h,
         })
     } else if let Some(e) = engine {
-        let (r_top, r_bot, h) = engine_visual_profile(e.diameter);
-        Some(VisualSpec {
-            mesh: ConicalFrustum {
-                radius_top: r_top,
-                radius_bottom: r_bot,
-                height: h,
+        match e.geometry {
+            EngineGeometry::RocketBell => {
+                let (r_top, r_bot, h) = engine_visual_profile(e.diameter);
+                Some(VisualSpec {
+                    mesh: ConicalFrustum {
+                        radius_top: r_top,
+                        radius_bottom: r_bot,
+                        height: h,
+                    }
+                    .mesh()
+                    .resolution(PART_RESOLUTION)
+                    .into(),
+                    height: h,
+                })
             }
-            .mesh()
-            .resolution(PART_RESOLUTION)
-            .into(),
-            height: h,
+            EngineGeometry::JetNacelle => Some(VisualSpec {
+                mesh: build_jet_nacelle_body_mesh(e),
+                height: jet_nacelle_length(e),
+            }),
+        }
+    } else if let Some(i) = intake {
+        Some(VisualSpec {
+            mesh: Cylinder::new(i.diameter * 0.5, i.length)
+                .mesh()
+                .resolution(PART_RESOLUTION)
+                .into(),
+            height: i.length,
         })
     } else {
         None
@@ -627,6 +883,8 @@ type VisualQuery<'w, 's> = Query<
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
         Option<&'static Engine>,
+        Option<&'static AirIntake>,
+        Option<&'static SurfaceMount>,
         Option<&'static Children>,
         Option<&'static PartShaderHandle>,
         Has<PartMaterial>,
@@ -643,8 +901,20 @@ fn rebuild_visuals(
     parts: VisualQuery,
     stale: Query<(), Or<(With<PartVisual>, With<AttachNodePin>)>>,
 ) {
-    for (e, nodes, pod, dec, adapter, tank, engine, children, part_shader, has_part_mat) in
-        parts.iter()
+    for (
+        e,
+        nodes,
+        pod,
+        dec,
+        adapter,
+        tank,
+        engine,
+        intake,
+        surface,
+        children,
+        part_shader,
+        has_part_mat,
+    ) in parts.iter()
     {
         if let Some(ch) = children {
             for c in ch.into_iter() {
@@ -654,8 +924,14 @@ fn rebuild_visuals(
             }
         }
 
+        if engine.is_some_and(|e| e.geometry == EngineGeometry::JetNacelle)
+            && surface.is_some_and(|m| m.kind == SurfaceMountKind::WingPylon)
+        {
+            continue;
+        }
+
         // ---- Body visual --------------------------------------------------
-        if let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine) {
+        if let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine, intake) {
             let mesh = meshes.add(spec.mesh);
 
             // Parts carrying `PartMaterial` render with `ShipPartMaterial`
@@ -731,10 +1007,304 @@ fn rebuild_visuals(
     }
 }
 
+/// Build (or rebuild) the mesh child for each wing whose shape, mount, or
+/// host diameter just changed. Wings are surface-mounted lifting surfaces,
+/// not bodies of revolution, so they live outside `rebuild_visuals`: the
+/// mesh is generated in the host-local frame by [`build_wing_mesh`] and the
+/// wing entity's transform (set in `update_part_transforms`) places it on
+/// the hull. Uses the shared part materials so selection / hover highlight
+/// flows through `update_selection_highlight` like any other part.
+fn rebuild_wing_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Res<EditorAssets>,
+    state: Res<EditorState>,
+    wings: Query<
+        (Entity, &Wing, &SurfaceMount, Option<&Children>),
+        Or<(Added<Wing>, Changed<Wing>, Changed<SurfaceMount>)>,
+    >,
+    host_nodes: Query<&AttachNodes>,
+    stale: Query<(), With<WingVisual>>,
+) {
+    for (e, wing, mount, children) in wings.iter() {
+        if let Some(ch) = children {
+            for c in ch.into_iter() {
+                if stale.get(*c).is_ok() {
+                    commands.entity(*c).despawn();
+                }
+            }
+        }
+        let parent_radius = host_nodes
+            .get(mount.parent)
+            .ok()
+            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+            .unwrap_or(1.0);
+        let mesh = meshes.add(build_wing_mesh(wing, mount.angle, parent_radius));
+        let material = if Some(e) == state.selected {
+            assets.selected_material.clone()
+        } else {
+            assets.part_material.clone()
+        };
+        let body = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::IDENTITY,
+                Visibility::default(),
+                WingVisual,
+                PartBody(e),
+                Pickable::default(),
+            ))
+            .observe(on_body_click)
+            .id();
+        let parent = e;
+        commands.queue(move |world: &mut World| {
+            if world.get_entity(parent).is_ok() {
+                world.entity_mut(body).insert(ChildOf(parent));
+            } else {
+                world.entity_mut(body).despawn();
+            }
+        });
+    }
+}
+
+fn rebuild_nacelle_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Res<EditorAssets>,
+    state: Res<EditorState>,
+    engines: Query<
+        (Entity, &Engine, &SurfaceMount, Option<&Children>),
+        Or<(Added<Engine>, Changed<SurfaceMount>)>,
+    >,
+    wings: Query<&Wing>,
+    surface_mounts: Query<&SurfaceMount>,
+    host_nodes: Query<&AttachNodes>,
+    stale: Query<(), With<NacelleVisual>>,
+) {
+    for (e, engine, mount, children) in engines.iter() {
+        if engine.geometry != EngineGeometry::JetNacelle
+            || mount.kind != SurfaceMountKind::WingPylon
+        {
+            continue;
+        }
+        if let Some(ch) = children {
+            for c in ch.into_iter() {
+                if stale.get(*c).is_ok() {
+                    commands.entity(*c).despawn();
+                }
+            }
+        }
+
+        let Ok(wing) = wings.get(mount.parent) else {
+            continue;
+        };
+        let Ok(wing_mount) = surface_mounts.get(mount.parent) else {
+            continue;
+        };
+        let parent_radius = host_nodes
+            .get(wing_mount.parent)
+            .ok()
+            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+            .unwrap_or(1.0);
+        let mesh = meshes.add(build_jet_nacelle_pylon_mesh(
+            engine,
+            JetNacelleMount {
+                wing,
+                wing_mount_angle: wing_mount.angle,
+                parent_radius,
+                span_fraction: mount.station,
+                chord_fraction: mount.angle,
+            },
+        ));
+        let material = if Some(e) == state.selected {
+            assets.selected_material.clone()
+        } else {
+            assets.part_material.clone()
+        };
+        let body = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::IDENTITY,
+                Visibility::default(),
+                NacelleVisual,
+                PartBody(e),
+                Pickable::default(),
+            ))
+            .observe(on_body_click)
+            .id();
+        let parent = e;
+        commands.queue(move |world: &mut World| {
+            if world.get_entity(parent).is_ok() {
+                world.entity_mut(body).insert(ChildOf(parent));
+            } else {
+                world.entity_mut(body).despawn();
+            }
+        });
+    }
+}
+
+/// Build (or rebuild) the mesh child for each gearbox whose dimensions, mount,
+/// or host diameter just changed. A gearbox is a single footprint part that
+/// draws all of its legs ([`build_gear_mesh`]); the mesh is in the host-local
+/// frame and the gear entity's transform (set in `update_part_transforms`)
+/// places it on the belly. Mirrors `rebuild_wing_visuals` — no symmetry.
+fn rebuild_gear_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Res<EditorAssets>,
+    state: Res<EditorState>,
+    gears: Query<
+        (Entity, &Gear, &SurfaceMount, Option<&Children>),
+        Or<(Added<Gear>, Changed<Gear>, Changed<SurfaceMount>)>,
+    >,
+    host_nodes: Query<&AttachNodes>,
+    stale: Query<(), Or<(With<GearVisual>, With<GearBayVisual>)>>,
+) {
+    for (e, gear, mount, children) in gears.iter() {
+        if let Some(ch) = children {
+            for c in ch.into_iter() {
+                if stale.get(*c).is_ok() {
+                    commands.entity(*c).despawn();
+                }
+            }
+        }
+        let parent_radius = host_nodes
+            .get(mount.parent)
+            .ok()
+            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+            .unwrap_or(1.0);
+        let mesh = meshes.add(build_gear_mesh(gear, mount.angle, parent_radius));
+        let material = if Some(e) == state.selected {
+            assets.selected_material.clone()
+        } else {
+            assets.gear_material.clone()
+        };
+        let body = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::IDENTITY,
+                Visibility::default(),
+                GearVisual,
+                PartBody(e),
+                Pickable::default(),
+            ))
+            .observe(on_body_click)
+            .id();
+        // Stow-bay ghost: an x-ray translucent box inside the fuselage. Not
+        // pickable, no `PartBody` (so the selection-highlight system leaves its
+        // ghost material alone), no click observer.
+        let bay = commands
+            .spawn((
+                Mesh3d(meshes.add(build_gear_bay_mesh(gear, mount.angle, parent_radius))),
+                MeshMaterial3d(assets.gear_bay_material.clone()),
+                Transform::IDENTITY,
+                Visibility::default(),
+                GearBayVisual,
+                Pickable::IGNORE,
+            ))
+            .id();
+        let parent = e;
+        commands.queue(move |world: &mut World| {
+            if world.get_entity(parent).is_ok() {
+                world.entity_mut(body).insert(ChildOf(parent));
+                world.entity_mut(bay).insert(ChildOf(parent));
+            } else {
+                world.entity_mut(body).despawn();
+                world.entity_mut(bay).despawn();
+            }
+        });
+    }
+}
+
+/// KSP linked symmetry: keep every mirror counterpart in lockstep with its
+/// group's primary — params copied (handed fields negated) and mount
+/// reflected across the host X = 0 plane — so editing or moving the primary
+/// updates the whole group. Writes are change-guarded so they don't
+/// re-trigger the rebuild systems every frame.
+fn sync_symmetry_groups(
+    groups: Query<(Entity, &SymmetryGroup)>,
+    mut mounts: Query<&mut SurfaceMount>,
+    mut wings: Query<&mut Wing>,
+) {
+    let mut primary_of_group: HashMap<u32, Entity> = HashMap::new();
+    let mut members: HashMap<u32, Vec<Entity>> = HashMap::new();
+    let mut role_of: HashMap<Entity, (u32, SymmetryRole)> = HashMap::new();
+    for (e, g) in groups.iter() {
+        members.entry(g.id).or_default().push(e);
+        role_of.insert(e, (g.id, g.role));
+        if g.role == SymmetryRole::Primary {
+            primary_of_group.insert(g.id, e);
+        }
+    }
+    // A host's mirror counterpart (for nested WingPylon parents): the member
+    // of the host's own group with the opposite role.
+    let host_mirror = |host: Entity| -> Option<Entity> {
+        let (gid, role) = role_of.get(&host)?;
+        let want = match role {
+            SymmetryRole::Primary => SymmetryRole::Mirror,
+            SymmetryRole::Mirror => SymmetryRole::Primary,
+        };
+        members
+            .get(gid)?
+            .iter()
+            .copied()
+            .find(|m| role_of.get(m).map(|(_, r)| *r) == Some(want))
+    };
+
+    for (gid, mems) in &members {
+        let Some(&primary) = primary_of_group.get(gid) else {
+            continue;
+        };
+        let Some(p_mount) = mounts.get(primary).ok().copied() else {
+            continue;
+        };
+        let p_wing = wings.get(primary).ok().cloned();
+        for &m in mems {
+            if m == primary {
+                continue;
+            }
+            let (parent, angle) = match p_mount.kind {
+                // Same host, reflected azimuth.
+                SurfaceMountKind::BodySkin => (p_mount.parent, -p_mount.angle),
+                // The host wing is itself mirrored; mount on its counterpart
+                // at the same local coords — the host reflection does the work.
+                SurfaceMountKind::WingPylon => {
+                    (host_mirror(p_mount.parent).unwrap_or(p_mount.parent), p_mount.angle)
+                }
+            };
+            let target = SurfaceMount {
+                parent,
+                kind: p_mount.kind,
+                station: p_mount.station,
+                angle,
+            };
+            if let Ok(mut mm) = mounts.get_mut(m)
+                && *mm != target
+            {
+                *mm = target;
+            }
+            if let Some(w) = &p_wing
+                && let Ok(mut mw) = wings.get_mut(m)
+            {
+                let mut tw = w.clone();
+                tw.incidence = -w.incidence; // incidence is the one handed param
+                if *mw != tw {
+                    *mw = tw;
+                }
+            }
+        }
+    }
+}
+
 fn update_part_transforms(
     ships: Query<&Ship>,
     attachments: Query<(Entity, &Attachment)>,
+    surface_mounts: Query<(Entity, &SurfaceMount)>,
     nodes: Query<&AttachNodes>,
+    orientation: Res<BuildOrientation>,
     mut transforms: Query<&mut Transform, With<Part>>,
 ) {
     let mut children_map: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
@@ -785,10 +1355,83 @@ fn update_part_transforms(
             }
         }
     }
+
+    // Surface-mounted parts sit in their host-local frame. Body-skin mounts
+    // (wings) move down the host body axis; wing-pylon mounts (nacelles)
+    // inherit the wing origin because the pylon mesh carries the offsets.
+    //
+    // Process in dependency order — BodySkin first, then WingPylon — because a
+    // nacelle's parent is a wing that is itself a surface mount. Reading a
+    // parent before it has been positioned this frame would pull its stale
+    // (already rigid-rotated) translation from the previous frame, which the
+    // rigid rotation below would then rotate a second time. Two passes keep
+    // every parent upright and freshly positioned before its child reads it.
+    let position_mount = |transforms: &mut Query<&mut Transform, With<Part>>,
+                          part: Entity,
+                          mount: &SurfaceMount| {
+        let Ok(parent_t) = transforms.get(mount.parent).map(|t| t.translation) else {
+            return;
+        };
+        let local_offset = match mount.kind {
+            SurfaceMountKind::BodySkin => {
+                let host_height = nodes
+                    .get(mount.parent)
+                    .ok()
+                    .and_then(|n| n.get("bottom").map(|nd| -nd.offset.y))
+                    .unwrap_or(0.0);
+                Vec3::new(0.0, -mount.station * host_height, 0.0)
+            }
+            SurfaceMountKind::WingPylon => Vec3::ZERO,
+        };
+        if let Ok(mut pt) = transforms.get_mut(part) {
+            pt.translation = parent_t + local_offset;
+            pt.rotation = Quat::IDENTITY;
+        }
+    };
+    for (part, mount) in surface_mounts.iter() {
+        if mount.kind == SurfaceMountKind::BodySkin {
+            position_mount(&mut transforms, part, mount);
+        }
+    }
+    for (part, mount) in surface_mounts.iter() {
+        if mount.kind == SurfaceMountKind::WingPylon {
+            position_mount(&mut transforms, part, mount);
+        }
+    }
+
+    // Build-layout: everything above is computed in the upright build frame;
+    // lay the whole assembly down rigidly for the horizontal (aircraft)
+    // layout. Identity in vertical mode, so this is a no-op for rockets.
+    let r = orientation.rotation();
+    if r != Quat::IDENTITY {
+        for mut t in transforms.iter_mut() {
+            t.translation = r * t.translation;
+            t.rotation = r;
+        }
+    }
+}
+
+/// Re-centre the orbit camera when the build layout flips, so the craft
+/// stays framed (it moves from a tall upright stack to a level fuselage).
+fn recenter_camera_on_orientation_change(
+    orientation: Res<BuildOrientation>,
+    mut cam: Query<&mut OrbitCamera>,
+) {
+    if !orientation.is_changed() {
+        return;
+    }
+    for mut c in cam.iter_mut() {
+        c.focus = if orientation.horizontal {
+            Vec3::ZERO
+        } else {
+            Vec3::new(0.0, -2.0, 0.0)
+        };
+    }
 }
 
 fn update_node_pin_style(
     state: Res<EditorState>,
+    catalog: Res<PartCatalog>,
     assets: Res<EditorAssets>,
     attachments: Query<&Attachment>,
     mut pins: Query<(
@@ -801,14 +1444,22 @@ fn update_node_pin_style(
         .iter()
         .map(|a| (a.parent, a.parent_node.clone()))
         .collect();
-    let pending = state.pending.is_some();
+    let pending_uses_nodes = state.pending.as_ref().is_some_and(|p| {
+        !matches!(p.params, PartParams::Wing { .. })
+            && !catalog.resolve(&p.catalog_id).is_ok_and(|entry| {
+                matches!(
+                    entry,
+                    CatalogEntry::Engine(e) if e.geometry == EngineGeometry::JetNacelle
+                )
+            })
+    });
 
     for (pin, mut mat, mut vis) in pins.iter_mut() {
         let is_occupied = occupied.contains(&(pin.part, pin.node_id.clone()));
 
         // Pins only appear while a part is pending, and only on unoccupied
         // nodes.
-        *vis = if pending && !is_occupied {
+        *vis = if pending_uses_nodes && !is_occupied {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -860,7 +1511,11 @@ fn sync_self_nodes(
         let mut targets: Vec<(String, f32, Vec3)> = Vec::new();
         if let Some(p) = pod {
             let d = p.diameter;
-            targets.push(("bottom".into(), d, Vec3::new(0.0, -d * 0.9, 0.0)));
+            targets.push((
+                "bottom".into(),
+                d,
+                Vec3::new(0.0, -d * p.geometry.length_factor(), 0.0),
+            ));
         }
         // Read kind-component fields through `as_ref()` so the borrow only
         // goes through Bevy's `Mut::deref` (no Changed trigger). The write
@@ -999,6 +1654,7 @@ fn spawn_tank_resize_arrow(
 /// pointing down along the tank's growth axis.
 fn update_tank_resize_arrow(
     state: Res<EditorState>,
+    orientation: Res<BuildOrientation>,
     tanks: Query<(&FuelTank, &AttachNodes), Without<TankResizeArrow>>,
     cameras: Query<
         &Transform,
@@ -1034,9 +1690,10 @@ fn update_tank_resize_arrow(
         }
 
         // Place the arrow on the camera's right so it doesn't occlude the
-        // tank body. Parts never rotate in this editor, so world-space XZ
-        // equals local-space XZ.
-        let cam_right = cam_transform.right();
+        // tank body. The arrow is a child of the (possibly laid-down) tank,
+        // so convert the world camera-right into the tank's build frame
+        // before using it as a local offset; the length axis stays local −Y.
+        let cam_right = orientation.rotation().inverse() * cam_transform.right().as_vec3();
         let right_xz = Vec2::new(cam_right.x, cam_right.z)
             .try_normalize()
             .unwrap_or(Vec2::X);
@@ -1048,7 +1705,8 @@ fn update_tank_resize_arrow(
             right_xz.y * offset_r,
         );
         // Bevy's Cone has its tip at +Y and base at -Y; rotate PI around X
-        // to point the tip down (i.e., the direction the tank grows).
+        // to point the tip down (i.e., the direction the tank grows). Local,
+        // so it composes with the tank's build-layout rotation.
         transform.rotation = Quat::from_rotation_x(std::f32::consts::PI);
     }
 }
@@ -1061,6 +1719,7 @@ fn on_arrow_drag_start(
     arrows: Query<&TankResizeArrow>,
     tanks: Query<(&FuelTank, &Transform)>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
+    orientation: Res<BuildOrientation>,
     mut drag: ResMut<TankResizeDrag>,
 ) {
     let event = trigger.event();
@@ -1075,9 +1734,9 @@ fn on_arrow_drag_start(
     };
 
     let origin_world = tank_transform.translation;
-    // Tanks grow in the -Y direction (bottom node offset = -length * Y).
-    // Flip this if that ever changes.
-    let grow_world = origin_world + Vec3::NEG_Y;
+    // Tanks grow along the body −Y axis, which the build layout may have
+    // laid down — use the rotated axis so the drag tracks the visible length.
+    let grow_world = origin_world + orientation.rotation() * Vec3::NEG_Y;
     let Ok(origin_screen) = camera.world_to_viewport(cam_transform, origin_world) else {
         return;
     };
@@ -1263,7 +1922,12 @@ fn update_selection_highlight(
     state: Res<EditorState>,
     assets: Res<EditorAssets>,
     hover_map: Res<HoverMap>,
-    mut bodies: Query<(Entity, &PartBody, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut bodies: Query<(
+        Entity,
+        &PartBody,
+        Has<GearVisual>,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
 ) {
     let hovered: HashSet<Entity> = hover_map
         .0
@@ -1271,11 +1935,13 @@ fn update_selection_highlight(
         .flat_map(|hovers| hovers.keys().copied())
         .collect();
 
-    for (body_entity, body, mut mat) in bodies.iter_mut() {
+    for (body_entity, body, is_gear, mut mat) in bodies.iter_mut() {
         let target = if Some(body.0) == state.selected {
             &assets.selected_material
         } else if hovered.contains(&body_entity) {
             &assets.hover_material
+        } else if is_gear {
+            &assets.gear_material
         } else {
             &assets.part_material
         };
@@ -1288,15 +1954,45 @@ fn update_selection_highlight(
 fn on_body_click(
     click: On<Pointer<Click>>,
     bodies: Query<&PartBody>,
+    wings: Query<(), With<Wing>>,
+    catalog: Res<PartCatalog>,
     mut state: ResMut<EditorState>,
     mut contexts: EguiContexts,
 ) {
     if pointer_over_egui(&mut contexts) {
         return;
     }
-    if let Ok(body) = bodies.get(click.entity) {
-        state.selected = Some(body.0);
+    let Ok(body) = bodies.get(click.entity) else {
+        return;
+    };
+    let pending_surface_kind = state.pending.as_ref().and_then(|pending| {
+        // Wings and landing gear both body-skin-mount on a hull (not a wing).
+        if matches!(pending.params, PartParams::Wing { .. } | PartParams::Gear { .. })
+            && wings.get(body.0).is_err()
+        {
+            return Some(SurfaceMountKind::BodySkin);
+        }
+        let entry = catalog.resolve(&pending.catalog_id).ok()?;
+        match entry {
+            CatalogEntry::Engine(e)
+                if e.geometry == EngineGeometry::JetNacelle && wings.get(body.0).is_ok() =>
+            {
+                Some(SurfaceMountKind::WingPylon)
+            }
+            _ => None,
+        }
+    });
+    if let Some(kind) = pending_surface_kind {
+        if let Some(pos) = click.hit.position {
+            state.place_surface_at = Some((body.0, pos, kind));
+        }
+        return;
     }
+    if state.pending.is_some() {
+        state.status = "Pick a compatible surface or attach node for the pending part".into();
+        return;
+    }
+    state.selected = Some(body.0);
 }
 
 fn on_pin_click(
@@ -1329,6 +2025,7 @@ fn orbit_camera(
     state: Res<EditorState>,
     resize_drag: Res<TankResizeDrag>,
     hover_map: Res<HoverMap>,
+    orientation: Res<BuildOrientation>,
     arrows: Query<(), With<TankResizeArrow>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut press_cursor: Local<Option<Vec2>>,
@@ -1345,7 +2042,7 @@ fn orbit_camera(
         .any(|hovers| hovers.keys().any(|e| arrows.get(*e).is_ok()));
 
     let delta = input.camera_motion;
-    let wheel_d = input.camera_wheel.y;
+    let wheel = input.camera_wheel;
     let mut pinch_d: f32 = 0.0;
     for p in pinch.read() {
         pinch_d += p.0;
@@ -1391,11 +2088,25 @@ fn orbit_camera(
             orbit.pitch = (orbit.pitch - delta.y * 0.005).clamp(-1.5, 1.5);
         }
 
-        if !pointer_over_egui && wheel_d.abs() > 0.0 {
+        if !pointer_over_egui && (wheel.x.abs() > 0.0 || wheel.y.abs() > 0.0) {
             if shift {
-                orbit.distance = (orbit.distance * (1.0 - wheel_d * 0.05)).clamp(2.0, 200.0);
+                orbit.distance = (orbit.distance * (1.0 - wheel.y * 0.05)).clamp(2.0, 200.0);
             } else {
-                orbit.focus.y += wheel_d * orbit.distance * 0.015;
+                // Vertical scroll: pan along the build's long axis (body +Y),
+                // which the horizontal layout lays down to −Z — so scrolling
+                // tracks the fuselage in either layout instead of always world-up.
+                if wheel.y.abs() > 0.0 {
+                    let pan = wheel.y * orbit.distance * 0.015;
+                    orbit.focus += orientation.rotation() * Vec3::Y * pan;
+                }
+                // Horizontal scroll (trackpad two-finger): pan perpendicular to
+                // the build axis using the camera's current azimuth so left/right
+                // always matches what's on screen regardless of orbit angle.
+                if wheel.x.abs() > 0.0 {
+                    let cam_right = Quat::from_rotation_y(orbit.yaw) * Vec3::X;
+                    let pan = wheel.x * orbit.distance * 0.015;
+                    orbit.focus += cam_right * pan;
+                }
             }
         }
 
@@ -1425,6 +2136,8 @@ type CollectQuery<'w, 's> = Query<
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
+        Option<&'static Wing>,
+        Option<&'static Gear>,
     ),
 >;
 
@@ -1432,13 +2145,17 @@ fn collect_blueprint(
     ship: &Ship,
     parts: &CollectQuery,
     attachments: &Query<(Entity, &Attachment)>,
+    surface_mounts: &Query<(Entity, &SurfaceMount)>,
+    groups: &Query<(Entity, &SymmetryGroup)>,
 ) -> Option<ShipBlueprint> {
-    let mut child_map: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
+    // Child graph unions both placement kinds so wings are ordered and
+    // indexed alongside the node-stacked hull.
+    let mut child_map: HashMap<Entity, Vec<Entity>> = HashMap::new();
     for (e, att) in attachments.iter() {
-        child_map
-            .entry(att.parent)
-            .or_default()
-            .push((e, att.clone()));
+        child_map.entry(att.parent).or_default().push(e);
+    }
+    for (e, sm) in surface_mounts.iter() {
+        child_map.entry(sm.parent).or_default().push(e);
     }
 
     let mut ordered: Vec<Entity> = Vec::new();
@@ -1446,7 +2163,7 @@ fn collect_blueprint(
     while let Some(e) = queue.pop_front() {
         ordered.push(e);
         if let Some(kids) = child_map.get(&e) {
-            for (c, _) in kids {
+            for c in kids {
                 queue.push_back(*c);
             }
         }
@@ -1456,7 +2173,7 @@ fn collect_blueprint(
 
     let mut part_blueprints = Vec::with_capacity(ordered.len());
     for e in &ordered {
-        let (_, cat_ref, res, dec, adapter, tank) = parts.get(*e).ok()?;
+        let (_, cat_ref, res, dec, adapter, tank, wing, gear) = parts.get(*e).ok()?;
         let params = if let Some(d) = dec {
             PartParams::Decoupler {
                 diameter: d.diameter,
@@ -1471,6 +2188,21 @@ fn collect_blueprint(
                 diameter: t.diameter,
                 length: t.length,
             }
+        } else if let Some(w) = wing {
+            PartParams::Wing {
+                span: w.span,
+                root_chord: w.root_chord,
+                tip_chord: w.tip_chord,
+                sweep: w.sweep,
+                dihedral: w.dihedral,
+                thickness: w.thickness,
+                incidence: w.incidence,
+            }
+        } else if let Some(g) = gear {
+            PartParams::Gear {
+                strut_length: g.strut_length,
+                wheel_radius: g.wheel_radius,
+            }
         } else {
             // Pods and engines carry no per-instance params.
             PartParams::None
@@ -1482,7 +2214,7 @@ fn collect_blueprint(
         part_blueprints.push(PartBlueprint {
             catalog_id: cat_ref.id.clone(),
             params,
-            resources,
+            resources: Some(resources),
         });
     }
 
@@ -1498,12 +2230,349 @@ fn collect_blueprint(
         }
     }
 
+    let mut surface = Vec::new();
+    for (e, sm) in surface_mounts.iter() {
+        if let (Some(&ci), Some(&pi)) = (idx.get(&e), idx.get(&sm.parent)) {
+            surface.push(SurfaceConnection {
+                parent: pi,
+                child: ci,
+                kind: sm.kind,
+                station: sm.station,
+                angle: sm.angle,
+                symmetry_group: groups.get(e).ok().map(|(_, g)| g.id),
+            });
+        }
+    }
+
     Some(ShipBlueprint {
         name: schema_ship_name(&ship.name),
         root: 0,
         parts: part_blueprints,
         connections,
+        surface_mounts: surface,
     })
+}
+
+/// The symmetry-group members of `host`, primary first, or `[host]` if the
+/// host isn't part of a group. Used to stamp a footprint part onto every
+/// counterpart of a symmetric host (KSP nested symmetry — a nacelle on a
+/// mirrored wing lands on both wings).
+fn host_group_members(host: Entity, groups: &Query<(Entity, &SymmetryGroup)>) -> Vec<Entity> {
+    let Ok((_, hg)) = groups.get(host) else {
+        return vec![host];
+    };
+    let gid = hg.id;
+    let mut primary = None;
+    let mut mirrors = Vec::new();
+    for (e, g) in groups.iter() {
+        if g.id == gid {
+            match g.role {
+                SymmetryRole::Primary => primary = Some(e),
+                SymmetryRole::Mirror => mirrors.push(e),
+            }
+        }
+    }
+    let mut out: Vec<Entity> = primary.into_iter().collect();
+    out.extend(mirrors);
+    if out.is_empty() { vec![host] } else { out }
+}
+
+/// The entity whose params the inspector should edit for a given selection:
+/// the selection's symmetry-group **primary** if it belongs to a group, else
+/// the selection itself. `sync_symmetry_groups` copies the primary onto its
+/// mirror counterparts every frame, so editing a counterpart directly would be
+/// reverted next frame — its inspector sliders would look dead. KSP-style, an
+/// edit on any member is applied to the controlling (primary) part and the
+/// mirrors follow.
+fn symmetry_edit_target(sel: Entity, groups: &Query<(Entity, &SymmetryGroup)>) -> Entity {
+    let Ok((_, sg)) = groups.get(sel) else {
+        return sel;
+    };
+    match sg.role {
+        SymmetryRole::Primary => sel,
+        SymmetryRole::Mirror => groups
+            .iter()
+            .find(|(_, g)| g.id == sg.id && g.role == SymmetryRole::Primary)
+            .map(|(e, _)| e)
+            .unwrap_or(sel),
+    }
+}
+
+/// Resolve a body-skin (cylinder) hit into a `(station, angle)` pair, with
+/// optional magnetic angle snapping. Shared by the commit path
+/// ([`surface_mount_from_hit`]) and the live placement preview so the ghost and
+/// the placed part land at exactly the same spot.
+fn body_skin_mount(
+    parent: Entity,
+    world_pos: Vec3,
+    part_transforms: &Query<&Transform, With<Part>>,
+    host_nodes: &Query<&AttachNodes>,
+    orientation: &BuildOrientation,
+    snap: bool,
+) -> (f32, f32) {
+    let parent_t = part_transforms
+        .get(parent)
+        .map(|t| t.translation)
+        .unwrap_or(Vec3::ZERO);
+    // Undo the build-layout rotation so the hit lands in the upright build
+    // frame, where all persisted surface coordinates are defined.
+    let local = orientation.rotation().inverse() * (world_pos - parent_t);
+    let host = host_nodes.get(parent).ok();
+    let radius = host
+        .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+        .unwrap_or(1.0);
+    let height = host
+        .and_then(|n| n.get("bottom").map(|nd| -nd.offset.y))
+        .unwrap_or(radius * 2.0);
+    let station = if height > 0.0 {
+        (-local.y / height).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let mut angle = local.x.atan2(local.z);
+    if snap {
+        angle = snap_body_skin_angle(angle);
+    }
+    (station, angle)
+}
+
+/// Resolve a hull/wing surface hit into the persisted `(station, angle)`
+/// pair for `kind`. Symmetry is no longer decided here — the global
+/// [`SymmetryMode`] + the host's own symmetry drive group stamping at the
+/// call site. `snap` magnetically rounds the azimuth of body-skin mounts.
+fn surface_mount_from_hit(
+    kind: SurfaceMountKind,
+    parent: Entity,
+    world_pos: Vec3,
+    part_transforms: &Query<&Transform, With<Part>>,
+    host_nodes: &Query<&AttachNodes>,
+    surface_mounts: &Query<(Entity, &SurfaceMount)>,
+    wings: &Query<&Wing>,
+    orientation: &BuildOrientation,
+    snap: bool,
+) -> Option<(f32, f32, String)> {
+    let parent_t = part_transforms
+        .get(parent)
+        .map(|t| t.translation)
+        .unwrap_or(Vec3::ZERO);
+    // Undo the build-layout rotation so the hit lands in the upright build
+    // frame, where all persisted surface coordinates are defined.
+    let local = orientation.rotation().inverse() * (world_pos - parent_t);
+
+    match kind {
+        SurfaceMountKind::BodySkin => {
+            let (station, angle) =
+                body_skin_mount(parent, world_pos, part_transforms, host_nodes, orientation, snap);
+            Some((station, angle, "Mounted wing".into()))
+        }
+        SurfaceMountKind::WingPylon => {
+            let wing = wings.get(parent).ok()?;
+            let (_, wing_mount) = surface_mounts.iter().find(|(e, _)| *e == parent)?;
+            let parent_radius = host_nodes
+                .get(wing_mount.parent)
+                .ok()
+                .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+                .unwrap_or(1.0);
+            // The click is on a specific wing entity; project it onto that
+            // wing's own panel frame.
+            let frame = wing_panel_frame(wing, wing_mount.angle, parent_radius);
+            let span_axis = frame.tip_center - frame.root_center;
+            let span_len2 = span_axis.length_squared();
+            let station = if span_len2 > f32::EPSILON {
+                ((local - frame.root_center).dot(span_axis) / span_len2).clamp(0.08, 0.92)
+            } else {
+                0.5
+            };
+            let chord = frame.chord_at(wing, station).max(0.1);
+            let chord_center = frame.center_at(station);
+            let chord_fraction =
+                ((local - chord_center).dot(frame.fore_dir) / chord).clamp(-0.4, 0.4);
+            Some((station, chord_fraction, "Mounted jet nacelle with pylon".into()))
+        }
+    }
+}
+
+/// Live placement preview. While a body-skin footprint part (gear / wing) is
+/// pending and the cursor hovers a compatible hull, draw a translucent ghost of
+/// it at the snapped `(station, angle)` it would land on — so you aim instead of
+/// clicking and praying. The ghost is one reused entity; its (small) mesh is
+/// rebuilt only when the snapped angle / host / params change. WingPylon
+/// (nacelle-on-wing) mounts aren't cylinder mounts, so they get no preview yet.
+fn update_placement_preview(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut contexts: EguiContexts,
+    state: Res<EditorState>,
+    catalog: Res<PartCatalog>,
+    snap: Res<PlacementSnap>,
+    orientation: Res<BuildOrientation>,
+    assets: Res<EditorAssets>,
+    hover_map: Res<HoverMap>,
+    mut preview: ResMut<PlacementPreview>,
+    bodies: Query<&PartBody>,
+    wing_marker: Query<(), With<Wing>>,
+    part_transforms: Query<&Transform, With<Part>>,
+    host_nodes: Query<&AttachNodes>,
+    mut ghosts: Query<
+        (&mut Transform, &mut Visibility, &mut Mesh3d),
+        (With<PreviewGhost>, Without<Part>),
+    >,
+) {
+    // Compute the desired ghost placement (None ⇒ hide it). An IIFE so the many
+    // early-outs read cleanly; its borrows end before we mutate `preview`.
+    let placement: Option<(Vec3, Quat, PreviewSig, Option<Handle<Mesh>>)> = (|| {
+        let pending = state.pending.as_ref()?;
+        // Only body-skin footprint parts get a preview (gear, wings).
+        if !matches!(pending.params, PartParams::Wing { .. } | PartParams::Gear { .. }) {
+            return None;
+        }
+        if pointer_over_egui(&mut contexts) {
+            return None;
+        }
+
+        // Hovered host = a non-wing body under the cursor, with its hit point.
+        let mut found: Option<(Entity, Vec3)> = None;
+        'outer: for hits in hover_map.0.values() {
+            for (hovered, data) in hits.iter() {
+                let Ok(pb) = bodies.get(*hovered) else {
+                    continue;
+                };
+                if wing_marker.get(pb.0).is_ok() {
+                    continue; // gear/wing mount on a hull, not on a wing
+                }
+                let Some(pos) = data.position else {
+                    continue;
+                };
+                found = Some((pb.0, pos));
+                break 'outer;
+            }
+        }
+        let (host, hit) = found?;
+
+        let (station, angle) = body_skin_mount(
+            host,
+            hit,
+            &part_transforms,
+            &host_nodes,
+            &orientation,
+            snap.enabled,
+        );
+        let host_n = host_nodes.get(host).ok();
+        let parent_radius = host_n
+            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+            .unwrap_or(1.0);
+        let host_height = host_n
+            .and_then(|n| n.get("bottom").map(|nd| -nd.offset.y))
+            .unwrap_or(0.0);
+        let host_t = part_transforms
+            .get(host)
+            .map(|t| t.translation)
+            .unwrap_or(Vec3::ZERO);
+
+        // Match where `update_part_transforms` puts a body-skin part: the host
+        // (already post-layout-rotation) plus the rotated local station offset.
+        let r = orientation.rotation();
+        let translation = host_t + r * Vec3::new(0.0, -station * host_height, 0.0);
+
+        let sig = PreviewSig {
+            host,
+            angle,
+            parent_radius,
+            params: pending.params.clone(),
+        };
+        // Rebuild the mesh only when the silhouette actually changed (or there's
+        // no ghost entity to carry it yet).
+        let mesh = if preview.sig.as_ref() != Some(&sig) || preview.entity.is_none() {
+            let m = match &pending.params {
+                PartParams::Gear {
+                    strut_length,
+                    wheel_radius,
+                } => {
+                    let track_fraction = catalog
+                        .resolve(&pending.catalog_id)
+                        .ok()
+                        .and_then(|e| match e {
+                            CatalogEntry::Gear(g) => Some(g.track_fraction),
+                            _ => None,
+                        })
+                        .unwrap_or(0.0);
+                    let g = Gear {
+                        strut_length: *strut_length,
+                        wheel_radius: *wheel_radius,
+                        track_fraction,
+                        dry_mass: 0.0,
+                    };
+                    build_gear_mesh(&g, angle, parent_radius)
+                }
+                PartParams::Wing {
+                    span,
+                    root_chord,
+                    tip_chord,
+                    sweep,
+                    dihedral,
+                    thickness,
+                    incidence,
+                } => {
+                    let w = Wing {
+                        span: *span,
+                        root_chord: *root_chord,
+                        tip_chord: *tip_chord,
+                        sweep: *sweep,
+                        dihedral: *dihedral,
+                        thickness: *thickness,
+                        incidence: *incidence,
+                        dry_mass: 0.0,
+                    };
+                    build_wing_mesh(&w, angle, parent_radius)
+                }
+                _ => return None,
+            };
+            Some(meshes.add(m))
+        } else {
+            None
+        };
+
+        Some((translation, r, sig, mesh))
+    })();
+
+    match placement {
+        None => {
+            if let Some(prev) = preview.entity
+                && let Ok((_, mut vis, _)) = ghosts.get_mut(prev)
+            {
+                *vis = Visibility::Hidden;
+            }
+            preview.sig = None;
+        }
+        Some((translation, rotation, sig, mesh)) => {
+            let mut updated = false;
+            if let Some(prev) = preview.entity
+                && let Ok((mut t, mut vis, mut mesh3d)) = ghosts.get_mut(prev)
+            {
+                t.translation = translation;
+                t.rotation = rotation;
+                *vis = Visibility::Visible;
+                if let Some(h) = &mesh {
+                    mesh3d.0 = h.clone();
+                }
+                updated = true;
+            }
+            if !updated && let Some(h) = mesh {
+                let id = commands
+                    .spawn((
+                        Mesh3d(h),
+                        MeshMaterial3d(assets.preview_material.clone()),
+                        Transform::from_translation(translation).with_rotation(rotation),
+                        Visibility::Visible,
+                        PreviewGhost,
+                        Pickable::IGNORE,
+                    ))
+                    .id();
+                preview.entity = Some(id);
+            }
+            preview.sig = Some(sig);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1516,6 +2585,14 @@ fn process_commands(
     mut ships: Query<&mut Ship>,
     parts_q: CollectQuery,
     attachments: Query<(Entity, &Attachment)>,
+    surface_mounts: Query<(Entity, &SurfaceMount)>,
+    part_transforms: Query<&Transform, With<Part>>,
+    host_nodes: Query<&AttachNodes>,
+    wings: Query<&Wing>,
+    groups: Query<(Entity, &SymmetryGroup)>,
+    orientation: Res<BuildOrientation>,
+    modes: PlacementModes,
+    mut next_sym_id: ResMut<NextSymmetryId>,
     all_parts: Query<Entity, With<Part>>,
     all_ships: Query<Entity, With<Ship>>,
     catalog: Res<PartCatalog>,
@@ -1526,7 +2603,7 @@ fn process_commands(
         if let Some(ship_entity) = state.ship_entity
             && let Ok(ship) = ships.get(ship_entity)
         {
-            match collect_blueprint(ship, &parts_q, &attachments) {
+            match collect_blueprint(ship, &parts_q, &attachments, &surface_mounts, &groups) {
                 Some(bp) => match bp.to_ron() {
                     Ok(text) => {
                         let path = ship_path_for_name(&bp.name);
@@ -1641,8 +2718,15 @@ fn process_commands(
                 for (e, att) in attachments.iter() {
                     child_map.entry(att.parent).or_default().push(e);
                 }
+                // Surface-mounted wings ride with their host: deleting a
+                // fuselage must take its wings too.
+                for (e, sm) in surface_mounts.iter() {
+                    child_map.entry(sm.parent).or_default().push(e);
+                }
                 let mut to_remove: Vec<Entity> = Vec::new();
-                let mut stack = vec![sel];
+                // Deleting any symmetry-group member deletes the whole group
+                // (KSP) — seed the walk with all counterparts of the selection.
+                let mut stack = host_group_members(sel, &groups);
                 while let Some(e) = stack.pop() {
                     to_remove.push(e);
                     if let Some(kids) = child_map.get(&e) {
@@ -1705,7 +2789,7 @@ fn process_commands(
             &catalog,
             &pending.catalog_id,
             pending.params,
-            HashMap::new(),
+            None,
         ) {
             Ok(child) => {
                 commands.entity(child).insert(Attachment {
@@ -1720,15 +2804,121 @@ fn process_commands(
         }
     }
 
+    // ---- Mount pending footprint part on a surface -------------------
+    // Body-skin mounts (wings) derive station/azimuth from a hull hit.
+    // Wing-pylon mounts (jet nacelles) derive span/chord position from
+    // the host wing hit.
+    if let Some((parent, world_pos, kind)) = state.place_surface_at.take() {
+        if let Some(pending) = state.pending.take() {
+            let Some((station, angle, status)) = surface_mount_from_hit(
+                kind,
+                parent,
+                world_pos,
+                &part_transforms,
+                &host_nodes,
+                &surface_mounts,
+                &wings,
+                &orientation,
+                modes.snap.enabled,
+            ) else {
+                state.status = "Surface placement failed".into();
+                state.pending = Some(pending);
+                return;
+            };
+
+            // Landing gear is a self-contained gearbox — it draws its own legs,
+            // so it is *always* a single mount regardless of the Mirror toggle
+            // or a (hypothetically) symmetric host. Special-cased before the
+            // wing/nacelle symmetry path below.
+            let is_gear = matches!(pending.params, PartParams::Gear { .. });
+
+            // KSP symmetry stamping. If the clicked host is itself a mirrored
+            // pair (e.g. a nacelle onto a wing), stamp one part per host
+            // member — nested symmetry. Otherwise, if mirror mode is on and
+            // this is an off-centreline body-skin mount, stamp the reflected
+            // pair on the same host. Else a single part.
+            let host_members = host_group_members(parent, &groups);
+            let stamps: Vec<(Entity, f32, f32)> = if is_gear {
+                vec![(parent, station, angle)]
+            } else if host_members.len() > 1 {
+                host_members.iter().map(|&h| (h, station, angle)).collect()
+            } else if modes.symmetry.mirror
+                && kind == SurfaceMountKind::BodySkin
+                && angle.sin().abs() > 0.3
+            {
+                vec![(parent, station, angle), (parent, station, -angle)]
+            } else {
+                vec![(parent, station, angle)]
+            };
+
+            let group_id = (stamps.len() > 1).then(|| next_sym_id.next());
+            let mut first: Option<Entity> = None;
+            for (i, (host, st, ang)) in stamps.iter().enumerate() {
+                match ShipBlueprint::spawn_part(
+                    &mut commands,
+                    &catalog,
+                    &pending.catalog_id,
+                    pending.params.clone(),
+                    None,
+                ) {
+                    Ok(child) => {
+                        let mut ec = commands.entity(child);
+                        ec.insert(SurfaceMount {
+                            parent: *host,
+                            kind,
+                            station: *st,
+                            angle: *ang,
+                        });
+                        if let Some(gid) = group_id {
+                            let role = if i == 0 {
+                                SymmetryRole::Primary
+                            } else {
+                                SymmetryRole::Mirror
+                            };
+                            ec.insert(SymmetryGroup { id: gid, role });
+                        }
+                        first.get_or_insert(child);
+                    }
+                    Err(e) => state.status = format!("Spawn failed: {e}"),
+                }
+            }
+            if let Some(sel) = first {
+                state.selected = Some(sel);
+                // `surface_mount_from_hit` labels every body-skin hit "Mounted
+                // wing"; gear shares that path but isn't a wing.
+                state.status = if is_gear {
+                    "Mounted landing gear".into()
+                } else {
+                    status
+                };
+            }
+        }
+    }
+
     // ---- Auto-place pending as root on empty canvas ------------------
     if state.ship_root.is_none() && state.pending.is_some() {
+        // Footprint parts need a host — they can't be roots. Keep them
+        // pending and nudge the user to add structure first.
+        let needs_surface_host = state.pending.as_ref().is_some_and(|p| {
+            matches!(p.params, PartParams::Wing { .. } | PartParams::Gear { .. })
+                || catalog.resolve(&p.catalog_id).is_ok_and(|entry| {
+                    matches!(
+                        entry,
+                        CatalogEntry::Engine(e) if e.geometry == EngineGeometry::JetNacelle
+                    )
+                })
+        });
+        if needs_surface_host {
+            state.status = "Add a hull first, then click a compatible surface".into();
+            return;
+        }
         let pending = state.pending.take().unwrap();
         match ShipBlueprint::spawn_part(
             &mut commands,
             &catalog,
             &pending.catalog_id,
             pending.params,
-            HashMap::new(),
+            None,
         ) {
             Ok(part) => {
                 let ship = commands
@@ -1763,6 +2953,9 @@ type InspectorQuery<'w, 's> = Query<
         Option<&'static mut Adapter>,
         Option<&'static mut FuelTank>,
         Option<&'static mut Engine>,
+        Option<&'static mut AirIntake>,
+        Option<&'static mut Wing>,
+        Option<&'static mut Gear>,
         Option<&'static mut PartResources>,
     ),
 >;
@@ -1784,6 +2977,12 @@ fn draw_ship_stats(ui: &mut egui::Ui, stats: &ShipStats) {
     }
     if let Some(burn_s) = vacuum.burn_time_s {
         ui.label(format!("Full burn: {}", format_duration_s(burn_s)));
+    }
+    // Geometry-derived "will it fly" feedback. There is no flight model
+    // yet (M6; Thalos has no atmosphere) — these are design references.
+    if stats.wing_area_m2 > 0.0 {
+        ui.label(format!("Wing area: {:.1} m²", stats.wing_area_m2));
+        ui.label(format!("MAC: {:.2} m", stats.mean_aerodynamic_chord_m));
     }
 }
 
@@ -1883,15 +3082,61 @@ fn format_duration_s(seconds: f64) -> String {
     }
 }
 
+fn inspector_params(
+    dec: Option<&Decoupler>,
+    adapter: Option<&Adapter>,
+    tank: Option<&FuelTank>,
+    wing: Option<&Wing>,
+    gear: Option<&Gear>,
+) -> PartParams {
+    if let Some(d) = dec {
+        PartParams::Decoupler {
+            diameter: d.diameter,
+        }
+    } else if let Some(a) = adapter {
+        PartParams::Adapter {
+            diameter: a.diameter,
+            target_diameter: a.target_diameter,
+        }
+    } else if let Some(t) = tank {
+        PartParams::Tank {
+            diameter: t.diameter,
+            length: t.length,
+        }
+    } else if let Some(w) = wing {
+        PartParams::Wing {
+            span: w.span,
+            root_chord: w.root_chord,
+            tip_chord: w.tip_chord,
+            sweep: w.sweep,
+            dihedral: w.dihedral,
+            thickness: w.thickness,
+            incidence: w.incidence,
+        }
+    } else if let Some(g) = gear {
+        PartParams::Gear {
+            strut_length: g.strut_length,
+            wheel_radius: g.wheel_radius,
+        }
+    } else {
+        PartParams::None
+    }
+}
+
 fn editor_ui(
     mut contexts: EguiContexts,
     mut state: ResMut<EditorState>,
     mut part_queries: ParamSet<(InspectorQuery, CollectQuery)>,
     mut ships: Query<&mut Ship>,
     attachments: Query<(Entity, &Attachment)>,
+    surface_mounts: Query<(Entity, &SurfaceMount)>,
+    groups: Query<(Entity, &SymmetryGroup)>,
     catalog: Res<PartCatalog>,
     mut sky: ResMut<SkyBackdropEnabled>,
     mut clear_color: ResMut<ClearColor>,
+    mut orientation: ResMut<BuildOrientation>,
+    mut symmetry_mode: ResMut<SymmetryMode>,
+    mut placement_snap: ResMut<PlacementSnap>,
     diagnostics: Res<DiagnosticsStore>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -1908,7 +3153,7 @@ fn editor_ui(
                 name: String::new(),
                 root,
             };
-            collect_blueprint(&ship, &collect_parts, &attachments)
+            collect_blueprint(&ship, &collect_parts, &attachments, &surface_mounts, &groups)
         });
         let stats = blueprint.as_ref().map(|bp| bp.stats(&catalog));
         let staging = blueprint.as_ref().map(|bp| bp.stage_summaries(&catalog));
@@ -1919,6 +3164,7 @@ fn editor_ui(
     egui::SidePanel::left("palette")
         .default_width(180.0)
         .show(&ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             let fps = diagnostics
                 .get(&FrameTimeDiagnosticsPlugin::FPS)
                 .and_then(|d| d.smoothed())
@@ -2008,7 +3254,37 @@ fn editor_ui(
             }
 
             ui.separator();
+            ui.heading("Symmetry");
+            ui.checkbox(&mut symmetry_mode.mirror, "Mirror (2×)")
+                .on_hover_text(
+                    "KSP-style: placing a wing/gear off-centre stamps a linked left/right pair. \
+                     A part placed on a mirrored wing (e.g. a nacelle) auto-mirrors onto both.",
+                );
+            ui.checkbox(&mut placement_snap.enabled, "Angle snap (15°)")
+                .on_hover_text(
+                    "Magnetic snapping around the fuselage: a body-skin mount's azimuth rounds to \
+                     15° steps as the cursor sweeps the hull, so gear/wings land dead-on the \
+                     belly / sides. Off = free placement.",
+                );
+
+            ui.separator();
             ui.heading("View");
+            {
+                // Read through bypass_change_detection so the mere act of
+                // rendering the checkbox doesn't mark BuildOrientation as
+                // changed every frame (which would fire recenter_camera_on_
+                // orientation_change and reset orbit.focus on every frame).
+                let mut horiz = orientation.bypass_change_detection().horizontal;
+                if ui
+                    .checkbox(&mut horiz, "Horizontal layout (aircraft)")
+                    .on_hover_text(
+                        "Lay the build down like KSP's SPH — fuselage fore/aft, wings level, fin up.",
+                    )
+                    .changed()
+                {
+                    orientation.horizontal = horiz;
+                }
+            }
             if ui.checkbox(&mut sky.0, "Celestial backdrop").changed() {
                 // Black clears behind the additively-blended stars so
                 // they read as points of light; the default grey washes
@@ -2023,25 +3299,46 @@ fn editor_ui(
             ui.separator();
             ui.label(format!("Status: {}", state.status));
             if state.pending.is_some() {
+                let pending = state.pending.as_ref().unwrap();
+                let surface_hint = matches!(
+                    pending.params,
+                    PartParams::Wing { .. } | PartParams::Gear { .. }
+                ) || catalog.resolve(&pending.catalog_id).is_ok_and(|entry| {
+                    matches!(
+                        entry,
+                        CatalogEntry::Engine(e) if e.geometry == EngineGeometry::JetNacelle
+                    )
+                });
                 ui.colored_label(
                     egui::Color32::YELLOW,
-                    "Pending part — pick an attach node to place.",
+                    if surface_hint {
+                        "Pending part — click a compatible surface to place."
+                    } else {
+                        "Pending part — pick an attach node to place."
+                    },
                 );
                 if ui.button("Cancel pending").clicked() {
                     state.pending = None;
                 }
             }
+            }); // scroll area
         });
 
     // -------- Right inspector --------
     egui::SidePanel::right("inspector")
         .default_width(260.0)
         .show(&ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("Inspector");
             let Some(sel) = state.selected else {
                 ui.label("(no selection)");
                 return;
             };
+            // KSP symmetry: edit the group's primary regardless of which member
+            // was clicked. `sync_symmetry_groups` propagates the change to the
+            // counterpart(s); editing a mirror counterpart directly would be
+            // reverted next frame, leaving its sliders looking dead.
+            let sel = symmetry_edit_target(sel, &groups);
             let mut parts = part_queries.p0();
             let Ok((
                 entity,
@@ -2052,6 +3349,9 @@ fn editor_ui(
                 mut adapter,
                 mut tank,
                 mut engine,
+                mut intake,
+                mut wing,
+                mut gear,
                 mut res,
             )) = parts.get_mut(sel)
             else {
@@ -2062,7 +3362,7 @@ fn editor_ui(
             let is_root = Some(sel) == state.ship_root;
 
             if let Some(p) = pod.as_deref_mut() {
-                ui.label("Kind: CommandPod");
+                ui.label(format!("Kind: Command Pod ({})", p.geometry.label()));
                 ui.label(format!("Model: {}", p.model));
                 ui.label(format!("Diameter: {:.2}m (fixed)", p.diameter));
                 ui.label(format!("Dry mass: {:.0} kg (fixed)", p.dry_mass));
@@ -2118,6 +3418,10 @@ fn editor_ui(
                     .unwrap_or("Unknown");
                 ui.label(format!("Kind: Engine ({optimized_for})"));
                 ui.label(format!("Model: {}", e.model));
+                ui.label(format!("Geometry: {}", e.geometry.label()));
+                if e.requires_atmosphere {
+                    ui.label("Requires atmosphere");
+                }
                 ui.label(format!("Diameter: {:.2}m (fixed)", e.diameter));
                 ui.label(format!("Thrust: {:.1} kN (fixed)", e.thrust / 1000.0));
                 ui.label(format!("Isp: {:.0} s (fixed)", e.isp));
@@ -2133,6 +3437,104 @@ fn editor_ui(
                         r.mass_fraction * 100.0,
                     ));
                 }
+                if let Some(requirement) = e.intake_requirement {
+                    ui.label(format!(
+                        "Intake required: {:.2} m² {}",
+                        requirement.area_m2,
+                        requirement.kind.label()
+                    ));
+                }
+                if let Some(capture) = e.builtin_intake {
+                    ui.label(format!(
+                        "Built-in intake: {:.2} m² {} (eff {:.0}%)",
+                        capture.area_m2,
+                        capture.kind.label(),
+                        capture.efficiency * 100.0
+                    ));
+                }
+            } else if let Some(i) = intake.as_deref_mut() {
+                ui.label("Kind: Air Intake");
+                ui.label(format!("Model: {}", i.model));
+                ui.label(format!("Diameter: {:.2}m (fixed)", i.diameter));
+                ui.label(format!("Length: {:.2}m (fixed)", i.length));
+                ui.label(format!(
+                    "Capture: {:.2} m² {} (eff {:.0}%)",
+                    i.capture.area_m2,
+                    i.capture.kind.label(),
+                    i.capture.efficiency * 100.0
+                ));
+                ui.label(format!("Dry mass: {:.0} kg (fixed)", i.dry_mass));
+            } else if let Some(w) = wing.as_deref_mut() {
+                ui.label("Kind: Wing");
+                ui.add(egui::Slider::new(&mut w.span, 0.5..=30.0).text("Span (per side)"));
+                ui.add(egui::Slider::new(&mut w.root_chord, 0.3..=15.0).text("Root chord"));
+                ui.add(egui::Slider::new(&mut w.tip_chord, 0.1..=15.0).text("Tip chord"));
+                // Angles authored in degrees, stored in radians.
+                let mut sweep_deg = w.sweep.to_degrees();
+                if ui
+                    .add(egui::Slider::new(&mut sweep_deg, -10.0..=60.0).text("Sweep °"))
+                    .changed()
+                {
+                    w.sweep = sweep_deg.to_radians();
+                }
+                let mut dihedral_deg = w.dihedral.to_degrees();
+                if ui
+                    .add(egui::Slider::new(&mut dihedral_deg, -15.0..=15.0).text("Dihedral °"))
+                    .changed()
+                {
+                    w.dihedral = dihedral_deg.to_radians();
+                }
+                let mut incidence_deg = w.incidence.to_degrees();
+                if ui
+                    .add(egui::Slider::new(&mut incidence_deg, -5.0..=10.0).text("Incidence °"))
+                    .changed()
+                {
+                    w.incidence = incidence_deg.to_radians();
+                }
+                ui.add(egui::Slider::new(&mut w.thickness, 0.04..=0.25).text("Thickness t/c"));
+                // dry_mass tracks planform area via `recompute_wing_state`.
+                ui.label(format!("Dry mass: {:.0} kg/panel", w.dry_mass));
+                // `sel` was resolved to the group primary above, so a grouped
+                // wing always lands here as the primary — editing either side
+                // updates both.
+                match groups.get(sel).ok() {
+                    Some(_) => {
+                        ui.label("Symmetry: mirrored pair");
+                        ui.label(
+                            egui::RichText::new(
+                                "Editing either side updates both; deleting either removes both.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    None => {
+                        ui.label("Symmetry: single");
+                    }
+                }
+            } else if let Some(g) = gear.as_deref_mut() {
+                ui.label(if g.track_fraction > 0.0 {
+                    "Kind: Landing Gear (main, L/R)"
+                } else {
+                    "Kind: Landing Gear (nose)"
+                });
+                ui.add(egui::Slider::new(&mut g.strut_length, 0.3..=4.0).text("Strut length"));
+                ui.add(egui::Slider::new(&mut g.wheel_radius, 0.1..=1.2).text("Wheel radius"));
+                if g.track_fraction > 0.0 {
+                    ui.label(format!(
+                        "Track: ±{:.0}% of host radius (fixed)",
+                        g.track_fraction * 100.0
+                    ));
+                }
+                // dry_mass tracks strut length × leg count via `recompute_gear_state`.
+                ui.label(format!("Dry mass: {:.0} kg", g.dry_mass));
+                ui.label(
+                    egui::RichText::new(
+                        "Self-contained gearbox — draws its own legs, not mirrored.",
+                    )
+                    .small()
+                    .weak(),
+                );
             }
 
             ui.separator();
@@ -2144,17 +3546,66 @@ fn editor_ui(
             ui.separator();
             ui.label("Resources:");
             if let Some(r) = res.as_deref_mut() {
-                for (resource, pool) in r.pools.iter_mut() {
-                    ui.label(format!(
-                        "{}: {:.0}/{:.0} {}",
-                        resource.display_name(),
-                        pool.amount,
-                        pool.capacity,
-                        resource.unit_label(),
-                    ));
-                    ui.add(egui::Slider::new(&mut pool.amount, 0.0..=pool.capacity).text("amount"));
+                let params = inspector_params(
+                    dec.as_deref(),
+                    adapter.as_deref(),
+                    tank.as_deref(),
+                    wing.as_deref(),
+                    gear.as_deref(),
+                );
+                let mut any_resource_row = false;
+                let mut remove_resource = Vec::new();
+                let mut add_resource = Vec::new();
+                if let Ok(entry) = catalog.resolve(&catalog_ref.id) {
+                    for option in entry.storage_options() {
+                        let Some(capacity) = resource_capacity_for(entry, &params, option.resource)
+                        else {
+                            continue;
+                        };
+                        any_resource_row = true;
+                        if let Some(pool) = r.pools.get_mut(&option.resource) {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Remove").clicked() {
+                                    remove_resource.push(option.resource);
+                                }
+                                ui.label(format!(
+                                    "{}: {:.0}/{:.0} {}",
+                                    option.resource.display_name(),
+                                    pool.amount,
+                                    pool.capacity,
+                                    option.resource.unit_label(),
+                                ));
+                            });
+                            ui.add(
+                                egui::Slider::new(&mut pool.amount, 0.0..=pool.capacity)
+                                    .text("amount"),
+                            );
+                        } else if ui
+                            .button(format!(
+                                "Add {} ({:.0} {})",
+                                option.resource.display_name(),
+                                capacity,
+                                option.resource.unit_label()
+                            ))
+                            .clicked()
+                        {
+                            add_resource.push((
+                                option.resource,
+                                ResourcePool {
+                                    capacity,
+                                    amount: capacity * option.default_fill_fraction.clamp(0.0, 1.0),
+                                },
+                            ));
+                        }
+                    }
                 }
-                if r.pools.is_empty() {
+                for resource in remove_resource {
+                    r.pools.remove(&resource);
+                }
+                for (resource, pool) in add_resource {
+                    r.pools.insert(resource, pool);
+                }
+                if !any_resource_row {
                     ui.label("  (none)");
                 }
             }
@@ -2168,6 +3619,7 @@ fn editor_ui(
             if ui.button("Delete part").clicked() {
                 state.delete_selected = true;
             }
+            }); // scroll area
         });
 
     // -------- Staging preview (right, left of the inspector) --------
@@ -2204,21 +3656,67 @@ fn editor_ui(
                     let Some(root) = state.ship_root else {
                         return;
                     };
-                    let mut child_map: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
+                    let mut child_map: HashMap<Entity, Vec<Entity>> = HashMap::new();
                     for (e, att) in attachments.iter() {
-                        child_map
-                            .entry(att.parent)
-                            .or_default()
-                            .push((e, att.clone()));
+                        child_map.entry(att.parent).or_default().push(e);
+                    }
+                    // Surface-mounted wings are part of the ship tree too.
+                    for (e, sm) in surface_mounts.iter() {
+                        child_map.entry(sm.parent).or_default().push(e);
                     }
                     draw_hierarchy(ui, root, &child_map, &mut state, 0);
                 });
 
                 ui.separator();
 
-                // Placement picker: list free nodes on the ship
-                if state.pending.is_some() {
+                // Placement picker. Surface parts click a compatible body;
+                // stack parts use a free attach node listed here.
+                if let Some(pending) = state.pending.clone() {
+                    let pending_wing = matches!(pending.params, PartParams::Wing { .. });
+                    let pending_gear = matches!(pending.params, PartParams::Gear { .. });
+                    let pending_nacelle = catalog.resolve(&pending.catalog_id).is_ok_and(|entry| {
+                        matches!(
+                            entry,
+                            CatalogEntry::Engine(e) if e.geometry == EngineGeometry::JetNacelle
+                        )
+                    });
                     ui.vertical(|ui| {
+                        if pending_wing {
+                            ui.heading("Mount wing");
+                            ui.label("Click a hull body where the wing root should sit.");
+                            ui.label(
+                                egui::RichText::new(
+                                    "Side hit → mirrored pair · top/bottom hit → single fin",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            return;
+                        }
+                        if pending_gear {
+                            ui.heading("Mount landing gear");
+                            ui.label("Click the fuselage belly where the gear should sit.");
+                            ui.label(
+                                egui::RichText::new(
+                                    "Self-contained gearbox — main draws both legs; never mirrored",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            return;
+                        }
+                        if pending_nacelle {
+                            ui.heading("Mount nacelle");
+                            ui.label("Click a wing where the pylon should sit.");
+                            ui.label(
+                                egui::RichText::new(
+                                    "A mirrored wing creates a mirrored nacelle pair",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            return;
+                        }
                         ui.heading("Place at…");
                         let occupied: std::collections::HashSet<(Entity, String)> = attachments
                             .iter()
@@ -2226,7 +3724,7 @@ fn editor_ui(
                             .collect();
                         let mut rows: Vec<(Entity, String, f32)> = Vec::new();
                         let parts = part_queries.p0();
-                        for (e, _, nodes, _, _, _, _, _, _) in parts.iter() {
+                        for (e, _, nodes, _, _, _, _, _, _, _, _, _) in parts.iter() {
                             for (nid, node) in &nodes.nodes {
                                 if occupied.contains(&(e, nid.clone())) {
                                     continue;
@@ -2250,7 +3748,7 @@ fn editor_ui(
 fn draw_hierarchy(
     ui: &mut egui::Ui,
     entity: Entity,
-    child_map: &HashMap<Entity, Vec<(Entity, Attachment)>>,
+    child_map: &HashMap<Entity, Vec<Entity>>,
     state: &mut EditorState,
     depth: usize,
 ) {
@@ -2261,7 +3759,7 @@ fn draw_hierarchy(
         state.selected = Some(entity);
     }
     if let Some(kids) = child_map.get(&entity) {
-        for (c, _) in kids {
+        for c in kids {
             draw_hierarchy(ui, *c, child_map, state, depth + 1);
         }
     }

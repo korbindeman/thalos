@@ -15,13 +15,20 @@ pub enum Resource {
     Lox,
     /// Liquid hydrogen (H2), high-performance nuclear-thermal propellant.
     Hydrogen,
+    /// Kerosene / Jet-A / RP-1 class hydrocarbon fuel.
+    Kerosene,
     /// Electric charge. Not mass-bearing (for ship dynamics).
     Electricity,
 }
 
 impl Resource {
     /// Stored resources that contribute mass and can appear in fuel UI.
-    pub const MASS_BEARING: [Resource; 3] = [Resource::Methane, Resource::Lox, Resource::Hydrogen];
+    pub const MASS_BEARING: [Resource; 4] = [
+        Resource::Methane,
+        Resource::Lox,
+        Resource::Hydrogen,
+        Resource::Kerosene,
+    ];
 
     /// Density in kg per native unit. For fluids (`Methane`, `Lox`) the
     /// native unit is litre (kg/L ≡ g/cm³). [`Resource::Electricity`] is
@@ -32,6 +39,7 @@ impl Resource {
             Resource::Methane => 0.422,    // LCH4 at ≈112 K
             Resource::Lox => 1.141,        // LOX at ≈90 K
             Resource::Hydrogen => 0.07085, // LH2 at ≈20 K
+            Resource::Kerosene => 0.81,    // Jet-A / RP-1 ballpark
             Resource::Electricity => 0.0,
         }
     }
@@ -44,7 +52,7 @@ impl Resource {
     /// Label for the native unit of `amount` / `capacity`.
     pub fn unit_label(self) -> &'static str {
         match self {
-            Resource::Methane | Resource::Lox | Resource::Hydrogen => "L",
+            Resource::Methane | Resource::Lox | Resource::Hydrogen | Resource::Kerosene => "L",
             Resource::Electricity => "kWh",
         }
     }
@@ -55,7 +63,18 @@ impl Resource {
             Resource::Methane => "Methane",
             Resource::Lox => "LOX",
             Resource::Hydrogen => "LH2",
+            Resource::Kerosene => "Kerosene",
             Resource::Electricity => "Electricity",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Resource::Methane => "CH4",
+            Resource::Lox => "Ox",
+            Resource::Hydrogen => "LH2",
+            Resource::Kerosene => "Kero",
+            Resource::Electricity => "EC",
         }
     }
 }

@@ -39,7 +39,9 @@ struct AtmosphereBlock {
     ///   y = Mie scale height H_M (render units),
     ///   z = strength multiplier (artistic; 0 disables the entire
     ///       scattering raymarch),
-    ///   w = reserved (ozone band — M4 follow-up).
+    ///   w = multiple-scattering gain (artistic horizon blue-fill; scales
+    ///       the multi-scatter LUT term on top of `strength`, ground
+    ///       multiscatter pass only; 1.0 = bare approximation).
     atmos_geom: vec4<f32>,
     /// Per-channel Minnaert limb darkening.
     ///   xyz = R/G/B exponents (typical 0.2–0.45),
@@ -506,9 +508,13 @@ fn integrate_atmosphere_multiscatter(
         sum_ms = sum_ms + trans_view * beta_rho * l_ms * ds;
     }
 
+    // Multiple-scattering gain (atmos_geom.w): lifts only the blue-dominant
+    // multi-scatter fill so the long-path horizon reads pale-blue instead of
+    // the warm single-scatter residual, without dimming/re-warming the dome.
+    let multi_gain = layers.atmos_geom.w;
     let in_scatter_single = sun_flux * strength
         * (beta_r * (sum_r * p_r) + vec3<f32>(beta_m_scalar) * (sum_m * p_m));
-    let in_scatter_multi = sun_flux * strength * sum_ms;
+    let in_scatter_multi = sun_flux * strength * multi_gain * sum_ms;
     let total_tau = beta_r * od_r + vec3<f32>(beta_m_scalar) * od_m;
     let transmittance = exp(-total_tau);
     return ScatterResult(in_scatter_single + in_scatter_multi, transmittance);

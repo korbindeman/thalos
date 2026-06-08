@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use bevy::math::Vec3;
-use thalos_world::{BodyDefinition, BodyKind};
 use thalos_terrain::{TerrainCompileContext, TerrainCompileOptions, cache};
+use thalos_world::{BodyDefinition, BodyKind};
 
 /// Crater-count scale baked into the cache key. Local bakes always use
 /// 1.0 (full crater authoring); any other value would mismatch the

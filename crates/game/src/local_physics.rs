@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
+use thalos_body_render::HeightSource;
 use thalos_physics_canonical::body_centered::{
     BodyCenteredState, body_centered_to_inertial, inertial_to_body_centered,
 };
@@ -11,12 +12,11 @@ use thalos_physics_canonical::body_fixed::body_fixed_pose_from_inertial;
 use thalos_physics_canonical::canonical::{
     AuthorityMode, BodyFixedPose, EntityRef, TranslationalState,
 };
-use thalos_world::BodyId;
 use thalos_physics_canonical::types::{AttitudeState, BodyState, VesselKind};
 use thalos_physics_local::avian::{
-    AngularVelocity, Collider, ConstantAngularAcceleration, ConstantLinearAcceleration,
-    ContactGraph, CustomPositionIntegration, LinearVelocity, LockedAxes, Physics, PhysicsTime,
-    Position, RigidBody, Rotation,
+    AngularVelocity, CenterOfMass, Collider, ConstantAngularAcceleration, ConstantLinearAcceleration,
+    ContactGraph, CustomPositionIntegration, LinearVelocity, LockedAxes, NoAutoCenterOfMass,
+    Physics, PhysicsTime, Position, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
 };
 use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalBubble, LocalBubbleConfig, LocalCraftBody,
@@ -25,9 +25,11 @@ use thalos_physics_local::{
     spawn_terrain_collider_patch, stable_contact_reached, terrain_patch_pose,
 };
 use thalos_shipyard::{
-    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part,
+    Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
+    FuelTank, Gear, Part, SurfaceMount, SurfaceMountKind, gear_leg_frames,
 };
-use thalos_body_render::HeightSource;
+use thalos_input::game::GameInputIntent;
+use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::bridge::WarpLimits;
@@ -63,9 +65,13 @@ impl Plugin for GameLocalPhysicsPlugin {
         app.add_plugins(LocalPhysicsPlugin)
             .init_resource::<AvianAuthority>()
             .init_resource::<AvianHandoffDiagnostics>()
+            .init_resource::<GearTuning>()
             .register_type::<AvianRole>()
             .register_type::<AvianAuthority>()
             .register_type::<AvianHandoffDiagnostics>()
+            .register_type::<GearTuning>()
+            .register_type::<Wheel>()
+            .register_type::<WheelSet>()
             .add_systems(
                 Update,
                 hard_pause_avian_time
@@ -86,6 +92,7 @@ impl Plugin for GameLocalPhysicsPlugin {
                     sync_avian_time,
                     snap_avian_from_canonical,
                     apply_local_forces,
+                    apply_landing_gear_forces,
                     readback_local_craft,
                     detect_terrain_impact,
                     maintain_terrain_patch,
@@ -419,6 +426,8 @@ fn spawn_player_avian_body(
     height_sources: Res<HeightSourceRegistry>,
     player_ship: Query<&GlobalTransform, With<PlayerShip>>,
     parts: PartColliderQuery,
+    gear_q: Query<(&Gear, &SurfaceMount), With<Part>>,
+    host_nodes: Query<&AttachNodes>,
 ) {
     if active.bubble.is_some() || *view != ViewMode::Ship {
         return;
@@ -528,7 +537,9 @@ fn spawn_player_avian_body(
                 return;
             }
             let collider_primitives = build_ship_collider_primitives(&parts);
-            spawn_local_craft_body(
+            let part_positions = compute_part_collider_positions(&parts);
+            let wheels = build_wheel_set(&gear_q, &host_nodes, &part_positions);
+            let entity = spawn_local_craft_body(
                 &mut commands,
                 LocalCraftSpawn {
                     craft_id: craft.id,
@@ -540,7 +551,29 @@ fn spawn_player_avian_body(
                     angular_inertia_kg_m2: params.moment_of_inertia,
                     collider_primitives,
                 },
-            )
+            );
+            if !wheels.is_empty() {
+                // Gear straddle the real CoM, so the ground rigid body must
+                // rotate about it (Avian `CenterOfMass`) — not the root/nose
+                // origin, where the upward wheel forces have no opposing torque
+                // and tip the craft over. `NoAutoCenterOfMass` keeps the
+                // compound collider from overwriting it. Position still tracks
+                // the root origin, so the snap/readback are unaffected.
+                let com = params.center_of_mass.as_vec3();
+                info!(
+                    "landing gear: {} wheel(s) on player ship, CoM = ({:.2}, {:.2}, {:.2}) m",
+                    wheels.len(),
+                    com.x,
+                    com.y,
+                    com.z,
+                );
+                commands.entity(entity).insert((
+                    WheelSet { wheels },
+                    CenterOfMass(com),
+                    NoAutoCenterOfMass,
+                ));
+            }
+            entity
         }
         VesselKind::Eva => {
             // KSP-on-foot is a kinematic capsule whose position is set
@@ -1276,7 +1309,7 @@ fn apply_local_forces(
     let params = *sim.simulation.ship_params();
     // A destroyed craft is inert debris: gravity still acts (so it falls and
     // settles), but thrust and reaction-wheel torque are cut. See
-    // `docs/landing.md`.
+    // `docs/surface.md`.
     let destroyed = sim.simulation.is_destroyed();
 
     // Linear: gravity + thrust only when Avian owns translation. Otherwise
@@ -1378,6 +1411,289 @@ fn compute_angular_acceleration(
     );
     let accel_body = torque_body * inv_i;
     rotation * accel_body
+}
+
+/// One landing-gear wheel as a **raycast suspension**, in the craft body frame.
+///
+/// All directions/points are craft-local (`X=right, Y=nose, Z=dorsal`) — the
+/// same frame `gear_mesh` authors in — so `Rotation.0 * p` maps them into the
+/// body-centered inertial frame the Avian rigid body lives in. Built once at
+/// spawn from the gear parts ([`build_wheel_set`]) and cached so the per-frame
+/// system does no part-tree walking.
+#[derive(Clone, Copy, Debug, Reflect)]
+pub struct Wheel {
+    /// Strut top at the host skin — the suspension ray origin.
+    pub strut_top_local: DVec3,
+    /// Suspension axis (belly-ward `r̂`): the ray direction and spring line.
+    pub susp_dir_local: DVec3,
+    /// Roll axis (`fore`): brake / rolling resistance act along this.
+    pub roll_dir_local: DVec3,
+    /// Axle axis (`lateral`): lateral grip resists slip along this.
+    pub axle_dir_local: DVec3,
+    pub strut_length: f64,
+    pub wheel_radius: f64,
+    /// Nose (single-leg) gear steers; main pairs do not.
+    pub steerable: bool,
+}
+
+/// Every wheel on a craft, attached to its Avian rigid body so
+/// [`apply_landing_gear_forces`] can find them.
+#[derive(Component, Clone, Debug, Default, Reflect)]
+#[reflect(Component)]
+pub struct WheelSet {
+    pub wheels: Vec<Wheel>,
+}
+
+/// Tunable landing-gear suspension/grip coefficients. Reflect-registered so an
+/// agent can live-tune them over BRP (`world_mutate_resources`) while taxiing,
+/// rather than recompiling. Forces are computed per wheel and summed into the
+/// craft's acceleration accumulators.
+#[derive(Resource, Clone, Debug, Reflect)]
+#[reflect(Resource)]
+pub struct GearTuning {
+    /// Spring stiffness, N per metre of compression.
+    pub k_spring: f64,
+    /// Suspension damping ratio ζ. The actual damper coefficient is derived
+    /// per frame from the craft's real per-wheel mass —
+    /// `c = 2·ζ·√(k·m_per_wheel)` — so a wheel is near-critically damped (no
+    /// bounce, no spin-pumping) regardless of craft mass. ζ = 1 is critical;
+    /// slightly above gives a dead-beat settle.
+    pub damping_ratio: f64,
+    /// Friction-circle limit: max horizontal force as a multiple of normal load.
+    pub mu: f64,
+    /// Lateral grip stiffness, N per (m/s) of sideways slip (clamped by `mu·N`).
+    pub k_lat: f64,
+    /// Free-rolling resistance, N per (m/s) of roll speed per unit normal load.
+    pub rolling_coeff: f64,
+    /// Added longitudinal resistance at full brake, same units as `rolling_coeff`.
+    pub brake_coeff: f64,
+    /// Max nosewheel steer angle at full yaw input, radians.
+    pub max_steer_rad: f64,
+    /// Max suspension travel as a fraction of strut length.
+    pub max_travel_fraction: f64,
+    /// Extra ray length past the rest length so a wheel just off the ground or
+    /// over a slope edge still finds the surface, metres.
+    pub skin_margin: f64,
+}
+
+impl Default for GearTuning {
+    fn default() -> Self {
+        // Sized for the ~10–20 t demo aircraft on Thalos surface gravity. The
+        // craft settles to a static squat of `(m·g/N)/k_spring`; these put that
+        // in the tens-of-cm range with near-critical damping. Live-tune via BRP.
+        Self {
+            k_spring: 120_000.0,
+            damping_ratio: 1.1,
+            mu: 1.1,
+            k_lat: 40_000.0,
+            rolling_coeff: 0.02,
+            brake_coeff: 1.5,
+            max_steer_rad: 0.5,
+            max_travel_fraction: 0.8,
+            skin_margin: 0.5,
+        }
+    }
+}
+
+/// Build the cached [`WheelSet`] for a craft from its landing-gear parts,
+/// reusing [`gear_leg_frames`] (the same per-leg geometry the visual mesh
+/// draws) so collider wheels sit exactly under the rendered ones. `positions`
+/// is the part-tree translation map ([`compute_part_collider_positions`]); the
+/// gear's mount point on the host axis mirrors the `BodySkin` station offset
+/// that map applies.
+fn build_wheel_set(
+    gear_q: &Query<(&Gear, &SurfaceMount), With<Part>>,
+    host_nodes: &Query<&AttachNodes>,
+    positions: &HashMap<Entity, DVec3>,
+) -> Vec<Wheel> {
+    let mut wheels = Vec::new();
+    for (gear, mount) in gear_q.iter() {
+        let Ok(nodes) = host_nodes.get(mount.parent) else {
+            continue;
+        };
+        let parent_radius = nodes
+            .get("top")
+            .map(|n| n.diameter * 0.5)
+            .unwrap_or(1.0)
+            .max(0.01);
+        let host_pos = positions.get(&mount.parent).copied().unwrap_or(DVec3::ZERO);
+        // The gear's mount origin on the host axis at its station — mirrors the
+        // `SurfaceMountKind` branch in `compute_part_collider_positions`.
+        let mount_axis = match mount.kind {
+            SurfaceMountKind::BodySkin => {
+                let host_height = nodes.get("bottom").map(|n| -n.offset.y).unwrap_or(0.0) as f64;
+                host_pos + DVec3::new(0.0, -(mount.station as f64) * host_height, 0.0)
+            }
+            SurfaceMountKind::WingPylon => host_pos,
+        };
+        for leg in gear_leg_frames(gear, mount.angle, parent_radius) {
+            wheels.push(Wheel {
+                strut_top_local: mount_axis + leg.strut_top.as_dvec3(),
+                susp_dir_local: leg.susp_dir.as_dvec3(),
+                roll_dir_local: leg.roll_dir.as_dvec3(),
+                axle_dir_local: leg.axle_dir.as_dvec3(),
+                strut_length: gear.strut_length as f64,
+                wheel_radius: gear.wheel_radius as f64,
+                steerable: gear.legs() == 1,
+            });
+        }
+    }
+    wheels
+}
+
+/// Carry the craft on its wheels: a raycast spring/damper per wheel, plus
+/// lateral grip, rolling resistance, brake, and emergent nosewheel-steer yaw.
+///
+/// Forces are summed into the craft's acceleration accumulators *after*
+/// [`apply_local_forces`] has written gravity + thrust + reaction-wheel torque,
+/// so this is a parallel channel on top of them. Runs only when Avian owns
+/// translation ([`AvianRole::Full`]) for a live Ship — exactly when there is a
+/// ground collider (runway slab or terrain patch) under the craft. The
+/// craft-excluded downward raycast is itself the "is there ground here" test:
+/// no hit → that wheel is airborne and contributes nothing. See `docs/surface.md`.
+#[allow(clippy::too_many_arguments)]
+fn apply_landing_gear_forces(
+    active: Res<ActiveLocalBubble>,
+    authority: Res<AvianAuthority>,
+    tuning: Res<GearTuning>,
+    intent: Res<GameInputIntent>,
+    spatial: SpatialQuery,
+    sim: Res<SimulationState>,
+    wheels_q: Query<&WheelSet>,
+    mut craft_q: Query<
+        (
+            &Position,
+            &Rotation,
+            &LinearVelocity,
+            &AngularVelocity,
+            &mut ConstantLinearAcceleration,
+            &mut ConstantAngularAcceleration,
+        ),
+        With<LocalCraftBody>,
+    >,
+) {
+    // Full only: Avian must own translation for the integrated force to mean
+    // anything. Ships only — EVA has no gear — and never a destroyed wreck.
+    if !authority.owns_translation()
+        || sim.simulation.vessel_kind() != VesselKind::Ship
+        || sim.simulation.is_destroyed()
+    {
+        return;
+    }
+    let Some(bubble) = active.bubble.as_ref() else {
+        return;
+    };
+    let Ok(wheelset) = wheels_q.get(bubble.craft_entity) else {
+        return;
+    };
+    if wheelset.wheels.is_empty() {
+        return;
+    }
+    let Ok((position, rotation, linear_velocity, angular_velocity, mut linear_accel, mut angular_accel)) =
+        craft_q.get_mut(bubble.craft_entity)
+    else {
+        return;
+    };
+
+    let rot = rotation.0;
+    let body_state = body_state_for(&sim, bubble.body_id);
+    // The ground co-rotates with the body, so the surface point under each
+    // *contact* moves at ω × (CoM + arm) — evaluated per wheel below, not once
+    // at the CoM. Using the CoM value for a wheel ~18 m out leaves an
+    // `ω × arm` (~0.3 m/s) phantom slip that the grip forces fight every frame
+    // and pump into a spin/bounce. A craft co-rotating at rest must read ~0
+    // slip at every wheel.
+    let omega_body = body_state.angular_velocity;
+    let mass = sim.simulation.ship_mass_kg().max(1.0);
+    let inertia_body = sim.simulation.ship_params().moment_of_inertia;
+    // Wheel torque is about the craft CoM (the Avian rotation pivot, set to
+    // this same point at spawn), not the root origin — otherwise the upward
+    // forces from gear that sit aft of the nose origin have no balancing
+    // torque and flip the craft.
+    let com_local = sim.simulation.ship_params().center_of_mass;
+    // Near-critical damper derived from the *actual* per-wheel mass, so the
+    // suspension settles dead-beat on any craft instead of bouncing.
+    let m_per_wheel = mass / wheelset.wheels.len().max(1) as f64;
+    let c_damp = 2.0 * tuning.damping_ratio * (tuning.k_spring * m_per_wheel).sqrt();
+
+    let steer = (intent.attitude.z as f64).clamp(-1.0, 1.0) * tuning.max_steer_rad;
+    let brake = if intent.wheel_brake { 1.0 } else { 0.0 };
+    let filter = SpatialQueryFilter::default().with_excluded_entities([bubble.craft_entity]);
+
+    let mut net_force = DVec3::ZERO;
+    let mut net_torque = DVec3::ZERO;
+    for wheel in &wheelset.wheels {
+        let origin = position.0 + rot * wheel.strut_top_local;
+        let down = rot * wheel.susp_dir_local;
+        let Ok(dir) = Dir3::new(down.as_vec3()) else {
+            continue;
+        };
+        let rest_len = wheel.strut_length + wheel.wheel_radius;
+        let max_len = rest_len + tuning.skin_margin;
+        let Some(hit) = spatial.cast_ray(origin, dir, max_len, true, &filter) else {
+            continue;
+        };
+        let max_travel = tuning.max_travel_fraction * wheel.strut_length;
+        let compression = (rest_len - hit.distance).clamp(0.0, max_travel);
+        if compression <= 0.0 {
+            continue;
+        }
+        let up = -down;
+        // Contact point relative to the craft CoM: the arm that turns wheel
+        // force into torque about the rotation pivot (lets steered front-wheel
+        // grip yaw the craft, and lets nose/main share the load in pitch).
+        let contact_local = wheel.strut_top_local + wheel.susp_dir_local * hit.distance;
+        let r_arm = rot * (contact_local - com_local);
+        // Avian's LinearVelocity is the CoM velocity; the contact moves at
+        // v_com + ω_craft × arm.
+        let v_point = linear_velocity.0 + angular_velocity.0.cross(r_arm);
+        // Ground velocity at *this* contact point (co-rotation), so a co-rotating
+        // craft reads ~0 slip everywhere — no phantom `ω × arm` excitation.
+        let com_world = position.0 + rot * com_local;
+        let surface_velocity = omega_body.cross(com_world + r_arm);
+        let v_rel = v_point - surface_velocity;
+
+        // One-way spring + damper along the suspension axis (never pulls down).
+        let compress_rate = -v_rel.dot(up);
+        let normal_n = (tuning.k_spring * compression + c_damp * compress_rate).max(0.0);
+        if normal_n <= 0.0 {
+            continue;
+        }
+        let mu_n = tuning.mu * normal_n;
+
+        // Steer the nose wheel by rotating its roll/axle dirs about the strut.
+        let (roll_local, axle_local) = if wheel.steerable && steer.abs() > 1.0e-6 {
+            let q = DQuat::from_axis_angle(wheel.susp_dir_local.normalize_or_zero(), steer);
+            (q * wheel.roll_dir_local, q * wheel.axle_dir_local)
+        } else {
+            (wheel.roll_dir_local, wheel.axle_dir_local)
+        };
+        let axle_w = (rot * axle_local).normalize_or_zero();
+        let roll_w = (rot * roll_local).normalize_or_zero();
+
+        // Lateral grip resists sideways slip; longitudinal resists roll (rolling
+        // resistance + brake). Both clamped to the friction circle so they only
+        // ever remove ground-relative speed, never propel.
+        let f_lat = -axle_w * (tuning.k_lat * v_rel.dot(axle_w)).clamp(-mu_n, mu_n);
+        let long_coeff = tuning.rolling_coeff + brake * tuning.brake_coeff;
+        let f_roll = -roll_w * (long_coeff * normal_n * v_rel.dot(roll_w)).clamp(-mu_n, mu_n);
+
+        let f = up * normal_n + f_lat + f_roll;
+        net_force += f;
+        net_torque += r_arm.cross(f);
+    }
+
+    if net_force == DVec3::ZERO && net_torque == DVec3::ZERO {
+        return;
+    }
+    linear_accel.0 += net_force / mass;
+    let torque_body = rot.inverse() * net_torque;
+    let inv_i = DVec3::new(
+        if inertia_body.x > 0.0 { 1.0 / inertia_body.x } else { 0.0 },
+        if inertia_body.y > 0.0 { 1.0 / inertia_body.y } else { 0.0 },
+        if inertia_body.z > 0.0 { 1.0 / inertia_body.z } else { 0.0 },
+    );
+    angular_accel.0 += rot * (torque_body * inv_i);
 }
 
 /// Pull Avian's integrated state back into canonical, with what we install
@@ -1502,7 +1818,7 @@ impl ImpactSpeedWindow {
 ///
 /// EVA is exempt (the capsule has no collider, so no contacts). A craft that
 /// is already destroyed short-circuits so debris settling on the ground
-/// doesn't re-trigger. See `docs/landing.md`.
+/// doesn't re-trigger. See `docs/surface.md`.
 fn detect_terrain_impact(
     contact_graph: Res<ContactGraph>,
     active: Res<ActiveLocalBubble>,
@@ -1612,7 +1928,7 @@ fn maintain_terrain_patch(
     let lateral = (delta - along * current.center_dir_body).length();
     let current_revision = height_source.revision();
     // Re-center before the craft drifts off the patch edge. The tile-based
-    // collider window (docs/landing.md §3.6) is only tens of metres, so cap the
+    // collider window (docs/surface.md §3.6) is only tens of metres, so cap the
     // global drift distance by a fraction of the patch's own half-extent; the
     // coarse tangent-grid fallback (km-scale half-extent) keeps the global
     // distance. `patch_half_extent_m` is 0 only with no patch attached, which
@@ -1911,11 +2227,13 @@ type PartColliderQuery<'w, 's> = Query<
         Entity,
         &'static AttachNodes,
         Option<&'static Attachment>,
+        Option<&'static SurfaceMount>,
         Option<&'static CommandPod>,
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
         Option<&'static Engine>,
+        Option<&'static AirIntake>,
     ),
     With<Part>,
 >;
@@ -1923,12 +2241,19 @@ type PartColliderQuery<'w, 's> = Query<
 fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<LocalPrimitiveCollider> {
     let part_positions = compute_part_collider_positions(parts);
     let mut primitives = Vec::new();
-    for (entity, nodes, _, pod, dec, adapter, tank, engine) in parts.iter() {
+    for (entity, nodes, _, surface_mount, pod, dec, adapter, tank, engine, intake) in parts.iter() {
         let Some(part_position) = part_positions.get(&entity).copied() else {
             continue;
         };
+        if matches!(
+            (engine, surface_mount.map(|m| m.kind)),
+            (Some(engine), Some(SurfaceMountKind::WingPylon))
+                if engine.geometry == EngineGeometry::JetNacelle
+        ) {
+            continue;
+        }
         let Some((shape, local_offset)) =
-            part_collider_shape(nodes, pod, dec, adapter, tank, engine)
+            part_collider_shape(nodes, pod, dec, adapter, tank, engine, intake)
         else {
             continue;
         };
@@ -1947,15 +2272,22 @@ fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<LocalPrimiti
 fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity, DVec3> {
     let mut nodes_by_entity: HashMap<Entity, &AttachNodes> = HashMap::new();
     let mut children_by_parent: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
+    let mut surface_children_by_parent: HashMap<Entity, Vec<(Entity, SurfaceMount)>> =
+        HashMap::new();
     let mut roots = Vec::new();
 
-    for (entity, nodes, attachment, ..) in parts.iter() {
+    for (entity, nodes, attachment, surface_mount, ..) in parts.iter() {
         nodes_by_entity.insert(entity, nodes);
         if let Some(attachment) = attachment {
             children_by_parent
                 .entry(attachment.parent)
                 .or_default()
                 .push((entity, attachment.clone()));
+        } else if let Some(surface_mount) = surface_mount {
+            surface_children_by_parent
+                .entry(surface_mount.parent)
+                .or_default()
+                .push((entity, *surface_mount));
         } else {
             roots.push(entity);
         }
@@ -1975,21 +2307,38 @@ fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity,
         let Some(parent_nodes) = nodes_by_entity.get(&parent).copied() else {
             continue;
         };
-        let Some(children) = children_by_parent.get(&parent) else {
-            continue;
-        };
-        for (child, attachment) in children {
-            let Some(parent_node) = parent_nodes.get(&attachment.parent_node) else {
-                continue;
-            };
-            let child_offset = nodes_by_entity
-                .get(child)
-                .and_then(|nodes| nodes.get(&attachment.my_node))
-                .map(|node| node.offset)
-                .unwrap_or(Vec3::ZERO);
-            let child_position = parent_position + (parent_node.offset - child_offset).as_dvec3();
-            positions.insert(*child, child_position);
-            queue.push_back(*child);
+        if let Some(children) = children_by_parent.get(&parent) {
+            for (child, attachment) in children {
+                let Some(parent_node) = parent_nodes.get(&attachment.parent_node) else {
+                    continue;
+                };
+                let child_offset = nodes_by_entity
+                    .get(child)
+                    .and_then(|nodes| nodes.get(&attachment.my_node))
+                    .map(|node| node.offset)
+                    .unwrap_or(Vec3::ZERO);
+                let child_position =
+                    parent_position + (parent_node.offset - child_offset).as_dvec3();
+                positions.insert(*child, child_position);
+                queue.push_back(*child);
+            }
+        }
+
+        if let Some(children) = surface_children_by_parent.get(&parent) {
+            for (child, mount) in children {
+                let local_offset = match mount.kind {
+                    SurfaceMountKind::BodySkin => {
+                        let host_height = parent_nodes
+                            .get("bottom")
+                            .map(|node| -node.offset.y)
+                            .unwrap_or(0.0);
+                        DVec3::new(0.0, -(mount.station as f64) * host_height as f64, 0.0)
+                    }
+                    SurfaceMountKind::WingPylon => DVec3::ZERO,
+                };
+                positions.insert(*child, parent_position + local_offset);
+                queue.push_back(*child);
+            }
         }
     }
 
@@ -2015,9 +2364,10 @@ fn part_collider_shape(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     engine: Option<&Engine>,
+    intake: Option<&AirIntake>,
 ) -> Option<(LocalPrimitiveShape, DVec3)> {
     if let Some(pod) = pod {
-        let height = pod.diameter * 0.9;
+        let height = pod.diameter * pod.geometry.length_factor();
         Some((
             LocalPrimitiveShape::Cylinder {
                 radius: (pod.diameter * 0.5) as f64,
@@ -2056,13 +2406,24 @@ fn part_collider_shape(
             DVec3::Y * -(tank.length as f64 * 0.5),
         ))
     } else if let Some(engine) = engine {
-        let height = engine.diameter * 0.9;
+        let height = match engine.geometry {
+            EngineGeometry::RocketBell => engine.diameter * 0.9,
+            EngineGeometry::JetNacelle => thalos_shipyard::jet_nacelle_length(engine),
+        };
         Some((
             LocalPrimitiveShape::Cylinder {
                 radius: (engine.diameter * 0.5) as f64,
                 height: height as f64,
             },
             DVec3::Y * -(height as f64 * 0.5),
+        ))
+    } else if let Some(intake) = intake {
+        Some((
+            LocalPrimitiveShape::Cylinder {
+                radius: (intake.diameter * 0.5) as f64,
+                height: intake.length as f64,
+            },
+            DVec3::Y * -(intake.length as f64 * 0.5),
         ))
     } else {
         None
@@ -2072,9 +2433,9 @@ fn part_collider_shape(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thalos_body_render::{TerrainPatchBasis, TerrainPatchMesh};
     use thalos_physics_canonical::canonical::Epoch;
     use thalos_physics_canonical::types::BodyState;
-    use thalos_body_render::{TerrainPatchBasis, TerrainPatchMesh};
 
     #[test]
     fn bubble_frame_round_trip_preserves_aggregate_state() {
@@ -2356,13 +2717,14 @@ mod tests {
         let nodes = AttachNodes::default();
         let pod = CommandPod {
             model: "test".to_string(),
+            geometry: Default::default(),
             diameter: 2.0,
             dry_mass: 0.0,
             reaction_wheel_torque: 0.0,
         };
 
         let (shape, offset) =
-            part_collider_shape(&nodes, Some(&pod), None, None, None, None).unwrap();
+            part_collider_shape(&nodes, Some(&pod), None, None, None, None, None).unwrap();
 
         let LocalPrimitiveShape::Cylinder { radius, height } = shape else {
             panic!("pod collider should be a cylinder");
@@ -2377,6 +2739,10 @@ mod tests {
         let nodes = AttachNodes::default();
         let engine = Engine {
             model: "test".to_string(),
+            geometry: EngineGeometry::RocketBell,
+            requires_atmosphere: false,
+            intake_requirement: None,
+            builtin_intake: None,
             diameter: 2.0,
             thrust: 0.0,
             isp: 0.0,
@@ -2386,7 +2752,7 @@ mod tests {
         };
 
         let (shape, offset) =
-            part_collider_shape(&nodes, None, None, None, None, Some(&engine)).unwrap();
+            part_collider_shape(&nodes, None, None, None, None, Some(&engine), None).unwrap();
 
         let LocalPrimitiveShape::Cylinder { radius, height } = shape else {
             panic!("engine collider should be a cylinder");

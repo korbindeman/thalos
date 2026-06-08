@@ -50,6 +50,12 @@ impl Default for AttitudeState {
 #[derive(Debug, Clone, Copy)]
 pub struct ShipParameters {
     pub moment_of_inertia: DVec3,
+    /// Center of mass in the craft body frame (`X=right, Y=nose, Z=dorsal`),
+    /// metres from the root-part origin. Aircraft land on gear that straddle
+    /// this point, so the ground-physics rigid body must rotate about it
+    /// (Avian `CenterOfMass`) rather than the nose origin, or it tips over.
+    /// `moment_of_inertia` is already expressed about this point.
+    pub center_of_mass: DVec3,
     pub max_torque: DVec3,
     pub thrust_n: f64,
     pub mass_flow_kg_per_s: f64,
@@ -63,7 +69,7 @@ pub struct ShipParameters {
     /// game's `detect_terrain_impact` compares the pre-contact approach
     /// speed against this. `f64::INFINITY` means "indestructible" — the
     /// sentinel for a craft whose real stats haven't been pushed yet, and
-    /// for EVA (no Avian contact damage). See `docs/landing.md`.
+    /// for EVA (no Avian contact damage). See `docs/surface.md`.
     pub impact_tolerance_m_s: f64,
     /// Aerodynamic reference (frontal) area in m², for the aggregate
     /// bluff-body drag of this craft. Derived from the ship's geometry
@@ -85,6 +91,7 @@ impl Default for ShipParameters {
         // divides by zero before a real ship has been pushed in.
         Self {
             moment_of_inertia: DVec3::ONE,
+            center_of_mass: DVec3::ZERO,
             max_torque: DVec3::ZERO,
             thrust_n: 0.0,
             mass_flow_kg_per_s: 0.0,
@@ -109,6 +116,7 @@ impl ShipParameters {
     pub fn eva() -> Self {
         Self {
             moment_of_inertia: DVec3::new(15.0, 1.5, 15.0),
+            center_of_mass: DVec3::ZERO,
             max_torque: DVec3::ZERO,
             thrust_n: 0.0,
             mass_flow_kg_per_s: 0.0,
@@ -193,4 +201,3 @@ pub struct TrajectorySample {
     /// `anchor_body`'s position at `time`, cached for cheap rendering.
     pub ref_pos: DVec3,
 }
-

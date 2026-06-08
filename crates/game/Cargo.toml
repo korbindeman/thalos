@@ -14,6 +14,7 @@ thalos_celestial = { path = "../celestial" }
 # Vendored LGPL flight-dynamics model; force-only use in the local bubble.
 avian_fdm = { workspace = true }
 thalos_shipyard = { path = "../shipyard" }
+thalos_volumetric_clouds = { path = "../volumetric_clouds" }
 bevy = { version = "0.18", features = ["wayland", "jpeg", "bevy_remote"] }
 bevy_brp_extras = "0.19"
 bevy_egui = "0.39"

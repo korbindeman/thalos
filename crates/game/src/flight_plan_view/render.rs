@@ -24,8 +24,8 @@ use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::trajectory::{
     FlightPlan, NumericSegment, Trajectory, TrajectoryBranch,
 };
-use thalos_world::{BodyDefinition, BodyId};
 use thalos_physics_canonical::types::TrajectorySample;
+use thalos_world::{BodyDefinition, BodyId};
 
 use crate::coords::{RenderGhostFocus, RenderOrigin, WorldScale, sample_render_pos};
 use crate::map_view::MapSnapshot;

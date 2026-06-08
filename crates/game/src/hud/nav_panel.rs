@@ -32,6 +32,7 @@ use crate::hud::nav_attitude::NavAttitudeRenderTarget;
 use crate::hud::theme::HudTheme;
 use crate::maneuver::ManeuverPlan;
 use crate::navball::markers::{MarkerIconState, MarkerKind, marker_icon_image};
+use crate::navball::ui::{NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX};
 use crate::navigation::{NavigationMode, NavigationState};
 use crate::rendering::SimulationState;
 use crate::target::TargetBody;
@@ -62,8 +63,12 @@ const AUTOPILOT_PANEL_HEIGHT: f32 = 58.0;
 const AUTOPILOT_BUTTON_WIDTH: f32 = 92.0;
 const AUTOPILOT_BUTTON_HEIGHT: f32 = 30.0;
 
-const MANEUVER_PANEL_TOP_PX: f32 = AUTOPILOT_PANEL_TOP_PX + AUTOPILOT_PANEL_HEIGHT + 8.0;
 const MANEUVER_PANEL_HEIGHT: f32 = 104.0;
+/// The maneuver editor lives in the bottom-left flight cluster, stacked above
+/// the velocity readout (which itself sits above the navball). The velocity
+/// readout (`HudFlight`) is ~60 px tall; clear it with a small gap.
+const MANEUVER_PANEL_LEFT_PX: f32 = NAVBALL_LEFT_PX;
+const MANEUVER_PANEL_BOTTOM_PX: f32 = NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 10.0 + 60.0 + 8.0;
 const MANEUVER_BAR_HEIGHT: f32 = 8.0;
 const MANEUVER_WARP_BUTTON_WIDTH: f32 = 56.0;
 const MANEUVER_WARP_BUTTON_HEIGHT: f32 = 24.0;
@@ -471,8 +476,8 @@ fn spawn_maneuver_panel(commands: &mut Commands, theme: &HudTheme) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(TOP_RIGHT_PANEL_RIGHT_PX),
-                top: Val::Px(MANEUVER_PANEL_TOP_PX),
+                left: Val::Px(MANEUVER_PANEL_LEFT_PX),
+                bottom: Val::Px(MANEUVER_PANEL_BOTTOM_PX),
                 width: Val::Px(PANEL_DIAMETER),
                 height: Val::Px(MANEUVER_PANEL_HEIGHT),
                 border: UiRect::all(Val::Px(1.0)),
@@ -927,13 +932,18 @@ pub fn update_maneuver_visuals(
     >,
 ) {
     let directive = schedule.next();
-    let has_node = !plan.nodes.is_empty();
+    // The burn HUD tracks the upcoming/active burn only. Spent (`Executed`)
+    // nodes linger in the plan for review but must not keep this panel pinned
+    // — counting just the directive-driving nodes makes a completed burn fall
+    // through the existing "executed, now sticky-fade" path unchanged.
+    let active_node_count = plan.nodes.iter().filter(|n| n.drives_directive()).count();
+    let has_node = active_node_count > 0;
     let autopilot_executing = matches!(
         autopilot.state(),
         AutopilotState::Engaging { .. } | AutopilotState::Burn { .. }
     );
 
-    let node_count = plan.nodes.len();
+    let node_count = active_node_count;
     if has_node {
         if node_count != panel_state.last_node_count {
             panel_state.dismissed = false;
@@ -1167,7 +1177,7 @@ fn nav_button_icon(
 fn mode_available(mode: NavigationMode, target: &TargetBody, plan: &ManeuverPlan) -> bool {
     match mode {
         NavigationMode::Target | NavigationMode::AntiTarget => target.target.is_some(),
-        NavigationMode::ManeuverNode => !plan.nodes.is_empty(),
+        NavigationMode::ManeuverNode => plan.nodes.iter().any(|n| n.drives_directive()),
         _ => true,
     }
 }

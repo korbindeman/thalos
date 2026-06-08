@@ -196,10 +196,14 @@ impl FieldSurface {
 
 impl SurfaceQuery for FieldSurface {
     fn sample(&self, dir: Vec3, lod_m: f32) -> SurfaceSample {
+        self.sample_d(dir.as_dvec3(), lod_m)
+    }
+
+    fn sample_d(&self, dir: glam::DVec3, lod_m: f32) -> SurfaceSample {
         let s = sample_oceanic_continental(
             self.params,
             self.radius_m as f64,
-            dir.as_dvec3(),
+            dir,
             lod_m,
             self.intent_cache.as_deref(),
         );

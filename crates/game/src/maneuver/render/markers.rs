@@ -110,7 +110,12 @@ pub(in crate::maneuver) fn manage_node_markers(
 
     for (entity, marker, mut tf, mut vis) in &mut markers {
         let selected = selected.id == Some(marker.node_id);
-        let node_exists = plan.nodes.iter().any(|n| n.id == marker.node_id);
+        // A spent (executed) node is treated as gone for disc-marker purposes:
+        // its burn is in the past, so the forward prediction can't anchor it.
+        let node_exists = plan
+            .nodes
+            .iter()
+            .any(|n| n.id == marker.node_id && !n.is_executed());
 
         if !node_exists || selected {
             commands.entity(entity).despawn();
@@ -143,7 +148,7 @@ pub(in crate::maneuver) fn manage_node_markers(
     }
 
     for node in &plan.nodes {
-        if selected.id == Some(node.id) {
+        if selected.id == Some(node.id) || node.is_executed() {
             continue;
         }
         let already_exists = markers

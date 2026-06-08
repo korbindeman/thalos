@@ -64,12 +64,7 @@ pub(super) struct StageResAmount {
 }
 
 fn short_label(resource: Resource) -> &'static str {
-    match resource {
-        Resource::Methane => "CH4",
-        Resource::Lox => "Ox",
-        Resource::Hydrogen => "LH2",
-        Resource::Electricity => "EC",
-    }
+    resource.short_label()
 }
 
 pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {

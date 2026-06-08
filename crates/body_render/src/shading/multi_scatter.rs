@@ -14,11 +14,17 @@
 //! shader-side cost is one texture sample per view step — eight samples on
 //! the current 8-step raymarch.
 //!
-//! Following Hillaire 2020 (§5.2). Each cell is approximated by a single
-//! bounce, `L_ms ≈ L_2`, rather than the full geometric series
-//! `L_2 / (1 − F)` — sufficient to recover the perceptual blue cast of a
-//! midday sky and to balance the in-scatter against star brightness without
-//! the extra cost of computing F per cell.
+//! Following Hillaire 2020 (§5.2). Each cell stores the full geometric series
+//! `Ψ = L_2 / (1 − f_ms)`, where `L_2` is the second-order in-scattered
+//! sunlight and `f_ms` is the per-channel multiple-scattering transfer factor
+//! (the fraction of a uniform unit ambient that scatters back toward the
+//! point). The series is per-channel, so blue — which has the largest `f_ms`
+//! — is amplified the most: this is what refills blue into the long-path
+//! horizon (killing the perpetual sunset-orange band at midday) and lifts the
+//! daytime dome's brightness into the range where the in-scatter can balance
+//! against star brightness. Computing the series instead of the bare `L_2`
+//! costs one extra accumulator per sphere direction in the bake; the runtime
+//! cost is unchanged (one texture sample per view step).
 //!
 //! The LUT axes are linear in `μ_s = cos(sun_zenith)` and altitude. 32×32 is
 //! plenty for a smooth output; higher resolution buys nothing visible at this
@@ -124,13 +130,14 @@ fn bake_cell(
     let sun_dir = Vec3::new((1.0 - mu_s * mu_s).max(0.0).sqrt(), mu_s, 0.0);
 
     let mut l_2 = Vec3::ZERO;
+    let mut f_ms = Vec3::ZERO;
     for i in 0..BAKE_SPHERE_DIRECTIONS {
         let s_dir = fibonacci_sphere(i, BAKE_SPHERE_DIRECTIONS);
         let t_exit = compute_t_exit(p, s_dir, planet_r, atmos_top_r);
         if t_exit <= 1e-3 {
             continue;
         }
-        l_2 += single_scatter_integral(
+        let c = single_scatter_integral(
             p,
             s_dir,
             sun_dir,
@@ -144,11 +151,23 @@ fn bake_cell(
             h_m,
             g,
         );
+        l_2 += c.scatter;
+        f_ms += c.transfer;
     }
-    // Isotropic-phase average: ∫_sphere L_1(ω) · (1 / 4π) dω
-    // → (1 / N) · Σ L_1(ω_i) with uniform sphere sampling. Conveniently, the
-    // 4π solid angle and 1 / 4π phase cancel.
-    l_2 / BAKE_SPHERE_DIRECTIONS as f32
+    // Isotropic-phase sphere average: ∫_sphere f(ω) · (1 / 4π) dω
+    // → (1 / N) · Σ f(ω_i) with uniform sphere sampling. The 4π solid angle and
+    // 1 / 4π phase cancel, so both the second-order radiance `L_2` and the
+    // transfer factor `f_ms` are plain means over the directions.
+    let inv_n = 1.0 / BAKE_SPHERE_DIRECTIONS as f32;
+    let g_2 = l_2 * inv_n;
+    let f = f_ms * inv_n;
+    // Infinite multiple-scattering series Ψ = L_2 · Σ fⁿ = L_2 / (1 − f),
+    // per channel (Hillaire 2020 §5.2). Blue's larger f gives it the strongest
+    // boost, which is what whitens/blues the horizon and brightens the dome.
+    // Clamp the denominator so a pathological f → 1 (very thick atmosphere)
+    // can't blow the LUT up; Earth-like atmospheres sit well below 1.
+    let denom = (Vec3::ONE - f).max(Vec3::splat(0.05));
+    g_2 / denom
 }
 
 fn fibonacci_sphere(i: usize, n: usize) -> Vec3 {
@@ -179,6 +198,20 @@ fn compute_t_exit(p: Vec3, dir: Vec3, planet_r: f32, atmos_top_r: f32) -> f32 {
     t_exit.max(0.0)
 }
 
+/// One sphere direction's contribution to a multi-scatter LUT cell.
+struct DirContribution {
+    /// Second-order in-scattered sunlight arriving at P along this direction
+    /// (per unit sun flux), with the real Rayleigh / Mie phase applied at the
+    /// first bounce. Summed and averaged over the sphere → `L_2`.
+    scatter: Vec3,
+    /// Multiple-scattering transfer: how much of a uniform unit ambient
+    /// radiance coming from this direction scatters back toward P (per
+    /// channel, dimensionless). Summed and averaged over the sphere → `f_ms`,
+    /// the ratio that drives the infinite-scattering series. Uses the uniform
+    /// phase (`∫ phase dω = 1`), so the integrand is just `σ_s · T_view`.
+    transfer: Vec3,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn single_scatter_integral(
     p_origin: Vec3,
@@ -193,10 +226,13 @@ fn single_scatter_integral(
     h_r: f32,
     h_m: f32,
     g: f32,
-) -> Vec3 {
+) -> DirContribution {
     let path = t_exit - t_enter;
     if path <= 0.0 {
-        return Vec3::ZERO;
+        return DirContribution {
+            scatter: Vec3::ZERO,
+            transfer: Vec3::ZERO,
+        };
     }
 
     let cos_theta = ray_dir.dot(sun_dir).clamp(-1.0, 1.0);
@@ -208,6 +244,7 @@ fn single_scatter_integral(
     let ds = path / BAKE_VIEW_STEPS as f32;
     let mut sum_r = Vec3::ZERO;
     let mut sum_m = Vec3::ZERO;
+    let mut transfer = Vec3::ZERO;
     let mut od_r = 0.0f32;
     let mut od_m = 0.0f32;
 
@@ -227,6 +264,13 @@ fn single_scatter_integral(
             (-tau_view.z).exp(),
         );
 
+        // Multiple-scattering transfer term: a uniform unit ambient radiance
+        // re-scatters at this point with coefficient σ_s = β · ρ (per channel,
+        // uniform phase already integrated to 1), attenuated back to P by the
+        // view transmittance. Independent of the sun column.
+        let sigma_s = beta_r * rho_r + Vec3::splat(beta_m) * rho_m;
+        transfer += trans_view * sigma_s * ds;
+
         let tau_sun = sun_optical_depth(
             p_pt,
             sun_dir,
@@ -244,7 +288,10 @@ fn single_scatter_integral(
         sum_m += rho_m * weight;
     }
 
-    beta_r * (sum_r * p_r) + Vec3::splat(beta_m) * (sum_m * p_m)
+    DirContribution {
+        scatter: beta_r * (sum_r * p_r) + Vec3::splat(beta_m) * (sum_m * p_m),
+        transfer,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

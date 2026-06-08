@@ -4,9 +4,9 @@
 
 use bevy::math::DQuat;
 use bevy::prelude::*;
-use thalos_world::{BodyDefinition, BodyId};
-use thalos_physics_canonical::types::BodyState;
 use thalos_body_render::{PlanetHaloMaterial, PlanetMaterial};
+use thalos_physics_canonical::types::BodyState;
+use thalos_world::{BodyDefinition, BodyId};
 
 use super::screen_marker_radius;
 use super::types::{

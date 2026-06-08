@@ -22,16 +22,16 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{Task, block_on, poll_once};
-use thalos_world::{BodyDefinition, BodyKind};
-use thalos_physics_local::HeightSourceRegistry;
-use thalos_physics_local::TerrainSurfaceRegistry;
 use thalos_body_render::{
     AtmosphereBlock, PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetMaterial,
     PlanetParams, PlanetWaterParams, PreparedPlanetBake, ReferenceClouds,
     cloud_cover_image_for_body, upload_prepared_bake,
 };
-use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_body_render::{BodySkyMaterial, ConstantHeightSource};
+use thalos_physics_local::HeightSourceRegistry;
+use thalos_physics_local::TerrainSurfaceRegistry;
+use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_world::{BodyDefinition, BodyKind};
 
 use crate::loading::LoadingProgress;
 
@@ -193,10 +193,9 @@ pub(super) fn install_baked_planet(
         TerrainTileProviderMode::Pipeline | TerrainTileProviderMode::Analytic3d => {
             assets.height_sources.insert_gpu_mirror_source(
                 body_id,
-                thalos_body_render::GpuAtlasMirrorHeightSource::new(
-                    surface.clone(),
-                    dynamic_state.clone(),
-                ),
+                thalos_body_render::GpuAtlasMirrorHeightSource::new(Arc::new(
+                    thalos_terrain::BakedSurface::new(surface.clone(), dynamic_state.clone()),
+                )),
             );
         }
     }

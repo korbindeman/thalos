@@ -22,11 +22,11 @@
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 
+use thalos_body_render::HeightSource;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
-use thalos_world::{BodyId, StateVector};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
-use thalos_body_render::HeightSource;
+use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
 use crate::loading::AppState;
@@ -45,6 +45,12 @@ pub enum SpawnSituation {
     Landing,
     /// Ship already low and slow over a flat dry patch.
     FinalApproach,
+    /// Aircraft parked at rest on the Thalos surface runway, lined up on the
+    /// centerline ready for a takeoff roll. Placed by [`crate::runway`].
+    Runway,
+    /// Aircraft airborne on short final, lined up with the runway centerline
+    /// and descending toward it. Placed by [`crate::runway`].
+    RunwayApproach,
 }
 
 impl SpawnSituation {
@@ -55,6 +61,10 @@ impl SpawnSituation {
             "eva" => Self::Eva,
             "land" | "landing" | "descent" => Self::Landing,
             "final" | "final-approach" | "final_approach" | "approach" => Self::FinalApproach,
+            "runway" | "rwy" => Self::Runway,
+            "runway-approach" | "runway_approach" | "rwy-approach" | "approach-runway" => {
+                Self::RunwayApproach
+            }
             "" | "orbit" | "ship" => Self::ShipOrbit,
             other => {
                 eprintln!("  Unknown spawn mode '{other}'; defaulting to ship orbit.");
@@ -67,11 +77,28 @@ impl SpawnSituation {
         self.descent_profile().map(|profile| profile.label)
     }
 
+    /// True for the two runway scenarios, which `crate::runway` finishes once
+    /// terrain is resident (and which load the aircraft blueprint instead of
+    /// the default rocket).
+    pub fn is_runway(self) -> bool {
+        matches!(self, Self::Runway | Self::RunwayApproach)
+    }
+
+    /// Ship blueprint to load for this scenario. The runway scenarios fly the
+    /// A220 airliner; everything else flies the default rocket.
+    pub fn ship_blueprint_path(self) -> &'static str {
+        if self.is_runway() {
+            "ships/a220.ron"
+        } else {
+            "ships/apollo.ron"
+        }
+    }
+
     fn descent_profile(self) -> Option<DescentProfile> {
         match self {
             Self::Landing => Some(LANDING_PROFILE),
             Self::FinalApproach => Some(FINAL_APPROACH_PROFILE),
-            Self::ShipOrbit | Self::Eva => None,
+            Self::ShipOrbit | Self::Eva | Self::Runway | Self::RunwayApproach => None,
         }
     }
 }
@@ -380,7 +407,7 @@ fn find_landing_site(
     best_fallback.map(|(_, d)| d).unwrap_or(sun)
 }
 
-fn sample_site_relief_m(
+pub(crate) fn sample_site_relief_m(
     height_source: &dyn HeightSource,
     dir_body_fixed: DVec3,
     body_radius_m: f64,

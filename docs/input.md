@@ -36,9 +36,42 @@ Gameplay systems consume intent resources, not `ButtonInput`:
 Unknown action names, unknown axis names, and unknown source names fail
 load with an error that includes the binding path.
 
-Keyboard and mouse are the only checked-in defaults today. Keep the
-schema extensible for gamepad sources, but do not add gamepad defaults
-until gamepad behavior is designed.
+Keyboard and mouse remain the enabled checked-in defaults. The binding
+schema also accepts Bevy `GamepadButton(...)` and `GamepadAxis(...)`
+sources so HOTAS/gamepad buttons can be mapped onto the existing
+actions without bypassing context gating.
+
+Continuous HOTAS flight axes use the separate `game.hotas` block,
+disabled by default. It is intentionally profile-shaped rather than a
+single "active gamepad" switch because flight sticks and throttles often
+enumerate as separate Bevy `Gamepad` entities. The supported semantic
+axes are:
+
+- `pitch`, `yaw`, `roll` — signed attitude commands merged into
+  `GameInputIntent.attitude`
+- `throttle` — absolute `[0, 1]` throttle command; when connected it is
+  the source of truth and keyboard ramp/full/cut becomes a fallback only
+
+Each HOTAS axis binding names a Bevy `GamepadAxis`, optionally overrides
+the device selector, and carries calibration fields:
+
+```ron
+hotas: (
+    enabled: true,
+    device: NameContains("T.16000M"), // or Any / Usb(...)
+    axes: {
+        "pitch": (axis: LeftStickY, invert: true, deadzone: 0.05),
+        "roll": (axis: LeftStickX, deadzone: 0.05),
+        "yaw": (axis: RightZ, deadzone: 0.05),
+        "throttle": (axis: LeftZ, min: -1.0, max: 1.0),
+    },
+),
+```
+
+For multi-device setups, put `device: ...` on an individual axis to bind
+that axis to a different physical device than the block default. Bevy's
+standard HOTAS-ish axes are `LeftZ` for throttle and `RightZ` for yaw;
+non-standard sliders and extra axes arrive as `Other(n)`.
 
 ## Context Model
 
@@ -48,7 +81,7 @@ Game:
 
 - `GameSystemContext` for Escape, screenshot, and freecam
 - `GameViewContext` for HUD toggle, map toggle, and camera cycle
-- `GameFlightContext` for attitude, SAS, and throttle
+- `GameFlightContext` for attitude, SAS, throttle, and HOTAS flight axes
 - `GameWarpContext` for sim-time meta-controls (pause, warp speed,
   warp-to-maneuver) — always active except during egui text input, so
   pause is reachable from EVA, freecam, etc.

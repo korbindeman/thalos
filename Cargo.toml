@@ -14,6 +14,7 @@ members = [
     "crates/udlod",
     "crates/physics_local",
     "crates/avian_fdm",
+    "crates/volumetric_clouds",
 ]
 
 [workspace.package]

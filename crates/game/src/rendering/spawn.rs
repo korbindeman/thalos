@@ -25,20 +25,20 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::math::DQuat;
 use bevy::prelude::*;
 use big_space::prelude::Grid;
-use thalos_physics_canonical::canonical::Epoch;
-use thalos_world::BodyKind;
+use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_body_render::{
     AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, MULTI_SCATTER_LUT_HEIGHT,
     MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial, RingParams, SceneLighting,
     SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut, build_ring_mesh,
     cloud_cover_image_for_body, prepare_planet_bake,
 };
+use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
+use thalos_physics_canonical::canonical::Epoch;
 use thalos_terrain::{
     DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
     TerrainConfig, cache, compile_dynamic_surface_layers, compile_tectonics_from_config,
 };
-use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
-use thalos_body_render::udlod::prelude::PreciseRotation;
+use thalos_world::BodyKind;
 
 use super::generation::{
     PendingPlanetInstall, PendingPlanetInstalls, PlanetBakeOutput, WorldStateAssets,
@@ -120,6 +120,32 @@ fn build_multi_scatter_lut(
     images.add(image)
 }
 
+/// 1×1 "clear" cloud layer (RGBA32F `(0, 0, 0, 1)` → transmittance 1) used as
+/// the [`BodySkyMaterial::cloud_layer`] fallback. The game swaps in the live
+/// `thalos_volumetric_clouds` texture for the body the player is at; every other
+/// body keeps this, so the cloud composite in `body_sky.wgsl` is a no-op there.
+fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{
+        Extent3d, TextureDimension, TextureFormat, TextureUsages,
+    };
+    // RGBA32F (0.0, 0.0, 0.0, 1.0), little-endian (1.0f32 = 0x3F80_0000).
+    let data = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x3F];
+    let mut image = Image::new(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba32Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    images.add(image)
+}
+
 pub(super) fn spawn_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -145,6 +171,9 @@ pub(super) fn spawn_bodies(
     // Unit rectangle (corners at ±1) shared across all planet billboards.
     // The vertex shader scales it by params.radius each frame.
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
+    // Fallback cloud layer for every body's BodySky; the live volumetric cloud
+    // texture is bound per-frame for the body the player is at.
+    let blank_cloud = blank_cloud_layer(&mut images);
     // Star icosphere — emissive star meshes still use a real sphere
     // (no impostor). Procedural bodies and gas giants render as
     // camera-facing quads (`billboard_mesh`); solid-impostor bodies
@@ -207,6 +236,7 @@ pub(super) fn spawn_bodies(
                 scene_depth: scene_depth.handle.clone(),
                 cloud_cover: sky_cloud_cover,
                 multi_scatter_lut,
+                cloud_layer: blank_cloud.clone(),
             };
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),

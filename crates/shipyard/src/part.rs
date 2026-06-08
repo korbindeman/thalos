@@ -1,3 +1,4 @@
+use crate::catalog::{EngineGeometry, IntakeCapture, IntakeRequirement, PodGeometry};
 use crate::resource::Resource;
 use bevy::prelude::*;
 
@@ -28,6 +29,9 @@ pub struct PartMaterial {
 #[derive(Component, Debug, Clone)]
 pub struct CommandPod {
     pub model: String,
+    /// Silhouette + length-to-diameter ratio (capsule vs aircraft cockpit
+    /// cone). Copied from the catalog [`crate::PodSpec`] at spawn.
+    pub geometry: PodGeometry,
     pub diameter: f32,
     pub dry_mass: f32,
     /// Torque this pod's built-in reaction wheel can produce per body
@@ -124,6 +128,86 @@ pub struct Adapter {
     pub dry_mass: f32,
 }
 
+/// A parametric lifting surface — main wing, tailplane (horizontal
+/// stabiliser), or fin (vertical stabiliser), distinguished only by its
+/// parameters and its mount. A single tapered, swept, dihedral panel; a
+/// mirrored pair is two of these as separate entities linked by a
+/// [`crate::SymmetryGroup`] (KSP-style), not one part drawing both sides.
+///
+/// Geometry is authored in the host's local frame at mount time (see
+/// [`crate::wing_mesh`]): span is the half-span (root→tip of one panel),
+/// chord runs fore/aft along the host body axis, thickness is the airfoil
+/// depth. `dry_mass` is catalog-derived from planform area.
+///
+/// **Extension point (control surfaces).** Per `docs/construction.md`, a
+/// wing's flaps / ailerons / elevators / rudder are planned as *parameters
+/// of the wing*, not separate parts — a trailing-edge chord fraction +
+/// spanwise window + a hinge/deflection descriptor will be added here as
+/// optional fields, so the wing stays one authored unit. Landing gear, by
+/// contrast, will be its own footprint part kind.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Wing {
+    /// Half-span of one panel (host skin → tip), metres.
+    pub span: f32,
+    /// Chord at the root (host skin), metres.
+    pub root_chord: f32,
+    /// Chord at the tip, metres. `< root_chord` for a tapered wing.
+    pub tip_chord: f32,
+    /// Leading-edge sweep, radians. Positive sweeps the tip aft.
+    pub sweep: f32,
+    /// Dihedral, radians. Positive raises the tip above the root.
+    pub dihedral: f32,
+    /// Maximum airfoil thickness as a fraction of local chord (t/c).
+    pub thickness: f32,
+    /// Mounting incidence, radians. Positive pitches the leading edge up.
+    pub incidence: f32,
+    /// Catalog-derived structural mass, kg (= `mass_per_m2` × planform
+    /// area, per panel; a mirrored pair is two entities, each one panel).
+    pub dry_mass: f32,
+}
+
+/// A self-contained landing-gear assembly — a "gearbox" footprint part that
+/// draws *all* of its legs in one mesh, like the wing model drew both panels
+/// in one mesh. This deliberately does **not** use [`crate::SymmetryGroup`]:
+/// `gear_main` houses a left/right main pair internally; `gear_nose` houses a
+/// single centred leg. The editor special-cases the [`crate::CatalogEntry`]
+/// kind so a gear is always placed as a single mount regardless of the Mirror
+/// toggle.
+///
+/// Geometry is authored in the host's local frame (see [`crate::gear_mesh`]):
+/// the strut runs out along the mount radial (toward the belly) from the host
+/// skin, and the wheel hangs at the strut's end with a lateral axle so it rolls
+/// fore/aft. `track_fraction` is the lateral leg spacing as a fraction of the
+/// host radius (0 → a single centred leg); the leg count derives from it.
+/// `dry_mass` is catalog-derived from strut length, wheel mass, and leg count.
+///
+/// **Future** (`docs/construction.md` §4.4): the fuselage will recess-morph to
+/// house the gearbox inside the belly. For now it sits at/below the belly with
+/// no skin deformation.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Gear {
+    /// Length of each strut from the host skin to the wheel, metres.
+    pub strut_length: f32,
+    /// Wheel radius, metres.
+    pub wheel_radius: f32,
+    /// Lateral offset of each main leg as a fraction of the host radius. `0.0`
+    /// means a single centred leg (nose gear); `> 0.0` means a left/right main
+    /// pair at `±track_fraction × host_radius`. Catalog-derived (copied from
+    /// [`crate::GearSpec`] at spawn), so it is fixed per part kind.
+    pub track_fraction: f32,
+    /// Catalog-derived structural mass, kg (struts + wheels for every leg).
+    pub dry_mass: f32,
+}
+
+impl Gear {
+    /// Number of legs this gearbox draws: a left/right main pair when a track
+    /// is set, otherwise a single centred leg. The mesh, mass, and editor
+    /// placement all read leg count from here so they never disagree.
+    pub fn legs(&self) -> u8 {
+        if self.track_fraction > 0.0 { 2 } else { 1 }
+    }
+}
+
 /// Pure geometry — contents live in [`crate::PartResources`]. A tank can
 /// hold any resource; this part does not restrict which. `diameter`
 /// drives node sizing when root; overridden by parent when attached.
@@ -132,6 +216,18 @@ pub struct FuelTank {
     pub diameter: f32,
     pub length: f32,
     pub dry_mass: f32,
+}
+
+/// Ambient-flow capture capability. This is not a stored resource: it is
+/// external flow supplied by the current atmosphere and consumed by engines
+/// that declare an [`IntakeRequirement`].
+#[derive(Component, Debug, Clone)]
+pub struct AirIntake {
+    pub model: String,
+    pub diameter: f32,
+    pub length: f32,
+    pub dry_mass: f32,
+    pub capture: IntakeCapture,
 }
 
 /// A mass fraction of a single reactant relative to the engine's total
@@ -146,6 +242,10 @@ pub struct ReactantRatio {
 #[derive(Component, Debug, Clone)]
 pub struct Engine {
     pub model: String,
+    pub geometry: EngineGeometry,
+    pub requires_atmosphere: bool,
+    pub intake_requirement: Option<IntakeRequirement>,
+    pub builtin_intake: Option<IntakeCapture>,
     pub diameter: f32,
     /// Thrust in vacuum, N.
     pub thrust: f32,

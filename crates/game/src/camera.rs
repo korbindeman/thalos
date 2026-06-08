@@ -4,13 +4,13 @@ use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy_egui::EguiContexts;
 use big_space::prelude::CellCoord;
+use thalos_body_render::rendered_height_m;
+use thalos_body_render::space_camera_post_stack;
 use thalos_input::game::GameInputIntent;
-use thalos_world::{BodyDefinition, BodyId};
 use thalos_physics_canonical::types::BodyState;
 use thalos_physics_local::TerrainSurfaceRegistry;
-use thalos_body_render::space_camera_post_stack;
-use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
-use thalos_body_render::rendered_height_m;
+use thalos_terrain::{DynamicSurfaceState, PlanetSurface, SurfaceRef};
+use thalos_world::{BodyDefinition, BodyId};
 
 /// `tile_lod_m` passed to `rendered_height_m` for the camera boom's
 /// ray-vs-terrain check. The boom rarely runs in tight sub-metre proximity
@@ -667,8 +667,10 @@ fn blocking_surface_height_m(
     dir_body: Vec3,
 ) -> f64 {
     let terrain_height_m = rendered_height_m(
-        surface,
-        dynamic_state,
+        &SurfaceRef {
+            surface,
+            dynamic_state,
+        },
         dir_body,
         CAMERA_HEIGHT_QUERY_TILE_LOD_M,
     ) as f64;

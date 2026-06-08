@@ -18,8 +18,8 @@ use std::sync::{Arc, RwLock};
 
 use bevy::math::{DVec3, Vec3};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
-use thalos_world::BodyId;
 use thalos_terrain::{Cubemap, PlanetSurface, cubemap::dir_to_face_uv};
+use thalos_world::BodyId;
 
 /// Thread-safe registry of baked planet surfaces, keyed by [`BodyId`].
 #[derive(Default, Clone)]

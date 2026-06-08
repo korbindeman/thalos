@@ -35,10 +35,7 @@ use anyhow::Result;
 use bevy::math::{DVec3, UVec2, Vec3};
 use bevy::prelude::*;
 use bevy::tasks::Task;
-use thalos_terrain::{
-    DynamicSurfaceState, PlanetSurface, StaticSurfaceData, surface_height_m,
-    surface_height_range_m, surface_sample,
-};
+use thalos_terrain::SurfaceQuery;
 use thalos_udlod::math::TileCoordinate;
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
@@ -51,23 +48,18 @@ use crate::ground::tile_synthesis_pool::tile_synthesis_pool;
 
 /// `thalos_udlod` `TileProvider` backed by the Thalos synthesis pipeline.
 pub struct PipelineTileProvider {
-    surface: Arc<PlanetSurface>,
-    dynamic_state: DynamicSurfaceState,
-    height_range_m: f32,
+    /// The terrain black box, behind the [`SurfaceQuery`] seam. The provider
+    /// names no generation internals (`PlanetSurface`/`StaticSurfaceData`); the
+    /// construction site supplies a `BakedSurface` (or any future backing) as
+    /// `Arc<dyn SurfaceQuery>`.
+    surface: Arc<dyn SurfaceQuery>,
     body_name: String,
 }
 
 impl PipelineTileProvider {
-    pub fn new(
-        body_name: impl Into<String>,
-        surface: Arc<PlanetSurface>,
-        dynamic_state: DynamicSurfaceState,
-        height_range_m: f32,
-    ) -> Self {
+    pub fn new(body_name: impl Into<String>, surface: Arc<dyn SurfaceQuery>) -> Self {
         Self {
             surface,
-            dynamic_state,
-            height_range_m,
             body_name: body_name.into(),
         }
     }
@@ -77,8 +69,8 @@ impl PipelineTileProvider {
 /// procedural detail headroom. Thin wrapper over the Query API seam
 /// ([`thalos_terrain::surface_height_range_m`]); used by `ground_terrain` to
 /// set up the thalos_udlod `TerrainModel` height bounds.
-pub fn rendered_height_range(surface: &PlanetSurface, state: &DynamicSurfaceState) -> f32 {
-    surface_height_range_m(surface, state)
+pub fn rendered_height_range(surface: &dyn SurfaceQuery) -> f32 {
+    surface.height_range_m()
 }
 
 /// Returns the `tile_lod_m` the renderer currently uses at `world_position`
@@ -121,13 +113,12 @@ impl TileProvider for PipelineTileProvider {
         attachments: &[AttachmentConfig],
     ) -> Task<Result<Vec<AttachmentData>>> {
         let surface = self.surface.clone();
-        let dynamic_state = self.dynamic_state.clone();
-        let height_range_m = self.height_range_m;
         let model = model.clone();
         let attachments: Vec<AttachmentConfig> = attachments.to_vec();
         let body_name = self.body_name.clone();
 
         tile_synthesis_pool().spawn(async move {
+            let height_range_m = surface.height_range_m();
             // All requested attachments share the same per-pixel evaluation,
             // so resolve the largest texture size once, evaluate, then encode
             // each attachment from the shared buffer. Different sizes would
@@ -146,7 +137,7 @@ impl TileProvider for PipelineTileProvider {
                  the same texture_size and border_size",
             );
 
-            let pixels = compute_tile_pixels(&surface, &dynamic_state, coord, &model, size, border);
+            let pixels = compute_tile_pixels(surface.as_ref(), coord, &model, size, border);
 
             let mut datas = Vec::with_capacity(attachments.len());
             for cfg in &attachments {
@@ -173,15 +164,13 @@ struct TilePixel {
 }
 
 fn compute_tile_pixels(
-    surface: &PlanetSurface,
-    dynamic_state: &DynamicSurfaceState,
+    surface: &dyn SurfaceQuery,
     coord: TileCoordinate,
     model: &TerrainModel,
     size: u32,
     border: u32,
 ) -> Vec<TilePixel> {
-    let body = &surface.static_surface;
-    let tile_lod_m = tile_lod_m(body, coord, size, border);
+    let tile_lod_m = tile_lod_m(surface.radius_m(), coord, size, border);
 
     let count = (size * size) as usize;
     let mut pixels = vec![TilePixel::default(); count];
@@ -189,7 +178,7 @@ fn compute_tile_pixels(
     for (y, row) in pixels.chunks_mut(size as usize).enumerate() {
         for (x, pixel) in row.iter_mut().enumerate() {
             let dir = pixel_direction(coord, UVec2::new(x as u32, y as u32), size, border, model);
-            let sample = surface_sample(surface, dynamic_state, dir, tile_lod_m);
+            let sample = surface.sample_d(dir, tile_lod_m);
             *pixel = TilePixel {
                 height_m: sample.height_m,
                 albedo_linear: sample.albedo_linear,
@@ -215,17 +204,12 @@ fn compute_tile_pixels(
 /// Pass a small `tile_lod_m` (e.g. `0.5`) for full procedural detail near the
 /// camera; pass the patch's vertex spacing when building a coarser collider
 /// mesh so the mesh resolution matches the represented detail.
-pub fn rendered_height_m(
-    surface: &PlanetSurface,
-    dynamic_state: &DynamicSurfaceState,
-    dir: Vec3,
-    tile_lod_m: f32,
-) -> f32 {
-    // f32-direction convenience for the trait/physics callers (camera ray-casts,
-    // HUD altitude, spawn-site search, the CPU height-source fallback). Near the
+pub fn rendered_height_m(surface: &dyn SurfaceQuery, dir: Vec3, tile_lod_m: f32) -> f32 {
+    // f32-direction convenience for the physics callers (camera ray-casts, HUD
+    // altitude, spawn-site search, the CPU height-source fallback). Near the
     // player these read the resident atlas via the GPU mirror, which carries the
     // f64-precise heights baked above; this CPU path is the far/coarse fallback.
-    surface_height_m(surface, dynamic_state, dir.as_dvec3(), tile_lod_m)
+    surface.sample_height_m(dir, tile_lod_m)
 }
 
 fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32) {
@@ -354,15 +338,10 @@ fn encode_attachment(
 // Tile-coordinate helpers
 // ---------------------------------------------------------------------------
 
-fn tile_lod_m(
-    body: &StaticSurfaceData,
-    coord: TileCoordinate,
-    texture_size: u32,
-    border_size: u32,
-) -> f32 {
+fn tile_lod_m(radius_m: f32, coord: TileCoordinate, texture_size: u32, border_size: u32) -> f32 {
     let inner_texels = texture_size.saturating_sub(border_size * 2).max(1);
     let face_radians = std::f32::consts::FRAC_PI_2 / TileCoordinate::count(coord.lod).max(1) as f32;
-    (body.radius_m * face_radians / inner_texels as f32).max(1.0)
+    (radius_m * face_radians / inner_texels as f32).max(1.0)
 }
 
 fn encode_height(height_m: f32, range: f32) -> u16 {

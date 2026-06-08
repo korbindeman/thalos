@@ -267,7 +267,9 @@ fn active_nav_basis(
 /// [`NavigationMode::ManeuverNode`] pointing target) and the burn-
 /// directive publisher's direction calculation.
 pub(crate) fn maneuver_burn_direction(sim: &Simulation, plan: &ManeuverPlan) -> Option<DVec3> {
-    maneuver_node_burn_direction(sim, plan.nodes.first()?)
+    // Point at the next burn the autopilot would fly — a still-planned or
+    // currently-executing node — never a spent one lingering for display.
+    maneuver_node_burn_direction(sim, plan.nodes.iter().find(|n| n.drives_directive())?)
 }
 
 /// World-frame unit vector pointing along a maneuver node's Δv.

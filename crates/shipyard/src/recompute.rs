@@ -11,10 +11,12 @@
 //! mutation re-firing the filter on the next frame), we only call
 //! `DerefMut` when a value actually differs by more than a small epsilon.
 
+use crate::blueprint::storage_capacity_for;
 use crate::catalog::{
-    CatalogEntry, CatalogRef, PartCatalog, adapter_surface_area, tank_surface_area, tank_volume,
+    CatalogEntry, CatalogRef, PartCatalog, adapter_surface_area, gear_dry_mass, tank_surface_area,
+    wing_panel_area,
 };
-use crate::part::{Adapter, Decoupler, FuelTank};
+use crate::part::{Adapter, Decoupler, FuelTank, Gear, Wing};
 use crate::resource::{PartResources, Resource};
 use bevy::prelude::*;
 
@@ -77,9 +79,81 @@ pub fn recompute_tank_state(
             tank.dry_mass = new_mass;
         }
 
-        let v = tank_volume(tank.diameter, tank.length);
-        rescale_pool(&mut res, Resource::Methane, t.methane_l_per_m3 * v);
-        rescale_pool(&mut res, Resource::Lox, t.lox_l_per_m3 * v);
+        let params = crate::PartParams::Tank {
+            diameter: tank.diameter,
+            length: tank.length,
+        };
+        res.pools
+            .retain(|resource, _| t.storage.iter().any(|option| option.resource == *resource));
+        for option in &t.storage {
+            if res.pools.contains_key(&option.resource) {
+                rescale_pool(
+                    &mut res,
+                    option.resource,
+                    storage_capacity_for(&CatalogEntry::Tank(t.clone()), &params, option),
+                );
+            }
+        }
+    }
+}
+
+/// Wing dry mass tracks planform area as the inspector edits span / chords;
+/// a wet wing's fuel capacity tracks its internal volume the same way a
+/// tank's does. Single-panel mass — a mirrored mount doubles it at
+/// aggregation time, so this system stays symmetry-agnostic.
+pub fn recompute_wing_state(
+    catalog: Option<Res<PartCatalog>>,
+    mut q: Query<(&CatalogRef, &mut Wing, &mut PartResources), Changed<Wing>>,
+) {
+    let Some(catalog) = catalog else { return };
+    for (cat_ref, mut wing, mut res) in q.iter_mut() {
+        let Ok(CatalogEntry::Wing(w)) = catalog.resolve(&cat_ref.id) else {
+            continue;
+        };
+        let new_mass = w.mass_per_m2 * wing_panel_area(wing.span, wing.root_chord, wing.tip_chord);
+        if (wing.dry_mass - new_mass).abs() > EPS {
+            wing.dry_mass = new_mass;
+        }
+
+        let params = crate::PartParams::Wing {
+            span: wing.span,
+            root_chord: wing.root_chord,
+            tip_chord: wing.tip_chord,
+            sweep: wing.sweep,
+            dihedral: wing.dihedral,
+            thickness: wing.thickness,
+            incidence: wing.incidence,
+        };
+        res.pools
+            .retain(|resource, _| w.storage.iter().any(|option| option.resource == *resource));
+        for option in &w.storage {
+            if res.pools.contains_key(&option.resource) {
+                rescale_pool(
+                    &mut res,
+                    option.resource,
+                    storage_capacity_for(&CatalogEntry::Wing(w.clone()), &params, option),
+                );
+            }
+        }
+    }
+}
+
+/// Gear dry mass tracks strut length (and the fixed wheel mass × leg count) as
+/// the inspector edits the strut. Symmetry-agnostic like the wing recompute —
+/// the gearbox already accounts for both legs via the catalog's `track_fraction`.
+pub fn recompute_gear_state(
+    catalog: Option<Res<PartCatalog>>,
+    mut q: Query<(&CatalogRef, &mut Gear), Changed<Gear>>,
+) {
+    let Some(catalog) = catalog else { return };
+    for (cat_ref, mut gear) in q.iter_mut() {
+        let Ok(CatalogEntry::Gear(g)) = catalog.resolve(&cat_ref.id) else {
+            continue;
+        };
+        let new_mass = gear_dry_mass(g, gear.strut_length);
+        if (gear.dry_mass - new_mass).abs() > EPS {
+            gear.dry_mass = new_mass;
+        }
     }
 }
 

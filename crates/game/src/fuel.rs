@@ -6,7 +6,8 @@
 //! between that abstract throttle and the ECS-side per-tank reactant
 //! state in [`PartResources`]:
 //!
-//! 1. Sample keyboard (Shift/Ctrl/Z/X, KSP convention) into
+//! 1. Sample player throttle input (absolute HOTAS axis when configured,
+//!    otherwise Shift/Ctrl/Z/X, KSP convention) into
 //!    [`ThrottleState::commanded`]. The scheduled-burn autopilot
 //!    (`crates/game/src/autopilot.rs`) writes the same field while
 //!    flying a scheduled directive — programmatic and manual control
@@ -33,9 +34,11 @@ use std::collections::{HashMap, VecDeque};
 
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
+use thalos_physics_canonical::canonical::Epoch;
 use thalos_shipyard::{
-    Adapter, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelCrossfeed, FuelTank,
-    G0, Part, PartResources, Resource,
+    Adapter, AirIntake, AmbientIntakeKind, Attachment, CommandPod, Decoupler, Engine,
+    EngineActivation, FuelCrossfeed, FuelTank, G0, IntakeCapture, Part,
+    PartResources, Resource, SurfaceMount,
 };
 
 use crate::SimStage;
@@ -51,6 +54,7 @@ use crate::sim_clock::SimClock;
 pub struct ActiveEngineFlow {
     pub entity: Entity,
     pub mass_flow_kg_per_s: f64,
+    pub thrust_scale: f64,
     pub reactants: Vec<(Resource, f64)>,
 }
 
@@ -85,8 +89,8 @@ pub(crate) struct LastBurnRecipe {
     engines: Vec<ActiveEngineFlow>,
 }
 
-/// Player throttle state, persisted across frames so Shift/Ctrl can
-/// ramp continuously.
+/// Player throttle state, persisted across frames so Shift/Ctrl can ramp
+/// continuously and absolute HOTAS axes can publish a stable command.
 ///
 /// `commanded` is what the player asked for; `effective` is what was
 /// actually applied this frame after the fuel-availability cap (the
@@ -185,8 +189,9 @@ fn finish_with_throttle(
     refresh.prev_effective = effective;
 }
 
-/// Sample keyboard → [`ThrottleState::commanded`].
+/// Sample player input → [`ThrottleState::commanded`].
 ///
+/// - HOTAS absolute axis, when present, directly sets the command
 /// - `Z` snaps to full
 /// - `X` snaps to zero
 /// - `Shift` (held) ramps up
@@ -203,6 +208,11 @@ pub fn handle_throttle_input(
     mut throttle: ResMut<ThrottleState>,
 ) {
     if locks.throttle {
+        return;
+    }
+
+    if let Some(throttle_absolute) = input.throttle_absolute {
+        throttle.commanded = throttle_absolute.clamp(0.0, 1.0) as f64;
         return;
     }
 
@@ -233,6 +243,8 @@ type DryMassQuery<'w, 's> = Query<
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
         Option<&'static Engine>,
+        Option<&'static AirIntake>,
+        Option<&'static SurfaceMount>,
     ),
     With<Part>,
 >;
@@ -243,8 +255,10 @@ fn part_dry_mass_kg(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     engine: Option<&Engine>,
+    intake: Option<&AirIntake>,
+    surface_mount: Option<&SurfaceMount>,
 ) -> f64 {
-    if let Some(pod) = pod {
+    let dry = if let Some(pod) = pod {
         pod.dry_mass as f64
     } else if let Some(dec) = dec {
         dec.dry_mass as f64
@@ -254,9 +268,55 @@ fn part_dry_mass_kg(
         tank.dry_mass as f64
     } else if let Some(engine) = engine {
         engine.dry_mass as f64
+    } else if let Some(intake) = intake {
+        intake.dry_mass as f64
     } else {
         0.0
+    };
+    dry * surface_multiplier(surface_mount)
+}
+
+fn surface_multiplier(_surface_mount: Option<&SurfaceMount>) -> f64 {
+    // KSP symmetry: each mirror counterpart is its own part, counted once.
+    1.0
+}
+
+fn surface_multiplier_for_entity(entity: Entity, parts: &DryMassQuery<'_, '_>) -> f64 {
+    parts
+        .get(entity)
+        .map(|(_, _, _, _, _, _, surface_mount)| surface_multiplier(surface_mount))
+        .unwrap_or(1.0)
+}
+
+fn add_intake_capture(
+    available: &mut HashMap<AmbientIntakeKind, f64>,
+    capture: IntakeCapture,
+    multiplier: f64,
+) {
+    if capture.area_m2 <= 0.0 || capture.efficiency <= 0.0 {
+        return;
     }
+    *available.entry(capture.kind).or_default() +=
+        capture.area_m2 as f64 * capture.efficiency as f64 * multiplier;
+}
+
+fn ship_in_atmosphere(sim: &SimulationState) -> bool {
+    let body_id = sim.simulation.dominant_body();
+    let Some(body) = sim.system.bodies.get(body_id) else {
+        return false;
+    };
+    let Some(atmosphere) = body.terrestrial_atmosphere.as_ref() else {
+        return false;
+    };
+    if atmosphere.karman_line_m <= 0.0 {
+        return false;
+    }
+    let body_pos = sim
+        .ephemeris
+        .state(body_id, Epoch(sim.simulation.sim_time()))
+        .position;
+    let altitude = (sim.simulation.ship_state().position - body_pos).length() - body.radius_m;
+    altitude >= 0.0 && altitude <= atmosphere.karman_line_m as f64
 }
 
 fn propulsion_config_changed(prev: &ActivePropulsion, next: &ActivePropulsion) -> bool {
@@ -281,12 +341,15 @@ fn refresh_active_propulsion(
     mut sim: ResMut<SimulationState>,
     mut active: ResMut<ActivePropulsion>,
     engines: Query<(Entity, &Engine, Option<&EngineActivation>)>,
+    intakes: Query<(Entity, &AirIntake, Option<&SurfaceMount>)>,
     parts: DryMassQuery,
     resources: Query<&PartResources>,
 ) {
     let dry_mass_kg: f64 = parts
         .iter()
-        .map(|(pod, dec, adapter, tank, engine)| part_dry_mass_kg(pod, dec, adapter, tank, engine))
+        .map(|(pod, dec, adapter, tank, engine, intake, surface_mount)| {
+            part_dry_mass_kg(pod, dec, adapter, tank, engine, intake, surface_mount)
+        })
         .sum();
 
     let resource_mass_kg: f64 = resources
@@ -301,6 +364,32 @@ fn refresh_active_propulsion(
     let mut per_resource_mdot: HashMap<Resource, f64> = HashMap::new();
     let mut active_engines = Vec::new();
 
+    let atmosphere_available = ship_in_atmosphere(&sim);
+    let mut intake_available: HashMap<AmbientIntakeKind, f64> = HashMap::new();
+    if atmosphere_available {
+        for (_, intake, surface_mount) in intakes.iter() {
+            add_intake_capture(
+                &mut intake_available,
+                intake.capture,
+                surface_multiplier(surface_mount),
+            );
+        }
+        for (entity, engine, activation) in engines.iter() {
+            if !activation.map(|a| a.enabled).unwrap_or(true) {
+                continue;
+            }
+            let Some(capture) = engine.builtin_intake else {
+                continue;
+            };
+            add_intake_capture(
+                &mut intake_available,
+                capture,
+                surface_multiplier_for_entity(entity, &parts),
+            );
+        }
+    }
+
+    let mut intake_demand: HashMap<AmbientIntakeKind, f64> = HashMap::new();
     for (entity, engine, activation) in engines.iter() {
         if !activation.map(|a| a.enabled).unwrap_or(true) {
             continue;
@@ -308,8 +397,49 @@ fn refresh_active_propulsion(
         if engine.thrust <= 0.0 || engine.isp <= 0.0 {
             continue;
         }
+        if let Some(requirement) = engine.intake_requirement {
+            *intake_demand.entry(requirement.kind).or_default() +=
+                requirement.area_m2 as f64 * surface_multiplier_for_entity(entity, &parts);
+        }
+    }
+    let intake_scale_by_kind: HashMap<AmbientIntakeKind, f64> = intake_demand
+        .iter()
+        .map(|(&kind, &demand)| {
+            let available = intake_available.get(&kind).copied().unwrap_or(0.0);
+            let scale = if demand > 0.0 {
+                (available / demand).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            (kind, scale)
+        })
+        .collect();
 
-        let thrust_n = engine.thrust as f64;
+    for (entity, engine, activation) in engines.iter() {
+        if !activation.map(|a| a.enabled).unwrap_or(true) {
+            continue;
+        }
+        if engine.requires_atmosphere && !atmosphere_available {
+            continue;
+        }
+        if engine.thrust <= 0.0 || engine.isp <= 0.0 {
+            continue;
+        }
+
+        let multiplier = surface_multiplier_for_entity(entity, &parts);
+        let intake_scale = engine
+            .intake_requirement
+            .map(|requirement| {
+                intake_scale_by_kind
+                    .get(&requirement.kind)
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+            .unwrap_or(1.0);
+        if intake_scale <= 0.0 {
+            continue;
+        }
+        let thrust_n = engine.thrust as f64 * multiplier * intake_scale;
         let mdot = thrust_n / (engine.isp as f64 * G0);
 
         let reactants: Vec<(Resource, f64)> = engine
@@ -328,11 +458,12 @@ fn refresh_active_propulsion(
 
         total_thrust_n += thrust_n;
         mass_flow_kg_per_s += mdot;
-        power_draw_kw += engine.power_draw_kw as f64;
+        power_draw_kw += engine.power_draw_kw as f64 * multiplier;
 
         active_engines.push(ActiveEngineFlow {
             entity,
             mass_flow_kg_per_s: mdot,
+            thrust_scale: intake_scale,
             reactants,
         });
     }
@@ -376,18 +507,16 @@ fn crossfeed_enabled(entity: Entity, crossfeeds: &Query<&FuelCrossfeed>) -> bool
 
 fn crossfeed_components(
     attachments: &Query<(Entity, &Attachment)>,
+    surface_mounts: &Query<(Entity, &SurfaceMount)>,
     crossfeeds: &Query<&FuelCrossfeed>,
 ) -> HashMap<Entity, usize> {
     let mut adjacency: HashMap<Entity, Vec<Entity>> = HashMap::new();
 
     for (child, attachment) in attachments.iter() {
-        let parent = attachment.parent;
-        adjacency.entry(child).or_default();
-        adjacency.entry(parent).or_default();
-        if crossfeed_enabled(child, crossfeeds) && crossfeed_enabled(parent, crossfeeds) {
-            adjacency.entry(child).or_default().push(parent);
-            adjacency.entry(parent).or_default().push(child);
-        }
+        add_crossfeed_edge(child, attachment.parent, crossfeeds, &mut adjacency);
+    }
+    for (child, mount) in surface_mounts.iter() {
+        add_crossfeed_edge(child, mount.parent, crossfeeds, &mut adjacency);
     }
 
     let mut component_by_entity = HashMap::new();
@@ -417,6 +546,20 @@ fn crossfeed_components(
     }
 
     component_by_entity
+}
+
+fn add_crossfeed_edge(
+    child: Entity,
+    parent: Entity,
+    crossfeeds: &Query<&FuelCrossfeed>,
+    adjacency: &mut HashMap<Entity, Vec<Entity>>,
+) {
+    adjacency.entry(child).or_default();
+    adjacency.entry(parent).or_default();
+    if crossfeed_enabled(child, crossfeeds) && crossfeed_enabled(parent, crossfeeds) {
+        adjacency.entry(child).or_default().push(parent);
+        adjacency.entry(parent).or_default().push(child);
+    }
 }
 
 fn component_for(entity: Entity, components: &HashMap<Entity, usize>) -> usize {
@@ -523,6 +666,7 @@ fn reconcile_tanks_from_sim_drain(
     last_burn: Res<LastBurnRecipe>,
     mut tanks: Query<(Entity, &mut PartResources)>,
     attachments: Query<(Entity, &Attachment)>,
+    surface_mounts: Query<(Entity, &SurfaceMount)>,
     crossfeeds: Query<&FuelCrossfeed>,
     mut prev_sim_mass: Local<Option<f64>>,
 ) {
@@ -543,7 +687,7 @@ fn reconcile_tanks_from_sim_drain(
         return;
     }
 
-    let components = crossfeed_components(&attachments, &crossfeeds);
+    let components = crossfeed_components(&attachments, &surface_mounts, &crossfeeds);
     let requests = engine_resource_requests(
         &last_burn.engines,
         &components,
@@ -570,6 +714,7 @@ pub fn gate_throttle_on_fuel_availability(
     mut throttle: ResMut<ThrottleState>,
     tanks: Query<(Entity, &PartResources)>,
     attachments: Query<(Entity, &Attachment)>,
+    surface_mounts: Query<(Entity, &SurfaceMount)>,
     crossfeeds: Query<&FuelCrossfeed>,
     mut last_burn: ResMut<LastBurnRecipe>,
     mut refresh: Local<PredictionRefresh>,
@@ -578,7 +723,7 @@ pub fn gate_throttle_on_fuel_availability(
     let real_dt = clock.delta_secs_f64();
 
     // A destroyed craft can't burn — force throttle to zero so the HUD arc
-    // and canonical throttle both read inert. See `docs/landing.md`.
+    // and canonical throttle both read inert. See `docs/surface.md`.
     if sim.simulation.is_destroyed() {
         last_burn.engines.clear();
         finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh);
@@ -604,7 +749,7 @@ pub fn gate_throttle_on_fuel_availability(
         return;
     }
 
-    let components = crossfeed_components(&attachments, &crossfeeds);
+    let components = crossfeed_components(&attachments, &surface_mounts, &crossfeeds);
     let available = resource_mass_by_component(&tanks, &components);
     let requests =
         engine_resource_requests(&active.engines, &components, throttle_in_use * drain_dt);
@@ -658,6 +803,7 @@ mod tests {
         let engines = vec![ActiveEngineFlow {
             entity: engine,
             mass_flow_kg_per_s: 10.0,
+            thrust_scale: 1.0,
             reactants: vec![(Resource::Methane, 0.25), (Resource::Lox, 0.75)],
         }];
 

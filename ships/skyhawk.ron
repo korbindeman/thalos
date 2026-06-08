@@ -1,0 +1,61 @@
+// Skyhawk — a basic demo aircraft for the parametric-wing + jet-nacelle
+// slices. Built like any vessel: a nose-up fuselage stack (pod + kerosene
+// tank), three lifting surfaces, and a Mistral jet nacelle under each main
+// wing. There is no flight model yet, so this is a shape and resource/loadout
+// demo, not a flyer. Load it in the shipyard (`just shipyard`) to edit.
+//
+// KSP-style symmetry: a mirrored pair is two real parts sharing a
+// `symmetry_group` id (the lowest child index is the primary; the editor
+// keeps the counterpart in lockstep). A nacelle mounted on a mirrored wing is
+// its own pair, one per wing. `angle` is radians: π/2 (≈1.5708) = right side,
+// −π/2 = left, 0 = dorsal (top).
+(
+    name: "Skyhawk",
+    root: 0,
+    parts: [
+        (catalog_id: "argos"),                                              // 0 nose
+        (catalog_id: "tank_kerosene", params: Tank(diameter: 2.5, length: 6.0)), // 1 fuselage
+        (catalog_id: "wing_std", params: Wing(                             // 2 main wing R
+            span: 6.0, root_chord: 2.5, tip_chord: 1.0,
+            sweep: 0.35, dihedral: 0.05, thickness: 0.12, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 3 main wing L
+            span: 6.0, root_chord: 2.5, tip_chord: 1.0,
+            sweep: 0.35, dihedral: 0.05, thickness: 0.12, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 4 tailplane R
+            span: 2.0, root_chord: 1.2, tip_chord: 0.6,
+            sweep: 0.4, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 5 tailplane L
+            span: 2.0, root_chord: 1.2, tip_chord: 0.6,
+            sweep: 0.4, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 6 vertical fin
+            span: 1.6, root_chord: 1.4, tip_chord: 0.6,
+            sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "mistral_jet"),                                        // 7 nacelle R
+        (catalog_id: "mistral_jet"),                                        // 8 nacelle L
+        // Tricycle landing gear — a matched light set (1.25 + 0.30 = 1.55 m
+        // drop equals 1.20 + 0.35), so the aircraft sits level. Belly-mounted
+        // (angle π). These are functional wheels: raycast suspension + grip +
+        // nosewheel steer + brake (see crates/game/src/local_physics.rs).
+        (catalog_id: "gear_nose", params: Gear(strut_length: 1.25, wheel_radius: 0.30)), // 9 nose gear
+        (catalog_id: "gear_main", params: Gear(strut_length: 1.20, wheel_radius: 0.35)), // 10 main gear
+    ],
+    connections: [
+        (parent: 0, parent_node: "bottom", child: 1, child_node: "top"),
+    ],
+    surface_mounts: [
+        (parent: 1, child: 2, station: 0.45, angle:  1.5708, symmetry_group: Some(0)), // main wing R
+        (parent: 1, child: 3, station: 0.45, angle: -1.5708, symmetry_group: Some(0)), // main wing L
+        (parent: 1, child: 4, station: 0.9,  angle:  1.5708, symmetry_group: Some(1)), // tailplane R
+        (parent: 1, child: 5, station: 0.9,  angle: -1.5708, symmetry_group: Some(1)), // tailplane L
+        (parent: 1, child: 6, station: 0.9,  angle:  0.0),                             // fin (single)
+        (parent: 2, child: 7, kind: WingPylon, station: 0.45, angle: -0.05, symmetry_group: Some(2)), // nacelle R
+        (parent: 3, child: 8, kind: WingPylon, station: 0.45, angle: -0.05, symmetry_group: Some(2)), // nacelle L
+        (parent: 1, child: 9,  station: 0.15, angle: 3.14159),                         // nose gear (belly, forward)
+        (parent: 1, child: 10, station: 0.60, angle: 3.14159),                         // main gear (belly, aft of CoM)
+    ],
+)

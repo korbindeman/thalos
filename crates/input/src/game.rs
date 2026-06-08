@@ -3,7 +3,7 @@ use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
 
-use crate::settings::InputSettings;
+use crate::settings::{HotasAxisBinding, HotasDeviceSelector, InputSettings};
 
 #[derive(Component)]
 pub struct GameInputController;
@@ -83,6 +83,10 @@ pub struct ThrottleCutAction;
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct StageAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct WheelBrakeAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
@@ -198,8 +202,13 @@ pub struct GameInputIntent {
     pub throttle_cut: bool,
     /// Edge-triggered: the player advanced to the next stage this frame.
     pub stage: bool,
+    /// Held: the player is holding the wheel brake (ground taxi / rollout).
+    pub wheel_brake: bool,
     pub throttle_up: bool,
     pub throttle_down: bool,
+    /// Absolute HOTAS throttle command in `[0, 1]`. `None` leaves the
+    /// frame to the discrete keyboard ramp/full/cut controls.
+    pub throttle_absolute: Option<f32>,
     pub attitude: Vec3,
     pub toggle_view: bool,
     pub toggle_photo_mode: bool,
@@ -254,6 +263,7 @@ impl Plugin for GameInputPlugin {
                     collect_player_controller_intent,
                     collect_maneuver_intent,
                     collect_precision_intent,
+                    collect_hotas_intent,
                 )
                     .chain()
                     .after(EnhancedInputSystems::Apply),
@@ -337,6 +347,11 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<StageAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.flight.bindings("stage")),
+            ),
+            (
+                Action::<WheelBrakeAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.flight.bindings("wheel_brake")),
             ),
             (
                 Action::<PitchPositiveAction>::new(),
@@ -584,7 +599,9 @@ fn collect_throttle_axis_intent(
     keys: Res<ButtonInput<KeyCode>>,
     throttle_up: Query<&Action<ThrottleRampPositiveAction>>,
     throttle_down: Query<&Action<ThrottleRampNegativeAction>>,
+    wheel_brake: Query<&Action<WheelBrakeAction>>,
 ) {
+    intent.wheel_brake = held(&wheel_brake);
     // Keep Shift/Ctrl available as throttle controls during normal flight, but
     // do not let OS command chords like cmd+shift-click or cmd+shift+2 leak
     // into gameplay as throttle input.
@@ -661,6 +678,37 @@ fn collect_precision_intent(
     intent.precision_ultra = held(&ultra);
 }
 
+fn collect_hotas_intent(
+    mut intent: ResMut<GameInputIntent>,
+    settings: Res<InputSettings>,
+    flight: Query<&ContextActivity<GameFlightContext>>,
+    gamepads: Query<(&Gamepad, Option<&Name>)>,
+) {
+    let hotas = &settings.game.hotas;
+    if !hotas.enabled {
+        return;
+    }
+    let flight_active = flight.single().map(|activity| **activity).unwrap_or(false);
+    if !flight_active {
+        return;
+    }
+
+    if let Some(value) = hotas_axis_value(hotas.axis("pitch"), &hotas.device, &gamepads) {
+        intent.attitude.x = merge_hotas_axis(intent.attitude.x, value);
+    }
+    if let Some(value) = hotas_axis_value(hotas.axis("roll"), &hotas.device, &gamepads) {
+        intent.attitude.y = merge_hotas_axis(intent.attitude.y, value);
+    }
+    if let Some(value) = hotas_axis_value(hotas.axis("yaw"), &hotas.device, &gamepads) {
+        intent.attitude.z = merge_hotas_axis(intent.attitude.z, value);
+    }
+    if let Some(binding) = hotas.axis("throttle")
+        && let Some(raw) = hotas_axis_raw(binding, &hotas.device, &gamepads)
+    {
+        intent.throttle_absolute = Some(hotas_throttle_value(raw, binding));
+    }
+}
+
 fn started<A: InputAction<Output = bool>>(query: &Query<(&Action<A>, &ActionEvents)>) -> bool {
     query
         .single()
@@ -701,18 +749,93 @@ fn vec2<A: InputAction<Output = Vec2>>(query: &Query<&Action<A>>) -> Vec2 {
     query.single().map(|action| **action).unwrap_or(Vec2::ZERO)
 }
 
+fn hotas_axis_value(
+    binding: Option<&HotasAxisBinding>,
+    default_device: &HotasDeviceSelector,
+    gamepads: &Query<(&Gamepad, Option<&Name>)>,
+) -> Option<f32> {
+    let binding = binding?;
+    hotas_axis_raw(binding, default_device, gamepads).map(|raw| hotas_signed_value(raw, binding))
+}
+
+fn hotas_axis_raw(
+    binding: &HotasAxisBinding,
+    default_device: &HotasDeviceSelector,
+    gamepads: &Query<(&Gamepad, Option<&Name>)>,
+) -> Option<f32> {
+    let selector = binding.device.as_ref().unwrap_or(default_device);
+    gamepads
+        .iter()
+        .find(|(gamepad, name)| hotas_device_matches(selector, gamepad, *name))
+        .and_then(|(gamepad, _)| gamepad.get(binding.axis))
+}
+
+fn hotas_device_matches(
+    selector: &HotasDeviceSelector,
+    gamepad: &Gamepad,
+    name: Option<&Name>,
+) -> bool {
+    match selector {
+        HotasDeviceSelector::Any => true,
+        HotasDeviceSelector::NameContains(needle) => name
+            .map(|name| {
+                name.as_str()
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase())
+            })
+            .unwrap_or(false),
+        HotasDeviceSelector::Usb {
+            vendor_id,
+            product_id,
+        } => {
+            gamepad.vendor_id() == Some(*vendor_id)
+                && product_id.map_or(true, |id| gamepad.product_id() == Some(id))
+        }
+    }
+}
+
+fn hotas_unit_value(raw: f32, binding: &HotasAxisBinding) -> f32 {
+    ((raw - binding.min) / (binding.max - binding.min)).clamp(0.0, 1.0)
+}
+
+fn hotas_signed_value(raw: f32, binding: &HotasAxisBinding) -> f32 {
+    let mut value = hotas_unit_value(raw, binding) * 2.0 - 1.0;
+    if binding.invert {
+        value = -value;
+    }
+    let magnitude = value.abs();
+    if magnitude <= binding.deadzone {
+        0.0
+    } else {
+        value.signum() * ((magnitude - binding.deadzone) / (1.0 - binding.deadzone)).min(1.0)
+    }
+}
+
+fn hotas_throttle_value(raw: f32, binding: &HotasAxisBinding) -> f32 {
+    let value = hotas_unit_value(raw, binding);
+    if binding.invert { 1.0 - value } else { value }
+}
+
+fn merge_hotas_axis(current: f32, hotas: f32) -> f32 {
+    if hotas.abs() > 1.0e-4 { hotas } else { current }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::input::InputPlugin;
     use bevy::prelude::*;
 
     use super::*;
-    use crate::settings::InputSettings;
+    use crate::settings::{HotasAxisBinding, InputSettings};
 
     fn input_app() -> App {
+        input_app_with_settings(InputSettings::default())
+    }
+
+    fn input_app_with_settings(settings: InputSettings) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, InputPlugin))
-            .insert_resource(InputSettings::default())
+            .insert_resource(settings)
             .add_plugins(GameInputPlugin);
         app.finish();
         app.cleanup();
@@ -741,6 +864,54 @@ mod tests {
         app.world_mut()
             .entity_mut(entity)
             .insert(ContextActivity::<GameManeuverPrecisionContext>::new(active));
+    }
+
+    fn set_flight_context(app: &mut App, active: bool) {
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<GameFlightContext>>()
+            .single(app.world())
+            .expect("flight context should exist");
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(ContextActivity::<GameFlightContext>::new(active));
+    }
+
+    fn hotas_binding(axis: GamepadAxis) -> HotasAxisBinding {
+        HotasAxisBinding {
+            axis,
+            device: None,
+            invert: false,
+            deadzone: 0.0,
+            min: -1.0,
+            max: 1.0,
+        }
+    }
+
+    fn hotas_settings() -> InputSettings {
+        let mut settings = InputSettings::default();
+        settings.game.hotas.enabled = true;
+        settings.game.hotas.axes.insert(
+            "pitch".to_string(),
+            HotasAxisBinding {
+                invert: true,
+                ..hotas_binding(GamepadAxis::LeftStickY)
+            },
+        );
+        settings
+            .game
+            .hotas
+            .axes
+            .insert("throttle".to_string(), hotas_binding(GamepadAxis::LeftZ));
+        settings
+    }
+
+    fn spawn_gamepad_with_axes(app: &mut App, axes: impl IntoIterator<Item = (GamepadAxis, f32)>) {
+        let mut gamepad = Gamepad::default();
+        for (axis, value) in axes {
+            gamepad.analog_mut().set(axis, value);
+        }
+        app.world_mut().spawn((Name::new("Test HOTAS"), gamepad));
     }
 
     #[test]
@@ -820,5 +991,48 @@ mod tests {
             Vec2::new(0.0, 1.0),
             "KeyW with active EVA move context should produce forward axis",
         );
+    }
+
+    #[test]
+    fn hotas_axes_feed_attitude_and_absolute_throttle() {
+        let mut app = input_app_with_settings(hotas_settings());
+        spawn_gamepad_with_axes(
+            &mut app,
+            [(GamepadAxis::LeftStickY, -0.5), (GamepadAxis::LeftZ, 0.25)],
+        );
+
+        app.update();
+
+        let intent = app.world().resource::<GameInputIntent>();
+        assert_eq!(intent.attitude.x, 0.5);
+        assert_eq!(intent.throttle_absolute, Some(0.625));
+    }
+
+    #[test]
+    fn centered_hotas_axis_does_not_clear_keyboard_attitude() {
+        let mut app = input_app_with_settings(hotas_settings());
+        spawn_gamepad_with_axes(&mut app, [(GamepadAxis::LeftStickY, 0.0)]);
+
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+
+        let intent = app.world().resource::<GameInputIntent>();
+        assert_eq!(intent.attitude.x, 1.0);
+    }
+
+    #[test]
+    fn hotas_axes_follow_flight_context_activity() {
+        let mut app = input_app_with_settings(hotas_settings());
+        spawn_gamepad_with_axes(
+            &mut app,
+            [(GamepadAxis::LeftStickY, -0.5), (GamepadAxis::LeftZ, 1.0)],
+        );
+        set_flight_context(&mut app, false);
+
+        app.update();
+
+        let intent = app.world().resource::<GameInputIntent>();
+        assert_eq!(intent.attitude, Vec3::ZERO);
+        assert_eq!(intent.throttle_absolute, None);
     }
 }

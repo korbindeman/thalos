@@ -151,7 +151,11 @@ impl AtmosphereBlock {
                 atmos.karman_line_m.max(0.0) * inv_m,
                 h_m_m * inv_m,
                 sc.strength.max(0.0),
-                0.0,
+                // w: multiple-scattering gain (artistic horizon blue-fill),
+                // applied on top of `strength` in the ground multiscatter pass.
+                // Was reserved; the ozone band (the prior plan for w) is still
+                // unimplemented, so this slot is free.
+                sc.multi_scatter_gain.max(0.0),
             );
         }
 

@@ -1,0 +1,64 @@
+// A220 — a narrow-body airliner equivalent, built from the heavy aircraft-part
+// class. Roughly the proportions of an Airbus A220 / regional jet, scaled to
+// this kit: a Ø3.5 m fuselage with a wide flight-deck nose, two Ø2.0 m Sirocco
+// geared turbofans under swept wings, and a heavy tricycle gear set.
+//
+// Proportions: fuselage ≈ 33 m (length/diameter ≈ 9) with a tapered tailcone,
+// wingspan ≈ 31.5 m (span ≈ length, like a real airliner). No flight model yet,
+// so this is a shape + loadout demo.
+//
+// Fuselage is node-stacked: flight deck → structural fuselage → tailcone
+// adapter. The fuselage carries no fuel; kerosene lives in the wet main wings.
+// Wings, stabilizers, nacelles, and gear are surface-mounted. The heavy gear
+// (`gear_main_hd` + `gear_nose_hd`) is a matched set — both 2.50 m drop — so the
+// jet sits level. `angle` radians: π/2 (≈1.5708) = right, −π/2 = left, 0 =
+// dorsal (top), π (≈3.14159) = belly. Enable "Horizontal layout (aircraft)" in
+// the shipyard View panel to see it on its gear.
+(
+    name: "A220",
+    root: 0,
+    parts: [
+        (catalog_id: "flightdeck"),                                          // 0 nose (command)
+        (catalog_id: "fuselage_structural", params: Tank(diameter: 3.5, length: 26.0)), // 1 fuselage (structural)
+        (catalog_id: "wing_wet", params: Wing(                             // 2 main wing R (wet)
+            span: 14.0, root_chord: 5.0, tip_chord: 1.6,
+            sweep: 0.44, dihedral: 0.06, thickness: 0.11, incidence: 0.0,
+        )),
+        (catalog_id: "wing_wet", params: Wing(                             // 3 main wing L (wet)
+            span: 14.0, root_chord: 5.0, tip_chord: 1.6,
+            sweep: 0.44, dihedral: 0.06, thickness: 0.11, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 4 tailplane R
+            span: 4.5, root_chord: 2.6, tip_chord: 1.1,
+            sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 5 tailplane L
+            span: 4.5, root_chord: 2.6, tip_chord: 1.1,
+            sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 6 vertical fin
+            span: 4.0, root_chord: 3.2, tip_chord: 1.4,
+            sweep: 0.6, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "sirocco_turbofan"),                                   // 7 nacelle R
+        (catalog_id: "sirocco_turbofan"),                                   // 8 nacelle L
+        (catalog_id: "gear_nose_hd", params: Gear(strut_length: 2.0, wheel_radius: 0.5)), // 9 nose gear
+        (catalog_id: "gear_main_hd", params: Gear(strut_length: 1.9, wheel_radius: 0.6)), // 10 main gear (matched: both 2.50 m drop)
+        (catalog_id: "adapter_std", params: Adapter(diameter: 3.5, target_diameter: 1.1)), // 11 tailcone
+    ],
+    connections: [
+        (parent: 0, parent_node: "bottom", child: 1,  child_node: "top"), // flight deck → fuselage
+        (parent: 1, parent_node: "bottom", child: 11, child_node: "top"), // fuselage → tailcone
+    ],
+    surface_mounts: [
+        (parent: 1, child: 2, station: 0.42, angle:  1.5708, symmetry_group: Some(0)), // main wing R
+        (parent: 1, child: 3, station: 0.42, angle: -1.5708, symmetry_group: Some(0)), // main wing L
+        (parent: 1, child: 4, station: 0.94, angle:  1.5708, symmetry_group: Some(1)), // tailplane R
+        (parent: 1, child: 5, station: 0.94, angle: -1.5708, symmetry_group: Some(1)), // tailplane L
+        (parent: 1, child: 6, station: 0.94, angle:  0.0),                             // vertical fin (single)
+        (parent: 2, child: 7, kind: WingPylon, station: 0.33, angle: 0.12, symmetry_group: Some(2)), // nacelle R
+        (parent: 3, child: 8, kind: WingPylon, station: 0.33, angle: 0.12, symmetry_group: Some(2)), // nacelle L
+        (parent: 1, child: 9,  station: 0.07, angle: 3.14159),                         // nose gear (belly)
+        (parent: 1, child: 10, station: 0.55, angle: 3.14159),                         // main gear (belly)
+    ],
+)

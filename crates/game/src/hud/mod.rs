@@ -23,6 +23,7 @@ mod nav_attitude;
 mod nav_panel;
 mod orbital_panel;
 mod staging_panel;
+mod system_map_panel;
 pub mod theme;
 mod view_mode_panel;
 mod warp_time_panel;
@@ -64,6 +65,7 @@ fn setup_top_left_row(mut commands: Commands) {
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(UiMaterialPlugin::<flight_panel::ThrottleArcMaterial>::default())
+            .add_plugins(UiMaterialPlugin::<system_map_panel::SystemMapMaterial>::default())
             .init_resource::<UiPointerGate>()
             .init_resource::<TimeDisplayMode>()
             .init_resource::<nav_panel::ManeuverPanelState>()
@@ -82,6 +84,7 @@ impl Plugin for HudPlugin {
                     fps_overlay::setup,
                     eva_panel::setup,
                     atmo_panel::setup,
+                    system_map_panel::setup,
                 )
                     .after(theme::init_theme)
                     .after(setup_top_left_row),
@@ -106,7 +109,7 @@ impl Plugin for HudPlugin {
                     orbital_panel::update,
                     orbital_panel::handle_click,
                     staging_panel::update,
-                    flight_panel::update,
+                    (flight_panel::update, system_map_panel::update),
                     flight_panel::handle_velocity_frame_click,
                     fps_overlay::update,
                     eva_panel::update,

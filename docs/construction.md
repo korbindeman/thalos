@@ -5,14 +5,182 @@ model that builds **planes, rockets, ships, and space stations** from
 one set of primitives, instead of the rocket-only stack the shipyard
 ships today.
 
-This is a **design document**, not an implementation report. No code
-exists for it yet. It captures the shape agreed during design so the
-next agent inherits the model rather than re-deriving it. The current
-`thalos_shipyard` crate (see `crates/shipyard/`, summarised in §2) is
-the foundation this **generalises** — we extend the existing attach-node
+This is mostly a **design document**. It captures the shape agreed during
+design so the next agent inherits the model rather than re-deriving it. The
+current `thalos_shipyard` crate (see `crates/shipyard/`, summarised in §2)
+is the foundation this **generalises** — we extend the existing attach-node
 system, we do not fork it.
 
-Target home: M6 ("advanced ships") in [ROADMAP.md](ROADMAP.md). The
+**Slices 1–2 (parametric wing, wing-pylon jet nacelle, and scalar intake
+flow) have landed** — the rest of this spec is still forward-looking design.
+See **§0 Implementation status** for exactly what exists in code today and
+what is still on paper.
+
+## 0. Implementation status
+
+### Landed — Slice 1: the parametric wing
+
+The first aircraft slice is in code. It adds a wing and the **surface /
+footprint placement** capability (§4.3) without forking the rocket path:
+
+- **`Wing` part** (`part.rs`, `catalog.rs::WingSpec`, `PartParams::Wing`):
+  a tapered / swept / dihedral lifting surface parameterised by span,
+  root/tip chord, sweep, dihedral, thickness (t/c), and incidence. One
+  catalog entry (`wing_std`) serves main wing, tailplane, and fin —
+  they differ only by parameters and mount. Dry mass = `mass_per_m2` ×
+  planform area.
+- **Surface mounting** (`attach.rs::SurfaceMount`): a placement component
+  *parallel to* `Attachment`, carrying `(parent, kind, station, angle)`.
+  It sits a part on a host's skin at a `(station, angle)` point and
+  **opts out of diameter propagation**. Kept distinct from `Attachment`
+  so sizing / shrouds / staging-topology are untouched; traversals that
+  need the whole part graph union both. Serialized as a separate
+  `surface_mounts` list on `ShipBlueprint` (`#[serde(default)]`, so every
+  pre-wing save still loads).
+- **Symmetry — KSP linked groups** (`attach.rs::SymmetryGroup`, §4.5).
+  Symmetry is **not** a per-part flag: placing a footprint part under
+  mirror mode stamps a **real counterpart entity** (a separate left and
+  right wing), linked by a `SymmetryGroup { id, role }`. `sync_symmetry_groups`
+  keeps each mirror in lockstep with its group's primary — params copied
+  (handed fields like `Wing.incidence` negated), mount reflected across the
+  host X = 0 plane; editing or deleting one affects the whole group.
+  **Nesting** is first-class: a part placed on a wing that is itself a
+  mirrored pair (a nacelle) is stamped onto *both* wings. The mirror is
+  thus a normal part everywhere downstream — meshes are single-panel and
+  stats / staging count each entity once (no ×2 multiplier). The blueprint
+  persists a `symmetry_group` id per surface mount so a loaded craft
+  re-links its groups in the editor; the game ignores it (flat parts).
+- **Editor**: an *Aerodynamics* palette category; a **Mirror (2×)** toggle
+  (Symmetry panel); arm a wing then click a hull body to mount it — the hit
+  point becomes the `(station, angle)`, and with mirror on, an off-centre
+  hit stamps a linked left/right pair while a top/bottom hit stays single.
+  Inspector sliders for all wing parameters; the group status shows whether
+  a part is a mirror primary / counterpart. Wing geometry rebuilds live. A
+  **Horizontal layout** toggle (View panel) lays the whole build down
+  KSP-SPH-style — a rigid display rotation in `update_part_transforms`;
+  pointer-driven placement / tank resize convert hits back through its
+  inverse so building stays correct either way.
+- **Geometry feedback** (§8 "free now"): `ShipStats` reports total
+  **wing area** and area-weighted **mean aerodynamic chord**; wing mass
+  feeds dry mass, CoM, and a crude rod-model MOI.
+- **In-game**: `crates/game/src/ship_view.rs` renders and positions wings
+  with the same `wing_mesh` builder, so a saved aircraft looks right when
+  spawned (as static mass — there is no flight model).
+
+Deliberate slice-1 simplifications, to revisit:
+
+- The wing cross-section is an **extruded box**, not a true airfoil loft
+  (`wing_mesh.rs`). Recognizable at editor/orbit distance; upgrade to an
+  airfoil section (and the control-surface fields below) later.
+- Wing meshes rebuild on wing / mount change but **not** when the host
+  diameter changes — re-touch a wing after resizing its fuselage to
+  refit. Centreline-station mounting only (no fore/aft re-drag post-place;
+  re-place to move).
+- MOI for wings is a thin-rod approximation; CoM uses the on-axis mount
+  point.
+
+### Landed — Slice 2: wing-pylon jet nacelle
+
+The first wing-hosted module is in code. It adds an atmospheric jet engine
+catalog entry plus the **wing-host + auto-pylon** connector path from §4.1 /
+§4.5:
+
+- **`Mistral Jet Nacelle`** (`assets/parts.ron::mistral_jet`): an
+  atmosphere-optimized kerosene air-breather (`EngineGeometry::JetNacelle`,
+  `requires_atmosphere = true`). It consumes stored kerosene and declares an
+  `intake_requirement`; its nacelle housing also declares a `builtin_intake`.
+  Vacuum/air-breathing performance curves are still future work.
+- **Surface mount kind** (`attach.rs::SurfaceMountKind`): old wing mounts
+  default to `BodySkin`; nacelles use `WingPylon`, where `station` means
+  span fraction and `angle` means chord fraction. Serialized
+  `SurfaceConnection.kind` is defaulted, so pre-nacelle saves continue to
+  load as body-skin mounts.
+- **Editor**: arming a jet nacelle and clicking a wing mounts it under that
+  wing. A mirrored wing automatically yields a mirrored nacelle pair from one
+  engine part; a single wing/fin yields one nacelle. The generated connector is
+  a rectangular pylon from the wing underside to the nacelle.
+- **Geometry**: `engine_mesh.rs` owns the shared nacelle/pylon mesh builder,
+  and both the shipyard editor and `crates/game/src/ship_view.rs` render from
+  it. Rocket engines keep the old bell/frustum body.
+- **Runtime graph**: live fuel crossfeed and staging now union
+  `Attachment` + `SurfaceMount`, so wing-mounted engines can receive fuel and
+  drop with their host subtree. Mirrored nacelles count double for dry mass,
+  thrust, mass flow, and stage summaries.
+- **Atmosphere gate**: `crates/game/src/fuel.rs` ignores
+  `requires_atmosphere` engines unless the craft is inside the dominant
+  body's `terrestrial_atmosphere.karman_line_m`. There is still no aerodynamic
+  lift/drag model; the jet is construction-ready and scalar-thrust-ready, not
+  a full flight model.
+- **Ambient intake model**: air is not a stored resource and does not appear in
+  `PartResources`. Engines can require an `AmbientIntakeKind` at full rated
+  thrust; nacelles can provide `builtin_intake`, and separate catalog
+  `Intake` parts (for example `intake_cone`) provide the same capture for
+  later inlet/core layouts. At runtime, available capture and active demand
+  are summed by ambient kind while the ship is in atmosphere. If capture is
+  short, all engines of that kind are scalar-throttled by the same ratio; if it
+  is absent, they produce no thrust and burn no fuel.
+- **Resource storage whitelist**: the previous methalox-only tank schema
+  (`methane_l_per_m3` / `lox_l_per_m3`) has been replaced by per-part
+  `storage: [(resource, units, units_per_m3, ...)]` entries in the catalog.
+  Any part kind can now opt into fixed or volume-scaled resource capacity, but
+  a blueprint may only activate resources whitelisted by that part. Omitted
+  blueprint resources mean "use catalog defaults"; explicit resource maps are
+  the selected active pools. The editor inspector exposes this as Add/Remove
+  controls plus amount sliders for the selected part.
+
+Deliberate slice-2 simplifications, to revisit:
+
+- Pylon placement is span/chord only; there is no fore/aft drag handle after
+  placement. Re-place to move it.
+- Mirrored nacelles are one logical part with doubled aggregate stats. The
+  renderer draws both nacelles, but part-level torque, asymmetric failures,
+  and per-nacelle collider/shadow primitives are deferred.
+- Intake flow is whole-craft scalar plumbing, not a physical duct network.
+  Capture has a constant efficiency and ignores speed, angle of attack,
+  pressure, inlet shock losses, and engine-local starvation.
+- Design-time Δv/stage estimates are still nominal and not environment-aware;
+  the runtime gate enforces atmosphere availability.
+
+### Landed — wet wings + structural fuselage
+
+A small follow-on to the storage whitelist (§Slice 2) splits "carries fuel"
+from "is structure", exercising the volume-scaled storage path on a
+non-cylindrical part:
+
+- **`wing_wet`** (`assets/parts.ron`): a `Wing` whose integral box is
+  whitelisted for kerosene. Capacity is volume-scaled like a tank, but the
+  volume comes from `catalog::wing_volume` — `planform_area × (t/c · MAC) ×
+  WING_BOX_FILL` — so a bigger panel holds proportionally more fuel.
+  `blueprint::storage_volume_for` and `recompute::recompute_wing_state` both
+  route wings through it, so spawn-time and editor-resize capacity agree.
+  Dry wings stay `wing_std` (empty storage). Because surface-mounted parts
+  with no `FuelCrossfeed` component default to crossfeed-enabled, a wet wing
+  is already in the same crossfeed component as the nacelle on its pylon —
+  wing fuel feeds the engine with no runtime change.
+- **`fuselage_structural`** (`assets/parts.ron`): a `Tank` with an empty
+  `storage` whitelist — same stainless-steel skin, diameter propagation, and
+  node stacking as a propellant tank, but load-bearing structure that holds
+  no fuel.
+- **Aircraft loadout**: `ships/jet.ron` and `ships/a220.ron` now stack a
+  `fuselage_structural` body and carry their kerosene in `wing_wet` main
+  wings (tailplanes/fins stay dry). This is the airliner pattern — fuel in
+  the wings, dry structural fuselage — and a step toward the §5.3 internal
+  fuel-fill layer.
+
+### Next (the stated goal: gear + control surfaces)
+
+- **Control surfaces become parameters of the `Wing`**, not separate
+  parts: trailing-edge chord fraction + spanwise window + a
+  hinge/deflection descriptor, so a flap / aileron / elevator / rudder is
+  authored as part of the wing it lives on. The `Wing` struct documents
+  this extension point.
+- **Landing gear** is a *separate* footprint part kind reusing
+  `SurfaceMount` + `MountSymmetry::Mirrored` for the L/R pair.
+
+The remaining sections describe the full target model these slices build
+toward; only the pieces named above exist in code.
+
+Target home: M6 ("advanced ships"). The
 geometry/editor work can start before the aero *simulation* exists —
 the editor computes and displays geometry-derived references (mass,
 CoM, wing area, MAC, volumes) long before there is a flight model to
@@ -233,6 +401,14 @@ Fuel therefore exists **two ways**, both feeding the same pools:
   *is* the tank. Assembly layer.
 - **Internal fuel fill** (airliner wet wing / belly tank) — a
   compartment with the fuel role. Internal layer.
+
+Catalog storage is now whitelist-based: a part's `storage` list says exactly
+which resources it can physically house and how capacity is computed. Fixed
+capacity (`units`) covers batteries and service modules; volume-scaled capacity
+(`units_per_m3`) covers tanks and future loft compartments. The same
+`PartResources` map is still the runtime sink, but blueprint serialization
+distinguishes omitted resources (catalog default loadout) from explicit maps
+(the user's selected active pools).
 
 ### 5.4 Optional internals, default auto-loadout
 

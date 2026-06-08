@@ -1,7 +1,9 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use super::super::state::{GameNode, ManeuverEvent, ManeuverPlan, NodeDeltaV, SelectedNode};
+use super::super::state::{
+    GameNode, ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, SelectedNode,
+};
 
 /// Sync NodeDeltaV when selection changes.
 pub(in crate::maneuver) fn sync_node_delta_v(
@@ -53,6 +55,7 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                     time: trail_time,
                     delta_v: DVec3::ZERO,
                     reference_body,
+                    phase: NodeBurnPhase::default(),
                 });
                 selected.id = Some(id);
                 plan.dirty = true;
@@ -78,13 +81,25 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                 }
             }
             ManeuverEvent::DeleteNode { id } => {
-                let Some(delete_time) = plan.nodes.iter().find(|n| n.id == id).map(|n| n.time)
-                else {
+                let Some(target) = plan.nodes.iter().find(|n| n.id == id) else {
                     continue;
                 };
                 let before = plan.nodes.len();
-                plan.nodes
-                    .retain(|n| n.time < delete_time - NODE_TIME_EPSILON_S);
+                if target.phase == NodeBurnPhase::Executed {
+                    // Dismissing a spent node clears only that marker. Its burn
+                    // already happened; any later nodes are planned off the
+                    // achieved orbit, not off this node, so they must survive.
+                    plan.nodes.retain(|n| n.id != id);
+                } else {
+                    // Deleting a still-planned node cascades to everything at or
+                    // after its time (those legs are planned off this one), but
+                    // never removes an already-executed node behind it.
+                    let delete_time = target.time;
+                    plan.nodes.retain(|n| {
+                        n.phase == NodeBurnPhase::Executed
+                            || n.time < delete_time - NODE_TIME_EPSILON_S
+                    });
+                }
                 if plan.nodes.len() != before {
                     plan.dirty = true;
                 }

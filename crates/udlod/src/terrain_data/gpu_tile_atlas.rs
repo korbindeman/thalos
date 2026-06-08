@@ -1,16 +1,16 @@
 use crate::{
     terrain::TerrainComponents,
     terrain_data::{
-        AttachmentFormat,
         tile_atlas::{AtlasAttachment, AtlasTileAttachmentWithData, TileAtlas},
+        AttachmentFormat,
     },
 };
 use bevy::{
     prelude::*,
     render::{
-        Extract, MainWorld,
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
+        Extract, MainWorld,
     },
 };
 use itertools::Itertools;

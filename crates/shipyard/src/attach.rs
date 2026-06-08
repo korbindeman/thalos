@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub type NodeId = String;
@@ -25,11 +26,88 @@ impl AttachNodes {
 }
 
 /// This entity is attached to `parent` — `my_node` mates with `parent_node`.
+///
+/// This is the **end-node stack** placement: two parts mate at named nodes
+/// and diameter propagates parent→child (`sizing::propagate_node_sizes`).
+/// It is the original (and only, until wings) connection mechanism — the
+/// rocket path. Surface/footprint placement uses [`SurfaceMount`] instead.
 #[derive(Component, Debug, Clone)]
 pub struct Attachment {
     pub parent: Entity,
     pub parent_node: NodeId,
     pub my_node: NodeId,
+}
+
+/// Role of an entity within a [`SymmetryGroup`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SymmetryRole {
+    /// The authored original. Its params + mount are the source of truth the
+    /// editor syncs counterparts from.
+    #[default]
+    Primary,
+    /// A mirror counterpart, re-derived from the primary by the editor
+    /// (reflected across the host X = 0 plane).
+    Mirror,
+}
+
+/// KSP-style symmetry link. Footprint parts placed under mirror symmetry
+/// form a **group**: one [`SymmetryRole::Primary`] plus its mirror
+/// counterpart, as **separate real entities** (not one part drawing two
+/// copies). The editor keeps the group in lockstep — counterpart params
+/// synced and mount reflected — and edits / deletes the whole group
+/// together. At runtime (the game) the group is inert metadata: each member
+/// is just a normal part, so stats / staging / rendering need no symmetry
+/// logic. `id` is stable and persisted so a loaded craft re-links in the
+/// editor.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SymmetryGroup {
+    pub id: u32,
+    pub role: SymmetryRole,
+}
+
+/// Which surface-placement frame a [`SurfaceMount`] uses.
+///
+/// `BodySkin` is the original wing-on-fuselage frame: `station` is a
+/// fraction down the host body axis and `angle` is the azimuth around the
+/// host skin. `WingPylon` reuses the same storage for a wing-hosted nacelle:
+/// `station` is span fraction (root→tip) and `angle` is chord fraction
+/// (`-0.5` trailing edge, `0.5` leading edge).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SurfaceMountKind {
+    #[default]
+    BodySkin,
+    WingPylon,
+}
+
+/// **Surface / footprint** placement: this entity sits on `parent`'s skin
+/// at a `(station, angle)` point rather than mating an end node. This is
+/// the second placement capability from `docs/construction.md` §4.3 —
+/// wings, wing-hosted nacelles, and later gear / footprint cockpits.
+/// Surface mounts deliberately **opt out of diameter propagation**: a
+/// footprint part's size is its own, not the host's local diameter.
+///
+/// Kept as a component distinct from [`Attachment`] so the existing
+/// end-node stack code (sizing, shrouds, staging topology) is untouched;
+/// traversals that need the *whole* part graph union both. `parent` plays
+/// the same connectivity role as [`Attachment::parent`].
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceMount {
+    pub parent: Entity,
+    pub kind: SurfaceMountKind,
+    /// Fraction along the host body axis, 0 = top (y = 0) → 1 = bottom
+    /// (y = −height) for [`SurfaceMountKind::BodySkin`], or span fraction
+    /// root→tip for [`SurfaceMountKind::WingPylon`].
+    pub station: f32,
+    /// Angle around the host body axis, radians. The outboard radial is
+    /// `(sin angle, 0, cos angle)`; `angle = 0` is the +Z (dorsal / "up")
+    /// side, `angle = π/2` the +X (right) side. For
+    /// [`SurfaceMountKind::WingPylon`], this stores chord fraction instead
+    /// (`-0.5` trailing edge, `0.5` leading edge).
+    ///
+    /// A mirror counterpart stores its *own* reflected coordinates here (a
+    /// single panel), not a "draw both sides" flag — symmetry lives on
+    /// [`SymmetryGroup`], not on the mount.
+    pub angle: f32,
 }
 
 /// Root of a ship assembly.

@@ -98,8 +98,10 @@ struct BorrowedRenderedHeightSource<'a> {
 impl HeightSource for BorrowedRenderedHeightSource<'_> {
     fn sample_height_m(&self, dir: bevy::math::Vec3, tile_lod_m: f32) -> Option<f32> {
         Some(rendered_height_m(
-            self.surface,
-            self.dynamic_state,
+            &thalos_terrain::SurfaceRef {
+                surface: self.surface,
+                dynamic_state: self.dynamic_state,
+            },
             dir,
             tile_lod_m,
         ))

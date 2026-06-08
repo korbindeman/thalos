@@ -24,8 +24,8 @@ use crate::autopilot::{Autopilot, autopilot_system};
 /// dropped. Defaults are all `false` (everything free).
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct ControlLocks {
-    /// Throttle setting — Z/X snap, Shift/Ctrl ramp, future throttle
-    /// slider. Gated in [`crate::fuel::handle_throttle_input`].
+    /// Throttle setting — HOTAS absolute axis, Z/X snap, Shift/Ctrl ramp,
+    /// future throttle slider. Gated in [`crate::fuel::handle_throttle_input`].
     pub throttle: bool,
     /// Attitude torque commands — W/A/S/D/Q/E. Gated in
     /// [`crate::bridge::handle_attitude_controls`] (player_torque is

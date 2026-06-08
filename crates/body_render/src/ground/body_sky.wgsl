@@ -38,6 +38,7 @@ struct SkyAtmosExtra {
     sun_dir_flux:              vec4<f32>,  // xyz = sun dir (normalized), w = flux
     planet_center_radius:      vec4<f32>,  // xyz = planet center (render-space), w = radius
     world_to_body_orientation: vec4<f32>,  // render-space direction -> body-local cubemap direction
+    cloud_band_radii:          vec4<f32>,  // x = cloud base radius, y = cloud top radius (render units)
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 
@@ -61,6 +62,13 @@ struct SkyAtmosExtra {
 // sky its blue luminance and lets the alpha boost below crush stars at noon.
 @group(3) @binding(5) var ms_lut_tex: texture_2d<f32>;
 @group(3) @binding(6) var ms_lut_sampler: sampler;
+
+// High-fidelity volumetric cloud layer (thalos_volumetric_clouds raymarch
+// output): rgb = premultiplied in-scatter, a = transmittance. Sampled in
+// screen space with textureLoad and composited over the atmosphere in-scatter
+// below. A 1×1 clear fallback (a = 1) makes this a no-op on bodies with no
+// active cloud layer.
+@group(3) @binding(7) var cloud_layer_tex: texture_2d<f32>;
 
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
@@ -450,6 +458,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var fallback_t_surface: f32 = 1.0e30;
     var fallback_surface_fade: f32 = 0.0;
     var surface_fade: f32 = 0.0;
+    // Distance to opaque geometry at this pixel (ship hull, terrain), or a large
+    // sentinel when the pixel is sky. Used below to keep the cloud layer from
+    // painting over geometry that sits in front of the cloud band.
+    var scene_t: f32 = 1.0e30;
     if disc_planet > 0.0 {
         let sqrt_disc_planet = sqrt(disc_planet);
         let t_planet = -b - sqrt_disc_planet;
@@ -475,6 +487,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let view_pos_h = view.view_from_clip * vec4<f32>(ndc_x, ndc_y, depth_sample, 1.0);
         let view_pos   = view_pos_h.xyz / view_pos_h.w;
         let t_scene    = length(view_pos);
+        scene_t = t_scene;
         t_exit = min(t_exit, t_scene);
         surface_fade = 1.0;
     } else if fallback_t_surface < 1.0e29 {
@@ -495,16 +508,67 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         ms_lut_tex, ms_lut_sampler,
     );
 
-    let cloud = cloud_volume_overlay(
-        cam_pos,
-        ray_dir,
-        planet_center,
-        planet_radius,
-        in.clip_position.xy,
-        t_enter,
-        t_exit,
-        surface_fade,
-    );
+    // Composite the high-fidelity volumetric cloud layer: a screen-space sample
+    // of the `thalos_volumetric_clouds` raymarch output, rather than the legacy
+    // in-shader slab march (`cloud_volume_overlay`, kept for reference). Doing it
+    // inside this fullscreen pass — after the atmosphere in-scatter — lands the
+    // clouds deterministically on top of the sky; a separate transparent quad
+    // sorted unreliably against this pass under big_space.
+    let cloud_res = vec2<f32>(1920.0, 1080.0);
+    let cloud_texel = vec2<i32>(in.clip_position.xy / view.viewport.zw * cloud_res);
+    let cloud_sample = textureLoad(cloud_layer_tex, cloud_texel, 0);
+
+    // Suppress the cloud where opaque geometry sits in front of the cloud band,
+    // so close geometry (the ship hull) isn't painted over by clouds behind it.
+    // `d_cloud_near` is the distance at which this view ray first reaches cloud
+    // altitude; if the scene depth is nearer, the cloud is entirely behind the
+    // geometry. Inside the band, d_cloud_near = 0 (you're in the cloud, so it
+    // correctly fogs in front of nearby geometry).
+    // `cloud_vis` is the fraction of the cloud band that lies in FRONT of the
+    // opaque geometry on this ray. We intersect the ray with the base/top cloud
+    // shells to get the band interval [band_near, band_far] along the ray, then
+    // ramp from 0 (geometry before the band → cloud fully behind it, e.g. the
+    // ship hull just under the deck) to 1 (geometry past the band → cloud fully
+    // in front). Ramping across the band thickness (instead of snapping at the
+    // base shell) is what makes the ship cross the cloud boundary smoothly.
+    let r_cloud_base = sky_atmos_extra.cloud_band_radii.x;
+    let r_cloud_top = sky_atmos_extra.cloud_band_radii.y;
+    let cam_r_len = sqrt(oc_len_sq);
+    let disc_cb = b * b - (oc_len_sq - r_cloud_base * r_cloud_base);
+    let disc_ct = b * b - (oc_len_sq - r_cloud_top * r_cloud_top);
+    let sqrt_cb = sqrt(max(disc_cb, 0.0));
+    let sqrt_ct = sqrt(max(disc_ct, 0.0));
+    var band_near = 0.0;
+    var band_far = 1.0e30;
+    if cam_r_len < r_cloud_base {
+        // Below the deck: enter at the base (forward root), exit at the top.
+        band_near = max(-b + sqrt_cb, 0.0);
+        band_far = max(-b + sqrt_ct, band_near);
+    } else if cam_r_len <= r_cloud_top {
+        // Inside the deck: band starts at the camera, ends at the nearest
+        // forward shell crossing (top exit, or the downward base crossing).
+        band_near = 0.0;
+        var bf = -b + sqrt_ct;
+        let base_down = -b - sqrt_cb;
+        if disc_cb > 0.0 && base_down > 0.0 {
+            bf = min(bf, base_down);
+        }
+        band_far = max(bf, 1.0);
+    } else {
+        // Above the deck: enter at the top near root, exit at the base near root
+        // (ray dips through) or the top far root otherwise.
+        band_near = max(-b - sqrt_ct, 0.0);
+        if disc_cb > 0.0 {
+            band_far = max(-b - sqrt_cb, band_near);
+        } else {
+            band_far = max(-b + sqrt_ct, band_near);
+        }
+    }
+    var cloud_vis = 1.0;
+    if scene_t < 1.0e29 && r_cloud_top > r_cloud_base {
+        cloud_vis = clamp((scene_t - band_near) / max(band_far - band_near, 1.0), 0.0, 1.0);
+    }
+    let cloud = CloudOverlay(cloud_sample.rgb * cloud_vis, (1.0 - cloud_sample.a) * cloud_vis);
 
     // Premultiplied: `rgb` is already weighted by sun flux and β coefficients
     // inside `integrate_atmosphere`. Alpha is the mean opacity over the three
@@ -538,5 +602,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         0.0,
         1.0,
     );
-    return vec4(scatter.in_scatter + cloud.premul_rgb, combined_opacity);
+    // Attenuate the atmosphere in-scatter by the cloud transmittance so opaque
+    // cloud cores hide the sky behind them, then add the cloud's own premult
+    // in-scatter on top. `1 - cloud.opacity` already folds in the depth
+    // suppression above.
+    return vec4(scatter.in_scatter * (1.0 - cloud.opacity) + cloud.premul_rgb, combined_opacity);
 }

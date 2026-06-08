@@ -736,8 +736,8 @@ mod tests {
     use thalos_physics_canonical::trajectory::{
         CaptureStatus, ClosestApproach, Encounter, Leg, TrajectoryEvent,
     };
-    use thalos_world::StateVector;
     use thalos_physics_canonical::types::{BodyState, TrajectorySample};
+    use thalos_world::StateVector;
 
     use crate::coords::RenderGhostFocus;
     use crate::map_view::ProjectedBodyState;

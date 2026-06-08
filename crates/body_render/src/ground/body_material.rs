@@ -1,21 +1,24 @@
 //! Ground-LOD terrain material for procedural bodies.
 //!
 //! Reads the height + albedo + roughness tile attachments produced by
-//! [`crate::pipeline::PipelineTileProvider`] and shades them with the
-//! shared Hapke BRDF helper (`thalos::lighting::shade_hapke_surface`).
+//! [`crate::pipeline::PipelineTileProvider`] and shades them with a
+//! rough-dielectric BRDF (Oren–Nayar diffuse + Cook–Torrance GGX specular)
+//! defined in `body_terrain.wgsl` — Thalos is a wet vegetated terrestrial
+//! body, not airless regolith, so the ground LOD diverges from the impostor's
+//! Hapke model here.
 //! Atmospheric scattering for this surface is composited downstream by
 //! the `BodySky` fullscreen pass while ground LOD terrain is active —
 //! this material's atmosphere block is bound so the material stays
 //! self-contained at upload time and so future inline transmittance work
 //! doesn't need a fresh binding contract.
 
+use crate::shading::{AtmosphereBlock, SceneLighting};
 use bevy::asset::embedded_asset;
 use bevy::math::Vec4;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use crate::shading::{AtmosphereBlock, SceneLighting};
 
 /// Per-frame dynamic data for `BodySkyMaterial`.
 ///
@@ -32,6 +35,11 @@ pub struct BodySkyExtra {
     /// Quaternion rotating render-space directions into the body-local frame
     /// used by terrain/cloud cubemaps.
     pub world_to_body_orientation: Vec4,
+    /// Volumetric cloud band radii in render units: x = base (planet_radius +
+    /// base altitude), y = top. Used by `body_sky.wgsl` to suppress the
+    /// composited `cloud_layer` where opaque geometry (ship hull, terrain) sits
+    /// in front of the cloud band. Zero on bodies with no active cloud layer.
+    pub cloud_band_radii: Vec4,
 }
 
 impl Default for BodySkyExtra {
@@ -40,6 +48,7 @@ impl Default for BodySkyExtra {
             sun_dir_flux: Vec4::ZERO,
             planet_center_radius: Vec4::ZERO,
             world_to_body_orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            cloud_band_radii: Vec4::ZERO,
         }
     }
 }

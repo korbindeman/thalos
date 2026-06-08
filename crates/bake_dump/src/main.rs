@@ -55,7 +55,6 @@ use glam::{DVec3, Vec3};
 use image::{ImageBuffer, RgbImage};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use thalos_world::parsing::load_solar_system_from_dir;
 use thalos_terrain::cubemap::{CubemapFace, dir_to_face_uv};
 use thalos_terrain::{
     BodyArchetype, BoundaryKind, ColdDesertField, DynamicSurfaceState, FeatureId,
@@ -64,6 +63,7 @@ use thalos_terrain::{
     compile_static_terrain_config, compile_tectonics_from_config, generate_initial_manifest,
     surface_height_m, surface_normal, surface_sample,
 };
+use thalos_world::parsing::load_solar_system_from_dir;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -196,29 +196,28 @@ fn main() {
         .unwrap_or_else(|| std::path::Path::new("assets"));
     let system = load_solar_system_from_dir(root_path).expect("parsing solar system");
 
-    let targets: Vec<&thalos_world::BodyDefinition> =
-        if args.body_arg.eq_ignore_ascii_case("all") {
-            let mut v: Vec<_> = system
-                .bodies
-                .iter()
-                .filter(|b| b.terrain.is_some())
-                .collect();
-            if v.is_empty() {
-                panic!(
-                    "no bodies in '{}' have terrain",
-                    args.solar_system.display()
-                );
-            }
-            v.sort_by(|a, b| a.name.cmp(&b.name));
-            v
-        } else {
-            let body = system
-                .bodies
-                .iter()
-                .find(|b| b.name.eq_ignore_ascii_case(&args.body_arg))
-                .unwrap_or_else(|| panic!("body '{}' not found", args.body_arg));
-            vec![body]
-        };
+    let targets: Vec<&thalos_world::BodyDefinition> = if args.body_arg.eq_ignore_ascii_case("all") {
+        let mut v: Vec<_> = system
+            .bodies
+            .iter()
+            .filter(|b| b.terrain.is_some())
+            .collect();
+        if v.is_empty() {
+            panic!(
+                "no bodies in '{}' have terrain",
+                args.solar_system.display()
+            );
+        }
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
+    } else {
+        let body = system
+            .bodies
+            .iter()
+            .find(|b| b.name.eq_ignore_ascii_case(&args.body_arg))
+            .unwrap_or_else(|| panic!("body '{}' not found", args.body_arg));
+        vec![body]
+    };
 
     let mode_subdir = if args.preview { "preview" } else { "full" };
     let is_all = targets.len() > 1;
@@ -469,17 +468,14 @@ fn local_bake_is_up_to_date(body: &thalos_world::BodyDefinition) -> bool {
     )
 }
 
-fn terrain_context(
-    body: &thalos_world::BodyDefinition,
-) -> TerrainCompileContext {
+fn terrain_context(body: &thalos_world::BodyDefinition) -> TerrainCompileContext {
     TerrainCompileContext {
         body_name: body.name.clone(),
         radius_m: body.radius_m as f32,
         gravity_m_s2: (body.gm / (body.radius_m * body.radius_m)) as f32,
         rotation_hours: None,
         obliquity_deg: Some((body.axial_tilt_rad as f32).to_degrees()),
-        tidal_axis: matches!(body.kind, thalos_world::BodyKind::Moon)
-            .then_some(Vec3::Z),
+        tidal_axis: matches!(body.kind, thalos_world::BodyKind::Moon).then_some(Vec3::Z),
         axial_tilt_rad: body.axial_tilt_rad as f32,
     }
 }
@@ -735,9 +731,7 @@ fn smoothstep_scalar(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn cold_desert_biome_field(
-    body: &thalos_world::BodyDefinition,
-) -> Option<ColdDesertField> {
+fn cold_desert_biome_field(body: &thalos_world::BodyDefinition) -> Option<ColdDesertField> {
     let TerrainConfig::Feature(feature) = &body.terrain else {
         return None;
     };
@@ -1166,7 +1160,9 @@ fn dump_patches(surface: &PlanetSurface, out_dir: &Path, log: &mut dyn FnMut(Str
     let res = 1024;
     for (site, center) in &sites {
         let (lat, lon) = dir_to_latlon(*center);
-        log(format!("patch: {site} centre = lat {lat:.2}°, lon {lon:.2}°"));
+        log(format!(
+            "patch: {site} centre = lat {lat:.2}°, lon {lon:.2}°"
+        ));
         // Each site is a "biome" tile column: its own `patch/<biome>/` subdir
         // holding the LOD cascade as bare `<span>.png` files. This mirrors the
         // planet editor's tile view, where one tile carries several zoom

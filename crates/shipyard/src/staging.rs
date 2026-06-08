@@ -16,7 +16,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::blueprint::{ShipBlueprint, pools_for};
+use crate::blueprint::{
+    ShipBlueprint, check_params_match, check_resource_amounts_allowed, pools_for,
+};
 use crate::catalog::{CatalogEntry, CatalogError, PartCatalog};
 use crate::resource::Resource;
 use crate::stats::{
@@ -334,12 +336,26 @@ impl ShipBlueprint {
             .iter()
             .map(|pb| catalog.resolve(&pb.catalog_id))
             .collect::<Result<_, _>>()?;
+        for (pb, entry) in self.parts.iter().zip(&entries) {
+            check_params_match(&pb.catalog_id, entry, &pb.params)?;
+            check_resource_amounts_allowed(&pb.catalog_id, entry, &pb.resources)?;
+        }
 
-        // Parent index per part, from the connection graph.
+        // Parent index per part, from the connection graph. Surface mounts
+        // (wings) record a parent too so a wing drops with the host stage it
+        // sits on, rather than looking like a separate root.
         let mut parent: Vec<Option<usize>> = vec![None; self.parts.len()];
         for c in &self.connections {
             if c.child < parent.len() {
                 parent[c.child] = Some(c.parent);
+            }
+        }
+        // KSP symmetry: a mirrored pair is two real parts, each counted once —
+        // no per-part doubling here. Surface mounts still record a parent so a
+        // wing/nacelle drops with the host stage it sits on.
+        for m in &self.surface_mounts {
+            if m.child < parent.len() {
+                parent[m.child] = Some(m.parent);
             }
         }
 
@@ -636,32 +652,32 @@ mod tests {
                 PartBlueprint {
                     catalog_id: "argos".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "tank_methalox".into(),
                     params: tank(),
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "zephyr".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "decoupler_std".into(),
                     params: PartParams::Decoupler { diameter: 2.5 },
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "tank_methalox".into(),
                     params: tank(),
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "boreas".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
             ],
             connections: vec![
@@ -696,6 +712,7 @@ mod tests {
                     child_node: "top".into(),
                 },
             ],
+            surface_mounts: vec![],
         };
 
         let summaries = bp.stage_summaries(&cat).expect("stage summaries");

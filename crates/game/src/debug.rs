@@ -7,6 +7,7 @@ use bevy::math::{DMat3, DQuat, DVec3, Isometry3d, Quat, Vec3};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
+use thalos_body_render::rendered_height_m;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::{
     body_fixed::body_fixed_pose_from_inertial,
@@ -15,13 +16,12 @@ use thalos_physics_canonical::{
     debug_orbits::debug_parking_orbit_state,
     types::{AttitudeState, BodyState, VesselKind},
 };
-use thalos_world::{BodyDefinition, BodyId, BodyKind, StateVector};
 use thalos_physics_local::avian::{AngularVelocity, LinearVelocity, Position, Rotation};
 use thalos_physics_local::{
     ActiveLocalBubble, LocalCraftBody, LocalCraftColliderPrimitives, LocalPrimitiveCollider,
     LocalPrimitiveShape, TerrainSurfaceRegistry,
 };
-use thalos_body_render::rendered_height_m;
+use thalos_world::{BodyDefinition, BodyId, BodyKind, StateVector};
 
 use crate::camera::{ActiveCamera, MapCamera};
 use crate::coords::{MAP_SCALE, SHIP_LAYER};
@@ -526,8 +526,9 @@ fn raycast_debug_surface_cursor(
     let dir_body = (body_state.orientation.inverse() * dir_world).normalize();
     let (surface_height_m, used_rendered_surface) = if let Some(surface) = surfaces.get(body_id) {
         let dynamic_state = body_states.dynamic_surface_for(body_id, &surface);
+        let query = thalos_terrain::BakedSurface::new(surface.clone(), dynamic_state);
         (
-            rendered_height_m(&surface, &dynamic_state, dir_body.as_vec3(), 1.0) as f64,
+            rendered_height_m(&query, dir_body.as_vec3(), 1.0) as f64,
             true,
         )
     } else {
