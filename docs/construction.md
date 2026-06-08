@@ -189,13 +189,27 @@ continuous, upswept superellipse loft:
   superellipse cross-section **stations** with per-station **vertical offset**,
   generated from high-level airliner params — `length`, `max_width`/
   `max_height`, `roundness`, `nose_fraction`/`tail_fraction`, `nose_droop`,
-  `tail_upsweep`, `tail_tip_diameter`. The tailcone necks on a smooth ogive
-  while its centerline sweeps **up** (the airliner tail), instead of a straight
-  pencil-point. `fuselage_mesh.rs` owns the station generator, the skin mesh,
-  and the host-skin query; the editor and `crates/game/src/ship_view.rs` render
-  from the same builder. Straight-axis only (full 3-D spline still deferred,
-  §8); roundness handles circle → rounded-rectangle, but a true double-bubble
-  (control-loop sections) is future work.
+  `tail_upsweep`, `tail_tip_diameter`, `tail_bluntness`. The tailcone necks on a
+  smooth ogive while its centerline sweeps **up** (the airliner tail), instead
+  of a straight pencil-point. `fuselage_mesh.rs` owns the station generator, the
+  skin mesh, and the host-skin query; the editor and
+  `crates/game/src/ship_view.rs` render from the same builder. Straight-axis
+  only (full 3-D spline still deferred, §8); roundness handles circle →
+  rounded-rectangle, but a true double-bubble (control-loop sections) is future
+  work.
+- **End-cap geometry (a pure loft isn't enough at the tips)**: lofting straight
+  to a single point fans the cross-section into an open pole — a visible hole
+  with a pinched, smeared tip. So the two ends are **explicit caps**, not raw
+  loft termini. (1) Stations are **cosine-clustered toward both ends** so the
+  terminal domes are densely sampled (smooth, not faceted). (2) Each tip profile
+  is a **cone↔ogive blend** — `nose_bluntness` for the radome, `tail_bluntness`
+  for the tailcone — so the two ends are shaped independently (`0` → sharp conic
+  point, `1` → rounded ellipsoidal dome). (3) A tip that necks to ~0 Ø
+  (`tail_tip_diameter: 0`) **closes with a rounded apex** that shares the
+  adjacent loft ring's vertices, so smooth normals carry across the seam — no
+  crease, hole, or pole; a finite tail tip Ø instead gets a **crisp flat cap**
+  with its own rim (the APU-style truncated tailcone). A barrel-fronted body
+  (`nose_fraction: 0`) still leaves the top open for a cockpit end-cap.
 - **Host-skin query** (`fuselage_mesh::skin_radius` / `v_offset_at` /
   `host_mount_geometry`): the §4.1 "host" capability for a loft. Surface mounts
   (wings, gear, nacelles) ask the loft for the skin radius **and** centerline
@@ -212,10 +226,15 @@ continuous, upswept superellipse loft:
 - **Editor**: the `Fuselage` appears under *Structure* with inspector sliders
   for every shape param; it node-stacks and hosts surface mounts like any hull,
   and the placement preview follows the loft skin.
-- **Meridian** (`ships/meridian.ron`): the body is now one `fuselage_loft` (barrel +
-  upswept tailcone) replacing the old `fuselage_structural` tank +
-  `adapter_std` cone pair; the flight-deck ogive provides the nose. `jet.ron` /
-  `skyhawk.ron` keep their straight `fuselage_structural` tubes.
+- **Meridian** (`ships/meridian.ron`): a classic early-jet-age short-haul liner
+  (Comet / 707 / CV-880 idiom). The body is one `fuselage_loft` — a slender
+  circular tube with a pointed radome nose and a pointed, upswept boat-tail
+  (`tail_tip_diameter: 0`, both ends closed by cap geometry) — replacing the old
+  `fuselage_structural` tank + `adapter_std` cone pair; the inline flight deck
+  provides command with no body mesh. Power is **four** slim `vega_turbojet`
+  pods in inboard/outboard pairs under the swept wings (the four-engine classic
+  look), not two fat fans. `jet.ron` / `skyhawk.ron` keep their straight
+  `fuselage_structural` tubes.
 
 Deliberate simplifications, to revisit: straight axis only (no nose-to-tail
 spline); the near-circular barrel reuses the cylindrical `ship_part` panel

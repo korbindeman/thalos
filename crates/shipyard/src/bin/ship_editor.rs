@@ -2255,6 +2255,7 @@ fn collect_blueprint(
                 nose_droop: f.nose_droop,
                 tail_upsweep: f.tail_upsweep,
                 tail_tip_diameter: f.tail_tip_diameter,
+                tail_bluntness: f.tail_bluntness,
             }
         } else if let Some(w) = wing {
             PartParams::Wing {
@@ -3188,6 +3189,7 @@ fn inspector_params(
             nose_droop: f.nose_droop,
             tail_upsweep: f.tail_upsweep,
             tail_tip_diameter: f.tail_tip_diameter,
+            tail_bluntness: f.tail_bluntness,
         }
     } else if let Some(w) = wing {
         PartParams::Wing {
@@ -3511,6 +3513,10 @@ fn editor_ui(
                 ui.add(egui::Slider::new(&mut f.tail_upsweep, 0.0..=3.0).text("Tail upsweep"));
                 ui.add(
                     egui::Slider::new(&mut f.tail_tip_diameter, 0.0..=3.0).text("Tail tip Ø"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut f.tail_bluntness, 0.0..=1.0)
+                        .text("Tail shape (cone→dome)"),
                 );
                 // dry_mass tracks lofted skin area via `recompute_fuselage_state`.
                 ui.label(format!("Dry mass: {:.0} kg", f.dry_mass));

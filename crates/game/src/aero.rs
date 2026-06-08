@@ -2,13 +2,19 @@
 //!
 //! Thalos uses the vendored [`avian_fdm`] flight-dynamics model for aerodynamic
 //! forces, but only its **force pipeline** — Thalos owns mass, gravity, and the
-//! body-centered-inertial bubble frame. This module is the adapter:
+//! body-fixed (rotating) bubble frame ships integrate in. This module is the adapter:
 //!
 //! - **Atmosphere.** `AircraftFdmPlugin` runs with `manage_atmosphere: false`;
 //!   [`sync_aero_environment`] fills [`AtmosphereState`] from the body's physical
 //!   atmosphere ([`thalos_world::TerrestrialAtmosphere::sample_at_altitude_m`]).
-//! - **Airspeed.** Local air co-rotates with the planet, so true airspeed is
-//!   `v − ω×r`; that wind is published into `avian_fdm`'s [`WindResource`].
+//! - **Airspeed.** Ships integrate in the body's **body-fixed (rotating) frame**,
+//!   so the craft's Avian [`LinearVelocity`] is already surface-relative — and the
+//!   local air co-rotates with the surface, i.e. it is *static* in that frame. So
+//!   the published [`WindResource`] is **zero**: true airspeed is the body-fixed
+//!   velocity directly (parked → 0; takeoff roll → ground speed). Do not restore an
+//!   `ω×r` wind here — that double-counts the co-rotation and gives a parked craft
+//!   a phantom ~`ω·R` airspeed (and crushing dynamic pressure the instant Avian
+//!   takes `Full` authority).
 //! - **Frame.** `avian_fdm` works in SAE body axes (X=nose, Y=right, Z=down);
 //!   Thalos ships are Y=nose, X=right, Z=up. An [`AeroFrame`] on the aircraft
 //!   root carries that fixed rotation so lift/drag/AoA are computed correctly,
@@ -33,7 +39,6 @@ use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use std::f64::consts::PI;
 use thalos_input::game::GameInputIntent;
-use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
 use thalos_physics_local::LocalCraftBody;
@@ -438,8 +443,11 @@ fn sync_aero_environment(
         speed_of_sound_ms: sample.speed_of_sound_m_s,
     };
 
-    let body_state = sim
-        .ephemeris
-        .state(bubble.body_id, Epoch(sim.simulation.sim_time()));
-    wind.velocity_world_ms = body_state.angular_velocity.cross(position.0);
+    // Ships integrate in the body-fixed (rotating) frame, where `position` and
+    // the Avian `LinearVelocity` are surface-relative and the co-rotating airmass
+    // is static. So the air is still in this frame: wind = 0, and true airspeed
+    // is the body-fixed velocity itself. (Publishing `ω×r` here would be the old
+    // body-centered-inertial assumption and double-count the co-rotation — see the
+    // module docs.)
+    wind.velocity_world_ms = DVec3::ZERO;
 }

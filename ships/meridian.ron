@@ -1,21 +1,22 @@
-// Meridian — a fictional small jetliner in the early jet-age idiom (late
-// '50s / early '60s): the optimistic first generation of short-haul jets, kin
-// to the Comet / Caravelle class. Swept wings, podded engines, a clean
-// circular-section pressure tube. Built from the heavy aircraft-part kit: a
-// Ø3.5 m parametric fuselage with its own nose, two Ø2.0 m Sirocco engines
-// under the wings, and a heavy tricycle gear set. Proportions of a small
-// short-haul jet — ≈33 m long, ≈31.5 m span.
+// Meridian — a fictional short-haul jetliner in the early jet-age idiom (late
+// '50s / early '60s): the optimistic first generation of jets, kin to the
+// Comet / 707 / Convair 880 class. A slender circular pressure tube, a sharply
+// pointed radome nose, a long pointed upswept tailcone, swept wings, and — the
+// signature classic look — **four** slim podded turbojets in pairs under the
+// wings rather than two fat modern fans. ≈35 m long, ≈32 m span.
 //
 // The whole body is one **parametric fuselage** (`fuselage_loft`): a stationed
-// superellipse loft that owns its nose (rounded radome, slight droop), barrel,
-// and upswept tailcone in a single continuous skin — no separate nose-cone pod.
-// Command/crew lives in an **inline cockpit** (`cockpit_inline`), an internal
-// module surface-mounted near the nose with no body mesh of its own. The
-// fuselage is the root; everything else (cockpit, wings, stabilizers, nacelles,
-// gear) surface-mounts onto it and rides its skin. The empennage uses the
-// `stabilizer` parts (the `Wing` kind's small/dry/zero-incidence preset) —
-// twin tailplanes and a single vertical fin. No flight model yet — a shape +
-// loadout demo.
+// superellipse loft that owns its nose and tailcone in a single continuous skin
+// — no separate nose-cone pod. Both ends are explicitly capped geometry, not
+// bare loft termini: the nose closes to a smooth pointed radome and the tail to
+// a clean pointed boat-tail (`tail_tip_diameter: 0`), each shaped by its own
+// cone↔dome blend (`nose_bluntness` / `tail_bluntness`). Command/crew lives in
+// an **inline cockpit** (`cockpit_inline`), an internal module surface-mounted
+// near the nose with no body mesh of its own. The fuselage is the root;
+// everything else (cockpit, wings, stabilizers, nacelles, gear) surface-mounts
+// onto it and rides its skin. The empennage uses the `stabilizer` parts (the
+// `Wing` kind's small/dry/zero-incidence preset) — twin tailplanes and a single
+// vertical fin. No flight model yet — a shape + loadout demo.
 //
 // `angle` radians: π/2 (≈1.5708) = right, −π/2 = left, 0 = dorsal (top),
 // π (≈3.14159) = belly. Enable "Horizontal layout (aircraft)" in the shipyard
@@ -25,47 +26,52 @@
     root: 0,
     parts: [
         (catalog_id: "fuselage_loft", params: Fuselage(                      // 0 fuselage (root, parametric)
-            length: 33.0, max_width: 3.5, max_height: 3.5, roundness: 1.0,
-            nose_fraction: 0.11, nose_bluntness: 0.85,
-            tail_fraction: 0.30, nose_droop: 0.2, tail_upsweep: 0.9, tail_tip_diameter: 1.2,
+            length: 35.0, max_width: 3.3, max_height: 3.3, roundness: 1.0,
+            nose_fraction: 0.13, nose_bluntness: 0.55,
+            tail_fraction: 0.34, nose_droop: 0.18, tail_upsweep: 1.05,
+            tail_tip_diameter: 0.0, tail_bluntness: 0.6,
         )),
         (catalog_id: "cockpit_inline"),                                      // 1 inline flight deck (command)
         (catalog_id: "wing_wet", params: Wing(                             // 2 main wing R (wet)
-            span: 14.0, root_chord: 5.0, tip_chord: 1.6,
-            sweep: 0.44, dihedral: 0.06, thickness: 0.11, incidence: 0.0,
+            span: 15.0, root_chord: 5.2, tip_chord: 1.5,
+            sweep: 0.52, dihedral: 0.07, thickness: 0.11, incidence: 0.0,
         )),
         (catalog_id: "wing_wet", params: Wing(                             // 3 main wing L (wet)
-            span: 14.0, root_chord: 5.0, tip_chord: 1.6,
-            sweep: 0.44, dihedral: 0.06, thickness: 0.11, incidence: 0.0,
+            span: 15.0, root_chord: 5.2, tip_chord: 1.5,
+            sweep: 0.52, dihedral: 0.07, thickness: 0.11, incidence: 0.0,
         )),
         (catalog_id: "stabilizer", params: Wing(                           // 4 tailplane R
-            span: 4.5, root_chord: 2.6, tip_chord: 1.1,
-            sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+            span: 4.6, root_chord: 2.6, tip_chord: 1.1,
+            sweep: 0.55, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
         )),
         (catalog_id: "stabilizer", params: Wing(                           // 5 tailplane L
-            span: 4.5, root_chord: 2.6, tip_chord: 1.1,
-            sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+            span: 4.6, root_chord: 2.6, tip_chord: 1.1,
+            sweep: 0.55, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
         )),
         (catalog_id: "stabilizer", params: Wing(                           // 6 vertical fin
-            span: 4.0, root_chord: 3.2, tip_chord: 1.4,
-            sweep: 0.6, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+            span: 4.4, root_chord: 3.4, tip_chord: 1.4,
+            sweep: 0.62, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
         )),
-        (catalog_id: "sirocco_turbofan"),                                   // 7 nacelle R
-        (catalog_id: "sirocco_turbofan"),                                   // 8 nacelle L
-        (catalog_id: "gear_nose_hd", params: Gear(strut_length: 2.0, wheel_radius: 0.5)), // 9 nose gear
-        (catalog_id: "gear_main_hd", params: Gear(strut_length: 1.9, wheel_radius: 0.6)), // 10 main gear (matched: both 2.50 m drop)
+        (catalog_id: "vega_turbojet"),                                      // 7 inboard nacelle R
+        (catalog_id: "vega_turbojet"),                                      // 8 inboard nacelle L
+        (catalog_id: "vega_turbojet"),                                      // 9 outboard nacelle R
+        (catalog_id: "vega_turbojet"),                                      // 10 outboard nacelle L
+        (catalog_id: "gear_nose_hd", params: Gear(strut_length: 2.0, wheel_radius: 0.5)), // 11 nose gear
+        (catalog_id: "gear_main_hd", params: Gear(strut_length: 1.9, wheel_radius: 0.6)), // 12 main gear (matched: both 2.50 m drop)
     ],
     connections: [],
     surface_mounts: [
         (parent: 0, child: 1, station: 0.06, angle: 0.0),                              // inline cockpit (forward dorsal)
-        (parent: 0, child: 2, station: 0.45, angle:  1.5708, symmetry_group: Some(0)), // main wing R
-        (parent: 0, child: 3, station: 0.45, angle: -1.5708, symmetry_group: Some(0)), // main wing L
+        (parent: 0, child: 2, station: 0.44, angle:  1.5708, symmetry_group: Some(0)), // main wing R
+        (parent: 0, child: 3, station: 0.44, angle: -1.5708, symmetry_group: Some(0)), // main wing L
         (parent: 0, child: 4, station: 0.90, angle:  1.5708, symmetry_group: Some(1)), // tailplane R (necked tail)
         (parent: 0, child: 5, station: 0.90, angle: -1.5708, symmetry_group: Some(1)), // tailplane L
-        (parent: 0, child: 6, station: 0.89, angle:  0.0),                             // vertical fin (single)
-        (parent: 2, child: 7, kind: WingPylon, station: 0.33, angle: 0.12, symmetry_group: Some(2)), // nacelle R
-        (parent: 3, child: 8, kind: WingPylon, station: 0.33, angle: 0.12, symmetry_group: Some(2)), // nacelle L
-        (parent: 0, child: 9,  station: 0.16, angle: 3.14159),                         // nose gear (belly)
-        (parent: 0, child: 10, station: 0.57, angle: 3.14159),                         // main gear (belly)
+        (parent: 0, child: 6, station: 0.88, angle:  0.0),                             // vertical fin (single)
+        (parent: 2, child: 7,  kind: WingPylon, station: 0.28, angle: 0.15, symmetry_group: Some(2)), // inboard nacelle R
+        (parent: 3, child: 8,  kind: WingPylon, station: 0.28, angle: 0.15, symmetry_group: Some(2)), // inboard nacelle L
+        (parent: 2, child: 9,  kind: WingPylon, station: 0.60, angle: 0.15, symmetry_group: Some(3)), // outboard nacelle R
+        (parent: 3, child: 10, kind: WingPylon, station: 0.60, angle: 0.15, symmetry_group: Some(3)), // outboard nacelle L
+        (parent: 0, child: 11, station: 0.16, angle: 3.14159),                         // nose gear (belly)
+        (parent: 0, child: 12, station: 0.55, angle: 3.14159),                         // main gear (belly)
     ],
 )

@@ -251,6 +251,27 @@
                 (resource: Electricity, units: 5.0),
             ],
         )),
+        // Slim early-jet-age turbojet pod (Comet / 707 / CV-880 idiom): a
+        // long, narrow nacelle meant to hang in fours under a swept wing rather
+        // than as a pair of fat high-bypass fans. Lower thrust and a smaller Ø
+        // each — the classic four-engine look. Same Kerosene + ambient-intake
+        // model as the Sirocco.
+        "vega_turbojet": Engine((
+            display_name: "Vega Turbojet",
+            optimized_for: Atmosphere,
+            geometry: JetNacelle,
+            requires_atmosphere: true,
+            intake_requirement: Some((kind: OxygenatedAir, area_m2: 0.7)),
+            builtin_intake: Some((kind: OxygenatedAir, area_m2: 0.85, efficiency: 1.0)),
+            diameter: 1.15,
+            thrust: 80000.0,
+            isp: 2600.0,
+            dry_mass: 650.0,
+            reactants: [
+                (resource: Kerosene, mass_fraction: 1.0),
+            ],
+            power_draw_kw: 0.0,
+        )),
         "sirocco_turbofan": Engine((
             display_name: "Sirocco Turbofan",
             optimized_for: Atmosphere,

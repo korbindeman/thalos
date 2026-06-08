@@ -17,6 +17,12 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Serde default for a fuselage's `tail_bluntness` (blueprints saved before
+/// the field existed): a softly rounded tail.
+fn default_tail_bluntness() -> f32 {
+    0.35
+}
+
 /// Per-instance parameters that the catalog cannot derive. Pure-catalog
 /// kinds (Pod, Engine) carry [`PartParams::None`]. Parametric kinds carry
 /// the dimensions the user picks; the catalog turns those into mass,
@@ -54,8 +60,12 @@ pub enum PartParams {
         nose_droop: f32,
         /// Tail centerline upsweep, metres.
         tail_upsweep: f32,
-        /// Diameter the tailcone necks to, metres.
+        /// Diameter the tailcone necks to, metres (`0` → closes to a point).
         tail_tip_diameter: f32,
+        /// Tail tip profile `∈ [0,1]`: `0` cone, `1` rounded ogive. Defaults
+        /// (for blueprints saved before this field existed) to a rounded tail.
+        #[serde(default = "default_tail_bluntness")]
+        tail_bluntness: f32,
     },
     Wing {
         span: f32,
@@ -444,6 +454,7 @@ fn insert_part(
                 nose_droop,
                 tail_upsweep,
                 tail_tip_diameter,
+                tail_bluntness,
             },
         ) => {
             let dry_mass =
@@ -465,6 +476,7 @@ fn insert_part(
                     nose_droop: *nose_droop,
                     tail_upsweep: *tail_upsweep,
                     tail_tip_diameter: *tail_tip_diameter,
+                    tail_bluntness: *tail_bluntness,
                     dry_mass,
                 },
                 FuelCrossfeed::default(),
@@ -745,16 +757,16 @@ mod tests {
             .expect("parse parts.ron");
         let bp = ShipBlueprint::from_ron(include_str!("../../../ships/meridian.ron"))
             .expect("parse meridian.ron");
-        // inline cockpit + main wing ×2 + tailplane ×2 + fin + nacelle ×2 +
-        // nose gear + main gear = 10 surface mounts (everything rides the loft).
-        assert_eq!(bp.surface_mounts.len(), 10);
-        // Three linked groups: main wings, tailplanes, nacelles.
+        // inline cockpit + main wing ×2 + tailplane ×2 + fin + nacelle ×4 +
+        // nose gear + main gear = 12 surface mounts (everything rides the loft).
+        assert_eq!(bp.surface_mounts.len(), 12);
+        // Four linked groups: main wings, tailplanes, inboard + outboard nacelles.
         let groups: std::collections::HashSet<u32> = bp
             .surface_mounts
             .iter()
             .filter_map(|m| m.symmetry_group)
             .collect();
-        assert_eq!(groups.len(), 3, "main / tail / nacelle groups");
+        assert_eq!(groups.len(), 4, "main / tail / inboard + outboard nacelle groups");
         let s = bp.stats(&cat).expect("meridian stats");
         assert!(s.wing_area_m2 > 0.0, "meridian should report wing area");
         assert!(s.mean_aerodynamic_chord_m > 0.0);
@@ -854,7 +866,8 @@ pub fn default_params_for(entry: &CatalogEntry) -> PartParams {
             tail_fraction: 0.34,
             nose_droop: 0.1,
             tail_upsweep: 0.9,
-            tail_tip_diameter: 0.5,
+            tail_tip_diameter: 0.0,
+            tail_bluntness: 0.35,
         },
         // Both wing roles spawn the same `Wing` kind; the role only picks the
         // starting geometry so a freshly-placed part is sane without tuning.

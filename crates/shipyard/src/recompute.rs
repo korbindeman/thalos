@@ -126,6 +126,7 @@ pub fn recompute_fuselage_state(
             nose_droop: fus.nose_droop,
             tail_upsweep: fus.tail_upsweep,
             tail_tip_diameter: fus.tail_tip_diameter,
+            tail_bluntness: fus.tail_bluntness,
         };
         res.pools
             .retain(|resource, _| f.storage.iter().any(|option| option.resource == *resource));

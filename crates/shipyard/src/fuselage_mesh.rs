@@ -36,6 +36,23 @@
 //! `n`: `1` → ellipse, `0` → boxy. The A220 is essentially circular
 //! (`roundness ≈ 1`, `a ≈ b`).
 //!
+//! ## End geometry (caps)
+//!
+//! A pure loft to a single point fans the cross-section vertices into an open
+//! pole — a visible hole with a pinched, smeared tip. So the two ends are
+//! treated as **explicit caps**, not raw loft termini:
+//!
+//! - Stations are **cosine-clustered toward both ends** so the terminal domes
+//!   are densely sampled and read as smooth curves, not facets.
+//! - Each tip profile is a **cone↔ogive blend** (`nose_bluntness` /
+//!   `tail_bluntness`): `0` necks to a sharp conic point, `1` to a rounded
+//!   ellipsoidal dome. The two ends are shaped independently.
+//! - A tip that necks to ~0 Ø is **closed with a rounded apex** that shares the
+//!   adjacent loft ring's vertices, so smooth normals carry across the seam —
+//!   no crease, no hole, no pole. A tail that keeps a finite tip Ø
+//!   (`tail_tip_diameter > 0`) instead gets a **crisp flat cap** with its own
+//!   rim vertices (the APU-style truncated tailcone).
+//!
 //! ## Host skin query
 //!
 //! [`skin_radius`] / [`v_offset_at`] are the **surface-mount seam**: wings,
@@ -75,11 +92,42 @@ fn superellipse_exponent(roundness: f32) -> f32 {
     2.0 + (1.0 - roundness.clamp(0.0, 1.0)) * 4.0
 }
 
-/// Smooth Hermite ease on `[0, 1]`, used for both the curved tailcone neck
-/// and the centerline droop/upsweep so neither is a straight-line ramp.
+/// Smooth Hermite ease on `[0, 1]`, used for the centerline droop/upsweep so
+/// neither is a straight-line ramp.
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Radius fraction of a tapering end, as a function of `t ∈ [0, 1]` running
+/// from the **barrel** (`0` → radius 1) to the **tip** (`1` → radius 0).
+///
+/// Both blended profiles have **zero slope at the barrel side** (`t = 0`), so
+/// the cap always meets the barrel tangentially — no curvature crease / dent at
+/// the join, whatever the bluntness. `bluntness` shapes only the *tip*:
+/// - `0` → `1 − t²`, a parabolic cone with a fairly sharp (but not needle)
+///   point;
+/// - `1` → `√(1 − t²)`, a quarter-ellipse — fuller through the middle and
+///   closing on a vertical tangent (a rounded dome).
+///
+/// Because the ellipse term's slope is vertical at `t = 1`, any `bluntness > 0`
+/// rounds the very tip rather than leaving a pinched needle.
+fn cap_falloff(t: f32, bluntness: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let cone = 1.0 - t * t;
+    let dome = cone.max(0.0).sqrt(); // √(1 − t²)
+    cone + (dome - cone) * bluntness.clamp(0.0, 1.0)
+}
+
+/// Axial parameter for station `i` of `n`, cosine-clustered toward both ends so
+/// the terminal domes are densely sampled (smooth) while the simple barrel runs
+/// sparse. `f ∈ [0, 1]` runs top (nose) → tail.
+fn station_param(i: usize, n: usize) -> f32 {
+    if n <= 1 {
+        return 0.0;
+    }
+    let u = i as f32 / (n - 1) as f32;
+    0.5 * (1.0 - (std::f32::consts::PI * u).cos())
 }
 
 /// Uniform scale a child fuselage inherits when its `top` node diameter is
@@ -111,30 +159,34 @@ fn stations(fus: &Fuselage, effective_diameter: f32) -> Vec<Station> {
     let nose_end = fus.nose_fraction.clamp(0.0, 0.49);
     let tail_start = (1.0 - fus.tail_fraction.clamp(0.0, 0.95)).max(nose_end);
 
+    let tip_frac = (tail_tip_r / half_w.max(1e-3)).clamp(0.0, 1.0);
+
     (0..AXIAL_STATIONS)
         .map(|i| {
-            let f = i as f32 / (AXIAL_STATIONS - 1) as f32;
+            let f = station_param(i, AXIAL_STATIONS);
             let y = fus.length * 0.5 - f * fus.length;
 
             // Radial profile: nose growth → constant barrel → curved tail neck.
+            // Both tapers run through `cap_falloff` (cone↔dome); the nose
+            // grows from a closed tip, the tail necks down toward `tip_frac`
+            // (0 → a closed apex; > 0 → a truncated cap).
             let (radius_frac, v) = if f < nose_end && nose_end > 0.0 {
-                // Nose: grow from the tip (t=0) to the full barrel (t=1). The
-                // shape blends a straight cone (linear) with a rounded radome
-                // (convex ellipsoid `√(t·(2−t))`) by `nose_bluntness`. Droop
-                // lowers the tip and eases out toward the barrel.
-                let t = f / nose_end;
-                let conic = t;
-                let radome = (t * (2.0 - t)).max(0.0).sqrt();
-                let grow = conic + (radome - conic) * fus.nose_bluntness.clamp(0.0, 1.0);
-                (grow.max(0.02), -fus.nose_droop * s * (1.0 - smoothstep(t)))
+                // Nose. `t_from_barrel` runs 0 (barrel) → 1 (tip); `cap_falloff`
+                // grows the radome from the barrel tangentially down to a closed
+                // tip. Droop lowers the tip and eases out toward the barrel.
+                let t_from_tip = f / nose_end;
+                let t_from_barrel = 1.0 - t_from_tip;
+                let grow = cap_falloff(t_from_barrel, fus.nose_bluntness);
+                (grow, -fus.nose_droop * s * (1.0 - smoothstep(t_from_tip)))
             } else if f > tail_start && tail_start < 1.0 {
-                // Tail: neck from full barrel to the tail tip on a smooth
-                // curve, centerline sweeping up.
-                let t = (f - tail_start) / (1.0 - tail_start);
-                let e = smoothstep(t);
-                let barrel = 1.0;
-                let tip_frac = tail_tip_r / half_w.max(1e-3);
-                (barrel * (1.0 - e) + tip_frac * e, fus.tail_upsweep * s * e)
+                // Tail. `t_along` runs 0 (barrel) → 1 (tip); `cap_falloff` necks
+                // tangentially off the barrel, lifted toward `tip_frac` so a
+                // finite tip Ø truncates and a zero tip Ø closes to a (rounded)
+                // point. Centerline sweeps up across the necked region.
+                let t_along = (f - tail_start) / (1.0 - tail_start);
+                let neck = cap_falloff(t_along, fus.tail_bluntness);
+                let grow = tip_frac + (1.0 - tip_frac) * neck;
+                (grow, fus.tail_upsweep * s * smoothstep(t_along))
             } else {
                 (1.0, 0.0)
             };
@@ -158,55 +210,69 @@ fn section_point(a: f32, b: f32, n: f32, theta: f32) -> Vec2 {
     Vec2::new(a * c.signum() * powx, b * s.signum() * powz)
 }
 
+/// Radius below which a station counts as a closed apex rather than a loft
+/// ring: it is dropped from the loft (it would be a degenerate, pinched ring)
+/// and its point becomes the apex of a rounded end cap.
+const APEX_EPS: f32 = 1e-3;
+
 /// Build the host-local fuselage skin mesh at the given barrel diameter.
-/// Smooth-shaded along the whole loft; the tail-tip cap carries its own
-/// vertices so its rim stays crisp. The top (nose-end) is left open — the
-/// cockpit end-cap covers it, exactly as the old cylinder + nose pair did.
+/// Smooth-shaded along the whole loft. A tip that necks to ~0 Ø is closed with
+/// a rounded apex sharing the adjacent ring's vertices (smooth, hole-free); a
+/// finite tail tip Ø gets a crisp flat cap with its own rim. A barrel-fronted
+/// body (`nose_fraction = 0`) leaves the top open — the cockpit end-cap covers
+/// it, exactly as the old cylinder + nose pair did.
 pub fn build_fuselage_mesh(fus: &Fuselage, effective_diameter: f32) -> Mesh {
     let stations = stations(fus, effective_diameter);
     let n_exp = superellipse_exponent(fus.roundness);
-    let rings = stations.len();
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // Loft rings (shared vertices → smooth skin).
+    // Loft rings (shared vertices → smooth skin), excluding any pinched apex
+    // ring at either end. `ring_bases[k]` is the first vertex index of the kth
+    // emitted ring.
+    let mut ring_bases: Vec<u32> = Vec::new();
     for st in &stations {
+        if st.a.max(st.b) < APEX_EPS {
+            continue; // closed apex — handled as a cap below
+        }
+        ring_bases.push(positions.len() as u32);
         for j in 0..RADIAL_SEGMENTS {
             let theta = std::f32::consts::TAU * (j as f32 / RADIAL_SEGMENTS as f32);
             let p = section_point(st.a, st.b, n_exp, theta);
             positions.push([p.x, st.y, p.y + st.v]);
         }
     }
-    for i in 0..(rings - 1) {
-        for j in 0..RADIAL_SEGMENTS {
-            let j2 = (j + 1) % RADIAL_SEGMENTS;
-            let a = (i * RADIAL_SEGMENTS + j) as u32;
-            let b = (i * RADIAL_SEGMENTS + j2) as u32;
-            let c = ((i + 1) * RADIAL_SEGMENTS + j2) as u32;
-            let d = ((i + 1) * RADIAL_SEGMENTS + j) as u32;
+    for w in ring_bases.windows(2) {
+        let (lo, hi) = (w[0], w[1]);
+        for j in 0..RADIAL_SEGMENTS as u32 {
+            let j2 = (j + 1) % RADIAL_SEGMENTS as u32;
             // Outward winding (lower ring first → faces away from the axis).
-            indices.extend_from_slice(&[a, b, c, a, c, d]);
+            indices.extend_from_slice(&[lo + j, lo + j2, hi + j2, lo + j, hi + j2, hi + j]);
         }
     }
 
-    // Tail-tip cap (own vertices for a crisp rim).
-    if let Some(tail) = stations.last() {
-        let center = positions.len() as u32;
-        positions.push([0.0, tail.y, tail.v]);
-        let rim_base = positions.len() as u32;
-        for j in 0..RADIAL_SEGMENTS {
-            let theta = std::f32::consts::TAU * (j as f32 / RADIAL_SEGMENTS as f32);
-            let p = section_point(tail.a, tail.b, n_exp, theta);
-            positions.push([p.x, tail.y, p.y + tail.v]);
-        }
-        for j in 0..RADIAL_SEGMENTS {
-            let j2 = ((j + 1) % RADIAL_SEGMENTS) as u32;
-            // Faces −Y (aft, outward at the tail). The rings wind CCW about +Y,
-            // so following that order (`j → j2`) gives a −Y-facing normal — the
-            // outward direction at the aft end. (Reversed winding faces +Y, into
-            // the body, rendering the cap dark/inside-out.)
-            indices.extend_from_slice(&[center, rim_base + j as u32, rim_base + j2]);
+    // Nose cap. A closed (apex) nose is a rounded dome sharing the first loft
+    // ring's vertices; a barrel-fronted body leaves the top open.
+    if let (Some(front), Some(&ring0)) = (stations.first(), ring_bases.first())
+        && front.a.max(front.b) < APEX_EPS
+    {
+        append_apex_cap(ring0, [0.0, front.y, front.v], true, &mut positions, &mut indices);
+    }
+
+    // Tail cap. A pinched tip closes with a rounded apex (shared rim, smooth);
+    // a finite tip Ø gets a crisp flat cap with its own rim vertices.
+    if let (Some(tail), Some(&ring_last)) = (stations.last(), ring_bases.last()) {
+        if tail.a.max(tail.b) < APEX_EPS {
+            append_apex_cap(
+                ring_last,
+                [0.0, tail.y, tail.v],
+                false,
+                &mut positions,
+                &mut indices,
+            );
+        } else {
+            append_flat_cap(tail, n_exp, &mut positions, &mut indices);
         }
     }
 
@@ -220,6 +286,47 @@ pub fn build_fuselage_mesh(fus: &Fuselage, effective_diameter: f32) -> Mesh {
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
     mesh
+}
+
+/// Close an end with a single apex vertex fanned to the adjacent loft ring,
+/// reusing the ring's existing vertices so smooth normals carry across the
+/// seam (no crease). `forward` caps the nose end (apex on +Y, faces forward);
+/// otherwise it caps the tail (apex on −Y, faces aft). The loft rings wind CCW
+/// about +Y, so the two ends need opposite triangle order to face outward.
+fn append_apex_cap(
+    ring_base: u32,
+    apex: [f32; 3],
+    forward: bool,
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+) {
+    let apex_i = positions.len() as u32;
+    positions.push(apex);
+    for j in 0..RADIAL_SEGMENTS as u32 {
+        let j2 = (j + 1) % RADIAL_SEGMENTS as u32;
+        if forward {
+            indices.extend_from_slice(&[apex_i, ring_base + j2, ring_base + j]);
+        } else {
+            indices.extend_from_slice(&[apex_i, ring_base + j, ring_base + j2]);
+        }
+    }
+}
+
+/// Crisp flat cap over a truncated tail tip, with its own centre + rim vertices
+/// so the rim stays a sharp edge. Faces −Y (aft, outward).
+fn append_flat_cap(tail: &Station, n_exp: f32, positions: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>) {
+    let center = positions.len() as u32;
+    positions.push([0.0, tail.y, tail.v]);
+    let rim_base = positions.len() as u32;
+    for j in 0..RADIAL_SEGMENTS {
+        let theta = std::f32::consts::TAU * (j as f32 / RADIAL_SEGMENTS as f32);
+        let p = section_point(tail.a, tail.b, n_exp, theta);
+        positions.push([p.x, tail.y, p.y + tail.v]);
+    }
+    for j in 0..RADIAL_SEGMENTS as u32 {
+        let j2 = (j + 1) % RADIAL_SEGMENTS as u32;
+        indices.extend_from_slice(&[center, rim_base + j, rim_base + j2]);
+    }
 }
 
 /// Skin radius along the mount radial at `(station01, angle)` for a fuselage
@@ -271,22 +378,31 @@ fn section_extents(fus: &Fuselage, effective_diameter: f32, station01: f32) -> (
     (st.a, st.b)
 }
 
+/// Interpolate the station at a continuous `station01 ∈ [0, 1]` measured as a
+/// fraction of body *length* (0 → nose, 1 → tail). Stations are non-uniformly
+/// spaced along the axis (cosine-clustered toward the ends), so this brackets
+/// by axial position `y`, not by station index.
 fn interp_station(fus: &Fuselage, effective_diameter: f32, station01: f32) -> Station {
     let stations = stations(fus, effective_diameter);
-    let f = station01.clamp(0.0, 1.0);
-    let x = f * (stations.len() - 1) as f32;
-    let i = x.floor() as usize;
-    if i + 1 >= stations.len() {
-        return stations[stations.len() - 1];
+    let target_y = fus.length * 0.5 - station01.clamp(0.0, 1.0) * fus.length;
+    // `y` runs monotonically descending from +length/2 (nose) to −length/2.
+    for w in stations.windows(2) {
+        let (hi, lo) = (w[0], w[1]); // hi.y > lo.y
+        if target_y <= hi.y && target_y >= lo.y {
+            let span = (hi.y - lo.y).abs().max(1e-6);
+            let t = (hi.y - target_y) / span;
+            return Station {
+                y: target_y,
+                a: hi.a + (lo.a - hi.a) * t,
+                b: hi.b + (lo.b - hi.b) * t,
+                v: hi.v + (lo.v - hi.v) * t,
+            };
+        }
     }
-    let t = x - i as f32;
-    let lo = stations[i];
-    let hi = stations[i + 1];
-    Station {
-        y: lo.y + (hi.y - lo.y) * t,
-        a: lo.a + (hi.a - lo.a) * t,
-        b: lo.b + (hi.b - lo.b) * t,
-        v: lo.v + (hi.v - lo.v) * t,
+    if target_y > stations[0].y {
+        stations[0]
+    } else {
+        stations[stations.len() - 1]
     }
 }
 
@@ -306,6 +422,7 @@ mod tests {
             nose_droop: 0.0,
             tail_upsweep: 1.2,
             tail_tip_diameter: 0.6,
+            tail_bluntness: 0.5,
             dry_mass: 0.0,
         }
     }
@@ -406,6 +523,48 @@ mod tests {
         }
         let n = found.expect("tail cap centre vertex");
         assert!(n[1] < -0.8, "tail cap faces aft (−Y), got normal {n:?}");
+    }
+
+    #[test]
+    fn nose_cap_closes_and_faces_forward() {
+        // A fuselage with a real nose closes to a rounded apex on +Y (forward),
+        // with no open ring at the tip. The apex is the unique vertex at
+        // (x≈0, y=+length/2, z≈−droop·…≈0 here).
+        let f = Fuselage {
+            nose_fraction: 0.18,
+            nose_bluntness: 1.0,
+            ..a220_fuselage()
+        };
+        let m = build_fuselage_mesh(&f, f.max_width);
+        let pos = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
+        let nor = m.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        let nose_y = f.length * 0.5;
+        let mut apex_n = None;
+        for (p, n) in pos.iter().zip(nor) {
+            if (p[1] - nose_y).abs() < 1e-3 && p[0].abs() < 1e-3 {
+                apex_n = Some(*n);
+            }
+        }
+        let n = apex_n.expect("nose apex vertex");
+        assert!(n[1] > 0.8, "nose apex faces forward (+Y), got {n:?}");
+    }
+
+    #[test]
+    fn closed_tail_apex_faces_aft() {
+        // A zero tip Ø necks the tail to a single apex (no flat disc), facing −Y.
+        let f = Fuselage { tail_tip_diameter: 0.0, ..a220_fuselage() };
+        let m = build_fuselage_mesh(&f, f.max_width);
+        let pos = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
+        let nor = m.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        let tail_y = -f.length * 0.5;
+        let mut apex_n = None;
+        for (p, n) in pos.iter().zip(nor) {
+            if (p[1] - tail_y).abs() < 1e-2 && p[0].abs() < 1e-3 {
+                apex_n = Some(*n);
+            }
+        }
+        let n = apex_n.expect("tail apex vertex");
+        assert!(n[1] < -0.7, "closed tail apex faces aft (−Y), got {n:?}");
     }
 
     #[test]

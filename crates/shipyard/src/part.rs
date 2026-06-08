@@ -263,8 +263,14 @@ pub struct Fuselage {
     pub nose_droop: f32,
     /// Tail centerline upsweep, metres (raises the tail — the airliner look).
     pub tail_upsweep: f32,
-    /// Diameter the tailcone necks down to at the tip, metres.
+    /// Diameter the tailcone necks down to at the tip, metres. `0` → the
+    /// tailcone closes to a point (a clean classic boat-tail); `> 0` → it is
+    /// truncated with a flat cap (the APU-style blunt tailcone).
     pub tail_tip_diameter: f32,
+    /// Tail tip profile `∈ [0, 1]`: `0` → a straight cone (sharply pointed),
+    /// `1` → a rounded ogive dome. Symmetric to `nose_bluntness` for the aft
+    /// end, so each end is shaped independently.
+    pub tail_bluntness: f32,
     /// Catalog-derived structural mass, kg.
     pub dry_mass: f32,
 }
