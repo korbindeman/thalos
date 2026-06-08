@@ -1,7 +1,10 @@
-// A220 — a narrow-body airliner equivalent, built from the heavy aircraft-part
-// class. Roughly the proportions of an Airbus A220 / regional jet, scaled to
-// this kit: a Ø3.5 m parametric fuselage with its own nose, two Ø2.0 m Sirocco
-// geared turbofans under swept wings, and a heavy tricycle gear set.
+// Meridian — a fictional small jetliner in the early jet-age idiom (late
+// '50s / early '60s): the optimistic first generation of short-haul jets, kin
+// to the Comet / Caravelle class. Swept wings, podded engines, a clean
+// circular-section pressure tube. Built from the heavy aircraft-part kit: a
+// Ø3.5 m parametric fuselage with its own nose, two Ø2.0 m Sirocco engines
+// under the wings, and a heavy tricycle gear set. Proportions of a small
+// short-haul jet — ≈33 m long, ≈31.5 m span.
 //
 // The whole body is one **parametric fuselage** (`fuselage_loft`): a stationed
 // superellipse loft that owns its nose (rounded radome, slight droop), barrel,
@@ -9,14 +12,16 @@
 // Command/crew lives in an **inline cockpit** (`cockpit_inline`), an internal
 // module surface-mounted near the nose with no body mesh of its own. The
 // fuselage is the root; everything else (cockpit, wings, stabilizers, nacelles,
-// gear) surface-mounts onto it and rides its skin. Proportions: fuselage ≈ 33 m,
-// wingspan ≈ 31.5 m. No flight model yet — a shape + loadout demo.
+// gear) surface-mounts onto it and rides its skin. The empennage uses the
+// `stabilizer` parts (the `Wing` kind's small/dry/zero-incidence preset) —
+// twin tailplanes and a single vertical fin. No flight model yet — a shape +
+// loadout demo.
 //
 // `angle` radians: π/2 (≈1.5708) = right, −π/2 = left, 0 = dorsal (top),
 // π (≈3.14159) = belly. Enable "Horizontal layout (aircraft)" in the shipyard
 // View panel to see it on its gear.
 (
-    name: "A220",
+    name: "Meridian",
     root: 0,
     parts: [
         (catalog_id: "fuselage_loft", params: Fuselage(                      // 0 fuselage (root, parametric)
@@ -33,15 +38,15 @@
             span: 14.0, root_chord: 5.0, tip_chord: 1.6,
             sweep: 0.44, dihedral: 0.06, thickness: 0.11, incidence: 0.0,
         )),
-        (catalog_id: "wing_std", params: Wing(                             // 4 tailplane R
+        (catalog_id: "stabilizer", params: Wing(                           // 4 tailplane R
             span: 4.5, root_chord: 2.6, tip_chord: 1.1,
             sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
         )),
-        (catalog_id: "wing_std", params: Wing(                             // 5 tailplane L
+        (catalog_id: "stabilizer", params: Wing(                           // 5 tailplane L
             span: 4.5, root_chord: 2.6, tip_chord: 1.1,
             sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
         )),
-        (catalog_id: "wing_std", params: Wing(                             // 6 vertical fin
+        (catalog_id: "stabilizer", params: Wing(                           // 6 vertical fin
             span: 4.0, root_chord: 3.2, tip_chord: 1.4,
             sweep: 0.6, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
         )),

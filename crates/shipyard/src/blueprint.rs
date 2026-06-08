@@ -3,7 +3,7 @@ use crate::attach::{
     SymmetryGroup, SymmetryRole,
 };
 use crate::catalog::{
-    CatalogEntry, CatalogError, CatalogId, CatalogRef, PartCatalog, adapter_surface_area,
+    CatalogEntry, CatalogError, CatalogId, CatalogRef, PartCatalog, WingRole, adapter_surface_area,
     fuselage_surface_area, fuselage_volume, gear_dry_mass, tank_surface_area, tank_volume,
     wing_panel_area, wing_volume,
 };
@@ -733,17 +733,18 @@ mod tests {
     use super::*;
     use crate::catalog::PartCatalog;
 
-    /// The shipped demo aircraft must stay loadable: parse `ships/a220.ron`
+    /// The shipped demo aircraft must stay loadable: parse `ships/meridian.ron`
     /// against the catalog, confirm its KSP-symmetry surface mounts survive
     /// the round-trip, and that stats derive a positive wing area. Guards the
     /// hand-authored RON (`surface_mounts` shape, `symmetry_group`) from drift —
-    /// including the loft-fuselage-root + inline-cockpit layout.
+    /// including the loft-fuselage-root + inline-cockpit layout and the
+    /// `stabilizer`-part empennage.
     #[test]
-    fn a220_sample_loads_with_wings() {
+    fn meridian_sample_loads_with_wings() {
         let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
             .expect("parse parts.ron");
-        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/a220.ron"))
-            .expect("parse a220.ron");
+        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/meridian.ron"))
+            .expect("parse meridian.ron");
         // inline cockpit + main wing ×2 + tailplane ×2 + fin + nacelle ×2 +
         // nose gear + main gear = 10 surface mounts (everything rides the loft).
         assert_eq!(bp.surface_mounts.len(), 10);
@@ -754,8 +755,8 @@ mod tests {
             .filter_map(|m| m.symmetry_group)
             .collect();
         assert_eq!(groups.len(), 3, "main / tail / nacelle groups");
-        let s = bp.stats(&cat).expect("a220 stats");
-        assert!(s.wing_area_m2 > 0.0, "a220 should report wing area");
+        let s = bp.stats(&cat).expect("meridian stats");
+        assert!(s.wing_area_m2 > 0.0, "meridian should report wing area");
         assert!(s.mean_aerodynamic_chord_m > 0.0);
         assert!(s.dry_mass_kg > 0.0);
     }
@@ -806,13 +807,13 @@ mod tests {
     }
 
     /// The shipped airliner loads with fuel in its wings and none in the
-    /// structural body. Guards `ships/a220.ron`.
+    /// structural body. Guards `ships/meridian.ron`.
     #[test]
-    fn a220_carries_wing_fuel() {
+    fn meridian_carries_wing_fuel() {
         let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
             .expect("parse parts.ron");
-        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/a220.ron"))
-            .expect("parse a220.ron");
+        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/meridian.ron"))
+            .expect("parse meridian.ron");
         let s = bp.stats(&cat).expect("aircraft stats");
         let kero = s
             .resources
@@ -855,14 +856,30 @@ pub fn default_params_for(entry: &CatalogEntry) -> PartParams {
             tail_upsweep: 0.9,
             tail_tip_diameter: 0.5,
         },
-        CatalogEntry::Wing(_) => PartParams::Wing {
-            span: 5.0,
-            root_chord: 2.5,
-            tip_chord: 1.0,
-            sweep: 20.0_f32.to_radians(),
-            dihedral: 3.0_f32.to_radians(),
-            thickness: 0.12,
-            incidence: 0.0,
+        // Both wing roles spawn the same `Wing` kind; the role only picks the
+        // starting geometry so a freshly-placed part is sane without tuning.
+        // A `Stabilizer` is a small, dry, ~0°-incidence trim surface — equally
+        // a tailplane or a fin, since orientation is decided by the mount
+        // azimuth, not these params.
+        CatalogEntry::Wing(spec) => match spec.role {
+            WingRole::Lift => PartParams::Wing {
+                span: 5.0,
+                root_chord: 2.5,
+                tip_chord: 1.0,
+                sweep: 20.0_f32.to_radians(),
+                dihedral: 3.0_f32.to_radians(),
+                thickness: 0.12,
+                incidence: 0.0,
+            },
+            WingRole::Stabilizer => PartParams::Wing {
+                span: 2.0,
+                root_chord: 1.4,
+                tip_chord: 0.7,
+                sweep: 12.0_f32.to_radians(),
+                dihedral: 0.0,
+                thickness: 0.10,
+                incidence: 0.0,
+            },
         },
         CatalogEntry::Gear(g) => PartParams::Gear {
             strut_length: g.default_strut_length,

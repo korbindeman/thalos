@@ -26,10 +26,17 @@ footprint placement** capability (§4.3) without forking the rocket path:
 
 - **`Wing` part** (`part.rs`, `catalog.rs::WingSpec`, `PartParams::Wing`):
   a tapered / swept / dihedral lifting surface parameterised by span,
-  root/tip chord, sweep, dihedral, thickness (t/c), and incidence. One
-  catalog entry (`wing_std`) serves main wing, tailplane, and fin —
-  they differ only by parameters and mount. Dry mass = `mass_per_m2` ×
-  planform area.
+  root/tip chord, sweep, dihedral, thickness (t/c), and incidence. The
+  `Wing` *kind* serves main wing, tailplane, and fin alike — they differ
+  only by parameters and mount. Two catalog entries arm different
+  placement presets of that one kind (`WingSpec::role`, à la
+  `gear_main`/`gear_nose`): **`wing_std`** (`role: Lift`) starts a full-span
+  swept lifting surface with positive incidence, **`stabilizer`**
+  (`role: Stabilizer`) a small dry ~0°-incidence trim surface. The role is a
+  placement-time default only — not stored on the part/blueprint — and
+  horizontal (tailplane/canard) vs vertical (fin) falls out of the mount
+  azimuth, so twin fins are just a `stabilizer` under Mirror mode. Dry mass =
+  `mass_per_m2` × planform area.
 - **Surface mounting** (`attach.rs::SurfaceMount`): a placement component
   *parallel to* `Attachment`, carrying `(parent, kind, station, angle)`.
   It sits a part on a host's skin at a `(station, angle)` point and
@@ -165,7 +172,7 @@ non-cylindrical part:
   `storage` whitelist — same stainless-steel skin, diameter propagation, and
   node stacking as a propellant tank, but load-bearing structure that holds
   no fuel.
-- **Aircraft loadout**: `ships/jet.ron` and `ships/a220.ron` now stack a
+- **Aircraft loadout**: `ships/jet.ron` and `ships/meridian.ron` now stack a
   `fuselage_structural` body and carry their kerosene in `wing_wet` main
   wings (tailplanes/fins stay dry). This is the airliner pattern — fuel in
   the wings, dry structural fuselage — and a step toward the §5.3 internal
@@ -205,7 +212,7 @@ continuous, upswept superellipse loft:
 - **Editor**: the `Fuselage` appears under *Structure* with inspector sliders
   for every shape param; it node-stacks and hosts surface mounts like any hull,
   and the placement preview follows the loft skin.
-- **A220** (`ships/a220.ron`): the body is now one `fuselage_loft` (barrel +
+- **Meridian** (`ships/meridian.ron`): the body is now one `fuselage_loft` (barrel +
   upswept tailcone) replacing the old `fuselage_structural` tank +
   `adapter_std` cone pair; the flight-deck ogive provides the nose. `jet.ron` /
   `skyhawk.ron` keep their straight `fuselage_structural` tubes.
@@ -237,7 +244,7 @@ an internal module — there is no separate nose-cone pod on a loft-bodied craft
 - **Camera framing fix**: `update_ship_camera_offset` / `visual_extent` now
   include the fuselage body (previously omitted), so a loft-bodied aircraft
   auto-frames on its whole hull.
-- **A220** (`ships/a220.ron`): rebuilt around this — `fuselage_loft` root with a
+- **Meridian** (`ships/meridian.ron`): rebuilt around this — `fuselage_loft` root with a
   parametric nose + upswept tail, `cockpit_inline` near the nose, everything else
   surface-mounted; `flightdeck` retired from this craft.
 
@@ -245,7 +252,7 @@ an internal module — there is no separate nose-cone pod on a loft-bodied craft
 
 `GearSpec`/`Gear` gain `wheels_per_leg`: `1` is a single wheel, `2`+ a fore/aft
 **tandem bogie** (with a connecting beam), drawn by `gear_mesh`. Catalog-only
-like `track_fraction`, so no `PartParams` change. The A220's `gear_main_hd` is now
+like `track_fraction`, so no `PartParams` change. The Meridian's `gear_main_hd` is now
 a 2-wheel bogie on a wider (`±0.85·radius`) track for a stable, airliner-looking
 stance. *To revisit:* a belly-mounted axle can't exceed the hull width without
 floating — a true wing/sponson gear mount comes with the morph work; physics still

@@ -180,6 +180,18 @@
                 (resource: Kerosene, units_per_m3: 1000.0),
             ],
         )),
+        // Stabilizer: the *same* `Wing` part underneath, but armed with the
+        // small / dry / zero-incidence empennage preset (`role: Stabilizer`) so
+        // it lands as a sane tailplane or fin without hand-tuning. Whether it
+        // ends up horizontal (tailplane / canard) or vertical (fin) is decided
+        // by where you click — top of the fuselage → vertical, side →
+        // horizontal — and twin fins are just this part under Mirror mode.
+        // Dry like the standard wing; reuses the same light-alloy mass/area.
+        "stabilizer": Wing((
+            display_name: "Stabilizer",
+            mass_per_m2: 22.0,
+            role: Stabilizer,
+        )),
         // Landing gear are self-contained "gearbox" footprint parts: one part
         // draws all of its legs in a single mesh (no symmetry). A track > 0
         // means a left/right main pair; track 0 means a single centred nose

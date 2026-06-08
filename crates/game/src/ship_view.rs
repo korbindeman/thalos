@@ -1,5 +1,5 @@
 //! Player ship rendering — loads the spawn situation's ship blueprint on
-//! startup (`ships/apollo.ron` by default, `ships/a220.ron` for the runway
+//! startup (`ships/apollo.ron` by default, `ships/meridian.ron` for the runway
 //! scenarios; see [`crate::spawn::SpawnSituation::ship_blueprint_path`]),
 //! spawns its parts as children of a [`PlayerShip`] root, and keeps the root's
 //! world position in sync with the physics ship state each frame.

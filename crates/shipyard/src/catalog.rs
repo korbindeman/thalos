@@ -279,6 +279,27 @@ pub struct FuselageSpec {
     pub storage: Vec<ResourceStorageSpec>,
 }
 
+/// Placement-time default preset for a [`WingSpec`] catalog entry. Both
+/// presets spawn the *same* [`crate::Wing`] part kind — this only selects the
+/// initial geometry a freshly-placed instance starts at, so the user almost
+/// always gets a sane shape without hand-tuning. It is **not** stored on the
+/// part or blueprint (a stabilizer is a plain `Wing` underneath); reloading a
+/// saved craft restores the user's tuned params, not the preset.
+///
+/// Orientation (horizontal tailplane vs vertical fin) is *not* encoded here —
+/// it falls out of the mount azimuth at placement: a top-of-fuselage hit
+/// extends the surface vertically (fin), a side hit horizontally (tailplane /
+/// canard). Twin fins are just a `Stabilizer` placed under Mirror mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WingRole {
+    /// Primary lifting surface: full span, positive default incidence, swept.
+    #[default]
+    Lift,
+    /// Trim / control surface (tailplane, fin, canard): small span, ~0°
+    /// incidence, low sweep, no dihedral. The empennage default.
+    Stabilizer,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WingSpec {
     pub display_name: String,
@@ -286,6 +307,11 @@ pub struct WingSpec {
     /// a mirrored pair). Lifting surfaces are lighter per area than
     /// pressure tanks — spar + skin, not a sealed vessel.
     pub mass_per_m2: f32,
+    /// Default geometry preset this catalog entry arms with. Pre-stabilizer
+    /// saves omit it and load as `Lift`, so existing wing entries are
+    /// unchanged.
+    #[serde(default)]
+    pub role: WingRole,
     /// Whitelisted resource storage this part may carry. Dry wings leave it
     /// empty; wet wings (`wing_wet`) whitelist kerosene, whose capacity scales
     /// with the panel's internal volume (see [`wing_volume`]).
