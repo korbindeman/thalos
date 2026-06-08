@@ -15,6 +15,7 @@ use thalos_input::game::GameInputIntent;
 
 use crate::hud::theme::{HudTheme, panel_frame};
 use crate::maneuver::InteractionMode;
+use crate::settings_menu::SettingsMenu;
 use crate::target::TargetBody;
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
@@ -28,6 +29,7 @@ struct PauseMenuRoot;
 #[derive(Component, Clone, Copy)]
 enum PauseMenuAction {
     Resume,
+    Settings,
     Quit,
 }
 
@@ -163,6 +165,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                     })
                     .with_children(|buttons| {
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Resume, "RESUME");
+                        spawn_menu_button(buttons, &theme, PauseMenuAction::Settings, "SETTINGS");
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Quit, "QUIT");
                     });
             });
@@ -211,6 +214,7 @@ pub(crate) fn handle_escape_input(
     intent: Res<GameInputIntent>,
     scenario: Res<crate::scenario_menu::ScenarioMenu>,
     mut pause: ResMut<GamePause>,
+    mut settings_menu: ResMut<SettingsMenu>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
@@ -221,6 +225,12 @@ pub(crate) fn handle_escape_input(
     // The destruction scenario picker is a forced modal: Escape must not
     // dismiss it or stack the pause menu on top. See `crate::scenario_menu`.
     if scenario.open {
+        return;
+    }
+
+    // Settings overlay closes before the pause menu backdrop.
+    if settings_menu.open {
+        settings_menu.open = false;
         return;
     }
 
@@ -251,6 +261,7 @@ fn handle_button_clicks(
     interactions: Query<(&Interaction, &PauseMenuAction), Changed<Interaction>>,
     primary_window: Query<Entity, With<PrimaryWindow>>,
     mut pause: ResMut<GamePause>,
+    mut settings_menu: ResMut<SettingsMenu>,
     mut close_requested: MessageWriter<WindowCloseRequested>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -260,6 +271,7 @@ fn handle_button_clicks(
         }
         match action {
             PauseMenuAction::Resume => pause.active = false,
+            PauseMenuAction::Settings => settings_menu.open = true,
             PauseMenuAction::Quit => {
                 pause.active = false;
                 if let Ok(window) = primary_window.single() {

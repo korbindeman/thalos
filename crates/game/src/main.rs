@@ -29,6 +29,7 @@ mod rendering;
 mod runway;
 mod scenario_menu;
 mod screenshot;
+mod settings_menu;
 mod ship_view;
 mod sim_clock;
 mod sky_render;
@@ -87,6 +88,7 @@ use map_view::MapViewPlugin;
 use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use pause_menu::PauseMenuPlugin;
+use settings_menu::SettingsMenuPlugin;
 use perf_log::PerfLogPlugin;
 use photo_mode::PhotoModePlugin;
 use player_controller::PlayerControllerPlugin;
@@ -545,6 +547,7 @@ fn main() {
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)
+        .add_plugins(SettingsMenuPlugin)
         .add_plugins(PerfLogPlugin)
         .add_plugins(ScenarioMenuPlugin)
         .add_plugins(NavballPlugin)
