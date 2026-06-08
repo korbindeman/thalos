@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: nightly
+
+jobs:
+  boundaries:
+    name: Crate dependency boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Pure-Rust crates must not depend on Bevy
+        shell: bash
+        run: |
+          # Design invariant (CLAUDE.md): world, physics_canonical, terrain, and
+          # celestial are pure Rust libraries with no Bevy dependency. This is
+          # a `cargo tree` boundary check, not a build — it stays fast and
+          # catches transitive leaks (e.g. a registry dep pulling Bevy via its
+          # default features) the moment they enter Cargo.lock.
+          #
+          # `bevy_erosion_filter` is intentionally allowed: terrain uses its
+          # pure-glam `cpu` module with default-features = false, so the crate
+          # is present by name but pulls no Bevy engine crate.
+          status=0
+          for crate in \
+            thalos_world \
+            thalos_physics_canonical \
+            thalos_terrain \
+            thalos_celestial; do
+            offenders="$(cargo tree -p "$crate" -e normal \
+              | grep -oE '\bbevy[a-z0-9_]* v[0-9][^ ]*' \
+              | grep -vE '^bevy_erosion_filter ' \
+              | sort -u || true)"
+            if [ -n "$offenders" ]; then
+              echo "::error::${crate} pulled in Bevy:"
+              echo "$offenders"
+              status=1
+            else
+              echo "OK: ${crate} has no Bevy in its dependency tree"
+            fi
+          done
+          exit "$status"
+
+  licenses:
+    name: No GPL/AGPL dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Fail if any GPL (non-LGPL) crate enters the tree
+        shell: bash
+        run: |
+          # Licensing invariant (LICENSING.md): Thalos code is PolyForm
+          # Noncommercial. LGPL is compatible (crates/avian_fdm is the sole
+          # copyleft dep, kept isolated, and full-source distribution satisfies
+          # its relinking requirement). GPL and AGPL are NOT: they are viral
+          # across the whole combined work and would void the noncommercial
+          # model. The classic trap is avian_fdm's GPL-3.0-only JSBSim preset
+          # crate (avian_fdm_j3cub_jsbsim). This guard catches it — and any
+          # other GPL/AGPL dep — the moment it enters Cargo.lock.
+          #
+          # Conservative by design: a crate offered under "MIT OR GPL-3.0"
+          # would also trip this. If that ever happens for a genuinely
+          # permissive option, add a targeted allow below with a comment.
+          offenders="$(cargo tree --workspace -e normal -f '{p} = {l}' \
+            | grep -iE '\b(a)?gpl' \
+            | grep -ivE 'lgpl' \
+            | sort -u || true)"
+          if [ -n "$offenders" ]; then
+            echo "::error::GPL/AGPL-licensed crate(s) found — incompatible with the noncommercial license model (see LICENSING.md):"
+            echo "$offenders"
+            exit 1
+          fi
+          echo "OK: no GPL/AGPL crates in the workspace dependency tree"

@@ -43,6 +43,11 @@ const PART_RESOLUTION: u32 = 128;
 // TEMP (camera-judder repro): survive a hard touchdown so the craft settles in
 // Full on the terrain instead of being destroyed. Restore to 12.0 after.
 const SHIP_IMPACT_TOLERANCE_M_S: f64 = 1.0e9;
+/// Aggregate bluff-body drag coefficient for the player ship. Blunt
+/// capsule-topped stacks sit around 1.0; a future per-shape model can derive
+/// this from the nose part. The frontal area is per-vehicle
+/// (`ShipStats::frontal_area_m2`).
+const SHIP_DRAG_COEFFICIENT: f64 = 1.0;
 
 /// Initial orbital distance (metres) when switching into ship view. The
 /// camera snaps to this distance — close enough that a ~10 m ship fills
@@ -147,6 +152,10 @@ pub(crate) fn spawn_player_ship(
         // future per-part model derives this from the contacting parts).
         // See docs/landing.md.
         impact_tolerance_m_s: SHIP_IMPACT_TOLERANCE_M_S,
+        // Per-vehicle aerodynamic drag: frontal area from the actual part
+        // geometry, blunt-body Cd. See docs/aerodynamics.md.
+        reference_area_m2: stats.frontal_area_m2,
+        drag_coefficient: SHIP_DRAG_COEFFICIENT,
     });
     sim.simulation.set_ship_mass(stats.wet_mass_kg());
     info!(

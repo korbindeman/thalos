@@ -210,6 +210,12 @@ pub struct ShipStats {
     /// per body axis. Symmetric — the per-axis cap is the same on all
     /// three. Per-axis-asymmetric torque is reserved for RCS arrangements.
     pub max_reaction_torque_n_m: f64,
+    /// Nose-on frontal (reference) area, m², from the widest propagated part
+    /// diameter: π·(d_max/2)². Used as the aerodynamic reference area for the
+    /// aggregate bluff-body drag of rockets/capsules. A crude but per-vehicle
+    /// estimate (a slim rocket and a blunt capsule now differ); a richer model
+    /// can integrate the true cross-section later.
+    pub frontal_area_m2: f64,
 }
 
 impl ShipStats {
@@ -361,6 +367,13 @@ impl ShipBlueprint {
                 + parallel_axis_inertia(m, geo[i].position - com);
         }
 
+        // Nose-on frontal area from the widest propagated part diameter.
+        let max_diameter_m = geo
+            .iter()
+            .map(|g| g.diameter as f64)
+            .fold(0.0_f64, f64::max);
+        let frontal_area_m2 = std::f64::consts::PI * (max_diameter_m * 0.5).powi(2);
+
         Ok(ShipStats {
             dry_mass_kg,
             propellant_mass_kg,
@@ -372,6 +385,7 @@ impl ShipBlueprint {
             resources,
             moment_of_inertia_kg_m2,
             max_reaction_torque_n_m,
+            frontal_area_m2,
         })
     }
 }

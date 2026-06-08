@@ -305,6 +305,21 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
+- **`avian_fdm`** — vendored zone-based 6-DoF flight-dynamics model (lives at
+  `crates/avian_fdm/`). Forked from [`viccuad/avian_fdm`](https://github.com/viccuad/avian_fdm)
+  for atmospheric aerodynamics (drag now; lift + planes later). **LGPL-3.0-or-later**
+  (its GPL J-3 Cub preset crate is *not* depended on) — the sole copyleft entry on
+  an otherwise permissive stack. **Resolved by full-source distribution**: Thalos
+  is now fully source-available (code PolyForm Noncommercial, assets CC BY — see
+  `LICENSING.md`), so LGPL's relink requirement is satisfied for every build,
+  including the paid one. No relicense or replacement is needed. **Keep it
+  isolated and never add the GPL J-3 Cub preset crate (`avian_fdm_j3cub_jsbsim`)
+  or any other GPL/AGPL (non-LGPL) dependency** — GPL is viral across the whole
+  combined work and would void the noncommercial model; CI guards against this
+  (`.github/workflows/ci.yml`). Used **force-only** in the local bubble (Thalos
+  owns mass/inertia/gravity); only Bevy-side crates (`game`/`physics_local`) may
+  depend on it. See `docs/aerodynamics.md` for the model and environment
+  adaptations.
 
 Core separation: `world`, `physics_canonical`, `terrain`, and
 `celestial` are pure Rust libraries; `input`, `game`, `body_render`,
@@ -418,8 +433,12 @@ Key modules:
   `final_approach` / `approach`) uses the same deferred terrain-aware
   path but scores daylight dry sites by local height relief, then starts
   the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
-  patch (or the flattest dry fallback). Thalos has no atmosphere yet, so
-  both descents are lunar-style — no aerobraking.
+  patch (or the flattest dry fallback). Thalos now has a physics atmosphere
+  (per-body density below the Kármán line), so descents experience
+  aerodynamic **drag** — a reentering/descending ship decelerates toward a
+  terminal velocity rather than free-falling lunar-style. Aero runs only in
+  the live Avian bubble at 1× (see `docs/aerodynamics.md`); full lift /
+  control-surface flight arrives with plane geometry.
 - **EVA is a full craft with a real character controller and a
   grounded/airborne split.** The `EvaMode` resource
   (`player_controller.rs`, `Grounded` | `Airborne`, defaults `Grounded`)
@@ -791,7 +810,13 @@ status, dependency graph. Each major system has a unified spec doc.
 - `atmosphere.md` — gas giants, rocky-atmosphere single-scattering
   raymarch (unified per-body fullscreen pass with scene-depth
   coupling for aerial perspective), Kármán-line authoring, ocean
-  rendering, IBL/reflection probe.
+  rendering, IBL/reflection probe. (Atmosphere *rendering*; the
+  *physics* density/drag model is in `aerodynamics.md`.)
+- `aerodynamics.md` — atmospheric flight forces (drag now; lift + planes
+  later) via the vendored `avian_fdm`: the per-body density model, the
+  body-centered/rotating-airmass adaptations, force-only bubble use, the
+  in-atmosphere `Full`-role trigger + warp clamp, and the LGPL story (satisfied
+  by full-source distribution; see `LICENSING.md`).
 - `celestial.md` — celestial sphere design: source model, spectrum,
   generation, rendering pipeline.
 - `tooling.md` — Rust toolchain policy and local developer tooling notes.

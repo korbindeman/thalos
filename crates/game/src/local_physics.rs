@@ -224,7 +224,30 @@ fn avian_role_for(
         sim.simulation.authority(),
         throttle.effective,
         terrain_attached,
+        craft_in_atmosphere(sim),
     )
+}
+
+/// True when the craft sits below the dominant body's Kármán line — i.e. inside
+/// the atmosphere shell, where aerodynamic forces act.
+///
+/// Uses the cheap mean-radius altitude (`|r| − radius`); the Kármán line sits
+/// far above terrain relief, so a per-pixel terrain-height query is unnecessary
+/// here. Returns false for airless bodies (no `terrestrial_atmosphere`, or a
+/// zero Kármán line).
+fn craft_in_atmosphere(sim: &SimulationState) -> bool {
+    let body_id = sim.simulation.dominant_body();
+    let body = &sim.system.bodies[body_id];
+    let Some(atmosphere) = body.terrestrial_atmosphere.as_ref() else {
+        return false;
+    };
+    if atmosphere.karman_line_m <= 0.0 {
+        return false;
+    }
+    let body_state = body_state_for(sim, body_id);
+    let craft = sim.simulation.craft_state();
+    let altitude_m = (craft.translation.position - body_state.position).length() - body.radius_m;
+    altitude_m < atmosphere.karman_line_m as f64
 }
 
 /// Pure predicate: classify Avian's role from raw inputs.
@@ -234,12 +257,15 @@ fn avian_role_for(
 ///   either (the existing convention zeroes ω at warp entry to avoid a
 ///   tap-rotate-then-warp leaving the ship spinning out).
 /// - **`BodyFixed` authority** → `Paused`. Landed pose is analytic.
-/// - **Throttle active OR terrain collider attached** → `Full`. We need
-///   Avian to integrate the non-gravity force (thrust, contact) plus
-///   gravity. Terrain-collider presence is the "contact is physically
-///   possible here" signal — the collider only spawns inside the AGL
-///   handoff band, so its existence flags us being close enough that
-///   contact resolution must be live.
+/// - **Throttle active, terrain collider attached, OR inside the atmosphere
+///   shell** → `Full`. We need Avian to integrate the non-gravity force
+///   (thrust, contact, aerodynamic drag/lift) plus gravity. Terrain-collider
+///   presence flags "contact is physically possible here"; `in_atmosphere`
+///   flags "aero forces act here" — and crucially makes Avian own translation
+///   across the *whole* atmospheric column (Kármán line down), not only inside
+///   the ~20 km terrain-collider band, so reentry drag is applied the entire
+///   way down instead of the ship Kepler-coasting drag-free through the upper
+///   atmosphere.
 /// - **Otherwise (coasting in vacuum at 1× warp)** → `AttitudeOnly`. Avian
 ///   keeps integrating rotation and contact; Kepler owns translation, so
 ///   AP/PE don't drift across pause/unpause cycles.
@@ -248,6 +274,7 @@ fn avian_role_from_inputs(
     authority: AuthorityMode,
     throttle_effective: f64,
     terrain_attached: bool,
+    in_atmosphere: bool,
 ) -> AvianRole {
     let near_one_x = (warp_speed - 1.0).abs() <= f64::EPSILON;
     if !near_one_x {
@@ -257,7 +284,7 @@ fn avian_role_from_inputs(
         return AvianRole::Paused;
     }
     let thrust_active = throttle_effective > 0.0;
-    if thrust_active || terrain_attached {
+    if thrust_active || terrain_attached || in_atmosphere {
         AvianRole::Full
     } else {
         AvianRole::AttitudeOnly
@@ -2186,7 +2213,7 @@ mod tests {
         // (no drift) while Avian's clock keeps stepping for rotation —
         // otherwise the player can't rotate the ship while coasting.
         assert_eq!(
-            avian_role_from_inputs(1.0, on_rails(), 0.0, false),
+            avian_role_from_inputs(1.0, on_rails(), 0.0, false, false),
             AvianRole::AttitudeOnly
         );
     }
@@ -2194,7 +2221,7 @@ mod tests {
     #[test]
     fn thrust_at_one_x_takes_full_ownership() {
         assert_eq!(
-            avian_role_from_inputs(1.0, on_rails(), 0.5, false),
+            avian_role_from_inputs(1.0, on_rails(), 0.5, false, false),
             AvianRole::Full
         );
     }
@@ -2204,7 +2231,18 @@ mod tests {
         // Inside the AGL handoff band the terrain collider is present;
         // Avian needs to own translation so contact resolution can fire.
         assert_eq!(
-            avian_role_from_inputs(1.0, on_rails(), 0.0, true),
+            avian_role_from_inputs(1.0, on_rails(), 0.0, true, false),
+            AvianRole::Full
+        );
+    }
+
+    #[test]
+    fn inside_atmosphere_at_one_x_takes_full_ownership() {
+        // Below the Kármán line, aerodynamic forces act, so Avian must own
+        // translation across the whole column (not just the terrain band) —
+        // otherwise reentry drag would be skipped above the handoff altitude.
+        assert_eq!(
+            avian_role_from_inputs(1.0, on_rails(), 0.0, false, true),
             AvianRole::Full
         );
     }
@@ -2216,11 +2254,11 @@ mod tests {
         // Rotation also stops integrating (matching the existing
         // "ω is zeroed at warp entry" convention).
         assert_eq!(
-            avian_role_from_inputs(10.0, on_rails(), 1.0, true),
+            avian_role_from_inputs(10.0, on_rails(), 1.0, true, true),
             AvianRole::Paused
         );
         assert_eq!(
-            avian_role_from_inputs(1_000_000.0, on_rails(), 0.5, false),
+            avian_role_from_inputs(1_000_000.0, on_rails(), 0.5, false, true),
             AvianRole::Paused
         );
     }
@@ -2232,11 +2270,11 @@ mod tests {
         // must hold even with thrust applied — `release_debug_launch_mount`
         // releases the clamp by transitioning out of BodyFixed first.
         assert_eq!(
-            avian_role_from_inputs(1.0, body_fixed(), 0.0, false),
+            avian_role_from_inputs(1.0, body_fixed(), 0.0, false, false),
             AvianRole::Paused
         );
         assert_eq!(
-            avian_role_from_inputs(1.0, body_fixed(), 0.9, true),
+            avian_role_from_inputs(1.0, body_fixed(), 0.9, true, true),
             AvianRole::Paused
         );
     }

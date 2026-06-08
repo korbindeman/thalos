@@ -65,6 +65,14 @@ pub struct ShipParameters {
     /// sentinel for a craft whose real stats haven't been pushed yet, and
     /// for EVA (no Avian contact damage). See `docs/landing.md`.
     pub impact_tolerance_m_s: f64,
+    /// Aerodynamic reference (frontal) area in m², for the aggregate
+    /// bluff-body drag of this craft. Derived from the ship's geometry
+    /// (`ShipStats::frontal_area_m2`); 0 means "no aerodynamic drag" (sentinel
+    /// default and EVA). See `docs/aerodynamics.md`.
+    pub reference_area_m2: f64,
+    /// Aggregate bluff-body drag coefficient (dimensionless). Blunt capsule
+    /// ~1.0–1.4, streamlined rocket ~0.3–0.5. 0 means "no aerodynamic drag".
+    pub drag_coefficient: f64,
 }
 
 impl Default for ShipParameters {
@@ -84,6 +92,9 @@ impl Default for ShipParameters {
             // Indestructible until a real ship pushes its stats — same
             // sentinel philosophy as the zero torque above.
             impact_tolerance_m_s: f64::INFINITY,
+            // No drag until a real ship pushes its frontal area / Cd.
+            reference_area_m2: 0.0,
+            drag_coefficient: 0.0,
         }
     }
 }
@@ -105,6 +116,10 @@ impl ShipParameters {
             // On-foot contact damage is out of scope (EVA doesn't use Avian
             // contact resolution); never destroyed by terrain impact.
             impact_tolerance_m_s: f64::INFINITY,
+            // EVA has no aerodynamic model (a jetpack/suit-drag pass is future
+            // work); aero systems skip EVA entirely.
+            reference_area_m2: 0.0,
+            drag_coefficient: 0.0,
         }
     }
 }

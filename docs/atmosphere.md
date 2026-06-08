@@ -22,6 +22,14 @@ in-atmosphere flight is the remaining frontier.
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
+> **Rendering vs physics.** This doc covers atmosphere *rendering* (how the sky
+> and aerial perspective look). The *physical* atmosphere — air density vs
+> altitude, and the aerodynamic drag/lift forces it produces — is a separate
+> concern in `docs/aerodynamics.md`. They share one authored boundary, the
+> `karman_line_m` on `TerrestrialAtmosphere`, but the physical profile
+> (`TerrestrialAtmosphere::sample_at_altitude_m` → density / pressure /
+> temperature / speed-of-sound) feeds forces, not shading.
+
 ## Goals
 
 - Read the right way at orbit and in atmosphere. Earth-like worlds

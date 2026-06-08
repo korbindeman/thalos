@@ -1,0 +1,274 @@
+//! [`AeroZone`] and related types for the per-zone aerodynamic model.
+
+use crate::_bevy::*;
+use crate::components::aero_coeff::AeroCoeff;
+use avian3d::math::Scalar;
+use avian3d::prelude::Collider;
+use serde::{Deserialize, Serialize};
+
+/// Per-zone aerodynamic coefficient contributions.
+///
+/// Attach to any child entity that has an Avian [`Collider`]. The FDM
+/// system queries all entities with this component, evaluates the coefficients
+/// at the current flight state, and accumulates force and torque onto the
+/// nearest `RigidBody` ancestor.
+///
+/// Lives on each **AeroZone child entity** (child of the aircraft root).
+///
+/// Failure state is tracked separately via [`super::Failure`].
+///
+/// All fields are [`AeroCoeff`].
+///
+/// ## Aerodynamic centre offset
+///
+/// The aerodynamic centre is the point on a wing section where the pitching
+/// moment does not change with angle of attack. By default, forces are applied
+/// at the zone entity's origin. Set [`ac_offset`](Self::ac_offset) to shift
+/// the force application point relative to the entity origin.
+///
+/// ## Required components
+///
+/// - ZoneForce: written by the FDM each frame; treat as read-only.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug)]
+#[reflect(Component, Serialize, Deserialize)]
+#[require(crate::components::zone_force::ZoneForce)]
+pub struct AeroZone {
+    /// Name of a registered airfoil to resolve coefficient tables from at spawn
+    /// time. Set to a name registered via
+    /// [`RegisterAirfoil::register_airfoil`](crate::airfoil::RegisterAirfoil::register_airfoil)
+    /// (e.g. `"NACA2412"`, `"USA35B"`).
+    ///
+    /// When non-empty, the airfoil resolution system will look up this name in
+    /// [`AirfoilLibrary`](crate::airfoil::AirfoilLibrary) and overwrite any
+    /// [`AeroCoeff::Placeholder`] cl/cd/cm fields with data from the library.
+    /// Explicit (non-`Placeholder`) fields are never overwritten.
+    ///
+    /// Defaults to `""` (empty string = no named airfoil, resolution is skipped).
+    pub airfoil_name: String,
+    /// Partial contribution to CL (lift coefficient).
+    ///
+    /// Always present. Defaults to [`AeroCoeff::Placeholder`] so unset zones warn.
+    pub cl: AeroCoeff,
+    /// Partial contribution to CD (drag coefficient).
+    ///
+    /// Always present. Defaults to [`AeroCoeff::Placeholder`] so unset zones warn.
+    pub cd: AeroCoeff,
+    /// Partial contribution to CY (side-force coefficient).
+    ///
+    /// Defaults to [`AeroCoeff::Absent`]. Most symmetric zones produce no side force.
+    /// Set to [`AeroCoeff::Placeholder`] if this zone should contribute CY but data is pending.
+    pub cy: AeroCoeff,
+    /// Partial contribution to CM (pitching-moment coefficient, about c̄).
+    ///
+    /// Defaults to [`AeroCoeff::Absent`]. Pitching moment is often handled via tail geometry.
+    /// Set to [`AeroCoeff::Placeholder`] if this zone should contribute CM but data is pending.
+    pub cm: AeroCoeff,
+    /// Partial contribution to Cl (rolling-moment coefficient, about b).
+    ///
+    /// Named `croll` (not `cl`) to avoid collision with the lift coefficient field `cl` on
+    /// [`AirfoilData`](crate::airfoil::AirfoilData). Standard ICAS/NASA notation uses `Cl`
+    /// for rolling moment; the lowercase spelling here is a field-name disambiguation.
+    ///
+    /// Defaults to [`AeroCoeff::Absent`]. Roll is often handled emergently by zone geometry.
+    /// Set to [`AeroCoeff::Placeholder`] if this zone should contribute Cl but data is pending.
+    pub croll: AeroCoeff,
+    /// Partial contribution to Cn (yawing-moment coefficient, about b).
+    ///
+    /// Defaults to [`AeroCoeff::Absent`]. Yaw is often handled emergently by zone geometry.
+    /// Set to [`AeroCoeff::Placeholder`] if this zone should contribute Cn but data is pending.
+    pub cn: AeroCoeff,
+    /// Offset from the zone entity's local origin to the Aerodynamic Centre,
+    /// in the zone's local coordinate frame (metres).
+    ///
+    /// When `Vec3::ZERO` (default), the entity origin *is* the AC, i.e. the
+    /// zone's [`Transform`] position is both mesh centre and force application
+    /// point.
+    ///
+    /// For a wing panel whose mesh is centered at mid-chord, a typical value
+    /// is `Vec3::new(0.25 * chord, 0.0, 0.0)` to place the AC at the
+    /// quarter-chord point (body-frame X = forward).
+    pub ac_offset: Vec3,
+    /// If `Some`, this zone acts as a control surface. Its coefficients are
+    /// additionally scaled by the matching [`super::ControlInputs`] value.
+    pub control_role: Option<ControlSurfaceRole>,
+    /// Extra drag added when the zone is partially failed (structural
+    /// deformation drag). `None` (default) disables this. Extra drag =
+    /// coefficient * fraction destroyed / dynamic pressure. Zero when fully
+    /// intact or fully detached.
+    pub damage_drag_coeff: Option<Scalar>,
+
+    /// Aerodynamic planform area of this zone (m^2).
+    ///
+    /// Force = coefficient * q-bar * area_m2, so each zone is
+    /// self-contained. For wing zones, set to the physical planform area.
+    /// Defaults to 0.0 (no aerodynamic force, correct for mass-only zones).
+    pub area_m2: Scalar,
+
+    /// Reference chord for this zone (m), used to dimensionalize pitching-moment
+    /// coefficients: `M_pitch = CM * q_bar * area_m2 * chord_m`.
+    ///
+    /// For wing zones, use the mean aerodynamic chord. Defaults to 0.0 (no
+    /// pitching moment contribution, which is correct when CM is Absent).
+    pub chord_m: Scalar,
+}
+
+impl AeroZone {
+    /// Extend all aerodynamic coefficient tables to +/-180 deg using the
+    /// Viterna-Corrigan post-stall model.
+    ///
+    /// Computes the aspect ratio from this zone's geometry as
+    /// AR = area_m2 / chord_m^2. This is exact for rectangular surfaces
+    /// (wings, stabilizers, fins with constant chord). For tapered or swept
+    /// surfaces, the true AR is span^2 / area, which differs from
+    /// area / chord^2 when chord varies along the span. In those cases, use
+    /// the lower-level [`AeroCoeff::with_post_stall_lift`] and
+    /// [`AeroCoeff::with_post_stall_drag`] methods directly, passing the
+    /// correct AR.
+    ///
+    /// Applies `with_post_stall_lift` to CL, CY, and `with_post_stall_drag`
+    /// to CD. Other coefficients (CM, Croll, Cn) and variants that do not
+    /// benefit from extension (Absent, Placeholder) are left unchanged.
+    ///
+    /// When all tables cover the full +/-180 deg range, no clamping occurs
+    /// during evaluation regardless of how extreme the local angle of attack
+    /// becomes during post-stall flight or tumbling.
+    ///
+    /// Zones with zero chord or zero area are returned unchanged (no
+    /// meaningful AR can be computed).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use avian_fdm::components::*;
+    /// # use avian_fdm::components::aero_coeff::AeroCoeff;
+    /// let zone = AeroZone {
+    ///     cl: AeroCoeff::Table1D {
+    ///         breakpoints: vec![-0.35, 0.0, 0.35],
+    ///         values: vec![-2.5, 0.0, 2.5],
+    ///     },
+    ///     cd: AeroCoeff::Scalar(0.01),
+    ///     area_m2: 3.0,
+    ///     chord_m: 1.0,
+    ///     ..Default::default()
+    /// }.with_post_stall_extension();
+    /// // AR = 3.0 / 1.0^2 = 3.0, computed automatically.
+    /// // CL extended to +/-180 via Viterna lift model.
+    /// // CD converted to Table1D with flat-plate drag progression.
+    /// ```
+    pub fn with_post_stall_extension(mut self) -> Self {
+        if self.chord_m <= 0.0 || self.area_m2 <= 0.0 {
+            return self;
+        }
+        let ar = self.area_m2 / (self.chord_m * self.chord_m);
+        self.cl = self.cl.with_post_stall_lift(ar);
+        self.cd = self.cd.with_post_stall_drag(ar);
+        self.cy = self.cy.with_post_stall_lift(ar);
+        self
+    }
+
+    /// Validate all coefficients and fields. Returns a list of problems
+    /// (empty means valid).
+    ///
+    /// Checks each [`AeroCoeff`] field for table structure errors (unsorted
+    /// breakpoints, mismatched dimensions, NaN/Inf values) and warns about
+    /// negative `area_m2`.
+    ///
+    /// Call at spawn time to catch data-entry mistakes early. See
+    /// [`AeroCoeff::validate`] for the per-coefficient checks.
+    pub fn validate(&self, zone_name: &str) -> Vec<String> {
+        let mut problems = Vec::new();
+        let fields: &[(&str, &AeroCoeff)] = &[
+            ("cl", &self.cl),
+            ("cd", &self.cd),
+            ("cy", &self.cy),
+            ("cm", &self.cm),
+            ("croll", &self.croll),
+            ("cn", &self.cn),
+        ];
+        for (field, coeff) in fields {
+            let label = format!("{zone_name}.{field}");
+            problems.extend(coeff.validate(&label));
+        }
+        if self.area_m2 < 0.0 {
+            problems.push(format!(
+                "{zone_name}: area_m2 is negative ({:.4})",
+                self.area_m2
+            ));
+        }
+        if self.chord_m < 0.0 {
+            problems.push(format!(
+                "{zone_name}: chord_m is negative ({:.4})",
+                self.chord_m
+            ));
+        }
+        problems
+    }
+}
+
+/// Which flight control function this zone performs, if any.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[reflect(Serialize, Deserialize)]
+pub enum ControlSurfaceRole {
+    /// Horizontal tail elevator.
+    Elevator,
+    /// Left aileron.
+    AileronLeft,
+    /// Right aileron.
+    AileronRight,
+    /// Vertical tail rudder.
+    Rudder,
+}
+
+/// Bundle for one aerodynamic zone child entity.
+///
+/// Spawn as a child of the aircraft root entity.
+///
+/// # Example
+/// ```rust,no_run
+/// # use avian_fdm::components::*;
+/// # use avian3d::prelude::*;
+/// # use bevy::prelude::*;
+/// // commands.spawn(AeroZoneBundle { zone: AeroZone { ... }, collider: Collider::cuboid(1.0, 0.1, 2.0), ..default() });
+/// ```
+#[derive(Bundle, Default)]
+pub struct AeroZoneBundle {
+    /// Aerodynamic coefficients and control role.
+    pub zone: AeroZone,
+    /// Avian collider defining this zone's shape and volume.
+    ///
+    /// Used by Avian to compute the zone's mass contribution (via
+    /// [`avian3d::prelude::ColliderDensity`]) to the parent rigid body's
+    /// [`avian3d::prelude::ComputedMass`].
+    ///
+    /// Zone colliders are **real physics colliders**: by default they will
+    /// interact with any other collider in the world (terrain, obstacles).
+    /// If you want aerodynamics-only with no collision response, assign
+    /// [`avian3d::prelude::CollisionLayers`] to each zone entity to put it on
+    /// a layer that does not interact with the world. Do not use
+    /// [`avian3d::prelude::Sensor`] - sensor colliders are excluded from mass
+    /// computation and will give the aircraft wrong inertia.
+    pub collider: Collider,
+    /// Position/orientation relative to the aircraft root.
+    pub transform: Transform,
+    /// Required by Bevy for transform propagation.
+    pub global_transform: GlobalTransform,
+}
+
+impl Default for AeroZone {
+    fn default() -> Self {
+        Self {
+            cl: AeroCoeff::Placeholder,
+            cd: AeroCoeff::Placeholder,
+            cy: AeroCoeff::Absent,
+            cm: AeroCoeff::Absent,
+            croll: AeroCoeff::Absent,
+            cn: AeroCoeff::Absent,
+            ac_offset: Vec3::ZERO,
+            airfoil_name: String::new(),
+            control_role: None,
+            damage_drag_coeff: None,
+            area_m2: 0.0,
+            chord_m: 0.0,
+        }
+    }
+}

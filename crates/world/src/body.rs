@@ -79,6 +79,47 @@ pub struct BodyDefinition {
     pub surface_frame_ceiling_m: Option<f64>,
 }
 
+impl BodyDefinition {
+    /// Surface gravity g = GM/r² (m/s²) at the mean surface. Used by the
+    /// aerodynamic atmosphere model to derive the density scale height.
+    pub fn surface_gravity_m_s2(&self) -> f64 {
+        if self.radius_m > 0.0 {
+            self.gm / (self.radius_m * self.radius_m)
+        } else {
+            0.0
+        }
+    }
+
+    /// Surface atmospheric pressure (Pa), the single authored source for the
+    /// aerodynamic atmosphere model. Read from the terrain environment's
+    /// `AtmosphereSpec` (so pressure isn't authored twice). Falls back to ~1 bar
+    /// for a body that carries a `terrestrial_atmosphere` shell but no
+    /// terrain-authored pressure, and to 0 (vacuum) for an explicit `None`
+    /// atmosphere.
+    pub fn surface_pressure_pa(&self) -> f64 {
+        const ONE_BAR_PA: f64 = 101_325.0;
+        match &self.terrain {
+            TerrainConfig::Feature(feature) => {
+                let bar = feature.environment.atmosphere.pressure_bar() as f64;
+                if bar > 0.0 {
+                    bar * ONE_BAR_PA
+                } else {
+                    0.0
+                }
+            }
+            // No feature terrain to read pressure from: assume ~1 bar if a
+            // terrestrial atmosphere shell is present, else vacuum.
+            _ => {
+                if self.terrestrial_atmosphere.is_some() {
+                    ONE_BAR_PA
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BodyKind {
     Star,

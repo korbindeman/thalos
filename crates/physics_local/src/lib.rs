@@ -19,9 +19,10 @@ use thalos_body_render::{
 pub mod avian {
     pub use avian3d::prelude::{
         AngularInertia, AngularVelocity, CoefficientCombine, Collider, ConstantAngularAcceleration,
-        ConstantLinearAcceleration, ContactGraph, CustomPositionIntegration, Friction,
-        LinearVelocity, LockedAxes, Mass, NoAutoAngularInertia, NoAutoMass, Physics, PhysicsTime,
-        Position, Restitution, RigidBody, Rotation, SleepingDisabled, SweptCcd,
+        ConstantForce, ConstantLinearAcceleration, ConstantTorque, ContactGraph,
+        CustomPositionIntegration, Friction, LinearVelocity, LockedAxes, Mass, NoAutoAngularInertia,
+        NoAutoMass, Physics, PhysicsSchedule, PhysicsTime, Position, Restitution, RigidBody,
+        Rotation, SleepingDisabled, SweptCcd,
     };
 }
 
