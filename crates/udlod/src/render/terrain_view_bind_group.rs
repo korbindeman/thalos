@@ -8,17 +8,17 @@ use bevy::{
     ecs::{
         query::ROQueryItem,
         system::{
-            SystemParamItem,
             lifetimeless::{Read, SRes},
+            SystemParamItem,
         },
     },
     prelude::*,
     render::{
-        Extract,
         render_phase::{PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass},
         render_resource::{binding_types::*, *},
         renderer::{RenderDevice, RenderQueue},
         sync_world::MainEntity,
+        Extract,
     },
 };
 

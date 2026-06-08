@@ -1884,7 +1884,9 @@ pub(crate) fn draw_field_viewer_panel(
         });
     ui.label(selected.help);
     ui.checkbox(&mut state.overlay_on_planet, "Overlay on planet")
-        .on_hover_text("Project the selected field onto the 3D body. Hold Space to peek through it.");
+        .on_hover_text(
+            "Project the selected field onto the 3D body. Hold Space to peek through it.",
+        );
 
     let (Some(surface), Some(dynamic_state)) =
         (&active_surface.surface, &active_surface.dynamic_state)
@@ -2096,9 +2098,8 @@ pub(crate) fn draw_generation_params_panel(
         match terrain {
             TerrainConfig::Feature(config) => {
                 ui.horizontal(|ui| {
-                    terrain_changed |= fires(
-                        &ui.add(egui::Slider::new(&mut config.seed, 0..=9999).text("Seed")),
-                    );
+                    terrain_changed |=
+                        fires(&ui.add(egui::Slider::new(&mut config.seed, 0..=9999).text("Seed")));
                     if ui.button("Reroll World").clicked() {
                         config.seed = sub_seed(config.seed, "planet_editor:world_seed");
                         terrain_changed = true;
@@ -2147,9 +2148,12 @@ pub(crate) fn draw_generation_params_panel(
                 terrain_changed |= fires(&ui.add(
                     egui::Slider::new(&mut ocean.sea_level_m, 0.0..=10.0).text("Sea level (m)"),
                 ));
-                terrain_changed |= fires(&ui.add(
-                    egui::Slider::new(&mut ocean.water_roughness, 0.0..=0.3).text("Water roughness"),
-                ));
+                terrain_changed |= fires(
+                    &ui.add(
+                        egui::Slider::new(&mut ocean.water_roughness, 0.0..=0.3)
+                            .text("Water roughness"),
+                    ),
+                );
             }
             TerrainConfig::None => {}
         }

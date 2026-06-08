@@ -28,6 +28,20 @@
                 ),
             },
         ),
+        hotas: (
+            enabled: false,
+            // Example continuous-axis profile. Confirm how Bevy names your
+            // hardware axes during local testing, then flip this on and
+            // uncomment the axes you need.
+            //
+            // device: NameContains("T.16000M"),
+            // axes: {
+            //     "pitch": (axis: LeftStickY, invert: true, deadzone: 0.05),
+            //     "roll": (axis: LeftStickX, deadzone: 0.05),
+            //     "yaw": (axis: RightZ, deadzone: 0.05),
+            //     "throttle": (axis: LeftZ, min: -1.0, max: 1.0),
+            // },
+        ),
         warp: (
             bindings: {
                 "warp_to_maneuver": [Key(KeyG)],

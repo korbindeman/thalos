@@ -26,6 +26,7 @@ mod photo_mode;
 mod player_controller;
 mod reflection_probe;
 mod rendering;
+mod runway;
 mod scenario_menu;
 mod screenshot;
 mod ship_view;
@@ -53,6 +54,7 @@ use bevy::render::{
 use bevy::window::{
     MonitorSelection, PresentMode, VideoModeSelection, WindowMode, WindowResolution,
 };
+use thalos_body_render::BodyRenderPlugin;
 use thalos_input::game::GameInputPlugin;
 use thalos_input::settings::InputSettings;
 use thalos_physics_canonical::{
@@ -63,7 +65,6 @@ use thalos_physics_canonical::{
     simulation::{Simulation, SimulationConfig},
     types::{AttitudeState, ShipParameters, VesselKind},
 };
-use thalos_body_render::BodyRenderPlugin;
 use thalos_world::StateVector;
 use thalos_world::parsing::load_solar_system_from_dir;
 
@@ -380,6 +381,14 @@ fn main() {
                 "  Ship:            {label} on {} (over land)",
                 homeworld.name
             );
+        } else if situation.is_runway() {
+            // The runway scenarios also seed the parking orbit as a placeholder
+            // behind the loading screen; `runway::finish_runway_spawn` installs
+            // the real runway + aircraft state on the first `Running` frame.
+            println!(
+                "  Aircraft:        runway scenario on {} (placed once terrain loads)",
+                homeworld.name
+            );
         } else {
             let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
             println!(
@@ -517,6 +526,7 @@ fn main() {
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(LoadingScreenPlugin)
         .add_plugins(SpawnPlugin)
+        .add_plugins(runway::RunwayPlugin)
         .add_plugins(RenderingPlugin)
         .add_plugins(GameLocalPhysicsPlugin)
         .add_plugins(PlayerControllerPlugin)

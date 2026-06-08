@@ -6,9 +6,12 @@
 //
 // Parametric parts (decouplers, adapters, tanks) define recipes:
 //   - dry_mass scales from `wall_mass_per_m2` × surface area
-//   - tank capacity scales from `*_l_per_m3` × tank volume
+//   - resource capacity scales from `storage.units_per_m3` × part volume
 //
 // Reactant ratios are mass fractions and must sum to 1.0 per engine.
+// Part `storage` lists are whitelists: a part can only house resources named
+// there. Omitted blueprint resources use the catalog defaults; explicit
+// blueprint resources are the selected active pools.
 
 (
     parts: {
@@ -17,14 +20,18 @@
             diameter: 2.5,
             dry_mass: 2720.0,
             reaction_wheel_torque: 15000.0,
-            base_electricity_kwh: 2.5,
+            storage: [
+                (resource: Electricity, units: 2.5),
+            ],
         )),
         "hyperion": Pod((
             display_name: "Hyperion",
             diameter: 4.0,
             dry_mass: 5800.0,
             reaction_wheel_torque: 40000.0,
-            base_electricity_kwh: 4.0,
+            storage: [
+                (resource: Electricity, units: 4.0),
+            ],
         )),
         "zephyr": Engine((
             display_name: "Zephyr",
@@ -52,6 +59,32 @@
             ],
             power_draw_kw: 0.0,
         )),
+        "mistral_jet": Engine((
+            display_name: "Mistral Jet Nacelle",
+            optimized_for: Atmosphere,
+            geometry: JetNacelle,
+            requires_atmosphere: true,
+            intake_requirement: Some((kind: OxygenatedAir, area_m2: 0.45)),
+            builtin_intake: Some((kind: OxygenatedAir, area_m2: 0.55, efficiency: 1.0)),
+            diameter: 1.2,
+            thrust: 120000.0,
+            // Effective air-breathing Isp. The current propulsion model still
+            // consumes stored fuel only; ambient air is supplied by intake
+            // capture rather than stored as a resource.
+            isp: 2600.0,
+            dry_mass: 680.0,
+            reactants: [
+                (resource: Kerosene, mass_fraction: 1.0),
+            ],
+            power_draw_kw: 0.0,
+        )),
+        "intake_cone": Intake((
+            display_name: "Cone Air Intake",
+            diameter: 1.25,
+            length: 0.9,
+            dry_mass: 90.0,
+            capture: (kind: OxygenatedAir, area_m2: 0.65, efficiency: 0.95),
+        )),
         "decoupler_std": Decoupler((
             display_name: "Decoupler",
             mass_per_diameter: 25.0,
@@ -66,12 +99,32 @@
             wall_mass_per_m2: 12.0,
             // 429 L/m³ CH4 + 571 L/m³ LOX → 1000 L/m³ total at stoichiometric
             // O/F ≈ 3.6 mass ratio (Raptor-class). Volume utilization 100%.
-            methane_l_per_m3: 429.0,
-            lox_l_per_m3: 571.0,
+            storage: [
+                (resource: Methane, units_per_m3: 429.0),
+                (resource: Lox,     units_per_m3: 571.0),
+            ],
             reactants: [
                 (resource: Methane, mass_fraction: 0.21739131),
                 (resource: Lox,     mass_fraction: 0.78260869),
             ],
+        )),
+        "tank_kerosene": Tank((
+            display_name: "Kerosene Tank",
+            wall_mass_per_m2: 12.0,
+            // Near-full volume utilization for a single ambient-density
+            // hydrocarbon fuel. Oxidizer is atmospheric for jet engines.
+            storage: [
+                (resource: Kerosene, units_per_m3: 1000.0),
+            ],
+            reactants: [
+                (resource: Kerosene, mass_fraction: 1.0),
+            ],
+        )),
+        "wing_std": Wing((
+            display_name: "Wing",
+            // Spar + skin lifting surface: lighter per area than a sealed
+            // pressure tank. ~22 kg/m² is a light-alloy airframe ballpark.
+            mass_per_m2: 22.0,
         )),
     },
 )

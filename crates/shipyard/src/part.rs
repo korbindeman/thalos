@@ -1,3 +1,4 @@
+use crate::catalog::{EngineGeometry, IntakeCapture, IntakeRequirement};
 use crate::resource::Resource;
 use bevy::prelude::*;
 
@@ -124,6 +125,44 @@ pub struct Adapter {
     pub dry_mass: f32,
 }
 
+/// A parametric lifting surface — main wing, tailplane (horizontal
+/// stabiliser), or fin (vertical stabiliser), distinguished only by its
+/// parameters and its [`crate::SurfaceMount::side`]. A single tapered,
+/// swept, dihedral panel per side; a `MountSide::Pair` part renders the
+/// mirrored left+right pair from these same parameters.
+///
+/// Geometry is authored in the host's local frame at mount time (see
+/// [`crate::wing_mesh`]): span is the half-span (root→tip of one panel),
+/// chord runs fore/aft along the host body axis, thickness is the airfoil
+/// depth. `dry_mass` is catalog-derived from planform area.
+///
+/// **Extension point (control surfaces).** Per `docs/construction.md`, a
+/// wing's flaps / ailerons / elevators / rudder are planned as *parameters
+/// of the wing*, not separate parts — a trailing-edge chord fraction +
+/// spanwise window + a hinge/deflection descriptor will be added here as
+/// optional fields, so the wing stays one authored unit. Landing gear, by
+/// contrast, will be its own footprint part kind.
+#[derive(Component, Debug, Clone)]
+pub struct Wing {
+    /// Half-span of one panel (host skin → tip), metres.
+    pub span: f32,
+    /// Chord at the root (host skin), metres.
+    pub root_chord: f32,
+    /// Chord at the tip, metres. `< root_chord` for a tapered wing.
+    pub tip_chord: f32,
+    /// Leading-edge sweep, radians. Positive sweeps the tip aft.
+    pub sweep: f32,
+    /// Dihedral, radians. Positive raises the tip above the root.
+    pub dihedral: f32,
+    /// Maximum airfoil thickness as a fraction of local chord (t/c).
+    pub thickness: f32,
+    /// Mounting incidence, radians. Positive pitches the leading edge up.
+    pub incidence: f32,
+    /// Catalog-derived structural mass, kg (= `mass_per_m2` × planform
+    /// area, doubled for a mirrored pair).
+    pub dry_mass: f32,
+}
+
 /// Pure geometry — contents live in [`crate::PartResources`]. A tank can
 /// hold any resource; this part does not restrict which. `diameter`
 /// drives node sizing when root; overridden by parent when attached.
@@ -132,6 +171,18 @@ pub struct FuelTank {
     pub diameter: f32,
     pub length: f32,
     pub dry_mass: f32,
+}
+
+/// Ambient-flow capture capability. This is not a stored resource: it is
+/// external flow supplied by the current atmosphere and consumed by engines
+/// that declare an [`IntakeRequirement`].
+#[derive(Component, Debug, Clone)]
+pub struct AirIntake {
+    pub model: String,
+    pub diameter: f32,
+    pub length: f32,
+    pub dry_mass: f32,
+    pub capture: IntakeCapture,
 }
 
 /// A mass fraction of a single reactant relative to the engine's total
@@ -146,6 +197,10 @@ pub struct ReactantRatio {
 #[derive(Component, Debug, Clone)]
 pub struct Engine {
     pub model: String,
+    pub geometry: EngineGeometry,
+    pub requires_atmosphere: bool,
+    pub intake_requirement: Option<IntakeRequirement>,
+    pub builtin_intake: Option<IntakeCapture>,
     pub diameter: f32,
     /// Thrust in vacuum, N.
     pub thrust: f32,

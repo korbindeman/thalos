@@ -27,9 +27,9 @@ use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
 
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
-use thalos_world::BodyId;
 use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_world::BodyId;
 
 use crate::debug::DebugLaunchMount;
 use crate::hud::theme::{HudTheme, panel_frame};
@@ -389,6 +389,14 @@ fn respawn_into(
                     warn!("respawn: terrain not resident for {situation:?}; using orbit");
                     orbit_respawn_state(sim, homeworld)
                 });
+            sim.simulation.set_ship_state(state);
+            sim.simulation.set_attitude(attitude);
+            sim.simulation
+                .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+        }
+        SpawnSituation::Runway | SpawnSituation::RunwayApproach => {
+            warn!("respawn: runway scenarios are one-shot at startup; using orbit");
+            let (state, attitude) = orbit_respawn_state(sim, homeworld);
             sim.simulation.set_ship_state(state);
             sim.simulation.set_attitude(attitude);
             sim.simulation

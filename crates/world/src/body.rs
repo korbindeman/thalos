@@ -1,9 +1,9 @@
 //! Body and system data types — the authored physical/orbital definition.
 
+use crate::atmosphere::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::atmosphere::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
 use thalos_terrain::{TectonicConfig, TerrainConfig};
 
 /// Gravitational constant in m^3 kg^-1 s^-2.

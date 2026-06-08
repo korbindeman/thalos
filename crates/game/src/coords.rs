@@ -20,8 +20,8 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_world::BodyId;
 use thalos_physics_canonical::types::TrajectorySample;
+use thalos_world::BodyId;
 
 /// Map view: 1 render unit = 1,000 km.
 pub const MAP_SCALE: f64 = 1.0e-6;

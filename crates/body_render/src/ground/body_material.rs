@@ -9,13 +9,13 @@
 //! self-contained at upload time and so future inline transmittance work
 //! doesn't need a fresh binding contract.
 
+use crate::shading::{AtmosphereBlock, SceneLighting};
 use bevy::asset::embedded_asset;
 use bevy::math::Vec4;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use crate::shading::{AtmosphereBlock, SceneLighting};
 
 /// Per-frame dynamic data for `BodySkyMaterial`.
 ///

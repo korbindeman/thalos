@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use big_space::prelude::*;
-use thalos_physics_canonical::types::BodyState;
 use thalos_body_render::udlod::prelude::PreciseRotation;
+use thalos_physics_canonical::types::BodyState;
 
 use super::transforms::surface_body_to_world_orientation_f64;
 use super::types::{PlayerShip, RealSpaceBody, SolarSystemState, TidallyLocked};
@@ -133,8 +133,8 @@ mod tests {
     use bevy::math::{DQuat, DVec3};
     use thalos_physics_canonical::body_trajectory_provider::BodyTrajectoryProvider;
     use thalos_physics_canonical::canonical::Epoch;
-    use thalos_world::parsing::load_solar_system_from_dir;
     use thalos_physics_canonical::patched_conics::PatchedConics;
+    use thalos_world::parsing::load_solar_system_from_dir;
 
     use super::*;
 

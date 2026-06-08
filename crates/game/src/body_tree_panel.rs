@@ -10,9 +10,9 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
 use thalos_physics_canonical::canonical::AuthorityMode;
-use thalos_world::{BodyDefinition, BodyId, BodyKind};
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
+use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::debug::{DebugLaunchMount, DebugMode, DebugSurfaceTeleport, low_orbit_state};
@@ -235,7 +235,7 @@ fn body_tree_panel(
         sim.simulation.set_ship_state(state);
         sim.simulation.set_attitude(attitude);
         // Teleporting to orbit hands the player a fresh craft — clear any
-        // structural failure so a wreck can be recovered. See docs/landing.md.
+        // structural failure so a wreck can be recovered. See docs/surface.md.
         sim.simulation.repair();
         sim.simulation.warp.reset();
         launch_mount.active = None;

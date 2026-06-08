@@ -8,13 +8,13 @@ use std::{collections::HashMap, sync::Arc};
 use avian3d::prelude::*;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
-use thalos_physics_canonical::canonical::CraftId;
-use thalos_world::BodyId;
-use thalos_terrain::PlanetSurface;
 use thalos_body_render::{
     GpuAtlasMirrorHandle, GpuAtlasMirrorHeightSource, HeightSource, TerrainPatchBasis,
     TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch_from_source,
 };
+use thalos_physics_canonical::canonical::CraftId;
+use thalos_terrain::PlanetSurface;
+use thalos_world::BodyId;
 
 pub mod avian {
     pub use avian3d::prelude::{
@@ -50,7 +50,7 @@ impl Default for LocalBubbleConfig {
             // dominant surface-frame CPU cost. 129² (~32k tris) covered far
             // more ground than any resting craft contacts; 65² (~8k tris)
             // keeps native-texel density in a still-generous window around the
-            // craft at a quarter of the collision cost. See docs/landing.md.
+            // craft at a quarter of the collision cost. See docs/surface.md.
             patch_resolution: 65,
             patch_rebuild_distance_m: 1024.0,
             stable_contact_time_s: 2.0,
@@ -150,7 +150,7 @@ pub struct LocalBubble {
     pub basis: TerrainPatchBasis,
     /// Metric lateral half-extent of the attached collider patch. Drives a
     /// window-relative rebuild so the small tile-based collider window
-    /// (`docs/landing.md` §3.6, only tens of metres) re-centers before the
+    /// (`docs/surface.md` §3.6, only tens of metres) re-centers before the
     /// craft drifts off its edge — the global `patch_rebuild_distance_m` is
     /// too coarse for it. Zero when no patch is attached, and left at the
     /// fallback patch's `half_extent_m` for the coarse tangent-grid path.
@@ -247,7 +247,7 @@ impl Plugin for LocalPhysicsPlugin {
             // unpause `transform_to_position` would clobber the snapped rotation
             // with that stale `Transform`, snapping the ship off retrograde. Keep
             // the one-way `position_to_transform` so renderers/debug still see the
-            // pose; drop the reverse direction. See `docs/landing.md`.
+            // pose; drop the reverse direction. See `docs/surface.md`.
             .insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
                 transform_to_position: false,
                 ..default()
@@ -283,7 +283,7 @@ pub fn spawn_terrain_collider_patch(
     // surface by construction. Sources with no resident tile geometry (CPU
     // pipeline, flat, baked cubemap) return `None`, as does the GPU mirror
     // before a tile is resident, and we fall back to the coarser tangent-grid
-    // resample. See `docs/landing.md`.
+    // resample. See `docs/surface.md`.
     let patch = height_source
         .build_collider_patch(center_dir_body.as_vec3(), config.patch_resolution)
         .unwrap_or_else(|| {

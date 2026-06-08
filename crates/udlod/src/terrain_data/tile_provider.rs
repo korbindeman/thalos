@@ -259,8 +259,8 @@ fn attachment_format_hash(format: AttachmentFormat) -> u8 {
 mod tests {
     use super::*;
     use bevy::math::DVec3;
-    use bevy::tasks::TaskPool;
     use bevy::tasks::futures_lite::future;
+    use bevy::tasks::TaskPool;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingProvider {

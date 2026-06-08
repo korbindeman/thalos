@@ -19,8 +19,8 @@ use std::f64::consts::{PI, TAU};
 
 use bevy::prelude::*;
 use thalos_physics_canonical::orbital_math::{OsculatingElements, cartesian_to_elements};
-use thalos_world::StateVector;
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
+use thalos_world::StateVector;
 
 use crate::hud::HudPanel;
 use crate::hud::format;

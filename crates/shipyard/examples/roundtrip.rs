@@ -5,7 +5,6 @@
 //! so the numbers are easy to eyeball.
 
 use bevy::prelude::*;
-use std::collections::HashMap;
 use thalos_shipyard::*;
 
 fn main() {
@@ -18,12 +17,12 @@ fn main() {
             PartBlueprint {
                 catalog_id: "argos".into(),
                 params: PartParams::None,
-                resources: HashMap::new(),
+                resources: None,
             },
             PartBlueprint {
                 catalog_id: "decoupler_std".into(),
                 params: PartParams::Decoupler { diameter: 2.5 },
-                resources: HashMap::new(),
+                resources: None,
             },
             PartBlueprint {
                 catalog_id: "adapter_std".into(),
@@ -31,7 +30,7 @@ fn main() {
                     diameter: 2.5,
                     target_diameter: 4.0,
                 },
-                resources: HashMap::new(),
+                resources: None,
             },
             PartBlueprint {
                 catalog_id: "tank_methalox".into(),
@@ -39,12 +38,12 @@ fn main() {
                     diameter: 4.0,
                     length: 4.0,
                 },
-                resources: HashMap::new(),
+                resources: None,
             },
             PartBlueprint {
                 catalog_id: "boreas".into(),
                 params: PartParams::None,
-                resources: HashMap::new(),
+                resources: None,
             },
         ],
         connections: vec![
@@ -73,6 +72,7 @@ fn main() {
                 child_node: "top".into(),
             },
         ],
+        surface_mounts: vec![],
     };
 
     let ron = blueprint.to_ron().expect("serialize");

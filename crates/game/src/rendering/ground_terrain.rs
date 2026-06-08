@@ -19,21 +19,23 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::grid::Grid;
 use big_space::prelude::CellCoord;
-use thalos_physics_canonical::canonical::AuthorityMode;
-use thalos_world::{BodyDefinition, BodyId};
-use thalos_physics_canonical::types::VesselKind;
+use thalos_body_render::udlod::math::TileCoordinate;
+use thalos_body_render::udlod::prelude::*;
 use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
-use thalos_shipyard::{Adapter, AttachNodes, CommandPod, Decoupler, Engine, FuelTank, Part};
-use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
     BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent,
-    GpuAtlasMirrorHandle,
-    MAX_TERRAIN_SHADOW_CASTERS, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
-    rendered_height_range,
+    GpuAtlasMirrorHandle, MAX_TERRAIN_SHADOW_CASTERS, PipelineTileProvider, SyntheticTerrainMode,
+    SyntheticTileProvider, rendered_height_range,
 };
-use thalos_body_render::udlod::math::TileCoordinate;
-use thalos_body_render::udlod::prelude::*;
+use thalos_physics_canonical::canonical::AuthorityMode;
+use thalos_physics_canonical::types::VesselKind;
+use thalos_shipyard::{
+    Adapter, AirIntake, AttachNodes, CommandPod, Decoupler, Engine, EngineGeometry, FuelTank, Part,
+    SurfaceMount, SurfaceMountKind,
+};
+use thalos_terrain::{BakedSurface, DynamicSurfaceState, PlanetSurface, SurfaceQuery};
+use thalos_world::{BodyDefinition, BodyId};
 
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
@@ -137,6 +139,8 @@ type ShadowPartQuery<'w, 's> = Query<
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
         Option<&'static Engine>,
+        Option<&'static AirIntake>,
+        Option<&'static SurfaceMount>,
     ),
     With<Part>,
 >;
@@ -338,7 +342,12 @@ pub(crate) fn spawn_body_terrain(
     height_mirror: Option<GpuAtlasMirrorHandle>,
 ) -> Entity {
     let radius_m = body.radius_m as f32;
-    let height_range = rendered_height_range(&surface, &dynamic_state);
+    // The construction site is the one place that names the concrete generation
+    // type: wrap it as `Arc<dyn SurfaceQuery>` so the provider and the
+    // height-range query see only the black-box seam.
+    let terrain_surface: Arc<dyn SurfaceQuery> =
+        Arc::new(BakedSurface::new(surface, dynamic_state));
+    let height_range = rendered_height_range(terrain_surface.as_ref());
     let provider_mode = terrain_tile_provider_mode();
     let terrain_height_range = match provider_mode {
         TerrainTileProviderMode::Pipeline => height_range,
@@ -406,9 +415,7 @@ pub(crate) fn spawn_body_terrain(
     let provider: Box<dyn TileProvider> = match provider_mode {
         TerrainTileProviderMode::Pipeline => Box::new(PipelineTileProvider::new(
             body.name.clone(),
-            surface,
-            dynamic_state,
-            height_range,
+            terrain_surface,
         )),
         TerrainTileProviderMode::Analytic3d => {
             info!(
@@ -966,9 +973,7 @@ pub(super) fn update_body_terrain_atmosphere(
     // translations directly without an extra origin/scale transform.
     let mut occluders: Vec<(BodyId, Vec3, f32)> = Vec::with_capacity(sim.system.bodies.len());
     for (i, body) in sim.system.bodies.iter().enumerate() {
-        if matches!(body.kind, thalos_world::BodyKind::Star)
-            || body.radius_m < 1.0
-        {
+        if matches!(body.kind, thalos_world::BodyKind::Star) || body.radius_m < 1.0 {
             continue;
         }
         let Some(pos) = body_render_pos.get(&i) else {
@@ -1188,8 +1193,17 @@ fn local_craft_shadow(
     if ship_q.single().is_ok() {
         let mut shadow = BodyTerrainShadow::default();
         let mut count = 0usize;
-        for (xform, nodes, pod, dec, adapter, tank, engine) in part_q.iter() {
-            let Some(shape) = part_shadow_shape(nodes, pod, dec, adapter, tank, engine) else {
+        for (xform, nodes, pod, dec, adapter, tank, engine, intake, surface_mount) in part_q.iter()
+        {
+            if matches!(
+                (engine, surface_mount.map(|m| m.kind)),
+                (Some(engine), Some(SurfaceMountKind::WingPylon))
+                    if engine.geometry == EngineGeometry::JetNacelle
+            ) {
+                continue;
+            }
+            let Some(shape) = part_shadow_shape(nodes, pod, dec, adapter, tank, engine, intake)
+            else {
                 continue;
             };
             let transform = xform.compute_transform();
@@ -1262,6 +1276,7 @@ fn part_shadow_shape(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     engine: Option<&Engine>,
+    intake: Option<&AirIntake>,
 ) -> Option<PartShadowShape> {
     if let Some(pod) = pod {
         let diameter = pod.diameter;
@@ -1292,10 +1307,22 @@ fn part_shadow_shape(
             radius_top: radius,
             radius_bottom: radius,
         })
+    } else if let Some(intake) = intake {
+        Some(PartShadowShape {
+            height: intake.length,
+            radius_top: intake.diameter * 0.5,
+            radius_bottom: intake.diameter * 0.5,
+        })
     } else {
         engine.map(|engine| PartShadowShape {
-            height: engine.diameter * 0.9,
-            radius_top: engine.diameter * 0.35,
+            height: match engine.geometry {
+                EngineGeometry::RocketBell => engine.diameter * 0.9,
+                EngineGeometry::JetNacelle => thalos_shipyard::jet_nacelle_length(engine),
+            },
+            radius_top: match engine.geometry {
+                EngineGeometry::RocketBell => engine.diameter * 0.35,
+                EngineGeometry::JetNacelle => engine.diameter * 0.5,
+            },
             radius_bottom: engine.diameter * 0.5,
         })
     }

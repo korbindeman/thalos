@@ -141,6 +141,17 @@ pub trait SurfaceQuery: Send + Sync {
     /// regardless of caller or order.
     fn sample(&self, dir: Vec3, lod_m: f32) -> SurfaceSample;
 
+    /// Evaluate the surface at an **f64** direction. The precision-critical
+    /// render path (per-tile-pixel synthesis at planet scale) must not downcast
+    /// the direction to f32 before multiplying by the body radius, or the
+    /// sample position quantises to a ~0.25 m body-local lattice and terraces
+    /// the ground on foot. The default upcasts the f32 [`Self::sample`];
+    /// backings that synthesise in f64 (the baked detail cascade, the
+    /// continental field) override this to keep full precision.
+    fn sample_d(&self, dir: DVec3, lod_m: f32) -> SurfaceSample {
+        self.sample(dir.as_vec3(), lod_m)
+    }
+
     /// Geometric height only — the common case for colliders, camera
     /// ray-casts, and altitude readouts.
     fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {
@@ -207,6 +218,10 @@ impl SurfaceQuery for BakedSurface {
         surface_sample(&self.surface, &self.dynamic_state, dir.as_dvec3(), lod_m)
     }
 
+    fn sample_d(&self, dir: DVec3, lod_m: f32) -> SurfaceSample {
+        surface_sample(&self.surface, &self.dynamic_state, dir, lod_m)
+    }
+
     fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {
         surface_height_m(&self.surface, &self.dynamic_state, dir.as_dvec3(), lod_m)
     }
@@ -217,6 +232,38 @@ impl SurfaceQuery for BakedSurface {
 
     fn height_range_m(&self) -> f32 {
         surface_height_range_m(&self.surface, &self.dynamic_state)
+    }
+}
+
+/// Borrowing [`SurfaceQuery`] over `&PlanetSurface` + `&DynamicSurfaceState`,
+/// for consumers that already hold borrows and don't want an `Arc` round-trip
+/// (camera ray-casts, the editor's tile config). Mirrors [`BakedSurface`]
+/// without owning, so call sites can pass `&dyn SurfaceQuery` without threading
+/// an `Arc` through their plumbing.
+pub struct SurfaceRef<'a> {
+    pub surface: &'a PlanetSurface,
+    pub dynamic_state: &'a DynamicSurfaceState,
+}
+
+impl SurfaceQuery for SurfaceRef<'_> {
+    fn sample(&self, dir: Vec3, lod_m: f32) -> SurfaceSample {
+        surface_sample(self.surface, self.dynamic_state, dir.as_dvec3(), lod_m)
+    }
+
+    fn sample_d(&self, dir: DVec3, lod_m: f32) -> SurfaceSample {
+        surface_sample(self.surface, self.dynamic_state, dir, lod_m)
+    }
+
+    fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {
+        surface_height_m(self.surface, self.dynamic_state, dir.as_dvec3(), lod_m)
+    }
+
+    fn radius_m(&self) -> f32 {
+        self.surface.static_surface.radius_m
+    }
+
+    fn height_range_m(&self) -> f32 {
+        surface_height_range_m(self.surface, self.dynamic_state)
     }
 }
 

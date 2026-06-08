@@ -77,7 +77,7 @@ profiling of a running session: `brp_extras_get_diagnostics` reports
 GPU-vs-CPU bound (frame time unchanged with the 3D render off ⇒ CPU-bound);
 removing post-process components (`Bloom`, `Smaa`, …) or sending `Escape`
 (sim pause) attributes cost to specific subsystems. This is how the surface
-frame cost was traced to the Avian terrain collider (see `docs/landing.md`).
+frame cost was traced to the Avian terrain collider (see `docs/surface.md`).
 
 ### Windows fast incremental loop
 

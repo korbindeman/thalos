@@ -339,9 +339,17 @@ in the body RON (`coverage`, `albedo`, `scroll_rate`,
   full-res; on surface views it touches the whole sky hemisphere. Drop to
   half/quarter-res with temporal reprojection (Blackrack/HZD style) if it
   bites.
-- **Surface cloud shadows.** Project the cloud layer onto terrain LOD —
-  the impostor already has a shadow probe; the terrain receiver side is
-  still deferred.
+- **Surface cloud shadows (designed; terrain receiver pending).** A dynamic,
+  low-res **sun-projected cloud transmittance** buffer, sampled as the
+  `cloud_transmittance` multiplier on the direct-sun term by terrain, objects,
+  and the in-scatter march alike — one shared slot (see
+  [terrain.md](terrain.md) *Surface shadows*). Cheap because clouds are
+  soft/low-frequency; updated per frame (or every few) from the cloud volume
+  state in `SolarSystemState`, kept in a body-fixed / sun-aligned frame so it
+  doesn't swim under the floating origin. The same transmittance, sampled per
+  step in the `BodySky` march, gives **god rays / crepuscular shafts** (already
+  depth-coupled via `SceneDepthImage`). The impostor's existing shadow probe is
+  the orbital analogue; the terrain receiver is the remaining wiring.
 
 For gas giants, "clouds" *are* the cloud deck and live inside
 `AtmosphereParams` already.
@@ -392,6 +400,33 @@ that drives ground LOD also drives ocean shoreline.
 ---
 
 ## Reflective surfaces / IBL
+
+### Goal and the two tiers
+
+The goal is **gorgeous mirror-finish stainless ships with accurate
+reflections** — ambitious, deferred. It splits into two tiers that share one
+foundation (the single terrain height authority):
+
+- **MVP (in progress): brushed/satin stainless** via **SSR + a ship-anchored
+  reflection probe**. The probe captures terrain *for free* — terrain
+  rasterizes normally into the probe faces; SSR adds the on-screen part; and
+  brushed-stainless roughness blurs the reflection enough to hide probe
+  parallax error and SSR holes. Real stainless (Starship-style) is satin, not a
+  flawless mirror, and hulls are curved — both work in the MVP's favor. Keep
+  stainless **roughness a parameter drivable toward zero**, and keep the
+  reflection source **behind the material interface** so the SSR+probe backend
+  can later swap to an RT backend without touching ship materials.
+- **Dream: flawless mirror finish** with off-screen-complete, parallax-correct
+  terrain reflections. This requires **terrain in the ray-tracing acceleration
+  structure (a BLAS)** — there is no shortcut. RT *on the ship only* (terrain
+  absent from the BLAS) reflects the sky but **not the ground**, exactly the
+  wrong artifact for a grounded stainless vehicle. Making terrain RT-visible
+  means extending the collider-patch trimesh extraction (see
+  [terrain.md](terrain.md) *The tile contract* / *M5 colliders*) into a BLAS
+  region, accepting raster-vs-RT geometry divergence at LOD seams, and solving
+  acceleration-structure precision under the floating origin. A research
+  project, not a toggle — the single height authority is what keeps the door
+  open.
 
 ### Today
 
@@ -455,6 +490,20 @@ actual impostor; stars are a flat tint; planet direction is keyed
 off the homeworld and will need to re-pick the nearest body once
 ships move far from Thalos.
 
+### Real-time GI / ray tracing (bevy_solari)
+
+Not wired in (Bevy 0.18). `bevy_solari` builds ray-tracing acceleration
+structures from `Mesh3d`; the terrain has no mesh (GPU-procedural indirect
+draw), so it is invisible to ray tracing without the BLAS-extraction work
+above. Its natural fit is the **near-field mesh scene** — ship, EVA, future
+interiors/stations — where dynamic RT bounce shines; it is experimental and
+hardware-RT-only, so it is **not** a foundation for planet lighting. The
+dominant surface indirect is already analytic/baked and more robust at scale:
+**planetshine** (ground bounce), **atmospheric skylight** (in-scatter), and the
+**baked horizon AO** tile attachment. If dynamic bounce that also covers
+terrain is wanted without solving RT geometry, **SSGI** is the pipeline-agnostic
+middle path — screen-space, sees terrain and objects, no BLAS.
+
 ---
 
 ## BRDFs by body type
@@ -467,7 +516,7 @@ This is a switch on the body, not per-pixel.
 |---|---|---|
 | Airless (Mira, Selva, asteroids) | Hapke + opposition-surge width keyed by `roughness_cubemap` | Reads as lunar; the surge is what makes the surface brighten when the sun is behind the camera |
 | Thin atmosphere, dry (Vaelen, Mars-likes) | Lommel-Seeliger | Cheap stand-in that captures the dust-dominant scatter; can upgrade to Hapke if it bites |
-| Thick atmosphere, wet (Thalos, Pelagos, Earth-likes) | PBR GGX + microfacet ocean | Standard; the atmosphere does most of the aesthetic work via Bruneton |
+| Thick atmosphere, wet (Thalos, Pelagos, Earth-likes) | GGX microfacet surface + microfacet ocean | The single-scattering atmosphere march (not Bruneton — see *Why this approach*) does most of the aesthetic work |
 | Thick atmosphere, dry (Ashara, Venus-likes) | PBR GGX with Mie-thick atmosphere overpowering everything | Ground BRDF barely matters; the atmosphere is the read |
 | Gas / ice giants | Cloud-deck shading via `gas_giant.wgsl` | Not a surface BRDF in the usual sense — the cloud deck is layered transmittance |
 
@@ -495,8 +544,8 @@ This is a switch on the body, not per-pixel.
 
 ## References
 
-- [gen/planet_aesthetics.md](gen/planet_aesthetics.md) — visual
-  target reference. Read this before tuning M4.
+- [archive/gen/planet_aesthetics.md](archive/gen/planet_aesthetics.md) —
+  visual target reference (archived). Read this before tuning M4.
 - [terrain.md](terrain.md) — supplies the surface heights and ocean
   topology that atmosphere/ocean read against.
 - [simulation.md](simulation.md) — ship state and floating origin

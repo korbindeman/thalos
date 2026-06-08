@@ -5,16 +5,16 @@ use crate::{
 use bevy::{
     ecs::{
         query::ROQueryItem,
-        system::{SystemParamItem, lifetimeless::SRes},
+        system::{lifetimeless::SRes, SystemParamItem},
     },
     pbr::{MaterialBindGroupSlot, MeshTransforms, MeshUniform, PreviousGlobalTransform},
     prelude::*,
     render::{
-        Extract,
         render_phase::{PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass},
         render_resource::{binding_types::*, *},
         renderer::{RenderDevice, RenderQueue},
         texture::FallbackImage,
+        Extract,
     },
 };
 use itertools::Itertools;

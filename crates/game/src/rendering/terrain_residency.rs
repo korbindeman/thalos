@@ -42,12 +42,12 @@ use std::sync::Arc;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use thalos_world::BodyId;
-use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
 use thalos_body_render::AtmosphereBlock;
-use thalos_terrain::PlanetSurface;
-use thalos_body_render::{BodyTerrainMaterial, BodyWaterMaterial};
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileTree};
+use thalos_body_render::{BodyTerrainMaterial, BodyWaterMaterial};
+use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_terrain::PlanetSurface;
+use thalos_world::BodyId;
 
 use super::ground_terrain::{spawn_body_terrain, spawn_body_water};
 use super::types::{RealSpaceBody, SimulationState, SolarSystemState};

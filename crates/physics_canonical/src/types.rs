@@ -63,7 +63,7 @@ pub struct ShipParameters {
     /// game's `detect_terrain_impact` compares the pre-contact approach
     /// speed against this. `f64::INFINITY` means "indestructible" — the
     /// sentinel for a craft whose real stats haven't been pushed yet, and
-    /// for EVA (no Avian contact damage). See `docs/landing.md`.
+    /// for EVA (no Avian contact damage). See `docs/surface.md`.
     pub impact_tolerance_m_s: f64,
 }
 
@@ -178,4 +178,3 @@ pub struct TrajectorySample {
     /// `anchor_body`'s position at `time`, cached for cheap rendering.
     pub ref_pos: DVec3,
 }
-

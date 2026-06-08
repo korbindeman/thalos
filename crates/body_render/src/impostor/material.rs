@@ -1,3 +1,4 @@
+use crate::shading::SceneLighting;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
@@ -6,7 +7,6 @@ use bevy::render::render_resource::{
 };
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
-use crate::shading::SceneLighting;
 use thalos_terrain::StaticSurfaceData;
 
 /// Re-export so existing call sites resolve unchanged. The canonical home for

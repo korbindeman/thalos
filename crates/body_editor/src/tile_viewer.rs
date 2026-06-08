@@ -32,7 +32,10 @@ pub(crate) fn tile_viewer_terrain_config(
     surface: &PlanetSurface,
     dynamic_state: &DynamicSurfaceState,
 ) -> UdlodTerrainConfig {
-    let height_range = rendered_height_range(surface, dynamic_state);
+    let height_range = rendered_height_range(&thalos_terrain::SurfaceRef {
+        surface,
+        dynamic_state,
+    });
     UdlodTerrainConfig {
         lod_count: TILE_VIEWER_LOD_COUNT,
         model: thalos_body_render::udlod::math::TerrainModel::sphere(
@@ -157,12 +160,12 @@ pub(crate) fn update_tile_viewer_terrain(
         return;
     };
     let config = tile_viewer_terrain_config(surface, dynamic_state);
-    let height_range = rendered_height_range(surface, dynamic_state);
     let provider: Box<dyn TileProvider> = Box::new(PipelineTileProvider::new(
         active.body_name.clone(),
-        surface.clone(),
-        dynamic_state.clone(),
-        height_range,
+        std::sync::Arc::new(thalos_terrain::BakedSurface::new(
+            surface.clone(),
+            dynamic_state.clone(),
+        )),
     ));
     let mut tile_atlas = TileAtlas::with_provider(&config, provider);
     for side in 0..6 {

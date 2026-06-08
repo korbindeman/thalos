@@ -555,7 +555,7 @@ pub struct CraftStateMirror {
     /// Discriminant name of `AuthorityMode` (variant fields elided).
     pub authority: String,
     /// Whole-craft structural failure from a terrain impact. See
-    /// `docs/landing.md`.
+    /// `docs/surface.md`.
     pub destroyed: bool,
     /// Surface-relative approach speed (m/s) of the destroying impact;
     /// `0.0` unless `destroyed`.

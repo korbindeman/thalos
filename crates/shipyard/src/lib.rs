@@ -14,6 +14,7 @@ use bevy::prelude::*;
 pub mod attach;
 pub mod blueprint;
 pub mod catalog;
+pub mod engine_mesh;
 pub mod material;
 pub mod part;
 pub mod recompute;
@@ -21,18 +22,30 @@ pub mod resource;
 pub mod sizing;
 pub mod staging;
 pub mod stats;
+pub mod wing_mesh;
 
-pub use attach::{AttachNode, AttachNodes, Attachment, NodeId, Ship};
-pub use blueprint::{Connection, PartBlueprint, PartParams, ShipBlueprint};
+pub use attach::{
+    AttachNode, AttachNodes, Attachment, MountSymmetry, NodeId, Ship, SurfaceMount,
+    SurfaceMountKind,
+};
+pub use blueprint::{
+    Connection, PartBlueprint, PartParams, ShipBlueprint, SurfaceConnection, resource_capacity_for,
+};
 pub use catalog::{
-    AdapterSpec, CatalogEntry, CatalogError, CatalogId, CatalogRef, DecouplerSpec,
-    EngineOptimization, EngineSpec, PartCatalog, PodSpec, TankSpec,
+    AdapterSpec, AmbientIntakeKind, CatalogEntry, CatalogError, CatalogId, CatalogRef,
+    DecouplerSpec, EngineGeometry, EngineOptimization, EngineSpec, IntakeCapture,
+    IntakeRequirement, IntakeSpec, PartCatalog, PodSpec, ResourceStorageSpec, TankSpec, WingSpec,
+    wing_mean_aerodynamic_chord, wing_panel_area,
+};
+pub use engine_mesh::{
+    JetNacelleMount, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
+    jet_nacelle_centers, jet_nacelle_length,
 };
 pub use material::{ShipPartExtension, ShipPartMaterial, ShipPartParams, stainless_steel_base};
 pub use part::{
-    Adapter, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust, EngineValidationError,
-    FuelCrossfeed, FuelTank, MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel,
-    ShroudProvider, Shroudable,
+    Adapter, AirIntake, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust,
+    EngineValidationError, FuelCrossfeed, FuelTank, MaterialKind, Part, PartMaterial,
+    ReactantRatio, ReactionWheel, ShroudProvider, Shroudable, Wing,
 };
 pub use resource::{PartResources, Resource, ResourcePool};
 pub use staging::{
@@ -43,6 +56,7 @@ pub use stats::{
     DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals, ShipStats,
     aggregate_resource_totals, cylinder_principal_inertia, estimate_delta_v, parallel_axis_inertia,
 };
+pub use wing_mesh::{WingPanelFrame, build_wing_mesh, wing_panel_frame};
 
 pub struct ShipyardPlugin;
 
@@ -59,6 +73,7 @@ impl Plugin for ShipyardPlugin {
                     recompute::recompute_decoupler_state.after(sizing::propagate_node_sizes),
                     recompute::recompute_adapter_state.after(sizing::propagate_node_sizes),
                     recompute::recompute_tank_state.after(sizing::propagate_node_sizes),
+                    recompute::recompute_wing_state.after(sizing::propagate_node_sizes),
                 ),
             );
     }

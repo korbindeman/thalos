@@ -18,9 +18,14 @@
 //! reactant — it never enters the rocket equation; engines instead declare
 //! a continuous `power_draw_kw` for the duration of the burn.
 
-use crate::blueprint::{Connection, PartBlueprint, PartParams, ShipBlueprint, pools_for};
+use crate::attach::MountSymmetry;
+use crate::blueprint::{
+    Connection, PartBlueprint, PartParams, ShipBlueprint, check_params_match,
+    check_resource_amounts_allowed, pools_for,
+};
 use crate::catalog::{
     CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, tank_surface_area,
+    wing_mean_aerodynamic_chord, wing_panel_area,
 };
 use crate::part::ReactantRatio;
 use crate::resource::{PartResources, Resource};
@@ -210,6 +215,13 @@ pub struct ShipStats {
     /// per body axis. Symmetric — the per-axis cap is the same on all
     /// three. Per-axis-asymmetric torque is reserved for RCS arrangements.
     pub max_reaction_torque_n_m: f64,
+    /// Total planform (top-down) wing area across every lifting surface,
+    /// m² — mirrored pairs counted on both sides. Geometry-derived editor
+    /// feedback ("will this fly"); there is no flight model yet.
+    pub wing_area_m2: f64,
+    /// Area-weighted mean aerodynamic chord across all wings, m. Zero when
+    /// the vessel has no wings.
+    pub mean_aerodynamic_chord_m: f64,
 }
 
 impl ShipStats {
@@ -282,14 +294,28 @@ impl ShipBlueprint {
             .iter()
             .map(|pb| catalog.resolve(&pb.catalog_id))
             .collect::<Result<_, _>>()?;
-
         for (pb, entry) in self.parts.iter().zip(&entries) {
-            dry_mass_kg += part_dry_mass(entry, &pb.params) as f64;
+            check_params_match(&pb.catalog_id, entry, &pb.params)?;
+            check_resource_amounts_allowed(&pb.catalog_id, entry, &pb.resources)?;
+        }
+
+        // Surface-mounted parts: a Mirrored mount draws (and so weighs and
+        // spans) two panels from one part. `panels[i]` is that multiplier;
+        // 1.0 for everything node-stacked or single.
+        let mut panels = vec![1.0_f64; self.parts.len()];
+        for m in &self.surface_mounts {
+            if m.child < panels.len() && m.symmetry == MountSymmetry::Mirrored {
+                panels[m.child] = 2.0;
+            }
+        }
+
+        for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
+            dry_mass_kg += part_dry_mass(entry, &pb.params) as f64 * panels[i];
 
             if let CatalogEntry::Engine(e) = entry {
-                let t = e.thrust as f64;
+                let t = e.thrust as f64 * panels[i];
                 total_thrust_n += t;
-                power_draw_kw += e.power_draw_kw as f64;
+                power_draw_kw += e.power_draw_kw as f64 * panels[i];
                 if e.isp > 0.0 {
                     let isp_f = e.isp as f64;
                     thrust_over_isp += t / isp_f;
@@ -338,12 +364,39 @@ impl ShipBlueprint {
             HashMap::new()
         };
 
+        // Geometry-only "will it fly" feedback: total wing area (both
+        // sides of a pair) and the area-weighted mean aerodynamic chord.
+        let mut wing_area_m2 = 0.0_f64;
+        let mut mac_area_weighted = 0.0_f64;
+        for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
+            if let (
+                CatalogEntry::Wing(_),
+                PartParams::Wing {
+                    span,
+                    root_chord,
+                    tip_chord,
+                    ..
+                },
+            ) = (entry, &pb.params)
+            {
+                let area = wing_panel_area(*span, *root_chord, *tip_chord) as f64 * panels[i];
+                wing_area_m2 += area;
+                mac_area_weighted +=
+                    wing_mean_aerodynamic_chord(*root_chord, *tip_chord) as f64 * area;
+            }
+        }
+        let mean_aerodynamic_chord_m = if wing_area_m2 > 0.0 {
+            mac_area_weighted / wing_area_m2
+        } else {
+            0.0
+        };
+
         let geo = ship_geometry(self, &entries);
 
         let mut com_total_mass = 0.0_f64;
         let mut com_weighted = DVec3::ZERO;
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
-            let m = part_total_mass(pb, entry);
+            let m = part_total_mass(pb, entry) * panels[i];
             com_total_mass += m;
             com_weighted += geo[i].position * m;
         }
@@ -355,10 +408,21 @@ impl ShipBlueprint {
 
         let mut moment_of_inertia_kg_m2 = DVec3::ZERO;
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
-            let m = part_total_mass(pb, entry);
-            let (r, l) = part_cylinder_dims(entry, &pb.params, geo[i].diameter);
-            moment_of_inertia_kg_m2 += cylinder_principal_inertia(m, r, l)
-                + parallel_axis_inertia(m, geo[i].position - com);
+            let m = part_total_mass(pb, entry) * panels[i];
+            let self_inertia = if let (
+                CatalogEntry::Wing(_),
+                PartParams::Wing {
+                    span, root_chord, ..
+                },
+            ) = (entry, &pb.params)
+            {
+                wing_self_inertia(m, *span as f64, *root_chord as f64, panels[i])
+            } else {
+                let (r, l) = part_cylinder_dims(entry, &pb.params, geo[i].diameter);
+                cylinder_principal_inertia(m, r, l)
+            };
+            moment_of_inertia_kg_m2 +=
+                self_inertia + parallel_axis_inertia(m, geo[i].position - com);
         }
 
         Ok(ShipStats {
@@ -372,6 +436,8 @@ impl ShipBlueprint {
             resources,
             moment_of_inertia_kg_m2,
             max_reaction_torque_n_m,
+            wing_area_m2,
+            mean_aerodynamic_chord_m,
         })
     }
 }
@@ -458,13 +524,43 @@ fn ship_geometry(blueprint: &ShipBlueprint, entries: &[&CatalogEntry]) -> Vec<Pa
         }
     }
 
+    // Surface-mounted parts (wings) sit on the host body axis at their
+    // station. Approximate their CoM there — the radial/spanwise offset of
+    // a single panel is small next to the lever from the ship CoM, and a
+    // mirrored pair's panels cancel in X. Hosts are node-stacked, so their
+    // positions are already resolved above.
+    for m in &blueprint.surface_mounts {
+        if m.parent < geo.len() && m.child < geo.len() {
+            let parent_entry = entries[m.parent];
+            let parent_pb = &blueprint.parts[m.parent];
+            let (_, parent_h) =
+                part_cylinder_dims(parent_entry, &parent_pb.params, geo[m.parent].diameter);
+            geo[m.child].position =
+                geo[m.parent].position + DVec3::new(0.0, -(m.station as f64) * parent_h, 0.0);
+        }
+    }
+
     geo
+}
+
+/// Crude thin-wing self-inertia about its own CoM: model the span as a flat
+/// rod along body X (chord along Y, negligible thickness). A mirrored pair
+/// spans roughly tip-to-tip, so its `full_span` is doubled. Placeholder in
+/// the same spirit as the per-part cylinder model until an airfoil mass
+/// distribution exists; the parallel-axis lever dominates for an off-centre
+/// wing regardless.
+fn wing_self_inertia(mass_kg: f64, span_m: f64, chord_m: f64, panels: f64) -> DVec3 {
+    let full_span = span_m * panels;
+    let i_span = mass_kg * full_span * full_span / 12.0; // bending about Y and Z
+    let i_chord = mass_kg * chord_m * chord_m / 12.0; // about the span axis X
+    DVec3::new(i_chord, i_span, i_span)
 }
 
 fn declared_diameter(entry: &CatalogEntry, params: &PartParams) -> f32 {
     match (entry, params) {
         (CatalogEntry::Pod(p), _) => p.diameter,
         (CatalogEntry::Engine(e), _) => e.diameter,
+        (CatalogEntry::Intake(i), _) => i.diameter,
         (CatalogEntry::Decoupler(_), PartParams::Decoupler { diameter }) => *diameter,
         (CatalogEntry::Adapter(_), PartParams::Adapter { diameter, .. }) => *diameter,
         (CatalogEntry::Tank(_), PartParams::Tank { diameter, .. }) => *diameter,
@@ -507,7 +603,9 @@ fn node_diameter(
 ) -> Option<f32> {
     match (entry, params) {
         (CatalogEntry::Pod(_), _) => (node == "bottom").then_some(effective_d),
-        (CatalogEntry::Engine(_), _) => (node == "top" || node == "bottom").then_some(effective_d),
+        (CatalogEntry::Engine(_), _) | (CatalogEntry::Intake(_), _) => {
+            (node == "top" || node == "bottom").then_some(effective_d)
+        }
         (CatalogEntry::Decoupler(_), _) | (CatalogEntry::Tank(_), _) => {
             (node == "top" || node == "bottom").then_some(effective_d)
         }
@@ -540,6 +638,11 @@ fn node_offset(
         (CatalogEntry::Engine(_), _) => match node {
             "top" => Some(Vec3::ZERO),
             "bottom" => Some(Vec3::new(0.0, -effective_d * 0.9, 0.0)),
+            _ => None,
+        },
+        (CatalogEntry::Intake(i), _) => match node {
+            "top" => Some(Vec3::ZERO),
+            "bottom" => Some(Vec3::new(0.0, -i.length, 0.0)),
             _ => None,
         },
         (CatalogEntry::Decoupler(_), _) => match node {
@@ -577,6 +680,7 @@ fn part_cylinder_dims(entry: &CatalogEntry, params: &PartParams, effective_d: f3
     let l = match (entry, params) {
         (CatalogEntry::Pod(_), _) => (effective_d * 0.9) as f64,
         (CatalogEntry::Engine(_), _) => (effective_d * 0.9) as f64,
+        (CatalogEntry::Intake(i), _) => i.length as f64,
         (CatalogEntry::Decoupler(_), _) => 0.2,
         (
             CatalogEntry::Adapter(_),
@@ -632,6 +736,7 @@ pub(crate) fn part_dry_mass(entry: &CatalogEntry, params: &PartParams) -> f32 {
     match (entry, params) {
         (CatalogEntry::Pod(p), _) => p.dry_mass,
         (CatalogEntry::Engine(e), _) => e.dry_mass,
+        (CatalogEntry::Intake(i), _) => i.dry_mass,
         (CatalogEntry::Decoupler(d), PartParams::Decoupler { diameter }) => {
             d.mass_per_diameter * *diameter
         }
@@ -645,6 +750,16 @@ pub(crate) fn part_dry_mass(entry: &CatalogEntry, params: &PartParams) -> f32 {
         (CatalogEntry::Tank(t), PartParams::Tank { diameter, length }) => {
             t.wall_mass_per_m2 * tank_surface_area(*diameter, *length)
         }
+        // Single-panel mass; a mirrored mount doubles it at the call site.
+        (
+            CatalogEntry::Wing(w),
+            PartParams::Wing {
+                span,
+                root_chord,
+                tip_chord,
+                ..
+            },
+        ) => w.mass_per_m2 * wing_panel_area(*span, *root_chord, *tip_chord),
         _ => 0.0,
     }
 }
@@ -676,6 +791,7 @@ mod tests {
             root: 0,
             parts: vec![],
             connections: vec![],
+            surface_mounts: vec![],
         }
         .stats(&cat)
         .expect("stats");
@@ -705,9 +821,10 @@ mod tests {
             parts: vec![PartBlueprint {
                 catalog_id: "argos".into(),
                 params: PartParams::None,
-                resources: HashMap::new(),
+                resources: None,
             }],
             connections: vec![],
+            surface_mounts: vec![],
         };
         let s = bp.stats(&cat).unwrap();
         let m = 2720.0_f64;
@@ -732,7 +849,7 @@ mod tests {
                 PartBlueprint {
                     catalog_id: "argos".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "tank_methalox".into(),
@@ -740,12 +857,12 @@ mod tests {
                         diameter: 2.5,
                         length: 4.0,
                     },
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "zephyr".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
             ],
             connections: vec![
@@ -762,6 +879,7 @@ mod tests {
                     child_node: "top".into(),
                 },
             ],
+            surface_mounts: vec![],
         };
         let s = bp.stats(&cat).unwrap();
         assert!((s.total_thrust_n - 500_000.0).abs() < 1e-6);
@@ -779,6 +897,56 @@ mod tests {
     }
 
     #[test]
+    fn explicit_empty_tank_resources_disable_catalog_defaults() {
+        let cat = catalog();
+        let bp = ShipBlueprint {
+            name: "dry".into(),
+            root: 0,
+            parts: vec![PartBlueprint {
+                catalog_id: "tank_methalox".into(),
+                params: PartParams::Tank {
+                    diameter: 2.5,
+                    length: 2.0,
+                },
+                resources: Some(HashMap::new()),
+            }],
+            connections: vec![],
+            surface_mounts: vec![],
+        };
+
+        let s = bp.stats(&cat).unwrap();
+        assert_eq!(s.propellant_mass_kg, 0.0);
+        assert!(s.resources.is_empty());
+    }
+
+    #[test]
+    fn non_whitelisted_resource_is_rejected() {
+        let cat = catalog();
+        let bp = ShipBlueprint {
+            name: "bad".into(),
+            root: 0,
+            parts: vec![PartBlueprint {
+                catalog_id: "tank_methalox".into(),
+                params: PartParams::Tank {
+                    diameter: 2.5,
+                    length: 2.0,
+                },
+                resources: Some(HashMap::from([(Resource::Kerosene, 100.0)])),
+            }],
+            connections: vec![],
+            surface_mounts: vec![],
+        };
+
+        assert!(matches!(
+            bp.stats(&cat),
+            Err(CatalogError::ResourceNotAllowed {
+                resource: Resource::Kerosene,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn balanced_stack_delta_v_matches_rocket_equation() {
         let cat = catalog();
         let bp = ShipBlueprint {
@@ -788,7 +956,7 @@ mod tests {
                 PartBlueprint {
                     catalog_id: "argos".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "tank_methalox".into(),
@@ -796,12 +964,12 @@ mod tests {
                         diameter: 2.5,
                         length: 4.0,
                     },
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "zephyr".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
             ],
             connections: vec![
@@ -818,6 +986,7 @@ mod tests {
                     child_node: "top".into(),
                 },
             ],
+            surface_mounts: vec![],
         };
         let s = bp.stats(&cat).unwrap();
         let expected = s.exhaust_velocity() * (s.wet_mass_kg() / s.dry_mass_kg).ln();
@@ -883,7 +1052,7 @@ mod tests {
                 PartBlueprint {
                     catalog_id: "hyperion".into(),
                     params: PartParams::None,
-                    resources: HashMap::new(),
+                    resources: None,
                 },
                 PartBlueprint {
                     catalog_id: "tank_methalox".into(),
@@ -891,7 +1060,7 @@ mod tests {
                         diameter: 2.5,
                         length: 2.0,
                     },
-                    resources: HashMap::new(),
+                    resources: None,
                 },
             ],
             connections: vec![Connection {
@@ -900,12 +1069,14 @@ mod tests {
                 child: 1,
                 child_node: "top".into(),
             }],
+            surface_mounts: vec![],
         };
         // Same blueprint with no connection — the tank stays at its
         // declared 2.5 m and the pod is a separate root. Roll inertia
         // is just the sum of self-inertia at the declared diameters.
         let bp_unattached = ShipBlueprint {
             connections: vec![],
+            surface_mounts: vec![],
             ..bp_inherited.clone()
         };
         let inherited = bp_inherited.stats(&cat).unwrap().moment_of_inertia_kg_m2.y;
@@ -919,6 +1090,114 @@ mod tests {
     }
 
     #[test]
+    fn mirrored_wing_doubles_area_and_mass() {
+        use crate::blueprint::SurfaceConnection;
+        let cat = catalog();
+        // Hyperion pod + one mirrored main wing surface-mounted on it.
+        let bp = ShipBlueprint {
+            name: "plane".into(),
+            root: 0,
+            parts: vec![
+                PartBlueprint {
+                    catalog_id: "hyperion".into(),
+                    params: PartParams::None,
+                    resources: None,
+                },
+                PartBlueprint {
+                    catalog_id: "wing_std".into(),
+                    params: PartParams::Wing {
+                        span: 5.0,
+                        root_chord: 2.0,
+                        tip_chord: 1.0,
+                        sweep: 0.2,
+                        dihedral: 0.05,
+                        thickness: 0.12,
+                        incidence: 0.0,
+                    },
+                    resources: None,
+                },
+            ],
+            connections: vec![],
+            surface_mounts: vec![SurfaceConnection {
+                parent: 0,
+                child: 1,
+                kind: crate::attach::SurfaceMountKind::BodySkin,
+                station: 0.5,
+                angle: std::f32::consts::FRAC_PI_2,
+                symmetry: MountSymmetry::Mirrored,
+            }],
+        };
+        let s = bp.stats(&cat).unwrap();
+        // Panel planform area = 5 · (2 + 1)/2 = 7.5 m²; mirrored → 15 m².
+        assert!((s.wing_area_m2 - 15.0).abs() < 1e-3);
+        assert!(s.mean_aerodynamic_chord_m > 0.0);
+        // Wing dry mass = 22 kg/m² · 7.5 · 2 panels = 330 kg, on top of the
+        // 5800 kg Hyperion pod.
+        assert!((s.dry_mass_kg - (5800.0 + 330.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn mirrored_wing_pylon_engine_doubles_thrust_and_mass() {
+        use crate::attach::SurfaceMountKind;
+        use crate::blueprint::SurfaceConnection;
+
+        let cat = catalog();
+        let bp = ShipBlueprint {
+            name: "jet".into(),
+            root: 0,
+            parts: vec![
+                PartBlueprint {
+                    catalog_id: "hyperion".into(),
+                    params: PartParams::None,
+                    resources: None,
+                },
+                PartBlueprint {
+                    catalog_id: "wing_std".into(),
+                    params: PartParams::Wing {
+                        span: 5.0,
+                        root_chord: 2.0,
+                        tip_chord: 1.0,
+                        sweep: 0.2,
+                        dihedral: 0.05,
+                        thickness: 0.12,
+                        incidence: 0.0,
+                    },
+                    resources: None,
+                },
+                PartBlueprint {
+                    catalog_id: "mistral_jet".into(),
+                    params: PartParams::None,
+                    resources: None,
+                },
+            ],
+            connections: vec![],
+            surface_mounts: vec![
+                SurfaceConnection {
+                    parent: 0,
+                    child: 1,
+                    kind: SurfaceMountKind::BodySkin,
+                    station: 0.5,
+                    angle: std::f32::consts::FRAC_PI_2,
+                    symmetry: MountSymmetry::Mirrored,
+                },
+                SurfaceConnection {
+                    parent: 1,
+                    child: 2,
+                    kind: SurfaceMountKind::WingPylon,
+                    station: 0.45,
+                    angle: 0.0,
+                    symmetry: MountSymmetry::Mirrored,
+                },
+            ],
+        };
+
+        let s = bp.stats(&cat).unwrap();
+        assert!((s.total_thrust_n - 240_000.0).abs() < 1e-6);
+        assert!((s.combined_isp_s - 2600.0).abs() < 1e-6);
+        assert!(s.dry_mass_kg > 5800.0 + 2.0 * 680.0);
+    }
+
+    #[test]
     fn unknown_catalog_id_errors() {
         let cat = catalog();
         let bp = ShipBlueprint {
@@ -927,9 +1206,10 @@ mod tests {
             parts: vec![PartBlueprint {
                 catalog_id: "nope".into(),
                 params: PartParams::None,
-                resources: HashMap::new(),
+                resources: None,
             }],
             connections: vec![],
+            surface_mounts: vec![],
         };
         assert!(matches!(bp.stats(&cat), Err(CatalogError::UnknownId(_))));
     }

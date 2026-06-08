@@ -1,6 +1,8 @@
-//! Player ship rendering — loads `ships/apollo.ron` on startup, spawns its
-//! parts as children of a [`PlayerShip`] root, and keeps the root's world
-//! position in sync with the physics ship state each frame.
+//! Player ship rendering — loads the spawn situation's ship blueprint on
+//! startup (`ships/apollo.ron` by default, `ships/skyhawk.ron` for the runway
+//! scenarios; see [`crate::spawn::SpawnSituation::ship_blueprint_path`]),
+//! spawns its parts as children of a [`PlayerShip`] root, and keeps the root's
+//! world position in sync with the physics ship state each frame.
 //!
 //! Ship parts are authored in metres. The root's scale is kept at
 //! [`Vec3::ONE`]; in ship view the global [`WorldScale`] is `1.0`, so a
@@ -22,9 +24,11 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
-    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part, PartCatalog,
-    PartMaterial, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams,
-    ShipyardPlugin, stainless_steel_base,
+    Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
+    FuelTank, JetNacelleMount, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint,
+    ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipyardPlugin, SurfaceMount,
+    SurfaceMountKind, Wing, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
+    build_wing_mesh, jet_nacelle_length, stainless_steel_base,
 };
 
 use crate::SimStage;
@@ -39,7 +43,7 @@ const PART_RESOLUTION: u32 = 128;
 /// Whole-craft crash tolerance (m/s of surface-relative approach speed).
 /// A terrain contact above this destroys the vessel. Forgiving first-slice
 /// constant — a future per-part model derives it from the contacting parts.
-/// See `docs/landing.md`.
+/// See `docs/surface.md`.
 // TEMP (camera-judder repro): survive a hard touchdown so the craft settles in
 // Full on the terrain instead of being destroyed. Restore to 12.0 after.
 const SHIP_IMPACT_TOLERANCE_M_S: f64 = 1.0e9;
@@ -71,6 +75,8 @@ impl Plugin for ShipViewPlugin {
                 Update,
                 (
                     rebuild_ship_visuals,
+                    rebuild_ship_wing_visuals,
+                    rebuild_ship_nacelle_visuals,
                     update_ship_part_transforms.after(rebuild_ship_visuals),
                     update_ship_part_shader_params.after(rebuild_ship_visuals),
                     update_ship_camera_offset.after(update_ship_part_transforms),
@@ -97,6 +103,7 @@ struct PartShaderHandle(Handle<ShipPartMaterial>);
 pub(crate) fn spawn_player_ship(
     mut commands: Commands,
     view: Res<ViewMode>,
+    situation: Res<crate::spawn::SpawnSituation>,
     mut sim: ResMut<SimulationState>,
     catalog: Res<PartCatalog>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -110,7 +117,7 @@ pub(crate) fn spawn_player_ship(
     if sim.simulation.vessel_kind() == thalos_physics_canonical::types::VesselKind::Eva {
         return;
     }
-    let ron_path = PathBuf::from("ships/apollo.ron");
+    let ron_path = PathBuf::from(situation.ship_blueprint_path());
     let text = match std::fs::read_to_string(&ron_path) {
         Ok(t) => t,
         Err(e) => {
@@ -145,7 +152,7 @@ pub(crate) fn spawn_player_ship(
         dry_mass_kg: stats.dry_mass_kg,
         // Whole-craft crash tolerance (forgiving first-slice constant; a
         // future per-part model derives this from the contacting parts).
-        // See docs/landing.md.
+        // See docs/surface.md.
         impact_tolerance_m_s: SHIP_IMPACT_TOLERANCE_M_S,
     });
     sim.simulation.set_ship_mass(stats.wet_mass_kg());
@@ -244,6 +251,12 @@ pub(crate) fn spawn_player_ship(
         let mut att_query = world.query::<(Entity, &Attachment)>();
         for (e, att) in att_query.iter(world) {
             attachments.entry(att.parent).or_default().push(e);
+        }
+        // Surface-mounted parts (wings) connect via `SurfaceMount`, not
+        // `Attachment` — include them so they reparent under the ship too.
+        let mut sm_query = world.query::<(Entity, &SurfaceMount)>();
+        for (e, sm) in sm_query.iter(world) {
+            attachments.entry(sm.parent).or_default().push(e);
         }
         let mut queue: VecDeque<Entity> = VecDeque::from([root]);
         let mut to_reparent: Vec<Entity> = Vec::new();
@@ -382,6 +395,7 @@ fn visual_spec(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     engine: Option<&Engine>,
+    intake: Option<&AirIntake>,
 ) -> Option<VisualSpec> {
     if let Some(p) = pod {
         let d = p.diameter;
@@ -433,18 +447,34 @@ fn visual_spec(
             height: h,
         })
     } else if let Some(e) = engine {
-        let d = e.diameter;
-        let (r_top, r_bot, h) = (d * 0.35, d * 0.5, d * 0.9);
-        Some(VisualSpec {
-            mesh: ConicalFrustum {
-                radius_top: r_top,
-                radius_bottom: r_bot,
-                height: h,
+        match e.geometry {
+            EngineGeometry::RocketBell => {
+                let d = e.diameter;
+                let (r_top, r_bot, h) = (d * 0.35, d * 0.5, d * 0.9);
+                Some(VisualSpec {
+                    mesh: ConicalFrustum {
+                        radius_top: r_top,
+                        radius_bottom: r_bot,
+                        height: h,
+                    }
+                    .mesh()
+                    .resolution(PART_RESOLUTION)
+                    .into(),
+                    height: h,
+                })
             }
-            .mesh()
-            .resolution(PART_RESOLUTION)
-            .into(),
-            height: h,
+            EngineGeometry::JetNacelle => Some(VisualSpec {
+                mesh: build_jet_nacelle_body_mesh(e),
+                height: jet_nacelle_length(e),
+            }),
+        }
+    } else if let Some(i) = intake {
+        Some(VisualSpec {
+            mesh: Cylinder::new(i.diameter * 0.5, i.length)
+                .mesh()
+                .resolution(PART_RESOLUTION)
+                .into(),
+            height: i.length,
         })
     } else {
         None
@@ -492,6 +522,8 @@ type VisualQuery<'w, 's> = Query<
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
         Option<&'static Engine>,
+        Option<&'static AirIntake>,
+        Option<&'static SurfaceMount>,
         Option<&'static Children>,
         Option<&'static PartShaderHandle>,
         Has<PartMaterial>,
@@ -511,8 +543,20 @@ fn rebuild_ship_visuals(
     parts: VisualQuery,
     stale: Query<(), With<PartVisual>>,
 ) {
-    for (e, nodes, pod, dec, adapter, tank, engine, children, part_shader, has_part_mat) in
-        parts.iter()
+    for (
+        e,
+        nodes,
+        pod,
+        dec,
+        adapter,
+        tank,
+        engine,
+        intake,
+        surface,
+        children,
+        part_shader,
+        has_part_mat,
+    ) in parts.iter()
     {
         if let Some(ch) = children {
             for c in ch.into_iter() {
@@ -522,7 +566,13 @@ fn rebuild_ship_visuals(
             }
         }
 
-        let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine) else {
+        if engine.is_some_and(|e| e.geometry == EngineGeometry::JetNacelle)
+            && surface.is_some_and(|m| m.kind == SurfaceMountKind::WingPylon)
+        {
+            continue;
+        }
+
+        let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, engine, intake) else {
             continue;
         };
         let mesh = meshes.add(spec.mesh);
@@ -575,11 +625,137 @@ fn rebuild_ship_visuals(
     }
 }
 
+/// Build the mesh child for each wing on spawn (and on the rare runtime
+/// change). Mirrors the editor's `rebuild_wing_visuals`: the mesh is in the
+/// host-local frame and the wing entity's transform places it. Wings render
+/// with a plain double-sided metal material until they get a dedicated skin.
+fn rebuild_ship_wing_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    wings: Query<
+        (Entity, &Wing, &SurfaceMount, Option<&Children>),
+        Or<(Added<Wing>, Changed<Wing>, Changed<SurfaceMount>)>,
+    >,
+    host_nodes: Query<&AttachNodes>,
+    stale: Query<(), With<PartVisual>>,
+) {
+    for (e, wing, mount, children) in wings.iter() {
+        if let Some(ch) = children {
+            for c in ch.into_iter() {
+                if stale.get(*c).is_ok() {
+                    commands.entity(*c).despawn();
+                }
+            }
+        }
+        let parent_radius = host_nodes
+            .get(mount.parent)
+            .ok()
+            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+            .unwrap_or(1.0);
+        let mesh = meshes.add(build_wing_mesh(
+            wing,
+            mount.angle,
+            mount.symmetry,
+            parent_radius,
+        ));
+        let mat = std_materials.add(StandardMaterial {
+            base_color: Color::srgb(0.6, 0.62, 0.65),
+            perceptual_roughness: 0.5,
+            metallic: 0.6,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        });
+        let body = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform::IDENTITY,
+                Visibility::default(),
+                NoFrustumCulling,
+                PartVisual,
+            ))
+            .id();
+        commands.entity(e).add_child(body);
+    }
+}
+
+fn rebuild_ship_nacelle_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    engines: Query<
+        (Entity, &Engine, &SurfaceMount, Option<&Children>),
+        Or<(Added<Engine>, Changed<SurfaceMount>)>,
+    >,
+    wings: Query<&Wing>,
+    surface_mounts: Query<&SurfaceMount>,
+    host_nodes: Query<&AttachNodes>,
+    stale: Query<(), With<PartVisual>>,
+) {
+    for (e, engine, mount, children) in engines.iter() {
+        if engine.geometry != EngineGeometry::JetNacelle
+            || mount.kind != SurfaceMountKind::WingPylon
+        {
+            continue;
+        }
+        if let Some(ch) = children {
+            for c in ch.into_iter() {
+                if stale.get(*c).is_ok() {
+                    commands.entity(*c).despawn();
+                }
+            }
+        }
+        let Ok(wing) = wings.get(mount.parent) else {
+            continue;
+        };
+        let Ok(wing_mount) = surface_mounts.get(mount.parent) else {
+            continue;
+        };
+        let parent_radius = host_nodes
+            .get(wing_mount.parent)
+            .ok()
+            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+            .unwrap_or(1.0);
+        let mesh = meshes.add(build_jet_nacelle_pylon_mesh(
+            engine,
+            JetNacelleMount {
+                wing,
+                wing_mount_angle: wing_mount.angle,
+                parent_radius,
+                span_fraction: mount.station,
+                chord_fraction: mount.angle,
+                symmetry: mount.symmetry,
+            },
+        ));
+        let mat = std_materials.add(StandardMaterial {
+            base_color: Color::srgb(0.55, 0.57, 0.6),
+            perceptual_roughness: 0.42,
+            metallic: 0.75,
+            ..default()
+        });
+        let body = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform::IDENTITY,
+                Visibility::default(),
+                NoFrustumCulling,
+                PartVisual,
+            ))
+            .id();
+        commands.entity(e).add_child(body);
+    }
+}
+
 /// BFS from the ship root, positioning each part's local Transform based
-/// on its [`Attachment`]. Copied from the ship editor.
+/// on its [`Attachment`]. Copied from the ship editor. A trailing pass
+/// places surface-mounted parts (wings) on the host axis at their station.
 fn update_ship_part_transforms(
     ships: Query<&Ship>,
     attachments: Query<(Entity, &Attachment)>,
+    surface_mounts: Query<(Entity, &SurfaceMount)>,
     nodes: Query<&AttachNodes>,
     mut transforms: Query<&mut Transform, With<Part>>,
 ) {
@@ -631,6 +807,30 @@ fn update_ship_part_transforms(
             }
         }
     }
+
+    // Surface-mounted parts sit in their host-local frame. Body-skin mounts
+    // (wings) move down the host body axis; wing-pylon mounts (nacelles)
+    // inherit the wing origin because the pylon mesh carries the offsets.
+    for (part, mount) in surface_mounts.iter() {
+        let Ok(parent_t) = transforms.get(mount.parent).map(|t| t.translation) else {
+            continue;
+        };
+        let local_offset = match mount.kind {
+            SurfaceMountKind::BodySkin => {
+                let host_height = nodes
+                    .get(mount.parent)
+                    .ok()
+                    .and_then(|n| n.get("bottom").map(|nd| -nd.offset.y))
+                    .unwrap_or(0.0);
+                Vec3::new(0.0, -mount.station * host_height, 0.0)
+            }
+            SurfaceMountKind::WingPylon => Vec3::ZERO,
+        };
+        if let Ok(mut pt) = transforms.get_mut(part) {
+            pt.translation = parent_t + local_offset;
+            pt.rotation = Quat::IDENTITY;
+        }
+    }
 }
 
 /// Visual-AABB centre of all parts in the [`PlayerShip`]'s local frame.
@@ -654,6 +854,8 @@ fn update_ship_camera_offset(
             Option<&Adapter>,
             Option<&FuelTank>,
             Option<&Engine>,
+            Option<&AirIntake>,
+            Option<&Wing>,
         ),
         With<Part>,
     >,
@@ -667,10 +869,12 @@ fn update_ship_camera_offset(
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         let mut hits = 0;
         for child in children.iter() {
-            let Ok((t, nodes, pod, dec, adapter, tank, engine)) = parts.get(child) else {
+            let Ok((t, nodes, pod, dec, adapter, tank, engine, intake, wing)) = parts.get(child)
+            else {
                 continue;
             };
-            let Some((height, radius)) = visual_extent(nodes, pod, dec, adapter, tank, engine)
+            let Some((height, radius)) =
+                visual_extent(nodes, pod, dec, adapter, tank, engine, intake, wing)
             else {
                 continue;
             };
@@ -708,6 +912,8 @@ fn visual_extent(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     engine: Option<&Engine>,
+    intake: Option<&AirIntake>,
+    wing: Option<&Wing>,
 ) -> Option<(f32, f32)> {
     if let Some(p) = pod {
         Some((p.diameter * 0.9, p.diameter * 0.5))
@@ -722,8 +928,19 @@ fn visual_extent(
     } else if let Some(t) = tank {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         Some((t.length, d * 0.5))
+    } else if let Some(w) = wing {
+        // Chord runs along the body axis; the span reaches outboard in X/Z.
+        Some((w.root_chord, w.span + w.root_chord))
+    } else if let Some(i) = intake {
+        Some((i.length, i.diameter * 0.5))
     } else {
-        engine.map(|e| (e.diameter * 0.9, e.diameter * 0.5))
+        engine.map(|e| {
+            let height = match e.geometry {
+                EngineGeometry::RocketBell => e.diameter * 0.9,
+                EngineGeometry::JetNacelle => jet_nacelle_length(e),
+            };
+            (height, e.diameter * 0.5)
+        })
     }
 }
 

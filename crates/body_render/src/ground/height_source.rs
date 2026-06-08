@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use bevy::math::{DVec2, UVec2, Vec2, Vec3};
 use bevy::prelude::*;
-use thalos_terrain::{BakedSurface, DynamicSurfaceState, PlanetSurface, SurfaceQuery};
+use thalos_terrain::SurfaceQuery;
 use thalos_udlod::math::{Coordinate, TerrainModel, TileCoordinate};
 use thalos_udlod::prelude::TileAtlas;
 
@@ -42,14 +42,12 @@ pub trait HeightSource: Send + Sync {
 }
 
 pub struct CpuPipelineHeightSource {
-    surface: BakedSurface,
+    surface: Arc<dyn SurfaceQuery>,
 }
 
 impl CpuPipelineHeightSource {
-    pub fn new(surface: Arc<PlanetSurface>, dynamic_state: DynamicSurfaceState) -> Self {
-        Self {
-            surface: BakedSurface::new(surface, dynamic_state),
-        }
+    pub fn new(surface: Arc<dyn SurfaceQuery>) -> Self {
+        Self { surface }
     }
 }
 
@@ -88,10 +86,10 @@ pub struct GpuAtlasMirrorHeightSource {
 }
 
 impl GpuAtlasMirrorHeightSource {
-    pub fn new(surface: Arc<PlanetSurface>, dynamic_state: DynamicSurfaceState) -> Self {
+    pub fn new(surface: Arc<dyn SurfaceQuery>) -> Self {
         Self {
             mirror: Arc::new(RwLock::new(GpuAtlasHeightMirror::default())),
-            fallback: CpuPipelineHeightSource::new(surface, dynamic_state),
+            fallback: CpuPipelineHeightSource::new(surface),
         }
     }
 

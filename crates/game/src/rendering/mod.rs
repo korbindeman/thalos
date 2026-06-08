@@ -47,7 +47,9 @@ use terrain_residency::TerrainResidencyPlugin;
 use trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_planet_orientations, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
-pub use types::{CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, ShipMarker};
+pub use types::{
+    CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, RealSpaceBody, ShipMarker,
+};
 
 use bevy::prelude::*;
 pub use thalos_body_render::ReferenceClouds;

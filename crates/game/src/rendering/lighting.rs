@@ -3,11 +3,11 @@
 //! material light updates, sun-light direction.
 
 use bevy::prelude::*;
-use thalos_physics_canonical::types::BodyStates;
 use thalos_body_render::{
     AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, PlanetHaloMaterial, PlanetMaterial,
     SceneLighting, SolidPlanetMaterial, StarLight,
 };
+use thalos_physics_canonical::types::BodyStates;
 
 use super::types::{
     CameraExposure, CelestialBody, PlanetMaterials, PlanetshineTints, SimulationState,
@@ -260,10 +260,8 @@ pub(super) fn update_planet_light_dirs(
             // resource hasn't been populated for contribute no shine.
             if let Some(parent_id) = body_def.parent {
                 let parent_def = &body_defs[parent_id];
-                if !matches!(
-                    parent_def.kind,
-                    thalos_world::BodyKind::Star
-                ) && let Some(parent_state) = states.get(parent_id)
+                if !matches!(parent_def.kind, thalos_world::BodyKind::Star)
+                    && let Some(parent_state) = states.get(parent_id)
                     && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {
                     let parent_render_pos =
@@ -370,10 +368,8 @@ pub(super) fn update_solid_planet_params(
 
             if let Some(parent_id) = body_def.parent {
                 let parent_def = &body_defs[parent_id];
-                if !matches!(
-                    parent_def.kind,
-                    thalos_world::BodyKind::Star
-                ) && let Some(parent_state) = states.get(parent_id)
+                if !matches!(parent_def.kind, thalos_world::BodyKind::Star)
+                    && let Some(parent_state) = states.get(parent_id)
                     && let Some(tint) = planetshine.by_body.get(&parent_id)
                 {
                     let parent_render_pos =

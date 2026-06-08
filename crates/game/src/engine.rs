@@ -20,7 +20,7 @@ use bevy::prelude::*;
 use thalos_shipyard::{Engine, EngineActivation, EngineThrust};
 
 use crate::SimStage;
-use crate::fuel::ThrottleState;
+use crate::fuel::{ActivePropulsion, ThrottleState};
 use crate::ship_view::PartVisual;
 
 /// Default engine mesh tint when idle. Matches the placeholder
@@ -57,13 +57,22 @@ impl Plugin for EnginePlugin {
 /// and write it back to each engine's [`EngineThrust`] component.
 fn update_engine_thrust(
     throttle: Res<ThrottleState>,
-    mut engines: Query<(&Engine, Option<&EngineActivation>, &mut EngineThrust)>,
+    active: Res<ActivePropulsion>,
+    mut engines: Query<(
+        Entity,
+        &Engine,
+        Option<&EngineActivation>,
+        &mut EngineThrust,
+    )>,
 ) {
     let throttle_eff = throttle.effective.clamp(0.0, 1.0) as f32;
-    for (engine, activation, mut thrust) in engines.iter_mut() {
+    for (entity, engine, activation, mut thrust) in engines.iter_mut() {
         let enabled = activation.map(|a| a.enabled).unwrap_or(true);
-        thrust.current_n = if enabled {
-            engine.thrust * throttle_eff
+        let active_flow = active.engines.iter().find(|e| e.entity == entity);
+        let active = enabled && active_flow.is_some();
+        let thrust_scale = active_flow.map(|flow| flow.thrust_scale).unwrap_or(0.0) as f32;
+        thrust.current_n = if active {
+            engine.thrust * throttle_eff * thrust_scale
         } else {
             0.0
         };

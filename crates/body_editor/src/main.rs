@@ -14,23 +14,33 @@ use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::{PresentMode, WindowMode, WindowResolution};
 use bevy_egui::egui;
-use thalos_input::enhanced::{ActionSources, EnhancedInputSystems};
-use thalos_input::body_editor::{BodyEditorInputIntent, BodyEditorInputPlugin};
-use thalos_input::settings::InputSettings;
-use thalos_physics_canonical::body_trajectory_provider::BodyTrajectoryProvider;
-use thalos_physics_canonical::canonical::Epoch;
-use thalos_world::parsing::load_solar_system_from_dir;
-use thalos_physics_canonical::patched_conics::PatchedConics;
-use thalos_world::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
+use thalos_body_render::udlod::big_space::{
+    BigSpaceCommands, FloatingOrigin, GridCell, ReferenceFrame,
+};
+use thalos_body_render::udlod::math::TileCoordinate;
+use thalos_body_render::udlod::prelude::{
+    AttachmentConfig, AttachmentFormat, TerrainBundle, TerrainConfig as UdlodTerrainConfig,
+    TerrainViewComponents, TerrainViewConfig, TileAtlas, TileProvider, TileTree,
+};
 use thalos_body_render::{
     AU_M, AtmosphereBlock, BodyRenderPlugin, CLOUD_BAND_COUNT, GasGiantLayers, GasGiantMaterial,
     GasGiantMaterialHandle, GasGiantParams, LIGHT_AT_1AU, PlanetCoastlineParams,
     PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle, PlanetMaterial,
-    PlanetMaterialHandle, PlanetParams, PlanetWaterParams, ReferenceClouds,
-    RingLayers, RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight,
+    PlanetMaterialHandle, PlanetParams, PlanetWaterParams, ReferenceClouds, RingLayers,
+    RingMaterial, RingMaterialHandle, RingParams, SceneLighting, StarLight,
     bake_from_planet_surface, build_ring_mesh, cloud_cover_image_for_body,
     convert_reference_clouds_when_ready, load_reference_cloud_sources,
 };
+use thalos_body_render::{
+    BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow, PipelineTileProvider,
+    rendered_height_range,
+};
+use thalos_input::body_editor::{BodyEditorInputIntent, BodyEditorInputPlugin};
+use thalos_input::enhanced::{ActionSources, EnhancedInputSystems};
+use thalos_input::settings::InputSettings;
+use thalos_physics_canonical::body_trajectory_provider::BodyTrajectoryProvider;
+use thalos_physics_canonical::canonical::Epoch;
+use thalos_physics_canonical::patched_conics::PatchedConics;
 use thalos_terrain::{
     AirlessImpactProjectionConfig, AtmosphereSpec, AuthoredFeatureConfig, BodyArchetype,
     BoundaryKind, ColdDesertProjectionConfig, CompositionClass, DynamicSurfaceLayers,
@@ -41,18 +51,8 @@ use thalos_terrain::{
     TerrainCompileOptions, TerrainConfig, TerrainIntent, compile_terrain_config,
     plan_initial_compilation, sample_static_surface, sample_surface, sub_seed, surface_sample,
 };
-use thalos_body_render::{
-    BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow, PipelineTileProvider,
-    rendered_height_range,
-};
-use thalos_body_render::udlod::big_space::{
-    BigSpaceCommands, FloatingOrigin, GridCell, ReferenceFrame,
-};
-use thalos_body_render::udlod::math::TileCoordinate;
-use thalos_body_render::udlod::prelude::{
-    AttachmentConfig, AttachmentFormat, TerrainBundle, TerrainConfig as UdlodTerrainConfig,
-    TerrainViewComponents, TerrainViewConfig, TileAtlas, TileProvider, TileTree,
-};
+use thalos_world::parsing::load_solar_system_from_dir;
+use thalos_world::{BodyDefinition, BodyId, BodyKind, SolarSystemDefinition};
 
 mod body_params;
 mod camera;

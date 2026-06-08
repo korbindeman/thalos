@@ -24,7 +24,9 @@ use rayon::prelude::*;
 use thalos_terrain::cubemap::{CubemapFace, face_uv_to_dir};
 use thalos_terrain::{Cubemap, DynamicSurfaceState, PlanetSurface};
 
-use crate::impostor::shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature};
+use crate::impostor::shader_types::{
+    GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature,
+};
 use crate::impostor::texture::PlanetTextures;
 
 /// Maximum face resolution uploaded for the flat planet impostor.

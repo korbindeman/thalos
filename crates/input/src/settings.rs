@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use bevy::prelude::{KeyCode, MouseButton, Resource};
+use bevy::prelude::{GamepadAxis, GamepadButton, KeyCode, MouseButton, Resource};
 use bevy_enhanced_input::prelude::Binding;
 use serde::Deserialize;
 
@@ -137,6 +137,7 @@ fn validate_file(file: &InputFile) -> Result<(), InputSettingsError> {
     let defaults = InputSettings::default();
     validate_section_file("game.system", &file.game.system, &defaults.game.system)?;
     validate_section_file("game.flight", &file.game.flight, &defaults.game.flight)?;
+    validate_hotas_file("game.hotas", &file.game.hotas)?;
     validate_section_file("game.view", &file.game.view, &defaults.game.view)?;
     validate_section_file("game.camera", &file.game.camera, &defaults.game.camera)?;
     validate_section_file("game.eva", &file.game.eva, &defaults.game.eva)?;
@@ -155,11 +156,7 @@ fn validate_file(file: &InputFile) -> Result<(), InputSettingsError> {
         &file.game.maneuver_precision,
         &defaults.game.maneuver_precision,
     )?;
-    validate_section_file(
-        "body_editor",
-        &file.body_editor,
-        &defaults.body_editor,
-    )?;
+    validate_section_file("body_editor", &file.body_editor, &defaults.body_editor)?;
     validate_section_file("shipyard", &file.shipyard, &defaults.shipyard)?;
     Ok(())
 }
@@ -193,6 +190,40 @@ fn validate_section_file(
     Ok(())
 }
 
+fn validate_hotas_file(path: &str, file: &HotasSettingsFile) -> Result<(), InputSettingsError> {
+    const AXES: [&str; 4] = ["pitch", "yaw", "roll", "throttle"];
+
+    for (axis_name, binding) in &file.axes {
+        if !AXES.contains(&axis_name.as_str()) {
+            return Err(InputSettingsError::Validation(InputValidationError::new(
+                format!("{path}.axes.{axis_name}"),
+                "unknown HOTAS axis",
+            )));
+        }
+
+        if !binding.min.is_finite() || !binding.max.is_finite() {
+            return Err(InputSettingsError::Validation(InputValidationError::new(
+                format!("{path}.axes.{axis_name}"),
+                "HOTAS axis min/max must be finite",
+            )));
+        }
+        if binding.min >= binding.max {
+            return Err(InputSettingsError::Validation(InputValidationError::new(
+                format!("{path}.axes.{axis_name}"),
+                "HOTAS axis min must be lower than max",
+            )));
+        }
+        if !(0.0..1.0).contains(&binding.deadzone) {
+            return Err(InputSettingsError::Validation(InputValidationError::new(
+                format!("{path}.axes.{axis_name}.deadzone"),
+                "HOTAS axis deadzone must be >= 0 and < 1",
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct InputFile {
     pub version: Option<u32>,
@@ -208,6 +239,7 @@ pub struct InputFile {
 pub struct GameInputSettings {
     pub system: BindingSection,
     pub flight: BindingSection,
+    pub hotas: HotasSettings,
     pub warp: BindingSection,
     pub view: BindingSection,
     pub camera: BindingSection,
@@ -222,6 +254,7 @@ impl Default for GameInputSettings {
         Self {
             system: defaults::game_system(),
             flight: defaults::game_flight(),
+            hotas: HotasSettings::default(),
             warp: defaults::game_warp(),
             view: defaults::game_view(),
             camera: defaults::game_camera(),
@@ -237,6 +270,7 @@ impl GameInputSettings {
     fn merge(&mut self, file: GameInputFile) {
         self.system.merge(file.system);
         self.flight.merge(file.flight);
+        self.hotas.merge(file.hotas);
         self.warp.merge(file.warp);
         self.view.merge(file.view);
         self.camera.merge(file.camera);
@@ -254,6 +288,8 @@ pub struct GameInputFile {
     #[serde(default)]
     pub flight: BindingSectionFile,
     #[serde(default)]
+    pub hotas: HotasSettingsFile,
+    #[serde(default)]
     pub warp: BindingSectionFile,
     #[serde(default)]
     pub view: BindingSectionFile,
@@ -267,6 +303,93 @@ pub struct GameInputFile {
     pub maneuver: BindingSectionFile,
     #[serde(default)]
     pub maneuver_precision: BindingSectionFile,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HotasSettings {
+    pub enabled: bool,
+    pub device: HotasDeviceSelector,
+    pub axes: BTreeMap<String, HotasAxisBinding>,
+}
+
+impl Default for HotasSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device: HotasDeviceSelector::Any,
+            axes: BTreeMap::new(),
+        }
+    }
+}
+
+impl HotasSettings {
+    fn merge(&mut self, file: HotasSettingsFile) {
+        if let Some(enabled) = file.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(device) = file.device {
+            self.device = device;
+        }
+        for (axis, binding) in file.axes {
+            self.axes.insert(axis, binding);
+        }
+    }
+
+    pub fn axis(&self, axis: &str) -> Option<&HotasAxisBinding> {
+        self.axes.get(axis)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct HotasSettingsFile {
+    pub enabled: Option<bool>,
+    pub device: Option<HotasDeviceSelector>,
+    #[serde(default)]
+    pub axes: BTreeMap<String, HotasAxisBinding>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub enum HotasDeviceSelector {
+    Any,
+    NameContains(String),
+    Usb {
+        vendor_id: u16,
+        #[serde(default)]
+        product_id: Option<u16>,
+    },
+}
+
+impl Default for HotasDeviceSelector {
+    fn default() -> Self {
+        Self::Any
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HotasAxisBinding {
+    pub axis: GamepadAxis,
+    #[serde(default)]
+    pub device: Option<HotasDeviceSelector>,
+    #[serde(default)]
+    pub invert: bool,
+    #[serde(default = "default_hotas_deadzone")]
+    pub deadzone: f32,
+    #[serde(default = "default_hotas_min")]
+    pub min: f32,
+    #[serde(default = "default_hotas_max")]
+    pub max: f32,
+}
+
+fn default_hotas_deadzone() -> f32 {
+    0.05
+}
+
+fn default_hotas_min() -> f32 {
+    -1.0
+}
+
+fn default_hotas_max() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -329,6 +452,8 @@ pub enum BindingSpec {
     MouseButton(MouseButton),
     MouseMotion,
     MouseWheel,
+    GamepadButton(GamepadButton),
+    GamepadAxis(GamepadAxis),
 }
 
 impl BindingSpec {
@@ -340,12 +465,18 @@ impl BindingSpec {
         Self::MouseButton(button)
     }
 
+    pub fn gamepad_button(button: GamepadButton) -> Self {
+        Self::GamepadButton(button)
+    }
+
     pub fn to_binding(&self) -> Binding {
         match self {
             Self::Key(key) => Binding::from(*key),
             Self::MouseButton(button) => Binding::from(*button),
             Self::MouseMotion => Binding::mouse_motion(),
             Self::MouseWheel => Binding::mouse_wheel(),
+            Self::GamepadButton(button) => Binding::from(*button),
+            Self::GamepadAxis(axis) => Binding::from(*axis),
         }
     }
 }
@@ -525,7 +656,7 @@ pub mod defaults {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::prelude::KeyCode;
+    use bevy::prelude::{GamepadAxis, GamepadButton, KeyCode};
 
     #[test]
     fn assets_input_ron_parses() {
@@ -607,5 +738,83 @@ mod tests {
                 .map(|axis| &axis.negative),
             Some(&vec![BindingSpec::key(KeyCode::KeyS)])
         );
+    }
+
+    #[test]
+    fn gamepad_sources_and_hotas_profile_parse() {
+        let settings = InputSettings::from_ron_str(
+            r#"#![enable(implicit_some)]
+(
+    version: 1,
+    game: (
+        flight: (
+            bindings: {
+                "toggle_sas": [GamepadButton(South)],
+            },
+            axes: {
+                "pitch": (
+                    positive: [GamepadButton(DPadUp)],
+                    negative: [GamepadButton(DPadDown)],
+                ),
+            },
+        ),
+        hotas: (
+            enabled: true,
+            device: NameContains("T.16000M"),
+            axes: {
+                "pitch": (axis: LeftStickY, invert: true),
+                "throttle": (axis: LeftZ, min: -1.0, max: 1.0),
+            },
+        ),
+    ),
+)
+"#,
+        )
+        .expect("gamepad/HOTAS bindings should parse");
+
+        assert_eq!(
+            settings.game.flight.bindings.get("toggle_sas"),
+            Some(&vec![BindingSpec::gamepad_button(GamepadButton::South)])
+        );
+        assert!(settings.game.hotas.enabled);
+        assert_eq!(
+            settings
+                .game
+                .hotas
+                .axis("pitch")
+                .map(|binding| binding.axis),
+            Some(GamepadAxis::LeftStickY)
+        );
+        assert_eq!(
+            settings
+                .game
+                .hotas
+                .axis("throttle")
+                .map(|binding| binding.axis),
+            Some(GamepadAxis::LeftZ)
+        );
+    }
+
+    #[test]
+    fn invalid_hotas_axis_reports_path() {
+        let error = InputSettings::from_ron_str(
+            r#"#![enable(implicit_some)]
+(
+    version: 1,
+    game: (
+        hotas: (
+            enabled: true,
+            axes: {
+                "pitchh": (axis: LeftStickY),
+            },
+        ),
+    ),
+)
+"#,
+        )
+        .expect_err("settings should reject unknown HOTAS axes")
+        .to_string();
+        assert!(error.contains("game.hotas.axes.pitchh"));
+        assert!(error.contains("unknown HOTAS axis"));
     }
 }

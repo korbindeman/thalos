@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
+use thalos_body_render::HeightSource;
 use thalos_physics_canonical::body_centered::{
     BodyCenteredState, body_centered_to_inertial, inertial_to_body_centered,
 };
@@ -11,7 +12,6 @@ use thalos_physics_canonical::body_fixed::body_fixed_pose_from_inertial;
 use thalos_physics_canonical::canonical::{
     AuthorityMode, BodyFixedPose, EntityRef, TranslationalState,
 };
-use thalos_world::BodyId;
 use thalos_physics_canonical::types::{AttitudeState, BodyState, VesselKind};
 use thalos_physics_local::avian::{
     AngularVelocity, Collider, ConstantAngularAcceleration, ConstantLinearAcceleration,
@@ -25,9 +25,10 @@ use thalos_physics_local::{
     spawn_terrain_collider_patch, stable_contact_reached, terrain_patch_pose,
 };
 use thalos_shipyard::{
-    Adapter, AttachNodes, Attachment, CommandPod, Decoupler, Engine, FuelTank, Part,
+    Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
+    FuelTank, Part, SurfaceMount, SurfaceMountKind,
 };
-use thalos_body_render::HeightSource;
+use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::bridge::WarpLimits;
@@ -1249,7 +1250,7 @@ fn apply_local_forces(
     let params = *sim.simulation.ship_params();
     // A destroyed craft is inert debris: gravity still acts (so it falls and
     // settles), but thrust and reaction-wheel torque are cut. See
-    // `docs/landing.md`.
+    // `docs/surface.md`.
     let destroyed = sim.simulation.is_destroyed();
 
     // Linear: gravity + thrust only when Avian owns translation. Otherwise
@@ -1475,7 +1476,7 @@ impl ImpactSpeedWindow {
 ///
 /// EVA is exempt (the capsule has no collider, so no contacts). A craft that
 /// is already destroyed short-circuits so debris settling on the ground
-/// doesn't re-trigger. See `docs/landing.md`.
+/// doesn't re-trigger. See `docs/surface.md`.
 fn detect_terrain_impact(
     contact_graph: Res<ContactGraph>,
     active: Res<ActiveLocalBubble>,
@@ -1585,7 +1586,7 @@ fn maintain_terrain_patch(
     let lateral = (delta - along * current.center_dir_body).length();
     let current_revision = height_source.revision();
     // Re-center before the craft drifts off the patch edge. The tile-based
-    // collider window (docs/landing.md §3.6) is only tens of metres, so cap the
+    // collider window (docs/surface.md §3.6) is only tens of metres, so cap the
     // global drift distance by a fraction of the patch's own half-extent; the
     // coarse tangent-grid fallback (km-scale half-extent) keeps the global
     // distance. `patch_half_extent_m` is 0 only with no patch attached, which
@@ -1884,11 +1885,13 @@ type PartColliderQuery<'w, 's> = Query<
         Entity,
         &'static AttachNodes,
         Option<&'static Attachment>,
+        Option<&'static SurfaceMount>,
         Option<&'static CommandPod>,
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
         Option<&'static Engine>,
+        Option<&'static AirIntake>,
     ),
     With<Part>,
 >;
@@ -1896,12 +1899,19 @@ type PartColliderQuery<'w, 's> = Query<
 fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<LocalPrimitiveCollider> {
     let part_positions = compute_part_collider_positions(parts);
     let mut primitives = Vec::new();
-    for (entity, nodes, _, pod, dec, adapter, tank, engine) in parts.iter() {
+    for (entity, nodes, _, surface_mount, pod, dec, adapter, tank, engine, intake) in parts.iter() {
         let Some(part_position) = part_positions.get(&entity).copied() else {
             continue;
         };
+        if matches!(
+            (engine, surface_mount.map(|m| m.kind)),
+            (Some(engine), Some(SurfaceMountKind::WingPylon))
+                if engine.geometry == EngineGeometry::JetNacelle
+        ) {
+            continue;
+        }
         let Some((shape, local_offset)) =
-            part_collider_shape(nodes, pod, dec, adapter, tank, engine)
+            part_collider_shape(nodes, pod, dec, adapter, tank, engine, intake)
         else {
             continue;
         };
@@ -1920,15 +1930,22 @@ fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<LocalPrimiti
 fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity, DVec3> {
     let mut nodes_by_entity: HashMap<Entity, &AttachNodes> = HashMap::new();
     let mut children_by_parent: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
+    let mut surface_children_by_parent: HashMap<Entity, Vec<(Entity, SurfaceMount)>> =
+        HashMap::new();
     let mut roots = Vec::new();
 
-    for (entity, nodes, attachment, ..) in parts.iter() {
+    for (entity, nodes, attachment, surface_mount, ..) in parts.iter() {
         nodes_by_entity.insert(entity, nodes);
         if let Some(attachment) = attachment {
             children_by_parent
                 .entry(attachment.parent)
                 .or_default()
                 .push((entity, attachment.clone()));
+        } else if let Some(surface_mount) = surface_mount {
+            surface_children_by_parent
+                .entry(surface_mount.parent)
+                .or_default()
+                .push((entity, *surface_mount));
         } else {
             roots.push(entity);
         }
@@ -1948,21 +1965,38 @@ fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity,
         let Some(parent_nodes) = nodes_by_entity.get(&parent).copied() else {
             continue;
         };
-        let Some(children) = children_by_parent.get(&parent) else {
-            continue;
-        };
-        for (child, attachment) in children {
-            let Some(parent_node) = parent_nodes.get(&attachment.parent_node) else {
-                continue;
-            };
-            let child_offset = nodes_by_entity
-                .get(child)
-                .and_then(|nodes| nodes.get(&attachment.my_node))
-                .map(|node| node.offset)
-                .unwrap_or(Vec3::ZERO);
-            let child_position = parent_position + (parent_node.offset - child_offset).as_dvec3();
-            positions.insert(*child, child_position);
-            queue.push_back(*child);
+        if let Some(children) = children_by_parent.get(&parent) {
+            for (child, attachment) in children {
+                let Some(parent_node) = parent_nodes.get(&attachment.parent_node) else {
+                    continue;
+                };
+                let child_offset = nodes_by_entity
+                    .get(child)
+                    .and_then(|nodes| nodes.get(&attachment.my_node))
+                    .map(|node| node.offset)
+                    .unwrap_or(Vec3::ZERO);
+                let child_position =
+                    parent_position + (parent_node.offset - child_offset).as_dvec3();
+                positions.insert(*child, child_position);
+                queue.push_back(*child);
+            }
+        }
+
+        if let Some(children) = surface_children_by_parent.get(&parent) {
+            for (child, mount) in children {
+                let local_offset = match mount.kind {
+                    SurfaceMountKind::BodySkin => {
+                        let host_height = parent_nodes
+                            .get("bottom")
+                            .map(|node| -node.offset.y)
+                            .unwrap_or(0.0);
+                        DVec3::new(0.0, -(mount.station as f64) * host_height as f64, 0.0)
+                    }
+                    SurfaceMountKind::WingPylon => DVec3::ZERO,
+                };
+                positions.insert(*child, parent_position + local_offset);
+                queue.push_back(*child);
+            }
         }
     }
 
@@ -1988,6 +2022,7 @@ fn part_collider_shape(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     engine: Option<&Engine>,
+    intake: Option<&AirIntake>,
 ) -> Option<(LocalPrimitiveShape, DVec3)> {
     if let Some(pod) = pod {
         let height = pod.diameter * 0.9;
@@ -2029,13 +2064,24 @@ fn part_collider_shape(
             DVec3::Y * -(tank.length as f64 * 0.5),
         ))
     } else if let Some(engine) = engine {
-        let height = engine.diameter * 0.9;
+        let height = match engine.geometry {
+            EngineGeometry::RocketBell => engine.diameter * 0.9,
+            EngineGeometry::JetNacelle => thalos_shipyard::jet_nacelle_length(engine),
+        };
         Some((
             LocalPrimitiveShape::Cylinder {
                 radius: (engine.diameter * 0.5) as f64,
                 height: height as f64,
             },
             DVec3::Y * -(height as f64 * 0.5),
+        ))
+    } else if let Some(intake) = intake {
+        Some((
+            LocalPrimitiveShape::Cylinder {
+                radius: (intake.diameter * 0.5) as f64,
+                height: intake.length as f64,
+            },
+            DVec3::Y * -(intake.length as f64 * 0.5),
         ))
     } else {
         None
@@ -2045,9 +2091,9 @@ fn part_collider_shape(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thalos_body_render::{TerrainPatchBasis, TerrainPatchMesh};
     use thalos_physics_canonical::canonical::Epoch;
     use thalos_physics_canonical::types::BodyState;
-    use thalos_body_render::{TerrainPatchBasis, TerrainPatchMesh};
 
     #[test]
     fn bubble_frame_round_trip_preserves_aggregate_state() {
@@ -2324,7 +2370,7 @@ mod tests {
         };
 
         let (shape, offset) =
-            part_collider_shape(&nodes, Some(&pod), None, None, None, None).unwrap();
+            part_collider_shape(&nodes, Some(&pod), None, None, None, None, None).unwrap();
 
         let LocalPrimitiveShape::Cylinder { radius, height } = shape else {
             panic!("pod collider should be a cylinder");
@@ -2339,6 +2385,10 @@ mod tests {
         let nodes = AttachNodes::default();
         let engine = Engine {
             model: "test".to_string(),
+            geometry: EngineGeometry::RocketBell,
+            requires_atmosphere: false,
+            intake_requirement: None,
+            builtin_intake: None,
             diameter: 2.0,
             thrust: 0.0,
             isp: 0.0,
@@ -2348,7 +2398,7 @@ mod tests {
         };
 
         let (shape, offset) =
-            part_collider_shape(&nodes, None, None, None, None, Some(&engine)).unwrap();
+            part_collider_shape(&nodes, None, None, None, None, Some(&engine), None).unwrap();
 
         let LocalPrimitiveShape::Cylinder { radius, height } = shape else {
             panic!("engine collider should be a cylinder");

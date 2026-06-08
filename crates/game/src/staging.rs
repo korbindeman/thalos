@@ -30,10 +30,10 @@ use std::collections::HashMap;
 
 use thalos_input::game::GameInputIntent;
 use thalos_shipyard::{
-    Adapter, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelTank, Part,
-    PartResources, PartRole, Resource, ResourceTotals, StageSummary, SummaryEngine, SummaryPart,
-    SummaryStageInput, compute_stage_summaries, cylinder_principal_inertia, derive_stages,
-    parallel_axis_inertia,
+    Adapter, AirIntake, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelTank,
+    MountSymmetry, Part, PartResources, PartRole, Resource, ResourceTotals, StageSummary,
+    SummaryEngine, SummaryPart, SummaryStageInput, SurfaceMount, compute_stage_summaries,
+    cylinder_principal_inertia, derive_stages, parallel_axis_inertia,
 };
 
 use crate::SimStage;
@@ -105,6 +105,7 @@ fn build_staging_plan(
         (
             Entity,
             Option<&Attachment>,
+            Option<&SurfaceMount>,
             Option<&Decoupler>,
             Option<&Engine>,
         ),
@@ -126,7 +127,7 @@ fn build_staging_plan(
 
     let mut roles = vec![PartRole::Other; entities.len()];
     let mut parent = vec![None; entities.len()];
-    for (e, attachment, decoupler, engine) in parts.iter() {
+    for (e, attachment, surface_mount, decoupler, engine) in parts.iter() {
         let i = index[&e];
         roles[i] = if decoupler.is_some() {
             PartRole::Decoupler
@@ -135,7 +136,10 @@ fn build_staging_plan(
         } else {
             PartRole::Other
         };
-        parent[i] = attachment.and_then(|a| index.get(&a.parent).copied());
+        parent[i] = attachment
+            .map(|a| a.parent)
+            .or_else(|| surface_mount.map(|m| m.parent))
+            .and_then(|p| index.get(&p).copied());
     }
 
     let stages: Vec<Stage> = derive_stages(&roles, &parent)
@@ -185,6 +189,7 @@ fn activate_stage(
     mut plans: Query<&mut StagingPlan>,
     mut engine_activations: Query<&mut EngineActivation>,
     attachments: Query<(Entity, &Attachment)>,
+    surface_mounts: Query<(Entity, &SurfaceMount)>,
 ) {
     if !intent.stage {
         return;
@@ -216,7 +221,7 @@ fn activate_stage(
     }
 
     if !decouplers.is_empty() {
-        let children = child_map(&attachments);
+        let children = child_map(&attachments, &surface_mounts);
         for decoupler in decouplers {
             for dropped in attach_subtree(decoupler, &children) {
                 // `try_despawn` is recursive (drops each part's visual mesh
@@ -235,10 +240,16 @@ fn activate_stage(
 }
 
 /// Map each part to its attach children, from the live attachment graph.
-fn child_map(attachments: &Query<(Entity, &Attachment)>) -> HashMap<Entity, Vec<Entity>> {
+fn child_map(
+    attachments: &Query<(Entity, &Attachment)>,
+    surface_mounts: &Query<(Entity, &SurfaceMount)>,
+) -> HashMap<Entity, Vec<Entity>> {
     let mut map: HashMap<Entity, Vec<Entity>> = HashMap::new();
     for (child, attachment) in attachments.iter() {
         map.entry(attachment.parent).or_default().push(child);
+    }
+    for (child, mount) in surface_mounts.iter() {
+        map.entry(mount.parent).or_default().push(child);
     }
     map
 }
@@ -271,6 +282,8 @@ type InertiaPartQuery<'w, 's> = Query<
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static PartResources>,
+        Option<&'static AirIntake>,
+        Option<&'static SurfaceMount>,
     ),
     With<Part>,
 >;
@@ -289,13 +302,22 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: InertiaPartQu
     // (mass, body-frame position, radius, length) per part.
     let mut bodies: Vec<(f64, DVec3, f64, f64)> = Vec::new();
 
-    for (transform, pod, engine, tank, decoupler, adapter, resources) in parts.iter() {
+    for (transform, pod, engine, tank, decoupler, adapter, resources, intake, surface_mount) in
+        parts.iter()
+    {
         if let Some(pod) = pod {
             max_torque += pod.reaction_wheel_torque as f64;
         }
-        let Some((mass, radius, length)) =
-            part_cylinder_mass_dims(pod, engine, tank, decoupler, adapter, resources)
-        else {
+        let Some((mass, radius, length)) = part_cylinder_mass_dims(
+            pod,
+            engine,
+            tank,
+            decoupler,
+            adapter,
+            resources,
+            intake,
+            surface_mount,
+        ) else {
             continue;
         };
         let position = transform.translation.as_dvec3();
@@ -333,6 +355,8 @@ fn part_cylinder_mass_dims(
     decoupler: Option<&Decoupler>,
     adapter: Option<&Adapter>,
     resources: Option<&PartResources>,
+    intake: Option<&AirIntake>,
+    surface_mount: Option<&SurfaceMount>,
 ) -> Option<(f64, f64, f64)> {
     let propellant: f64 = resources
         .map(|r| r.pools.iter().map(|(&res, pool)| pool.mass_kg(res)).sum())
@@ -351,10 +375,16 @@ fn part_cylinder_mass_dims(
     } else if let Some(a) = adapter {
         let avg = (a.diameter + a.target_diameter) as f64 * 0.5;
         (a.dry_mass as f64, avg * 0.5, avg.max(0.4))
+    } else if let Some(i) = intake {
+        (i.dry_mass as f64, i.diameter as f64 * 0.5, i.length as f64)
     } else {
         return None;
     };
-    Some((dry + propellant, radius, length))
+    Some((
+        (dry + propellant) * surface_multiplier(surface_mount),
+        radius,
+        length,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +407,14 @@ type SummaryPartQuery<'w, 's> = Query<
     (
         Entity,
         Option<&'static Attachment>,
+        Option<&'static SurfaceMount>,
         Option<&'static CommandPod>,
         Option<&'static Engine>,
         Option<&'static FuelTank>,
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static PartResources>,
+        Option<&'static AirIntake>,
     ),
     With<Part>,
 >;
@@ -405,15 +437,39 @@ fn publish_staging_summaries(
     let mut summary_parts: Vec<SummaryPart> = Vec::new();
     let mut parents: Vec<Option<Entity>> = Vec::new();
 
-    for (entity, attachment, pod, engine, tank, decoupler, adapter, resources) in parts.iter() {
+    for (
+        entity,
+        attachment,
+        surface_mount,
+        pod,
+        engine,
+        tank,
+        decoupler,
+        adapter,
+        resources,
+        intake,
+    ) in parts.iter()
+    {
         index.insert(entity, summary_parts.len());
-        parents.push(attachment.map(|a| a.parent));
+        parents.push(
+            attachment
+                .map(|a| a.parent)
+                .or_else(|| surface_mount.map(|m| m.parent)),
+        );
         summary_parts.push(SummaryPart {
             parent: None,
-            dry_mass_kg: part_dry_mass(pod, engine, tank, decoupler, adapter),
+            dry_mass_kg: part_dry_mass(
+                pod,
+                engine,
+                tank,
+                decoupler,
+                adapter,
+                intake,
+                surface_mount,
+            ),
             resources: resources.map(part_resource_totals).unwrap_or_default(),
             engine: engine.map(|en| SummaryEngine {
-                thrust_n: en.thrust as f64,
+                thrust_n: en.thrust as f64 * surface_multiplier(surface_mount),
                 isp_s: en.isp as f64,
                 reactants: en
                     .reactants
@@ -455,8 +511,10 @@ fn part_dry_mass(
     tank: Option<&FuelTank>,
     decoupler: Option<&Decoupler>,
     adapter: Option<&Adapter>,
+    intake: Option<&AirIntake>,
+    surface_mount: Option<&SurfaceMount>,
 ) -> f64 {
-    if let Some(p) = pod {
+    let dry = if let Some(p) = pod {
         p.dry_mass as f64
     } else if let Some(e) = engine {
         e.dry_mass as f64
@@ -466,8 +524,18 @@ fn part_dry_mass(
         d.dry_mass as f64
     } else if let Some(a) = adapter {
         a.dry_mass as f64
+    } else if let Some(i) = intake {
+        i.dry_mass as f64
     } else {
         0.0
+    };
+    dry * surface_multiplier(surface_mount)
+}
+
+fn surface_multiplier(surface_mount: Option<&SurfaceMount>) -> f64 {
+    match surface_mount.map(|m| m.symmetry) {
+        Some(MountSymmetry::Mirrored) => 2.0,
+        _ => 1.0,
     }
 }
 

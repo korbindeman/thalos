@@ -10,13 +10,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Deserialize;
 use crate::atmosphere::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
+use serde::Deserialize;
 use thalos_terrain::{TectonicConfig, TerrainConfig};
 
-use crate::body::{
-    BodyDefinition, BodyId, BodyKind, G, OrbitalElements, SolarSystemDefinition,
-};
+use crate::body::{BodyDefinition, BodyId, BodyKind, G, OrbitalElements, SolarSystemDefinition};
 
 // ---------------------------------------------------------------------------
 // File schema

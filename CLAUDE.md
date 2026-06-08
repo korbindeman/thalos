@@ -15,6 +15,8 @@ just game                 # cargo run -p thalos_game — ship in low Thalos orbi
 just game eva             # spawn on foot (EVA) on the Thalos surface instead
 just game landing         # powered-descent approach over dry Thalos land
 just game final           # low final approach over a flat dry Thalos patch
+just game runway          # aircraft parked on the Thalos surface runway
+just game runway-approach # aircraft on short final lined up with that runway
 just edit <body>          # cargo run -p thalos_body_editor -- <body>
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
@@ -299,11 +301,11 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
-- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. Fast descents are kept from tunneling through the terrain trimesh by `SweptCcd` on the craft body, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/landing.md`.
+- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. Fast descents are kept from tunneling through the terrain trimesh by `SweptCcd` on the craft body, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
 - **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + two backends. Three modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render`. A backend chooses geometry, never its own lighting/atmosphere/cloud math.
 - **`thalos_body_editor`** — interactive celestial-body editor tool
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
-- **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints)
+- **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
 
 Core separation: `world`, `physics_canonical`, `terrain`, and
@@ -316,7 +318,11 @@ Avian lives behind `thalos_physics_local`; do not add Avian to
 `thalos_physics_canonical`.
 Semantic input for the Bevy binaries flows through `thalos_input`
 contexts and intent resources, with checked-in defaults at
-`assets/input.ron`.
+`assets/input.ron`. HOTAS support also lives there: buttons can be
+added to the existing action bindings as `GamepadButton(...)`, while
+continuous pitch/yaw/roll/throttle axes are opt-in under
+`game.hotas` and feed the same `GameInputIntent` fields as keyboard
+flight controls.
 
 ### Physics crate (`crates/physics/`)
 
@@ -386,17 +392,20 @@ Key modules:
 ### Game crate (`crates/game/`)
 
 - **Spawn situation is a flag: ship in orbit (default), EVA on the
-  surface, a landing approach over land, or a final approach over
-  flat land.** `main.rs` reads
+  surface, a landing approach over land, a final approach over
+  flat land, or one of two surface-runway scenarios.** `main.rs` reads
   `just game [mode]` (passed as a CLI arg — default `orbit`; falls back
   to the `THALOS_SPAWN` env var for a direct `cargo run`) into a
   `spawn::SpawnSituation` resource (`ShipOrbit` | `Eva` | `Landing` |
-  `FinalApproach`).
+  `FinalApproach` | `Runway` | `RunwayApproach`).
   The canonical `CraftState` is the player either way — KSP-style: one
-  craft, Ship or EVA, distinguished by `VesselKind`. **`orbit`**:
+  craft, Ship or EVA, distinguished by `VesselKind`. The ship blueprint is
+  chosen per scenario by `SpawnSituation::ship_blueprint_path`
+  (`apollo.ron` by default, `skyhawk.ron` for the runway scenarios).
+  **`orbit`**:
   `VesselKind::Ship` in a low Thalos parking orbit
   (`system.ship.initial_state`), nose along prograde;
-  `ship_view::spawn_player_ship` loads `apollo.ron` and pushes the real
+  `ship_view::spawn_player_ship` loads the blueprint and pushes the real
   ship params. **`eva`**: the player on foot, `VesselKind::Eva` with
   `ShipParameters::eva()` (90 kg, no thrust, no torque), placed ~12 km
   above the Thalos sub-stellar point;
@@ -419,7 +428,20 @@ Key modules:
   path but scores daylight dry sites by local height relief, then starts
   the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
   patch (or the flattest dry fallback). Thalos has no atmosphere yet, so
-  both descents are lunar-style — no aerobraking.
+  both descents are lunar-style — no aerobraking. **`runway`** (alias
+  `rwy`) and **`runway-approach`** (aliases `rwy-approach` /
+  `approach-runway`) put the `skyhawk.ron` aircraft on a fixed runway on
+  the Thalos surface, owned by `crate::runway`. Like the descent modes
+  these are deferred and terrain-aware: `runway::finish_runway_spawn`
+  runs once on the first `AppState::Running` frame, picks a flat dry
+  low-latitude site by a deterministic body-fixed search (epoch-
+  independent), drapes a 3 km × 60 m runway + markings + raised edge
+  posts over the real terrain height (sampled at `PHYSICS_QUERY_TILE_LOD_M`
+  so it matches the collider), and parents it to the body's
+  `RealSpaceBody` grid so it co-rotates with the surface. `runway` parks
+  the aircraft at rest on the threshold (`BodyFixed` authority, the
+  launch-clamp pattern); `runway-approach` starts it on short final
+  (`OnRails` → bubble handoff).
 - **EVA is a full craft with a real character controller and a
   grounded/airborne split.** The `EvaMode` resource
   (`player_controller.rs`, `Grounded` | `Airborne`, defaults `Grounded`)
@@ -605,13 +627,41 @@ quantities (flux, temperature, SED) — never pre-baked RGB.
 
 ### Shipyard crate (`crates/shipyard/`)
 
-Parametric ship editor. Bevy + egui.
+Parametric ship editor. Bevy + egui. The full next-gen construction model
+(planes/ships/stations from one Module primitive) is specced in
+`docs/construction.md`; **Slices 1–2 (parametric wing, wing-pylon jet nacelle,
+and scalar intake flow) have landed** — see that doc's §0 for the status
+boundary.
 
 - `AttachNode` / `Ship` — ECS tree structure for ship assembly
-- `Part` trait — `CommandPod`, `Engine`, `FuelTank`, `Decoupler`,
-  `Adapter`
-- `ShipBlueprint` — RON serialization format for ship designs
-- `sizing` — parametric node sizing (adapters/tanks scale from parent)
+- `Part` trait — `CommandPod`, `Engine`, `AirIntake`, `FuelTank`,
+  `Decoupler`, `Adapter`, `Wing`
+- **Two placement capabilities.** `Attachment` is end-node stacking (the
+  rocket path: mate `top`/`bottom`, diameter propagates). `SurfaceMount`
+  is surface/footprint placement: sit a part on a host's skin at
+  `(station, angle)`, **opting out of diameter propagation** (wings;
+  later gear). It is a *parallel* component, not a fork of `Attachment` —
+  graph traversals that need every part union both. `MountSymmetry`
+  (`Single` | `Mirrored`) makes off-centreline mounts a left/right pair
+  drawn from one part.
+- `Wing` — tapered/swept/dihedral lifting surface (span, root/tip chord,
+  sweep, dihedral, t/c, incidence). `wing_mesh::build_wing_mesh` builds it
+  in the host-local frame, shared by the editor and the game's
+  `ship_view`. Control surfaces are planned as *wing parameters* (not
+  separate parts); gear will be its own footprint part. No flight model
+  yet (M6).
+- `Engine` / `AirIntake` — rocket bells remain node-stacked; jet nacelles can
+  surface-mount to wings as `WingPylon` mounts with generated pylons. Ambient
+  flow is modeled separately from resources: engines declare required intake
+  kind/area, nacelles may carry built-in capture, and standalone intakes
+  provide capture for future separated inlet/core designs.
+- `ShipBlueprint` — RON serialization. Node mates serialize as
+  `connections`; surface mounts as a separate `surface_mounts` list
+  (`#[serde(default)]`, so pre-wing saves load unchanged).
+- `sizing` — parametric node sizing (adapters/tanks scale from parent);
+  surface mounts are intentionally excluded.
+- `stats` — aggregate mass / CoM / MOI / Δv, plus geometry-derived
+  **wing area + mean aerodynamic chord** ("will it fly" feedback; no sim).
 - `staging` — pure stage derivation from decoupler topology
   (`derive_stages`) + per-stage Δv/fuel accounting
   (`compute_stage_summaries`). Single home for the staging model: the
@@ -760,24 +810,22 @@ assets/solar_system.ron + assets/bodies/<body>.ron
 
 ### Documentation (`docs/`)
 
-`ROADMAP.md` is the entry point: engineering milestones, current
-status, dependency graph. Each major system has a unified spec doc.
+Each major system has a unified spec doc.
 
-- `ROADMAP.md` — top-level roadmap. Phase 1 (M1-M4) = architectural +
-  rendering; Phase 2 (M5-M6) = gameplay; M7-M8 deferred.
 - `tooling.md` — toolchain policy and local-only compiler tuning recipes
   for Windows fast incremental builds, macOS incremental workarounds, and
   backend/linker experiments.
 - `simulation.md` — simulation architecture (orbital mechanics,
   authority, time warp, map decoupling, big_space, Avian local
-  bubble). Target design.
-- `surface_gameplay.md` — on-foot / EVA surface gameplay: ground
-  physics, body-fixed pose, the `HeightSource` interface, surface map
-  view. Defers landed-*ship* mechanics to `landing.md`.
-- `landing.md` — landed-ship mechanics: descent, terrain collision
-  (`SweptCcd` anti-tunneling), and whole-craft impact destruction
-  (`ShipParameters::impact_tolerance_m_s` →
-  `Simulation::is_destroyed`).
+  bubble, navball velocity reference frames). Target design, plus a
+  background note on layered astrodynamics methods.
+- `surface.md` — surface gameplay in two parts: **on foot (EVA)**
+  (ground physics, body-fixed pose, the `HeightSource` interface,
+  surface map view) and **landing & impact destruction** (landed-ship
+  descent, terrain collision via `SweptCcd` anti-tunneling, and
+  whole-craft impact destruction, `ShipParameters::impact_tolerance_m_s`
+  → `Simulation::is_destroyed`). Merged from the former
+  `surface_gameplay.md` + `landing.md`.
 - `construction.md` — next-gen shipyard / construction model design:
   one Module primitive (end-node / footprint+morph / end-cap / host /
   connector / reservation), stationed-loft fuselages and wings, a
@@ -786,8 +834,11 @@ status, dependency graph. Each major system has a unified spec doc.
   stations. Target: M6. Design-only, no code yet.
 - `input.md` — enhanced-input context model, binding file rules, and
   per-binary intent resources.
-- `terrain.md` — terrain generation (feature compiler) + ground LOD
-  rendering. Includes v2 backlog from terrestrial-pipeline research.
+- `terrain.md` — the **consumer-side terrain contract**: the tile primitive
+  (the black-box boundary), ground-LOD rendering, surface shadows, colliders,
+  and dynamic features. Terrain *generation* is treated as a black box behind
+  the tile contract; its previous design is archived (see below) and a new
+  generator is being built against the contract.
 - `atmosphere.md` — gas giants, rocky-atmosphere single-scattering
   raymarch (unified per-body fullscreen pass with scene-depth
   coupling for aerial perspective), Kármán-line authoring, ocean
@@ -800,10 +851,17 @@ status, dependency graph. Each major system has a unified spec doc.
 - `lore/civilization.md` — civilization, narrative progression
   phases, resource economy.
 
-Standalone references (not consolidated):
+Archived (superseded terrain-*generation* design — reference only, see
+`docs/archive/README.md`):
 
-- `gen/terrestrial_pipeline_research.md` — academic + industry survey
-  for the terrestrial pipeline.
-- `gen/planet_aesthetics.md` — visual target field guide.
-- `gen/dunes.md` — dune-field generator algorithm.
-- `gen/vaelen_processes.md` — per-body process notes for Vaelen.
+- `archive/terrain-generation-legacy.md` — the old feature-compiler chapter +
+  v2 backlog extracted from `terrain.md`.
+- `archive/planet-generation-pipeline-spec.md`,
+  `archive/planet-generation-pipeline-migration.md`,
+  `archive/planet-generation-method.md`,
+  `archive/terrain-generation-cascade.md` — old field-DAG pipeline design,
+  migration sequencing, authoring method, and semantic cascade model.
+- `archive/gen/` — research surveys + aesthetic targets + per-body process
+  notes (`terrestrial_pipeline_research.md`, `planet_aesthetics.md`,
+  `dunes.md`, `vaelen_processes.md`). `planet_aesthetics.md` still captures
+  visual targets the new generator should aim at.

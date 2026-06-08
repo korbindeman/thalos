@@ -1,0 +1,39 @@
+// Skyhawk — a basic demo aircraft for the parametric-wing + jet-nacelle
+// slices. Built like any vessel: a nose-up fuselage stack (pod + kerosene
+// tank), three surface-mounted lifting surfaces, and a mirrored Mistral jet
+// nacelle pair pylon-mounted under the main wing. There is no flight model
+// yet, so this is a shape and resource/loadout demo, not a flyer. Load it in
+// the shipyard (`just shipyard`) to inspect / edit, or as a ship blueprint.
+//
+// `angle` is radians around the fuselage axis: π/2 (≈1.5708) = side mount,
+// 0 = dorsal (top). A side mount auto-mirrors into a left/right pair.
+(
+    name: "Skyhawk",
+    root: 0,
+    parts: [
+        (catalog_id: "argos"),                                              // 0 nose
+        (catalog_id: "tank_kerosene", params: Tank(diameter: 2.5, length: 6.0)), // 1 fuselage
+        (catalog_id: "wing_std", params: Wing(                             // 2 main wing
+            span: 6.0, root_chord: 2.5, tip_chord: 1.0,
+            sweep: 0.35, dihedral: 0.05, thickness: 0.12, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 3 tailplane
+            span: 2.0, root_chord: 1.2, tip_chord: 0.6,
+            sweep: 0.4, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "wing_std", params: Wing(                             // 4 vertical fin
+            span: 1.6, root_chord: 1.4, tip_chord: 0.6,
+            sweep: 0.5, dihedral: 0.0, thickness: 0.1, incidence: 0.0,
+        )),
+        (catalog_id: "mistral_jet"),                                        // 5 mirrored wing nacelles
+    ],
+    connections: [
+        (parent: 0, parent_node: "bottom", child: 1, child_node: "top"),
+    ],
+    surface_mounts: [
+        (parent: 1, child: 2, station: 0.45, angle: 1.5708, symmetry: Mirrored), // main wing, mid, sides
+        (parent: 1, child: 3, station: 0.9,  angle: 1.5708, symmetry: Mirrored), // tailplane, rear, sides
+        (parent: 1, child: 4, station: 0.9,  angle: 0.0,    symmetry: Single),   // fin, rear, dorsal
+        (parent: 2, child: 5, kind: WingPylon, station: 0.45, angle: -0.05, symmetry: Mirrored), // under main wing
+    ],
+)

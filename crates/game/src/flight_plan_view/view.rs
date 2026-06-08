@@ -37,8 +37,8 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics_canonical::trajectory::{FlightPlan, Trajectory};
-use thalos_world::{BodyDefinition, BodyId, BodyKind};
 use thalos_physics_canonical::types::BodyState;
+use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
 use crate::coords::{RenderFrame, RenderGhostFocus};
 use crate::map_view::MapSnapshot;

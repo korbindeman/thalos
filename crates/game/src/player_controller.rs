@@ -41,10 +41,10 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{Epoch, TranslationalState};
-use thalos_world::BodyId;
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::avian::{AngularVelocity, LinearVelocity, Position, Rotation};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, LocalCraftBody};
+use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
