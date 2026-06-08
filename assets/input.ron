@@ -6,7 +6,7 @@
             bindings: {
                 "escape": [Key(Escape)],
                 "screenshot": [Key(F2)],
-                "toggle_free_cam": [Key(F3)],
+                "toggle_free_cam": [Key(F4)],
             },
         ),
         flight: (
@@ -17,6 +17,10 @@
                 // KSP convention: Space stages. Time pause lives on the warp
                 // ladder instead — "," (warp_decrease) steps down into pause.
                 "stage": [Key(Space)],
+                // Held wheel brake for taxiing/landing rollout. Nosewheel
+                // steering reuses the yaw axis (A/D), KSP-style — no separate
+                // binding.
+                "wheel_brake": [Key(KeyB)],
             },
             axes: {
                 "pitch": (positive: [Key(KeyW)], negative: [Key(KeyS)]),

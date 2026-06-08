@@ -307,6 +307,15 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
+- **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
+  (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
+  layer (Perlin-Worley atlas + 3-D Worley detail, dual-lobe HG; compute →
+  texture), adapted to Thalos's spherical / `big_space` / dual-camera engine.
+  The game (`rendering/clouds.rs`) drives it in a planet-local tangent frame;
+  the cloud texture composites *inside* the `body_sky` atmosphere pass (bound as
+  `BodySkyMaterial::cloud_layer`), not as a separate quad (which sorts
+  unreliably against the fullscreen sky under big_space). See
+  `docs/atmosphere.md` *Cloud rendering*.
 
 Core separation: `world`, `physics_canonical`, `terrain`, and
 `celestial` are pure Rust libraries; `input`, `game`, `body_render`,
@@ -427,21 +436,43 @@ Key modules:
   `final_approach` / `approach`) uses the same deferred terrain-aware
   path but scores daylight dry sites by local height relief, then starts
   the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
-  patch (or the flattest dry fallback). Thalos has no atmosphere yet, so
-  both descents are lunar-style — no aerobraking. **`runway`** (alias
+  patch (or the flattest dry fallback). Thalos now has a *visual*
+  atmosphere + volumetric clouds (`terrestrial_atmosphere` in
+  `assets/bodies/thalos.ron`; see `docs/atmosphere.md`) but no aerodynamic
+  model yet, so both descents are still dynamically lunar-style — no
+  aerobraking or drag. **`runway`** (alias
   `rwy`) and **`runway-approach`** (aliases `rwy-approach` /
   `approach-runway`) put the `skyhawk.ron` aircraft on a fixed runway on
   the Thalos surface, owned by `crate::runway`. Like the descent modes
   these are deferred and terrain-aware: `runway::finish_runway_spawn`
-  runs once on the first `AppState::Running` frame, picks a flat dry
+  runs once on the first `AppState::Running` frame and picks a flat dry
   low-latitude site by a deterministic body-fixed search (epoch-
-  independent), drapes a 3 km × 60 m runway + markings + raised edge
-  posts over the real terrain height (sampled at `PHYSICS_QUERY_TILE_LOD_M`
-  so it matches the collider), and parents it to the body's
-  `RealSpaceBody` grid so it co-rotates with the surface. `runway` parks
-  the aircraft at rest on the threshold (`BodyFixed` authority, the
-  launch-clamp pattern); `runway-approach` starts it on short final
-  (`OnRails` → bubble handoff).
+  independent). The runway is a **flat raised platform, not a draped
+  ribbon**: it is built at a single fixed elevation `E = max(terrain over
+  the 3 km × 60 m footprint) + margin`, as a level (constant-radius) slab.
+  Its edges step out to a flat paved **shoulder** (still at `E`) and then a
+  graded **runoff** slope whose outer edge drapes onto the terrain, so the
+  platform blends smoothly into the ground instead of ending in a hard
+  cliff — plus markings and raised edge posts. To stay rock-steady at high
+  warp the runway is positioned like the player ship: a **root** big_space
+  grid child re-placed in f64 every frame (`update_runway_transform`),
+  *not* a fixed-cell child of the rotating body grid — whose multi-Mm cell
+  offset rotated by an f32 quaternion jitters as the body spins fast (only
+  the small child vertex offsets ride the f32 `Transform.rotation`). Because the platform — and the aircraft placed on it —
+  reference `E` rather than re-sampling the streaming terrain, the surface
+  stays perfectly flat and the aircraft never sinks or heaves as UDLOD
+  tiles load/refine. A **flat kinematic collider at `E`** (a trimesh posed
+  each frame by `sync_runway_collider_pose`, exactly like the terrain
+  collider patch via `terrain_patch_pose`) gives the aircraft a real flat
+  surface to rest on and land on, independent of the bumpy terrain below.
+  `runway` parks the aircraft at rest on the threshold (`BodyFixed`
+  authority, the launch-clamp pattern), lifted by its own measured ground
+  clearance — `craft_ground_clearance` walks the part-visual meshes
+  (`Mesh::compute_aabb`, since they carry `NoFrustumCulling` and so have no
+  Bevy `Aabb`), finds the lowest point in the craft body frame, and offsets
+  the spawn so *any* craft rests on the surface rather than a hardcoded
+  constant; `runway-approach` starts it on short final (`OnRails` → bubble
+  handoff onto the flat collider).
 - **EVA is a full craft with a real character controller and a
   grounded/airborne split.** The `EvaMode` resource
   (`player_controller.rs`, `Grounded` | `Airborne`, defaults `Grounded`)
@@ -639,11 +670,20 @@ boundary.
 - **Two placement capabilities.** `Attachment` is end-node stacking (the
   rocket path: mate `top`/`bottom`, diameter propagates). `SurfaceMount`
   is surface/footprint placement: sit a part on a host's skin at
-  `(station, angle)`, **opting out of diameter propagation** (wings;
-  later gear). It is a *parallel* component, not a fork of `Attachment` —
-  graph traversals that need every part union both. `MountSymmetry`
-  (`Single` | `Mirrored`) makes off-centreline mounts a left/right pair
-  drawn from one part.
+  `(station, angle)`, **opting out of diameter propagation** (wings,
+  wing-pylon nacelles; later gear). It is a *parallel* component, not a
+  fork of `Attachment` — graph traversals that need every part union both.
+- **KSP linked symmetry** — `SymmetryGroup { id, role }`. Placing a
+  footprint part under the editor's Mirror (2×) mode stamps a **real
+  counterpart entity** (separate left/right parts) linked in a group;
+  `sync_symmetry_groups` keeps the mirror in lockstep with its primary
+  (params copied with handed fields like `Wing.incidence` negated, mount
+  reflected across X = 0), and edits/deletes act on the whole group. Nested
+  symmetry stamps a part placed on a mirrored host (a nacelle on a wing)
+  onto both hosts. Downstream the mirror is a plain part: meshes are
+  single-panel, stats/staging count each entity once (no ×2), and the
+  blueprint persists a `symmetry_group` id only so the editor re-links on
+  load (the game ignores it).
 - `Wing` — tapered/swept/dihedral lifting surface (span, root/tip chord,
   sweep, dihedral, t/c, incidence). `wing_mesh::build_wing_mesh` builds it
   in the host-local frame, shared by the editor and the game's

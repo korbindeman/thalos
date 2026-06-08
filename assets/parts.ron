@@ -33,6 +33,21 @@
                 (resource: Electricity, units: 4.0),
             ],
         )),
+        // Aircraft cockpit: a nose-cone command pod sized for the plane-scale
+        // parts (jet nacelle Ø1.2, landing gear), not the 2.5 m rocket stack.
+        // `AircraftCockpit` geometry renders a rounded ogive nose about as long
+        // as it is wide (an airliner radome); it's a placeholder silhouette for a
+        // real model later. Still a full command pod (reaction wheel + battery).
+        "cockpit": Pod((
+            display_name: "Canopy Cockpit",
+            geometry: AircraftCockpit,
+            diameter: 1.5,
+            dry_mass: 400.0,
+            reaction_wheel_torque: 8000.0,
+            storage: [
+                (resource: Electricity, units: 1.5),
+            ],
+        )),
         "zephyr": Engine((
             display_name: "Zephyr",
             optimized_for: Atmosphere,
@@ -120,11 +135,112 @@
                 (resource: Kerosene, mass_fraction: 1.0),
             ],
         )),
+        // Structural fuselage: a parametric cylinder that carries no fuel.
+        // Same `Tank` recipe and stainless-steel skin as the propellant
+        // tanks (so it node-stacks, propagates diameter, and renders
+        // identically), but with an empty `storage` whitelist — the body is
+        // load-bearing structure, and aircraft fuel lives in the wet wings
+        // (`wing_wet`). Empty `reactants` because nothing burns from here.
+        "fuselage_structural": Tank((
+            display_name: "Fuselage",
+            wall_mass_per_m2: 12.0,
+            storage: [],
+            reactants: [],
+        )),
         "wing_std": Wing((
             display_name: "Wing",
             // Spar + skin lifting surface: lighter per area than a sealed
             // pressure tank. ~22 kg/m² is a light-alloy airframe ballpark.
             mass_per_m2: 22.0,
+        )),
+        // Wet wing: the same spar+skin lifting surface as `wing_std`, but its
+        // integral wing box is sealed to carry kerosene. Capacity scales with
+        // the panel's internal volume (planform × airfoil thickness × wing-box
+        // fill; see `wing_volume`), so a bigger wing holds proportionally more
+        // fuel. Slightly heavier per area than the dry wing for the tank
+        // sealing + plumbing. Used for aircraft main wings; tailplanes and fins
+        // stay dry `wing_std`.
+        "wing_wet": Wing((
+            display_name: "Wet Wing",
+            mass_per_m2: 24.0,
+            storage: [
+                (resource: Kerosene, units_per_m3: 1000.0),
+            ],
+        )),
+        // Landing gear are self-contained "gearbox" footprint parts: one part
+        // draws all of its legs in a single mesh (no symmetry). A track > 0
+        // means a left/right main pair; track 0 means a single centred nose
+        // leg. Mass = legs × (strut_mass_per_m × strut_length + wheel_mass).
+        //
+        // Light gear set (business-jet class). `gear_main` + `gear_nose` are a
+        // matched pair: 1.20 + 0.35 = 1.55 m drop equals the nose's 1.25 + 0.30,
+        // so on a common fuselage the aircraft sits level with no hand-tuning.
+        "gear_main": Gear((
+            display_name: "Main Landing Gear",
+            strut_mass_per_m: 60.0,
+            wheel_mass: 40.0,
+            // Legs at ±0.6 × host radius — a sensible track for a narrow-body
+            // belly. Two legs.
+            track_fraction: 0.6,
+            default_strut_length: 1.2,
+            default_wheel_radius: 0.35,
+        )),
+        "gear_nose": Gear((
+            display_name: "Nose Landing Gear",
+            strut_mass_per_m: 50.0,
+            wheel_mass: 30.0,
+            // Single centred leg.
+            track_fraction: 0.0,
+            default_strut_length: 1.25,
+            default_wheel_radius: 0.3,
+        )),
+        //
+        // ---- Heavy class (A220 / narrow-body airliner) -------------------
+        // A larger family for a ~Ø3.5 m fuselage. Same kinds as the light
+        // parts, scaled up: a wide flight-deck cockpit, a Ø2.0 m geared
+        // turbofan, and a heavy gear set (matched 1.90 + 0.60 = 2.50 m drop =
+        // nose 2.00 + 0.50).
+        "flightdeck": Pod((
+            display_name: "Flight Deck",
+            geometry: AircraftCockpit,
+            diameter: 3.5,
+            dry_mass: 2200.0,
+            reaction_wheel_torque: 35000.0,
+            storage: [
+                (resource: Electricity, units: 5.0),
+            ],
+        )),
+        "sirocco_turbofan": Engine((
+            display_name: "Sirocco Turbofan",
+            optimized_for: Atmosphere,
+            geometry: JetNacelle,
+            requires_atmosphere: true,
+            intake_requirement: Some((kind: OxygenatedAir, area_m2: 1.25)),
+            builtin_intake: Some((kind: OxygenatedAir, area_m2: 1.5, efficiency: 1.0)),
+            diameter: 2.0,
+            thrust: 220000.0,
+            isp: 3000.0,
+            dry_mass: 1600.0,
+            reactants: [
+                (resource: Kerosene, mass_fraction: 1.0),
+            ],
+            power_draw_kw: 0.0,
+        )),
+        "gear_main_hd": Gear((
+            display_name: "Heavy Main Landing Gear",
+            strut_mass_per_m: 130.0,
+            wheel_mass: 120.0,
+            track_fraction: 0.42,
+            default_strut_length: 1.9,
+            default_wheel_radius: 0.6,
+        )),
+        "gear_nose_hd": Gear((
+            display_name: "Heavy Nose Landing Gear",
+            strut_mass_per_m: 110.0,
+            wheel_mass: 90.0,
+            track_fraction: 0.0,
+            default_strut_length: 2.0,
+            default_wheel_radius: 0.5,
         )),
     },
 )

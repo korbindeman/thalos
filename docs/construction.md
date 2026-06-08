@@ -30,27 +30,36 @@ footprint placement** capability (§4.3) without forking the rocket path:
   they differ only by parameters and mount. Dry mass = `mass_per_m2` ×
   planform area.
 - **Surface mounting** (`attach.rs::SurfaceMount`): a placement component
-  *parallel to* `Attachment`, carrying `(parent, station, angle,
-  symmetry)`. It sits a part on a host's skin at a `(station, angle)`
-  point and **opts out of diameter propagation**. Kept distinct from
-  `Attachment` so sizing / shrouds / staging-topology are untouched;
-  traversals that need the whole part graph union both. Serialized as a
-  separate `surface_mounts` list on `ShipBlueprint` (`#[serde(default)]`,
-  so every pre-wing save still loads).
-- **Symmetry** (`attach.rs::MountSymmetry`, §4.5): `Single` (a centreline
-  fin) or `Mirrored` (a left/right pair drawn from one part, reflected
-  across the host X = 0 plane). A general footprint property — gear and
-  wing-mounted engines will reuse it. A `Mirrored` part's area / mass
-  count double at aggregation time.
-- **Editor**: an *Aerodynamics* palette category; arm a wing then click a
-  hull body to mount it — the hit point becomes the `(station, angle)`,
-  a side hit auto-picks a mirrored pair and a top/bottom hit a single
-  fin. Inspector sliders for all wing parameters plus a single/pair
-  toggle. Wing geometry rebuilds live. A **Horizontal layout** toggle
-  (View panel) lays the whole build down KSP-SPH-style — a rigid display
-  rotation in `update_part_transforms`; pointer-driven placement / tank
-  resize convert hits back through its inverse so building stays correct
-  either way.
+  *parallel to* `Attachment`, carrying `(parent, kind, station, angle)`.
+  It sits a part on a host's skin at a `(station, angle)` point and
+  **opts out of diameter propagation**. Kept distinct from `Attachment`
+  so sizing / shrouds / staging-topology are untouched; traversals that
+  need the whole part graph union both. Serialized as a separate
+  `surface_mounts` list on `ShipBlueprint` (`#[serde(default)]`, so every
+  pre-wing save still loads).
+- **Symmetry — KSP linked groups** (`attach.rs::SymmetryGroup`, §4.5).
+  Symmetry is **not** a per-part flag: placing a footprint part under
+  mirror mode stamps a **real counterpart entity** (a separate left and
+  right wing), linked by a `SymmetryGroup { id, role }`. `sync_symmetry_groups`
+  keeps each mirror in lockstep with its group's primary — params copied
+  (handed fields like `Wing.incidence` negated), mount reflected across the
+  host X = 0 plane; editing or deleting one affects the whole group.
+  **Nesting** is first-class: a part placed on a wing that is itself a
+  mirrored pair (a nacelle) is stamped onto *both* wings. The mirror is
+  thus a normal part everywhere downstream — meshes are single-panel and
+  stats / staging count each entity once (no ×2 multiplier). The blueprint
+  persists a `symmetry_group` id per surface mount so a loaded craft
+  re-links its groups in the editor; the game ignores it (flat parts).
+- **Editor**: an *Aerodynamics* palette category; a **Mirror (2×)** toggle
+  (Symmetry panel); arm a wing then click a hull body to mount it — the hit
+  point becomes the `(station, angle)`, and with mirror on, an off-centre
+  hit stamps a linked left/right pair while a top/bottom hit stays single.
+  Inspector sliders for all wing parameters; the group status shows whether
+  a part is a mirror primary / counterpart. Wing geometry rebuilds live. A
+  **Horizontal layout** toggle (View panel) lays the whole build down
+  KSP-SPH-style — a rigid display rotation in `update_part_transforms`;
+  pointer-driven placement / tank resize convert hits back through its
+  inverse so building stays correct either way.
 - **Geometry feedback** (§8 "free now"): `ShipStats` reports total
   **wing area** and area-weighted **mean aerodynamic chord**; wing mass
   feeds dry mass, CoM, and a crude rod-model MOI.
@@ -131,6 +140,32 @@ Deliberate slice-2 simplifications, to revisit:
   pressure, inlet shock losses, and engine-local starvation.
 - Design-time Δv/stage estimates are still nominal and not environment-aware;
   the runtime gate enforces atmosphere availability.
+
+### Landed — wet wings + structural fuselage
+
+A small follow-on to the storage whitelist (§Slice 2) splits "carries fuel"
+from "is structure", exercising the volume-scaled storage path on a
+non-cylindrical part:
+
+- **`wing_wet`** (`assets/parts.ron`): a `Wing` whose integral box is
+  whitelisted for kerosene. Capacity is volume-scaled like a tank, but the
+  volume comes from `catalog::wing_volume` — `planform_area × (t/c · MAC) ×
+  WING_BOX_FILL` — so a bigger panel holds proportionally more fuel.
+  `blueprint::storage_volume_for` and `recompute::recompute_wing_state` both
+  route wings through it, so spawn-time and editor-resize capacity agree.
+  Dry wings stay `wing_std` (empty storage). Because surface-mounted parts
+  with no `FuelCrossfeed` component default to crossfeed-enabled, a wet wing
+  is already in the same crossfeed component as the nacelle on its pylon —
+  wing fuel feeds the engine with no runtime change.
+- **`fuselage_structural`** (`assets/parts.ron`): a `Tank` with an empty
+  `storage` whitelist — same stainless-steel skin, diameter propagation, and
+  node stacking as a propellant tank, but load-bearing structure that holds
+  no fuel.
+- **Aircraft loadout**: `ships/jet.ron` and `ships/a220.ron` now stack a
+  `fuselage_structural` body and carry their kerosene in `wing_wet` main
+  wings (tailplanes/fins stay dry). This is the airliner pattern — fuel in
+  the wings, dry structural fuselage — and a step toward the §5.3 internal
+  fuel-fill layer.
 
 ### Next (the stated goal: gear + control surfaces)
 

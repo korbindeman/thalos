@@ -484,33 +484,21 @@ pub fn handle_warp_controls(
     }
 }
 
-/// Sync the UI-side [`ManeuverPlan`] with the physics `ManeuverSequence`.
+/// Sync the UI-side [`ManeuverPlan`] into the physics `ManeuverSequence`.
 ///
-/// Lifecycle:
-/// 1. Remove UI nodes that physics reports as consumed this frame. This is
-///    the only way UI nodes retire — never by comparing time to `sim_time`,
-///    which would silently drop nodes whose execution was skipped (e.g. at
-///    observation warp). A UI node still sitting with `time <= sim_time`
-///    means physics didn't burn it — a bug signal worth surfacing, not
-///    hiding.
-/// 2. When `plan.dirty` (user edit or consumption), push the current UI
-///    list into physics, tagging each entry with its `NodeId` so the next
-///    consumption cycle can round-trip.
+/// The UI plan is authoritative for the node lifecycle: physics never removes
+/// nodes on its own. When `plan.dirty` (a user edit, or the autopilot advancing
+/// a node's burn phase), the physics sequence is rebuilt from scratch, taking
+/// only the nodes that still drive the prediction — i.e. [`NodeBurnPhase::Planned`]
+/// ones. A burning node (`Executing`) is excluded so the planned Δv isn't
+/// double-counted on top of the live thrust, and a spent node (`Executed`) is
+/// excluded because its burn is already in the past; both linger in the UI plan
+/// for display until the user dismisses them.
+///
+/// [`NodeBurnPhase::Planned`]: crate::maneuver::NodeBurnPhase::Planned
+/// [`NodeBurnPhase::Executing`]: crate::maneuver::NodeBurnPhase::Executing
+/// [`NodeBurnPhase::Executed`]: crate::maneuver::NodeBurnPhase::Executed
 fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<SimulationState>) {
-    let consumed = sim.simulation.drain_consumed_node_ids();
-    if !consumed.is_empty() {
-        info!(
-            "[bridge] physics consumed maneuver node ids: {:?} (sim_time={:.2})",
-            consumed,
-            sim.simulation.sim_time()
-        );
-        let before = plan.nodes.len();
-        plan.nodes.retain(|n| !consumed.contains(&n.id.0));
-        if plan.nodes.len() != before {
-            plan.dirty = true;
-        }
-    }
-
     if !plan.dirty {
         return;
     }
@@ -519,7 +507,7 @@ fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<Simulation
 
     let seq = sim.simulation.maneuvers_mut();
     seq.nodes.clear();
-    for node in &plan.nodes {
+    for node in plan.nodes.iter().filter(|n| n.drives_prediction()) {
         seq.nodes.push(ManeuverNode {
             id: Some(node.id.0),
             time: node.time,
@@ -560,9 +548,33 @@ pub struct CraftStateMirror {
     /// Surface-relative approach speed (m/s) of the destroying impact;
     /// `0.0` unless `destroyed`.
     pub last_impact_speed_m_s: f64,
+    /// Aggregate thrust currently pushed into the propagator (N). Zero
+    /// means no engine is producing thrust this frame (e.g. air-breathing
+    /// jets with no intake air). Diagnostic mirror of
+    /// `ship_params().thrust_n`.
+    pub thrust_n: f64,
+    /// Altitude above the dominant body's reference radius (m).
+    pub altitude_m: f64,
+    /// Whether the dominant body has a `terrestrial_atmosphere` block.
+    pub has_atmosphere: bool,
+    /// Kármán line of the dominant body's atmosphere (m); 0 if none.
+    pub karman_line_m: f64,
+    /// Whether the ship is currently inside the breathable column (the
+    /// gate air-breathing jets check). Diagnostic mirror of
+    /// `fuel::ship_in_atmosphere`.
+    pub in_atmosphere: bool,
+    /// Number of engines that passed every propulsion gate this frame
+    /// (enabled, positive thrust/isp, atmosphere ok, intake satisfied,
+    /// reactants present). Zero with `in_atmosphere == true` means the
+    /// gate that killed thrust is *not* the atmosphere.
+    pub propulsion_engine_count: u32,
 }
 
-fn refresh_craft_state_mirror(sim: Res<SimulationState>, mut mirror: ResMut<CraftStateMirror>) {
+fn refresh_craft_state_mirror(
+    sim: Res<SimulationState>,
+    propulsion: Res<crate::fuel::ActivePropulsion>,
+    mut mirror: ResMut<CraftStateMirror>,
+) {
     let state = sim.simulation.ship_state();
     mirror.sim_time_s = sim.simulation.sim_time();
     mirror.warp_speed = sim.simulation.warp.speed();
@@ -580,6 +592,30 @@ fn refresh_craft_state_mirror(sim: Res<SimulationState>, mut mirror: ResMut<Craf
     .to_string();
     mirror.destroyed = sim.simulation.is_destroyed();
     mirror.last_impact_speed_m_s = sim.simulation.last_impact_speed_m_s();
+    mirror.thrust_n = sim.simulation.ship_params().thrust_n;
+    let body_id = sim.simulation.dominant_body();
+    let body = sim.system.bodies.get(body_id);
+    mirror.altitude_m = body
+        .map(|body| {
+            let body_pos = sim
+                .ephemeris
+                .state(body_id, Epoch(sim.simulation.sim_time()))
+                .position;
+            (state.position - body_pos).length() - body.radius_m
+        })
+        .unwrap_or(f64::NAN);
+    mirror.has_atmosphere = body
+        .map(|b| b.terrestrial_atmosphere.is_some())
+        .unwrap_or(false);
+    mirror.karman_line_m = body
+        .and_then(|b| b.terrestrial_atmosphere.as_ref())
+        .map(|a| a.karman_line_m as f64)
+        .unwrap_or(0.0);
+    mirror.in_atmosphere = mirror.has_atmosphere
+        && mirror.karman_line_m > 0.0
+        && mirror.altitude_m >= 0.0
+        && mirror.altitude_m <= mirror.karman_line_m;
+    mirror.propulsion_engine_count = propulsion.engines.len() as u32;
 }
 
 // ---------------------------------------------------------------------------

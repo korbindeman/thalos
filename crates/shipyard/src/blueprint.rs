@@ -1,14 +1,15 @@
 use crate::attach::{
-    AttachNode, AttachNodes, Attachment, MountSymmetry, NodeId, Ship, SurfaceMount,
-    SurfaceMountKind,
+    AttachNode, AttachNodes, Attachment, NodeId, Ship, SurfaceMount, SurfaceMountKind,
+    SymmetryGroup, SymmetryRole,
 };
 use crate::catalog::{
     CatalogEntry, CatalogError, CatalogId, CatalogRef, PartCatalog, adapter_surface_area,
-    tank_surface_area, tank_volume, wing_panel_area,
+    gear_dry_mass, tank_surface_area, tank_volume, wing_panel_area, wing_volume,
 };
 use crate::part::{
     Adapter, AirIntake, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust,
-    FuelCrossfeed, FuelTank, Part, PartMaterial, ReactionWheel, ShroudProvider, Shroudable, Wing,
+    FuelCrossfeed, FuelTank, Gear, Part, PartMaterial, ReactionWheel, ShroudProvider, Shroudable,
+    Wing,
 };
 use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
@@ -19,7 +20,7 @@ use std::collections::HashMap;
 /// kinds (Pod, Engine) carry [`PartParams::None`]. Parametric kinds carry
 /// the dimensions the user picks; the catalog turns those into mass,
 /// capacity, and visual geometry.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum PartParams {
     #[default]
     None,
@@ -46,6 +47,12 @@ pub enum PartParams {
         thickness: f32,
         /// Mounting incidence, radians.
         incidence: f32,
+    },
+    Gear {
+        /// Length of each strut from the host skin to the wheel, metres.
+        strut_length: f32,
+        /// Wheel radius, metres.
+        wheel_radius: f32,
     },
 }
 
@@ -109,8 +116,12 @@ pub struct SurfaceConnection {
     pub kind: SurfaceMountKind,
     pub station: f32,
     pub angle: f32,
-    #[serde(default)]
-    pub symmetry: MountSymmetry,
+    /// KSP symmetry group id. All surface mounts sharing an id form one
+    /// linked group; the member with the lowest `child` index is the
+    /// primary, the rest are mirror counterparts. `None` = a standalone
+    /// (1×) mount. The game ignores this; only the editor re-links groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symmetry_group: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -185,14 +196,33 @@ impl ShipBlueprint {
             });
         }
 
+        // Lowest child index in each symmetry group is the primary.
+        let mut group_primary: HashMap<u32, usize> = HashMap::new();
         for m in &self.surface_mounts {
-            commands.entity(ids[m.child]).insert(SurfaceMount {
+            if let Some(g) = m.symmetry_group {
+                let entry = group_primary.entry(g).or_insert(m.child);
+                if m.child < *entry {
+                    *entry = m.child;
+                }
+            }
+        }
+
+        for m in &self.surface_mounts {
+            let mut ec = commands.entity(ids[m.child]);
+            ec.insert(SurfaceMount {
                 parent: ids[m.parent],
                 kind: m.kind,
                 station: m.station,
                 angle: m.angle,
-                symmetry: m.symmetry,
             });
+            if let Some(g) = m.symmetry_group {
+                let role = if group_primary.get(&g) == Some(&m.child) {
+                    SymmetryRole::Primary
+                } else {
+                    SymmetryRole::Mirror
+                };
+                ec.insert(SymmetryGroup { id: g, role });
+            }
         }
 
         let root = ids[self.root];
@@ -221,6 +251,7 @@ pub fn check_params_match(
         (CatalogEntry::Adapter(_), PartParams::Adapter { .. }) => Ok(()),
         (CatalogEntry::Tank(_), PartParams::Tank { .. }) => Ok(()),
         (CatalogEntry::Wing(_), PartParams::Wing { .. }) => Ok(()),
+        (CatalogEntry::Gear(_), PartParams::Gear { .. }) => Ok(()),
         _ => Err(CatalogError::ParamMismatch {
             id: id.to_string(),
             kind: entry.kind_name(),
@@ -288,6 +319,7 @@ fn insert_part(
             ec.insert((
                 CommandPod {
                     model: p.display_name.clone(),
+                    geometry: p.geometry,
                     diameter: p.diameter,
                     dry_mass: p.dry_mass,
                     reaction_wheel_torque: p.reaction_wheel_torque,
@@ -405,6 +437,26 @@ fn insert_part(
                 dry_mass,
             });
         }
+        (
+            CatalogEntry::Gear(g),
+            PartParams::Gear {
+                strut_length,
+                wheel_radius,
+            },
+        ) => {
+            // A self-contained gearbox: one entity draws every leg. No
+            // `PartMaterial` (the ship_part shader maps detail cylindrically and
+            // would smear across the struts/wheels — same reasoning as wings).
+            // `track_fraction` is carried from the catalog so the mesh + mass
+            // know the leg count without a catalog lookup.
+            let dry_mass = gear_dry_mass(g, *strut_length);
+            ec.insert(Gear {
+                strut_length: *strut_length,
+                wheel_radius: *wheel_radius,
+                track_fraction: g.track_fraction,
+                dry_mass,
+            });
+        }
         _ => unreachable!("check_params_match guarantees variant match"),
     }
 }
@@ -420,7 +472,7 @@ pub fn nodes_for(entry: &CatalogEntry, params: &PartParams) -> HashMap<NodeId, A
                 "bottom".into(),
                 AttachNode {
                     diameter: p.diameter,
-                    offset: Vec3::new(0.0, -p.diameter * 0.9, 0.0),
+                    offset: Vec3::new(0.0, -p.diameter * p.geometry.length_factor(), 0.0),
                 },
             );
         }
@@ -559,6 +611,18 @@ fn storage_volume_for(entry: &CatalogEntry, params: &PartParams) -> f32 {
         (CatalogEntry::Tank(_), PartParams::Tank { diameter, length }) => {
             tank_volume(*diameter, *length)
         }
+        // Wet wings store fuel in the integral wing box; capacity scales with
+        // the panel's internal volume just as a tank's does with its cylinder.
+        (
+            CatalogEntry::Wing(_),
+            PartParams::Wing {
+                span,
+                root_chord,
+                tip_chord,
+                thickness,
+                ..
+            },
+        ) => wing_volume(*span, *root_chord, *tip_chord, *thickness),
         _ => 0.0,
     }
 }
@@ -569,24 +633,95 @@ mod tests {
     use crate::catalog::PartCatalog;
 
     /// The shipped demo aircraft must stay loadable: parse `ships/skyhawk.ron`
-    /// against the catalog, confirm its three surface-mounted wings survive
+    /// against the catalog, confirm its KSP-symmetry surface mounts survive
     /// the round-trip, and that stats derive a positive wing area. Guards the
-    /// hand-authored RON (enum spelling, `surface_mounts` shape) from drift.
+    /// hand-authored RON (`surface_mounts` shape, `symmetry_group`) from drift.
     #[test]
     fn skyhawk_sample_loads_with_wings() {
         let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
             .expect("parse parts.ron");
         let bp = ShipBlueprint::from_ron(include_str!("../../../ships/skyhawk.ron"))
             .expect("parse skyhawk.ron");
-        assert_eq!(
-            bp.surface_mounts.len(),
-            4,
-            "main wing + tailplane + fin + jet nacelle"
-        );
+        // main wing ×2 + tailplane ×2 + fin + nacelle ×2 = 7 surface mounts.
+        assert_eq!(bp.surface_mounts.len(), 7);
+        // Three linked groups: main wings, tailplanes, nacelles.
+        let groups: std::collections::HashSet<u32> = bp
+            .surface_mounts
+            .iter()
+            .filter_map(|m| m.symmetry_group)
+            .collect();
+        assert_eq!(groups.len(), 3, "main / tail / nacelle groups");
         let s = bp.stats(&cat).expect("skyhawk stats");
         assert!(s.wing_area_m2 > 0.0, "skyhawk should report wing area");
         assert!(s.mean_aerodynamic_chord_m > 0.0);
         assert!(s.dry_mass_kg > 0.0);
+    }
+
+    /// A structural fuselage carries no propellant; a wet wing's kerosene
+    /// capacity scales with its internal volume. Guards the two new catalog
+    /// parts and the wing-volume storage path.
+    #[test]
+    fn structural_fuselage_is_dry_and_wet_wing_holds_fuel() {
+        let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
+            .expect("parse parts.ron");
+
+        // The structural fuselage resolves as a Tank with no storage options,
+        // so it composes zero resource pools at any size.
+        let fuselage = cat.resolve("fuselage_structural").expect("fuselage");
+        assert!(fuselage.storage_options().is_empty());
+        let fuselage_pools = pools_for(
+            fuselage,
+            &PartParams::Tank {
+                diameter: 1.5,
+                length: 9.0,
+            },
+            &None,
+        );
+        assert!(fuselage_pools.is_empty(), "structural fuselage stores nothing");
+
+        // A wet wing fills its integral box with kerosene; a bigger wing holds
+        // proportionally more.
+        let wet = cat.resolve("wing_wet").expect("wet wing");
+        let wing_params = |span: f32| PartParams::Wing {
+            span,
+            root_chord: 2.4,
+            tip_chord: 0.9,
+            sweep: 0.44,
+            dihedral: 0.05,
+            thickness: 0.11,
+            incidence: 0.0,
+        };
+        let small = pools_for(wet, &wing_params(5.5), &None);
+        let large = pools_for(wet, &wing_params(11.0), &None);
+        let small_kero = small.get(&Resource::Kerosene).expect("kerosene pool");
+        let large_kero = large.get(&Resource::Kerosene).expect("kerosene pool");
+        assert!(small_kero.capacity > 0.0);
+        assert!(
+            large_kero.capacity > small_kero.capacity,
+            "doubling span should raise wet-wing capacity",
+        );
+    }
+
+    /// Both shipped aircraft load with fuel in their wings and none in the
+    /// structural fuselage. Guards `ships/jet.ron` + `ships/a220.ron`.
+    #[test]
+    fn jet_and_a220_carry_wing_fuel() {
+        let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
+            .expect("parse parts.ron");
+        for ron in [
+            include_str!("../../../ships/jet.ron"),
+            include_str!("../../../ships/a220.ron"),
+        ] {
+            let bp = ShipBlueprint::from_ron(ron).expect("parse aircraft ron");
+            let s = bp.stats(&cat).expect("aircraft stats");
+            let kero = s
+                .resources
+                .get(&Resource::Kerosene)
+                .expect("aircraft should carry kerosene");
+            assert!(kero.capacity > 0.0, "wet wings provide kerosene capacity");
+            assert!(kero.mass_kg > 0.0, "wet wings spawn full of kerosene");
+            assert!(s.wing_area_m2 > 0.0);
+        }
     }
 }
 
@@ -615,6 +750,10 @@ pub fn default_params_for(entry: &CatalogEntry) -> PartParams {
             dihedral: 3.0_f32.to_radians(),
             thickness: 0.12,
             incidence: 0.0,
+        },
+        CatalogEntry::Gear(g) => PartParams::Gear {
+            strut_length: g.default_strut_length,
+            wheel_radius: g.default_wheel_radius,
         },
     }
 }

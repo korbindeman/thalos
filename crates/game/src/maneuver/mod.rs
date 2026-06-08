@@ -20,7 +20,9 @@ use render::{
 };
 use state::{ArrowHitbox, ArrowStretchState, NodeSlideSphere, SelectedNodeView, SlidePreview};
 
-pub use state::{GameNode, InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, SelectedNode};
+pub use state::{
+    GameNode, InteractionMode, ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, SelectedNode,
+};
 
 /// Block camera rotation whenever a maneuver element is hovered or any
 /// non-Idle interaction mode is active.

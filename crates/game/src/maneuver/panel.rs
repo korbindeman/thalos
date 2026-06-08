@@ -2,7 +2,7 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
-use super::state::{ManeuverEvent, ManeuverPlan, NodeDeltaV, SelectedNode};
+use super::state::{ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, SelectedNode};
 use crate::rendering::SimulationState;
 
 /// Bottom panel: node editor shown when a node is selected.
@@ -22,6 +22,9 @@ pub(super) fn node_editor_panel(
 
     let burn_time = plan.nodes[node_idx].time;
     let total_dv = plan.nodes[node_idx].delta_v.length();
+    let phase = plan.nodes[node_idx].phase;
+    let executed = phase == NodeBurnPhase::Executed;
+    let executing = phase == NodeBurnPhase::Executing;
     let sim_time = sim.as_ref().map(|s| s.simulation.sim_time()).unwrap_or(0.0);
     let time_until = burn_time - sim_time;
 
@@ -39,17 +42,39 @@ pub(super) fn node_editor_panel(
             ui.heading("Maneuver Node");
             ui.separator();
             ui.label(format!("Node #{}", sel_id.0));
+            if executed {
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(120, 180, 120), "EXECUTED");
+            } else if executing {
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(230, 200, 90), "BURNING");
+            }
             ui.separator();
             ui.label(format!("T{:+.0}s", time_until));
             ui.separator();
             ui.label(format!("Total \u{0394}v: {:.1} m/s", total_dv));
-            ui.label(format!("Est. burn: {:.1}s", burn_duration));
+            if !executed {
+                ui.label(format!("Est. burn: {:.1}s", burn_duration));
+            }
             ui.separator();
-            if ui.button("Delete").clicked() {
+            let delete_label = if executed { "Dismiss" } else { "Delete" };
+            if ui.button(delete_label).clicked() {
                 writer.write(ManeuverEvent::DeleteNode { id: sel_id });
                 selected.id = None;
             }
         });
+
+        if executed {
+            // A spent burn is a record, not a plan — show its components but
+            // don't offer editing handles that would imply it can still change.
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "P: {:.1}   N: {:.1}   R: {:.1} m/s",
+                    node_dv.prograde, node_dv.normal, node_dv.radial
+                ));
+            });
+            return;
+        }
 
         ui.horizontal(|ui| {
             let mut pg = node_dv.prograde as f32;

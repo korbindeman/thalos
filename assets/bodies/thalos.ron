@@ -38,7 +38,20 @@
             mie_optical_depth: 0.06,
             mie_scale_height_m: 1600.0,
             mie_asymmetry: 0.76,
-            strength: 1.0,
+            // Sky in-scatter brightness. The shader's flux units are arbitrary
+            // (LIGHT_AT_1AU = 10, SCENE_FLUX_SCALE = 0.5), and at strength 1.0
+            // the midday-zenith in-scatter (~0.13) sits below the star-crush
+            // threshold (0.20 in `body_sky.wgsl`), so the daytime dome reads as
+            // dim navy with stars showing through. Lifted so a clear midday sky
+            // reads bright and crushes stars; scales single + multi together so
+            // the multiple-scattering horizon-blue balance is preserved, and
+            // does not touch extinction (aerial perspective stays put).
+            strength: 3.0,
+            // Multiple-scattering blue-fill gain. Single scattering reddens the
+            // long horizon-grazing path at every sun angle; this lifts the
+            // blue-dominant multi-scatter term so the daytime horizon reads
+            // pale-blue rather than orange. Tuned live against the runway view.
+            multi_scatter_gain: 3.0,
         )),
         // Volumetric cloud layer (Phase 1) — temporarily disabled. Re-enable
         // by swapping `None` for the `Some((...))` below. The terrain

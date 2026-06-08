@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use thalos_input::game::GameInputIntent;
 use thalos_shipyard::{
     Adapter, AirIntake, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelTank,
-    MountSymmetry, Part, PartResources, PartRole, Resource, ResourceTotals, StageSummary,
+    Part, PartResources, PartRole, Resource, ResourceTotals, StageSummary,
     SummaryEngine, SummaryPart, SummaryStageInput, SurfaceMount, compute_stage_summaries,
     cylinder_principal_inertia, derive_stages, parallel_axis_inertia,
 };
@@ -532,11 +532,11 @@ fn part_dry_mass(
     dry * surface_multiplier(surface_mount)
 }
 
-fn surface_multiplier(surface_mount: Option<&SurfaceMount>) -> f64 {
-    match surface_mount.map(|m| m.symmetry) {
-        Some(MountSymmetry::Mirrored) => 2.0,
-        _ => 1.0,
-    }
+fn surface_multiplier(_surface_mount: Option<&SurfaceMount>) -> f64 {
+    // KSP symmetry: each mirror counterpart is its own part, counted once —
+    // no per-mount doubling. Kept as a hook in case future footprint kinds
+    // re-introduce a multiplier.
+    1.0
 }
 
 fn part_resource_totals(resources: &PartResources) -> HashMap<Resource, ResourceTotals> {

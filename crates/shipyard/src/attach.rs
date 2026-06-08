@@ -38,20 +38,31 @@ pub struct Attachment {
     pub my_node: NodeId,
 }
 
-/// Whether a [`SurfaceMount`] is a single footprint or a mirrored pair
-/// about the host's vertical (X = 0) plane. A general footprint property —
-/// wings today, landing gear / wing-mounted engines later (symmetry is
-/// first-class for off-centreline mounts, `docs/construction.md` §4.5).
+/// Role of an entity within a [`SymmetryGroup`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum MountSymmetry {
-    /// A single footprint at the mount point — a dorsal/ventral fin
-    /// (vertical stabiliser), a centreline part. Not mirrored.
-    Single,
-    /// A mirrored left/right pair drawn from one part — main wings,
-    /// tailplanes. The part renders two footprints reflected across the
-    /// host's X = 0 plane, and its area / mass count double.
+pub enum SymmetryRole {
+    /// The authored original. Its params + mount are the source of truth the
+    /// editor syncs counterparts from.
     #[default]
-    Mirrored,
+    Primary,
+    /// A mirror counterpart, re-derived from the primary by the editor
+    /// (reflected across the host X = 0 plane).
+    Mirror,
+}
+
+/// KSP-style symmetry link. Footprint parts placed under mirror symmetry
+/// form a **group**: one [`SymmetryRole::Primary`] plus its mirror
+/// counterpart, as **separate real entities** (not one part drawing two
+/// copies). The editor keeps the group in lockstep — counterpart params
+/// synced and mount reflected — and edits / deletes the whole group
+/// together. At runtime (the game) the group is inert metadata: each member
+/// is just a normal part, so stats / staging / rendering need no symmetry
+/// logic. `id` is stable and persisted so a loaded craft re-links in the
+/// editor.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SymmetryGroup {
+    pub id: u32,
+    pub role: SymmetryRole,
 }
 
 /// Which surface-placement frame a [`SurfaceMount`] uses.
@@ -79,7 +90,7 @@ pub enum SurfaceMountKind {
 /// end-node stack code (sizing, shrouds, staging topology) is untouched;
 /// traversals that need the *whole* part graph union both. `parent` plays
 /// the same connectivity role as [`Attachment::parent`].
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceMount {
     pub parent: Entity,
     pub kind: SurfaceMountKind,
@@ -87,13 +98,16 @@ pub struct SurfaceMount {
     /// (y = −height) for [`SurfaceMountKind::BodySkin`], or span fraction
     /// root→tip for [`SurfaceMountKind::WingPylon`].
     pub station: f32,
-    /// Angle around the host body axis, radians. The primary panel's
-    /// outboard radial is `(sin angle, 0, cos angle)`; `angle = 0` is the
-    /// +Z (dorsal / "up") side, `angle = π/2` the +X (right) side. For
+    /// Angle around the host body axis, radians. The outboard radial is
+    /// `(sin angle, 0, cos angle)`; `angle = 0` is the +Z (dorsal / "up")
+    /// side, `angle = π/2` the +X (right) side. For
     /// [`SurfaceMountKind::WingPylon`], this stores chord fraction instead
     /// (`-0.5` trailing edge, `0.5` leading edge).
+    ///
+    /// A mirror counterpart stores its *own* reflected coordinates here (a
+    /// single panel), not a "draw both sides" flag — symmetry lives on
+    /// [`SymmetryGroup`], not on the mount.
     pub angle: f32,
-    pub symmetry: MountSymmetry,
 }
 
 /// Root of a ship assembly.

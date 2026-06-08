@@ -86,7 +86,7 @@ use bevy::prelude::*;
 
 use crate::SimStage;
 use crate::fuel::{ThrottleState, gate_throttle_on_fuel_availability, handle_throttle_input};
-use crate::maneuver::{InteractionMode, ManeuverPlan};
+use crate::maneuver::{InteractionMode, ManeuverPlan, NodeBurnPhase};
 use crate::navigation::{AUTOPILOT_SETTLE_S, SHIP_NOSE_BODY, maneuver_node_burn_direction};
 use crate::rendering::SimulationState;
 
@@ -292,16 +292,16 @@ impl Plugin for AutopilotPlugin {
             )
             .add_systems(
                 Update,
-                consume_started_maneuver_directives
+                mark_started_maneuver_nodes_executing
                     .in_set(SimStage::Physics)
                     .after(autopilot_system)
                     .before(crate::bridge::advance_simulation),
             )
             .add_systems(
                 Update,
-                consume_completed_maneuver_directives
+                mark_completed_maneuver_nodes_executed
                     .in_set(SimStage::Physics)
-                    .after(consume_started_maneuver_directives)
+                    .after(mark_started_maneuver_nodes_executing)
                     .before(crate::bridge::advance_simulation),
             );
     }
@@ -366,7 +366,11 @@ pub(crate) fn publish_maneuver_autopilot_directive(
         return;
     }
 
-    let Some(node) = plan.nodes.first() else {
+    // The next burn directive comes from the first node that still drives one:
+    // a Planned node (to arm) or the Executing node (so the burn-progress HUD
+    // keeps reading it through the burn). Executed nodes linger for display only
+    // and are skipped here so the autopilot never re-fires a spent burn.
+    let Some(node) = plan.nodes.iter().find(|n| n.drives_directive()) else {
         schedule.clear();
         return;
     };
@@ -389,35 +393,60 @@ pub(crate) fn publish_maneuver_autopilot_directive(
     });
 }
 
-/// Retire maneuver nodes whose generic autopilot directive started.
+/// Mark a maneuver node as executing when its burn starts.
 ///
 /// This is the output adapter corresponding to
 /// [`publish_maneuver_autopilot_directive`]. The core autopilot emits an
-/// opaque directive id; this adapter recognizes the maneuver namespace
-/// and reconciles the physics/UI maneuver schedule.
-pub(crate) fn consume_started_maneuver_directives(
+/// opaque directive id; this adapter recognizes the maneuver namespace and
+/// advances the matching UI node's lifecycle. Flipping it to
+/// [`NodeBurnPhase::Executing`] (rather than deleting it, as the old design
+/// did) drops it out of the physics prediction via the next
+/// [`crate::bridge::sync_maneuver_plan`] — the live thrust now owns the
+/// trajectory — while keeping it in the plan so the burn-progress HUD and
+/// maneuver panel keep showing the burn as it happens.
+pub(crate) fn mark_started_maneuver_nodes_executing(
     mut started: MessageReader<AutopilotBurnStarted>,
-    mut sim: ResMut<SimulationState>,
+    mut plan: ResMut<ManeuverPlan>,
 ) {
     for event in started.read() {
         if event.id.namespace() != MANEUVER_DIRECTIVE_NAMESPACE {
             continue;
         }
-        sim.simulation.consume_maneuver_node(event.id.local_id());
+        if let Some(node) = plan
+            .nodes
+            .iter_mut()
+            .find(|n| n.id.0 == event.id.local_id())
+            && node.phase != NodeBurnPhase::Executing
+        {
+            node.phase = NodeBurnPhase::Executing;
+            plan.dirty = true;
+        }
     }
 }
 
-/// Idempotent cleanup for maneuver directives that complete after their
-/// source node has already been removed at burn start.
-pub(crate) fn consume_completed_maneuver_directives(
+/// Mark a maneuver node as executed when its burn completes.
+///
+/// The node is *not* removed — it lingers on screen for review until the user
+/// dismisses it with the Delete action. [`NodeBurnPhase::Executed`] stops it
+/// driving the prediction, the directive, and re-arming, so the autopilot won't
+/// fly the same burn twice.
+pub(crate) fn mark_completed_maneuver_nodes_executed(
     mut completed: MessageReader<AutopilotBurnCompleted>,
-    mut sim: ResMut<SimulationState>,
+    mut plan: ResMut<ManeuverPlan>,
 ) {
     for event in completed.read() {
         if event.id.namespace() != MANEUVER_DIRECTIVE_NAMESPACE {
             continue;
         }
-        sim.simulation.consume_maneuver_node(event.id.local_id());
+        if let Some(node) = plan
+            .nodes
+            .iter_mut()
+            .find(|n| n.id.0 == event.id.local_id())
+            && node.phase != NodeBurnPhase::Executed
+        {
+            node.phase = NodeBurnPhase::Executed;
+            plan.dirty = true;
+        }
     }
 }
 

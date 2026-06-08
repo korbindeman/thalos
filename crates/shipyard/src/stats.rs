@@ -18,14 +18,13 @@
 //! reactant — it never enters the rocket equation; engines instead declare
 //! a continuous `power_draw_kw` for the duration of the burn.
 
-use crate::attach::MountSymmetry;
 use crate::blueprint::{
     Connection, PartBlueprint, PartParams, ShipBlueprint, check_params_match,
     check_resource_amounts_allowed, pools_for,
 };
 use crate::catalog::{
-    CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, tank_surface_area,
-    wing_mean_aerodynamic_chord, wing_panel_area,
+    CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, gear_dry_mass,
+    tank_surface_area, wing_mean_aerodynamic_chord, wing_panel_area,
 };
 use crate::part::ReactantRatio;
 use crate::resource::{PartResources, Resource};
@@ -211,6 +210,11 @@ pub struct ShipStats {
     /// the parallel-axis theorem. Off-diagonal terms are ignored —
     /// adequate for axially-symmetric stacks.
     pub moment_of_inertia_kg_m2: DVec3,
+    /// Center of mass in the ship body frame (`X=right, Y=nose, Z=dorsal`),
+    /// metres from the root-part origin. The same point
+    /// [`moment_of_inertia_kg_m2`] is taken about; ground physics rotates the
+    /// craft about it so gear that straddle the CoM hold the aircraft level.
+    pub center_of_mass_m: DVec3,
     /// Sum of every [`crate::ReactionWheel`]'s `max_torque`, in N·m
     /// per body axis. Symmetric — the per-axis cap is the same on all
     /// three. Per-axis-asymmetric torque is reserved for RCS arrangements.
@@ -299,23 +303,16 @@ impl ShipBlueprint {
             check_resource_amounts_allowed(&pb.catalog_id, entry, &pb.resources)?;
         }
 
-        // Surface-mounted parts: a Mirrored mount draws (and so weighs and
-        // spans) two panels from one part. `panels[i]` is that multiplier;
-        // 1.0 for everything node-stacked or single.
-        let mut panels = vec![1.0_f64; self.parts.len()];
-        for m in &self.surface_mounts {
-            if m.child < panels.len() && m.symmetry == MountSymmetry::Mirrored {
-                panels[m.child] = 2.0;
-            }
-        }
-
-        for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
-            dry_mass_kg += part_dry_mass(entry, &pb.params) as f64 * panels[i];
+        // KSP symmetry: a mirrored pair is two real parts, each counted once
+        // here — no per-part doubling. The mirror counterpart is a separate
+        // entry in `self.parts`.
+        for (pb, entry) in self.parts.iter().zip(&entries) {
+            dry_mass_kg += part_dry_mass(entry, &pb.params) as f64;
 
             if let CatalogEntry::Engine(e) = entry {
-                let t = e.thrust as f64 * panels[i];
+                let t = e.thrust as f64;
                 total_thrust_n += t;
-                power_draw_kw += e.power_draw_kw as f64 * panels[i];
+                power_draw_kw += e.power_draw_kw as f64;
                 if e.isp > 0.0 {
                     let isp_f = e.isp as f64;
                     thrust_over_isp += t / isp_f;
@@ -368,7 +365,7 @@ impl ShipBlueprint {
         // sides of a pair) and the area-weighted mean aerodynamic chord.
         let mut wing_area_m2 = 0.0_f64;
         let mut mac_area_weighted = 0.0_f64;
-        for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
+        for (pb, entry) in self.parts.iter().zip(&entries) {
             if let (
                 CatalogEntry::Wing(_),
                 PartParams::Wing {
@@ -379,7 +376,7 @@ impl ShipBlueprint {
                 },
             ) = (entry, &pb.params)
             {
-                let area = wing_panel_area(*span, *root_chord, *tip_chord) as f64 * panels[i];
+                let area = wing_panel_area(*span, *root_chord, *tip_chord) as f64;
                 wing_area_m2 += area;
                 mac_area_weighted +=
                     wing_mean_aerodynamic_chord(*root_chord, *tip_chord) as f64 * area;
@@ -396,7 +393,7 @@ impl ShipBlueprint {
         let mut com_total_mass = 0.0_f64;
         let mut com_weighted = DVec3::ZERO;
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
-            let m = part_total_mass(pb, entry) * panels[i];
+            let m = part_total_mass(pb, entry);
             com_total_mass += m;
             com_weighted += geo[i].position * m;
         }
@@ -408,7 +405,7 @@ impl ShipBlueprint {
 
         let mut moment_of_inertia_kg_m2 = DVec3::ZERO;
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
-            let m = part_total_mass(pb, entry) * panels[i];
+            let m = part_total_mass(pb, entry);
             let self_inertia = if let (
                 CatalogEntry::Wing(_),
                 PartParams::Wing {
@@ -416,7 +413,7 @@ impl ShipBlueprint {
                 },
             ) = (entry, &pb.params)
             {
-                wing_self_inertia(m, *span as f64, *root_chord as f64, panels[i])
+                wing_self_inertia(m, *span as f64, *root_chord as f64)
             } else {
                 let (r, l) = part_cylinder_dims(entry, &pb.params, geo[i].diameter);
                 cylinder_principal_inertia(m, r, l)
@@ -435,6 +432,7 @@ impl ShipBlueprint {
             reactant_fractions,
             resources,
             moment_of_inertia_kg_m2,
+            center_of_mass_m: com,
             max_reaction_torque_n_m,
             wing_area_m2,
             mean_aerodynamic_chord_m,
@@ -543,15 +541,14 @@ fn ship_geometry(blueprint: &ShipBlueprint, entries: &[&CatalogEntry]) -> Vec<Pa
     geo
 }
 
-/// Crude thin-wing self-inertia about its own CoM: model the span as a flat
-/// rod along body X (chord along Y, negligible thickness). A mirrored pair
-/// spans roughly tip-to-tip, so its `full_span` is doubled. Placeholder in
-/// the same spirit as the per-part cylinder model until an airfoil mass
-/// distribution exists; the parallel-axis lever dominates for an off-centre
-/// wing regardless.
-fn wing_self_inertia(mass_kg: f64, span_m: f64, chord_m: f64, panels: f64) -> DVec3 {
-    let full_span = span_m * panels;
-    let i_span = mass_kg * full_span * full_span / 12.0; // bending about Y and Z
+/// Crude thin-wing self-inertia about its own CoM: model the panel as a flat
+/// rod along body X (chord along Y, negligible thickness). One panel per
+/// entity now (a mirrored pair is two entities, summed by the caller).
+/// Placeholder in the same spirit as the per-part cylinder model until an
+/// airfoil mass distribution exists; the parallel-axis lever dominates for an
+/// off-centre wing regardless.
+fn wing_self_inertia(mass_kg: f64, span_m: f64, chord_m: f64) -> DVec3 {
+    let i_span = mass_kg * span_m * span_m / 12.0; // bending about Y and Z
     let i_chord = mass_kg * chord_m * chord_m / 12.0; // about the span axis X
     DVec3::new(i_chord, i_span, i_span)
 }
@@ -632,8 +629,8 @@ fn node_offset(
     node: &str,
 ) -> Option<Vec3> {
     match (entry, params) {
-        (CatalogEntry::Pod(_), _) => {
-            (node == "bottom").then_some(Vec3::new(0.0, -effective_d * 0.9, 0.0))
+        (CatalogEntry::Pod(p), _) => {
+            (node == "bottom").then_some(Vec3::new(0.0, -effective_d * p.geometry.length_factor(), 0.0))
         }
         (CatalogEntry::Engine(_), _) => match node {
             "top" => Some(Vec3::ZERO),
@@ -678,7 +675,7 @@ fn node_offset(
 fn part_cylinder_dims(entry: &CatalogEntry, params: &PartParams, effective_d: f32) -> (f64, f64) {
     let r = (effective_d * 0.5) as f64;
     let l = match (entry, params) {
-        (CatalogEntry::Pod(_), _) => (effective_d * 0.9) as f64,
+        (CatalogEntry::Pod(p), _) => (effective_d * p.geometry.length_factor()) as f64,
         (CatalogEntry::Engine(_), _) => (effective_d * 0.9) as f64,
         (CatalogEntry::Intake(i), _) => i.length as f64,
         (CatalogEntry::Decoupler(_), _) => 0.2,
@@ -760,6 +757,11 @@ pub(crate) fn part_dry_mass(entry: &CatalogEntry, params: &PartParams) -> f32 {
                 ..
             },
         ) => w.mass_per_m2 * wing_panel_area(*span, *root_chord, *tip_chord),
+        // A self-contained gearbox: the formula counts every leg (both legs
+        // for `gear_main`), so this is the whole assembly's mass.
+        (CatalogEntry::Gear(g), PartParams::Gear { strut_length, .. }) => {
+            gear_dry_mass(g, *strut_length)
+        }
         _ => 0.0,
     }
 }
@@ -1090,10 +1092,26 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_wing_doubles_area_and_mass() {
+    fn mirrored_wing_pair_doubles_area_and_mass() {
+        use crate::attach::SurfaceMountKind;
         use crate::blueprint::SurfaceConnection;
         let cat = catalog();
-        // Hyperion pod + one mirrored main wing surface-mounted on it.
+        // KSP symmetry: the mirrored pair is two real wing parts sharing a
+        // symmetry group, so the area/mass doubling comes from there being
+        // two entities — not a per-part multiplier.
+        let wing = || PartBlueprint {
+            catalog_id: "wing_std".into(),
+            params: PartParams::Wing {
+                span: 5.0,
+                root_chord: 2.0,
+                tip_chord: 1.0,
+                sweep: 0.2,
+                dihedral: 0.05,
+                thickness: 0.12,
+                incidence: 0.0,
+            },
+            resources: None,
+        };
         let bp = ShipBlueprint {
             name: "plane".into(),
             root: 0,
@@ -1103,72 +1121,8 @@ mod tests {
                     params: PartParams::None,
                     resources: None,
                 },
-                PartBlueprint {
-                    catalog_id: "wing_std".into(),
-                    params: PartParams::Wing {
-                        span: 5.0,
-                        root_chord: 2.0,
-                        tip_chord: 1.0,
-                        sweep: 0.2,
-                        dihedral: 0.05,
-                        thickness: 0.12,
-                        incidence: 0.0,
-                    },
-                    resources: None,
-                },
-            ],
-            connections: vec![],
-            surface_mounts: vec![SurfaceConnection {
-                parent: 0,
-                child: 1,
-                kind: crate::attach::SurfaceMountKind::BodySkin,
-                station: 0.5,
-                angle: std::f32::consts::FRAC_PI_2,
-                symmetry: MountSymmetry::Mirrored,
-            }],
-        };
-        let s = bp.stats(&cat).unwrap();
-        // Panel planform area = 5 · (2 + 1)/2 = 7.5 m²; mirrored → 15 m².
-        assert!((s.wing_area_m2 - 15.0).abs() < 1e-3);
-        assert!(s.mean_aerodynamic_chord_m > 0.0);
-        // Wing dry mass = 22 kg/m² · 7.5 · 2 panels = 330 kg, on top of the
-        // 5800 kg Hyperion pod.
-        assert!((s.dry_mass_kg - (5800.0 + 330.0)).abs() < 1.0);
-    }
-
-    #[test]
-    fn mirrored_wing_pylon_engine_doubles_thrust_and_mass() {
-        use crate::attach::SurfaceMountKind;
-        use crate::blueprint::SurfaceConnection;
-
-        let cat = catalog();
-        let bp = ShipBlueprint {
-            name: "jet".into(),
-            root: 0,
-            parts: vec![
-                PartBlueprint {
-                    catalog_id: "hyperion".into(),
-                    params: PartParams::None,
-                    resources: None,
-                },
-                PartBlueprint {
-                    catalog_id: "wing_std".into(),
-                    params: PartParams::Wing {
-                        span: 5.0,
-                        root_chord: 2.0,
-                        tip_chord: 1.0,
-                        sweep: 0.2,
-                        dihedral: 0.05,
-                        thickness: 0.12,
-                        incidence: 0.0,
-                    },
-                    resources: None,
-                },
-                PartBlueprint {
-                    catalog_id: "mistral_jet".into(),
-                    params: PartParams::None,
-                    resources: None,
-                },
+                wing(), // 1 primary
+                wing(), // 2 mirror counterpart
             ],
             connections: vec![],
             surface_mounts: vec![
@@ -1178,15 +1132,98 @@ mod tests {
                     kind: SurfaceMountKind::BodySkin,
                     station: 0.5,
                     angle: std::f32::consts::FRAC_PI_2,
-                    symmetry: MountSymmetry::Mirrored,
+                    symmetry_group: Some(0),
+                },
+                SurfaceConnection {
+                    parent: 0,
+                    child: 2,
+                    kind: SurfaceMountKind::BodySkin,
+                    station: 0.5,
+                    angle: -std::f32::consts::FRAC_PI_2,
+                    symmetry_group: Some(0),
+                },
+            ],
+        };
+        let s = bp.stats(&cat).unwrap();
+        // Each panel area = 5 · (2 + 1)/2 = 7.5 m²; two panels → 15 m².
+        assert!((s.wing_area_m2 - 15.0).abs() < 1e-3);
+        assert!(s.mean_aerodynamic_chord_m > 0.0);
+        // Wing dry mass = 22 kg/m² · 7.5 · 2 panels = 330 kg, plus the
+        // 5800 kg Hyperion pod.
+        assert!((s.dry_mass_kg - (5800.0 + 330.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn nacelle_pair_doubles_thrust_and_mass() {
+        use crate::attach::SurfaceMountKind;
+        use crate::blueprint::SurfaceConnection;
+
+        let cat = catalog();
+        let wing = || PartBlueprint {
+            catalog_id: "wing_std".into(),
+            params: PartParams::Wing {
+                span: 5.0,
+                root_chord: 2.0,
+                tip_chord: 1.0,
+                sweep: 0.2,
+                dihedral: 0.05,
+                thickness: 0.12,
+                incidence: 0.0,
+            },
+            resources: None,
+        };
+        let nacelle = || PartBlueprint {
+            catalog_id: "mistral_jet".into(),
+            params: PartParams::None,
+            resources: None,
+        };
+        let bp = ShipBlueprint {
+            name: "jet".into(),
+            root: 0,
+            parts: vec![
+                PartBlueprint {
+                    catalog_id: "hyperion".into(),
+                    params: PartParams::None,
+                    resources: None,
+                },
+                wing(),    // 1 primary wing
+                wing(),    // 2 mirror wing
+                nacelle(), // 3 nacelle on primary wing
+                nacelle(), // 4 nacelle on mirror wing
+            ],
+            connections: vec![],
+            surface_mounts: vec![
+                SurfaceConnection {
+                    parent: 0,
+                    child: 1,
+                    kind: SurfaceMountKind::BodySkin,
+                    station: 0.5,
+                    angle: std::f32::consts::FRAC_PI_2,
+                    symmetry_group: Some(0),
+                },
+                SurfaceConnection {
+                    parent: 0,
+                    child: 2,
+                    kind: SurfaceMountKind::BodySkin,
+                    station: 0.5,
+                    angle: -std::f32::consts::FRAC_PI_2,
+                    symmetry_group: Some(0),
                 },
                 SurfaceConnection {
                     parent: 1,
-                    child: 2,
+                    child: 3,
                     kind: SurfaceMountKind::WingPylon,
                     station: 0.45,
                     angle: 0.0,
-                    symmetry: MountSymmetry::Mirrored,
+                    symmetry_group: Some(1),
+                },
+                SurfaceConnection {
+                    parent: 2,
+                    child: 4,
+                    kind: SurfaceMountKind::WingPylon,
+                    station: 0.45,
+                    angle: 0.0,
+                    symmetry_group: Some(1),
                 },
             ],
         };

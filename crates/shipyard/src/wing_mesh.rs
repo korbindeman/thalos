@@ -14,12 +14,11 @@
 //! axis at the mount station (the wing entity's transform places that
 //! point; see the transform systems). Host body axis is +Y (fore = toward
 //! the nose / "top"); the circular cross-section lies in X/Z. A mount angle
-//! `θ` gives the primary panel's outboard radial `r̂ = (sin θ, 0, cos θ)`
-//! (θ = 0 → +Z "up", θ = π/2 → +X "right"). A `Mirrored` wing appends a
-//! second panel reflected across the host X = 0 plane, so a side mount
-//! becomes a left/right pair and a dorsal mount a single fin.
+//! `θ` gives the panel's outboard radial `r̂ = (sin θ, 0, cos θ)`
+//! (θ = 0 → +Z "up", θ = π/2 → +X "right"). Mirror symmetry is a separate
+//! entity with a reflected `θ` (and `Wing.incidence`), not a flag here —
+//! see [`crate::SymmetryGroup`].
 
-use crate::attach::MountSymmetry;
 use crate::part::Wing;
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -53,7 +52,16 @@ pub fn wing_panel_frame(wing: &Wing, angle: f32, parent_radius: f32) -> WingPane
     // Incidence pitches the chord's leading edge up about the span axis.
     let fore_flat = Vec3::Y;
     let fore_dir = Quat::from_axis_angle(span_dir, wing.incidence) * fore_flat;
-    let thick_dir = span_dir.cross(fore_dir).normalize_or(Vec3::Z);
+    // Thickness normal = span × fore, but that cross product flips sign when
+    // the span flips (a left wing), which would point the wing's "up" — and
+    // anything mounted by it, like a pylon nacelle — *downward*, giving point
+    // (radial) symmetry instead of mirror symmetry. Pin the normal to the
+    // dorsal (+Z) hemisphere so left and right are true reflections: tops up,
+    // nacelles hang down, on both sides.
+    let mut thick_dir = span_dir.cross(fore_dir).normalize_or(Vec3::Z);
+    if thick_dir.z < 0.0 {
+        thick_dir = -thick_dir;
+    }
 
     let root_center = r_hat * parent_radius;
     let tip_center = root_center + span_dir * wing.span - fore_dir * (wing.span * wing.sweep.tan());
@@ -68,19 +76,17 @@ pub fn wing_panel_frame(wing: &Wing, angle: f32, parent_radius: f32) -> WingPane
     }
 }
 
-/// Build the host-local mesh for `wing` mounted at `angle` on a host of
-/// radius `parent_radius`, including the mirrored panel when `symmetry` is
-/// [`MountSymmetry::Mirrored`].
-pub fn build_wing_mesh(
-    wing: &Wing,
-    angle: f32,
-    symmetry: MountSymmetry,
-    parent_radius: f32,
-) -> Mesh {
+/// Build the host-local mesh for one wing panel mounted at `angle` on a
+/// host of radius `parent_radius`.
+///
+/// **One entity = one panel.** Under KSP-style mirror symmetry the mirror
+/// is a *separate* entity whose own `angle` (and `Wing.incidence`) are
+/// reflected, so it renders its own correctly-mirrored panel from this same
+/// builder — no "draw both sides" flag (see [`crate::SymmetryGroup`]).
+pub fn build_wing_mesh(wing: &Wing, angle: f32, parent_radius: f32) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // Primary panel: outboard radial from the mount angle.
     let r_hat = Vec3::new(angle.sin(), 0.0, angle.cos());
     append_panel(
         wing,
@@ -90,22 +96,6 @@ pub fn build_wing_mesh(
         &mut positions,
         &mut indices,
     );
-
-    if symmetry == MountSymmetry::Mirrored {
-        // The mirror is the *primary panel reflected across X = 0* — same
-        // shape, tip raised by the same dihedral toward +Z. `append_panel`
-        // does that reflection itself (negates X + reverses winding) when
-        // `mirror` is set, so it takes the primary `r_hat`, not a
-        // pre-reflected radial (passing both would cancel out).
-        append_panel(
-            wing,
-            r_hat,
-            parent_radius,
-            true,
-            &mut positions,
-            &mut indices,
-        );
-    }
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -208,18 +198,13 @@ mod tests {
     #[test]
     fn single_panel_is_one_box_on_the_clicked_side() {
         // angle = π/2 → +X (right) side.
-        let m = build_wing_mesh(
-            &test_wing(),
-            std::f32::consts::FRAC_PI_2,
-            MountSymmetry::Single,
-            1.0,
-        );
+        let m = build_wing_mesh(&test_wing(), std::f32::consts::FRAC_PI_2, 1.0);
         let pos = m
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .unwrap()
             .as_float3()
             .unwrap();
-        // 6 quads × 4 vertices.
+        // 6 quads × 4 vertices, one panel.
         assert_eq!(pos.len(), 24);
         // The whole panel sits outboard on +X (root at the radius).
         assert!(pos.iter().all(|p| p[0] > 0.0));
@@ -229,24 +214,32 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_pair_reaches_both_sides() {
-        let m = build_wing_mesh(
-            &test_wing(),
-            std::f32::consts::FRAC_PI_2,
-            MountSymmetry::Mirrored,
-            1.0,
-        );
+    fn reflected_angle_lands_on_the_opposite_side() {
+        // The mirror counterpart renders by building at the reflected angle
+        // (−θ), which must put its single panel entirely on the −X side.
+        let m = build_wing_mesh(&test_wing(), -std::f32::consts::FRAC_PI_2, 1.0);
         let pos = m
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .unwrap()
             .as_float3()
             .unwrap();
-        assert_eq!(pos.len(), 48); // two panels
-        let max_x = pos.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
-        let min_x = pos.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
+        assert_eq!(pos.len(), 24);
         assert!(
-            max_x > 1.0 && min_x < -1.0,
-            "mirrored pair should span both sides: {min_x}..{max_x}"
+            pos.iter().all(|p| p[0] < 0.0),
+            "−θ panel should sit entirely on −X"
         );
+    }
+
+    #[test]
+    fn mirror_wing_is_a_reflection_not_a_radial_rotation() {
+        // A left/right pair must be a true mirror: both tops face up (+Z), so
+        // a pylon nacelle (hung along −thick) drops on both sides. If the
+        // mirror's normal flipped to −Z, the nacelle would point up → radial.
+        let w = test_wing();
+        let right = wing_panel_frame(&w, std::f32::consts::FRAC_PI_2, 1.0);
+        let left = wing_panel_frame(&w, -std::f32::consts::FRAC_PI_2, 1.0);
+        assert!(right.thick_dir.z > 0.0, "right wing top faces up");
+        assert!(left.thick_dir.z > 0.0, "left wing top faces up");
+        assert!(right.tip_center.x > 0.0 && left.tip_center.x < 0.0);
     }
 }

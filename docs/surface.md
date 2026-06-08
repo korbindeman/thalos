@@ -1228,11 +1228,66 @@ direct canonical state change for now, not an emitted event).
   performs). Whole-craft tolerance becomes `min` over contacting parts.
 - **Landing legs.** A dedicated part with a wide footprint and impact
   absorption (higher tolerance + a suspension constraint) so tall
-  stacks land upright without tipping. Adds a `Part` type +
-  collider; deferred.
+  stacks land upright without tipping. Aircraft landing *gear* (wheels)
+  is now implemented as raycast suspension (§7); rocket landing *legs*
+  (no roll, wide static footprint) can reuse the same per-contact force
+  channel with rolling/steer disabled.
 - **Landing on water / oceans.** Ocean bodies use a flat-water
   placeholder; splashdown vs. terrain impact is unaddressed.
 - **`SimEvent` pipeline.** When the event model
   (`simulation.md` §"Event model") is built, destruction should emit
   `SimEvent::Impact` instead of being a bare state mutation, so map
   warnings / mission logic can subscribe.
+
+## Functional landing gear (wheels)
+
+Landing gear are real wheels you can roll and taxi on, not cosmetic
+struts. The model is **raycast suspension** on the single craft rigid
+body — no physical wheel colliders or joints (those are unstable at
+planet scale). It lives in
+[`crates/game/src/local_physics.rs`](crates/game/src/local_physics.rs)
+as `apply_landing_gear_forces`, running in the local-physics chain right
+**after** `apply_local_forces`, so wheel forces add on top of the gravity
++ thrust + reaction-wheel torque already written into the craft's
+acceleration accumulators.
+
+- **Where the wheels are.** At craft spawn, `build_wheel_set` walks the
+  gear parts and, via `thalos_shipyard::gear_leg_frames` (the *same*
+  per-leg geometry `build_gear_mesh` draws), caches a `WheelSet` of
+  craft-local strut-top points and suspension/roll/axle axes. Collider
+  wheels therefore sit exactly under the rendered wheels, for any craft,
+  with no hand-placed constants.
+- **Per wheel, per frame.** A ray is cast from the strut top straight
+  down the suspension axis (`Rotation.0 * r̂`, belly-ward) against every
+  collider *except the craft* — which transparently finds the runway slab
+  or the terrain patch, whichever is closest, and reports nothing when the
+  wheel is airborne. From the hit: a one-way **spring + damper** along the
+  strut (using the contact-*point* velocity, ground-relative via
+  `ω_body × r`), **lateral grip** resisting sideways slip, and a
+  **longitudinal** force (rolling resistance + brake) — both clamped to a
+  friction circle so wheels only ever remove ground-relative speed, never
+  propel. Forward motion still comes from engine thrust.
+- **Steering & brake.** Nosewheel steering reuses the yaw axis (A/D,
+  KSP-style — no separate binding); it rotates the single-leg gear's
+  roll/axle directions about the strut, and the resulting off-CoM lateral
+  grip yaws the craft (emergent, friction-limited). The wheel brake is a
+  held key (`B`, `flight.wheel_brake`) scaling the longitudinal force.
+- **Gating.** Only when Avian owns translation (`AvianRole::Full`) for a
+  live, non-destroyed `Ship`. On the runway scenario the craft is already
+  `Full` (a terrain patch attaches at AGL≈0), so taxiing works straight
+  from the parked state on throttle-up. At warp≠1× the role is `Paused`
+  and the system is inert, so no warp-scaled `dt` ever reaches the spring.
+- **Belly colliders stay.** The compound fuselage/engine cylinder
+  colliders are kept as the `SweptCcd`/impact backstop; with the craft
+  spawned at gear-bottom clearance the belly rides above the surface and
+  only engages on a gear-collapse/abnormal landing.
+- **Tuning.** `GearTuning` (spring/damper, friction `mu`, lateral
+  stiffness, rolling/brake coefficients, max steer, travel, ray margin) is
+  a Reflect-registered resource — live-tune over BRP while taxiing rather
+  than recompiling. Defaults target the ~10–20 t demo aircraft; the craft
+  settles to a static squat of `(m·g/N)/k_spring`.
+
+Not yet covered: powered wheels (drive torque from a throttle — the user's
+intended later extension), gear retraction, and rolling friction that
+holds statically on a slope (the longitudinal force is viscous, so a
+parking brake on a grade creeps; add a static latch when needed).

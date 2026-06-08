@@ -11,6 +11,7 @@
 //! ship-view meshes use 1.0 (1 unit = 1 m) inside BigSpace cells.
 
 mod body_lod;
+mod clouds;
 mod generation;
 pub(crate) mod ground_terrain;
 mod lighting;
@@ -79,6 +80,7 @@ impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(SceneDepthPlugin)
             .add_plugins(TerrainResidencyPlugin)
+            .add_plugins(clouds::CloudsRenderPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())

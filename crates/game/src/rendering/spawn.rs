@@ -120,6 +120,32 @@ fn build_multi_scatter_lut(
     images.add(image)
 }
 
+/// 1×1 "clear" cloud layer (RGBA32F `(0, 0, 0, 1)` → transmittance 1) used as
+/// the [`BodySkyMaterial::cloud_layer`] fallback. The game swaps in the live
+/// `thalos_volumetric_clouds` texture for the body the player is at; every other
+/// body keeps this, so the cloud composite in `body_sky.wgsl` is a no-op there.
+fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{
+        Extent3d, TextureDimension, TextureFormat, TextureUsages,
+    };
+    // RGBA32F (0.0, 0.0, 0.0, 1.0), little-endian (1.0f32 = 0x3F80_0000).
+    let data = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x3F];
+    let mut image = Image::new(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba32Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    images.add(image)
+}
+
 pub(super) fn spawn_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -145,6 +171,9 @@ pub(super) fn spawn_bodies(
     // Unit rectangle (corners at ±1) shared across all planet billboards.
     // The vertex shader scales it by params.radius each frame.
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
+    // Fallback cloud layer for every body's BodySky; the live volumetric cloud
+    // texture is bound per-frame for the body the player is at.
+    let blank_cloud = blank_cloud_layer(&mut images);
     // Star icosphere — emissive star meshes still use a real sphere
     // (no impostor). Procedural bodies and gas giants render as
     // camera-facing quads (`billboard_mesh`); solid-impostor bodies
@@ -207,6 +236,7 @@ pub(super) fn spawn_bodies(
                 scene_depth: scene_depth.handle.clone(),
                 cloud_cover: sky_cloud_cover,
                 multi_scatter_lut,
+                cloud_layer: blank_cloud.clone(),
             };
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),

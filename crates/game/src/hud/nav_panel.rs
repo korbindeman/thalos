@@ -932,13 +932,18 @@ pub fn update_maneuver_visuals(
     >,
 ) {
     let directive = schedule.next();
-    let has_node = !plan.nodes.is_empty();
+    // The burn HUD tracks the upcoming/active burn only. Spent (`Executed`)
+    // nodes linger in the plan for review but must not keep this panel pinned
+    // — counting just the directive-driving nodes makes a completed burn fall
+    // through the existing "executed, now sticky-fade" path unchanged.
+    let active_node_count = plan.nodes.iter().filter(|n| n.drives_directive()).count();
+    let has_node = active_node_count > 0;
     let autopilot_executing = matches!(
         autopilot.state(),
         AutopilotState::Engaging { .. } | AutopilotState::Burn { .. }
     );
 
-    let node_count = plan.nodes.len();
+    let node_count = active_node_count;
     if has_node {
         if node_count != panel_state.last_node_count {
             panel_state.dismissed = false;
@@ -1172,7 +1177,7 @@ fn nav_button_icon(
 fn mode_available(mode: NavigationMode, target: &TargetBody, plan: &ManeuverPlan) -> bool {
     match mode {
         NavigationMode::Target | NavigationMode::AntiTarget => target.target.is_some(),
-        NavigationMode::ManeuverNode => !plan.nodes.is_empty(),
+        NavigationMode::ManeuverNode => plan.nodes.iter().any(|n| n.drives_directive()),
         _ => true,
     }
 }

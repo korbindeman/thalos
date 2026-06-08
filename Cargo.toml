@@ -13,6 +13,7 @@ members = [
     "crates/bake_dump",
     "crates/udlod",
     "crates/physics_local",
+    "crates/volumetric_clouds",
 ]
 
 [workspace.package]

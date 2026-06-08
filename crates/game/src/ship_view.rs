@@ -1,5 +1,5 @@
 //! Player ship rendering — loads the spawn situation's ship blueprint on
-//! startup (`ships/apollo.ron` by default, `ships/skyhawk.ron` for the runway
+//! startup (`ships/apollo.ron` by default, `ships/a220.ron` for the runway
 //! scenarios; see [`crate::spawn::SpawnSituation::ship_blueprint_path`]),
 //! spawns its parts as children of a [`PlayerShip`] root, and keeps the root's
 //! world position in sync with the physics ship state each frame.
@@ -25,10 +25,11 @@ use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
-    FuelTank, JetNacelleMount, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint,
+    FuelTank, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint,
     ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipyardPlugin, SurfaceMount,
-    SurfaceMountKind, Wing, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
-    build_wing_mesh, jet_nacelle_length, stainless_steel_base,
+    PodGeometry, SurfaceMountKind, Wing, build_cockpit_mesh, build_gear_mesh,
+    build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh, build_wing_mesh, jet_nacelle_length,
+    landing_gear_base, pod_visual_profile, stainless_steel_base,
 };
 
 use crate::SimStage;
@@ -77,6 +78,7 @@ impl Plugin for ShipViewPlugin {
                     rebuild_ship_visuals,
                     rebuild_ship_wing_visuals,
                     rebuild_ship_nacelle_visuals,
+                    rebuild_ship_gear_visuals,
                     update_ship_part_transforms.after(rebuild_ship_visuals),
                     update_ship_part_shader_params.after(rebuild_ship_visuals),
                     update_ship_camera_offset.after(update_ship_part_transforms),
@@ -146,6 +148,7 @@ pub(crate) fn spawn_player_ship(
     };
     sim.simulation.set_ship_params(ShipParameters {
         moment_of_inertia: stats.moment_of_inertia_kg_m2,
+        center_of_mass: stats.center_of_mass_m,
         max_torque: DVec3::splat(stats.max_reaction_torque_n_m),
         thrust_n: 0.0,
         mass_flow_kg_per_s: 0.0,
@@ -398,19 +401,20 @@ fn visual_spec(
     intake: Option<&AirIntake>,
 ) -> Option<VisualSpec> {
     if let Some(p) = pod {
-        let d = p.diameter;
-        let h = d * 0.9;
-        Some(VisualSpec {
-            mesh: ConicalFrustum {
-                radius_top: d * 0.3,
-                radius_bottom: d * 0.5,
+        let (radius_top, radius_bottom, h) = pod_visual_profile(p.diameter, p.geometry);
+        let mesh = match p.geometry {
+            // Rounded ogive nose (airliner radome) vs the plain capsule cone.
+            PodGeometry::AircraftCockpit => build_cockpit_mesh(p.diameter, h),
+            PodGeometry::Capsule => ConicalFrustum {
+                radius_top,
+                radius_bottom,
                 height: h,
             }
             .mesh()
             .resolution(PART_RESOLUTION)
             .into(),
-            height: h,
-        })
+        };
+        Some(VisualSpec { mesh, height: h })
     } else if dec.is_some() {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         let h = 0.2;
@@ -601,15 +605,10 @@ fn rebuild_ship_visuals(
                 ))
                 .id()
         } else {
-            // CommandPod and Engine have no `PartMaterial` yet: plain PBR
-            // metal until they get their own shader. Enough to tell parts
-            // apart visually.
-            let mat = std_materials.add(StandardMaterial {
-                base_color: Color::srgb(0.6, 0.62, 0.65),
-                perceptual_roughness: 0.35,
-                metallic: 0.85,
-                ..default()
-            });
+            // CommandPod and Engine have no `PartMaterial` yet: give them the
+            // same stainless-steel base finish as the fuel tank so the whole
+            // craft reads as one material (no procedural seam shader on these).
+            let mat = std_materials.add(stainless_steel_base());
             commands
                 .spawn((
                     Mesh3d(mesh),
@@ -653,19 +652,11 @@ fn rebuild_ship_wing_visuals(
             .ok()
             .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
             .unwrap_or(1.0);
-        let mesh = meshes.add(build_wing_mesh(
-            wing,
-            mount.angle,
-            mount.symmetry,
-            parent_radius,
-        ));
+        let mesh = meshes.add(build_wing_mesh(wing, mount.angle, parent_radius));
         let mat = std_materials.add(StandardMaterial {
-            base_color: Color::srgb(0.6, 0.62, 0.65),
-            perceptual_roughness: 0.5,
-            metallic: 0.6,
             double_sided: true,
             cull_mode: None,
-            ..default()
+            ..stainless_steel_base()
         });
         let body = commands
             .spawn((
@@ -726,14 +717,57 @@ fn rebuild_ship_nacelle_visuals(
                 parent_radius,
                 span_fraction: mount.station,
                 chord_fraction: mount.angle,
-                symmetry: mount.symmetry,
             },
         ));
+        let mat = std_materials.add(stainless_steel_base());
+        let body = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform::IDENTITY,
+                Visibility::default(),
+                NoFrustumCulling,
+                PartVisual,
+            ))
+            .id();
+        commands.entity(e).add_child(body);
+    }
+}
+
+/// Build the mesh child for each gearbox on spawn (and the rare runtime
+/// change). Mirrors the editor's `rebuild_gear_visuals`: the mesh is in the
+/// host-local frame and the gear entity's transform places it. A gearbox draws
+/// all its legs in one mesh — no symmetry. Plain double-sided metal until gear
+/// gets a dedicated material.
+fn rebuild_ship_gear_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    gears: Query<
+        (Entity, &Gear, &SurfaceMount, Option<&Children>),
+        Or<(Added<Gear>, Changed<Gear>, Changed<SurfaceMount>)>,
+    >,
+    host_nodes: Query<&AttachNodes>,
+    stale: Query<(), With<PartVisual>>,
+) {
+    for (e, gear, mount, children) in gears.iter() {
+        if let Some(ch) = children {
+            for c in ch.into_iter() {
+                if stale.get(*c).is_ok() {
+                    commands.entity(*c).despawn();
+                }
+            }
+        }
+        let parent_radius = host_nodes
+            .get(mount.parent)
+            .ok()
+            .and_then(|n| n.get("top").map(|nd| nd.diameter * 0.5))
+            .unwrap_or(1.0);
+        let mesh = meshes.add(build_gear_mesh(gear, mount.angle, parent_radius));
         let mat = std_materials.add(StandardMaterial {
-            base_color: Color::srgb(0.55, 0.57, 0.6),
-            perceptual_roughness: 0.42,
-            metallic: 0.75,
-            ..default()
+            double_sided: true,
+            cull_mode: None,
+            ..landing_gear_base()
         });
         let body = commands
             .spawn((
@@ -856,6 +890,7 @@ fn update_ship_camera_offset(
             Option<&Engine>,
             Option<&AirIntake>,
             Option<&Wing>,
+            Option<&Gear>,
         ),
         With<Part>,
     >,
@@ -869,12 +904,13 @@ fn update_ship_camera_offset(
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         let mut hits = 0;
         for child in children.iter() {
-            let Ok((t, nodes, pod, dec, adapter, tank, engine, intake, wing)) = parts.get(child)
+            let Ok((t, nodes, pod, dec, adapter, tank, engine, intake, wing, gear)) =
+                parts.get(child)
             else {
                 continue;
             };
             let Some((height, radius)) =
-                visual_extent(nodes, pod, dec, adapter, tank, engine, intake, wing)
+                visual_extent(nodes, pod, dec, adapter, tank, engine, intake, wing, gear)
             else {
                 continue;
             };
@@ -914,9 +950,10 @@ fn visual_extent(
     engine: Option<&Engine>,
     intake: Option<&AirIntake>,
     wing: Option<&Wing>,
+    gear: Option<&Gear>,
 ) -> Option<(f32, f32)> {
     if let Some(p) = pod {
-        Some((p.diameter * 0.9, p.diameter * 0.5))
+        Some((p.diameter * p.geometry.length_factor(), p.diameter * 0.5))
     } else if dec.is_some() {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(1.0);
         Some((0.2, d * 0.5))
@@ -931,6 +968,12 @@ fn visual_extent(
     } else if let Some(w) = wing {
         // Chord runs along the body axis; the span reaches outboard in X/Z.
         Some((w.root_chord, w.span + w.root_chord))
+    } else if let Some(g) = gear {
+        // Struts + wheels hang below the belly along the mount radial; the
+        // crude AABB just needs a reach large enough to keep the camera framing
+        // it. Height ≈ strut + wheel, radius ≈ the same reach outboard.
+        let reach = g.strut_length + g.wheel_radius * 2.0;
+        Some((reach, reach))
     } else if let Some(i) = intake {
         Some((i.length, i.diameter * 0.5))
     } else {

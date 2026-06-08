@@ -16,7 +16,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::attach::MountSymmetry;
 use crate::blueprint::{
     ShipBlueprint, check_params_match, check_resource_amounts_allowed, pools_for,
 };
@@ -351,13 +350,12 @@ impl ShipBlueprint {
                 parent[c.child] = Some(c.parent);
             }
         }
-        let mut panels = vec![1.0_f64; self.parts.len()];
+        // KSP symmetry: a mirrored pair is two real parts, each counted once —
+        // no per-part doubling here. Surface mounts still record a parent so a
+        // wing/nacelle drops with the host stage it sits on.
         for m in &self.surface_mounts {
             if m.child < parent.len() {
                 parent[m.child] = Some(m.parent);
-            }
-            if m.child < panels.len() && m.symmetry == MountSymmetry::Mirrored {
-                panels[m.child] = 2.0;
             }
         }
 
@@ -401,7 +399,7 @@ impl ShipBlueprint {
                     .collect();
                 let engine = match entry {
                     CatalogEntry::Engine(e) => Some(SummaryEngine {
-                        thrust_n: e.thrust as f64 * panels[i],
+                        thrust_n: e.thrust as f64,
                         isp_s: e.isp as f64,
                         reactants: e
                             .reactants
@@ -413,7 +411,7 @@ impl ShipBlueprint {
                 };
                 SummaryPart {
                     parent: parent[i],
-                    dry_mass_kg: part_dry_mass(entry, &pb.params) as f64 * panels[i],
+                    dry_mass_kg: part_dry_mass(entry, &pb.params) as f64,
                     resources,
                     engine,
                 }

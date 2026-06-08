@@ -118,3 +118,15 @@ pub fn stainless_steel_base() -> StandardMaterial {
         ..default()
     }
 }
+
+/// Matte dark finish for landing gear (struts + wheels). Deliberately *not*
+/// the mirror-polish stainless of the hull: low metallic and high roughness so
+/// the gear reads as painted oleo struts / rubber tyres rather than steel.
+pub fn landing_gear_base() -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::srgb(0.12, 0.12, 0.13),
+        metallic: 0.1,
+        perceptual_roughness: 0.85,
+        ..default()
+    }
+}

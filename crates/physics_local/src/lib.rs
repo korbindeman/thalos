@@ -18,10 +18,12 @@ use thalos_world::BodyId;
 
 pub mod avian {
     pub use avian3d::prelude::{
-        AngularInertia, AngularVelocity, CoefficientCombine, Collider, ConstantAngularAcceleration,
-        ConstantLinearAcceleration, ContactGraph, CustomPositionIntegration, Friction,
-        LinearVelocity, LockedAxes, Mass, NoAutoAngularInertia, NoAutoMass, Physics, PhysicsTime,
-        Position, Restitution, RigidBody, Rotation, SleepingDisabled, SweptCcd,
+        AngularInertia, AngularVelocity, CenterOfMass, CoefficientCombine, Collider,
+        ConstantAngularAcceleration, ConstantLinearAcceleration, ContactGraph,
+        CustomPositionIntegration, Friction, LinearVelocity, LockedAxes, Mass,
+        NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Physics, PhysicsTime, Position,
+        RayHitData, Restitution, RigidBody, Rotation, SleepingDisabled, SpatialQuery,
+        SpatialQueryFilter, SweptCcd,
     };
 }
 

@@ -43,17 +43,60 @@ pub enum CatalogEntry {
     Adapter(AdapterSpec),
     Tank(TankSpec),
     Wing(WingSpec),
+    Gear(GearSpec),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodSpec {
     pub display_name: String,
+    /// Silhouette: a blunt crew capsule (default) or a slender aircraft
+    /// cockpit cone. Pre-cockpit saves omit it and load as `Capsule`, so
+    /// existing pods are byte-identical.
+    #[serde(default)]
+    pub geometry: PodGeometry,
     pub diameter: f32,
     pub dry_mass: f32,
     pub reaction_wheel_torque: f32,
     /// Whitelisted resource storage this part may carry.
     #[serde(default)]
     pub storage: Vec<ResourceStorageSpec>,
+}
+
+/// Command-pod silhouette. Selects the editor / in-game mesh **and** the
+/// body's length-to-diameter ratio. Mirrors [`EngineGeometry`]: a backend
+/// picks geometry, never its own physics. Node layout, MOI cylinder,
+/// collider height, and visual height all read
+/// [`PodGeometry::length_factor`] so rendering and physics never disagree
+/// on the pod's extent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PodGeometry {
+    /// Blunt crew capsule — a truncated cone, slightly taller than wide.
+    #[default]
+    Capsule,
+    /// Aircraft nose: a rounded ogive radome (see [`crate::build_cockpit_mesh`])
+    /// about as long as it is wide, blunt and convex rather than a needle
+    /// spike. A simple symmetric placeholder; a real nose-low model can replace
+    /// it later.
+    AircraftCockpit,
+}
+
+impl PodGeometry {
+    pub fn label(self) -> &'static str {
+        match self {
+            PodGeometry::Capsule => "Capsule",
+            PodGeometry::AircraftCockpit => "Aircraft cockpit",
+        }
+    }
+
+    /// Body length as a multiple of the pod diameter. The single knob that
+    /// keeps a cockpit cone longer than a capsule while every consumer
+    /// (node offset, inertia, collider, mesh) stays in agreement.
+    pub fn length_factor(self) -> f32 {
+        match self {
+            PodGeometry::Capsule => 0.9,
+            PodGeometry::AircraftCockpit => 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,10 +261,36 @@ pub struct WingSpec {
     /// a mirrored pair). Lifting surfaces are lighter per area than
     /// pressure tanks — spar + skin, not a sealed vessel.
     pub mass_per_m2: f32,
-    /// Whitelisted resource storage this part may carry. Empty today; future
-    /// wet wings can opt into kerosene here without changing the schema.
+    /// Whitelisted resource storage this part may carry. Dry wings leave it
+    /// empty; wet wings (`wing_wet`) whitelist kerosene, whose capacity scales
+    /// with the panel's internal volume (see [`wing_volume`]).
     #[serde(default)]
     pub storage: Vec<ResourceStorageSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GearSpec {
+    pub display_name: String,
+    /// dry_mass contribution per leg = `strut_mass_per_m × strut_length`.
+    pub strut_mass_per_m: f32,
+    /// Fixed mass per wheel, kg (added once per leg).
+    pub wheel_mass: f32,
+    /// Lateral spacing of the main legs as a fraction of the host radius
+    /// (`±track_fraction × host_radius`). `0.0` means a single centred leg
+    /// (nose gear); `> 0.0` a left/right main pair. This is what distinguishes
+    /// `gear_main` from `gear_nose` — the leg count derives from it
+    /// ([`crate::Gear::legs`]).
+    pub track_fraction: f32,
+    /// Strut length (host skin → wheel hub) a freshly-placed gear starts at,
+    /// metres. Per-spec rather than a kind-wide constant so each **size
+    /// class** authors its own ride height, and a nose/main pair ships as a
+    /// **matched set**: equal `default_strut_length + default_wheel_radius`
+    /// on a shared fuselage makes the aircraft sit level out of the box,
+    /// instead of the user hand-tuning two struts to agree.
+    pub default_strut_length: f32,
+    /// Wheel radius a freshly-placed gear starts at, metres. See
+    /// [`GearSpec::default_strut_length`] for the matched-set contract.
+    pub default_wheel_radius: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +330,7 @@ impl CatalogEntry {
             CatalogEntry::Adapter(a) => &a.display_name,
             CatalogEntry::Tank(t) => &t.display_name,
             CatalogEntry::Wing(w) => &w.display_name,
+            CatalogEntry::Gear(g) => &g.display_name,
         }
     }
 
@@ -273,6 +343,7 @@ impl CatalogEntry {
             CatalogEntry::Adapter(_) => "Adapter",
             CatalogEntry::Tank(_) => "Tank",
             CatalogEntry::Wing(_) => "Wing",
+            CatalogEntry::Gear(_) => "Gear",
         }
     }
 
@@ -285,6 +356,8 @@ impl CatalogEntry {
             CatalogEntry::Adapter(a) => &a.storage,
             CatalogEntry::Tank(t) => &t.storage,
             CatalogEntry::Wing(w) => &w.storage,
+            // Landing gear stores nothing.
+            CatalogEntry::Gear(_) => &[],
         }
     }
 }
@@ -372,6 +445,28 @@ impl std::error::Error for CatalogError {}
 
 // ---- geometry helpers used by catalog→part composition -------------------
 
+/// Cone silhouette for a command pod: `(radius_top, radius_bottom, height)`
+/// in metres for a given diameter and geometry. Height is
+/// `diameter × geometry.length_factor()`, matching the node offset / MOI /
+/// collider so physics and rendering agree on the pod's extent.
+///
+/// The **capsule** renders directly from this truncated cone. The **aircraft
+/// cockpit** instead renders a rounded ogive ([`crate::build_cockpit_mesh`]);
+/// its radii here are only a coarse cone approximation used for the terrain
+/// shadow silhouette and camera-framing extent, not the rendered nose.
+pub fn pod_visual_profile(diameter: f32, geometry: PodGeometry) -> (f32, f32, f32) {
+    let (top_frac, bottom_frac) = match geometry {
+        PodGeometry::Capsule => (0.3, 0.5),
+        // Coarse cone proxy for the ogive (shadow / extent only).
+        PodGeometry::AircraftCockpit => (0.15, 0.5),
+    };
+    (
+        diameter * top_frac,
+        diameter * bottom_frac,
+        diameter * geometry.length_factor(),
+    )
+}
+
 /// Cylindrical tank surface area: lateral wall (2πrL) plus two flat caps
 /// (2 × πr²). Hemispherical caps would be a refinement; flat is a fine
 /// proxy for mass scaling.
@@ -396,6 +491,20 @@ pub fn wing_panel_area(span: f32, root_chord: f32, tip_chord: f32) -> f32 {
     span * (root_chord + tip_chord) * 0.5
 }
 
+/// Internal wet-tank volume of one wing panel, m³ — the capacity basis for
+/// a wet wing's `units_per_m3` storage. The airfoil's max-thickness envelope
+/// is `planform_area × (t/c · MAC)`; the integral wing box that actually
+/// holds fuel is a fraction of that (spars, ribs, and the leading/trailing
+/// edges aren't wet), captured by `WING_BOX_FILL`. Mirrors how
+/// [`tank_volume`] is the capacity basis for a cylindrical tank.
+pub fn wing_volume(span: f32, root_chord: f32, tip_chord: f32, thickness: f32) -> f32 {
+    /// Usable share of the airfoil envelope that forms the sealed wing box.
+    const WING_BOX_FILL: f32 = 0.5;
+    let area = wing_panel_area(span, root_chord, tip_chord);
+    let mean_thickness = thickness * wing_mean_aerodynamic_chord(root_chord, tip_chord);
+    area * mean_thickness * WING_BOX_FILL
+}
+
 /// Mean aerodynamic chord of one trapezoidal panel, m. For a linear taper
 /// with taper ratio λ = tip/root: MAC = (2/3)·root·(1 + λ + λ²)/(1 + λ).
 /// Degenerates to the chord for an untapered panel.
@@ -405,6 +514,17 @@ pub fn wing_mean_aerodynamic_chord(root_chord: f32, tip_chord: f32) -> f32 {
     }
     let lambda = (tip_chord / root_chord).clamp(0.0, 1.0);
     (2.0 / 3.0) * root_chord * (1.0 + lambda + lambda * lambda) / (1.0 + lambda)
+}
+
+/// Structural mass of a landing-gear assembly, kg: every leg contributes a
+/// strut (`strut_mass_per_m × strut_length`) plus a wheel (`wheel_mass`). The
+/// leg count derives from the spec's `track_fraction` (a track ⇒ a main pair),
+/// so `gear_main` counts both legs and `gear_nose` counts one. Single home for
+/// the formula shared by blueprint composition, the recompute system, and the
+/// stats aggregator.
+pub fn gear_dry_mass(spec: &GearSpec, strut_length: f32) -> f32 {
+    let legs = if spec.track_fraction > 0.0 { 2.0 } else { 1.0 };
+    legs * (spec.strut_mass_per_m * strut_length + spec.wheel_mass)
 }
 
 /// Lateral surface area of a frustum with the two given diameters and a
@@ -456,6 +576,17 @@ mod tests {
             panic!("intake_cone should be an intake");
         };
         assert_eq!(intake.capture.kind, AmbientIntakeKind::OxygenatedAir);
+
+        // The cockpit is a command pod with the aircraft-cockpit silhouette;
+        // existing pods omit `geometry` and default to a capsule.
+        let CatalogEntry::Pod(cockpit) = cat.resolve("cockpit").unwrap() else {
+            panic!("cockpit should be a pod");
+        };
+        assert_eq!(cockpit.geometry, PodGeometry::AircraftCockpit);
+        let CatalogEntry::Pod(argos) = cat.resolve("argos").unwrap() else {
+            panic!("argos should be a pod");
+        };
+        assert_eq!(argos.geometry, PodGeometry::Capsule);
 
         let CatalogEntry::Tank(jet_tank) = cat.resolve("tank_kerosene").unwrap() else {
             panic!("tank_kerosene should be a tank");

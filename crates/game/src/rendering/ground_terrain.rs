@@ -938,6 +938,12 @@ pub(super) fn update_body_terrain_atmosphere(
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
     time: Res<Time<Real>>,
+    // Combined into one tuple param to stay under Bevy's 16-arg system limit:
+    // .0 = live cloud render texture, .1 = cloud config (heights for occlusion).
+    cloud_io: (
+        Option<Res<thalos_volumetric_clouds::CloudRenderTexture>>,
+        Option<Res<thalos_volumetric_clouds::CloudsConfig>>,
+    ),
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut water_materials: ResMut<Assets<BodyWaterMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
@@ -1006,6 +1012,24 @@ pub(super) fn update_body_terrain_atmosphere(
             .get(&i)
             .copied()
             .unwrap_or(Quat::IDENTITY);
+        // Cloud band radii (render units) for the body the player is at, so the
+        // sky pass can keep the cloud layer from painting over closer geometry.
+        let cloud_band_radii = if i == sim.system.homeworld_id {
+            cloud_io
+                .1
+                .as_ref()
+                .map(|cfg| {
+                    Vec4::new(
+                        planet_radius + cfg.clouds_bottom_height,
+                        planet_radius + cfg.clouds_top_height,
+                        0.0,
+                        0.0,
+                    )
+                })
+                .unwrap_or(Vec4::ZERO)
+        } else {
+            Vec4::ZERO
+        };
         sky_by_body.insert(
             i,
             BodySkyExtra {
@@ -1017,6 +1041,7 @@ pub(super) fn update_body_terrain_atmosphere(
                     planet_radius,
                 ),
                 world_to_body_orientation: Vec4::new(q.x, q.y, q.z, q.w),
+                cloud_band_radii,
             },
         );
     }
@@ -1107,6 +1132,14 @@ pub(super) fn update_body_terrain_atmosphere(
             continue;
         };
         mat.atmosphere_extra = *extra;
+        // Bind the live volumetric cloud texture for the body the player is at
+        // (driven relative to the homeworld); other bodies keep the blank
+        // fallback so their atmosphere pass composites no clouds.
+        if sky.body_id == sim.system.homeworld_id {
+            if let Some(ref cr) = cloud_io.0 {
+                mat.cloud_layer = cr.handle.clone();
+            }
+        }
         if let Some(clouds) = cache
             .environment
             .get(sky.body_id)
@@ -1279,11 +1312,12 @@ fn part_shadow_shape(
     intake: Option<&AirIntake>,
 ) -> Option<PartShadowShape> {
     if let Some(pod) = pod {
-        let diameter = pod.diameter;
+        let (radius_top, radius_bottom, height) =
+            thalos_shipyard::pod_visual_profile(pod.diameter, pod.geometry);
         Some(PartShadowShape {
-            height: diameter * 0.9,
-            radius_top: diameter * 0.3,
-            radius_bottom: diameter * 0.5,
+            height,
+            radius_top,
+            radius_bottom,
         })
     } else if dec.is_some() {
         let radius = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);

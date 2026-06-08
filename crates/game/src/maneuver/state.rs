@@ -44,6 +44,28 @@ impl TrajectoryRail {
     }
 }
 
+/// Burn lifecycle of a maneuver node.
+///
+/// A node is no longer deleted the instant its burn fires. It walks through
+/// these phases so the maneuver panel and burn-progress HUD keep showing the
+/// burn as it happens (KSP-style), and the spent node lingers for review until
+/// the user dismisses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeBurnPhase {
+    /// Not yet executed. Drives the trajectory prediction and can be armed by
+    /// the autopilot.
+    #[default]
+    Planned,
+    /// The autopilot is flying this burn right now. Excluded from the physics
+    /// prediction (the live thrust already moves the ship, so re-applying the
+    /// planned Δv would double-count) but still published as the active
+    /// directive so the burn-progress bar fills.
+    Executing,
+    /// The burn has completed. Kept on screen for review until the user
+    /// dismisses it; no longer drives prediction, arming, or the directive.
+    Executed,
+}
+
 /// Game-side representation of a maneuver node (owned by the UI, synced to physics).
 #[derive(Clone, Debug)]
 pub struct GameNode {
@@ -54,6 +76,29 @@ pub struct GameNode {
     pub delta_v: DVec3,
     /// Body used as the local reference frame (dominant body at placement time).
     pub reference_body: usize,
+    /// Where this node sits in its burn lifecycle.
+    pub phase: NodeBurnPhase,
+}
+
+impl GameNode {
+    /// `true` while this node should be fed into the physics `ManeuverSequence`
+    /// (and therefore the trajectory prediction). Only [`NodeBurnPhase::Planned`]
+    /// nodes qualify; a burning or spent node must not perturb the predicted path.
+    pub fn drives_prediction(&self) -> bool {
+        matches!(self.phase, NodeBurnPhase::Planned)
+    }
+
+    /// `true` while this node should be published as an autopilot burn directive
+    /// — both [`NodeBurnPhase::Planned`] (so it can be armed) and
+    /// [`NodeBurnPhase::Executing`] (so the burn-progress HUD keeps reading it).
+    pub fn drives_directive(&self) -> bool {
+        !matches!(self.phase, NodeBurnPhase::Executed)
+    }
+
+    /// `true` once the burn has been flown and the node is only kept for display.
+    pub fn is_executed(&self) -> bool {
+        matches!(self.phase, NodeBurnPhase::Executed)
+    }
 }
 
 /// UI-side maneuver plan. Synced to `ManeuverSequence` in physics when dirty.

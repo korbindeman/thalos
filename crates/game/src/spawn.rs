@@ -85,10 +85,10 @@ impl SpawnSituation {
     }
 
     /// Ship blueprint to load for this scenario. The runway scenarios fly the
-    /// demo aircraft; everything else flies the default rocket.
+    /// A220 airliner; everything else flies the default rocket.
     pub fn ship_blueprint_path(self) -> &'static str {
         if self.is_runway() {
-            "ships/skyhawk.ron"
+            "ships/a220.ron"
         } else {
             "ships/apollo.ron"
         }

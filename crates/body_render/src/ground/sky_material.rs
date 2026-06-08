@@ -53,6 +53,15 @@ pub struct BodySkyMaterial {
     #[texture(5)]
     #[sampler(6)]
     pub multi_scatter_lut: Handle<Image>,
+    /// High-fidelity volumetric cloud layer rendered by `thalos_volumetric_clouds`
+    /// (RGBA32F: rgb = premultiplied in-scatter, a = transmittance), composited
+    /// over the atmosphere in-scatter as the final step of the fullscreen pass.
+    /// Sampled with `textureLoad` (unfilterable float, no sampler). The game
+    /// binds the live cloud texture for the body the player is at and a 1×1
+    /// "clear" fallback (a = 1) for every other body, so the composite is a
+    /// no-op where there are no clouds.
+    #[texture(7, sample_type = "float", filterable = false)]
+    pub cloud_layer: Handle<Image>,
 }
 
 impl Material for BodySkyMaterial {

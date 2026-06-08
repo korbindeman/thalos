@@ -22,10 +22,12 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
+use bevy::math::DVec3;
 use thalos_celestial::Universe;
 use thalos_celestial::generate::{DefaultGenParams, generate_default};
 
 use crate::rendering::CameraExposure;
+use crate::solar_system_state::{SimulationState, SolarSystemState};
 
 /// Uniform buffer for the stars shader. Matches the `StarsParams`
 /// struct in `assets/shaders/stars.wgsl`.
@@ -124,13 +126,109 @@ impl Plugin for SkyRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<StarsMaterial>::default())
             .add_plugins(MaterialPlugin::<GalaxyMaterial>::default())
+            .init_resource::<CelestialBackdropVisibility>()
+            .register_type::<CelestialBackdropVisibility>()
             .add_systems(Startup, dispatch_sky_generation)
             .add_systems(Update, finalize_sky_generation)
             .add_systems(
                 Update,
-                (update_stars_brightness, update_galaxy_uniform).in_set(crate::SimStage::Sync),
+                (
+                    update_atmospheric_star_visibility,
+                    (update_stars_brightness, update_galaxy_uniform),
+                )
+                    .chain()
+                    .in_set(crate::SimStage::Sync),
             );
     }
+}
+
+/// Global visibility multiplier in `[0, 1]` for the whole celestial backdrop
+/// (stars **and** galaxies). This is the eye-adaptation analogue of the
+/// per-pixel star crush in `body_sky.wgsl`: a single bright twilight sky hides
+/// the *entire* starfield, not just the patches that happen to be locally lit.
+/// `1.0` = full backdrop (orbit, true night, airless-body surface); `0.0` =
+/// fully hidden (sun up inside an atmosphere). BRP-readable for live tuning.
+///
+/// **Sole writer:** [`update_atmospheric_star_visibility`].
+#[derive(Resource, Reflect, Clone, Copy)]
+#[reflect(Resource)]
+pub struct CelestialBackdropVisibility(pub f32);
+
+impl Default for CelestialBackdropVisibility {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+/// Hermite smoothstep, matching the WGSL builtin. `edge0 < edge1`.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Suppress the celestial backdrop while an observer stands under a lit sky.
+///
+/// On a real planet the sky still vastly outshines the stars at sunset, so the
+/// backdrop only emerges as the world darkens through civil → astronomical
+/// twilight. The per-pixel crush in `body_sky.wgsl` can't reproduce this — it
+/// only hides stars where *that pixel's* in-scatter is bright, so the darker
+/// zenith/anti-solar sky leaks stars at dusk. This computes the missing global
+/// term from the sun's elevation at the observer:
+///
+/// * full suppression with the sun at or above the horizon,
+/// * fading the backdrop in linearly (Hermite) down to the sun 18° below the
+///   horizon (astronomical night),
+/// * disabled above the Kármán line (orbit keeps the full starfield) and on
+///   airless bodies (no atmosphere to scatter → starry daytime sky).
+fn update_atmospheric_star_visibility(
+    sim: Res<SimulationState>,
+    cache: Res<SolarSystemState>,
+    mut visibility: ResMut<CelestialBackdropVisibility>,
+) {
+    // sin of sun elevation thresholds: full backdrop at/below astronomical
+    // twilight (−18°), fully suppressed at/above the horizon (0°).
+    const SIN_ASTRONOMICAL_TWILIGHT: f32 = -0.309; // sin(-18°)
+
+    let mut factor = 1.0_f32;
+
+    if let Some(states) = cache.states.as_ref() {
+        let dominant = sim.simulation.dominant_body();
+        if let (Some(body_state), Some(star_state), Some(body)) = (
+            states.get(dominant),
+            states.first(),
+            sim.system.bodies.get(dominant),
+        ) {
+            // Only atmospheres scatter sunlight into a star-hiding sky.
+            if let Some(atmos) = body.terrestrial_atmosphere.as_ref() {
+                let karman = atmos.karman_line_m.max(1.0);
+                let observer = sim.simulation.ship_state().position;
+                let to_obs = observer - body_state.position;
+                let dist = to_obs.length();
+                let altitude = (dist - body.radius_m) as f32;
+                let up = if dist > 1.0 { to_obs / dist } else { DVec3::Y };
+
+                let to_sun = star_state.position - body_state.position;
+                let sun_len = to_sun.length();
+                let sun_dir = if sun_len > 1.0 {
+                    to_sun / sun_len
+                } else {
+                    DVec3::Y
+                };
+
+                // sin(sun elevation above the observer's local horizon).
+                let sun_up = up.dot(sun_dir) as f32;
+
+                // 1 with the sun up, ramping to 0 by 18° below the horizon.
+                let twilight = smoothstep(SIN_ASTRONOMICAL_TWILIGHT, 0.0, sun_up);
+                // 1 at the surface, fading to 0 at the Kármán line (orbit).
+                let inside = 1.0 - smoothstep(0.0, karman, altitude);
+
+                factor = 1.0 - inside * twilight;
+            }
+        }
+    }
+
+    visibility.0 = factor.clamp(0.0, 1.0);
 }
 
 /// Result of the off-thread sky build: the two meshes ready for upload.
@@ -171,11 +269,12 @@ struct StarsMesh;
 /// star flux blows out the frame.
 fn update_stars_brightness(
     exposure: Res<CameraExposure>,
+    visibility: Res<CelestialBackdropVisibility>,
     handles: Query<&MeshMaterial3d<StarsMaterial>, With<StarsMesh>>,
     mut materials: ResMut<Assets<StarsMaterial>>,
 ) {
     let gain = exposure.gain.max(1.0e-3);
-    let brightness = StarsParams::BASE_BRIGHTNESS / gain;
+    let brightness = StarsParams::BASE_BRIGHTNESS / gain * visibility.0;
     for handle in &handles {
         if let Some(material) = materials.get_mut(&handle.0) {
             material.params.brightness = brightness;
@@ -325,6 +424,7 @@ struct GalaxyMesh;
 /// therefore keep galaxies the same angular size on-screen.
 fn update_galaxy_uniform(
     exposure: Res<CameraExposure>,
+    visibility: Res<CelestialBackdropVisibility>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     projections: Query<&Projection, With<crate::camera::ActiveCamera>>,
     handles: Query<&MeshMaterial3d<GalaxyMaterial>, With<GalaxyMesh>>,
@@ -344,7 +444,7 @@ fn update_galaxy_uniform(
     let px_per_rad = height_px / vertical_fov;
 
     let gain = exposure.gain.max(1.0e-3);
-    let brightness = GalaxyParams::BASE_BRIGHTNESS / gain;
+    let brightness = GalaxyParams::BASE_BRIGHTNESS / gain * visibility.0;
 
     for handle in &handles {
         if let Some(material) = materials.get_mut(&handle.0) {

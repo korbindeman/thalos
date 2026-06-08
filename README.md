@@ -68,6 +68,17 @@ Debug surface drop: click a body's `drop` button in the map-view navigator, aim 
 
 This project is in a very early stage. You're welcome to look through the code, but the internals are changing quickly and there is no public-facing documentation yet.
 
+## License
+
+Thalos is fully source-available, with a deliberate split — **you can't sell the game; you can sell content for it.**
+
+- **Code** — [PolyForm Noncommercial 1.0.0](LICENSE): use, modify, fork, and redistribute for any noncommercial purpose. Selling the game is reserved to the copyright holder.
+- **Assets** (art, audio, and authored content under `assets/` and `ships/`) — [CC BY 4.0](LICENSE-ASSETS): share and adapt for any purpose, **including commercially** (e.g. paid planet/part packs), with attribution.
+- **Vendored crates** under `crates/` keep their upstream licenses (`avian_fdm` is LGPL-3.0-or-later; `udlod` and `volumetric_clouds` are MIT/Apache-2.0).
+- The **"Thalos" name and logo** are not licensed.
+
+See [LICENSING.md](LICENSING.md) for the full rationale and contribution terms.
+
 ## Acknowledgements
 
 Kerbal Space Program was a major influence on me and the main inspiration for this project.

@@ -387,6 +387,23 @@ pub struct AtmosphericScattering {
     /// > 1 exaggerates haze and sunsets at the cost of accuracy.
     #[serde(default = "default_one")]
     pub strength: f32,
+
+    /// Artistic gain on the multiple-scattering fill term (the precomputed
+    /// multi-scatter LUT contribution), applied on top of `strength`.
+    ///
+    /// Single scattering along a long horizon-grazing path scatters blue out
+    /// of its own column, leaving a warm residual — so the grazing horizon
+    /// reads orange at *every* sun angle. On a real planet, multiple
+    /// scattering refills that blue and the horizon reads pale/whitish. Our
+    /// single-bounce isotropic LUT approximates multiple scattering but
+    /// undercounts it at the horizon, so this lifts only the multi-scatter
+    /// term: it de-reddens the horizon toward pale-blue without dimming the
+    /// dome or re-warming anything (it adds blue-dominant fill, not warm
+    /// single-scatter). 1.0 = the bare approximation; ~2–4 reads Earth-like.
+    /// Only the ground/surface `BodySky` pass consumes it; the orbital
+    /// impostor (single-scatter only) is unaffected.
+    #[serde(default = "default_one")]
+    pub multi_scatter_gain: f32,
 }
 
 /// Per-channel Minnaert-style limb darkening.

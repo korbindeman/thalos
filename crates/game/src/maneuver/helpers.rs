@@ -407,8 +407,11 @@ pub(super) fn slide_search_segments<'a>(
         return Vec::new();
     };
 
-    // Sort nodes by time to find the slide_id's chronological index.
-    let mut sorted: Vec<&GameNode> = plan.nodes.iter().collect();
+    // Sort nodes by time to find the slide_id's chronological index. Only
+    // prediction-driving nodes are considered: the branch stack's `prefix_len`
+    // indexes the physics sequence, which excludes burning/spent nodes, so
+    // including them here would misalign the index with the branches.
+    let mut sorted: Vec<&GameNode> = plan.nodes.iter().filter(|n| n.drives_prediction()).collect();
     sorted.sort_by(|a, b| {
         a.time
             .partial_cmp(&b.time)
@@ -1017,6 +1020,7 @@ mod tests {
             time,
             delta_v,
             reference_body: 0,
+            phase: super::super::state::NodeBurnPhase::Planned,
         }
     }
 

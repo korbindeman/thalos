@@ -141,9 +141,12 @@ The ship-view LOD split is:
    the shell into the void (sky color).
 
 The terrain surface shader itself still owns only surface-side light:
-direct Hapke sunlight, eclipse/craft shadow factors, and a small
-atmosphere-derived sky-diffuse fill computed from the bound
-`AtmosphereBlock`. `BodySky` owns camera-path haze/transmittance/clouds.
+direct sunlight (rough-dielectric Oren–Nayar + Cook–Torrance GGX for wet
+vegetated bodies like Thalos — see the BRDF table below; the impostor still
+uses Hapke for airless bodies, pending a unified per-material shading
+dispatch), eclipse/craft shadow factors, and a small atmosphere-derived
+sky-diffuse fill computed from the bound `AtmosphereBlock`. `BodySky` owns
+camera-path haze/transmittance/clouds.
 That split keeps airless terrain vacuum-black while preventing daylight
 terrain under a blue atmosphere from turning pure black on sun-opposed
 nearby slopes.
@@ -278,63 +281,89 @@ line: Thalos 80 km, Pelagos 90 km, Vaelen 60 km.
 
 ## Cloud rendering (M4)
 
-### Today: volumetric slab raymarch (terrain path)
+### Today: vendored HZD volumetric clouds (`thalos_volumetric_clouds`)
 
-The terrain `BodySky` fullscreen pass (`crates/terrain_render/src/body_sky.wgsl`)
-raymarches a **volumetric cloud layer** as a thin slab between two
-concentric spheres — cloud base `radius + cloud_shape.x` and cloud top
-`base + cloud_shape.y`. This replaced the earlier fixed-altitude 2-D
-shell intersection. The march reuses everything the atmosphere pass
-already solved: the per-body fullscreen quad, the scene-depth clip (so
-terrain and the ship hull correctly occlude clouds), and the
-`AtmosphereBlock` cloud uniforms.
+The shipping near-cloud renderer is a vendored fork of
+`bevy-volumetric-clouds` (MIT, evroon) at `crates/volumetric_clouds/`,
+adapted to Thalos's spherical, `big_space`, dual-camera engine. Three
+stages:
 
-Per sample, density is built from three factors:
+1. **Generation + raymarch (compute, `clouds_compute.wgsl`).** An `init`
+   pass builds a Perlin-Worley 2-D atlas + a 3-D Worley volume (the HZD
+   noise set); an `update` pass raymarches the cloud shell every frame
+   into a 1920×1080 RGBA32F texture (rgb = premultiplied in-scatter,
+   a = transmittance). Density = atlas base shape eroded by the Worley
+   detail, shaped by a vertical profile + a coverage knob; lighting is a
+   dual-lobe Henyey-Greenstein phase + a Beer self-shadow march. The
+   march uses a **constant world-space step** (not a fixed step *count*)
+   capped at `MAX_RAY_STEPS`, plus a distance haze-out, so near-tangent
+   horizon rays can't alias into the radial "fountain" streaks a fixed
+   count produces at planet scale. Shell intersection is a true
+   ray-sphere from the camera's real position (radius = `planet_radius +
+   altitude`), so the deck sits at a fixed absolute altitude regardless
+   of camera height.
+2. **Tangent-frame drive (game, `rendering/clouds.rs`).** Upstream is
+   Y-up, flat-plane, single-camera. `drive_clouds` feeds the crate a
+   rotated `inverse_camera_view` built from the `ShipCamera` and the
+   homeworld centre so the player's local up maps to the shader's +Y,
+   with altitude in `camera_translation.y` — the raymarch then renders
+   correctly as a planet-local **tangent-plane approximation**. It also
+   feeds the sun (scene-matched flux) and planet radius. Static appearance
+   (coverage/density/scale/heights) is set once and is BRP-tunable
+   (`CloudsConfig` is `Reflect`-registered).
+3. **Composite (body_render, `body_sky.wgsl`).** The cloud texture is
+   bound onto `BodySkyMaterial` (`cloud_layer`) and composited as the
+   final step of the per-body atmosphere fullscreen pass — over the
+   in-scatter, attenuating the sky behind opaque cloud. This is the home
+   on purpose: a separate transparent quad sorts *unreliably* against the
+   fullscreen atmosphere pass under `big_space` (the atmosphere drew over
+   the clouds at some view angles), whereas compositing inside the pass is
+   deterministic. Occlusion against geometry (ship hull / terrain) ramps
+   `cloud_vis` smoothly across the cloud band, computed from a ray-shell
+   intersection (`cloud_band_radii` in `BodySkyExtra`), so the ship
+   crosses the cloud boundary without a hard pop.
 
-1. **Coverage** — the reference cloud-cover cubemap, sampled with the
-   existing 16-band differential rotation (`sample_cloud_banded`). This
-   is the large-scale weather map and the co-rotation source.
-2. **Vertical profile** — rounded base, eroded top, so the slab reads as
-   a deck rather than a uniform fog.
-3. **Detail noise** — a few octaves of animated 3-D value-noise fbm in
-   body-local space (so billows co-rotate with the surface), combined via
-   a coverage-threshold erosion (`n + cov − 1`) that carves clear sky
-   where coverage is low and keeps cloud where it is high.
+The old in-shader slab raymarch (`cloud_volume_overlay`, still in
+`body_sky.wgsl`) is retained for reference but unused; it read the body
+RON `clouds:` block (`CloudCover` → `AtmosphereBlock::cloud_shape`), now
+`None` on Thalos.
 
-Lighting is a short secondary march toward the sun for self-shadow
-(Beer's law), a cheap forward-biased phase for the sun-facing silver
-lining, and an ambient floor so undersides aren't black. A per-sample
-and per-segment terminator fade keeps night-side clouds from occluding
-stars as black blobs. The result is premultiplied and composited over
-the atmosphere in-scatter exactly like the old overlay.
-
-The pass is **camera-regime aware**: above the layer (orbit) clouds are
-gated to the planet disk and faded across the geometric horizon to avoid
-a hard limb tangent band; below the layer (standing on the surface) the
-underside renders overhead on sky pixels too; inside the layer (descent)
-the march runs from the camera to the nearest shell. Step count is
-adaptive (target ~`thickness/16`, clamped 8–32) with per-pixel
-interleaved-gradient jitter to hide banding.
-
-The **orbital impostor** (≥ 4× radius) is unchanged — it still
-composites a flat lit reference shell + shadow probe
+The **orbital impostor** (≥ 4× radius) is unchanged — it still composites
+a flat lit reference shell + shadow probe
 (`planet_impostor.wgsl::composite_clouds`); a per-pixel volumetric march
 on a body that small on screen isn't worth it yet.
 
-Cloud parameters live on `CloudCover` alongside `TerrestrialAtmosphere`
-in the body RON (`coverage`, `albedo`, `scroll_rate`,
-`differential_rotation`, plus the new `base_altitude_m`, `thickness_m`,
-`density`). They convert to render units and pack into
-`AtmosphereBlock::cloud_shape` at the `from_terrestrial` boundary.
+**NOW-path approximations (deliberate — see Next):**
 
-### Next
+- The tangent frame is a local plane, so the cloud **horizon shifts
+  slightly with view angle** and degrades at the limb / high altitude.
+- Coverage is a **2-D field extruded vertically**, so clouds follow the
+  camera horizontally rather than staying glued to the ground.
+- Boundary occlusion assumes **uniform band density** (a band fraction),
+  not a per-pixel cloud distance.
+- Motion noise is the raymarch jitter; temporal reprojection only
+  converges while the camera is still.
 
-- **Procedural coverage field.** The coverage cube is still a hand-picked
-  equirectangular reference image per body (`reference_clouds.rs`).
-  Replace it with a procedural weather field (noise + the latitude bands
-  the environment model already carries) — this is the hook for real,
-  evolving weather patterns and storm structure inferred from rotation
-  rate + obliquity.
+### Next (proper spherical + weather)
+
+- **True spherical raymarch.** Retire the tangent-frame trick for a real
+  ray-sphere shell march from the camera's actual position (the
+  precision-safe, camera-relative intersection `cloud_volume_overlay`
+  already demonstrates), so the horizon is correct from orbit and at the
+  limb and doesn't shift with view angle.
+- **Per-pixel cloud-distance occlusion.** Export the raymarch's nearest
+  cloud-hit distance (the currently-unused `sky_texture` slot in the
+  crate) so `body_sky` occludes clouds against geometry by true depth,
+  replacing the band-fraction approximation.
+- **Weather-driven coverage field.** The coverage source is still a
+  hand-picked equirectangular reference image per body
+  (`reference_clouds.rs`) / a scalar knob. Replace it with a procedural,
+  evolving weather field (noise + the latitude bands the environment
+  model already carries), sampled in planet-fixed coordinates so clouds
+  stay glued to the ground — the hook for real weather.
+- **Storms.** Cyclonic systems / fronts as features in that field, with
+  locally boosted density, height, and (later) lightning, inferred from
+  rotation rate + obliquity.
 - **Cost: half-res + temporal upscale.** The march currently runs
   full-res; on surface views it touches the whole sky hemisphere. Drop to
   half/quarter-res with temporal reprojection (Blackrack/HZD style) if it

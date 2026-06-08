@@ -1,10 +1,13 @@
 // Ground-LOD terrain shader for procedural bodies.
 //
 // Reads height, albedo, and roughness from the thalos_udlod attachment
-// atlases (group 1), ray-tests a local craft-shadow proxy, and shades
-// with the shared Hapke BRDF helper
-// (`thalos::lighting::shade_hapke_surface`). The same routine drives
-// `planet_impostor.wgsl`, so the LOD swap is visually continuous.
+// atlases (group 1), ray-tests a local craft-shadow proxy, and shades with a
+// rough-dielectric BRDF (Oren–Nayar diffuse + Cook–Torrance GGX specular; see
+// the BRDF block below). This deliberately diverges from `planet_impostor.wgsl`,
+// which still uses the Hapke regolith model: Thalos is a wet, vegetated
+// terrestrial body, not airless regolith, so its near-surface ground wants a
+// dielectric BRDF. Reconverging the impostor onto a per-material shading
+// dispatch (terrain's `ShadingModel`) is the follow-up.
 //
 // Atmospheric scattering is NOT applied here — it is composited on top
 // by `BodySky` (the fullscreen pass in `body_sky.wgsl`) whenever this
@@ -17,7 +20,7 @@
 #import thalos_udlod::fragment::{FragmentInput, FragmentOutput, fragment_info}
 #import thalos_udlod::functions::{lookup_tile, tile_count}
 #import thalos::atmosphere::AtmosphereBlock
-#import thalos::lighting::{SceneLighting, SCENE_FLUX_SCALE, shade_hapke_surface}
+#import thalos::lighting::{SceneLighting, SCENE_FLUX_SCALE}
 
 const MAX_TERRAIN_SHADOW_CASTERS: u32 = 16u;
 
@@ -703,6 +706,99 @@ fn surface_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> Su
     return out;
 }
 
+// ── Rough-dielectric surface BRDF ─────────────────────────────────────────
+// Thalos is a wet, vegetated terrestrial body — soil, grass, rock, snow,
+// water — not airless particulate regolith, so its ground LOD shades with a
+// standard rough-dielectric BRDF rather than the Hapke radiative-transfer
+// model (the impostor still uses Hapke for genuinely airless bodies). Two
+// lobes: an Oren–Nayar rough-diffuse term that degrades gracefully at grazing
+// angles — the harsh opposition-surge contour bands near the terminator were
+// the Hapke artefact that motivated the prior P2A placeholder — plus a
+// Cook–Torrance GGX microfacet specular with a dielectric F0, so wet ground
+// and snow pick up a tight highlight that Hapke cannot express.
+
+const PI_BRDF: f32 = 3.14159265358979323846;
+// Non-metallic surface normal reflectance at normal incidence (~4%).
+const DIELECTRIC_F0: f32 = 0.04;
+// Weight of the direct-sun lobe relative to the sky fill. Carried over from
+// the placeholder so overall ground brightness stays in the tonemapper's
+// range; the primary knob to nudge after a preview.
+const DIRECT_SUN_STRENGTH: f32 = 0.62;
+
+// GGX / Trowbridge–Reitz normal distribution.
+fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / max(PI_BRDF * d * d, 1.0e-7);
+}
+
+// Smith height-correlated visibility term for GGX, with the specular
+// denominator 1/(4·n·l·n·v) folded in.
+fn smith_visibility(n_dot_l: f32, n_dot_v: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let lambda_v = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
+    let lambda_l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
+    return 0.5 / max(lambda_v + lambda_l, 1.0e-5);
+}
+
+// Schlick Fresnel for a scalar (achromatic dielectric) F0.
+fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
+    let m = clamp(1.0 - cos_theta, 0.0, 1.0);
+    let m2 = m * m;
+    return f0 + (1.0 - f0) * (m2 * m2 * m);
+}
+
+// Oren–Nayar rough-diffuse BRDF scalar (sans albedo, sans cosine). Uses the
+// trig-free `s/t` formulation so there is no `acos`/`tan`/`normalize`-of-zero
+// hazard; `s = L·V − (N·L)(N·V)` reconstructs cos(Δφ)·sinθᵢ·sinθᵣ directly.
+fn oren_nayar_term(
+    n_dot_l: f32,
+    n_dot_v: f32,
+    l: vec3<f32>,
+    v: vec3<f32>,
+    roughness: f32,
+) -> f32 {
+    let sigma2 = roughness * roughness;
+    let a = 1.0 - 0.5 * sigma2 / (sigma2 + 0.33);
+    let b = 0.45 * sigma2 / (sigma2 + 0.09);
+    let s = dot(l, v) - n_dot_l * n_dot_v;
+    let t = select(max(n_dot_l, n_dot_v), 1.0, s <= 0.0);
+    return a + b * s / max(t, 1.0e-4);
+}
+
+// Combined rough-dielectric reflectance for one light direction. Returns the
+// reflected radiance factor (diffuse albedo-tinted + white dielectric
+// specular), excluding the irradiance cosine and incident flux, which the
+// caller applies.
+fn surface_brdf(
+    albedo: vec3<f32>,
+    roughness: f32,
+    n: vec3<f32>,
+    l: vec3<f32>,
+    v: vec3<f32>,
+    n_dot_l: f32,
+    n_dot_v: f32,
+) -> vec3<f32> {
+    if (n_dot_l <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let h = normalize(l + v);
+    let n_dot_h = max(dot(n, h), 0.0);
+    let l_dot_h = max(dot(l, h), 0.0);
+
+    let f = fresnel_schlick(l_dot_h, DIELECTRIC_F0);
+    let d = ggx_distribution(n_dot_h, roughness);
+    let vis = smith_visibility(n_dot_l, max(n_dot_v, 1.0e-4), roughness);
+    let spec = d * vis * f;
+
+    let diff = oren_nayar_term(n_dot_l, n_dot_v, l, v, roughness);
+    let diffuse = albedo * diff * (1.0 - f);
+
+    return diffuse + vec3<f32>(spec);
+}
+
 @fragment
 fn fragment(input: FragmentInput) -> FragmentOutput {
     var info = fragment_info(input);
@@ -828,17 +924,35 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         self_shadow = terrain_self_shadow(tile, geo_normal, sun_dir_ws);
     }
     let external_shadow = craft_shadow * self_shadow;
-    // P2A temporary terrain lighting: keep the ground LOD visually stable
-    // while the full Hapke + aerial-perspective path is being reworked for
-    // near-surface views. Use mostly the atlas/detail normal with a sky fill
-    // that tracks the sun's elevation, so terrain has readable relief without
-    // dropping back into the harsh Hapke grazing-angle bands that motivated
-    // this simpler path.
-    let stable_normal = normalize(mix(geo_normal, normal, 0.85));
 
-    // Direct sunlight: relief-aware, fades to zero across the terminator.
-    let geo_n_dot_l = dot(stable_normal, sun_dir_ws);
-    let direct = smoothstep(-0.10, 0.78, geo_n_dot_l) * external_shadow;
+    // Rough-dielectric surface lighting (see the BRDF block above). The
+    // shading normal is pulled most of the way toward the relief normal but
+    // kept anchored to the geometric normal so steep micro-facets near the
+    // terminator can't out-light the body curvature.
+    let stable_normal = normalize(mix(geo_normal, normal, 0.85));
+    let n_dot_l = max(dot(stable_normal, sun_dir_ws), 0.0);
+    let n_dot_v = max(dot(stable_normal, view_dir), 1.0e-4);
+
+    // Specular roughness from the sampled attachment, tightened in wet hollows
+    // (material mask .a) so puddles and wet rock get a sharper highlight while
+    // dry, rough ground stays matte. Clamped away from 0 to keep the GGX lobe
+    // from collapsing to a firefly.
+    let wetness = clamp(material_masks.a, 0.0, 1.0);
+    let surf_roughness = clamp(mix(roughness, roughness * 0.45, wetness), 0.06, 1.0);
+
+    let brdf = surface_brdf(
+        albedo.rgb,
+        surf_roughness,
+        stable_normal,
+        sun_dir_ws,
+        view_dir,
+        n_dot_l,
+        n_dot_v,
+    );
+    // Irradiance cosine + direct-sun shadowing applied here; flux is folded
+    // into DIRECT_SUN_STRENGTH below to stay in the placeholder's brightness
+    // range until the scene exposure path is unified.
+    let direct_rgb = brdf * n_dot_l * external_shadow;
 
     // Sky fill (diffuse skylight). A constant ambient floor used to light the
     // night side as brightly as a hazy daytime shadow. Real skylight only
@@ -856,7 +970,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let fill = mix(night_fill, day_fill, daylight) * material.occlusion;
     let sky_tint = mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.74, 1.0), 0.25 * daylight);
 
-    let lit = albedo.rgb * (sky_tint * fill + direct * 0.62);
+    let lit = direct_rgb * DIRECT_SUN_STRENGTH + albedo.rgb * sky_tint * fill;
 
     var output: FragmentOutput;
     output.color = vec4<f32>(lit, albedo.a);

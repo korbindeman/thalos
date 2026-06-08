@@ -37,7 +37,7 @@ use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_shipyard::{
     Adapter, AirIntake, AmbientIntakeKind, Attachment, CommandPod, Decoupler, Engine,
-    EngineActivation, FuelCrossfeed, FuelTank, G0, IntakeCapture, MountSymmetry, Part,
+    EngineActivation, FuelCrossfeed, FuelTank, G0, IntakeCapture, Part,
     PartResources, Resource, SurfaceMount,
 };
 
@@ -276,11 +276,9 @@ fn part_dry_mass_kg(
     dry * surface_multiplier(surface_mount)
 }
 
-fn surface_multiplier(surface_mount: Option<&SurfaceMount>) -> f64 {
-    match surface_mount.map(|m| m.symmetry) {
-        Some(MountSymmetry::Mirrored) => 2.0,
-        _ => 1.0,
-    }
+fn surface_multiplier(_surface_mount: Option<&SurfaceMount>) -> f64 {
+    // KSP symmetry: each mirror counterpart is its own part, counted once.
+    1.0
 }
 
 fn surface_multiplier_for_entity(entity: Entity, parts: &DryMassQuery<'_, '_>) -> f64 {

@@ -469,7 +469,6 @@ pub struct Simulation {
     ephemeris: Arc<dyn BodyTrajectoryProvider>,
     bodies: Vec<BodyDefinition>,
     maneuvers: ManeuverSequence,
-    consumed_node_ids: Vec<u64>,
     target_body: Option<BodyId>,
 
     /// Lifetime cumulative magnitude of Δv applied through
@@ -553,7 +552,6 @@ impl Simulation {
             ephemeris,
             bodies,
             maneuvers: ManeuverSequence::new(),
-            consumed_node_ids: Vec::new(),
             target_body: None,
             delivered_dv: 0.0,
             ship_params,
@@ -885,27 +883,6 @@ impl Simulation {
         &mut self.maneuvers
     }
 
-    pub fn drain_consumed_node_ids(&mut self) -> Vec<u64> {
-        std::mem::take(&mut self.consumed_node_ids)
-    }
-
-    /// Remove the maneuver node with the given `id` from the schedule,
-    /// queue its id for the bridge to retire on the UI side, and dirty
-    /// prediction. Once a directive starts physically burning, it is no
-    /// longer future plan input; prediction must rebuild from the live
-    /// ship state plus any still-future nodes.
-    ///
-    /// Returns `true` if a node was found and removed.
-    pub fn consume_maneuver_node(&mut self, id: u64) -> bool {
-        let Some(idx) = self.maneuvers.nodes.iter().position(|n| n.id == Some(id)) else {
-            return false;
-        };
-        self.maneuvers.nodes.remove(idx);
-        self.consumed_node_ids.push(id);
-        self.prediction_state.mark_dirty();
-        true
-    }
-
     /// Lifetime cumulative magnitude of Δv accumulated through
     /// [`Self::apply_external_mass_flow`], in m/s. The game-side autopilot
     /// reads this at burn-start (anchor) and each subsequent frame to
@@ -1220,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn consuming_maneuver_node_removes_future_input_and_dirties_prediction() {
+    fn editing_maneuvers_dirties_prediction() {
         let mut sim = minimal_simulation();
         sim.maneuvers_mut()
             .nodes
@@ -1233,10 +1210,12 @@ mod tests {
         sim.recompute_prediction();
         assert!(!sim.prediction_needs_refresh());
 
-        assert!(sim.consume_maneuver_node(42));
+        // The UI owns the node lifecycle now: dropping a node from the sequence
+        // (the game does this when a burn starts/completes via the maneuver
+        // plan) must dirty the prediction so it rebuilds without that input.
+        sim.maneuvers_mut().nodes.clear();
 
         assert!(sim.maneuvers().nodes.is_empty());
-        assert_eq!(sim.drain_consumed_node_ids(), vec![42]);
         assert!(sim.prediction_needs_refresh());
     }
 }

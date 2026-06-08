@@ -1,10 +1,10 @@
 //! Procedural engine geometry shared by the editor and the in-game ship view.
 //!
 //! Rocket bells still use Bevy's stock frustum primitive at the call sites.
-//! This module owns the jet nacelle shape because wing pylons need one mesh
-//! that can draw a mirrored pair from a single surface-mounted engine part.
+//! This module owns the jet nacelle shape (one nacelle + pylon per part).
+//! Under KSP-style mirror symmetry the opposite nacelle is a *separate*
+//! entity built in its own (reflected) wing frame — not drawn here.
 
-use crate::attach::MountSymmetry;
 use crate::part::{Engine, Wing};
 use crate::wing_mesh::{WingPanelFrame, wing_panel_frame};
 use bevy::asset::RenderAssetUsages;
@@ -22,7 +22,6 @@ pub struct JetNacelleMount<'a> {
     pub span_fraction: f32,
     /// Chord fraction, `-0.5` trailing edge to `0.5` leading edge.
     pub chord_fraction: f32,
-    pub symmetry: MountSymmetry,
 }
 
 pub fn jet_nacelle_length(engine: &Engine) -> f32 {
@@ -47,22 +46,14 @@ pub fn build_jet_nacelle_body_mesh(engine: &Engine) -> Mesh {
 pub fn build_jet_nacelle_pylon_mesh(engine: &Engine, mount: JetNacelleMount<'_>) -> Mesh {
     let mut positions = Vec::new();
     let mut indices = Vec::new();
+    // One nacelle + pylon per part; the mirror counterpart is its own entity,
+    // built in its own reflected wing frame.
     append_pylon_side(engine, mount, false, &mut positions, &mut indices);
-    if mount.symmetry == MountSymmetry::Mirrored {
-        append_pylon_side(engine, mount, true, &mut positions, &mut indices);
-    }
     finish_mesh(positions, indices)
 }
 
 pub fn jet_nacelle_centers(engine: &Engine, mount: JetNacelleMount<'_>) -> Vec<Vec3> {
-    let primary = nacelle_center(engine, mount, false);
-    if mount.symmetry == MountSymmetry::Mirrored {
-        let mut mirror = primary;
-        mirror.x = -mirror.x;
-        vec![primary, mirror]
-    } else {
-        vec![primary]
-    }
+    vec![nacelle_center(engine, mount, false)]
 }
 
 fn append_pylon_side(
@@ -208,7 +199,9 @@ fn append_cap(
         let next = (i + 1) % NACELLE_SEGMENTS;
         let a = ring_start + i;
         let b = ring_start + next;
-        let reverse = mirror ^ !front;
+        // Front cap (+Y) faces outward wound [center, b, a]; back cap (−Y) is
+        // the reverse. A mirrored (x-reflected) copy flips handedness again.
+        let reverse = mirror ^ front;
         if reverse {
             indices.extend_from_slice(&[center_i, b, a]);
         } else {
@@ -322,27 +315,30 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_nacelle_mesh_draws_both_sides() {
+    fn nacelle_follows_its_wing_side() {
+        // One nacelle per part, on the side of the wing it's mounted on. A
+        // wing at +π/2 puts the nacelle on +X; the mirror counterpart is a
+        // separate entity built at the reflected wing angle (−π/2) → −X.
         let engine = test_engine();
         let wing = test_wing();
-        let mesh = build_jet_nacelle_pylon_mesh(
-            &engine,
-            JetNacelleMount {
-                wing: &wing,
-                wing_mount_angle: std::f32::consts::FRAC_PI_2,
-                parent_radius: 1.0,
-                span_fraction: 0.5,
-                chord_fraction: 0.0,
-                symmetry: MountSymmetry::Mirrored,
-            },
-        );
-        let pos = mesh
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .unwrap()
-            .as_float3()
-            .unwrap();
-        let max_x = pos.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
-        let min_x = pos.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
-        assert!(max_x > 1.0 && min_x < -1.0);
+        let mount = |wing_mount_angle: f32| JetNacelleMount {
+            wing: &wing,
+            wing_mount_angle,
+            parent_radius: 1.0,
+            span_fraction: 0.5,
+            chord_fraction: 0.0,
+        };
+        let right = build_jet_nacelle_pylon_mesh(&engine, mount(std::f32::consts::FRAC_PI_2));
+        let left = build_jet_nacelle_pylon_mesh(&engine, mount(-std::f32::consts::FRAC_PI_2));
+        let mean_x = |m: &Mesh| -> f32 {
+            let pos = m
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            pos.iter().map(|p| p[0]).sum::<f32>() / pos.len() as f32
+        };
+        assert!(mean_x(&right) > 0.0, "wing at +π/2 → nacelle on +X");
+        assert!(mean_x(&left) < 0.0, "wing at −π/2 → nacelle on −X");
     }
 }
