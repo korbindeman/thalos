@@ -38,8 +38,8 @@ pub use catalog::{
     AdapterSpec, AmbientIntakeKind, CatalogEntry, CatalogError, CatalogId, CatalogRef,
     DecouplerSpec, EngineGeometry, EngineOptimization, EngineSpec, FuselageSpec, GearSpec,
     IntakeCapture, IntakeRequirement, IntakeSpec, PartCatalog, PodGeometry, PodSpec,
-    ResourceStorageSpec, TankSpec, WingSpec, fuselage_surface_area, fuselage_volume, gear_dry_mass,
-    pod_visual_profile, wing_mean_aerodynamic_chord, wing_panel_area,
+    ResourceStorageSpec, TankSpec, WingRole, WingSpec, fuselage_surface_area, fuselage_volume,
+    gear_dry_mass, pod_visual_profile, wing_mean_aerodynamic_chord, wing_panel_area,
 };
 pub use engine_mesh::{
     JetNacelleMount, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,

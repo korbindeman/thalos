@@ -23,7 +23,7 @@ use crate::blueprint::{
     check_resource_amounts_allowed, pools_for,
 };
 use crate::catalog::{
-    CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, fuselage_surface_area,
+    CatalogEntry, CatalogError, PartCatalog, WingRole, adapter_surface_area, fuselage_surface_area,
     gear_dry_mass, tank_surface_area, wing_mean_aerodynamic_chord, wing_panel_area,
 };
 use crate::part::{ReactantRatio, Wing};
@@ -479,7 +479,7 @@ impl ShipBlueprint {
             }
             let pb = &self.parts[m.child];
             let (
-                CatalogEntry::Wing(_),
+                CatalogEntry::Wing(wing_spec),
                 PartParams::Wing {
                     span,
                     root_chord,
@@ -522,6 +522,7 @@ impl ShipBlueprint {
                 span_m: *span as f64,
                 station: m.station as f64,
                 angle: m.angle as f64,
+                role: wing_spec.role,
             });
         }
         Ok(panels)
@@ -550,6 +551,10 @@ pub struct WingAeroPanel {
     pub station: f64,
     /// Mount azimuth (rad): 0 = dorsal, π/2 = right, π = belly, −π/2 = left.
     pub angle: f64,
+    /// Authored aerodynamic role from the catalog: `Lift` (main wing) or
+    /// `Stabilizer` (tailplane / fin). The consumer pairs this with the mount
+    /// azimuth (horizontal vs vertical) to assign control surfaces.
+    pub role: WingRole,
 }
 
 // ---------------------------------------------------------------------------

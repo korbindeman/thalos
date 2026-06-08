@@ -45,7 +45,7 @@ use thalos_physics_local::LocalCraftBody;
 use thalos_physics_local::avian::{
     ConstantForce, ConstantTorque, PhysicsDebugPlugin, PhysicsGizmos, PhysicsSchedule, Position,
 };
-use thalos_shipyard::WingAeroPanel;
+use thalos_shipyard::{WingAeroPanel, WingRole};
 
 use crate::rendering::SimulationState;
 
@@ -69,8 +69,6 @@ const PARASITIC_CD: f64 = 0.018;
 const CONTROL_AREA_FRACTION: f64 = 0.28;
 /// Lift coefficient produced by a control surface at full deflection.
 const CONTROL_AUTHORITY_CL: f64 = 1.8;
-/// Stations beyond this fraction down the fuselage are the empennage (tail).
-const TAIL_STATION_THRESHOLD: f64 = 0.75;
 /// Mount-angle tolerance (rad) for classifying a surface as vertical (a fin).
 const VERTICAL_ANGLE_TOLERANCE: f64 = 0.6;
 
@@ -206,10 +204,12 @@ fn panel_transform_sae(panel: &WingAeroPanel) -> (Vec3, Quat) {
 
 /// Compute the aerodynamic zone layout for an aircraft from its wing panels.
 ///
-/// Classifies each panel by mount geometry: vertical surfaces → fin (rudder),
-/// aft horizontal → stabiliser (elevator), forward horizontal → main wing
-/// (cambered, ailerons). Each surface gets a base lifting zone (stability) plus
-/// a control zone (authority). A fuselage bluff-body drag zone is always added.
+/// Classifies each panel by its **authored** [`WingRole`] (from the catalog),
+/// not a station heuristic: `Lift` → main wing (cambered, ailerons L/R by side);
+/// `Stabilizer` → empennage, split by mount azimuth into horizontal tailplane
+/// (elevator) vs vertical fin (rudder). Each surface gets a base lifting zone
+/// (stability) plus a control zone (authority). A fuselage bluff-body drag zone
+/// is always added.
 pub fn build_ship_aero_layout(
     panels: &[WingAeroPanel],
     frontal_area_m2: f64,
@@ -240,13 +240,15 @@ pub fn build_ship_aero_layout(
         // Vertical (fin) when mounted near the dorsal/belly meridian.
         let vertical = panel.angle.abs() < VERTICAL_ANGLE_TOLERANCE
             || (PI - panel.angle.abs()).abs() < VERTICAL_ANGLE_TOLERANCE;
-        let aft = panel.station > TAIL_STATION_THRESHOLD;
         let right_side = panel.angle > 0.0;
-        let cambered = !vertical && !aft;
+        // Authored role drives the split: primary lifting surfaces are the main
+        // wing; stabilisers are the empennage (tailplane / fin).
+        let is_lift = matches!(panel.role, WingRole::Lift);
+        let cambered = is_lift;
 
-        let role = if vertical {
+        let role = if !is_lift && vertical {
             ControlSurfaceRole::Rudder
-        } else if aft {
+        } else if !is_lift {
             ControlSurfaceRole::Elevator
         } else if right_side {
             ControlSurfaceRole::AileronRight

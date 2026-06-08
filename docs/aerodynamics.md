@@ -11,8 +11,10 @@ stabiliser/fin; elevator/aileron/rudder control surfaces); spacecraft get a
 bluff-body drag zone. Flight controls (pitch/roll/yaw → elevator/aileron/rudder)
 are wired, and an F3 debug overlay draws colliders + force/moment vectors. The
 **airfoil and control-authority constants are a first cut that needs in-game
-tuning** (static margin, control sign/gain, stall, takeoff speed). The A220
-(`ships/a220.ron`) is the reference test aircraft on the runway scenarios.
+tuning** (static margin, control sign/gain, stall, takeoff speed). The Meridian
+(`ships/meridian.ron`, a narrow-body airliner) is the reference test aircraft on
+the runway scenarios; its wings carry an authored `WingRole` (`Lift` main wing,
+`Stabilizer` empennage) that the zone generator classifies on.
 
 ## Why a vendored crate (and the LGPL story)
 
