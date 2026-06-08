@@ -34,13 +34,22 @@ const MAX_TRAJ: usize = 96;
 
 /// Side length of the square plot, in logical px.
 const MAP_SIZE_PX: f32 = 200.0;
-/// Fraction of the half-extent the fit radius maps to (leaves a margin).
+/// Fraction of the half-extent a zoom level's radius maps to (leaves a margin).
 const NDC_FIT: f64 = 0.82;
-/// Cap on how far the plot zooms out relative to the ship's current radius, so
-/// an escape hyperbola can't shrink the useful near-field to a dot.
-const MAX_ZOOM_RATIO: f64 = 16.0;
 /// Keep the panel up briefly after a burn ends so throttle blips don't flicker.
-const BURN_LINGER_SECS: f32 = 1.0;
+const BURN_LINGER_SECS: f32 = 5.0;
+
+/// Discrete zoom ladder: each entry is the view radius (panel half-extent) in
+/// metres. The plot snaps to the smallest level that contains the relevant
+/// content, so the scale changes in fixed notches instead of drifting
+/// continuously as a burn proceeds. 1-2-5 ladder from 1 000 km to ~6.7 AU.
+const ZOOM_LEVELS_M: [f64; 19] = [
+    1.0e6, 2.0e6, 5.0e6, 1.0e7, 2.0e7, 5.0e7, 1.0e8, 2.0e8, 5.0e8, 1.0e9, 2.0e9, 5.0e9, 1.0e10,
+    2.0e10, 5.0e10, 1.0e11, 2.0e11, 5.0e11, 1.0e12,
+];
+/// Step down a notch only when content shrinks to well inside the smaller
+/// level, so content hovering near a boundary doesn't oscillate the zoom.
+const ZOOM_DOWN_HYSTERESIS: f64 = 0.8;
 
 // Shape sizes / line widths, in the shader's normalised half-extent units
 // (1.0 == half the plot, i.e. MAP_SIZE_PX * 0.5 px).
@@ -65,6 +74,9 @@ pub(super) struct SystemMapData {
     style: Vec4,
     /// xy = ship marker, zw = maneuver-node marker.
     markers: Vec4,
+    /// x = dominant-body disc radius (to scale), yz = sun direction (plot
+    /// space, normalized), w = is-star flag (1 = dominant body is the star).
+    extra: Vec4,
     col_central: Vec4,
     col_ring: Vec4,
     col_body: Vec4,
@@ -86,6 +98,7 @@ impl Default for SystemMapData {
             geom: Vec4::ZERO,
             style: Vec4::ZERO,
             markers: Vec4::ZERO,
+            extra: Vec4::ZERO,
             col_central: Vec4::ZERO,
             col_ring: Vec4::ZERO,
             col_body: Vec4::ZERO,
@@ -119,6 +132,19 @@ pub(super) struct SystemMapRoot;
 /// Marker on the `MaterialNode` canvas (carries the live material handle).
 #[derive(Component)]
 pub(super) struct SystemMapCanvas;
+
+/// Marker on the scale-readout text under the plot.
+#[derive(Component)]
+pub(super) struct SystemMapScale;
+
+/// Persistent zoom selection, kept across frames so the ladder snap has
+/// hysteresis (held in a `Local` on [`update`]). Reset when the dominant body
+/// changes, since the appropriate scale shifts by orders of magnitude.
+#[derive(Default)]
+pub(super) struct ZoomState {
+    idx: usize,
+    dominant: Option<BodyId>,
+}
 
 pub(super) fn setup(
     mut commands: Commands,
@@ -159,6 +185,7 @@ pub(super) fn setup(
                 SystemMapCanvas,
                 Name::new("HudSystemMapCanvas"),
             ));
+            p.spawn((label(&theme, "—"), SystemMapScale, Name::new("HudSystemMapScale")));
         });
 }
 
@@ -173,7 +200,9 @@ pub(super) fn update(
     mut materials: ResMut<Assets<SystemMapMaterial>>,
     mut root_q: Query<&mut Visibility, With<SystemMapRoot>>,
     canvas_q: Query<&MaterialNode<SystemMapMaterial>, With<SystemMapCanvas>>,
+    mut scale_q: Query<&mut Text, With<SystemMapScale>>,
     mut last_burn: Local<Option<f32>>,
+    mut zoom: Local<ZoomState>,
 ) {
     let Ok(mut vis) = root_q.single_mut() else {
         return;
@@ -214,7 +243,14 @@ pub(super) fn update(
         return;
     };
 
-    build_data(&mut material.data, &sim, branches, states, &theme);
+    build_data(&mut material.data, &sim, branches, states, &theme, &mut zoom);
+
+    if let Ok(mut text) = scale_q.single_mut() {
+        let s = fmt_view_radius(ZOOM_LEVELS_M[zoom.idx]);
+        if text.0 != s {
+            text.0 = s;
+        }
+    }
 }
 
 fn build_data(
@@ -223,6 +259,7 @@ fn build_data(
     branches: &TrajectoryBranchStack,
     states: &[BodyState],
     theme: &HudTheme,
+    zoom: &mut ZoomState,
 ) {
     let dominant = sim.simulation.dominant_body();
     let center = states.get(dominant).map_or(DVec3::ZERO, |s| s.position);
@@ -286,26 +323,77 @@ fn build_data(
         }
     }
 
-    // Fit to the trajectory (so the burn-relevant orbits dominate the frame),
-    // capped relative to the ship's radius so escapes don't collapse the view.
-    let ship_radius = ship2d.length().max(1.0);
-    let mut fit = ship_radius;
-    for p in solid_pts.iter().chain(dotted_pts.iter()) {
-        fit = fit.max(p.length());
-    }
-    fit = fit.min(ship_radius * MAX_ZOOM_RATIO).max(1.0);
+    // Orientation reference: the dominant body's true radius + colour, and the
+    // sun direction (toward the star). `dominant == star` (interplanetary) has
+    // no meaningful sun direction → full-bright.
+    let (body_radius_m, body_color) = sim
+        .system
+        .bodies
+        .get(dominant)
+        .map_or((1.0, [0.46, 0.44, 0.40]), |b| (b.radius_m, b.color));
+    let star_pos = sim
+        .system
+        .bodies
+        .iter()
+        .position(|b| b.parent.is_none())
+        .and_then(|id| states.get(id))
+        .map(|s| s.position);
+    let is_star = star_pos.is_some_and(|sp| (sp - center).length() < 1.0);
+    let sun_dir = match star_pos {
+        Some(sp) if !is_star => {
+            let d = sp - center;
+            DVec2::new(d.x, d.z).normalize_or_zero().as_vec2()
+        }
+        _ => Vec2::ZERO,
+    };
 
-    // Keep only rings that fall (roughly) inside the framed region.
-    children.retain(|(r, _)| *r <= fit * 1.3);
+    // Content the view must contain: the current orbit, the planned (maneuver)
+    // orbit when a node exists — so the level fits the *maneuver* and stays put
+    // through its execution — plus the ship and the body itself.
+    let mut content = ship2d.length().max(body_radius_m * 1.1);
+    for p in solid_pts.iter() {
+        content = content.max(p.length());
+    }
+    if has_nodes {
+        for p in dotted_pts.iter() {
+            content = content.max(p.length());
+        }
+    }
+
+    // Snap to the discrete zoom ladder with hysteresis: step up the instant
+    // content overflows the current notch, step down only once it shrinks well
+    // inside a smaller notch, so the scale holds steady during a burn.
+    let smallest_fit = ZOOM_LEVELS_M
+        .iter()
+        .position(|&l| l >= content)
+        .unwrap_or(ZOOM_LEVELS_M.len() - 1);
+    if zoom.dominant != Some(dominant) {
+        zoom.dominant = Some(dominant);
+        zoom.idx = smallest_fit;
+    } else if content > ZOOM_LEVELS_M[zoom.idx] {
+        zoom.idx = smallest_fit;
+    } else if zoom.idx > 0 && content < ZOOM_LEVELS_M[zoom.idx - 1] * ZOOM_DOWN_HYSTERESIS {
+        zoom.idx = smallest_fit;
+    }
+    let scale = NDC_FIT / ZOOM_LEVELS_M[zoom.idx]; // world metres → plot units
+
+    // Keep only rings that fall inside the framed region.
+    children.retain(|(r, _)| (*r * scale) as f32 <= 1.05);
     children.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     children.truncate(MAX_RINGS);
 
-    let scale = NDC_FIT / fit; // world metres → normalised plot units
+    let body_disc_r = ((body_radius_m * scale) as f32).clamp(CENTRAL_R, 0.95);
 
     *data = SystemMapData::default();
     data.geom = Vec4::new(CENTRAL_R, SHIP_R, NODE_R, LINE_HW);
     data.style = Vec4::new(RING_HW, DASH_PERIOD, DASH_DUTY, BODY_DOT_R);
-    data.col_central = lin(Color::srgb(0.46, 0.44, 0.40));
+    data.extra = Vec4::new(
+        body_disc_r,
+        sun_dir.x,
+        sun_dir.y,
+        if is_star { 1.0 } else { 0.0 },
+    );
+    data.col_central = lin(Color::srgb(body_color[0], body_color[1], body_color[2]));
     data.col_ring = lin(Color::srgba(0.56, 0.58, 0.52, 0.30));
     data.col_body = lin(Color::srgba(0.74, 0.76, 0.72, 0.90));
     data.col_solid = lin_with_alpha(theme.text_accent, 0.92); // amber = current path
@@ -359,6 +447,16 @@ fn fill_line(out: &mut [Vec4; MAX_TRAJ], pts: &[DVec2], scale: f64) -> usize {
         *slot = Vec4::new(p.x, p.y, arc, 1.0);
     }
     count
+}
+
+/// Format a zoom-level view radius (metres) as the panel's scale readout.
+fn fmt_view_radius(m: f64) -> String {
+    let km = m / 1000.0;
+    if km >= 1.0e6 {
+        format!("\u{00b1}{:.1} Mkm", km / 1.0e6)
+    } else {
+        format!("\u{00b1}{:.0} km", km)
+    }
 }
 
 fn lin(color: Color) -> Vec4 {

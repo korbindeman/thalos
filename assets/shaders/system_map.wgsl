@@ -18,6 +18,8 @@ struct SystemMapData {
     style: vec4<f32>,
     // xy = ship marker pos, zw = maneuver-node marker pos (all in [-1, 1])
     markers: vec4<f32>,
+    // x = dominant-body disc radius (to scale), yz = sun direction, w = is-star
+    extra: vec4<f32>,
     col_central: vec4<f32>,
     col_ring: vec4<f32>,
     col_body: vec4<f32>,
@@ -79,10 +81,25 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
         col = over(col, data.col_ring.rgb, a * data.col_ring.a);
     }
 
-    // Dominant body (filled disc).
-    let cd = radial - central_r;
-    let ca = 1.0 - smoothstep(-radial_aa, radial_aa, cd);
-    col = over(col, data.col_central.rgb, ca * data.col_central.a);
+    // Dominant body, drawn to scale and shaded day/night toward the star so
+    // the plot has an unambiguous size + orientation reference.
+    let disc_r = max(data.extra.x, central_r);
+    let sun_dir = data.extra.yz;
+    let is_star = data.extra.w > 0.5;
+    let bd = radial - disc_r;
+    let body_mask = 1.0 - smoothstep(-radial_aa, radial_aa, bd);
+    var body_rgb = data.col_central.rgb;
+    if (!is_star) {
+        // Terminator is the line through the centre perpendicular to the sun
+        // direction; project the pixel onto the sun axis across the disc.
+        let term = dot(c, sun_dir) / max(disc_r, 1e-4);
+        let day = smoothstep(-0.12, 0.12, term);
+        body_rgb = mix(data.col_central.rgb * 0.16, data.col_central.rgb, day);
+    }
+    col = over(col, body_rgb, body_mask);
+    // Crisp limb.
+    let limb = 1.0 - smoothstep(ring_hw - radial_aa, ring_hw + radial_aa, abs(bd));
+    col = over(col, data.col_central.rgb, limb * 0.5);
 
     // Child-body dots sitting on their rings.
     for (var i: u32 = 0u; i < ring_count; i = i + 1u) {
