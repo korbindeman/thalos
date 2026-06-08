@@ -178,6 +178,28 @@ pub(crate) fn spawn_player_ship(
         stats.wet_mass_kg(),
     );
 
+    // Aerodynamic zone layout from the blueprint's wing parts (lift, control
+    // surfaces, drag). Consumed by `aero::attach_ship_aero` when the Avian body
+    // spawns. A wingless craft yields just the bluff-body drag zone.
+    match blueprint.wing_aero_panels(&catalog) {
+        Ok(panels) => {
+            let layout = crate::aero::build_ship_aero_layout(
+                &panels,
+                stats.frontal_area_m2,
+                SHIP_DRAG_COEFFICIENT,
+            );
+            info!(
+                "aero layout: {} wing panel(s) -> {} zone(s), wing area {:.1} m², MAC {:.2} m",
+                panels.len(),
+                layout.zones.len(),
+                layout.reference_area_m2,
+                layout.reference_chord_m,
+            );
+            commands.insert_resource(layout);
+        }
+        Err(err) => error!("Failed to compute wing aero panels: {err}"),
+    }
+
     let ship_entity = match blueprint.spawn(&mut commands, &catalog) {
         Ok(e) => e,
         Err(err) => {

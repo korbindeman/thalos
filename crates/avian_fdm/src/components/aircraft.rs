@@ -1,9 +1,39 @@
 //! Aircraft-level components: geometry and the core spawn bundle.
 
 use crate::_bevy::*;
-use avian3d::math::Scalar;
+use avian3d::math::{Quaternion, Scalar};
 use avian3d::prelude::{AngularVelocity, ConstantForce, ConstantTorque, LinearVelocity, RigidBody};
 use serde::{Deserialize, Serialize};
+
+/// Optional fixed rotation mapping the host engine's entity-local body frame to
+/// `avian_fdm`'s **SAE aerodynamic frame** (X = nose/forward, Y = right wing,
+/// Z = down).
+///
+/// `avian_fdm` computes angle-of-attack, sideslip, and all aerodynamic forces in
+/// the SAE frame, reading the aircraft's `Rotation` as "SAE-body → world". When
+/// the host engine uses a different body-axis convention (Thalos ships are
+/// Y = nose, X = right, Z = up), add this component so the whole pipeline —
+/// `update_flight_state`, `compute_aero_forces`, and the debug gizmos — operates
+/// in the correct frame. Absent (or identity) means "the entity frame already
+/// is SAE", preserving upstream behaviour.
+///
+/// `AeroZone` transforms are then authored in the **SAE frame**, not the entity
+/// frame. (Zones are collider-less and invisible, so this never affects visuals.)
+#[derive(Component, Clone, Copy, Debug)]
+pub struct AeroFrame {
+    /// Rotation taking a vector from the SAE-aero frame into the host entity's
+    /// local frame (the inverse converts entity → SAE). For a Bevy Y-forward,
+    /// Z-up ship this is a 180° rotation about (1, 1, 0)/√2.
+    pub sae_to_entity: Quaternion,
+}
+
+impl Default for AeroFrame {
+    fn default() -> Self {
+        Self {
+            sae_to_entity: Quaternion::IDENTITY,
+        }
+    }
+}
 
 /// Core bundle. Spawn on the aircraft root entity.
 ///

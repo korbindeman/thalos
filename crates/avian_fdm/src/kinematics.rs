@@ -11,8 +11,8 @@
 
 use crate::_bevy::*;
 use crate::atmosphere::WindResource;
-use crate::components::{AtmosphereState, FlightState};
-use avian3d::math::{Scalar, Vector};
+use crate::components::{AeroFrame, AtmosphereState, FlightState};
+use avian3d::math::{Quaternion, Scalar, Vector};
 
 /// Updates [`FlightState`] on each aircraft from velocity and atmosphere.
 ///
@@ -26,6 +26,7 @@ pub fn update_flight_state(
         &avian3d::prelude::AngularVelocity,
         &AtmosphereState,
         &mut FlightState,
+        Option<&AeroFrame>,
     )>,
     wind: Option<Res<WindResource>>,
 ) {
@@ -33,11 +34,17 @@ pub fn update_flight_state(
 
     let wind_world = wind.map(|w| w.velocity_world_ms).unwrap_or(Vector::ZERO);
 
-    for (transform, lin_vel, ang_vel, atm, mut fs) in &mut query {
+    for (transform, lin_vel, ang_vel, atm, mut fs, aero_frame) in &mut query {
         let altitude_m = transform.translation().y as Scalar;
 
+        // Effective body→world rotation in the SAE aero frame. With an
+        // `AeroFrame`, the host entity uses a non-SAE convention; multiplying by
+        // `sae_to_entity` makes `q` map SAE-body → world, so the velocity/rate
+        // conversions below land in the SAE frame this model expects.
+        let sae_to_entity = aero_frame.map_or(Quaternion::IDENTITY, |f| f.sae_to_entity);
+
         // Body angular rates, rotate world AngularVelocity to body frame.
-        let q = quat_to_quaternion(transform.rotation());
+        let q = quat_to_quaternion(transform.rotation()) * sae_to_entity;
         let av_world = ang_vel.0;
         let omega_body = q.inverse() * av_world;
         let p_rads = omega_body.x;

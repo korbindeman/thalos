@@ -10,7 +10,7 @@ pub mod zone_force;
 
 pub use aero_coeff::AeroCoeff;
 pub use aero_zone::{AeroZone, AeroZoneBundle, ControlSurfaceRole};
-pub use aircraft::{AircraftCoreBundle, AircraftGeometry, InducedDrag, LodDamping};
+pub use aircraft::{AeroFrame, AircraftCoreBundle, AircraftGeometry, InducedDrag, LodDamping};
 pub use controls::ControlInputs;
 pub use failure::{get_remaining, Failure};
 pub use flight_state::{AtmosphereState, FlightState};

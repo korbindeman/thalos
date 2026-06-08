@@ -26,8 +26,9 @@ use crate::catalog::{
     CatalogEntry, CatalogError, PartCatalog, adapter_surface_area, gear_dry_mass,
     tank_surface_area, wing_mean_aerodynamic_chord, wing_panel_area,
 };
-use crate::part::ReactantRatio;
+use crate::part::{ReactantRatio, Wing};
 use crate::resource::{PartResources, Resource};
+use crate::wing_mesh::wing_panel_frame;
 use bevy::math::Vec3;
 use glam::DVec3;
 use std::collections::{HashMap, VecDeque};
@@ -452,6 +453,103 @@ impl ShipBlueprint {
             mean_aerodynamic_chord_m,
         })
     }
+
+    /// Per-panel aerodynamic geometry for every [`Wing`] part, in the **ship
+    /// body frame** (`+Y` = nose, `+X` = right, `+Z` = dorsal/up). One entry
+    /// per wing entity (a mirrored pair is two entries). This is the geometry a
+    /// flight model turns into lift/drag/control zones — the game maps each
+    /// panel to an `avian_fdm` `AeroZone` (airfoil coefficients, control role,
+    /// and the body→SAE frame conversion live game-side).
+    ///
+    /// `center_body_m` is the panel's aerodynamic centre (≈ quarter-chord at
+    /// ~40% span); `fore_dir`/`thick_dir`/`span_dir` are the airfoil basis
+    /// (chord-forward / lift-normal / spanwise) in the body frame.
+    pub fn wing_aero_panels(&self, catalog: &PartCatalog) -> Result<Vec<WingAeroPanel>, CatalogError> {
+        let entries: Vec<&CatalogEntry> = self
+            .parts
+            .iter()
+            .map(|pb| catalog.resolve(&pb.catalog_id))
+            .collect::<Result<_, _>>()?;
+        let geo = ship_geometry(self, &entries);
+
+        let mut panels = Vec::new();
+        for m in &self.surface_mounts {
+            if m.child >= self.parts.len() || m.parent >= geo.len() {
+                continue;
+            }
+            let pb = &self.parts[m.child];
+            let (
+                CatalogEntry::Wing(_),
+                PartParams::Wing {
+                    span,
+                    root_chord,
+                    tip_chord,
+                    sweep,
+                    dihedral,
+                    thickness,
+                    incidence,
+                },
+            ) = (entries[m.child], &pb.params)
+            else {
+                continue;
+            };
+            let wing = Wing {
+                span: *span,
+                root_chord: *root_chord,
+                tip_chord: *tip_chord,
+                sweep: *sweep,
+                dihedral: *dihedral,
+                thickness: *thickness,
+                incidence: *incidence,
+                dry_mass: 0.0,
+            };
+            let parent_radius = geo[m.parent].diameter * 0.5;
+            let frame = wing_panel_frame(&wing, m.angle, parent_radius);
+            // Aerodynamic centre: ~40% span, shifted forward from mid-chord to
+            // roughly quarter-chord.
+            let ac_span_frac = 0.4_f32;
+            let chord_here = frame.chord_at(&wing, ac_span_frac);
+            let ac_local = frame.center_at(ac_span_frac) + frame.fore_dir * (chord_here * 0.25);
+            let center_body_m = geo[m.child].position + ac_local.as_dvec3();
+
+            panels.push(WingAeroPanel {
+                center_body_m,
+                fore_dir: frame.fore_dir.as_dvec3(),
+                thick_dir: frame.thick_dir.as_dvec3(),
+                span_dir: frame.span_dir.as_dvec3(),
+                area_m2: wing_panel_area(*span, *root_chord, *tip_chord) as f64,
+                chord_m: wing_mean_aerodynamic_chord(*root_chord, *tip_chord) as f64,
+                span_m: *span as f64,
+                station: m.station as f64,
+                angle: m.angle as f64,
+            });
+        }
+        Ok(panels)
+    }
+}
+
+/// One wing panel's aerodynamic geometry in the ship body frame. See
+/// [`ShipBlueprint::wing_aero_panels`].
+#[derive(Clone, Copy, Debug)]
+pub struct WingAeroPanel {
+    /// Aerodynamic-centre position in the ship body frame (m).
+    pub center_body_m: DVec3,
+    /// Chord-forward unit vector (toward the nose), body frame.
+    pub fore_dir: DVec3,
+    /// Airfoil lift-normal unit vector ("up"/dorsal side), body frame.
+    pub thick_dir: DVec3,
+    /// Spanwise (outboard) unit vector, body frame.
+    pub span_dir: DVec3,
+    /// Single-panel planform area (m²).
+    pub area_m2: f64,
+    /// Mean aerodynamic chord (m).
+    pub chord_m: f64,
+    /// Panel half-span (m).
+    pub span_m: f64,
+    /// Mount station along the host (0 = nose end, 1 = tail end).
+    pub station: f64,
+    /// Mount azimuth (rad): 0 = dorsal, π/2 = right, π = belly, −π/2 = left.
+    pub angle: f64,
 }
 
 // ---------------------------------------------------------------------------

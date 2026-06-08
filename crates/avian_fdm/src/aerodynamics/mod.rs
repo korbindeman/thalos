@@ -40,12 +40,12 @@ pub(crate) use world_forces::zone_force_world;
 
 use crate::_bevy::*;
 use crate::math::{quat_to_quaternion, vec3_to_vector, vector_to_vec3};
-use avian3d::math::{Scalar, Vector};
+use avian3d::math::{Quaternion, Scalar, Vector};
 use avian3d::prelude::{ComputedCenterOfMass, ConstantForce, ConstantTorque, Position, Rotation};
 
 use crate::components::EngineZone;
 use crate::components::{
-    get_remaining, AeroZone, AircraftGeometry, AtmosphereState, ControlInputs, Failure,
+    get_remaining, AeroFrame, AeroZone, AircraftGeometry, AtmosphereState, ControlInputs, Failure,
     FlightState, InducedDrag, LodDamping, ZoneForce,
 };
 
@@ -68,6 +68,7 @@ pub fn compute_aero_forces(
         &Children,
         Option<&LodDamping>,
         Option<&InducedDrag>,
+        Option<&AeroFrame>,
     )>,
     mut zone_query: Query<(&AeroZone, &Transform, &mut ZoneForce, Option<&Failure>)>,
     engine_zone_query: Query<&ZoneForce, (With<EngineZone>, Without<AeroZone>)>,
@@ -85,6 +86,7 @@ pub fn compute_aero_forces(
         children,
         lod_damping,
         induced_drag,
+        aero_frame,
     ) in root_query.iter_mut()
     {
         cf.0 = Vector::ZERO;
@@ -107,11 +109,17 @@ pub fn compute_aero_forces(
         let mu = crate::atmosphere::sutherland_viscosity(atm.temperature_k);
         let rho = atm.density_kgm3;
 
-        let body_to_world = rot.0;
+        // SAE aero frame (see `AeroFrame`): `body_to_world` maps SAE-body →
+        // world, and `com_sae` is the CoM offset expressed in the SAE frame
+        // (Avian's `ComputedCenterOfMass` is in the entity frame). With no
+        // `AeroFrame` both reduce to the entity frame == SAE (upstream).
+        let sae_to_entity = aero_frame.map_or(Quaternion::IDENTITY, |f| f.sae_to_entity);
+        let body_to_world = rot.0 * sae_to_entity;
+        let com_sae: Vector = sae_to_entity.inverse() * com.0;
         let (sa, ca) = (alpha.sin(), alpha.cos());
         let (sb, cb) = (beta.sin(), beta.cos());
         let vel_body_unit_global = Vector::new(ca * cb, sb, sa * cb);
-        let com_world: Vector = pos.0 + body_to_world * com.0;
+        let com_world: Vector = pos.0 + body_to_world * com_sae;
         let use_lod = lod_damping.is_some();
 
         let mut total_cl_x_area: Scalar = 0.0;
@@ -128,7 +136,7 @@ pub fn compute_aero_forces(
                 }
 
                 let zone_body_from_cg: Vector =
-                    vec3_to_vector(zone_transform.translation) - com.0;
+                    vec3_to_vector(zone_transform.translation) - com_sae;
                 let zone_q = quat_to_quaternion(zone_transform.rotation);
 
                 // Step 0: per-zone local α/β (skipped in LOD mode).
