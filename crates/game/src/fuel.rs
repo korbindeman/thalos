@@ -35,6 +35,7 @@ use std::collections::{HashMap, VecDeque};
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::Epoch;
+use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, AmbientIntakeKind, Attachment, CommandPod, Decoupler, Engine,
     EngineActivation, FuelCrossfeed, FuelTank, G0, IntakeCapture, Part,
@@ -271,7 +272,9 @@ type DryMassQuery<'w, 's> = Query<
         Option<&'static AirIntake>,
         Option<&'static SurfaceMount>,
     ),
-    With<Part>,
+    // The in-game shipyard editor assembles parts from the same components;
+    // its build must never feed the flight craft's mass/propulsion.
+    (With<Part>, Without<EditorPart>),
 >;
 
 fn part_dry_mass_kg(
@@ -366,10 +369,10 @@ fn refresh_active_propulsion(
     mut sim: ResMut<SimulationState>,
     mut active: ResMut<ActivePropulsion>,
     debug: Option<Res<crate::debug::DebugMode>>,
-    engines: Query<(Entity, &Engine, Option<&EngineActivation>)>,
-    intakes: Query<(Entity, &AirIntake, Option<&SurfaceMount>)>,
+    engines: Query<(Entity, &Engine, Option<&EngineActivation>), Without<EditorPart>>,
+    intakes: Query<(Entity, &AirIntake, Option<&SurfaceMount>), Without<EditorPart>>,
     parts: DryMassQuery,
-    resources: Query<&PartResources>,
+    resources: Query<&PartResources, Without<EditorPart>>,
 ) {
     let dry_mass_kg: f64 = parts
         .iter()
@@ -540,8 +543,8 @@ fn crossfeed_enabled(entity: Entity, crossfeeds: &Query<&FuelCrossfeed>) -> bool
 }
 
 fn crossfeed_components(
-    attachments: &Query<(Entity, &Attachment)>,
-    surface_mounts: &Query<(Entity, &SurfaceMount)>,
+    attachments: &Query<(Entity, &Attachment), Without<EditorPart>>,
+    surface_mounts: &Query<(Entity, &SurfaceMount), Without<EditorPart>>,
     crossfeeds: &Query<&FuelCrossfeed>,
 ) -> HashMap<Entity, usize> {
     let mut adjacency: HashMap<Entity, Vec<Entity>> = HashMap::new();
@@ -604,7 +607,7 @@ fn component_for(entity: Entity, components: &HashMap<Entity, usize>) -> usize {
 }
 
 fn resource_mass_by_component(
-    tanks: &Query<(Entity, &PartResources)>,
+    tanks: &Query<(Entity, &PartResources), Without<EditorPart>>,
     components: &HashMap<Entity, usize>,
 ) -> HashMap<(usize, Resource), f64> {
     let mut available = HashMap::new();
@@ -640,7 +643,7 @@ fn engine_resource_requests(
 }
 
 fn drain_resource_from_component(
-    tanks: &mut Query<(Entity, &mut PartResources)>,
+    tanks: &mut Query<(Entity, &mut PartResources), Without<EditorPart>>,
     components: &HashMap<Entity, usize>,
     target_component: usize,
     resource: Resource,
@@ -698,9 +701,9 @@ fn drain_resource_from_component(
 fn reconcile_tanks_from_sim_drain(
     sim: Res<SimulationState>,
     last_burn: Res<LastBurnRecipe>,
-    mut tanks: Query<(Entity, &mut PartResources)>,
-    attachments: Query<(Entity, &Attachment)>,
-    surface_mounts: Query<(Entity, &SurfaceMount)>,
+    mut tanks: Query<(Entity, &mut PartResources), Without<EditorPart>>,
+    attachments: Query<(Entity, &Attachment), Without<EditorPart>>,
+    surface_mounts: Query<(Entity, &SurfaceMount), Without<EditorPart>>,
     crossfeeds: Query<&FuelCrossfeed>,
     mut prev_sim_mass: Local<Option<f64>>,
 ) {
@@ -746,9 +749,9 @@ pub fn gate_throttle_on_fuel_availability(
     active: Res<ActivePropulsion>,
     mut sim: ResMut<SimulationState>,
     mut throttle: ResMut<ThrottleState>,
-    tanks: Query<(Entity, &PartResources)>,
-    attachments: Query<(Entity, &Attachment)>,
-    surface_mounts: Query<(Entity, &SurfaceMount)>,
+    tanks: Query<(Entity, &PartResources), Without<EditorPart>>,
+    attachments: Query<(Entity, &Attachment), Without<EditorPart>>,
+    surface_mounts: Query<(Entity, &SurfaceMount), Without<EditorPart>>,
     crossfeeds: Query<&FuelCrossfeed>,
     mut last_burn: ResMut<LastBurnRecipe>,
     mut refresh: Local<PredictionRefresh>,

@@ -38,8 +38,13 @@ pub struct ShipyardInputPlugin;
 
 impl Plugin for ShipyardInputPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(EnhancedInputPlugin)
-            .add_input_context::<ShipyardContext>()
+        // The game adds this plugin alongside `GameInputPlugin`, which already
+        // registers `EnhancedInputPlugin`; the standalone ship_editor binary
+        // adds it alone. Guard so both hosts work.
+        if !app.is_plugin_added::<EnhancedInputPlugin>() {
+            app.add_plugins(EnhancedInputPlugin);
+        }
+        app.add_input_context::<ShipyardContext>()
             .init_resource::<ShipyardInputIntent>()
             .add_systems(Startup, spawn_shipyard_input)
             .add_systems(
@@ -53,6 +58,10 @@ fn spawn_shipyard_input(mut commands: Commands, settings: Res<InputSettings>) {
     let section = &settings.shipyard;
     commands.spawn((
         ShipyardContext,
+        // Explicit activity so a host can gate the whole context off (the
+        // game keeps it inactive unless its shipyard editor is open; the
+        // standalone editor leaves it always-on).
+        ContextActivity::<ShipyardContext>::ACTIVE,
         Name::new("ShipyardInputController"),
         actions!(ShipyardContext[
             (

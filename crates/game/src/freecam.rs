@@ -81,6 +81,7 @@ fn toggle_freecam_system(
     debug: Option<Res<DebugMode>>,
     view: Res<ViewMode>,
     input: Res<GameInputIntent>,
+    shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     mut freecam: ResMut<FreeCam>,
     mut egui: EguiContexts,
 ) {
@@ -93,6 +94,10 @@ fn toggle_freecam_system(
     }
 
     if !input.toggle_free_cam {
+        return;
+    }
+    // The shipyard editor owns the screen; freecam has no scene to fly.
+    if shipyard.as_deref().map(|s| s.open).unwrap_or(false) {
         return;
     }
     if let Ok(ctx) = egui.ctx_mut()

@@ -181,6 +181,7 @@ fn propagate_view_render_layers(
 /// `bevy_egui` skips extracting its render output and the UI vanishes.
 fn apply_active_camera(
     view: Res<ViewMode>,
+    shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     mut commands: Commands,
     mut cameras: Query<
         (
@@ -193,6 +194,13 @@ fn apply_active_camera(
         Or<(With<MapCamera>, With<ShipCamera>)>,
     >,
 ) {
+    // While the shipyard editor is open it owns the screen: both scene
+    // cameras stay inactive (its `apply_open_state` flips them) and the
+    // editor camera renders instead. Reasserting the ViewMode camera here
+    // would leave two active order-0 window cameras fighting.
+    if shipyard.as_deref().map(|s| s.open).unwrap_or(false) {
+        return;
+    }
     if !view.is_changed() {
         return;
     }

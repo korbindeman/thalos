@@ -53,7 +53,20 @@ and backend choice out of the equation without changing source:
 THALOS_WINDOW_MODE=windowed      # windowed | borderless | fullscreen
 THALOS_WINDOW_SIZE=1600x900      # optional, used for windowed mode
 THALOS_WGPU_BACKEND=vulkan       # auto | dx12 | vulkan | metal | gl
+THALOS_SCALE=2                   # optional, pin the UI scale factor
 ```
+
+### HiDPI UI scale factor (`THALOS_SCALE`)
+
+Bevy 0.18 has a text-rendering bug at **fractional** window scale factors: on a
+150 % display (scale 1.5), glyphs rasterise at inconsistent sizes and the UI
+text looks broken (non-uniform, "not monospace"). Integer scale factors render
+cleanly. So `main.rs`'s `snap_window_scale_to_integer` snaps the OS scale to the
+nearest integer (≥ 1) at startup — 1.5 → 2, 1.25 → 1 — which makes text crisp at
+the cost of the UI being slightly larger or smaller than the OS-intended size.
+Set `THALOS_SCALE=<float>` to pin a specific factor instead (e.g. `THALOS_SCALE=1`
+for native-pixel UI on a HiDPI laptop, smaller but sharp). Remove the snap once
+the upstream Bevy fractional-scale text bug is fixed.
 
 `THALOS_WGPU_BACKEND` is a Thalos-facing alias for the same class of wgpu
 backend selection that `WGPU_BACKEND` provides, but it is scoped to our game

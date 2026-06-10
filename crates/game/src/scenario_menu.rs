@@ -26,7 +26,7 @@
 use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
 
-use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
+use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
 use thalos_world::BodyId;
@@ -35,7 +35,7 @@ use crate::hud::theme::{HudTheme, panel_frame};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::player_controller::EvaMode;
 use crate::rendering::{PlayerShip, SimulationState};
-use crate::spawn::{Homeworld, SpawnSituation, compute_descent_state, orbit_parking_state};
+use crate::spawn::{Homeworld, SpawnSituation, compute_descent_state, orbit_respawn_state};
 
 /// Whether the destruction scenario picker is shown (and the game halted).
 ///
@@ -409,26 +409,10 @@ fn respawn_into(
     info!("respawned into {situation:?}");
 }
 
-/// The Thalos debug parking orbit at the current epoch — the `just game`
-/// default start, rebuilt for a respawn.
-fn orbit_respawn_state(
-    sim: &SimulationState,
-    homeworld: BodyId,
-) -> (
-    thalos_world::StateVector,
-    thalos_physics_canonical::types::AttitudeState,
-) {
-    let epoch = Epoch(sim.simulation.sim_time());
-    let homeworld_state = sim.ephemeris.state(homeworld, epoch);
-    let rel = thalos_physics_canonical::debug_orbits::debug_parking_orbit_relative_state(
-        &sim.system.bodies[homeworld],
-    );
-    orbit_parking_state(rel, &homeworld_state)
-}
-
 /// Despawn the active bubble's craft body (and any attached terrain patch) and
 /// clear the slot, so the on-demand spawner makes a fresh body next frame.
-fn clear_bubble(commands: &mut Commands, active: &mut ActiveLocalBubble) {
+/// Shared with the editor's Launch relaunch ([`crate::relaunch`]).
+pub(crate) fn clear_bubble(commands: &mut Commands, active: &mut ActiveLocalBubble) {
     let Some(bubble) = active.bubble.take() else {
         return;
     };

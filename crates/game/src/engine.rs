@@ -17,6 +17,7 @@
 //!    plumbing in (1) stays.
 
 use bevy::prelude::*;
+use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{Engine, EngineActivation, EngineThrust};
 
 use crate::SimStage;
@@ -58,12 +59,15 @@ impl Plugin for EnginePlugin {
 fn update_engine_thrust(
     throttle: Res<ThrottleState>,
     active: Res<ActivePropulsion>,
-    mut engines: Query<(
-        Entity,
-        &Engine,
-        Option<&EngineActivation>,
-        &mut EngineThrust,
-    )>,
+    mut engines: Query<
+        (
+            Entity,
+            &Engine,
+            Option<&EngineActivation>,
+            &mut EngineThrust,
+        ),
+        Without<EditorPart>,
+    >,
 ) {
     let throttle_eff = throttle.effective.clamp(0.0, 1.0) as f32;
     for (entity, engine, activation, mut thrust) in engines.iter_mut() {
@@ -82,7 +86,7 @@ fn update_engine_thrust(
 /// Temporary placeholder visual: tint the engine's body mesh from
 /// gray to red proportional to thrust. Replace with a real effect.
 fn update_engine_tint(
-    engines: Query<(&Engine, &EngineThrust, &Children)>,
+    engines: Query<(&Engine, &EngineThrust, &Children), Without<EditorPart>>,
     visuals: Query<&MeshMaterial3d<StandardMaterial>, With<PartVisual>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {

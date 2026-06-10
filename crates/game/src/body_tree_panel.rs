@@ -35,7 +35,12 @@ impl Plugin for BodyTreePanelPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            body_tree_panel.run_if(not_game_paused.and(not_in_photo_mode).and(in_map_view)),
+            body_tree_panel.run_if(
+                not_game_paused
+                    .and(not_in_photo_mode)
+                    .and(in_map_view)
+                    .and(crate::shipyard_editor::editor_closed),
+            ),
         );
     }
 }

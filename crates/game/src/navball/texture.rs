@@ -36,8 +36,8 @@ const GLYPH_PITCH: [u8; 3] = [40, 40, 40];
 /// Marker fill for zenith / nadir.
 const POLE_MARK: [u8; 3] = [25, 25, 25];
 
-/// Embedded font for glyphs. JetBrains Mono Regular, OFL.
-const FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/JetBrainsMono-Regular.ttf");
+/// Embedded font for glyphs. Fira Code Regular, OFL.
+const FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/FiraCode-Regular.ttf");
 
 /// Generate an equirectangular navball texture.
 ///

@@ -23,6 +23,7 @@ use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
+use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial,
@@ -162,11 +163,41 @@ pub(crate) fn spawn_player_ship(
         }
     };
 
+    build_player_ship(
+        &mut commands,
+        &view,
+        &blueprint,
+        &mut sim,
+        &catalog,
+        &mut meshes,
+        &mut std_materials,
+    );
+}
+
+/// Build the rendered + physics-registered player craft from a parsed
+/// blueprint: push `ShipParameters` / aero into the simulation, spawn the
+/// part tree under a fresh [`PlayerShip`], and the map-view billboard.
+///
+/// Shared by the startup [`spawn_player_ship`] and the editor's Launch
+/// relaunch ([`crate::relaunch::finish_relaunch`]). The caller has already
+/// set the canonical craft **state** (where it flies); this sets **what**
+/// it is. The spawned parts carry no [`thalos_shipyard::editor::EditorPart`]
+/// marker, so — unlike the editor's build — they enter the flight
+/// aggregations (fuel, staging, inertia, colliders).
+pub(crate) fn build_player_ship(
+    commands: &mut Commands,
+    view: &ViewMode,
+    blueprint: &ShipBlueprint,
+    sim: &mut SimulationState,
+    catalog: &PartCatalog,
+    meshes: &mut Assets<Mesh>,
+    std_materials: &mut Assets<StandardMaterial>,
+) {
     // Push spawn-time MOI + reaction-wheel torque into the physics
     // simulation so attitude integration knows what we're flying. Active
     // thrust, mass flow, dry mass, and wet mass are refreshed each frame
     // by `fuel.rs` from enabled engines and live tank state.
-    let stats = match blueprint.stats(&catalog) {
+    let stats = match blueprint.stats(catalog) {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to compute ship stats: {e}");
@@ -203,7 +234,7 @@ pub(crate) fn spawn_player_ship(
     // Whole-body aero config from the blueprint's wing parts (lift + stability),
     // or a bluff-body drag config for a wingless craft. Consumed by
     // `aero::attach_ship_aero` when the Avian body spawns.
-    match blueprint.wing_aero_panels(&catalog) {
+    match blueprint.wing_aero_panels(catalog) {
         Ok(panels) => {
             let config = crate::aero::build_ship_aero_config(
                 &panels,
@@ -223,7 +254,7 @@ pub(crate) fn spawn_player_ship(
         Err(err) => error!("Failed to compute wing aero panels: {err}"),
     }
 
-    let ship_entity = match blueprint.spawn(&mut commands, &catalog) {
+    let ship_entity = match blueprint.spawn(commands, catalog) {
         Ok(e) => e,
         Err(err) => {
             error!("Failed to spawn ship blueprint: {err}");
@@ -629,7 +660,9 @@ type VisualQuery<'w, 's> = Query<
         Option<&'static PartShaderHandle>,
         Has<PartMaterial>,
     ),
-    Or<(Added<Part>, Changed<AttachNodes>)>,
+    // The in-game shipyard editor owns its own visuals for `EditorPart`
+    // entities; the flight-ship rebuild must not double-spawn them.
+    (Or<(Added<Part>, Changed<AttachNodes>)>, Without<EditorPart>),
 >;
 
 /// Spawn (or respawn) the body mesh child for each part whose attach
@@ -733,7 +766,10 @@ fn rebuild_ship_wing_visuals(
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     wings: Query<
         (Entity, &Wing, &SurfaceMount, Option<&Children>),
-        Or<(Added<Wing>, Changed<Wing>, Changed<SurfaceMount>)>,
+        (
+            Or<(Added<Wing>, Changed<Wing>, Changed<SurfaceMount>)>,
+            Without<EditorPart>,
+        ),
     >,
     host_nodes: Query<&AttachNodes>,
     hosts: Query<&Fuselage>,
@@ -833,7 +869,10 @@ fn rebuild_ship_nacelle_visuals(
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     engines: Query<
         (Entity, &Engine, &SurfaceMount, Option<&Children>),
-        Or<(Added<Engine>, Changed<SurfaceMount>)>,
+        (
+            Or<(Added<Engine>, Changed<SurfaceMount>)>,
+            Without<EditorPart>,
+        ),
     >,
     wings: Query<&Wing>,
     surface_mounts: Query<&SurfaceMount>,
@@ -903,7 +942,10 @@ fn rebuild_ship_gear_visuals(
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     gears: Query<
         (Entity, &Gear, &SurfaceMount, Option<&Children>),
-        Or<(Added<Gear>, Changed<Gear>, Changed<SurfaceMount>)>,
+        (
+            Or<(Added<Gear>, Changed<Gear>, Changed<SurfaceMount>)>,
+            Without<EditorPart>,
+        ),
     >,
     host_nodes: Query<&AttachNodes>,
     hosts: Query<&Fuselage>,
@@ -944,12 +986,12 @@ fn rebuild_ship_gear_visuals(
 /// on its [`Attachment`]. Copied from the ship editor. A trailing pass
 /// places surface-mounted parts (wings) on the host axis at their station.
 fn update_ship_part_transforms(
-    ships: Query<&Ship>,
-    attachments: Query<(Entity, &Attachment)>,
-    surface_mounts: Query<(Entity, &SurfaceMount)>,
+    ships: Query<&Ship, Without<EditorPart>>,
+    attachments: Query<(Entity, &Attachment), Without<EditorPart>>,
+    surface_mounts: Query<(Entity, &SurfaceMount), Without<EditorPart>>,
     nodes: Query<&AttachNodes>,
     hosts: Query<&Fuselage>,
-    mut transforms: Query<&mut Transform, With<Part>>,
+    mut transforms: Query<&mut Transform, (With<Part>, Without<EditorPart>)>,
 ) {
     let mut children_map: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
     for (e, att) in attachments.iter() {

@@ -456,7 +456,7 @@ fn spawn_player_avian_body(
     height_sources: Res<HeightSourceRegistry>,
     player_ship: Query<&GlobalTransform, With<PlayerShip>>,
     parts: PartColliderQuery,
-    gear_q: Query<(&Gear, &SurfaceMount), With<Part>>,
+    gear_q: Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
     host_nodes: Query<&AttachNodes>,
 ) {
     if active.bubble.is_some() || *view != ViewMode::Ship {
@@ -1687,7 +1687,7 @@ fn toggle_parking_brake(intent: Res<GameInputIntent>, mut brake: ResMut<ParkingB
 /// already loaded — see [`crate::runway`].
 pub(crate) fn gear_contact_geometry(
     parts: &PartColliderQuery,
-    gear_q: &Query<(&Gear, &SurfaceMount), With<Part>>,
+    gear_q: &Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
     host_nodes: &Query<&AttachNodes>,
 ) -> Option<(f64, usize)> {
     let positions = compute_part_collider_positions(parts);
@@ -1703,7 +1703,7 @@ pub(crate) fn gear_contact_geometry(
 }
 
 pub(crate) fn build_wheel_set(
-    gear_q: &Query<(&Gear, &SurfaceMount), With<Part>>,
+    gear_q: &Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
     host_nodes: &Query<&AttachNodes>,
     positions: &HashMap<Entity, DVec3>,
 ) -> Vec<Wheel> {
@@ -2981,7 +2981,9 @@ pub(crate) type PartColliderQuery<'w, 's> = Query<
         Option<&'static AirIntake>,
         Option<&'static Wing>,
     ),
-    With<Part>,
+    // The in-game shipyard editor's build shares these components; it must
+    // never contribute colliders, wheels, or clearance to the flight craft.
+    (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
 >;
 
 fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<LocalPrimitiveCollider> {

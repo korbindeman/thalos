@@ -161,6 +161,18 @@ pub struct SurfaceConnection {
     pub symmetry_group: Option<u32>,
 }
 
+/// Default editor build layout persisted with a ship. `Vertical` is the
+/// rocket / VAB stack; `Horizontal` lays the craft down like KSP's SPH
+/// (aircraft). Purely editorial — it controls how the editor *displays* the
+/// ship on load; a flight craft's attitude comes from its spawn scenario,
+/// not this. Persisted so a plane reopens horizontal.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BuildLayout {
+    #[default]
+    Vertical,
+    Horizontal,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ShipBlueprint {
     pub name: String,
@@ -172,6 +184,11 @@ pub struct ShipBlueprint {
     /// no extra keys.
     #[serde(default)]
     pub surface_mounts: Vec<SurfaceConnection>,
+    /// Default editor build layout. `None` on saves written before this
+    /// field existed; the editor then infers it (horizontal for a winged
+    /// craft, vertical otherwise) on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<BuildLayout>,
 }
 
 impl ShipBlueprint {
