@@ -26,7 +26,7 @@ use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
     BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent,
     GpuAtlasMirrorHandle, MAX_TERRAIN_SHADOW_CASTERS, PipelineTileProvider, SyntheticTerrainMode,
-    SyntheticTileProvider, rendered_height_range,
+    SyntheticTileProvider, TerrainShadingStyle, rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
@@ -351,6 +351,20 @@ fn body_terrain_view_config(body_radius_m: f64) -> TerrainViewConfig {
     }
 }
 
+/// Pick the ground-LOD shading style for a body from its authored terrain
+/// archetype. Airless impact moons (Mira) reconverge on the orbital impostor's
+/// gray Hapke regolith look; everything else keeps the wet, vegetated
+/// terrestrial path. Future airless archetypes get added to this match.
+fn terrain_shading_style_for(body: &BodyDefinition) -> TerrainShadingStyle {
+    match &body.terrain {
+        thalos_terrain::TerrainConfig::Feature(cfg) => match cfg.archetype {
+            thalos_terrain::BodyArchetype::AirlessImpactMoon => TerrainShadingStyle::Regolith,
+            _ => TerrainShadingStyle::Vegetated,
+        },
+        _ => TerrainShadingStyle::Vegetated,
+    }
+}
+
 /// Spawn the UDLOD terrain for one procedural body.
 ///
 /// `ship_parent_entity` is the body's `RealSpaceBody` entity (the 1 km-cell
@@ -535,13 +549,18 @@ pub(crate) fn spawn_body_terrain(
     // `scene` is zeroed here; `update_body_terrain_atmosphere` writes the
     // correct sun direction, flux, occluders, and ambient on the first Sync
     // tick after spawn.
+    // Surface shading style is body-static (derived from the terrain
+    // archetype), so set it once here; the per-frame `extras` writer
+    // (`update_body_terrain_atmosphere`) only touches `craft_shadow`/`debug`
+    // and leaves `inspection` alone.
+    let shading_style = terrain_shading_style_for(body);
     let material = BodyTerrainMaterial {
         atmosphere,
         scene: SceneLighting::default(),
         extras: BodyTerrainExtras {
             craft_shadow: BodyTerrainShadow::default(),
             debug,
-            inspection: Vec4::ZERO,
+            inspection: Vec4::new(0.0, shading_style.shader_flag(), 0.0, 0.0),
         },
     };
 

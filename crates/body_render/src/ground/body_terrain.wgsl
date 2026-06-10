@@ -1,13 +1,17 @@
 // Ground-LOD terrain shader for procedural bodies.
 //
 // Reads height, albedo, and roughness from the thalos_udlod attachment
-// atlases (group 1), ray-tests a local craft-shadow proxy, and shades with a
-// rough-dielectric BRDF (Oren–Nayar diffuse + Cook–Torrance GGX specular; see
-// the BRDF block below). This deliberately diverges from `planet_impostor.wgsl`,
-// which still uses the Hapke regolith model: Thalos is a wet, vegetated
-// terrestrial body, not airless regolith, so its near-surface ground wants a
-// dielectric BRDF. Reconverging the impostor onto a per-material shading
-// dispatch (terrain's `ShadingModel`) is the follow-up.
+// atlases (group 1), ray-tests a local craft-shadow proxy, and shades by a
+// per-body surface style (see `TerrainShadingStyle` in body_material.rs,
+// carried in `terrain_extras.inspection.y`):
+//
+//   * Vegetated (Thalos): rough-dielectric BRDF (Oren–Nayar diffuse +
+//     Cook–Torrance GGX specular; see the BRDF block below) over the
+//     ecological-band albedo model — a wet, vegetated terrestrial body.
+//   * Regolith (Mira and other airless impact moons): the baked gray albedo
+//     shaded by the Hapke radiative-transfer model via `shade_hapke_surface`,
+//     the SAME routine `planet_impostor.wgsl` uses, so the ground LOD and the
+//     orbital impostor reconverge across the LOD swap.
 //
 // Atmospheric scattering is NOT applied here — it is composited on top
 // by `BodySky` (the fullscreen pass in `body_sky.wgsl`) whenever this
@@ -20,7 +24,7 @@
 #import thalos_udlod::fragment::{FragmentInput, FragmentOutput, fragment_info}
 #import thalos_udlod::functions::{lookup_tile, tile_count}
 #import thalos::atmosphere::AtmosphereBlock
-#import thalos::lighting::{SceneLighting, SCENE_FLUX_SCALE}
+#import thalos::lighting::{SceneLighting, SCENE_FLUX_SCALE, shade_hapke_surface}
 
 const MAX_TERRAIN_SHADOW_CASTERS: u32 = 16u;
 
@@ -107,6 +111,24 @@ const ROCK_STRENGTH: f32 = 0.0;
 const BREAKUP_SCALE: f32 = 0.05;     // 1/period_m → ~20 m base patches
 const BREAKUP_VALUE_AMT: f32 = 0.18; // ± fractional value variation
 const BREAKUP_HUE_AMT: f32 = 0.04;   // ± warm/cool drift
+
+// Regolith fine detail. Airless particulate regolith reads as a fairly uniform
+// gray at the macro level (the baked albedo is the body's mare/highland tone),
+// but up close the Moon is densely textured: broad mare/highland mottle, a
+// dense speckle of small craters / micro-ejecta (bright fresh spots, dark
+// hollows), and a pocked micro-relief that catches the low sun. Without that
+// the ground reads as a flat, over-bright plain. All value-only (regolith has
+// negligible hue variation). Strengths are kept moderate so the value-noise
+// micro-normal doesn't reintroduce the axis-aligned "weave".
+const REGOLITH_MOTTLE_SCALE: f32 = 0.02;     // 1/period_m → ~50 m broad patches
+const REGOLITH_MOTTLE_AMT: f32 = 0.16;       // ± broad value mottle
+const REGOLITH_SPECKLE_SCALE: f32 = 0.55;    // 1/period_m → ~1.8 m dust/ejecta
+const REGOLITH_SPECKLE_AMT: f32 = 0.20;      // ± fine value speckle
+const REGOLITH_NORMAL_STRENGTH: f32 = 0.45;  // micro-relief facet tilt
+// Slight overall darkening: the baked highland albedo plus Hapke backscatter
+// at near-opposition reads a touch bright on flat ground; trimming value gives
+// the dusty mid-gray the reference Apollo surface shots have.
+const REGOLITH_VALUE_TRIM: f32 = 0.90;
 
 // ── Altitude + slope material model (snow, treeline, scree) ───────────────
 // Realistic terrain reads as ecological bands stacked by elevation: lush
@@ -706,6 +728,48 @@ fn surface_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> Su
     return out;
 }
 
+// Airless regolith fine detail: value-only albedo mottle + speckle and a
+// micro-relief normal. Same body-fixed coordinate basis as `surface_detail`, so
+// it stays glued to the surface under time warp / floating-origin shifts, and
+// it fades with distance to avoid sub-pixel shimmer (the macro albedo carries
+// the far field).
+fn regolith_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> SurfaceDetail {
+    var out: SurfaceDetail;
+    out.tint = vec3<f32>(REGOLITH_VALUE_TRIM);
+    out.normal_offset = vec3<f32>(0.0);
+
+    let fade = 1.0 - smoothstep(DETAIL_FADE_NEAR, DETAIL_FADE_FAR, cam_dist);
+    if (fade <= 0.0) {
+        return out;
+    }
+
+    // Broad mare/highland mottle + fine dust/ejecta speckle. Both centred on 0
+    // so the mean stays at the trimmed baked albedo; the spread is what reads as
+    // dusty texture and dark small-crater hollows.
+    let mottle = (fbm3_periodic(
+        p_body * REGOLITH_MOTTLE_SCALE,
+        4,
+        DETAIL_COORD_PERIOD_M * REGOLITH_MOTTLE_SCALE,
+    ) - 0.5) * 2.0;
+    let speckle = (fbm3_periodic(
+        p_body * REGOLITH_SPECKLE_SCALE,
+        3,
+        DETAIL_COORD_PERIOD_M * REGOLITH_SPECKLE_SCALE,
+    ) - 0.5) * 2.0;
+    let value_mul = 1.0 + (mottle * REGOLITH_MOTTLE_AMT + speckle * REGOLITH_SPECKLE_AMT) * fade;
+    out.tint = vec3<f32>(REGOLITH_VALUE_TRIM * clamp(value_mul, 0.45, 1.8));
+
+    // Micro-relief normal from the fine detail height gradient (~1.25 m), tangent
+    // to the sphere so it tilts facets toward/away from the low sun — the pocked
+    // light/dark micro-contrast that makes regolith read as solid cratered ground.
+    let grad = detail_height_grad(p_body).yzw;
+    let grad_t = grad - geo_normal * dot(grad, geo_normal);
+    var off = -grad_t * (REGOLITH_NORMAL_STRENGTH * fade);
+    let off_len = length(off);
+    out.normal_offset = off * (0.7 / max(0.7, off_len));
+    return out;
+}
+
 // ── Rough-dielectric surface BRDF ─────────────────────────────────────────
 // Thalos is a wet, vegetated terrestrial body — soil, grass, rock, snow,
 // water — not airless particulate regolith, so its ground LOD shades with a
@@ -826,6 +890,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let hit_ws = info.world_position.xyz;
     let cam_dist = length(info.view_vector);
     let debug_on = terrain_extras.debug.params.x >= 0.5;
+    // Surface shading style (see `TerrainShadingStyle` in body_material.rs).
+    // Vegetated terrestrial (Thalos) keeps the ecological-band + dielectric-BRDF
+    // path; airless regolith (Mira) uses the baked gray albedo + Hapke, matching
+    // its orbital impostor across the LOD swap.
+    let style_regolith = terrain_extras.inspection.y >= 0.5;
 
     // Procedural surface detail (Step 2 breakup + Step 3 micro-relief normal),
     // synthesised from body-fixed metres so it remains static under time warp.
@@ -834,30 +903,58 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let detail_p_body = terrain_extras.debug.view_phase.xyz + body_relative_position;
     let detail = surface_detail(detail_p_body, geo_normal, cam_dist);
 
-    // Naturalistic material blending. The tile provider publishes continuous
-    // material intent masks, so grass, soil, rock, and wet hollows separate by
-    // terrain form; on top of that we stack altitude/slope ecological bands
-    // (treeline, alpine scree, snow caps) computed here from the height
-    // attachment and the geometric slope.
     let altitude_m = sample_height(tile);
     let geo_slope_t = surface_slope(height_normal, geo_normal);
-    // Low-frequency value variation in [-1,1]; jitters the treeline/snowline and
-    // mottles vegetation so the altitude bands don't read as clean contour rings.
-    let macro_var = (fbm3_periodic(
-        detail_p_body * MACRO_VAR_SCALE,
-        3,
-        DETAIL_COORD_PERIOD_M * MACRO_VAR_SCALE,
-    ) - 0.5) * 2.0;
-    let material = eval_material_stack(
-        material_masks,
-        grade_surface(albedo.rgb, material_masks.b),
-        altitude_m,
-        geo_slope_t,
-        macro_var,
-    );
-    var surface_rgb = material.albedo;
-    if (!debug_on) {
-        surface_rgb = surface_rgb * detail.tint;
+
+    // `material.normal_strength` / `material.occlusion` feed the vegetated
+    // lighting path; regolith ignores them, so default to neutral values.
+    var material: TerrainMaterialSample;
+    material.albedo = albedo.rgb;
+    material.normal_strength = 0.45;
+    material.occlusion = 1.0;
+
+    // Regolith micro-relief normal, set in the regolith branch and consumed by
+    // the lighting-normal section below (the vegetated path uses `detail`).
+    var regolith_normal_offset = vec3<f32>(0.0);
+
+    var surface_rgb: vec3<f32>;
+    if (style_regolith) {
+        // Airless regolith: baked gray albedo (the body's authored mare/highland
+        // tone) textured by value-only mottle + speckle; no ecological bands, no
+        // hue drift. The micro-relief normal is fed to the lighting below.
+        if (debug_on) {
+            surface_rgb = albedo.rgb * REGOLITH_VALUE_TRIM;
+        } else {
+            let rd = regolith_detail(detail_p_body, geo_normal, cam_dist);
+            surface_rgb = albedo.rgb * rd.tint;
+            regolith_normal_offset = rd.normal_offset;
+        }
+    } else {
+        // Naturalistic material blending. The tile provider publishes continuous
+        // material intent masks, so grass, soil, rock, and wet hollows separate
+        // by terrain form; on top of that we stack altitude/slope ecological
+        // bands (treeline, alpine scree, snow caps) computed here from the
+        // height attachment and the geometric slope.
+        //
+        // Low-frequency value variation in [-1,1]; jitters the treeline/snowline
+        // and mottles vegetation so the altitude bands don't read as clean
+        // contour rings.
+        let macro_var = (fbm3_periodic(
+            detail_p_body * MACRO_VAR_SCALE,
+            3,
+            DETAIL_COORD_PERIOD_M * MACRO_VAR_SCALE,
+        ) - 0.5) * 2.0;
+        material = eval_material_stack(
+            material_masks,
+            grade_surface(albedo.rgb, material_masks.b),
+            altitude_m,
+            geo_slope_t,
+            macro_var,
+        );
+        surface_rgb = material.albedo;
+        if (!debug_on) {
+            surface_rgb = surface_rgb * detail.tint;
+        }
     }
     albedo = vec4<f32>(surface_rgb, albedo.a);
 
@@ -910,7 +1007,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let height_n = normalize(mix(geo_normal, normalize(height_normal), HEIGHT_NORMAL_WEIGHT));
     var normal = height_n;
     if (!debug_on) {
-        normal = normalize(height_n + detail.normal_offset * material.normal_strength);
+        if (style_regolith) {
+            normal = normalize(height_n + regolith_normal_offset);
+        } else {
+            normal = normalize(height_n + detail.normal_offset * material.normal_strength);
+        }
     }
     let view_dir = normalize(info.view_vector);
 
@@ -925,52 +1026,76 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     }
     let external_shadow = craft_shadow * self_shadow;
 
-    // Rough-dielectric surface lighting (see the BRDF block above). The
-    // shading normal is pulled most of the way toward the relief normal but
-    // kept anchored to the geometric normal so steep micro-facets near the
-    // terminator can't out-light the body curvature.
+    // Surface lighting. The shading normal is pulled most of the way toward the
+    // relief normal but kept anchored to the geometric normal so steep micro-
+    // facets near the terminator can't out-light the body curvature.
     let stable_normal = normalize(mix(geo_normal, normal, 0.85));
-    let n_dot_l = max(dot(stable_normal, sun_dir_ws), 0.0);
-    let n_dot_v = max(dot(stable_normal, view_dir), 1.0e-4);
 
-    // Specular roughness from the sampled attachment, tightened in wet hollows
-    // (material mask .a) so puddles and wet rock get a sharper highlight while
-    // dry, rough ground stays matte. Clamped away from 0 to keep the GGX lobe
-    // from collapsing to a firefly.
-    let wetness = clamp(material_masks.a, 0.0, 1.0);
-    let surf_roughness = clamp(mix(roughness, roughness * 0.45, wetness), 0.06, 1.0);
+    var lit: vec3<f32>;
+    if (style_regolith) {
+        // Airless regolith: Hapke radiative-transfer BRDF — the exact routine
+        // the orbital impostor uses (`shade_hapke_surface`), so the two render
+        // paths shade identically at the impostor↔ground LOD swap. No
+        // atmospheric sky fill (airless); ambient comes from the scene floor
+        // inside the Hapke helper. Roughness drives the opposition-surge width;
+        // dry regolith has no wet-hollow tightening.
+        let surf_roughness = clamp(roughness, 0.06, 1.0);
+        lit = shade_hapke_surface(
+            albedo.rgb,
+            surf_roughness,
+            stable_normal,
+            geo_normal,
+            view_dir,
+            hit_ws,
+            sun_dir_ws,
+            sun_flux,
+            terrain_scene,
+            external_shadow,
+        );
+    } else {
+        // Rough-dielectric surface lighting (see the BRDF block above).
+        let n_dot_l = max(dot(stable_normal, sun_dir_ws), 0.0);
+        let n_dot_v = max(dot(stable_normal, view_dir), 1.0e-4);
 
-    let brdf = surface_brdf(
-        albedo.rgb,
-        surf_roughness,
-        stable_normal,
-        sun_dir_ws,
-        view_dir,
-        n_dot_l,
-        n_dot_v,
-    );
-    // Irradiance cosine + direct-sun shadowing applied here; flux is folded
-    // into DIRECT_SUN_STRENGTH below to stay in the placeholder's brightness
-    // range until the scene exposure path is unified.
-    let direct_rgb = brdf * n_dot_l * external_shadow;
+        // Specular roughness from the sampled attachment, tightened in wet
+        // hollows (material mask .a) so puddles and wet rock get a sharper
+        // highlight while dry, rough ground stays matte. Clamped away from 0 to
+        // keep the GGX lobe from collapsing to a firefly.
+        let wetness = clamp(material_masks.a, 0.0, 1.0);
+        let surf_roughness = clamp(mix(roughness, roughness * 0.45, wetness), 0.06, 1.0);
 
-    // Sky fill (diffuse skylight). A constant ambient floor used to light the
-    // night side as brightly as a hazy daytime shadow. Real skylight only
-    // exists while the sun illuminates the atmosphere, so drive the fill by the
-    // sun's elevation over the *macro* horizon (geometric normal, not the
-    // relief normal) and let it fade to a faint starlight floor at night. The
-    // daytime level is well under the old 0.28 floor so the overhead-sun case
-    // stops washing the flat ground out into the tonemapper's grey shoulder; a
-    // gentle cool tint stands in for blue-sky scatter and keeps daylight
-    // shadows from reading as flat grey.
-    let sun_elevation = dot(geo_normal, sun_dir_ws);
-    let daylight = smoothstep(-0.06, 0.12, sun_elevation);
-    let night_fill = 0.012;
-    let day_fill = 0.15;
-    let fill = mix(night_fill, day_fill, daylight) * material.occlusion;
-    let sky_tint = mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.74, 1.0), 0.25 * daylight);
+        let brdf = surface_brdf(
+            albedo.rgb,
+            surf_roughness,
+            stable_normal,
+            sun_dir_ws,
+            view_dir,
+            n_dot_l,
+            n_dot_v,
+        );
+        // Irradiance cosine + direct-sun shadowing applied here; flux is folded
+        // into DIRECT_SUN_STRENGTH below to stay in the placeholder's brightness
+        // range until the scene exposure path is unified.
+        let direct_rgb = brdf * n_dot_l * external_shadow;
 
-    let lit = direct_rgb * DIRECT_SUN_STRENGTH + albedo.rgb * sky_tint * fill;
+        // Sky fill (diffuse skylight). A constant ambient floor used to light the
+        // night side as brightly as a hazy daytime shadow. Real skylight only
+        // exists while the sun illuminates the atmosphere, so drive the fill by
+        // the sun's elevation over the *macro* horizon (geometric normal, not
+        // the relief normal) and let it fade to a faint starlight floor at night.
+        // The daytime level is well under the old 0.28 floor so the overhead-sun
+        // case stops washing the flat ground out into the tonemapper's grey
+        // shoulder; a gentle cool tint stands in for blue-sky scatter and keeps
+        // daylight shadows from reading as flat grey.
+        let sun_elevation = dot(geo_normal, sun_dir_ws);
+        let daylight = smoothstep(-0.06, 0.12, sun_elevation);
+        let night_fill = 0.012;
+        let day_fill = 0.15;
+        let fill = mix(night_fill, day_fill, daylight) * material.occlusion;
+        let sky_tint = mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.74, 1.0), 0.25 * daylight);
+
+        lit = direct_rgb * DIRECT_SUN_STRENGTH + albedo.rgb * sky_tint * fill;
+    }
 
     var output: FragmentOutput;
     output.color = vec4<f32>(lit, albedo.a);
