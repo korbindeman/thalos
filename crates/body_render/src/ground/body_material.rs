@@ -1,11 +1,12 @@
 //! Ground-LOD terrain material for procedural bodies.
 //!
 //! Reads the height + albedo + roughness tile attachments produced by
-//! [`crate::pipeline::PipelineTileProvider`] and shades them with a
-//! rough-dielectric BRDF (Oren–Nayar diffuse + Cook–Torrance GGX specular)
-//! defined in `body_terrain.wgsl` — Thalos is a wet vegetated terrestrial
-//! body, not airless regolith, so the ground LOD diverges from the impostor's
-//! Hapke model here.
+//! [`crate::pipeline::PipelineTileProvider`] and shades them by a per-body
+//! [`TerrainShadingStyle`] in `body_terrain.wgsl`: a rough-dielectric BRDF
+//! (Oren–Nayar diffuse + Cook–Torrance GGX specular) + ecological albedo bands
+//! for wet, vegetated terrestrial bodies (Thalos), or the impostor's Hapke
+//! regolith model over the baked gray albedo for airless bodies (Mira) so the
+//! two render paths reconverge across the impostor↔ground LOD swap.
 //! Atmospheric scattering for this surface is composited downstream by
 //! the `BodySky` fullscreen pass while ground LOD terrain is active —
 //! this material's atmosphere block is bound so the material stays
@@ -136,6 +137,37 @@ impl Default for BodyTerrainDebug {
     }
 }
 
+/// Surface shading style for the ground LOD.
+///
+/// Selects which shading path `body_terrain.wgsl` takes per body. The ground
+/// LOD historically hard-coded the wet, vegetated terrestrial path (Thalos);
+/// airless regolith bodies (Mira) want their orbital impostor's gray Hapke
+/// look instead, so the two render paths reconverge at the impostor↔ground LOD
+/// swap.
+///
+/// Encoded into [`BodyTerrainExtras::inspection`]`.y` (no extra uniform
+/// binding — see that field's slot-budget rationale).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerrainShadingStyle {
+    /// Wet, vegetated terrestrial body: Oren–Nayar + GGX dielectric BRDF,
+    /// ecological albedo bands (grass/soil/rock/snow), atmospheric sky fill.
+    #[default]
+    Vegetated,
+    /// Airless particulate regolith: Hapke radiative-transfer BRDF over the
+    /// baked gray albedo, no vegetation/snow bands, no atmospheric sky fill.
+    Regolith,
+}
+
+impl TerrainShadingStyle {
+    /// Shader flag value stored in `inspection.y`.
+    pub fn shader_flag(self) -> f32 {
+        match self {
+            Self::Vegetated => 0.0,
+            Self::Regolith => 1.0,
+        }
+    }
+}
+
 /// Packed bag of terrain-specific per-frame uniforms.
 ///
 /// Exists so the material lands a single uniform binding instead of three.
@@ -152,7 +184,9 @@ impl Default for BodyTerrainDebug {
 pub struct BodyTerrainExtras {
     pub craft_shadow: BodyTerrainShadow,
     pub debug: BodyTerrainDebug,
-    /// x = fullbright albedo output, yzw reserved.
+    /// x = fullbright albedo output, y = surface shading style
+    /// ([`TerrainShadingStyle::shader_flag`]: 0 = vegetated, 1 = regolith),
+    /// zw reserved.
     pub inspection: Vec4,
 }
 

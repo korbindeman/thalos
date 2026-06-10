@@ -767,9 +767,14 @@ reads from. No materials of its own.
   `AtmosphereBlock` / `CLOUD_BAND_COUNT` — scene + per-body uniforms.
 - `shaders/lighting.wgsl` — WGSL mirror of `SceneLighting` plus
   `eclipse_factor`, `planetshine_sample`, `hapke_brdf`, and
-  `shade_hapke_surface`. Both backends route through the same
-  `shade_hapke_surface` so shading matches across the impostor↔ground
-  LOD swap.
+  `shade_hapke_surface`. The impostor always shades through
+  `shade_hapke_surface`; the ground LOD picks a path per body via
+  `TerrainShadingStyle` (`body_terrain.wgsl`, carried in
+  `BodyTerrainExtras.inspection.y`, derived from the terrain archetype at
+  spawn): airless `Regolith` bodies (Mira) route through the same
+  `shade_hapke_surface` so they reconverge with the impostor across the LOD
+  swap, while `Vegetated` bodies (Thalos) use the ground-only rough-dielectric
+  BRDF + ecological albedo bands.
 - `shaders/atmosphere.wgsl` — WGSL mirror of `AtmosphereBlock`,
   `integrate_atmosphere`, `composite_clouds`, `apply_limb_darkening`.
 

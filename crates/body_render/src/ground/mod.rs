@@ -38,7 +38,7 @@ mod water_material;
 
 pub use body_material::{
     BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow,
-    MAX_TERRAIN_SHADOW_CASTERS,
+    MAX_TERRAIN_SHADOW_CASTERS, TerrainShadingStyle,
 };
 pub use height_source::{
     ConstantHeightSource, CpuPipelineHeightSource, GpuAtlasHeightMirror,

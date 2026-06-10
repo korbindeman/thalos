@@ -114,10 +114,31 @@ impl OceanicContinentalParams {
     }
 }
 
+/// Gentle, rounded runtime detail for airless particulate regolith.
+///
+/// The legacy HMF cascade ([`RuntimeTerrainDetail::LegacyHmf`]) is a
+/// domain-warped *ridged* multifractal — a mountainous texture that reads wrong
+/// on a crater-dominated airless moon (Mira). This instead adds a low-amplitude
+/// rounded fBM undulation between the craters/basins that the feature layer
+/// already carries, so the regolith surface looks softly hummocky rather than
+/// jagged.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct AirlessRegolithParams {
+    /// Peak signed undulation amplitude in metres (`± amplitude_m`).
+    pub amplitude_m: f32,
+    /// Base wavelength of the lowest fBM octave, in metres.
+    pub base_wavelength_m: f32,
+    /// Noise seed for the undulation field.
+    pub seed: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RuntimeTerrainDetail {
     /// P0 compatibility: baked cubemap + legacy runtime HMF uplift.
     LegacyHmf,
+    /// Airless regolith: gentle rounded fBM undulation over the baked feature
+    /// surface. See [`AirlessRegolithParams`].
+    AirlessRegolith(AirlessRegolithParams),
     /// P2A: evaluate the basic continental terrain function directly. This is
     /// the same function used to bake the cubemap, so the ground mesh no
     /// longer receives a separate old detail layer. Runtime ground geometry

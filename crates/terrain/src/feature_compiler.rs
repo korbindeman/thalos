@@ -12,7 +12,8 @@ use crate::aging_oceanic_field::{AgingOceanicField, enforce_single_connected_oce
 use crate::body_builder::BodyBuilder;
 use crate::cold_desert_field::{ColdDesertField, ColdDesertStyle};
 use crate::generic_terrestrial_field::{
-    BasicContinentalField, BasicContinentalParams, OceanicContinentalParams, RuntimeTerrainDetail,
+    AirlessRegolithParams, BasicContinentalField, BasicContinentalParams, OceanicContinentalParams,
+    RuntimeTerrainDetail,
 };
 use crate::height_generator::{
     ColdDesertBiomeHeightGenerators, HeightGenerator, HeightGeneratorStack, IqDerivativeFbmHeight,
@@ -1877,6 +1878,17 @@ fn compile_airless_impact_moon(
             projection.ray_half_width,
         ),
     );
+
+    // Runtime geometric detail tuned for airless regolith: a gentle rounded fBM
+    // undulation between the baked craters/basins, instead of the default
+    // `LegacyHmf` ridged cascade (which reads as jagged mountains the moon
+    // shouldn't have). The feature layer is the macro relief; this is only the
+    // soft hummocky texture on top.
+    builder.runtime_detail = RuntimeTerrainDetail::AirlessRegolith(AirlessRegolithParams {
+        amplitude_m: 50.0,
+        base_wavelength_m: 700.0,
+        seed: (regolith.seed.detail as u32) ^ 0xA1_E0_F0_07u32 ^ (spec.root_seed as u32),
+    });
 
     Ok(builder.build())
 }
