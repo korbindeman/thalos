@@ -1009,6 +1009,7 @@ mod tests {
             parts: vec![],
             connections: vec![],
             surface_mounts: vec![],
+            layout: None,
         }
         .stats(&cat)
         .expect("stats");
@@ -1042,6 +1043,7 @@ mod tests {
             }],
             connections: vec![],
             surface_mounts: vec![],
+            layout: None,
         };
         let s = bp.stats(&cat).unwrap();
         let m = 2720.0_f64;
@@ -1097,6 +1099,7 @@ mod tests {
                 },
             ],
             surface_mounts: vec![],
+            layout: None,
         };
         let s = bp.stats(&cat).unwrap();
         assert!((s.total_thrust_n - 500_000.0).abs() < 1e-6);
@@ -1129,6 +1132,7 @@ mod tests {
             }],
             connections: vec![],
             surface_mounts: vec![],
+            layout: None,
         };
 
         let s = bp.stats(&cat).unwrap();
@@ -1152,6 +1156,7 @@ mod tests {
             }],
             connections: vec![],
             surface_mounts: vec![],
+            layout: None,
         };
 
         assert!(matches!(
@@ -1204,6 +1209,7 @@ mod tests {
                 },
             ],
             surface_mounts: vec![],
+            layout: None,
         };
         let s = bp.stats(&cat).unwrap();
         let expected = s.exhaust_velocity() * (s.wet_mass_kg() / s.dry_mass_kg).ln();
@@ -1287,6 +1293,7 @@ mod tests {
                 child_node: "top".into(),
             }],
             surface_mounts: vec![],
+            layout: None,
         };
         // Same blueprint with no connection — the tank stays at its
         // declared 2.5 m and the pod is a separate root. Roll inertia
@@ -1294,6 +1301,7 @@ mod tests {
         let bp_unattached = ShipBlueprint {
             connections: vec![],
             surface_mounts: vec![],
+            layout: None,
             ..bp_inherited.clone()
         };
         let inherited = bp_inherited.stats(&cat).unwrap().moment_of_inertia_kg_m2.y;
@@ -1359,6 +1367,7 @@ mod tests {
                     symmetry_group: Some(0),
                 },
             ],
+            layout: None,
         };
         let s = bp.stats(&cat).unwrap();
         // Each panel area = 5 · (2 + 1)/2 = 7.5 m²; two panels → 15 m².
@@ -1443,6 +1452,7 @@ mod tests {
                     symmetry_group: Some(1),
                 },
             ],
+            layout: None,
         };
 
         let s = bp.stats(&cat).unwrap();
@@ -1464,6 +1474,7 @@ mod tests {
             }],
             connections: vec![],
             surface_mounts: vec![],
+            layout: None,
         };
         assert!(matches!(bp.stats(&cat), Err(CatalogError::UnknownId(_))));
     }
