@@ -87,6 +87,8 @@ impl Plugin for RenderingPlugin {
             .insert_resource(PlanetshineTints::default())
             .insert_resource(CameraExposure::default())
             .register_type::<CameraExposure>()
+            .register_type::<ground_terrain::AtmosphereTuning>()
+            .init_resource::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()
             .init_resource::<PendingPlanetInstalls>()

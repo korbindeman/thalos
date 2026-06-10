@@ -950,6 +950,61 @@ pub(super) fn sync_body_render_lod(
     }
 }
 
+/// Aerial-perspective (distance-haze) controls + live sky-dome dev overrides
+/// (BRP-mutable; `#[reflect(Resource)]`).
+///
+/// **Why this exists.** A body's authored `scattering.strength` /
+/// `multi_scatter_gain` brighten the **sky dome** so a clear midday sky reads
+/// bright and crushes stars. But the `BodySky` fullscreen pass adds the *same*
+/// in-scatter as the airlight (aerial perspective) on terrain/geometry pixels —
+/// and that airlight is far brighter than the surface even over short paths, so
+/// the ground washes out into a uniform veil at any altitude. Extinction
+/// (transmittance) is already Earth-clear-day correct (~50–90 km visibility);
+/// the wash is purely the additive airlight. See `docs/atmosphere.md` *Aerial
+/// perspective*.
+///
+/// **The fix.** `aerial_perspective_strength` is an **absolute** in-scatter
+/// strength used only for the terrain airlight, decoupled from the (much
+/// higher) sky-dome strength. The per-body shader multiplier is
+/// `aerial_perspective_strength / effective_sky_strength`, so every body's
+/// ground haze lands at the same absolute strength regardless of how bright its
+/// sky is authored — and remains physically proportional to that body's β
+/// (thicker atmospheres still haze more). This is the **clear-weather
+/// visibility knob weather will later modulate** (lower = clearer, higher =
+/// hazier/humid). Plumbed to the shader via `BodySkyExtra::cloud_band_radii.z`.
+///
+/// **Dev overrides.** `strength` / `multi_scatter_gain`, when `>= 0`, override
+/// `atmos_geom.z` / `atmos_geom.w` on every body's sky+terrain material this
+/// frame (`< 0` keeps the authored spawn-time value). Both are pure runtime
+/// multipliers — they do **not** feed the multi-scatter LUT bake — so overriding
+/// them live is exact. Handy for live sky tuning; not needed for normal play.
+///
+/// Mutate live, e.g.:
+///   `world_mutate_resources thalos_game::rendering::ground_terrain::AtmosphereTuning .aerial_perspective_strength 0.10`
+#[derive(Resource, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
+pub struct AtmosphereTuning {
+    pub strength: f32,
+    pub multi_scatter_gain: f32,
+    pub aerial_perspective_strength: f32,
+}
+
+impl Default for AtmosphereTuning {
+    fn default() -> Self {
+        Self {
+            // Negative sentinels: keep each body's authored sky-dome strength /
+            // gain until explicitly overridden over BRP.
+            strength: -1.0,
+            multi_scatter_gain: -1.0,
+            // Clear-weather default. Tuned against the in-atmosphere flight view:
+            // ground reads crisply from altitude with only a subtle haze building
+            // toward the horizon, instead of a uniform veil. Weather will later
+            // drive this up for hazy/humid conditions.
+            aerial_perspective_strength: 0.15,
+        }
+    }
+}
+
 /// Update the per-frame dynamic data on every body's `BodyTerrainMaterial`,
 /// `BodyWaterMaterial`, and `BodySkyMaterial`:
 ///
@@ -978,10 +1033,12 @@ pub(super) fn update_body_terrain_atmosphere(
     exposure: Res<CameraExposure>,
     time: Res<Time<Real>>,
     // Combined into one tuple param to stay under Bevy's 16-arg system limit:
-    // .0 = live cloud render texture, .1 = cloud config (heights for occlusion).
+    // .0 = live cloud render texture, .1 = cloud config (heights for occlusion),
+    // .2 = live atmosphere airlight tuning.
     cloud_io: (
         Option<Res<thalos_volumetric_clouds::CloudRenderTexture>>,
         Option<Res<thalos_volumetric_clouds::CloudsConfig>>,
+        Res<AtmosphereTuning>,
     ),
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut water_materials: ResMut<Assets<BodyWaterMaterial>>,
@@ -997,6 +1054,8 @@ pub(super) fn update_body_terrain_atmosphere(
     };
 
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
+    // Live atmosphere airlight tuning (BRP-mutable; see `AtmosphereTuning`).
+    let tuning = &cloud_io.2;
 
     // Planet center and orientation in render space from each body's grid
     // transform. The real-space grid rotation is body-local → world, so the
@@ -1108,6 +1167,14 @@ pub(super) fn update_body_terrain_atmosphere(
         mat.scene =
             build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
         mat.extras.craft_shadow = craft_shadow;
+        // Live strength/gain override (keeps the terrain's atmosphere-driven
+        // ambient sky fill in step with the sky dome). `< 0` = keep authored.
+        if tuning.strength >= 0.0 {
+            mat.atmosphere.atmos_geom.z = tuning.strength;
+        }
+        if tuning.multi_scatter_gain >= 0.0 {
+            mat.atmosphere.atmos_geom.w = tuning.multi_scatter_gain;
+        }
         // Body-fixed camera phase for shader-side procedural detail and the
         // optional flat-mode debug checker. The nearby terrain shader works in
         // camera-relative render metres for precision, then adds this f64-
@@ -1171,6 +1238,23 @@ pub(super) fn update_body_terrain_atmosphere(
             continue;
         };
         mat.atmosphere_extra = *extra;
+        // Sky-dome dev overrides (`< 0` keep the authored value).
+        if tuning.strength >= 0.0 {
+            mat.atmosphere.atmos_geom.z = tuning.strength;
+        }
+        if tuning.multi_scatter_gain >= 0.0 {
+            mat.atmosphere.atmos_geom.w = tuning.multi_scatter_gain;
+        }
+        // Aerial-perspective decoupling: the shader multiplies the in-scatter on
+        // terrain/geometry pixels by `cloud_band_radii.z`. We want the terrain
+        // airlight to land at an *absolute* strength independent of the sky
+        // dome, so divide by the effective sky strength (the in-scatter scales
+        // linearly with `atmos_geom.z`). Result: ground haze stays at
+        // `aerial_perspective_strength` on every body — proportional to its β,
+        // not its authored sky brightness.
+        let sky_strength = mat.atmosphere.atmos_geom.z.max(1.0e-3);
+        mat.atmosphere_extra.cloud_band_radii.z =
+            (tuning.aerial_perspective_strength / sky_strength).max(0.0);
         // Bind the live volumetric cloud texture for the body the player is at
         // (driven relative to the homeworld); other bodies keep the blank
         // fallback so their atmosphere pass composites no clouds.

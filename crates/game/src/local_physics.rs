@@ -38,7 +38,7 @@ use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::bridge::WarpLimits;
-use crate::debug::{DebugLaunchMount, DebugMode};
+use crate::debug::DebugMode;
 use crate::fuel::ThrottleState;
 use crate::player_controller::{EvaMode, PlayerControllerBody, PlayerControllerState};
 use crate::rendering::{PlayerShip, SimulationState};
@@ -53,7 +53,9 @@ pub const PHYSICS_QUERY_TILE_LOD_M: f32 = 0.5;
 
 const THALOS_NAME: &str = "Thalos";
 const DEBUG_DROP_KEY: KeyCode = KeyCode::F9;
-const DEBUG_LAUNCH_MOUNT_RELEASE_THROTTLE: f64 = 0.001;
+/// Commanded-throttle threshold above which a landed (`BodyFixed`) ship is
+/// released back to live physics by [`release_landed_ship_on_throttle`].
+const LANDED_THROTTLE_RELEASE: f64 = 0.001;
 
 /// Position discontinuity above which a take-translation handoff is treated
 /// as a bug in debug builds. A healthy handoff residual is the distance
@@ -95,7 +97,7 @@ impl Plugin for GameLocalPhysicsPlugin {
                 Update,
                 (
                     debug_surface_drop,
-                    release_debug_launch_mount,
+                    release_landed_ship_on_throttle,
                     spawn_player_avian_body,
                     rebase_bubble_to_dominant_body,
                     attach_terrain_patch_when_close,
@@ -1187,7 +1189,6 @@ fn debug_surface_drop(
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
     mut active: ResMut<ActiveLocalBubble>,
-    mut launch_mount: ResMut<DebugLaunchMount>,
     mut eva_mode: ResMut<EvaMode>,
     mut sim: ResMut<SimulationState>,
     mut craft_q: Query<
@@ -1299,7 +1300,6 @@ fn debug_surface_drop(
     }
     // A fresh drop hands back a flyable craft — clear any structural failure.
     sim.simulation.repair();
-    launch_mount.active = None;
 
     info!(
         "debug surface drop placed {:?} {:.0} m above rendered {} terrain (day-side)",
@@ -1309,44 +1309,36 @@ fn debug_surface_drop(
     );
 }
 
-fn release_debug_launch_mount(
-    throttle: Res<ThrottleState>,
-    mut launch_mount: ResMut<DebugLaunchMount>,
-    mut sim: ResMut<SimulationState>,
-) {
-    if throttle.commanded <= DEBUG_LAUNCH_MOUNT_RELEASE_THROTTLE {
+/// Release a landed ship from `BodyFixed` when the pilot applies throttle.
+///
+/// A landed/parked ship sits in analytic `BodyFixed` authority — set at a runway
+/// spawn ([`crate::runway`]), reached via the stable-landing collapse
+/// ([`collapse_or_constrain_warp`]), or dropped there by a debug surface
+/// teleport. Advancing the throttle is the pilot's "fly" command: drop warp to
+/// 1× and hand translation back to the live regimes (`OnRails` →
+/// [`manage_authority`] → `LocalRigidBody`/`Full`), where thrust and the landing
+/// gear take over from the equilibrium pose. Because the parked pose already is
+/// the gear equilibrium, the handoff is jump-free.
+///
+/// Ships only. Grounded EVA is pinned to `LocalRigidBody` (never `BodyFixed`) by
+/// [`manage_authority`], so it is unaffected. This is the single landed→flying
+/// transition, replacing the former debug-only `DebugLaunchMount` launch-clamp
+/// release; a real staging / launch-clamp part can supersede it later.
+fn release_landed_ship_on_throttle(throttle: Res<ThrottleState>, mut sim: ResMut<SimulationState>) {
+    if throttle.commanded <= LANDED_THROTTLE_RELEASE {
         return;
     }
-    let Some(mount) = launch_mount.active else {
-        return;
-    };
-    let AuthorityMode::BodyFixed { body, pose } = sim.simulation.authority() else {
-        launch_mount.active = None;
-        return;
-    };
-    if body != mount.body_id || pose != mount.pose {
-        launch_mount.active = None;
+    if !matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. })
+        || sim.simulation.vessel_kind() != VesselKind::Ship
+    {
         return;
     }
-
-    // Debug-only launch clamp release. This is a temporary staging substitute:
-    // remove it when real staging/launch-clamp parts own attach and release.
     sim.simulation
         .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
     sim.simulation.warp.reset_immediate();
-    launch_mount.active = None;
-    let body = &sim.system.bodies[mount.body_id];
-    let gravity_m_s2 = body.gm / body.radius_m.powi(2);
-    let mass_kg = sim.simulation.ship_mass_kg();
-    let thrust_n = sim.simulation.ship_params().thrust_n;
-    let twr = if mass_kg > 0.0 && gravity_m_s2 > 0.0 {
-        thrust_n / (mass_kg * gravity_m_s2)
-    } else {
-        0.0
-    };
     info!(
-        "released debug launch mount on commanded throttle {:.2}; thrust={:.0} N mass={:.0} kg local TWR={:.2}",
-        throttle.commanded, thrust_n, mass_kg, twr
+        "released landed ship on commanded throttle {:.2}",
+        throttle.commanded
     );
 }
 
@@ -2722,7 +2714,7 @@ fn collapse_or_constrain_warp(
         collapse_to_body_fixed(&mut sim, &bubble);
         // Avian body persists; reset stability tracking and let
         // snap_avian_from_canonical keep the rigid body aligned with the
-        // BodyFixed pose until throttle-up releases the clamp.
+        // BodyFixed pose until throttle-up releases it back to live physics.
         bubble.stable_contact_s = 0.0;
         bubble.stable_landed = false;
     }
@@ -2734,7 +2726,7 @@ fn collapse_or_constrain_warp(
 /// onto the terrain. The Avian body itself stays alive — Avian remains the
 /// universal rigid-body integrator, and [`snap_avian_from_canonical`] holds
 /// it on the body-fixed pose until throttle-up triggers
-/// [`release_debug_launch_mount`].
+/// [`release_landed_ship_on_throttle`].
 fn collapse_to_body_fixed(sim: &mut SimulationState, bubble: &LocalBubble) {
     let body_state = body_state_for(sim, bubble.body_id);
     let craft = sim.simulation.craft_state();
@@ -3459,8 +3451,8 @@ mod tests {
     fn body_fixed_authority_pauses_avian() {
         // Landed pose is evaluated analytically from the body's rotation;
         // Avian holds the rigid body in place but does not integrate. This
-        // must hold even with thrust applied — `release_debug_launch_mount`
-        // releases the clamp by transitioning out of BodyFixed first.
+        // must hold even with thrust applied — `release_landed_ship_on_throttle`
+        // releases a landed ship by transitioning out of BodyFixed first.
         assert_eq!(
             avian_role_from_inputs(1.0, body_fixed(), 0.0, false, false),
             AvianRole::Paused
@@ -3520,9 +3512,9 @@ mod tests {
         // The handoff snap fires once when Avian takes translation
         // ownership, regardless of whether the previous role was
         // AttitudeOnly (typical thrust-on case) or Paused
-        // (warp-down-with-throttle-on, launch-clamp release).
+        // (warp-down-with-throttle-on, landed-ship release).
         let cases = [
-            (AvianRole::Paused, AvianRole::Full, true), // warp-down/clamp release
+            (AvianRole::Paused, AvianRole::Full, true), // warp-down/landed release
             (AvianRole::AttitudeOnly, AvianRole::Full, true), // thrust-on
             (AvianRole::Full, AvianRole::Full, false),  // mid-burn
             (AvianRole::Full, AvianRole::AttitudeOnly, false), // burn-end

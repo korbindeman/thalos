@@ -1,15 +1,18 @@
 # Surface
 
-> **Direction update (2026-06): surface-local frame design.** The
-> body-centered-inertial contact bubble described in the "Landing &
-> impact destruction" part of this doc (per-frame re-posed terrain
-> trimesh, `SweptCcd` + analytic fall-through backstop, the
-> `AvianRole` snap machinery) is slated to be replaced by a
-> **surface-local tangent frame** with a static heightfield collider
-> and raycast-suspension gear — see `docs/surface_local.md`. That doc
-> also generalizes the runway into terrain-anchored structures. This
-> doc remains the accurate description of the *current* implementation
-> until those phases land.
+> **Landed (2026-06): surface-local frame.** The body-centered-inertial
+> *ship* contact bubble formerly described in the "Landing & impact
+> destruction" part of this doc has been **replaced** by a **surface-local
+> tangent frame** with a **solid** ground collider (terrain heightfield /
+> runway cuboid) and gear-as-sole-ground-contact — see `docs/surface_local.md`
+> (§10 for what shipped). The runway is now a terrain-anchored *structure*
+> (`crates/game/src/structures.rs`). **EVA (the on-foot part below, §§1–7)
+> is unchanged** — it deliberately stayed on its body-centered kinematic
+> seam (it has no collider and gains nothing from the SLF; see
+> `surface_local.md` §10), so this doc's EVA sections remain accurate. The
+> ship "Landing & impact destruction" section below describes the
+> *pre-rebase* trimesh bubble; `surface_local.md` is now authoritative for
+> ship surface contact.
 
 How Thalos behaves at and on a planetary surface. Two parts:
 

@@ -19,10 +19,15 @@
 //! the tiles that stream in there bake flattened from the start.
 //!
 //! On top of the levelled ground the runway is just a paved strip + markings +
-//! posts, lifted a few centimetres so the paving reads on the grass. A flat
-//! kinematic collider at `E` (posed each frame like the terrain collider patch)
-//! still backs the landing surface so it stays exactly flat regardless of tile
-//! residency timing.
+//! posts, lifted a few centimetres so the paving reads on the grass. The strip
+//! is a **true flat plane** (the tangent plane at the site centre), not a
+//! sphere-draped strip — paving, markings, the kinematic collider slab, and the
+//! parked craft's rest pose all share that one plane, so the gear rests exactly
+//! on the painted surface. The collider's top face sits at the paved surface
+//! (posed each frame like the terrain collider patch) and stays exactly flat
+//! regardless of tile residency timing. A parked aircraft spawns landed,
+//! resting on its gear at static-sag equilibrium (no launch clamp); the pilot
+//! flies it off with the throttle.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
@@ -42,13 +47,11 @@ use thalos_physics_local::avian::{
 };
 use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
 use thalos_shipyard::{AttachNodes, EngineActivation, Gear, Part, SurfaceMount};
-use thalos_terrain::TerrainFlatten;
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
-use crate::debug::{DebugLaunchMount, DebugLaunchMountState};
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::{PlayerShip, RealSpaceBody};
@@ -252,10 +255,13 @@ fn finish_runway_spawn(
     situation: Res<SpawnSituation>,
     mut sim: ResMut<SimulationState>,
     mut settle: ResMut<crate::surface_settle::SurfaceSettle>,
-    mut launch_mount: ResMut<DebugLaunchMount>,
     height_sources: Res<HeightSourceRegistry>,
     surfaces: Res<TerrainSurfaceRegistry>,
-    mut flatten_registry: ResMut<TerrainFlattenRegistry>,
+    // Bundled to stay within Bevy's 16-param system limit (like `gear_geometry`).
+    registries: (
+        ResMut<TerrainFlattenRegistry>,
+        ResMut<crate::structures::StructureRegistry>,
+    ),
     root: Res<RealSpaceRoot>,
     ship_root_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
     children_q: Query<&Children>,
@@ -276,6 +282,7 @@ fn finish_runway_spawn(
     if *done || !situation.is_runway() {
         return;
     }
+    let (mut flatten_registry, mut structure_registry) = registries;
     let body_id = sim.simulation.dominant_body();
     let Some(height_source) = height_sources.get(body_id) else {
         return; // terrain not resident yet — retry next frame
@@ -348,24 +355,29 @@ fn finish_runway_spawn(
     );
     let elevation_m = max_h + RUNWAY_PLATFORM_MARGIN_M;
 
-    // Install the terrain flatten pad. The terrain provider reads this handle as
-    // it bakes tiles, so the rendered ground — and, via the GPU-atlas height
-    // mirror, the collider and CPU height queries — level out to `elevation_m`
-    // across the pad, smoothstep-blending back to natural terrain over the ramp.
-    // Set before placing the aircraft / moving the camera so the tiles that
-    // stream in at the site bake flattened from the start.
-    let flatten = TerrainFlatten::new(
+    // Register the runway as a terrain-anchored structure and install its flat
+    // pad through the shared structures path (`crate::structures`). The terrain
+    // provider reads the flatten handle as it bakes tiles, so the rendered
+    // ground — and, via the GPU-atlas height mirror, the collider and CPU height
+    // queries — level out to `elevation_m` across the pad, smoothstep-blending
+    // back to natural terrain over the ramp. Done before placing the aircraft /
+    // moving the camera so the tiles that stream in at the site bake flattened
+    // from the start. A future building registers the same way and gets the same
+    // flattening — the runway is just the first `StructureKind`.
+    let structure_id = structure_registry.register(
+        body_id,
         center_dir,
         heading_tangent,
-        across,
-        pad_half_along,
-        pad_half_across,
-        RUNWAY_PAD_RAMP_M,
-        elevation_m,
-        body_radius_m,
+        crate::structures::StructurePlacement::FlattenTo {
+            elevation_m,
+            half_along_m: pad_half_along,
+            half_across_m: pad_half_across,
+            ramp_m: RUNWAY_PAD_RAMP_M,
+        },
+        crate::structures::StructureKind::Runway,
     );
-    if let Ok(mut guard) = flatten_registry.handle(body_id).write() {
-        *guard = Some(flatten);
+    if let Some(structure) = structure_registry.get(structure_id).copied() {
+        crate::structures::apply_structure_flatten(&structure, body_radius_m, &mut flatten_registry);
     }
 
     let site = RunwaySite {
@@ -421,7 +433,6 @@ fn finish_runway_spawn(
     match *situation {
         SpawnSituation::Runway => place_parked(
             &mut sim,
-            &mut launch_mount,
             &body_state,
             &site,
             body_radius_m,
@@ -631,14 +642,19 @@ impl RunwayFrame {
         self.center_dir * (self.body_radius_m + self.elevation_m)
     }
 
-    /// Body-fixed offset (from the pad centre) of a runway coordinate at radius
-    /// `E + radius_offset`, plus the radial direction there. With
-    /// `radius_offset = 0` this is the flat (level) pad top.
-    fn level(&self, along_m: f64, across_m: f64, radius_offset: f64) -> (DVec3, DVec3) {
-        let cs = self.center_surface();
-        let dir = (cs + self.heading * along_m + self.across * across_m).normalize();
-        let pos = dir * (self.body_radius_m + self.elevation_m + radius_offset);
-        (pos - cs, dir)
+    /// Body-fixed offset (from the pad centre) of a runway coordinate, plus the
+    /// surface normal there. The runway is a **true flat plane** — the tangent
+    /// plane at the site centre — not a sphere-draped strip: the normal is the
+    /// constant `center_dir` and `height_offset` lifts straight up off the
+    /// plane. This is what makes the paving, markings, the cuboid collider, and
+    /// the parked-craft rest pose share one surface. A sphere-draped strip would
+    /// diverge from the flat collider by the curvature drop (~0.3 m at the
+    /// parked station, ~0.4 m at the runway ends) — exactly the gap that buried
+    /// the gear at rest and launched the craft up when physics took over.
+    fn level(&self, along_m: f64, across_m: f64, height_offset: f64) -> (DVec3, DVec3) {
+        let up = self.center_dir;
+        let offset = self.heading * along_m + self.across * across_m + up * height_offset;
+        (offset, up)
     }
 }
 
@@ -930,9 +946,12 @@ fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, _body_sta
         frame.center_dir,
         frame.heading,
     ));
-    // Cuboid centre: drop half the slab thickness below the pad so the top face
-    // sits exactly at `E`.
-    let center_body_m = frame.center_surface() - frame.center_dir * RUNWAY_SLAB_HALF_THICKNESS_M;
+    // Cuboid centre: drop half the slab thickness below the *paved* surface
+    // (`E + asphalt lift`) so the top face coincides with the visible asphalt —
+    // the gear raycast then rests the wheels exactly on the painted strip, not
+    // on the bare pad a paving-thickness below it.
+    let center_body_m = frame.center_surface()
+        + frame.center_dir * (RUNWAY_ASPHALT_LIFT_M - RUNWAY_SLAB_HALF_THICKNESS_M);
     // `Collider::cuboid` takes full side lengths; local axes (X=across, Y=up,
     // Z=along) match `basis_body_quat`.
     let collider = Collider::cuboid(
@@ -1057,29 +1076,32 @@ fn craft_ground_clearance(
     found.then(|| (-min_z as f64).max(0.0))
 }
 
-/// Park the aircraft frozen, level, on the runway as a **`BodyFixed` launch
-/// clamp** — the documented "spawn stably, settle on the runway, go from there"
-/// behaviour, and the fix for the tip-over.
+/// Park the aircraft **landed** on the runway, resting on its gear, KSP-style —
+/// no debug launch clamp.
 ///
-/// The clamp is the whole point. The parked spawn happens during loading, while
-/// the terrain under the craft is still streaming from coarse → fine and its
-/// collider is heaving up toward the flat pad height. If the craft were under
-/// the local-physics bubble (Avian) through that window it would integrate gear
-/// contacts against that moving ground and tip itself over (it lands on its tail
-/// by reveal). `BodyFixed` makes the pose analytic — Avian is held on it by
-/// [`crate::local_physics::snap_avian_from_canonical`] and never integrates — so
-/// the craft sits rock-steady, level, regardless of what the terrain is doing.
-/// References the fixed elevation `E`, so it never sinks or heaves.
-/// `clearance_m` lifts the origin so the lowest point rests on the surface.
+/// The craft spawns already at its landing-gear static-sag equilibrium against
+/// the flat runway slab: the origin is lifted by `clearance_m` (the measured
+/// gear-contact depth minus the static suspension sag, computed by the caller),
+/// so the wheels rest on the paved surface with the suspension pre-loaded — no
+/// settle, no tip, and (crucially) **no jump** when live physics takes over,
+/// because the spawn pose already *is* the equilibrium the gear would integrate
+/// to. Because the runway is now a true flat plane shared by the paving, the
+/// collider, and this pose (see [`RunwayFrame::level`]), the wheels sit on the
+/// painted strip in every regime instead of being buried by the paving-vs-pad
+/// curvature gap the old spherical reference produced.
 ///
-/// Registering the clamp in [`DebugLaunchMount`] lets the existing
-/// [`crate::local_physics::release_debug_launch_mount`] release it to `OnRails`
-/// (→ bubble) when the player throttles up — i.e. the dynamic handoff to Avian
-/// happens *after* the terrain has settled and on the player's command, on flat
-/// ground, so it doesn't tip.
+/// Authority is analytic `BodyFixed` — the proper "landed" state (a frozen
+/// surface-local pose, per `docs/surface_local.md` §4), held by
+/// [`crate::local_physics::snap_avian_from_canonical`] without integration so it
+/// can't drift while the terrain streams in behind the loading screen. The
+/// pilot leaves it the moment they advance the throttle:
+/// [`crate::local_physics::release_landed_ship_on_throttle`] hands translation
+/// back to the live regimes (`OnRails` → bubble), where thrust + gear take over
+/// from the equilibrium pose. Stationary-while-warping is the same `BodyFixed`
+/// state the generic stable-landing collapse uses, so time-warp on the runway
+/// is stable for free.
 fn place_parked(
     sim: &mut SimulationState,
-    launch_mount: &mut DebugLaunchMount,
     body_state: &BodyState,
     site: &RunwaySite,
     body_radius_m: f64,
@@ -1087,20 +1109,28 @@ fn place_parked(
 ) {
     let surface_radius = body_radius_m + site.elevation_m;
     let center_surface = site.center_dir * surface_radius;
-    let threshold_dir =
-        (center_surface - site.heading_tangent * (RUNWAY_HALF_LENGTH_M - PARK_THRESHOLD_INSET_M))
-            .normalize();
 
-    let up_body = threshold_dir;
-    let nose_body = (site.heading_tangent - up_body * site.heading_tangent.dot(up_body)).normalize();
-    let position_body = threshold_dir * (surface_radius + clearance_m);
+    // Park inset from the threshold end, on the flat runway plane. Up is the
+    // plane normal (`center_dir`), not the local radial, so the craft sits
+    // parallel to the flat strip and every wheel reads the same compression.
+    let along = -(RUNWAY_HALF_LENGTH_M - PARK_THRESHOLD_INSET_M);
+    let up_body = site.center_dir;
+    // The paved (drive) surface at the parked station — the same flat plane the
+    // collider's top face and the asphalt mesh use.
+    let drive_point = center_surface + site.heading_tangent * along + up_body * RUNWAY_ASPHALT_LIFT_M;
+    // Rest the gear on it: lift the origin off the paving by the gear-contact
+    // depth minus static sag (already folded into `clearance_m`).
+    let position_body = drive_point + up_body * clearance_m;
+    let nose_body =
+        (site.heading_tangent - up_body * site.heading_tangent.dot(up_body)).normalize();
 
     let position = body_state.position + body_state.orientation * position_body;
     let velocity = body_fixed_surface_velocity(body_state, position_body);
     let state = StateVector { position, velocity };
     let attitude = level_heading_attitude(body_state, up_body, nose_body);
 
-    // Freeze as a body-fixed launch clamp at the level pose.
+    // Landed: a frozen body-fixed pose at the gear equilibrium. Released to the
+    // live bubble by `release_landed_ship_on_throttle` on throttle-up.
     sim.simulation.set_ship_state(state);
     sim.simulation.set_attitude(attitude);
     let pose = body_fixed_pose_from_inertial(body_state, TranslationalState::from(state), attitude);
@@ -1113,11 +1143,6 @@ fn place_parked(
     // sets the final level once on `Loading → Running` per `AutoRun`.
     sim.simulation.set_throttle(0.0);
     sim.simulation.set_target_body(Some(site.body_id));
-    // Arm the throttle-up release so the player can taxi/take off from the clamp.
-    launch_mount.active = Some(DebugLaunchMountState {
-        body_id: site.body_id,
-        pose,
-    });
 }
 
 /// Put the aircraft on short final, lined up with the centreline and sinking,
