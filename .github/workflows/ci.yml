@@ -61,32 +61,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        run: rustup toolchain install nightly --profile minimal
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version "^0.16"
 
-      - name: Fail if any GPL (non-LGPL) crate enters the tree
-        shell: bash
-        run: |
-          # Licensing invariant (LICENSING.md): Thalos code is PolyForm
-          # Noncommercial. The stack is now permissive end-to-end — there is no
-          # copyleft dependency at all (the former vendored LGPL flight-dynamics
-          # crate `avian_fdm` was replaced by the native
-          # `thalos_physics_canonical::aero` model and removed). GPL and AGPL
-          # remain banned: they are viral across the whole combined work and
-          # would void the noncommercial model. This guard catches any GPL/AGPL
-          # dep the moment it enters Cargo.lock. (LGPL would still be tolerated
-          # by the `lgpl` exclusion below, but none is currently present.)
-          #
-          # Conservative by design: a crate offered under "MIT OR GPL-3.0"
-          # would also trip this. If that ever happens for a genuinely
-          # permissive option, add a targeted allow below with a comment.
-          offenders="$(cargo tree --workspace -e normal -f '{p} = {l}' \
-            | grep -iE '\b(a)?gpl' \
-            | grep -ivE 'lgpl' \
-            | sort -u || true)"
-          if [ -n "$offenders" ]; then
-            echo "::error::GPL/AGPL-licensed crate(s) found — incompatible with the noncommercial license model (see LICENSING.md):"
-            echo "$offenders"
-            exit 1
-          fi
-          echo "OK: no GPL/AGPL crates in the workspace dependency tree"
+      - name: Check licenses
+        # cargo-deny evaluates SPDX OR expressions properly:
+        # "Apache-2.0 OR GPL-2.0-only" passes because Apache-2.0 is in the
+        # allow list (deny.toml).  GPL/AGPL entries in the deny list still
+        # catch purely-copyleft crates.  See deny.toml for the full policy.
+        run: cargo deny check licenses
