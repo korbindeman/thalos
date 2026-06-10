@@ -10,13 +10,14 @@ gets a bluff-body drag config with weathervane stability, so it aligns with the
 wind instead of tumbling. An aircraft gets lift + control + stability derived from
 its wing parts (area / chord / span → reference geometry; cambered lift). Flight
 controls (pitch/roll/yaw) are wired, and an F3 overlay draws colliders +
-force/wind vectors. The **airfoil / stability / control constants are a first cut
-that needs in-game tuning** (cruise trim, control gains, stall, takeoff speed).
-The Meridian (`ships/meridian.ron`, a narrow-body airliner) is the reference test
-aircraft on the runway scenarios; its wings carry an authored `WingRole` (`Lift`
-main wing, `Stabilizer` empennage) that the config builder classifies on. Verified
-in-game (`just game cruise`): the Meridian flies with bounded angular rates and a
-sane angle of attack — no spin-up, no escape.
+force/wind vectors. The moment coefficients are **derived from transport-category
+stability derivatives** (see *Handling feel* below), so felt inertia scales with
+the craft's real mass and geometry. The Meridian (`ships/meridian.ron`, a
+narrow-body airliner) is the reference test aircraft on the runway scenarios; its
+wings carry an authored `WingRole` (`Lift` main wing, `Stabilizer` empennage)
+that the config builder classifies on. Verified in-game (`just game cruise`): the
+Meridian flies with bounded angular rates and a sane angle of attack — no
+spin-up, no escape.
 
 > **History.** This replaced a vendored LGPL flight-dynamics crate (`avian_fdm`).
 > That crate's zone physics was sound, but Thalos used only ~30% of it behind a
@@ -49,9 +50,11 @@ then:
   both scaled by `q̄·S`. A wingless craft sets `CL_α = 0` → pure drag.
 - **Moments** (about the CoM, body frame) are three explicit, **unconditionally
   stable** terms scaled by `q̄·S·(arm)`:
-  - **Restoring** — `−stability·α` in pitch and `−stability·β` in yaw, which turns
-    the nose toward the relative wind (weathervane static stability; works for a
-    wingless capsule too).
+  - **Restoring** — `cm0 − stability·α` in pitch and `−stability·β` in yaw, which
+    turns the nose toward the relative wind (weathervane static stability; works
+    for a wingless capsule too). The `cm0` trim offset puts the hands-off pitch
+    trim point at a small positive AoA (`α_trim = cm0 / pitch_stability` ≈ the
+    cruise attitude) instead of α = 0, so level cruise needs no held stick.
   - **Damping** — `−damp·(ρ·V·S·L²)·ω` on each axis, which **always opposes the
     angular rate** (this is what makes a spin impossible to pump).
   - **Control** — pitch/roll/yaw control-surface deflection × authority. The
@@ -152,23 +155,71 @@ translation, at 1× warp.
 
 EVA is excluded throughout (no aero surfaces attached).
 
+## Handling feel — coefficients from transport derivatives
+
+The moment coefficients (`crates/game/src/aero.rs`, live-tunable via the
+`AeroTuning` resource over BRP) are mapped from standard transport-category
+stability derivatives (Cm_α ≈ −1.2, Cm_q ≈ −25 including the α̇ lag this model
+lacks, Cl_p ≈ −0.45, Cn_r ≈ −0.3; full-throw Cl_δa ≈ 0.06, Cm_δe ≈ 0.5). Two
+mapping details: the model's damping term `coeff·ρ·V·S·L²·ω` is 4× the standard
+`C_q·(ωL/2V)` non-dimensionalisation, so `coeff = C/4`; and the reference span is
+the **full tip-to-tip wingspan** (2 × the largest half-panel — panels are single
+half-wings), which also makes the aspect ratio (b²/S ≈ 9 for the Meridian) and
+hence induced drag realistic.
+
+What this buys: **felt inertia is real physics, not per-class tuning.** Rate
+onset is `τ = I / (damp·ρ·V·S·L²)` — about 1.2 s in roll for the ~37 t Meridian
+(rates build over a second-plus and coast to a stop, with a full-stick steady
+roll rate of ~35°/s at approach speed), while a fighter-sized airframe's small
+inertia and span land it at a few tenths of a second and triple-digit roll
+rates. Heavy planes feel heavy and small planes nimble through their actual
+mass and geometry. Full deflection commands the craft's real physical capability
+(an airliner *can* roll at ~35°/s and pull to stall AoA — its pilots just
+don't), so gentle inputs fly gently. `crates/game/src/aero.rs` has unit tests
+pinning the Meridian's aspect ratio, steady roll rate, roll-onset τ, and pitch
+trim authority to these bands so a retune can't silently regress the feel.
+
+**Aircraft have no reaction wheels.** The aircraft command pods (`cockpit`,
+`flightdeck`, `cockpit_inline` in `assets/parts.ron`) author
+`reaction_wheel_torque: 0`: a plane's only attitude authority is its control
+surfaces, scaled by dynamic pressure, exactly like reality. Controls are mushy
+below flying speed, dead when parked, and crisp at cruise — and there is no
+free, airspeed-independent torque to roll the craft over on the runway or
+rotate it below V_r. (Rocket pods keep their wheels; the fly-by-wire allocator
+already drives whichever effectors exist.)
+
 ## Ground handling
 
-While weight is on the wheels the **gear, not aero, owns attitude**:
-`apply_aero_forces` zeros the aero moment, and below an airspeed floor
-(`GROUND_AERO_AIRSPEED_FLOOR_M_S`) zeros the force too (near-zero speed gives a
-degenerate AoA). Lift/drag above the floor still build the takeoff roll; once lift
-lifts the wheels, `WeightOnWheels.grounded` clears and full aero (moments included)
-returns for flight.
+Below a taxi airspeed floor (`GROUND_AERO_AIRSPEED_FLOOR_M_S`, 5 m/s) a craft
+with weight on wheels gets **no aero at all** — at near-zero airspeed the AoA is
+degenerate (the velocity is suspension settle, not flow), so the gear owns the
+craft outright. Above the floor a grounded craft flies the **full aero model**:
+elevator authority builds with q̄ until rotation at V_r, the wings damp roll
+through the takeoff run, and the fin weathervanes the nose — all real
+aerodynamics, with no discontinuity at liftoff or touchdown. (The old blanket
+weight-on-wheels moment zeroing existed to protect against the previous
+over-damped coefficients, which were strong enough at taxi speed to fight the
+suspension.)
+
+Nosewheel steering fades with ground speed
+(`GearTuning::steer_fade_speed_m_s`, `crates/game/src/local_physics.rs`): full
+tiller throw at taxi speed, a couple of degrees at takeoff speed — the
+real-world tiller→pedals split — so a hard yaw input at speed cannot command
+the lateral grip that would trip the craft over its main gear. Tire grip
+(`GearTuning::mu` = 0.8) is a dry-tire value: a skidding craft slides before
+the contact force grows a tipping moment.
 
 ## Scope and roadmap
 
 **Aircraft.** `aero::build_ship_aero_config` aggregates the blueprint's `Wing`
 parts via `ShipBlueprint::wing_aero_panels` into one `AeroConfig`: reference area =
 total lifting (non-vertical) panel area, chord = mean aerodynamic chord, span =
-max span, aspect ratio = b²/S; cambered lift + the wing stability/damping/control
-coefficients. Engine thrust stays Thalos's nose-forward throttle. **Cruise trim,
-control gains, stall, takeoff speed need in-game iteration.**
+full wingspan (2 × max half-panel), aspect ratio = b²/S; cambered lift + trim +
+the wing stability/damping/control coefficients. Engine thrust stays Thalos's
+nose-forward throttle. The natural next refinement is deriving the per-axis
+*control* coefficients from the authored `ControlSurface` geometry (span window ×
+chord fraction × arm) instead of one whole-body constant, so aileron sizing in
+the shipyard shows up in roll feel.
 
 **Spacecraft (rockets, capsules).** A bluff-body config (reference area
 `ShipStats::frontal_area_m2`, Cd a blunt-body constant), `CL_α = 0`, with
@@ -204,8 +255,13 @@ for directions). Both groups start disabled.
   (prograde); a blunt capsule that should re-enter base-first needs an offset
   trim angle / a per-craft "stable attitude".
 - **Per-nose-shape drag coefficient** — Cd is a single blunt-body constant.
-- **Cruise trim** — the wing `cl0`/incidence isn't yet tuned for hands-off level
-  flight; the `cruise` scenario descends gently rather than holding altitude.
+- **Compressibility / wave drag** — no Mach drag rise, so a full-throttle
+  aircraft has no transonic wall and will happily exceed Mach 1. A
+  drag-divergence term (`ΔCD ∝ (M − M_dd)²`) is the cheap fix once
+  `evaluate_aero` is handed the Mach number.
+- **Per-control-surface authority** — control coefficients are whole-body
+  constants; deriving them from the authored `ControlSurface` geometry would
+  make shipyard surface sizing show up in handling.
 
 ## File map
 

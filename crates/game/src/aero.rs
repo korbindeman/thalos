@@ -34,11 +34,15 @@ use thalos_shipyard::{WingAeroPanel, WingRole};
 
 use crate::rendering::{PlayerShip, SimulationState};
 
-// --- First-cut airfoil / stability / control constants (tuned in-game) -------
+// --- Airfoil / stability / control constants ---------------------------------
 /// Lift-curve slope, per radian (3-D, below the 2-D 2π for finite AR).
 const LIFT_SLOPE_PER_RAD: f64 = 5.0;
 /// Camber lift at zero angle of attack for a cambered main wing.
 const MAIN_WING_CL0: f64 = 0.25;
+/// Pitch trim moment at zero AoA: trims the statically-stable airframe at
+/// `α_trim = cm0 / pitch_stability` ≈ 1.4°, the cruise attitude, so level
+/// flight is hands-off instead of constant forward stick.
+const MAIN_WING_CM0: f64 = 0.03;
 /// Parasitic (zero-lift) drag coefficient of a winged aircraft.
 const WING_PARASITIC_CD: f64 = 0.03;
 /// Stall angle (rad) where |CL| is clamped.
@@ -46,25 +50,36 @@ const STALL_ANGLE_RAD: f64 = 0.26; // ~15°
 
 // Non-dimensional moment coefficients for a winged aircraft. Restoring > 0 gives
 // static stability; damping > 0 always opposes the rate; control sets pilot
-// authority. Tuned for **airliner heft**: low control authority so full
-// deflection commands a sane attitude (~8° trim AoA, not 70°), and high damping
-// so rates build over a second or two rather than snapping — the felt rotational
-// inertia of a 30 t airframe. Live-tunable at runtime via [`AeroTuning`].
-const WING_PITCH_STABILITY: f64 = 0.5;
-const WING_YAW_STABILITY: f64 = 0.4;
+// authority. Derived from transport-category stability derivatives (Cm_α ≈ −1.2,
+// Cm_q ≈ −25 incl. the α̇ lag this model lacks, Cl_p ≈ −0.45, Cn_r ≈ −0.3,
+// full-throw Cl_δa ≈ 0.06 / Cm_δe ≈ 0.5) mapped to this model's scaling: the
+// damping term is `coeff·ρ·V·S·L²·ω` = 4× the standard `C_q·(ωL/2V)` form, so
+// `coeff = C/4`, with the reference span being the **full wingspan**.
+//
+// What this buys is *felt inertia from real physics*: rate onset is governed by
+// `τ = I / (damp·ρ·V·S·L²)`, which lands at ~1.2 s in roll for the ~37 t
+// Meridian (rates build over a second-plus and coast to a stop) and a few
+// tenths of a second for a fighter-sized airframe — heavy planes feel heavy and
+// small ones nimble through their actual mass and geometry, not per-class
+// tuning. Full deflection commands the real physical capability (an airliner
+// *can* roll at ~35°/s and pull to stall AoA; its pilots just don't), so
+// gentle inputs fly gently. Live-tunable at runtime via [`AeroTuning`].
+const WING_PITCH_STABILITY: f64 = 1.2;
+const WING_YAW_STABILITY: f64 = 0.2;
 const WING_PITCH_DAMP: f64 = 8.0;
-const WING_ROLL_DAMP: f64 = 4.0;
-const WING_YAW_DAMP: f64 = 6.0;
-const WING_PITCH_CONTROL: f64 = 0.10;
-const WING_ROLL_CONTROL: f64 = 0.15;
-const WING_YAW_CONTROL: f64 = 0.08;
+const WING_ROLL_DAMP: f64 = 0.13;
+const WING_YAW_DAMP: f64 = 0.2;
+const WING_PITCH_CONTROL: f64 = 0.5;
+const WING_ROLL_CONTROL: f64 = 0.06;
+const WING_YAW_CONTROL: f64 = 0.04;
 
 // Bluff body (rocket/capsule): no lift, no control, but weathervane-stable.
 const BLUFF_STABILITY: f64 = 0.5;
 const BLUFF_DAMP: f64 = 0.5;
 
-/// Airspeed (m/s) below which a grounded craft's aero *forces* are also dropped
-/// (not just moments) — near-zero speed gives a degenerate AoA.
+/// Airspeed (m/s) below which a grounded craft gets no aero at all (forces or
+/// moments) — near-zero speed gives a degenerate AoA (the velocity is mostly
+/// suspension settle). Above it, a grounded craft flies the full aero model.
 const GROUND_AERO_AIRSPEED_FLOOR_M_S: f64 = 5.0;
 /// Inertia-relative safety ceilings (see `apply_aero_forces`): a real craft
 /// pulls only a few g / a few rad/s², so bound the aero force/torque by the
@@ -115,7 +130,7 @@ pub(crate) fn resolved_aero_config(base: AeroConfig, tuning: &AeroTuning) -> Aer
 /// per-craft config's moment terms each frame. Reflect-registered so the feel
 /// (control authority, damping, static stability) can be dialled in live over BRP
 /// — e.g. `world_mutate_resources` on `thalos_game::aero::AeroTuning` — without a
-/// rebuild. Defaults are the airliner-heft constants above.
+/// rebuild. Defaults are the transport-derivative constants above.
 #[derive(Resource, Reflect, Clone, Copy)]
 #[reflect(Resource)]
 pub struct AeroTuning {
@@ -236,17 +251,22 @@ pub fn build_ship_aero_config(
         mac_acc += panel.chord_m * panel.area_m2;
         max_span = max_span.max(panel.span_m);
     }
+    // Panels are single half-wings (mirrored pairs are separate entities), so
+    // the aerodynamic reference span — the roll/yaw moment arm and the
+    // aspect-ratio basis — is the full tip-to-tip wingspan, two panels.
+    let full_span = 2.0 * max_span;
 
     if total_area > 0.0 {
         AeroConfig {
             reference_area_m2: total_area,
             reference_chord_m: mac_acc / total_area,
-            reference_span_m: max_span.max(1.0),
+            reference_span_m: full_span.max(1.0),
             lift_slope: LIFT_SLOPE_PER_RAD,
             cl0: MAIN_WING_CL0,
+            cm0: MAIN_WING_CM0,
             cd0: WING_PARASITIC_CD,
             stall_alpha: STALL_ANGLE_RAD,
-            aspect_ratio: (max_span * max_span / total_area).clamp(1.0, 20.0),
+            aspect_ratio: (full_span * full_span / total_area).clamp(1.0, 20.0),
             pitch_stability: WING_PITCH_STABILITY,
             yaw_stability: WING_YAW_STABILITY,
             pitch_damp: WING_PITCH_DAMP,
@@ -265,6 +285,7 @@ pub fn build_ship_aero_config(
             reference_span_m: body_len,
             lift_slope: 0.0,
             cl0: 0.0,
+            cm0: 0.0,
             cd0: drag_cd,
             stall_alpha: STALL_ANGLE_RAD,
             aspect_ratio: 0.0,
@@ -397,15 +418,20 @@ fn apply_aero_forces(
     let config = resolved_aero_config(ship_aero.config, &tuning);
     let out = evaluate_aero(vel_body, omega_body, density, &config, controls);
 
-    // On the ground the gear, not aero, owns attitude: zero the moment while
-    // weight is on the wheels, and below an airspeed floor zero the force too.
+    // Parked / slow taxi: below the airspeed floor the AoA is degenerate (the
+    // velocity is mostly suspension settle, not flow), so a grounded craft gets
+    // no aero at all — the gear owns it outright. Above the floor the full
+    // model stays live on the ground: that's where elevator authority for
+    // rotation, roll damping during the takeoff run, and weathervane stability
+    // come from, and at ground-roll dynamic pressures the moments are far too
+    // small to fight the gear. (The old blanket weight-on-wheels torque
+    // zeroing existed to protect against the previous over-damped moment
+    // coefficients, which were strong enough at taxi speed to tip the craft.)
     let mut force_body = out.force;
     let mut torque_body = out.torque;
-    if weight_on_wheels.grounded {
+    if weight_on_wheels.grounded && vel_body.length() < GROUND_AERO_AIRSPEED_FLOOR_M_S {
+        force_body = DVec3::ZERO;
         torque_body = DVec3::ZERO;
-        if vel_body.length() < GROUND_AERO_AIRSPEED_FLOOR_M_S {
-            force_body = DVec3::ZERO;
-        }
     }
 
     // Inertia-relative safety clamp. A real craft pulls only a few g and a few
@@ -469,5 +495,106 @@ fn draw_aero_debug(
     if viz.vel_body.length() >= 1.0 {
         let wind = rot * viz.vel_body.normalize() * 14.0;
         gizmos.arrow(origin, origin - wind, Color::srgb(0.6, 0.6, 0.6));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Meridian's main-wing panels (one mirrored pair) as
+    /// `build_ship_aero_config` sees them — span / chords from
+    /// `ships/meridian.ron`. Tail panels are omitted: they're either vertical
+    /// (skipped) or small enough not to move the reference numbers.
+    fn meridian_panels() -> Vec<WingAeroPanel> {
+        let span = 15.0;
+        let (root, tip) = (5.2, 1.5);
+        let area = span * (root + tip) * 0.5;
+        let lambda: f64 = tip / root;
+        let mac = (2.0 / 3.0) * root * (1.0 + lambda + lambda * lambda) / (1.0 + lambda);
+        [1.5708_f64, -1.5708]
+            .into_iter()
+            .map(|angle| WingAeroPanel {
+                center_body_m: DVec3::ZERO,
+                fore_dir: DVec3::Y,
+                thick_dir: DVec3::Z,
+                span_dir: DVec3::new(angle.signum(), 0.0, 0.0),
+                area_m2: area,
+                chord_m: mac,
+                span_m: span,
+                station: 0.44,
+                angle,
+                role: WingRole::Lift,
+            })
+            .collect()
+    }
+
+    /// Approach-regime flight condition and Meridian-class inertia. The roll
+    /// inertia is dominated by wing fuel + engines far outboard (~1.3e6 kg·m²,
+    /// airliner-class); ρ/V are a Thalos sea-level approach.
+    const APPROACH_SPEED_M_S: f64 = 80.0;
+    const APPROACH_DENSITY: f64 = 1.2;
+    const ROLL_INERTIA_KG_M2: f64 = 1.3e6;
+
+    /// Handling-feel bands: these encode "an airliner should feel heavy and
+    /// stable" as numbers, so a coefficient retune can't silently bring back
+    /// the old arcade feel (instant rate onset) or a wallowing one.
+    #[test]
+    fn meridian_rolls_like_an_airliner() {
+        let panels = meridian_panels();
+        let cfg = build_ship_aero_config(&panels, 8.0, 0.5);
+
+        // Full wingspan reference → a realistic aspect ratio (A220-class ≈ 9),
+        // not the ~2 the per-panel span used to give (4× the induced drag).
+        assert!(
+            (7.0..12.0).contains(&cfg.aspect_ratio),
+            "aspect ratio {} outside the transport band",
+            cfg.aspect_ratio
+        );
+
+        // Steady full-stick roll rate: control moment balanced against roll
+        // damping. Transports physically manage ~25–45°/s at full throw.
+        let q = 0.5 * APPROACH_DENSITY * APPROACH_SPEED_M_S * APPROACH_SPEED_M_S;
+        let control_nm = cfg.roll_control * q * cfg.reference_area_m2 * cfg.reference_span_m;
+        let damp_nm_per_rad_s = cfg.roll_damp
+            * APPROACH_DENSITY
+            * APPROACH_SPEED_M_S
+            * cfg.reference_area_m2
+            * cfg.reference_span_m
+            * cfg.reference_span_m;
+        let p_max_deg_s = (control_nm / damp_nm_per_rad_s).to_degrees();
+        assert!(
+            (20.0..50.0).contains(&p_max_deg_s),
+            "full-stick steady roll rate {p_max_deg_s:.1}°/s outside the airliner band"
+        );
+
+        // Roll-rate onset time constant τ = I / damping: the felt rotational
+        // inertia. Sub-~0.5 s reads as an arcade snap on a 35 m airframe;
+        // beyond ~2.5 s it wallows.
+        let tau_s = ROLL_INERTIA_KG_M2 / damp_nm_per_rad_s;
+        assert!(
+            (0.5..2.5).contains(&tau_s),
+            "roll onset τ {tau_s:.2}s outside the airliner band"
+        );
+    }
+
+    #[test]
+    fn meridian_pitch_can_rotate_but_trims_gently() {
+        let panels = meridian_panels();
+        let cfg = build_ship_aero_config(&panels, 8.0, 0.5);
+
+        // Full elevator must out-muscle static stability up to a rotation /
+        // flare attitude well past the approach AoA…
+        let full_stick_trim_deg = (cfg.pitch_control / cfg.pitch_stability).to_degrees();
+        assert!(
+            full_stick_trim_deg > 12.0,
+            "full-stick trim AoA {full_stick_trim_deg:.1}° too weak to rotate or flare"
+        );
+        // …while the hands-off trim point sits at a small positive cruise AoA.
+        let trim_deg = (cfg.cm0 / cfg.pitch_stability).to_degrees();
+        assert!(
+            (0.5..4.0).contains(&trim_deg),
+            "hands-off trim AoA {trim_deg:.1}° not a level-cruise attitude"
+        );
     }
 }

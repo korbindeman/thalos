@@ -158,10 +158,14 @@ const RUNWAY_GEAR_REST_MARGIN_M: f64 = 0.03;
 /// Park this far in from the threshold end so the nose is on the numbers.
 const PARK_THRESHOLD_INSET_M: f64 = 150.0;
 
-const APPROACH_BACK_M: f64 = 1500.0;
-const APPROACH_ALT_M: f64 = 250.0;
-const APPROACH_SPEED_M_S: f64 = 60.0;
-const APPROACH_SINK_M_S: f64 = 4.0;
+// Short-final spawn geometry: ~3.4° glideslope flown at ~1.3 × the Meridian's
+// clean stall speed (~60 m/s at its ~37 t wet mass), the standard approach
+// margin. The speed must track the craft's wing loading: spawning at or below
+// stall just falls out of the sky.
+const APPROACH_BACK_M: f64 = 2500.0;
+const APPROACH_ALT_M: f64 = 150.0;
+const APPROACH_SPEED_M_S: f64 = 80.0;
+const APPROACH_SINK_M_S: f64 = 4.7;
 
 /// Hide the runway beyond this multiple of the body radius (matches the
 /// terrain/impostor LOD swap so it isn't a speck poking through the orbital

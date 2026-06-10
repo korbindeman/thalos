@@ -1569,8 +1569,16 @@ pub struct GearTuning {
     /// the friction circle `mu·N`. High so even a tiny creep is opposed
     /// near-maximally — the craft stays put when the brake is engaged.
     pub parking_brake_stiffness: f64,
-    /// Max nosewheel steer angle at full yaw input, radians.
+    /// Max nosewheel steer angle at full yaw input, radians. This is the
+    /// *taxi* (tiller) authority; it fades with ground speed — see
+    /// [`GearTuning::steer_fade_speed_m_s`].
     pub max_steer_rad: f64,
+    /// Ground speed (m/s) at which nosewheel steering authority has faded to
+    /// half its taxi value (`scale = 1 / (1 + (v/v_fade)²)`). Full tiller
+    /// throw at taxi speed would trip the craft over its main gear at takeoff
+    /// speed, so steering blends out as the aero rudder blends in — the
+    /// real-world tiller→pedals split.
+    pub steer_fade_speed_m_s: f64,
     /// Max suspension travel as a fraction of strut length.
     pub max_travel_fraction: f64,
     /// Extra ray length past the rest length so a wheel just off the ground or
@@ -1580,7 +1588,7 @@ pub struct GearTuning {
 
 impl Default for GearTuning {
     fn default() -> Self {
-        // Sized for the ~10–20 t demo aircraft on Thalos surface gravity. The
+        // Sized for the ~20–40 t demo aircraft on Thalos surface gravity. The
         // craft settles to a static squat of `(m·g/N)/k_spring`; these put that
         // in the tens-of-cm range with near-critical damping. Live-tune via BRP.
         Self {
@@ -1590,12 +1598,17 @@ impl Default for GearTuning {
             // near-critical `damping_ratio` keeps it dead-beat.
             k_spring: 800_000.0,
             damping_ratio: 1.2,
-            mu: 1.1,
+            // Dry-tire grip. Deliberately below ~1.0: the lateral force a
+            // skidding tire can transmit is what rolls a craft over its gear,
+            // and a real tire slides at ~0.8 before it can generate a
+            // tipping moment that large.
+            mu: 0.8,
             k_lat: 40_000.0,
             rolling_mu: 0.02,
             rolling_hold_stiffness: 60_000.0,
             parking_brake_stiffness: 60_000.0,
             max_steer_rad: 0.5,
+            steer_fade_speed_m_s: 12.0,
             max_travel_fraction: 0.8,
             skin_margin: 0.5,
         }
@@ -1623,11 +1636,12 @@ impl Default for ParkingBrake {
 
 /// Whether any landing-gear wheel is currently bearing load on the ground
 /// ("weight on wheels"). Set each frame by [`apply_landing_gear_forces`] from
-/// its per-wheel suspension raycast, and read in the atmosphere pass
-/// ([`crate::aero::suppress_ground_aero`]) to gate aerodynamic moments while the
-/// craft is taxiing/parked — the gear, not aero, owns attitude on the ground, so
-/// a near-zero-airspeed (degenerate ~90° AoA) aero torque must not be allowed to
-/// tip the craft. Reflect-registered for BRP inspection.
+/// its per-wheel suspension raycast, and read in the aero pass
+/// ([`crate::aero::apply_aero_forces`]) to drop all aero on a grounded craft
+/// below the taxi airspeed floor, where the AoA is degenerate (the velocity is
+/// suspension settle, not flow). Above that floor a grounded craft flies the
+/// full aero model — rotation authority and ground-roll damping are real
+/// aerodynamics. Reflect-registered for BRP inspection.
 #[derive(Resource, Default, Debug, Clone, Copy, Reflect)]
 #[reflect(Resource)]
 pub struct WeightOnWheels {
@@ -1834,7 +1848,13 @@ fn apply_landing_gear_forces(
     // stiff enough that the static sag `m·g/(n·k)` is small (a couple cm), so the
     // rigid wheel meshes barely dip below the surface.
 
-    let steer = (intent.attitude.z as f64).clamp(-1.0, 1.0) * tuning.max_steer_rad;
+    // Nosewheel steering: full tiller throw at taxi speed, fading toward zero
+    // with ground speed (the aero rudder takes over) so a hard yaw input at
+    // takeoff speed can't generate the lateral grip that trips the craft over
+    // its main gear.
+    let ground_speed = linear_velocity.0.length();
+    let steer_scale = 1.0 / (1.0 + (ground_speed / tuning.steer_fade_speed_m_s).powi(2));
+    let steer = (intent.attitude.z as f64).clamp(-1.0, 1.0) * tuning.max_steer_rad * steer_scale;
     let filter = SpatialQueryFilter::default().with_excluded_entities([bubble.craft_entity]);
 
     let mut net_force = DVec3::ZERO;
@@ -3251,19 +3271,6 @@ mod tests {
             basis,
             half_extent_m: 0.0,
         };
-        let bubble = LocalBubble {
-            id: 1,
-            body_id: 0,
-            craft_entity: Entity::PLACEHOLDER,
-            terrain_entity: Some(Entity::PLACEHOLDER),
-            center_dir_body: DVec3::Y,
-            center_surface_body_m: patch.center_surface_body_m,
-            basis,
-            patch_half_extent_m: 0.0,
-            stable_contact_s: 0.0,
-            stable_landed: false,
-            terrain_built_at_revision: 0,
-        };
         let body = BodyState {
             id: 0,
             epoch: Epoch(0.0),
@@ -3274,6 +3281,26 @@ mod tests {
             mass_kg: 1.0e20,
             gm: 1.0,
             radius_m: 1000.0,
+        };
+        let bubble = LocalBubble {
+            id: 1,
+            body_id: 0,
+            craft_entity: Entity::PLACEHOLDER,
+            frame: SurfaceLocalFrame::new(
+                &body,
+                SurfaceAnchor {
+                    dir_body: DVec3::Y,
+                    elevation_m: 0.0,
+                },
+            ),
+            terrain_entity: Some(Entity::PLACEHOLDER),
+            center_dir_body: DVec3::Y,
+            center_surface_body_m: patch.center_surface_body_m,
+            basis,
+            patch_half_extent_m: 0.0,
+            stable_contact_s: 0.0,
+            stable_landed: false,
+            terrain_built_at_revision: 0,
         };
         let local_position = DVec3::new(12.0, 3.0, -7.0);
         let local_rotation = DQuat::from_rotation_x(0.2) * DQuat::from_rotation_y(-0.1);

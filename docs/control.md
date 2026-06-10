@@ -65,18 +65,20 @@ the whole pipeline:
    wheels cover the rest; the controller closes the loop on the summed
    result via ω feedback.
 
-   > **Known issue — over-actuation in atmosphere (TODO: dynamic-pressure
-   > blend).** Feeding *both* effectors the full command is correct in
-   > vacuum but over-drives in thick air: at cruise the aero control
-   > surfaces alone have large authority, so adding the full reaction-wheel
-   > command on top makes the SAS `Hold` loop over-actuate. Observed via BRP
-   > on the Meridian (`CraftStateMirror.angular_velocity_rad_s`): under SAS,
-   > **yaw** picks up a ~0.05 rad/s oscillation where aero alone holds it
-   > near zero. The fix is to make `allocate` dynamic-pressure aware — lean
-   > on aero surfaces in atmosphere and reaction wheels in vacuum, rather
-   > than commanding both fully — so the effective loop gain stays at what
-   > the PD assumes. `realize_control` has the body atmosphere + airspeed to
-   > compute `q̄` and pass an authority split into `allocate`.
+   > **Over-actuation in atmosphere — resolved.** Feeding both effectors the
+   > full command used to over-drive in thick air (a ~0.05 rad/s SAS yaw
+   > oscillation on the Meridian at cruise). The fix lives in the
+   > *controller*, not the allocator: `pd_to_normalized_torque` normalizes
+   > the PD output by the **total** available authority (`max_torque` + the
+   > aero control authority at the current dynamic pressure, supplied by
+   > `control_bus::player_aero_authority`), so driving both effectors at
+   > that fraction realizes exactly the PD's intended torque.
+   >
+   > Aircraft command pods author `reaction_wheel_torque: 0`
+   > (`assets/parts.ron`) — a plane's only attitude effector is its control
+   > surfaces, so its authority scales with dynamic pressure like a real
+   > aircraft's, and there is no free torque on the runway. The allocator
+   > needs no special case: the wheels term simply contributes nothing.
 
 ## SAS feel: centered stick holds attitude
 

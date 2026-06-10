@@ -71,8 +71,12 @@
         (catalog_id: "vega_turbojet"),                                      // 8 inboard nacelle L
         (catalog_id: "vega_turbojet"),                                      // 9 outboard nacelle R
         (catalog_id: "vega_turbojet"),                                      // 10 outboard nacelle L
-        (catalog_id: "gear_nose_hd", params: Gear(strut_length: 2.0, wheel_radius: 0.5)), // 11 nose gear
-        (catalog_id: "gear_main_hd", params: Gear(strut_length: 1.9, wheel_radius: 0.6)), // 12 main gear (matched: both 2.50 m drop)
+        // Low stance (matched: both 2.20 m drop): the shorter the legs, the
+        // lower the CoM rides over the track and the harder the craft is to
+        // tip — and an airliner sits low anyway. Keeps ~8° of rotation before
+        // tail strike (main gear → tail tip arm ≈ 15.7 m, plus the upsweep).
+        (catalog_id: "gear_nose_hd", params: Gear(strut_length: 1.7, wheel_radius: 0.5)), // 11 nose gear
+        (catalog_id: "gear_main_hd", params: Gear(strut_length: 1.6, wheel_radius: 0.6)), // 12 main gear
     ],
     connections: [],
     surface_mounts: [

@@ -61,6 +61,11 @@ pub struct AeroConfig {
     pub lift_slope: f64,
     /// Lift coefficient at zero angle of attack (camber).
     pub cl0: f64,
+    /// Pitch moment coefficient at zero angle of attack (trim). A small
+    /// positive value trims a statically-stable craft at a small positive AoA
+    /// (`α_trim = cm0 / pitch_stability`) so it holds level flight hands-off
+    /// instead of needing constant forward stick against the restoring moment.
+    pub cm0: f64,
     /// Parasitic (zero-lift) drag coefficient.
     pub cd0: f64,
     /// Stall angle (rad); |CL| is clamped past it.
@@ -93,6 +98,7 @@ impl Default for AeroConfig {
             reference_span_m: 1.0,
             lift_slope: 0.0,
             cl0: 0.0,
+            cm0: 0.0,
             cd0: 0.5,
             stall_alpha: 0.26,
             aspect_ratio: 0.0,
@@ -170,8 +176,9 @@ pub fn evaluate_aero(
     // so it stays finite as V→0 and always opposes ω.
     let rho_v_s = density * speed * s;
 
-    // Pitch about +X (nose +Y → up +Z). Restoring drives α→0; +pitch = nose up.
-    let pitch = -cfg.pitch_stability * q * s * c * alpha
+    // Pitch about +X (nose +Y → up +Z). Restoring drives α→α_trim (= cm0 /
+    // pitch_stability); +pitch = nose up.
+    let pitch = (cfg.cm0 - cfg.pitch_stability * alpha) * q * s * c
         + cfg.pitch_control * q * s * c * controls.pitch
         - cfg.pitch_damp * rho_v_s * c * c * omega_body.x;
 
@@ -262,6 +269,23 @@ mod tests {
         let out = evaluate_aero(v, DVec3::ZERO, 1.0, &wing(), ControlInputs::default());
         // Restoring pitch moment must be nose-down: about −X (τx < 0).
         assert!(out.torque.x < 0.0, "pitch should restore (nose down), got {}", out.torque.x);
+    }
+
+    #[test]
+    fn cm0_trims_at_positive_alpha() {
+        let cfg = AeroConfig { cm0: 0.03, ..wing() };
+        let alpha_trim = cfg.cm0 / cfg.pitch_stability;
+        // Below trim AoA the moment pitches the nose up, above it down, and at
+        // trim it vanishes — a hands-off stable cruise attitude.
+        let v_level = DVec3::new(0.0, 100.0, 0.0); // α = 0 < α_trim
+        let up = evaluate_aero(v_level, DVec3::ZERO, 1.0, &cfg, ControlInputs::default());
+        assert!(up.torque.x > 0.0, "below trim should pitch up, got {}", up.torque.x);
+        let v_trim = DVec3::new(0.0, 100.0, -100.0 * alpha_trim.tan());
+        let trim = evaluate_aero(v_trim, DVec3::ZERO, 1.0, &cfg, ControlInputs::default());
+        assert_relative_eq!(trim.torque.x, 0.0, epsilon = 1.0);
+        let v_high = DVec3::new(0.0, 100.0, -20.0); // α ≈ 11° > α_trim
+        let down = evaluate_aero(v_high, DVec3::ZERO, 1.0, &cfg, ControlInputs::default());
+        assert!(down.torque.x < 0.0, "above trim should pitch down, got {}", down.torque.x);
     }
 
     #[test]
