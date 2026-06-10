@@ -251,12 +251,59 @@ line: Thalos 80 km, Pelagos 90 km, Vaelen 60 km.
 - ✓ **Limb glow extends beyond the geometric edge** — graze rays
   through the atmosphere shell.
 - ✓ **Aerial perspective** on terrain and impostor body via
-  scene-depth clipping.
+  scene-depth clipping, **decoupled from sky-dome brightness** (see
+  *Aerial perspective vs sky-dome brightness* below).
 - ✓ **Mie forward-peak haze** on the night-side rim — warm crescent
   on back-lit bodies.
 - ✓ **Knife-edge terminator** preserved on airless bodies (Mira,
   Selva, asteroids — `karman_line_m == 0` or absent
   `TerrestrialAtmosphere` skips both spawn and raymarch).
+
+### Aerial perspective vs sky-dome brightness
+
+The `BodySky` pass produces both the **sky dome** (in-scatter along view
+rays that miss the surface) and the **aerial perspective** (the airlight
+in-scatter added on top of terrain/geometry pixels, attenuated by the same
+integral's transmittance). Both come from one `integrate_atmosphere`
+result, so they share the authored `strength` / `multi_scatter_gain`.
+
+That sharing is a trap. Those knobs are tuned so the **sky dome** reads
+bright and crushes stars at midday (Thalos sits at `strength: 3`,
+`multi_scatter_gain: 3`). But applied unchanged as airlight, the in-scatter
+is far brighter than the surface even over short paths, so the ground
+washes into a uniform veil at *any* altitude — well above 400 m you can
+barely see it, and nearby relief reads as fog. Crucially this is **not**
+extinction: per-channel β is already Earth-clear-day correct (~50–90 km
+Koschmieder visibility), and zeroing the in-scatter (`strength → 0`) leaves
+the ground perfectly crisp under a black sky. The wash is purely the
+*additive* airlight, and it is over-bright even at the physically "correct"
+`strength: 1` (verified on Pelagos) — short-path airlight (especially the
+altitude-dependent multi-scatter fill, strong where air is densest near the
+ground) simply over-contributes relative to surface albedo in the engine's
+flux units.
+
+The fix decouples the two. `crates/game/src/rendering/ground_terrain.rs`
+holds an `AtmosphereTuning` resource (BRP-mutable, `#[reflect(Resource)]`)
+with an **absolute** `aerial_perspective_strength` (default `0.15` =
+clear weather). Each frame the per-body shader multiplier is computed as
+`aerial_perspective_strength / effective_sky_strength` and passed in
+`BodySkyExtra::cloud_band_radii.z`; `body_sky.wgsl` scales the in-scatter
+on surface/geometry-hit pixels by it (blended by `surface_fade` so it eases
+to full sky-dome strength across the horizon — sky pixels are untouched).
+Dividing by the sky strength makes the ground airlight land at the same
+absolute strength on every body regardless of how bright its sky is
+authored, while staying physically proportional to that body's β (thicker
+atmospheres still haze more). Transmittance/extinction is left untouched,
+so distance still fades contrast the same way — only the additive veil is
+dimmed.
+
+This is the **clear-weather visibility knob weather will later drive**
+(lower = clearer, higher = hazier/humid); it is the natural seam for a
+future per-region visibility field. `AtmosphereTuning` also carries
+`strength` / `multi_scatter_gain` dev overrides (sentinel `< 0` = keep the
+authored value) for live sky-dome tuning — both are pure runtime
+multipliers that do **not** feed the multi-scatter LUT bake, so overriding
+them over BRP is exact.
 
 ### Backlog
 

@@ -1,12 +1,30 @@
 # Surface-local frame & terrain-anchored structures
 
-**Status: design, no code yet.** Target: the current atmospheric/surface
-gameplay phase (landing successfully with both spaceships and planes).
-Once implemented, this supersedes the body-centered-inertial contact
-bubble described in `docs/surface.md` ("Landing & impact destruction")
-and generalizes the runway (`crates/game/src/runway.rs`) into a
-structures system. `docs/simulation.md` regime tables should be updated
-as phases land.
+**Status: implemented for ships (2026-06).** The surface-local frame (SLF)
+is live for ship craft, the ground colliders are solid, the runway is a
+terrain-anchored structure, and the render-shake/gizmo bugs are fixed.
+Verified across the `runway`, `cruise`, `final`, and `landing` scenarios
+(handoff residuals 0–1e-10 m, no NaN/panic, stable landings). Three things
+deviate from the original design below and are called out in
+§10 *Implementation status*: **EVA was intentionally left on its
+body-centered kinematic seam** (it gains nothing from the SLF — see §10),
+the **runway keeps a solid cuboid collider** rather than being folded into
+the terrain heightfield, and the physics step is still **fixed-timestep**
+(a per-frame variant is a staged optional follow-up). Sections 1–9 are the
+original design narrative; read §10 for what actually shipped.
+
+Supersedes the body-centered-inertial *ship* contact bubble formerly
+described in `docs/surface.md` ("Landing & impact destruction"). The
+prior design premise — that ships needed migrating *to* a body-fixed
+frame — was already partly true in the code: ships integrated in a
+planet-centered body-fixed rotating frame with exact gravity/centrifugal/
+Coriolis and a static-in-that-frame terrain trimesh, and raycast
+spring-damper landing gear already existed. What the rebase actually
+changed (§10): swapped the conversion seam to an anchored, re-anchorable
+SLF; made the ground a **solid** collider (heightfield / cuboid) instead
+of a one-sided trimesh; filtered the wheeled-craft hull out of ground
+contact so the gear is the sole interface; clamped gear forces; and fixed
+two render-side shakes.
 
 ## 1. Motivation — why the current contact stack is fragile
 
@@ -307,3 +325,98 @@ decision to replace Avian:
 - **Heightfield window size vs. gear shapecast length** at extreme
   attitudes (a plane nosing over the patch edge) — likely solved by a
   generous window + the AGL-banded attach logic that exists today.
+
+## 10. Implementation status (what actually shipped)
+
+The frame math and ship rebase landed as designed; the contact and EVA
+details diverged. Concretely:
+
+**SLF frame math** — `thalos_physics_canonical::surface_local`
+(`SurfaceAnchor`, `SurfaceLocalFrame` with the Y-up ENU basis + pole
+fallback, `SurfaceLocalState`, the `inertial_to_surface_local` /
+`surface_local_to_inertial` conversions composed onto `body_fixed.rs`,
+`surface_local_acceleration`, `altitude_asl_m`/`radial_up`, `reanchor`).
+Unit-tested incl. a free-fall dynamics-equivalence test (SLF vs
+body-centered inertial agree to <1e-6) that pins the Coriolis sign.
+
+**Ships in the SLF** — `LocalBubble.frame: SurfaceLocalFrame`
+(`crates/physics_local`); the ship conversion seam
+(`inertial_to_ship_frame`/`ship_frame_to_inertial` in
+`crates/game/src/local_physics.rs`) routes through the SLF;
+`apply_local_forces` uses `surface_local_acceleration`;
+`reanchor_surface_frame` re-anchors at 1.5 km horizontal drift (exact f64,
+canonical untouched). Consumers migrated: aero/control_bus altitude →
+`altitude_asl_m`, debug hitbox isometry, terrain-floor backstop and
+surface-friction up-vectors. Handoff residuals measured 0–1e-10 m in every
+scenario.
+
+**Solid ground** — the one-sided kinematic trimesh became a solid
+**heightfield** collider (`spawn_terrain_collider_patch`, authored in the
+patch-tangent frame, posed via `patch_basis_rotation` + the SLF rotation),
+and the runway's one-sided trimesh became a solid **cuboid slab**
+(`crates/game/src/runway.rs`). The one-sided trimesh was the cause of the
+landing craft being violently ejected off its gear (one-step
+penetration-recovery on a surface with no interior).
+
+**Gear as sole ground contact** — a wheeled craft's hull collider is
+filtered out of solver contact with the ground via collision layers
+(`thalos_physics_local::{GROUND_LAYER, CRAFT_LAYER,
+ground_collision_layers, wheeled_craft_collision_layers}`); the raycast
+spring-damper gear is its only ground interface, and that gear force/torque
+is now **inertia-relative clamped** (mirroring the aero model) — together
+these stopped the spin/jump on throttle-up. Gearless craft (landers) keep
+default all-vs-all layers and rest on the heightfield directly (verified in
+`final`). Crash detection and the stable-contact→`BodyFixed` collapse were
+repointed to `weight_on_wheels.grounded || hull-contact`.
+
+**Render-shake fixes (not in the original design)** — two pre-existing
+bugs surfaced once contact was stable: (a) the ship-pose overstep
+extrapolation in `ship_view.rs` double-counted the planet co-rotation
+`ω×r` after the SLF migration, injecting a ~4 m ground-speed-independent
+sawtooth that read as the *ground* shaking while rolling — fixed by
+subtracting the full surface velocity; (b) `draw_debug_hitboxes` (F3) read
+a one-frame-stale `GlobalTransform` under big_space — fixed by moving it to
+`PostUpdate` after `TransformSystems::Propagate` (same fix `draw_aero_debug`
+already had).
+
+**Structures registry** — `crates/game/src/structures.rs`:
+`StructureSite`/`StructureRegistry`/`StructurePlacement` +
+`apply_structure_flatten` (the single "stick to terrain" flatten path). The
+runway registers a `StructureSite { kind: Runway, placement: FlattenTo }`
+and installs its pad through this path; a future building is a data entry
+(`FlattenTo` or `Drape`) plus its own visuals.
+
+### Deviations & deferred work
+- **EVA stayed on its body-centered kinematic seam** (design §5 wanted it
+  folded in). Rationale: grounded EVA is a kinematic character controller
+  with no collider and no Avian integration — it computes its canonical
+  state directly in body-fixed (`player_controller.rs`, the
+  `install_local_rigid_body_state` at the end of `step_eva_controller`).
+  The SLF exists to give Avian's *contact solver* stable small coordinates;
+  EVA never touches that solver, so the fold-in is cosmetic, carries real
+  risk (the controller's surface-slide-out reseed guard, warp co-rotation
+  sweep, and teleport-reseed would all interact with re-anchoring), and is
+  hard to verify without on-foot walk-testing. EVA's "special cases" are
+  intrinsic to it being kinematic, not artifacts of the frame. Treat EVA as
+  a deliberately separate kinematic path.
+- **Runway keeps its own solid cuboid collider** rather than being folded
+  into the terrain heightfield (design §3/§6 envisioned the flatten pad in
+  the heightfield as the sole ground). The cuboid is simpler and guaranteed
+  flat; consolidation is a possible cleanup but the terrain patch is
+  currently skipped on the runway body to avoid double contact.
+- **Fixed-timestep physics retained.** Avian still steps in `FixedPostUpdate`
+  at 64 Hz. A per-render-frame variant (`PhysicsPlugins::new(Update)` +
+  reordering the force/readback chain around `PhysicsSystems::First..Last`)
+  would remove the residual high-speed render stutter and the gear's
+  one-frame force latency (possibly letting the gear clamp relax), but
+  carries warp-pause-ordering and gear-retune risk and was deferred while
+  feel is acceptable.
+- **Penetration backstop not demoted.** `terrain_floor_backstop` is still
+  load-bearing (the heightfield is a surface, not a closed solid, so fast
+  descents can still tunnel). Demotion to a warning needs an intervention
+  counter + zero-intervention runs across the descent scenarios first.
+- **Heightfield rebuilds are synchronous** on the main thread
+  (on re-anchor / height-source revision change) — a possible hitch near
+  terrain streaming; async rebuild with atomic swap is the planned upgrade.
+- **Runtime structure placement / region tile invalidation** (design §6.4)
+  is unbuilt — only authored (runway) sites exist so far.

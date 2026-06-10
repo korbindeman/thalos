@@ -12,7 +12,7 @@ use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::{
     body_fixed::body_fixed_pose_from_inertial,
     body_fixed::body_fixed_surface_velocity,
-    canonical::{AuthorityMode, BodyFixedPose, TranslationalState},
+    canonical::{AuthorityMode, TranslationalState},
     debug_orbits::debug_parking_orbit_state,
     types::{AttitudeState, BodyState, VesselKind},
 };
@@ -36,9 +36,10 @@ use crate::rendering::{CelestialBody, PlayerShip, SimulationState, SolarSystemSt
 use crate::target::TargetBody;
 use crate::view::{ViewMode, in_map_view};
 
-/// Debug surface drops park the craft slightly above terrain, then hold it in
-/// body-fixed authority until the player throttles up.
-pub const DEBUG_LAUNCH_MOUNT_HEIGHT_M: f64 = 18.0;
+/// Debug surface drops place the craft this far above the terrain in a landed
+/// `BodyFixed` pose; the player throttles up to fly it off
+/// ([`crate::local_physics::release_landed_ship_on_throttle`]).
+pub const DEBUG_SURFACE_DROP_HEIGHT_M: f64 = 18.0;
 
 /// EVA surface teleports plant the capsule a couple of metres above the
 /// rendered terrain; `step_eva_controller` re-seeds and snaps it onto the
@@ -61,21 +62,6 @@ pub struct DebugMode {
     /// stopgap until Thalos has air or the demo aircraft gets a non-jet drive.
     /// Toggle live over BRP (`world_mutate_resources`).
     pub jets_in_vacuum: bool,
-}
-
-/// Temporary debug-only launch clamp used by command-shift body-tree surface
-/// spawns. It keeps the craft in a stable body-fixed pose above terrain until
-/// the player applies throttle, at which point game-side local physics releases
-/// it. Remove this once real staging/launch clamps exist.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct DebugLaunchMount {
-    pub active: Option<DebugLaunchMountState>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DebugLaunchMountState {
-    pub body_id: BodyId,
-    pub pose: BodyFixedPose,
 }
 
 /// Explicit map-view debug teleport mode.
@@ -124,7 +110,6 @@ impl Plugin for DebugPlugin {
             jets_in_vacuum: true,
         })
         .init_gizmo_group::<CraftColliderGizmos>()
-        .init_resource::<DebugLaunchMount>()
         .init_resource::<DebugSurfaceTeleport>()
         .add_systems(Startup, configure_craft_collider_gizmos)
         .add_systems(
@@ -485,7 +470,6 @@ fn commit_debug_surface_teleport(
     mut teleport: ResMut<DebugSurfaceTeleport>,
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
     mut sim: ResMut<SimulationState>,
-    mut launch_mount: ResMut<DebugLaunchMount>,
     mut eva_mode: ResMut<EvaMode>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
@@ -573,17 +557,17 @@ fn commit_debug_surface_teleport(
                 attitude,
             );
         }
-        launch_mount.active = None;
     } else {
-        // Ships drop onto a launch clamp in body-fixed authority, respawning
-        // their bubble from scratch.
+        // Ships drop in landed `BodyFixed` authority just above the terrain,
+        // respawning their bubble from scratch; the player throttles up to fly
+        // off (`release_landed_ship_on_throttle`).
         clear_active_local_bubble(&mut commands, &mut active_bubble);
         let (state, attitude) = surface_spawn_state(
             &body,
             &body_state,
             hit.dir_body,
             hit.surface_height_m,
-            DEBUG_LAUNCH_MOUNT_HEIGHT_M,
+            DEBUG_SURFACE_DROP_HEIGHT_M,
         );
         let pose =
             body_fixed_pose_from_inertial(&body_state, TranslationalState::from(state), attitude);
@@ -595,10 +579,6 @@ fn commit_debug_surface_teleport(
         sim.simulation.set_ship_state(state);
         sim.simulation.set_attitude(attitude);
         sim.simulation.warp.reset();
-        launch_mount.active = Some(DebugLaunchMountState {
-            body_id: hit.body_id,
-            pose,
-        });
     }
 
     sim.simulation.set_target_body(Some(hit.body_id));
@@ -622,8 +602,8 @@ fn commit_debug_surface_teleport(
         );
     }
     info!(
-        "mounted craft {:.0} m above {} {} via cursor (dir_body=({:.3},{:.3},{:.3}) h={:.1}m)",
-        DEBUG_LAUNCH_MOUNT_HEIGHT_M,
+        "dropped craft {:.0} m above {} {} via cursor (dir_body=({:.3},{:.3},{:.3}) h={:.1}m)",
+        DEBUG_SURFACE_DROP_HEIGHT_M,
         body.name,
         surface_label,
         hit.dir_body.x,

@@ -311,7 +311,11 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   `physics_local`/Avian, not a claim of being the foundation.) Also hosts the
   native atmospheric-aero force model (`aero`): a whole-body lift/drag +
   stability/damping/control evaluator the game drives force-only in the local
-  bubble — see `docs/aerodynamics.md`.
+  bubble — see `docs/aerodynamics.md`. Also hosts `surface_local`: the
+  body-fixed Y-up tangent-frame math (anchor + ENU basis, inertial↔SLF
+  conversions composed on `body_fixed`, exact gravity/centrifugal/Coriolis,
+  re-anchor) the ship local-physics bubble integrates in — see
+  `docs/surface_local.md`.
 - **`thalos_control`** — pure-Rust fly-by-wire control layer. The single
   command vocabulary every ship-control source speaks (`AttitudeDemand` /
   `ControlDemand` tagged with a `DemandSource` priority), the priority
@@ -327,7 +331,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
-- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. Fast descents are kept from tunneling through the terrain trimesh by `SweptCcd` on the craft body, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
+- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
 - **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + two backends. Three modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render`. A backend chooses geometry, never its own lighting/atmosphere/cloud math.
 - **`thalos_body_editor`** — interactive celestial-body editor tool
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
@@ -951,15 +955,19 @@ Each major system has a unified spec doc.
   whole-craft impact destruction, `ShipParameters::impact_tolerance_m_s`
   → `Simulation::is_destroyed`). Merged from the former
   `surface_gameplay.md` + `landing.md`.
-- `surface_local.md` — **design (no code yet)**: the surface-local
-  tangent frame (SLF) — a body-fixed ENU frame anchored at a surface
-  point — as the single near-surface physics regime, replacing the
-  body-centered-inertial contact bubble (per-frame re-posed terrain
-  trimesh, fall-through backstop, the `AvianRole` snap dance) with a
-  static heightfield collider and raycast spring-damper gear; EVA folds
-  into the same frame. Also generalizes the runway into data-driven
-  terrain-anchored **structures** (`StructureSite` registry, terrain
-  modifiers, future player placement via region tile invalidation).
+- `surface_local.md` — **implemented for ships (2026-06)**: the
+  surface-local tangent frame (SLF) — a body-fixed Y-up frame anchored at
+  a surface point, re-anchored on drift — as the ship near-surface physics
+  regime, replacing the body-centered-inertial *ship* contact bubble with
+  a **solid** ground collider (terrain heightfield / runway cuboid) and the
+  gear-as-sole-ground-contact model. Also generalizes the runway into
+  data-driven terrain-anchored **structures** (`crates/game/src/structures.rs`:
+  `StructureSite`/`StructureRegistry`, the `apply_structure_flatten` path).
+  §10 records what shipped vs the design: **EVA stayed on its body-centered
+  kinematic seam** (intentional — it has no collider and gains nothing from
+  the SLF), the runway keeps a solid cuboid collider, the physics step is
+  still fixed-timestep, and the backstop demotion / async heightfield
+  rebuild / runtime structure placement are deferred follow-ups.
 - `construction.md` — next-gen shipyard / construction model design:
   one Module primitive (end-node / footprint+morph / end-cap / host /
   connector / reservation), stationed-loft fuselages and wings, a

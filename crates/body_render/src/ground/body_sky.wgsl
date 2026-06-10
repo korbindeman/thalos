@@ -500,13 +500,33 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let jitter = atmosphere_jitter(in.clip_position.xy);
-    let scatter = integrate_atmosphere_multiscatter(
+    var scatter = integrate_atmosphere_multiscatter(
         cam_pos, ray_dir, planet_center,
         sky_atmos_extra.sun_dir_flux.xyz,
         sky_atmos_extra.sun_dir_flux.w * SCENE_FLUX_SCALE,
         t_enter, t_exit, planet_radius, sky_atmos, jitter,
         ms_lut_tex, ms_lut_sampler,
     );
+
+    // Aerial-perspective decoupling. The authored in-scatter strength is tuned
+    // so the SKY DOME reads bright and crushes stars, but the same in-scatter is
+    // also the airlight added on top of terrain — at that strength it over-fogs
+    // the ground at any altitude. `cloud_band_radii.z` is the CPU-computed
+    // ratio `aerial_perspective_strength / sky_strength` (see `AtmosphereTuning`):
+    // it scales the in-scatter on surface/geometry-hit pixels only down to an
+    // absolute clear-weather airlight, blended by `surface_fade` so it eases to
+    // full sky-dome strength across the horizon (sky pixels are untouched).
+    // Extinction (transmittance) is left physical — it already matches
+    // Earth-clear-day visibility — so this dims the additive haze veil without
+    // changing how distance fades contrast. `0` is unset (airless / pre-first-
+    // update); treat it as full strength so we never blank the in-scatter.
+    let airlight_ratio = sky_atmos_extra.cloud_band_radii.z;
+    let airlight_scale = select(
+        mix(1.0, airlight_ratio, clamp(surface_fade, 0.0, 1.0)),
+        1.0,
+        airlight_ratio <= 0.0,
+    );
+    scatter.in_scatter = scatter.in_scatter * airlight_scale;
 
     // Composite the high-fidelity volumetric cloud layer: a screen-space sample
     // of the `thalos_volumetric_clouds` raymarch output, rather than the legacy

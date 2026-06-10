@@ -966,6 +966,16 @@ Current M5 first slice:
   part-level bodies. Collider primitives are derived from
   `ships/apollo.ron` + `assets/parts.ron`; mass and principal inertia
   come from the existing aggregate ship stats.
+> **Superseded for ships (2026-06): see `docs/surface_local.md`.** The
+> body-centered-inertial *ship* bubble described in the next two bullets
+> was replaced by the **surface-local frame** (a body-fixed Y-up tangent
+> frame anchored under the craft, re-anchored on drift) with a **solid**
+> heightfield/cuboid ground collider and gear-as-sole-ground-contact. The
+> apo/peri-drift concern noted below was solved instead by keeping the
+> conversions exact (handoff residuals measured 0–1e-10 m) — *not* by
+> avoiding a rotating frame. The bullets below remain accurate for the
+> **EVA** capsule, which deliberately stayed on the body-centered kinematic
+> seam. The fuller layered model in this doc is otherwise unchanged.
 - The local bubble frame is body-centered inertial — the origin tracks
   the dominant body's centre, but the axes are the parent inertial axes
   (they do not rotate with the body). Canonical inertial state converts

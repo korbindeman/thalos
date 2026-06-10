@@ -15,7 +15,7 @@ use thalos_physics_local::ActiveLocalBubble;
 use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
-use crate::debug::{DebugLaunchMount, DebugMode, DebugSurfaceTeleport, low_orbit_state};
+use crate::debug::{DebugMode, DebugSurfaceTeleport, low_orbit_state};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::pause_menu::not_game_paused;
 use crate::photo_mode::not_in_photo_mode;
@@ -51,7 +51,6 @@ fn body_tree_panel(
     debug: Res<DebugMode>,
     mut surface_teleport: ResMut<DebugSurfaceTeleport>,
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
-    mut launch_mount: ResMut<DebugLaunchMount>,
     mut eva_mode: ResMut<EvaMode>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
@@ -238,7 +237,6 @@ fn body_tree_panel(
         // structural failure so a wreck can be recovered. See docs/surface.md.
         sim.simulation.repair();
         sim.simulation.warp.reset();
-        launch_mount.active = None;
         // Airborne: Kepler owns translation, the canonical→Avian snap drives
         // the capsule, and `step_eva_controller` stands down.
         if is_eva {

@@ -31,7 +31,6 @@ use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
 use thalos_world::BodyId;
 
-use crate::debug::DebugLaunchMount;
 use crate::hud::theme::{HudTheme, panel_frame};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::player_controller::EvaMode;
@@ -305,7 +304,6 @@ fn handle_button_clicks(
     player_ship: Query<Entity, With<PlayerShip>>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
-    mut launch_mount: ResMut<DebugLaunchMount>,
     homeworld: Res<Homeworld>,
 ) {
     if !menu.open {
@@ -326,7 +324,6 @@ fn handle_button_clicks(
             &player_ship,
             &mut plan,
             &mut selected,
-            &mut launch_mount,
             homeworld.0,
         );
         // One respawn per frame; `is_destroyed` is now clear, so the menu
@@ -347,16 +344,15 @@ fn respawn_into(
     player_ship: &Query<Entity, With<PlayerShip>>,
     plan: &mut ManeuverPlan,
     selected: &mut SelectedNode,
-    launch_mount: &mut DebugLaunchMount,
     homeworld: BodyId,
 ) {
     // Fresh-craft reset shared by every scenario: clear structural failure,
-    // drop back to 1×, discard the wreck's flight plan, release any launch
-    // clamp, and tear down its Avian bubble. `spawn_player_avian_body` rebuilds
-    // a clean body for the (possibly new) vessel kind next physics frame.
+    // drop back to 1×, discard the wreck's flight plan, and tear down its Avian
+    // bubble. `spawn_player_avian_body` rebuilds a clean body for the (possibly
+    // new) vessel kind next physics frame. The `transition_authority` calls
+    // below leave any landed `BodyFixed` state by switching to `OnRails`.
     sim.simulation.repair();
     sim.simulation.warp.reset();
-    launch_mount.active = None;
     if !plan.nodes.is_empty() {
         plan.nodes.clear();
         plan.dirty = true;
