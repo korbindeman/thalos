@@ -92,6 +92,30 @@ pub(crate) struct CloudsImage {
     #[storage_texture(2, image_format = Rgba32Float, access = ReadWrite, dimension = "3d")]
     pub cloud_worley_image: Handle<Image>,
 
-    #[storage_texture(3, image_format = Rgba32Float, access = ReadWrite)]
-    pub sky_image: Handle<Image>,
+    /// Nearest cloud-hit distance per pixel (metres from the camera; ≥ 1e8
+    /// sentinel = no cloud on this ray). The game samples it as a regular
+    /// texture in the `body_sky` composite; the raymarch's own history reads
+    /// go through `history_distance_image`.
+    #[storage_texture(3, image_format = R32Float, access = WriteOnly)]
+    pub cloud_distance_image: Handle<Image>,
+
+    /// Planet-fixed equirect coverage (weather) map, sampled by body-fixed
+    /// direction in the raymarch. Linear-filtered, repeat in U. Visibility
+    /// must be `compute` explicitly — the AsBindGroup default for sampled
+    /// textures is vertex|fragment, which fails pipeline validation against
+    /// this compute-only pipeline (storage textures default to compute).
+    #[texture(4, visibility(compute))]
+    #[sampler(5, visibility(compute))]
+    pub coverage_image: Handle<Image>,
+
+    /// Previous frame's render texture, snapshotted by the render node after
+    /// each `update` dispatch. Sole source for temporal-history reads (and
+    /// the saved camera rows) so the raymarch never races its own writes.
+    #[texture(6, visibility(compute), sample_type = "float", filterable = false)]
+    pub history_image: Handle<Image>,
+
+    /// Previous frame's nearest cloud-hit distance — the disocclusion test
+    /// for motion reprojection.
+    #[texture(7, visibility(compute), sample_type = "float", filterable = false)]
+    pub history_distance_image: Handle<Image>,
 }

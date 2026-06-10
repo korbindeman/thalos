@@ -28,7 +28,10 @@ pub struct CloudsConfig {
     pub clouds_bottom_height: f32,
     /// Height of the `clouds_top_height` of the cloud layer.
     pub clouds_top_height: f32,
-    /// `clouds_coverage` of 0.0 means no clouds (fair weather), 1.0 means full overcast
+    /// Global coverage scale on the planet-fixed weather map: the local
+    /// overcast fraction is `coverage_map(dir) * clouds_coverage`. With the
+    /// default all-1 map this behaves like the original scalar knob
+    /// (0.0 = no clouds, 1.0 = full overcast).
     pub clouds_coverage: f32,
     /// Determines how much the base cloud structure is eroded by higher-frequency,
     /// lower-amplitude detail noise.
@@ -73,7 +76,11 @@ pub struct CloudsConfig {
     pub ui_visible: bool,
     /// Resolution of the image we're writing to.
     pub render_resolution: Vec2,
-    /// Velocity of the wind.
+    /// Velocity of the wind, metres/second in the body-fixed frame: `x` is
+    /// zonal drift (eastward surface speed at the equator — applied as a slow
+    /// rotation of the whole cloud field about the body's spin axis, so the
+    /// drift stays glued to the sphere), `y`/`z` drift the detail-erosion
+    /// noise for slow "boiling". Later this becomes a weather-system output.
     pub wind_velocity: Vec3,
 }
 

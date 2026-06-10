@@ -2,36 +2,49 @@
 //! crate (HZD-style raymarch, MIT, evroon fork).
 //!
 //! The vendored crate raymarches a planet-relative cloud layer into a texture.
-//! This module makes it work on Thalos's sphere via the **tangent-frame trick**:
-//! [`drive_clouds`] reads the `ShipCamera`, the homeworld's render-space centre,
-//! and the sun, then feeds the crate a rotated `inverse_camera_view` so the
-//! player's local "up" (radial from the planet centre) maps to the shader's +Y,
-//! with altitude in `camera_translation.y`.
+//! [`drive_clouds`] runs it in the **body-fixed frame** of the active cloud
+//! body (the nearest terrestrial-atmosphere body): it feeds the crate the
+//! camera's true planet-centred position rotated into body-fixed coordinates
+//! plus a `body_from_world`-rotated view basis, so the raymarch is a real
+//! spherical-shell march and every noise field is sampled planet-fixed —
+//! clouds stay glued to the ground, co-rotate with the planet, and the horizon
+//! is correct at any altitude and at the limb.
+//!
+//! **Weather.** Large-scale coverage comes from a planet-fixed equirect
+//! coverage map ([`thalos_volumetric_clouds::CloudCoverageMap`]).
+//! [`sync_cloud_weather_map`] projects the per-body
+//! [`CloudWeatherState`](crate::solar_system_state::CloudWeatherState)
+//! (owned by `SolarSystemState`, like the other per-body environment state)
+//! into that texture: latitude bands (ITCZ, subtropical dry belts, storm
+//! tracks) plus seeded low-frequency variation. The future weather system
+//! evolves `CloudWeatherState` and bumps its `version`; the map re-uploads on
+//! change.
 //!
 //! **Compositing.** The cloud texture is *not* drawn by a separate quad — a
 //! fullscreen transparent quad sorts unreliably against the body's fullscreen
 //! `BodySky` atmosphere pass under big_space, so the atmosphere would draw over
-//! the clouds at some camera angles. Instead the texture is bound onto
-//! [`thalos_body_render::BodySkyMaterial`] (`cloud_layer`) and composited as the
-//! final step of `body_sky.wgsl`, which lands the clouds deterministically on
-//! top of the sky. The bind happens per-frame for the body the player is at, in
+//! the clouds at some camera angles. Instead the texture (and the per-pixel
+//! nearest cloud-hit distance the raymarch exports alongside it) is bound onto
+//! [`thalos_body_render::BodySkyMaterial`] and composited as the final step of
+//! `body_sky.wgsl`, which lands the clouds deterministically on top of the sky
+//! and occludes them against geometry by true depth. The bind happens
+//! per-frame for the [`ActiveCloudBody`], in
 //! `super::ground_terrain::update_body_terrain_atmosphere`. High-altitude
 //! fade-out is handled for free by `BodySky`'s LOD visibility (hidden once the
 //! camera leaves the atmosphere shell).
-//!
-//! Known limitations (see `docs/atmosphere.md` for the proper plan): the layer
-//! is a tangent-plane approximation that degrades at the limb / high altitude,
-//! and the coverage field is 2-D (extruded vertically), so it follows the
-//! camera rather than staying glued to the ground.
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
 use thalos_body_render::{AU_M, LIGHT_AT_1AU};
-use thalos_volumetric_clouds::{CameraMatrices, CloudsConfig, CloudsPlugin};
+use thalos_volumetric_clouds::{
+    COVERAGE_HEIGHT, COVERAGE_WIDTH, CameraMatrices, CloudCoverageMap, CloudsConfig, CloudsPlugin,
+};
+use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
+use crate::solar_system_state::CloudWeatherState;
 
 use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemState};
 
@@ -41,9 +54,10 @@ const BASE_ALTITUDE_M: f32 = 2000.0;
 /// Cloud-layer thickness, metres (top = base + thickness). A thin deck (vs the
 /// 3 km starting slab) reads as broken cumulus rather than a fuzzy wall.
 const THICKNESS_M: f32 = 1300.0;
-/// Overcast fraction knob (0 = clear, 1 = solid). Tuned down toward broken /
-/// scattered cloud rather than full overcast (BRP-tunable at runtime).
-const COVERAGE: f32 = 0.38;
+/// Global scale on the planet-fixed weather coverage map (which carries the
+/// local overcast fraction, mean ≈ `CloudWeatherState::coverage_mean`).
+/// 1.0 = trust the weather field; BRP-tunable global trim.
+const COVERAGE_SCALE: f32 = 1.0;
 /// Extinction density multiplier. Some core contrast, but not so high that the
 /// flat deck base reads as a hard sliced edge.
 const DENSITY: f32 = 0.09;
@@ -69,6 +83,17 @@ const EDGE_SOFTNESS: f32 = 0.11;
 const SUN_FLUX_SCALE: f32 = 0.5;
 const AMBIENT_TOP_SCALE: f32 = 0.10;
 const AMBIENT_BOTTOM_SCALE: f32 = 0.05;
+/// Frequency of the weather map's large-scale variation noise over the unit
+/// sphere (≈ feature size of planet circumference / frequency).
+const WEATHER_NOISE_FREQ: f32 = 2.5;
+
+/// Which body the volumetric cloud raymarch is currently rendered for — the
+/// terrestrial-atmosphere body the camera is closest to, or `None` when no
+/// such body exists. `ground_terrain::update_body_terrain_atmosphere` binds
+/// the live cloud textures onto this body's `BodySkyMaterial` (every other
+/// body keeps the blank fallback). **Sole writer:** [`drive_clouds`].
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ActiveCloudBody(pub Option<BodyId>);
 
 pub struct CloudsRenderPlugin;
 
@@ -77,7 +102,9 @@ impl Plugin for CloudsRenderPlugin {
         app.add_plugins(CloudsPlugin)
             .register_type::<CloudsConfig>()
             .register_type::<CameraMatrices>()
+            .init_resource::<ActiveCloudBody>()
             .add_systems(bevy::app::PostStartup, init_cloud_appearance)
+            .add_systems(Update, sync_cloud_weather_map)
             .add_systems(
                 bevy::app::PostUpdate,
                 drive_clouds.after(TransformSystems::Propagate),
@@ -93,23 +120,22 @@ impl Plugin for CloudsRenderPlugin {
 fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
     config.clouds_bottom_height = BASE_ALTITUDE_M;
     config.clouds_top_height = BASE_ALTITUDE_M + THICKNESS_M;
-    // Volumetric clouds temporarily disabled: keep the CloudsPlugin (its
-    // full-screen render texture must stay valid — body_sky.wgsl composites it
-    // with screen-space `textureLoad`, and a missing/1×1 texture reads as opaque
-    // black), but force a clear field so the raymarch yields transmittance 1 and
-    // the composite is a no-op. Restore `COVERAGE` / `DENSITY` to re-enable.
-    config.clouds_coverage = 0.0;
-    config.clouds_density = 0.0;
-    let _ = (COVERAGE, DENSITY);
+    config.clouds_coverage = COVERAGE_SCALE;
+    config.clouds_density = DENSITY;
     config.clouds_base_scale = BASE_SCALE;
     config.clouds_detail_scale = DETAIL_SCALE;
     config.clouds_detail_strength = DETAIL_STRENGTH;
     config.clouds_base_edge_softness = EDGE_SOFTNESS;
     config.clouds_bottom_softness = BOTTOM_SOFTNESS;
+    // 4 self-shadow steps (upstream 6): each view sample pays this many extra
+    // density evaluations, and the adaptive view step already raised the
+    // sample count through the band — the lighting difference is subtle, the
+    // cost is not. BRP-tunable back up if shadow gradients look flat.
+    config.clouds_shadow_raymarch_steps_count = 4;
 }
 
-/// Per-frame: build the planet-local tangent frame from the ship camera and the
-/// homeworld, and feed it (plus the sun) to the cloud crate.
+/// Per-frame: pick the active cloud body, build its body-fixed frame from the
+/// ship camera, and feed it (plus the sun) to the cloud crate.
 ///
 /// Runs in `PostUpdate` after `TransformSystems::Propagate` so body
 /// `GlobalTransform`s (and the camera's) are the recentred big_space values —
@@ -120,84 +146,229 @@ fn drive_clouds(
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
+    mut active: ResMut<ActiveCloudBody>,
     mut cam_mat: ResMut<CameraMatrices>,
     mut config: ResMut<CloudsConfig>,
+    time: Res<Time>,
+    mut wind_angle: Local<f32>,
 ) {
-    let homeworld_id = sim.system.homeworld_id;
-    let radius = sim.system.bodies[homeworld_id].radius_m as f32;
-
-    // Homeworld centre in render space (big_space SHIP_LAYER, 1 unit = 1 m).
-    let mut planet_center = None;
-    for (rsb, gt) in &body_q {
-        if rsb.body_id == homeworld_id {
-            planet_center = Some(gt.translation());
-            break;
-        }
-    }
-    let Some(planet_center) = planet_center else {
-        return;
-    };
     let Ok((cam_gt, camera)) = ship_cam_q.single() else {
         return;
     };
-
     let cam_pos = cam_gt.translation();
+
+    // Active cloud body: the terrestrial-atmosphere body the camera is
+    // closest to (by altitude above its surface).
+    let mut best: Option<(BodyId, Vec3, Quat, f32, f32)> = None;
+    for (rsb, gt) in &body_q {
+        let Some(body) = sim.system.bodies.get(rsb.body_id) else {
+            continue;
+        };
+        if body.terrestrial_atmosphere.is_none() {
+            continue;
+        }
+        let center = gt.translation();
+        let radius = body.radius_m as f32;
+        let alt = (cam_pos - center).length() - radius;
+        if best.is_none_or(|(_, _, _, _, best_alt)| alt < best_alt) {
+            best = Some((
+                rsb.body_id,
+                center,
+                gt.compute_transform().rotation,
+                radius,
+                alt,
+            ));
+        }
+    }
+    let Some((body_id, planet_center, body_rot, radius, _alt)) = best else {
+        // No cloud-capable body: park the raymarch camera far outside any
+        // shell so every ray misses and the pass is near-free.
+        active.0 = None;
+        cam_mat.translation = Vec3::new(0.0, config.planet_radius * 1.0e3 + 1.0e9, 0.0);
+        return;
+    };
+    active.0 = Some(body_id);
+
     let to_cam = cam_pos - planet_center;
-    let dist = to_cam.length();
-    if dist < 1.0 {
+    if to_cam.length() < 1.0 {
         return;
     }
-    let up = to_cam / dist;
-    let altitude = dist - radius;
 
-    // Orthonormal planet-local tangent basis: any stable horizontal axes work
-    // (they just orient the noise field). `tangent_from_world` maps a world
-    // vector v → (v·east, v·up, v·north), i.e. local up → +Y.
-    let world_ref = if up.dot(Vec3::Y).abs() > 0.99 {
-        Vec3::X
-    } else {
-        Vec3::Y
-    };
-    let east = world_ref.cross(up).normalize();
-    let north = up.cross(east);
-    let tangent_from_world = Mat3::from_cols(east, up, north).transpose();
-
-    // Feed a rotated world_from_view so the raymarch's world-space rays emerge
-    // in the tangent frame. Only the rotation matters (rays use w = 0); the
-    // translation component is ignored by the shader.
-    let world_from_view = cam_gt.to_matrix();
-    cam_mat.inverse_camera_view = Mat4::from_mat3(tangent_from_world) * world_from_view;
+    // Body-fixed frame: rotate the camera basis and position by the inverse
+    // of the body's render-space orientation, so the raymarch's rays and
+    // sample positions co-rotate with the surface (same convention as
+    // `BodySkyExtra::world_to_body_orientation`). Zonal wind is folded in as
+    // a slow extra rotation about the spin axis — the shader then samples an
+    // already-advected field with zero per-sample wind math (~1e-8 rad/frame,
+    // far below the reprojection change threshold).
+    *wind_angle = (*wind_angle + config.wind_velocity.x * time.delta_secs() / radius.max(1.0))
+        .rem_euclid(std::f32::consts::TAU);
+    let q_bw = (Quat::from_rotation_y(*wind_angle) * body_rot.inverse()).normalize();
+    let cam_body = q_bw * to_cam;
+    cam_mat.translation = cam_body;
+    // Rays use only the rotation part of this matrix (w = 0), but the shader's
+    // temporal-reprojection change detection compares whole columns — so put
+    // the *body-fixed planet-centred* camera position in the translation
+    // column. The raw render-space translation drifts with the body's orbital
+    // motion every frame, which would permanently disable reprojection even
+    // for a parked, surface-static camera. Scaled down so the ~0.25 m f32
+    // rounding jitter of `q_bw * to_cam` at planet radius stays below the
+    // shader's `CAM_EPSILON` (1e-4) change threshold while real motion
+    // (≳ metres/frame) still trips it. The shader recovers the position with
+    // `CAM_POS_COLUMN_SCALE` (1e4) for motion reprojection — keep them inverse.
+    let mut view_mat = Mat4::from_quat(q_bw) * cam_gt.to_matrix();
+    view_mat.w_axis = (cam_body * 1.0e-4).extend(1.0);
+    cam_mat.inverse_camera_view = view_mat;
     cam_mat.inverse_camera_projection = camera.computed.clip_from_view.inverse();
-    cam_mat.translation = Vec3::new(0.0, altitude, 0.0);
 
-    // Sun direction (toward the star) and scene-matched flux.
+    // Sun direction (toward the star, body-fixed) and scene-matched flux.
     let Some(states) = cache.states.as_ref() else {
         return;
     };
     let star_pos = states.first().map(|s| s.position).unwrap_or(DVec3::ZERO);
-    let hw_pos = states
-        .get(homeworld_id)
+    let body_pos = states
+        .get(body_id)
         .map(|s| s.position)
         .unwrap_or(DVec3::ZERO);
-    let star_off = star_pos - hw_pos;
+    let star_off = star_pos - body_pos;
     let d_star = star_off.length();
     let sun_world = if d_star > 0.0 {
         (star_off / d_star).as_vec3()
     } else {
         Vec3::Y
     };
-    let sun_tangent = tangent_from_world * sun_world;
+    let sun_body = q_bw * sun_world;
     let au_over_d = (AU_M / d_star.max(1.0)) as f32;
     let scene_flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
 
     // Drive only the dynamic config (static appearance is set once in
     // `init_cloud_appearance`, leaving it BRP-tunable at runtime).
     config.planet_radius = radius;
-    config.sun_dir = Vec4::new(sun_tangent.x, sun_tangent.y, sun_tangent.z, 0.0);
+    config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
     let sun_rgb = Vec3::new(1.0, 0.97, 0.92) * scene_flux * SUN_FLUX_SCALE;
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
     config.clouds_ambient_color_top =
         Vec4::new(0.55, 0.66, 0.86, 0.0) * scene_flux * AMBIENT_TOP_SCALE;
     config.clouds_ambient_color_bottom =
         Vec4::new(0.36, 0.43, 0.55, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE;
+}
+
+/// Project the active body's [`CloudWeatherState`] into the planet-fixed
+/// equirect coverage map. Installs a default weather state for a body on
+/// first contact (seeded per body), and regenerates the texture only when the
+/// `(body, version)` pair changes — the weather system's re-upload hook.
+fn sync_cloud_weather_map(
+    active: Res<ActiveCloudBody>,
+    mut cache: ResMut<SolarSystemState>,
+    coverage: Option<Res<CloudCoverageMap>>,
+    mut images: ResMut<Assets<Image>>,
+    mut last: Local<Option<(BodyId, u32)>>,
+) {
+    let Some(body_id) = active.0 else {
+        return;
+    };
+    let Some(coverage) = coverage else {
+        return;
+    };
+    let state = match cache
+        .environment
+        .get(body_id)
+        .and_then(|env| env.cloud_weather)
+    {
+        Some(state) => state,
+        None => {
+            let state = CloudWeatherState {
+                seed: CloudWeatherState::default().seed ^ (body_id as u64).wrapping_mul(0x9E37),
+                ..CloudWeatherState::default()
+            };
+            cache.install_cloud_weather(body_id, state);
+            state
+        }
+    };
+    if *last == Some((body_id, state.version)) {
+        return;
+    }
+    let Some(image) = images.get_mut(&coverage.handle) else {
+        return;
+    };
+    image.data = Some(generate_coverage_map(&state));
+    *last = Some((body_id, state.version));
+}
+
+/// Bake the weather state into the R8 equirect coverage grid (u = longitude,
+/// v = colatitude — must match `clouds_compute.wgsl::sample_coverage`).
+fn generate_coverage_map(state: &CloudWeatherState) -> Vec<u8> {
+    let w = COVERAGE_WIDTH as usize;
+    let h = COVERAGE_HEIGHT as usize;
+    let mut data = vec![0u8; w * h];
+    for row in 0..h {
+        let colat = std::f32::consts::PI * (row as f32 + 0.5) / h as f32;
+        let lat = std::f32::consts::FRAC_PI_2 - colat;
+        let band = latitude_band_profile(lat);
+        let (sin_c, cos_c) = colat.sin_cos();
+        for col in 0..w {
+            let lon = std::f32::consts::TAU * ((col as f32 + 0.5) / w as f32 - 0.5);
+            let dir = Vec3::new(sin_c * lon.cos(), cos_c, sin_c * lon.sin());
+            let n = fbm3(dir * WEATHER_NOISE_FREQ, state.seed, 4);
+            let c = state.coverage_mean
+                + state.band_strength * band
+                + state.variation * (n - 0.5);
+            data[row * w + col] = (c.clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    }
+    data
+}
+
+/// Centered (≈ [-1, 1]) latitude modulation of coverage: wetter at the ITCZ
+/// and the mid-latitude storm tracks, drier in the subtropical belts and at
+/// the poles. Latitudes in radians.
+fn latitude_band_profile(lat: f32) -> f32 {
+    let gauss = |x: f32, c: f32, wd: f32| (-((x - c) / wd) * ((x - c) / wd)).exp();
+    let a = lat.abs();
+    gauss(a, 0.0, 0.10) + 0.7 * gauss(a, 0.96, 0.24)
+        - 0.8 * gauss(a, 0.44, 0.15)
+        - 0.4 * gauss(a, std::f32::consts::FRAC_PI_2, 0.25)
+}
+
+/// Integer-mix hash → [0, 1) (no trig — stable at any coordinate).
+fn hash3(p: IVec3, seed: u64) -> f32 {
+    let mut h = (p.x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (p.y as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (p.z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
+        ^ seed;
+    h ^= h >> 31;
+    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    h ^= h >> 32;
+    (h & 0x00FF_FFFF) as f32 / 16_777_216.0
+}
+
+/// Trilinearly-interpolated value noise in [0, 1].
+fn value_noise3(p: Vec3, seed: u64) -> f32 {
+    let i = p.floor();
+    let f = p - i;
+    let u = f * f * (Vec3::splat(3.0) - 2.0 * f);
+    let i = i.as_ivec3();
+    let corner = |dx: i32, dy: i32, dz: i32| hash3(i + IVec3::new(dx, dy, dz), seed);
+    let x00 = corner(0, 0, 0) + (corner(1, 0, 0) - corner(0, 0, 0)) * u.x;
+    let x10 = corner(0, 1, 0) + (corner(1, 1, 0) - corner(0, 1, 0)) * u.x;
+    let x01 = corner(0, 0, 1) + (corner(1, 0, 1) - corner(0, 0, 1)) * u.x;
+    let x11 = corner(0, 1, 1) + (corner(1, 1, 1) - corner(0, 1, 1)) * u.x;
+    let y0 = x00 + (x10 - x00) * u.y;
+    let y1 = x01 + (x11 - x01) * u.y;
+    y0 + (y1 - y0) * u.z
+}
+
+/// Normalized fractal value noise in [0, 1].
+fn fbm3(p: Vec3, seed: u64, octaves: u32) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 0.5;
+    let mut norm = 0.0;
+    let mut q = p;
+    for _ in 0..octaves {
+        sum += amp * value_noise3(q, seed);
+        norm += amp;
+        amp *= 0.5;
+        q *= 2.17;
+    }
+    sum / norm
 }

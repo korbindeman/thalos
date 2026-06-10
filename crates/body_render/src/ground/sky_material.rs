@@ -57,11 +57,18 @@ pub struct BodySkyMaterial {
     /// (RGBA32F: rgb = premultiplied in-scatter, a = transmittance), composited
     /// over the atmosphere in-scatter as the final step of the fullscreen pass.
     /// Sampled with `textureLoad` (unfilterable float, no sampler). The game
-    /// binds the live cloud texture for the body the player is at and a 1×1
+    /// binds the live cloud texture for the active cloud body and a 1×1
     /// "clear" fallback (a = 1) for every other body, so the composite is a
     /// no-op where there are no clouds.
     #[texture(7, sample_type = "float", filterable = false)]
     pub cloud_layer: Handle<Image>,
+    /// Per-pixel nearest cloud-hit distance from the same raymarch (R32F,
+    /// metres from the camera; ≥ 1e8 sentinel = no cloud on the ray). Lets the
+    /// composite occlude clouds against opaque geometry by true depth rather
+    /// than by the geometric shell-band approximation. Bodies without an
+    /// active cloud layer bind a 1×1 far-sentinel fallback.
+    #[texture(8, sample_type = "float", filterable = false)]
+    pub cloud_distance: Handle<Image>,
 }
 
 impl Material for BodySkyMaterial {

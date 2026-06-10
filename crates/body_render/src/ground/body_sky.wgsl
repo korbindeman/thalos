@@ -70,6 +70,12 @@ struct SkyAtmosExtra {
 // active cloud layer.
 @group(3) @binding(7) var cloud_layer_tex: texture_2d<f32>;
 
+// Per-pixel nearest cloud-hit distance from the same raymarch (R32F, metres
+// from the camera; ≥ 1e8 sentinel = no cloud on this ray). Drives the
+// geometry-occlusion ramp below. 1×1 far-sentinel fallback on bodies without
+// an active cloud layer.
+@group(3) @binding(8) var cloud_distance_tex: texture_2d<f32>;
+
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
@@ -534,23 +540,38 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // inside this fullscreen pass — after the atmosphere in-scatter — lands the
     // clouds deterministically on top of the sky; a separate transparent quad
     // sorted unreliably against this pass under big_space.
+    //
+    // Manual bilinear: the layer is RGBA32F (not filterable), and the cloud
+    // texture is a fixed 1920×1080 while the viewport may be larger (4K) —
+    // nearest sampling turns the raymarch's per-texel dither into visible
+    // 2×2-block checkering. Four loads + lerp smooth both the upscale and
+    // most of the dither. Clamped to row 1077: the top two texture rows
+    // (screen-bottom) hold the compute pass's camera-save payload.
     let cloud_res = vec2<f32>(1920.0, 1080.0);
-    let cloud_texel = vec2<i32>(in.clip_position.xy / view.viewport.zw * cloud_res);
-    let cloud_sample = textureLoad(cloud_layer_tex, cloud_texel, 0);
+    let cloud_uv = in.clip_position.xy / view.viewport.zw;
+    let cloud_p = cloud_uv * cloud_res - 0.5;
+    let cloud_base = floor(cloud_p);
+    let cloud_f = cloud_p - cloud_base;
+    let cb = clamp(vec2<i32>(cloud_base), vec2<i32>(0, 0), vec2<i32>(1918, 1076));
+    let cs00 = textureLoad(cloud_layer_tex, cb, 0);
+    let cs10 = textureLoad(cloud_layer_tex, cb + vec2<i32>(1, 0), 0);
+    let cs01 = textureLoad(cloud_layer_tex, cb + vec2<i32>(0, 1), 0);
+    let cs11 = textureLoad(cloud_layer_tex, cb + vec2<i32>(1, 1), 0);
+    let cloud_sample = mix(mix(cs00, cs10, cloud_f.x), mix(cs01, cs11, cloud_f.x), cloud_f.y);
+    let cloud_texel = vec2<i32>(cloud_uv * cloud_res);
 
-    // Suppress the cloud where opaque geometry sits in front of the cloud band,
-    // so close geometry (the ship hull) isn't painted over by clouds behind it.
-    // `d_cloud_near` is the distance at which this view ray first reaches cloud
-    // altitude; if the scene depth is nearer, the cloud is entirely behind the
-    // geometry. Inside the band, d_cloud_near = 0 (you're in the cloud, so it
-    // correctly fogs in front of nearby geometry).
-    // `cloud_vis` is the fraction of the cloud band that lies in FRONT of the
-    // opaque geometry on this ray. We intersect the ray with the base/top cloud
-    // shells to get the band interval [band_near, band_far] along the ray, then
-    // ramp from 0 (geometry before the band → cloud fully behind it, e.g. the
-    // ship hull just under the deck) to 1 (geometry past the band → cloud fully
-    // in front). Ramping across the band thickness (instead of snapping at the
-    // base shell) is what makes the ship cross the cloud boundary smoothly.
+    // Suppress the cloud where opaque geometry sits in front of it, so close
+    // geometry (the ship hull) isn't painted over by clouds behind it.
+    // `cloud_near` is the per-pixel distance at which the raymarch first hit
+    // actual cloud density on this ray (exported alongside the cloud layer);
+    // if the scene depth is nearer, the cloud is entirely behind the geometry.
+    // `cloud_vis` then ramps from 0 (geometry before the first cloud) to 1
+    // (geometry past the band exit `band_far`, from a ray-shell intersection)
+    // — an approximation of the in-front fraction that makes the ship cross
+    // the cloud boundary smoothly instead of popping. Using the true per-pixel
+    // hit distance (rather than the geometric base-shell crossing) keeps
+    // geometry under a sparse deck from dimming clouds that are actually far
+    // behind it.
     let r_cloud_base = sky_atmos_extra.cloud_band_radii.x;
     let r_cloud_top = sky_atmos_extra.cloud_band_radii.y;
     let cam_r_len = sqrt(oc_len_sq);
@@ -558,16 +579,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let disc_ct = b * b - (oc_len_sq - r_cloud_top * r_cloud_top);
     let sqrt_cb = sqrt(max(disc_cb, 0.0));
     let sqrt_ct = sqrt(max(disc_ct, 0.0));
-    var band_near = 0.0;
     var band_far = 1.0e30;
     if cam_r_len < r_cloud_base {
-        // Below the deck: enter at the base (forward root), exit at the top.
-        band_near = max(-b + sqrt_cb, 0.0);
-        band_far = max(-b + sqrt_ct, band_near);
+        // Below the deck: the band ends at the far top-shell exit.
+        band_far = max(-b + sqrt_ct, 0.0);
     } else if cam_r_len <= r_cloud_top {
-        // Inside the deck: band starts at the camera, ends at the nearest
-        // forward shell crossing (top exit, or the downward base crossing).
-        band_near = 0.0;
+        // Inside the deck: nearest forward shell crossing (top exit, or the
+        // downward base crossing).
         var bf = -b + sqrt_ct;
         let base_down = -b - sqrt_cb;
         if disc_cb > 0.0 && base_down > 0.0 {
@@ -575,18 +593,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         band_far = max(bf, 1.0);
     } else {
-        // Above the deck: enter at the top near root, exit at the base near root
-        // (ray dips through) or the top far root otherwise.
-        band_near = max(-b - sqrt_ct, 0.0);
+        // Above the deck: exit at the base near root (ray dips through) or
+        // the top far root otherwise.
         if disc_cb > 0.0 {
-            band_far = max(-b - sqrt_cb, band_near);
+            band_far = max(-b - sqrt_cb, 0.0);
         } else {
-            band_far = max(-b + sqrt_ct, band_near);
+            band_far = max(-b + sqrt_ct, 0.0);
         }
     }
+    let cloud_near = textureLoad(cloud_distance_tex, cloud_texel, 0).r;
     var cloud_vis = 1.0;
     if scene_t < 1.0e29 && r_cloud_top > r_cloud_base {
-        cloud_vis = clamp((scene_t - band_near) / max(band_far - band_near, 1.0), 0.0, 1.0);
+        let near = min(cloud_near, band_far);
+        cloud_vis = clamp((scene_t - near) / max(band_far - near, 1.0), 0.0, 1.0);
     }
     let cloud = CloudOverlay(cloud_sample.rgb * cloud_vis, (1.0 - cloud_sample.a) * cloud_vis);
 

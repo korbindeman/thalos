@@ -50,6 +50,40 @@ impl CloudBandEnvironmentState {
     }
 }
 
+/// Per-body large-scale cloud-coverage weather parameters: the source the
+/// volumetric-cloud renderer projects into its planet-fixed equirect coverage
+/// map (latitude bands + low-frequency variation). This is the future weather
+/// system's write target — evolve the fields (or, later, a full coverage grid)
+/// and bump `version`; the renderer re-uploads on version change.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CloudWeatherState {
+    /// Noise seed for the large-scale coverage variation.
+    pub seed: u64,
+    /// Mean overcast fraction in [0, 1] (0.38 ≈ broken/scattered cloud).
+    pub coverage_mean: f32,
+    /// Amplitude of the latitude-band modulation (ITCZ / subtropical dry
+    /// belts / mid-latitude storm tracks), added to the mean.
+    pub band_strength: f32,
+    /// Amplitude of the low-frequency noise variation (clear patches vs.
+    /// overcast regions), centred on the mean.
+    pub variation: f32,
+    /// Re-upload trigger: the renderer regenerates its coverage texture when
+    /// this changes.
+    pub version: u32,
+}
+
+impl Default for CloudWeatherState {
+    fn default() -> Self {
+        Self {
+            seed: 0x7A105_C10D5,
+            coverage_mean: 0.38,
+            band_strength: 0.18,
+            variation: 0.45,
+            version: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BodyEnvironmentState {
     /// Mutable runtime state for terrain-owned dynamic layers: seasonal ice,
@@ -59,6 +93,9 @@ pub struct BodyEnvironmentState {
     /// components, so map impostors, ship impostors, terrain skies, and future
     /// weather systems all see the same cloud state.
     pub cloud_bands: Option<CloudBandEnvironmentState>,
+    /// Large-scale volumetric-cloud coverage weather (terrestrial-atmosphere
+    /// bodies). Same ownership rationale as `cloud_bands`.
+    pub cloud_weather: Option<CloudWeatherState>,
 }
 
 /// Canonical evaluated solar-system state for the current game frame.
@@ -99,6 +136,11 @@ impl SolarSystemState {
     pub fn install_cloud_band_state(&mut self, body_id: BodyId, state: CloudBandEnvironmentState) {
         self.ensure_body_capacity(body_id + 1);
         self.environment[body_id].cloud_bands = Some(state);
+    }
+
+    pub fn install_cloud_weather(&mut self, body_id: BodyId, state: CloudWeatherState) {
+        self.ensure_body_capacity(body_id + 1);
+        self.environment[body_id].cloud_weather = Some(state);
     }
 
     /// Return the dynamic-surface state for `body_id`, falling back to a

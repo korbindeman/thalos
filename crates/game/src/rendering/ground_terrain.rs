@@ -1053,10 +1053,16 @@ pub(super) fn update_body_terrain_atmosphere(
     time: Res<Time<Real>>,
     // Combined into one tuple param to stay under Bevy's 16-arg system limit:
     // .0 = live cloud render texture, .1 = cloud config (heights for occlusion),
-    // .2 = live atmosphere airlight tuning.
+    // .2 = per-pixel cloud-hit distance texture, .3 = which body the cloud
+    // raymarch is currently rendered for (sole writer: `clouds::drive_clouds`),
+    // .4 = blank fallbacks to rebind on bodies that are not the active one,
+    // .5 = live atmosphere airlight tuning.
     cloud_io: (
         Option<Res<thalos_volumetric_clouds::CloudRenderTexture>>,
         Option<Res<thalos_volumetric_clouds::CloudsConfig>>,
+        Option<Res<thalos_volumetric_clouds::CloudDistanceTexture>>,
+        Res<super::clouds::ActiveCloudBody>,
+        Option<Res<super::spawn::BlankCloudTextures>>,
         Res<AtmosphereTuning>,
     ),
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
@@ -1074,7 +1080,7 @@ pub(super) fn update_body_terrain_atmosphere(
 
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     // Live atmosphere airlight tuning (BRP-mutable; see `AtmosphereTuning`).
-    let tuning = &cloud_io.2;
+    let tuning = &cloud_io.5;
 
     // Planet center and orientation in render space from each body's grid
     // transform. The real-space grid rotation is body-local → world, so the
@@ -1129,9 +1135,10 @@ pub(super) fn update_body_terrain_atmosphere(
             .get(&i)
             .copied()
             .unwrap_or(Quat::IDENTITY);
-        // Cloud band radii (render units) for the body the player is at, so the
-        // sky pass can keep the cloud layer from painting over closer geometry.
-        let cloud_band_radii = if i == sim.system.homeworld_id {
+        // Cloud band radii (render units) for the body the cloud raymarch is
+        // rendered for, so the sky pass can keep the cloud layer from painting
+        // over closer geometry.
+        let cloud_band_radii = if Some(i) == cloud_io.3.0 {
             cloud_io
                 .1
                 .as_ref()
@@ -1274,13 +1281,20 @@ pub(super) fn update_body_terrain_atmosphere(
         let sky_strength = mat.atmosphere.atmos_geom.z.max(1.0e-3);
         mat.atmosphere_extra.cloud_band_radii.z =
             (tuning.aerial_perspective_strength / sky_strength).max(0.0);
-        // Bind the live volumetric cloud texture for the body the player is at
-        // (driven relative to the homeworld); other bodies keep the blank
-        // fallback so their atmosphere pass composites no clouds.
-        if sky.body_id == sim.system.homeworld_id {
+        // Bind the live volumetric cloud + cloud-distance textures for the
+        // active cloud body (the one `drive_clouds` is rendering); other
+        // bodies keep the blank fallbacks so their atmosphere pass composites
+        // no clouds.
+        if Some(sky.body_id) == cloud_io.3.0 {
             if let Some(ref cr) = cloud_io.0 {
                 mat.cloud_layer = cr.handle.clone();
             }
+            if let Some(ref cd) = cloud_io.2 {
+                mat.cloud_distance = cd.handle.clone();
+            }
+        } else if let Some(ref blanks) = cloud_io.4 {
+            mat.cloud_layer = blanks.layer.clone();
+            mat.cloud_distance = blanks.distance.clone();
         }
         if let Some(clouds) = cache
             .environment

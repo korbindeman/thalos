@@ -344,12 +344,21 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
   (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
   layer (Perlin-Worley atlas + 3-D Worley detail, dual-lobe HG; compute →
-  texture), adapted to Thalos's spherical / `big_space` / dual-camera engine.
-  The game (`rendering/clouds.rs`) drives it in a planet-local tangent frame;
-  the cloud texture composites *inside* the `body_sky` atmosphere pass (bound as
-  `BodySkyMaterial::cloud_layer`), not as a separate quad (which sorts
-  unreliably against the fullscreen sky under big_space). See
-  `docs/atmosphere.md` *Cloud rendering*.
+  texture), reworked around Thalos's spherical / `big_space` / dual-camera
+  engine: the raymarch runs in the **body-fixed frame** of the active cloud
+  body (true ray-sphere shells from the camera's planet-centred position;
+  wrap-first triplanar noise sampling, f32-safe at planet-radius coordinates),
+  so clouds are planet-fixed — glued to the ground, co-rotating, horizon-
+  correct at any altitude. Large-scale coverage is a planet-fixed equirect
+  weather map (`CloudCoverageMap`) generated from per-body `CloudWeatherState`
+  in `SolarSystemState` (latitude bands + seeded noise; version-gated
+  re-upload) — the future weather system's write target. The game
+  (`rendering/clouds.rs`) drives it via `drive_clouds` (`ActiveCloudBody` =
+  nearest terrestrial-atmosphere body, sole writer); the cloud texture plus a
+  per-pixel nearest-hit distance composite *inside* the `body_sky` atmosphere
+  pass (bound as `BodySkyMaterial::cloud_layer` / `cloud_distance`), not as a
+  separate quad (which sorts unreliably against the fullscreen sky under
+  big_space). See `docs/atmosphere.md` *Cloud rendering*.
 
 Core separation: `world`, `physics_canonical`, `control`, `terrain`, and
 `celestial` are pure Rust libraries; `input`, `game`, `body_render`,

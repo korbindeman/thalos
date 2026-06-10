@@ -34,9 +34,13 @@ const WORKGROUP_SIZE: u32 = 8;
 /// ~44% of the raymarch threads off the bottom of the render target.
 const RENDER_HEIGHT: u32 = 1080;
 
-/// Camera basis fed to the cloud raymarch. Thalos drives this each frame from
-/// the `ShipCamera` in a planet-local tangent frame (local "up" → +Y), rather
-/// than the upstream `Single<Camera>` system — see `CloudsPlugin` docs.
+/// Camera basis fed to the cloud raymarch, in the **body-fixed frame** of the
+/// active cloud body: `translation` is the camera position relative to the
+/// planet centre, rotated into body-fixed coordinates (so it co-rotates with
+/// the surface), and `inverse_camera_view` is `body_from_world ×
+/// world_from_view`, so view rays emerge directly in body-fixed space. Thalos
+/// drives this each frame from the `ShipCamera`, rather than the upstream
+/// `Single<Camera>` system — see `CloudsPlugin` docs.
 #[derive(Resource, Clone, Copy, Reflect)]
 #[reflect(Resource)]
 pub struct CameraMatrices {
@@ -118,7 +122,10 @@ fn prepare_textures_bind_group(
     let cloud_render_view = gpu_images.get(&clouds_image.cloud_render_image).unwrap();
     let cloud_atlas_view = gpu_images.get(&clouds_image.cloud_atlas_image).unwrap();
     let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
-    let sky_view = gpu_images.get(&clouds_image.sky_image).unwrap();
+    let cloud_distance_view = gpu_images.get(&clouds_image.cloud_distance_image).unwrap();
+    let coverage_view = gpu_images.get(&clouds_image.coverage_image).unwrap();
+    let history_view = gpu_images.get(&clouds_image.history_image).unwrap();
+    let history_distance_view = gpu_images.get(&clouds_image.history_distance_image).unwrap();
 
     let bind_group = render_device.create_bind_group(
         None,
@@ -127,7 +134,11 @@ fn prepare_textures_bind_group(
             &cloud_render_view.texture_view,
             &cloud_atlas_view.texture_view,
             &cloud_worley_view.texture_view,
-            &sky_view.texture_view,
+            &cloud_distance_view.texture_view,
+            &coverage_view.texture_view,
+            &coverage_view.sampler,
+            &history_view.texture_view,
+            &history_distance_view.texture_view,
         )),
     );
     commands.insert_resource(CloudsImageBindGroup(bind_group));
@@ -248,35 +259,67 @@ impl Node for CloudsNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = world.resource::<CloudsPipeline>();
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor::default());
+        {
+            let mut pass = render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor::default());
 
-        pass.set_bind_group(0, uniform_bind_group, &[]);
-        pass.set_bind_group(1, texture_bind_group, &[]);
+            pass.set_bind_group(0, uniform_bind_group, &[]);
+            pass.set_bind_group(1, texture_bind_group, &[]);
 
-        match self.state {
-            CloudsState::Loading => {}
-            CloudsState::Init => {
-                let init_pipeline = pipeline_cache
-                    .get_compute_pipeline(pipeline.init_pipeline)
-                    .unwrap();
-                pass.set_pipeline(init_pipeline);
-                pass.dispatch_workgroups(
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    1,
-                );
+            match self.state {
+                CloudsState::Loading => {}
+                CloudsState::Init => {
+                    let init_pipeline = pipeline_cache
+                        .get_compute_pipeline(pipeline.init_pipeline)
+                        .unwrap();
+                    pass.set_pipeline(init_pipeline);
+                    pass.dispatch_workgroups(
+                        IMAGE_SIZE / WORKGROUP_SIZE,
+                        IMAGE_SIZE / WORKGROUP_SIZE,
+                        1,
+                    );
+                }
+                CloudsState::Update => {
+                    let update_pipeline = pipeline_cache
+                        .get_compute_pipeline(pipeline.update_pipeline)
+                        .unwrap();
+                    pass.set_pipeline(update_pipeline);
+                    pass.dispatch_workgroups(
+                        IMAGE_SIZE / WORKGROUP_SIZE,
+                        RENDER_HEIGHT / WORKGROUP_SIZE,
+                        1,
+                    );
+                }
             }
-            CloudsState::Update => {
-                let update_pipeline = pipeline_cache
-                    .get_compute_pipeline(pipeline.update_pipeline)
-                    .unwrap();
-                pass.set_pipeline(update_pipeline);
-                pass.dispatch_workgroups(
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    RENDER_HEIGHT / WORKGROUP_SIZE,
-                    1,
+        }
+
+        // Snapshot this frame's output into the history textures the next
+        // frame reads (same-pixel accumulation, motion reprojection, the
+        // saved camera rows). A separate history copy keeps the raymarch from
+        // ever reading the texture it is writing — in-pass history reads race
+        // across workgroups and showed as coherent streak artifacts.
+        if matches!(self.state, CloudsState::Update) {
+            let gpu_images = world.resource::<RenderAssets<GpuImage>>();
+            let clouds_image = world.resource::<CloudsImage>();
+            let pairs = [
+                (
+                    &clouds_image.cloud_render_image,
+                    &clouds_image.history_image,
+                ),
+                (
+                    &clouds_image.cloud_distance_image,
+                    &clouds_image.history_distance_image,
+                ),
+            ];
+            for (src, dst) in pairs {
+                let (Some(src), Some(dst)) = (gpu_images.get(src), gpu_images.get(dst)) else {
+                    continue;
+                };
+                render_context.command_encoder().copy_texture_to_texture(
+                    src.texture.as_image_copy(),
+                    dst.texture.as_image_copy(),
+                    src.texture.size(),
                 );
             }
         }

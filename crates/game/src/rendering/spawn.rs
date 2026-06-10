@@ -122,7 +122,7 @@ fn build_multi_scatter_lut(
 
 /// 1×1 "clear" cloud layer (RGBA32F `(0, 0, 0, 1)` → transmittance 1) used as
 /// the [`BodySkyMaterial::cloud_layer`] fallback. The game swaps in the live
-/// `thalos_volumetric_clouds` texture for the body the player is at; every other
+/// `thalos_volumetric_clouds` texture for the active cloud body; every other
 /// body keeps this, so the cloud composite in `body_sky.wgsl` is a no-op there.
 fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::asset::RenderAssetUsages;
@@ -140,6 +140,40 @@ fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
         TextureDimension::D2,
         data,
         TextureFormat::Rgba32Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    images.add(image)
+}
+
+/// Blank fallback cloud textures shared by every body's `BodySky`.
+/// `ground_terrain::update_body_terrain_atmosphere` binds the live volumetric
+/// textures on the active cloud body and rebinds these on every other body,
+/// so a body that stops being active sheds its stale cloud layer.
+#[derive(Resource, Clone)]
+pub(super) struct BlankCloudTextures {
+    pub layer: Handle<Image>,
+    pub distance: Handle<Image>,
+}
+
+/// 1×1 far-sentinel cloud-distance fallback (R32F `1e9` = "no cloud on this
+/// ray") for [`BodySkyMaterial::cloud_distance`]; same swap policy as
+/// [`blank_cloud_layer`].
+fn blank_cloud_distance(images: &mut Assets<Image>) -> Handle<Image> {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{
+        Extent3d, TextureDimension, TextureFormat, TextureUsages,
+    };
+    let data = 1.0e9_f32.to_le_bytes().to_vec();
+    let mut image = Image::new(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::R32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
@@ -171,9 +205,14 @@ pub(super) fn spawn_bodies(
     // Unit rectangle (corners at ±1) shared across all planet billboards.
     // The vertex shader scales it by params.radius each frame.
     let billboard_mesh = meshes.add(Rectangle::new(2.0, 2.0));
-    // Fallback cloud layer for every body's BodySky; the live volumetric cloud
-    // texture is bound per-frame for the body the player is at.
+    // Fallback cloud layer + cloud-distance for every body's BodySky; the live
+    // volumetric cloud textures are bound per-frame for the active cloud body.
     let blank_cloud = blank_cloud_layer(&mut images);
+    let blank_cloud_dist = blank_cloud_distance(&mut images);
+    commands.insert_resource(BlankCloudTextures {
+        layer: blank_cloud.clone(),
+        distance: blank_cloud_dist.clone(),
+    });
     // Star icosphere — emissive star meshes still use a real sphere
     // (no impostor). Procedural bodies and gas giants render as
     // camera-facing quads (`billboard_mesh`); solid-impostor bodies
@@ -237,6 +276,7 @@ pub(super) fn spawn_bodies(
                 cloud_cover: sky_cloud_cover,
                 multi_scatter_lut,
                 cloud_layer: blank_cloud.clone(),
+                cloud_distance: blank_cloud_dist.clone(),
             };
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),

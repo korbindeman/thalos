@@ -6,25 +6,32 @@
 //! under `big_space` floating origin, and has two cameras (ship + map), so this
 //! fork keeps the valuable, geometry-agnostic half — the noise generation
 //! (Perlin-Worley atlas + 3-D Worley volume, built by the `init` compute pass)
-//! and the HZD density+lighting raymarch (`update` pass) — and strips the half
-//! that fights us:
+//! and the HZD density+lighting raymarch (`update` pass) — and reworks the
+//! geometry around a real spherical planet:
 //!
 //!   * removed the 6-plane skybox composite, the built-in blue `get_sky_color`,
 //!     and the `setup_daylight` directional light;
 //!   * removed the `Single<Camera>` `update_camera_matrices` system (it panics
 //!     with our two cameras). [`CameraMatrices`] is now a plain public resource
-//!     that the game writes each frame in a **planet-local tangent frame**
-//!     (local "up" → +Y, altitude in `translation.y`), which makes upstream's
-//!     Y-up raymarch render correctly as a local tangent-plane approximation
-//!     without touching the raymarch geometry;
+//!     that the game writes each frame in the **body-fixed frame** of the
+//!     active cloud body: the camera's true planet-centred position plus a
+//!     `body_from_world`-rotated view basis. The raymarch is a true ray-sphere
+//!     shell march from that position, and all noise fields are sampled at
+//!     body-fixed positions, so clouds stay glued to the ground, co-rotate
+//!     with the planet, and the horizon is correct at any altitude and at the
+//!     limb;
+//!   * large-scale coverage comes from a planet-fixed equirect **weather map**
+//!     ([`CloudCoverageMap`]), sampled by body-fixed direction and scaled by
+//!     the scalar `clouds_coverage` knob. The map defaults to full coverage
+//!     (scalar knob alone), and the game regenerates it from per-body
+//!     environment state — the hook for the future weather system;
 //!   * the compute shader stores the *clean* cloud layer (rgb = premultiplied
-//!     in-scatter, a = transmittance) to [`CloudRenderTexture`], for the game to
-//!     composite over its own scene in a separate fullscreen pass.
+//!     in-scatter, a = transmittance) to [`CloudRenderTexture`], plus the
+//!     per-pixel nearest cloud-hit distance to [`CloudDistanceTexture`], for
+//!     the game to composite over its own scene with true depth occlusion.
 //!
-//! This is the **NOW / "quick clouds"** path. The tangent-plane approximation
-//! degrades at high altitude and at the limb; the game fades clouds out there.
-//! The proper spherical-shell raymarch + weather-driven coverage + storms plan
-//! lives in `docs/atmosphere.md`.
+//! Remaining work (evolving/advected weather, storms, half-res + temporal
+//! upscale) is tracked in `docs/atmosphere.md`.
 
 mod compute;
 /// Controls the compute shader which renders the volumetric clouds.
@@ -38,6 +45,7 @@ use bevy::shader::load_shader_library;
 
 pub use crate::compute::CameraMatrices;
 pub use crate::config::CloudsConfig;
+pub use crate::images::{COVERAGE_HEIGHT, COVERAGE_WIDTH};
 
 use crate::compute::CloudsComputePlugin;
 use crate::images::build_images;
@@ -48,6 +56,28 @@ use crate::uniforms::CloudsImage;
 /// premultiplied composite pass: `out.rgb = rgb`, `out.a = 1 - transmittance`.
 #[derive(Resource, Clone)]
 pub struct CloudRenderTexture {
+    pub handle: Handle<Image>,
+}
+
+/// Handle to the per-pixel nearest cloud-hit distance texture (R32F, metres
+/// from the camera; ≥ 1e8 sentinel where the ray hit no cloud). Paired with
+/// [`CloudRenderTexture`] so the composite can occlude clouds against opaque
+/// geometry by true depth instead of a shell-band approximation.
+#[derive(Resource, Clone)]
+pub struct CloudDistanceTexture {
+    pub handle: Handle<Image>,
+}
+
+/// Handle to the planet-fixed equirect coverage (weather) map (R8Unorm,
+/// [`COVERAGE_WIDTH`]×[`COVERAGE_HEIGHT`]): u = longitude (`atan2(z, x)`,
+/// wrapping), v = colatitude (`acos(y)`, clamped), value = local overcast
+/// fraction in [0, 1]. The raymarch multiplies it with the scalar
+/// `clouds_coverage` knob. Defaults to all-1, so until a consumer writes a
+/// real field the scalar knob alone reproduces uniform coverage. The game owns
+/// the contents: rewrite the `Image` asset at this handle (it retains a
+/// MAIN_WORLD copy) to install a weather field.
+#[derive(Resource, Clone)]
+pub struct CloudCoverageMap {
     pub handle: Handle<Image>,
 }
 
@@ -74,17 +104,25 @@ impl Plugin for CloudsPlugin {
 }
 
 fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {
-    let (cloud_render_image, cloud_atlas_image, cloud_worley_image, sky_image) =
-        build_images(images);
+    let built = build_images(images);
 
     commands.insert_resource(CloudRenderTexture {
-        handle: cloud_render_image.clone(),
+        handle: built.cloud_render_image.clone(),
+    });
+    commands.insert_resource(CloudDistanceTexture {
+        handle: built.cloud_distance_image.clone(),
+    });
+    commands.insert_resource(CloudCoverageMap {
+        handle: built.coverage_image.clone(),
     });
     commands.insert_resource(CloudsImage {
-        cloud_render_image,
-        cloud_atlas_image,
-        cloud_worley_image,
-        sky_image,
+        cloud_render_image: built.cloud_render_image,
+        cloud_atlas_image: built.cloud_atlas_image,
+        cloud_worley_image: built.cloud_worley_image,
+        cloud_distance_image: built.cloud_distance_image,
+        coverage_image: built.coverage_image,
+        history_image: built.history_image,
+        history_distance_image: built.history_distance_image,
     });
     commands.insert_resource(CameraMatrices {
         translation: Vec3::ZERO,
