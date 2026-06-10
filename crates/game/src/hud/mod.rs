@@ -125,7 +125,10 @@ impl Plugin for HudPlugin {
                     ),
                 )
                     .after(crate::SimStage::Sync)
-                    .run_if(not_in_photo_mode),
+                    // The HUD is part of the flight scene, not the shipyard
+                    // editor; its updates stand down while the editor is open
+                    // (its panels are hidden too — see `shipyard_editor`).
+                    .run_if(not_in_photo_mode.and(crate::shipyard_editor::editor_closed)),
             )
             .add_systems(Update, input_gate::update_ui_pointer_gate)
             .add_systems(Update, hide_in_photo_mode);

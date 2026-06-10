@@ -1,7 +1,7 @@
 //! Shared visual style for the bevy_ui HUD.
 //!
-//! The font asset is the same JetBrains Mono that the navball texture
-//! uses (already in `assets/fonts/`). All HUD colours and the panel
+//! The font asset is the same Fira Code that the navball texture
+//! uses (bundled in `assets/fonts/`). All HUD colours and the panel
 //! frame look live here so a future styling pass touches a single file.
 
 use bevy::prelude::*;
@@ -29,7 +29,7 @@ pub struct HudTheme {
 
 pub fn init_theme(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(HudTheme {
-        font: asset_server.load("fonts/JetBrainsMono-Regular.ttf"),
+        font: asset_server.load("fonts/FiraCode-Regular.ttf"),
         panel_bg: Color::srgba(0.055, 0.055, 0.050, 0.86),
         panel_bg_alt: Color::srgba(0.085, 0.080, 0.070, 0.84),
         panel_border: Color::srgba(0.46, 0.43, 0.36, 0.66),

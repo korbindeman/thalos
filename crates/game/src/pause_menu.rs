@@ -29,6 +29,7 @@ struct PauseMenuRoot;
 #[derive(Component, Clone, Copy)]
 enum PauseMenuAction {
     Resume,
+    Shipyard,
     Settings,
     Quit,
 }
@@ -165,6 +166,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                     })
                     .with_children(|buttons| {
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Resume, "RESUME");
+                        spawn_menu_button(buttons, &theme, PauseMenuAction::Shipyard, "SHIPYARD");
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Settings, "SETTINGS");
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Quit, "QUIT");
                     });
@@ -215,6 +217,7 @@ pub(crate) fn handle_escape_input(
     scenario: Res<crate::scenario_menu::ScenarioMenu>,
     mut pause: ResMut<GamePause>,
     mut settings_menu: ResMut<SettingsMenu>,
+    shipyard: Option<ResMut<crate::shipyard_editor::ShipyardEditor>>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
@@ -231,6 +234,16 @@ pub(crate) fn handle_escape_input(
     // Settings overlay closes before the pause menu backdrop.
     if settings_menu.open {
         settings_menu.open = false;
+        return;
+    }
+
+    // The shipyard editor closes before the pause menu opens. (While its
+    // ship-name field is focused, the editor's own text-input system eats
+    // Escape first by disabling the keyboard action source.)
+    if let Some(mut shipyard) = shipyard
+        && shipyard.open
+    {
+        shipyard.open = false;
         return;
     }
 
@@ -262,6 +275,7 @@ fn handle_button_clicks(
     primary_window: Query<Entity, With<PrimaryWindow>>,
     mut pause: ResMut<GamePause>,
     mut settings_menu: ResMut<SettingsMenu>,
+    mut shipyard: ResMut<crate::shipyard_editor::ShipyardEditor>,
     mut close_requested: MessageWriter<WindowCloseRequested>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -271,6 +285,10 @@ fn handle_button_clicks(
         }
         match action {
             PauseMenuAction::Resume => pause.active = false,
+            PauseMenuAction::Shipyard => {
+                pause.active = false;
+                shipyard.open = true;
+            }
             PauseMenuAction::Settings => settings_menu.open = true,
             PauseMenuAction::Quit => {
                 pause.active = false;

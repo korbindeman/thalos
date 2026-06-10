@@ -10,7 +10,7 @@
 //! render — keeping the loading screen up across the transition means the
 //! user never sees an unpainted swapchain.
 //!
-//! Visual style follows `hud::theme` (same JetBrains Mono, accent gold,
+//! Visual style follows `hud::theme` (same Fira Code, accent gold,
 //! warm-black panel fill) so the screen feels like part of the same UI
 //! the HUD will draw once gameplay starts.
 
@@ -100,7 +100,7 @@ const PROGRESS_BAR_WIDTH: f32 = 360.0;
 const PROGRESS_BAR_HEIGHT: f32 = 14.0;
 
 fn spawn_loading_screen(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let font: Handle<Font> = asset_server.load("fonts/JetBrainsMono-Regular.ttf");
+    let font: Handle<Font> = asset_server.load("fonts/FiraCode-Regular.ttf");
 
     commands
         .spawn((

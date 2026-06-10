@@ -20,6 +20,63 @@ and what is still on paper.
 
 ## 0. Implementation status
 
+### Landed — the in-game shipyard editor (core/front-end split)
+
+The interactive editor is no longer a single egui binary. The editing
+machinery was extracted into **`thalos_shipyard::editor`**
+(`ShipEditorCorePlugin`) — UI-framework-agnostic: the `EditorState`
+command/state hub every front-end reads/writes, attach-node + surface-mount
+placement with the KSP linked-symmetry stamping, live mesh rebuilds and the
+build-frame transform solve, selection/hover highlight, the tank-resize
+handle, the placement-preview ghost, interstage shrouds, and blueprint
+save/load against `ships/*.ron`. Two front-ends drive that core:
+
+- **In-game (primary)** — `thalos_game::shipyard_editor`, native Bevy UI in
+  the game's `HudTheme` style. A **separate scene** (not an `AppState`): a
+  `SimClock` pause source whose `editor_closed` run condition also gates the
+  three `SimStage` sets + the HUD update systems, so **no game logic runs
+  while it's open** — the flight world is suspended, not just hidden. The
+  scene cameras deactivate, a dedicated hangar camera renders the build on
+  `EDITOR_LAYER`, gameplay input contexts hand over to `ShipyardContext`,
+  and the HUD hides. KSP(2)-style layout: parts palette (left), parametric
+  slider inspector (right), per-stage Δv/fuel readout, top bar with ship
+  name, live mass/Δv/TWR stats, mirror/snap/hangar-layout toggles,
+  **▶ Launch**, and save/new/exit. Entry: `F3`, the pause menu's SHIPYARD
+  button, or `just game shipyard`. Escape closes (pause-menu priority
+  chain). The build persists across open/close — entities are hidden, not
+  despawned — so a design in progress survives flying around in between.
+- **Launch** (`thalos_game::relaunch`) — fly the current design without a
+  process restart. It carries the live build's collected `ShipBlueprint`
+  (no file round-trip / save-timing race) to a two-phase relaunch that
+  despawns the old `PlayerShip` part tree + map billboard, tears down the
+  Avian bubble, resets the sim to a clean live craft, and seats it into a
+  scenario — **cruise** for an aircraft (any wing area), **orbit**
+  otherwise — reusing the same `compute_descent_state` / `orbit_respawn_state`
+  helpers the destruction respawn uses. The new `PlayerShip` carries no
+  `EditorPart`, so it rebuilds its `StagingPlan` and Avian bubble through
+  the existing systems and enters the flight aggregations the editor's
+  persistent build is filtered out of. `ship_view::build_player_ship` is the
+  shared craft-build core (startup + relaunch). Runway relaunch is deferred:
+  the runway is a one-shot terrain-aware startup placement, not yet
+  re-runnable.
+- **Standalone (secondary)** — the egui binary (`just shipyard`), now a thin
+  shell: app assembly, orbit camera, celestial backdrop, and egui panels
+  over the same core.
+
+**The world-partition rule that makes this safe:** the editor's build and
+the player's flight craft are assembled from the *same* part components in
+the *same* ECS `World`. Every editor-owned entity carries
+`thalos_shipyard::editor::EditorPart`; every iterating core query filters
+`With<EditorPart>`, and every game system that aggregates part components
+for the flight craft (fuel/propulsion, staging topology, inertia, gear
+wheels, part colliders, ship visuals) filters `Without<EditorPart>`. Any
+new aggregation over `Part`/`Engine`/`FuelTank`/… must pick a side.
+
+Deferred follow-ups: runway relaunch (Launch flies aircraft into cruise for
+now), a part hierarchy/tree panel, an attach-node placement list (the
+in-game editor places stack parts by clicking the glowing node pins only),
+and undo.
+
 ### Landed — Slice 1: the parametric wing
 
 The first aircraft slice is in code. It adds a wing and the **surface /
@@ -68,7 +125,11 @@ footprint placement** capability (§4.3) without forking the rocket path:
   **Horizontal layout** toggle (View panel) lays the whole build down
   KSP-SPH-style — a rigid display rotation in `update_part_transforms`;
   pointer-driven placement / tank resize convert hits back through its
-  inverse so building stays correct either way.
+  inverse so building stays correct either way. The layout is **persisted**
+  in the blueprint (`ShipBlueprint::layout: Option<BuildLayout>`), so a ship
+  reopens the way it was authored; a save predating the field infers it on
+  load (horizontal for a winged craft, vertical otherwise), so old aircraft
+  saves like `meridian.ron` come up horizontal.
 - **Geometry feedback** (§8 "free now"): `ShipStats` reports total
   **wing area** and area-weighted **mean aerodynamic chord**; wing mass
   feeds dry mass, CoM, and a crude rod-model MOI.

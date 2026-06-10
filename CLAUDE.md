@@ -18,9 +18,13 @@ just game final           # low final approach over a flat dry Thalos patch
 just game runway          # aircraft parked on the Thalos surface runway
 just game runway-approach # aircraft on short final lined up with that runway
 just game cruise          # Meridian at ~15,000 ft, level cruise over dry land
+just game shipyard        # open straight into the in-game ship editor
+                          #   (also: F3 or the pause menu's SHIPYARD button
+                          #    from any running mode)
 just edit <body>          # cargo run -p thalos_body_editor -- <body>
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
-just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
+just shipyard             # standalone egui ship editor (secondary front-end
+                          #   over the same thalos_shipyard::editor core)
 just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics_canonical
 just clippy               # cargo clippy --workspace
@@ -335,7 +339,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + two backends. Three modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render`. A backend chooses geometry, never its own lighting/atmosphere/cloud math.
 - **`thalos_body_editor`** — interactive celestial-body editor tool
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
-- **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
+- **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). The interactive editor is split **core/front-end**: `thalos_shipyard::editor` (`ShipEditorCorePlugin`) owns all UI-agnostic editing behaviour — `EditorState` command/state hub, attach-node + surface-mount placement, KSP linked symmetry, live mesh rebuilds, tank-resize handle, placement-preview ghost, shrouds, blueprint save/load against `ships/*.ron` — and two front-ends drive it: the **in-game Bevy-UI editor** (`thalos_game::shipyard_editor`, the primary) and the standalone egui binary (`just shipyard`, secondary). Every editor-owned entity carries the `EditorPart` marker and every core query filters on it; host systems that aggregate the same part components for the *flight* craft (fuel, staging, gear, ship visuals, colliders) must filter `Without<EditorPart>` — that marker is the only thing separating the build world from the flying craft in the same ECS `World`. Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
 - **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
   (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
@@ -667,14 +671,43 @@ Key modules:
 - `flight_plan_view/` — Renders the trajectory branch stack as
   on-screen tracks.
 - `camera` — KSP-style orbit camera.
+- `shipyard_editor/` — the **in-game ship editor** (primary front-end over
+  `thalos_shipyard::editor`'s `ShipEditorCorePlugin`). A **separate scene**,
+  not an `AppState`: `ShipyardEditor::open` is a `SimClock` pause source, and
+  the three `SimStage` sets (Physics/Sync/Camera) + the HUD update systems are
+  gated on `shipyard_editor::editor_closed` (configured in `main.rs` /
+  `hud/mod.rs`), so **no game logic runs while the editor is open** — the
+  flight world is suspended, not just hidden. While open, the scene cameras
+  deactivate and a dedicated editor camera renders the build world on
+  `coords::EDITOR_LAYER` (layer 5) — build entities (marked `EditorPart`,
+  layer-stamped each frame) never bleed into flight/map views and survive
+  close/reopen. All gameplay input contexts deactivate and the
+  `ShipyardContext` (orbit/click) activates (`input.rs` gate); Escape-close is
+  owned by `pause_menu::handle_escape_input`'s priority chain. UI is native
+  Bevy UI in `HudTheme` style (`shipyard_editor/ui/`):
+  parts palette, parametric slider inspector, staging readout, top bar with
+  ship-name text field + mirror/snap/layout toggles, a **▶ Launch** button,
+  status bar. Entry: F3 (`game.system.toggle_shipyard`), the pause menu's
+  SHIPYARD button, or `just game shipyard`. When adding game systems that
+  aggregate shipyard part components, filter `Without<EditorPart>` (see
+  fuel/staging/local_physics).
+- `relaunch` — fly the editor's current design without a process restart
+  (the editor's **Launch**). Carries the live build's collected
+  `ShipBlueprint` (no file round-trip) to a two-phase relaunch: despawn the
+  old `PlayerShip` + bubble, reset the sim, seat the craft into a scenario
+  (cruise for aircraft, orbit otherwise — reusing the destruction-respawn
+  helpers), then rebuild the craft via the shared
+  `ship_view::build_player_ship` core. The new craft carries no `EditorPart`,
+  so staging/bubble rebuild through the existing systems. Runway relaunch is
+  deferred (one-shot terrain-aware startup placement).
 
 Systems run in `SimStage` order: `Physics → Sync → Camera`
 (configured in `main.rs`), ensuring deterministic state flow each
 frame. Enhanced input intent collection runs in `PreUpdate` before these
 sets. Simulation pause is an explicit clock boundary, not a global Bevy
 clock pause: `crates/game/src/sim_clock.rs` owns `SimClock`, whose sole
-writer folds Escape pause, destruction scenario picker, freecam, and warp
-pause into a zero sim delta. Canonical stepping, local physics ownership,
+writer folds Escape pause, destruction scenario picker, freecam, the
+shipyard editor, and warp pause into a zero sim delta. Canonical stepping, local physics ownership,
 resource burn, and grounded EVA motion consume `SimClock`; presentation
 and UI animation use `Time<Real>` directly. Do not reintroduce pausing
 `Time<Virtual>`/plain `Res<Time>` as the game-wide sim pause switch.

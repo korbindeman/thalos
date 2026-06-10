@@ -29,6 +29,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use thalos_input::game::GameInputIntent;
+use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelTank,
     Part, PartResources, PartRole, Resource, ResourceTotals, StageSummary,
@@ -109,9 +110,11 @@ fn build_staging_plan(
             Option<&Decoupler>,
             Option<&Engine>,
         ),
-        With<Part>,
+        // The in-game shipyard editor's build world shares these components;
+        // it must never enter the flight craft's staging topology.
+        (With<Part>, Without<EditorPart>),
     >,
-    mut engine_activations: Query<&mut EngineActivation>,
+    mut engine_activations: Query<&mut EngineActivation, Without<EditorPart>>,
 ) {
     let Ok(ship) = ships.single() else {
         return;
@@ -188,8 +191,8 @@ fn activate_stage(
     sim: Res<SimulationState>,
     mut plans: Query<&mut StagingPlan>,
     mut engine_activations: Query<&mut EngineActivation>,
-    attachments: Query<(Entity, &Attachment)>,
-    surface_mounts: Query<(Entity, &SurfaceMount)>,
+    attachments: Query<(Entity, &Attachment), Without<EditorPart>>,
+    surface_mounts: Query<(Entity, &SurfaceMount), Without<EditorPart>>,
 ) {
     if !intent.stage {
         return;
@@ -241,8 +244,8 @@ fn activate_stage(
 
 /// Map each part to its attach children, from the live attachment graph.
 fn child_map(
-    attachments: &Query<(Entity, &Attachment)>,
-    surface_mounts: &Query<(Entity, &SurfaceMount)>,
+    attachments: &Query<(Entity, &Attachment), Without<EditorPart>>,
+    surface_mounts: &Query<(Entity, &SurfaceMount), Without<EditorPart>>,
 ) -> HashMap<Entity, Vec<Entity>> {
     let mut map: HashMap<Entity, Vec<Entity>> = HashMap::new();
     for (child, attachment) in attachments.iter() {
@@ -285,7 +288,7 @@ type InertiaPartQuery<'w, 's> = Query<
         Option<&'static AirIntake>,
         Option<&'static SurfaceMount>,
     ),
-    With<Part>,
+    (With<Part>, Without<EditorPart>),
 >;
 
 /// Recompute the ship's aggregate moment of inertia and reaction-wheel
@@ -416,7 +419,7 @@ type SummaryPartQuery<'w, 's> = Query<
         Option<&'static PartResources>,
         Option<&'static AirIntake>,
     ),
-    With<Part>,
+    (With<Part>, Without<EditorPart>),
 >;
 
 /// Gather the live parts + plan into the pure summary inputs, compute, and

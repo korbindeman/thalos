@@ -55,6 +55,10 @@ pub struct ToggleFreeCamAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
+pub struct ToggleShipyardAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
 pub struct ToggleSasAction;
 
 #[derive(InputAction)]
@@ -194,6 +198,8 @@ pub struct GameInputIntent {
     pub escape: bool,
     pub screenshot: bool,
     pub toggle_free_cam: bool,
+    /// Edge-triggered: toggle the in-game shipyard editor.
+    pub toggle_shipyard: bool,
     pub toggle_sas: bool,
     pub warp_to_maneuver: bool,
     pub warp_increase: bool,
@@ -306,6 +312,11 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<ToggleFreeCamAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.system.bindings("toggle_free_cam")),
+            ),
+            (
+                Action::<ToggleShipyardAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.system.bindings("toggle_shipyard")),
             ),
         ]),
     ));
@@ -557,10 +568,12 @@ fn collect_system_intent(
     escape: Query<(&Action<EscapeAction>, &ActionEvents)>,
     screenshot: Query<(&Action<ScreenshotAction>, &ActionEvents)>,
     toggle_free_cam: Query<(&Action<ToggleFreeCamAction>, &ActionEvents)>,
+    toggle_shipyard: Query<(&Action<ToggleShipyardAction>, &ActionEvents)>,
 ) {
     intent.escape = started(&escape);
     intent.screenshot = started(&screenshot);
     intent.toggle_free_cam = started(&toggle_free_cam);
+    intent.toggle_shipyard = started(&toggle_shipyard);
 }
 
 fn collect_flight_toggle_intent(

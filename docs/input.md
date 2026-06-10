@@ -99,7 +99,8 @@ Each binary spawns one controller entity with layered contexts.
 
 Game:
 
-- `GameSystemContext` for Escape, screenshot, and freecam
+- `GameSystemContext` for Escape, screenshot, freecam, and the shipyard
+  editor toggle (F3)
 - `GameViewContext` for HUD toggle, map toggle, and camera cycle
 - `GameFlightContext` for attitude, SAS, throttle, and HOTAS flight axes
 - `GameWarpContext` for sim-time meta-controls (pause, warp speed,
@@ -119,7 +120,13 @@ Planet editor:
 Shipyard:
 
 - `ShipyardContext` for orbit camera, wheel pan/zoom, primary pointer,
-  and precision modifier
+  and precision modifier. The **game adds this context too** (alongside
+  its own contexts) for the in-game shipyard editor: the gate in
+  `crates/game/src/input.rs` keeps it inactive unless the editor is open,
+  and deactivates every gameplay context (flight, warp, view, eva,
+  maneuver) while it is. While the editor's ship-name field has focus, the
+  keyboard action source is disabled entirely and the field consumes raw
+  key events (including Escape).
 
 Use `ActionSettings::consume_input` for semantic keyboard actions that
 should not bleed into lower-priority actions. Mouse camera actions stay
@@ -131,10 +138,12 @@ consumer systems.
 `GameSystemContext` emits the Escape intent, and `pause_menu` owns the
 priority policy:
 
-1. close the pause menu
-2. cancel an active maneuver interaction
-3. clear the current target
-4. open the pause menu
+1. close the settings overlay
+2. close the shipyard editor
+3. close the pause menu
+4. cancel an active maneuver interaction
+5. clear the current target
+6. open the pause menu
 
 Do not reintroduce `ButtonInput::clear_just_pressed` to arbitrate this.
 

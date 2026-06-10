@@ -15,6 +15,7 @@ pub mod attach;
 pub mod blueprint;
 pub mod catalog;
 pub mod cockpit_mesh;
+pub mod editor;
 pub mod engine_mesh;
 pub mod fuselage_mesh;
 pub mod gear_mesh;
@@ -32,7 +33,8 @@ pub use attach::{
     SymmetryGroup, SymmetryRole,
 };
 pub use blueprint::{
-    Connection, PartBlueprint, PartParams, ShipBlueprint, SurfaceConnection, resource_capacity_for,
+    BuildLayout, Connection, PartBlueprint, PartParams, ShipBlueprint, SurfaceConnection,
+    resource_capacity_for,
 };
 pub use catalog::{
     AdapterSpec, AmbientIntakeKind, CatalogEntry, CatalogError, CatalogId, CatalogRef,

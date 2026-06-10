@@ -271,7 +271,7 @@ fn finish_runway_spawn(
     // landing gear at the loaded static-sag equilibrium.
     gear_geometry: (
         crate::local_physics::PartColliderQuery,
-        Query<(&Gear, &SurfaceMount), With<Part>>,
+        Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
         Query<&AttachNodes>,
         Res<crate::local_physics::GearTuning>,
     ),

@@ -58,19 +58,25 @@ impl Plugin for SimClockPlugin {
 /// - Escape menu (`GamePause`)
 /// - destruction scenario picker (`ScenarioMenu::open`)
 /// - freecam (`FreeCam::active`)
+/// - shipyard editor (`ShipyardEditor::open`)
 /// - warp pause (`warp.speed() == 0`)
 pub(crate) fn sync_sim_clock(
     time: Res<Time<Real>>,
     pause: Res<GamePause>,
     scenario: Res<ScenarioMenu>,
     freecam: Option<Res<FreeCam>>,
+    shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     sim: Res<SimulationState>,
     mut clock: ResMut<SimClock>,
 ) {
     let wall_delta_s = time.delta_secs_f64();
     let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
-    let paused =
-        pause.active || scenario.open || freecam_active || sim.simulation.warp.speed() == 0.0;
+    let shipyard_open = shipyard.as_deref().map(|s| s.open).unwrap_or(false);
+    let paused = pause.active
+        || scenario.open
+        || freecam_active
+        || shipyard_open
+        || sim.simulation.warp.speed() == 0.0;
 
     *clock = SimClock {
         delta_s: if paused { 0.0 } else { wall_delta_s },

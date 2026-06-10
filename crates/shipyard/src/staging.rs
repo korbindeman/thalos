@@ -713,6 +713,7 @@ mod tests {
                 },
             ],
             surface_mounts: vec![],
+            layout: None,
         };
 
         let summaries = bp.stage_summaries(&cat).expect("stage summaries");

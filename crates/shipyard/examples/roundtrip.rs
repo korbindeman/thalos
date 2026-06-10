@@ -73,6 +73,7 @@ fn main() {
             },
         ],
         surface_mounts: vec![],
+        layout: None,
     };
 
     let ron = blueprint.to_ron().expect("serialize");

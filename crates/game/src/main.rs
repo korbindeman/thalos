@@ -27,12 +27,14 @@ mod perf_log;
 mod photo_mode;
 mod player_controller;
 mod reflection_probe;
+mod relaunch;
 mod rendering;
 mod runway;
 mod scenario_menu;
 mod screenshot;
 mod settings_menu;
 mod ship_view;
+mod shipyard_editor;
 mod sim_clock;
 mod sky_render;
 mod solar_system_state;
@@ -57,7 +59,7 @@ use bevy::render::{
     settings::{Backends, RenderCreation, WgpuSettings},
 };
 use bevy::window::{
-    MonitorSelection, PresentMode, VideoModeSelection, WindowMode, WindowResolution,
+    MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution,
 };
 use thalos_body_render::BodyRenderPlugin;
 use thalos_input::game::GameInputPlugin;
@@ -199,15 +201,65 @@ fn window_from_env() -> Window {
         Err(_) => WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
     };
 
+    // Dev/diagnostic: force a window scale factor (overrides the OS HiDPI
+    // scale). `THALOS_SCALE=1.0` etc. Used to isolate fractional-scale text
+    // rendering bugs.
+    let mut resolution = WindowResolution::new(size.0, size.1);
+    if let Ok(scale) = std::env::var("THALOS_SCALE")
+        && let Ok(value) = scale.trim().parse::<f32>()
+        && value > 0.0
+    {
+        resolution = resolution.with_scale_factor_override(value);
+    }
+
     Window {
         title: "Thalos".into(),
         mode,
-        resolution: WindowResolution::new(size.0, size.1),
+        resolution,
         // Dev/perf hook: `THALOS_VSYNC=off` uncaps the framerate so
         // frame-time deltas are observable when profiling. Default keeps
         // vsync on.
         present_mode,
         ..default()
+    }
+}
+
+/// Work around a Bevy 0.18 text-rendering bug: at **fractional** window scale
+/// factors (a 150 % HiDPI display reports 1.5, etc.) glyphs rasterise at
+/// inconsistent sizes — text looks broken (non-uniform, "not monospace").
+/// Integer scale factors render cleanly. So we snap the OS scale factor to the
+/// nearest integer (≥ 1) once the window's real scale is known.
+///
+/// The UI ends up slightly larger or smaller than the OS-intended size (e.g.
+/// 1.5 → 2.0) but crisp; a user who prefers the other integer can pin it with
+/// `THALOS_SCALE=1` (handled in [`window_from_env`], which wins here). Remove
+/// this once the upstream Bevy fractional-scale text bug is fixed.
+fn snap_window_scale_to_integer(
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut snapped_log: Local<bool>,
+) {
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    // A manual `THALOS_SCALE` override already pinned the scale — leave it.
+    if window.resolution.scale_factor_override().is_some() {
+        return;
+    }
+    let os = window.resolution.base_scale_factor();
+    if os <= 0.0 {
+        return; // scale not reported by winit yet
+    }
+    let snapped = os.round().max(1.0);
+    if (snapped - os).abs() > 1.0e-3 {
+        window.resolution.set_scale_factor_override(Some(snapped));
+        if !*snapped_log {
+            info!(
+                "snapped window scale factor {os:.3} → {snapped:.0} \
+                 (crisp-text workaround for Bevy fractional-scale rendering; \
+                 override with THALOS_SCALE)"
+            );
+            *snapped_log = true;
+        }
     }
 }
 
@@ -335,7 +387,18 @@ fn main() {
         .filter(|arg| !arg.trim().is_empty())
         .or_else(|| std::env::var("THALOS_SPAWN").ok())
         .unwrap_or_default();
-    let situation = SpawnSituation::from_request(&spawn_request);
+    // `just game shipyard` opens straight into the in-game ship editor: the
+    // sim seeds the default parking orbit behind it (and stays paused while
+    // the editor is open), so closing the editor drops into normal flight.
+    let open_shipyard = matches!(
+        spawn_request.trim().to_ascii_lowercase().as_str(),
+        "shipyard" | "editor" | "vab"
+    );
+    let situation = if open_shipyard {
+        SpawnSituation::ShipOrbit
+    } else {
+        SpawnSituation::from_request(&spawn_request)
+    };
 
     let (ship_state, vessel_kind, ship_params, attitude) = if situation == SpawnSituation::Eva {
         // Sub-stellar point so the player wakes up in daylight: the direction
@@ -413,12 +476,19 @@ fn main() {
     let wgpu_settings = wgpu_settings_from_env();
 
     App::new()
+        // The shipyard editor is a separate scene: while it is open, no game
+        // logic runs. Gating the three simulation stages on `editor_closed`
+        // (on top of the pause gate) freezes physics, world sync, and the game
+        // camera so the editor owns the frame entirely — the flight world is
+        // suspended, not just hidden. See `crate::shipyard_editor`.
         .configure_sets(
             Update,
             (
-                SimStage::Physics.run_if(pause_menu::not_game_paused),
-                SimStage::Sync,
-                SimStage::Camera.run_if(pause_menu::not_game_paused),
+                SimStage::Physics
+                    .run_if(pause_menu::not_game_paused.and(shipyard_editor::editor_closed)),
+                SimStage::Sync.run_if(shipyard_editor::editor_closed),
+                SimStage::Camera
+                    .run_if(pause_menu::not_game_paused.and(shipyard_editor::editor_closed)),
             )
                 .chain(),
         )
@@ -509,6 +579,10 @@ fn main() {
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))
         .insert_resource(situation)
+        // Open the editor only once the world finishes loading — opening it
+        // during `Loading` would gate off the very systems that complete the
+        // load (see `OpenShipyardOnStart`).
+        .insert_resource(shipyard_editor::OpenShipyardOnStart(open_shipyard))
         // Every spawn situation starts paused (warp 0×); `THALOS_AUTO_RUN`
         // resumes to 1× as soon as the loading screen clears (for agents).
         .insert_resource(spawn::AutoRun::from_env())
@@ -565,8 +639,14 @@ fn main() {
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ScreenshotPlugin)
+        // Snap fractional HiDPI scale factors to an integer so UI text renders
+        // crisply (Bevy 0.18 fractional-scale text bug). Runs every frame but
+        // no-ops once the override is set.
+        .add_systems(Update, snap_window_scale_to_integer)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
+        .add_plugins(relaunch::RelaunchPlugin)
+        .add_plugins(shipyard_editor::ShipyardEditorPlugin)
         .add_plugins(BodyTreePanelPlugin)
         .add_plugins(DebugPlugin)
         .run();

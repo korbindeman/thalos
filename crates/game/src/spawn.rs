@@ -170,6 +170,21 @@ pub struct Homeworld(pub BodyId);
 /// (+Z) radial-out — the shared "level orbital flight" convention used by the
 /// navball and control axes. Shared by `main.rs` (startup) and the destruction
 /// scenario menu (respawn) so both produce the identical orbit.
+/// The Thalos debug parking orbit at the current epoch — the `just game`
+/// default ship start, rebuilt for a destruction respawn or an editor Launch.
+/// Shared so a respawn / relaunch into orbit matches the `just game` boot.
+pub(crate) fn orbit_respawn_state(
+    sim: &SimulationState,
+    homeworld: BodyId,
+) -> (StateVector, AttitudeState) {
+    let epoch = Epoch(sim.simulation.sim_time());
+    let homeworld_state = sim.ephemeris.state(homeworld, epoch);
+    let rel = thalos_physics_canonical::debug_orbits::debug_parking_orbit_relative_state(
+        &sim.system.bodies[homeworld],
+    );
+    orbit_parking_state(rel, &homeworld_state)
+}
+
 pub(crate) fn orbit_parking_state(
     ship_rel: StateVector,
     homeworld_state: &BodyState,

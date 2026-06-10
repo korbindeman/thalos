@@ -35,6 +35,12 @@ pub const MAP_LAYER: usize = 1;
 /// Render layer for ship-view entities (metre-scale).
 pub const SHIP_LAYER: usize = 2;
 
+/// Render layer for the in-game shipyard editor's build scene (parts under
+/// construction, editor lights, hangar backdrop). Only the editor camera
+/// renders it, so the build world never bleeds into the flight or map views.
+/// (3 = navball render target, 4 = nav attitude indicator.)
+pub const EDITOR_LAYER: usize = 5;
+
 /// Metres → render-units scale factor for **map-view** systems
 /// (orbit trails, maneuver UI, body parent transforms). Always
 /// [`MAP_SCALE`]; the field is kept as a resource only so existing
