@@ -12,7 +12,7 @@
 //!   recipes (mass per area, storage per volume) and the blueprint provides
 //!   variable geometry.
 
-use crate::part::ReactantRatio;
+use crate::part::{ControlSurface, ControlSurfaceRole, ReactantRatio};
 use crate::resource::Resource;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -298,6 +298,46 @@ pub enum WingRole {
     /// Trim / control surface (tailplane, fin, canard): small span, ~0°
     /// incidence, low sweep, no dihedral. The empennage default.
     Stabilizer,
+}
+
+/// Placement-time default control surfaces for a freshly-placed wing, so a
+/// new part flies with sensible ailerons / elevator / rudder without
+/// hand-authoring. Like the rest of the catalog presets these are only the
+/// *initial* values written into the blueprint; a saved craft restores the
+/// user's authored set, not this default.
+///
+/// `role` picks the surface kind; for a [`WingRole::Stabilizer`] the
+/// horizontal-tailplane (elevator) vs vertical-fin (rudder) split falls out
+/// of the mount azimuth, exactly like the geometry preset — a near-side
+/// (±X) mount is a tailplane, a near-dorsal (±Z) mount is a fin.
+pub fn default_control_surfaces(role: WingRole, mount_angle: f32) -> Vec<ControlSurface> {
+    match role {
+        // Outboard aileron on the back quarter-chord.
+        WingRole::Lift => vec![ControlSurface {
+            role: ControlSurfaceRole::Aileron,
+            span_start: 0.55,
+            span_end: 0.95,
+            chord_fraction: 0.25,
+            max_deflection: 25.0_f32.to_radians(),
+        }],
+        WingRole::Stabilizer => {
+            // Horizontal when the panel extends sideways (|sin θ| large),
+            // vertical when it extends up/down toward the dorsal axis.
+            let horizontal = mount_angle.sin().abs() >= std::f32::consts::FRAC_1_SQRT_2;
+            let role = if horizontal {
+                ControlSurfaceRole::Elevator
+            } else {
+                ControlSurfaceRole::Rudder
+            };
+            vec![ControlSurface {
+                role,
+                span_start: 0.05,
+                span_end: 0.95,
+                chord_fraction: 0.35,
+                max_deflection: 25.0_f32.to_radians(),
+            }]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

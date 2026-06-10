@@ -6,6 +6,7 @@ mod bake_check;
 mod body_tree_panel;
 mod bridge;
 mod camera;
+mod control_bus;
 mod controls;
 mod coords;
 mod debug;
@@ -507,6 +508,9 @@ fn main() {
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))
         .insert_resource(situation)
+        // Every spawn situation starts paused (warp 0×); `THALOS_AUTO_RUN`
+        // resumes to 1× as soon as the loading screen clears (for agents).
+        .insert_resource(spawn::AutoRun::from_env())
         // The body the parking-orbit / on-foot scenarios anchor to, so the
         // destruction scenario menu can rebuild them on respawn.
         .insert_resource(spawn::Homeworld(homeworld_id))
@@ -549,6 +553,7 @@ fn main() {
         .add_plugins(NavigationPlugin)
         .add_plugins(AutopilotPlugin)
         .add_plugins(ControlLocksPlugin)
+        .add_plugins(control_bus::ControlBusPlugin)
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)

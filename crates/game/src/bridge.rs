@@ -18,12 +18,10 @@
 //!    worker-thread lag.
 //! 3. Maps keyboard input to warp controls.
 
-use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::maneuver::ManeuverNode;
-use thalos_physics_canonical::types::ControlInput;
 use thalos_physics_local::{
     ActiveLocalBubble, LocalBubbleConfig, LocalCraftBody,
     avian::{AngularVelocity, ContactGraph, LinearVelocity},
@@ -32,16 +30,12 @@ use thalos_physics_local::{
 
 use crate::GameTerrainRegistry;
 use crate::SimStage;
-use crate::autopilot::Autopilot;
 use crate::controls::ControlLocks;
 use crate::fuel::ThrottleState;
 use crate::maneuver::ManeuverPlan;
-use crate::navigation::{NavigationState, compute_attitude_control};
 use crate::player_controller::EvaMode;
 use crate::rendering::SimulationState;
 use crate::sim_clock::SimClock;
-use crate::target::TargetBody;
-use crate::velocity_frame::VelocityFrameState;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
 use thalos_physics_canonical::types::VesselKind;
@@ -195,66 +189,6 @@ fn update_prediction(
     }
 
     sim.simulation.recompute_prediction();
-}
-
-/// Sample player attitude input + active navigation mode and push the
-/// resulting [`ControlInput`] into the simulation.
-///
-/// Player keys (W/S pitch, A/D yaw, Q/E roll) override any active
-/// [`NavigationMode`] for the duration they're held; T toggles SAS for
-/// free-flight rate damping. Mode-specific autopilot logic lives in
-/// [`compute_attitude_control`] — this system just collects inputs.
-///
-/// Player torque is zeroed while [`ControlLocks::attitude`] is set so
-/// whatever programmatic system holds the lock (today: the autopilot's
-/// direct burn-pointing target) wins.
-/// `compute_attitude_control` still runs — it's the path that drives
-/// the autopilot's PD command from its direct target.
-pub fn handle_attitude_controls(
-    input: Res<GameInputIntent>,
-    nav: Res<NavigationState>,
-    locks: Res<ControlLocks>,
-    target: Res<TargetBody>,
-    plan: Res<ManeuverPlan>,
-    autopilot: Res<Autopilot>,
-    velocity_frame: Res<VelocityFrameState>,
-    mut sim: ResMut<SimulationState>,
-    mut sas_enabled: Local<bool>,
-) {
-    // A destroyed craft accepts no attitude input: kill the command, drop
-    // SAS, and skip the autopilot path so the wreck tumbles freely and the
-    // HUD reads inert. (`apply_local_forces` also zeroes torque on its side.)
-    if sim.simulation.is_destroyed() {
-        *sas_enabled = false;
-        sim.simulation.set_control(ControlInput::default());
-        return;
-    }
-
-    if input.toggle_sas {
-        *sas_enabled = !*sas_enabled;
-    }
-
-    let autopilot_target = autopilot.attitude_target();
-    let mut player_torque = DVec3::ZERO;
-    if !locks.attitude && autopilot_target.is_none() {
-        player_torque = DVec3::new(
-            input.attitude.x as f64,
-            input.attitude.y as f64,
-            input.attitude.z as f64,
-        );
-    }
-
-    let control = compute_attitude_control(
-        player_torque,
-        nav.mode,
-        autopilot_target,
-        velocity_frame.active,
-        &target,
-        &plan,
-        &sim.simulation,
-        *sas_enabled,
-    );
-    sim.simulation.set_control(control);
 }
 
 /// Per-frame cap on warp level imposed by altitude above the dominant
@@ -556,6 +490,12 @@ pub struct CraftStateMirror {
     pub warp_speed: f64,
     pub position_m: [f64; 3],
     pub velocity_m_s: [f64; 3],
+    /// World-frame angular velocity of the craft (rad/s). In the local
+    /// bubble this is the live Avian body rate (written back to canonical by
+    /// `local_physics::readback_local_craft`); a diagnostic for attitude /
+    /// control-stability work — a steady non-decaying oscillation here is
+    /// SAS chatter. See `docs/control.md`.
+    pub angular_velocity_rad_s: [f64; 3],
     pub mass_kg: f64,
     pub dominant_body_id: u32,
     /// Discriminant name of `AuthorityMode` (variant fields elided).
@@ -598,6 +538,8 @@ fn refresh_craft_state_mirror(
     mirror.warp_speed = sim.simulation.warp.speed();
     mirror.position_m = [state.position.x, state.position.y, state.position.z];
     mirror.velocity_m_s = [state.velocity.x, state.velocity.y, state.velocity.z];
+    let omega = sim.simulation.attitude().angular_velocity;
+    mirror.angular_velocity_rad_s = [omega.x, omega.y, omega.z];
     mirror.mass_kg = sim.simulation.ship_mass_kg();
     mirror.dominant_body_id = sim.simulation.dominant_body() as u32;
     mirror.authority = match sim.simulation.authority() {
@@ -652,7 +594,6 @@ impl Plugin for BridgePlugin {
                 (
                     enforce_warp_altitude_limits,
                     handle_warp_controls,
-                    handle_attitude_controls,
                     advance_simulation,
                     sync_maneuver_plan,
                     update_prediction,

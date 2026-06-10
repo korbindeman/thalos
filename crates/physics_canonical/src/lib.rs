@@ -18,6 +18,7 @@
 //! build the predicted [`trajectory::FlightPlan`] — so "where the ship is"
 //! and "where it will be" can never numerically diverge.
 
+pub mod aero;
 pub mod body_centered;
 pub mod body_fixed;
 pub mod body_trajectory_provider;
@@ -29,6 +30,7 @@ pub mod orbital_math;
 pub mod patched_conics;
 pub mod ship_propagator;
 pub mod simulation;
+pub mod surface_local;
 pub mod terrain_provider;
 pub mod trajectory;
 pub mod types;

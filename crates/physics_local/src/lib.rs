@@ -6,25 +6,57 @@
 use std::{collections::HashMap, sync::Arc};
 
 use avian3d::prelude::*;
-use bevy::math::{DQuat, DVec3};
+use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use thalos_body_render::{
     GpuAtlasMirrorHandle, GpuAtlasMirrorHeightSource, HeightSource, TerrainPatchBasis,
-    TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch_from_source,
+    TerrainPatchConfig,
 };
+
+/// `tile_lod_m` hint for the finest CPU-synthesizable terrain detail when a
+/// height source falls back to its procedural pipeline (mirrors the game's
+/// `PHYSICS_QUERY_TILE_LOD_M`).
+const PHYSICS_QUERY_TILE_LOD_M: f32 = 0.5;
 use thalos_physics_canonical::canonical::CraftId;
+use thalos_physics_canonical::surface_local::SurfaceLocalFrame;
 use thalos_terrain::PlanetSurface;
 use thalos_world::BodyId;
 
 pub mod avian {
     pub use avian3d::prelude::{
         AngularInertia, AngularVelocity, CenterOfMass, CoefficientCombine, Collider,
-        ConstantAngularAcceleration, ConstantForce, ConstantLinearAcceleration, ConstantTorque,
-        ContactGraph, CustomPositionIntegration, Friction, LinearVelocity, LockedAxes, Mass,
-        NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Physics, PhysicsDebugPlugin,
-        PhysicsGizmos, PhysicsSchedule, PhysicsTime, Position, RayHitData, Restitution, RigidBody,
-        Rotation, SleepingDisabled, SpatialQuery, SpatialQueryFilter, SweptCcd,
+        CollisionLayers, ConstantAngularAcceleration, ConstantForce, ConstantLinearAcceleration,
+        ConstantTorque, ContactGraph, CustomPositionIntegration, Friction, LayerMask,
+        LinearVelocity, LockedAxes, Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass,
+        Physics, PhysicsDebugPlugin, PhysicsGizmos, PhysicsSchedule, PhysicsStepSystems,
+        PhysicsTime, Position, RayHitData, Restitution, RigidBody, Rotation, SleepingDisabled,
+        SpatialQuery, SpatialQueryFilter, SweptCcd,
     };
+}
+
+/// Collision-layer bit for ground colliders (terrain heightfield, runway slab).
+pub const GROUND_LAYER: u32 = 1 << 0;
+/// Collision-layer bit for player/craft rigid bodies.
+pub const CRAFT_LAYER: u32 = 1 << 1;
+
+/// Collision layers for a ground collider: it is a member of `GROUND` and, by
+/// default, collides with everything (so gearless craft hulls still rest on it).
+pub fn ground_collision_layers() -> avian::CollisionLayers {
+    avian::CollisionLayers::new(avian::LayerMask(GROUND_LAYER), avian::LayerMask::ALL)
+}
+
+/// Collision layers for a **wheeled** craft hull: member of `CRAFT`, collides
+/// with everything **except `GROUND`**. The raycast spring-damper landing gear
+/// is the sole ground interface for such craft; the hull never produces solver
+/// contact against the ground (which otherwise fought the gear and flung the
+/// craft on its gear). Crash detection switches to the gear's weight-on-wheels
+/// signal. Gearless craft (landers/rockets) keep the default all-vs-all layers
+/// so their hull/legs rest on the ground directly. See `docs/surface_local.md`.
+pub fn wheeled_craft_collision_layers() -> avian::CollisionLayers {
+    avian::CollisionLayers::new(
+        avian::LayerMask(CRAFT_LAYER),
+        avian::LayerMask(!GROUND_LAYER),
+    )
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -134,18 +166,24 @@ impl TerrainSurfaceRegistry {
 /// geometry; in deep space the bubble runs without a collider with
 /// `basis = identity` and `center_surface_body_m = ZERO`.
 ///
-/// The Avian body lives in **body-centered inertial** coordinates — the
-/// origin tracks the dominant body's centre but the axes do not rotate.
-/// Gravity in `apply_local_forces` is the textbook two-body `−μr/r³`;
-/// no fictitious forces. The terrain collider is `Kinematic`, centered on
-/// the local patch with body-fixed vertex offsets and `Rotation =
-/// body.orientation`, so `Position + Rotation * local_vertex` evaluates to
-/// the rendered body-centered inertial surface as the body spins.
+/// Ship Avian bodies live in the **surface-local frame (SLF)** — a
+/// body-fixed tangent frame anchored at a surface point, Y-up, with small
+/// (meters–km) coordinates near the anchor; see
+/// `thalos_physics_canonical::surface_local` and `docs/surface_local.md`.
+/// Gravity + the rotating-frame centrifugal/Coriolis terms come from
+/// `surface_local_acceleration`. Ground colliders are static in this frame:
+/// posed once from their body-fixed geometry via
+/// `frame.rotation_body_to_frame`, never per-frame. The frame is rebuilt
+/// (re-anchored) when the craft drifts too far from the anchor; the EVA
+/// capsule still uses the body-centered inertial seam until its fold-in.
 #[derive(Resource, Debug, Clone)]
 pub struct LocalBubble {
     pub id: u64,
     pub body_id: BodyId,
     pub craft_entity: Entity,
+    /// The surface-local frame ship physics integrates in. Meaningful for
+    /// ships only this slice (EVA keeps the body-centered seam).
+    pub frame: SurfaceLocalFrame,
     pub terrain_entity: Option<Entity>,
     pub center_dir_body: DVec3,
     pub center_surface_body_m: DVec3,
@@ -229,7 +267,14 @@ pub struct LocalCraftSpawn {
 #[derive(Debug, Clone)]
 pub struct SpawnedTerrainPatch {
     pub entity: Entity,
-    pub mesh: TerrainPatchMesh,
+    /// Body-fixed surface point at the patch centre (drives drift-rebuild and
+    /// the collider's SLF pose via [`patch_basis_rotation`]).
+    pub center_surface_body_m: DVec3,
+    /// Patch-tangent basis (`tangent_x`, `normal`/up, `tangent_z`) the
+    /// heightfield is authored in.
+    pub basis: TerrainPatchBasis,
+    /// Metric lateral half-extent of the heightfield window.
+    pub half_extent_m: f64,
 }
 
 pub struct LocalPhysicsPlugin;
@@ -269,6 +314,14 @@ pub fn terrain_patch_config(config: &LocalBubbleConfig) -> TerrainPatchConfig {
     }
 }
 
+/// Rotation taking a patch-tangent basis (`X = tangent_x`, `Y = normal/up`,
+/// `Z = tangent_z`) into body-fixed axes. The heightfield/runway colliders are
+/// authored in this tangent frame (height along local `Y`), so composing this
+/// with the body-fixed→SLF rotation gives their SLF pose.
+pub fn patch_basis_rotation(basis: &TerrainPatchBasis) -> DQuat {
+    DQuat::from_mat3(&DMat3::from_cols(basis.tangent_x, basis.normal, basis.tangent_z))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_terrain_collider_patch(
     commands: &mut Commands,
@@ -277,69 +330,79 @@ pub fn spawn_terrain_collider_patch(
     body_radius_m: f64,
     center_dir_body: DVec3,
     config: &LocalBubbleConfig,
+    frame: &SurfaceLocalFrame,
 ) -> SpawnedTerrainPatch {
-    // Prefer a collider built from the source's native tile geometry — the GPU
-    // atlas tiles the renderer meshes from — so it lines up with the drawn
-    // surface by construction. Sources with no resident tile geometry (CPU
-    // pipeline, flat, baked cubemap) return `None`, as does the GPU mirror
-    // before a tile is resident, and we fall back to the coarser tangent-grid
-    // resample. See `docs/surface.md`.
-    let patch = height_source
-        .build_collider_patch(center_dir_body.as_vec3(), config.patch_resolution)
-        .unwrap_or_else(|| {
-            let basis = TerrainPatchBasis::from_normal(center_dir_body);
-            build_rendered_terrain_patch_from_source(
-                height_source,
-                body_radius_m,
-                center_dir_body,
-                basis,
-                terrain_patch_config(config),
-            )
-        });
-    // Keep the trimesh near its own origin. The source vertices are absolute
-    // body-fixed positions at planet radius; feeding those directly to the
-    // narrow phase makes every contact solve against million-metre local
-    // coordinates. Instead, put the kinematic body at the patch centre and
-    // store vertex offsets in body-fixed axes.
+    // A **solid heightfield**, not a one-sided trimesh: parry's heightfield has
+    // a defined interior, so resting contact resolves gently and a craft that
+    // dips a little into it is pushed straight back out — instead of the violent
+    // one-step penetration-recovery a one-sided trimesh applies (which launched
+    // the craft off its gear). See `docs/surface_local.md` §3.
     //
-    // The craft (ship) Avian body lives in the **body-fixed (rotating) frame**,
-    // so the collider is held *static* in that frame: `Position =
-    // center_surface_body_m`, identity rotation, zero velocity. Each local
-    // offset then lands exactly on the rotating surface with no co-rotation
-    // speed, which is what keeps ground contact stable.
-    // `sync_terrain_collider_pose` maintains this each frame (cheap; only the
-    // patch-recenter changes it).
-    let local_vertices = terrain_patch_local_vertices(&patch);
-    let collider = Collider::trimesh(local_vertices, patch.indices.clone());
+    // Authored in the patch-tangent frame (`X = tangent_x`, `Y = up = normal`,
+    // `Z = tangent_z`) with heights along local `Y`. The grid is sampled in
+    // body-fixed coordinates, so the baked heights are independent of the SLF
+    // frame — a re-anchor only re-poses the collider (no rebuild). The craft's
+    // Avian body lives in the SLF, so [`sync_terrain_collider_pose`] poses this
+    // at `Position = R·(center − anchor)`, `Rotation = R · patch_basis_rotation`.
+    let center_dir = center_dir_body.normalize_or_zero();
+    let basis = TerrainPatchBasis::from_normal(center_dir);
+    let h_center = height_source
+        .sample_height_m(center_dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+        .unwrap_or(0.0) as f64;
+    let center_surface_body_m = center_dir * (body_radius_m + h_center);
+
+    let n = config.patch_resolution.max(2) as usize;
+    let half = config.patch_half_extent_m;
+    // heights[i][j]: i advances along local Z (tangent_z), j along local X
+    // (tangent_x) — parry's heightfield convention. Height = offset from the
+    // patch-centre surface along the up normal.
+    let mut heights = vec![vec![0.0f64; n]; n];
+    for (i, row) in heights.iter_mut().enumerate() {
+        let z = (i as f64 / (n as f64 - 1.0) - 0.5) * 2.0 * half;
+        for (j, cell) in row.iter_mut().enumerate() {
+            let x = (j as f64 / (n as f64 - 1.0) - 0.5) * 2.0 * half;
+            let point = center_surface_body_m + basis.tangent_x * x + basis.tangent_z * z;
+            let dir = point.normalize_or_zero();
+            let h = height_source
+                .sample_height_m(dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+                .map(|h| h as f64)
+                .unwrap_or(h_center);
+            let surface = dir * (body_radius_m + h);
+            *cell = (surface - center_surface_body_m).dot(basis.normal);
+        }
+    }
+    let collider = Collider::heightfield(heights, DVec3::new(2.0 * half, 1.0, 2.0 * half));
     let entity = commands
         .spawn((
+            // Kinematic, not Static: it is re-posed by `sync_terrain_collider_pose`
+            // when the SLF frame re-anchors, and Avian only refreshes the
+            // broadphase/collider transform for moved *kinematic* bodies. Zero
+            // velocity — the pose is written directly, never integrated.
             RigidBody::Kinematic,
             collider,
-            Position(patch.center_surface_body_m),
-            Rotation(DQuat::IDENTITY),
+            Position(
+                frame.rotation_body_to_frame
+                    * (center_surface_body_m - frame.anchor_point_body_m),
+            ),
+            Rotation(frame.rotation_body_to_frame * patch_basis_rotation(&basis)),
             LinearVelocity(DVec3::ZERO),
             AngularVelocity(DVec3::ZERO),
+            ground_collision_layers(),
             TerrainColliderPatch {
                 body_id,
-                center_dir: center_dir_body.normalize(),
-                half_extent_m: config.patch_half_extent_m,
+                center_dir,
+                half_extent_m: half,
                 resolution: config.patch_resolution,
             },
-            Name::new("Local terrain collider patch"),
+            Name::new("Local terrain heightfield collider"),
         ))
         .id();
     SpawnedTerrainPatch {
         entity,
-        mesh: patch,
+        center_surface_body_m,
+        basis,
+        half_extent_m: half,
     }
-}
-
-fn terrain_patch_local_vertices(patch: &TerrainPatchMesh) -> Vec<DVec3> {
-    patch
-        .vertices_body_m
-        .iter()
-        .map(|vertex| *vertex - patch.center_surface_body_m)
-        .collect()
 }
 
 pub fn spawn_local_craft_body(commands: &mut Commands, spawn: LocalCraftSpawn) -> Entity {
@@ -494,34 +557,4 @@ mod tests {
         let _ = collider;
     }
 
-    #[test]
-    fn terrain_patch_vertices_are_local_to_patch_origin() {
-        let patch = TerrainPatchMesh {
-            vertices_body_m: vec![
-                DVec3::new(10.0, 1000.0, -2.0),
-                DVec3::new(11.0, 1001.0, -4.0),
-            ],
-            indices: vec![[0, 1, 1]],
-            center_surface_body_m: DVec3::new(10.0, 1000.0, -2.0),
-            basis: TerrainPatchBasis::from_normal(DVec3::Y),
-            half_extent_m: 1.0,
-        };
-
-        let local = terrain_patch_local_vertices(&patch);
-
-        assert_eq!(local[0], DVec3::ZERO);
-        assert_eq!(local[1], DVec3::new(1.0, 1.0, -2.0));
-    }
-
-    #[test]
-    fn terrain_patch_pose_tracks_rotating_surface_velocity() {
-        let center_body = DVec3::new(0.0, 1000.0, 0.0);
-        let orientation = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
-        let angular_velocity = DVec3::Z * 0.1;
-
-        let (position, velocity) = terrain_patch_pose(center_body, orientation, angular_velocity);
-
-        assert!((position - DVec3::new(-1000.0, 0.0, 0.0)).length() < 1.0e-9);
-        assert!((velocity - angular_velocity.cross(position)).length() < 1.0e-9);
-    }
 }

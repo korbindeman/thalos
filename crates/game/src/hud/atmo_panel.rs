@@ -1,13 +1,14 @@
 //! Top-middle atmospheric-flight readout: true airspeed, dynamic pressure, and
 //! Mach, shown only while the ship is inside an atmosphere.
 //!
-//! Sources the read-only [`FlightState`] + [`AtmosphereState`] that the
-//! vendored `avian_fdm` writes onto the ship root each physics step (see
-//! [`crate::aero`]). Hidden in vacuum (and for EVA, which has no aero root).
+//! Sources the read-only [`AeroReadout`] that the native aero model writes onto
+//! the ship root each physics step (see [`crate::aero`]). Hidden in vacuum (and
+//! for EVA, which has no aero root).
 
-use avian_fdm::prelude::{AtmosphereState, FlightState};
 use bevy::prelude::*;
 use thalos_physics_local::LocalCraftBody;
+
+use crate::aero::AeroReadout;
 
 use crate::hud::HudPanel;
 use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
@@ -59,13 +60,13 @@ pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {
 }
 
 pub fn update(
-    ship_q: Query<(&FlightState, &AtmosphereState), With<LocalCraftBody>>,
+    ship_q: Query<&AeroReadout, With<LocalCraftBody>>,
     mut panel_q: Query<&mut Visibility, With<AtmoPanel>>,
     mut text_q: Query<&mut Text, With<AtmoText>>,
 ) {
     let in_atmosphere = ship_q
         .single()
-        .map(|(_, atm)| atm.density_kgm3 > IN_ATMOSPHERE_DENSITY)
+        .map(|r| r.density_kgm3 > IN_ATMOSPHERE_DENSITY)
         .unwrap_or(false);
 
     if let Ok(mut visibility) = panel_q.single_mut() {
@@ -80,7 +81,7 @@ pub fn update(
     }
 
     if in_atmosphere
-        && let Ok((flight, _)) = ship_q.single()
+        && let Ok(flight) = ship_q.single()
         && let Ok(mut text) = text_q.single_mut()
     {
         let q_kpa = flight.dynamic_pressure_pa / 1000.0;

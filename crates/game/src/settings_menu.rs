@@ -223,20 +223,6 @@ fn show_hotas_tab(ui: &mut egui::Ui, settings: &mut InputSettings) {
     ui.add_space(4.0);
 
     let axes_order = ["pitch", "yaw", "roll", "throttle"];
-    let default_hw_axes = [
-        GamepadAxis::LeftStickY,
-        GamepadAxis::RightStickX,
-        GamepadAxis::LeftStickX,
-        GamepadAxis::LeftZ,
-    ];
-    let available_hw_axes = [
-        (GamepadAxis::LeftStickX, "L Stick X"),
-        (GamepadAxis::LeftStickY, "L Stick Y"),
-        (GamepadAxis::LeftZ, "L Z / Trigger"),
-        (GamepadAxis::RightStickX, "R Stick X"),
-        (GamepadAxis::RightStickY, "R Stick Y"),
-        (GamepadAxis::RightZ, "R Z / Trigger"),
-    ];
 
     ui.add_enabled_ui(hotas.enabled, |ui| {
         egui::Grid::new("hotas_axes_grid")
@@ -245,13 +231,13 @@ fn show_hotas_tab(ui: &mut egui::Ui, settings: &mut InputSettings) {
             .striped(true)
             .show(ui, |ui| {
                 ui.strong("Axis");
-                ui.strong("HW Axis");
+                ui.strong("Raw code");
                 ui.strong("Invert");
                 ui.strong("Deadzone");
                 ui.strong("");
                 ui.end_row();
 
-                for (i, axis_name) in axes_order.iter().enumerate() {
+                for axis_name in axes_order.iter() {
                     let has_binding = hotas.axes.contains_key(*axis_name);
 
                     ui.label(*axis_name);
@@ -261,14 +247,14 @@ fn show_hotas_tab(ui: &mut egui::Ui, settings: &mut InputSettings) {
                         let mut binding = hotas.axes.get(*axis_name).unwrap().clone();
                         let mut remove = false;
 
-                        egui::ComboBox::from_id_salt(format!("hotas_axis_{axis_name}"))
-                            .selected_text(format_gamepad_axis(binding.axis))
-                            .width(120.0)
-                            .show_ui(ui, |ui| {
-                                for &(ga, label) in &available_hw_axes {
-                                    ui.selectable_value(&mut binding.axis, ga, label);
-                                }
-                            });
+                        // Raw platform axis code (gilrs Code::into_u32). Discover
+                        // values via `cargo run -p thalos_input --example
+                        // gamepad_axes`; codes are platform-specific.
+                        ui.add(
+                            egui::DragValue::new(&mut binding.code)
+                                .speed(1.0)
+                                .prefix("code "),
+                        );
 
                         ui.checkbox(&mut binding.invert, "");
                         ui.add(
@@ -293,7 +279,7 @@ fn show_hotas_tab(ui: &mut egui::Ui, settings: &mut InputSettings) {
                             hotas.axes.insert(
                                 axis_name.to_string(),
                                 thalos_input::settings::HotasAxisBinding {
-                                    axis: default_hw_axes[i],
+                                    code: 0,
                                     device: None,
                                     invert: false,
                                     deadzone: 0.05,
@@ -310,7 +296,10 @@ fn show_hotas_tab(ui: &mut egui::Ui, settings: &mut InputSettings) {
     });
 
     ui.add_space(8.0);
-    ui.weak("Changes apply immediately. Edit assets/input.ron to persist.");
+    ui.weak(
+        "Raw codes are platform-specific — find yours with the gamepad_axes \
+         example. Changes apply immediately; edit assets/input.ron to persist.",
+    );
 }
 
 // ── Shared helpers ─────────────────────────────────────────────────────────────

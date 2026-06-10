@@ -5,14 +5,13 @@ edition.workspace = true
 
 [dependencies]
 thalos_physics_canonical = { path = "../physics_canonical" }
+thalos_control = { path = "../control" }
 thalos_world = { path = "../world" }
 thalos_input = { path = "../input" }
 thalos_body_render = { path = "../body_render" }
 thalos_terrain = { path = "../terrain" }
 thalos_physics_local = { path = "../physics_local" }
 thalos_celestial = { path = "../celestial" }
-# Vendored LGPL flight-dynamics model; force-only use in the local bubble.
-avian_fdm = { workspace = true }
 thalos_shipyard = { path = "../shipyard" }
 thalos_volumetric_clouds = { path = "../volumetric_clouds" }
 bevy = { version = "0.18", features = ["wayland", "jpeg", "bevy_remote"] }

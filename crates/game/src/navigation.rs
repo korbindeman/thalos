@@ -1,19 +1,19 @@
 //! Ship-orientation mode widget and attitude autopilot.
 //!
 //! [`NavigationState`] holds the player's current orientation request.
-//! The widget toggles modes via the side panel; [`compute_attitude_control`]
-//! turns the active mode into a [`ControlInput`] for the physics
-//! simulation each frame, called from
-//! [`crate::bridge::handle_attitude_controls`]. Player keyboard input
-//! takes priority over any active mode.
+//! The widget toggles modes via the side panel; [`nav_attitude_demand`]
+//! turns the active mode into an [`AttitudeDemand`] for the fly-by-wire
+//! control bus ([`crate::control_bus`]), which arbitrates it against the
+//! pilot, the autopilot, and the SAS hold. Player stick input outranks the
+//! nav mode at the arbiter.
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics_canonical::maneuver::delta_v_to_world;
 use thalos_physics_canonical::simulation::Simulation;
 use thalos_physics_canonical::trajectory::Trajectory;
-use thalos_physics_canonical::types::ControlInput;
 use thalos_physics_canonical::velocity_frame::{NavBasis, VelocityReferenceFrame, nav_basis};
+use thalos_control::AttitudeDemand;
 
 use crate::maneuver::{GameNode, ManeuverPlan};
 use crate::target::TargetBody;
@@ -76,99 +76,45 @@ impl Plugin for NavigationPlugin {
 /// starts within the linear-torque regime, longer when the controller
 /// saturates against `max_torque`. Read by the scheduled-burn autopilot
 /// in [`crate::autopilot`] to size its lead time before a maneuver.
-pub(crate) const AUTOPILOT_SETTLE_S: f64 = 2.0;
+pub(crate) const AUTOPILOT_SETTLE_S: f64 = thalos_control::SETTLE_TIME_S;
 
 /// Body-frame "nose" axis for ship pointing. Apollo-style stacks have
 /// their long axis along body Y, with the command pod at +Y; flipping
 /// this would also flip the autopilot's pointing convention.
-pub(crate) const SHIP_NOSE_BODY: DVec3 = DVec3::Y;
+pub(crate) const SHIP_NOSE_BODY: DVec3 = thalos_control::NOSE_BODY;
 
-/// Resolve the active orientation request into a [`ControlInput`] for
-/// [`Simulation::set_control`]. Priority order:
+/// Resolve the active navigation mode into an [`AttitudeDemand`] for the
+/// fly-by-wire control bus ([`crate::control_bus`]).
 ///
-/// 1. **Player keyboard input** (any of W/A/S/D/Q/E pressed) overrides
-///    navigation modes. Callers pass zero player torque while a
-///    programmatic lock owns attitude.
-/// 2. **Autopilot target** → direct scheduled-burn pointing target
-///    supplied by [`crate::autopilot`].
-/// 3. **Stability** mode → re-uses the integrator's SAS rate damper
-///    (zero command, `sas_enabled: true`).
-/// 4. **Directional modes** (Prograde/Retrograde/Normal/AntiNormal/
-///    Radial/Target/AntiTarget/ManeuverNode) → run the PD autopilot
-///    against the per-mode target direction.
-/// 5. **Free flight** (no mode active, no player input) → either zero
-///    torque or SAS damping per the T-key toggle state.
+/// - `Stability` → [`AttitudeDemand::Hold`] (kill drift, hold the current
+///   attitude — the controller captures and holds a target quaternion).
+/// - A directional mode (Prograde/Retrograde/Normal/AntiNormal/Radial/
+///   Target/AntiTarget/ManeuverNode) → [`AttitudeDemand::PointNose`] at the
+///   resolved world direction.
+/// - `None` mode, or a directional target that can't be resolved this frame
+///   (e.g. zero relative velocity for prograde, missing prediction for a
+///   maneuver node) → [`AttitudeDemand::Free`], yielding to the lower-priority
+///   SAS hold rather than pointing at the wrong thing.
 ///
-/// `target_unreachable` means the target was set but the world target
-/// vector couldn't be resolved this frame (e.g. zero relative velocity
-/// for prograde, missing prediction for ManeuverNode). In that case we
-/// fall back to the free-flight branch instead of holding the last
-/// command — better to do nothing than to point at the wrong thing.
-pub fn compute_attitude_control(
-    player_torque: DVec3,
+/// Priority against the pilot, the autopilot, and the SAS hold is resolved by
+/// the bus arbiter, not here. This function only answers "what does the nav
+/// mode want?".
+pub fn nav_attitude_demand(
     nav_mode: Option<NavigationMode>,
-    autopilot_target: Option<DVec3>,
     active: VelocityReferenceFrame,
     target: &TargetBody,
     plan: &ManeuverPlan,
     sim: &Simulation,
-    sas_toggle_state: bool,
-) -> ControlInput {
-    // Spread `..*sim.control()` to preserve fields this fn doesn't
-    // own — currently `throttle`, written by the fuel-drain system in
-    // a separate pass. Adding new orthogonal fields to `ControlInput`
-    // (e.g. RCS later) will inherit the same protection automatically.
-    let base = *sim.control();
-
-    let player_active = player_torque.length_squared() > 1e-6;
-    if player_active {
-        return ControlInput {
-            torque_command: player_torque,
-            sas_enabled: false,
-            ..base
-        };
-    }
-
-    if let Some(target_dir) = autopilot_target {
-        return ControlInput {
-            torque_command: autopilot_command(target_dir, sim),
-            sas_enabled: true,
-            ..base
-        };
-    }
-
+) -> AttitudeDemand {
     let Some(mode) = nav_mode else {
-        return ControlInput {
-            torque_command: DVec3::ZERO,
-            sas_enabled: sas_toggle_state,
-            ..base
-        };
+        return AttitudeDemand::Free;
     };
-
     if matches!(mode, NavigationMode::Stability) {
-        return ControlInput {
-            torque_command: DVec3::ZERO,
-            sas_enabled: true,
-            ..base
-        };
+        return AttitudeDemand::Hold;
     }
-
-    let Some(target_dir) = compute_target_direction(mode, active, sim, target, plan) else {
-        return ControlInput {
-            torque_command: DVec3::ZERO,
-            sas_enabled: sas_toggle_state,
-            ..base
-        };
-    };
-
-    // SAS=true is harmless while the autopilot is producing nonzero
-    // torque (the integrator's rate damper only activates when the
-    // command is ~zero) and cleanly takes over once the autopilot
-    // converges, killing any residual ω the PD term doesn't catch.
-    ControlInput {
-        torque_command: autopilot_command(target_dir, sim),
-        sas_enabled: true,
-        ..base
+    match compute_target_direction(mode, active, sim, target, plan) {
+        Some(dir) => AttitudeDemand::PointNose(dir),
+        None => AttitudeDemand::Free,
     }
 }
 
@@ -300,53 +246,6 @@ pub(crate) fn maneuver_node_burn_direction(sim: &Simulation, node: &GameNode) ->
         body_state.velocity,
     );
     safe_normalize(dv_world)
-}
-
-/// PD controller mapping (target direction, current attitude, ship
-/// inertia) → per-axis torque command in `[-1, 1]`. The pointing axis
-/// is body +Y; roll about that axis is purely damped (no orientation
-/// constraint about the nose).
-fn autopilot_command(target_nose_world: DVec3, sim: &Simulation) -> DVec3 {
-    let attitude = sim.attitude();
-    let params = sim.ship_params();
-
-    // Target in body frame so the cross product directly yields the
-    // body-frame error axis ω needs to act about.
-    let target_body = attitude.orientation.inverse() * target_nose_world;
-
-    // `nose × target` gives axis × sin(angle). The Y component is
-    // always zero (Y × anything has zero Y), so torque.y comes purely
-    // from the −Kd·ω damping term — exactly what we want for roll.
-    //
-    // Near 180° error, sin(angle)→0 and the controller stalls. Inject
-    // a kick about body X to break the symmetry; the integrator will
-    // settle on a real axis once it starts moving.
-    let dot_with_nose = target_body.y;
-    let error_axis = if dot_with_nose < -0.99 {
-        DVec3::X
-    } else {
-        SHIP_NOSE_BODY.cross(target_body)
-    };
-
-    let omega_n = std::f64::consts::PI / AUTOPILOT_SETTLE_S;
-    let kp = params.moment_of_inertia * (omega_n * omega_n);
-    let kd = params.moment_of_inertia * (2.0 * omega_n);
-
-    let desired_torque = error_axis * kp - attitude.angular_velocity * kd;
-
-    DVec3::new(
-        normalize_axis(desired_torque.x, params.max_torque.x),
-        normalize_axis(desired_torque.y, params.max_torque.y),
-        normalize_axis(desired_torque.z, params.max_torque.z),
-    )
-}
-
-fn normalize_axis(desired: f64, max: f64) -> f64 {
-    if max > 0.0 {
-        (desired / max).clamp(-1.0, 1.0)
-    } else {
-        0.0
-    }
 }
 
 fn safe_normalize(v: DVec3) -> Option<DVec3> {

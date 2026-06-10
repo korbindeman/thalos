@@ -168,6 +168,7 @@ pub fn recompute_wing_state(
             dihedral: wing.dihedral,
             thickness: wing.thickness,
             incidence: wing.incidence,
+            control_surfaces: wing.control_surfaces.clone(),
         };
         res.pools
             .retain(|resource, _| w.storage.iter().any(|option| option.resource == *resource));

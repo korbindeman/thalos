@@ -12,10 +12,11 @@ is the foundation this **generalises** — we extend the existing attach-node
 system, we do not fork it.
 
 **Slices 1–2 (parametric wing, wing-pylon jet nacelle, and scalar intake
-flow), plus the airfoil-lofted wing and the stationed-loft fuselage, have
-landed** — the rest of this spec is still forward-looking design. See **§0
-Implementation status** for exactly what exists in code today and what is
-still on paper.
+flow), the airfoil-lofted wing and the stationed-loft fuselage, plus
+visually-actuating control surfaces (ailerons/elevator/rudder as `Wing`
+parameters), have landed** — the rest of this spec is still forward-looking
+design. See **§0 Implementation status** for exactly what exists in code today
+and what is still on paper.
 
 ## 0. Implementation status
 
@@ -277,13 +278,47 @@ stance. *To revisit:* a belly-mounted axle can't exceed the hull width without
 floating — a true wing/sponson gear mount comes with the morph work; physics still
 uses one contact frame per leg (the bogie centre).
 
-### Next (the stated goal: gear + control surfaces)
+### Landed — control surfaces (visual actuation)
 
-- **Control surfaces become parameters of the `Wing`**, not separate
-  parts: trailing-edge chord fraction + spanwise window + a
-  hinge/deflection descriptor, so a flap / aileron / elevator / rudder is
-  authored as part of the wing it lives on. The `Wing` struct documents
-  this extension point.
+Control surfaces are **parameters of the `Wing`** (`Wing::control_surfaces:
+Vec<ControlSurface>`), not separate parts — confirming the planned shape:
+
+- **`ControlSurface`** (`part.rs`): a `role` (`Aileron` / `Elevator` /
+  `Rudder`), a spanwise window (`span_start`/`span_end` as half-span
+  fractions), a trailing-edge `chord_fraction`, and a `max_deflection`.
+  Serialized on `PartParams::Wing` behind `#[serde(default)]`, so pre-existing
+  blueprints load as plain wings. `catalog::default_control_surfaces(role,
+  mount_angle)` fills role-appropriate defaults at editor placement (the
+  elevator-vs-rudder split falls out of the mount azimuth, like the geometry
+  preset).
+- **Geometry** (`wing_mesh.rs`): `build_wing_mesh` **notches** each surface
+  out of the airfoil loft over its window (a blunt hinge face + a notch wall),
+  and `build_control_surface_mesh` meshes the removed trailing wedge as a
+  separate sub-mesh expressed *relative to its hinge anchor*, so the owning
+  entity rotates it cleanly. `control_surface_geometry` returns the hinge
+  anchor/axis + area + centroid — the **single seam a future per-surface
+  force model reads**. The hinge axis is oriented consistently across a
+  mirrored pair (via `fore × thick`), so `+θ` drops the trailing edge on both
+  sides.
+- **Actuation** (`game/src/ship_view.rs`): each surface is a hinged child of
+  its wing carrying `ControlSurfaceVisual`; `animate_ship_control_surfaces`
+  deflects it from `RealizedControl::command` (the controller's normalized
+  attitude effort — **not** the allocated `aero` fraction, which collapses to
+  ~0 when aero authority dwarfs the reaction-wheel torque). Elevators take
+  pitch (symmetric), ailerons take roll (differential by mount side), rudder
+  takes yaw.
+
+This slice is **visual only**: forces still come from the whole-body
+`thalos_physics_canonical::aero` model. Per-surface force generation (each
+surface's `area_m2`/`centroid` feeding real moments) is the deferred upgrade
+the geometry seam is built for. A known consequence today: an aircraft's
+*applied* control torque is capped by `allocate()` at the reaction-wheel
+`max_torque`, so a wing with little reaction-wheel authority deflects its
+ailerons fully but rolls only weakly — fixing that is part of the
+per-surface / allocator flight-model work, not the visual layer.
+
+### Next (the stated goal: gear)
+
 - **Landing gear** is a *separate* footprint part kind reusing
   `SurfaceMount` + `MountSymmetry::Mirrored` for the L/R pair.
 
@@ -627,13 +662,13 @@ you can also author a bare nose and place a footprint cockpit behind it.
   vertical offset.
 - Decks / multi-deck interiors (§6.3) — bulkheads-only carries fighters,
   GA, landers, most cargo.
-- Aero *simulation* for **planes** — the spacecraft-drag first slice now
-  exists (`docs/aerodynamics.md`, vendored `avian_fdm`), but lift / control
-  surfaces / full 6-DoF flight wait on this construction system's wing
-  geometry. The mapping is direct: **each airfoil-stationed wing /
-  control-surface Module becomes one `avian_fdm` `AeroZone`** (chord, area,
-  twist, deflection → coefficients), and the "free now" wing-area / MAC /
-  centre-of-lift feedback below is the same data the flight model consumes.
+- Aero *simulation* for **planes** — the native flight model now exists
+  (`docs/aerodynamics.md`, `thalos_physics_canonical::aero`) with lift / control
+  surfaces, but richer wings wait on this construction system's geometry. The
+  mapping is direct: **each airfoil-stationed wing / control-surface Module
+  becomes one `AeroSurface`** (chord, area, twist, deflection → coefficients),
+  and the "free now" wing-area / MAC / centre-of-lift feedback below is the same
+  data the flight model consumes.
 - Runtime door/gear animation + payload deploy/load gameplay.
 
 **Free now (geometry-derived editor feedback, no flight model needed):**

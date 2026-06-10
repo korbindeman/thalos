@@ -11,6 +11,7 @@ use bevy::math::Vec2;
 pub mod body_editor;
 pub mod game;
 pub mod gating;
+pub mod joystick;
 pub mod settings;
 pub mod shipyard;
 

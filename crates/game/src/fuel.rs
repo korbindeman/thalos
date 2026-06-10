@@ -113,14 +113,14 @@ impl Plugin for FuelPlugin {
                 (
                     // Sample the keyboard early so the scheduled-burn
                     // autopilot in `crates/game/src/autopilot.rs` can
-                    // run between this and `handle_attitude_controls`,
+                    // run between this and `control_bus::realize_control`,
                     // overriding `ThrottleState::commanded` for the
                     // upcoming gate step. Detached from the
                     // reconcile/gate chain because it has no data
                     // dependency on attitude.
                     handle_throttle_input
                         .in_set(SimStage::Physics)
-                        .before(crate::bridge::handle_attitude_controls),
+                        .before(crate::control_bus::realize_control),
                     // Reconcile first: at this point the simulation's
                     // `ship_mass_kg` reflects the previous frame's step,
                     // so any burn that fired during that step is now
@@ -134,7 +134,7 @@ impl Plugin for FuelPlugin {
                     )
                         .chain()
                         .in_set(SimStage::Physics)
-                        .after(crate::bridge::handle_attitude_controls)
+                        .after(crate::control_bus::realize_control)
                         .before(crate::bridge::advance_simulation),
                 ),
             );
@@ -146,6 +146,15 @@ impl Plugin for FuelPlugin {
 /// ~2 s, fast enough for combat-style adjustments and slow enough to
 /// hit a target setting without overshoot.
 const THROTTLE_RAMP_RATE: f64 = 0.5;
+
+/// How far the absolute HOTAS throttle lever must move (in `[0, 1]`) from the
+/// position at which it last took control before it reclaims the throttle from
+/// the keyboard. Comparing against that anchor — rather than the previous
+/// frame — ignores analog jitter while still catching slow deliberate slides
+/// (their cumulative deviation eventually crosses the threshold). This is what
+/// lets the lever and the keyboard (Z/X/Shift/Ctrl) coexist as
+/// most-recently-used-wins instead of the lever locking the keyboard out.
+const THROTTLE_LEVER_MOVE_EPS: f32 = 0.02;
 
 /// State shared across the throttle/drain systems for prediction
 /// management. Tracks the previous frame's effective throttle so the
@@ -191,11 +200,16 @@ fn finish_with_throttle(
 
 /// Sample player input → [`ThrottleState::commanded`].
 ///
-/// - HOTAS absolute axis, when present, directly sets the command
-/// - `Z` snaps to full
-/// - `X` snaps to zero
-/// - `Shift` (held) ramps up
-/// - `Ctrl` (held) ramps down
+/// Throttle is **most-recently-used-wins** between an absolute HOTAS lever and
+/// the keyboard, so both stay usable:
+/// - HOTAS absolute axis sets the throttle to the lever position, but only
+///   while the lever is being moved (see [`THROTTLE_LEVER_MOVE_EPS`]); a lever
+///   held still yields to the keyboard.
+/// - `Z` snaps to full, `X` snaps to zero
+/// - `Shift` (held) ramps up, `Ctrl` (held) ramps down
+///
+/// A lever held still lets keyboard adjustments stick; nudging the lever again
+/// reclaims the throttle at its physical position.
 ///
 /// Gated by [`ControlLocks::throttle`] — when set, player input is
 /// dropped because some programmatic system (today the scheduled-burn
@@ -206,14 +220,25 @@ pub fn handle_throttle_input(
     clock: Res<SimClock>,
     locks: Res<ControlLocks>,
     mut throttle: ResMut<ThrottleState>,
+    // The lever position at which it last took control; `None` until the axis
+    // first reports. Survives across frames.
+    mut lever_anchor: Local<Option<f32>>,
 ) {
     if locks.throttle {
         return;
     }
 
-    if let Some(throttle_absolute) = input.throttle_absolute {
-        throttle.commanded = throttle_absolute.clamp(0.0, 1.0) as f64;
-        return;
+    // Absolute HOTAS lever takes the throttle whenever it is physically moved
+    // relative to where it last asserted control. Held still, it falls through
+    // to the keyboard below so the two controls coexist.
+    if let Some(lever) = input.throttle_absolute {
+        let lever = lever.clamp(0.0, 1.0);
+        let moved = lever_anchor.is_none_or(|anchor| (lever - anchor).abs() > THROTTLE_LEVER_MOVE_EPS);
+        if moved {
+            *lever_anchor = Some(lever);
+            throttle.commanded = lever as f64;
+            return;
+        }
     }
 
     if input.throttle_full {

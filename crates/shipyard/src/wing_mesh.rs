@@ -36,7 +36,7 @@
 //! entity with a reflected `θ` (and `Wing.incidence`), not a flag here —
 //! see [`crate::SymmetryGroup`].
 
-use crate::part::Wing;
+use crate::part::{ControlSurface, Wing};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -130,6 +130,158 @@ fn airfoil_perimeter(tc: f32) -> Vec<(f32, f32)> {
     out
 }
 
+/// Cosine-spaced chord fractions within `[a, b]` (LE = 0 → TE = 1),
+/// inclusive of both endpoints. Shared by the forward (main-wing) and aft
+/// (control-surface) sub-sections so they meet on an identical hinge seam.
+fn chord_stations_in(a: f32, b: f32) -> Vec<f32> {
+    let n = CHORD_SAMPLES;
+    let mut xs = vec![a];
+    for i in 0..=n {
+        let theta = std::f32::consts::PI * (i as f32 / n as f32);
+        let x = 0.5 * (1.0 - theta.cos());
+        if x > a + 1e-5 && x < b - 1e-5 {
+            xs.push(x);
+        }
+    }
+    xs.push(b);
+    xs
+}
+
+/// Hinge chord-station `s` (LE `+0.5` → TE `−0.5`) for a control surface
+/// occupying `chord_fraction` of the chord, measured forward from the
+/// trailing edge.
+fn hinge_s(chord_fraction: f32) -> f32 {
+    -0.5 + chord_fraction.clamp(0.05, 0.95)
+}
+
+/// Forward (main-wing) section perimeter, the leading part of the airfoil
+/// closed off by a blunt vertical face at the hinge. `x_hinge` is the hinge
+/// chord fraction from the LE. Ordered upper LE→hinge then lower hinge→LE
+/// to match [`airfoil_perimeter`]'s winding.
+fn forward_perimeter(tc: f32, x_hinge: f32) -> Vec<(f32, f32)> {
+    let xs = chord_stations_in(0.0, x_hinge);
+    let mut out = Vec::with_capacity(2 * xs.len());
+    for &x in &xs {
+        out.push((0.5 - x, naca_half_thickness(tc, x)));
+    }
+    for &x in xs.iter().rev() {
+        if x <= 1e-6 {
+            continue; // skip the shared pinched leading edge
+        }
+        out.push((0.5 - x, -naca_half_thickness(tc, x)));
+    }
+    out
+}
+
+/// Aft (control-surface) section perimeter: the trailing wedge from the
+/// hinge to the closed trailing edge, with a blunt vertical face at the
+/// hinge. Same winding convention as [`airfoil_perimeter`].
+fn aft_perimeter(tc: f32, x_hinge: f32) -> Vec<(f32, f32)> {
+    let xs = chord_stations_in(x_hinge, 1.0);
+    let mut out = Vec::with_capacity(2 * xs.len());
+    for &x in &xs {
+        out.push((0.5 - x, naca_half_thickness(tc, x)));
+    }
+    for &x in xs.iter().rev() {
+        if x >= 1.0 - 1e-6 {
+            continue; // skip the shared pinched trailing edge
+        }
+        out.push((0.5 - x, -naca_half_thickness(tc, x)));
+    }
+    out
+}
+
+/// Place one section perimeter at a spanwise station, in host-local space,
+/// offset by `origin` (subtracted — used to express a control-surface mesh
+/// relative to its hinge anchor; pass `Vec3::ZERO` for the wing itself).
+fn section_ring(
+    frame: &WingPanelFrame,
+    wing: &Wing,
+    span_fraction: f32,
+    perimeter: &[(f32, f32)],
+    origin: Vec3,
+) -> Vec<Vec3> {
+    let center = frame.center_at(span_fraction);
+    let chord = frame.chord_at(wing, span_fraction);
+    perimeter
+        .iter()
+        .map(|&(s, u)| center + frame.fore_dir * (s * chord) + frame.thick_dir * (u * chord) - origin)
+        .collect()
+}
+
+/// Loft two equal-length section rings into a skin band. Winding matches the
+/// original loft (verified outward by `airfoil_loft_is_outward_facing`).
+fn loft_rings(
+    a_ring: &[Vec3],
+    b_ring: &[Vec3],
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+) {
+    let perimeter = a_ring.len();
+    let a_base = positions.len() as u32;
+    for v in a_ring {
+        positions.push([v.x, v.y, v.z]);
+    }
+    let b_base = positions.len() as u32;
+    for v in b_ring {
+        positions.push([v.x, v.y, v.z]);
+    }
+    for k in 0..perimeter {
+        let k2 = ((k + 1) % perimeter) as u32;
+        let k = k as u32;
+        let (r0, r1) = (a_base + k, a_base + k2);
+        let (t0, t1) = (b_base + k, b_base + k2);
+        indices.extend_from_slice(&[r0, t1, t0, r0, r1, t1]);
+    }
+}
+
+/// Fan a flat cap over a section ring from its centroid. `faces_plus_span`
+/// picks the winding so the cap normal points along +span (`true`, like the
+/// tip cap) or −span (`false`, like the root cap). Cap vertices are their
+/// own copies so the rim edge stays crisp under smoothing.
+fn cap_ring(
+    ring: &[Vec3],
+    faces_plus_span: bool,
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+) {
+    let perimeter = ring.len();
+    let centroid = ring.iter().copied().sum::<Vec3>() / perimeter as f32;
+    let center_idx = positions.len() as u32;
+    positions.push([centroid.x, centroid.y, centroid.z]);
+    let rim_base = positions.len() as u32;
+    for v in ring {
+        positions.push([v.x, v.y, v.z]);
+    }
+    for k in 0..perimeter {
+        let k2 = ((k + 1) % perimeter) as u32;
+        let k = k as u32;
+        if faces_plus_span {
+            indices.extend_from_slice(&[center_idx, rim_base + k, rim_base + k2]);
+        } else {
+            indices.extend_from_slice(&[center_idx, rim_base + k2, rim_base + k]);
+        }
+    }
+}
+
+fn finish_mesh(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Mesh {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let uv = vec![[0.0_f32, 0.0]; positions.len()];
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh.compute_smooth_normals();
+    mesh
+}
+
+/// Valid, clamped `(span_start, span_end)` of a control surface as
+/// fractions of the half-span, or `None` if the window is degenerate.
+fn surface_span_window(surface: &ControlSurface) -> Option<(f32, f32)> {
+    let a = surface.span_start.clamp(0.0, 1.0);
+    let b = surface.span_end.clamp(0.0, 1.0);
+    (b - a > 1e-3).then_some((a, b))
+}
+
 /// Build the host-local mesh for one wing panel mounted at `angle` on a
 /// host of radius `parent_radius`.
 ///
@@ -140,87 +292,197 @@ fn airfoil_perimeter(tc: f32) -> Vec<(f32, f32)> {
 ///
 /// The skin is a loft of the [`airfoil_perimeter`] section between the root
 /// (against the host) and the swept/tapered tip, plus a flat cap at each
-/// end so the panel is watertight (the root cap is hidden in the host; the
-/// tip cap closes the wingtip). Section vertices are shared around the loop
-/// so smoothing rounds the leading edge; the caps carry their own vertices
-/// so their rims stay crisp.
+/// end so the panel is watertight. Where a [`ControlSurface`] sits, the
+/// loft is **notched**: across that spanwise window the section is truncated
+/// at the hinge chord-station (a blunt trailing face), and the removed
+/// trailing wedge is meshed separately by [`build_control_surface_mesh`] so
+/// it can hinge. The wall closing each notch is capped with the same aft
+/// wedge outline, so the gap reads correctly when the surface deflects.
 pub fn build_wing_mesh(wing: &Wing, angle: f32, parent_radius: f32) -> Mesh {
     let frame = wing_panel_frame(wing, angle, parent_radius);
-    let section = airfoil_perimeter(wing.thickness);
-    let perimeter = section.len();
+    let tc = wing.thickness;
 
-    // A ring of perimeter points at one spanwise station, in host-local space.
-    let ring = |span_fraction: f32| -> Vec<Vec3> {
-        let center = frame.center_at(span_fraction);
-        let chord = frame.chord_at(wing, span_fraction);
-        section
-            .iter()
-            .map(|&(s, u)| center + frame.fore_dir * (s * chord) + frame.thick_dir * (u * chord))
-            .collect()
+    // Spanwise breakpoints: panel ends plus every surface window edge.
+    let mut bounds = vec![0.0_f32, 1.0];
+    for surface in &wing.control_surfaces {
+        if let Some((a, b)) = surface_span_window(surface) {
+            bounds.push(a);
+            bounds.push(b);
+        }
+    }
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    bounds.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+    // For a spanwise interval midpoint, the covering surface's hinge x (if any).
+    let covering_hinge_x = |mid: f32| -> Option<f32> {
+        wing.control_surfaces.iter().find_map(|s| {
+            let (a, b) = surface_span_window(s)?;
+            (mid > a && mid < b).then(|| 0.5 - hinge_s(s.chord_fraction))
+        })
     };
-    let root_ring = ring(0.0);
-    let tip_ring = ring(1.0);
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
-    let push = |positions: &mut Vec<[f32; 3]>, v: Vec3| positions.push([v.x, v.y, v.z]);
 
-    // Lofted skin: shared section rings, root first then tip.
-    let root_base = 0u32;
-    for v in &root_ring {
-        push(&mut positions, *v);
-    }
-    let tip_base = positions.len() as u32;
-    for v in &tip_ring {
-        push(&mut positions, *v);
-    }
-    for k in 0..perimeter {
-        let k2 = (k + 1) % perimeter;
-        let (k, k2) = (k as u32, k2 as u32);
-        let r0 = root_base + k;
-        let r1 = root_base + k2;
-        let t0 = tip_base + k;
-        let t1 = tip_base + k2;
-        // Winding: outward (verified by `airfoil_loft_is_outward_facing`).
-        indices.extend_from_slice(&[r0, t1, t0, r0, r1, t1]);
-    }
-
-    // End caps — their own vertices so the rim edge stays crisp under smoothing.
-    let cap = |ring: &[Vec3], center: Vec3, outward_is_tip: bool, positions: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>| {
-        let center_idx = positions.len() as u32;
-        push(positions, center);
-        let rim_base = positions.len() as u32;
-        for v in ring {
-            push(positions, *v);
-        }
-        for k in 0..perimeter {
-            let k2 = ((k + 1) % perimeter) as u32;
-            let k = k as u32;
-            if outward_is_tip {
-                indices.extend_from_slice(&[center_idx, rim_base + k, rim_base + k2]);
-            } else {
-                indices.extend_from_slice(&[center_idx, rim_base + k2, rim_base + k]);
-            }
+    // Per-segment perimeter: clean airfoil, or forward (notched) section.
+    let seg_perimeter = |mid: f32| -> Vec<(f32, f32)> {
+        match covering_hinge_x(mid) {
+            Some(x_hinge) => forward_perimeter(tc, x_hinge),
+            None => airfoil_perimeter(tc),
         }
     };
-    cap(&root_ring, frame.center_at(0.0), false, &mut positions, &mut indices);
-    cap(&tip_ring, frame.center_at(1.0), true, &mut positions, &mut indices);
 
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+    // Loft each spanwise segment with its own section.
+    for w in bounds.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let mid = 0.5 * (a + b);
+        let perim = seg_perimeter(mid);
+        let a_ring = section_ring(&frame, wing, a, &perim, Vec3::ZERO);
+        let b_ring = section_ring(&frame, wing, b, &perim, Vec3::ZERO);
+        loft_rings(&a_ring, &b_ring, &mut positions, &mut indices);
+    }
+
+    // Root and tip caps use the section present at each panel end.
+    let root_perim = seg_perimeter(0.5 * (bounds[0] + bounds[1]));
+    cap_ring(
+        &section_ring(&frame, wing, 0.0, &root_perim, Vec3::ZERO),
+        false,
+        &mut positions,
+        &mut indices,
     );
-    // UVs the standard material expects; a flat default is fine until the
-    // wing gets a real skin material.
-    let uv = vec![[0.0_f32, 0.0]; positions.len()];
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
-    mesh.insert_indices(Indices::U32(indices));
-    // Section ring vertices are shared between adjacent chordwise faces, so
-    // smoothing rounds the leading edge; cap vertices are separate copies,
-    // so their rims average only within the cap and stay crisp.
-    mesh.compute_smooth_normals();
-    mesh
+    let last = bounds.len() - 1;
+    let tip_perim = seg_perimeter(0.5 * (bounds[last - 1] + bounds[last]));
+    cap_ring(
+        &section_ring(&frame, wing, 1.0, &tip_perim, Vec3::ZERO),
+        true,
+        &mut positions,
+        &mut indices,
+    );
+
+    // Notch walls: at any interior boundary where a clean segment meets a
+    // notched one, close the aft cavity of the clean side with the aft-wedge
+    // outline, facing into the gap.
+    for i in 1..last {
+        let f = bounds[i];
+        let left_hinge = covering_hinge_x(0.5 * (bounds[i - 1] + f));
+        let right_hinge = covering_hinge_x(0.5 * (f + bounds[i + 1]));
+        match (left_hinge, right_hinge) {
+            // Clean on the left, notch opens toward +span.
+            (None, Some(x_hinge)) => {
+                let ring = section_ring(&frame, wing, f, &aft_perimeter(tc, x_hinge), Vec3::ZERO);
+                cap_ring(&ring, true, &mut positions, &mut indices);
+            }
+            // Clean on the right, notch opens toward −span.
+            (Some(x_hinge), None) => {
+                let ring = section_ring(&frame, wing, f, &aft_perimeter(tc, x_hinge), Vec3::ZERO);
+                cap_ring(&ring, false, &mut positions, &mut indices);
+            }
+            _ => {}
+        }
+    }
+
+    finish_mesh(positions, indices)
+}
+
+/// Geometry of one control surface in the host-local wing frame — the
+/// shared seam both the visual layer and a future per-surface force model
+/// read. `hinge_anchor` + `hinge_axis` place and rotate the hinged mesh;
+/// `centroid` + `area_m2` describe where its force acts and how large it is.
+#[derive(Clone, Copy, Debug)]
+pub struct ControlSurfaceGeometry {
+    /// A point on the hinge line (host-local); the surface entity's local
+    /// translation, so its mesh — built relative to this point — rotates
+    /// about the hinge.
+    pub hinge_anchor: Vec3,
+    /// Unit hinge axis (host-local), inboard→outboard. Positive rotation
+    /// about it is consistent across the panel; the game maps command sign.
+    pub hinge_axis: Vec3,
+    /// Area centroid of the surface (host-local), at its mid-chord, mid-span.
+    pub centroid: Vec3,
+    /// Planform area of the surface, m².
+    pub area_m2: f32,
+}
+
+/// A built control-surface sub-mesh plus the geometry needed to hinge it.
+pub struct BuiltControlSurface {
+    pub mesh: Mesh,
+    pub geometry: ControlSurfaceGeometry,
+}
+
+/// Compute the hinge/area geometry of `surface` on `wing` without building a
+/// mesh. Pure; safe for the (future) force model to call per frame.
+pub fn control_surface_geometry(
+    wing: &Wing,
+    surface: &ControlSurface,
+    angle: f32,
+    parent_radius: f32,
+) -> ControlSurfaceGeometry {
+    let frame = wing_panel_frame(wing, angle, parent_radius);
+    let (a, b) = surface_span_window(surface).unwrap_or((0.0, 1.0));
+    let s_hinge = hinge_s(surface.chord_fraction);
+
+    // Point on the hinge line at span fraction f (mid-thickness).
+    let hinge_point = |f: f32| -> Vec3 {
+        frame.center_at(f) + frame.fore_dir * (s_hinge * frame.chord_at(wing, f))
+    };
+    let hinge_anchor = hinge_point(a);
+    // The hinge line is spanwise; orient it consistently across a mirrored
+    // pair so a given +θ deflects the trailing edge the *same* way (down) on
+    // both sides. `fore × thick` is ~+X on both panels (fore ≈ +Y, thick ≈
+    // +Z), unlike `span_dir`, which flips, so it fixes the sense. The game
+    // then makes ailerons differential with an explicit per-side sign and
+    // leaves elevator/rudder symmetric.
+    let mut hinge_axis = (hinge_point(b) - hinge_anchor).normalize_or(frame.span_dir);
+    if hinge_axis.dot(frame.fore_dir.cross(frame.thick_dir)) < 0.0 {
+        hinge_axis = -hinge_axis;
+    }
+
+    let mid = 0.5 * (a + b);
+    // Aft-wedge chord centroid sits between the hinge and the trailing edge.
+    let s_centroid = 0.5 * (s_hinge + -0.5);
+    let centroid =
+        frame.center_at(mid) + frame.fore_dir * (s_centroid * frame.chord_at(wing, mid));
+
+    let span_len = (frame.tip_center - frame.root_center).length() * (b - a);
+    let area_m2 = surface.chord_fraction.clamp(0.05, 0.95) * frame.chord_at(wing, mid) * span_len;
+
+    ControlSurfaceGeometry {
+        hinge_anchor,
+        hinge_axis,
+        centroid,
+        area_m2,
+    }
+}
+
+/// Build the hinged trailing-wedge mesh for one control surface, expressed
+/// **relative to its hinge anchor** so the owning entity can be placed at
+/// `geometry.hinge_anchor` and rotate the surface about `geometry.hinge_axis`.
+pub fn build_control_surface_mesh(
+    wing: &Wing,
+    surface: &ControlSurface,
+    angle: f32,
+    parent_radius: f32,
+) -> BuiltControlSurface {
+    let frame = wing_panel_frame(wing, angle, parent_radius);
+    let geometry = control_surface_geometry(wing, surface, angle, parent_radius);
+    let (a, b) = surface_span_window(surface).unwrap_or((0.0, 1.0));
+    let x_hinge = 0.5 - hinge_s(surface.chord_fraction);
+    let perim = aft_perimeter(wing.thickness, x_hinge);
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    let a_ring = section_ring(&frame, wing, a, &perim, geometry.hinge_anchor);
+    let b_ring = section_ring(&frame, wing, b, &perim, geometry.hinge_anchor);
+    loft_rings(&a_ring, &b_ring, &mut positions, &mut indices);
+    // Inboard end faces −span, outboard end faces +span.
+    cap_ring(&a_ring, false, &mut positions, &mut indices);
+    cap_ring(&b_ring, true, &mut positions, &mut indices);
+
+    BuiltControlSurface {
+        mesh: finish_mesh(positions, indices),
+        geometry,
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +499,7 @@ mod tests {
             thickness: 0.12,
             incidence: 0.0,
             dry_mass: 0.0,
+            control_surfaces: Vec::new(),
         }
     }
 
@@ -334,6 +597,93 @@ mod tests {
         let tip_c = near(frame.center_at(1.0)).expect("tip cap center vertex");
         assert!(Vec3::from_array(nor[root_c]).dot(frame.span_dir) < -0.8, "root cap inboard");
         assert!(Vec3::from_array(nor[tip_c]).dot(frame.span_dir) > 0.8, "tip cap outboard");
+    }
+
+    #[test]
+    fn hinge_splits_the_section_at_the_chord_fraction() {
+        // The forward (main-wing) and aft (control-surface) perimeters meet on
+        // the hinge chord-station and partition the section: forward keeps the
+        // LE side (s ≥ s_hinge), aft keeps the TE side (s ≤ s_hinge). For a
+        // 25%-chord surface the hinge sits at s = −0.5 + 0.25 = −0.25.
+        let tc = 0.12_f32;
+        let chord_fraction = 0.25_f32;
+        let s_hinge = hinge_s(chord_fraction);
+        let x_hinge = 0.5 - s_hinge;
+        assert!((s_hinge - -0.25).abs() < 1e-5);
+
+        let fwd = forward_perimeter(tc, x_hinge);
+        let aft = aft_perimeter(tc, x_hinge);
+        let fwd_min_s = fwd.iter().map(|&(s, _)| s).fold(f32::MAX, f32::min);
+        let fwd_max_s = fwd.iter().map(|&(s, _)| s).fold(f32::MIN, f32::max);
+        let aft_min_s = aft.iter().map(|&(s, _)| s).fold(f32::MAX, f32::min);
+        let aft_max_s = aft.iter().map(|&(s, _)| s).fold(f32::MIN, f32::max);
+        // Forward spans LE (+0.5) down to the hinge; aft spans the hinge to TE.
+        assert!((fwd_max_s - 0.5).abs() < 1e-4, "forward keeps the LE");
+        assert!((fwd_min_s - s_hinge).abs() < 1e-4, "forward stops at the hinge");
+        assert!((aft_max_s - s_hinge).abs() < 1e-4, "aft starts at the hinge");
+        assert!((aft_min_s - -0.5).abs() < 1e-4, "aft keeps the TE");
+        // Both carry the blunt hinge face (a ± pair at s_hinge).
+        let seam = naca_half_thickness(tc, x_hinge);
+        assert!(fwd.iter().any(|&(s, u)| (s - s_hinge).abs() < 1e-4 && u < -0.5 * seam));
+        assert!(aft.iter().any(|&(s, u)| (s - s_hinge).abs() < 1e-4 && u > 0.5 * seam));
+    }
+
+    #[test]
+    fn notched_wing_drops_vertices_versus_clean() {
+        use crate::part::{ControlSurface, ControlSurfaceRole};
+        // The notched main wing replaces the full-section loft over the surface
+        // window with a truncated section, so its skin loft is lighter, while
+        // the removed wedge becomes the separate control-surface mesh.
+        let mut w = test_wing();
+        let angle = std::f32::consts::FRAC_PI_2;
+        let clean = build_wing_mesh(&w, angle, 1.0);
+        let clean_n = clean.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().len();
+        w.control_surfaces = vec![ControlSurface {
+            role: ControlSurfaceRole::Aileron,
+            span_start: 0.55,
+            span_end: 0.95,
+            chord_fraction: 0.25,
+            max_deflection: 0.4,
+        }];
+        let notched = build_wing_mesh(&w, angle, 1.0);
+        // The most-aft point of the truncated middle segment's ring is forward
+        // of the clean trailing edge at the same station.
+        let frame = wing_panel_frame(&w, angle, 1.0);
+        let fwd = forward_perimeter(w.thickness, 0.5 - hinge_s(0.25));
+        let ring = section_ring(&frame, &w, 0.75, &fwd, Vec3::ZERO);
+        let notch_aft = ring.iter().map(|v| (*v - frame.root_center).dot(-frame.fore_dir)).fold(f32::MIN, f32::max);
+        let clean_full = airfoil_perimeter(w.thickness);
+        let clean_ring = section_ring(&frame, &w, 0.75, &clean_full, Vec3::ZERO);
+        let clean_aft = clean_ring.iter().map(|v| (*v - frame.root_center).dot(-frame.fore_dir)).fold(f32::MIN, f32::max);
+        assert!(notch_aft < clean_aft - 0.1, "truncated section stops short of the clean TE");
+        assert!(notched.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().len() != clean_n);
+    }
+
+    #[test]
+    fn control_surface_mesh_hinges_about_its_anchor() {
+        use crate::part::{ControlSurface, ControlSurfaceRole};
+        let mut w = test_wing();
+        let surface = ControlSurface {
+            role: ControlSurfaceRole::Aileron,
+            span_start: 0.55,
+            span_end: 0.95,
+            chord_fraction: 0.25,
+            max_deflection: 0.4,
+        };
+        w.control_surfaces = vec![surface];
+        let angle = std::f32::consts::FRAC_PI_2;
+        let built = build_control_surface_mesh(&w, &surface, angle, 1.0);
+        let pos = built.mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
+        assert!(!pos.is_empty());
+        // Mesh is relative to the hinge anchor, so the leading (hinge) edge is
+        // near the origin and the trailing edge extends aft of it.
+        let min_aft = pos.iter().map(|p| Vec3::from_array(*p).dot(crate::wing_mesh::wing_panel_frame(&w, angle, 1.0).fore_dir)).fold(f32::MAX, f32::min);
+        // Some vertex sits well behind the hinge (−fore direction).
+        assert!(min_aft < -0.1, "surface should extend aft of its hinge anchor (min_aft {min_aft})");
+        // Hinge axis is roughly spanwise.
+        let span_dir = wing_panel_frame(&w, angle, 1.0).span_dir;
+        assert!(built.geometry.hinge_axis.dot(span_dir) > 0.9, "hinge axis ~ spanwise");
+        assert!(built.geometry.area_m2 > 0.0);
     }
 
     #[test]

@@ -802,19 +802,19 @@ The exact entry rule is policy data, not hardcoded into the integrator.
 Initial implementation can use altitude and density thresholds; later
 versions can add dynamic pressure and heating.
 
-**Implemented (first slice, see `docs/aerodynamics.md`).** The
-*aerodynamic flight regime* now exists for spacecraft drag, implemented
-**bubble-side** via the vendored `avian_fdm` force model rather than as a
-canonical `ForceProvider`. The entry rule is the body's `karman_line_m`:
-below it, `crates/game/src/local_physics.rs` returns `AvianRole::Full`
-(Avian owns translation so drag acts across the whole column) and
-`enforce_warp_altitude_limits` clamps warp to 1× — matching the
-"high warp disallowed in aerodynamic flight" rule above. The *orbital
-drag regime* (decay under warp) and aero in **prediction** are still
-deferred: aero is not yet a `ForceProvider`, so predicted trajectories
-do not account for drag. Folding the force math into
-`thalos_physics_canonical` (the "replace" exit for the LGPL dependency)
-is the prerequisite for prediction-aware aero.
+**Implemented (see `docs/aerodynamics.md`).** The *aerodynamic flight
+regime* exists for spacecraft drag + aircraft lift/control via the native
+`thalos_physics_canonical::aero` whole-body model, applied **bubble-side**
+(force-only into Avian) rather than as a canonical `ForceProvider`. The
+entry rule is the body's `karman_line_m`: below it,
+`crates/game/src/local_physics.rs` returns `AvianRole::Full` (Avian owns
+translation so drag acts across the whole column) and
+`enforce_warp_altitude_limits` clamps warp to 1× — matching the "high warp
+disallowed in aerodynamic flight" rule above. The *orbital drag regime*
+(decay under warp) and aero in **prediction** are still deferred: the aero
+evaluator is not yet wired into the shared `ShipPropagator`. Because it is
+now pure `thalos_physics_canonical`, doing so is the natural next step (no
+crate boundary left to cross).
 
 ## Maneuver frames
 
@@ -942,6 +942,17 @@ Attitude integration must support:
 
 Autopilot is a controller that emits torque or desired torque. It is not
 a magical transform setter.
+
+> **Realized by the fly-by-wire layer (`thalos_control`, see
+> `docs/control.md`).** This principle is now concrete: every attitude
+> command source — pilot stick, the SAS hold, the directional nav modes,
+> and the scheduled-burn autopilot — emits a `ControlDemand`; one
+> `AttitudeController` turns the arbitrated demand into a torque; that
+> torque is allocated to the reaction wheels *and* the aero control
+> surfaces together. The former per-frame deadbeat SAS damper (which
+> annihilated all ω every frame and limit-cycled against aero) is gone,
+> replaced by a critically-damped quaternion `Hold` PD. RCS and engine
+> gimbal are designed-in extension points (new effectors in `allocate`).
 
 ## Local physics with Avian
 
@@ -1845,10 +1856,11 @@ Shipped close to §4–§8. File map:
 - **`thalos_game::velocity_frame`** (new) — `VelocityFrameState` resource +
   `update_velocity_frame` writer + `VelocityFramePlugin`, plus `next_frame`
   for the click cycle. Registered in `main.rs`; the writer runs in
-  `SimStage::Physics` `.before(bridge::handle_attitude_controls)`.
-- **SAS** — `navigation::compute_attitude_control` /
-  `compute_target_direction` take the active frame; the velocity holds
-  resolve through `active_nav_basis` (ephemeris-sourced, Physics stage).
+  `SimStage::Physics` `.before(control_bus::realize_control)`.
+- **SAS** — `navigation::nav_attitude_demand` / `compute_target_direction`
+  take the active frame and emit an `AttitudeDemand` for the fly-by-wire
+  bus (`docs/control.md`); the velocity holds resolve through
+  `active_nav_basis` (ephemeris-sourced, Physics stage).
 - **Navball** — `navball::markers::compute_marker_directions` reads the
   active frame + `nav_basis` (solar-system-snapshot-sourced).
 - **Readout** — `hud::flight_panel` is now a clickable `Button`; `update`

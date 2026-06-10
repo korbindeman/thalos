@@ -1,6 +1,6 @@
 //! Player spawn situations.
 //!
-//! Four ways the player can start a session, selected by `just game [mode]`
+//! Five ways the player can start a session, selected by `just game [mode]`
 //! (CLI arg) or the `THALOS_SPAWN` env var:
 //!
 //! - `orbit` (default): a ship in the authored low Thalos parking orbit.
@@ -10,13 +10,15 @@
 //!   suicide-burn descent — there is no aerobraking to lean on.)
 //! - `final`: the same ship already on final approach, very low over a flat
 //!   dry patch of Thalos.
+//! - `cruise`: the Meridian aircraft at ~15,000 ft (~4,600 m AGL), flying
+//!   level at cruise speed over dry land.
 //!
 //! `orbit` and `eva` resolve fully in `main.rs` from the body state alone.
-//! `landing` and `final` need terrain data to place the ship *over land* at a
-//! true above-ground altitude, neither of which is known until the bakes load —
-//! so `main.rs` seeds the ship in the parking orbit (hidden behind the loading
-//! screen) and [`refine_descent_spawn`] installs the real descent state on the
-//! first `Running` frame, after searching the daylight hemisphere for a land
+//! `landing`, `final`, and `cruise` need terrain data to place the ship *over
+//! land* at a true above-ground altitude, neither of which is known until the
+//! bakes load — so `main.rs` seeds the ship in the parking orbit (hidden behind
+//! the loading screen) and [`refine_descent_spawn`] installs the real state on
+//! the first `Running` frame, after searching the daylight hemisphere for a land
 //! site. The loading gate guarantees terrain is resident by then.
 
 use bevy::math::{DMat3, DQuat, DVec3};
@@ -29,7 +31,39 @@ use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
+use crate::loading::AppState;
 use crate::solar_system_state::SimulationState;
+
+/// Whether a fresh session resumes at 1× immediately instead of holding the
+/// paused-on-spawn default.
+///
+/// **Every** spawn situation starts paused (warp 0×) so the player — or an
+/// agent driving the game over BRP — gets a beat to orient before sim time
+/// advances. Setting `THALOS_AUTO_RUN` (truthy) flips this on so the sim is
+/// live at 1× the instant the loading screen clears; this exists mainly for
+/// agents that want to observe motion without first issuing a warp input.
+///
+/// Sole consumer: [`apply_initial_warp`].
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct AutoRun {
+    pub enabled: bool,
+}
+
+impl AutoRun {
+    /// Read `THALOS_AUTO_RUN`. Truthy = `1` / `true` / `yes` / `on`
+    /// (case-insensitive); anything else, or unset, keeps the paused default.
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("THALOS_AUTO_RUN")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        Self { enabled }
+    }
+}
 
 /// Which scenario the player is dropped into. Selected once at startup in
 /// `main.rs`; inserted as a resource so deferred spawn finishers (today only
@@ -50,6 +84,9 @@ pub enum SpawnSituation {
     /// Aircraft airborne on short final, lined up with the runway centerline
     /// and descending toward it. Placed by [`crate::runway`].
     RunwayApproach,
+    /// Meridian aircraft at ~15,000 ft (~4,600 m AGL), flying level at cruise
+    /// speed over dry land. Placed by [`refine_descent_spawn`].
+    Cruise,
 }
 
 impl SpawnSituation {
@@ -64,6 +101,7 @@ impl SpawnSituation {
             "runway-approach" | "runway_approach" | "rwy-approach" | "approach-runway" => {
                 Self::RunwayApproach
             }
+            "cruise" | "cruising" => Self::Cruise,
             "" | "orbit" | "ship" => Self::ShipOrbit,
             other => {
                 eprintln!("  Unknown spawn mode '{other}'; defaulting to ship orbit.");
@@ -83,19 +121,24 @@ impl SpawnSituation {
         matches!(self, Self::Runway | Self::RunwayApproach)
     }
 
+    /// True for scenarios that fly the Meridian aircraft (runway + cruise).
+    pub fn is_aircraft(self) -> bool {
+        matches!(self, Self::Runway | Self::RunwayApproach | Self::Cruise)
+    }
+
     /// True when the surface state is installed by a *deferred*, terrain-aware
     /// placement system ([`crate::runway`] for the runway scenarios,
-    /// [`refine_descent_spawn`] for the descents) rather than seeded directly in
-    /// `main.rs`. The settle gate must wait for that placement before judging
-    /// whether tiles at the (then-known) site have settled.
+    /// [`refine_descent_spawn`] for the descents and cruise) rather than seeded
+    /// directly in `main.rs`. The settle gate must wait for that placement
+    /// before judging whether tiles at the (then-known) site have settled.
     pub fn has_deferred_placement(self) -> bool {
         self.is_runway() || self.descent_profile().is_some()
     }
 
-    /// Ship blueprint to load for this scenario. The runway scenarios fly the
+    /// Ship blueprint to load for this scenario. Aircraft scenarios fly the
     /// Meridian jetliner; everything else flies the default rocket.
     pub fn ship_blueprint_path(self) -> &'static str {
-        if self.is_runway() {
+        if self.is_aircraft() {
             "ships/meridian.ron"
         } else {
             "ships/apollo.ron"
@@ -106,6 +149,7 @@ impl SpawnSituation {
         match self {
             Self::Landing => Some(LANDING_PROFILE),
             Self::FinalApproach => Some(FINAL_APPROACH_PROFILE),
+            Self::Cruise => Some(CRUISE_PROFILE),
             Self::ShipOrbit | Self::Eva | Self::Runway | Self::RunwayApproach => None,
         }
     }
@@ -158,6 +202,9 @@ struct DescentProfile {
     cross_track_speed_m_s: f64,
     surface_query_lod_m: f32,
     site_search: SiteSearch,
+    /// When true the nose (+Y) points *forward* along the velocity vector
+    /// instead of retrograde. Used for the cruise scenario.
+    nose_forward: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,6 +240,7 @@ const LANDING_PROFILE: DescentProfile = DescentProfile {
     cross_track_speed_m_s: LANDING_CROSS_TRACK_SPEED_M_S,
     surface_query_lod_m: LANDING_SITE_QUERY_LOD_M,
     site_search: SiteSearch::NearestDryLand,
+    nose_forward: false,
 };
 
 /// Very low final-approach altitude (m). This starts inside the local-physics
@@ -235,6 +283,27 @@ const FINAL_APPROACH_PROFILE: DescentProfile = DescentProfile {
         max_relief_m: FINAL_APPROACH_MAX_RELIEF_M,
         distance_penalty_m_per_rad: FINAL_APPROACH_DISTANCE_PENALTY_M_PER_RAD,
     },
+    nose_forward: false,
+};
+
+/// Cruise altitude (m AGL) — 15,000 ft rounded slightly.
+const CRUISE_ALTITUDE_M: f64 = 4_600.0;
+
+/// Cruise speed (m/s) — ~160 m/s (~Mach 0.5 at sea level) for the Meridian.
+const CRUISE_SPEED_M_S: f64 = 160.0;
+
+/// LOD for the cruise site search — coarse enough to find coastlines and pick
+/// a dry-land site, fine enough to avoid landing over a lone reef.
+const CRUISE_SITE_QUERY_LOD_M: f32 = 2_000.0;
+
+const CRUISE_PROFILE: DescentProfile = DescentProfile {
+    label: "cruise",
+    altitude_m: CRUISE_ALTITUDE_M,
+    descent_rate_m_s: 0.0,
+    cross_track_speed_m_s: CRUISE_SPEED_M_S,
+    surface_query_lod_m: CRUISE_SITE_QUERY_LOD_M,
+    site_search: SiteSearch::NearestDryLand,
+    nose_forward: true,
 };
 
 /// Coarse LOD (m) for the land/ocean search. We want the baked macro height
@@ -264,7 +333,25 @@ impl Plugin for SpawnPlugin {
             // behind the loading screen, letting terrain stream in before the
             // reveal. Self-gated by its `done` local + terrain residency.
             refine_descent_spawn.before(SimStage::Physics),
-        );
+        )
+        // Single source of truth for the initial warp level, applied once when
+        // the loading screen clears (after every deferred placement has run).
+        .add_systems(OnEnter(AppState::Running), apply_initial_warp);
+    }
+}
+
+/// Apply the paused-on-spawn policy once the loading screen clears.
+///
+/// Every situation spawns paused (warp 0×); this resumes to 1× only when
+/// [`AutoRun`] is set. Centralising it on the `Loading → Running` transition
+/// keeps the deferred placement flows (runway, descent) from each having to
+/// decide a warp level — they install canonical state and leave the clock
+/// alone, and this fires after all of them so it always has the last word.
+fn apply_initial_warp(auto_run: Res<AutoRun>, mut sim: ResMut<SimulationState>) {
+    if auto_run.enabled {
+        sim.simulation.warp.reset_immediate();
+    } else {
+        sim.simulation.warp.pause_immediate();
     }
 }
 
@@ -311,9 +398,10 @@ fn descent_approach_state(
     let descent = -up * profile.descent_rate_m_s + east * profile.cross_track_speed_m_s;
     let velocity = surface_velocity + descent;
 
-    // Nose (+Y) retrograde to the surface-relative velocity (= `-descent`),
-    // dorsal (+Z) toward radial-out — same convention as the orbit spawn.
-    let nose = (-descent).try_normalize().unwrap_or(up);
+    // Nose (+Y): forward (prograde) for cruise, retrograde for descents.
+    // Dorsal (+Z) toward radial-out — same convention as the orbit spawn.
+    let flight_dir = descent.try_normalize().unwrap_or(east);
+    let nose = if profile.nose_forward { flight_dir } else { -flight_dir };
     let dorsal = (up - nose * up.dot(nose)).try_normalize().unwrap_or(east);
     let right = nose.cross(dorsal).normalize();
     let basis = DMat3::from_cols(right, nose, dorsal);

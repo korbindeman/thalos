@@ -311,6 +311,7 @@ mod tests {
             thickness: 0.12,
             incidence: 0.0,
             dry_mass: 0.0,
+            control_surfaces: Vec::new(),
         }
     }
 

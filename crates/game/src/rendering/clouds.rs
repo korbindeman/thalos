@@ -93,8 +93,14 @@ impl Plugin for CloudsRenderPlugin {
 fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
     config.clouds_bottom_height = BASE_ALTITUDE_M;
     config.clouds_top_height = BASE_ALTITUDE_M + THICKNESS_M;
-    config.clouds_coverage = COVERAGE;
-    config.clouds_density = DENSITY;
+    // Volumetric clouds temporarily disabled: keep the CloudsPlugin (its
+    // full-screen render texture must stay valid — body_sky.wgsl composites it
+    // with screen-space `textureLoad`, and a missing/1×1 texture reads as opaque
+    // black), but force a clear field so the raymarch yields transmittance 1 and
+    // the composite is a no-op. Restore `COVERAGE` / `DENSITY` to re-enable.
+    config.clouds_coverage = 0.0;
+    config.clouds_density = 0.0;
+    let _ = (COVERAGE, DENSITY);
     config.clouds_base_scale = BASE_SCALE;
     config.clouds_detail_scale = DETAIL_SCALE;
     config.clouds_detail_strength = DETAIL_STRENGTH;

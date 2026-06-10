@@ -76,7 +76,7 @@ impl Plugin for VelocityFramePlugin {
             Update,
             update_velocity_frame
                 .in_set(SimStage::Physics)
-                .before(crate::bridge::handle_attitude_controls),
+                .before(crate::control_bus::realize_control),
         );
     }
 }

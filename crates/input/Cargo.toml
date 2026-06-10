@@ -8,4 +8,8 @@ bevy = { version = "0.18", features = ["serialize"] }
 bevy_enhanced_input = { version = "0.25", features = ["serialize"] }
 ron = "0.12"
 serde = { version = "1.0", features = ["derive"] }
+# Private gilrs instance for reading raw HOTAS axes (flight-stick twist,
+# throttle sliders) that Bevy's `bevy_gilrs` converter drops as `Unknown`.
+# Same gilrs major as Bevy 0.18 pulls in (bevy_gilrs 0.18 -> gilrs 0.11).
+gilrs = "0.11"
 

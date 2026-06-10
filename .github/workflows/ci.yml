@@ -23,8 +23,9 @@ jobs:
       - name: Pure-Rust crates must not depend on Bevy
         shell: bash
         run: |
-          # Design invariant (CLAUDE.md): world, physics_canonical, terrain, and
-          # celestial are pure Rust libraries with no Bevy dependency. This is
+          # Design invariant (CLAUDE.md): world, physics_canonical, control,
+          # terrain, and celestial are pure Rust libraries with no Bevy
+          # dependency. This is
           # a `cargo tree` boundary check, not a build — it stays fast and
           # catches transitive leaks (e.g. a registry dep pulling Bevy via its
           # default features) the moment they enter Cargo.lock.
@@ -36,6 +37,7 @@ jobs:
           for crate in \
             thalos_world \
             thalos_physics_canonical \
+            thalos_control \
             thalos_terrain \
             thalos_celestial; do
             offenders="$(cargo tree -p "$crate" -e normal \
@@ -66,13 +68,14 @@ jobs:
         shell: bash
         run: |
           # Licensing invariant (LICENSING.md): Thalos code is PolyForm
-          # Noncommercial. LGPL is compatible (crates/avian_fdm is the sole
-          # copyleft dep, kept isolated, and full-source distribution satisfies
-          # its relinking requirement). GPL and AGPL are NOT: they are viral
-          # across the whole combined work and would void the noncommercial
-          # model. The classic trap is avian_fdm's GPL-3.0-only JSBSim preset
-          # crate (avian_fdm_j3cub_jsbsim). This guard catches it — and any
-          # other GPL/AGPL dep — the moment it enters Cargo.lock.
+          # Noncommercial. The stack is now permissive end-to-end — there is no
+          # copyleft dependency at all (the former vendored LGPL flight-dynamics
+          # crate `avian_fdm` was replaced by the native
+          # `thalos_physics_canonical::aero` model and removed). GPL and AGPL
+          # remain banned: they are viral across the whole combined work and
+          # would void the noncommercial model. This guard catches any GPL/AGPL
+          # dep the moment it enters Cargo.lock. (LGPL would still be tolerated
+          # by the `lgpl` exclusion below, but none is currently present.)
           #
           # Conservative by design: a crate offered under "MIT OR GPL-3.0"
           # would also trip this. If that ever happens for a genuinely

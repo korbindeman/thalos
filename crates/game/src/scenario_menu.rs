@@ -196,6 +196,12 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                         spawn_scenario_button(
                             buttons,
                             &theme,
+                            SpawnSituation::Cruise,
+                            "RELAUNCH — CRUISE (15,000 FT)",
+                        );
+                        spawn_scenario_button(
+                            buttons,
+                            &theme,
                             SpawnSituation::Eva,
                             "DISEMBARK — ON FOOT (EVA)",
                         );
@@ -380,7 +386,7 @@ fn respawn_into(
             sim.simulation
                 .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
         }
-        SpawnSituation::Landing | SpawnSituation::FinalApproach => {
+        SpawnSituation::Landing | SpawnSituation::FinalApproach | SpawnSituation::Cruise => {
             // Terrain is resident (we just crashed on it), so this resolves on
             // the first try; the parking-orbit fallback is belt-and-braces for a
             // somehow-missing height source.

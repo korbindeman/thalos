@@ -473,7 +473,12 @@ pub fn propagate_flight_plan(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let ephemeris_end = start_time + ctx.ephemeris.time_span();
+    // `time_span()` is the ephemeris's *absolute* horizon epoch (the propagator
+    // caps its own look-ahead at `time_span − start_time`, and `clamp_time`
+    // asserts queries stay within `[0, time_span]`). The final coast runs *to*
+    // that epoch — do NOT add `start_time`, which would query `start_time` past
+    // the horizon and trip the clamp assert (a sub-second overshoot at launch).
+    let ephemeris_end = ctx.ephemeris.time_span();
     let leg_count = node_order.len() + 1;
 
     // Walking state: where the next leg begins.

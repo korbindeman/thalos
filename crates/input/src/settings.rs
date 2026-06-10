@@ -367,7 +367,10 @@ impl Default for HotasDeviceSelector {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct HotasAxisBinding {
-    pub axis: GamepadAxis,
+    /// Raw platform axis code (`gilrs::Code::into_u32`), read through our own
+    /// gilrs instance — see [`crate::joystick`]. Codes are platform-specific;
+    /// discover them with `cargo run -p thalos_input --example gamepad_axes`.
+    pub code: u32,
     #[serde(default)]
     pub device: Option<HotasDeviceSelector>,
     #[serde(default)]
@@ -657,7 +660,7 @@ pub mod defaults {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::prelude::{GamepadAxis, GamepadButton, KeyCode};
+    use bevy::prelude::{GamepadButton, KeyCode};
 
     #[test]
     fn assets_input_ron_parses() {
@@ -763,8 +766,8 @@ mod tests {
             enabled: true,
             device: NameContains("T.16000M"),
             axes: {
-                "pitch": (axis: LeftStickY, invert: true),
-                "throttle": (axis: LeftZ, min: -1.0, max: 1.0),
+                "pitch": (code: 65537, invert: true),
+                "throttle": (code: 65539, min: -1.0, max: 1.0),
             },
         ),
     ),
@@ -779,20 +782,16 @@ mod tests {
         );
         assert!(settings.game.hotas.enabled);
         assert_eq!(
-            settings
-                .game
-                .hotas
-                .axis("pitch")
-                .map(|binding| binding.axis),
-            Some(GamepadAxis::LeftStickY)
+            settings.game.hotas.axis("pitch").map(|binding| binding.code),
+            Some(65537)
         );
         assert_eq!(
             settings
                 .game
                 .hotas
                 .axis("throttle")
-                .map(|binding| binding.axis),
-            Some(GamepadAxis::LeftZ)
+                .map(|binding| binding.code),
+            Some(65539)
         );
     }
 
@@ -806,7 +805,7 @@ mod tests {
         hotas: (
             enabled: true,
             axes: {
-                "pitchh": (axis: LeftStickY),
+                "pitchh": (code: 65537),
             },
         ),
     ),

@@ -38,8 +38,9 @@ pub use catalog::{
     AdapterSpec, AmbientIntakeKind, CatalogEntry, CatalogError, CatalogId, CatalogRef,
     DecouplerSpec, EngineGeometry, EngineOptimization, EngineSpec, FuselageSpec, GearSpec,
     IntakeCapture, IntakeRequirement, IntakeSpec, PartCatalog, PodGeometry, PodSpec,
-    ResourceStorageSpec, TankSpec, WingRole, WingSpec, fuselage_surface_area, fuselage_volume,
-    gear_dry_mass, pod_visual_profile, wing_mean_aerodynamic_chord, wing_panel_area,
+    ResourceStorageSpec, TankSpec, WingRole, WingSpec, default_control_surfaces,
+    fuselage_surface_area, fuselage_volume, gear_dry_mass, pod_visual_profile,
+    wing_mean_aerodynamic_chord, wing_panel_area,
 };
 pub use engine_mesh::{
     JetNacelleMount, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
@@ -55,9 +56,10 @@ pub use material::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, landing_gear_base, stainless_steel_base,
 };
 pub use part::{
-    Adapter, AirIntake, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust,
-    EngineValidationError, FuelCrossfeed, FuelTank, Fuselage, Gear, MaterialKind, Part,
-    PartMaterial, ReactantRatio, ReactionWheel, ShroudProvider, Shroudable, Wing,
+    Adapter, AirIntake, CommandPod, ControlSurface, ControlSurfaceRole, Decoupler, Engine,
+    EngineActivation, EngineThrust, EngineValidationError, FuelCrossfeed, FuelTank, Fuselage, Gear,
+    MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel, ShroudProvider, Shroudable,
+    Wing,
 };
 pub use resource::{PartResources, Resource, ResourcePool};
 pub use staging::{
@@ -68,7 +70,10 @@ pub use stats::{
     DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals, ShipStats, WingAeroPanel,
     aggregate_resource_totals, cylinder_principal_inertia, estimate_delta_v, parallel_axis_inertia,
 };
-pub use wing_mesh::{WingPanelFrame, build_wing_mesh, wing_panel_frame};
+pub use wing_mesh::{
+    BuiltControlSurface, ControlSurfaceGeometry, WingPanelFrame, build_control_surface_mesh,
+    build_wing_mesh, control_surface_geometry, wing_panel_frame,
+};
 
 pub struct ShipyardPlugin;
 

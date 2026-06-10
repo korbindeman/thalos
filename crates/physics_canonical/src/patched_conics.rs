@@ -110,10 +110,18 @@ impl PatchedConics {
     }
 
     fn clamp_time(&self, time: f64) -> f64 {
+        // Floating-point noise tolerance: a coast propagated *to* the horizon
+        // epoch lands a few ULP past it (the final query is `start_time + Σdt`,
+        // accumulating ULP(time_span)-scale error over the substeps). Tolerate
+        // that — ~64·ULP relative — while still catching gross overshoots that
+        // signal a real horizon/logic bug (e.g. an erroneous `+ start_time`
+        // adds a whole `start_time`, far above this band).
+        let tol = self.time_span.abs() * 64.0 * f64::EPSILON;
         debug_assert!(
-            (0.0..=self.time_span).contains(&time),
-            "query time {time}s outside [0, {span}]; callers must clamp before \
-             querying so the silent fallback doesn't mask a horizon overshoot",
+            (-tol..=self.time_span + tol).contains(&time),
+            "query time {time}s outside [0, {span}] (±{tol}s fp tolerance); \
+             callers must clamp before querying so the silent fallback doesn't \
+             mask a horizon overshoot",
             span = self.time_span,
         );
         time.clamp(0.0, self.time_span)

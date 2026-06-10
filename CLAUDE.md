@@ -17,6 +17,7 @@ just game landing         # powered-descent approach over dry Thalos land
 just game final           # low final approach over a flat dry Thalos patch
 just game runway          # aircraft parked on the Thalos surface runway
 just game runway-approach # aircraft on short final lined up with that runway
+just game cruise          # Meridian at ~15,000 ft, level cruise over dry land
 just edit <body>          # cargo run -p thalos_body_editor -- <body>
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just shipyard             # cargo run -p thalos_shipyard --bin ship_editor
@@ -194,6 +195,19 @@ policy and the canonical→Bevy mirror pattern used at the bridge
 (`CraftStateMirror`). Do not derive `Reflect` in `thalos_physics_canonical`;
 mirror into a Bevy-side resource at the bridge instead.
 
+**Every spawn situation starts paused (warp 0×).** All `just game [mode]`
+scenarios — orbit, eva, landing, final, cruise, runway(-approach) — hold time
+at 0× once the loading screen clears, so the sim is frozen until something
+advances warp. An agent inspecting over BRP will see *no* motion until it
+unpauses. Two ways to start time:
+- Launch with `THALOS_AUTO_RUN=1` (also `true`/`yes`/`on`) — resumes to 1× the
+  instant `Loading → Running` fires. Preferred for autonomous agents.
+- At runtime, advance warp (`world_mutate`/key input) — the warp `.`/`,` keys
+  step up/down, and `,` at the bottom is pause.
+The single source of truth is `spawn::apply_initial_warp` (on
+`OnEnter(AppState::Running)`), gated by the `spawn::AutoRun` resource; deferred
+placement flows (runway, descent) must **not** reset warp themselves.
+
 ## Profiling
 
 Two backends, both gated on cargo features so default builds stay clean.
@@ -294,7 +308,19 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   Bevy. Consumed by physics, terrain gen, and rendering.
 - **`thalos_physics_canonical`** — pure Rust orbital-mechanics algorithms +
   runtime simulation state; depends on `thalos_world`. (Name contrasts with
-  `physics_local`/Avian, not a claim of being the foundation.)
+  `physics_local`/Avian, not a claim of being the foundation.) Also hosts the
+  native atmospheric-aero force model (`aero`): a whole-body lift/drag +
+  stability/damping/control evaluator the game drives force-only in the local
+  bubble — see `docs/aerodynamics.md`.
+- **`thalos_control`** — pure-Rust fly-by-wire control layer. The single
+  command vocabulary every ship-control source speaks (`AttitudeDemand` /
+  `ControlDemand` tagged with a `DemandSource` priority), the priority
+  `arbitrate`, the one `AttitudeController` (full-quaternion `Hold` PD +
+  nose-`PointNose` PD, replacing the old per-frame deadbeat SAS damper),
+  and the effector `allocate` (one torque → reaction wheels + aero control
+  surfaces, so they stop fighting). Depends one-way on `physics_canonical`;
+  no Bevy. The game-side glue is `thalos_game::control_bus`. See
+  `docs/control.md`.
 - **`thalos_input`** — Bevy enhanced-input contexts, RON binding loader, and per-binary input intent resources
 - **`thalos_game`** — Bevy consumer of physics + terrain outputs
 - **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
@@ -307,21 +333,6 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
 - **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
-- **`avian_fdm`** — vendored zone-based 6-DoF flight-dynamics model (lives at
-  `crates/avian_fdm/`). Forked from [`viccuad/avian_fdm`](https://github.com/viccuad/avian_fdm)
-  for atmospheric aerodynamics (drag now; lift + planes later). **LGPL-3.0-or-later**
-  (its GPL J-3 Cub preset crate is *not* depended on) — the sole copyleft entry on
-  an otherwise permissive stack. **Resolved by full-source distribution**: Thalos
-  is now fully source-available (code PolyForm Noncommercial, assets CC BY — see
-  `LICENSING.md`), so LGPL's relink requirement is satisfied for every build,
-  including the paid one. No relicense or replacement is needed. **Keep it
-  isolated and never add the GPL J-3 Cub preset crate (`avian_fdm_j3cub_jsbsim`)
-  or any other GPL/AGPL (non-LGPL) dependency** — GPL is viral across the whole
-  combined work and would void the noncommercial model; CI guards against this
-  (`.github/workflows/ci.yml`). Used **force-only** in the local bubble (Thalos
-  owns mass/inertia/gravity); only Bevy-side crates (`game`/`physics_local`) may
-  depend on it. See `docs/aerodynamics.md` for the model and environment
-  adaptations.
 - **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
   (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
   layer (Perlin-Worley atlas + 3-D Worley detail, dual-lobe HG; compute →
@@ -332,7 +343,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   unreliably against the fullscreen sky under big_space). See
   `docs/atmosphere.md` *Cloud rendering*.
 
-Core separation: `world`, `physics_canonical`, `terrain`, and
+Core separation: `world`, `physics_canonical`, `control`, `terrain`, and
 `celestial` are pure Rust libraries; `input`, `game`, `body_render`,
 `physics_local`, `body_editor`, and `shipyard` are Bevy consumers. Within
 `body_render`, the `shading` module is the single source of truth for
@@ -346,7 +357,16 @@ contexts and intent resources, with checked-in defaults at
 added to the existing action bindings as `GamepadButton(...)`, while
 continuous pitch/yaw/roll/throttle axes are opt-in under
 `game.hotas` and feed the same `GameInputIntent` fields as keyboard
-flight controls.
+flight controls. Those continuous axes are **not** read through Bevy's
+gamepad layer: Bevy's `bevy_gilrs` converter drops every axis gilrs
+labels `Unknown` (a bare flight stick's twist/throttle slider), so they
+never reach `Gamepad` state. `thalos_input::joystick` instead runs its
+own `gilrs::Gilrs` instance, reads every axis by raw platform `Code`,
+and snapshots `code -> value` into `RawJoystickState`; HOTAS axes bind a
+raw `u32` `code` (platform-specific — discover with `cargo run -p
+thalos_input --example gamepad_axes`), not a `GamepadAxis`. Do not
+revert HOTAS axes to `GamepadAxis` bindings; the twist literally cannot
+be expressed that way.
 
 ### Physics crate (`crates/physics/`)
 
@@ -577,6 +597,20 @@ Key modules:
   warp controls. (Single early-terminating `propagate_flight_plan`
   pass keeps the typical rebuild well under a frame; running in-line
   means an edit on frame N produces the fresh trajectory on frame N.)
+- `control_bus` — game-side glue for the `thalos_control` fly-by-wire
+  layer. Each frame `realize_control` collects every attitude command
+  source as a tagged `ControlDemand` (pilot stick, the `T`-key SAS hold,
+  the directional nav modes via `navigation::nav_attitude_demand`, the
+  scheduled-burn autopilot via `Autopilot::attitude_demand`), arbitrates
+  by priority, runs the one `AttitudeController`, and allocates the
+  resulting torque to *both* effectors — reaction wheels
+  (`ControlInput::torque_command` → `apply_local_forces`) and aero control
+  surfaces (`RealizedControl::aero` → the aero force system). Attitude is
+  no longer set anywhere else; the old `bridge::handle_attitude_controls`
+  + `navigation::compute_attitude_control` + raw-stick aero paths are
+  gone, and the per-frame deadbeat SAS damper with them. Throttle still
+  rides its own setpoint path (`ThrottleState::commanded`, autopilot
+  override, `ControlLocks`) pending a later fold-in. See `docs/control.md`.
 - `map_view` — snapshot/projection boundary for map rendering. Copies
   `CraftState`, body states, and `FlightPlan` into `MapSnapshot`; map
   systems consume the snapshot and never mutate canonical simulation
@@ -703,8 +737,8 @@ quantities (flux, temperature, SED) — never pre-baked RGB.
 Parametric ship editor. Bevy + egui. The full next-gen construction model
 (planes/ships/stations from one Module primitive) is specced in
 `docs/construction.md`; **Slices 1–2 (parametric wing, wing-pylon jet nacelle,
-and scalar intake flow) have landed** — see that doc's §0 for the status
-boundary.
+and scalar intake flow) plus visually-actuating control surfaces have landed**
+— see that doc's §0 for the status boundary.
 
 - `AttachNode` / `Ship` — ECS tree structure for ship assembly
 - `Part` trait — `CommandPod`, `Engine`, `AirIntake`, `FuelTank`,
@@ -728,10 +762,19 @@ boundary.
   load (the game ignores it).
 - `Wing` — tapered/swept/dihedral lifting surface (span, root/tip chord,
   sweep, dihedral, t/c, incidence). `wing_mesh::build_wing_mesh` builds it
-  in the host-local frame, shared by the editor and the game's
-  `ship_view`. Control surfaces are planned as *wing parameters* (not
-  separate parts); gear will be its own footprint part. No flight model
-  yet (M6).
+  in the host-local frame, shared by the editor and the game's `ship_view`.
+  **Control surfaces are `Wing` parameters** (`Wing::control_surfaces:
+  Vec<ControlSurface>` — ailerons/elevator/rudder, each a trailing-edge
+  spanwise window + chord fraction + deflection limit), not separate parts:
+  `build_wing_mesh` notches them out of the loft and `build_control_surface_mesh`
+  meshes each as a separate hinged sub-mesh about a consistently-oriented
+  hinge axis (`control_surface_geometry` is the shared seam a future
+  per-surface force model reads). The game animates them from the fly-by-wire
+  command (`RealizedControl::command`, *not* the allocated aero fraction):
+  elevators on pitch (symmetric), ailerons on roll (differential by mount
+  side), rudder on yaw. Forces are still the whole-body aero model (visual
+  actuation only this slice); per-surface forces are the deferred upgrade.
+  Gear will be its own footprint part. No flight model yet (M6).
 - `Engine` / `AirIntake` — rocket bells remain node-stacked; jet nacelles can
   surface-mount to wings as `WingPylon` mounts with generated pylons. Ambient
   flow is modeled separately from resources: engines declare required intake
@@ -908,6 +951,15 @@ Each major system has a unified spec doc.
   whole-craft impact destruction, `ShipParameters::impact_tolerance_m_s`
   → `Simulation::is_destroyed`). Merged from the former
   `surface_gameplay.md` + `landing.md`.
+- `surface_local.md` — **design (no code yet)**: the surface-local
+  tangent frame (SLF) — a body-fixed ENU frame anchored at a surface
+  point — as the single near-surface physics regime, replacing the
+  body-centered-inertial contact bubble (per-frame re-posed terrain
+  trimesh, fall-through backstop, the `AvianRole` snap dance) with a
+  static heightfield collider and raycast spring-damper gear; EVA folds
+  into the same frame. Also generalizes the runway into data-driven
+  terrain-anchored **structures** (`StructureSite` registry, terrain
+  modifiers, future player placement via region tile invalidation).
 - `construction.md` — next-gen shipyard / construction model design:
   one Module primitive (end-node / footprint+morph / end-cap / host /
   connector / reservation), stationed-loft fuselages and wings, a
@@ -916,6 +968,12 @@ Each major system has a unified spec doc.
   stations. Target: M6. Design-only, no code yet.
 - `input.md` — enhanced-input context model, binding file rules, and
   per-binary intent resources.
+- `control.md` — the **fly-by-wire control layer** (`thalos_control` +
+  `game::control_bus`): the demand vocabulary + source priority, the one
+  attitude controller (quaternion `Hold` PD / nose `PointNose` PD,
+  replacing the deadbeat SAS damper), the effector allocator (reaction
+  wheels + aero surfaces from one command), and the warp/EVA/RCS/throttle
+  extension points.
 - `terrain.md` — the **consumer-side terrain contract**: the tile primitive
   (the black-box boundary), ground-LOD rendering, surface shadows, colliders,
   and dynamic features. Terrain *generation* is treated as a black box behind
@@ -926,11 +984,12 @@ Each major system has a unified spec doc.
   coupling for aerial perspective), Kármán-line authoring, ocean
   rendering, IBL/reflection probe. (Atmosphere *rendering*; the
   *physics* density/drag model is in `aerodynamics.md`.)
-- `aerodynamics.md` — atmospheric flight forces (drag now; lift + planes
-  later) via the vendored `avian_fdm`: the per-body density model, the
-  body-centered/rotating-airmass adaptations, force-only bubble use, the
-  in-atmosphere `Full`-role trigger + warp clamp, and the LGPL story (satisfied
-  by full-source distribution; see `LICENSING.md`).
+- `aerodynamics.md` — atmospheric flight forces via the native
+  `thalos_physics_canonical::aero` whole-body model (drag + bluff-body
+  weathervane stability; lift/control for planes): the per-body density model,
+  force-only bubble coupling, the CoM/airspeed integration invariants, and the
+  in-atmosphere `Full`-role trigger + warp clamp. (Replaced the former vendored
+  LGPL `avian_fdm` crate.)
 - `celestial.md` — celestial sphere design: source model, spectrum,
   generation, rendering pipeline.
 - `tooling.md` — Rust toolchain policy and local developer tooling notes.

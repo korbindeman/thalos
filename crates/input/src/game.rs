@@ -3,6 +3,7 @@ use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
 
+use crate::joystick::{RawJoystickState, init_joysticks, poll_joysticks};
 use crate::settings::{HotasAxisBinding, HotasDeviceSelector, InputSettings};
 
 #[derive(Component)]
@@ -245,6 +246,7 @@ impl Plugin for GameInputPlugin {
             .add_input_context::<GameManeuverContext>()
             .add_input_context::<GameManeuverPrecisionContext>()
             .init_resource::<GameInputIntent>()
+            .init_resource::<RawJoystickState>()
             .add_systems(Startup, spawn_game_input_controller)
             .add_systems(
                 PreUpdate,
@@ -253,6 +255,9 @@ impl Plugin for GameInputPlugin {
             .add_systems(
                 PreUpdate,
                 (
+                    // Snapshot raw HOTAS axes before any intent collection so
+                    // `collect_hotas_intent` reads this frame's stick state.
+                    poll_joysticks,
                     collect_system_intent,
                     collect_flight_toggle_intent,
                     collect_throttle_command_intent,
@@ -268,6 +273,12 @@ impl Plugin for GameInputPlugin {
                     .chain()
                     .after(EnhancedInputSystems::Apply),
             );
+
+        // Private gilrs instance for raw HOTAS axes (see `crate::joystick`).
+        // Absent if the platform backend fails to start; HOTAS axes then no-op.
+        if let Some(joysticks) = init_joysticks() {
+            app.insert_non_send_resource(joysticks);
+        }
     }
 }
 
@@ -682,7 +693,7 @@ fn collect_hotas_intent(
     mut intent: ResMut<GameInputIntent>,
     settings: Res<InputSettings>,
     flight: Query<&ContextActivity<GameFlightContext>>,
-    gamepads: Query<(&Gamepad, Option<&Name>)>,
+    joysticks: Res<RawJoystickState>,
 ) {
     let hotas = &settings.game.hotas;
     if !hotas.enabled {
@@ -693,17 +704,17 @@ fn collect_hotas_intent(
         return;
     }
 
-    if let Some(value) = hotas_axis_value(hotas.axis("pitch"), &hotas.device, &gamepads) {
+    if let Some(value) = hotas_axis_value(hotas.axis("pitch"), &hotas.device, &joysticks) {
         intent.attitude.x = merge_hotas_axis(intent.attitude.x, value);
     }
-    if let Some(value) = hotas_axis_value(hotas.axis("roll"), &hotas.device, &gamepads) {
+    if let Some(value) = hotas_axis_value(hotas.axis("roll"), &hotas.device, &joysticks) {
         intent.attitude.y = merge_hotas_axis(intent.attitude.y, value);
     }
-    if let Some(value) = hotas_axis_value(hotas.axis("yaw"), &hotas.device, &gamepads) {
+    if let Some(value) = hotas_axis_value(hotas.axis("yaw"), &hotas.device, &joysticks) {
         intent.attitude.z = merge_hotas_axis(intent.attitude.z, value);
     }
     if let Some(binding) = hotas.axis("throttle")
-        && let Some(raw) = hotas_axis_raw(binding, &hotas.device, &gamepads)
+        && let Some(raw) = hotas_axis_raw(binding, &hotas.device, &joysticks)
     {
         intent.throttle_absolute = Some(hotas_throttle_value(raw, binding));
     }
@@ -752,46 +763,19 @@ fn vec2<A: InputAction<Output = Vec2>>(query: &Query<&Action<A>>) -> Vec2 {
 fn hotas_axis_value(
     binding: Option<&HotasAxisBinding>,
     default_device: &HotasDeviceSelector,
-    gamepads: &Query<(&Gamepad, Option<&Name>)>,
+    joysticks: &RawJoystickState,
 ) -> Option<f32> {
     let binding = binding?;
-    hotas_axis_raw(binding, default_device, gamepads).map(|raw| hotas_signed_value(raw, binding))
+    hotas_axis_raw(binding, default_device, joysticks).map(|raw| hotas_signed_value(raw, binding))
 }
 
 fn hotas_axis_raw(
     binding: &HotasAxisBinding,
     default_device: &HotasDeviceSelector,
-    gamepads: &Query<(&Gamepad, Option<&Name>)>,
+    joysticks: &RawJoystickState,
 ) -> Option<f32> {
     let selector = binding.device.as_ref().unwrap_or(default_device);
-    gamepads
-        .iter()
-        .find(|(gamepad, name)| hotas_device_matches(selector, gamepad, *name))
-        .and_then(|(gamepad, _)| gamepad.get(binding.axis))
-}
-
-fn hotas_device_matches(
-    selector: &HotasDeviceSelector,
-    gamepad: &Gamepad,
-    name: Option<&Name>,
-) -> bool {
-    match selector {
-        HotasDeviceSelector::Any => true,
-        HotasDeviceSelector::NameContains(needle) => name
-            .map(|name| {
-                name.as_str()
-                    .to_ascii_lowercase()
-                    .contains(&needle.to_ascii_lowercase())
-            })
-            .unwrap_or(false),
-        HotasDeviceSelector::Usb {
-            vendor_id,
-            product_id,
-        } => {
-            gamepad.vendor_id() == Some(*vendor_id)
-                && product_id.map_or(true, |id| gamepad.product_id() == Some(id))
-        }
-    }
+    joysticks.axis(selector, binding.code)
 }
 
 fn hotas_unit_value(raw: f32, binding: &HotasAxisBinding) -> f32 {
@@ -826,6 +810,7 @@ mod tests {
     use bevy::prelude::*;
 
     use super::*;
+    use crate::joystick::{Joysticks, RawJoystickDevice, RawJoystickState};
     use crate::settings::{HotasAxisBinding, InputSettings};
 
     fn input_app() -> App {
@@ -877,9 +862,15 @@ mod tests {
             .insert(ContextActivity::<GameFlightContext>::new(active));
     }
 
-    fn hotas_binding(axis: GamepadAxis) -> HotasAxisBinding {
+    // Raw axis codes (arbitrary, fixed for the tests). On a real T.16000M the
+    // twist is 65538 and the throttle slider 65539; the exact values don't
+    // matter here, only that bindings reference codes the snapshot carries.
+    const PITCH_CODE: u32 = 65537;
+    const THROTTLE_CODE: u32 = 65539;
+
+    fn hotas_binding(code: u32) -> HotasAxisBinding {
         HotasAxisBinding {
-            axis,
+            code,
             device: None,
             invert: false,
             deadzone: 0.0,
@@ -895,23 +886,31 @@ mod tests {
             "pitch".to_string(),
             HotasAxisBinding {
                 invert: true,
-                ..hotas_binding(GamepadAxis::LeftStickY)
+                ..hotas_binding(PITCH_CODE)
             },
         );
         settings
             .game
             .hotas
             .axes
-            .insert("throttle".to_string(), hotas_binding(GamepadAxis::LeftZ));
+            .insert("throttle".to_string(), hotas_binding(THROTTLE_CODE));
         settings
     }
 
-    fn spawn_gamepad_with_axes(app: &mut App, axes: impl IntoIterator<Item = (GamepadAxis, f32)>) {
-        let mut gamepad = Gamepad::default();
-        for (axis, value) in axes {
-            gamepad.analog_mut().set(axis, value);
-        }
-        app.world_mut().spawn((Name::new("Test HOTAS"), gamepad));
+    /// Drop the real gilrs instance so [`poll_joysticks`] no-ops, then install
+    /// a snapshot with one synthetic device carrying the given raw axes. This
+    /// keeps the test deterministic regardless of any hardware actually
+    /// plugged into the machine running the suite.
+    fn set_raw_axes(app: &mut App, axes: impl IntoIterator<Item = (u32, f32)>) {
+        app.world_mut().remove_non_send_resource::<Joysticks>();
+        app.insert_resource(RawJoystickState {
+            devices: vec![RawJoystickDevice {
+                name: "Test HOTAS".to_string(),
+                vendor_id: None,
+                product_id: None,
+                axes: axes.into_iter().collect(),
+            }],
+        });
     }
 
     #[test]
@@ -996,10 +995,7 @@ mod tests {
     #[test]
     fn hotas_axes_feed_attitude_and_absolute_throttle() {
         let mut app = input_app_with_settings(hotas_settings());
-        spawn_gamepad_with_axes(
-            &mut app,
-            [(GamepadAxis::LeftStickY, -0.5), (GamepadAxis::LeftZ, 0.25)],
-        );
+        set_raw_axes(&mut app, [(PITCH_CODE, -0.5), (THROTTLE_CODE, 0.25)]);
 
         app.update();
 
@@ -1011,7 +1007,7 @@ mod tests {
     #[test]
     fn centered_hotas_axis_does_not_clear_keyboard_attitude() {
         let mut app = input_app_with_settings(hotas_settings());
-        spawn_gamepad_with_axes(&mut app, [(GamepadAxis::LeftStickY, 0.0)]);
+        set_raw_axes(&mut app, [(PITCH_CODE, 0.0)]);
 
         press_key(&mut app, KeyCode::KeyW);
         app.update();
@@ -1023,10 +1019,7 @@ mod tests {
     #[test]
     fn hotas_axes_follow_flight_context_activity() {
         let mut app = input_app_with_settings(hotas_settings());
-        spawn_gamepad_with_axes(
-            &mut app,
-            [(GamepadAxis::LeftStickY, -0.5), (GamepadAxis::LeftZ, 1.0)],
-        );
+        set_raw_axes(&mut app, [(PITCH_CODE, -0.5), (THROTTLE_CODE, 1.0)]);
         set_flight_context(&mut app, false);
 
         app.update();

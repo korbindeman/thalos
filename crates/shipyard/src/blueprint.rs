@@ -8,9 +8,9 @@ use crate::catalog::{
     wing_panel_area, wing_volume,
 };
 use crate::part::{
-    Adapter, AirIntake, CommandPod, Decoupler, Engine, EngineActivation, EngineThrust,
-    FuelCrossfeed, FuelTank, Fuselage, Gear, Part, PartMaterial, ReactionWheel, ShroudProvider,
-    Shroudable, Wing,
+    Adapter, AirIntake, CommandPod, ControlSurface, Decoupler, Engine, EngineActivation,
+    EngineThrust, FuelCrossfeed, FuelTank, Fuselage, Gear, Part, PartMaterial, ReactionWheel,
+    ShroudProvider, Shroudable, Wing,
 };
 use crate::resource::{PartResources, Resource, ResourcePool};
 use bevy::prelude::*;
@@ -79,6 +79,11 @@ pub enum PartParams {
         thickness: f32,
         /// Mounting incidence, radians.
         incidence: f32,
+        /// Trailing-edge control surfaces (ailerons / elevator / rudder).
+        /// Defaults empty so blueprints saved before control surfaces existed
+        /// load as plain lifting surfaces.
+        #[serde(default)]
+        control_surfaces: Vec<ControlSurface>,
     },
     Gear {
         /// Length of each strut from the host skin to the wheel, metres.
@@ -493,6 +498,7 @@ fn insert_part(
                 dihedral,
                 thickness,
                 incidence,
+                control_surfaces,
             },
         ) => {
             // Single-panel structural mass; a mirrored mount doubles it at
@@ -510,6 +516,7 @@ fn insert_part(
                 thickness: *thickness,
                 incidence: *incidence,
                 dry_mass,
+                control_surfaces: control_surfaces.clone(),
             });
         }
         (
@@ -806,6 +813,7 @@ mod tests {
             dihedral: 0.05,
             thickness: 0.11,
             incidence: 0.0,
+            control_surfaces: Vec::new(),
         };
         let small = pools_for(wet, &wing_params(5.5), &None);
         let large = pools_for(wet, &wing_params(11.0), &None);
@@ -874,6 +882,10 @@ pub fn default_params_for(entry: &CatalogEntry) -> PartParams {
         // A `Stabilizer` is a small, dry, ~0°-incidence trim surface — equally
         // a tailplane or a fin, since orientation is decided by the mount
         // azimuth, not these params.
+        // Control surfaces depend on the mount azimuth (elevator vs rudder),
+        // which isn't known until placement, so they start empty here and the
+        // editor fills role-appropriate defaults once the wing is mounted (see
+        // `default_control_surfaces`).
         CatalogEntry::Wing(spec) => match spec.role {
             WingRole::Lift => PartParams::Wing {
                 span: 5.0,
@@ -883,6 +895,7 @@ pub fn default_params_for(entry: &CatalogEntry) -> PartParams {
                 dihedral: 3.0_f32.to_radians(),
                 thickness: 0.12,
                 incidence: 0.0,
+                control_surfaces: Vec::new(),
             },
             WingRole::Stabilizer => PartParams::Wing {
                 span: 2.0,
@@ -892,6 +905,7 @@ pub fn default_params_for(entry: &CatalogEntry) -> PartParams {
                 dihedral: 0.0,
                 thickness: 0.10,
                 incidence: 0.0,
+                control_surfaces: Vec::new(),
             },
         },
         CatalogEntry::Gear(g) => PartParams::Gear {

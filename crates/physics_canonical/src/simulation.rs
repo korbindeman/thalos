@@ -265,6 +265,16 @@ impl WarpController {
         self.set_level_immediate(index);
     }
 
+    /// Snap directly to paused (0×) without a transition, regardless of the
+    /// current level. Used to install the paused-on-spawn initial state.
+    /// Unlike [`Self::clamp_to_level`] this is unconditional — it does not
+    /// early-out when already at a low level — and clears any latched resume
+    /// index so a later unpause goes to 1×.
+    pub fn pause_immediate(&mut self) {
+        self.resume_index = None;
+        self.set_level_immediate(0);
+    }
+
     pub fn toggle_pause(&mut self) {
         if self.level_index == 0 {
             let target = self

@@ -8,12 +8,13 @@ use thalos_body_render::HeightSource;
 use thalos_physics_canonical::body_centered::{
     BodyCenteredState, body_centered_to_inertial, inertial_to_body_centered,
 };
-use thalos_physics_canonical::body_fixed::{
-    BodyFixedFrameState, body_fixed_pose_from_inertial, body_fixed_to_inertial,
-    inertial_to_body_fixed,
-};
+use thalos_physics_canonical::body_fixed::body_fixed_pose_from_inertial;
 use thalos_physics_canonical::canonical::{
     AuthorityMode, BodyFixedPose, EntityRef, TranslationalState,
+};
+use thalos_physics_canonical::surface_local::{
+    SurfaceAnchor, SurfaceLocalFrame, SurfaceLocalState, inertial_to_surface_local, reanchor,
+    surface_local_acceleration, surface_local_to_inertial,
 };
 use thalos_physics_canonical::types::{AttitudeState, BodyState, VesselKind};
 use thalos_physics_local::avian::{
@@ -23,7 +24,8 @@ use thalos_physics_local::avian::{
 };
 use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalBubble, LocalBubbleConfig, LocalCraftBody,
-    LocalCraftSpawn, LocalPhysicsPlugin, LocalPrimitiveCollider, LocalPrimitiveShape,
+    LocalCraftColliderPrimitives, LocalCraftSpawn, LocalPhysicsPlugin, LocalPrimitiveCollider,
+    LocalPrimitiveShape,
     TerrainColliderPatch, craft_contacts_terrain, spawn_local_craft_body,
     spawn_terrain_collider_patch, stable_contact_reached,
 };
@@ -70,11 +72,17 @@ impl Plugin for GameLocalPhysicsPlugin {
             .init_resource::<AvianHandoffDiagnostics>()
             .init_resource::<GearTuning>()
             .init_resource::<ParkingBrake>()
+            .init_resource::<WeightOnWheels>()
+            .init_resource::<SurfaceFriction>()
+            .init_resource::<TerrainFloorBackstop>()
+            .register_type::<TerrainFloorBackstop>()
             .register_type::<AvianRole>()
             .register_type::<AvianAuthority>()
             .register_type::<AvianHandoffDiagnostics>()
             .register_type::<GearTuning>()
             .register_type::<ParkingBrake>()
+            .register_type::<WeightOnWheels>()
+            .register_type::<SurfaceFriction>()
             .register_type::<Wheel>()
             .register_type::<WheelSet>()
             .add_systems(
@@ -99,15 +107,29 @@ impl Plugin for GameLocalPhysicsPlugin {
                     apply_local_forces,
                     toggle_parking_brake,
                     apply_landing_gear_forces,
+                    terrain_floor_backstop,
+                    apply_surface_friction,
+                )
+                    .chain()
+                    .in_set(SimStage::Physics)
+                    .after(crate::bridge::advance_simulation),
+            )
+            // Second half of the per-frame chain (Bevy's `.chain()` tuple caps
+            // at 20 systems): readback + frame/collider maintenance, strictly
+            // after the force/contact half above.
+            .add_systems(
+                Update,
+                (
                     readback_local_craft,
                     detect_terrain_impact,
+                    reanchor_surface_frame,
                     maintain_terrain_patch,
                     sync_terrain_collider_pose,
                     collapse_or_constrain_warp,
                 )
                     .chain()
                     .in_set(SimStage::Physics)
-                    .after(crate::bridge::advance_simulation),
+                    .after(apply_surface_friction),
             );
     }
 }
@@ -407,12 +429,12 @@ fn agl_above_rendered_surface(
 }
 
 /// Spawn the player's Avian rigid body the first time the simulation is
-/// ready to host it. The body lives in body-centered inertial coordinates
-/// — origin at the dominant body's centre, axes are the parent inertial
-/// axes (no rotation). Gravity is a clean `−μr/r³` with no fictitious
-/// forces; the terrain collider (when attached later) is centered on its
-/// patch and carries `Rotation = body.orientation` so its body-fixed
-/// vertex offsets land in the right place.
+/// ready to host it. Ships live in the **surface-local frame** (a body-fixed
+/// tangent frame anchored under the craft, Y-up, small coordinates — see
+/// `docs/surface_local.md`); gravity plus the rotating-frame terms come from
+/// `surface_local_acceleration`, and ground colliders are static in the
+/// frame. The EVA capsule still lives in body-centered inertial coordinates
+/// until its SLF fold-in.
 ///
 /// Two vessel kinds spawn through this single seam, KSP-style:
 /// - `VesselKind::Ship`: waits for `PlayerShip` + ship params, then
@@ -535,7 +557,26 @@ fn spawn_player_avian_body(
     }
 
     let craft = sim.simulation.craft_state();
-    let frame = inertial_to_craft_frame(vessel_kind, &body_state, craft.translation, craft.attitude);
+    // Anchor the surface-local frame under the craft's surface projection.
+    // The height source may not be registered yet (bakes still loading) —
+    // a reference-radius anchor is exact regardless, and the re-anchor
+    // system refreshes the elevation as the craft moves.
+    let height_source = height_sources.get(body_id);
+    let slf = SurfaceLocalFrame::new(
+        &body_state,
+        surface_anchor_under(
+            &body_state,
+            height_source.as_deref(),
+            craft.translation.position,
+        ),
+    );
+    let frame = inertial_to_craft_frame(
+        vessel_kind,
+        &body_state,
+        &slf,
+        craft.translation,
+        craft.attitude,
+    );
 
     let craft_entity = match vessel_kind {
         VesselKind::Ship => {
@@ -558,14 +599,22 @@ fn spawn_player_avian_body(
                     collider_primitives,
                 },
             );
+            // Pin the rigid body's rotation pivot to the craft's *real* CoM for
+            // every ship, not just gear ships. Two systems depend on it:
+            //   - aero: the native aero model (`thalos_physics_canonical::aero`)
+            //     takes each surface's moment about the CoM. With Avian's auto
+            //     CoM (the collider centroid) the static margin — hence pitch/yaw
+            //     stability — is accidental, which is the wingless-craft tumble.
+            //   - gear: upward wheel forces aft of the nose origin need the pivot
+            //     at the CoM they straddle, or they tip the craft over.
+            // `NoAutoCenterOfMass` stops the compound collider from overwriting
+            // it; Position still tracks the root origin, so snap/readback are
+            // unaffected.
+            let com = params.center_of_mass.as_vec3();
+            commands
+                .entity(entity)
+                .insert((CenterOfMass(com), NoAutoCenterOfMass));
             if !wheels.is_empty() {
-                // Gear straddle the real CoM, so the ground rigid body must
-                // rotate about it (Avian `CenterOfMass`) — not the root/nose
-                // origin, where the upward wheel forces have no opposing torque
-                // and tip the craft over. `NoAutoCenterOfMass` keeps the
-                // compound collider from overwriting it. Position still tracks
-                // the root origin, so the snap/readback are unaffected.
-                let com = params.center_of_mass.as_vec3();
                 info!(
                     "landing gear: {} wheel(s) on player ship, CoM = ({:.2}, {:.2}, {:.2}) m",
                     wheels.len(),
@@ -573,10 +622,15 @@ fn spawn_player_avian_body(
                     com.y,
                     com.z,
                 );
+                // Gear is the sole ground interface for a wheeled craft: filter
+                // the hull compound collider out of solver contact with the
+                // ground so it can't fight the raycast suspension (which flung
+                // the craft on its gear). The gear raycast is a SpatialQuery,
+                // unaffected by these layers; crash detection switches to the
+                // weight-on-wheels signal. See `docs/surface_local.md`.
                 commands.entity(entity).insert((
                     WheelSet { wheels },
-                    CenterOfMass(com),
-                    NoAutoCenterOfMass,
+                    thalos_physics_local::wheeled_craft_collision_layers(),
                 ));
             }
             entity
@@ -628,6 +682,7 @@ fn spawn_player_avian_body(
         id: bubble_id,
         body_id,
         craft_entity,
+        frame: slf,
         terrain_entity: None,
         center_dir_body: DVec3::Y,
         center_surface_body_m: DVec3::ZERO,
@@ -658,6 +713,7 @@ fn spawn_player_avian_body(
 fn rebase_bubble_to_dominant_body(
     mut commands: Commands,
     mut active: ResMut<ActiveLocalBubble>,
+    height_sources: Res<HeightSourceRegistry>,
     sim: Res<SimulationState>,
     mut craft_q: Query<
         (
@@ -686,13 +742,25 @@ fn rebase_bubble_to_dominant_body(
     let (translation, attitude) = craft_frame_to_inertial(
         kind,
         &old_body_state,
+        &bubble.frame,
         position.0,
         rotation.0,
         linear_velocity.0,
         angular_velocity.0,
     );
     let new_body_state = body_state_for(&sim, new_body_id);
-    let frame = inertial_to_craft_frame(kind, &new_body_state, translation, attitude);
+    // Fresh surface-local frame anchored under the craft on the *new* body.
+    let height_source = height_sources.get(new_body_id);
+    let new_frame = SurfaceLocalFrame::new(
+        &new_body_state,
+        surface_anchor_under(
+            &new_body_state,
+            height_source.as_deref(),
+            translation.position,
+        ),
+    );
+    let frame = inertial_to_craft_frame(kind, &new_body_state, &new_frame, translation, attitude);
+    bubble.frame = new_frame;
     position.0 = frame.position_m;
     rotation.0 = frame.rotation;
     linear_velocity.0 = frame.linear_velocity_m_s;
@@ -838,6 +906,7 @@ fn attach_terrain_patch_when_close(
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
     limits: Res<WarpLimits>,
+    runway: Option<Res<crate::runway::RunwaySite>>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
 ) {
@@ -845,6 +914,15 @@ fn attach_terrain_patch_when_close(
         return;
     };
     if bubble.terrain_entity.is_some() {
+        return;
+    }
+    // In a runway scenario the purpose-built flat `RunwayCollider` already backs
+    // the surface under the craft. Attaching the generic terrain patch on top
+    // would put a *second* flat kinematic collider at the same elevation, so the
+    // craft's compound collider resolves contacts against both at once — a
+    // double penetration-recovery push that launches it off its gear. Skip the
+    // patch on that body and let the runway collider be the sole ground.
+    if runway.as_deref().is_some_and(|r| r.body_id == bubble.body_id) {
         return;
     }
     if !terrain_colliders_allowed_by_warp(&sim, &limits) {
@@ -886,6 +964,7 @@ fn attach_terrain_patch_when_close(
         return;
     }
     let built_revision = height_source.revision();
+    let slf = bubble.frame;
     let patch = spawn_terrain_collider_patch(
         &mut commands,
         body_id,
@@ -893,12 +972,13 @@ fn attach_terrain_patch_when_close(
         body.radius_m,
         center_dir,
         &config,
+        &slf,
     );
     bubble.terrain_entity = Some(patch.entity);
     bubble.center_dir_body = center_dir;
-    bubble.center_surface_body_m = patch.mesh.center_surface_body_m;
-    bubble.basis = patch.mesh.basis;
-    bubble.patch_half_extent_m = patch.mesh.half_extent_m;
+    bubble.center_surface_body_m = patch.center_surface_body_m;
+    bubble.basis = patch.basis;
+    bubble.patch_half_extent_m = patch.half_extent_m;
     bubble.terrain_built_at_revision = built_revision;
     info!(
         "attached terrain collider patch over {} at AGL {:.0} m (height-source revision {})",
@@ -1065,6 +1145,7 @@ fn snap_avian_from_canonical(
     let frame = inertial_to_craft_frame(
         sim.simulation.vessel_kind(),
         &body_state,
+        &bubble.frame,
         craft.translation,
         craft.attitude,
     );
@@ -1336,40 +1417,26 @@ fn apply_local_forces(
     // doesn't drift Avian's pos/vel away from Kepler's authoritative state.
     if authority.owns_translation() {
         let body = &sim.system.bodies[bubble.body_id];
-        let body_state = body_state_for(&sim, bubble.body_id);
-        // Ships integrate in the **body-fixed (rotating) frame**, so `position.0`
-        // and `linear_velocity.0` are body-fixed. Gravity keeps the textbook
-        // `−μr/r³` form (length is rotation-invariant, the radial direction in
-        // body-fixed axes still points at the centre), but the rotating frame
-        // adds centrifugal and Coriolis pseudo-forces. `Ω` is the body's spin
-        // expressed in the body-fixed axes (constant for a rigidly spinning
-        // body, so no Euler term). At Thalos' spin these are ~0.02 m/s², but
-        // they keep an orbital burn correct and a parked craft from creeping.
-        let body_pos = position.0;
-        if body_pos.length_squared() > 0.0 {
-            let omega = body_state.orientation.inverse() * body_state.angular_velocity;
-            let gravity_accel = -body.gm * body_pos / body_pos.length().powi(3);
-            let centrifugal = -omega.cross(omega.cross(body_pos));
-            let coriolis = -2.0 * omega.cross(linear_velocity.0);
-            let mut accel = gravity_accel + centrifugal + coriolis;
-            let throttle_eff = throttle.effective.clamp(0.0, 1.0);
-            let mass = sim.simulation.ship_mass_kg();
-            if !destroyed
-                && throttle_eff > 0.0
-                && params.thrust_n > 0.0
-                && mass > params.dry_mass_kg
-            {
-                // `rotation.0` is the craft orientation in the body-fixed frame,
-                // so the nose direction is already in that frame.
-                let nose_frame = rotation.0 * DVec3::Y;
-                accel += nose_frame * (params.thrust_n / mass) * throttle_eff;
-                sim.simulation
-                    .apply_external_mass_flow(throttle_eff, clock.delta_secs_f64());
-            }
-            linear_accel.0 = accel;
-        } else {
-            linear_accel.0 = DVec3::ZERO;
+        // Ships integrate in the **surface-local frame**, so `position.0` and
+        // `linear_velocity.0` are anchor-relative SLF quantities. The exact
+        // radial gravity plus the rotating-frame centrifugal and Coriolis
+        // terms come from one canonical helper (unit-tested against an
+        // inertial integration). At Thalos' spin the fictitious terms are
+        // ~0.02 m/s², but they keep an orbital burn correct and a parked
+        // craft from creeping.
+        let mut accel =
+            surface_local_acceleration(body.gm, &bubble.frame, position.0, linear_velocity.0);
+        let throttle_eff = throttle.effective.clamp(0.0, 1.0);
+        let mass = sim.simulation.ship_mass_kg();
+        if !destroyed && throttle_eff > 0.0 && params.thrust_n > 0.0 && mass > params.dry_mass_kg {
+            // `rotation.0` is the craft orientation in the SLF, so the nose
+            // direction is already in frame axes.
+            let nose_frame = rotation.0 * DVec3::Y;
+            accel += nose_frame * (params.thrust_n / mass) * throttle_eff;
+            sim.simulation
+                .apply_external_mass_flow(throttle_eff, clock.delta_secs_f64());
         }
+        linear_accel.0 = accel;
     } else {
         linear_accel.0 = DVec3::ZERO;
     }
@@ -1391,34 +1458,30 @@ fn apply_local_forces(
     };
 }
 
-/// Convert player attitude command + SAS damping into a world-space angular
-/// acceleration for the Avian rigid body. Matches `Simulation::integrate_attitude`
-/// (now removed) so the rotational feel is identical whether the ship is in
-/// deep space or on a surface — Avian is the integrator in both cases.
+/// Convert the realized reaction-wheel torque command into a world-space
+/// angular acceleration for the Avian rigid body.
+///
+/// `control.torque_command` is now the *output of the fly-by-wire attitude
+/// controller* ([`crate::control_bus`]) — pointing, hold, or raw rate — so
+/// this just scales it by `max_torque` and divides by inertia. The former
+/// per-frame deadbeat SAS damper (`−I·ω/dt` when `sas_enabled`) lived here;
+/// it annihilated all angular velocity every frame and limit-cycled against
+/// continuous aero moments. SAS is now a proper critically-damped controller
+/// upstream, so `sas_enabled` no longer does anything here.
 fn compute_angular_acceleration(
     control: &thalos_physics_canonical::types::ControlInput,
     params: &thalos_physics_canonical::types::ShipParameters,
     rotation: DQuat,
-    angular_velocity_world: DVec3,
-    dt: f64,
+    _angular_velocity_world: DVec3,
+    _dt: f64,
 ) -> DVec3 {
     let inertia_body = params.moment_of_inertia;
     let max_torque = params.max_torque;
     let cmd = control
         .torque_command
         .clamp(DVec3::splat(-1.0), DVec3::splat(1.0));
-    let no_input = cmd.length_squared() < 1e-6;
 
-    let torque_body = if control.sas_enabled && no_input {
-        if dt <= 0.0 {
-            DVec3::ZERO
-        } else {
-            let omega_body = rotation.inverse() * angular_velocity_world;
-            (-inertia_body * omega_body / dt).clamp(-max_torque, max_torque)
-        }
-    } else {
-        cmd * max_torque
-    };
+    let torque_body = cmd * max_torque;
 
     let inv_i = DVec3::new(
         if inertia_body.x > 0.0 {
@@ -1491,8 +1554,17 @@ pub struct GearTuning {
     pub mu: f64,
     /// Lateral grip stiffness, N per (m/s) of sideways slip (clamped by `mu·N`).
     pub k_lat: f64,
-    /// Free-rolling resistance, N per (m/s) of roll speed per unit normal load.
-    pub rolling_coeff: f64,
+    /// Free-rolling resistance coefficient: the Coulomb cap on fore/aft wheel
+    /// force as a fraction of normal load (`μ_roll·N`). A *constant* opposing
+    /// force, not viscous — so a coasting craft decelerates linearly to a true
+    /// stop and then holds, instead of asymptotically creeping forever. Small,
+    /// so wheels stay low-resistance under thrust and roll on gentle slopes.
+    pub rolling_mu: f64,
+    /// Hold stiffness for the rolling-resistance Coulomb term: N per (m/s) of
+    /// roll speed, clamped to `rolling_mu·N`. High enough that the breakaway
+    /// speed (`cap/stiffness`) is a few cm/s, so below it the wheel is pinned
+    /// (static) and above it the force saturates to the constant Coulomb cap.
+    pub rolling_hold_stiffness: f64,
     /// Parking-brake hold stiffness: N per (m/s) of fore/aft creep, clamped to
     /// the friction circle `mu·N`. High so even a tiny creep is opposed
     /// near-maximally — the craft stays put when the brake is engaged.
@@ -1520,7 +1592,8 @@ impl Default for GearTuning {
             damping_ratio: 1.2,
             mu: 1.1,
             k_lat: 40_000.0,
-            rolling_coeff: 0.02,
+            rolling_mu: 0.02,
+            rolling_hold_stiffness: 60_000.0,
             parking_brake_stiffness: 60_000.0,
             max_steer_rad: 0.5,
             max_travel_fraction: 0.8,
@@ -1548,6 +1621,53 @@ impl Default for ParkingBrake {
     }
 }
 
+/// Whether any landing-gear wheel is currently bearing load on the ground
+/// ("weight on wheels"). Set each frame by [`apply_landing_gear_forces`] from
+/// its per-wheel suspension raycast, and read in the atmosphere pass
+/// ([`crate::aero::suppress_ground_aero`]) to gate aerodynamic moments while the
+/// craft is taxiing/parked — the gear, not aero, owns attitude on the ground, so
+/// a near-zero-airspeed (degenerate ~90° AoA) aero torque must not be allowed to
+/// tip the craft. Reflect-registered for BRP inspection.
+#[derive(Resource, Default, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
+pub struct WeightOnWheels {
+    pub grounded: bool,
+}
+
+/// Coulomb friction tuning for a ship resting/sliding on its **hull** — gearless
+/// craft (landers, rockets) or a craft on its belly. Wheeled craft get their
+/// tangential ground reaction from the landing-gear model instead. Stick/slip
+/// with a static and a kinetic coefficient, so a landed craft comes to a true
+/// rest in finite time rather than the indefinite frictionless slide it had
+/// before (the only ground force was the floor backstop, which removes the
+/// into-surface velocity component only). Reflect-registered for BRP tuning.
+#[derive(Resource, Clone, Copy, Debug, Reflect)]
+#[reflect(Resource)]
+pub struct SurfaceFriction {
+    /// Static coefficient: a craft whose per-frame tangential slip is below
+    /// `μ_static · g · dt` sticks (its surface-parallel velocity is zeroed).
+    pub mu_static: f64,
+    /// Kinetic coefficient (≤ static): a faster-sliding craft decelerates at
+    /// `μ_kinetic · g` along its slip direction until it drops to the stick band.
+    pub mu_kinetic: f64,
+    /// How close the deepest hull point must sit to the surface (metres) to
+    /// count as in contact — a small band above the floor backstop's lift so
+    /// a craft held exactly at the surface still reads as grounded.
+    pub contact_margin_m: f64,
+}
+
+impl Default for SurfaceFriction {
+    fn default() -> Self {
+        // Metal/composite hull on rock/regolith: high grip, true stop. A small
+        // static>kinetic gap gives the usual break-free-then-slide feel.
+        Self {
+            mu_static: 0.8,
+            mu_kinetic: 0.6,
+            contact_margin_m: 0.3,
+        }
+    }
+}
+
 /// Flip the parking brake on the toggle edge (B). Runs before the gear forces.
 fn toggle_parking_brake(intent: Res<GameInputIntent>, mut brake: ResMut<ParkingBrake>) {
     if intent.parking_brake_toggle {
@@ -1561,7 +1681,36 @@ fn toggle_parking_brake(intent: Res<GameInputIntent>, mut brake: ResMut<ParkingB
 /// is the part-tree translation map ([`compute_part_collider_positions`]); the
 /// gear's mount point on the host axis mirrors the `BodySkin` station offset
 /// that map applies.
-fn build_wheel_set(
+/// Landing-gear contact geometry for parked placement: the lowest wheel-bottom
+/// depth below the craft origin along the ventral (−Z) axis, plus the wheel
+/// count. Derived from the **gear contact geometry** ([`build_wheel_set`], the
+/// same data the runtime suspension uses), *not* visual meshes: at parked-spawn
+/// time the gear's visual meshes may not be spawned yet, so a visual-extent
+/// measurement would only see the fuselage and bury the gear. Returns `None` for
+/// a craft with no landing gear (the caller falls back to the visual-mesh
+/// clearance and rests it on its belly).
+///
+/// The depth is the *zero-compression* rest height (wheels just touching). The
+/// caller subtracts the static suspension sag so the craft spawns with its gear
+/// already loaded — see [`crate::runway`].
+pub(crate) fn gear_contact_geometry(
+    parts: &PartColliderQuery,
+    gear_q: &Query<(&Gear, &SurfaceMount), With<Part>>,
+    host_nodes: &Query<&AttachNodes>,
+) -> Option<(f64, usize)> {
+    let positions = compute_part_collider_positions(parts);
+    let wheels = build_wheel_set(gear_q, host_nodes, &positions);
+    if wheels.is_empty() {
+        return None;
+    }
+    let lowest = wheels.iter().fold(f64::INFINITY, |acc, w| {
+        let bottom = w.strut_top_local + w.susp_dir_local * (w.strut_length + w.wheel_radius);
+        acc.min(bottom.z)
+    });
+    (lowest.is_finite() && lowest < 0.0).then_some((-lowest, wheels.len()))
+}
+
+pub(crate) fn build_wheel_set(
     gear_q: &Query<(&Gear, &SurfaceMount), With<Part>>,
     host_nodes: &Query<&AttachNodes>,
     positions: &HashMap<Entity, DVec3>,
@@ -1620,6 +1769,7 @@ fn apply_landing_gear_forces(
     intent: Res<GameInputIntent>,
     spatial: SpatialQuery,
     sim: Res<SimulationState>,
+    mut weight_on_wheels: ResMut<WeightOnWheels>,
     wheels_q: Query<&WheelSet>,
     mut craft_q: Query<
         (
@@ -1633,6 +1783,10 @@ fn apply_landing_gear_forces(
         With<LocalCraftBody>,
     >,
 ) {
+    // Default to airborne; any loaded wheel below flips this true. Cleared up
+    // front so every early-return path (not owning translation, no gear, etc.)
+    // correctly reports "no weight on wheels".
+    weight_on_wheels.grounded = false;
     // Full only: Avian must own translation for the integrated force to mean
     // anything. Ships only — EVA has no gear — and never a destroyed wreck.
     if !authority.owns_translation()
@@ -1703,6 +1857,9 @@ fn apply_landing_gear_forces(
         if compression <= 0.0 {
             continue;
         }
+        // A wheel is bearing load: the craft has weight on its wheels, so the
+        // aero pass should treat it as grounded and suppress tipping moments.
+        weight_on_wheels.grounded = true;
         let up = -down;
         // Contact point relative to the craft CoM: the arm that turns wheel
         // force into torque about the rotation pivot (lets steered front-wheel
@@ -1743,7 +1900,13 @@ fn apply_landing_gear_forces(
         let f_roll = if parking_brake.engaged {
             -roll_w * (tuning.parking_brake_stiffness * roll_speed).clamp(-mu_n, mu_n)
         } else {
-            -roll_w * (tuning.rolling_coeff * normal_n * roll_speed).clamp(-mu_n, mu_n)
+            // Coulomb rolling resistance: a stiff hold clamped to a small
+            // `μ_roll·N` cap. The constant (non-viscous) cap means a coasting
+            // craft loses speed linearly and reaches a true stop in finite time,
+            // then the stiff term holds it within the cap — instead of the old
+            // `∝ v` law that decayed exponentially and crept forever.
+            let roll_cap = (tuning.rolling_mu * normal_n).min(mu_n);
+            -roll_w * (tuning.rolling_hold_stiffness * roll_speed).clamp(-roll_cap, roll_cap)
         };
 
         let f = up * normal_n + f_lat + f_roll;
@@ -1754,14 +1917,333 @@ fn apply_landing_gear_forces(
     if net_force == DVec3::ZERO && net_torque == DVec3::ZERO {
         return;
     }
-    linear_accel.0 += net_force / mass;
+    // Inertia-relative safety clamp, mirroring the aero force model
+    // (`crate::aero`): a real undercarriage imparts at most a few g and a few
+    // rad/s², so bounding the per-frame gear acceleration to the craft's own
+    // mass/MOI makes a stiff-spring numerical blow-up impossible — a single bad
+    // frame (or a discrete-step pumping cycle) can no longer spike the craft to
+    // hundreds of rad/s and fling it off the runway — while leaving normal
+    // taxi/landing loads (well under these limits) untouched. Without this the
+    // gear was the one unclamped force path; see `docs/surface_local.md`.
+    const GEAR_MAX_LIN_ACCEL_M_S2: f64 = 50.0; // ~5 g
+    const GEAR_MAX_ANG_ACCEL_RAD_S2: f64 = 4.0;
+    let lin_accel = net_force / mass;
+    let lin_len = lin_accel.length();
+    let lin_accel = if lin_len > GEAR_MAX_LIN_ACCEL_M_S2 {
+        lin_accel * (GEAR_MAX_LIN_ACCEL_M_S2 / lin_len)
+    } else {
+        lin_accel
+    };
+    linear_accel.0 += lin_accel;
+
     let torque_body = rot.inverse() * net_torque;
     let inv_i = DVec3::new(
         if inertia_body.x > 0.0 { 1.0 / inertia_body.x } else { 0.0 },
         if inertia_body.y > 0.0 { 1.0 / inertia_body.y } else { 0.0 },
         if inertia_body.z > 0.0 { 1.0 / inertia_body.z } else { 0.0 },
     );
-    angular_accel.0 += rot * (torque_body * inv_i);
+    let ang_accel = torque_body * inv_i;
+    let ang_len = ang_accel.length();
+    let ang_accel = if ang_len > GEAR_MAX_ANG_ACCEL_RAD_S2 {
+        ang_accel * (GEAR_MAX_ANG_ACCEL_RAD_S2 / ang_len)
+    } else {
+        ang_accel
+    };
+    angular_accel.0 += rot * ang_accel;
+}
+
+/// Analytic ground backstop — a deterministic safety net that guarantees the
+/// craft hull can never tunnel through the terrain, independent of the collision
+/// mesh.
+///
+/// The terrain collider patch + `SweptCcd` are the *primary* contact layer, but
+/// any mesh-based contact is probabilistic: a fast enough descent, an
+/// edge-of-patch / not-yet-streamed tile, or a single missed sweep can let the
+/// hull cross the surface — and the patch is a one-sided trimesh with no
+/// "inside" to push back out of, so one missed frame becomes a permanent
+/// fall-through. This system is the deterministic backstop. It samples terrain
+/// height analytically (the same [`HeightSource`] the renderer and collider
+/// read) directly under the craft and lifts any penetrating hull point back to
+/// the surface, killing the into-surface velocity component. Because it is a
+/// closed-form height query evaluated every frame — not a swept intersection —
+/// it has no tunneling failure mode at any speed.
+///
+/// Ships only, and only while Avian owns translation ([`AvianRole::Full`]) —
+/// the sole regime where Avian-integrated motion can drive the hull into the
+/// ground. Under Kepler/OnRails coast the craft is far above the handoff band;
+/// under warp / `BodyFixed` the pose is analytic and pinned. EVA is exempt (no
+/// hull collider; the grounded controller owns its pose and clamps its own
+/// terrain height). Runs after the force systems and just before
+/// [`readback_local_craft`], so the corrected pose is what flows into canonical;
+/// in `Full` the snap does not overwrite `Position`, so the correction persists
+/// as the start state for Avian's next integration.
+fn terrain_floor_backstop(
+    active: Res<ActiveLocalBubble>,
+    authority: Res<AvianAuthority>,
+    backstop: Res<TerrainFloorBackstop>,
+    height_sources: Res<HeightSourceRegistry>,
+    sim: Res<SimulationState>,
+    mut craft_q: Query<
+        (
+            &mut Position,
+            &Rotation,
+            &mut LinearVelocity,
+            &LocalCraftColliderPrimitives,
+        ),
+        With<LocalCraftBody>,
+    >,
+) {
+    if !backstop.enabled
+        || !authority.owns_translation()
+        || sim.simulation.vessel_kind() != VesselKind::Ship
+        || sim.simulation.is_destroyed()
+    {
+        return;
+    }
+    let Some(bubble) = active.bubble.as_ref() else {
+        return;
+    };
+    let Some(height_source) = height_sources.get(bubble.body_id) else {
+        return;
+    };
+    let body = &sim.system.bodies[bubble.body_id];
+    let Ok((mut position, rotation, mut linear_velocity, primitives)) =
+        craft_q.get_mut(bubble.craft_entity)
+    else {
+        return;
+    };
+    // Ship Avian state lives in the surface-local frame: `Position` is
+    // anchor-relative (small), so recover the body-center offset for the
+    // radial direction, and convert to body-fixed axes for the height query.
+    // `LinearVelocity` is surface-relative (a parked craft reads ~0).
+    let r_center = bubble.frame.body_center_offset(position.0);
+    let Some(dir) = r_center.try_normalize() else {
+        return;
+    };
+    let dir_body = bubble.frame.rotation_body_to_frame.inverse() * dir;
+    let Some(height) = height_source.sample_height_m(dir_body.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+    else {
+        return;
+    };
+    let surface_radius = body.radius_m + height as f64;
+
+    // Deepest hull point along the radial — the lowest the hull reaches toward
+    // the surface, measured from the body centre. See [`deepest_hull_radial`].
+    let deepest = deepest_hull_radial(r_center, rotation.0, primitives, dir);
+    if !deepest.is_finite() {
+        return;
+    }
+
+    // Only the depth *past the skin* is corrected — see
+    // [`TerrainFloorBackstop::skin_m`]. Resting on the collider (penetration
+    // shallower than the skin) leaves this ≤ 0 and the backstop stands down, so
+    // it never becomes a second hard floor fighting the soft contact solver.
+    let excess = (surface_radius - deepest) - backstop.skin_m;
+    if excess <= 0.0 {
+        return;
+    }
+    if excess > 1.0 {
+        // A correction this deep means the primary contact layer let the hull
+        // sink a metre+ past the skin — exactly the tunnelling the backstop
+        // exists to catch. Surface it so the mesh layer's gap can be investigated.
+        debug!(
+            "terrain floor backstop caught a {:.2} m hull penetration (past {:.2} m skin) over {}",
+            excess + backstop.skin_m,
+            backstop.skin_m,
+            body.name
+        );
+    }
+    // Lift the hull out to skin depth and remove only the into-surface (negative
+    // radial) velocity, so tangential motion (taxi / slide) is untouched.
+    position.0 += dir * excess;
+    let radial_speed = linear_velocity.0.dot(dir);
+    if radial_speed < 0.0 {
+        linear_velocity.0 -= dir * radial_speed;
+    }
+}
+
+/// Tuning + kill-switch for [`terrain_floor_backstop`]. Reflect-registered so it
+/// can be toggled / tuned live over BRP (`world_mutate_resources`) while
+/// diagnosing ground contact.
+#[derive(Resource, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
+pub struct TerrainFloorBackstop {
+    /// Master enable. Off → the backstop never moves the craft (diagnostic
+    /// isolation lever).
+    pub enabled: bool,
+    /// Allowed penetration skin, metres.
+    ///
+    /// The backstop is a *deep-penetration safety net*, **not** a zero-tolerance
+    /// surface clamp. The primary contact layer — the terrain/runway collider,
+    /// gear suspension, and hull friction — is a soft (XPBD) solver that tolerates
+    /// small per-frame penetration and resolves it over substeps. A backstop that
+    /// clamps at zero depth becomes a *second, stiffer* hard floor that disagrees
+    /// with the collider by sub-metre amounts and fights it every frame →
+    /// uncontrollable jitter. So the backstop ignores penetration shallower than
+    /// this skin and corrects only the excess below it: normal resting contact is
+    /// left entirely to the solver, while genuine tunnelling (metres deep) is
+    /// still caught. The craft can never end up more than `skin_m` below the
+    /// surface, and can never pass through.
+    pub skin_m: f64,
+}
+
+impl Default for TerrainFloorBackstop {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            skin_m: 0.5,
+        }
+    }
+}
+
+/// Coulomb surface friction for a ship resting/sliding on its **hull** (no
+/// weight on wheels). Velocity-level stick/slip on the tangential
+/// (surface-parallel) component of the craft's body-fixed velocity, applied the
+/// same frame [`terrain_floor_backstop`] removes the into-surface component and
+/// just before [`readback_local_craft`] flows the corrected velocity into
+/// canonical. Brings a landed gearless craft to a true rest in finite time
+/// instead of the indefinite slide it had before — the only ground force was the
+/// backstop, which touches the normal direction only.
+///
+/// Done at the velocity level (like the backstop), not as a force into the
+/// acceleration accumulator: a velocity-level stick/slip cancels exactly within
+/// the friction budget each frame, so it reaches a true stop regardless of step
+/// size, whereas an `∝ v` force law only ever decays asymptotically (the bug
+/// this replaces). Gravity here is central (radial), so it has no tangential
+/// component — friction only has to remove residual slip, and the normal load
+/// per unit mass is just `g = μ/r²`.
+///
+/// Wheeled craft are skipped: when any wheel bears load the landing-gear model
+/// owns the tangential ground reaction (lateral grip + Coulomb rolling) and the
+/// suspension holds the hull clear of the surface.
+fn apply_surface_friction(
+    clock: Res<SimClock>,
+    active: Res<ActiveLocalBubble>,
+    authority: Res<AvianAuthority>,
+    height_sources: Res<HeightSourceRegistry>,
+    weight_on_wheels: Res<WeightOnWheels>,
+    tuning: Res<SurfaceFriction>,
+    sim: Res<SimulationState>,
+    mut craft_q: Query<
+        (
+            &Position,
+            &Rotation,
+            &mut LinearVelocity,
+            &LocalCraftColliderPrimitives,
+        ),
+        With<LocalCraftBody>,
+    >,
+) {
+    if !authority.owns_translation()
+        || sim.simulation.vessel_kind() != VesselKind::Ship
+        || sim.simulation.is_destroyed()
+        || weight_on_wheels.grounded
+    {
+        return;
+    }
+    let dt = clock.delta_secs_f64();
+    if dt <= 0.0 {
+        return;
+    }
+    let Some(bubble) = active.bubble.as_ref() else {
+        return;
+    };
+    let Some(height_source) = height_sources.get(bubble.body_id) else {
+        return;
+    };
+    let body = &sim.system.bodies[bubble.body_id];
+    let Ok((position, rotation, mut linear_velocity, primitives)) =
+        craft_q.get_mut(bubble.craft_entity)
+    else {
+        return;
+    };
+    // Surface-local frame: recover the body-center offset for the radial
+    // direction (local up), body-fixed axes for the height query.
+    // `LinearVelocity` is surface-relative (the ground is static here, so
+    // tangential velocity is the slip directly).
+    let r_center = bubble.frame.body_center_offset(position.0);
+    let Some(dir) = r_center.try_normalize() else {
+        return;
+    };
+    let dir_body = bubble.frame.rotation_body_to_frame.inverse() * dir;
+    let Some(height) = height_source.sample_height_m(dir_body.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+    else {
+        return;
+    };
+    let surface_radius = body.radius_m + height as f64;
+
+    // In hull contact? The backstop holds the deepest hull point ~at the surface;
+    // a small margin keeps a resting craft reading grounded across sample noise.
+    let deepest = deepest_hull_radial(r_center, rotation.0, primitives, dir);
+    if !deepest.is_finite() || deepest > surface_radius + tuning.contact_margin_m {
+        return;
+    }
+
+    let v = linear_velocity.0;
+    let v_tan = v - dir * v.dot(dir);
+    let speed = v_tan.length();
+    if speed < 1.0e-9 {
+        return;
+    }
+    // Normal load per unit mass = gravity into the (near-radial) surface. Mass
+    // cancels in the velocity-level form, so it never enters.
+    let g = body.gm / r_center.length_squared().max(1.0);
+    let static_budget = tuning.mu_static * g * dt;
+    if speed <= static_budget {
+        // Stick: remove all tangential motion, keep the radial component.
+        linear_velocity.0 = v - v_tan;
+    } else {
+        // Slip: kinetic friction opposes the slip at `μ_kinetic · g`.
+        linear_velocity.0 = v - (v_tan / speed) * (tuning.mu_kinetic * g * dt);
+    }
+}
+
+/// Deepest hull point along `dir` (local up): the minimum radial coordinate
+/// (projection onto `dir`) over every collider primitive's true support point in
+/// the `-dir` direction. Each primitive lives in the craft body frame, so its
+/// world (body-fixed) centre is `position + R_craft · offset`. `dir` must be
+/// unit-length. Shared by [`terrain_floor_backstop`] (penetration → lift) and
+/// [`apply_surface_friction`] (contact test).
+fn deepest_hull_radial(
+    position: DVec3,
+    rotation: DQuat,
+    primitives: &LocalCraftColliderPrimitives,
+    dir: DVec3,
+) -> f64 {
+    let mut deepest = f64::INFINITY;
+    for prim in &primitives.0 {
+        let center = position + rotation * prim.offset_m;
+        // `a = (R_craft · R_prim)^T · dir` is unit-length (rotations preserve
+        // norm, `dir` is unit); `shape_min_support` returns the shape's signed
+        // support depth along `-a`, i.e. how far below its centre the hull
+        // reaches along the radial.
+        let a = (rotation * prim.rotation).inverse() * dir;
+        deepest = deepest.min(center.dot(dir) + shape_min_support(prim.shape, a));
+    }
+    deepest
+}
+
+/// Minimum of `a · p` over the points `p` of a centred primitive shape — the
+/// signed depth of the shape's support point in the `-a` direction. `a` must be
+/// unit-length; the result is ≤ 0. Exact for cuboid/sphere/capsule/cylinder;
+/// the cone is bounded conservatively by its enclosing cylinder (a backstop
+/// erring toward catching the hull slightly early is safe).
+fn shape_min_support(shape: LocalPrimitiveShape, a: DVec3) -> f64 {
+    match shape {
+        // `Collider::cuboid` takes full side lengths; support uses half-extents.
+        LocalPrimitiveShape::Cuboid { x, y, z } => {
+            -(a.x.abs() * x + a.y.abs() * y + a.z.abs() * z) * 0.5
+        }
+        LocalPrimitiveShape::Sphere { radius } => -radius,
+        // Parry capsule/cylinder/cone principal axis is local Y. `length` is the
+        // capsule's segment length (between hemisphere centres); `height` is the
+        // full cylinder/cone height.
+        LocalPrimitiveShape::Capsule { radius, length } => -(a.y.abs() * length * 0.5) - radius,
+        LocalPrimitiveShape::Cylinder { radius, height }
+        | LocalPrimitiveShape::Cone { radius, height } => {
+            -(a.y.abs() * height * 0.5) - radius * (a.x * a.x + a.z * a.z).sqrt()
+        }
+    }
 }
 
 /// Pull Avian's integrated state back into canonical, with what we install
@@ -1807,6 +2289,7 @@ fn readback_local_craft(
     let (translation, attitude) = craft_frame_to_inertial(
         sim.simulation.vessel_kind(),
         &body_state,
+        &bubble.frame,
         position.0,
         rotation.0,
         linear_velocity.0,
@@ -1892,6 +2375,7 @@ fn detect_terrain_impact(
     contact_graph: Res<ContactGraph>,
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
+    weight_on_wheels: Res<WeightOnWheels>,
     mut sim: ResMut<SimulationState>,
     craft_q: Query<(&LinearVelocity, &Position), With<LocalCraftBody>>,
     mut speed_window: Local<ImpactSpeedWindow>,
@@ -1914,23 +2398,25 @@ fn detect_terrain_impact(
         speed_window.clear();
         return;
     }
-    let Some(terrain_entity) = bubble.terrain_entity else {
-        *was_touching = false;
-        speed_window.clear();
-        return;
-    };
     let Ok((linear_velocity, _position)) = craft_q.get(bubble.craft_entity) else {
         return;
     };
 
-    // Ships integrate in the body-fixed (rotating) frame and the terrain
-    // collider is held static there, so the craft's body-fixed velocity is
-    // already the surface-relative approach speed (a craft resting on the
-    // surface reads ~0). No `ω × r` subtraction needed.
+    // Ships integrate in the surface-local frame and the ground collider is
+    // static there, so the craft's SLF velocity is already the surface-relative
+    // approach speed (a craft resting on the surface reads ~0). No `ω × r`
+    // subtraction needed.
     let approach_speed = linear_velocity.0.length();
     speed_window.push(approach_speed);
 
-    let touching = craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity);
+    // Ground contact onset. A wheeled craft's hull is filtered out of solver
+    // contact with the ground (gear is its sole interface), so use the gear's
+    // weight-on-wheels signal for it; a gearless craft still contacts the
+    // terrain heightfield directly, so fall back to the contact graph.
+    let hull_touches = bubble
+        .terrain_entity
+        .is_some_and(|t| craft_contacts_terrain(&contact_graph, bubble.craft_entity, t));
+    let touching = weight_on_wheels.grounded || hull_touches;
     let contact_started = touching && !*was_touching;
     *was_touching = touching;
     if !contact_started {
@@ -1946,6 +2432,88 @@ fn detect_terrain_impact(
         );
         sim.simulation.mark_destroyed(impact_speed);
     }
+}
+
+/// Horizontal drift from the anchor that triggers a re-anchor. Keeps the
+/// craft's SLF coordinates small near the ground; each re-anchor is an exact
+/// f64 state translation (a handful of quaternion ops), so even the orbital
+/// AttitudeOnly regime crossing the surface at ~2 km/s re-anchors cheaply.
+const REANCHOR_HORIZONTAL_M: f64 = 1500.0;
+
+/// Move the surface-local frame's anchor back under the craft when it has
+/// drifted too far horizontally. The state translation is exact
+/// ([`thalos_physics_canonical::surface_local::reanchor`] — no inertial round
+/// trip), so canonical state is untouched. Runs after [`readback_local_craft`]
+/// and before [`maintain_terrain_patch`] / [`sync_terrain_collider_pose`], so
+/// the collider systems immediately re-pose the static ground geometry in the
+/// new frame within the same chain.
+pub(crate) fn reanchor_surface_frame(
+    height_sources: Res<HeightSourceRegistry>,
+    sim: Res<SimulationState>,
+    mut active: ResMut<ActiveLocalBubble>,
+    mut craft_q: Query<
+        (
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        With<LocalCraftBody>,
+    >,
+) {
+    let Some(bubble) = active.bubble.as_mut() else {
+        return;
+    };
+    // EVA keeps the body-centered seam until its SLF fold-in; its frame is
+    // refreshed only on explicit teleports.
+    if sim.simulation.vessel_kind() == VesselKind::Eva {
+        return;
+    }
+    let Ok((mut position, mut rotation, mut linear_velocity, mut angular_velocity)) =
+        craft_q.get_mut(bubble.craft_entity)
+    else {
+        return;
+    };
+    let horizontal = DVec3::new(position.0.x, 0.0, position.0.z).length();
+    if horizontal <= REANCHOR_HORIZONTAL_M {
+        return;
+    }
+    let body_state = body_state_for(&sim, bubble.body_id);
+    // New anchor directly under the craft, in body-fixed coordinates.
+    let dir_body = (bubble.frame.rotation_body_to_frame.inverse()
+        * bubble.frame.body_center_offset(position.0))
+    .normalize_or_zero();
+    if dir_body == DVec3::ZERO {
+        return;
+    }
+    let elevation_m = height_sources
+        .get(bubble.body_id)
+        .and_then(|hs| hs.sample_height_m(dir_body.as_vec3(), PHYSICS_QUERY_TILE_LOD_M))
+        .map(|h| h as f64)
+        .unwrap_or(0.0);
+    let new_frame = SurfaceLocalFrame::new(
+        &body_state,
+        SurfaceAnchor {
+            dir_body,
+            elevation_m,
+        },
+    );
+    let orientation = rotation.0.normalize();
+    let moved = reanchor(
+        &bubble.frame,
+        &new_frame,
+        SurfaceLocalState {
+            position_m: position.0,
+            velocity_m_s: linear_velocity.0,
+            orientation_frame: orientation,
+            angular_velocity_body: orientation.inverse() * angular_velocity.0,
+        },
+    );
+    position.0 = moved.position_m;
+    linear_velocity.0 = moved.velocity_m_s;
+    rotation.0 = moved.orientation_frame;
+    angular_velocity.0 = moved.orientation_frame * moved.angular_velocity_body;
+    bubble.frame = new_frame;
 }
 
 fn maintain_terrain_patch(
@@ -1984,10 +2552,11 @@ fn maintain_terrain_patch(
         position
     };
     // Terrain patches only exist for ships, whose Avian body is in the
-    // body-fixed frame — so `position.0` is already the body-fixed position the
+    // surface-local frame — recover the body-fixed body-centered position the
     // patch metadata (`center_surface_body_m`, `center_dir_body`) is expressed
     // in. (EVA never attaches a patch, so it never reaches here.)
-    let craft_body_fixed = position.0;
+    let craft_body_fixed = current.frame.rotation_body_to_frame.inverse()
+        * current.frame.body_center_offset(position.0);
     let delta = craft_body_fixed - current.center_surface_body_m;
     let along = delta.dot(current.center_dir_body);
     let lateral = (delta - along * current.center_dir_body).length();
@@ -2025,13 +2594,14 @@ fn maintain_terrain_patch(
         body.radius_m,
         center_dir,
         &config,
+        &current.frame,
     );
     active.bubble = Some(LocalBubble {
         terrain_entity: Some(patch.entity),
         center_dir_body: center_dir,
-        center_surface_body_m: patch.mesh.center_surface_body_m,
-        basis: patch.mesh.basis,
-        patch_half_extent_m: patch.mesh.half_extent_m,
+        center_surface_body_m: patch.center_surface_body_m,
+        basis: patch.basis,
+        patch_half_extent_m: patch.half_extent_m,
         stable_contact_s: current.stable_contact_s,
         stable_landed: current.stable_landed,
         terrain_built_at_revision: current_revision,
@@ -2039,14 +2609,14 @@ fn maintain_terrain_patch(
     });
 }
 
-/// Hold the kinematic terrain collider **static in the ship's body-fixed
-/// frame**: its mesh vertices are body-fixed offsets from `center_surface_body_m`,
-/// so with `Position = center_surface_body_m`, identity rotation, and zero
-/// velocity, every contact point sits exactly where the rotating surface is —
-/// with no co-rotation speed. That is the whole point of the body-fixed frame:
-/// the craft and the ground are both ~stationary, so the contact solver is
-/// stable instead of jittering and tunneling at the ~256 m/s the old
-/// body-centered inertial frame imposed.
+/// Hold the kinematic terrain collider **static in the surface-local frame**:
+/// its mesh vertices are body-fixed offsets from `center_surface_body_m`, so
+/// with `Position` = the patch centre in SLF coordinates and `Rotation` = the
+/// constant body-fixed→SLF rotation, every contact point sits exactly where
+/// the rotating surface is — with zero velocity, genuinely static geometry.
+/// The pose is constant between re-anchors (this is a cheap idempotent write
+/// that guarantees consistency after [`reanchor_surface_frame`] swaps the
+/// frame), so the contact solver sees a floor that never moves.
 fn sync_terrain_collider_pose(
     active: Res<ActiveLocalBubble>,
     mut terrain_q: Query<
@@ -2070,8 +2640,13 @@ fn sync_terrain_collider_pose(
     else {
         return;
     };
-    position.0 = bubble.center_surface_body_m;
-    rotation.0 = DQuat::IDENTITY;
+    // The heightfield is authored in the patch-tangent frame (height along its
+    // local +Y = the patch up-normal), so its SLF rotation composes the
+    // body-fixed→SLF rotation with the patch-basis rotation.
+    position.0 = bubble.frame.rotation_body_to_frame
+        * (bubble.center_surface_body_m - bubble.frame.anchor_point_body_m);
+    rotation.0 = bubble.frame.rotation_body_to_frame
+        * thalos_physics_local::patch_basis_rotation(&bubble.basis);
     linear_velocity.0 = DVec3::ZERO;
     angular_velocity.0 = DVec3::ZERO;
 }
@@ -2087,6 +2662,7 @@ fn collapse_or_constrain_warp(
     contact_graph: Res<ContactGraph>,
     config: Res<LocalBubbleConfig>,
     throttle: Res<ThrottleState>,
+    weight_on_wheels: Res<WeightOnWheels>,
     mut active: ResMut<ActiveLocalBubble>,
     mut sim: ResMut<SimulationState>,
     craft_q: Query<(&LinearVelocity, &AngularVelocity), With<LocalCraftBody>>,
@@ -2100,25 +2676,18 @@ fn collapse_or_constrain_warp(
         active.bubble = Some(bubble);
         return;
     }
-    // Only track stable contact while a terrain patch is actually attached;
-    // contact graph queries against `None` would be vacuously false anyway,
-    // but skipping early keeps the timer from accumulating in deep space.
-    let Some(terrain_entity) = bubble.terrain_entity else {
-        bubble.stable_contact_s = 0.0;
-        bubble.stable_landed = false;
-        active.bubble = Some(bubble);
-        return;
-    };
     let Ok((linear_velocity, angular_velocity)) = craft_q.get(bubble.craft_entity) else {
         return;
     };
-    // Contact graph is the source of truth — a terrain-aware altitude
-    // fallback would need to sample the rendered cubemap at the craft's
-    // body-fixed direction (radius + terrain_height varies by km), so we
-    // skip the half-correct radial shortcut the previous body-fixed
-    // implementation had. If F9 surface-drop ever fails to register
-    // contact, add a proper AGL fallback via `agl_above_rendered_surface`.
-    let contact = craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity);
+    // Ground contact: a wheeled craft's hull is filtered out of solver contact
+    // (gear is its sole ground interface), so weight-on-wheels is its landed
+    // signal; a gearless craft contacts the terrain heightfield directly via the
+    // contact graph. Either way, with no contact the timer resets and the craft
+    // stays a ballistic / coasting body.
+    let hull_touches = bubble
+        .terrain_entity
+        .is_some_and(|t| craft_contacts_terrain(&contact_graph, bubble.craft_entity, t));
+    let contact = weight_on_wheels.grounded || hull_touches;
     bubble.stable_landed = stable_contact_reached(
         &mut bubble.stable_contact_s,
         clock.delta_secs_f64(),
@@ -2241,6 +2810,12 @@ pub(crate) fn place_eva_on_surface(
     bubble.basis = thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y);
     bubble.stable_contact_s = 0.0;
     bubble.stable_landed = false;
+    // Keep the (ship-frame) SLF coherent with the new body even though the EVA
+    // seam doesn't read it — ship-only systems consult `bubble.frame` by body.
+    bubble.frame = SurfaceLocalFrame::new(
+        &body_state,
+        surface_anchor_under(&body_state, None, translation.position),
+    );
 
     let frame = inertial_to_bubble_frame(&body_state, translation, attitude);
     position.0 = frame.position_m;
@@ -2272,61 +2847,63 @@ fn bubble_frame_to_inertial(
 
 /// Convert canonical inertial state into the **ship** Avian body's frame.
 ///
-/// Ships use the **body-fixed (rotating) frame**: the axes rotate with the
-/// dominant body, so a craft parked on or taxiing across the surface is
-/// ~stationary instead of translating at the surface co-rotation speed
-/// (`ω×r`, hundreds of m/s). Dynamic ground contact and the wheel suspension
-/// are only stable at low speed — in the body-centered *inertial* frame the
-/// craft and the terrain collider both hurtled along at the co-rotation speed
-/// and the contact solver jittered and tunneled. The ground colliders are
-/// posed statically in this same body-fixed frame (see
-/// [`sync_terrain_collider_pose`]).
+/// Ships use the **surface-local frame (SLF)**: a body-fixed tangent frame
+/// anchored at a surface point, Y-up, small coordinates near the anchor
+/// (`thalos_physics_canonical::surface_local`, `docs/surface_local.md`). The
+/// frame co-rotates with the body, so a craft parked on or taxiing across the
+/// surface is ~stationary instead of translating at the surface co-rotation
+/// speed (`ω×r`, hundreds of m/s), and the ground colliders are genuinely
+/// static geometry (see [`sync_terrain_collider_pose`]). Frame velocity is
+/// airspeed (the atmosphere co-rotates).
 ///
 /// EVA keeps the body-centered [`inertial_to_bubble_frame`] seam — its capsule
 /// is owned directly by the on-foot controller and never touches a runway.
 fn inertial_to_ship_frame(
     body_state: &BodyState,
+    frame: &SurfaceLocalFrame,
     translation: TranslationalState,
     attitude: AttitudeState,
 ) -> BubbleFrame {
-    let state = inertial_to_body_fixed(body_state, translation, attitude);
+    let state = inertial_to_surface_local(body_state, frame, translation, attitude);
     BubbleFrame {
-        position_m: state.translation_body.position,
-        rotation: state.orientation_body.normalize(),
-        linear_velocity_m_s: state.translation_body.velocity,
-        angular_velocity_rad_s: state.orientation_body * state.angular_velocity_body,
+        position_m: state.position_m,
+        rotation: state.orientation_frame.normalize(),
+        linear_velocity_m_s: state.velocity_m_s,
+        // Avian's `AngularVelocity` lives in the surrounding (SLF) axes;
+        // `SurfaceLocalState` carries it in the craft body frame.
+        angular_velocity_rad_s: state.orientation_frame * state.angular_velocity_body,
     }
 }
 
 fn ship_frame_to_inertial(
     body_state: &BodyState,
+    frame: &SurfaceLocalFrame,
     position_m: DVec3,
     rotation: DQuat,
     linear_velocity_m_s: DVec3,
     angular_velocity_rad_s: DVec3,
 ) -> (TranslationalState, AttitudeState) {
     let orientation = rotation.normalize();
-    let frame = BodyFixedFrameState {
-        translation_body: TranslationalState {
-            position: position_m,
-            velocity: linear_velocity_m_s,
-        },
-        orientation_body: orientation,
+    let state = SurfaceLocalState {
+        position_m,
+        velocity_m_s: linear_velocity_m_s,
+        orientation_frame: orientation,
         angular_velocity_body: orientation.inverse() * angular_velocity_rad_s,
     };
-    body_fixed_to_inertial(body_state, frame)
+    surface_local_to_inertial(body_state, frame, state)
 }
 
 /// Pick the inertial→Avian conversion for the craft's kind: ships are
-/// body-fixed (rotating), EVA is body-centered inertial.
+/// surface-local (body-fixed tangent frame), EVA is body-centered inertial.
 fn inertial_to_craft_frame(
     kind: VesselKind,
     body_state: &BodyState,
+    frame: &SurfaceLocalFrame,
     translation: TranslationalState,
     attitude: AttitudeState,
 ) -> BubbleFrame {
     match kind {
-        VesselKind::Ship => inertial_to_ship_frame(body_state, translation, attitude),
+        VesselKind::Ship => inertial_to_ship_frame(body_state, frame, translation, attitude),
         VesselKind::Eva => inertial_to_bubble_frame(body_state, translation, attitude),
     }
 }
@@ -2335,6 +2912,7 @@ fn inertial_to_craft_frame(
 fn craft_frame_to_inertial(
     kind: VesselKind,
     body_state: &BodyState,
+    frame: &SurfaceLocalFrame,
     position_m: DVec3,
     rotation: DQuat,
     linear_velocity_m_s: DVec3,
@@ -2343,6 +2921,7 @@ fn craft_frame_to_inertial(
     match kind {
         VesselKind::Ship => ship_frame_to_inertial(
             body_state,
+            frame,
             position_m,
             rotation,
             linear_velocity_m_s,
@@ -2358,6 +2937,33 @@ fn craft_frame_to_inertial(
     }
 }
 
+/// Build a [`SurfaceAnchor`] at the surface projection of an inertial
+/// position, sampling terrain elevation when a height source is available
+/// (the anchor elevation only places the frame origin — conversions are
+/// exact regardless, so a missing source degrades to reference-radius
+/// origin, not to incorrectness).
+fn surface_anchor_under(
+    body_state: &BodyState,
+    height_source: Option<&dyn HeightSource>,
+    position_inertial: DVec3,
+) -> SurfaceAnchor {
+    let dir_body = (body_state.orientation.inverse() * (position_inertial - body_state.position))
+        .normalize_or_zero();
+    let dir_body = if dir_body == DVec3::ZERO {
+        DVec3::Y
+    } else {
+        dir_body
+    };
+    let elevation_m = height_source
+        .and_then(|hs| hs.sample_height_m(dir_body.as_vec3(), PHYSICS_QUERY_TILE_LOD_M))
+        .map(|h| h as f64)
+        .unwrap_or(0.0);
+    SurfaceAnchor {
+        dir_body,
+        elevation_m,
+    }
+}
+
 fn level_attitude_for_body_dir(body_orientation: DQuat, up_body: DVec3) -> DQuat {
     let basis = thalos_body_render::TerrainPatchBasis::from_normal(up_body);
     let nose_body = basis.tangent_z;
@@ -2367,7 +2973,7 @@ fn level_attitude_for_body_dir(body_orientation: DQuat, up_body: DVec3) -> DQuat
     (body_orientation * DQuat::from_mat3(&craft_to_body)).normalize()
 }
 
-type PartColliderQuery<'w, 's> = Query<
+pub(crate) type PartColliderQuery<'w, 's> = Query<
     'w,
     's,
     (
@@ -2467,7 +3073,7 @@ fn wing_collider_primitive(
     }
 }
 
-fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity, DVec3> {
+pub(crate) fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity, DVec3> {
     let mut nodes_by_entity: HashMap<Entity, &AttachNodes> = HashMap::new();
     let mut children_by_parent: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
     let mut surface_children_by_parent: HashMap<Entity, Vec<(Entity, SurfaceMount)>> =

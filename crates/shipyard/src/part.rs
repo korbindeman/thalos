@@ -139,12 +139,9 @@ pub struct Adapter {
 /// chord runs fore/aft along the host body axis, thickness is the airfoil
 /// depth. `dry_mass` is catalog-derived from planform area.
 ///
-/// **Extension point (control surfaces).** Per `docs/construction.md`, a
-/// wing's flaps / ailerons / elevators / rudder are planned as *parameters
-/// of the wing*, not separate parts — a trailing-edge chord fraction +
-/// spanwise window + a hinge/deflection descriptor will be added here as
-/// optional fields, so the wing stays one authored unit. Landing gear, by
-/// contrast, will be its own footprint part kind.
+/// Control surfaces are authored as *parameters of the wing*
+/// ([`Wing::control_surfaces`]), not separate parts, so the wing stays one
+/// authored unit. Landing gear, by contrast, is its own footprint part kind.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct Wing {
     /// Half-span of one panel (host skin → tip), metres.
@@ -164,6 +161,53 @@ pub struct Wing {
     /// Catalog-derived structural mass, kg (= `mass_per_m2` × planform
     /// area, per panel; a mirrored pair is two entities, each one panel).
     pub dry_mass: f32,
+    /// Trailing-edge control surfaces hinged into this panel (ailerons,
+    /// elevator, rudder). Empty for a plain lifting surface. The mesh
+    /// builder notches these out of the loft and meshes each as a separate
+    /// hinged sub-mesh; the game animates them from the fly-by-wire command.
+    pub control_surfaces: Vec<ControlSurface>,
+}
+
+/// What a [`ControlSurface`] controls. This selects which arbitrated
+/// command axis drives the surface's deflection and how it reflects across
+/// a mirrored pair (see [`crate::SymmetryGroup`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ControlSurfaceRole {
+    /// Roll control. **Anti-symmetric** across a mirror: the left and right
+    /// ailerons deflect in opposite senses, so they take the roll command
+    /// with a per-side sign (keyed on the panel's mount azimuth).
+    Aileron,
+    /// Pitch control. **Symmetric**: both halves of a tailplane deflect
+    /// together; takes the pitch command.
+    Elevator,
+    /// Yaw control. Lives on a near-vertical fin; takes the yaw command.
+    Rudder,
+}
+
+/// A trailing-edge control surface hinged into a [`Wing`] panel.
+///
+/// Authored against the panel's own geometry so it scales with the wing:
+/// `span_start`/`span_end` are fractions of the half-span (root = 0, tip =
+/// 1) and `chord_fraction` is the fraction of the *local* chord, measured
+/// from the trailing edge forward, that the surface occupies. The hinge
+/// line runs spanwise at that chord station.
+///
+/// This is the single authored record both the visual layer and a future
+/// per-surface force model read: the visual layer takes the hinge line and
+/// `max_deflection`; the force model takes the area/arm derived from the
+/// same window (see [`crate::wing_mesh::control_surface_geometry`]).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ControlSurface {
+    pub role: ControlSurfaceRole,
+    /// Inboard edge of the surface, as a fraction of the half-span (0 = root).
+    pub span_start: f32,
+    /// Outboard edge of the surface, as a fraction of the half-span (1 = tip).
+    pub span_end: f32,
+    /// Fraction of the local chord the surface occupies, from the trailing
+    /// edge forward. The hinge sits at this chord station.
+    pub chord_fraction: f32,
+    /// Maximum deflection magnitude, radians (trailing edge down positive).
+    pub max_deflection: f32,
 }
 
 /// A self-contained landing-gear assembly — a "gearbox" footprint part that

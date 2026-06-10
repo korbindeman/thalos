@@ -1,5 +1,16 @@
 # Surface
 
+> **Direction update (2026-06): surface-local frame design.** The
+> body-centered-inertial contact bubble described in the "Landing &
+> impact destruction" part of this doc (per-frame re-posed terrain
+> trimesh, `SweptCcd` + analytic fall-through backstop, the
+> `AvianRole` snap machinery) is slated to be replaced by a
+> **surface-local tangent frame** with a static heightfield collider
+> and raycast-suspension gear — see `docs/surface_local.md`. That doc
+> also generalizes the runway into terrain-anchored structures. This
+> doc remains the accurate description of the *current* implementation
+> until those phases land.
+
 How Thalos behaves at and on a planetary surface. Two parts:
 
 - **On foot (EVA)** — on-foot / walking / rover gameplay: ground
@@ -1274,6 +1285,43 @@ Implementation (`crates/game/src/local_physics.rs`):
   `readback_local_craft` converts the ship's body-fixed Avian state back to
   inertial each frame.
 
+## Surface friction (hull contact)
+
+A craft *without* landing gear — a lander or rocket resting on its belly —
+gets its tangential ground friction from `apply_surface_friction`
+([`crates/game/src/local_physics.rs`](crates/game/src/local_physics.rs)),
+which runs right **after** `terrain_floor_backstop` and just **before**
+`readback_local_craft` in the local-physics chain. The backstop only ever
+removes the *into-surface* (radial) velocity component; before this system
+existed a landed gearless craft kept its full tangential velocity and slid
+indefinitely, because nothing opposed surface-parallel motion.
+
+- **Coulomb stick/slip, velocity-level.** Like the backstop, it edits
+  `LinearVelocity` directly rather than pushing a force into the
+  acceleration accumulator. A velocity-level stick/slip cancels exactly
+  within the per-frame friction budget, so the craft reaches a *true* stop
+  regardless of step size — an `∝ v` force law only decays asymptotically
+  and creeps forever (the bug this fixes).
+- **Static / kinetic.** If the per-frame tangential slip is below
+  `mu_static · g · dt` the craft sticks (its surface-parallel velocity is
+  zeroed); otherwise kinetic friction decelerates it at `mu_kinetic · g`
+  along the slip direction. Gravity in the body-fixed frame is central
+  (purely radial), so it contributes no tangential term: friction only has
+  to remove residual slip, and the normal load per unit mass is just
+  `g = μ/r²` (mass cancels in the velocity-level form).
+- **Contact test.** Reuses `deepest_hull_radial` (shared with the
+  backstop): the craft is "on its hull" when the deepest collider-primitive
+  support point sits within `contact_margin_m` of the sampled terrain
+  surface. Airborne craft fall outside the band and are untouched.
+- **Wheeled craft are skipped.** When any wheel bears load
+  (`WeightOnWheels.grounded`) the landing-gear model owns the tangential
+  reaction and the suspension holds the hull clear, so hull friction stands
+  down — the two models never double-count.
+- **Gating.** Same as the backstop: only when Avian owns translation
+  (`AvianRole::Full`) for a live, non-destroyed `Ship`.
+- **Tuning.** `SurfaceFriction` (`mu_static`, `mu_kinetic`,
+  `contact_margin_m`) is a Reflect-registered resource — live-tune over BRP.
+
 ## Functional landing gear (wheels)
 
 Landing gear are real wheels you can roll and taxi on, not cosmetic
@@ -1308,7 +1356,12 @@ acceleration accumulators.
   **lateral grip** resisting sideways slip, and a **longitudinal** force
   (rolling resistance + brake) — both clamped to a friction circle so
   wheels only ever remove ground-relative speed, never propel. Forward
-  motion comes from engine thrust (or, later, powered wheels).
+  motion comes from engine thrust (or, later, powered wheels). The free
+  rolling resistance is **Coulomb, not viscous**: a stiff fore/aft hold
+  clamped to a small `rolling_mu·N` cap, so the constant opposing force
+  brings a coasting craft to a true stop in finite time and then holds it,
+  instead of the old `∝ v` law that decayed asymptotically and let the
+  craft creep forever.
 - **Ride height (no clip).** The damper is sized from the craft's real
   per-wheel mass for a near-critical settle, and `k_spring` is stiff enough
   that the natural static sag `m·g/(n·k)` is ~cm-scale, so the rigid wheel
@@ -1343,9 +1396,10 @@ acceleration accumulators.
   spawned at gear-bottom clearance the belly rides above the surface and
   only engages on a gear-collapse/abnormal landing.
 - **Tuning.** `GearTuning` (spring stiffness, damping ratio, friction
-  `mu`, lateral stiffness, rolling resistance, parking-brake stiffness,
-  max steer, travel, ray margin) is a Reflect-registered resource —
-  live-tune over BRP while taxiing rather than recompiling.
+  `mu`, lateral stiffness, rolling `rolling_mu` + `rolling_hold_stiffness`,
+  parking-brake stiffness, max steer, travel, ray margin) is a
+  Reflect-registered resource — live-tune over BRP while taxiing rather
+  than recompiling.
 
 **Driving requires thrust, which requires staged + fuelled engines.** The
 demo aircraft's engines only produce thrust once *activated* (staging —

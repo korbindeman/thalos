@@ -44,34 +44,54 @@ actions without bypassing context gating.
 Continuous HOTAS flight axes use the separate `game.hotas` block,
 disabled by default. It is intentionally profile-shaped rather than a
 single "active gamepad" switch because flight sticks and throttles often
-enumerate as separate Bevy `Gamepad` entities. The supported semantic
-axes are:
+enumerate as separate devices. The supported semantic axes are:
 
 - `pitch`, `yaw`, `roll` — signed attitude commands merged into
   `GameInputIntent.attitude`
 - `throttle` — absolute `[0, 1]` throttle command; when connected it is
   the source of truth and keyboard ramp/full/cut becomes a fallback only
 
-Each HOTAS axis binding names a Bevy `GamepadAxis`, optionally overrides
-the device selector, and carries calibration fields:
+### Why raw axis codes, not `GamepadAxis`
+
+HOTAS axes are **not** read through Bevy's gamepad layer. Bevy's
+`bevy_gilrs` converter (`convert_axis`) maps only the standard named
+gamepad axes and discards every axis gilrs labels `Axis::Unknown` —
+which, on a bare flight stick with no SDL gamepad profile (e.g. a
+Thrustmaster T.16000M), is precisely the twist (rudder) and the throttle
+slider. Those axes never reach Bevy's `Gamepad` state, so they cannot be
+bound through `GamepadAxis` at all.
+
+Thalos works around this in `thalos_input::joystick`: it runs its **own**
+`gilrs::Gilrs` instance alongside Bevy's, reads every axis by its raw
+platform `Code` (`Code::into_u32`), and snapshots `code -> value` per
+device into the `RawJoystickState` resource each frame
+(`poll_joysticks`). `collect_hotas_intent` reads that snapshot. So a HOTAS
+axis binding names a **raw `u32` code**, not a `GamepadAxis`:
 
 ```ron
 hotas: (
     enabled: true,
-    device: NameContains("T.16000M"), // or Any / Usb(...)
+    device: NameContains("T16000M"), // or Any / Usb(...)
     axes: {
-        "pitch": (axis: LeftStickY, invert: true, deadzone: 0.05),
-        "roll": (axis: LeftStickX, deadzone: 0.05),
-        "yaw": (axis: RightZ, deadzone: 0.05),
-        "throttle": (axis: LeftZ, min: -1.0, max: 1.0),
+        // codes below are a T.16000M on Windows
+        "pitch": (code: 65537, invert: true, deadzone: 0.05),
+        "roll":  (code: 65536, deadzone: 0.05),
+        "yaw":   (code: 65538, deadzone: 0.05), // the twist Bevy drops
+        // "throttle": (code: 65539, min: -1.0, max: 1.0),
     },
 ),
 ```
 
+Raw codes are **platform-specific** (a Windows code does not equal a
+Linux one) and per-device. Discover them for your hardware with the probe
+tool, which prints each axis's raw code and value range as you move it:
+
+```bash
+cargo run -p thalos_input --example gamepad_axes
+```
+
 For multi-device setups, put `device: ...` on an individual axis to bind
-that axis to a different physical device than the block default. Bevy's
-standard HOTAS-ish axes are `LeftZ` for throttle and `RightZ` for yaw;
-non-standard sliders and extra axes arrive as `Other(n)`.
+that axis to a different physical device than the block default.
 
 ## Context Model
 

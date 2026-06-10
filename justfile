@@ -12,9 +12,10 @@ game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_g
 # spawns the player on foot on the Thalos surface; `just game landing`
 # starts a powered-descent approach coming down over Thalos land; `just game
 # final` starts very low over a flat dry patch for touchdown practice;
-# `just game runway` parks the aircraft on the Thalos surface runway, and
+# `just game runway` parks the aircraft on the Thalos surface runway;
 # `just game runway-approach` starts it on short final lined up with that
-# runway. Set a persistent default with THALOS_SPAWN in `.env.just`.
+# runway; `just game cruise` places the Meridian at ~15,000 ft flying level.
+# Set a persistent default with THALOS_SPAWN in `.env.just`.
 game mode=env_var_or_default("THALOS_SPAWN", "orbit"):
     {{game_command}} -- {{mode}}
 

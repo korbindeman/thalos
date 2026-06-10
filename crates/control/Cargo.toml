@@ -1,0 +1,11 @@
+[package]
+name = "thalos_control"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = { version = "0.30.10", features = ["serde"] }
+thalos_physics_canonical = { path = "../physics_canonical" }
+
+[dev-dependencies]
+approx = "0.5"

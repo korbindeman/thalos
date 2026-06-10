@@ -1091,7 +1091,7 @@ fn rebuild_wing_visuals(
         let body = commands
             .spawn((
                 Mesh3d(mesh),
-                MeshMaterial3d(material),
+                MeshMaterial3d(material.clone()),
                 Transform::IDENTITY,
                 Visibility::default(),
                 WingVisual,
@@ -1108,6 +1108,32 @@ fn rebuild_wing_visuals(
                 world.entity_mut(body).despawn();
             }
         });
+
+        // Control surfaces, shown deflected to a small angle so they read as
+        // distinct hinged panels in the editor (no flight sim here).
+        for surface in &wing.control_surfaces {
+            let built = build_control_surface_mesh(wing, surface, mount.angle, parent_radius);
+            let preview = Quat::from_axis_angle(built.geometry.hinge_axis, surface.max_deflection * 0.4);
+            let cs = commands
+                .spawn((
+                    Mesh3d(meshes.add(built.mesh)),
+                    MeshMaterial3d(material.clone()),
+                    Transform::from_translation(built.geometry.hinge_anchor).with_rotation(preview),
+                    Visibility::default(),
+                    WingVisual,
+                    PartBody(e),
+                    Pickable::default(),
+                ))
+                .observe(on_body_click)
+                .id();
+            commands.queue(move |world: &mut World| {
+                if world.get_entity(parent).is_ok() {
+                    world.entity_mut(cs).insert(ChildOf(parent));
+                } else {
+                    world.entity_mut(cs).despawn();
+                }
+            });
+        }
     }
 }
 
@@ -2266,6 +2292,7 @@ fn collect_blueprint(
                 dihedral: w.dihedral,
                 thickness: w.thickness,
                 incidence: w.incidence,
+                control_surfaces: w.control_surfaces.clone(),
             }
         } else if let Some(g) = gear {
             PartParams::Gear {
@@ -2584,6 +2611,7 @@ fn update_placement_preview(
                     dihedral,
                     thickness,
                     incidence,
+                    control_surfaces,
                 } => {
                     let w = Wing {
                         span: *span,
@@ -2594,6 +2622,7 @@ fn update_placement_preview(
                         thickness: *thickness,
                         incidence: *incidence,
                         dry_mass: 0.0,
+                        control_surfaces: control_surfaces.clone(),
                     };
                     build_wing_mesh(&w, angle, parent_radius)
                 }
@@ -2898,6 +2927,19 @@ fn process_commands(
                 return;
             };
 
+            // Fill role-appropriate default control surfaces for a freshly
+            // placed wing now that the mount azimuth is known (it decides
+            // elevator vs rudder for a stabilizer). Leave a user-authored set
+            // untouched.
+            let mut pending = pending;
+            if let PartParams::Wing { control_surfaces, .. } = &mut pending.params {
+                if control_surfaces.is_empty() {
+                    if let Ok(CatalogEntry::Wing(spec)) = catalog.resolve(&pending.catalog_id) {
+                        *control_surfaces = default_control_surfaces(spec.role, angle);
+                    }
+                }
+            }
+
             // Landing gear is a self-contained gearbox — it draws its own legs,
             // so it is *always* a single mount regardless of the Mirror toggle
             // or a (hypothetically) symmetric host. Special-cased before the
@@ -3200,6 +3242,7 @@ fn inspector_params(
             dihedral: w.dihedral,
             thickness: w.thickness,
             incidence: w.incidence,
+            control_surfaces: w.control_surfaces.clone(),
         }
     } else if let Some(g) = gear {
         PartParams::Gear {

@@ -24,12 +24,13 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
-    Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
-    FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial, Ship, ShipBlueprint,
-    ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipyardPlugin, SurfaceMount,
-    PodGeometry, SurfaceMountKind, Wing, build_cockpit_mesh, build_fuselage_mesh, build_gear_mesh,
-    build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry,
-    jet_nacelle_length, landing_gear_base, pod_visual_profile, stainless_steel_base,
+    Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
+    EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial,
+    Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipyardPlugin,
+    SurfaceMount, PodGeometry, SurfaceMountKind, Wing, build_control_surface_mesh,
+    build_cockpit_mesh, build_fuselage_mesh, build_gear_mesh, build_jet_nacelle_body_mesh,
+    build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
+    landing_gear_base, pod_visual_profile, stainless_steel_base,
 };
 
 use crate::SimStage;
@@ -82,6 +83,7 @@ impl Plugin for ShipViewPlugin {
                 (
                     rebuild_ship_visuals,
                     rebuild_ship_wing_visuals,
+                    animate_ship_control_surfaces.after(rebuild_ship_wing_visuals),
                     rebuild_ship_nacelle_visuals,
                     rebuild_ship_gear_visuals,
                     update_ship_part_transforms.after(rebuild_ship_visuals),
@@ -103,6 +105,26 @@ impl Plugin for ShipViewPlugin {
 /// material it should mutate.
 #[derive(Component)]
 pub(crate) struct PartVisual;
+
+/// A hinged control-surface sub-mesh of a wing. Carries everything
+/// [`animate_ship_control_surfaces`] needs to deflect it from the
+/// fly-by-wire command: which command axis drives it (`role`), the
+/// per-side differential sign for ailerons, the host-local hinge frame, and
+/// the deflection limit. Built by [`rebuild_ship_wing_visuals`].
+#[derive(Component)]
+struct ControlSurfaceVisual {
+    role: ControlSurfaceRole,
+    /// +1 / −1 by mount side, so a roll command deflects the left and right
+    /// ailerons in opposite senses (differential). Symmetric surfaces use 1.
+    side_sign: f32,
+    /// Host-local hinge axis (consistently oriented so +θ = trailing edge
+    /// down on both panels — see `control_surface_geometry`).
+    hinge_axis: Vec3,
+    /// Host-local hinge anchor; the surface entity's local translation.
+    hinge_anchor: Vec3,
+    /// Maximum deflection magnitude, radians.
+    max_deflection: f32,
+}
 
 #[derive(Component, Clone)]
 struct PartShaderHandle(Handle<ShipPartMaterial>);
@@ -178,24 +200,25 @@ pub(crate) fn spawn_player_ship(
         stats.wet_mass_kg(),
     );
 
-    // Aerodynamic zone layout from the blueprint's wing parts (lift, control
-    // surfaces, drag). Consumed by `aero::attach_ship_aero` when the Avian body
-    // spawns. A wingless craft yields just the bluff-body drag zone.
+    // Whole-body aero config from the blueprint's wing parts (lift + stability),
+    // or a bluff-body drag config for a wingless craft. Consumed by
+    // `aero::attach_ship_aero` when the Avian body spawns.
     match blueprint.wing_aero_panels(&catalog) {
         Ok(panels) => {
-            let layout = crate::aero::build_ship_aero_layout(
+            let config = crate::aero::build_ship_aero_config(
                 &panels,
                 stats.frontal_area_m2,
                 SHIP_DRAG_COEFFICIENT,
             );
             info!(
-                "aero layout: {} wing panel(s) -> {} zone(s), wing area {:.1} m², MAC {:.2} m",
+                "aero config: {} wing panel(s), ref area {:.1} m², MAC {:.2} m, span {:.1} m, lift_slope {:.1}",
                 panels.len(),
-                layout.zones.len(),
-                layout.reference_area_m2,
-                layout.reference_chord_m,
+                config.reference_area_m2,
+                config.reference_chord_m,
+                config.reference_span_m,
+                config.lift_slope,
             );
-            commands.insert_resource(layout);
+            commands.insert_resource(crate::aero::ShipAeroLayout { config });
         }
         Err(err) => error!("Failed to compute wing aero panels: {err}"),
     }
@@ -313,6 +336,7 @@ pub(crate) fn spawn_player_ship(
 fn update_player_ship_world_position(
     sim: Res<SimulationState>,
     authority: Res<crate::local_physics::AvianAuthority>,
+    clock: Res<crate::sim_clock::SimClock>,
     fixed_time: Res<Time<Fixed>>,
     grid: Query<&Grid, With<BigSpace>>,
     mut query: Query<(&mut CellCoord, &mut Transform), With<PlayerShip>>,
@@ -336,19 +360,34 @@ fn update_player_ship_world_position(
     // body-relative velocity across the fixed-step overstep so the ship (and
     // hence the camera and terrain) move smoothly between physics steps.
     //
-    // Only the relative velocity is extrapolated: the canonical velocity is
-    // heliocentric (~30 km/s orbital), but the orbital component already moves
-    // smoothly via the Kepler-evaluated body position in the readback — only the
-    // body-relative descent stutters. Physics, canonical state, and the terrain
+    // Only the **surface-relative** velocity is extrapolated: the canonical
+    // velocity is heliocentric (~30 km/s orbital) *plus* the planet co-rotation
+    // (`ω×r`, ~260 m/s at a low-latitude site), and BOTH of those components
+    // already advance smoothly — the readback re-converts the surface-local
+    // Avian state with `body_state` at the *current* sim_time every frame, so
+    // orbital motion and co-rotation are analytic. Only the craft's motion
+    // relative to the ground stutters at the fixed physics tick. Subtracting
+    // just `body.velocity` here (the pre-SLF form) double-counted `ω×r` and
+    // injected a ground-speed-independent ~4 m sawtooth into the rendered pose —
+    // the camera follows the ship, so it showed up as the *terrain and runway*
+    // shaking violently while rolling. Physics, canonical state, and the terrain
     // collider are untouched. Kepler-owned coast (`OnRails`/`AttitudeOnly`)
     // already advances once per render frame, so it is left alone.
-    let position = if authority.owns_translation() {
+    //
+    // Suppressed while the sim is paused: `Time<Fixed>` keeps accumulating
+    // overstep across the escape pause (only `Time<Physics>`/`SimClock` halt),
+    // so extrapolating a frozen canonical position by an ever-cycling overstep
+    // makes the parked craft visibly jitter in the pause menu. When paused, the
+    // overstep is meaningless — render the canonical position directly.
+    let position = if authority.owns_translation() && !clock.is_paused() {
         let body_id = sim.simulation.dominant_body();
         let body = sim.ephemeris.state(
             body_id,
             thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time()),
         );
-        let rel_velocity = ship.velocity - body.velocity;
+        let surface_velocity =
+            body.velocity + body.angular_velocity.cross(ship.position - body.position);
+        let rel_velocity = ship.velocity - surface_velocity;
         ship.position + rel_velocity * fixed_time.overstep().as_secs_f64()
     } else {
         ship.position
@@ -728,6 +767,63 @@ fn rebuild_ship_wing_visuals(
             ))
             .id();
         commands.entity(e).add_child(body);
+
+        // One hinged child per control surface. Right panels (mount sin > 0)
+        // take side_sign +1, left panels −1, so a roll command splits them.
+        let side_sign = if mount.angle.sin() >= 0.0 { 1.0 } else { -1.0 };
+        for surface in &wing.control_surfaces {
+            let built = build_control_surface_mesh(wing, surface, mount.angle, parent_radius);
+            let mat = std_materials.add(StandardMaterial {
+                double_sided: true,
+                cull_mode: None,
+                ..stainless_steel_base()
+            });
+            let cs = commands
+                .spawn((
+                    Mesh3d(meshes.add(built.mesh)),
+                    MeshMaterial3d(mat),
+                    Transform::from_translation(built.geometry.hinge_anchor),
+                    Visibility::default(),
+                    NoFrustumCulling,
+                    PartVisual,
+                    ControlSurfaceVisual {
+                        role: surface.role,
+                        side_sign,
+                        hinge_axis: built.geometry.hinge_axis,
+                        hinge_anchor: built.geometry.hinge_anchor,
+                        max_deflection: surface.max_deflection,
+                    },
+                ))
+                .id();
+            commands.entity(e).add_child(cs);
+        }
+    }
+}
+
+/// Deflect each control surface from the realized fly-by-wire command.
+/// `+θ` about the (consistently oriented) hinge axis drops the trailing
+/// edge, so the role signs convert command intent into geometry: nose-up
+/// pitch raises the elevator's trailing edge, roll-right raises the right
+/// aileron / lowers the left, nose-right yaw swings the rudder.
+fn animate_ship_control_surfaces(
+    realized: Res<crate::control_bus::RealizedControl>,
+    mut q: Query<(&ControlSurfaceVisual, &mut Transform)>,
+) {
+    // Deflect to the commanded attitude effort (full-scale), not the allocated
+    // aero fraction — see `RealizedControl::command`.
+    let cmd_vec = realized.command;
+    for (cs, mut transform) in q.iter_mut() {
+        let cmd = match cs.role {
+            // −θ raises the trailing edge; nose-up pitch wants elevator up.
+            ControlSurfaceRole::Elevator => -(cmd_vec.x as f32),
+            // Differential: per-side sign, then −θ so roll-right raises the
+            // right aileron's trailing edge.
+            ControlSurfaceRole::Aileron => -(cmd_vec.y as f32) * cs.side_sign,
+            ControlSurfaceRole::Rudder => cmd_vec.z as f32,
+        };
+        let angle = cmd.clamp(-1.0, 1.0) * cs.max_deflection;
+        transform.translation = cs.hinge_anchor;
+        transform.rotation = Quat::from_axis_angle(cs.hinge_axis, angle);
     }
 }
 

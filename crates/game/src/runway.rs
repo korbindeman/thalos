@@ -41,6 +41,7 @@ use thalos_physics_local::avian::{
     AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation,
 };
 use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_shipyard::{AttachNodes, EngineActivation, Gear, Part, SurfaceMount};
 use thalos_terrain::TerrainFlatten;
 use thalos_world::{BodyId, StateVector};
 
@@ -84,9 +85,28 @@ const RUNWAY_TOP_SEGMENTS_LEN: usize = 120;
 const RUNWAY_TOP_SEGMENTS_W: usize = 4;
 /// Subdivision length for marking strips (kept fine so dashes read cleanly).
 const RUNWAY_MARKING_SEG_LEN_M: f64 = 25.0;
-/// Flat collider tessellation (a trimesh; coarse is fine for a flat surface).
-const RUNWAY_COLLIDER_SEGMENTS_LEN: usize = 24;
-const RUNWAY_COLLIDER_SEGMENTS_W: usize = 3;
+
+/// Light the jet engines once the cruise aircraft is placed. Mirrors
+/// [`enable_runway_engines`] but triggers on the cruise scenario (no runway
+/// site resource needed — the aircraft is already airborne at spawn).
+fn enable_cruise_engines(
+    mut done: Local<bool>,
+    situation: Res<SpawnSituation>,
+    mut activations: Query<&mut EngineActivation>,
+) {
+    if *done || !matches!(*situation, SpawnSituation::Cruise) {
+        return;
+    }
+    let mut count = 0;
+    for mut activation in &mut activations {
+        activation.enabled = true;
+        count += 1;
+    }
+    if count > 0 {
+        *done = true;
+        info!("cruise: lit {count} engine(s) for cruise flight");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Site & heading search (deterministic, body-fixed)
@@ -173,13 +193,16 @@ struct RunwayVisual {
     center_surface_body: DVec3,
 }
 
-/// Marker on the flat kinematic collider entity. Posed each frame so it
-/// co-rotates with the body, exactly like the terrain collider patch.
+/// Marker on the solid runway collider slab. Posed each frame from the active
+/// surface-local frame so it sits flush and static under the craft.
 #[derive(Component, Debug)]
 struct RunwayCollider {
     body_id: BodyId,
-    /// Body-fixed position of the platform centre at elevation `E`.
-    center_surface_body_m: DVec3,
+    /// Cuboid centre in body-fixed coordinates (its top face is the pad at `E`).
+    center_body_m: DVec3,
+    /// Rotation from the runway-local tangent frame (`X = across`, `Y = up`,
+    /// `Z = heading`) into body-fixed axes.
+    basis_body_quat: DQuat,
 }
 
 pub struct RunwayPlugin;
@@ -201,13 +224,17 @@ impl Plugin for RunwayPlugin {
                 sync_runway_visibility
                     .in_set(SimStage::Sync)
                     .after(update_runway_transform),
+                enable_runway_engines,
+                enable_cruise_engines,
             ),
         )
         .add_systems(
             Update,
             sync_runway_collider_pose
                 .in_set(SimStage::Physics)
-                .after(crate::bridge::advance_simulation),
+                // After a re-anchor swaps the bubble frame, so the runway
+                // collider's SLF pose is never a frame stale mid-takeoff-roll.
+                .after(crate::local_physics::reanchor_surface_frame),
         );
     }
 }
@@ -229,6 +256,15 @@ fn finish_runway_spawn(
     ship_root_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
     children_q: Query<&Children>,
     mesh_q: Query<(&GlobalTransform, &Mesh3d)>,
+    // Bundled into one tuple param to stay within Bevy's 16-param system limit.
+    // Used (with the gear parts + suspension stiffness) to rest the craft on its
+    // landing gear at the loaded static-sag equilibrium.
+    gear_geometry: (
+        crate::local_physics::PartColliderQuery,
+        Query<(&Gear, &SurfaceMount), With<Part>>,
+        Query<&AttachNodes>,
+        Res<crate::local_physics::GearTuning>,
+    ),
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -242,17 +278,37 @@ fn finish_runway_spawn(
     };
     let hs = height_source.as_ref();
 
-    // For the parked scenario, measure how far the craft's lowest point sits
-    // below its origin so it rests on the surface for *any* craft. Computed
-    // before building anything, so a craft whose meshes/AABBs aren't ready yet
-    // just retries instead of double-spawning the runway.
+    // How far to lift the parked craft so it rests on the surface. Computed
+    // before building anything, so a craft whose geometry isn't ready yet just
+    // retries instead of double-spawning the runway.
     let park_clearance_m = if matches!(*situation, SpawnSituation::Runway) {
         let Ok((ship_entity, ship_gt)) = ship_root_q.single() else {
             return; // ship not spawned yet — retry
         };
-        match craft_ground_clearance(ship_entity, ship_gt, &children_q, &mesh_q, &meshes) {
-            Some(c) => c + RUNWAY_GEAR_REST_MARGIN_M,
-            None => return, // craft geometry not ready yet — retry
+        let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
+        // Rest the craft on its landing gear. Measure the wheel-contact depth
+        // from the gear parts — *not* visual meshes, which aren't spawned yet at
+        // this loading-time placement (a visual measurement saw only the fuselage
+        // and buried the gear). Then drop the craft by the static suspension sag
+        // so the gear spawns already *loaded* (grounded → WoW aero gate on);
+        // spawning at zero compression left the gear unsupported for a frame and
+        // the craft tipped before the spring engaged. The suspension self-trims
+        // from this equilibrium. A craft with no gear falls back to the
+        // visual-mesh extent and rests on its belly.
+        match crate::local_physics::gear_contact_geometry(parts, gear_q, host_nodes) {
+            Some((depth_m, wheel_count)) => {
+                let body = &sim.system.bodies[body_id];
+                let g = body.gm / (body.radius_m * body.radius_m);
+                let mass = sim.simulation.ship_mass_kg().max(1.0);
+                let k = gear_tuning.k_spring.max(1.0);
+                let sag = mass * g / (wheel_count.max(1) as f64 * k);
+                (depth_m - sag).max(0.0)
+            }
+            None => match craft_ground_clearance(ship_entity, ship_gt, &children_q, &mesh_q, &meshes)
+            {
+                Some(c) => c + RUNWAY_GEAR_REST_MARGIN_M,
+                None => return, // craft geometry not ready yet — retry
+            },
         }
     } else {
         0.0
@@ -378,6 +434,36 @@ fn finish_runway_spawn(
     // The surface state + flatten pad are installed and the aircraft is placed:
     // let the settle gate start timing the tile stream at the (now-known) site.
     settle.mark_placed();
+}
+
+/// Light the jet engines once the runway aircraft is placed.
+///
+/// The staging system ([`crate::staging::build_staging_plan`]) disables every
+/// engine at spawn (KSP rocket convention: ignite a stage with the stage key).
+/// That's wrong for an aircraft on a runway — a real jet is already running and
+/// the pilot just advances the throttle. So for the runway scenarios we re-enable
+/// the engines once (after the staging plan has been built and the aircraft is
+/// placed, both signalled by [`RunwaySite`] existing), giving the documented
+/// "throttle-only flight" the staging comment promises. One-shot via the `done`
+/// local; `build_staging_plan` runs only once per ship, so it won't re-disable.
+fn enable_runway_engines(
+    mut done: Local<bool>,
+    situation: Res<SpawnSituation>,
+    site: Option<Res<RunwaySite>>,
+    mut activations: Query<&mut EngineActivation>,
+) {
+    if *done || !situation.is_runway() || site.is_none() {
+        return;
+    }
+    let mut count = 0;
+    for mut activation in &mut activations {
+        activation.enabled = true;
+        count += 1;
+    }
+    if count > 0 {
+        *done = true;
+        info!("runway: lit {count} engine(s) for throttle-only flight");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -819,89 +905,78 @@ fn spawn_runway_posts(
 // Collider — a flat kinematic trimesh at elevation E
 // ---------------------------------------------------------------------------
 
-/// Spawn the flat landing collider at the platform elevation. Kept near its own
-/// origin (body-fixed offsets from the platform centre) and posed each frame by
-/// [`sync_runway_collider_pose`], exactly like the terrain collider patch — so
-/// the aircraft rests/lands on a flat surface independent of the bumpy terrain.
+/// Half-thickness of the solid runway slab (m). Generous so a fast or
+/// hard-landing craft can never tunnel through the bottom face.
+const RUNWAY_SLAB_HALF_THICKNESS_M: f64 = 50.0;
+
+/// Spawn the **solid** runway collider — a cuboid slab whose top face is the
+/// flat pad at elevation `E`. A solid (two-sided) shape resolves resting
+/// contact gently and pushes a slightly-penetrating craft straight back out,
+/// unlike the one-sided trimesh it replaces (whose one-step penetration
+/// recovery launched the craft off its gear). Posed each frame from the active
+/// surface-local frame by [`sync_runway_collider_pose`] (the spawn-time pose is
+/// a placeholder — the bubble may not exist yet during the loading-screen
+/// install). See `docs/surface_local.md` §3.
 fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, _body_state: &BodyState) {
-    let (vertices, indices) = build_collider_trimesh(frame);
-    let center_surface = frame.center_surface();
-    // The ship Avian body lives in the **body-fixed (rotating) frame**, so the
-    // runway collider is held static there: `Position = center_surface` (the
-    // body-fixed platform centre), identity rotation, zero velocity. The
-    // trimesh vertices are body-fixed offsets from that centre, so they land
-    // on the level platform with no co-rotation speed — the aircraft rests and
-    // taxis at ~0 m/s instead of the ~256 m/s the old inertial frame imposed,
-    // which is what keeps ground contact stable. See `docs/surface.md`.
-    let collider = Collider::trimesh(vertices, indices);
+    let half_along = RUNWAY_HALF_LENGTH_M + RUNWAY_PAD_MARGIN_M;
+    let half_across = RUNWAY_HALF_WIDTH_M + RUNWAY_PAD_MARGIN_M;
+    // Runway-local tangent frame: X = across, Y = up (center_dir), Z = heading.
+    let basis_body_quat = DQuat::from_mat3(&DMat3::from_cols(
+        frame.across,
+        frame.center_dir,
+        frame.heading,
+    ));
+    // Cuboid centre: drop half the slab thickness below the pad so the top face
+    // sits exactly at `E`.
+    let center_body_m = frame.center_surface() - frame.center_dir * RUNWAY_SLAB_HALF_THICKNESS_M;
+    // `Collider::cuboid` takes full side lengths; local axes (X=across, Y=up,
+    // Z=along) match `basis_body_quat`.
+    let collider = Collider::cuboid(
+        2.0 * half_across,
+        2.0 * RUNWAY_SLAB_HALF_THICKNESS_M,
+        2.0 * half_along,
+    );
     commands.spawn((
+        // Kinematic (not Static): re-posed each frame from the SLF frame, so
+        // Avian must refresh its collider transform. Zero velocity — the pose
+        // is written directly.
         RigidBody::Kinematic,
         collider,
-        Position(center_surface),
-        Rotation(DQuat::IDENTITY),
+        Position(center_body_m),
+        Rotation(basis_body_quat),
         LinearVelocity(DVec3::ZERO),
         AngularVelocity(DVec3::ZERO),
+        thalos_physics_local::ground_collision_layers(),
         RunwayCollider {
             body_id: frame.body_id,
-            center_surface_body_m: center_surface,
+            center_body_m,
+            basis_body_quat,
         },
-        Name::new("Runway collider"),
+        Name::new("Runway collider slab"),
     ));
 }
 
-/// Flat trimesh (level grid at `E`): body-fixed vertex offsets from the
-/// platform centre plus triangle indices.
-fn build_collider_trimesh(frame: &RunwayFrame) -> (Vec<DVec3>, Vec<[u32; 3]>) {
-    let nl = RUNWAY_COLLIDER_SEGMENTS_LEN;
-    let nw = RUNWAY_COLLIDER_SEGMENTS_W;
-    // Cover the runway plus the levelled pad margin so the aircraft can roll
-    // off the strip onto the flat shoulder without dropping off the collider.
-    let half_l = RUNWAY_HALF_LENGTH_M + RUNWAY_PAD_MARGIN_M;
-    let half_w = RUNWAY_HALF_WIDTH_M + RUNWAY_PAD_MARGIN_M;
-    let mut vertices = Vec::with_capacity((nl + 1) * (nw + 1));
-    let mut indices = Vec::with_capacity(nl * nw * 2);
-    for i in 0..=nl {
-        let along = -half_l + 2.0 * half_l * (i as f64 / nl as f64);
-        for j in 0..=nw {
-            let across_m = -half_w + 2.0 * half_w * (j as f64 / nw as f64);
-            let (off, _) = frame.level(along, across_m, 0.0);
-            vertices.push(off);
-        }
-    }
-    let row = (nw + 1) as u32;
-    for i in 0..nl as u32 {
-        for j in 0..nw as u32 {
-            let a = i * row + j;
-            let b = a + 1;
-            let c = a + row;
-            let d = c + 1;
-            indices.push([a, c, b]);
-            indices.push([b, c, d]);
-        }
-    }
-    (vertices, indices)
-}
-
-/// Hold the kinematic runway collider **static in the ship's body-fixed frame**
-/// (mirrors `local_physics::sync_terrain_collider_pose`): `Position =
-/// center_surface_body_m`, identity rotation, zero velocity. The collider's
-/// trimesh vertices are body-fixed offsets from that centre, so it stays
-/// exactly on the level platform with no co-rotation speed. Defensive each
-/// frame; the pose is constant, so this is effectively a no-op after spawn.
+/// Pose the solid runway slab **static in the surface-local frame** (mirrors
+/// `local_physics::sync_terrain_collider_pose`): `Position = R·(centre − anchor)`,
+/// `Rotation = R · runway_basis`, where `R` is the active bubble's
+/// body-fixed→SLF rotation. The pose is constant between re-anchors; this
+/// idempotent write keeps it consistent when `reanchor_surface_frame` swaps the
+/// bubble's frame.
 fn sync_runway_collider_pose(
-    mut q: Query<(
-        &RunwayCollider,
-        &mut Position,
-        &mut Rotation,
-        &mut LinearVelocity,
-        &mut AngularVelocity,
-    )>,
+    active: Res<thalos_physics_local::ActiveLocalBubble>,
+    mut q: Query<(&RunwayCollider, &mut Position, &mut Rotation)>,
 ) {
-    for (rc, mut position, mut rotation, mut linear_velocity, mut angular_velocity) in &mut q {
-        position.0 = rc.center_surface_body_m;
-        rotation.0 = DQuat::IDENTITY;
-        linear_velocity.0 = DVec3::ZERO;
-        angular_velocity.0 = DVec3::ZERO;
+    let Some(bubble) = active.bubble.as_ref() else {
+        return;
+    };
+    let frame = &bubble.frame;
+    for (rc, mut position, mut rotation) in &mut q {
+        if rc.body_id != bubble.body_id {
+            continue;
+        }
+        position.0 =
+            frame.rotation_body_to_frame * (rc.center_body_m - frame.anchor_point_body_m);
+        rotation.0 = frame.rotation_body_to_frame * rc.basis_body_quat;
     }
 }
 
@@ -1030,7 +1105,8 @@ fn place_parked(
             body: site.body_id,
             pose,
         });
-    sim.simulation.warp.reset();
+    // Warp is left at the spawn default (paused); `spawn::apply_initial_warp`
+    // sets the final level once on `Loading → Running` per `AutoRun`.
     sim.simulation.set_throttle(0.0);
     sim.simulation.set_target_body(Some(site.body_id));
     // Arm the throttle-up release so the player can taxi/take off from the clamp.
@@ -1075,7 +1151,8 @@ fn place_approach(sim: &mut SimulationState, body_state: &BodyState, site: &Runw
     sim.simulation.set_attitude(attitude);
     sim.simulation
         .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
-    sim.simulation.warp.reset();
+    // Warp is left at the spawn default (paused); `spawn::apply_initial_warp`
+    // sets the final level once on `Loading → Running` per `AutoRun`.
     sim.simulation.set_throttle(0.0);
     sim.simulation.set_target_body(Some(site.body_id));
 }

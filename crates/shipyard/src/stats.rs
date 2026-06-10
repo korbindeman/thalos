@@ -28,7 +28,7 @@ use crate::catalog::{
 };
 use crate::part::{ReactantRatio, Wing};
 use crate::resource::{PartResources, Resource};
-use crate::wing_mesh::wing_panel_frame;
+use crate::wing_mesh::{WingPanelFrame, wing_panel_frame};
 use bevy::math::Vec3;
 use glam::DVec3;
 use std::collections::{HashMap, VecDeque};
@@ -457,9 +457,9 @@ impl ShipBlueprint {
     /// Per-panel aerodynamic geometry for every [`Wing`] part, in the **ship
     /// body frame** (`+Y` = nose, `+X` = right, `+Z` = dorsal/up). One entry
     /// per wing entity (a mirrored pair is two entries). This is the geometry a
-    /// flight model turns into lift/drag/control zones — the game maps each
-    /// panel to an `avian_fdm` `AeroZone` (airfoil coefficients, control role,
-    /// and the body→SAE frame conversion live game-side).
+    /// flight model turns into lift/drag/control surfaces — the game maps each
+    /// panel to a `thalos_physics_canonical::aero::AeroSurface` (airfoil
+    /// coefficients and control role live game-side, in this same body frame).
     ///
     /// `center_body_m` is the panel's aerodynamic centre (≈ quarter-chord at
     /// ~40% span); `fore_dir`/`thick_dir`/`span_dir` are the airfoil basis
@@ -488,6 +488,7 @@ impl ShipBlueprint {
                     dihedral,
                     thickness,
                     incidence,
+                    ..
                 },
             ) = (entries[m.child], &pb.params)
             else {
@@ -502,6 +503,7 @@ impl ShipBlueprint {
                 thickness: *thickness,
                 incidence: *incidence,
                 dry_mass: 0.0,
+                control_surfaces: Vec::new(),
             };
             let parent_radius = geo[m.parent].diameter * 0.5;
             let frame = wing_panel_frame(&wing, m.angle, parent_radius);
@@ -639,19 +641,86 @@ fn ship_geometry(blueprint: &ShipBlueprint, entries: &[&CatalogEntry]) -> Vec<Pa
         }
     }
 
-    // Surface-mounted parts (wings) sit on the host body axis at their
-    // station. Approximate their CoM there — the radial/spanwise offset of
-    // a single panel is small next to the lever from the ship CoM, and a
-    // mirrored pair's panels cancel in X. Hosts are node-stacked, so their
-    // positions are already resolved above.
+    // Surface-mounted parts: place each at its true body-frame position. The
+    // spanwise/radial offset is essential for the **moment of inertia**: a
+    // mirrored pair cancels in the CoM (Σ m·x = 0), but the roll/yaw inertia is
+    // Σ m·x², which adds regardless of sign. Dropping it collapsed the roll
+    // inertia (Iyy) and put wing-mounted mass — the engines especially — on the
+    // roll axis, so aerodynamic roll moments spun the craft up explosively while
+    // pitch stayed fine (Ixx kept its longitudinal term). Process mounts in
+    // blueprint order so a part mounted on a wing (a nacelle) resolves along
+    // that wing's span; wings are authored before their nacelles.
+    let mut wing_frames: HashMap<usize, (DVec3, WingPanelFrame)> = HashMap::new();
     for m in &blueprint.surface_mounts {
-        if m.parent < geo.len() && m.child < geo.len() {
+        if m.parent >= geo.len() || m.child >= geo.len() {
+            continue;
+        }
+        let parent_pos = geo[m.parent].position;
+
+        // The point on the host where this part mounts, in body frame.
+        let mount_point = if let Some((wbase, wframe)) = wing_frames.get(&m.parent) {
+            // Host is a wing: the mount station runs along the wing span.
+            *wbase + wframe.center_at(m.station).as_dvec3()
+        } else {
+            // Host is a cylinder (fuselage/tank): station along its long axis,
+            // plus radially out to the skin in the mount-angle direction.
             let parent_entry = entries[m.parent];
             let parent_pb = &blueprint.parts[m.parent];
-            let (_, parent_h) =
+            let (radius, length) =
                 part_cylinder_dims(parent_entry, &parent_pb.params, geo[m.parent].diameter);
-            geo[m.child].position =
-                geo[m.parent].position + DVec3::new(0.0, -(m.station as f64) * parent_h, 0.0);
+            let r_hat = DVec3::new((m.angle as f64).sin(), 0.0, (m.angle as f64).cos());
+            parent_pos + DVec3::new(0.0, -(m.station as f64) * length, 0.0) + r_hat * radius
+        };
+
+        // A wing child gets its mass placed at ~40% span (matching the
+        // aerodynamic-centre convention in `wing_aero_panels`), and caches its
+        // frame so its own surface-mounted children (nacelles) resolve along the
+        // span instead of collapsing onto the root.
+        let child_entry = entries[m.child];
+        let child_pb = &blueprint.parts[m.child];
+        if let (
+            CatalogEntry::Wing(_),
+            PartParams::Wing {
+                span,
+                root_chord,
+                tip_chord,
+                sweep,
+                dihedral,
+                thickness,
+                incidence,
+                ..
+            },
+        ) = (child_entry, &child_pb.params)
+        {
+            let wing = Wing {
+                span: *span,
+                root_chord: *root_chord,
+                tip_chord: *tip_chord,
+                sweep: *sweep,
+                dihedral: *dihedral,
+                thickness: *thickness,
+                incidence: *incidence,
+                dry_mass: 0.0,
+                control_surfaces: Vec::new(),
+            };
+            // The frame's `root_center` already carries the radial offset to the
+            // host skin, so anchor the frame at the host's *on-axis* mount point
+            // to avoid double-counting it.
+            let wbase = if wing_frames.contains_key(&m.parent) {
+                mount_point
+            } else {
+                let parent_entry = entries[m.parent];
+                let parent_pb = &blueprint.parts[m.parent];
+                let (_, length) =
+                    part_cylinder_dims(parent_entry, &parent_pb.params, geo[m.parent].diameter);
+                parent_pos + DVec3::new(0.0, -(m.station as f64) * length, 0.0)
+            };
+            let parent_radius = geo[m.parent].diameter * 0.5;
+            let frame = wing_panel_frame(&wing, m.angle, parent_radius);
+            geo[m.child].position = wbase + frame.center_at(0.4).as_dvec3();
+            wing_frames.insert(m.child, (wbase, frame));
+        } else {
+            geo[m.child].position = mount_point;
         }
     }
 
@@ -1255,6 +1324,7 @@ mod tests {
                 dihedral: 0.05,
                 thickness: 0.12,
                 incidence: 0.0,
+                control_surfaces: Vec::new(),
             },
             resources: None,
         };
@@ -1315,6 +1385,7 @@ mod tests {
                 dihedral: 0.05,
                 thickness: 0.12,
                 incidence: 0.0,
+                control_surfaces: Vec::new(),
             },
             resources: None,
         };

@@ -215,6 +215,18 @@ impl Autopilot {
             AutopilotState::Idle | AutopilotState::Armed { .. } => None,
         }
     }
+
+    /// The autopilot's attitude request for the fly-by-wire control bus
+    /// ([`crate::control_bus`]). `PointNose` at the burn direction while
+    /// engaging/burning, otherwise `Free` (it yields attitude to lower-
+    /// priority sources). The arbiter ranks this above nav modes and the SAS
+    /// hold but below an unlocked pilot stick.
+    pub(crate) fn attitude_demand(&self) -> thalos_control::AttitudeDemand {
+        match self.attitude_target() {
+            Some(direction) => thalos_control::AttitudeDemand::PointNose(direction),
+            None => thalos_control::AttitudeDemand::Free,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -286,7 +298,7 @@ impl Plugin for AutopilotPlugin {
                     .in_set(SimStage::Physics)
                     .after(crate::bridge::handle_warp_controls)
                     .after(handle_throttle_input)
-                    .before(crate::bridge::handle_attitude_controls)
+                    .before(crate::control_bus::realize_control)
                     .before(gate_throttle_on_fuel_availability)
                     .before(crate::bridge::advance_simulation),
             )

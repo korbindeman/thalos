@@ -34,18 +34,38 @@
             },
         ),
         hotas: (
-            enabled: false,
-            // Example continuous-axis profile. Confirm how Bevy names your
-            // hardware axes during local testing, then flip this on and
-            // uncomment the axes you need.
+            enabled: true,
+            // Thrustmaster T.16000M stick. Bevy's gilrs converter only surfaces
+            // a device's STANDARD gamepad axes and drops everything it labels
+            // `Unknown` — which on a bare flight stick is the twist and the
+            // throttle slider. Thalos works around this by reading raw axes
+            // through its own gilrs instance (see crates/input/src/joystick.rs),
+            // so HOTAS axes are bound by raw platform CODE, not GamepadAxis.
             //
-            // device: NameContains("T.16000M"),
-            // axes: {
-            //     "pitch": (axis: LeftStickY, invert: true, deadzone: 0.05),
-            //     "roll": (axis: LeftStickX, deadzone: 0.05),
-            //     "yaw": (axis: RightZ, deadzone: 0.05),
-            //     "throttle": (axis: LeftZ, min: -1.0, max: 1.0),
-            // },
+            // Discover codes for your hardware with:
+            //     cargo run -p thalos_input --example gamepad_axes
+            // (codes are platform-specific; these are this T.16000M on Windows).
+            device: NameContains("T16000M"),
+            axes: {
+                // Pitch on the stick fore/aft axis. `invert` so pull-back =
+                // nose up (MSFS convention; positive attitude.x = nose up).
+                // If pitch feels reversed, flip this `invert`.
+                "pitch": (code: 65537, invert: true, deadzone: 0.05),
+                // Roll on the stick left/right axis.
+                "roll": (code: 65536, deadzone: 0.05),
+                // Yaw on the stick TWIST — the axis Bevy's gamepad layer drops.
+                "yaw": (code: 65538, deadzone: 0.05, invert: true),
+                // Base throttle slider -> absolute throttle [0, 1]. The slider
+                // position becomes the throttle setting (MSFS-style) and takes
+                // over from the keyboard Z/X/Shift/Ctrl ramp. `min`/`max` are
+                // the raw axis ends mapped to 0..1; flip `invert` if pushing
+                // the slider forward decreases throttle.
+                //
+                // Note: gilrs only reports an axis after it first moves, so the
+                // slider claims the throttle the moment you nudge it (until
+                // then the keyboard ramp still works).
+                "throttle": (code: 65539, min: -1.0, max: 1.0, invert: true),
+            },
         ),
         warp: (
             bindings: {

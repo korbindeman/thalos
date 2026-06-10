@@ -7,7 +7,7 @@ use bevy::math::{DMat3, DQuat, DVec3, Isometry3d, Quat, Vec3};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
-use thalos_body_render::rendered_height_m;
+use thalos_body_render::{TerrainPatchBasis, rendered_height_m};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::{
     body_fixed::body_fixed_pose_from_inertial,
@@ -18,15 +18,15 @@ use thalos_physics_canonical::{
 };
 use thalos_physics_local::avian::{AngularVelocity, LinearVelocity, Position, Rotation};
 use thalos_physics_local::{
-    ActiveLocalBubble, LocalCraftBody, LocalCraftColliderPrimitives, LocalPrimitiveCollider,
-    LocalPrimitiveShape, TerrainSurfaceRegistry,
+    ActiveLocalBubble, HeightSourceRegistry, LocalCraftBody, LocalCraftColliderPrimitives,
+    LocalPrimitiveCollider, LocalPrimitiveShape, TerrainSurfaceRegistry,
 };
 use thalos_world::{BodyDefinition, BodyId, BodyKind, StateVector};
 
 use crate::camera::{ActiveCamera, MapCamera};
 use crate::coords::{MAP_SCALE, SHIP_LAYER};
 use crate::fuel::ThrottleState;
-use crate::local_physics::place_eva_on_surface;
+use crate::local_physics::{PHYSICS_QUERY_TILE_LOD_M, WheelSet, place_eva_on_surface};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::navigation::SHIP_NOSE_BODY;
 use crate::pause_menu::not_game_paused;
@@ -44,12 +44,17 @@ pub const DEBUG_LAUNCH_MOUNT_HEIGHT_M: f64 = 18.0;
 /// rendered terrain; `step_eva_controller` re-seeds and snaps it onto the
 /// surface on the next frame, so this is just a safe initial clearance.
 const EVA_SURFACE_CLEARANCE_M: f64 = 2.0;
-const DEBUG_CRAFT_COLLIDERS_KEY: KeyCode = KeyCode::F8;
+/// **F3** — show physics hitboxes: craft colliders, landing-gear contact
+/// geometry, and the ground collider surface. Shares the key with the aero
+/// force overlay (`aero::toggle_debug_overlay`); both flip on the same press.
+const DEBUG_HITBOXES_KEY: KeyCode = KeyCode::F3;
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct DebugMode {
     pub enabled: bool,
-    pub show_craft_colliders: bool,
+    /// Draw physics hitboxes (craft colliders + gear contact + ground surface).
+    /// Toggled by F3; see [`draw_debug_hitboxes`].
+    pub show_hitboxes: bool,
     /// Debug hack: let air-breathing engines produce thrust even with no
     /// atmosphere, so aircraft can taxi/fly on airless bodies like Thalos for
     /// testing the ground/wheel physics. Contradicts the atmosphere model — a
@@ -112,7 +117,7 @@ impl Plugin for DebugPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DebugMode {
             enabled: true,
-            show_craft_colliders: false,
+            show_hitboxes: false,
             // On by default in dev so the airless-Thalos runway scenarios are
             // actually drivable; flip off over BRP to feel the real (no-air)
             // engine behaviour.
@@ -124,12 +129,22 @@ impl Plugin for DebugPlugin {
         .add_systems(Startup, configure_craft_collider_gizmos)
         .add_systems(
             Update,
-            (
-                toggle_debug_craft_colliders.run_if(not_game_paused.and(not_in_photo_mode)),
-                draw_debug_craft_colliders
-                    .run_if(not_game_paused.and(not_in_photo_mode))
-                    .after(crate::SimStage::Camera),
-            ),
+            toggle_debug_hitboxes.run_if(not_game_paused.and(not_in_photo_mode)),
+        )
+        // PostUpdate after big_space's transform propagation: this system
+        // anchors gizmos to the PlayerShip `GlobalTransform`, which under
+        // big_space is recomputed (floating-origin-relative) only in
+        // `TransformSystems::Propagate`. Reading it in Update used the
+        // *previous* frame's value while the gizmo lines render with this
+        // frame's camera — and a parked craft still sweeps the root grid at
+        // heliocentric speed (~500 m/frame), so the overlay jittered by
+        // hundreds of metres whenever the sim ran. Same staleness fix as
+        // `draw_aero_debug` and `update_body_terrain_atmosphere`.
+        .add_systems(
+            bevy::app::PostUpdate,
+            draw_debug_hitboxes
+                .run_if(not_game_paused.and(not_in_photo_mode))
+                .after(bevy::transform::TransformSystems::Propagate),
         )
         .add_systems(
             Update,
@@ -154,50 +169,164 @@ fn configure_craft_collider_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     config.render_layers = bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER);
 }
 
-fn toggle_debug_craft_colliders(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugMode>) {
-    if !debug.enabled || !keys.just_pressed(DEBUG_CRAFT_COLLIDERS_KEY) {
+fn toggle_debug_hitboxes(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugMode>) {
+    if !debug.enabled || !keys.just_pressed(DEBUG_HITBOXES_KEY) {
         return;
     }
-    debug.show_craft_colliders = !debug.show_craft_colliders;
-    let state = if debug.show_craft_colliders {
+    debug.show_hitboxes = !debug.show_hitboxes;
+    let state = if debug.show_hitboxes {
         "enabled"
     } else {
         "disabled"
     };
-    info!("craft collider debug {state}");
+    info!("hitbox debug overlay {state}");
 }
 
-fn draw_debug_craft_colliders(
+/// Half-width of the ground-collider grid drawn under the craft, in metres.
+const GROUND_GRID_HALF_M: f64 = 50.0;
+/// Cells per side of the ground-collider grid.
+const GROUND_GRID_STEPS: usize = 16;
+
+/// **F3 hitbox overlay.** Draws, at the rendered ship pose, three things the
+/// surface-interaction physics actually uses:
+///
+/// - **Craft colliders** (cyan) — the compound rigid-body primitives.
+/// - **Landing-gear contact geometry** (yellow) — the suspension travel line
+///   and wheel rim. Wheels are raycast springs, *not* colliders, so they never
+///   show up in the craft compound or the analytic backstop's primitive set —
+///   yet they are exactly what touches (and can sink into) the ground. Drawing
+///   them is what makes gear-vs-ground clipping visible.
+/// - **Ground collider surface** (orange grid) — sampled from the *same*
+///   [`HeightSource`] the terrain collider patch and the floor backstop read, so
+///   this is the true contact surface. Compare it against the rendered terrain
+///   to spot collider/visual mismatch, and against the gear rims to spot
+///   penetration.
+///
+/// Avian's built-in `PhysicsGizmos` can't be used here: under `big_space` the
+/// colliders live at body-fixed coordinates (~planet radius), which don't map to
+/// render space. Everything below is placed by recovering the body-fixed→render
+/// isometry from the ship's pose.
+fn draw_debug_hitboxes(
     debug: Res<DebugMode>,
     view: Res<ViewMode>,
     active: Res<ActiveLocalBubble>,
+    height_sources: Res<HeightSourceRegistry>,
+    sim: Res<SimulationState>,
     ship_q: Query<&GlobalTransform, With<PlayerShip>>,
-    craft_q: Query<&LocalCraftColliderPrimitives, With<LocalCraftBody>>,
+    craft_q: Query<
+        (
+            &LocalCraftColliderPrimitives,
+            &Position,
+            &Rotation,
+            Option<&WheelSet>,
+        ),
+        With<LocalCraftBody>,
+    >,
     mut gizmos: Gizmos<CraftColliderGizmos>,
 ) {
-    if !debug.enabled || !debug.show_craft_colliders || *view != ViewMode::Ship {
+    if !debug.enabled || !debug.show_hitboxes || *view != ViewMode::Ship {
         return;
     }
     let Some(bubble) = active.bubble.as_ref() else {
         return;
     };
-    let Ok(primitives) = craft_q.get(bubble.craft_entity) else {
+    let Ok((primitives, position, rotation, wheels)) = craft_q.get(bubble.craft_entity) else {
         return;
     };
     let Ok(root) = ship_q.single() else {
         return;
     };
     let (_, root_rotation, root_translation) = root.affine().to_scale_rotation_translation();
-    let color = Color::srgba(0.0, 1.0, 0.75, 0.9);
 
+    // Craft-local point → render: the rendered `GlobalTransform` *is* the craft
+    // pose in render space, so a craft-local vector rotates by `root_rotation`.
+    let craft_to_render = |q: DVec3| root_translation + root_rotation * q.as_vec3();
+
+    // Body-fixed point → render. The craft's Avian body lives in the
+    // surface-local frame; composing its craft→SLF `Rotation` with the
+    // constant body-fixed→SLF frame rotation recovers the craft→body-fixed
+    // pose, which paired with the rendered pose gives the body-fixed→render
+    // isometry — placing the ground samples (body-fixed frame) without
+    // touching big_space. Differences `p − P_craft` are local (metres), so
+    // the f64→f32 narrowing is exact here.
+    let frame_rot_inv = bubble.frame.rotation_body_to_frame.inverse();
+    let p_craft = frame_rot_inv * bubble.frame.body_center_offset(position.0);
+    let rot_craft_to_body_fixed = frame_rot_inv * rotation.0;
+    let r_map = root_rotation * rot_craft_to_body_fixed.as_quat().inverse();
+    let body_to_render = |p: DVec3| root_translation + r_map * (p - p_craft).as_vec3();
+
+    // --- Craft collider primitives (cyan) ---------------------------------
+    let craft_color = Color::srgba(0.0, 1.0, 0.75, 0.9);
     for primitive in &primitives.0 {
         draw_collider_primitive(
             &mut gizmos,
             root_translation,
             root_rotation,
             primitive,
-            color,
+            craft_color,
         );
+    }
+
+    // --- Landing-gear contact geometry (yellow) ---------------------------
+    if let Some(wheels) = wheels {
+        let gear_color = Color::srgba(1.0, 0.85, 0.2, 0.95);
+        for wheel in &wheels.wheels {
+            let top = craft_to_render(wheel.strut_top_local);
+            let axle = wheel.strut_top_local + wheel.susp_dir_local * wheel.strut_length;
+            let bottom = craft_to_render(axle + wheel.susp_dir_local * wheel.wheel_radius);
+            // Suspension travel line, strut top down to the contact patch.
+            gizmos.line(top, bottom, gear_color);
+            // Wheel rim: a circle of `wheel_radius` about the axle, normal along
+            // the axle axis so it reads as the side profile of the tyre.
+            let rim_normal = (root_rotation * wheel.axle_dir_local.as_vec3()).normalize_or_zero();
+            if rim_normal != Vec3::ZERO {
+                gizmos
+                    .circle(
+                        Isometry3d::new(
+                            craft_to_render(axle),
+                            Quat::from_rotation_arc(Vec3::Z, rim_normal),
+                        ),
+                        wheel.wheel_radius as f32,
+                        gear_color,
+                    )
+                    .resolution(20);
+            }
+        }
+    }
+
+    // --- Ground collider surface (orange grid) ----------------------------
+    if let Some(height_source) = height_sources.get(bubble.body_id)
+        && let Some(dir_craft) = p_craft.try_normalize()
+    {
+        let body = &sim.system.bodies[bubble.body_id];
+        let basis = TerrainPatchBasis::from_normal(dir_craft);
+        let ground_color = Color::srgba(1.0, 0.5, 0.0, 0.7);
+        let cell = |i: usize| (i as f64 / GROUND_GRID_STEPS as f64 * 2.0 - 1.0) * GROUND_GRID_HALF_M;
+        let mut grid: Vec<Vec<Vec3>> = Vec::with_capacity(GROUND_GRID_STEPS + 1);
+        for iz in 0..=GROUND_GRID_STEPS {
+            let z = cell(iz);
+            let mut row = Vec::with_capacity(GROUND_GRID_STEPS + 1);
+            for ix in 0..=GROUND_GRID_STEPS {
+                let x = cell(ix);
+                let dir =
+                    (dir_craft * body.radius_m + basis.tangent_x * x + basis.tangent_z * z).normalize();
+                let h = height_source
+                    .sample_height_m(dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+                    .unwrap_or(0.0) as f64;
+                row.push(body_to_render(dir * (body.radius_m + h)));
+            }
+            grid.push(row);
+        }
+        for iz in 0..=GROUND_GRID_STEPS {
+            for ix in 0..=GROUND_GRID_STEPS {
+                if ix < GROUND_GRID_STEPS {
+                    gizmos.line(grid[iz][ix], grid[iz][ix + 1], ground_color);
+                }
+                if iz < GROUND_GRID_STEPS {
+                    gizmos.line(grid[iz][ix], grid[iz + 1][ix], ground_color);
+                }
+            }
+        }
     }
 }
 
