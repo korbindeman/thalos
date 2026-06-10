@@ -453,7 +453,7 @@ Key modules:
   The canonical `CraftState` is the player either way — KSP-style: one
   craft, Ship or EVA, distinguished by `VesselKind`. The ship blueprint is
   chosen per scenario by `SpawnSituation::ship_blueprint_path`
-  (`apollo.ron` by default, `skyhawk.ron` for the runway scenarios).
+  (`apollo.ron` by default, `meridian.ron` for the aircraft scenarios).
   **`orbit`**:
   `VesselKind::Ship` in a low Thalos parking orbit
   (`system.ship.initial_state`), nose along prograde;
@@ -487,7 +487,7 @@ Key modules:
   a descending/reentering ship decelerates toward a terminal velocity rather
   than free-falling lunar-style. **`runway`** (alias
   `rwy`) and **`runway-approach`** (aliases `rwy-approach` /
-  `approach-runway`) put the `skyhawk.ron` aircraft on a fixed runway on
+  `approach-runway`) put the `meridian.ron` aircraft on a fixed runway on
   the Thalos surface, owned by `crate::runway`. Like the descent modes
   these are deferred and terrain-aware: `runway::finish_runway_spawn`
   runs once on the first `AppState::Running` frame and picks a flat dry
@@ -847,9 +847,14 @@ reads from. No materials of its own.
   `AtmosphereBlock` / `CLOUD_BAND_COUNT` — scene + per-body uniforms.
 - `shaders/lighting.wgsl` — WGSL mirror of `SceneLighting` plus
   `eclipse_factor`, `planetshine_sample`, `hapke_brdf`, and
-  `shade_hapke_surface`. Both backends route through the same
-  `shade_hapke_surface` so shading matches across the impostor↔ground
-  LOD swap.
+  `shade_hapke_surface`. The impostor always shades through
+  `shade_hapke_surface`; the ground LOD picks a path per body via
+  `TerrainShadingStyle` (`body_terrain.wgsl`, carried in
+  `BodyTerrainExtras.inspection.y`, derived from the terrain archetype at
+  spawn): airless `Regolith` bodies (Mira) route through the same
+  `shade_hapke_surface` so they reconverge with the impostor across the LOD
+  swap, while `Vegetated` bodies (Thalos) use the ground-only rough-dielectric
+  BRDF + ecological albedo bands.
 - `shaders/atmosphere.wgsl` — WGSL mirror of `AtmosphereBlock`,
   `integrate_atmosphere`, `composite_clouds`, `apply_limb_darkening`.
 

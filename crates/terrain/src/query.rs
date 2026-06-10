@@ -44,7 +44,7 @@ use glam::{DVec3, Vec3};
 
 use crate::cubemap::{Cubemap, dir_to_face_uv};
 use crate::feature_compositor::{compose_runtime_features_m, runtime_feature_height_margin_m};
-use crate::generic_terrestrial_field::RuntimeTerrainDetail;
+use crate::generic_terrestrial_field::{AirlessRegolithParams, RuntimeTerrainDetail};
 use crate::sample::apply_dynamic_surface_layers;
 use crate::static_surface::PlanetSurface;
 use crate::types::DynamicSurfaceState;
@@ -520,6 +520,9 @@ pub fn surface_height_range_m(surface: &PlanetSurface, state: &DynamicSurfaceSta
             + runtime_feature_height_margin_m(&surface.static_surface)
             + DETAIL_HEIGHT_MARGIN_M)
             .max(1.0),
+        RuntimeTerrainDetail::AirlessRegolith(params) => {
+            (base + params.amplitude_m.abs()).max(1.0)
+        }
         RuntimeTerrainDetail::BasicContinental(params) => {
             base.max(params.height_range_hint_m()).max(1.0)
         }
@@ -697,6 +700,20 @@ fn runtime_height_m(surface: &PlanetSurface, dir: DVec3, lod_m: f32, base_height
             let detail_h = compute_detail_height(dir_f, surface.static_surface.radius_m, plan);
             combine_base_and_detail(feature_base_m, detail_h, surface.static_surface.sea_level_m)
         }
+        RuntimeTerrainDetail::AirlessRegolith(params) => {
+            // Airless regolith: the feature layer (craters/basins/mare) is the
+            // macro relief; add only a gentle rounded fBM undulation on top. No
+            // ridged HMF, no domain warp — those read as jagged mountains the
+            // moon shouldn't have. LOD-invariant (sampled at full detail
+            // regardless of tile LOD) like the other non-legacy arms, so a
+            // parent→child tile handoff doesn't terrace the ground mesh.
+            let dir_f = dir.as_vec3();
+            let feature_base_m =
+                compose_runtime_features_m(&surface.static_surface, dir_f, base_height_m);
+            let detail_h =
+                compute_regolith_detail_height(dir_f, surface.static_surface.radius_m, params);
+            feature_base_m + detail_h
+        }
         RuntimeTerrainDetail::BasicContinental(params) => {
             let _ = lod_m;
             // For the P2A Thalos prototype, keep runtime geometry invariant
@@ -750,6 +767,29 @@ fn compute_detail_height(dir: Vec3, radius_m: f32, plan: DetailPlan) -> f32 {
     );
 
     hmf * DETAIL_AMP_M
+}
+
+/// Gentle rounded fBM undulation for airless regolith, in metres. Signed
+/// (`± amplitude_m`) and evaluated in body-local 3D so it's sphere-continuous.
+/// Unlike [`compute_detail_height`] there is no domain warp and no ridged
+/// transform — plain fBM gives soft hummocks between the feature-layer craters
+/// rather than the jagged mountains the ridged cascade produces.
+fn compute_regolith_detail_height(dir: Vec3, radius_m: f32, params: AirlessRegolithParams) -> f32 {
+    let wl = params.base_wavelength_m.max(1.0);
+    let p = dir * radius_m / wl;
+    // fbm3 returns ~[0,1]; center to ±1 then scale to the signed amplitude.
+    // 5 octaves of rounded fBM: enough to texture the surface across the LOD
+    // range without the high-frequency aliasing the ridged cascade had.
+    let n = crate::noise::fbm3(
+        p.x,
+        p.y,
+        p.z,
+        params.seed,
+        5,
+        DETAIL_PERSISTENCE,
+        DETAIL_LACUNARITY,
+    );
+    (n - 0.5) * 2.0 * params.amplitude_m
 }
 
 /// Combine macro height and HMF detail uplift, capping in shallow bathymetry so

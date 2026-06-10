@@ -37,13 +37,16 @@
         // parts (jet nacelle Ø1.2, landing gear), not the 2.5 m rocket stack.
         // `AircraftCockpit` geometry renders a rounded ogive nose about as long
         // as it is wide (an airliner radome); it's a placeholder silhouette for a
-        // real model later. Still a full command pod (reaction wheel + battery).
+        // real model later. A command pod, but **no reaction wheels**: an
+        // aircraft's only attitude authority is its control surfaces, so it
+        // handles like a plane (mushy below flying speed, no free torque on the
+        // ground), not a spacecraft in plane's clothing.
         "cockpit": Pod((
             display_name: "Canopy Cockpit",
             geometry: AircraftCockpit,
             diameter: 1.5,
             dry_mass: 400.0,
-            reaction_wheel_torque: 8000.0,
+            reaction_wheel_torque: 0.0,
             storage: [
                 (resource: Electricity, units: 1.5),
             ],
@@ -155,9 +158,15 @@
         // upsweep, tail-tip Ø) is per-instance; `wall_mass_per_m2` scales mass
         // with the lofted skin area. Structure-only for now (empty storage);
         // aircraft fuel still lives in the wet wings.
+        //
+        // 40 kg/m² is an *airframe* areal density — frames, stringers, floor,
+        // pressurization, systems, and interior amortized over the skin — not
+        // the bare 12 kg/m² tank-wall skin (which put a 35 m jetliner at a
+        // toy-like ~13 t all-up and made it fly like one). This lands the
+        // Meridian at ~37 t wet: A220-class wing loading and inertia.
         "fuselage_loft": Fuselage((
             display_name: "Loft Fuselage",
-            wall_mass_per_m2: 12.0,
+            wall_mass_per_m2: 40.0,
             storage: [],
         )),
         "wing_std": Wing((
@@ -225,12 +234,13 @@
         // parts, scaled up: a wide flight-deck cockpit, a Ø2.0 m geared
         // turbofan, and a heavy gear set (matched 1.90 + 0.60 = 2.50 m drop =
         // nose 2.00 + 0.50).
+        // No reaction wheels on aircraft flight decks — see "cockpit".
         "flightdeck": Pod((
             display_name: "Flight Deck",
             geometry: AircraftCockpit,
             diameter: 3.5,
             dry_mass: 2200.0,
-            reaction_wheel_torque: 35000.0,
+            reaction_wheel_torque: 0.0,
             storage: [
                 (resource: Electricity, units: 5.0),
             ],
@@ -241,12 +251,13 @@
         // crew / reaction-wheel capability. A windshield region is morphed into
         // the skin where it sits. The `diameter` is nominal (it drives no
         // geometry); it auto-fits whatever fuselage nose it mounts on.
+        // No reaction wheels on aircraft flight decks — see "cockpit".
         "cockpit_inline": Pod((
             display_name: "Inline Flight Deck",
             geometry: Inline,
             diameter: 3.5,
             dry_mass: 2200.0,
-            reaction_wheel_torque: 35000.0,
+            reaction_wheel_torque: 0.0,
             storage: [
                 (resource: Electricity, units: 5.0),
             ],
@@ -264,7 +275,10 @@
             intake_requirement: Some((kind: OxygenatedAir, area_m2: 0.7)),
             builtin_intake: Some((kind: OxygenatedAir, area_m2: 0.85, efficiency: 1.0)),
             diameter: 1.15,
-            thrust: 80000.0,
+            // ~50 kN per pod — a JT8D-class early turbojet. Four on the ~37 t
+            // Meridian gives T/W ≈ 0.55 (era-appropriate for a jetliner); the
+            // previous 80 kN put it at fighter-class T/W ≈ 1.
+            thrust: 50000.0,
             isp: 2600.0,
             dry_mass: 650.0,
             reactants: [
@@ -292,11 +306,12 @@
             display_name: "Heavy Main Landing Gear",
             strut_mass_per_m: 130.0,
             wheel_mass: 120.0,
-            // Wide track (±0.85·host radius ≈ the fuselage width) so a broad
-            // airliner sits stably, with a 2-wheel tandem bogie per leg. (A
-            // belly-mounted axle wider than the hull would float off the skin;
-            // a true wing/sponson mount comes with the morph work.)
-            track_fraction: 0.85,
+            // Wide track (±1.0·host radius = the full fuselage half-width) so a
+            // broad airliner resists tipping over its main gear, with a 2-wheel
+            // tandem bogie per leg. (A belly-mounted axle much wider than the
+            // hull would float off the skin; a true wing/sponson mount comes
+            // with the morph work.)
+            track_fraction: 1.0,
             default_strut_length: 1.9,
             default_wheel_radius: 0.6,
             wheels_per_leg: 2,
