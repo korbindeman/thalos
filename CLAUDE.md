@@ -19,7 +19,7 @@ just game runway          # aircraft parked on the Thalos surface runway
 just game runway-approach # aircraft on short final lined up with that runway
 just game cruise          # Meridian at ~15,000 ft, level cruise over dry land
 just game shipyard        # open straight into the in-game ship editor
-                          #   (also: F3 or the pause menu's SHIPYARD button
+                          #   (also: the pause menu's SHIPYARD button
                           #    from any running mode)
 just edit <body>          # cargo run -p thalos_body_editor -- <body>
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
@@ -696,8 +696,8 @@ Key modules:
   Bevy UI in `HudTheme` style (`shipyard_editor/ui/`):
   parts palette, parametric slider inspector, staging readout, top bar with
   ship-name text field + mirror/snap/layout toggles, a **▶ Launch** button,
-  status bar. Entry: F3 (`game.system.toggle_shipyard`), the pause menu's
-  SHIPYARD button, or `just game shipyard`. When adding game systems that
+  status bar. Entry: the pause menu's SHIPYARD button, or `just game
+  shipyard`. When adding game systems that
   aggregate shipyard part components, filter `Without<EditorPart>` (see
   fuel/staging/local_physics).
 - `relaunch` — fly the editor's current design without a process restart
@@ -880,10 +880,17 @@ reads from. No materials of its own.
 **`ground`** — the `thalos_udlod`-backed terrain LOD (former
 `terrain_render`).
 - `ThalosTerrainPlugin` — adds `thalos_udlod::TerrainPlugin` +
-  `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, embedding
-  their `src/ground/*.wgsl` via `embedded://thalos_body_render/ground/…`.
+  `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`/`GrassMaterial`,
+  embedding their `src/ground/*.wgsl` via `embedded://thalos_body_render/ground/…`.
 - `PipelineTileProvider`, `rendered_height_*`, the `HeightSource` family,
   and rendered-height patch utilities used by M5 colliders.
+- `vegetation` — near-camera grass-blade decoration layer for vegetated
+  bodies: cube-sphere grass-tile lattice + batched blade-mesh builder
+  (placement reuses the tile baker's grass-mask gate against the body's
+  `HeightSource`) + `GrassMaterial`. Driven per-frame by
+  `thalos_game::rendering::grass` (runway-style f64 body-fixed anchoring,
+  revision-based rebuilds). See `docs/terrain.md` *Vegetation decoration
+  layer*.
 
 `body_render` is the **sole consumer** of the vendored `thalos_udlod`,
 re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no

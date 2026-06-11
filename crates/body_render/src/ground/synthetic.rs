@@ -509,7 +509,7 @@ mod tests {
         max_h: f32,
     ) -> Vec<u16> {
         let cfg = height_cfg(size, border);
-        let data = synthesize_height(model, coord, &cfg, min_h, max_h);
+        let data = synthesize_height_r16(model, coord, &cfg, min_h, max_h);
         r16_from(&data).to_vec()
     }
 

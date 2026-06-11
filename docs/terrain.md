@@ -798,6 +798,56 @@ home for the cheap dynamic re-pass.
 
 ---
 
+## Vegetation decoration layer (grass blades)
+
+Near-camera grass blades on vegetated bodies (Thalos), shipped 2026-06 as a
+**self-contained decoration layer on the consumer side of the tile contract** —
+it reads only the runtime seams (`HeightSource`, the material-mask gate,
+`sea_level_m`), so the coming generation revamp can replace everything behind
+those seams without touching it.
+
+**Shape.** A camera-local set of body-fixed *grass tiles* (~25 m tangent
+squares on a self-contained cube-sphere lattice, `GRASS_TILE_SIZE_M`). Each
+tile is one batched `Mesh` of up to a few thousand tapered five-vertex blade
+strips, built on `AsyncComputeTaskPool` and anchored exactly like the runway:
+a root-grid big_space child re-posed in f64 every frame, vertices stored as
+small offsets from the tile's surface centre. No GPU instancing in v1.
+
+**Placement = the terrain shader's own grass gate.** Blades sample the body's
+registered `HeightSource` (GPU-atlas mirror with CPU fallback — the collider's
+source, so blades sit on the rendered ground) and accept by the same
+slope/curvature mask math the tile baker writes into the material attachment's
+grass channel (`material_masks_from_heights`), plus: above `sea_level_m + 1 m`,
+slope ≤ 0.45, fading out over 2 400–3 100 m altitude (the shader's
+grass→alpine band), and excluded where a `TerrainFlatten` pad (the runway) has
+weight. Blade tints mirror the shader's `C_FOREST`/`C_GRASS`/`C_DRYGRASS`
+palette by altitude.
+
+**Shading.** `GrassMaterial` (`ground/grass.wgsl`) mirrors the vegetated
+terrain path's lighting constants (`DIRECT_SUN_STRENGTH`, day/night sky fill)
+with a wrap-diffuse against the sun direction; blades carry the *terrain*
+normal so they light like the ground they grow from. Wind sway is a per-blade
+phase-shifted vertex displacement; the distance fade (70→100 m) is a
+screen-space-dithered discard in the opaque pass. Ship-layer only, so the map
+view never sees it.
+
+**Staleness.** Tiles snapshot `HeightSource::revision()` at build; a periodic
+scan re-samples stale tiles' centre height and rebuilds only the ones whose
+ground actually moved (> 5 cm) — this re-seats grass after tile streaming and
+removes it when a flatten pad is installed late.
+
+**Code.** Engine side: `crates/body_render/src/ground/vegetation.rs` +
+`grass.wgsl` (lattice, builder, material). Driver:
+`crates/game/src/rendering/grass.rs` (`GrassRenderPlugin`: active-body pick,
+tile lifecycle, f64 anchoring, wind/sun updates, rebuild scan).
+
+**Deferred.** GPU instancing / compute placement; density falloff rings;
+albedo-sampled per-blade tint; eclipse occluders + received shadows; blade
+bending under the player/downwash; exact cube-face-seam coverage (a small
+grass gap at face seams is accepted).
+
+---
+
 ## Open questions
 
 Consumer-side open questions. (Generation's own open questions live with the new

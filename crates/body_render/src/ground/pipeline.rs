@@ -253,7 +253,11 @@ fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32)
     }
 }
 
-fn material_masks_from_heights(
+/// Slope/curvature/altitude → packed material masks (R = grass, G = soil,
+/// B = rock, A = wetness). `pub(crate)` so the grass decoration layer
+/// (`vegetation`) places blades with the exact gate the shader's grass
+/// channel is baked from.
+pub(crate) fn material_masks_from_heights(
     height_m: f32,
     h_l: f32,
     h_r: f32,

@@ -99,8 +99,7 @@ Each binary spawns one controller entity with layered contexts.
 
 Game:
 
-- `GameSystemContext` for Escape, screenshot, freecam, and the shipyard
-  editor toggle (F3)
+- `GameSystemContext` for Escape, screenshot, and freecam
 - `GameViewContext` for HUD toggle, map toggle, and camera cycle
 - `GameFlightContext` for attitude, SAS, throttle, and HOTAS flight axes
 - `GameWarpContext` for sim-time meta-controls (pause, warp speed,

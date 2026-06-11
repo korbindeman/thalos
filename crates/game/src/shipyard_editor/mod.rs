@@ -15,9 +15,9 @@
 //! - the HUD hides (photo-mode pattern) and the editor's Bevy-UI panels
 //!   (`ui` module, styled from [`crate::hud::theme::HudTheme`]) show.
 //!
-//! Entry points: `F3` (`game.system.toggle_shipyard`), the pause menu's
-//! SHIPYARD button, or launching with `just game shipyard`. Escape closes
-//! (owned by `pause_menu::handle_escape_input`'s priority chain).
+//! Entry points: the pause menu's SHIPYARD button, or launching with
+//! `just game shipyard`. Escape closes (owned by
+//! `pause_menu::handle_escape_input`'s priority chain).
 //!
 //! The build world is partitioned from the flight ship by the
 //! `EditorPart` marker — see `thalos_shipyard::editor` docs. Build state
@@ -31,7 +31,6 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
-use thalos_input::game::GameInputIntent;
 use thalos_input::shipyard::ShipyardInputPlugin;
 use thalos_shipyard::editor::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
 
@@ -45,9 +44,8 @@ pub use ui::EditorTextFocus;
 
 /// Whether the in-game shipyard editor is open. A sim-clock pause source.
 ///
-/// **Sole writer of `open`:** the toggle paths — [`handle_toggle_input`],
-/// the pause menu's SHIPYARD button, and Escape via
-/// `pause_menu::handle_escape_input`.
+/// **Sole writer of `open`:** the pause menu's SHIPYARD button, Escape via
+/// `pause_menu::handle_escape_input`, and `just game shipyard` startup.
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct ShipyardEditor {
     pub open: bool,
@@ -90,13 +88,7 @@ impl Plugin for ShipyardEditorPlugin {
             // Deferred open: only once the world has loaded (see
             // `OpenShipyardOnStart`).
             .add_systems(OnEnter(AppState::Running), open_on_start)
-            .add_systems(
-                Update,
-                (
-                    handle_toggle_input.run_if(in_state(AppState::Running)),
-                    apply_open_state.after(handle_toggle_input),
-                ),
-            )
+            .add_systems(Update, apply_open_state)
             .add_systems(PostUpdate, propagate_editor_render_layers);
     }
 }
@@ -107,26 +99,6 @@ fn open_on_start(flag: Res<OpenShipyardOnStart>, mut editor: ResMut<ShipyardEdit
     if flag.0 {
         editor.open = true;
     }
-}
-
-/// F3 toggles the editor. Blocked while the destruction scenario picker is
-/// up (forced modal) or freecam drives the camera.
-fn handle_toggle_input(
-    intent: Res<GameInputIntent>,
-    scenario: Res<crate::scenario_menu::ScenarioMenu>,
-    freecam: Option<Res<crate::freecam::FreeCam>>,
-    mut editor: ResMut<ShipyardEditor>,
-) {
-    if !intent.toggle_shipyard {
-        return;
-    }
-    if scenario.open {
-        return;
-    }
-    if freecam.as_deref().map(|f| f.active).unwrap_or(false) {
-        return;
-    }
-    editor.open = !editor.open;
 }
 
 /// React to open/close: flip the cameras, show/hide the build world, and

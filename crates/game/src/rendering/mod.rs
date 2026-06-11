@@ -13,6 +13,7 @@
 mod body_lod;
 mod clouds;
 mod generation;
+mod grass;
 pub(crate) mod ground_terrain;
 mod lighting;
 mod materials;
@@ -81,6 +82,7 @@ impl Plugin for RenderingPlugin {
         app.add_plugins(SceneDepthPlugin)
             .add_plugins(TerrainResidencyPlugin)
             .add_plugins(clouds::CloudsRenderPlugin)
+            .add_plugins(grass::GrassRenderPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())

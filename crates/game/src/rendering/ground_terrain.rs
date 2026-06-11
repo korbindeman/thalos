@@ -355,7 +355,7 @@ fn body_terrain_view_config(body_radius_m: f64) -> TerrainViewConfig {
 /// archetype. Airless impact moons (Mira) reconverge on the orbital impostor's
 /// gray Hapke regolith look; everything else keeps the wet, vegetated
 /// terrestrial path. Future airless archetypes get added to this match.
-fn terrain_shading_style_for(body: &BodyDefinition) -> TerrainShadingStyle {
+pub(crate) fn terrain_shading_style_for(body: &BodyDefinition) -> TerrainShadingStyle {
     match &body.terrain {
         thalos_terrain::TerrainConfig::Feature(cfg) => match cfg.archetype {
             thalos_terrain::BodyArchetype::AirlessImpactMoon => TerrainShadingStyle::Regolith,

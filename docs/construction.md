@@ -41,7 +41,7 @@ save/load against `ships/*.ron`. Two front-ends drive that core:
   and the HUD hides. KSP(2)-style layout: parts palette (left), parametric
   slider inspector (right), per-stage Δv/fuel readout, top bar with ship
   name, live mass/Δv/TWR stats, mirror/snap/hangar-layout toggles,
-  **▶ Launch**, and save/new/exit. Entry: `F3`, the pause menu's SHIPYARD
+  **▶ Launch**, and save/new/exit. Entry: the pause menu's SHIPYARD
   button, or `just game shipyard`. Escape closes (pause-menu priority
   chain). The build persists across open/close — entities are hidden, not
   despawned — so a design in progress survives flying around in between.

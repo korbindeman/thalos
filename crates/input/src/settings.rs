@@ -494,7 +494,6 @@ pub mod defaults {
                 ("escape", keys([KeyCode::Escape])),
                 ("screenshot", keys([KeyCode::F2])),
                 ("toggle_free_cam", keys([KeyCode::F4])),
-                ("toggle_shipyard", keys([KeyCode::F3])),
             ],
             [],
         )

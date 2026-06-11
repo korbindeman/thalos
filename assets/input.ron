@@ -6,7 +6,6 @@
             bindings: {
                 "escape": [Key(Escape)],
                 "screenshot": [Key(F2)],
-                "toggle_shipyard": [Key(F3)],
                 "toggle_free_cam": [Key(F4)],
             },
         ),

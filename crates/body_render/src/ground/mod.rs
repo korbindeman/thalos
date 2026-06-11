@@ -34,6 +34,7 @@ mod rendered_height;
 mod sky_material;
 mod synthetic;
 mod tile_synthesis_pool;
+mod vegetation;
 mod water_material;
 
 pub use body_material::{
@@ -56,6 +57,10 @@ pub use rendered_height::{
 pub use sky_material::BodySkyMaterial;
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
 pub use tile_synthesis_pool::tile_synthesis_pool;
+pub use vegetation::{
+    GRASS_TILE_SIZE_M, GrassMaterial, GrassParams, GrassTileBuildInput, GrassTileKey,
+    GrassTileMesh, build_grass_tile_mesh, grass_tile_frame, grass_tile_key, grass_tiles_per_side,
+};
 pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 
 pub struct ThalosTerrainPlugin;
@@ -81,9 +86,13 @@ impl Plugin for ThalosTerrainPlugin {
         // icosphere mesh respectively), not thalos_udlod's UDLOD pipeline.
         app.add_plugins(MaterialPlugin::<BodySkyMaterial>::default());
         app.add_plugins(MaterialPlugin::<BodyWaterMaterial>::default());
+        // Grass blades render through the regular forward pipeline too — the
+        // decoration tiles are plain meshes, not UDLOD geometry.
+        app.add_plugins(MaterialPlugin::<GrassMaterial>::default());
         body_material::embed_body_terrain_shader(app);
         sky_material::embed_body_sky_shader(app);
         water_material::embed_body_water_shader(app);
+        vegetation::embed_grass_shader(app);
         #[cfg(feature = "playground")]
         playground_material::embed_playground_shader(app);
     }
