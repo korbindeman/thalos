@@ -272,6 +272,7 @@ fn update_lens_flare(
     body_states: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     view: Res<ViewMode>,
+    ui_scale: Res<UiScale>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut tex_ghosts: Query<
         (
@@ -491,9 +492,18 @@ fn update_lens_flare(
         )
     };
 
+    // `Node` left/top are UI-logical px, which Bevy multiplies by `UiScale`
+    // (set ≠ 1 to compensate fractional HiDPI scale — see
+    // `main::compensate_fractional_ui_scale`). `sun_screen`/`to_center` are
+    // window-logical px from `world_to_viewport` + `window.width()`, which are
+    // UiScale-independent. Divide by UiScale here so the ghost's *physical*
+    // position lands on the projected star instead of drifting by the UiScale
+    // factor. `size_px` is authored in UI-px and stays as-is (Bevy scales it).
+    let inv_ui = 1.0 / ui_scale.0.max(1.0e-6);
+
     // Textured ghosts (iris, starburst).
     for (ghost, mut node, handle, _) in &mut tex_ghosts {
-        let pos = sun_screen + to_center * ghost.axis_t;
+        let pos = (sun_screen + to_center * ghost.axis_t) * inv_ui;
         node.left = Val::Px(pos.x - ghost.size_px * 0.5);
         node.top = Val::Px(pos.y - ghost.size_px * 0.5);
         if let Some(m) = tex_materials.get_mut(&handle.0) {
@@ -504,7 +514,7 @@ fn update_lens_flare(
     // Halo (analytic crescent ring) — orients its bright arc toward
     // screen center each frame via axis_dir.
     for (ghost, halo, mut node, handle, _) in &mut halo_ghosts {
-        let pos = sun_screen + to_center * ghost.axis_t;
+        let pos = (sun_screen + to_center * ghost.axis_t) * inv_ui;
         node.left = Val::Px(pos.x - ghost.size_px * 0.5);
         node.top = Val::Px(pos.y - ghost.size_px * 0.5);
         if let Some(m) = halo_materials.get_mut(&handle.0) {

@@ -130,7 +130,12 @@ impl AttitudeController {
         // and well-behaved up to π.
         let error_world = 2.0 * DVec3::new(q_err.x, q_err.y, q_err.z);
         let error_body = q.inverse() * error_world;
-        let omega_body = q.inverse() * attitude.angular_velocity;
+        // `attitude.angular_velocity` is already expressed in the body frame
+        // (see `AttitudeState` docs); it is the ω the PD damps directly. Do
+        // *not* rotate it by `q.inverse()` — that double-transform misaims the
+        // damping torque by the ship's orientation, which manifests as SAS
+        // failing to settle and pointing modes spinning up.
+        let omega_body = attitude.angular_velocity;
         pd_to_normalized_torque(error_body, omega_body, params, aero_authority)
     }
 }
@@ -154,16 +159,40 @@ pub fn point_nose(
     } else {
         NOSE_BODY.cross(target_body)
     };
-    let omega_body = attitude.orientation.inverse() * attitude.angular_velocity;
+    // `attitude.angular_velocity` is already body-frame (see `AttitudeState`
+    // docs) — the frame the PD damps in. The old `navigation::autopilot_command`
+    // this was ported from used it directly; the `orientation.inverse() *` added
+    // in the port was a frame bug that misaimed the roll/yaw damping.
+    let omega_body = attitude.angular_velocity;
     pd_to_normalized_torque(error_axis, omega_body, params, aero_authority)
 }
 
-/// Critically-damped PD: `kp·error − kd·ω`, gains derived per-axis from MOI
-/// and `ω_n = π / SETTLE_TIME_S`, then normalized by the **total** available
-/// authority (`max_torque + aero_authority`) to `[-1, 1]`. Normalizing by the
-/// total — not just `max_torque` — is what keeps the realized closed-loop
-/// torque equal to the designed PD torque when the allocator drives both the
-/// reaction wheels and the aero surfaces at this same fraction.
+/// Fraction of the available angular deceleration the stopping-rate cap
+/// budgets for braking. Below 1 it leaves headroom so the finite-gain rate
+/// loop can track the shrinking stop-rate without coasting past it (a value
+/// of 1 would brake exactly time-optimally on paper but leak a few degrees of
+/// overshoot through tracking lag).
+const DECEL_MARGIN: f64 = 0.9;
+
+/// Critically-damped PD with a **deceleration-limited rate cap**, normalized
+/// by the **total** available authority (`max_torque + aero_authority`) to
+/// `[-1, 1]`. Normalizing by the total — not just `max_torque` — keeps the
+/// realized closed-loop torque equal to the designed torque when the allocator
+/// drives both the reaction wheels and the aero surfaces at this same fraction.
+///
+/// The bare PD `kp·e − kd·ω` is critically damped only in its *linear* region.
+/// `kp` is sized for a small-angle `SETTLE_TIME_S` settle, so the command
+/// saturates against the available authority at a fairly small error; a large
+/// target change then runs open-loop at full torque, builds up rate, and
+/// **overshoots** — it snaps to the target and bounces back. To ease in
+/// instead, cap the PD's implied desired rate `ω_des = (kp/kd)·e = (ω_n/2)·e`
+/// at the deceleration-limited *stopping rate* `ω_stop = √(2·α·|e|)`, the
+/// fastest rate from which the available angular acceleration `α = authority/I`
+/// can still null the error by the time it reaches zero. Far from the target
+/// the stop-rate cap binds (near time-optimal — no overshoot); close in,
+/// `ω_des` falls below the cap and the law *is* the original critically-damped
+/// PD (no sqrt chatter at the target). So small slews and strong-wheel craft
+/// are unchanged; only the saturating slews that used to overshoot are tamed.
 fn pd_to_normalized_torque(
     error_body: DVec3,
     omega_body: DVec3,
@@ -171,15 +200,38 @@ fn pd_to_normalized_torque(
     aero_authority: DVec3,
 ) -> DVec3 {
     let omega_n = std::f64::consts::PI / SETTLE_TIME_S;
-    let kp = params.moment_of_inertia * (omega_n * omega_n);
-    let kd = params.moment_of_inertia * (2.0 * omega_n);
-    let desired = error_body * kp - omega_body * kd;
+    let moi = params.moment_of_inertia;
+    let kd = moi * (2.0 * omega_n);
     let authority = params.max_torque + aero_authority;
+    // (kp/kd) = ω_n/2 — the linear PD's implied desired rate per unit error.
+    let rate_gain = omega_n * 0.5;
     DVec3::new(
-        normalize_axis(desired.x, authority.x),
-        normalize_axis(desired.y, authority.y),
-        normalize_axis(desired.z, authority.z),
+        slew_axis(error_body.x, omega_body.x, rate_gain, kd.x, authority.x, moi.x),
+        slew_axis(error_body.y, omega_body.y, rate_gain, kd.y, authority.y, moi.y),
+        slew_axis(error_body.z, omega_body.z, rate_gain, kd.z, authority.z, moi.z),
     )
+}
+
+/// One axis of the deceleration-limited PD → normalized torque in `[-1, 1]`.
+/// Reduces to the plain critically-damped PD (`kp·e − kd·ω`) whenever the
+/// linear branch is taken (small error / ample authority).
+fn slew_axis(error: f64, omega: f64, rate_gain: f64, kd: f64, authority: f64, moi: f64) -> f64 {
+    let omega_des_linear = rate_gain * error;
+    let alpha = if moi > 0.0 {
+        DECEL_MARGIN * authority / moi
+    } else {
+        0.0
+    };
+    let omega_stop = (2.0 * alpha * error.abs()).sqrt().copysign(error);
+    // Smaller magnitude wins: stop-rate far from target, linear PD near it.
+    let omega_des = if omega_des_linear.abs() < omega_stop.abs() {
+        omega_des_linear
+    } else {
+        omega_stop
+    };
+    // Rate loop closes on the (capped) desired rate. When the linear branch is
+    // taken this is exactly kd·((kp/kd)·e − ω) = kp·e − kd·ω.
+    normalize_axis(kd * (omega_des - omega), authority)
 }
 
 fn normalize_axis(desired: f64, max: f64) -> f64 {
@@ -281,6 +333,87 @@ mod tests {
         // Center (Rate ~0) → recaptures the *current* attitude.
         c.update(AttitudeDemand::Rate(DVec3::ZERO), &att, &p, DVec3::ZERO);
         assert_eq!(c.hold_target(), Some(att.orientation));
+    }
+
+    #[test]
+    fn hold_damps_off_axis_omega_in_the_body_frame() {
+        // Regression for the frame bug where `hold` rotated the (already
+        // body-frame) `attitude.angular_velocity` by `orientation.inverse()`
+        // before damping. With the craft *at* its hold target (zero
+        // orientation error) and a pure body-X angular velocity, the only
+        // term is `-kd·ω`, so the command must be a pure body-X brake.
+        //
+        // The orientation is a 90° roll about Z, chosen so the buggy
+        // `q.inverse() * ω` would rotate body-X into body-(-Y): under the bug
+        // the command would point along Y, not X. A non-axis-aligned
+        // orientation is what the older on-axis tests never exercised.
+        let p = params();
+        let q = DQuat::from_axis_angle(DVec3::Z, std::f64::consts::FRAC_PI_2);
+        let mut c = AttitudeController::new();
+        c.hold_target = Some(q); // at target → zero positional error
+        let att = AttitudeState {
+            orientation: q,
+            angular_velocity: DVec3::new(0.001, 0.0, 0.0), // body-frame, off the Z spin axis
+        };
+        let cmd = c.hold(q, &att, &p, DVec3::ZERO);
+        // Pure body-X brake: oppose ω on X, nothing on Y/Z.
+        assert!(cmd.x < 0.0, "expected a braking torque opposing +X ω, got {cmd:?}");
+        assert_abs_diff_eq!(cmd.y, 0.0, epsilon = 1e-9);
+        assert_abs_diff_eq!(cmd.z, 0.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn point_nose_damps_off_axis_omega_in_the_body_frame() {
+        // Same frame regression for the pointing law. Nose already on target
+        // (so the cross-product error term vanishes) but spinning about body
+        // X; the command must be a pure body-X brake, not a rotated one.
+        let p = params();
+        let q = DQuat::from_axis_angle(DVec3::Z, std::f64::consts::FRAC_PI_2);
+        let nose_world = q * NOSE_BODY; // current nose dir → zero pointing error
+        let att = AttitudeState {
+            orientation: q,
+            angular_velocity: DVec3::new(0.001, 0.0, 0.0),
+        };
+        let cmd = point_nose(nose_world, &att, &p, DVec3::ZERO);
+        assert!(cmd.x < 0.0, "expected a braking torque opposing +X ω, got {cmd:?}");
+        assert_abs_diff_eq!(cmd.y, 0.0, epsilon = 1e-9);
+        assert_abs_diff_eq!(cmd.z, 0.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn hold_large_slew_eases_in_without_overshoot() {
+        // Weak reaction wheels relative to inertia (I/T = 10) — the saturating
+        // regime. The plain critically-damped PD overshoots a 90° change by
+        // ~0.43 rad and rings; the deceleration-limited cap must ease in with
+        // only a sliver of overshoot. Single-axis (Z) closed-loop sim mirroring
+        // the game: cmd·max_torque is applied as body-frame torque, integrated
+        // as an isotropic rigid body.
+        let p = ShipParameters {
+            moment_of_inertia: DVec3::splat(10_000.0),
+            max_torque: DVec3::splat(1_000.0),
+            ..params()
+        };
+        let target_angle = std::f64::consts::FRAC_PI_2;
+        let target = DQuat::from_axis_angle(DVec3::Z, target_angle);
+        let mut c = AttitudeController::new();
+        c.hold_target = Some(target);
+
+        let mut orientation = DQuat::IDENTITY;
+        let mut omega = DVec3::ZERO; // body frame
+        let dt = 1.0 / 60.0;
+        let mut max_overshoot = 0.0_f64;
+        for _ in 0..1800 {
+            let att = AttitudeState { orientation, angular_velocity: omega };
+            let cmd = c.hold(target, &att, &p, DVec3::ZERO);
+            let ang_accel = (cmd * p.max_torque) / p.moment_of_inertia;
+            omega += ang_accel * dt;
+            orientation = (orientation * DQuat::from_scaled_axis(omega * dt)).normalize();
+            let phi = orientation.to_scaled_axis().z; // pure-Z rotation angle
+            max_overshoot = max_overshoot.max((phi - target_angle).max(0.0));
+        }
+        let final_err = (orientation.to_scaled_axis().z - target_angle).abs();
+        assert!(final_err < 0.02, "did not settle: {final_err} rad");
+        assert!(max_overshoot < 0.1, "overshoot too large: {max_overshoot} rad");
     }
 
     #[test]

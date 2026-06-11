@@ -57,6 +57,24 @@ the whole pipeline:
      damping roll (roll is free during a burn).
    - `Rate(cmd)` → pass-through (deflected stick = direct command).
    - `Free` → zero.
+
+   > **Damping is body-frame.** `AttitudeState::angular_velocity` is already
+   > body-frame (canonical convention), so the PD damps it directly. An earlier
+   > cut rotated it by `orientation.inverse()` first — a spurious double
+   > transform that misaimed the damping torque by the ship's orientation, so
+   > SAS failed to settle and pointing modes spun up. The `Rate` (pilot)
+   > path is unaffected; only the PD laws read ω.
+   >
+   > **Eased-in slews, no overshoot.** The PD laws (`Hold`, `PointNose`) carry
+   > a **deceleration-limited rate cap**. The bare PD is critically damped only
+   > in its linear region; because `kp` is sized for a small-angle settle, the
+   > command saturates against the available authority at a small error, so a
+   > large target change used to run open-loop at full torque, build up rate,
+   > and overshoot (snap-and-bounce). `pd_to_normalized_torque` now caps the
+   > PD's implied desired rate `(ω_n/2)·e` at the stopping rate `√(2·α·|e|)`
+   > (`α = authority/I`, with a 0.9 decel margin): far from target the cap binds
+   > (near time-optimal — eases in), near it the law *is* the original PD (no
+   > sqrt chatter). Small slews and strong-wheel craft are unchanged.
 4. **Allocate.** `thalos_control::allocate` hands the *same* torque to
    every effector: reaction wheels (`ControlInput::torque_command`,
    consumed by `apply_local_forces`) and aero control surfaces
