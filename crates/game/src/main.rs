@@ -227,21 +227,35 @@ fn window_from_env() -> Window {
 /// Work around a Bevy 0.18 text-rendering bug: at **fractional** window scale
 /// factors (a 150 % HiDPI display reports 1.5, etc.) glyphs rasterise at
 /// inconsistent sizes — text looks broken (non-uniform, "not monospace").
-/// Integer scale factors render cleanly. So we snap the OS scale factor to the
+/// Integer scale factors render cleanly. So we compensate through the UI
+/// scale so the *effective* UI scale (window scale × UI scale) lands on the
 /// nearest integer (≥ 1) once the window's real scale is known.
 ///
+/// An earlier version snapped the *window* scale-factor override instead, but
+/// `bevy_winit::changed_windows` treats a scale-factor change as
+/// logical-size-preserving and physically resizes the window — on a 150 %
+/// display the borderless-fullscreen window grew to 4/3 of the monitor. The
+/// window is left untouched now: `UiScale` covers Bevy UI (rasterised at
+/// `window scale × UiScale`) and `EguiContextSettings::scale_factor` covers
+/// the egui panels (`window scale × scale_factor`), so the two stay mutually
+/// consistent.
+///
 /// The UI ends up slightly larger or smaller than the OS-intended size (e.g.
-/// 1.5 → 2.0) but crisp; a user who prefers the other integer can pin it with
-/// `THALOS_SCALE=1` (handled in [`window_from_env`], which wins here). Remove
-/// this once the upstream Bevy fractional-scale text bug is fixed.
-fn snap_window_scale_to_integer(
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut snapped_log: Local<bool>,
+/// 1.5 → 2.0) but crisp; a user who prefers a specific scale can pin the
+/// window scale with `THALOS_SCALE=1` (handled in [`window_from_env`], which
+/// wins here). Remove this once the upstream Bevy fractional-scale text bug
+/// is fixed.
+fn compensate_fractional_ui_scale(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut ui_scale: ResMut<UiScale>,
+    mut egui_settings: Query<&mut bevy_egui::EguiContextSettings>,
+    mut compensated_log: Local<bool>,
 ) {
-    let Ok(mut window) = windows.single_mut() else {
+    let Ok(window) = windows.single() else {
         return;
     };
-    // A manual `THALOS_SCALE` override already pinned the scale — leave it.
+    // A manual `THALOS_SCALE` override already pinned the window scale (winit
+    // honours it from creation, no resize involved) — leave the UI alone.
     if window.resolution.scale_factor_override().is_some() {
         return;
     }
@@ -249,16 +263,23 @@ fn snap_window_scale_to_integer(
     if os <= 0.0 {
         return; // scale not reported by winit yet
     }
-    let snapped = os.round().max(1.0);
-    if (snapped - os).abs() > 1.0e-3 {
-        window.resolution.set_scale_factor_override(Some(snapped));
-        if !*snapped_log {
+    let ratio = os.round().max(1.0) / os;
+    if (ui_scale.0 - ratio).abs() > 1.0e-4 {
+        ui_scale.0 = ratio;
+        if !*compensated_log {
             info!(
-                "snapped window scale factor {os:.3} → {snapped:.0} \
+                "compensating fractional window scale {os:.3} with UI scale ×{ratio:.3} \
                  (crisp-text workaround for Bevy fractional-scale rendering; \
                  override with THALOS_SCALE)"
             );
-            *snapped_log = true;
+            *compensated_log = true;
+        }
+    }
+    // Egui contexts can spawn after startup (and after the ratio is known),
+    // so keep late arrivals in step instead of writing once.
+    for mut settings in &mut egui_settings {
+        if (settings.scale_factor - ratio).abs() > 1.0e-4 {
+            settings.scale_factor = ratio;
         }
     }
 }
@@ -642,7 +663,7 @@ fn main() {
         // Snap fractional HiDPI scale factors to an integer so UI text renders
         // crisply (Bevy 0.18 fractional-scale text bug). Runs every frame but
         // no-ops once the override is set.
-        .add_systems(Update, snap_window_scale_to_integer)
+        .add_systems(Update, compensate_fractional_ui_scale)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
         .add_plugins(relaunch::RelaunchPlugin)
