@@ -1,5 +1,6 @@
 [package]
 name = "thalos_input"
+publish = false
 version.workspace = true
 edition.workspace = true
 

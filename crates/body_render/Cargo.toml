@@ -1,5 +1,6 @@
 [package]
 name = "thalos_body_render"
+publish = false
 version.workspace = true
 edition.workspace = true
 

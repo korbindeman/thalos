@@ -1,5 +1,6 @@
 [package]
 name = "thalos_physics_local"
+publish = false
 version.workspace = true
 edition.workspace = true
 

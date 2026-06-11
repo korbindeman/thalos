@@ -1,5 +1,6 @@
 [package]
 name = "thalos_celestial"
+publish = false
 version.workspace = true
 edition.workspace = true
 

@@ -1,5 +1,6 @@
 [package]
 name = "thalos_bake_dump"
+publish = false
 version.workspace = true
 edition.workspace = true
 

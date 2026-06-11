@@ -1,5 +1,6 @@
 [package]
 name = "thalos_control"
+publish = false
 version.workspace = true
 edition.workspace = true
 
