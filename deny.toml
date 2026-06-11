@@ -23,17 +23,5 @@ allow = [
   "BSL-1.0",
 ]
 
-# GPL and AGPL are viral across the combined work and void the
-# PolyForm-Noncommercial model.  Listed explicitly so the error message
-# names the offending license rather than just "not in allow list".
-deny = [
-  "GPL-2.0",
-  "GPL-2.0-only",
-  "GPL-2.0-or-later",
-  "GPL-3.0",
-  "GPL-3.0-only",
-  "GPL-3.0-or-later",
-  "AGPL-3.0",
-  "AGPL-3.0-only",
-  "AGPL-3.0-or-later",
-]
+# With version = 2, any license not in the allow list is denied — no
+# explicit deny list needed.  GPL/AGPL are rejected by omission.
