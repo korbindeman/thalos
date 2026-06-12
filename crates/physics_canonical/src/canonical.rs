@@ -74,22 +74,6 @@ pub struct UnsupportedWorldPreset {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum TimeMode {
-    Realtime,
-    PhysicsWarp,
-    RailsWarp,
-    PlanningPreview,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct SimClock {
-    pub current: Epoch,
-    pub scale: f64,
-    pub paused: bool,
-    pub mode: TimeMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TranslationalState {
     pub position: DVec3,
     pub velocity: DVec3,
@@ -126,10 +110,7 @@ pub struct ResourceState;
 
 pub type CraftId = u64;
 pub type TrajectoryId = u64;
-pub type WarpIntegratorId = u64;
 pub type LocalBubbleId = u64;
-pub type AssemblyId = u64;
-pub type DockingPortId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityRef(pub u64);
@@ -145,9 +126,6 @@ pub enum AuthorityMode {
     OnRails {
         trajectory: TrajectoryId,
     },
-    WarpIntegrated {
-        integrator: WarpIntegratorId,
-    },
     LocalRigidBody {
         bubble: LocalBubbleId,
         root_entity: EntityRef,
@@ -155,10 +133,6 @@ pub enum AuthorityMode {
     BodyFixed {
         body: BodyId,
         pose: BodyFixedPose,
-    },
-    Docked {
-        assembly: AssemblyId,
-        port: DockingPortId,
     },
 }
 
@@ -236,16 +210,17 @@ mod tests {
         book.transition_to(Epoch(10.0), AuthorityMode::OnRails { trajectory: 7 });
         assert!(book.log.is_empty());
 
-        book.transition_to(Epoch(11.0), AuthorityMode::WarpIntegrated { integrator: 3 });
+        let next = AuthorityMode::LocalRigidBody {
+            bubble: 3,
+            root_entity: EntityRef(9),
+        };
+        book.transition_to(Epoch(11.0), next);
 
-        assert_eq!(book.mode, AuthorityMode::WarpIntegrated { integrator: 3 });
+        assert_eq!(book.mode, next);
         assert_eq!(book.log.len(), 1);
         assert_eq!(book.log[0].craft, 42);
         assert_eq!(book.log[0].from, AuthorityMode::OnRails { trajectory: 7 });
-        assert_eq!(
-            book.log[0].to,
-            AuthorityMode::WarpIntegrated { integrator: 3 }
-        );
+        assert_eq!(book.log[0].to, next);
     }
 
     #[test]

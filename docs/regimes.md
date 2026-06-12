@@ -318,27 +318,34 @@ rovers, jointed cranes/trailers). Decide with a spike: prototype the
 parry-direct path for the gearless-lander contact case on a branch
 and compare stability and effort directly.
 
-## 5. Vocabulary cleanup (Phase B)
+## 5. Vocabulary cleanup (Phase B) — **done (2026-06-12)**
 
-- **Delete** canonical `SimClock` + `TimeMode`
-  (`crates/physics_canonical/src/canonical.rs`) — unused, and the
-  name collides with the real `crates/game/src/sim_clock.rs` clock.
-- **Delete** `AuthorityMode::WarpIntegrated` and
-  `AuthorityMode::Docked` — never constructed outside tests, no save
-  format exists to break, and Phase C should design the perturbed
-  coast (and a later docking pass should design docking) on their own
-  merits rather than inherit placeholder variants. Pre-alpha teardown
-  policy applies.
-- **Split `crates/game/src/local_physics.rs`** (~3.6 k lines) into
-  focused modules: `regime` (executors of the record), `snap_readback`,
-  `forces`, `gear` (wheels, suspension, parking brake),
-  `ground_contact` (friction, backstop, impact detection),
-  `terrain_patch`, `frames` (the inertial↔SLF/body-centered seam),
-  `colliders` (part-collider construction).
-- **Rewrite `docs/simulation.md`** to separate "shipped architecture"
-  from "target design" (the unbuilt provider-policy / ephemeris /
-  crate-split material), and update CLAUDE.md per the
-  announce-and-document policy.
+- **Deleted** canonical `SimClock` + `TimeMode` — unused, and the name
+  collided with the real `crates/game/src/sim_clock.rs` clock.
+- **Deleted** `AuthorityMode::WarpIntegrated` and
+  `AuthorityMode::Docked` (and their `WarpIntegratorId` /
+  `AssemblyId` / `DockingPortId` payload aliases, and the matching
+  `AuthorityKind` variants) — never constructed outside tests; Phase C
+  designs the perturbed coast (and a later docking pass designs
+  docking) on their own merits. `AuthorityMode` is now exactly the
+  three implemented variants: `OnRails` / `LocalRigidBody` /
+  `BodyFixed`.
+- **Split `crates/game/src/local_physics.rs`** (~3 k lines after the
+  A3 deletions) into `local_physics/` with eight focused modules —
+  `spawn` (bubble lifecycle, SOI rebase, debug drops, EVA placement),
+  `terrain_patch`, `snap` (snap/readback/re-anchor), `forces`, `gear`,
+  `ground` (backstop/friction/impact), `frames` (the conversion seam),
+  `colliders` — re-exported from `mod.rs` so every external
+  `crate::local_physics::X` path is unchanged.
+- **Reconciled `docs/simulation.md`**: an implementation-status banner
+  separating shipped architecture from target design (provider
+  policies, `WarpIntegrator`, navigation contexts, the
+  `sim_core`/`ephemeris`/`flight` crate split — all explicitly marked
+  unbuilt), the `AuthorityMode` section updated to the three-variant
+  reality, and the "Avian's three roles" section repointed at the
+  landed resolver. CLAUDE.md updated alongside each phase.
+- Runtime-verified post-split (runway parked → release → takeoff on
+  the harness; zero sanity-check failures).
 
 ## 6. Migration plan
 

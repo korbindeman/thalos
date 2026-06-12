@@ -154,20 +154,16 @@ pub struct RegimeMemory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityKind {
     OnRails,
-    WarpIntegrated,
     LocalRigidBody,
     BodyFixed,
-    Docked,
 }
 
 impl From<AuthorityMode> for AuthorityKind {
     fn from(mode: AuthorityMode) -> Self {
         match mode {
             AuthorityMode::OnRails { .. } => Self::OnRails,
-            AuthorityMode::WarpIntegrated { .. } => Self::WarpIntegrated,
             AuthorityMode::LocalRigidBody { .. } => Self::LocalRigidBody,
             AuthorityMode::BodyFixed { .. } => Self::BodyFixed,
-            AuthorityMode::Docked { .. } => Self::Docked,
         }
     }
 }
@@ -452,9 +448,7 @@ fn prediction_display(inputs: &RegimeInputs) -> PredictionDisplay {
                 PredictionDisplay::Show
             }
         }
-        AuthorityKind::OnRails | AuthorityKind::WarpIntegrated | AuthorityKind::Docked => {
-            PredictionDisplay::Show
-        }
+        AuthorityKind::OnRails => PredictionDisplay::Show,
     }
 }
 
@@ -503,15 +497,6 @@ pub fn expected_authority(inputs: &RegimeInputs, regime: &CraftRegime) -> Author
             return AuthorityKind::BodyFixed;
         }
     }
-    // Never-constructed variants pass through untouched (legacy leaves them
-    // alone); slated for deletion in Phase B.
-    if matches!(
-        authority,
-        AuthorityKind::WarpIntegrated | AuthorityKind::Docked
-    ) {
-        return authority;
-    }
-
     // Landed warp-request collapse (mirror of `manage_authority`): quiet
     // hull contact + warp requested above 1× ⇒ pin to the rotating surface.
     if authority == AuthorityKind::LocalRigidBody

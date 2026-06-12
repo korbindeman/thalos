@@ -337,10 +337,6 @@ pub(crate) fn apply_regime_authority(
                 });
             info!("collapsed stable landed craft to BodyFixed authority");
         }
-        // Never produced as a transition *target*: `expected_authority`
-        // passes these through unchanged, so `current == target` returns
-        // above. Both variants are slated for deletion in Phase B.
-        AuthorityKind::WarpIntegrated | AuthorityKind::Docked => {}
     }
 }
 

@@ -585,7 +585,7 @@ impl Simulation {
     /// canonical state coherent under warp: `BodyFixed` evaluates pose at
     /// `sim_time`; `LocalRigidBody` is a no-op for translation (Avian
     /// reads back into canonical separately); `OnRails` /
-    /// `WarpIntegrated` / `Docked` propagate the ship's coast across the
+    /// propagates the ship's coast across the
     /// warp-scaled time interval, breaking on SOI transitions until the
     /// cap is reached or the target time is hit.
     pub fn step(&mut self, real_dt: f64) {
@@ -615,9 +615,7 @@ impl Simulation {
                 self.craft.epoch = Epoch(self.sim_time);
                 return;
             }
-            AuthorityMode::OnRails { .. }
-            | AuthorityMode::WarpIntegrated { .. }
-            | AuthorityMode::Docked { .. } => {}
+            AuthorityMode::OnRails { .. } => {}
         }
 
         if sim_delta <= 0.0 {
@@ -1173,12 +1171,13 @@ mod tests {
         assert_eq!(sim.craft_state().authority, sim.authority());
         assert_eq!(sim.authority_log().len(), 0);
 
-        sim.transition_authority(AuthorityMode::WarpIntegrated { integrator: 1 });
+        let next = AuthorityMode::LocalRigidBody {
+            bubble: 1,
+            root_entity: crate::canonical::EntityRef(2),
+        };
+        sim.transition_authority(next);
 
-        assert_eq!(
-            sim.craft_state().authority,
-            AuthorityMode::WarpIntegrated { integrator: 1 }
-        );
+        assert_eq!(sim.craft_state().authority, next);
         assert_eq!(sim.authority_log().len(), 1);
     }
 

@@ -265,7 +265,10 @@ mod tests {
         };
 
         snapshot.crafts[0].translation.position = DVec3::splat(99.0);
-        snapshot.crafts[0].authority = AuthorityMode::WarpIntegrated { integrator: 4 };
+        snapshot.crafts[0].authority = AuthorityMode::LocalRigidBody {
+            bubble: 4,
+            root_entity: thalos_physics_canonical::canonical::EntityRef(7),
+        };
 
         assert_eq!(canonical.translation.position, DVec3::X);
         assert_eq!(

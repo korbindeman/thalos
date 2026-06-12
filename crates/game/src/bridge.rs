@@ -100,12 +100,7 @@ pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>
     // here every frame was the surface time-warp bug: anywhere terrain sits
     // below the mean radius, warp snapped back to 1× and the player could not
     // fast-forward on the ground.
-    let coasting = matches!(
-        sim.simulation.authority(),
-        AuthorityMode::OnRails { .. }
-            | AuthorityMode::WarpIntegrated { .. }
-            | AuthorityMode::Docked { .. }
-    );
+    let coasting = matches!(sim.simulation.authority(), AuthorityMode::OnRails { .. });
     let soi_body = sim.simulation.dominant_body();
     let (body_radius, body_name) = {
         let body_def = &sim.simulation.bodies()[soi_body];
@@ -391,10 +386,8 @@ fn refresh_craft_state_mirror(
     mirror.dominant_body_id = sim.simulation.dominant_body() as u32;
     mirror.authority = match sim.simulation.authority() {
         AuthorityMode::OnRails { .. } => "OnRails",
-        AuthorityMode::WarpIntegrated { .. } => "WarpIntegrated",
         AuthorityMode::LocalRigidBody { .. } => "LocalRigidBody",
         AuthorityMode::BodyFixed { .. } => "BodyFixed",
-        AuthorityMode::Docked { .. } => "Docked",
     }
     .to_string();
     mirror.destroyed = sim.simulation.is_destroyed();
