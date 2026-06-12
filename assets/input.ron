@@ -17,11 +17,17 @@
                 // KSP convention: Space stages. Time pause lives on the warp
                 // ladder instead — "," (warp_decrease) steps down into pause.
                 "stage": [Key(Space)],
-                // Parking brake: a latched toggle (KSP-style), engaged at
-                // startup so a spawned aircraft holds on the runway. Tap to
-                // release and taxi, tap to re-engage. Nosewheel steering reuses
-                // the yaw axis (A/D) — no separate binding.
+                // Brakes: a latched toggle (KSP-style) — wheel brakes on the
+                // ground *and* spoilers in the air, one key to shed speed.
+                // The parked runway spawn engages it so the aircraft holds on
+                // the strip. Nosewheel steering reuses the yaw axis (A/D) —
+                // no separate binding.
                 "parking_brake": [Key(KeyB)],
+                // Flap lever, one detent per tap: UP → T/O → LDG and back.
+                // (R is provisional — if an RCS toggle later wants KSP's R,
+                // move flaps to the bracket keys.)
+                "flaps_extend": [Key(KeyF)],
+                "flaps_retract": [Key(KeyR)],
             },
             axes: {
                 "pitch": (positive: [Key(KeyW)], negative: [Key(KeyS)]),
@@ -91,7 +97,11 @@
         ),
         eva: (
             bindings: {
-                "toggle_player_controller": [Key(KeyF)],
+                // Ship↔EVA re-boarding is not wired up yet, and its context
+                // is always active — a bound key would be consumed before any
+                // other context sees it (it sat on F and ate the flap lever).
+                // Bind it here once re-boarding lands.
+                "toggle_player_controller": [],
             },
         ),
         eva_move: (

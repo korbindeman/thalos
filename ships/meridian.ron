@@ -36,14 +36,26 @@
             span: 15.0, root_chord: 5.2, tip_chord: 1.5,
             sweep: 0.52, dihedral: 0.07, thickness: 0.11, incidence: 0.0,
             control_surfaces: [
-                (role: Aileron, span_start: 0.66, span_end: 0.97, chord_fraction: 0.25, max_deflection: 0.35),
+                // Inboard high-lift flaps (lever-driven, F/R), mid-span
+                // spoiler panels (ride the brakes toggle, B), outboard
+                // ailerons. The flap/spoiler windows also size the craft's
+                // ΔCL/ΔCD — see docs/aerodynamics.md "High-lift devices".
+                (role: Flap,    span_start: 0.08, span_end: 0.58, chord_fraction: 0.30, max_deflection: 0.61),
+                (role: Spoiler, span_start: 0.60, span_end: 0.72, chord_fraction: 0.30, max_deflection: 1.05),
+                (role: Aileron, span_start: 0.74, span_end: 0.97, chord_fraction: 0.25, max_deflection: 0.35),
             ],
         )),
         (catalog_id: "wing_wet", params: Wing(                             // 3 main wing L (wet)
             span: 15.0, root_chord: 5.2, tip_chord: 1.5,
             sweep: 0.52, dihedral: 0.07, thickness: 0.11, incidence: 0.0,
             control_surfaces: [
-                (role: Aileron, span_start: 0.66, span_end: 0.97, chord_fraction: 0.25, max_deflection: 0.35),
+                // Inboard high-lift flaps (lever-driven, F/R), mid-span
+                // spoiler panels (ride the brakes toggle, B), outboard
+                // ailerons. The flap/spoiler windows also size the craft's
+                // ΔCL/ΔCD — see docs/aerodynamics.md "High-lift devices".
+                (role: Flap,    span_start: 0.08, span_end: 0.58, chord_fraction: 0.30, max_deflection: 0.61),
+                (role: Spoiler, span_start: 0.60, span_end: 0.72, chord_fraction: 0.30, max_deflection: 1.05),
+                (role: Aileron, span_start: 0.74, span_end: 0.97, chord_fraction: 0.25, max_deflection: 0.35),
             ],
         )),
         (catalog_id: "stabilizer", params: Wing(                           // 4 tailplane R

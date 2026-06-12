@@ -347,10 +347,52 @@ fn ship_in_atmosphere(sim: &SimulationState) -> bool {
     altitude >= 0.0 && altitude <= atmosphere.karman_line_m as f64
 }
 
+/// Ambient air density (kg/m³) at the ship's current altitude over the
+/// dominant body; `0` outside an atmosphere.
+fn ambient_air_density_kg_m3(sim: &SimulationState) -> f64 {
+    let body_id = sim.simulation.dominant_body();
+    let Some(body) = sim.system.bodies.get(body_id) else {
+        return 0.0;
+    };
+    let Some(atmosphere) = body.terrestrial_atmosphere.as_ref() else {
+        return 0.0;
+    };
+    let body_pos = sim
+        .ephemeris
+        .state(body_id, Epoch(sim.simulation.sim_time()))
+        .position;
+    let altitude = (sim.simulation.ship_state().position - body_pos).length() - body.radius_m;
+    atmosphere
+        .sample_at_altitude_m(
+            altitude,
+            body.surface_pressure_pa(),
+            body.surface_gravity_m_s2(),
+        )
+        .density_kg_m3
+}
+
+/// Catalog jet thrust is rated at this density (≈ Thalos / Earth sea level).
+const JET_RATED_DENSITY_KG_M3: f64 = 1.225;
+
+/// Air-breathing thrust lapse: a jet's thrust scales with the air mass its
+/// core swallows, so it falls off with ambient density (and is what makes a
+/// service ceiling real — you can't climb into thin air and keep
+/// accelerating). Rockets carry their own oxidizer and are unaffected.
+/// Clamped at 1 so denser-than-rated air doesn't overboost.
+pub(crate) fn air_breathing_thrust_factor(density_kg_m3: f64) -> f64 {
+    (density_kg_m3 / JET_RATED_DENSITY_KG_M3).clamp(0.0, 1.0)
+}
+
 fn propulsion_config_changed(prev: &ActivePropulsion, next: &ActivePropulsion) -> bool {
     const EPS: f64 = 1e-6;
-    (prev.total_thrust_n - next.total_thrust_n).abs() > EPS
-        || (prev.mass_flow_kg_per_s - next.mass_flow_kg_per_s).abs() > EPS
+    // Thrust and mass flow vary *continuously* with altitude for air-breathing
+    // engines (the density lapse), so compare with a relative threshold —
+    // an absolute epsilon would re-dirty the trajectory prediction every
+    // frame of a climb.
+    let rel_changed =
+        |a: f64, b: f64| (a - b).abs() > EPS + 0.01 * a.abs().max(b.abs());
+    rel_changed(prev.total_thrust_n, next.total_thrust_n)
+        || rel_changed(prev.mass_flow_kg_per_s, next.mass_flow_kg_per_s)
         || (prev.power_draw_kw - next.power_draw_kw).abs() > EPS
         || (prev.dry_mass_kg - next.dry_mass_kg).abs() > EPS
         || prev.engines.len() != next.engines.len()
@@ -402,6 +444,13 @@ fn refresh_active_propulsion(
         .map(|d| d.enabled && d.jets_in_vacuum)
         .unwrap_or(false);
     let atmosphere_available = ship_in_atmosphere(&sim) || force_atmosphere;
+    // Air-breathing thrust falls off with ambient density (the jet lapse);
+    // the debug jets-in-vacuum stopgap pretends rated sea-level air.
+    let air_lapse = if force_atmosphere {
+        1.0
+    } else {
+        air_breathing_thrust_factor(ambient_air_density_kg_m3(&sim))
+    };
     let mut intake_available: HashMap<AmbientIntakeKind, f64> = HashMap::new();
     if atmosphere_available {
         for (_, intake, surface_mount) in intakes.iter() {
@@ -476,7 +525,11 @@ fn refresh_active_propulsion(
         if intake_scale <= 0.0 {
             continue;
         }
-        let thrust_n = engine.thrust as f64 * multiplier * intake_scale;
+        // Jets lapse with density; rockets carry their own oxidizer. Mass
+        // flow follows the lapsed thrust (fixed Isp), so fuel burn falls off
+        // with altitude too.
+        let lapse = if engine.requires_atmosphere { air_lapse } else { 1.0 };
+        let thrust_n = engine.thrust as f64 * multiplier * intake_scale * lapse;
         let mdot = thrust_n / (engine.isp as f64 * G0);
 
         let reactants: Vec<(Resource, f64)> = engine

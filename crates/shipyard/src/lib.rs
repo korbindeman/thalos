@@ -69,8 +69,9 @@ pub use staging::{
     compute_stage_summaries, derive_stages,
 };
 pub use stats::{
-    DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals, ShipStats, WingAeroPanel,
-    aggregate_resource_totals, cylinder_principal_inertia, estimate_delta_v, parallel_axis_inertia,
+    AeroSurfaceWindow, DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals,
+    ShipStats, WingAeroPanel, aggregate_resource_totals, cylinder_principal_inertia,
+    estimate_delta_v, parallel_axis_inertia,
 };
 pub use wing_mesh::{
     BuiltControlSurface, ControlSurfaceGeometry, WingPanelFrame, build_control_surface_mesh,

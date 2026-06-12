@@ -15,6 +15,7 @@
 
 mod atmo_panel;
 mod eva_panel;
+mod flight_config_panel;
 mod flight_panel;
 mod format;
 mod fps_overlay;
@@ -84,6 +85,7 @@ impl Plugin for HudPlugin {
                     fps_overlay::setup,
                     eva_panel::setup,
                     atmo_panel::setup,
+                    flight_config_panel::setup,
                     system_map_panel::setup,
                 )
                     .after(theme::init_theme)
@@ -113,7 +115,11 @@ impl Plugin for HudPlugin {
                     flight_panel::handle_velocity_frame_click,
                     fps_overlay::update,
                     eva_panel::update,
-                    atmo_panel::update,
+                    (
+                        atmo_panel::update,
+                        flight_config_panel::handle_clicks,
+                        flight_config_panel::update.after(flight_config_panel::handle_clicks),
+                    ),
                     // Nested tuple: keeps the outer system-tuple within Bevy's
                     // 20-element `IntoScheduleConfigs` arity limit.
                     (

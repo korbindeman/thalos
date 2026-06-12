@@ -241,7 +241,8 @@ pub(crate) fn build_player_ship(
         stats.wet_mass_kg(),
     );
 
-    // Whole-body aero config from the blueprint's wing parts (lift + stability),
+    // Whole-body aero config from the blueprint's wing parts (lift + stability
+    // + per-surface control authority, with moment arms about the real CoM),
     // or a bluff-body drag config for a wingless craft. Consumed by
     // `aero::attach_ship_aero` when the Avian body spawns.
     match blueprint.wing_aero_panels(catalog) {
@@ -250,6 +251,7 @@ pub(crate) fn build_player_ship(
                 &panels,
                 stats.frontal_area_m2,
                 SHIP_DRAG_COEFFICIENT,
+                stats.center_of_mass_m,
             );
             info!(
                 "aero config: {} wing panel(s), ref area {:.1} m², MAC {:.2} m, span {:.1} m, lift_slope {:.1}",
@@ -853,10 +855,13 @@ fn rebuild_ship_wing_visuals(
 /// aileron / lowers the left, nose-right yaw swings the rudder.
 fn animate_ship_control_surfaces(
     realized: Res<crate::control_bus::RealizedControl>,
+    flight_config: Res<crate::flight_config::FlightConfig>,
     mut q: Query<(&ControlSurfaceVisual, &mut Transform)>,
 ) {
-    // Deflect to the commanded attitude effort (full-scale), not the allocated
-    // aero fraction — see `RealizedControl::command`.
+    // Attitude surfaces deflect to the commanded attitude effort (full-scale),
+    // not the allocated aero fraction — see `RealizedControl::command`. Flaps
+    // and spoilers deflect to the flight-config actuator positions, the same
+    // smoothed values the aero force model consumes.
     let cmd_vec = realized.command;
     for (cs, mut transform) in q.iter_mut() {
         let cmd = match cs.role {
@@ -866,6 +871,9 @@ fn animate_ship_control_surfaces(
             // right aileron's trailing edge.
             ControlSurfaceRole::Aileron => -(cmd_vec.y as f32) * cs.side_sign,
             ControlSurfaceRole::Rudder => cmd_vec.z as f32,
+            // +θ drops the trailing edge: flaps run down, spoilers up.
+            ControlSurfaceRole::Flap => flight_config.flap_fraction as f32,
+            ControlSurfaceRole::Spoiler => -(flight_config.spoiler_fraction as f32),
         };
         let angle = cmd.clamp(-1.0, 1.0) * cs.max_deflection;
         transform.translation = cs.hinge_anchor;

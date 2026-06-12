@@ -133,23 +133,23 @@ impl Default for GearTuning {
     }
 }
 
-/// Latched parking brake. Engaged at startup so a freshly-spawned aircraft
-/// holds on the runway instead of creeping; the player toggles it with the
-/// parking-brake key (B) to taxi. When engaged, [`apply_landing_gear_forces`]
-/// replaces free rolling with a high-gain fore/aft hold (clamped to the tyre
-/// friction circle), so the craft stays put under gravity, slopes, and the
-/// residual settle — though full takeoff thrust still overpowers it.
-/// Reflect-registered so it's visible/toggleable over BRP.
-#[derive(Resource, Clone, Copy, Debug, Reflect)]
+/// Latched brakes (KSP-style, the B key). When engaged,
+/// [`apply_landing_gear_forces`] replaces free rolling with a high-gain
+/// fore/aft hold (clamped to the tyre friction circle), so the craft stays
+/// put under gravity, slopes, and the residual settle — though full takeoff
+/// thrust still overpowers it — and the spoilers deploy
+/// ([`crate::flight_config`]), so the same latch is the in-air speedbrake
+/// and the rollout lift dump.
+///
+/// Defaults **off** (most spawns are airborne and must not start with
+/// spoilers out); the parked runway placement engages it explicitly so a
+/// freshly-spawned aircraft holds on the strip
+/// (`runway::finish_runway_spawn`). Reflect-registered so it's
+/// visible/toggleable over BRP.
+#[derive(Resource, Clone, Copy, Debug, Default, Reflect)]
 #[reflect(Resource)]
 pub struct ParkingBrake {
     pub engaged: bool,
-}
-
-impl Default for ParkingBrake {
-    fn default() -> Self {
-        Self { engaged: true }
-    }
 }
 
 /// Whether any landing-gear wheel is currently bearing load on the ground

@@ -491,13 +491,19 @@ fn finish_runway_spawn(
     spawn_runway_collider(&mut commands, &frame, &body_state);
 
     match *situation {
-        SpawnSituation::Runway => place_parked(
-            &mut sim,
-            &body_state,
-            &site,
-            body_radius_m,
-            park_clearance_m,
-        ),
+        SpawnSituation::Runway => {
+            place_parked(
+                &mut sim,
+                &body_state,
+                &site,
+                body_radius_m,
+                park_clearance_m,
+            );
+            // Hold the freshly-parked craft on the strip. The brakes latch
+            // defaults off (airborne spawns must not start with the spoilers
+            // out), so the parked placement is the one spot that engages it.
+            commands.insert_resource(crate::local_physics::ParkingBrake { engaged: true });
+        }
         SpawnSituation::RunwayApproach => {
             place_approach(&mut sim, &body_state, &site, body_radius_m)
         }

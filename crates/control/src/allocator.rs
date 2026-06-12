@@ -42,10 +42,14 @@ pub fn allocate(command: DVec3) -> Allocation {
     let c = command.clamp(DVec3::splat(-1.0), DVec3::splat(1.0));
     Allocation {
         reaction_wheel: c,
+        // Flap / spoiler deployment is a craft *configuration*, not an
+        // attitude effector — the game overlays it downstream (see
+        // `thalos_game::flight_config`), so the allocator leaves it default.
         aero: ControlInputs {
             pitch: c.x,
             roll: c.y,
             yaw: c.z,
+            ..Default::default()
         },
     }
 }

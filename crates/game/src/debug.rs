@@ -50,17 +50,20 @@ const EVA_SURFACE_CLEARANCE_M: f64 = 2.0;
 /// force overlay (`aero::toggle_debug_overlay`); both flip on the same press.
 const DEBUG_HITBOXES_KEY: KeyCode = KeyCode::F3;
 
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
 pub struct DebugMode {
     pub enabled: bool,
     /// Draw physics hitboxes (craft colliders + gear contact + ground surface).
     /// Toggled by F3; see [`draw_debug_hitboxes`].
     pub show_hitboxes: bool,
-    /// Debug hack: let air-breathing engines produce thrust even with no
-    /// atmosphere, so aircraft can taxi/fly on airless bodies like Thalos for
-    /// testing the ground/wheel physics. Contradicts the atmosphere model — a
-    /// stopgap until Thalos has air or the demo aircraft gets a non-jet drive.
-    /// Toggle live over BRP (`world_mutate_resources`).
+    /// Debug hack: let air-breathing engines produce rated sea-level thrust
+    /// regardless of atmosphere — fire in vacuum, no density lapse — so
+    /// aircraft can taxi/fly on airless bodies for ground/wheel testing.
+    /// Contradicts the atmosphere model; **off by default** now that Thalos
+    /// has air (leaving it on pinned every jet at rated thrust and defeated
+    /// the thrust lapse / transonic wall). Toggle live over BRP
+    /// (`world_mutate_resources`).
     pub jets_in_vacuum: bool,
 }
 
@@ -104,11 +107,11 @@ impl Plugin for DebugPlugin {
         app.insert_resource(DebugMode {
             enabled: true,
             show_hitboxes: false,
-            // On by default in dev so the airless-Thalos runway scenarios are
-            // actually drivable; flip off over BRP to feel the real (no-air)
-            // engine behaviour.
-            jets_in_vacuum: true,
+            // Off: Thalos has an atmosphere now, so the runway scenarios fly
+            // on real air. Flip on over BRP for airless-body ground testing.
+            jets_in_vacuum: false,
         })
+        .register_type::<DebugMode>()
         .init_gizmo_group::<CraftColliderGizmos>()
         .init_resource::<DebugSurfaceTeleport>()
         .add_systems(Startup, configure_craft_collider_gizmos)

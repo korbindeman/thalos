@@ -30,7 +30,7 @@ use thalos_physics_local::avian::{
     AngularVelocity, ConstantForce, ConstantTorque, LinearVelocity, Physics, PhysicsDebugPlugin,
     PhysicsGizmos, PhysicsSchedule, PhysicsStepSystems, Position, Rotation,
 };
-use thalos_shipyard::{WingAeroPanel, WingRole};
+use thalos_shipyard::{ControlSurfaceRole, WingAeroPanel, WingRole};
 
 use crate::rendering::{PlayerShip, SimulationState};
 
@@ -47,6 +47,32 @@ const MAIN_WING_CM0: f64 = 0.03;
 const WING_PARASITIC_CD: f64 = 0.03;
 /// Stall angle (rad) where |CL| is clamped.
 const STALL_ANGLE_RAD: f64 = 0.26; // ~15°
+
+// --- Compressibility (Korn equation) ------------------------------------------
+// The drag-divergence Mach is *derived from the authored wing geometry*, not
+// tuned per craft: `M_dd = κ/cosΛ − (t/c)/cos²Λ − CL/(10·cos³Λ)`. Sweep and a
+// thin airfoil buy transonic margin, exactly the trade a player makes in the
+// shipyard. The cruise-CL term uses the camber CL0 (a level-flight proxy).
+/// Korn airfoil technology factor (0.87 = conventional, 0.95 = supercritical).
+const KORN_AIRFOIL_FACTOR: f64 = 0.87;
+/// Sanity band for the derived divergence Mach: even a fat straight wing
+/// keeps a wall somewhere past M 0.5, and nothing subsonic-authored gets to
+/// push the wall past M 0.95.
+const MACH_DD_MIN: f64 = 0.5;
+const MACH_DD_MAX: f64 = 0.95;
+
+// --- High-lift devices / spoilers ----------------------------------------------
+// Flap force increments are derived from the authored `Flap` windows (plain-
+// flap theory): ΔCL = CLα·τ(c_f)·η·δ_max·(S_flapped/S_ref) with τ the
+// chord-fraction effectiveness and η a viscous knock-down; ΔCD is Roskam's
+// plain-flap form `1.7·c_f^1.38·(S_f/S)·sin²δ`. Spoiler drag is a deflected-
+// plate term on the panel area; its lift dump scales with the spanned strip.
+/// Viscous flap-effectiveness knock-down at large deflections.
+const FLAP_VISCOUS_ETA: f64 = 0.6;
+/// Roskam plain-flap profile-drag constant.
+const FLAP_DRAG_FACTOR: f64 = 1.7;
+/// Deflected-plate drag constant for spoiler panels.
+const SPOILER_DRAG_FACTOR: f64 = 1.6;
 
 // Non-dimensional moment coefficients for a winged aircraft. Restoring > 0 gives
 // static stability; damping > 0 always opposes the rate; control sets pilot
@@ -69,13 +95,19 @@ const WING_YAW_STABILITY: f64 = 0.2;
 const WING_PITCH_DAMP: f64 = 8.0;
 const WING_ROLL_DAMP: f64 = 0.13;
 const WING_YAW_DAMP: f64 = 0.2;
-const WING_PITCH_CONTROL: f64 = 0.5;
-const WING_ROLL_CONTROL: f64 = 0.06;
-const WING_YAW_CONTROL: f64 = 0.04;
 
 // Bluff body (rocket/capsule): no lift, no control, but weathervane-stable.
 const BLUFF_STABILITY: f64 = 0.5;
 const BLUFF_DAMP: f64 = 0.5;
+
+/// Flap load relief: above this dynamic pressure the effective flap
+/// deployment fades as `q_relief/q`, which caps the flap force increment at
+/// its value at the relief point (ΔCL·q·S stops growing). Real transports
+/// auto-relieve flap loads instead of ripping the tracks off; for gameplay it
+/// means slamming landing flaps at cruise speed produces a gentle balloon,
+/// not a 10 g pull-up, with no placard-speed micromanagement. 10 kPa ≈ a
+/// 128 m/s sea-level approach — well above any sane flap speed.
+const FLAP_LOAD_RELIEF_Q_PA: f64 = 10_000.0;
 
 /// Airspeed (m/s) below which a grounded craft gets no aero at all (forces or
 /// moments) — near-zero speed gives a degenerate AoA (the velocity is mostly
@@ -111,6 +143,12 @@ pub struct ShipAero {
 /// allocator ([`crate::control_bus`]) calls this so the aero authority it splits
 /// against is the same config the evaluator flies — bluff bodies (no
 /// `lift_slope`) keep their authored coefficients.
+///
+/// Stability / damping are whole-body terms, so the tuning values *replace*
+/// them; the control coefficients are **derived per surface** from the
+/// authored geometry (see [`build_ship_aero_config`]), so the tuning values
+/// only *scale* them — a live feel-tweak can't erase the difference between
+/// a big and a small aileron.
 pub(crate) fn resolved_aero_config(base: AeroConfig, tuning: &AeroTuning) -> AeroConfig {
     let mut config = base;
     if config.lift_slope > 0.0 {
@@ -119,18 +157,20 @@ pub(crate) fn resolved_aero_config(base: AeroConfig, tuning: &AeroTuning) -> Aer
         config.pitch_damp = tuning.pitch_damp;
         config.roll_damp = tuning.roll_damp;
         config.yaw_damp = tuning.yaw_damp;
-        config.pitch_control = tuning.pitch_control;
-        config.roll_control = tuning.roll_control;
-        config.yaw_control = tuning.yaw_control;
+        config.pitch_control *= tuning.pitch_control_scale;
+        config.roll_control *= tuning.roll_control_scale;
+        config.yaw_control *= tuning.yaw_control_scale;
     }
     config
 }
 
-/// Runtime-tunable handling coefficients for **winged** aircraft, overriding the
-/// per-craft config's moment terms each frame. Reflect-registered so the feel
-/// (control authority, damping, static stability) can be dialled in live over BRP
-/// — e.g. `world_mutate_resources` on `thalos_game::aero::AeroTuning` — without a
-/// rebuild. Defaults are the transport-derivative constants above.
+/// Runtime-tunable handling coefficients for **winged** aircraft, applied over
+/// the per-craft config's moment terms each frame. Reflect-registered so the
+/// feel (control authority, damping, static stability) can be dialled in live
+/// over BRP — e.g. `world_mutate_resources` on `thalos_game::aero::AeroTuning`
+/// — without a rebuild. Stability/damping defaults are the transport-derivative
+/// constants above; the control *scales* default to 1 (the per-surface derived
+/// authority is flown as-is).
 #[derive(Resource, Reflect, Clone, Copy)]
 #[reflect(Resource)]
 pub struct AeroTuning {
@@ -139,9 +179,10 @@ pub struct AeroTuning {
     pub pitch_damp: f64,
     pub roll_damp: f64,
     pub yaw_damp: f64,
-    pub pitch_control: f64,
-    pub roll_control: f64,
-    pub yaw_control: f64,
+    /// Multipliers on the per-surface-derived control coefficients.
+    pub pitch_control_scale: f64,
+    pub roll_control_scale: f64,
+    pub yaw_control_scale: f64,
 }
 
 impl Default for AeroTuning {
@@ -152,9 +193,9 @@ impl Default for AeroTuning {
             pitch_damp: WING_PITCH_DAMP,
             roll_damp: WING_ROLL_DAMP,
             yaw_damp: WING_YAW_DAMP,
-            pitch_control: WING_PITCH_CONTROL,
-            roll_control: WING_ROLL_CONTROL,
-            yaw_control: WING_YAW_CONTROL,
+            pitch_control_scale: 1.0,
+            roll_control_scale: 1.0,
+            yaw_control_scale: 1.0,
         }
     }
 }
@@ -230,16 +271,22 @@ fn toggle_debug_overlay(keys: Res<ButtonInput<KeyCode>>, mut store: ResMut<Gizmo
 ///
 /// Aircraft (panels present): reference area = total lifting (non-vertical)
 /// panel area, chord = mean aerodynamic chord, span = max panel span; cambered
-/// lift + control. Wingless (no panels): a bluff-body drag config sized from the
-/// frontal area, no lift/control but weathervane-stable.
+/// lift + **per-surface-derived control authority** (see
+/// [`derive_control_coefficients`] — `com_body_m` is the CoM the moment arms
+/// are measured about). Wingless (no panels): a bluff-body drag config sized
+/// from the frontal area, no lift/control but weathervane-stable.
 pub fn build_ship_aero_config(
     panels: &[WingAeroPanel],
     frontal_area_m2: f64,
     drag_cd: f64,
+    com_body_m: DVec3,
 ) -> AeroConfig {
     let mut total_area = 0.0;
     let mut mac_acc = 0.0;
     let mut max_span = 0.0_f64;
+    let mut sweep_acc = 0.0;
+    let mut thickness_acc = 0.0;
+    let mut lifting_panels = Vec::new();
     for panel in panels {
         // Skip vertical fins (they don't contribute lifting area / chord).
         let vertical = !matches!(panel.role, WingRole::Lift)
@@ -250,6 +297,9 @@ pub fn build_ship_aero_config(
         total_area += panel.area_m2;
         mac_acc += panel.chord_m * panel.area_m2;
         max_span = max_span.max(panel.span_m);
+        sweep_acc += panel.sweep_rad * panel.area_m2;
+        thickness_acc += panel.thickness * panel.area_m2;
+        lifting_panels.push(panel);
     }
     // Panels are single half-wings (mirrored pairs are separate entities), so
     // the aerodynamic reference span — the roll/yaw moment arm and the
@@ -257,10 +307,59 @@ pub fn build_ship_aero_config(
     let full_span = 2.0 * max_span;
 
     if total_area > 0.0 {
+        // Korn equation on the area-weighted sweep / thickness: where the
+        // transonic wall stands for *this* planform. (Authored sweep is the
+        // leading edge's; close enough to quarter-chord at these tapers.)
+        let cos_sweep = (sweep_acc / total_area).cos().max(0.5);
+        let mach_dd = (KORN_AIRFOIL_FACTOR / cos_sweep
+            - (thickness_acc / total_area) / (cos_sweep * cos_sweep)
+            - MAIN_WING_CL0 / (10.0 * cos_sweep.powi(3)))
+        .clamp(MACH_DD_MIN, MACH_DD_MAX);
+
+        // Flap / spoiler force increments from the authored windows.
+        let mut flap_dcl = 0.0;
+        let mut flap_dcd = 0.0;
+        let mut spoiler_dcl = 0.0;
+        let mut spoiler_dcd = 0.0;
+        for panel in &lifting_panels {
+            for w in &panel.surfaces {
+                let spanned_frac = w.spanned_area_m2 / total_area;
+                match w.role {
+                    ControlSurfaceRole::Flap => {
+                        flap_dcl += LIFT_SLOPE_PER_RAD
+                            * flap_chord_effectiveness(w.chord_fraction)
+                            * FLAP_VISCOUS_ETA
+                            * w.max_deflection_rad
+                            * spanned_frac;
+                        flap_dcd += FLAP_DRAG_FACTOR
+                            * w.chord_fraction.powf(1.38)
+                            * spanned_frac
+                            * w.max_deflection_rad.sin().powi(2);
+                    }
+                    ControlSurfaceRole::Spoiler => {
+                        spoiler_dcd += SPOILER_DRAG_FACTOR * (w.area_m2 / total_area)
+                            * w.max_deflection_rad.sin();
+                        spoiler_dcl -= spanned_frac * w.max_deflection_rad.sin();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mean_chord = mac_acc / total_area;
+        let reference_span = full_span.max(1.0);
+        let (pitch_control, roll_control, yaw_control) = derive_control_coefficients(
+            panels,
+            com_body_m,
+            total_area,
+            mean_chord,
+            reference_span,
+        );
+
         AeroConfig {
             reference_area_m2: total_area,
-            reference_chord_m: mac_acc / total_area,
-            reference_span_m: full_span.max(1.0),
+            reference_chord_m: mean_chord,
+            reference_span_m: reference_span,
             lift_slope: LIFT_SLOPE_PER_RAD,
             cl0: MAIN_WING_CL0,
             cm0: MAIN_WING_CM0,
@@ -272,12 +371,19 @@ pub fn build_ship_aero_config(
             pitch_damp: WING_PITCH_DAMP,
             roll_damp: WING_ROLL_DAMP,
             yaw_damp: WING_YAW_DAMP,
-            pitch_control: WING_PITCH_CONTROL,
-            roll_control: WING_ROLL_CONTROL,
-            yaw_control: WING_YAW_CONTROL,
+            pitch_control,
+            roll_control,
+            yaw_control,
+            mach_drag_divergence: mach_dd,
+            flap_dcl,
+            flap_dcd,
+            spoiler_dcl,
+            spoiler_dcd,
         }
     } else {
-        // Bluff body: a body-length proxy from the frontal area as the moment arm.
+        // Bluff body: a body-length proxy from the frontal area as the moment
+        // arm. `mach_drag_divergence: 0` — a capsule's blunt-body Cd already
+        // stands in for its transonic behaviour; the wall is a wing concern.
         let body_len = (frontal_area_m2.max(1.0).sqrt() * 2.0).max(1.0);
         AeroConfig {
             reference_area_m2: frontal_area_m2.max(1.0),
@@ -297,8 +403,81 @@ pub fn build_ship_aero_config(
             pitch_control: 0.0,
             roll_control: 0.0,
             yaw_control: 0.0,
+            ..Default::default()
         }
     }
+}
+
+/// Plain-flap chord-fraction effectiveness `τ(c_f) = 1 − (θ − sin θ)/π` with
+/// `θ = acos(2·c_f − 1)` — thin-airfoil theory's lift effectiveness of a
+/// trailing-edge surface occupying chord fraction `c_f`.
+fn flap_chord_effectiveness(chord_fraction: f64) -> f64 {
+    let theta = (2.0 * chord_fraction.clamp(0.0, 1.0) - 1.0).acos();
+    1.0 - (theta - theta.sin()) / std::f64::consts::PI
+}
+
+/// Derive the per-axis control coefficients from the authored
+/// aileron / elevator / rudder windows — **per-surface control authority**.
+///
+/// For each window, the deflection lift at full throw is the same plain-flap
+/// term the flaps use (`CLα · τ(c_f) · η · δ_max` over the spanned strip), and
+/// its moment about the CoM comes from the window's real geometry: the force
+/// acts along the panel's lift normal (`thick_dir`) at the window centroid
+/// `r`, so the torque about a body axis `â` is `(r × n̂)·â` per unit force.
+/// Summing `|arm| · ΔCL_strip · S_strip` over the windows of each role and
+/// non-dimensionalising by `S_ref · L_ref` yields exactly the coefficient the
+/// evaluator's control term (`coeff · q̄ · S · L · input`) expects.
+///
+/// This is what makes shipyard surface *sizing and placement* show up in
+/// handling: a bigger or further-outboard aileron rolls harder, a longer tail
+/// arm pitches harder, and a craft authored with no rudder genuinely has no
+/// yaw authority. Each role feeds only its own axis (an elevator's left/right
+/// halves cancel in roll anyway; a rudder's roll cross-coupling is real but
+/// deliberately dropped — the whole-body model keeps control moments
+/// axis-diagonal so the fly-by-wire allocation stays unconditionally stable,
+/// the same "explicit, not emergent" reasoning as the restoring/damping
+/// terms). Vertical fins are included here even though they carry no lifting
+/// area — that's where the rudder lives.
+///
+/// Verified against the Meridian: the derived coefficients land within ~10%
+/// of the previously hand-tuned transport constants (pitch 0.48 vs 0.5, yaw
+/// 0.032 vs 0.04, roll 0.037 vs the deliberately-hot 0.06), so the feel stays
+/// in the airliner band while becoming a real consequence of the authored
+/// geometry (pinned by the `meridian_*` tests below).
+fn derive_control_coefficients(
+    panels: &[WingAeroPanel],
+    com_body_m: DVec3,
+    reference_area_m2: f64,
+    reference_chord_m: f64,
+    reference_span_m: f64,
+) -> (f64, f64, f64) {
+    let mut pitch_qs = 0.0; // Σ torque per unit q̄, N·m / Pa
+    let mut roll_qs = 0.0;
+    let mut yaw_qs = 0.0;
+    for panel in panels {
+        for w in &panel.surfaces {
+            let (axis, acc) = match w.role {
+                ControlSurfaceRole::Elevator => (DVec3::X, &mut pitch_qs),
+                ControlSurfaceRole::Aileron => (DVec3::Y, &mut roll_qs),
+                ControlSurfaceRole::Rudder => (DVec3::Z, &mut yaw_qs),
+                // Flaps / spoilers are craft configuration, not attitude
+                // effectors — their force model lives in flap_dcl/spoiler_dcd.
+                ControlSurfaceRole::Flap | ControlSurfaceRole::Spoiler => continue,
+            };
+            let strip_dcl = LIFT_SLOPE_PER_RAD
+                * flap_chord_effectiveness(w.chord_fraction)
+                * FLAP_VISCOUS_ETA
+                * w.max_deflection_rad;
+            let r = w.centroid_body_m - com_body_m;
+            let arm_m = r.cross(panel.thick_dir).dot(axis).abs();
+            *acc += strip_dcl * w.spanned_area_m2 * arm_m;
+        }
+    }
+    (
+        pitch_qs / (reference_area_m2 * reference_chord_m),
+        roll_qs / (reference_area_m2 * reference_span_m),
+        yaw_qs / (reference_area_m2 * reference_span_m),
+    )
 }
 
 /// Attach the aero config + force accumulators to the player ship's Avian body,
@@ -337,6 +516,7 @@ fn apply_aero_forces(
     phys_time: Res<Time<Physics>>,
     tuning: Res<AeroTuning>,
     weight_on_wheels: Res<crate::local_physics::WeightOnWheels>,
+    flight_config: Res<crate::flight_config::FlightConfig>,
     mut craft: Query<
         (
             &Position,
@@ -399,8 +579,18 @@ fn apply_aero_forces(
     // Control-surface deflections come from the fly-by-wire bus, not the raw
     // stick: the same allocated command the reaction wheels execute, so the
     // two effectors pull together instead of fighting (the old direct-stick
-    // path was half of the SAS jitter). See `crate::control_bus`.
-    let controls = realized.aero;
+    // path was half of the SAS jitter). See `crate::control_bus`. Flap /
+    // spoiler deployment is craft configuration, overlaid from the flight-
+    // config lever state (actual actuator positions, so a moving flap's
+    // forces build smoothly).
+    let mut controls = realized.aero;
+    controls.flap = flight_config.flap_fraction;
+    controls.spoiler = flight_config.spoiler_fraction;
+    // Flap load relief (see `FLAP_LOAD_RELIEF_Q_PA`).
+    let q_now = 0.5 * density * vel_body.length_squared();
+    if q_now > FLAP_LOAD_RELIEF_Q_PA {
+        controls.flap *= FLAP_LOAD_RELIEF_Q_PA / q_now;
+    }
 
     // A pathological physics step (e.g. a multi-second gap behind the loading
     // screen) must not integrate aero: even a sane force over a huge dt is a huge
@@ -416,7 +606,7 @@ fn apply_aero_forces(
     // The same resolve feeds the control allocator's authority estimate
     // (`control_bus`), so the split matches what we actually fly here.
     let config = resolved_aero_config(ship_aero.config, &tuning);
-    let out = evaluate_aero(vel_body, omega_body, density, &config, controls);
+    let out = evaluate_aero(vel_body, omega_body, density, speed_of_sound, &config, controls);
 
     // Parked / slow taxi: below the airspeed floor the AoA is degenerate (the
     // velocity is mostly suspension settle, not flow), so a grounded craft gets
@@ -503,30 +693,99 @@ mod tests {
     use super::*;
 
     /// The Meridian's main-wing panels (one mirrored pair) as
-    /// `build_ship_aero_config` sees them — span / chords from
-    /// `ships/meridian.ron`. Tail panels are omitted: they're either vertical
-    /// (skipped) or small enough not to move the reference numbers.
-    fn meridian_panels() -> Vec<WingAeroPanel> {
-        let span = 15.0;
-        let (root, tip) = (5.2, 1.5);
+    /// `build_ship_aero_config` sees them — span / chords / sweep / control
+    /// surfaces from `ships/meridian.ron`. Tail panels are omitted: they're
+    /// either vertical (skipped) or small enough not to move the reference
+    /// numbers.
+    /// Fuselage skin radius the panels root against (window centroids sit at
+    /// `radius + mid·span` outboard) and tail moment arms aft of the CoM —
+    /// the geometry the per-surface authority derivation reads.
+    const FUSELAGE_RADIUS_M: f64 = 1.65;
+    const TAILPLANE_ARM_M: f64 = 15.4;
+    const FIN_ARM_M: f64 = 14.7;
+
+    /// One half-wing panel with its trailing-edge windows, the way
+    /// `wing_aero_panels` emits it: strip areas from the mid-window chord,
+    /// window centroids in the ship body frame (CoM at the origin here).
+    /// `out_dir` is the spanwise direction (±X for wings/tailplanes, +Z for
+    /// the fin), `thick_dir` the lift normal, `arm_aft_m` how far the panel
+    /// root sits behind the CoM.
+    #[allow(clippy::too_many_arguments)]
+    fn panel(
+        span: f64,
+        root: f64,
+        tip: f64,
+        sweep: f64,
+        thickness: f64,
+        angle: f64,
+        role: WingRole,
+        out_dir: DVec3,
+        thick_dir: DVec3,
+        arm_aft_m: f64,
+        windows: &[(ControlSurfaceRole, f64, f64, f64, f64)],
+    ) -> WingAeroPanel {
         let area = span * (root + tip) * 0.5;
         let lambda: f64 = tip / root;
         let mac = (2.0 / 3.0) * root * (1.0 + lambda + lambda * lambda) / (1.0 + lambda);
-        [1.5708_f64, -1.5708]
-            .into_iter()
-            .map(|angle| WingAeroPanel {
-                center_body_m: DVec3::ZERO,
-                fore_dir: DVec3::Y,
-                thick_dir: DVec3::Z,
-                span_dir: DVec3::new(angle.signum(), 0.0, 0.0),
-                area_m2: area,
-                chord_m: mac,
-                span_m: span,
-                station: 0.44,
-                angle,
-                role: WingRole::Lift,
+        let root_pos = DVec3::new(0.0, -arm_aft_m, 0.0) + out_dir * FUSELAGE_RADIUS_M;
+        let surfaces = windows
+            .iter()
+            .map(|&(role, s0, s1, cf, dmax)| {
+                let mid = 0.5 * (s0 + s1);
+                let chord_mid = root + (tip - root) * mid;
+                let spanned = span * (s1 - s0) * chord_mid;
+                thalos_shipyard::AeroSurfaceWindow {
+                    role,
+                    spanned_area_m2: spanned,
+                    area_m2: spanned * cf,
+                    chord_fraction: cf,
+                    max_deflection_rad: dmax,
+                    centroid_body_m: root_pos + out_dir * (mid * span),
+                }
             })
-            .collect()
+            .collect();
+        WingAeroPanel {
+            center_body_m: root_pos + out_dir * (0.4 * span),
+            fore_dir: DVec3::Y,
+            thick_dir,
+            span_dir: out_dir,
+            area_m2: area,
+            chord_m: mac,
+            span_m: span,
+            sweep_rad: sweep,
+            thickness,
+            station: 0.5,
+            angle,
+            role,
+            surfaces,
+        }
+    }
+
+    /// The Meridian's aero panels — main wings, tailplanes, and the vertical
+    /// fin, with the authored control-surface windows at their real
+    /// body-frame positions (geometry from `ships/meridian.ron`; CoM at the
+    /// origin). The per-surface authority derivation needs the empennage:
+    /// elevators and rudder live there.
+    fn meridian_panels() -> Vec<WingAeroPanel> {
+        let wing_windows = [
+            (ControlSurfaceRole::Flap, 0.08, 0.58, 0.30, 0.61),
+            (ControlSurfaceRole::Spoiler, 0.60, 0.72, 0.30, 1.05),
+            (ControlSurfaceRole::Aileron, 0.74, 0.97, 0.25, 0.35),
+        ];
+        let elevator = [(ControlSurfaceRole::Elevator, 0.05, 0.95, 0.32, 0.4)];
+        let rudder = [(ControlSurfaceRole::Rudder, 0.05, 0.95, 0.32, 0.4)];
+        vec![
+            // Main wings (slightly ahead of the CoM; the lever that matters
+            // for roll is spanwise, so the fore/aft arm is irrelevant here).
+            panel(15.0, 5.2, 1.5, 0.52, 0.11, 1.5708, WingRole::Lift, DVec3::X, DVec3::Z, 1.0, &wing_windows),
+            panel(15.0, 5.2, 1.5, 0.52, 0.11, -1.5708, WingRole::Lift, -DVec3::X, DVec3::Z, 1.0, &wing_windows),
+            // Tailplanes — the pitch lever.
+            panel(4.6, 2.6, 1.1, 0.55, 0.10, 1.5708, WingRole::Stabilizer, DVec3::X, DVec3::Z, TAILPLANE_ARM_M, &elevator),
+            panel(4.6, 2.6, 1.1, 0.55, 0.10, -1.5708, WingRole::Stabilizer, -DVec3::X, DVec3::Z, TAILPLANE_ARM_M, &elevator),
+            // Vertical fin — the yaw lever. Skipped by the lifting-area
+            // aggregation (vertical), but its rudder still derives authority.
+            panel(4.4, 3.4, 1.4, 0.62, 0.10, 0.0, WingRole::Stabilizer, DVec3::Z, DVec3::X, FIN_ARM_M, &rudder),
+        ]
     }
 
     /// Approach-regime flight condition and Meridian-class inertia. The roll
@@ -542,7 +801,7 @@ mod tests {
     #[test]
     fn meridian_rolls_like_an_airliner() {
         let panels = meridian_panels();
-        let cfg = build_ship_aero_config(&panels, 8.0, 0.5);
+        let cfg = build_ship_aero_config(&panels, 8.0, 0.5, DVec3::ZERO);
 
         // Full wingspan reference → a realistic aspect ratio (A220-class ≈ 9),
         // not the ~2 the per-panel span used to give (4× the induced drag).
@@ -578,10 +837,154 @@ mod tests {
         );
     }
 
+    /// The transonic wall, end to end: the derived drag-divergence Mach sits
+    /// in the early-jet band, and at M 0.9 the total drag exceeds the
+    /// density-lapsed thrust of four Vega turbojets at *every* altitude — the
+    /// Meridian physically cannot sustain transonic flight, in level cruise
+    /// or a shallow climb-and-dash.
+    #[test]
+    fn meridian_cannot_sustain_transonic_flight() {
+        let panels = meridian_panels();
+        let cfg = build_ship_aero_config(&panels, 8.0, 0.5, DVec3::ZERO);
+
+        // Korn on the authored sweep/thickness: a 30°-swept, 11%-thick early
+        // jet wing diverges around M 0.8 (the 707 / Comet band).
+        assert!(
+            (0.76..0.88).contains(&cfg.mach_drag_divergence),
+            "M_dd {} outside the early-jet band",
+            cfg.mach_drag_divergence
+        );
+
+        // Thalos-like atmosphere: ρ₀ = 1.225, H = 9.1 km, a ≈ 337 m/s.
+        let rho0 = 1.225;
+        let scale_height_m = 9100.0;
+        let speed_of_sound = 337.0;
+        let weight_n = 37_000.0 * 9.06;
+        let rated_thrust_n = 4.0 * 50_000.0;
+        let mach = 0.9;
+        for altitude_m in [0.0_f64, 3000.0, 6000.0, 9000.0, 12000.0] {
+            let rho = rho0 * (-altitude_m / scale_height_m).exp();
+            let thrust = rated_thrust_n * crate::fuel::air_breathing_thrust_factor(rho);
+            let v = mach * speed_of_sound;
+            let q = 0.5 * rho * v * v;
+            // Level flight: CL carries the weight; CD = parasitic + induced +
+            // wave (the same terms `evaluate_aero` applies).
+            let cl = weight_n / (q * cfg.reference_area_m2);
+            let mach_crit = cfg.mach_drag_divergence - 0.108;
+            let cd = cfg.cd0
+                + cl * cl / (std::f64::consts::PI * 0.8 * cfg.aspect_ratio)
+                + 20.0 * (mach - mach_crit).clamp(0.0, 0.5).powi(4);
+            let drag = cd * q * cfg.reference_area_m2;
+            assert!(
+                drag > thrust,
+                "at {altitude_m} m: M 0.9 drag {:.0} kN must exceed thrust {:.0} kN",
+                drag / 1000.0,
+                thrust / 1000.0
+            );
+        }
+    }
+
+    /// Per-surface control authority: the coefficients must derive from the
+    /// authored aileron / elevator / rudder windows and their real moment
+    /// arms — and land in the transport band the old hand-tuned constants
+    /// encoded (pitch ≈ 0.5, roll ≈ 0.04, yaw ≈ 0.04), so the feel doesn't
+    /// regress while becoming a consequence of the geometry.
+    #[test]
+    fn meridian_control_authority_derives_from_surfaces() {
+        let panels = meridian_panels();
+        let cfg = build_ship_aero_config(&panels, 8.0, 0.5, DVec3::ZERO);
+
+        assert!(
+            (0.35..0.65).contains(&cfg.pitch_control),
+            "derived pitch authority {} outside the transport band",
+            cfg.pitch_control
+        );
+        assert!(
+            (0.025..0.06).contains(&cfg.roll_control),
+            "derived roll authority {} outside the transport band",
+            cfg.roll_control
+        );
+        assert!(
+            (0.02..0.05).contains(&cfg.yaw_control),
+            "derived yaw authority {} outside the transport band",
+            cfg.yaw_control
+        );
+
+        // Sizing must matter: stretching the aileron window inboard
+        // (0.74–0.97 → 0.54–0.97, more strip area on a still-long arm) should
+        // buy substantially more roll authority.
+        let wing_windows = [
+            (ControlSurfaceRole::Flap, 0.08, 0.50, 0.30, 0.61),
+            (ControlSurfaceRole::Aileron, 0.54, 0.97, 0.25, 0.35),
+        ];
+        let big = vec![
+            panel(15.0, 5.2, 1.5, 0.52, 0.11, 1.5708, WingRole::Lift, DVec3::X, DVec3::Z, 1.0, &wing_windows),
+            panel(15.0, 5.2, 1.5, 0.52, 0.11, -1.5708, WingRole::Lift, -DVec3::X, DVec3::Z, 1.0, &wing_windows),
+        ];
+        let big_cfg = build_ship_aero_config(&big, 8.0, 0.5, DVec3::ZERO);
+        assert!(
+            big_cfg.roll_control > 1.5 * cfg.roll_control,
+            "bigger ailerons must roll harder ({} vs {})",
+            big_cfg.roll_control,
+            cfg.roll_control
+        );
+
+        // A craft authored without a rudder genuinely has no yaw authority.
+        let no_fin: Vec<_> = panels
+            .iter()
+            .filter(|p| {
+                !p.surfaces
+                    .iter()
+                    .any(|w| matches!(w.role, ControlSurfaceRole::Rudder))
+            })
+            .cloned()
+            .collect();
+        let no_fin_cfg = build_ship_aero_config(&no_fin, 8.0, 0.5, DVec3::ZERO);
+        assert_eq!(no_fin_cfg.yaw_control, 0.0, "no rudder → no yaw authority");
+    }
+
+    /// Landing flaps must buy a real approach-speed reduction (≥ 10% off the
+    /// stall speed) and a real drag increment, derived purely from the
+    /// authored flap windows.
+    #[test]
+    fn meridian_flaps_buy_a_slow_approach() {
+        let panels = meridian_panels();
+        let cfg = build_ship_aero_config(&panels, 8.0, 0.5, DVec3::ZERO);
+
+        assert!(
+            (0.4..0.9).contains(&cfg.flap_dcl),
+            "flap ΔCL {} outside the landing-flap band",
+            cfg.flap_dcl
+        );
+        assert!(
+            (0.03..0.09).contains(&cfg.flap_dcd),
+            "flap ΔCD {} outside the landing-flap band",
+            cfg.flap_dcd
+        );
+
+        // Stall speed ∝ 1/√CL_max: the flap camber raises the stall ceiling.
+        let cl_max_clean = cfg.cl0 + cfg.lift_slope * cfg.stall_alpha;
+        let cl_max_landing = cl_max_clean + cfg.flap_dcl;
+        let vs_ratio = (cl_max_clean / cl_max_landing).sqrt();
+        assert!(
+            vs_ratio < 0.9,
+            "landing flaps should cut the stall speed by ≥10% (ratio {vs_ratio:.3})"
+        );
+
+        // Spoilers: a usable speedbrake (≈ doubles parasitic drag) that also
+        // dumps lift.
+        assert!(
+            cfg.spoiler_dcd > 0.5 * cfg.cd0,
+            "spoiler ΔCD {} too weak to brake with",
+            cfg.spoiler_dcd
+        );
+        assert!(cfg.spoiler_dcl < 0.0, "spoilers must dump lift");
+    }
+
     #[test]
     fn meridian_pitch_can_rotate_but_trims_gently() {
         let panels = meridian_panels();
-        let cfg = build_ship_aero_config(&panels, 8.0, 0.5);
+        let cfg = build_ship_aero_config(&panels, 8.0, 0.5, DVec3::ZERO);
 
         // Full elevator must out-muscle static stability up to a rotation /
         // flare attitude well past the approach AoA…
