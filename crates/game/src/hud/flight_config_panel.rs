@@ -67,19 +67,25 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
         )
     };
 
-    commands.entity(row).with_children(|p| {
+    // `panel_node()` defaults to absolute positioning (for standalone HUD
+    // boxes); these pills are flex children of the centring row, so they must
+    // be relative or they stack on top of each other at the row origin.
+    let pill_node = || {
         let mut pill = panel_node();
+        pill.position_type = PositionType::Relative;
         pill.padding = UiRect::axes(Val::Px(10.0), Val::Px(5.0));
+        pill
+    };
+
+    commands.entity(row).with_children(|p| {
         let (bg, border) = panel_frame(&theme);
-        p.spawn((pill, bg, border, Visibility::Hidden, FlapsPill))
+        p.spawn((pill_node(), bg, border, Visibility::Hidden, FlapsPill))
             .with_children(|p| {
                 p.spawn((pill_text(&theme, "FLAPS UP"), FlapsText));
             });
 
-        let mut pill = panel_node();
-        pill.padding = UiRect::axes(Val::Px(10.0), Val::Px(5.0));
         let (bg, border) = panel_frame(&theme);
-        p.spawn((pill, bg, border, Visibility::Hidden, BrakesPill))
+        p.spawn((pill_node(), bg, border, Visibility::Hidden, BrakesPill))
             .with_children(|p| {
                 p.spawn((pill_text(&theme, "BRAKES"), BrakesText));
             });
