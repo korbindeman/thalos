@@ -515,9 +515,11 @@ impl ShipBlueprint {
             let center_body_m = geo[m.child].position + ac_local.as_dvec3();
 
             // Per-window geometry of the authored control surfaces, for the
-            // consumer's flap / spoiler coefficient derivation. The wing
-            // tapers linearly, so the strip area between two span fractions
-            // is exact with the mid-window chord.
+            // consumer's flap / spoiler / control-authority derivation. The
+            // wing tapers linearly, so the strip area between two span
+            // fractions is exact with the mid-window chord, and the window
+            // centroid (mid-span, mid-chord — close enough to the hinge at
+            // these moment arms) gives the surface's real lever about the CoM.
             let surfaces = control_surfaces
                 .iter()
                 .filter_map(|cs| {
@@ -526,15 +528,18 @@ impl ShipBlueprint {
                     if s1 <= s0 {
                         return None;
                     }
+                    let mid = 0.5 * (s0 + s1);
                     let chord_mid = *root_chord as f64
-                        + (*tip_chord as f64 - *root_chord as f64) * 0.5 * (s0 + s1);
+                        + (*tip_chord as f64 - *root_chord as f64) * mid;
                     let spanned_area_m2 = *span as f64 * (s1 - s0) * chord_mid;
+                    let centroid_local = frame.center_at(mid as f32);
                     Some(AeroSurfaceWindow {
                         role: cs.role,
                         spanned_area_m2,
                         area_m2: spanned_area_m2 * cs.chord_fraction.clamp(0.0, 1.0) as f64,
                         chord_fraction: cs.chord_fraction.clamp(0.0, 1.0) as f64,
                         max_deflection_rad: cs.max_deflection.abs() as f64,
+                        centroid_body_m: geo[m.child].position + centroid_local.as_dvec3(),
                     })
                 })
                 .collect();
@@ -603,7 +608,8 @@ pub struct WingAeroPanel {
 pub struct AeroSurfaceWindow {
     pub role: ControlSurfaceRole,
     /// Wing strip area spanned by the window (m²) — the area whose lift the
-    /// surface modifies (flap ΔCL, spoiler lift dump scale with this).
+    /// surface modifies (flap ΔCL, spoiler lift dump, and the deflection
+    /// lift behind a control surface's moment all scale with this).
     pub spanned_area_m2: f64,
     /// Actual movable-panel area (m²) = spanned strip × chord fraction
     /// (spoiler drag scales with this).
@@ -613,6 +619,11 @@ pub struct AeroSurfaceWindow {
     pub chord_fraction: f64,
     /// Maximum deflection magnitude (rad).
     pub max_deflection_rad: f64,
+    /// Window centroid (mid-span, mid-chord of the spanned strip) in the
+    /// ship body frame (m). With the panel's `thick_dir` this gives the
+    /// surface's real moment arm about the CoM — what turns authored
+    /// aileron/elevator/rudder sizing into per-axis control authority.
+    pub centroid_body_m: DVec3,
 }
 
 // ---------------------------------------------------------------------------

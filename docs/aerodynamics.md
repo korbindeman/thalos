@@ -10,11 +10,13 @@ gets a bluff-body drag config with weathervane stability, so it aligns with the
 wind instead of tumbling. An aircraft gets lift + control + stability derived from
 its wing parts (area / chord / span → reference geometry; cambered lift), plus a
 **transonic wave-drag wall** (drag-divergence Mach from the authored sweep /
-thickness via Korn) with an **air-breathing thrust lapse**, and a shallow
-**flight-configuration layer**: a three-detent flap lever and brakes-driven
-spoilers, both authored as wing control-surface windows. Flight controls
-(pitch/roll/yaw) are wired, and an F3 overlay draws colliders +
-force/wind vectors. The moment coefficients are **derived from transport-category
+thickness via Korn) with an **air-breathing thrust lapse**, a shallow
+**flight-configuration layer** (a three-detent flap lever and brakes-driven
+spoilers, both authored as wing control-surface windows), and **per-surface
+control authority** (the per-axis control coefficients derive from the
+authored aileron/elevator/rudder windows and their real moment arms about the
+CoM). Flight controls (pitch/roll/yaw) are wired, and an F3 overlay draws
+colliders + force/wind vectors. The moment coefficients are **derived from transport-category
 stability derivatives** (see *Handling feel* below), so felt inertia scales with
 the craft's real mass and geometry. The Meridian (`ships/meridian.ron`, a
 narrow-body airliner) is the reference test aircraft on the runway scenarios; its
@@ -249,20 +251,24 @@ EVA is excluded throughout (no aero surfaces attached).
 
 ## Handling feel — coefficients from transport derivatives
 
-The moment coefficients (`crates/game/src/aero.rs`, live-tunable via the
-`AeroTuning` resource over BRP) are mapped from standard transport-category
-stability derivatives (Cm_α ≈ −1.2, Cm_q ≈ −25 including the α̇ lag this model
-lacks, Cl_p ≈ −0.45, Cn_r ≈ −0.3; full-throw Cl_δa ≈ 0.06, Cm_δe ≈ 0.5). Two
-mapping details: the model's damping term `coeff·ρ·V·S·L²·ω` is 4× the standard
+The **stability and damping** coefficients (`crates/game/src/aero.rs`,
+live-tunable via the `AeroTuning` resource over BRP) are mapped from standard
+transport-category stability derivatives (Cm_α ≈ −1.2, Cm_q ≈ −25 including
+the α̇ lag this model lacks, Cl_p ≈ −0.45, Cn_r ≈ −0.3). The **control**
+coefficients are no longer constants: they derive per craft from the authored
+control-surface windows (see *Per-surface control authority* below), with
+`AeroTuning` carrying scale multipliers over the derived values. Two mapping
+details: the model's damping term `coeff·ρ·V·S·L²·ω` is 4× the standard
 `C_q·(ωL/2V)` non-dimensionalisation, so `coeff = C/4`; and the reference span is
 the **full tip-to-tip wingspan** (2 × the largest half-panel — panels are single
 half-wings), which also makes the aspect ratio (b²/S ≈ 9 for the Meridian) and
 hence induced drag realistic.
 
 What this buys: **felt inertia is real physics, not per-class tuning.** Rate
-onset is `τ = I / (damp·ρ·V·S·L²)` — about 1.2 s in roll for the ~37 t Meridian
+onset is `τ = I / (damp·ρ·V·S·L²)` — about 1 s in roll for the ~37 t Meridian
 (rates build over a second-plus and coast to a stop, with a full-stick steady
-roll rate of ~35°/s at approach speed), while a fighter-sized airframe's small
+roll rate of ~22°/s at approach speed from the derived aileron authority —
+author bigger ailerons for more), while a fighter-sized airframe's small
 inertia and span land it at a few tenths of a second and triple-digit roll
 rates. Heavy planes feel heavy and small planes nimble through their actual
 mass and geometry. Full deflection commands the craft's real physical capability
@@ -307,11 +313,31 @@ the contact force grows a tipping moment.
 parts via `ShipBlueprint::wing_aero_panels` into one `AeroConfig`: reference area =
 total lifting (non-vertical) panel area, chord = mean aerodynamic chord, span =
 full wingspan (2 × max half-panel), aspect ratio = b²/S; cambered lift + trim +
-the wing stability/damping/control coefficients. Engine thrust stays Thalos's
-nose-forward throttle. The natural next refinement is deriving the per-axis
-*control* coefficients from the authored `ControlSurface` geometry (span window ×
-chord fraction × arm) instead of one whole-body constant, so aileron sizing in
-the shipyard shows up in roll feel.
+the wing stability/damping coefficients. Engine thrust stays Thalos's
+nose-forward throttle.
+
+**Per-surface control authority** (`derive_control_coefficients`): the per-axis
+*control* coefficients are derived from the authored `ControlSurface` windows,
+not tuned constants. Each aileron/elevator/rudder window contributes its
+deflection lift (the same plain-flap term the flaps use, `CLα·τ(c_f)·η·δ_max`
+over the spanned strip) times its **real moment arm about the CoM**
+(`|(r × n̂)·axis|` with `r` the window centroid and `n̂` the panel's lift
+normal), summed per role and non-dimensionalised into the evaluator's
+`coeff·q̄·S·L` control term. So a bigger or further-outboard aileron rolls
+harder, a longer tail arm pitches harder, and a craft authored without a
+rudder genuinely has no yaw authority — sizing and placement show up in
+handling exactly like flap sizing shows up in approach speed. Each role feeds
+only its own axis (cross-couplings like rudder-roll are deliberately dropped:
+the whole-body model keeps control moments axis-diagonal so fly-by-wire
+allocation stays unconditionally stable — the same "explicit, not emergent"
+reasoning as the restoring/damping terms; the **forces** never became a
+per-surface strip sum, which is the thing that pumped energy when tried). On
+the Meridian the derived values land within ~10% of the previously hand-tuned
+transport constants (pitch 0.48 vs 0.5, yaw 0.032 vs 0.04, roll 0.037),
+pinned by `meridian_control_authority_derives_from_surfaces`. The `AeroTuning`
+BRP resource now carries `*_control_scale` multipliers (default 1) over the
+derived values instead of absolute control overrides, so a live feel-tweak
+can't erase the difference between a big and a small aileron.
 
 **Spacecraft (rockets, capsules).** A bluff-body config (reference area
 `ShipStats::frontal_area_m2`, Cd a blunt-body constant), `CL_α = 0`, with
@@ -351,9 +377,12 @@ for directions). Both groups start disabled.
   airframes (capped quartic). A craft meant to fly supersonic needs a
   proper supersonic drag/lift model and an area-rule-ish authored escape
   (e.g. higher κ via a supercritical/sharp airfoil flag).
-- **Per-control-surface authority** — control coefficients are whole-body
-  constants; deriving them from the authored `ControlSurface` geometry would
-  make shipyard surface sizing show up in handling.
+- **Per-surface forces / cross-couplings** — control *authority* now derives
+  from the authored surface geometry (see *Per-surface control authority*),
+  but forces remain a whole-body sum and the axis cross-terms (rudder-roll,
+  adverse yaw, differential-flap asymmetry after damage) are deliberately
+  dropped for stability. An emergent per-surface strip-sum force model was
+  tried and rejected — it pumps energy under per-frame-constant integration.
 
 ## File map
 
@@ -361,7 +390,8 @@ for directions). Both groups start disabled.
   `ControlInputs` (incl. flap/spoiler deployment), `evaluate_aero` (incl.
   wave drag; + unit tests).
 - `crates/game/src/aero.rs` — `GameAeroPlugin`, `build_ship_aero_config`
-  (panels → config, incl. Korn `M_dd` + flap/spoiler coefficient derivation),
+  (panels → config, incl. Korn `M_dd` + flap/spoiler coefficient derivation +
+  `derive_control_coefficients` for per-surface control authority),
   `attach_ship_aero`, `apply_aero_forces` (atmosphere sample + body-frame
   velocity + inertia-relative clamp + force write), the F3 overlay.
 - `crates/game/src/flight_config.rs` — the flap lever / spoiler actuator
@@ -372,7 +402,8 @@ for directions). Both groups start disabled.
   lapse) inside `refresh_active_propulsion`.
 - `crates/shipyard/src/stats.rs` — `ShipBlueprint::wing_aero_panels` +
   `WingAeroPanel` (per-wing aerodynamic geometry incl. sweep/thickness and
-  the `AeroSurfaceWindow` control-surface windows, body frame).
+  the `AeroSurfaceWindow` control-surface windows with body-frame centroids
+  for the moment arms).
 - `crates/world/src/atmosphere.rs` — `AtmosphereProfile` + `AtmosphereSample` +
   `TerrestrialAtmosphere::sample_at_altitude_m`.
 - `crates/world/src/body.rs` — `surface_pressure_pa` / `surface_gravity_m_s2`.
@@ -392,8 +423,11 @@ for directions). Both groups start disabled.
   terminal velocity (not lunar freefall) and trim retrograde instead of tumbling.
 - `just game cruise` / `just game runway` — the Meridian should be controllable.
 - `cargo test -p thalos_game aero` — Meridian handling-feel pins, the
-  transonic-wall pin (`meridian_cannot_sustain_transonic_flight`), and the
-  flap approach-speed pin (`meridian_flaps_buy_a_slow_approach`).
+  transonic-wall pin (`meridian_cannot_sustain_transonic_flight`), the
+  flap approach-speed pin (`meridian_flaps_buy_a_slow_approach`), and the
+  per-surface authority pins (`meridian_control_authority_derives_from_surfaces`:
+  derived pitch/roll/yaw in the transport band, bigger ailerons roll harder,
+  no rudder → no yaw authority).
 - In `cruise`: `F`/`R` cycle FLAPS UP→T/O→LDG on the HUD flight-config pills
   and the inboard trailing edges visibly run out; `B` pops the mid-span
   spoilers ("BRAKES ON") and the craft decelerates; full throttle tops out

@@ -241,7 +241,8 @@ pub(crate) fn build_player_ship(
         stats.wet_mass_kg(),
     );
 
-    // Whole-body aero config from the blueprint's wing parts (lift + stability),
+    // Whole-body aero config from the blueprint's wing parts (lift + stability
+    // + per-surface control authority, with moment arms about the real CoM),
     // or a bluff-body drag config for a wingless craft. Consumed by
     // `aero::attach_ship_aero` when the Avian body spawns.
     match blueprint.wing_aero_panels(catalog) {
@@ -250,6 +251,7 @@ pub(crate) fn build_player_ship(
                 &panels,
                 stats.frontal_area_m2,
                 SHIP_DRAG_COEFFICIENT,
+                stats.center_of_mass_m,
             );
             info!(
                 "aero config: {} wing panel(s), ref area {:.1} m², MAC {:.2} m, span {:.1} m, lift_slope {:.1}",

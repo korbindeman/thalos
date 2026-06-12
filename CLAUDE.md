@@ -853,9 +853,13 @@ and scalar intake flow) plus visually-actuating control surfaces have landed**
   three-detent flap lever (F extend / R retract) and the B brakes latch
   (wheel brakes + spoilers, KSP-style) — and their authored window geometry
   derives the craft's flap/spoiler ΔCL/ΔCD in `build_ship_aero_config`
-  (`docs/aerodynamics.md` *Flight configuration*). Attitude forces are still
-  the whole-body aero model (visual actuation only this slice); per-surface
-  forces are the deferred upgrade.
+  (`docs/aerodynamics.md` *Flight configuration*). **Per-surface control
+  authority**: the per-axis control coefficients likewise derive from the
+  authored aileron/elevator/rudder windows (deflection lift × real moment arm
+  about the CoM — `derive_control_coefficients`), so surface sizing and
+  placement show up in handling; the *moment structure* stays the whole-body
+  stable model — forces are never an emergent per-surface strip sum, which
+  pumps energy (`docs/aerodynamics.md` *Per-surface control authority*).
   Gear will be its own footprint part. No flight model yet (M6).
 - `Engine` / `AirIntake` — rocket bells remain node-stacked; jet nacelles can
   surface-mount to wings as `WingPylon` mounts with generated pylons. Ambient
@@ -1109,10 +1113,12 @@ Each major system has a unified spec doc.
   force-only bubble coupling, the CoM/airspeed integration invariants, the
   in-atmosphere `Full`-role trigger + warp clamp, the transonic wave-drag wall
   (Korn-derived drag-divergence Mach from authored wing sweep/thickness) +
-  air-breathing jet thrust lapse, and the shallow flight-configuration layer
+  air-breathing jet thrust lapse, the shallow flight-configuration layer
   (three-detent flap lever + brakes-driven spoilers, authored as wing
-  `Flap`/`Spoiler` control-surface windows). (Replaced the former vendored
-  LGPL `avian_fdm` crate.)
+  `Flap`/`Spoiler` control-surface windows), and per-surface control
+  authority (per-axis control coefficients derived from the authored
+  aileron/elevator/rudder windows and their CoM moment arms). (Replaced the
+  former vendored LGPL `avian_fdm` crate.)
 - `celestial.md` — celestial sphere design: source model, spectrum,
   generation, rendering pipeline.
 - `tooling.md` — Rust toolchain policy and local developer tooling notes.
