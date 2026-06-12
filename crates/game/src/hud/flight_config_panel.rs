@@ -1,5 +1,10 @@
 //! Top-centre flight-configuration cluster: the flap lever detent and the
-//! brakes latch, as two small pills under the atmosphere readout.
+//! brakes latch, as two **clickable** pills under the atmosphere readout
+//! (same toggle-button treatment as the nav panel's SAS/RCS buttons).
+//!
+//! - Clicking **FLAPS** cycles the lever one detent (UP → T/O → LDG → UP);
+//!   the `F`/`R` keys remain the stepwise non-wrapping path.
+//! - Clicking **BRAKES** toggles the latch, exactly like `B`.
 //!
 //! **Capability-gated:** each pill appears only when the current craft
 //! actually has the system. Flaps show iff the wing aero config derived any
@@ -13,9 +18,10 @@ use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::LocalCraftBody;
 
 use crate::aero::ShipAero;
-use crate::flight_config::FlightConfig;
+use crate::flight_config::{FLAP_DETENTS, FlightConfig};
 use crate::hud::HudPanel;
-use crate::hud::theme::{HudTheme, panel_frame, panel_node};
+use crate::hud::nav_panel::{apply_button_colors, nav_button_colors};
+use crate::hud::theme::HudTheme;
 use crate::local_physics::{ParkingBrake, WheelSet};
 use crate::rendering::SimulationState;
 
@@ -55,6 +61,16 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
         ))
         .id();
 
+    // A clickable pill: a flex child of the centring row (NOT absolute, or
+    // the two stack at the row origin), styled like the nav-assist buttons.
+    let pill_node = || Node {
+        border: UiRect::all(Val::Px(1.0)),
+        border_radius: BorderRadius::all(Val::Px(3.0)),
+        padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        ..default()
+    };
     let pill_text = |theme: &HudTheme, label: &str| {
         (
             Text::new(label),
@@ -67,29 +83,56 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
         )
     };
 
-    // `panel_node()` defaults to absolute positioning (for standalone HUD
-    // boxes); these pills are flex children of the centring row, so they must
-    // be relative or they stack on top of each other at the row origin.
-    let pill_node = || {
-        let mut pill = panel_node();
-        pill.position_type = PositionType::Relative;
-        pill.padding = UiRect::axes(Val::Px(10.0), Val::Px(5.0));
-        pill
-    };
-
     commands.entity(row).with_children(|p| {
-        let (bg, border) = panel_frame(&theme);
-        p.spawn((pill_node(), bg, border, Visibility::Hidden, FlapsPill))
-            .with_children(|p| {
-                p.spawn((pill_text(&theme, "FLAPS UP"), FlapsText));
-            });
+        p.spawn((
+            Button,
+            pill_node(),
+            BackgroundColor(theme.panel_bg),
+            BorderColor::all(theme.panel_border),
+            Interaction::None,
+            Visibility::Hidden,
+            FlapsPill,
+            Name::new("FlightConfigFlapsButton"),
+        ))
+        .with_children(|p| {
+            p.spawn((pill_text(&theme, "FLAPS UP"), FlapsText));
+        });
 
-        let (bg, border) = panel_frame(&theme);
-        p.spawn((pill_node(), bg, border, Visibility::Hidden, BrakesPill))
-            .with_children(|p| {
-                p.spawn((pill_text(&theme, "BRAKES"), BrakesText));
-            });
+        p.spawn((
+            Button,
+            pill_node(),
+            BackgroundColor(theme.panel_bg),
+            BorderColor::all(theme.panel_border),
+            Interaction::None,
+            Visibility::Hidden,
+            BrakesPill,
+            Name::new("FlightConfigBrakesButton"),
+        ))
+        .with_children(|p| {
+            p.spawn((pill_text(&theme, "BRAKES"), BrakesText));
+        });
     });
+}
+
+/// Click handling: FLAPS cycles the lever one detent (wrapping), BRAKES
+/// toggles the latch — the same state the `F`/`R` and `B` keys drive
+/// ([`crate::flight_config`], `local_physics::toggle_parking_brake`).
+pub(super) fn handle_clicks(
+    flaps: Query<&Interaction, (Changed<Interaction>, With<FlapsPill>)>,
+    brakes: Query<&Interaction, (Changed<Interaction>, With<BrakesPill>)>,
+    mut config: ResMut<FlightConfig>,
+    mut brake: ResMut<ParkingBrake>,
+) {
+    for interaction in &flaps {
+        if matches!(interaction, Interaction::Pressed) {
+            config.flap_setting = (config.flap_setting + 1) % (FLAP_DETENTS + 1);
+        }
+    }
+    for interaction in &brakes {
+        if matches!(interaction, Interaction::Pressed) {
+            brake.engaged = !brake.engaged;
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -104,11 +147,11 @@ pub(super) fn update(
         (With<FlightConfigRow>, Without<FlapsPill>, Without<BrakesPill>),
     >,
     mut flaps_pill_q: Query<
-        &mut Visibility,
+        (&mut Visibility, &Interaction, &mut BorderColor, &mut BackgroundColor),
         (With<FlapsPill>, Without<FlightConfigRow>, Without<BrakesPill>),
     >,
     mut brakes_pill_q: Query<
-        &mut Visibility,
+        (&mut Visibility, &Interaction, &mut BorderColor, &mut BackgroundColor),
         (With<BrakesPill>, Without<FlightConfigRow>, Without<FlapsPill>),
     >,
     mut flaps_text_q: Query<(&mut Text, &mut TextColor), (With<FlapsText>, Without<BrakesText>)>,
@@ -127,13 +170,31 @@ pub(super) fn update(
             || aero.config.spoiler_dcd > 0.0;
     }
 
-    set_visibility(&mut row_q, has_flaps || has_brakes);
-    set_visibility(&mut flaps_pill_q, has_flaps);
-    set_visibility(&mut brakes_pill_q, has_brakes);
+    if let Ok(mut row_vis) = row_q.single_mut() {
+        set_visibility(&mut row_vis, has_flaps || has_brakes);
+    }
+
+    if let Ok((mut vis, interaction, mut border, mut bg)) = flaps_pill_q.single_mut() {
+        set_visibility(&mut vis, has_flaps);
+        if has_flaps {
+            let active = flight_config.flap_setting > 0;
+            let (border_color, bg_color) =
+                nav_button_colors(&theme, active, true, false, interaction);
+            apply_button_colors(&mut border, &mut bg, border_color, bg_color);
+        }
+    }
+
+    if let Ok((mut vis, interaction, mut border, mut bg)) = brakes_pill_q.single_mut() {
+        set_visibility(&mut vis, has_brakes);
+        if has_brakes {
+            let (border_color, bg_color) =
+                nav_button_colors(&theme, brake.engaged, true, false, interaction);
+            apply_button_colors(&mut border, &mut bg, border_color, bg_color);
+        }
+    }
 
     if has_flaps && let Ok((mut text, mut color)) = flaps_text_q.single_mut() {
-        let target = flight_config.flap_setting as f64
-            / crate::flight_config::FLAP_DETENTS.max(1) as f64;
+        let target = flight_config.flap_setting as f64 / FLAP_DETENTS.max(1) as f64;
         let in_transit = (flight_config.flap_fraction - target).abs() > 0.02;
         let label = format!("FLAPS {}", flight_config.flap_label());
         let new_color = if in_transit {
@@ -166,18 +227,13 @@ pub(super) fn update(
     }
 }
 
-fn set_visibility<F: bevy::ecs::query::QueryFilter>(
-    q: &mut Query<&mut Visibility, F>,
-    shown: bool,
-) {
+fn set_visibility(visibility: &mut Visibility, shown: bool) {
     let target = if shown {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
-    for mut visibility in q.iter_mut() {
-        if *visibility != target {
-            *visibility = target;
-        }
+    if *visibility != target {
+        *visibility = target;
     }
 }

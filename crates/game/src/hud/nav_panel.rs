@@ -1098,7 +1098,10 @@ fn format_duration_compact(seconds: f64) -> String {
     }
 }
 
-fn nav_button_colors(
+/// Shared HUD toggle-button styling (border, background) for the
+/// active/hover/pressed states — also used by the flight-config pills so
+/// every clickable HUD toggle reads the same.
+pub(super) fn nav_button_colors(
     theme: &HudTheme,
     active: bool,
     available: bool,
@@ -1122,7 +1125,7 @@ fn nav_button_colors(
     }
 }
 
-fn apply_button_colors(
+pub(super) fn apply_button_colors(
     border: &mut BorderColor,
     bg: &mut BackgroundColor,
     border_color: Color,

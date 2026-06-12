@@ -226,11 +226,13 @@ freshly placed `Lift` wing gets a default inboard flap + outboard aileron
 (`default_control_surfaces`).
 
 The HUD shows a **capability-gated flight-config cluster**
-(`hud/flight_config_panel.rs`, two pills under the atmosphere readout): the
-flap pill appears only when the craft's aero config derived flap authority
-from authored `Flap` windows (detent label, amber while the actuator is in
-transit), and the brakes pill only when the craft has gear wheels or
-spoilers. A rocket shows neither.
+(`hud/flight_config_panel.rs`, two clickable pills under the atmosphere
+readout, styled like the nav panel's SAS/RCS toggle buttons): the flap pill
+appears only when the craft's aero config derived flap authority from
+authored `Flap` windows (detent label, amber while the actuator is in
+transit; click cycles UP → T/O → LDG → UP), and the brakes pill only when
+the craft has gear wheels or spoilers (click toggles the latch, same as
+`B`). A rocket shows neither.
 
 ## Authority & warp coupling
 

@@ -33,9 +33,12 @@ const FLAP_TRAVEL_S: f64 = 6.0;
 /// Spoiler travel time, seconds.
 const SPOILER_TRAVEL_S: f64 = 0.8;
 
-/// Flap lever + spoiler state. **Sole writer:** [`update_flight_config`].
-/// Read by the aero force system ([`crate::aero::apply_aero_forces`]), the
-/// control-surface visuals (`ship_view`), and the HUD atmosphere panel.
+/// Flap lever + spoiler state. The lever detent is written by
+/// [`update_flight_config`] (the `F`/`R` keys) and the HUD flaps pill
+/// (`hud::flight_config_panel::handle_clicks`, click-to-cycle); the actuator
+/// fractions are solely [`update_flight_config`]'s. Read by the aero force
+/// system ([`crate::aero::apply_aero_forces`]), the control-surface visuals
+/// (`ship_view`), and the HUD flight-config pills.
 #[derive(Resource, Reflect, Clone, Copy, Default)]
 #[reflect(Resource)]
 pub struct FlightConfig {
