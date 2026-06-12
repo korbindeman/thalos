@@ -312,14 +312,25 @@ pub enum WingRole {
 /// (±X) mount is a tailplane, a near-dorsal (±Z) mount is a fin.
 pub fn default_control_surfaces(role: WingRole, mount_angle: f32) -> Vec<ControlSurface> {
     match role {
-        // Outboard aileron on the back quarter-chord.
-        WingRole::Lift => vec![ControlSurface {
-            role: ControlSurfaceRole::Aileron,
-            span_start: 0.55,
-            span_end: 0.95,
-            chord_fraction: 0.25,
-            max_deflection: 25.0_f32.to_radians(),
-        }],
+        // Inboard flap + outboard aileron on the back quarter-chord, the
+        // classic main-wing split. The flap window also sizes the craft's
+        // high-lift ΔCL/ΔCD, so a default wing lands slow out of the box.
+        WingRole::Lift => vec![
+            ControlSurface {
+                role: ControlSurfaceRole::Flap,
+                span_start: 0.08,
+                span_end: 0.50,
+                chord_fraction: 0.30,
+                max_deflection: 35.0_f32.to_radians(),
+            },
+            ControlSurface {
+                role: ControlSurfaceRole::Aileron,
+                span_start: 0.55,
+                span_end: 0.95,
+                chord_fraction: 0.25,
+                max_deflection: 25.0_f32.to_radians(),
+            },
+        ],
         WingRole::Stabilizer => {
             // Horizontal when the panel extends sideways (|sin θ| large),
             // vertical when it extends up/down toward the dorsal axis.

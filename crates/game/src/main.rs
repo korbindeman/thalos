@@ -11,6 +11,7 @@ mod controls;
 mod coords;
 mod debug;
 mod engine;
+mod flight_config;
 mod flight_plan_view;
 mod freecam;
 mod fuel;
@@ -637,6 +638,7 @@ fn main() {
         .add_plugins(RenderingPlugin)
         .add_plugins(GameLocalPhysicsPlugin)
         .add_plugins(GameAeroPlugin)
+        .add_plugins(flight_config::FlightConfigPlugin)
         .add_plugins(PlayerControllerPlugin)
         .add_plugins(MapViewPlugin)
         .add_plugins(BridgePlugin)

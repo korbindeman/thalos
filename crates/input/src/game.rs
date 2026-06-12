@@ -91,6 +91,14 @@ pub struct ParkingBrakeAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
+pub struct FlapsExtendAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FlapsRetractAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
 pub struct PitchPositiveAction;
 
 #[derive(InputAction)]
@@ -205,6 +213,10 @@ pub struct GameInputIntent {
     pub stage: bool,
     /// Edge-triggered: the player toggled the parking brake this frame.
     pub parking_brake_toggle: bool,
+    /// Edge-triggered: the player extended the flaps one detent this frame.
+    pub flaps_extend: bool,
+    /// Edge-triggered: the player retracted the flaps one detent this frame.
+    pub flaps_retract: bool,
     pub throttle_up: bool,
     pub throttle_down: bool,
     /// Absolute HOTAS throttle command in `[0, 1]`. `None` leaves the
@@ -363,6 +375,16 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<ParkingBrakeAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.flight.bindings("parking_brake")),
+            ),
+            (
+                Action::<FlapsExtendAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.flight.bindings("flaps_extend")),
+            ),
+            (
+                Action::<FlapsRetractAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.flight.bindings("flaps_retract")),
             ),
             (
                 Action::<PitchPositiveAction>::new(),
@@ -611,8 +633,12 @@ fn collect_throttle_axis_intent(
     throttle_up: Query<&Action<ThrottleRampPositiveAction>>,
     throttle_down: Query<&Action<ThrottleRampNegativeAction>>,
     parking_brake: Query<(&Action<ParkingBrakeAction>, &ActionEvents)>,
+    flaps_extend: Query<(&Action<FlapsExtendAction>, &ActionEvents)>,
+    flaps_retract: Query<(&Action<FlapsRetractAction>, &ActionEvents)>,
 ) {
     intent.parking_brake_toggle = started(&parking_brake);
+    intent.flaps_extend = started(&flaps_extend);
+    intent.flaps_retract = started(&flaps_retract);
     // Keep Shift/Ctrl available as throttle controls during normal flight, but
     // do not let OS command chords like cmd+shift-click or cmd+shift+2 leak
     // into gameplay as throttle input.

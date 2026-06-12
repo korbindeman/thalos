@@ -182,6 +182,16 @@ pub enum ControlSurfaceRole {
     Elevator,
     /// Yaw control. Lives on a near-vertical fin; takes the yaw command.
     Rudder,
+    /// High-lift device. **Symmetric**, driven by the flap lever (a craft
+    /// *configuration*, not an attitude command): deflects trailing-edge-down
+    /// with the lever setting. Its authored window area/chord also derives the
+    /// craft's flap ΔCL/ΔCD (see `thalos_game::aero::build_ship_aero_config`),
+    /// so sizing the flaps in the shipyard changes the landing performance.
+    Flap,
+    /// Spoiler / speedbrake panel. **Symmetric**, driven by the brakes toggle:
+    /// raises trailing-edge-up when the brakes are engaged, dumping lift and
+    /// adding drag. Window area derives the craft's speedbrake ΔCD/ΔCL.
+    Spoiler,
 }
 
 /// A trailing-edge control surface hinged into a [`Wing`] panel.

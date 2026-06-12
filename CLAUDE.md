@@ -810,16 +810,23 @@ and scalar intake flow) plus visually-actuating control surfaces have landed**
   sweep, dihedral, t/c, incidence). `wing_mesh::build_wing_mesh` builds it
   in the host-local frame, shared by the editor and the game's `ship_view`.
   **Control surfaces are `Wing` parameters** (`Wing::control_surfaces:
-  Vec<ControlSurface>` — ailerons/elevator/rudder, each a trailing-edge
-  spanwise window + chord fraction + deflection limit), not separate parts:
+  Vec<ControlSurface>` — ailerons/elevator/rudder/flaps/spoilers, each a
+  trailing-edge spanwise window + chord fraction + deflection limit), not
+  separate parts:
   `build_wing_mesh` notches them out of the loft and `build_control_surface_mesh`
   meshes each as a separate hinged sub-mesh about a consistently-oriented
   hinge axis (`control_surface_geometry` is the shared seam a future
-  per-surface force model reads). The game animates them from the fly-by-wire
-  command (`RealizedControl::command`, *not* the allocated aero fraction):
-  elevators on pitch (symmetric), ailerons on roll (differential by mount
-  side), rudder on yaw. Forces are still the whole-body aero model (visual
-  actuation only this slice); per-surface forces are the deferred upgrade.
+  per-surface force model reads). The game animates the attitude surfaces from
+  the fly-by-wire command (`RealizedControl::command`, *not* the allocated
+  aero fraction): elevators on pitch (symmetric), ailerons on roll
+  (differential by mount side), rudder on yaw. `Flap`/`Spoiler` windows
+  deflect instead from `thalos_game::flight_config::FlightConfig` — the
+  three-detent flap lever (F extend / R retract) and the B brakes latch
+  (wheel brakes + spoilers, KSP-style) — and their authored window geometry
+  derives the craft's flap/spoiler ΔCL/ΔCD in `build_ship_aero_config`
+  (`docs/aerodynamics.md` *Flight configuration*). Attitude forces are still
+  the whole-body aero model (visual actuation only this slice); per-surface
+  forces are the deferred upgrade.
   Gear will be its own footprint part. No flight model yet (M6).
 - `Engine` / `AirIntake` — rocket bells remain node-stacked; jet nacelles can
   surface-mount to wings as `WingPylon` mounts with generated pylons. Ambient
@@ -1049,8 +1056,12 @@ Each major system has a unified spec doc.
 - `aerodynamics.md` — atmospheric flight forces via the native
   `thalos_physics_canonical::aero` whole-body model (drag + bluff-body
   weathervane stability; lift/control for planes): the per-body density model,
-  force-only bubble coupling, the CoM/airspeed integration invariants, and the
-  in-atmosphere `Full`-role trigger + warp clamp. (Replaced the former vendored
+  force-only bubble coupling, the CoM/airspeed integration invariants, the
+  in-atmosphere `Full`-role trigger + warp clamp, the transonic wave-drag wall
+  (Korn-derived drag-divergence Mach from authored wing sweep/thickness) +
+  air-breathing jet thrust lapse, and the shallow flight-configuration layer
+  (three-detent flap lever + brakes-driven spoilers, authored as wing
+  `Flap`/`Spoiler` control-surface windows). (Replaced the former vendored
   LGPL `avian_fdm` crate.)
 - `celestial.md` — celestial sphere design: source model, spectrum,
   generation, rendering pipeline.

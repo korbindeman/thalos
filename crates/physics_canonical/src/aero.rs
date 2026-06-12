@@ -34,6 +34,16 @@ const MIN_SPEED_M_S: f64 = 1.0;
 /// authored config or a transient can never inject a non-physical impulse.
 const MAX_FORCE_N: f64 = 5.0e7;
 const MAX_TORQUE_NM: f64 = 5.0e8;
+/// Wave drag rises as `WAVE_DRAG_SCALE · (M − M_crit)⁴` past the critical Mach
+/// (the canonical transonic drag-rise shape: +20 counts at drag divergence,
+/// then a steep wall). The Mach excess is capped so a hypersonic entry doesn't
+/// produce an absurd coefficient — past the cap the craft is simply "very
+/// draggy" (ΔCD = 1.25), and the force ceiling still bounds the output.
+const WAVE_DRAG_SCALE: f64 = 20.0;
+const WAVE_DRAG_MACH_EXCESS_CAP: f64 = 0.5;
+/// Drag divergence is conventionally defined ~0.1 above the critical Mach
+/// where wave drag first appears (`ΔCD(M_dd) = 20 counts` with the quartic).
+const DRAG_DIVERGENCE_ABOVE_CRITICAL: f64 = 0.108;
 
 /// Pilot control inputs, each in [−1, 1].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -44,6 +54,13 @@ pub struct ControlInputs {
     pub roll: f64,
     /// +1 = full nose-right yaw.
     pub yaw: f64,
+    /// High-lift (flap) deployment in [0, 1]: the actual actuator position,
+    /// not the lever detent. Lift scales linearly with it and flap drag
+    /// quadratically, so a half setting is the high-lift/low-drag takeoff
+    /// configuration and full is the draggy landing one.
+    pub flap: f64,
+    /// Spoiler / speedbrake deployment in [0, 1]: adds drag and dumps lift.
+    pub spoiler: f64,
 }
 
 /// Whole-body aerodynamic configuration for one craft. Forces use the lift/drag
@@ -88,6 +105,24 @@ pub struct AeroConfig {
     pub roll_control: f64,
     /// Yaw control authority.
     pub yaw_control: f64,
+    /// Drag-divergence Mach number (`0` disables compressibility entirely —
+    /// the bluff-body default). Above the corresponding critical Mach
+    /// (`M_dd − 0.108`) wave drag rises quartically, the transonic wall that
+    /// keeps a subsonic airframe subsonic. Derived from the authored wing
+    /// sweep/thickness (Korn equation) by the consumer.
+    pub mach_drag_divergence: f64,
+    /// ΔCL at full flap deployment (high-lift camber increase). Scales
+    /// linearly with `ControlInputs::flap`; also raises the stall-clamped
+    /// |CL| ceiling, which is what lowers the stall speed.
+    pub flap_dcl: f64,
+    /// ΔCD at full flap deployment. Scales with `flap²` (drag grows with the
+    /// deflection angle squared), so takeoff flap is cheap and landing flap
+    /// is draggy.
+    pub flap_dcd: f64,
+    /// ΔCL at full spoiler deployment (negative: lift dump).
+    pub spoiler_dcl: f64,
+    /// ΔCD at full spoiler deployment (speedbrake drag).
+    pub spoiler_dcd: f64,
 }
 
 impl Default for AeroConfig {
@@ -110,6 +145,11 @@ impl Default for AeroConfig {
             pitch_control: 0.0,
             roll_control: 0.0,
             yaw_control: 0.0,
+            mach_drag_divergence: 0.0,
+            flap_dcl: 0.0,
+            flap_dcd: 0.0,
+            spoiler_dcl: 0.0,
+            spoiler_dcd: 0.0,
         }
     }
 }
@@ -126,10 +166,13 @@ pub struct AeroOutput {
 /// - `vel_body`: craft CoM velocity relative to the air, body frame (m/s).
 /// - `omega_body`: angular velocity, body frame (rad/s).
 /// - `density`: air density (kg/m³); ≤ 0 returns zero.
+/// - `speed_of_sound`: local speed of sound (m/s); ≤ 0 disables every Mach
+///   effect (vacuum, or a caller that doesn't model compressibility).
 pub fn evaluate_aero(
     vel_body: DVec3,
     omega_body: DVec3,
     density: f64,
+    speed_of_sound: f64,
     cfg: &AeroConfig,
     controls: ControlInputs,
 ) -> AeroOutput {
@@ -153,14 +196,29 @@ pub fn evaluate_aero(
     let b = cfg.reference_span_m;
 
     // --- Forces: lift + drag. ------------------------------------------------
-    let mut cl = cfg.cl0 + cfg.lift_slope * alpha;
-    let cl_stall = cfg.cl0.abs() + cfg.lift_slope * cfg.stall_alpha;
+    let flap = controls.flap.clamp(0.0, 1.0);
+    let spoiler = controls.spoiler.clamp(0.0, 1.0);
+    // Flaps add camber (linear in deployment); spoilers dump lift. Folding the
+    // increments into cl0 means the stall clamp below rises with the flaps —
+    // the higher CL_max is exactly what lowers the stall speed.
+    let cl0 = cfg.cl0 + cfg.flap_dcl * flap + cfg.spoiler_dcl * spoiler;
+    let mut cl = cl0 + cfg.lift_slope * alpha;
+    let cl_stall = cl0.abs() + cfg.lift_slope * cfg.stall_alpha;
     if cl_stall > 0.0 {
         cl = cl.clamp(-cl_stall, cl_stall);
     }
-    let mut cd = cfg.cd0;
+    let mut cd = cfg.cd0 + cfg.flap_dcd * flap * flap + cfg.spoiler_dcd * spoiler;
     if cfg.aspect_ratio > 0.0 {
         cd += cl * cl / (PI * OSWALD_E * cfg.aspect_ratio);
+    }
+    // Transonic wave drag: the quartic rise past the critical Mach. This is
+    // the wall that keeps a subsonic airframe from casually crossing Mach 1 —
+    // near M_dd the drag merely doubles, by M ≈ 1 it is several times CD0.
+    if cfg.mach_drag_divergence > 0.0 && speed_of_sound > 0.0 {
+        let mach = speed / speed_of_sound;
+        let mach_crit = cfg.mach_drag_divergence - DRAG_DIVERGENCE_ABOVE_CRITICAL;
+        let excess = (mach - mach_crit).clamp(0.0, WAVE_DRAG_MACH_EXCESS_CAP);
+        cd += WAVE_DRAG_SCALE * excess.powi(4);
     }
 
     let drag_dir = -vel_body / speed;
@@ -257,7 +315,7 @@ mod tests {
     fn lift_up_drag_back_in_level_flight() {
         // Forward (+Y), slight descent (−Z) → positive AoA.
         let v = DVec3::new(0.0, 100.0, -3.0);
-        let out = evaluate_aero(v, DVec3::ZERO, 1.225, &wing(), ControlInputs::default());
+        let out = evaluate_aero(v, DVec3::ZERO, 1.225, 0.0, &wing(), ControlInputs::default());
         assert!(out.force.z > 0.0, "lift up (+Z), got {}", out.force.z);
         assert!(out.force.y < 0.0, "drag opposes +Y, got {}", out.force.y);
     }
@@ -266,7 +324,7 @@ mod tests {
     fn pitch_up_disturbance_is_restored() {
         // Nose pitched above the velocity (flow from below, +α), no rotation.
         let v = DVec3::new(0.0, 100.0, -10.0);
-        let out = evaluate_aero(v, DVec3::ZERO, 1.0, &wing(), ControlInputs::default());
+        let out = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &wing(), ControlInputs::default());
         // Restoring pitch moment must be nose-down: about −X (τx < 0).
         assert!(out.torque.x < 0.0, "pitch should restore (nose down), got {}", out.torque.x);
     }
@@ -278,13 +336,13 @@ mod tests {
         // Below trim AoA the moment pitches the nose up, above it down, and at
         // trim it vanishes — a hands-off stable cruise attitude.
         let v_level = DVec3::new(0.0, 100.0, 0.0); // α = 0 < α_trim
-        let up = evaluate_aero(v_level, DVec3::ZERO, 1.0, &cfg, ControlInputs::default());
+        let up = evaluate_aero(v_level, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
         assert!(up.torque.x > 0.0, "below trim should pitch up, got {}", up.torque.x);
         let v_trim = DVec3::new(0.0, 100.0, -100.0 * alpha_trim.tan());
-        let trim = evaluate_aero(v_trim, DVec3::ZERO, 1.0, &cfg, ControlInputs::default());
+        let trim = evaluate_aero(v_trim, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
         assert_relative_eq!(trim.torque.x, 0.0, epsilon = 1.0);
         let v_high = DVec3::new(0.0, 100.0, -20.0); // α ≈ 11° > α_trim
-        let down = evaluate_aero(v_high, DVec3::ZERO, 1.0, &cfg, ControlInputs::default());
+        let down = evaluate_aero(v_high, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
         assert!(down.torque.x < 0.0, "above trim should pitch down, got {}", down.torque.x);
     }
 
@@ -292,7 +350,7 @@ mod tests {
     fn weathervane_restores_sideslip() {
         // Flow from the right (+β): nose should yaw right to align (τz < 0).
         let v = DVec3::new(10.0, 100.0, 0.0);
-        let out = evaluate_aero(v, DVec3::ZERO, 1.0, &wing(), ControlInputs::default());
+        let out = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &wing(), ControlInputs::default());
         assert!(out.torque.z < 0.0, "yaw should restore toward wind, got {}", out.torque.z);
     }
 
@@ -302,7 +360,7 @@ mod tests {
         // each axis (this is what makes a spin impossible to pump).
         let v = DVec3::new(0.0, 120.0, 0.0);
         let omega = DVec3::new(2.0, 2.0, 2.0);
-        let out = evaluate_aero(v, omega, 1.0, &wing(), ControlInputs::default());
+        let out = evaluate_aero(v, omega, 1.0, 0.0, &wing(), ControlInputs::default());
         assert!(out.torque.x < 0.0, "pitch rate damped, got {}", out.torque.x);
         assert!(out.torque.y < 0.0, "roll rate damped, got {}", out.torque.y);
         assert!(out.torque.z < 0.0, "yaw rate damped, got {}", out.torque.z);
@@ -312,16 +370,111 @@ mod tests {
     fn pull_pitches_nose_up() {
         let v = DVec3::new(0.0, 120.0, 0.0);
         let ctrl = ControlInputs { pitch: 1.0, ..Default::default() };
-        let out = evaluate_aero(v, DVec3::ZERO, 1.0, &wing(), ctrl);
+        let out = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &wing(), ctrl);
         assert!(out.torque.x > 0.0, "pull should pitch nose up (+X), got {}", out.torque.x);
     }
 
     #[test]
     fn drag_scales_with_speed_squared() {
         let body = AeroConfig { reference_area_m2: 2.0, cd0: 1.0, ..Default::default() };
-        let f1 = evaluate_aero(DVec3::new(0.0, 50.0, 0.0), DVec3::ZERO, 1.0, &body, ControlInputs::default());
-        let f2 = evaluate_aero(DVec3::new(0.0, 100.0, 0.0), DVec3::ZERO, 1.0, &body, ControlInputs::default());
+        let f1 = evaluate_aero(DVec3::new(0.0, 50.0, 0.0), DVec3::ZERO, 1.0, 0.0, &body, ControlInputs::default());
+        let f2 = evaluate_aero(DVec3::new(0.0, 100.0, 0.0), DVec3::ZERO, 1.0, 0.0, &body, ControlInputs::default());
         assert_relative_eq!(f2.force.length() / f1.force.length(), 4.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn wave_drag_walls_off_the_transonic_regime() {
+        // M_dd = 0.82 → M_crit ≈ 0.71. Same true airspeed: drag should be
+        // unchanged with compressibility disabled (speed_of_sound = 0),
+        // mildly higher just past divergence, and several × CD0 near Mach 1.
+        let cfg = AeroConfig { mach_drag_divergence: 0.82, ..wing() };
+        let a = 320.0;
+        let v = DVec3::new(0.0, 0.95 * a, 0.0);
+        let no_mach = evaluate_aero(v, DVec3::ZERO, 0.4, 0.0, &cfg, ControlInputs::default());
+        let transonic = evaluate_aero(v, DVec3::ZERO, 0.4, a, &cfg, ControlInputs::default());
+        // Compare the drag (−Y) component directly: lift is identical.
+        let d0 = -no_mach.force.y;
+        let d1 = -transonic.force.y;
+        assert!(
+            d1 > 2.0 * d0,
+            "near-sonic drag should be several × subsonic ({d1:.0} vs {d0:.0} N)"
+        );
+        // Below the critical Mach the term must vanish exactly.
+        let slow = DVec3::new(0.0, 0.5 * a, 0.0);
+        let s0 = evaluate_aero(slow, DVec3::ZERO, 0.4, 0.0, &cfg, ControlInputs::default());
+        let s1 = evaluate_aero(slow, DVec3::ZERO, 0.4, a, &cfg, ControlInputs::default());
+        assert_relative_eq!(s0.force.y, s1.force.y, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn flaps_add_lift_and_drag_and_raise_the_stall_ceiling() {
+        let cfg = AeroConfig { flap_dcl: 0.6, flap_dcd: 0.05, ..wing() };
+        let v = DVec3::new(0.0, 60.0, 0.0);
+        let clean = evaluate_aero(v, DVec3::ZERO, 1.2, 0.0, &cfg, ControlInputs::default());
+        let landing = evaluate_aero(
+            v,
+            DVec3::ZERO,
+            1.2,
+            0.0,
+            &cfg,
+            ControlInputs { flap: 1.0, ..Default::default() },
+        );
+        assert!(landing.force.z > clean.force.z, "flaps must add lift");
+        assert!(landing.force.y < clean.force.y, "flaps must add drag");
+
+        // At stall AoA the clean wing is clamped; flaps must still lift more
+        // (the clamp ceiling rises with the flap camber).
+        let v_stall = DVec3::new(0.0, 60.0, -60.0 * cfg.stall_alpha.tan() * 1.2);
+        let clean_stall =
+            evaluate_aero(v_stall, DVec3::ZERO, 1.2, 0.0, &cfg, ControlInputs::default());
+        let flap_stall = evaluate_aero(
+            v_stall,
+            DVec3::ZERO,
+            1.2,
+            0.0,
+            &cfg,
+            ControlInputs { flap: 1.0, ..Default::default() },
+        );
+        assert!(
+            flap_stall.force.z > clean_stall.force.z,
+            "flap lift must survive the stall clamp"
+        );
+
+        // Drag grows quadratically with deployment: takeoff flap (½) costs a
+        // quarter of the landing-flap drag increment.
+        let takeoff = evaluate_aero(
+            v,
+            DVec3::ZERO,
+            1.2,
+            0.0,
+            &cfg,
+            ControlInputs { flap: 0.5, ..Default::default() },
+        );
+        let q_s = 0.5 * 1.2 * 60.0 * 60.0 * cfg.reference_area_m2;
+        let takeoff_dcd = (clean.force.y - takeoff.force.y) / q_s;
+        let landing_dcd = (clean.force.y - landing.force.y) / q_s;
+        // Induced drag also moves with CL, so allow a loose band around 4×.
+        assert!(
+            landing_dcd / takeoff_dcd > 2.0,
+            "landing flap should cost disproportionately more drag ({landing_dcd:.4} vs {takeoff_dcd:.4})"
+        );
+    }
+
+    #[test]
+    fn spoilers_dump_lift_and_add_drag() {
+        let cfg = AeroConfig { spoiler_dcl: -0.08, spoiler_dcd: 0.035, ..wing() };
+        let v = DVec3::new(0.0, 150.0, -3.0);
+        let clean = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
+        let braked = evaluate_aero(
+            v,
+            DVec3::ZERO,
+            1.0,
+            0.0,
+            &cfg,
+            ControlInputs { spoiler: 1.0, ..Default::default() },
+        );
+        assert!(braked.force.z < clean.force.z, "spoilers must dump lift");
+        assert!(braked.force.y < clean.force.y, "spoilers must add drag");
     }
 
     #[test]
@@ -340,7 +493,7 @@ mod tests {
         };
         // Tumbling with sideslip: should both damp and restore, never amplify.
         let v = DVec3::new(8.0, 80.0, 0.0);
-        let out = evaluate_aero(v, DVec3::new(0.0, 0.0, 1.0), 1.0, &capsule, ControlInputs::default());
+        let out = evaluate_aero(v, DVec3::new(0.0, 0.0, 1.0), 1.0, 0.0, &capsule, ControlInputs::default());
         assert!(out.torque.z < 0.0, "capsule should weathervane + damp yaw, got {}", out.torque.z);
         assert!(out.force.y < 0.0, "capsule drag opposes motion, got {}", out.force.y);
     }

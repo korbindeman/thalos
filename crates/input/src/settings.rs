@@ -507,6 +507,8 @@ pub mod defaults {
                 ("throttle_cut", keys([KeyCode::KeyX])),
                 ("stage", keys([KeyCode::Space])),
                 ("parking_brake", keys([KeyCode::KeyB])),
+                ("flaps_extend", keys([KeyCode::KeyF])),
+                ("flaps_retract", keys([KeyCode::KeyR])),
             ],
             [
                 ("pitch", axis([KeyCode::KeyW], [KeyCode::KeyS])),
@@ -558,7 +560,12 @@ pub mod defaults {
     }
 
     pub fn game_eva() -> BindingSection {
-        section([("toggle_player_controller", keys([KeyCode::KeyF]))], [])
+        // `toggle_player_controller` (ship↔EVA re-boarding) is not wired up
+        // yet, but its context is always active — a default key here would
+        // consume that key before any other context sees it (it sat on F and
+        // silently ate the flap lever). Unbound until re-boarding lands;
+        // the action stays known so a user file may still bind it.
+        section([("toggle_player_controller", vec![])], [])
     }
 
     pub fn game_eva_move() -> BindingSection {
@@ -672,13 +679,17 @@ mod tests {
         assert_eq!(settings.version, INPUT_SETTINGS_VERSION);
         assert!(!settings.game.system.bindings("escape").is_empty());
         assert!(!settings.game.flight.axis_positive("pitch").is_empty());
+        // The EVA re-board toggle is deliberately unbound (unwired action in
+        // an always-active context — a bound key would be consumed and lost).
         assert!(
-            !settings
+            settings
                 .game
                 .eva
                 .bindings("toggle_player_controller")
                 .is_empty()
         );
+        assert!(!settings.game.flight.bindings("flaps_extend").is_empty());
+        assert!(!settings.game.flight.bindings("flaps_retract").is_empty());
         assert!(!settings.game.eva_move.axis_positive("forward").is_empty());
         assert!(!settings.body_editor.bindings("camera_motion").is_empty());
         assert!(!settings.shipyard.bindings("primary").is_empty());
