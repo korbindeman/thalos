@@ -38,7 +38,7 @@ use crate::view::{ViewMode, in_map_view};
 
 /// Debug surface drops place the craft this far above the terrain in a landed
 /// `BodyFixed` pose; the player throttles up to fly it off
-/// ([`crate::local_physics::release_landed_ship_on_throttle`]).
+/// ([`crate::regime::apply_regime_authority`], the landed throttle release).
 pub const DEBUG_SURFACE_DROP_HEIGHT_M: f64 = 18.0;
 
 /// EVA surface teleports plant the capsule a couple of metres above the
@@ -563,7 +563,7 @@ fn commit_debug_surface_teleport(
     } else {
         // Ships drop in landed `BodyFixed` authority just above the terrain,
         // respawning their bubble from scratch; the player throttles up to fly
-        // off (`release_landed_ship_on_throttle`).
+        // off (the authority executor's landed throttle release).
         clear_active_local_bubble(&mut commands, &mut active_bubble);
         let (state, attitude) = surface_spawn_state(
             &body,

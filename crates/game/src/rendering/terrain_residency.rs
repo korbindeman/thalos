@@ -53,7 +53,7 @@ use super::ground_terrain::{spawn_body_terrain, spawn_body_water};
 use super::types::{RealSpaceBody, SimulationState, SolarSystemState};
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_SCALE;
-use crate::loading::LoadingProgress;
+use crate::loading::LoadingTracker;
 
 /// Tunables for the residency planner. Lives in a [`Resource`] so the
 /// values can be tweaked at runtime (via BRP, debug UI) without
@@ -331,27 +331,31 @@ fn try_spawn(
 
 /// Loading-screen gate: once every body in the initial wanted set is
 /// either resident (terrain entity spawned) or has no authored terrain
-/// (e.g., the dominant body is a star), flip
-/// [`LoadingProgress::initial_terrain_done`].
+/// (e.g., the dominant body is a star), complete the tracker's
+/// [`crate::loading::step::TERRAIN`] step.
 ///
-/// The bake load itself counts via `LoadingProgress.completed`; this
-/// adds an additional gate so the `AppState::Loading → Running`
-/// transition doesn't fire before the ground terrain under the player's
-/// feet exists. Tiles still bake asynchronously inside the first 1–2 s
-/// of `Running`, matching the previous startup behavior.
+/// The bake load itself counts via the tracker's bake-install step; this
+/// adds an additional gate so the loading screen doesn't reveal before
+/// the ground terrain under the player's feet exists. Tiles still bake
+/// asynchronously inside the first 1–2 s after the reveal, matching the
+/// previous startup behavior.
 fn initial_residency_loading_gate(
-    mut progress: ResMut<LoadingProgress>,
+    mut tracker: ResMut<LoadingTracker>,
     wanted: Res<WantedResidencySet>,
     residency: Res<BodyTerrainResidency>,
     sim: Res<SimulationState>,
 ) {
-    if progress.initial_terrain_done {
+    // No-op once complete, and on runtime re-loads that don't register the
+    // step (the start screen's runway pass — the world is already up).
+    if !tracker.has_step(crate::loading::step::TERRAIN)
+        || tracker.is_step_complete(crate::loading::step::TERRAIN)
+    {
         return;
     }
-    // Don't flip until `spawn_bodies` has seeded the bake-task counter —
-    // before that, the wanted set might be empty (no SimulationState
-    // bodies installed yet) and would trivially pass.
-    if !progress.seeded {
+    // Don't flip until every bake install has landed — residency can only
+    // spawn terrain for installed bakes, and waiting keeps this gate from
+    // passing trivially on frame 0 before the wanted set means anything.
+    if !tracker.is_step_complete(crate::loading::step::BODIES) {
         return;
     }
     // Every body the residency planner currently wants must either be
@@ -367,5 +371,5 @@ fn initial_residency_loading_gate(
             return;
         }
     }
-    progress.initial_terrain_done = true;
+    tracker.complete(crate::loading::step::TERRAIN);
 }

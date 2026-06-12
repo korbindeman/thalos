@@ -1,0 +1,176 @@
+//! Per-frame force application: gravity/thrust accumulators and fly-by-wire torque.
+//!
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+
+#[allow(unused_imports)]
+use super::*;
+
+use bevy::math::{DQuat, DVec3};
+use thalos_physics_canonical::surface_local::surface_local_acceleration;
+use thalos_physics_canonical::types::VesselKind;
+use thalos_physics_local::avian::{
+    AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity, Position, Rotation,
+};
+use thalos_physics_local::{
+    ActiveLocalBubble, LocalCraftBody,
+};
+
+use crate::fuel::ThrottleState;
+use crate::rendering::SimulationState;
+use crate::sim_clock::SimClock;
+
+
+/// Write Avian's per-frame `ConstantLinearAcceleration` and
+/// `ConstantAngularAcceleration` accumulators.
+///
+/// Two paths through the function, by Avian role:
+/// - **`AttitudeOnly`**: write `angular_accel` from player + SAS torque
+///   (so rotation integrates correctly while coasting), and write
+///   `linear_accel = 0` so a stale `gravity + thrust` value from a
+///   previous `Full` frame doesn't drive Avian's translation through
+///   Kepler's authoritative pos/vel.
+/// - **`Full`**: write both — `linear_accel = gravity + thrust` and
+///   `angular_accel` from torque. Avian owns translation here so the
+///   gravity term is what actually moves the ship.
+///
+/// In `Paused` we skip entirely; the snap zeroes both accumulators on
+/// the way out anyway.
+pub(crate) fn apply_local_forces(
+    clock: Res<SimClock>,
+    active: Res<ActiveLocalBubble>,
+    authority: Res<AvianAuthority>,
+    mut sim: ResMut<SimulationState>,
+    throttle: Res<ThrottleState>,
+    mut craft_q: Query<(
+        &Position,
+        &Rotation,
+        &LinearVelocity,
+        &AngularVelocity,
+        &mut ConstantLinearAcceleration,
+        &mut ConstantAngularAcceleration,
+        &LocalCraftBody,
+    )>,
+) {
+    let Some(bubble) = active.bubble.as_ref() else {
+        return;
+    };
+    // EVA owns its own force application via `player_controller` — both
+    // gravity (from `apply_player_controller_motion`) and the walking
+    // velocity targeting. Reaction-wheel torque and thrust don't apply.
+    if sim.simulation.vessel_kind() == VesselKind::Eva {
+        return;
+    }
+    if !authority.integrator_active() {
+        // Avian's clock is paused; the snap will zero accel on its way out.
+        return;
+    }
+    let Ok((
+        position,
+        rotation,
+        linear_velocity,
+        angular_velocity,
+        mut linear_accel,
+        mut angular_accel,
+        _,
+    )) = craft_q.get_mut(bubble.craft_entity)
+    else {
+        return;
+    };
+    let params = *sim.simulation.ship_params();
+    // A destroyed craft is inert debris: gravity still acts (so it falls and
+    // settles), but thrust and reaction-wheel torque are cut. See
+    // `docs/surface.md`.
+    let destroyed = sim.simulation.is_destroyed();
+
+    // Linear: gravity + thrust only when Avian owns translation. Otherwise
+    // explicitly zero so a stale value from the previous `Full` frame
+    // doesn't drift Avian's pos/vel away from Kepler's authoritative state.
+    if authority.owns_translation() {
+        let body = &sim.system.bodies[bubble.body_id];
+        // Ships integrate in the **surface-local frame**, so `position.0` and
+        // `linear_velocity.0` are anchor-relative SLF quantities. The exact
+        // radial gravity plus the rotating-frame centrifugal and Coriolis
+        // terms come from one canonical helper (unit-tested against an
+        // inertial integration). At Thalos' spin the fictitious terms are
+        // ~0.02 m/s², but they keep an orbital burn correct and a parked
+        // craft from creeping.
+        let mut accel =
+            surface_local_acceleration(body.gm, &bubble.frame, position.0, linear_velocity.0);
+        let throttle_eff = throttle.effective.clamp(0.0, 1.0);
+        let mass = sim.simulation.ship_mass_kg();
+        if !destroyed && throttle_eff > 0.0 && params.thrust_n > 0.0 && mass > params.dry_mass_kg {
+            // `rotation.0` is the craft orientation in the SLF, so the nose
+            // direction is already in frame axes.
+            let nose_frame = rotation.0 * DVec3::Y;
+            accel += nose_frame * (params.thrust_n / mass) * throttle_eff;
+            sim.simulation
+                .apply_external_mass_flow(throttle_eff, clock.delta_secs_f64());
+        }
+        linear_accel.0 = accel;
+    } else {
+        linear_accel.0 = DVec3::ZERO;
+    }
+
+    // Angular accel always written when the integrator is active, in both
+    // `AttitudeOnly` and `Full`. This is the system that lets the player
+    // rotate the ship while coasting. A destroyed craft gets zero torque —
+    // no player input, no SAS damping — so it tumbles freely as debris.
+    angular_accel.0 = if destroyed {
+        DVec3::ZERO
+    } else {
+        compute_angular_acceleration(
+            sim.simulation.control(),
+            &params,
+            rotation.0,
+            angular_velocity.0,
+            clock.delta_secs_f64(),
+        )
+    };
+}
+
+/// Convert the realized reaction-wheel torque command into a world-space
+/// angular acceleration for the Avian rigid body.
+///
+/// `control.torque_command` is now the *output of the fly-by-wire attitude
+/// controller* ([`crate::control_bus`]) — pointing, hold, or raw rate — so
+/// this just scales it by `max_torque` and divides by inertia. The former
+/// per-frame deadbeat SAS damper (`−I·ω/dt` when `sas_enabled`) lived here;
+/// it annihilated all angular velocity every frame and limit-cycled against
+/// continuous aero moments. SAS is now a proper critically-damped controller
+/// upstream, so `sas_enabled` no longer does anything here.
+pub(crate) fn compute_angular_acceleration(
+    control: &thalos_physics_canonical::types::ControlInput,
+    params: &thalos_physics_canonical::types::ShipParameters,
+    rotation: DQuat,
+    _angular_velocity_world: DVec3,
+    _dt: f64,
+) -> DVec3 {
+    let inertia_body = params.moment_of_inertia;
+    let max_torque = params.max_torque;
+    let cmd = control
+        .torque_command
+        .clamp(DVec3::splat(-1.0), DVec3::splat(1.0));
+
+    let torque_body = cmd * max_torque;
+
+    let inv_i = DVec3::new(
+        if inertia_body.x > 0.0 {
+            1.0 / inertia_body.x
+        } else {
+            0.0
+        },
+        if inertia_body.y > 0.0 {
+            1.0 / inertia_body.y
+        } else {
+            0.0
+        },
+        if inertia_body.z > 0.0 {
+            1.0 / inertia_body.z
+        } else {
+            0.0
+        },
+    );
+    let accel_body = torque_body * inv_i;
+    rotation * accel_body
+}
+

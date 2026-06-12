@@ -22,23 +22,15 @@ use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::maneuver::ManeuverNode;
-use thalos_physics_local::{
-    ActiveLocalBubble, LocalBubbleConfig, LocalCraftBody,
-    avian::{AngularVelocity, ContactGraph, LinearVelocity},
-    craft_contacts_terrain,
-};
+use thalos_physics_canonical::regime::PredictionDisplay;
+use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody};
 
-use crate::GameTerrainRegistry;
 use crate::SimStage;
 use crate::controls::ControlLocks;
-use crate::fuel::ThrottleState;
 use crate::maneuver::ManeuverPlan;
-use crate::player_controller::EvaMode;
 use crate::rendering::SimulationState;
 use crate::sim_clock::SimClock;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
-use thalos_physics_canonical::terrain_provider::TerrainProvider;
-use thalos_physics_canonical::types::VesselKind;
 
 pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("advance_simulation").entered();
@@ -108,12 +100,7 @@ pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>
     // here every frame was the surface time-warp bug: anywhere terrain sits
     // below the mean radius, warp snapped back to 1× and the player could not
     // fast-forward on the ground.
-    let coasting = matches!(
-        sim.simulation.authority(),
-        AuthorityMode::OnRails { .. }
-            | AuthorityMode::WarpIntegrated { .. }
-            | AuthorityMode::Docked { .. }
-    );
+    let coasting = matches!(sim.simulation.authority(), AuthorityMode::OnRails { .. });
     let soi_body = sim.simulation.dominant_body();
     let (body_radius, body_name) = {
         let body_def = &sim.simulation.bodies()[soi_body];
@@ -133,53 +120,30 @@ pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>
     }
 }
 
-/// Whether the ship is currently on a ballistic trajectory — coasting under
-/// gravity (or thrusting) without any external authority overriding its
-/// motion. `BodyFixed` is landed and `LocalRigidBody` with active terrain
-/// contact carries Avian's contact reactions in its velocity; in both cases
-/// Keplerian propagation produces a curve the ship will never follow, so
-/// we hide it.
-fn ship_is_ballistic(
-    sim: &SimulationState,
-    active: &ActiveLocalBubble,
-    contact_graph: &ContactGraph,
-) -> bool {
-    match sim.simulation.authority() {
-        AuthorityMode::BodyFixed { .. } => false,
-        AuthorityMode::LocalRigidBody { .. } => {
-            let Some(bubble) = active.bubble.as_ref() else {
-                return true;
-            };
-            let Some(terrain_entity) = bubble.terrain_entity else {
-                return true;
-            };
-            !craft_contacts_terrain(contact_graph, bubble.craft_entity, terrain_entity)
-        }
-        AuthorityMode::OnRails { .. }
-        | AuthorityMode::WarpIntegrated { .. }
-        | AuthorityMode::Docked { .. } => true,
-    }
-}
-
+/// Drive the cached trajectory prediction from the regime record (A3 port
+/// #3, `docs/regimes.md`): `PredictionDisplay::Hide` clears the plan —
+/// landed (`BodyFixed`), in ground contact under the backend (the velocity
+/// carries contact reactions Kepler can't follow), or walking on foot
+/// (analytically glued to the rotating surface; predicting it at high warp
+/// caused expensive bogus recomputes and terrain-residency churn from
+/// impossible encounters). The classification lives in the resolver
+/// (`thalos_physics_canonical::regime::prediction_display`); before the
+/// bubble/record exists the plan stays visible, matching the legacy
+/// "no bubble → ballistic" default.
 fn update_prediction(
     mut sim: ResMut<SimulationState>,
     active: Res<ActiveLocalBubble>,
-    contact_graph: Res<ContactGraph>,
-    eva_mode: Res<EvaMode>,
+    craft_q: Query<&crate::regime::CraftRegimeState, With<LocalCraftBody>>,
 ) {
     let _span = tracing::info_span!("update_prediction").entered();
 
-    // Grounded EVA is analytically glued to the rotating surface by the
-    // body-fixed player controller. It has no ballistic flight plan; treating
-    // its collider-less LocalRigidBody as ballistic feeds a surface state into
-    // Kepler prediction at high warp, causing expensive bogus recomputes and
-    // terrain-residency churn from impossible encounters.
-    if sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded() {
-        sim.simulation.clear_prediction();
-        return;
-    }
-
-    if !ship_is_ballistic(&sim, &active, &contact_graph) {
+    let show = active
+        .bubble
+        .as_ref()
+        .and_then(|bubble| craft_q.get(bubble.craft_entity).ok())
+        .map(|state| matches!(state.regime.prediction, PredictionDisplay::Show))
+        .unwrap_or(true);
+    if !show {
         sim.simulation.clear_prediction();
         return;
     }
@@ -213,162 +177,40 @@ impl Default for WarpLimits {
     }
 }
 
-/// Compute the highest warp level the craft can safely engage, clamp the
-/// current level if it exceeds that cap, and publish the cap as
-/// [`WarpLimits`] for the input handler and HUD.
+/// Apply the regime record's warp policy (A4, `docs/regimes.md`): publish
+/// `CraftRegime.warp.max_level` as [`WarpLimits`] for the input handler and
+/// HUD, and clamp the current level down to it.
 ///
-/// Gating is purely a function of the craft's *current* altitude above
-/// the dominant body, KSP-style: each warp level carries a minimum
-/// altitude (in body-radii) in `WarpController`'s ladder, and the cap is
-/// the highest level whose floor the craft currently clears.
+/// The policy *computation* — the per-level altitude ladder, the
+/// in-atmosphere 1× clamp, the surface-resting exemptions (`BodyFixed` /
+/// quiet grounded ship), and the on-foot at-rest rule — lives in the
+/// unit-tested resolver (`thalos_physics_canonical::regime`); this system
+/// only enforces the published decision, and the record's
+/// `warp.constraint` tells the HUD *why* a cap binds.
 ///
-/// There is deliberately no trajectory lookahead. Whether a future
-/// periapsis dips below the surface is not this gate's concern — a
-/// suborbital arc is fully warpable while you're high on it, and the cap
-/// steps back down on its own as the craft descends and re-evaluates
-/// each frame. Phasing through terrain at high warp is prevented
-/// downstream, not here: `coast_segment` adaptively subdivides and the
-/// swept-min Hermite check in `detect_step_crossings` flags a sub-surface
-/// dip even when both ends of a warp step sit above ground, at which
-/// point `Simulation::step` halts the ship at the impact and resets warp
-/// to 1×. The gate decides *where you may warp*; the propagator
-/// guarantees *you can't warp through the ground*.
-///
-/// The altitude floor is skipped for the two surface-resting regimes —
-/// `BodyFixed` (settled ship) and grounded EVA — which instead get a flat
-/// `SURFACE_WARP_MAX_SPEED` ceiling, since they can't phase through terrain but
-/// do overrun the terrain streamer at very high warp. Every other regime gets
-/// the altitude gate, so flying low in the Avian bubble (`LocalRigidBody`)
-/// still drops to the pause/1× zone near terrain.
+/// There is deliberately no trajectory lookahead (a suborbital arc is fully
+/// warpable while you're high on it); phasing through terrain at high warp
+/// is prevented downstream by the propagator's swept collision detection,
+/// and the two emergency warp resets (coast collision, sub-surface state)
+/// remain in `Simulation::step` / [`advance_simulation`]. Before the
+/// bubble/record exists the cap stays `usize::MAX` ("no constraint") — the
+/// documented pre-enforcement default; every scenario spawns warp-paused
+/// behind the loading screen, so nothing can over-warp in that window.
 pub fn enforce_warp_altitude_limits(
     mut sim: ResMut<SimulationState>,
-    terrain: Res<GameTerrainRegistry>,
     mut limits: ResMut<WarpLimits>,
-    eva_mode: Res<EvaMode>,
-    input: Res<GameInputIntent>,
-    player: Option<Res<crate::player_controller::PlayerControllerState>>,
     active: Res<ActiveLocalBubble>,
-    contact_graph: Res<ContactGraph>,
-    config: Res<LocalBubbleConfig>,
-    throttle: Res<ThrottleState>,
-    craft_q: Query<(&LinearVelocity, &AngularVelocity), With<LocalCraftBody>>,
+    craft_q: Query<&crate::regime::CraftRegimeState, With<LocalCraftBody>>,
 ) {
-    // Both BodyFixed (settled ship) and grounded EVA are stationary on the
-    // surface and cannot phase through terrain, so they're exempt from the
-    // altitude floor below. Terrain streaming is separately frozen at very
-    // high stationary surface warp by `ground_terrain`, so the gameplay cap
-    // can be the top of the configured warp ladder instead of the old 100×
-    // renderer workaround.
-    const SURFACE_WARP_MAX_SPEED: f64 = f64::INFINITY;
-    let eva_grounded = sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded();
-    let ship_grounded_stationary = sim.simulation.vessel_kind() == VesselKind::Ship
-        && matches!(
-            sim.simulation.authority(),
-            AuthorityMode::LocalRigidBody { .. }
-        )
-        && active.bubble.as_ref().is_some_and(|bubble| {
-            bubble.terrain_entity.is_some_and(|terrain_entity| {
-                craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
-                    && craft_q.get(bubble.craft_entity).is_ok_and(
-                        |(linear_velocity, angular_velocity)| {
-                            linear_velocity.length() < config.max_stable_speed_m_s
-                                && angular_velocity.length() < config.max_stable_angular_speed_rad_s
-                                && throttle.effective <= 1.0e-3
-                        },
-                    )
-            })
-        });
-    if eva_grounded
-        || ship_grounded_stationary
-        || matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. })
-    {
-        // KSP rule: you can only engage on-rails warp on foot once you've come
-        // to a complete stop ("landed and stationary"). While the player is
-        // walking, jumping, or falling, hold them at 1× (live). Movement intent
-        // is read directly from input so pressing a move key while warping
-        // drops warp immediately, rather than waiting on the rest debounce.
-        let at_rest = player.as_deref().map(|p| p.is_at_rest()).unwrap_or(false);
-        let wants_to_move = input.player_move.length_squared() > 1.0e-4 || input.player_jump;
-        let eva_can_warp = eva_grounded && at_rest && !wants_to_move;
-        let ceiling = if eva_grounded && !eva_can_warp {
-            1.0
-        } else {
-            SURFACE_WARP_MAX_SPEED
-        };
-        let cap = {
-            let levels = sim.simulation.warp.levels();
-            levels
-                .iter()
-                .rposition(|&speed| speed <= ceiling)
-                .unwrap_or(0)
-        };
-        limits.max_level = cap;
-        if sim.simulation.warp.level_index() > cap {
-            sim.simulation.warp.clamp_to_level(cap);
-        }
-        return;
-    }
-
-    let dominant = sim.simulation.dominant_body();
-    let bodies = sim.simulation.bodies();
-    if bodies[dominant].radius_m <= 0.0 {
-        limits.max_level = usize::MAX;
-        return;
-    }
-
-    // Current altitude above the dominant body, as a fraction of its
-    // radius. Tracking the ratio rather than absolute metres lets each
-    // level's floor be a single body-radius fraction that's meaningful
-    // across the whole system — a 0.05-radius floor is ~160 km on Thalos,
-    // a few hundred metres on a small moon. The conservative
-    // `body_radius + max_terrain_elevation` buffer treats every direction
-    // as the tallest authored peak, so the gate never over-reports
-    // altitude near terrain. The radius is known > 0 from the early
-    // return above.
-    let sim_time = sim.simulation.sim_time();
-    let body_pos = sim
-        .simulation
-        .ephemeris()
-        .state(dominant, Epoch(sim_time))
-        .position;
-    let r = bodies[dominant].radius_m;
-    let buffer = r + terrain.0.max_elevation_m(dominant);
-    let altitude_m = (sim.simulation.ship_state().position - body_pos).length() - buffer;
-    let alt_radii = altitude_m.max(0.0) / r;
-
-    // Walk the levels in order; the highest one whose min-altitude floor
-    // the craft currently clears is the cap. `alt_radii` saturated at 0.0
-    // means we're inside the conservative terrain envelope and only
-    // levels with `min_altitude_radii_for(i) == 0.0` qualify.
-    let levels = sim.simulation.warp.levels();
-    let mut max_level = 0usize;
-    for i in 0..levels.len() {
-        if sim.simulation.warp.min_altitude_radii_for(i) <= alt_radii {
-            max_level = i;
-        }
-    }
-
-    // Aerodynamic flight disallows time warp (KSP-style): inside the atmosphere
-    // shell, clamp to 1×. Atmospheric drag/lift run only in the live Avian
-    // bubble (`AvianRole::Full`), which is also pinned to 1×, so warping in
-    // atmosphere would silently skip those forces. `altitude_m` is measured from
-    // the conservative `radius + max_terrain_elevation` buffer above, so this
-    // engages slightly early — harmless for a warp gate.
-    if let Some(atmosphere) = bodies[dominant].terrestrial_atmosphere.as_ref()
-        && atmosphere.karman_line_m > 0.0
-        && altitude_m < atmosphere.karman_line_m as f64
-    {
-        let one_x = levels
-            .iter()
-            .position(|&speed| (speed - 1.0).abs() <= f64::EPSILON)
-            .unwrap_or(0);
-        max_level = max_level.min(one_x);
-    }
-
-    limits.max_level = max_level;
-
-    if sim.simulation.warp.level_index() > max_level {
-        sim.simulation.warp.clamp_to_level(max_level);
+    let cap = active
+        .bubble
+        .as_ref()
+        .and_then(|bubble| craft_q.get(bubble.craft_entity).ok())
+        .map(|state| state.regime.warp.max_level)
+        .unwrap_or(usize::MAX);
+    limits.max_level = cap;
+    if sim.simulation.warp.level_index() > cap {
+        sim.simulation.warp.clamp_to_level(cap);
     }
 }
 
@@ -544,10 +386,8 @@ fn refresh_craft_state_mirror(
     mirror.dominant_body_id = sim.simulation.dominant_body() as u32;
     mirror.authority = match sim.simulation.authority() {
         AuthorityMode::OnRails { .. } => "OnRails",
-        AuthorityMode::WarpIntegrated { .. } => "WarpIntegrated",
         AuthorityMode::LocalRigidBody { .. } => "LocalRigidBody",
         AuthorityMode::BodyFixed { .. } => "BodyFixed",
-        AuthorityMode::Docked { .. } => "Docked",
     }
     .to_string();
     mirror.destroyed = sim.simulation.is_destroyed();

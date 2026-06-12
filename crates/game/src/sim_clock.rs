@@ -13,6 +13,7 @@ use bevy::prelude::*;
 
 use crate::SimStage;
 use crate::freecam::FreeCam;
+use crate::loading::AppState;
 use crate::pause_menu::GamePause;
 use crate::rendering::SimulationState;
 use crate::scenario_menu::ScenarioMenu;
@@ -57,13 +58,19 @@ impl Plugin for SimClockPlugin {
 /// Pause sources:
 /// - Escape menu (`GamePause`)
 /// - destruction scenario picker (`ScenarioMenu::open`)
+/// - start screen (`AppState::MainMenu`)
 /// - freecam (`FreeCam::active`)
 /// - shipyard editor (`ShipyardEditor::open`)
 /// - warp pause (`warp.speed() == 0`)
+///
+/// Loading is deliberately **not** a pause source: the deferred surface
+/// placements settle the craft and stream tiles behind the loading screen,
+/// which needs sim time advancing (see `crate::surface_settle`).
 pub(crate) fn sync_sim_clock(
     time: Res<Time<Real>>,
     pause: Res<GamePause>,
     scenario: Res<ScenarioMenu>,
+    app_state: Res<State<AppState>>,
     freecam: Option<Res<FreeCam>>,
     shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     sim: Res<SimulationState>,
@@ -74,6 +81,7 @@ pub(crate) fn sync_sim_clock(
     let shipyard_open = shipyard.as_deref().map(|s| s.open).unwrap_or(false);
     let paused = pause.active
         || scenario.open
+        || *app_state.get() == AppState::MainMenu
         || freecam_active
         || shipyard_open
         || sim.simulation.warp.speed() == 0.0;

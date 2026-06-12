@@ -5,6 +5,27 @@ rigidbody gameplay, time warp, map rendering, and the boundaries
 between them. This describes the **target** architecture; today's
 implementation is the patched-conics + `KeplerianPropagator` core.
 
+> **Implementation status (2026-06-12).** Shipped and current:
+> the canonical core (one `ShipPropagator` for live + prediction, one
+> `CraftState`/`AuthorityMode` with a transition log), the
+> surface-local-frame ship physics (`docs/surface_local.md`), the
+> fly-by-wire control layer (`docs/control.md`), and the **per-craft
+> regime resolver** (`docs/regimes.md`) which now drives authority
+> transitions, the Avian role, prediction gating, terrain-collider
+> gating, and the warp policy from one sole-writer classification.
+> `AuthorityMode` is now three variants (`OnRails` / `LocalRigidBody`
+> / `BodyFixed`): the never-implemented `WarpIntegrated` and `Docked`
+> placeholders were removed in regimes Phase B, along with this doc's
+> canonical `SimClock`/`TimeMode` sketch (the real clock boundary is
+> `crates/game/src/sim_clock.rs`). Sections describing **world
+> presets, provider policies, `ForceProvider`/`TorqueProvider`,
+> `WarpIntegrator`, navigation contexts/encounters, `ManeuverFrame`,
+> the hydrate/collapse bridge trait, and the `sim_core`/`ephemeris`/
+> `flight` crate split remain target design, unbuilt** — the actual
+> crate layout is in CLAUDE.md, and the next force-model step
+> (drag-aware prediction / perturbed coast) is regimes Phase C, which
+> will redesign the warp-integration regime on its own terms.
+
 The design intentionally separates "truth" from presentation. The map
 is a scaled analytical view. The real-space scene is a local gameplay
 view. Neither is allowed to become the only authoritative simulation
@@ -499,15 +520,13 @@ pub struct CraftState {
 
 ### Authority mode
 
-Every craft has exactly one current authority.
+Every craft has exactly one current authority. As implemented
+(`thalos_physics_canonical::canonical`):
 
 ```rust
 pub enum AuthorityMode {
     OnRails {
         trajectory: TrajectoryId,
-    },
-    WarpIntegrated {
-        integrator: WarpIntegratorId,
     },
     LocalRigidBody {
         bubble: LocalBubbleId,
@@ -517,12 +536,17 @@ pub enum AuthorityMode {
         body: BodyId,
         pose: BodyFixedPose,
     },
-    Docked {
-        assembly: AssemblyId,
-        port: DockingPortId,
-    },
 }
 ```
+
+Two further variants from the original design — `WarpIntegrated`
+(numeric perturbed/burn integration under warp) and `Docked` (assembly
+membership) — were placeholders that no code ever constructed, and were
+removed in regimes Phase B. The warp-integration regime returns as a
+real design in regimes Phase C (the unified force model); docking gets
+its variant when docking is built. Transitions between the live
+variants are owned by the regime executor
+(`crate::regime::apply_regime_authority`, see `docs/regimes.md`).
 
 Authority meaning:
 
@@ -560,6 +584,17 @@ accumulated into `Simulation::delivered_dv` via
 keeps working without re-running thrust on the canonical side.
 
 ### Avian's three roles
+
+> **Superseded as a decision-maker (2026-06-12): see `docs/regimes.md`.**
+> The migration landed: the role is classified by the per-craft
+> `CraftRegime` resolver and `AvianAuthority` survives only as a derived
+> projection (`compute_avian_authority` applies
+> `regime::legacy_avian_role`, keeping the `previous_role` edge the
+> handoff snap reads). `manage_authority` and the scattered warp gates
+> described below are gone — authority transitions are owned by
+> `crate::regime::apply_regime_authority`. The three-role *semantics*
+> described in this section (what `Paused`/`AttitudeOnly`/`Full` mean
+> for the snap, readback, and force systems) remain accurate.
 
 The Avian rigid body persists for the lifetime of the player ship, but
 *what role it plays* each frame is a three-way decision driven by

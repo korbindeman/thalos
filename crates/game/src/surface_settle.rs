@@ -20,8 +20,9 @@
 //!    under the view* ([`renderer_tile_lod_m_at`] at the tile tree's own view
 //!    position); once it has refined and plateaued (stopped getting finer for a
 //!    handful of frames), or a safety timeout elapses, it flips
-//!    [`SurfaceSettle::done`]. [`crate::loading::advance_to_running`] gates the
-//!    reveal on that, so the first visible frame is already flush and stable.
+//!    [`SurfaceSettle::done`] and completes the loading tracker's
+//!    [`step::SETTLE`] step, which the loading screen's reveal waits on — so
+//!    the first visible frame is already flush and stable.
 //!
 //! Only the **parked** `Runway` start is gated. Every other start (orbit,
 //! descents, EVA, and the airborne `RunwayApproach`) is a no-op here. The
@@ -35,7 +36,7 @@ use thalos_body_render::renderer_tile_lod_m_at;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 
 use crate::camera::ShipCamera;
-use crate::loading::AppState;
+use crate::loading::{AppState, LoadingTracker, step};
 use crate::rendering::ground_terrain::BodyTerrain;
 use crate::solar_system_state::SimulationState;
 use crate::spawn::SpawnSituation;
@@ -68,9 +69,10 @@ const HARD_TIMEOUT_S: f64 = 45.0;
 
 /// State for the near-surface tile-settle gate. See the module docs.
 ///
-/// Inserted once at startup by [`init_surface_settle`] from the active
-/// [`SpawnSituation`]. Read by [`crate::loading::advance_to_running`] to gate
-/// the reveal.
+/// Inserted at startup by [`init_surface_settle`] from the active
+/// [`SpawnSituation`]; re-armed at runtime via [`SurfaceSettle::arm`] when the
+/// start screen launches a runway scenario. The reveal is gated through the
+/// loading tracker's [`step::SETTLE`] step, which this module completes.
 #[derive(Resource, Debug)]
 pub struct SurfaceSettle {
     /// This scenario spawns parked at the surface and needs the gate at all.
@@ -94,16 +96,27 @@ pub struct SurfaceSettle {
 }
 
 impl SurfaceSettle {
+    /// (Re-)arm the gate for a fresh loading pass. `placed = false` when a
+    /// deferred placement will report in via [`mark_placed`](Self::mark_placed);
+    /// `true` for scenarios whose surface state is already installed. Used at
+    /// startup ([`init_surface_settle`]) and by the start screen's runway
+    /// scenario starter ([`crate::main_menu`]).
+    pub fn arm(&mut self, needs_settle: bool, placed: bool) {
+        *self = SurfaceSettle {
+            needs_settle,
+            placed,
+            done: false,
+            best_lod_m: f32::INFINITY,
+            stable_frames: 0,
+            elapsed_s: 0.0,
+            total_elapsed_s: 0.0,
+        };
+    }
+
     /// Called by the deferred runway placement once the aircraft is parked, the
     /// flatten pad is installed, and the site is known.
     pub fn mark_placed(&mut self) {
         self.placed = true;
-    }
-
-    /// May the loading screen reveal the scene? True for scenarios that don't
-    /// need a settle gate, and once a gated site has settled.
-    pub fn ready(&self) -> bool {
-        !self.needs_settle || self.done
     }
 }
 
@@ -119,21 +132,26 @@ impl Plugin for SurfaceSettlePlugin {
 }
 
 fn init_surface_settle(situation: Res<SpawnSituation>, mut commands: Commands) {
-    commands.insert_resource(SurfaceSettle {
-        // Only the parked `Runway` start is gated (see module docs): it installs
-        // a flatten pad and sits still at the surface, so the ground there can
-        // settle to a fixed flush state behind the screen.
-        needs_settle: matches!(*situation, SpawnSituation::Runway),
-        // Scenarios without a deferred placement install their surface state in
-        // `main.rs`, so they're "placed" from frame 0; the settle then just
-        // waits on the tiles.
-        placed: !situation.has_deferred_placement(),
+    let mut settle = SurfaceSettle {
+        needs_settle: false,
+        placed: false,
         done: false,
         best_lod_m: f32::INFINITY,
         stable_frames: 0,
         elapsed_s: 0.0,
         total_elapsed_s: 0.0,
-    });
+    };
+    settle.arm(
+        // Only the parked `Runway` start is gated (see module docs): it installs
+        // a flatten pad and sits still at the surface, so the ground there can
+        // settle to a fixed flush state behind the screen.
+        matches!(*situation, SpawnSituation::Runway),
+        // Scenarios without a deferred placement install their surface state in
+        // `main.rs`, so they're "placed" from frame 0; the settle then just
+        // waits on the tiles.
+        !situation.has_deferred_placement(),
+    );
+    commands.insert_resource(settle);
 }
 
 /// Drive the settle state machine each loading frame. Waits for the deferred
@@ -150,6 +168,7 @@ fn update_surface_settle(
     time: Res<Time<Real>>,
     sim: Res<SimulationState>,
     mut settle: ResMut<SurfaceSettle>,
+    mut tracker: ResMut<LoadingTracker>,
     tile_trees: Res<TerrainViewComponents<TileTree>>,
     terrains: Query<(Entity, &BodyTerrain, &TileAtlas)>,
     camera_q: Query<Entity, With<ShipCamera>>,
@@ -162,6 +181,7 @@ fn update_surface_settle(
     // Backstop: never hang the loading screen if the deferred placement stalls.
     if settle.total_elapsed_s >= HARD_TIMEOUT_S {
         settle.done = true;
+        tracker.complete(step::SETTLE);
         warn!(
             "surface settle hard-timeout at {:.1} s (placed={}) — revealing anyway",
             settle.total_elapsed_s, settle.placed
@@ -176,6 +196,21 @@ fn update_surface_settle(
     settle.elapsed_s += dt;
 
     let lod_m = resident_lod_under_view(&sim, &tile_trees, &terrains, &camera_q);
+
+    // Settle diagnostics: a line every few seconds while the gate is active
+    // (bounded — at most ~6 per load). The view radius tells whether the tile
+    // streamer's view actually reached the surface site; a stall at a coarse
+    // LOD with an orbital view radius means the camera never got there.
+    let log_bucket = (settle.elapsed_s / 5.0) as u32;
+    let prev_bucket = ((settle.elapsed_s - dt).max(0.0) / 5.0) as u32;
+    if log_bucket != prev_bucket {
+        let view_r_km = view_radius_km(&sim, &tile_trees, &terrains, &camera_q);
+        info!(
+            "surface settle: t={:.0}s lod={:?} m/texel (best {:.1}), view radius {:.1} km",
+            settle.elapsed_s, lod_m, settle.best_lod_m, view_r_km
+        );
+    }
+
     match lod_m {
         // Got meaningfully finer this frame: streaming is still refining the
         // ground here. Record the new best and reset the plateau counter.
@@ -194,10 +229,21 @@ fn update_surface_settle(
         }
     }
 
+    // Publish a progress estimate to the loading screen: how close the
+    // resident resolution is to the target (log-ish via the ratio), plus
+    // the plateau countdown once it's there.
+    if settle.best_lod_m.is_finite() {
+        let refine = (SETTLE_TARGET_LOD_M / settle.best_lod_m).clamp(0.0, 1.0);
+        let hold = settle.stable_frames as f32 / SETTLE_STABLE_FRAMES as f32;
+        tracker.set_fraction(step::SETTLE, 0.7 * refine + 0.3 * hold.min(1.0));
+        tracker.set_detail(step::SETTLE, format!("{:.0} m/texel", settle.best_lod_m));
+    }
+
     let plateaued = settle.best_lod_m <= SETTLE_TARGET_LOD_M
         && settle.stable_frames >= SETTLE_STABLE_FRAMES;
     if plateaued || settle.elapsed_s >= MAX_SETTLE_S {
         settle.done = true;
+        tracker.complete(step::SETTLE);
         info!(
             "surface terrain settled (lod {:.1} m/texel, {} stable frames, {:.1} s) — revealing",
             settle.best_lod_m, settle.stable_frames, settle.elapsed_s
@@ -223,4 +269,26 @@ fn resident_lod_under_view(
     let camera = camera_q.iter().next()?;
     let tree = tile_trees.get(&(terrain_entity, camera))?;
     renderer_tile_lod_m_at(atlas, tree, tree.view_position())
+}
+
+/// Distance (km) from the body centre to the tile tree's view position — the
+/// settle diagnostics' "did the streamer's view reach the surface" signal.
+/// `NAN` while the tree isn't up.
+fn view_radius_km(
+    sim: &SimulationState,
+    tile_trees: &TerrainViewComponents<TileTree>,
+    terrains: &Query<(Entity, &BodyTerrain, &TileAtlas)>,
+    camera_q: &Query<Entity, With<ShipCamera>>,
+) -> f64 {
+    let body = sim.simulation.dominant_body();
+    let Some((terrain_entity, _, _)) = terrains.iter().find(|(_, t, _)| t.body_id == body) else {
+        return f64::NAN;
+    };
+    let Some(camera) = camera_q.iter().next() else {
+        return f64::NAN;
+    };
+    let Some(tree) = tile_trees.get(&(terrain_entity, camera)) else {
+        return f64::NAN;
+    };
+    tree.view_position().length() / 1000.0
 }

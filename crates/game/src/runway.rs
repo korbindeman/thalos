@@ -45,7 +45,7 @@ use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::avian::{
     AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation,
 };
-use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
 use thalos_shipyard::{AttachNodes, EngineActivation, Gear, Part, SurfaceMount};
 use thalos_world::{BodyId, StateVector};
 
@@ -92,12 +92,28 @@ const RUNWAY_MARKING_SEG_LEN_M: f64 = 25.0;
 /// Light the jet engines once the cruise aircraft is placed. Mirrors
 /// [`enable_runway_engines`] but triggers on the cruise scenario (no runway
 /// site resource needed — the aircraft is already airborne at spawn).
+///
+/// Keyed per ship root (not a plain one-shot) and gated on the
+/// [`crate::staging::StagingPlan`] existing, so a craft swapped in at runtime
+/// (start screen / relaunch into cruise) gets its engines lit *after* the
+/// staging build has done its disable-at-spawn pass — never the outgoing
+/// craft, never re-disabled.
 fn enable_cruise_engines(
-    mut done: Local<bool>,
+    mut lit: Local<Option<Entity>>,
     situation: Res<SpawnSituation>,
-    mut activations: Query<&mut EngineActivation>,
+    ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
+    mut activations: Query<
+        &mut EngineActivation,
+        Without<thalos_shipyard::editor::EditorPart>,
+    >,
 ) {
-    if *done || !matches!(*situation, SpawnSituation::Cruise) {
+    if !matches!(*situation, SpawnSituation::Cruise) {
+        return;
+    }
+    let Ok(ship) = ships.single() else {
+        return; // craft not built / staging plan not derived yet
+    };
+    if *lit == Some(ship) {
         return;
     }
     let mut count = 0;
@@ -106,7 +122,7 @@ fn enable_cruise_engines(
         count += 1;
     }
     if count > 0 {
-        *done = true;
+        *lit = Some(ship);
         info!("cruise: lit {count} engine(s) for cruise flight");
     }
 }
@@ -212,19 +228,35 @@ struct RunwayCollider {
     basis_body_quat: DQuat,
 }
 
+/// Re-armable trigger for the deferred runway placement. Armed at startup
+/// when the boot scenario is a runway start, and again by the start screen
+/// when a runway scenario is picked there ([`crate::main_menu`]).
+/// [`finish_runway_spawn`] consumes it (clears `pending`) once the site is
+/// built and the aircraft placed.
+#[derive(Resource, Debug, Default)]
+pub struct RunwayPlacement {
+    pub pending: bool,
+}
+
 pub struct RunwayPlugin;
 
 impl Plugin for RunwayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<RunwayPlacement>()
+            .add_systems(Startup, arm_boot_runway_placement)
+            .add_systems(
             Update,
             (
                 // Runs during `AppState::Loading` (not gated on `Running`): the
                 // site selection + flatten install + aircraft placement happen
                 // behind the loading screen so the camera reaches the surface
                 // and the terrain streams/settles before the reveal. Self-gated
-                // by its `done` local + the height-source residency check.
-                finish_runway_spawn.before(SimStage::Physics),
+                // by `RunwayPlacement::pending` + the height-source residency
+                // check; `relaunch_idle` keeps it from measuring/parking the
+                // outgoing craft while a runtime craft swap is in flight.
+                finish_runway_spawn
+                    .run_if(crate::relaunch::relaunch_idle)
+                    .before(SimStage::Physics),
                 update_runway_transform
                     .in_set(SimStage::Sync)
                     .after(crate::solar_system_state::sync_solar_system_state),
@@ -246,21 +278,35 @@ impl Plugin for RunwayPlugin {
     }
 }
 
+/// Arm the deferred placement for a runway boot scenario. Runtime re-arms
+/// (start screen → runway) set [`RunwayPlacement::pending`] directly.
+fn arm_boot_runway_placement(
+    situation: Res<SpawnSituation>,
+    mut placement: ResMut<RunwayPlacement>,
+) {
+    placement.pending = situation.is_runway();
+}
+
 /// Deferred finisher: pick the site, build the flat platform + collider, and
-/// place the aircraft. Runs once, retrying each frame until the terrain height
-/// source is resident.
+/// place the aircraft. Runs once per arming of [`RunwayPlacement`], retrying
+/// each frame until the terrain height source is resident. (Each run builds a
+/// fresh runway; today it can only ever run once per process — the boot
+/// scenario *or* the one-shot start screen — so there is no stale-runway
+/// teardown here yet.)
 #[allow(clippy::too_many_arguments)]
 fn finish_runway_spawn(
-    mut done: Local<bool>,
+    mut placement: ResMut<RunwayPlacement>,
     situation: Res<SpawnSituation>,
     mut sim: ResMut<SimulationState>,
     mut settle: ResMut<crate::surface_settle::SurfaceSettle>,
+    mut tracker: ResMut<crate::loading::LoadingTracker>,
     height_sources: Res<HeightSourceRegistry>,
     surfaces: Res<TerrainSurfaceRegistry>,
     // Bundled to stay within Bevy's 16-param system limit (like `gear_geometry`).
     registries: (
         ResMut<TerrainFlattenRegistry>,
         ResMut<crate::structures::StructureRegistry>,
+        ResMut<ActiveLocalBubble>,
     ),
     root: Res<RealSpaceRoot>,
     ship_root_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
@@ -279,10 +325,10 @@ fn finish_runway_spawn(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if *done || !situation.is_runway() {
+    if !placement.pending || !situation.is_runway() {
         return;
     }
-    let (mut flatten_registry, mut structure_registry) = registries;
+    let (mut flatten_registry, mut structure_registry, mut active_bubble) = registries;
     let body_id = sim.simulation.dominant_body();
     let Some(height_source) = height_sources.get(body_id) else {
         return; // terrain not resident yet — retry next frame
@@ -329,7 +375,21 @@ fn finish_runway_spawn(
     let surface = surfaces.get(body_id);
     let sea_level_m = surface.as_ref().and_then(|s| s.static_surface.sea_level_m);
 
-    let (center_dir, relief_m) = find_runway_site(hs, sea_level_m, body_radius_m);
+    // Sub-stellar (daylight) direction in the body-fixed frame at placement
+    // time, so the site search can prefer a sunlit pad — same convention as
+    // the descent site search (`spawn::compute_descent_state`).
+    let placement_body_state = sim.ephemeris.state(
+        body_id,
+        thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time()),
+    );
+    let sun_dir_inertial = (-placement_body_state.position).normalize_or_zero();
+    let sun_dir_body_fixed = if sun_dir_inertial == DVec3::ZERO {
+        DVec3::Y
+    } else {
+        (placement_body_state.orientation.inverse() * sun_dir_inertial).normalize()
+    };
+
+    let (center_dir, relief_m) = find_runway_site(hs, sea_level_m, body_radius_m, sun_dir_body_fixed);
     let center_h = hs
         .sample_height_m(center_dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
         .unwrap_or(0.0) as f64;
@@ -451,10 +511,21 @@ fn finish_runway_spawn(
     }
 
     commands.insert_resource(site);
-    *done = true;
+    placement.pending = false;
+    // The placement just teleported the canonical craft. Any live Avian bubble
+    // was seeded from the *pre-placement* state (the placeholder orbit), and
+    // the authority-edge snap can miss a bubble whose spawn commands haven't
+    // flushed yet — the render craft (and the camera + tile streamer behind
+    // it) would then coast the stale orbit while the canonical stats sit
+    // parked. Tear the bubble down like every other ship teleport does;
+    // `spawn_player_avian_body` rebuilds it next frame seeded from the placed
+    // state.
+    crate::scenario_menu::clear_bubble(&mut commands, &mut active_bubble);
     // The surface state + flatten pad are installed and the aircraft is placed:
-    // let the settle gate start timing the tile stream at the (now-known) site.
+    // let the settle gate start timing the tile stream at the (now-known) site
+    // and release the loading screen's placement gate.
     settle.mark_placed();
+    tracker.complete(crate::loading::step::PLACEMENT);
 }
 
 /// Light the jet engines once the runway aircraft is placed.
@@ -464,16 +535,27 @@ fn finish_runway_spawn(
 /// That's wrong for an aircraft on a runway — a real jet is already running and
 /// the pilot just advances the throttle. So for the runway scenarios we re-enable
 /// the engines once (after the staging plan has been built and the aircraft is
-/// placed, both signalled by [`RunwaySite`] existing), giving the documented
-/// "throttle-only flight" the staging comment promises. One-shot via the `done`
-/// local; `build_staging_plan` runs only once per ship, so it won't re-disable.
+/// placed), giving the documented "throttle-only flight" the staging comment
+/// promises. Keyed per ship root + gated on [`crate::staging::StagingPlan`]
+/// for the same runtime-craft-swap reasons as [`enable_cruise_engines`];
+/// `build_staging_plan` runs only once per ship, so it won't re-disable.
 fn enable_runway_engines(
-    mut done: Local<bool>,
+    mut lit: Local<Option<Entity>>,
     situation: Res<SpawnSituation>,
     site: Option<Res<RunwaySite>>,
-    mut activations: Query<&mut EngineActivation>,
+    ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
+    mut activations: Query<
+        &mut EngineActivation,
+        Without<thalos_shipyard::editor::EditorPart>,
+    >,
 ) {
-    if *done || !situation.is_runway() || site.is_none() {
+    if !situation.is_runway() || site.is_none() {
+        return;
+    }
+    let Ok(ship) = ships.single() else {
+        return; // craft not built / staging plan not derived yet
+    };
+    if *lit == Some(ship) {
         return;
     }
     let mut count = 0;
@@ -482,7 +564,7 @@ fn enable_runway_engines(
         count += 1;
     }
     if count > 0 {
-        *done = true;
+        *lit = Some(ship);
         info!("runway: lit {count} engine(s) for throttle-only flight");
     }
 }
@@ -497,19 +579,31 @@ fn latlon_dir(lat_deg: f64, lon_deg: f64) -> DVec3 {
     DVec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin()).normalize()
 }
 
-/// Scan a fixed low-latitude lat/lon grid for the flattest dry-land patch.
-/// Returns `(center_dir, relief_m)`. Deterministic and epoch-independent.
+/// Minimum cosine between a candidate site direction and the sub-stellar
+/// direction for the site to count as comfortably sunlit: cos(60°) → the sun
+/// at least 30° above the local horizon.
+const SITE_MIN_SUN_COS: f64 = 0.5;
+
+/// Scan a fixed low-latitude lat/lon grid for the flattest dry-land patch,
+/// preferring **sunlit** sites (sun ≥ 30° up at `sun_dir_body_fixed`) so the
+/// player never spawns parked in the dark. Falls back to the flattest dry
+/// site anywhere if no daylight candidate exists (pathological coastlines).
+/// Returns `(center_dir, relief_m)`. The grid itself is fixed, so at a given
+/// epoch (e.g. every boot, at epoch ≈ 0) the choice is deterministic.
 fn find_runway_site(
     hs: &dyn HeightSource,
     sea_level_m: Option<f32>,
     body_radius_m: f64,
+    sun_dir_body_fixed: DVec3,
 ) -> (DVec3, f32) {
     let Some(sea_level_m) = sea_level_m else {
         return (DVec3::X, 0.0);
     };
     let land_threshold = sea_level_m + SITE_FREEBOARD_M;
+    let sun = sun_dir_body_fixed.try_normalize().unwrap_or(DVec3::Y);
 
-    let mut best_dry: Option<(f32, DVec3)> = None; // (relief, dir)
+    let mut best_lit: Option<(f32, DVec3)> = None; // (relief, dir) — sunlit dry
+    let mut best_dry: Option<(f32, DVec3)> = None; // (relief, dir) — any dry
     let mut best_any: Option<(f32, DVec3)> = None; // (height, dir)
 
     let mut lat = SITE_LAT_MIN_DEG;
@@ -541,10 +635,18 @@ fn find_runway_site(
             if best_dry.is_none_or(|(br, _)| relief < br) {
                 best_dry = Some((relief, dir));
             }
+            if dir.dot(sun) >= SITE_MIN_SUN_COS
+                && best_lit.is_none_or(|(br, _)| relief < br)
+            {
+                best_lit = Some((relief, dir));
+            }
         }
         lat += SITE_LAT_STEP_DEG;
     }
 
+    if let Some((relief, dir)) = best_lit {
+        return (dir, relief);
+    }
     if let Some((relief, dir)) = best_dry {
         return (dir, relief);
     }
@@ -1101,7 +1203,8 @@ fn craft_ground_clearance(
 /// [`crate::local_physics::snap_avian_from_canonical`] without integration so it
 /// can't drift while the terrain streams in behind the loading screen. The
 /// pilot leaves it the moment they advance the throttle:
-/// [`crate::local_physics::release_landed_ship_on_throttle`] hands translation
+/// the authority executor's landed throttle release
+/// ([`crate::regime::apply_regime_authority`]) hands translation
 /// back to the live regimes (`OnRails` → bubble), where thrust + gear take over
 /// from the equilibrium pose. Stationary-while-warping is the same `BodyFixed`
 /// state the generic stable-landing collapse uses, so time-warp on the runway
@@ -1136,7 +1239,7 @@ fn place_parked(
     let attitude = level_heading_attitude(body_state, up_body, nose_body);
 
     // Landed: a frozen body-fixed pose at the gear equilibrium. Released to the
-    // live bubble by `release_landed_ship_on_throttle` on throttle-up.
+    // live bubble by the authority executor's throttle release on throttle-up.
     sim.simulation.set_ship_state(state);
     sim.simulation.set_attitude(attitude);
     let pose = body_fixed_pose_from_inertial(body_state, TranslationalState::from(state), attitude);

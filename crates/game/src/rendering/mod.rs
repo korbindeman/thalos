@@ -120,6 +120,10 @@ impl Plugin for RenderingPlugin {
             .add_systems(
                 Update,
                 (
+                    // Runtime-built craft (relaunch / start-screen craft
+                    // swaps) need the same BigSpace attach the boot craft
+                    // gets at Startup; no-op once attached (see the fn docs).
+                    attach_player_ship_to_big_space,
                     convert_reference_clouds_when_ready,
                     update_render_origin.after(sync_solar_system_state),
                     update_render_frame.after(sync_solar_system_state),
