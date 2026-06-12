@@ -1,5 +1,7 @@
 /target
 /stage-bakes
+# Per-user runtime settings written by the game (window mode, UI scale, …).
+/user/
 Cargo.lock
 .DS_Store
 .cargo/config

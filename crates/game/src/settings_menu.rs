@@ -1,8 +1,10 @@
-//! Input settings overlay.
+//! Settings overlay.
 //!
-//! Opens from the pause menu via the "SETTINGS" button. Shows all keyboard /
-//! mouse / controller bindings (read-only in this version) and a live-editable
-//! HOTAS axis configuration — HOTAS changes take effect immediately because the
+//! Opens from the pause menu / start screen via the "SETTINGS" button. The
+//! Window tab live-edits the persisted `WindowSettings` (see
+//! `crate::window_settings`); the input tabs show all keyboard / mouse /
+//! controller bindings (read-only in this version) and a live-editable HOTAS
+//! axis configuration — HOTAS changes take effect immediately because the
 //! runtime reader polls `InputSettings` every frame.
 //!
 //! **Escape priority:** the escape-priority chain in `pause_menu` checks
@@ -10,8 +12,11 @@
 //! panel while leaving the pause backdrop up.
 
 use bevy::prelude::*;
+use bevy::window::{Monitor, PrimaryMonitor};
 use bevy_egui::{EguiContexts, egui};
 use thalos_input::settings::{AxisSpec, BindingSection, BindingSpec, HotasDeviceSelector, InputSettings};
+
+use crate::window_settings::{self, MonitorChoice, WindowSettings, WindowSettingsOverrides};
 
 // ── Resource ──────────────────────────────────────────────────────────────────
 
@@ -24,6 +29,7 @@ pub struct SettingsMenu {
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Tab {
     #[default]
+    Window,
     Keyboard,
     Mouse,
     Controller,
@@ -49,14 +55,33 @@ fn settings_ui(
     mut contexts: EguiContexts,
     mut settings_menu: ResMut<SettingsMenu>,
     mut input_settings: ResMut<InputSettings>,
+    mut window_settings: ResMut<WindowSettings>,
+    window_overrides: Res<WindowSettingsOverrides>,
+    monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
 ) {
     if !settings_menu.open {
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
+    let mut monitor_choices: Vec<MonitorChoice> = monitors
+        .iter()
+        .filter_map(|(monitor, primary)| {
+            // Unnamed monitors are skipped — the name is the persisted key.
+            let name = monitor.name.clone()?;
+            let label = format!(
+                "{name} — {}×{}{}",
+                monitor.physical_width,
+                monitor.physical_height,
+                if primary { " (primary)" } else { "" },
+            );
+            Some(MonitorChoice { name, label })
+        })
+        .collect();
+    monitor_choices.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut open = true;
-    egui::Window::new("Input Settings")
+    egui::Window::new("Settings")
         .open(&mut open)
         .resizable(false)
         .default_width(540.0)
@@ -64,6 +89,7 @@ fn settings_ui(
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 for (t, label) in [
+                    (Tab::Window, "Window"),
                     (Tab::Keyboard, "Keyboard"),
                     (Tab::Mouse, "Mouse"),
                     (Tab::Controller, "Controller"),
@@ -80,6 +106,23 @@ fn settings_ui(
             ui.separator();
 
             match settings_menu.tab {
+                Tab::Window => {
+                    // Bypass change detection while egui holds &mut, then flag
+                    // only on a real value change — a blanket `ResMut` deref
+                    // would mark the resource changed every frame the tab is
+                    // open and confuse `apply_window_settings`' push/pull
+                    // arbitration.
+                    let before = window_settings.clone();
+                    window_settings::show_window_tab(
+                        ui,
+                        window_settings.bypass_change_detection(),
+                        &window_overrides,
+                        &monitor_choices,
+                    );
+                    if *window_settings != before {
+                        window_settings.set_changed();
+                    }
+                }
                 Tab::Keyboard => show_keyboard_tab(ui, &input_settings),
                 Tab::Mouse => show_mouse_tab(ui, &input_settings),
                 Tab::Controller => show_controller_tab(ui, &input_settings),

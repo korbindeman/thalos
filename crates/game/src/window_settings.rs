@@ -1,0 +1,558 @@
+//! Persisted window / display settings.
+//!
+//! [`WindowSettings`] is the file-backed user preference set — window mode,
+//! windowed resolution, vsync, fullscreen monitor, UI scale — stored as RON at
+//! [`SETTINGS_PATH`] (gitignored). [`load`] reads it in `main()` before the
+//! Bevy app exists so the initial [`Window`] honours it. The
+//! `THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE` / `THALOS_VSYNC` env vars
+//! become *session overrides* ([`WindowSettingsOverrides`]): they win for the
+//! running session and disable their control in the settings UI, but are
+//! never written back to the file. (`THALOS_SCALE` stays a pure env knob — it
+//! pins the window scale-factor override, a diagnostic lever distinct from
+//! the user-facing UI scale here.)
+//!
+//! Writers of `WindowSettings`: the settings menu's Window tab (user edits,
+//! via [`show_window_tab`]) and [`apply_window_settings`] (which writes back
+//! OS-side window resizes in windowed mode so a drag-resized size sticks).
+//! `apply_window_settings` pushes the effective settings onto the primary
+//! `Window` each frame — value-compared, so untouched frames mark nothing
+//! changed for `bevy_winit` — and saves the file whenever the resource's
+//! value actually changed.
+
+use std::path::Path;
+
+use bevy::prelude::*;
+use bevy::window::{
+    Monitor, MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode,
+    WindowResolution,
+};
+use bevy_egui::egui;
+use serde::{Deserialize, Serialize};
+
+/// Where user settings persist, relative to the working directory the game
+/// already loads `assets/` from. Gitignored; recreated with defaults if
+/// missing or unparseable.
+pub const SETTINGS_PATH: &str = "user/settings.ron";
+
+const UI_SCALE_MIN: f32 = 0.5;
+const UI_SCALE_MAX: f32 = 2.0;
+
+const RESOLUTION_PRESETS: &[(u32, u32)] = &[
+    (1280, 720),
+    (1600, 900),
+    (1920, 1080),
+    (2560, 1440),
+    (3440, 1440),
+    (3840, 2160),
+];
+
+// ── Resources ─────────────────────────────────────────────────────────────────
+
+/// User window/display preferences, persisted to [`SETTINGS_PATH`].
+///
+/// Writers: the settings menu's Window tab and `apply_window_settings`'s
+/// windowed drag-resize write-back. Everything else reads.
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowSettings {
+    pub mode: WindowModeSetting,
+    /// Windowed-mode client size in physical pixels. Fullscreen modes use the
+    /// monitor's size / current video mode instead.
+    pub resolution: (u32, u32),
+    pub vsync: bool,
+    /// Fullscreen target monitor, matched against [`Monitor::name`];
+    /// `None` = primary. Falls back to primary when the named monitor is
+    /// absent (e.g. unplugged), without forgetting the preference.
+    pub monitor: Option<String>,
+    /// User UI-scale multiplier. Multiplies into the fractional-HiDPI
+    /// compensation in `apply_ui_scale`; note that non-integer *effective*
+    /// scales (window scale × UI scale) can soften Bevy UI text until the
+    /// upstream fractional-scale text bug is fixed.
+    pub ui_scale: f32,
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self {
+            mode: WindowModeSetting::Borderless,
+            resolution: (1600, 900),
+            vsync: true,
+            monitor: None,
+            ui_scale: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum WindowModeSetting {
+    Windowed,
+    #[default]
+    Borderless,
+    Exclusive,
+}
+
+/// Session-only env-var overrides (`THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE`
+/// / `THALOS_VSYNC`). A `Some` field wins over the persisted setting for this
+/// run and disables the corresponding settings-UI control; it is never saved.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct WindowSettingsOverrides {
+    pub mode: Option<WindowModeSetting>,
+    pub resolution: Option<(u32, u32)>,
+    pub vsync: Option<bool>,
+}
+
+// ── Load / save ───────────────────────────────────────────────────────────────
+
+/// Read persisted settings (defaults on first run or parse failure) plus the
+/// env-var session overrides. Called from `main()` before the app is built so
+/// [`initial_window`] can honour both.
+pub fn load() -> (WindowSettings, WindowSettingsOverrides) {
+    let mut settings = match std::fs::read_to_string(SETTINGS_PATH) {
+        Ok(source) => match ron::from_str::<WindowSettings>(&source) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                // Pre-LogPlugin, so eprintln. The next save overwrites the bad file.
+                eprintln!(
+                    "Failed to parse {SETTINGS_PATH}: {err}; using window-settings defaults."
+                );
+                WindowSettings::default()
+            }
+        },
+        Err(_) => WindowSettings::default(), // first run
+    };
+    settings.ui_scale = settings.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+    settings.resolution.0 = settings.resolution.0.max(320);
+    settings.resolution.1 = settings.resolution.1.max(240);
+    (settings, overrides_from_env())
+}
+
+fn overrides_from_env() -> WindowSettingsOverrides {
+    let mode = std::env::var("THALOS_WINDOW_MODE").ok().map(|value| {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "windowed" | "window" => WindowModeSetting::Windowed,
+            "exclusive" | "fullscreen" | "true-fullscreen" | "true_fullscreen" => {
+                WindowModeSetting::Exclusive
+            }
+            "borderless" | "borderless-fullscreen" | "borderless_fullscreen" | "" => {
+                WindowModeSetting::Borderless
+            }
+            other => {
+                eprintln!(
+                    "Unknown THALOS_WINDOW_MODE={other:?}; using borderless fullscreen. \
+                     Expected windowed, borderless, or fullscreen."
+                );
+                WindowModeSetting::Borderless
+            }
+        }
+    });
+    let resolution = std::env::var("THALOS_WINDOW_SIZE")
+        .ok()
+        .and_then(|value| parse_window_size(&value));
+    let vsync = std::env::var("THALOS_VSYNC").ok().map(|value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    });
+    WindowSettingsOverrides {
+        mode,
+        resolution,
+        vsync,
+    }
+}
+
+fn parse_window_size(value: &str) -> Option<(u32, u32)> {
+    let (width, height) = value
+        .trim()
+        .split_once(['x', 'X', ','])
+        .or_else(|| value.trim().split_once(' '))?;
+    let width = width.trim().parse().ok()?;
+    let height = height.trim().parse().ok()?;
+    Some((width, height))
+}
+
+fn save(settings: &WindowSettings) {
+    let path = Path::new(SETTINGS_PATH);
+    let result = (|| -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let body = ron::ser::to_string_pretty(settings, ron::ser::PrettyConfig::default())
+            .map_err(std::io::Error::other)?;
+        std::fs::write(path, body)
+    })();
+    if let Err(err) = result {
+        warn!("Failed to save window settings to {SETTINGS_PATH}: {err}");
+    }
+}
+
+// ── Initial window ────────────────────────────────────────────────────────────
+
+/// Primary-window descriptor for `WindowPlugin`, from persisted settings +
+/// env overrides. The persisted monitor preference can't be resolved here —
+/// [`Monitor`] entities don't exist before the app boots — so fullscreen
+/// starts on the primary monitor and [`apply_window_settings`] re-targets on
+/// the first frame.
+pub fn initial_window(settings: &WindowSettings, overrides: &WindowSettingsOverrides) -> Window {
+    let mode = match overrides.mode.unwrap_or(settings.mode) {
+        WindowModeSetting::Windowed => WindowMode::Windowed,
+        WindowModeSetting::Borderless => {
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+        }
+        WindowModeSetting::Exclusive => {
+            WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current)
+        }
+    };
+
+    let (width, height) = overrides.resolution.unwrap_or(settings.resolution);
+    let mut resolution = WindowResolution::new(width, height);
+    // Dev/diagnostic: force a window scale factor (overrides the OS HiDPI
+    // scale). `THALOS_SCALE=1.0` etc. Used to isolate fractional-scale text
+    // rendering bugs.
+    if let Ok(scale) = std::env::var("THALOS_SCALE")
+        && let Ok(value) = scale.trim().parse::<f32>()
+        && value > 0.0
+    {
+        resolution = resolution.with_scale_factor_override(value);
+    }
+
+    let present_mode = if overrides.vsync.unwrap_or(settings.vsync) {
+        PresentMode::AutoVsync
+    } else {
+        // Uncapped framerate so frame-time deltas are observable when
+        // profiling; wgpu falls back to a supported non-vsync present mode.
+        PresentMode::AutoNoVsync
+    };
+
+    Window {
+        title: "Thalos".into(),
+        mode,
+        resolution,
+        present_mode,
+        ..default()
+    }
+}
+
+// ── Plugin / systems ──────────────────────────────────────────────────────────
+
+pub struct WindowSettingsPlugin;
+
+impl Plugin for WindowSettingsPlugin {
+    fn build(&self, app: &mut App) {
+        // `WindowSettings` + `WindowSettingsOverrides` are inserted in
+        // `main()` (they shape the initial window before the app exists).
+        app.add_systems(Update, (apply_window_settings, apply_ui_scale));
+    }
+}
+
+/// A windowed-size push to winit that hasn't been observed back on the
+/// `Window` component yet. While in flight, the drag-resize write-back is
+/// suppressed so a half-applied transition can't overwrite the stored size;
+/// expires after a grace period in case the OS clamps the request.
+struct InFlightResolution {
+    target: (u32, u32),
+    frames_left: u8,
+}
+
+impl InFlightResolution {
+    fn new(target: (u32, u32)) -> Self {
+        Self {
+            target,
+            frames_left: 30,
+        }
+    }
+}
+
+fn apply_window_settings(
+    mut settings: ResMut<WindowSettings>,
+    overrides: Res<WindowSettingsOverrides>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    monitors: Query<(Entity, &Monitor)>,
+    mut in_flight: Local<Option<InFlightResolution>>,
+    mut last_saved: Local<Option<WindowSettings>>,
+) {
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+
+    let monitor_selection = settings
+        .monitor
+        .as_deref()
+        .and_then(|wanted| {
+            monitors
+                .iter()
+                .find(|(_, monitor)| monitor.name.as_deref() == Some(wanted))
+                .map(|(entity, _)| MonitorSelection::Entity(entity))
+        })
+        .unwrap_or(MonitorSelection::Primary);
+
+    let mode = overrides.mode.unwrap_or(settings.mode);
+    let desired_mode = match mode {
+        WindowModeSetting::Windowed => WindowMode::Windowed,
+        WindowModeSetting::Borderless => WindowMode::BorderlessFullscreen(monitor_selection),
+        WindowModeSetting::Exclusive => {
+            WindowMode::Fullscreen(monitor_selection, VideoModeSelection::Current)
+        }
+    };
+    if window.mode != desired_mode {
+        // Logged because mode/present/resolution pushes recreate the swapchain,
+        // which the flaky Windows surface-acquire path can turn into a crash —
+        // these lines tie any such crash to the triggering write.
+        info!("window mode {:?} → {:?}", window.mode, desired_mode);
+        window.mode = desired_mode;
+        // Mode switches resize the window asynchronously; hold off the
+        // windowed write-back until the dust settles.
+        *in_flight = Some(InFlightResolution::new(
+            overrides.resolution.unwrap_or(settings.resolution),
+        ));
+    }
+
+    let desired_present = if overrides.vsync.unwrap_or(settings.vsync) {
+        PresentMode::AutoVsync
+    } else {
+        PresentMode::AutoNoVsync
+    };
+    if window.present_mode != desired_present {
+        info!(
+            "window present mode {:?} → {:?}",
+            window.present_mode, desired_present
+        );
+        window.present_mode = desired_present;
+    }
+
+    // Windowed size: push UI edits to the window, pull OS drag-resizes back
+    // into the settings so they persist. With an env-pinned size the window
+    // is left alone entirely — the pin sized it at creation, and free
+    // drag-resizing shouldn't fight a push or leak into the file.
+    if mode == WindowModeSetting::Windowed && overrides.resolution.is_none() {
+        let current = (
+            window.resolution.physical_width(),
+            window.resolution.physical_height(),
+        );
+        if let Some(push) = in_flight.as_mut() {
+            push.frames_left = push.frames_left.saturating_sub(1);
+            if current == push.target || push.frames_left == 0 {
+                *in_flight = None;
+            }
+        }
+        if settings.is_changed() {
+            if current != settings.resolution && current != (0, 0) {
+                info!(
+                    "window resolution {}×{} → {}×{}",
+                    current.0, current.1, settings.resolution.0, settings.resolution.1
+                );
+                window
+                    .resolution
+                    .set_physical_resolution(settings.resolution.0, settings.resolution.1);
+                *in_flight = Some(InFlightResolution::new(settings.resolution));
+            }
+        } else if in_flight.is_none() && current != settings.resolution && current != (0, 0) {
+            // The user resized the OS window — remember the dragged size.
+            settings.resolution = current;
+        }
+    }
+
+    if last_saved.as_ref() != Some(&*settings) {
+        save(&settings);
+        *last_saved = Some(settings.clone());
+    }
+}
+
+/// Work around a Bevy 0.18 text-rendering bug: at **fractional** window scale
+/// factors (a 150 % HiDPI display reports 1.5, etc.) glyphs rasterise at
+/// inconsistent sizes — text looks broken (non-uniform, "not monospace").
+/// Integer scale factors render cleanly. So we compensate through the UI
+/// scale so the *effective* UI scale (window scale × UI scale) lands on the
+/// nearest integer (≥ 1) once the window's real scale is known, then multiply
+/// the user's [`WindowSettings::ui_scale`] preference on top.
+///
+/// An earlier version snapped the *window* scale-factor override instead, but
+/// `bevy_winit::changed_windows` treats a scale-factor change as
+/// logical-size-preserving and physically resizes the window — on a 150 %
+/// display the borderless-fullscreen window grew to 4/3 of the monitor. The
+/// window is left untouched now: `UiScale` covers Bevy UI (rasterised at
+/// `window scale × UiScale`) and `EguiContextSettings::scale_factor` covers
+/// the egui panels (`window scale × scale_factor`), so the two stay mutually
+/// consistent. A `THALOS_SCALE` window-scale pin skips the compensation
+/// (winit honours it from creation) but the user UI scale still applies.
+///
+/// Remove the snapping once the upstream Bevy fractional-scale text bug is
+/// fixed; the user-preference multiply stays.
+fn apply_ui_scale(
+    settings: Res<WindowSettings>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut ui_scale: ResMut<UiScale>,
+    mut egui_settings: Query<&mut bevy_egui::EguiContextSettings>,
+    mut compensated_log: Local<bool>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let base = if window.resolution.scale_factor_override().is_some() {
+        1.0
+    } else {
+        let os = window.resolution.base_scale_factor();
+        if os <= 0.0 {
+            return; // scale not reported by winit yet
+        }
+        let ratio = os.round().max(1.0) / os;
+        if (ratio - 1.0).abs() > 1.0e-4 && !*compensated_log {
+            info!(
+                "compensating fractional window scale {os:.3} with UI scale ×{ratio:.3} \
+                 (crisp-text workaround for Bevy fractional-scale rendering; \
+                 override with THALOS_SCALE)"
+            );
+            *compensated_log = true;
+        }
+        ratio
+    };
+
+    let target = base * settings.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+    if (ui_scale.0 - target).abs() > 1.0e-4 {
+        ui_scale.0 = target;
+    }
+    // Egui contexts can spawn after startup (and after the ratio is known),
+    // so keep late arrivals in step instead of writing once.
+    for mut egui in &mut egui_settings {
+        if (egui.scale_factor - target).abs() > 1.0e-4 {
+            egui.scale_factor = target;
+        }
+    }
+}
+
+// ── Settings-menu tab ─────────────────────────────────────────────────────────
+
+/// A selectable fullscreen monitor, prepared by the settings menu from the
+/// `Monitor` entity query (unnamed monitors are skipped — they can't be
+/// persisted).
+pub struct MonitorChoice {
+    /// [`Monitor::name`], the persisted key.
+    pub name: String,
+    /// Display label: name, size, primary marker.
+    pub label: String,
+}
+
+/// The Window tab body. `settings` is the raw (change-detection-bypassed)
+/// resource; the caller compares before/after and flags the change.
+pub fn show_window_tab(
+    ui: &mut egui::Ui,
+    settings: &mut WindowSettings,
+    overrides: &WindowSettingsOverrides,
+    monitors: &[MonitorChoice],
+) {
+    // Mode
+    let mode_pinned = overrides.mode.is_some();
+    let mut mode = overrides.mode.unwrap_or(settings.mode);
+    ui.horizontal(|ui| {
+        ui.label("Mode:");
+        ui.add_enabled_ui(!mode_pinned, |ui| {
+            ui.radio_value(&mut mode, WindowModeSetting::Windowed, "Windowed");
+            ui.radio_value(&mut mode, WindowModeSetting::Borderless, "Borderless");
+            ui.radio_value(&mut mode, WindowModeSetting::Exclusive, "Fullscreen");
+        });
+    });
+    if mode_pinned {
+        ui.weak("Pinned by THALOS_WINDOW_MODE for this session.");
+    } else {
+        settings.mode = mode;
+    }
+
+    ui.add_space(4.0);
+
+    // Resolution (windowed only)
+    let resolution_pinned = overrides.resolution.is_some();
+    let resolution = overrides.resolution.unwrap_or(settings.resolution);
+    ui.horizontal(|ui| {
+        ui.label("Resolution:");
+        ui.add_enabled_ui(
+            mode == WindowModeSetting::Windowed && !resolution_pinned,
+            |ui| {
+                egui::ComboBox::from_id_salt("window_resolution")
+                    .selected_text(format!("{} × {}", resolution.0, resolution.1))
+                    .show_ui(ui, |ui| {
+                        for &(width, height) in RESOLUTION_PRESETS {
+                            ui.selectable_value(
+                                &mut settings.resolution,
+                                (width, height),
+                                format!("{width} × {height}"),
+                            );
+                        }
+                    });
+            },
+        );
+    });
+    if resolution_pinned {
+        ui.weak("Pinned by THALOS_WINDOW_SIZE for this session.");
+    } else if mode == WindowModeSetting::Windowed {
+        ui.weak("Drag-resizing the window updates this too.");
+    }
+
+    ui.add_space(4.0);
+
+    // Monitor (fullscreen modes only)
+    ui.horizontal(|ui| {
+        ui.label("Monitor:");
+        let selected = match settings.monitor.as_deref() {
+            None => "Primary".to_string(),
+            Some(name) => monitors
+                .iter()
+                .find(|choice| choice.name == name)
+                .map(|choice| choice.label.clone())
+                .unwrap_or_else(|| format!("{name} (not connected)")),
+        };
+        ui.add_enabled_ui(mode != WindowModeSetting::Windowed, |ui| {
+            egui::ComboBox::from_id_salt("window_monitor")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.monitor, None, "Primary");
+                    for choice in monitors {
+                        ui.selectable_value(
+                            &mut settings.monitor,
+                            Some(choice.name.clone()),
+                            &choice.label,
+                        );
+                    }
+                });
+        });
+    });
+
+    ui.add_space(4.0);
+
+    // VSync
+    let vsync_pinned = overrides.vsync.is_some();
+    let mut vsync = overrides.vsync.unwrap_or(settings.vsync);
+    ui.add_enabled_ui(!vsync_pinned, |ui| {
+        ui.checkbox(&mut vsync, "VSync");
+    });
+    if vsync_pinned {
+        ui.weak("Pinned by THALOS_VSYNC for this session.");
+    } else {
+        settings.vsync = vsync;
+    }
+
+    ui.add_space(4.0);
+
+    // UI scale
+    ui.horizontal(|ui| {
+        ui.label("UI scale:");
+        ui.add(
+            egui::Slider::new(&mut settings.ui_scale, UI_SCALE_MIN..=UI_SCALE_MAX)
+                .step_by(0.05)
+                .fixed_decimals(2),
+        );
+    });
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    if ui.button("Reset to defaults").clicked() {
+        *settings = WindowSettings::default();
+    }
+
+    ui.add_space(4.0);
+    ui.weak(format!(
+        "Saved to {SETTINGS_PATH}. THALOS_WINDOW_MODE / THALOS_WINDOW_SIZE / \
+         THALOS_VSYNC override for one session without touching the file."
+    ));
+}

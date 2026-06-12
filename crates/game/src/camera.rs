@@ -101,28 +101,28 @@ pub(crate) struct CameraCollisionState {
     view: ViewMode,
 }
 
-/// KSP-style camera modes for ship view. `V` cycles between them.
+/// KSP-style camera modes for ship view. `V` toggles between them.
 ///
 /// - **Free**: camera "up" is gravity-up (radial out from the dominant body),
 ///   "forward" is the horizon-projected prograde direction. As the ship orbits,
-///   the planet stays "down" in the view.
-/// - **Orbital**: camera "up" is the orbital plane normal, "forward" is the
-///   prograde direction. The orbit appears edge-on, and the camera frame
-///   rotates with the ship around the orbit.
+///   the planet stays "down" in the view; the craft rotates freely within it.
+/// - **Locked**: the basis is the craft's own body frame, so the camera stays
+///   fixed relative to the hull and rides with it through pitch, roll, and yaw
+///   (KSP's "Locked" camera). The natural mode for flying aircraft.
 ///
 /// In map view this resource is ignored — that view always uses world-Y up.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShipCameraMode {
     #[default]
     Free,
-    Orbital,
+    Locked,
 }
 
 impl ShipCameraMode {
     fn cycle(self) -> Self {
         match self {
-            Self::Free => Self::Orbital,
-            Self::Orbital => Self::Free,
+            Self::Free => Self::Locked,
+            Self::Locked => Self::Free,
         }
     }
 }
@@ -462,7 +462,7 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
 // Systems
 // ---------------------------------------------------------------------------
 
-/// `V` cycles ship-view camera mode (Free ↔ Orbital). Suppressed in map view
+/// `V` toggles ship-view camera mode (Free ↔ Locked). Suppressed in map view
 /// and while egui is consuming keyboard input (e.g. text fields).
 fn ship_camera_mode_input(
     input: Res<GameInputIntent>,
@@ -987,7 +987,8 @@ fn clamp_body_focus_camera_against_terrain(
 /// from the ship state and its dominant body, so that rotation feels natural
 /// regardless of where the ship is in its orbit:
 /// - **Free**: `up = radial_out`, `forward = horizon-projected prograde`
-/// - **Orbital**: `up = orbital plane normal`, `forward = prograde`
+/// - **Locked**: the craft body frame — `up = dorsal`, `forward = nose` —
+///   so the camera stays fixed relative to the hull as it maneuvers
 ///
 /// In **map view** (and any other case where the ship state isn't available),
 /// the basis falls back to world axes: `up = +Y`, `forward = +Z`,
@@ -1128,6 +1129,7 @@ pub fn camera_transform_system(
             *mode,
             ship_state.position - body.position,
             ship_state.velocity - body.velocity,
+            sim.simulation.attitude().orientation,
         )
     } else {
         CameraBasis {
@@ -1203,17 +1205,18 @@ struct CameraBasis {
 /// Build the ship-view local basis from the ship's body-relative state.
 ///
 /// `r` and `v_rel` are body-relative position and velocity in physics units;
-/// only their directions matter, so `f64 → f32` cast is safe after normalization.
+/// only their directions matter, so `f64 → f32` cast is safe after
+/// normalization. `orientation` is the craft's canonical attitude
+/// (body frame → inertial), consumed only by `Locked`.
 fn ship_camera_basis(
     mode: ShipCameraMode,
     r: bevy::math::DVec3,
     v_rel: bevy::math::DVec3,
+    orientation: DQuat,
 ) -> CameraBasis {
-    let radial = r.normalize().as_vec3();
-    let h = r.cross(v_rel);
-
     match mode {
         ShipCameraMode::Free => {
+            let radial = r.normalize().as_vec3();
             // Forward = prograde projected onto the horizon plane (radial-perpendicular).
             // Falls back to an arbitrary perpendicular of `up` when velocity is purely
             // radial — rare in practice but possible at periapsis of a radial trajectory.
@@ -1232,23 +1235,13 @@ fn ship_camera_basis(
                 forward,
             }
         }
-        ShipCameraMode::Orbital => {
-            let up = if h.length_squared() > 1e-6 {
-                h.normalize().as_vec3()
-            } else {
-                radial
-            };
-            let v = v_rel.as_vec3();
-            let forward = if v.length_squared() > 1e-6 {
-                let proj = v - up * v.dot(up);
-                if proj.length_squared() > 1e-6 {
-                    proj.normalize()
-                } else {
-                    up.any_orthonormal_pair().0
-                }
-            } else {
-                up.any_orthonormal_pair().0
-            };
+        ShipCameraMode::Locked => {
+            // The craft body frame itself: `+Y` = nose (`thalos_control::NOSE_BODY`),
+            // `+Z` = dorsal. `forward` = nose keeps azimuth continuous with
+            // Free mode for a craft flying prograde, so toggling `V` in level
+            // flight keeps the camera on the same side of the craft.
+            let forward = (orientation * DVec3::Y).as_vec3().normalize();
+            let up = (orientation * DVec3::Z).as_vec3().normalize();
             let right = up.cross(forward).normalize();
             CameraBasis { right, up, forward }
         }

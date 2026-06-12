@@ -738,6 +738,22 @@ Key modules:
   `ship_view::build_player_ship` core. The new craft carries no `EditorPart`,
   so staging/bubble rebuild through the existing systems. Runway relaunch is
   deferred (one-shot terrain-aware startup placement).
+- `window_settings` — persisted window/display preferences (mode, windowed
+  resolution, vsync, fullscreen monitor, user UI scale), stored as RON at the
+  gitignored `user/settings.ron` and edited live from the settings menu's
+  Window tab (`settings_menu`). Loaded in `main()` before the app so the
+  initial window honours it; `THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE` /
+  `THALOS_VSYNC` are *session overrides* (they win for the run, grey out
+  their UI control, and never leak into the file), and `THALOS_SCALE` stays a
+  pure env diagnostic. `apply_window_settings` pushes settings onto the
+  primary `Window` (value-compared) and writes back windowed drag-resizes so
+  they persist; `apply_ui_scale` (which absorbed the former
+  `compensate_fractional_ui_scale`) multiplies the user UI scale into the
+  fractional-HiDPI crisp-text snap and drives `UiScale` + egui scale
+  together. Caveat: runtime mode switches recreate the swapchain, which the
+  known flaky Windows driver path (generic surface-acquire panic in Bevy's
+  `prepare_windows`) can turn into a crash — pre-existing platform issue,
+  newly reachable at runtime.
 
 Systems run in `SimStage` order: `Physics → Sync → Camera`
 (configured in `main.rs`), ensuring deterministic state flow each

@@ -50,6 +50,7 @@ mod terrain_registry;
 mod velocity_frame;
 mod view;
 mod warp_to_maneuver;
+mod window_settings;
 
 use std::sync::Arc;
 
@@ -59,9 +60,6 @@ use bevy::prelude::*;
 use bevy::render::{
     RenderPlugin,
     settings::{Backends, RenderCreation, WgpuSettings},
-};
-use bevy::window::{
-    MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution,
 };
 use thalos_body_render::BodyRenderPlugin;
 use thalos_input::game::GameInputPlugin;
@@ -147,144 +145,6 @@ pub struct GameTerrainRegistry(pub SharedTerrainRegistry);
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-
-/// Window present mode. `THALOS_VSYNC=off` (or `0`/`false`/`no`) selects
-/// `AutoNoVsync` so frame times run uncapped for profiling while still letting
-/// wgpu fall back to a supported non-vsync present mode; anything else keeps
-/// the vsync default (`AutoVsync`).
-fn present_mode_from_env() -> PresentMode {
-    match std::env::var("THALOS_VSYNC") {
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "off" | "0" | "false" | "no" => PresentMode::AutoNoVsync,
-            _ => PresentMode::AutoVsync,
-        },
-        Err(_) => PresentMode::AutoVsync,
-    }
-}
-
-fn parse_window_size(value: &str) -> Option<(u32, u32)> {
-    let (width, height) = value
-        .trim()
-        .split_once(['x', 'X', ','])
-        .or_else(|| value.trim().split_once(' '))?;
-    let width = width.trim().parse().ok()?;
-    let height = height.trim().parse().ok()?;
-    Some((width, height))
-}
-
-/// Primary-window configuration. Borderless fullscreen remains the default,
-/// but `THALOS_WINDOW_MODE=windowed` is a useful Windows swapchain-stability
-/// fallback when a driver returns a generic surface-acquire error. Optional:
-/// `THALOS_WINDOW_SIZE=1600x900`.
-fn window_from_env() -> Window {
-    let present_mode = present_mode_from_env();
-    let size = std::env::var("THALOS_WINDOW_SIZE")
-        .ok()
-        .and_then(|value| parse_window_size(&value))
-        .unwrap_or((1600, 900));
-
-    let mode = match std::env::var("THALOS_WINDOW_MODE") {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "windowed" | "window" => WindowMode::Windowed,
-            "exclusive" | "fullscreen" | "true-fullscreen" | "true_fullscreen" => {
-                WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current)
-            }
-            "borderless" | "borderless-fullscreen" | "borderless_fullscreen" | "" => {
-                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-            }
-            other => {
-                eprintln!(
-                    "Unknown THALOS_WINDOW_MODE={other:?}; using borderless fullscreen. \
-                     Expected windowed, borderless, or fullscreen."
-                );
-                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-            }
-        },
-        Err(_) => WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-    };
-
-    // Dev/diagnostic: force a window scale factor (overrides the OS HiDPI
-    // scale). `THALOS_SCALE=1.0` etc. Used to isolate fractional-scale text
-    // rendering bugs.
-    let mut resolution = WindowResolution::new(size.0, size.1);
-    if let Ok(scale) = std::env::var("THALOS_SCALE")
-        && let Ok(value) = scale.trim().parse::<f32>()
-        && value > 0.0
-    {
-        resolution = resolution.with_scale_factor_override(value);
-    }
-
-    Window {
-        title: "Thalos".into(),
-        mode,
-        resolution,
-        // Dev/perf hook: `THALOS_VSYNC=off` uncaps the framerate so
-        // frame-time deltas are observable when profiling. Default keeps
-        // vsync on.
-        present_mode,
-        ..default()
-    }
-}
-
-/// Work around a Bevy 0.18 text-rendering bug: at **fractional** window scale
-/// factors (a 150 % HiDPI display reports 1.5, etc.) glyphs rasterise at
-/// inconsistent sizes — text looks broken (non-uniform, "not monospace").
-/// Integer scale factors render cleanly. So we compensate through the UI
-/// scale so the *effective* UI scale (window scale × UI scale) lands on the
-/// nearest integer (≥ 1) once the window's real scale is known.
-///
-/// An earlier version snapped the *window* scale-factor override instead, but
-/// `bevy_winit::changed_windows` treats a scale-factor change as
-/// logical-size-preserving and physically resizes the window — on a 150 %
-/// display the borderless-fullscreen window grew to 4/3 of the monitor. The
-/// window is left untouched now: `UiScale` covers Bevy UI (rasterised at
-/// `window scale × UiScale`) and `EguiContextSettings::scale_factor` covers
-/// the egui panels (`window scale × scale_factor`), so the two stay mutually
-/// consistent.
-///
-/// The UI ends up slightly larger or smaller than the OS-intended size (e.g.
-/// 1.5 → 2.0) but crisp; a user who prefers a specific scale can pin the
-/// window scale with `THALOS_SCALE=1` (handled in [`window_from_env`], which
-/// wins here). Remove this once the upstream Bevy fractional-scale text bug
-/// is fixed.
-fn compensate_fractional_ui_scale(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    mut ui_scale: ResMut<UiScale>,
-    mut egui_settings: Query<&mut bevy_egui::EguiContextSettings>,
-    mut compensated_log: Local<bool>,
-) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    // A manual `THALOS_SCALE` override already pinned the window scale (winit
-    // honours it from creation, no resize involved) — leave the UI alone.
-    if window.resolution.scale_factor_override().is_some() {
-        return;
-    }
-    let os = window.resolution.base_scale_factor();
-    if os <= 0.0 {
-        return; // scale not reported by winit yet
-    }
-    let ratio = os.round().max(1.0) / os;
-    if (ui_scale.0 - ratio).abs() > 1.0e-4 {
-        ui_scale.0 = ratio;
-        if !*compensated_log {
-            info!(
-                "compensating fractional window scale {os:.3} with UI scale ×{ratio:.3} \
-                 (crisp-text workaround for Bevy fractional-scale rendering; \
-                 override with THALOS_SCALE)"
-            );
-            *compensated_log = true;
-        }
-    }
-    // Egui contexts can spawn after startup (and after the ratio is known),
-    // so keep late arrivals in step instead of writing once.
-    for mut settings in &mut egui_settings {
-        if (settings.scale_factor - ratio).abs() > 1.0e-4 {
-            settings.scale_factor = ratio;
-        }
-    }
-}
 
 fn backends_from_env() -> Option<Backends> {
     let value = std::env::var("THALOS_WGPU_BACKEND").ok()?;
@@ -501,7 +361,11 @@ fn main() {
     // ------------------------------------------------------------------
     // 5. Build and run the Bevy app.
     // ------------------------------------------------------------------
-    let window = window_from_env();
+    // Persisted window/display preferences (user/settings.ron) + the
+    // THALOS_WINDOW_MODE / THALOS_WINDOW_SIZE / THALOS_VSYNC session
+    // overrides; loaded before the app so the initial window honours them.
+    let (win_settings, win_overrides) = window_settings::load();
+    let window = window_settings::initial_window(&win_settings, &win_overrides);
     let wgpu_settings = wgpu_settings_from_env();
 
     App::new()
@@ -522,6 +386,8 @@ fn main() {
                 .chain(),
         )
         .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
+        .insert_resource(win_settings)
+        .insert_resource(win_overrides)
         .insert_resource(
             InputSettings::load_from_path("assets/input.ron")
                 .expect("Failed to load input bindings from assets/input.ron"),
@@ -677,10 +543,10 @@ fn main() {
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ScreenshotPlugin)
-        // Snap fractional HiDPI scale factors to an integer so UI text renders
-        // crisply (Bevy 0.18 fractional-scale text bug). Runs every frame but
-        // no-ops once the override is set.
-        .add_systems(Update, compensate_fractional_ui_scale)
+        // Applies WindowSettings to the live window (mode / vsync / monitor /
+        // windowed size) and folds the user UI scale into the fractional-HiDPI
+        // crisp-text compensation. Persists edits to user/settings.ron.
+        .add_plugins(window_settings::WindowSettingsPlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
         .add_plugins(relaunch::RelaunchPlugin)

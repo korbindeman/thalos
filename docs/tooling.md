@@ -82,7 +82,11 @@ that floor shows no movement. Set `THALOS_VSYNC=off` (also accepts
 `0`/`false`/`no`) to launch with `PresentMode::AutoNoVsync` and read the true,
 uncapped frame time while still allowing wgpu to fall back to a supported
 non-vsync present mode; anything else keeps the vsync default. Read by
-`present_mode_from_env` in `crates/game/src/main.rs`.
+`overrides_from_env` in `crates/game/src/window_settings.rs` as a session
+override: it wins over the persisted `user/settings.ron` vsync preference and
+greys out the VSync control in the settings menu, without being written into
+the file. (Vsync can also be toggled live from the settings menu's Window
+tab, which *does* persist.)
 
 Pair it with the BRP MCP server (`bevy_brp_mcp`) for live, no-rebuild A/B
 profiling of a running session: `brp_extras_get_diagnostics` reports

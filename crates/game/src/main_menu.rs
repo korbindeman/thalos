@@ -225,7 +225,7 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>) {
                     Name::new("MainMenuDivider"),
                 ));
                 spawn_menu_button(panel, &theme, MenuAction::Shipyard, "SHIPYARD", "design a craft");
-                spawn_menu_button(panel, &theme, MenuAction::Settings, "SETTINGS", "input bindings");
+                spawn_menu_button(panel, &theme, MenuAction::Settings, "SETTINGS", "window & input");
                 spawn_menu_button(panel, &theme, MenuAction::Quit, "QUIT", "");
             });
         });
