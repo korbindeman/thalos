@@ -114,6 +114,12 @@ impl SpawnSituation {
         self.descent_profile().map(|profile| profile.label)
     }
 
+    /// True for the scenarios placed by the deferred descent finisher
+    /// ([`refine_descent_spawn`]): the two descents and cruise.
+    pub fn is_descent(self) -> bool {
+        self.descent_profile().is_some()
+    }
+
     /// True for the two runway scenarios, which `crate::runway` finishes once
     /// terrain is resident (and which load the aircraft blueprint instead of
     /// the default rocket).
@@ -337,22 +343,46 @@ const LANDING_SITE_MAX_ABS_LAT_SIN: f32 = 0.82;
 /// the spawn isn't planted right on the waterline.
 const LANDING_SITE_FREEBOARD_M: f32 = 50.0;
 
+/// Re-armable trigger for the deferred descent/cruise placement, mirroring
+/// [`crate::runway::RunwayPlacement`]. Armed at startup when the boot
+/// scenario is a descent; **not** armed by runtime scenario starts (the start
+/// screen and the destruction picker place descents synchronously via
+/// [`compute_descent_state`], so arming this would double-place). The
+/// explicit flag exists because [`SpawnSituation`] is mutable at runtime now —
+/// a `Local<bool>` keyed off the resource would fire spuriously after a
+/// scenario switch.
+#[derive(Resource, Debug, Default)]
+pub struct DescentPlacement {
+    pub pending: bool,
+}
+
 pub struct SpawnPlugin;
 
 impl Plugin for SpawnPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            // Runs during `AppState::Loading` (not gated on `Running`) so the
-            // descent is placed and the camera reaches the approach altitude
-            // behind the loading screen, letting terrain stream in before the
-            // reveal. Self-gated by its `done` local + terrain residency.
-            refine_descent_spawn.before(SimStage::Physics),
-        )
-        // Single source of truth for the initial warp level, applied once when
-        // the loading screen clears (after every deferred placement has run).
-        .add_systems(OnEnter(AppState::Running), apply_initial_warp);
+        app.init_resource::<DescentPlacement>()
+            .add_systems(Startup, arm_boot_descent_placement)
+            .add_systems(
+                Update,
+                // Runs during `AppState::Loading` (not gated on `Running`) so the
+                // descent is placed and the camera reaches the approach altitude
+                // behind the loading screen, letting terrain stream in before the
+                // reveal. Self-gated by `DescentPlacement` + terrain residency.
+                refine_descent_spawn.before(SimStage::Physics),
+            )
+            // Single source of truth for the initial warp level, applied once
+            // when the loading screen clears (after every deferred placement
+            // has run).
+            .add_systems(OnEnter(AppState::Running), apply_initial_warp);
     }
+}
+
+/// Arm the deferred placement for a descent boot scenario.
+fn arm_boot_descent_placement(
+    situation: Res<SpawnSituation>,
+    mut placement: ResMut<DescentPlacement>,
+) {
+    placement.pending = situation.is_descent();
 }
 
 /// Apply the paused-on-spawn policy once the loading screen clears.
@@ -571,14 +601,15 @@ pub(crate) fn sample_site_relief_m(
 /// daylight land (or flat daylight land for final approach) at a true
 /// above-ground altitude and leave it coasting on rails. Runs exactly once.
 fn refine_descent_spawn(
-    mut done: Local<bool>,
+    mut placement: ResMut<DescentPlacement>,
     situation: Res<SpawnSituation>,
     mut sim: ResMut<SimulationState>,
     mut settle: ResMut<crate::surface_settle::SurfaceSettle>,
+    mut tracker: ResMut<crate::loading::LoadingTracker>,
     height_sources: Res<HeightSourceRegistry>,
     surfaces: Res<TerrainSurfaceRegistry>,
 ) {
-    if situation.descent_profile().is_none() || *done {
+    if !placement.pending || situation.descent_profile().is_none() {
         return;
     }
     let Some((state, attitude)) =
@@ -591,9 +622,11 @@ fn refine_descent_spawn(
     // Coast on rails until the descent crosses the local-physics handoff band.
     sim.simulation
         .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
-    *done = true;
-    // Surface state installed: start the tile-settle timer at the site.
+    placement.pending = false;
+    // Surface state installed: start the tile-settle timer at the site and
+    // release the loading screen's placement gate.
     settle.mark_placed();
+    tracker.complete(crate::loading::step::PLACEMENT);
 }
 
 /// Build the descent state for `situation` (a `Landing` / `FinalApproach`

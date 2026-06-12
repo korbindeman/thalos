@@ -22,20 +22,25 @@ fn gate_enhanced_input_sources(
     mut commands: Commands,
     mut action_sources: ResMut<ActionSources>,
     mut contexts: EguiContexts,
+    app_state: Res<State<crate::loading::AppState>>,
     ui_pointer_gate: Option<Res<crate::hud::UiPointerGate>>,
     freecam: Option<Res<crate::freecam::FreeCam>>,
     player: Option<Res<crate::player_controller::PlayerControllerState>>,
     shipyard_editor: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     editor_text: Option<Res<crate::shipyard_editor::EditorTextFocus>>,
-    flight: Query<(Entity, &ContextActivity<GameFlightContext>)>,
-    warp: Query<(Entity, &ContextActivity<GameWarpContext>)>,
-    view: Query<(Entity, &ContextActivity<GameViewContext>)>,
-    eva: Query<(Entity, &ContextActivity<GameEvaContext>)>,
-    eva_move: Query<(Entity, &ContextActivity<GameEvaMoveContext>)>,
-    maneuver: Query<(Entity, &ContextActivity<GameManeuverContext>)>,
-    precision: Query<(Entity, &ContextActivity<GameManeuverPrecisionContext>)>,
-    shipyard_ctx: Query<(Entity, &ContextActivity<ShipyardContext>)>,
+    // Bundled to stay within Bevy's 16-param system limit.
+    context_queries: (
+        Query<(Entity, &ContextActivity<GameFlightContext>)>,
+        Query<(Entity, &ContextActivity<GameWarpContext>)>,
+        Query<(Entity, &ContextActivity<GameViewContext>)>,
+        Query<(Entity, &ContextActivity<GameEvaContext>)>,
+        Query<(Entity, &ContextActivity<GameEvaMoveContext>)>,
+        Query<(Entity, &ContextActivity<GameManeuverContext>)>,
+        Query<(Entity, &ContextActivity<GameManeuverPrecisionContext>)>,
+        Query<(Entity, &ContextActivity<ShipyardContext>)>,
+    ),
 ) {
+    let (flight, warp, view, eva, eva_move, maneuver, precision, shipyard_ctx) = context_queries;
     let (egui_pointer_busy, egui_keyboard_busy) = contexts
         .ctx_mut()
         .map(|ctx| (ctx.wants_pointer_input(), ctx.wants_keyboard_input()))
@@ -47,6 +52,11 @@ fn gate_enhanced_input_sources(
     let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
     let editor_open = shipyard_editor.as_deref().map(|e| e.open).unwrap_or(false);
     let editor_text_focused = editor_text.as_deref().map(|t| t.is_focused()).unwrap_or(false);
+    // The start screen owns the frame like the shipyard editor does: every
+    // gameplay context deactivates (the system context stays active for
+    // Escape / screenshot). Folded into `editor_open` since the suppression
+    // set is identical.
+    let editor_open = editor_open || *app_state.get() == crate::loading::AppState::MainMenu;
 
     thalos_input::gating::set_mouse_sources(
         &mut action_sources,

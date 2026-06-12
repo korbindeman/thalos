@@ -53,10 +53,19 @@ pub(super) fn attach_ship_camera_to_big_space(
     }
 }
 
+/// Seat a [`PlayerShip`] root into the BigSpace hierarchy. Runs at startup
+/// for the boot-spawned craft **and every frame in `Update`** for craft built
+/// at runtime (the editor's Launch relaunch, the start screen's craft-swap
+/// scenario starts): `ship_view::build_player_ship` spawns a bare root, and
+/// without the `CellCoord` + `ChildOf` insert the canonical→render sync
+/// (`ship_view::update_player_ship_world_position`) never matches it — the
+/// craft visually freezes in the inertial frame while the planet sails away.
+/// The `Without<CellCoord>` filter makes the per-frame pass a no-op once
+/// every root is attached.
 pub(super) fn attach_player_ship_to_big_space(
     mut commands: Commands,
     root: Res<RealSpaceRoot>,
-    ships: Query<Entity, With<PlayerShip>>,
+    ships: Query<Entity, (With<PlayerShip>, Without<CellCoord>)>,
 ) {
     for entity in &ships {
         commands

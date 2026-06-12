@@ -11,7 +11,10 @@ the new shape, not the old one. No silent rewrites.
 ## Commands
 
 ```bash
-just game                 # cargo run -p thalos_game — ship in low Thalos orbit (default)
+just game                 # cargo run -p thalos_game — boots to the start screen
+                          #   (scenario picker / shipyard / settings; naming a
+                          #    mode below skips it, as does THALOS_AUTO_RUN=1)
+just game orbit           # ship in low Thalos orbit, no start screen
 just game eva             # spawn on foot (EVA) on the Thalos surface instead
 just game landing         # powered-descent approach over dry Thalos land
 just game final           # low final approach over a flat dry Thalos patch
@@ -205,12 +208,16 @@ at 0× once the loading screen clears, so the sim is frozen until something
 advances warp. An agent inspecting over BRP will see *no* motion until it
 unpauses. Two ways to start time:
 - Launch with `THALOS_AUTO_RUN=1` (also `true`/`yes`/`on`) — resumes to 1× the
-  instant `Loading → Running` fires. Preferred for autonomous agents.
+  instant `Loading → Running` fires. Preferred for autonomous agents. It also
+  **skips the start screen** a bare `just game` would otherwise boot to, so
+  agents never sit at a menu; alternatively name a mode explicitly
+  (`just game orbit`).
 - At runtime, advance warp (`world_mutate`/key input) — the warp `.`/`,` keys
   step up/down, and `,` at the bottom is pause.
 The single source of truth is `spawn::apply_initial_warp` (on
-`OnEnter(AppState::Running)`), gated by the `spawn::AutoRun` resource; deferred
-placement flows (runway, descent) must **not** reset warp themselves.
+`OnEnter(AppState::Running)` — which fires on every entry, including
+start-screen scenario launches), gated by the `spawn::AutoRun` resource;
+deferred placement flows (runway, descent) must **not** reset warp themselves.
 
 ## Profiling
 
@@ -335,7 +342,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
-- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole` decided in `crates/game/src/local_physics.rs`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active or terrain collider attached). Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The classifier (`compute_avian_authority`) and the resulting authority transitions (`manage_authority`) live next to each other in `crates/game/src/local_physics.rs`. **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
+- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/game/src/local_physics.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/game/src/local_physics.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
 - **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + two backends. Three modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render`. A backend chooses geometry, never its own lighting/atmosphere/cloud math.
 - **`thalos_body_editor`** — interactive celestial-body editor tool
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
@@ -452,11 +459,26 @@ Key modules:
 
 ### Game crate (`crates/game/`)
 
-- **Spawn situation is a flag: ship in orbit (default), EVA on the
+- **Boot, loading, and the start screen** (see `docs/boot.md`).
+  `loading.rs` owns `AppState` (`Loading` → `MainMenu` | `Running`) and the
+  **`LoadingTracker`** — a declarative step registry (`begin` registers the
+  step set for a load; producers update their step by id; the reveal fires
+  when all registered steps complete, including deferred craft placement).
+  A bare `just game` boots to the **start screen** (`main_menu.rs`:
+  scenario picker / SHIPYARD / SETTINGS / QUIT) over the placeholder
+  parking-orbit world; naming a scenario (`just game runway`) or setting
+  `THALOS_AUTO_RUN` skips it. Menu scenario starts reuse the respawn /
+  relaunch machinery in place — the runway pair re-arms its deferred
+  placement + settle gate and re-enters `Loading`. `SpawnSituation` is
+  therefore **mutable at runtime**; deferred placements are explicitly
+  armed (`DescentPlacement`, `RunwayPlacement`), never keyed off the
+  situation with a `Local<bool>`.
+- **Spawn situation is a flag: ship in orbit, EVA on the
   surface, a landing approach over land, a final approach over
   flat land, or one of two surface-runway scenarios.** `main.rs` reads
-  `just game [mode]` (passed as a CLI arg — default `orbit`; falls back
-  to the `THALOS_SPAWN` env var for a direct `cargo run`) into a
+  `just game [mode]` (passed as a CLI arg — default `menu`, the start
+  screen; falls back to the `THALOS_SPAWN` env var for a direct
+  `cargo run`) into a
   `spawn::SpawnSituation` resource (`ShipOrbit` | `Eva` | `Landing` |
   `FinalApproach` | `Runway` | `RunwayApproach`).
   The canonical `CraftState` is the player either way — KSP-style: one
@@ -499,9 +521,15 @@ Key modules:
   `approach-runway`) put the `meridian.ron` aircraft on a fixed runway on
   the Thalos surface, owned by `crate::runway`. Like the descent modes
   these are deferred and terrain-aware: `runway::finish_runway_spawn`
-  runs once on the first `AppState::Running` frame and picks a flat dry
-  low-latitude site by a deterministic body-fixed search (epoch-
-  independent). **The terrain itself is flattened into a pad and the runway
+  runs once per arming of `RunwayPlacement` (boot, or a start-screen
+  runway launch) and picks a flat dry low-latitude site by a fixed
+  body-fixed grid scan, **daylight-first** (sunlit candidates win so the
+  player never spawns parked in the dark; at boot epoch ≈ 0 the choice
+  is still deterministic). After placing, it tears down any live Avian
+  bubble so the rebuild seeds from the placed state (a bubble seeded
+  from the pre-placement placeholder orbit would leave the rendered
+  craft coasting the wrong trajectory). **The terrain itself is
+  flattened into a pad and the runway
   sits flush on it** (replacing the former raised-slab + skirt/runoff
   platform): a single fixed elevation `E = max(natural terrain over the pad)
   + margin` is chosen, then a `thalos_terrain::TerrainFlatten` pad is
@@ -569,9 +597,10 @@ Key modules:
   of snapping to the reference radius). `snap_avian_from_canonical`,
   `apply_local_forces`, and the `readback_local_craft` translation all
   short-circuit for grounded EVA so the controller owns the capsule pose
-  outright; canonical authority is pinned to `LocalRigidBody` by
-  `manage_authority` (not `OnRails`) since grounded EVA co-rotates with the
-  surface and `Simulation::step` must only advance sim-time.
+  outright; canonical authority is pinned to `LocalRigidBody` by the
+  regime executor's walking pin (`regime::expected_authority`, not
+  `OnRails`) since grounded EVA co-rotates with the surface and
+  `Simulation::step` must only advance sim-time.
   `sync_avian_time` still pauses Avian's clock under warp (the controller
   writes `Position` directly each frame; no integrator is needed and the
   km/s-scaled integration that broke it is gone).
@@ -958,10 +987,13 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   have exactly one writing system, named in the resource's doc comment as
   **Sole writer:**. Today: `SolarSystemState` ← `sync_solar_system_state`,
   `MapSnapshot` ← `update_map_snapshot`, `CraftStateMirror` ←
-  `refresh_craft_state_mirror`, `AvianAuthority` ← `compute_avian_authority`.
-  Every other system reads. Don't add a second writer; if a resource needs
-  to be mutated from elsewhere, route through an accessor on the sole writer
-  or reconsider the ownership.
+  `refresh_craft_state_mirror`, the per-craft `CraftRegimeState` component ←
+  `regime::resolve_regime` (the regime decision record every per-frame
+  ownership/warp/prediction consumer reads — see `docs/regimes.md`), and
+  `AvianAuthority` ← `compute_avian_authority` (a derived projection of
+  that record). Every other system reads. Don't add a second writer; if a
+  resource needs to be mutated from elsewhere, route through an accessor on
+  the sole writer or reconsider the ownership.
 - **Map view is decoupled.** Map systems read `MapSnapshot`, projected
   body states, and trajectories. They do not share or mutate
   real-space rendering entities.
@@ -1002,6 +1034,24 @@ Each major system has a unified spec doc.
   authority, time warp, map decoupling, big_space, Avian local
   bubble, navball velocity reference frames). Target design, plus a
   background note on layered astrodynamics methods.
+- `regimes.md` — the per-craft `CraftRegime` resolver — one sole-writer
+  classification (craft capabilities × environment) replacing the
+  scattered `AvianRole`/`manage_authority`/warp-gate/`VesselKind`
+  predicates; walking reframed as a locomotion mode (jetpack-EVA
+  becomes a normal craft later); backend seam policy (Avian stays
+  behind a swappable executor layer; parry-direct re-evaluated at
+  Phase C). **Phase A2 (shadow mode) landed 2026-06-12**: pure
+  classifier in `thalos_physics_canonical::regime`, sole-writer
+  resolver + BRP-readable drift checker in `crates/game/src/regime.rs`
+  (`RegimeDriftDiagnostics`); legacy machinery still drives everything.
+  Orbit + EVA scenarios verified drift-free; remaining scenario matrix
+  + the A3 consumer ports are next.
+- `boot.md` — boot pipeline: the `AppState` graph
+  (`Loading` → `MainMenu` | `Running`), the declarative `LoadingTracker`
+  step registry (how to add a loading step), the start screen and its
+  in-place scenario starts, and the runtime-scenario invariants
+  (explicitly-armed deferred placements, per-ship engine lighting,
+  `relaunch_idle`).
 - `surface.md` — surface gameplay in two parts: **on foot (EVA)**
   (ground physics, body-fixed pose, the `HeightSource` interface,
   surface map view) and **landing & impact destruction** (landed-ship

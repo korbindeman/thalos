@@ -28,6 +28,7 @@ pub mod gravity_mode;
 pub mod maneuver;
 pub mod orbital_math;
 pub mod patched_conics;
+pub mod regime;
 pub mod ship_propagator;
 pub mod simulation;
 pub mod surface_local;

@@ -40,7 +40,14 @@ impl Plugin for PauseMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GamePause>()
             .add_systems(Startup, setup.after(crate::hud::theme::init_theme))
-            .add_systems(Update, handle_escape_input.before(crate::SimStage::Physics))
+            // Gated to `Running`: during loading there is nothing to pause,
+            // and on the start screen Escape is owned by `crate::main_menu`.
+            .add_systems(
+                Update,
+                handle_escape_input
+                    .run_if(in_state(crate::loading::AppState::Running))
+                    .before(crate::SimStage::Physics),
+            )
             .add_systems(
                 Update,
                 (

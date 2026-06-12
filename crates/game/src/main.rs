@@ -18,6 +18,7 @@ mod hud;
 mod input;
 mod loading;
 mod local_physics;
+mod main_menu;
 mod maneuver;
 mod map_view;
 mod navball;
@@ -27,6 +28,7 @@ mod perf_log;
 mod photo_mode;
 mod player_controller;
 mod reflection_probe;
+mod regime;
 mod relaunch;
 mod rendering;
 mod runway;
@@ -402,20 +404,24 @@ fn main() {
 
     // Spawn mode arrives as a CLI arg from `just game [mode]` (works in any
     // shell), falling back to the `THALOS_SPAWN` env var for a direct
-    // `cargo run`. Unset → ship orbit.
+    // `cargo run`. Unset / `menu` → boot to the start screen.
     let spawn_request = std::env::args()
         .nth(1)
         .filter(|arg| !arg.trim().is_empty())
         .or_else(|| std::env::var("THALOS_SPAWN").ok())
         .unwrap_or_default();
+    let request = spawn_request.trim().to_ascii_lowercase();
     // `just game shipyard` opens straight into the in-game ship editor: the
     // sim seeds the default parking orbit behind it (and stays paused while
     // the editor is open), so closing the editor drops into normal flight.
-    let open_shipyard = matches!(
-        spawn_request.trim().to_ascii_lowercase().as_str(),
-        "shipyard" | "editor" | "vab"
-    );
-    let situation = if open_shipyard {
+    let open_shipyard = matches!(request.as_str(), "shipyard" | "editor" | "vab");
+    let auto_run = spawn::AutoRun::from_env();
+    // Bare launch → start screen, behind the boot load of the placeholder
+    // parking-orbit world. `THALOS_AUTO_RUN` skips the menu (straight into
+    // orbit) so autonomous agents keep their one-shot launch flow.
+    let wants_menu = matches!(request.as_str(), "" | "menu" | "title");
+    let menu_boot = wants_menu && !open_shipyard && !auto_run.enabled;
+    let situation = if open_shipyard || wants_menu {
         SpawnSituation::ShipOrbit
     } else {
         SpawnSituation::from_request(&spawn_request)
@@ -480,6 +486,8 @@ fn main() {
                 "  Aircraft:        runway scenario on {} (placed once terrain loads)",
                 homeworld.name
             );
+        } else if menu_boot {
+            println!("  Start screen:    pick a scenario in-game (just game <mode> skips it)");
         } else {
             let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
             println!(
@@ -604,9 +612,16 @@ fn main() {
         // during `Loading` would gate off the very systems that complete the
         // load (see `OpenShipyardOnStart`).
         .insert_resource(shipyard_editor::OpenShipyardOnStart(open_shipyard))
+        // Where the boot load reveals to: the start screen for a bare
+        // launch, straight into the scenario otherwise.
+        .insert_resource(loading::LoadDestination(if menu_boot {
+            loading::AppState::MainMenu
+        } else {
+            loading::AppState::Running
+        }))
         // Every spawn situation starts paused (warp 0×); `THALOS_AUTO_RUN`
         // resumes to 1× as soon as the loading screen clears (for agents).
-        .insert_resource(spawn::AutoRun::from_env())
+        .insert_resource(auto_run)
         // The body the parking-orbit / on-foot scenarios anchor to, so the
         // destruction scenario menu can rebuild them on respawn.
         .insert_resource(spawn::Homeworld(homeworld_id))
@@ -640,6 +655,7 @@ fn main() {
         .add_plugins(PlayerControllerPlugin)
         .add_plugins(MapViewPlugin)
         .add_plugins(BridgePlugin)
+        .add_plugins(regime::RegimePlugin)
         .add_plugins(FuelPlugin)
         .add_plugins(staging::StagingPlugin)
         .add_plugins(EnginePlugin)
@@ -654,6 +670,7 @@ fn main() {
         .add_plugins(WarpToManeuverPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)
+        .add_plugins(main_menu::MainMenuPlugin)
         .add_plugins(SettingsMenuPlugin)
         .add_plugins(PerfLogPlugin)
         .add_plugins(ScenarioMenuPlugin)

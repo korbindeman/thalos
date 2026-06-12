@@ -147,20 +147,8 @@ pub(crate) fn spawn_player_ship(
     if sim.simulation.vessel_kind() == thalos_physics_canonical::types::VesselKind::Eva {
         return;
     }
-    let ron_path = PathBuf::from(situation.ship_blueprint_path());
-    let text = match std::fs::read_to_string(&ron_path) {
-        Ok(t) => t,
-        Err(e) => {
-            error!("Failed to read {}: {}", ron_path.display(), e);
-            return;
-        }
-    };
-    let blueprint = match ShipBlueprint::from_ron(&text) {
-        Ok(bp) => bp,
-        Err(e) => {
-            error!("Failed to parse {}: {}", ron_path.display(), e);
-            return;
-        }
+    let Some(blueprint) = load_blueprint_from_path(situation.ship_blueprint_path()) else {
+        return;
     };
 
     build_player_ship(
@@ -172,6 +160,28 @@ pub(crate) fn spawn_player_ship(
         &mut meshes,
         &mut std_materials,
     );
+}
+
+/// Load a ship blueprint RON from a workspace-relative path (e.g.
+/// `ships/meridian.ron`). Logs and returns `None` on read/parse failure.
+/// Shared by the startup spawn and the start screen's scenario starter
+/// ([`crate::main_menu`]), which swaps craft per chosen scenario.
+pub(crate) fn load_blueprint_from_path(path: &str) -> Option<ShipBlueprint> {
+    let ron_path = PathBuf::from(path);
+    let text = match std::fs::read_to_string(&ron_path) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to read {}: {}", ron_path.display(), e);
+            return None;
+        }
+    };
+    match ShipBlueprint::from_ron(&text) {
+        Ok(bp) => Some(bp),
+        Err(e) => {
+            error!("Failed to parse {}: {}", ron_path.display(), e);
+            None
+        }
+    }
 }
 
 /// Build the rendered + physics-registered player craft from a parsed

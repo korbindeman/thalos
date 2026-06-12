@@ -11,7 +11,7 @@
 //! polling system in `super::generation::poll_planet_install_tasks`
 //! drains those tasks each frame and finishes the install (GPU upload,
 //! impostors, halos, terrain, water). Each completed install ticks the
-//! [`crate::loading::LoadingProgress`] counter that drives the startup
+//! [`crate::loading::LoadingTracker`] step that drives the startup
 //! loading screen. Missing or stale bakes still panic with a message
 //! pointing at `just bake <name>` — just from the task instead of the
 //! main thread. Bodies with no authored terrain (`TerrainConfig::None`)
@@ -52,7 +52,7 @@ use super::types::{
     SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
-use crate::loading::LoadingProgress;
+use crate::loading::LoadingTracker;
 use crate::view::HideInShipView;
 use bevy::tasks::AsyncComputeTaskPool;
 
@@ -194,11 +194,12 @@ pub(super) fn spawn_bodies(
     scene_depth: Res<SceneDepthImage>,
     reference_clouds: Res<ReferenceClouds>,
     mut pending_installs: ResMut<PendingPlanetInstalls>,
-    mut loading_progress: ResMut<LoadingProgress>,
+    mut loading_tracker: ResMut<LoadingTracker>,
     mut world_state: WorldStateAssets,
 ) {
     let bodies = &sim.system.bodies;
     let initial_states = sim.ephemeris.states(Epoch::ZERO);
+    let mut bake_task_count = 0usize;
 
     // Shared meshes.
     let icon_mesh = meshes.add(Circle::new(1.0));
@@ -523,7 +524,7 @@ pub(super) fn spawn_bodies(
                 }
             });
 
-            loading_progress.total += 1;
+            bake_task_count += 1;
             pending_installs.0.push(PendingPlanetInstall {
                 body_id: body.id,
                 body_name: body.name.clone(),
@@ -873,9 +874,8 @@ pub(super) fn spawn_bodies(
         ..default()
     });
 
-    // Tell the loading screen the totals are final. Without this the
-    // `advance_to_running` system would fire on frame 0 (when
-    // `completed == total == 0` is trivially true) and the state would
-    // tick over before any bake had been dispatched.
-    loading_progress.seeded = true;
+    // Seed the bake-install step's total now that every task is dispatched.
+    // The tracker treats an unseeded counter as incomplete, so the loading
+    // screen can't tick over on frame 0 before this runs.
+    loading_tracker.set_total(crate::loading::step::BODIES, bake_task_count);
 }

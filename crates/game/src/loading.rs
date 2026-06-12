@@ -1,14 +1,40 @@
-//! Startup loading screen — fullscreen bevy_ui overlay shown from the
-//! very first frame until every procedural body's bake is installed.
+//! Startup loading screen + the flexible loading-step tracker.
 //!
 //! Acts as a gate, not just a decoration: the [`AppState::Loading`] state
-//! is the default; [`AppState::Running`] is entered exactly once, when
-//! `spawn_bodies` has seeded the bake-task totals and every task has
-//! finished its main-thread install (GPU upload + entity spawn). Covering
-//! the very first frame also masks the brief swapchain-uninitialised
-//! magenta flash some Vulkan / Metal drivers emit before the first real
-//! render — keeping the loading screen up across the transition means the
-//! user never sees an unpainted swapchain.
+//! is the default; the screen stays up until every step registered in
+//! [`LoadingTracker`] reports complete, then transitions to the
+//! [`LoadDestination`] (the start screen for a bare launch, straight into
+//! [`AppState::Running`] for `just game <scenario>`). Covering the very
+//! first frame also masks the brief swapchain-uninitialised magenta flash
+//! some Vulkan / Metal drivers emit before the first real render.
+//!
+//! # The tracker
+//!
+//! Loading work is declared as **steps** ([`LoadingTracker::begin`]): each
+//! has an id, a display label, a weight (its share of the progress bar),
+//! and either counted (`n / total`) or binary completion. Producer systems
+//! update *their* step by id and never see each other:
+//!
+//! - [`step::BODIES`] — per-body bake install. Total seeded by
+//!   `rendering::spawn::spawn_bodies`, advanced by
+//!   `rendering::generation::poll_planet_install_tasks` (detail = the body
+//!   name just installed).
+//! - [`step::TERRAIN`] — ground-LOD terrain for the initially-wanted
+//!   bodies. Completed by
+//!   `rendering::terrain_residency::initial_residency_loading_gate`.
+//! - [`step::PLACEMENT`] — deferred terrain-aware craft placement
+//!   (descents via `spawn::refine_descent_spawn`, runway scenarios via
+//!   `runway::finish_runway_spawn`). Registered only for scenarios with a
+//!   deferred placement; the reveal now waits for it, so the first visible
+//!   frame has the craft in its real scenario state.
+//! - [`step::SETTLE`] — tile streaming settled under the view
+//!   (`crate::surface_settle`). Registered only for the parked runway
+//!   start.
+//!
+//! Updates to an unregistered step are no-ops, so producers don't need to
+//! know which scenario is loading. A load can be re-armed at runtime
+//! (`begin` again + `NextState(AppState::Loading)`) — the start screen's
+//! runway scenarios do exactly that.
 //!
 //! Visual style follows `hud::theme` (same Fira Code, accent gold,
 //! warm-black panel fill) so the screen feels like part of the same UI
@@ -16,49 +42,239 @@
 
 use bevy::prelude::*;
 
+use crate::spawn::SpawnSituation;
+
 /// Top-level app state. Starts in [`Loading`] so the very first frame is
-/// covered by the loading screen. Transitions to [`Running`] once
-/// [`LoadingProgress`] reports `completed >= total` and the totals have
-/// been seeded.
-#[derive(States, Default, Clone, Eq, PartialEq, Debug, Hash)]
+/// covered by the loading screen; finishes into [`MainMenu`] (bare launch)
+/// or [`Running`] (`just game <scenario>`), per [`LoadDestination`]. The
+/// start screen re-enters [`Loading`] for scenarios that need a deferred
+/// placement pass (runway).
+#[derive(States, Default, Clone, Copy, Eq, PartialEq, Debug, Hash)]
 pub enum AppState {
     #[default]
     Loading,
+    MainMenu,
     Running,
 }
 
-/// Shared counter driving the progress bar. `total` is seeded by
-/// `rendering::spawn::spawn_bodies` once it has dispatched one async
-/// bake-load task per procedural body and set `seeded = true`.
-/// `completed` is incremented by `rendering::generation::
-/// poll_planet_install_tasks` each time an install finishes on the main
-/// thread.
-///
-/// The transition to `AppState::Running` also waits on
-/// `initial_terrain_done`. Bake installation only spawns each body's
-/// impostor; the ground-LOD terrain entity (the thing the player
-/// actually stands on) is spawned lazily by
-/// `rendering::terrain_residency`. Holding the loading screen until
-/// that residency has fired ensures the player's first frame in
-/// `Running` already has a `BodyTerrain` under their feet, so the
-/// visibility-swap system at `4 × radius` does not briefly fall back
-/// to the flat impostor billboard.
-#[derive(Resource, Default)]
-pub struct LoadingProgress {
-    pub total: usize,
-    pub completed: usize,
-    /// `true` once `spawn_bodies` has counted every procedural body. The
-    /// state transition needs this so it does not fire on frame 0 when
-    /// `total == completed == 0` is the trivially-satisfied initial state.
-    pub seeded: bool,
-    /// `true` once the initial-wanted bodies in `BodyTerrainResidency`
-    /// have terrain entities spawned (or have no authored terrain).
-    /// Flipped by `terrain_residency::initial_residency_loading_gate`.
-    pub initial_terrain_done: bool,
-    /// Human-readable line under the progress bar — the most recently
-    /// installed body's name.
-    pub label: String,
+/// Where the current loading pass goes when it completes. Inserted by
+/// `main.rs` (start screen for a bare launch, `Running` otherwise); the
+/// start screen sets it to `Running` before re-entering `Loading`.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct LoadDestination(pub AppState);
+
+impl Default for LoadDestination {
+    fn default() -> Self {
+        Self(AppState::Running)
+    }
 }
+
+/// Well-known step ids. Plain strings so future systems can add their own
+/// steps without touching this module.
+pub mod step {
+    /// Per-body bake load + install (counted).
+    pub const BODIES: &str = "bodies";
+    /// Ground-LOD terrain spawned for the initially-wanted bodies.
+    pub const TERRAIN: &str = "terrain";
+    /// Deferred terrain-aware craft placement (descents, runway).
+    pub const PLACEMENT: &str = "placement";
+    /// Tile streaming settled under the view (parked runway).
+    pub const SETTLE: &str = "settle";
+}
+
+/// Descriptor passed to [`LoadingTracker::begin`].
+pub struct StepDesc {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Relative share of the overall progress bar.
+    pub weight: f32,
+}
+
+impl StepDesc {
+    pub const fn new(id: &'static str, label: &'static str, weight: f32) -> Self {
+        Self { id, label, weight }
+    }
+}
+
+/// One registered unit of loading work.
+pub struct LoadStep {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Mutable sub-label shown after the step label (body name, LOD…).
+    pub detail: String,
+    weight: f32,
+    /// Counted steps: progress is `done / total`. `total` stays `None`
+    /// until the producer seeds it, so an unseeded counter is never
+    /// trivially complete (`0 >= 0`).
+    done: usize,
+    total: Option<usize>,
+    /// Smooth 0..1 progress for binary steps that can estimate it
+    /// (settle). Counted steps derive it from `done / total`.
+    fraction: f32,
+    complete: bool,
+}
+
+impl LoadStep {
+    fn progress(&self) -> f32 {
+        if self.complete {
+            return 1.0;
+        }
+        match self.total {
+            Some(total) if total > 0 => (self.done as f32 / total as f32).clamp(0.0, 1.0),
+            _ => self.fraction.clamp(0.0, 1.0),
+        }
+    }
+
+    /// `"3/9"`-style counter for counted steps, empty otherwise.
+    fn counter(&self) -> Option<String> {
+        self.total.map(|total| format!("{}/{}", self.done, total))
+    }
+}
+
+/// Declarative loading-step registry driving the loading screen and the
+/// `Loading → next` transition.
+///
+/// **Sole registrar:** [`register_boot_steps`] at startup and the start
+/// screen's scenario starter ([`crate::main_menu`]) at runtime; both go
+/// through [`begin`](Self::begin). Producer systems only update steps.
+#[derive(Resource, Default)]
+pub struct LoadingTracker {
+    steps: Vec<LoadStep>,
+    /// `true` once `begin` has registered the step set for this load —
+    /// guards the empty-on-frame-0 tracker from reading as complete.
+    sealed: bool,
+}
+
+impl LoadingTracker {
+    /// Reset the tracker and register the full step set for one load.
+    pub fn begin(&mut self, steps: impl IntoIterator<Item = StepDesc>) {
+        self.steps = steps
+            .into_iter()
+            .map(|desc| LoadStep {
+                id: desc.id,
+                label: desc.label,
+                detail: String::new(),
+                weight: desc.weight.max(f32::EPSILON),
+                done: 0,
+                total: None,
+                fraction: 0.0,
+                complete: false,
+            })
+            .collect();
+        self.sealed = true;
+    }
+
+    fn get_mut(&mut self, id: &str) -> Option<&mut LoadStep> {
+        self.steps.iter_mut().find(|s| s.id == id)
+    }
+
+    pub fn has_step(&self, id: &str) -> bool {
+        self.steps.iter().any(|s| s.id == id)
+    }
+
+    pub fn is_step_complete(&self, id: &str) -> bool {
+        self.steps.iter().any(|s| s.id == id && s.complete)
+    }
+
+    /// Seed a counted step's total. Completes immediately when `done`
+    /// already covers it (including `total == 0`).
+    pub fn set_total(&mut self, id: &str, total: usize) {
+        if let Some(s) = self.get_mut(id) {
+            s.total = Some(total);
+            s.complete = s.done >= total;
+        }
+    }
+
+    /// Advance a counted step; completes it when `done` reaches the total.
+    pub fn advance(&mut self, id: &str, n: usize) {
+        if let Some(s) = self.get_mut(id) {
+            s.done += n;
+            if let Some(total) = s.total {
+                s.complete = s.done >= total;
+            }
+        }
+    }
+
+    pub fn set_detail(&mut self, id: &str, detail: impl Into<String>) {
+        if let Some(s) = self.get_mut(id) {
+            s.detail = detail.into();
+        }
+    }
+
+    /// Smooth progress estimate for a binary step (no completion side
+    /// effect — call [`complete`](Self::complete) for that).
+    pub fn set_fraction(&mut self, id: &str, fraction: f32) {
+        if let Some(s) = self.get_mut(id) {
+            s.fraction = fraction.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn complete(&mut self, id: &str) {
+        if let Some(s) = self.get_mut(id) {
+            s.complete = true;
+        }
+    }
+
+    /// Weighted overall progress in 0..1.
+    pub fn overall(&self) -> f32 {
+        let total_weight: f32 = self.steps.iter().map(|s| s.weight).sum();
+        if total_weight <= 0.0 {
+            return if self.sealed { 1.0 } else { 0.0 };
+        }
+        self.steps
+            .iter()
+            .map(|s| s.weight * s.progress())
+            .sum::<f32>()
+            / total_weight
+    }
+
+    /// First incomplete step, in registration order.
+    pub fn active_step(&self) -> Option<&LoadStep> {
+        self.steps.iter().find(|s| !s.complete)
+    }
+
+    /// `(1-based index of the active step, step count)` for the
+    /// `step i/N` readout.
+    pub fn step_position(&self) -> (usize, usize) {
+        let total = self.steps.len();
+        let index = self
+            .steps
+            .iter()
+            .position(|s| !s.complete)
+            .map(|i| i + 1)
+            .unwrap_or(total);
+        (index, total)
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.sealed && self.steps.iter().all(|s| s.complete)
+    }
+}
+
+/// Build the step set for loading into `situation`. `boot` includes the
+/// world-load steps (bake installs + initial terrain), which only happen
+/// once per process; a runtime re-load (start screen → runway) passes
+/// `boot = false` and gets only the scenario steps.
+pub fn steps_for(situation: SpawnSituation, boot: bool) -> Vec<StepDesc> {
+    let mut steps = Vec::new();
+    if boot {
+        steps.push(StepDesc::new(step::BODIES, "Celestial bodies", 3.0));
+        steps.push(StepDesc::new(step::TERRAIN, "Surface terrain", 1.0));
+    }
+    if situation.has_deferred_placement() {
+        steps.push(StepDesc::new(step::PLACEMENT, "Placing craft", 1.0));
+    }
+    if matches!(situation, SpawnSituation::Runway) {
+        steps.push(StepDesc::new(step::SETTLE, "Settling terrain", 2.0));
+    }
+    steps
+}
+
+/// Backstop on the whole loading pass, measured per `Loading` entry. The
+/// per-gate timeouts in `surface_settle` cover the settle wait; this
+/// covers everything else (a stalled placement, a bake task that never
+/// completes) so the screen reveals with a warning rather than hanging.
+const LOADING_HARD_TIMEOUT_S: f64 = 120.0;
 
 #[derive(Component)]
 struct LoadingScreenRoot;
@@ -69,21 +285,33 @@ struct LoadingProgressBarFill;
 #[derive(Component)]
 struct LoadingStatusText;
 
+#[derive(Component)]
+struct LoadingStepCounterText;
+
 pub struct LoadingScreenPlugin;
 
 impl Plugin for LoadingScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<AppState>()
-            .init_resource::<LoadingProgress>()
-            .add_systems(Startup, spawn_loading_screen)
+            .init_resource::<LoadingTracker>()
+            .init_resource::<LoadDestination>()
+            // Startup (not just OnEnter) so the screen exists on the very
+            // first rendered frame; OnEnter covers runtime re-loads.
+            .add_systems(Startup, (register_boot_steps, spawn_loading_screen))
+            .add_systems(OnEnter(AppState::Loading), spawn_loading_screen)
             .add_systems(
                 Update,
-                (update_loading_progress_ui, advance_to_running)
+                (update_loading_progress_ui, finish_loading)
                     .chain()
                     .run_if(in_state(AppState::Loading)),
             )
             .add_systems(OnExit(AppState::Loading), despawn_loading_screen);
     }
+}
+
+/// Register the boot load's steps from the startup [`SpawnSituation`].
+fn register_boot_steps(situation: Res<SpawnSituation>, mut tracker: ResMut<LoadingTracker>) {
+    tracker.begin(steps_for(*situation, true));
 }
 
 // Visual palette — kept local to this module so the loading screen can
@@ -95,11 +323,20 @@ const TRACK_BG: Color = Color::srgba(0.085, 0.080, 0.070, 1.0);
 const TRACK_BORDER: Color = Color::srgba(0.46, 0.43, 0.36, 0.66);
 const ACCENT: Color = Color::srgba(0.95, 0.70, 0.28, 1.0);
 const TEXT_DIM: Color = Color::srgba(0.62, 0.60, 0.53, 1.0);
+const TEXT_FAINT: Color = Color::srgba(0.62, 0.60, 0.53, 0.55);
 
 const PROGRESS_BAR_WIDTH: f32 = 360.0;
 const PROGRESS_BAR_HEIGHT: f32 = 14.0;
 
-fn spawn_loading_screen(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn spawn_loading_screen(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    existing: Query<(), With<LoadingScreenRoot>>,
+) {
+    // Idempotent: Startup and OnEnter(Loading) both fire on boot.
+    if !existing.is_empty() {
+        return;
+    }
     let font: Handle<Font> = asset_server.load("fonts/FiraCode-Regular.ttf");
 
     commands
@@ -120,9 +357,10 @@ fn spawn_loading_screen(mut commands: Commands, asset_server: Res<AssetServer>) 
                 ..default()
             },
             BackgroundColor(SCREEN_BG),
-            // Sits above every other UI element. Pause menu uses 100,
-            // HUD panels use the default (0); 1000 is well clear of both
-            // so even a misbehaving overlay can't poke through.
+            // Sits above every other UI element. Pause menu uses 100, the
+            // start screen 900, HUD panels the default (0); 1000 is well
+            // clear of all of them so even a misbehaving overlay can't
+            // poke through.
             GlobalZIndex(1000),
             Name::new("LoadingScreen"),
         ))
@@ -173,13 +411,12 @@ fn spawn_loading_screen(mut commands: Commands, asset_server: Res<AssetServer>) 
                 ));
             });
 
-            // Status text under the bar — body name being installed, or
-            // a count fallback while no body has finished yet.
+            // Status text under the bar — the active step's label + detail.
             root.spawn((
                 LoadingStatusText,
-                Text::new("Loading…"),
+                Text::new("Preparing…"),
                 TextFont {
-                    font,
+                    font: font.clone(),
                     font_size: 13.0,
                     ..default()
                 },
@@ -187,32 +424,56 @@ fn spawn_loading_screen(mut commands: Commands, asset_server: Res<AssetServer>) 
                 TextLayout::new_with_justify(Justify::Center),
                 Name::new("LoadingStatusText"),
             ));
+
+            // Faint `step i/N` counter under the status line.
+            root.spawn((
+                LoadingStepCounterText,
+                Text::new(""),
+                TextFont {
+                    font,
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(TEXT_FAINT),
+                TextLayout::new_with_justify(Justify::Center),
+                Name::new("LoadingStepCounter"),
+            ));
         });
 }
 
 fn update_loading_progress_ui(
-    progress: Res<LoadingProgress>,
+    tracker: Res<LoadingTracker>,
     mut fill_q: Query<&mut Node, With<LoadingProgressBarFill>>,
-    mut text_q: Query<&mut Text, With<LoadingStatusText>>,
+    mut text_q: Query<&mut Text, (With<LoadingStatusText>, Without<LoadingStepCounterText>)>,
+    mut counter_q: Query<&mut Text, (With<LoadingStepCounterText>, Without<LoadingStatusText>)>,
 ) {
     if let Ok(mut node) = fill_q.single_mut() {
-        let ratio = if progress.total == 0 {
-            0.0
-        } else {
-            (progress.completed as f32 / progress.total as f32).clamp(0.0, 1.0)
-        };
-        node.width = Val::Percent(ratio * 100.0);
+        node.width = Val::Percent(tracker.overall().clamp(0.0, 1.0) * 100.0);
     }
     if let Ok(mut text) = text_q.single_mut() {
-        let new_text = if !progress.seeded {
-            "Preparing…".to_string()
-        } else if progress.label.is_empty() {
-            format!("Loading {} / {}", progress.completed, progress.total)
+        let new_text = match tracker.active_step() {
+            Some(step) => {
+                let mut line = step.label.to_string();
+                if let Some(counter) = step.counter() {
+                    line.push_str(&format!("  {counter}"));
+                }
+                if !step.detail.is_empty() {
+                    line.push_str(&format!("  ·  {}", step.detail));
+                }
+                line
+            }
+            None => "Preparing…".to_string(),
+        };
+        if text.0 != new_text {
+            **text = new_text;
+        }
+    }
+    if let Ok(mut text) = counter_q.single_mut() {
+        let (index, total) = tracker.step_position();
+        let new_text = if total > 1 {
+            format!("step {index} / {total}")
         } else {
-            format!(
-                "{} / {}  ·  {}",
-                progress.completed, progress.total, progress.label
-            )
+            String::new()
         };
         if text.0 != new_text {
             **text = new_text;
@@ -220,30 +481,34 @@ fn update_loading_progress_ui(
     }
 }
 
-fn advance_to_running(
-    progress: Res<LoadingProgress>,
-    settle: Res<crate::surface_settle::SurfaceSettle>,
+/// Transition out of `Loading` once every registered step completes (or
+/// the hard timeout fires), into the configured [`LoadDestination`].
+fn finish_loading(
+    time: Res<Time<Real>>,
+    mut elapsed_s: Local<f64>,
+    tracker: Res<LoadingTracker>,
+    dest: Res<LoadDestination>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
-    // Wait for `spawn_bodies` to have seeded the totals — otherwise the
-    // first frame's trivially-satisfied `0 >= 0` would fire the
-    // transition before any work has started. Also wait for the initial
-    // residency planner pass to spawn the ground-LOD terrain entity for
-    // the body the player is starting on; otherwise the first `Running`
-    // frame falls back to the flat impostor billboard until the lazy
-    // residency executor catches up.
-    //
-    // For near-surface spawns (runway, descents, EVA) also wait for the
-    // tile streamer to settle the ground at the site — otherwise the first
-    // visible frame shows tiles popping in and the runway pad heaving up to
-    // the strip. See `crate::surface_settle`.
-    if progress.seeded
-        && progress.completed >= progress.total
-        && progress.initial_terrain_done
-        && settle.ready()
-    {
-        next_state.set(AppState::Running);
+    *elapsed_s += time.delta_secs_f64();
+    let timed_out = *elapsed_s >= LOADING_HARD_TIMEOUT_S;
+    if !tracker.is_complete() && !timed_out {
+        return;
     }
+    if timed_out && !tracker.is_complete() {
+        let stuck = tracker
+            .active_step()
+            .map(|s| s.label)
+            .unwrap_or("(unregistered)");
+        warn!(
+            "loading hard-timeout after {:.0} s — revealing with step '{}' incomplete",
+            *elapsed_s, stuck
+        );
+    }
+    // Reset for a potential later re-entry into `Loading` (the Local
+    // persists across state transitions).
+    *elapsed_s = 0.0;
+    next_state.set(dest.0);
 }
 
 fn despawn_loading_screen(mut commands: Commands, roots: Query<Entity, With<LoadingScreenRoot>>) {

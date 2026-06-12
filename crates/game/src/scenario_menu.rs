@@ -332,8 +332,12 @@ fn handle_button_clicks(
     }
 }
 
+/// Reset the craft and seat it into `situation` in place. Shared by the
+/// destruction picker's buttons and the start screen's same-craft scenario
+/// starts ([`crate::main_menu`]); craft-swapping starts (cruise, runway) go
+/// through [`crate::relaunch`] instead.
 #[allow(clippy::too_many_arguments)]
-fn respawn_into(
+pub(crate) fn respawn_into(
     situation: SpawnSituation,
     commands: &mut Commands,
     sim: &mut SimulationState,

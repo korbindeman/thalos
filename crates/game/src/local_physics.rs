@@ -8,10 +8,7 @@ use thalos_body_render::HeightSource;
 use thalos_physics_canonical::body_centered::{
     BodyCenteredState, body_centered_to_inertial, inertial_to_body_centered,
 };
-use thalos_physics_canonical::body_fixed::body_fixed_pose_from_inertial;
-use thalos_physics_canonical::canonical::{
-    AuthorityMode, BodyFixedPose, EntityRef, TranslationalState,
-};
+use thalos_physics_canonical::canonical::{AuthorityMode, TranslationalState};
 use thalos_physics_canonical::surface_local::{
     SurfaceAnchor, SurfaceLocalFrame, SurfaceLocalState, inertial_to_surface_local, reanchor,
     surface_local_acceleration, surface_local_to_inertial,
@@ -27,7 +24,7 @@ use thalos_physics_local::{
     LocalCraftColliderPrimitives, LocalCraftSpawn, LocalPhysicsPlugin, LocalPrimitiveCollider,
     LocalPrimitiveShape,
     TerrainColliderPatch, craft_contacts_terrain, spawn_local_craft_body,
-    spawn_terrain_collider_patch, stable_contact_reached,
+    spawn_terrain_collider_patch,
 };
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
@@ -37,7 +34,6 @@ use thalos_input::game::GameInputIntent;
 use thalos_world::BodyId;
 
 use crate::SimStage;
-use crate::bridge::WarpLimits;
 use crate::debug::DebugMode;
 use crate::fuel::ThrottleState;
 use crate::player_controller::{EvaMode, PlayerControllerBody, PlayerControllerState};
@@ -53,9 +49,6 @@ pub const PHYSICS_QUERY_TILE_LOD_M: f32 = 0.5;
 
 const THALOS_NAME: &str = "Thalos";
 const DEBUG_DROP_KEY: KeyCode = KeyCode::F9;
-/// Commanded-throttle threshold above which a landed (`BodyFixed`) ship is
-/// released back to live physics by [`release_landed_ship_on_throttle`].
-const LANDED_THROTTLE_RELEASE: f64 = 0.001;
 
 /// Position discontinuity above which a take-translation handoff is treated
 /// as a bug in debug builds. A healthy handoff residual is the distance
@@ -97,13 +90,18 @@ impl Plugin for GameLocalPhysicsPlugin {
                 Update,
                 (
                     debug_surface_drop,
-                    release_landed_ship_on_throttle,
                     spawn_player_avian_body,
                     rebase_bubble_to_dominant_body,
                     attach_terrain_patch_when_close,
                     detach_terrain_patch_when_far,
                     compute_avian_authority,
-                    manage_authority,
+                    // Phase A3 port #1: the single authority executor,
+                    // applying `CraftRegimeState::expected_authority`. It
+                    // replaced `manage_authority`,
+                    // `release_landed_ship_on_throttle`, and
+                    // `collapse_or_constrain_warp` (see `docs/regimes.md`
+                    // and `crate::regime::apply_regime_authority`).
+                    crate::regime::apply_regime_authority,
                     sync_avian_time,
                     snap_avian_from_canonical,
                     apply_local_forces,
@@ -127,7 +125,6 @@ impl Plugin for GameLocalPhysicsPlugin {
                     reanchor_surface_frame,
                     maintain_terrain_patch,
                     sync_terrain_collider_pose,
-                    collapse_or_constrain_warp,
                 )
                     .chain()
                     .in_set(SimStage::Physics)
@@ -179,10 +176,13 @@ pub enum AvianRole {
 
 /// Per-frame Avian role + previous-frame role for edge detection.
 ///
-/// Computed once at the top of the local-physics chain by
-/// [`compute_avian_authority`] from canonical state + throttle + terrain
-/// collider presence, so every downstream system reads a single
-/// authoritative value instead of recomputing the predicate.
+/// Since the A3 port (`docs/regimes.md`) this is a **projection of the
+/// per-craft `CraftRegime` record**: [`compute_avian_authority`] derives the
+/// role from the record's owner/clock fields (the classification itself
+/// lives in the unit-tested `thalos_physics_canonical::regime` resolver),
+/// keeping this resource as the distribution vehicle every backend-side
+/// system reads — including the `previous_role` edge the handoff snap
+/// depends on.
 #[derive(Resource, Default, Debug, Clone, Copy, Reflect)]
 #[reflect(Resource)]
 pub struct AvianAuthority {
@@ -213,7 +213,8 @@ impl AvianAuthority {
 }
 
 /// Observability for the canonical↔Avian translation handoff. Recorded at
-/// each authority transition by [`manage_authority`] (direction + time) and
+/// each authority transition by the authority executor
+/// ([`crate::regime::apply_regime_authority`], direction + time) and
 /// [`readback_local_craft`] (the residual measured when Avian first takes
 /// translation). Reflect-registered so an agent can read it over BRP without
 /// attaching a debugger.
@@ -244,120 +245,31 @@ pub struct AvianHandoffDiagnostics {
     pub velocity_residual_m_s: f64,
 }
 
-/// Resource-aware shim that unpacks ECS state and delegates to
-/// [`avian_role_from_inputs`]. Split for unit-testability.
-fn avian_role_for(
-    sim: &SimulationState,
-    throttle: &ThrottleState,
-    active: &ActiveLocalBubble,
-) -> AvianRole {
-    let terrain_attached = active
-        .bubble
-        .as_ref()
-        .and_then(|b| b.terrain_entity)
-        .is_some();
-    avian_role_from_inputs(
-        sim.simulation.warp.speed(),
-        sim.simulation.authority(),
-        throttle.effective,
-        terrain_attached,
-        craft_in_atmosphere(sim),
-    )
-}
-
-/// True when the craft sits below the dominant body's Kármán line — i.e. inside
-/// the atmosphere shell, where aerodynamic forces act.
+/// Project the per-craft `CraftRegime` record onto [`AvianAuthority`]
+/// (A3 port #2, `docs/regimes.md`).
 ///
-/// Uses the cheap mean-radius altitude (`|r| − radius`); the Kármán line sits
-/// far above terrain relief, so a per-pixel terrain-height query is unnecessary
-/// here. Returns false for airless bodies (no `terrestrial_atmosphere`, or a
-/// zero Kármán line).
-fn craft_in_atmosphere(sim: &SimulationState) -> bool {
-    let body_id = sim.simulation.dominant_body();
-    let body = &sim.system.bodies[body_id];
-    let Some(atmosphere) = body.terrestrial_atmosphere.as_ref() else {
-        return false;
-    };
-    if atmosphere.karman_line_m <= 0.0 {
-        return false;
-    }
-    let body_state = body_state_for(sim, body_id);
-    let craft = sim.simulation.craft_state();
-    let altitude_m = (craft.translation.position - body_state.position).length() - body.radius_m;
-    altitude_m < atmosphere.karman_line_m as f64
-}
-
-/// Pure predicate: classify Avian's role from raw inputs.
-///
-/// - **Warp ≠ 1×** → `Paused`. Time-stepped integration of central-force
-///   gravity blows up at large `dt`, and we don't run rotation under warp
-///   either (the existing convention zeroes ω at warp entry to avoid a
-///   tap-rotate-then-warp leaving the ship spinning out).
-/// - **`BodyFixed` authority** → `Paused`. Landed pose is analytic.
-/// - **Throttle active, terrain collider attached, OR inside the atmosphere
-///   shell** → `Full`. We need Avian to integrate the non-gravity force
-///   (thrust, contact, aerodynamic drag/lift) plus gravity. Terrain-collider
-///   presence flags "contact is physically possible here"; `in_atmosphere`
-///   flags "aero forces act here" — and crucially makes Avian own translation
-///   across the *whole* atmospheric column (Kármán line down), not only inside
-///   the ~20 km terrain-collider band, so reentry drag is applied the entire
-///   way down instead of the ship Kepler-coasting drag-free through the upper
-///   atmosphere.
-/// - **Otherwise (coasting in vacuum at 1× warp)** → `AttitudeOnly`. Avian
-///   keeps integrating rotation and contact; Kepler owns translation, so
-///   AP/PE don't drift across pause/unpause cycles.
-fn avian_role_from_inputs(
-    warp_speed: f64,
-    authority: AuthorityMode,
-    throttle_effective: f64,
-    terrain_attached: bool,
-    in_atmosphere: bool,
-) -> AvianRole {
-    let near_one_x = (warp_speed - 1.0).abs() <= f64::EPSILON;
-    if !near_one_x {
-        return AvianRole::Paused;
-    }
-    if matches!(authority, AuthorityMode::BodyFixed { .. }) {
-        return AvianRole::Paused;
-    }
-    let thrust_active = throttle_effective > 0.0;
-    if thrust_active || terrain_attached || in_atmosphere {
-        AvianRole::Full
-    } else {
-        AvianRole::AttitudeOnly
-    }
-}
-
-/// Terrain colliders are the expensive near-ground contact path, not the
-/// general "local bubble exists" signal. Build and refresh them only once the
-/// altitude warp gate has forced the craft into the live 1x zone.
-fn terrain_colliders_allowed_by_warp(sim: &SimulationState, limits: &WarpLimits) -> bool {
-    let warp = &sim.simulation.warp;
-    terrain_colliders_allowed_by_warp_inputs(warp.speed(), warp.levels(), limits.max_level)
-}
-
-fn terrain_colliders_allowed_by_warp_inputs(
-    warp_speed: f64,
-    warp_levels: &[f64],
-    max_level: usize,
-) -> bool {
-    let Some(one_x_index) = warp_levels
-        .iter()
-        .position(|&speed| (speed - 1.0).abs() <= f64::EPSILON)
-    else {
-        return false;
-    };
-    (warp_speed - 1.0).abs() <= f64::EPSILON && max_level <= one_x_index
-}
-
+/// The role *classification* lives in the resolver
+/// (`thalos_physics_canonical::regime::resolve` — warp/BodyFixed →
+/// clock off, thrust/terrain-collider/atmosphere → Backend translation,
+/// vacuum coast → Backend rotation only); this system only maps the
+/// record's owner/clock fields onto the legacy three-way role and rolls
+/// the `previous_role` edge. Before the first record exists (the frames
+/// between bubble spawn and the resolver's component insert) the role
+/// holds at the `Paused` default — every scenario spawns warp-paused, so
+/// the classifications agree.
 fn compute_avian_authority(
-    sim: Res<SimulationState>,
-    throttle: Res<ThrottleState>,
     active: Res<ActiveLocalBubble>,
     mut authority: ResMut<AvianAuthority>,
+    craft_q: Query<&crate::regime::CraftRegimeState, With<LocalCraftBody>>,
 ) {
+    let role = active
+        .bubble
+        .as_ref()
+        .and_then(|bubble| craft_q.get(bubble.craft_entity).ok())
+        .map(|state| crate::regime::legacy_avian_role(&state.regime))
+        .unwrap_or(AvianRole::Paused);
     authority.previous_role = authority.role;
-    authority.role = avian_role_for(&sim, &throttle, &active);
+    authority.role = role;
 }
 
 fn hard_pause_avian_time(clock: Res<SimClock>, mut physics_time: ResMut<Time<Physics>>) {
@@ -690,8 +602,6 @@ fn spawn_player_avian_body(
         center_surface_body_m: DVec3::ZERO,
         basis: thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y),
         patch_half_extent_m: 0.0,
-        stable_contact_s: 0.0,
-        stable_landed: false,
         terrain_built_at_revision: 0,
     });
     info!(
@@ -774,125 +684,12 @@ fn rebase_bubble_to_dominant_body(
     bubble.center_dir_body = DVec3::Y;
     bubble.center_surface_body_m = DVec3::ZERO;
     bubble.basis = thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y);
-    bubble.stable_contact_s = 0.0;
-    bubble.stable_landed = false;
     let old_body_id = bubble.body_id;
     bubble.body_id = new_body_id;
     info!(
         "rebased local bubble across SOI transit: body_id {} -> {}",
         old_body_id, new_body_id
     );
-}
-
-/// Keep `AuthorityMode` aligned with [`AvianAuthority::owns_translation`].
-///
-/// `OnRails` is the default; we transition to `LocalRigidBody` only when
-/// the role is [`AvianRole::Full`] — i.e., a non-gravity force is in play
-/// (thrust, terrain contact possible) at 1× warp. Coasting in vacuum stays
-/// `OnRails` so the Kepler propagator owns translation and AP/PE do not
-/// drift across pause/unpause cycles or just from elapsed sim time. Note
-/// that [`AvianRole::AttitudeOnly`] also stays `OnRails` — Avian is still
-/// integrating rotation, but translation is canonical's responsibility.
-///
-/// `BodyFixed`, `WarpIntegrated`, and `Docked` are owned by other systems
-/// (landed-pose evaluation, warp integrators, docking) and left alone.
-///
-/// Grounded EVA is special-cased ahead of the match: it is pinned to
-/// `LocalRigidBody` so warping on foot doesn't release it to `OnRails` and
-/// Kepler-coast its surface state into the ground (which tripped the
-/// collision warp-reset). See the inline comment for the failure mode.
-///
-/// Previously this function gated solely on warp level: at 1× warp, Avian
-/// always owned; warping up handed translation back to Kepler. The result
-/// was visible orbital drift any time the player paused/unpaused
-/// mid-orbit, because Avian was integrating central-force gravity for a
-/// ship that wasn't actually doing anything that needed an integrator.
-fn manage_authority(
-    active: Res<ActiveLocalBubble>,
-    authority: Res<AvianAuthority>,
-    eva_mode: Res<EvaMode>,
-    contact_graph: Res<ContactGraph>,
-    config: Res<LocalBubbleConfig>,
-    throttle: Res<ThrottleState>,
-    mut sim: ResMut<SimulationState>,
-    mut diagnostics: ResMut<AvianHandoffDiagnostics>,
-    craft_q: Query<(&LinearVelocity, &AngularVelocity), With<LocalCraftBody>>,
-) {
-    let Some(bubble) = active.bubble.as_ref() else {
-        return;
-    };
-
-    // Grounded EVA co-rotates with the surface, so it must never be
-    // Kepler-coasted. Pin it to `LocalRigidBody`, whose `Simulation::step` arm
-    // only advances sim-time (no coast, no surface-collision warp reset) and
-    // leaves translation to `step_eva_controller` + `readback_local_craft`.
-    //
-    // Without this pin, time-warp breaks on foot: warping flips the Avian role
-    // to `Paused`, the match below releases translation to `OnRails`, and the
-    // next `step()` coasts the player's slow surface-velocity state — a
-    // sub-surface trajectory — until `coast_segment` reports a collision and
-    // `warp.reset_immediate()` snaps warp back to 1×. (The altitude gate skips
-    // grounded EVA, so unlike a ship it isn't capped near terrain; nothing else
-    // stops the coast.) `LocalRigidBody` rather than `BodyFixed` because EVA can
-    // walk, which would leave an analytic `BodyFixed` pose stale.
-    if sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded() {
-        if !matches!(
-            sim.simulation.authority(),
-            AuthorityMode::LocalRigidBody { .. }
-        ) {
-            sim.simulation
-                .transition_authority(AuthorityMode::LocalRigidBody {
-                    bubble: bubble.id,
-                    root_entity: EntityRef(bubble.craft_entity.to_bits()),
-                });
-        }
-        return;
-    }
-
-    // Landed ships should behave like landed EVA under time warp: fixed to the
-    // rotating surface, not released to an inertial Kepler coast. If the player
-    // requests warp while the ship is already in quiet terrain contact, collapse
-    // to the same analytic `BodyFixed` authority before the generic
-    // `LocalRigidBody -> OnRails` release below can run. In freefall (no
-    // terrain contact, moving too fast, or throttle active) ships and EVA stay
-    // ordinary ballistic craft.
-    if sim.simulation.vessel_kind() == VesselKind::Ship
-        && sim.simulation.warp.target_speed() > 1.0
-        && matches!(
-            sim.simulation.authority(),
-            AuthorityMode::LocalRigidBody { .. }
-        )
-        && let Some(terrain_entity) = bubble.terrain_entity
-        && craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
-        && let Ok((linear_velocity, angular_velocity)) = craft_q.get(bubble.craft_entity)
-        && linear_velocity.length() < config.max_stable_speed_m_s
-        && angular_velocity.length() < config.max_stable_angular_speed_rad_s
-        && throttle.effective <= 1.0e-3
-    {
-        collapse_to_body_fixed(&mut sim, bubble);
-        return;
-    }
-
-    match (sim.simulation.authority(), authority.owns_translation()) {
-        (AuthorityMode::LocalRigidBody { .. }, false) => {
-            sim.simulation
-                .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
-            diagnostics.last_handoff_kind = "ReleasedTranslation".to_string();
-            diagnostics.last_handoff_sim_time_s = sim.simulation.sim_time();
-        }
-        (AuthorityMode::OnRails { .. }, true) => {
-            sim.simulation
-                .transition_authority(AuthorityMode::LocalRigidBody {
-                    bubble: bubble.id,
-                    root_entity: EntityRef(bubble.craft_entity.to_bits()),
-                });
-            // `last_handoff_kind` / time and the residual for this take are
-            // finalized in `readback_local_craft` once Avian's converted
-            // state is available; recording here would only capture the
-            // pre-step canonical position.
-        }
-        _ => {}
-    }
 }
 
 /// Attach a terrain collider patch when the ship enters the AGL handoff
@@ -907,10 +704,10 @@ fn attach_terrain_patch_when_close(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
-    limits: Res<WarpLimits>,
     runway: Option<Res<crate::runway::RunwaySite>>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
+    craft_q: Query<&crate::regime::CraftRegimeState, With<LocalCraftBody>>,
 ) {
     let Some(bubble) = active.bubble.as_mut() else {
         return;
@@ -927,19 +724,17 @@ fn attach_terrain_patch_when_close(
     if runway.as_deref().is_some_and(|r| r.body_id == bubble.body_id) {
         return;
     }
-    if !terrain_colliders_allowed_by_warp(&sim, &limits) {
-        return;
-    }
-    // EVA never collides: its capsule's `Collider` is removed at spawn
-    // (`spawn_player_avian_body`) and `step_eva_controller` plants it
-    // kinematically from direct height queries. A terrain collider patch would
-    // therefore collide with nothing — yet once attached, `maintain_terrain_patch`
-    // rebuilds its trimesh every frame as the GPU-atlas height-source
-    // `revision()` churns with tile streaming (the player co-rotates with the
-    // planet, so the streamer constantly loads/evicts tiles). That rebuild was
-    // ~11% of surface frame time and the cause of the EVA "unplayable stutter".
-    // Skip the patch entirely for EVA; ships still get it for real contact.
-    if sim.simulation.vessel_kind() == VesselKind::Eva {
+    // Regime gate (A3 port, `docs/regimes.md`): the record's
+    // `terrain_collider_allowed` folds the 1×-warp-lock requirement with the
+    // craft-has-a-collider capability. The capability term subsumes the old
+    // per-`VesselKind` EVA skip — the EVA capsule's `Collider` is removed at
+    // spawn, so a patch would collide with nothing while its per-frame
+    // streaming rebuilds cost ~11% of surface frame time (the old EVA
+    // "unplayable stutter").
+    if !craft_q
+        .get(bubble.craft_entity)
+        .is_ok_and(|state| state.regime.terrain_collider_allowed)
+    {
         return;
     }
     let Some(body_id) = thalos_body_id(&sim) else {
@@ -994,10 +789,10 @@ fn detach_terrain_patch_when_far(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
-    limits: Res<WarpLimits>,
     contact_graph: Res<ContactGraph>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
+    craft_q: Query<&crate::regime::CraftRegimeState, With<LocalCraftBody>>,
 ) {
     let Some(bubble) = active.bubble.as_mut() else {
         return;
@@ -1010,7 +805,9 @@ fn detach_terrain_patch_when_far(
         info!("detached terrain collider patch from BodyFixed craft");
         return;
     }
-    if !terrain_colliders_allowed_by_warp(&sim, &limits)
+    if !craft_q
+        .get(bubble.craft_entity)
+        .is_ok_and(|state| state.regime.terrain_collider_allowed)
         && !craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
     {
         clear_terrain_patch(&mut commands, bubble);
@@ -1306,39 +1103,6 @@ fn debug_surface_drop(
         sim.simulation.vessel_kind(),
         config.debug_drop_height_m,
         body.name,
-    );
-}
-
-/// Release a landed ship from `BodyFixed` when the pilot applies throttle.
-///
-/// A landed/parked ship sits in analytic `BodyFixed` authority — set at a runway
-/// spawn ([`crate::runway`]), reached via the stable-landing collapse
-/// ([`collapse_or_constrain_warp`]), or dropped there by a debug surface
-/// teleport. Advancing the throttle is the pilot's "fly" command: drop warp to
-/// 1× and hand translation back to the live regimes (`OnRails` →
-/// [`manage_authority`] → `LocalRigidBody`/`Full`), where thrust and the landing
-/// gear take over from the equilibrium pose. Because the parked pose already is
-/// the gear equilibrium, the handoff is jump-free.
-///
-/// Ships only. Grounded EVA is pinned to `LocalRigidBody` (never `BodyFixed`) by
-/// [`manage_authority`], so it is unaffected. This is the single landed→flying
-/// transition, replacing the former debug-only `DebugLaunchMount` launch-clamp
-/// release; a real staging / launch-clamp part can supersede it later.
-fn release_landed_ship_on_throttle(throttle: Res<ThrottleState>, mut sim: ResMut<SimulationState>) {
-    if throttle.commanded <= LANDED_THROTTLE_RELEASE {
-        return;
-    }
-    if !matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. })
-        || sim.simulation.vessel_kind() != VesselKind::Ship
-    {
-        return;
-    }
-    sim.simulation
-        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
-    sim.simulation.warp.reset_immediate();
-    info!(
-        "released landed ship on commanded throttle {:.2}",
-        throttle.commanded
     );
 }
 
@@ -2532,10 +2296,10 @@ fn maintain_terrain_patch(
     mut commands: Commands,
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
-    limits: Res<WarpLimits>,
     mut active: ResMut<ActiveLocalBubble>,
     sim: Res<SimulationState>,
     craft_q: Query<&Position, With<LocalCraftBody>>,
+    regime_q: Query<&crate::regime::CraftRegimeState, With<LocalCraftBody>>,
     player: Option<Res<PlayerControllerState>>,
     player_q: Query<&Position, With<PlayerControllerBody>>,
 ) {
@@ -2545,7 +2309,10 @@ fn maintain_terrain_patch(
     if current.terrain_entity.is_none() {
         return;
     }
-    if !terrain_colliders_allowed_by_warp(&sim, &limits) {
+    if !regime_q
+        .get(current.craft_entity)
+        .is_ok_and(|state| state.regime.terrain_collider_allowed)
+    {
         return;
     }
     let Some(height_source) = height_sources.get(current.body_id) else {
@@ -2614,8 +2381,6 @@ fn maintain_terrain_patch(
         center_surface_body_m: patch.center_surface_body_m,
         basis: patch.basis,
         patch_half_extent_m: patch.half_extent_m,
-        stable_contact_s: current.stable_contact_s,
-        stable_landed: current.stable_landed,
         terrain_built_at_revision: current_revision,
         ..current
     });
@@ -2661,83 +2426,6 @@ fn sync_terrain_collider_pose(
         * thalos_physics_local::patch_basis_rotation(&bubble.basis);
     linear_velocity.0 = DVec3::ZERO;
     angular_velocity.0 = DVec3::ZERO;
-}
-
-/// Track stable-contact landing and collapse to `BodyFixed` when the ship
-/// settles. Warp gating now lives in [`manage_authority`], which derives
-/// authority from [`AvianOwnership`] (warp ≠ 1× falls back to `OnRails`
-/// regardless of contact). Warping no longer requires tearing down the
-/// bubble.
-fn collapse_or_constrain_warp(
-    mut commands: Commands,
-    clock: Res<SimClock>,
-    contact_graph: Res<ContactGraph>,
-    config: Res<LocalBubbleConfig>,
-    throttle: Res<ThrottleState>,
-    weight_on_wheels: Res<WeightOnWheels>,
-    mut active: ResMut<ActiveLocalBubble>,
-    mut sim: ResMut<SimulationState>,
-    craft_q: Query<(&LinearVelocity, &AngularVelocity), With<LocalCraftBody>>,
-) {
-    let Some(mut bubble) = active.bubble.clone() else {
-        return;
-    };
-    if matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
-        bubble.stable_contact_s = 0.0;
-        bubble.stable_landed = false;
-        active.bubble = Some(bubble);
-        return;
-    }
-    let Ok((linear_velocity, angular_velocity)) = craft_q.get(bubble.craft_entity) else {
-        return;
-    };
-    // Ground contact: a wheeled craft's hull is filtered out of solver contact
-    // (gear is its sole ground interface), so weight-on-wheels is its landed
-    // signal; a gearless craft contacts the terrain heightfield directly via the
-    // contact graph. Either way, with no contact the timer resets and the craft
-    // stays a ballistic / coasting body.
-    let hull_touches = bubble
-        .terrain_entity
-        .is_some_and(|t| craft_contacts_terrain(&contact_graph, bubble.craft_entity, t));
-    let contact = weight_on_wheels.grounded || hull_touches;
-    bubble.stable_landed = stable_contact_reached(
-        &mut bubble.stable_contact_s,
-        clock.delta_secs_f64(),
-        contact,
-        linear_velocity.length(),
-        angular_velocity.length(),
-        throttle.effective,
-        &config,
-    );
-
-    if bubble.stable_landed {
-        collapse_to_body_fixed(&mut sim, &bubble);
-        // Avian body persists; reset stability tracking and let
-        // snap_avian_from_canonical keep the rigid body aligned with the
-        // BodyFixed pose until throttle-up releases it back to live physics.
-        bubble.stable_contact_s = 0.0;
-        bubble.stable_landed = false;
-    }
-    let _ = &mut commands;
-    active.bubble = Some(bubble);
-}
-
-/// Transition canonical authority to `BodyFixed` once the ship has settled
-/// onto the terrain. The Avian body itself stays alive — Avian remains the
-/// universal rigid-body integrator, and [`snap_avian_from_canonical`] holds
-/// it on the body-fixed pose until throttle-up triggers
-/// [`release_landed_ship_on_throttle`].
-fn collapse_to_body_fixed(sim: &mut SimulationState, bubble: &LocalBubble) {
-    let body_state = body_state_for(sim, bubble.body_id);
-    let craft = sim.simulation.craft_state();
-    let pose: BodyFixedPose =
-        body_fixed_pose_from_inertial(&body_state, craft.translation, craft.attitude);
-    sim.simulation
-        .transition_authority(AuthorityMode::BodyFixed {
-            body: bubble.body_id,
-            pose,
-        });
-    info!("collapsed stable landed craft to BodyFixed authority");
 }
 
 struct BubbleFrame {
@@ -2820,8 +2508,6 @@ pub(crate) fn place_eva_on_surface(
     bubble.center_dir_body = DVec3::Y;
     bubble.center_surface_body_m = DVec3::ZERO;
     bubble.basis = thalos_body_render::TerrainPatchBasis::from_normal(DVec3::Y);
-    bubble.stable_contact_s = 0.0;
-    bubble.stable_landed = false;
     // Keep the (ship-frame) SLF coherent with the new body even though the EVA
     // seam doesn't read it — ship-only systems consult `bubble.frame` by body.
     bubble.frame = SurfaceLocalFrame::new(
@@ -3292,8 +2978,6 @@ mod tests {
             center_surface_body_m: patch.center_surface_body_m,
             basis,
             patch_half_extent_m: 0.0,
-            stable_contact_s: 0.0,
-            stable_landed: false,
             terrain_built_at_revision: 0,
         };
         let local_position = DVec3::new(12.0, 3.0, -7.0);
@@ -3361,109 +3045,10 @@ mod tests {
         assert!((rt_attitude.angular_velocity - attitude.angular_velocity).length() < 1e-9);
     }
 
-    fn on_rails() -> AuthorityMode {
-        AuthorityMode::OnRails { trajectory: 0 }
-    }
-
-    fn body_fixed() -> AuthorityMode {
-        AuthorityMode::BodyFixed {
-            body: 0,
-            pose: thalos_physics_canonical::canonical::BodyFixedPose {
-                position_body_m: DVec3::Y * 1000.0,
-                orientation_body: DQuat::IDENTITY,
-            },
-        }
-    }
-
-    #[test]
-    fn terrain_colliders_wait_until_warp_gate_locks_to_one_x() {
-        let levels = [0.0, 1.0, 10.0, 100.0];
-
-        assert!(!terrain_colliders_allowed_by_warp_inputs(1.0, &levels, 2));
-        assert!(terrain_colliders_allowed_by_warp_inputs(1.0, &levels, 1));
-    }
-
-    #[test]
-    fn terrain_colliders_do_not_build_while_paused_or_high_warp() {
-        let levels = [0.0, 1.0, 10.0, 100.0];
-
-        assert!(!terrain_colliders_allowed_by_warp_inputs(0.0, &levels, 1));
-        assert!(!terrain_colliders_allowed_by_warp_inputs(10.0, &levels, 1));
-    }
-
-    #[test]
-    fn coasting_in_vacuum_at_one_x_uses_attitude_only() {
-        // The bug we're fixing: at 1× warp with no thrust and no contact,
-        // Avian was integrating gravity and producing visible AP/PE drift.
-        // The role here must be `AttitudeOnly` so Kepler owns translation
-        // (no drift) while Avian's clock keeps stepping for rotation —
-        // otherwise the player can't rotate the ship while coasting.
-        assert_eq!(
-            avian_role_from_inputs(1.0, on_rails(), 0.0, false, false),
-            AvianRole::AttitudeOnly
-        );
-    }
-
-    #[test]
-    fn thrust_at_one_x_takes_full_ownership() {
-        assert_eq!(
-            avian_role_from_inputs(1.0, on_rails(), 0.5, false, false),
-            AvianRole::Full
-        );
-    }
-
-    #[test]
-    fn terrain_collider_attached_at_one_x_takes_full_ownership() {
-        // Inside the AGL handoff band the terrain collider is present;
-        // Avian needs to own translation so contact resolution can fire.
-        assert_eq!(
-            avian_role_from_inputs(1.0, on_rails(), 0.0, true, false),
-            AvianRole::Full
-        );
-    }
-
-    #[test]
-    fn inside_atmosphere_at_one_x_takes_full_ownership() {
-        // Below the Kármán line, aerodynamic forces act, so Avian must own
-        // translation across the whole column (not just the terrain band) —
-        // otherwise reentry drag would be skipped above the handoff altitude.
-        assert_eq!(
-            avian_role_from_inputs(1.0, on_rails(), 0.0, false, true),
-            AvianRole::Full
-        );
-    }
-
-    #[test]
-    fn high_warp_pauses_avian_entirely() {
-        // Avian's integrator can't take warp-sized timesteps; the
-        // physical-state triggers do not override the warp guard.
-        // Rotation also stops integrating (matching the existing
-        // "ω is zeroed at warp entry" convention).
-        assert_eq!(
-            avian_role_from_inputs(10.0, on_rails(), 1.0, true, true),
-            AvianRole::Paused
-        );
-        assert_eq!(
-            avian_role_from_inputs(1_000_000.0, on_rails(), 0.5, false, true),
-            AvianRole::Paused
-        );
-    }
-
-    #[test]
-    fn body_fixed_authority_pauses_avian() {
-        // Landed pose is evaluated analytically from the body's rotation;
-        // Avian holds the rigid body in place but does not integrate. This
-        // must hold even with thrust applied — `release_landed_ship_on_throttle`
-        // releases a landed ship by transitioning out of BodyFixed first.
-        assert_eq!(
-            avian_role_from_inputs(1.0, body_fixed(), 0.0, false, false),
-            AvianRole::Paused
-        );
-        assert_eq!(
-            avian_role_from_inputs(1.0, body_fixed(), 0.9, true, true),
-            AvianRole::Paused
-        );
-    }
+    // The role *classification* tests (vacuum coast -> AttitudeOnly,
+    // thrust/terrain/atmosphere -> Full, warp/BodyFixed -> Paused) live in
+    // `thalos_physics_canonical::regime` since the A3 port — the resolver
+    // is the classifier; only the projection lives here.
 
     #[test]
     fn integrator_is_active_in_attitude_only_and_full() {

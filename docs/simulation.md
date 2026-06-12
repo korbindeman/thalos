@@ -561,6 +561,14 @@ keeps working without re-running thrust on the canonical side.
 
 ### Avian's three roles
 
+> **Target design update (2026-06-11): see `docs/regimes.md`.** The
+> `AvianRole`/`manage_authority` machinery described in this section —
+> along with the scattered warp gates and the per-vessel-kind branches —
+> is slated to be replaced by a single per-craft `CraftRegime` resolver
+> (capabilities × environment classification, sole writer, executors
+> downstream). This section remains accurate for today's implementation
+> until that migration lands.
+
 The Avian rigid body persists for the lifetime of the player ship, but
 *what role it plays* each frame is a three-way decision driven by
 `AvianAuthority` / `AvianRole` (`crates/game/src/local_physics.rs`).

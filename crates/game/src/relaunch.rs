@@ -62,8 +62,20 @@ pub struct RelaunchRequest(pub Option<RelaunchSpec>);
 
 /// Internal hand-off between the two relaunch phases: holds the blueprint
 /// after teardown until the old craft has despawned and the new one can build.
+/// (`pub(crate)` only so [`relaunch_idle`] can appear in run conditions; no
+/// other module touches it.)
 #[derive(Resource, Default)]
-struct RelaunchInFlight(Option<RelaunchSpec>);
+pub(crate) struct RelaunchInFlight(Option<RelaunchSpec>);
+
+/// Run condition: no relaunch teardown/rebuild is in flight. Systems that
+/// measure or place the player craft (the deferred runway placement) gate on
+/// this so they never act on the outgoing craft during the swap window.
+pub(crate) fn relaunch_idle(
+    request: Res<RelaunchRequest>,
+    in_flight: Res<RelaunchInFlight>,
+) -> bool {
+    request.0.is_none() && in_flight.0.is_none()
+}
 
 pub struct RelaunchPlugin;
 

@@ -8,17 +8,19 @@ set dotenv-filename := ".env.just"
 # command in `.env.just` to opt out locally.
 game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game --features bevy/dynamic_linking")
 
-# Run the game. Defaults to a ship in low Thalos orbit; `just game eva`
-# spawns the player on foot on the Thalos surface; `just game landing`
-# starts a powered-descent approach coming down over Thalos land; `just game
-# final` starts very low over a flat dry patch for touchdown practice;
-# `just game runway` parks the aircraft on the Thalos surface runway;
-# `just game runway-approach` starts it on short final lined up with that
-# runway; `just game cruise` places the Meridian at ~15,000 ft flying level;
-# `just game shipyard` opens straight into the in-game ship editor (also
-# reachable in any mode via F3 or the pause menu's SHIPYARD button).
+# Run the game. Bare `just game` boots to the start screen (scenario
+# picker / shipyard / settings); naming a mode skips it and launches
+# directly: `just game orbit` (ship in low Thalos orbit), `just game eva`
+# (on foot on the Thalos surface), `just game landing` (powered-descent
+# approach over Thalos land), `just game final` (very low over a flat dry
+# patch for touchdown practice), `just game runway` (aircraft parked on the
+# Thalos surface runway), `just game runway-approach` (short final lined up
+# with that runway), `just game cruise` (Meridian at ~15,000 ft flying
+# level), `just game shipyard` (straight into the in-game ship editor —
+# also reachable via the pause menu's SHIPYARD button). `THALOS_AUTO_RUN=1`
+# also skips the start screen (agents keep a one-shot launch flow).
 # Set a persistent default with THALOS_SPAWN in `.env.just`.
-game mode=env_var_or_default("THALOS_SPAWN", "orbit"):
+game mode=env_var_or_default("THALOS_SPAWN", "menu"):
     {{game_command}} -- {{mode}}
 
 # Edit a planet's terrain. Usage: just edit auron

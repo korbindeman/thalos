@@ -94,10 +94,15 @@ impl Plugin for ShipyardEditorPlugin {
 }
 
 /// Open the editor on entry to `AppState::Running` when launched with
-/// `just game shipyard` — after the world has loaded, never during it.
-fn open_on_start(flag: Res<OpenShipyardOnStart>, mut editor: ResMut<ShipyardEditor>) {
+/// `just game shipyard` (or via the start screen's SHIPYARD button) — after
+/// the world has loaded, never during it.
+fn open_on_start(mut flag: ResMut<OpenShipyardOnStart>, mut editor: ResMut<ShipyardEditor>) {
     if flag.0 {
         editor.open = true;
+        // One-shot: `OnEnter(Running)` fires again on every later loading
+        // pass (start-screen runway starts), which must not re-open the
+        // editor. The start screen's SHIPYARD button re-arms this.
+        flag.0 = false;
     }
 }
 

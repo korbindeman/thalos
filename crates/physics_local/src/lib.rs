@@ -195,8 +195,6 @@ pub struct LocalBubble {
     /// too coarse for it. Zero when no patch is attached, and left at the
     /// fallback patch's `half_extent_m` for the coarse tangent-grid path.
     pub patch_half_extent_m: f64,
-    pub stable_contact_s: f64,
-    pub stable_landed: bool,
     /// `HeightSource::revision()` snapshot taken when `terrain_entity`
     /// was last (re)built. Drives the rebuild-on-mirror-update path in
     /// `maintain_terrain_patch`: when the source's revision advances
@@ -473,27 +471,6 @@ pub fn primitive_collider(shape: LocalPrimitiveShape) -> Collider {
     }
 }
 
-pub fn stable_contact_reached(
-    timer_s: &mut f64,
-    dt_s: f64,
-    has_contact: bool,
-    linear_speed_m_s: f64,
-    angular_speed_rad_s: f64,
-    throttle: f64,
-    config: &LocalBubbleConfig,
-) -> bool {
-    let stable = has_contact
-        && linear_speed_m_s < config.max_stable_speed_m_s
-        && angular_speed_rad_s < config.max_stable_angular_speed_rad_s
-        && throttle <= 1.0e-3;
-    if stable {
-        *timer_s += dt_s.max(0.0);
-    } else {
-        *timer_s = 0.0;
-    }
-    *timer_s >= config.stable_contact_time_s
-}
-
 pub fn craft_contacts_terrain(
     contact_graph: &ContactGraph,
     craft_entity: Entity,
@@ -509,30 +486,9 @@ pub fn craft_contacts_terrain(
 mod tests {
     use super::*;
 
-    #[test]
-    fn stable_contact_requires_duration_speed_and_zero_throttle() {
-        let config = LocalBubbleConfig {
-            stable_contact_time_s: 2.0,
-            ..Default::default()
-        };
-        let mut timer = 0.0;
-
-        assert!(!stable_contact_reached(
-            &mut timer, 1.0, true, 0.25, 0.01, 0.0, &config
-        ));
-        assert!(stable_contact_reached(
-            &mut timer, 1.0, true, 0.25, 0.01, 0.0, &config
-        ));
-
-        assert!(!stable_contact_reached(
-            &mut timer, 1.0, true, 0.75, 0.01, 0.0, &config
-        ));
-        assert_eq!(timer, 0.0);
-        assert!(!stable_contact_reached(
-            &mut timer, 1.0, true, 0.25, 0.01, 0.5, &config
-        ));
-        assert_eq!(timer, 0.0);
-    }
+    // The stable-contact settle predicate moved into the unit-tested pure
+    // regime classifier (`thalos_physics_canonical::regime::classify_ground`,
+    // Phase A3 — see docs/regimes.md); the timer lives in `RegimeMemory`.
 
     #[test]
     fn compound_builder_accepts_blueprint_primitives() {

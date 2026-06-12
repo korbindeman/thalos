@@ -6,8 +6,8 @@
 //! finished their disk I/O + decompress + [`prepare_planet_bake`] CPU work,
 //! and calls [`install_baked_planet`] to run the main-thread half
 //! (`upload_prepared_bake`, impostor + halo + ground-terrain spawn). Each
-//! completed install ticks the [`LoadingProgress`] counter that drives the
-//! startup loading-screen overlay.
+//! completed install advances the [`LoadingTracker`]'s bake-install step,
+//! which drives the startup loading-screen overlay.
 //!
 //! [`patch_reference_cloud_covers`] remains a per-frame system because the
 //! reference-cloud cubemap loads asynchronously from disk (image decoding,
@@ -33,7 +33,7 @@ use thalos_physics_local::TerrainSurfaceRegistry;
 use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
 use thalos_world::{BodyDefinition, BodyKind};
 
-use crate::loading::LoadingProgress;
+use crate::loading::LoadingTracker;
 
 use super::ground_terrain::{
     BodyHalo, BodySky, RealSpaceImpostor, TerrainTileProviderMode, terrain_tile_provider_mode,
@@ -402,13 +402,14 @@ pub(super) struct PendingPlanetInstalls(pub Vec<PendingPlanetInstall>);
 
 /// Per-frame poll: any task whose load + prepare has finished is handed
 /// off to [`install_baked_planet`] (main-thread asset upload + entity
-/// spawn). Each install ticks `LoadingProgress.completed`; once the
-/// counter matches `total`, the loading overlay hides itself.
+/// spawn). Each install advances the tracker's bake-install step; once the
+/// counter matches its total the step completes and the loading overlay
+/// moves on.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poll_planet_install_tasks(
     mut commands: Commands,
     mut pending: ResMut<PendingPlanetInstalls>,
-    mut progress: ResMut<LoadingProgress>,
+    mut tracker: ResMut<LoadingTracker>,
     mut images: ResMut<Assets<Image>>,
     reference_clouds: Res<ReferenceClouds>,
     sim: Res<super::types::SimulationState>,
@@ -468,8 +469,8 @@ pub(super) fn poll_planet_install_tasks(
             },
         );
 
-        progress.completed += 1;
-        progress.label = entry.body_name;
+        tracker.advance(crate::loading::step::BODIES, 1);
+        tracker.set_detail(crate::loading::step::BODIES, entry.body_name);
     }
 }
 
