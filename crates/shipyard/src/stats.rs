@@ -26,9 +26,13 @@ use crate::catalog::{
     CatalogEntry, CatalogError, PartCatalog, WingRole, adapter_surface_area, fuselage_surface_area,
     gear_dry_mass, tank_surface_area, wing_mean_aerodynamic_chord, wing_panel_area,
 };
-use crate::part::{ControlSurfaceRole, ReactantRatio, Wing};
+use crate::part::{
+    Adapter, AirIntake, CommandPod, ControlSurfaceRole, Decoupler, Engine, FuelTank, Fuselage,
+    Gear, ReactantRatio, Wing,
+};
 use crate::resource::{PartResources, Resource};
 use crate::wing_mesh::{WingPanelFrame, wing_panel_frame};
+use bevy::ecs::world::EntityRef;
 use bevy::math::Vec3;
 use glam::DVec3;
 use std::collections::{HashMap, VecDeque};
@@ -991,6 +995,106 @@ pub fn parallel_axis_inertia(mass_kg: f64, offset_m: DVec3) -> DVec3 {
         mass_kg * (offset_m.x * offset_m.x + offset_m.z * offset_m.z),
         mass_kg * (offset_m.x * offset_m.x + offset_m.y * offset_m.y),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Live-ECS per-part aggregation
+//
+// Runtime counterparts to the build-time `part_dry_mass` / per-part inertia
+// model above, reading the components a *flying* craft's part entities carry.
+// The game recomputes mass and inertia every frame from these — mass/thrust in
+// `thalos_game::fuel`, inertia in `thalos_game::staging` — because parts come
+// and go with staging and fuel burn, so a static blueprint figure won't do.
+//
+// Every mass-bearing part kind is enumerated in ONE place here. That is the
+// invariant that keeps a flying craft's mass from silently diverging from the
+// shipyard's figure: the bug these replaced had each consumer enumerate its own
+// subset of part kinds in a query tuple and quietly drop wings/gear/fuselage.
+// Add a new mass-bearing kind's component to these functions and every runtime
+// aggregation that calls them picks it up.
+// ---------------------------------------------------------------------------
+
+/// Live structural (dry) mass, kg, of one flight part — read from whichever
+/// mass-bearing component it carries. Runtime counterpart to [`part_dry_mass`]
+/// (catalog entry + params at build time): both read the same per-part
+/// structural mass, so the two can never disagree about which kinds count.
+pub fn live_part_dry_mass_kg(part: EntityRef) -> f32 {
+    if let Some(p) = part.get::<CommandPod>() {
+        p.dry_mass
+    } else if let Some(e) = part.get::<Engine>() {
+        e.dry_mass
+    } else if let Some(t) = part.get::<FuelTank>() {
+        t.dry_mass
+    } else if let Some(d) = part.get::<Decoupler>() {
+        d.dry_mass
+    } else if let Some(a) = part.get::<Adapter>() {
+        a.dry_mass
+    } else if let Some(i) = part.get::<AirIntake>() {
+        i.dry_mass
+    } else if let Some(f) = part.get::<Fuselage>() {
+        f.dry_mass
+    } else if let Some(w) = part.get::<Wing>() {
+        w.dry_mass
+    } else if let Some(g) = part.get::<Gear>() {
+        g.dry_mass
+    } else {
+        0.0
+    }
+}
+
+/// Total (dry + currently stored propellant) mass, kg, of one live flight part.
+pub fn live_part_total_mass_kg(part: EntityRef) -> f64 {
+    let propellant: f64 = part
+        .get::<PartResources>()
+        .map(|r| r.pools.iter().map(|(&res, pool)| pool.mass_kg(res)).sum())
+        .unwrap_or(0.0);
+    live_part_dry_mass_kg(part) as f64 + propellant
+}
+
+/// Self-inertia (about the part's own CoM), kg·m², of one live flight part of
+/// total `mass_kg`. Mirrors the per-part inertia model in
+/// [`ShipBlueprint::stats`]: wings use the flat-plate [`wing_self_inertia`];
+/// every other kind uses the solid-cylinder model. Cylinder dimensions come
+/// from the part's own component (not the propagated node diameter) — the
+/// existing live-recompute approximation, where the parallel-axis lever
+/// dominates anyway.
+pub fn live_part_self_inertia(part: EntityRef, mass_kg: f64) -> DVec3 {
+    if let Some(w) = part.get::<Wing>() {
+        return wing_self_inertia(mass_kg, w.span as f64, w.root_chord as f64);
+    }
+    let (radius_m, length_m) = live_part_cylinder_dims(part);
+    cylinder_principal_inertia(mass_kg, radius_m, length_m)
+}
+
+/// `(radius, length)` in metres for a live part's solid-cylinder inertia
+/// approximation, read from its own component dimensions. Mirrors
+/// [`part_cylinder_dims`] over live components. Wings are excluded — they use
+/// [`wing_self_inertia`] in [`live_part_self_inertia`].
+fn live_part_cylinder_dims(part: EntityRef) -> (f64, f64) {
+    if let Some(p) = part.get::<CommandPod>() {
+        let d = p.diameter as f64;
+        (d * 0.5, d * 0.9)
+    } else if let Some(e) = part.get::<Engine>() {
+        let d = e.diameter as f64;
+        (d * 0.5, d * 0.9)
+    } else if let Some(t) = part.get::<FuelTank>() {
+        (t.diameter as f64 * 0.5, t.length as f64)
+    } else if let Some(d) = part.get::<Decoupler>() {
+        (d.diameter as f64 * 0.5, 0.2)
+    } else if let Some(a) = part.get::<Adapter>() {
+        let avg = (a.diameter + a.target_diameter) as f64 * 0.5;
+        (avg * 0.5, avg.max(0.4))
+    } else if let Some(i) = part.get::<AirIntake>() {
+        (i.diameter as f64 * 0.5, i.length as f64)
+    } else if let Some(f) = part.get::<Fuselage>() {
+        (f.max_width as f64 * 0.5, f.length as f64)
+    } else if let Some(g) = part.get::<Gear>() {
+        // Compact gearbox: a short stub about its mount. Small mass; the
+        // parallel-axis lever down to the belly dominates its contribution.
+        (g.wheel_radius as f64, g.strut_length as f64)
+    } else {
+        (0.0, 0.0)
+    }
 }
 
 fn part_total_mass(pb: &PartBlueprint, entry: &CatalogEntry) -> f64 {

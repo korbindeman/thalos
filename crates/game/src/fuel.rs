@@ -32,14 +32,14 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use bevy::ecs::world::EntityRef;
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
-    Adapter, AirIntake, AmbientIntakeKind, Attachment, CommandPod, Decoupler, Engine,
-    EngineActivation, FuelCrossfeed, FuelTank, G0, IntakeCapture, Part,
-    PartResources, Resource, SurfaceMount,
+    AirIntake, AmbientIntakeKind, Attachment, Engine, EngineActivation, FuelCrossfeed, G0,
+    IntakeCapture, Part, PartResources, Resource, SurfaceMount, live_part_dry_mass_kg,
 };
 
 use crate::SimStage;
@@ -221,98 +221,82 @@ pub fn handle_throttle_input(
     clock: Res<SimClock>,
     locks: Res<ControlLocks>,
     mut throttle: ResMut<ThrottleState>,
-    // The lever position at which it last took control; `None` until the axis
-    // first reports. Survives across frames.
+    // The lever position at which it last asserted (or yielded) control; `None`
+    // until the axis first reports. Survives across frames.
     mut lever_anchor: Local<Option<f32>>,
 ) {
     if locks.throttle {
         return;
     }
 
-    // Absolute HOTAS lever takes the throttle whenever it is physically moved
-    // relative to where it last asserted control. Held still, it falls through
-    // to the keyboard below so the two controls coexist.
-    if let Some(lever) = input.throttle_absolute {
-        let lever = lever.clamp(0.0, 1.0);
-        let moved = lever_anchor.is_none_or(|anchor| (lever - anchor).abs() > THROTTLE_LEVER_MOVE_EPS);
-        if moved {
-            *lever_anchor = Some(lever);
-            throttle.commanded = lever as f64;
-            return;
+    let lever_now = input.throttle_absolute.map(|lever| lever.clamp(0.0, 1.0));
+
+    // Absolute HOTAS lever takes the throttle only when *deliberately moved*
+    // past the deadband from where it last asserted/yielded control. A lever
+    // held still — including one resting at a nonzero idle position, or
+    // jittering within the deadband — falls through to the keyboard so the two
+    // coexist, and never silently overrides a keyboard cut or the parked-spawn
+    // throttle from idle-pot noise. The anchor is seeded on first sight
+    // *without* claiming, so the lever asserts only on a real move, not on the
+    // first frame it happens to report.
+    if let Some(lever) = lever_now {
+        match *lever_anchor {
+            Some(anchor) if (lever - anchor).abs() > THROTTLE_LEVER_MOVE_EPS => {
+                *lever_anchor = Some(lever);
+                throttle.commanded = lever as f64;
+                return;
+            }
+            None => *lever_anchor = Some(lever),
+            _ => {}
         }
     }
 
-    if input.throttle_full {
+    // Any explicit keyboard throttle command wins, and re-anchors the lever to
+    // its current physical position so it must be *deliberately moved from
+    // there* to reclaim. Without this re-anchor, idle-pot drift crossing the
+    // deadband re-claims the throttle a frame after an `X` cut — the parked
+    // craft then keeps a residual throttle that blocks the settle-to-`BodyFixed`
+    // collapse, and it never stops shaking.
+    let keyboard_acted = if input.throttle_full {
         throttle.commanded = 1.0;
-        return;
-    }
-    if input.throttle_cut {
+        true
+    } else if input.throttle_cut {
         throttle.commanded = 0.0;
-        return;
-    }
-
-    let dt = clock.delta_secs_f64();
-    if input.throttle_up {
-        throttle.commanded = (throttle.commanded + THROTTLE_RAMP_RATE * dt).min(1.0);
-    }
-    if input.throttle_down {
-        throttle.commanded = (throttle.commanded - THROTTLE_RAMP_RATE * dt).max(0.0);
-    }
-}
-
-type DryMassQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Option<&'static CommandPod>,
-        Option<&'static Decoupler>,
-        Option<&'static Adapter>,
-        Option<&'static FuelTank>,
-        Option<&'static Engine>,
-        Option<&'static AirIntake>,
-        Option<&'static SurfaceMount>,
-    ),
-    // The in-game shipyard editor assembles parts from the same components;
-    // its build must never feed the flight craft's mass/propulsion.
-    (With<Part>, Without<EditorPart>),
->;
-
-fn part_dry_mass_kg(
-    pod: Option<&CommandPod>,
-    dec: Option<&Decoupler>,
-    adapter: Option<&Adapter>,
-    tank: Option<&FuelTank>,
-    engine: Option<&Engine>,
-    intake: Option<&AirIntake>,
-    surface_mount: Option<&SurfaceMount>,
-) -> f64 {
-    let dry = if let Some(pod) = pod {
-        pod.dry_mass as f64
-    } else if let Some(dec) = dec {
-        dec.dry_mass as f64
-    } else if let Some(adapter) = adapter {
-        adapter.dry_mass as f64
-    } else if let Some(tank) = tank {
-        tank.dry_mass as f64
-    } else if let Some(engine) = engine {
-        engine.dry_mass as f64
-    } else if let Some(intake) = intake {
-        intake.dry_mass as f64
+        true
     } else {
-        0.0
+        let dt = clock.delta_secs_f64();
+        let mut acted = false;
+        if input.throttle_up {
+            throttle.commanded = (throttle.commanded + THROTTLE_RAMP_RATE * dt).min(1.0);
+            acted = true;
+        }
+        if input.throttle_down {
+            throttle.commanded = (throttle.commanded - THROTTLE_RAMP_RATE * dt).max(0.0);
+            acted = true;
+        }
+        acted
     };
-    dry * surface_multiplier(surface_mount)
+    if keyboard_acted && let Some(lever) = lever_now {
+        *lever_anchor = Some(lever);
+    }
 }
+
+/// Every flight part (the editor's build world is filtered out, since it
+/// assembles parts from the same components and must never feed the flight
+/// craft's mass/propulsion). [`EntityRef`] lets the per-part mass come from the
+/// single [`live_part_dry_mass_kg`] enumeration in `thalos_shipyard`, so no part
+/// kind is silently dropped from the flight mass.
+type PartQuery<'w, 's> = Query<'w, 's, EntityRef<'static>, (With<Part>, Without<EditorPart>)>;
 
 fn surface_multiplier(_surface_mount: Option<&SurfaceMount>) -> f64 {
     // KSP symmetry: each mirror counterpart is its own part, counted once.
     1.0
 }
 
-fn surface_multiplier_for_entity(entity: Entity, parts: &DryMassQuery<'_, '_>) -> f64 {
+fn surface_multiplier_for_entity(entity: Entity, parts: &PartQuery<'_, '_>) -> f64 {
     parts
         .get(entity)
-        .map(|(_, _, _, _, _, _, surface_mount)| surface_multiplier(surface_mount))
+        .map(|part| surface_multiplier(part.get::<SurfaceMount>()))
         .unwrap_or(1.0)
 }
 
@@ -413,13 +397,13 @@ fn refresh_active_propulsion(
     debug: Option<Res<crate::debug::DebugMode>>,
     engines: Query<(Entity, &Engine, Option<&EngineActivation>), Without<EditorPart>>,
     intakes: Query<(Entity, &AirIntake, Option<&SurfaceMount>), Without<EditorPart>>,
-    parts: DryMassQuery,
+    parts: PartQuery,
     resources: Query<&PartResources, Without<EditorPart>>,
 ) {
     let dry_mass_kg: f64 = parts
         .iter()
-        .map(|(pod, dec, adapter, tank, engine, intake, surface_mount)| {
-            part_dry_mass_kg(pod, dec, adapter, tank, engine, intake, surface_mount)
+        .map(|part| {
+            live_part_dry_mass_kg(part) as f64 * surface_multiplier(part.get::<SurfaceMount>())
         })
         .sum();
 

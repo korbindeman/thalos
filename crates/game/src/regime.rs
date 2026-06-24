@@ -29,19 +29,20 @@
 //! steady-state drift and a real classifier bug; the A2 acceptance criterion
 //! is zero steady mismatches across the scenario matrix.
 
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
-use thalos_physics_canonical::body_fixed::body_fixed_pose_from_inertial;
-use thalos_physics_canonical::canonical::{AuthorityMode, EntityRef, Epoch};
+use thalos_physics_canonical::canonical::{AuthorityMode, BodyFixedPose, EntityRef, Epoch};
 use thalos_physics_canonical::regime::{
     AuthorityKind, CraftRegime, PredictionDisplay, RegimeInputs, RegimeMemory, TranslationOwner,
     WalkingInputs, WarpLevel, expected_authority, resolve,
 };
+use thalos_physics_canonical::surface_local::{SurfaceLocalState, surface_local_to_body_fixed};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::{
     ActiveLocalBubble, LocalBubbleConfig, LocalCraftBody,
-    avian::{AngularVelocity, ContactGraph, LinearVelocity},
+    avian::{AngularVelocity, ContactGraph, LinearVelocity, Position, Rotation},
     craft_contacts_terrain,
 };
 
@@ -280,12 +281,12 @@ pub(crate) fn apply_regime_authority(
     active: Res<ActiveLocalBubble>,
     mut sim: ResMut<SimulationState>,
     mut diagnostics: ResMut<crate::local_physics::AvianHandoffDiagnostics>,
-    craft_q: Query<&CraftRegimeState, With<LocalCraftBody>>,
+    craft_q: Query<(&CraftRegimeState, &Position, &Rotation), With<LocalCraftBody>>,
 ) {
     let Some(bubble) = active.bubble.as_ref() else {
         return;
     };
-    let Ok(state) = craft_q.get(bubble.craft_entity) else {
+    let Ok((state, position, rotation)) = craft_q.get(bubble.craft_entity) else {
         return;
     };
     let current = AuthorityKind::from(sim.simulation.authority());
@@ -319,17 +320,34 @@ pub(crate) fn apply_regime_authority(
             // state is available.
         }
         AuthorityKind::BodyFixed => {
-            // Settle / landed-warp collapse: freeze the current canonical
-            // pose into the rotating body frame.
-            let body_state = sim
-                .simulation
-                .ephemeris()
-                .state(bubble.body_id, Epoch(sim.simulation.sim_time()));
-            let (translation, attitude) = {
-                let craft = sim.simulation.craft_state();
-                (craft.translation, craft.attitude)
+            // Settle / landed-warp collapse: freeze the craft's current pose
+            // into the rotating body frame.
+            //
+            // Capture the pose from Avian's **surface-local** state, *not* from
+            // canonical. This collapse always comes from `LocalRigidBody`, where
+            // canonical's translation is only re-synced by `readback_local_craft`
+            // at the end of the frame — so here (executor runs before readback)
+            // it is one frame stale relative to `sim_time`. Pairing that stale
+            // inertial translation with the current `body_state` mismatches their
+            // epochs by one frame of the body's orbital motion (~hundreds of
+            // metres at orbital speed), which froze the craft into a displaced
+            // pose hovering off the surface after every re-settle. The
+            // SLF→body-fixed conversion takes no `body_state` at all
+            // (`surface_local_to_body_fixed` is a constant rotation + translation
+            // in the co-rotating frame), so it is epoch-coherent by construction
+            // — the mismatch cannot arise. (Ship-only path; EVA never settles to
+            // `BodyFixed`. Velocity/spin are zero in the landed pose.)
+            let slf = SurfaceLocalState {
+                position_m: position.0,
+                velocity_m_s: DVec3::ZERO,
+                orientation_frame: rotation.0.normalize(),
+                angular_velocity_body: DVec3::ZERO,
             };
-            let pose = body_fixed_pose_from_inertial(&body_state, translation, attitude);
+            let body_fixed = surface_local_to_body_fixed(&bubble.frame, slf);
+            let pose = BodyFixedPose {
+                position_body_m: body_fixed.translation_body.position,
+                orientation_body: body_fixed.orientation_body,
+            };
             sim.simulation
                 .transition_authority(AuthorityMode::BodyFixed {
                     body: bubble.body_id,

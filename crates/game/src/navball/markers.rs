@@ -54,7 +54,7 @@ pub enum MarkerKind {
 }
 
 impl MarkerKind {
-    const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Prograde,
         Self::Retrograde,
         Self::Normal,
@@ -256,7 +256,7 @@ pub fn update_navball_markers(
     }
 }
 
-struct MarkerDirections {
+pub(crate) struct MarkerDirections {
     prograde: Option<DVec3>,
     normal: Option<DVec3>,
     radial_out: Option<DVec3>,
@@ -265,7 +265,7 @@ struct MarkerDirections {
 }
 
 impl MarkerDirections {
-    fn for_kind(&self, kind: MarkerKind) -> Option<DVec3> {
+    pub(crate) fn for_kind(&self, kind: MarkerKind) -> Option<DVec3> {
         match kind {
             MarkerKind::Prograde => self.prograde,
             MarkerKind::Retrograde => self.prograde.map(|v| -v),
@@ -280,7 +280,10 @@ impl MarkerDirections {
     }
 }
 
-fn compute_marker_directions(
+/// World-space directions for every marker kind in the active velocity
+/// frame. Shared by the navball overlay and the PFD HUD mode
+/// (`hud::pfd_panel`).
+pub(crate) fn compute_marker_directions(
     active: VelocityReferenceFrame,
     sim_state: &SimulationState,
     solar_system: &SolarSystemState,
@@ -339,7 +342,8 @@ pub fn marker_icon_image(kind: MarkerKind, size: u32, state: MarkerIconState) ->
     image_from_rgba8(size, size, pixels)
 }
 
-fn orientation_icon_image(width: u32, height: u32) -> Image {
+/// The ship-orientation ("level indicator") icon; also the PFD boresight.
+pub(crate) fn orientation_icon_image(width: u32, height: u32) -> Image {
     let pixels = render_svg_rgba8(
         include_bytes!("../../../../assets/markers/navigation/level-indicator.svg"),
         width,

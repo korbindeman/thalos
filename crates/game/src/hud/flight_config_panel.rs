@@ -1,17 +1,24 @@
-//! Top-centre flight-configuration cluster: the flap lever detent and the
-//! brakes latch, as two **clickable** pills under the atmosphere readout
-//! (same toggle-button treatment as the nav panel's SAS/RCS buttons).
+//! Top-centre flight-configuration cluster: the flap lever and the
+//! brakes latch, sitting under the atmosphere readout.
 //!
-//! - Clicking **FLAPS** cycles the lever one detent (UP → T/O → LDG → UP);
-//!   the `F`/`R` keys remain the stepwise non-wrapping path.
-//! - Clicking **BRAKES** toggles the latch, exactly like `B`.
+//! - **FLAPS** is a *segmented gate* — three detent segments
+//!   `[ UP · T/O · LDG ]` laid out like a flap lever's gate. Clicking a
+//!   segment drives the lever **straight to that detent** (one click to any
+//!   position, never the wrong direction); the current detent is highlighted
+//!   and glows amber while the actuators are still travelling toward it. The
+//!   `F`/`R` keys remain the stepwise extend/retract path. (This replaced a
+//!   single one-directional cycling pill, whose only motion was
+//!   `UP → T/O → LDG → UP`: it couldn't express "retract" and needed two
+//!   clicks to clean up after takeoff.)
+//! - **BRAKES** stays a single latched toggle pill (it *is* a binary latch),
+//!   exactly like `B` — wheel brakes on the ground and spoilers in the air.
 //!
-//! **Capability-gated:** each pill appears only when the current craft
-//! actually has the system. Flaps show iff the wing aero config derived any
-//! flap authority from authored `Flap` windows; brakes show iff the craft has
-//! landing-gear wheels (wheel brakes) or `Spoiler` windows (speedbrake). A
-//! rocket/capsule shows neither; the panel also stands down outside the local
-//! bubble (on rails, where neither system can act) and on EVA.
+//! **Capability-gated:** the flap gate appears only when the wing aero config
+//! derived flap authority from authored `Flap` windows; brakes show iff the
+//! craft has landing-gear wheels (wheel brakes) or `Spoiler` windows
+//! (speedbrake). A rocket/capsule shows neither; the panel also stands down
+//! outside the local bubble (on rails, where neither system can act) and on
+//! EVA.
 
 use bevy::prelude::*;
 use thalos_physics_canonical::types::VesselKind;
@@ -28,11 +35,24 @@ use crate::rendering::SimulationState;
 #[derive(Component)]
 pub(super) struct FlightConfigRow;
 
+/// Container for the flap-lever gate (the static `FLAPS` label + the detent
+/// segments). Carries the whole group's capability visibility.
 #[derive(Component)]
-pub(super) struct FlapsPill;
+pub(super) struct FlapsGate;
 
+/// One detent segment button. `detent` is the lever position it selects
+/// (0 = UP, `FLAP_DETENTS` = LANDING).
 #[derive(Component)]
-pub(super) struct FlapsText;
+pub(super) struct FlapsSegment {
+    detent: u8,
+}
+
+/// The label inside a flap segment, tagged with its detent so the per-segment
+/// colouring can find it.
+#[derive(Component)]
+pub(super) struct FlapsSegmentText {
+    detent: u8,
+}
 
 #[derive(Component)]
 pub(super) struct BrakesPill;
@@ -51,6 +71,7 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                 left: Val::Px(0.0),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 column_gap: Val::Px(8.0),
                 ..default()
             },
@@ -71,6 +92,16 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
         align_items: AlignItems::Center,
         ..default()
     };
+    // Segments are slightly tighter than a full pill so the three read as one
+    // gate rather than three separate buttons.
+    let segment_node = || Node {
+        border: UiRect::all(Val::Px(1.0)),
+        border_radius: BorderRadius::all(Val::Px(3.0)),
+        padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        ..default()
+    };
     let pill_text = |theme: &HudTheme, label: &str| {
         (
             Text::new(label),
@@ -84,18 +115,45 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
     };
 
     commands.entity(row).with_children(|p| {
+        // Flap gate: a static "FLAPS" label followed by the three detent
+        // segments. The gate node carries the capability visibility.
         p.spawn((
-            Button,
-            pill_node(),
-            BackgroundColor(theme.panel_bg),
-            BorderColor::all(theme.panel_border),
-            Interaction::None,
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
             Visibility::Hidden,
-            FlapsPill,
-            Name::new("FlightConfigFlapsButton"),
+            FlapsGate,
+            Name::new("FlightConfigFlapsGate"),
         ))
         .with_children(|p| {
-            p.spawn((pill_text(&theme, "FLAPS UP"), FlapsText));
+            p.spawn(pill_text(&theme, "FLAPS"));
+            // The detent segments, joined by a tight gap.
+            p.spawn(Node {
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(3.0),
+                ..default()
+            })
+            .with_children(|p| {
+                for detent in 0..=FLAP_DETENTS {
+                    p.spawn((
+                        Button,
+                        segment_node(),
+                        BackgroundColor(theme.panel_bg),
+                        BorderColor::all(theme.panel_border),
+                        Interaction::None,
+                        FlapsSegment { detent },
+                        Name::new("FlightConfigFlapSegment"),
+                    ))
+                    .with_children(|p| {
+                        p.spawn((
+                            pill_text(&theme, FlightConfig::detent_label(detent)),
+                            FlapsSegmentText { detent },
+                        ));
+                    });
+                }
+            });
         });
 
         p.spawn((
@@ -114,18 +172,18 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
     });
 }
 
-/// Click handling: FLAPS cycles the lever one detent (wrapping), BRAKES
-/// toggles the latch — the same state the `F`/`R` and `B` keys drive
+/// Click handling: a FLAPS segment sets the lever straight to its detent,
+/// BRAKES toggles the latch — the same state the `F`/`R` and `B` keys drive
 /// ([`crate::flight_config`], `local_physics::toggle_parking_brake`).
 pub(super) fn handle_clicks(
-    flaps: Query<&Interaction, (Changed<Interaction>, With<FlapsPill>)>,
+    flaps: Query<(&Interaction, &FlapsSegment), Changed<Interaction>>,
     brakes: Query<&Interaction, (Changed<Interaction>, With<BrakesPill>)>,
     mut config: ResMut<FlightConfig>,
     mut brake: ResMut<ParkingBrake>,
 ) {
-    for interaction in &flaps {
+    for (interaction, segment) in &flaps {
         if matches!(interaction, Interaction::Pressed) {
-            config.flap_setting = (config.flap_setting + 1) % (FLAP_DETENTS + 1);
+            config.flap_setting = segment.detent.min(FLAP_DETENTS);
         }
     }
     for interaction in &brakes {
@@ -144,18 +202,27 @@ pub(super) fn update(
     craft: Query<(&ShipAero, Option<&WheelSet>), With<LocalCraftBody>>,
     mut row_q: Query<
         &mut Visibility,
-        (With<FlightConfigRow>, Without<FlapsPill>, Without<BrakesPill>),
+        (With<FlightConfigRow>, Without<FlapsGate>, Without<BrakesPill>),
     >,
-    mut flaps_pill_q: Query<
-        (&mut Visibility, &Interaction, &mut BorderColor, &mut BackgroundColor),
-        (With<FlapsPill>, Without<FlightConfigRow>, Without<BrakesPill>),
+    mut gate_q: Query<
+        &mut Visibility,
+        (With<FlapsGate>, Without<FlightConfigRow>, Without<BrakesPill>),
+    >,
+    mut segments_q: Query<
+        (&FlapsSegment, &Interaction, &mut BorderColor, &mut BackgroundColor),
+        Without<BrakesPill>,
     >,
     mut brakes_pill_q: Query<
         (&mut Visibility, &Interaction, &mut BorderColor, &mut BackgroundColor),
-        (With<BrakesPill>, Without<FlightConfigRow>, Without<FlapsPill>),
+        (
+            With<BrakesPill>,
+            Without<FlightConfigRow>,
+            Without<FlapsGate>,
+            Without<FlapsSegment>,
+        ),
     >,
-    mut flaps_text_q: Query<(&mut Text, &mut TextColor), (With<FlapsText>, Without<BrakesText>)>,
-    mut brakes_text_q: Query<(&mut Text, &mut TextColor), (With<BrakesText>, Without<FlapsText>)>,
+    mut segment_text_q: Query<(&FlapsSegmentText, &mut TextColor), Without<BrakesText>>,
+    mut brakes_text_q: Query<(&mut Text, &mut TextColor), (With<BrakesText>, Without<FlapsSegmentText>)>,
 ) {
     // Capability of the *current* craft: flap/spoiler authority from the wing
     // aero config on the bubble body, wheel brakes from its wheel set. No
@@ -174,13 +241,34 @@ pub(super) fn update(
         set_visibility(&mut row_vis, has_flaps || has_brakes);
     }
 
-    if let Ok((mut vis, interaction, mut border, mut bg)) = flaps_pill_q.single_mut() {
-        set_visibility(&mut vis, has_flaps);
-        if has_flaps {
-            let active = flight_config.flap_setting > 0;
+    if let Ok(mut gate_vis) = gate_q.single_mut() {
+        set_visibility(&mut gate_vis, has_flaps);
+    }
+
+    if has_flaps {
+        // The commanded detent is highlighted; while the actuators are still
+        // travelling toward it the highlight reads amber ("moving").
+        let target = flight_config.flap_setting as f64 / FLAP_DETENTS.max(1) as f64;
+        let in_transit = (flight_config.flap_fraction - target).abs() > 0.02;
+
+        for (segment, interaction, mut border, mut bg) in &mut segments_q {
+            let active = segment.detent == flight_config.flap_setting;
             let (border_color, bg_color) =
                 nav_button_colors(&theme, active, true, false, interaction);
             apply_button_colors(&mut border, &mut bg, border_color, bg_color);
+        }
+
+        for (label, mut color) in &mut segment_text_q {
+            let new_color = if label.detent != flight_config.flap_setting {
+                theme.text_dim
+            } else if in_transit {
+                theme.text_warn
+            } else {
+                theme.text_accent
+            };
+            if color.0 != new_color {
+                color.0 = new_color;
+            }
         }
     }
 
@@ -190,25 +278,6 @@ pub(super) fn update(
             let (border_color, bg_color) =
                 nav_button_colors(&theme, brake.engaged, true, false, interaction);
             apply_button_colors(&mut border, &mut bg, border_color, bg_color);
-        }
-    }
-
-    if has_flaps && let Ok((mut text, mut color)) = flaps_text_q.single_mut() {
-        let target = flight_config.flap_setting as f64 / FLAP_DETENTS.max(1) as f64;
-        let in_transit = (flight_config.flap_fraction - target).abs() > 0.02;
-        let label = format!("FLAPS {}", flight_config.flap_label());
-        let new_color = if in_transit {
-            theme.text_warn
-        } else if flight_config.flap_setting > 0 {
-            theme.text_accent
-        } else {
-            theme.text_dim
-        };
-        if text.0 != label {
-            text.0 = label;
-        }
-        if color.0 != new_color {
-            color.0 = new_color;
         }
     }
 

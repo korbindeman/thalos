@@ -9,6 +9,9 @@
 //! - **Bottom-left (above navball)**: orbital velocity
 //! - **Bottom-right**: per-stage staging stack (Δv + fuel per stage)
 //! - **Bottom-left (beside navball)**: circular navigation panel
+//! - **Screen centre (HUD mode)**: PFD overlay replacing the navball
+//!   cluster — pitch ladder, speed/altitude tapes, direction markers
+//!   ([`pfd_panel`], toggled by the top-left BALL/HUD selector)
 //!
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
@@ -23,6 +26,7 @@ pub mod input_gate;
 mod nav_attitude;
 mod nav_panel;
 mod orbital_panel;
+mod pfd_panel;
 mod staging_panel;
 mod system_map_panel;
 pub mod theme;
@@ -71,6 +75,8 @@ impl Plugin for HudPlugin {
             .init_resource::<TimeDisplayMode>()
             .init_resource::<nav_panel::ManeuverPanelState>()
             .init_resource::<orbital_panel::AltitudeDisplay>()
+            .init_resource::<pfd_panel::NavDisplayMode>()
+            .register_type::<pfd_panel::NavDisplayMode>()
             .add_systems(Startup, theme::init_theme)
             .add_systems(bevy_egui::EguiPrimaryContextPass, theme::apply_egui_theme)
             .add_systems(Startup, setup_top_left_row.after(theme::init_theme))
@@ -78,7 +84,12 @@ impl Plugin for HudPlugin {
                 Startup,
                 (
                     nav_attitude::setup,
-                    (warp_time_panel::setup, view_mode_panel::setup).chain(),
+                    (
+                        warp_time_panel::setup,
+                        view_mode_panel::setup,
+                        pfd_panel::setup_toggle,
+                    )
+                        .chain(),
                     orbital_panel::setup,
                     staging_panel::setup,
                     flight_panel::setup.after(crate::navball::ui::setup_navball_ui),
@@ -87,6 +98,7 @@ impl Plugin for HudPlugin {
                     atmo_panel::setup,
                     flight_config_panel::setup,
                     system_map_panel::setup,
+                    pfd_panel::setup,
                 )
                     .after(theme::init_theme)
                     .after(setup_top_left_row),
@@ -129,6 +141,15 @@ impl Plugin for HudPlugin {
                         nav_panel::update_maneuver_visuals,
                         nav_attitude::update_attitude,
                     ),
+                    (
+                        pfd_panel::handle_mode_clicks,
+                        pfd_panel::update_mode_button_visuals,
+                        pfd_panel::sync_visibility,
+                        pfd_panel::update_attitude_display,
+                        pfd_panel::update_tapes.after(orbital_panel::update),
+                        pfd_panel::update_annunciators,
+                    )
+                        .chain(),
                 )
                     .after(crate::SimStage::Sync)
                     // The HUD is part of the flight scene, not the shipyard

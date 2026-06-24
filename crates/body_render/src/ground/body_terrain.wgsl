@@ -26,16 +26,32 @@
 #import thalos::atmosphere::AtmosphereBlock
 #import thalos::lighting::{SceneLighting, SCENE_FLUX_SCALE, shade_hapke_surface}
 
-const MAX_TERRAIN_SHADOW_CASTERS: u32 = 16u;
+// Must match `MAX_TERRAIN_SHADOW_CASTERS` / `MAX_TERRAIN_SHADOW_QUADS` in
+// `body_material.rs`.
+const MAX_TERRAIN_SHADOW_CASTERS: u32 = 24u;
+const MAX_TERRAIN_SHADOW_QUADS: u32 = 8u;
+
+// Penumbra growth per metre of caster height: the star's angular diameter
+// (~0.6 deg), so contact shadows are crisp and high shadows soften out the
+// way a real sun shadow does.
+const SHADOW_PENUMBRA_PER_M: f32 = 0.011;
 
 struct BodyTerrainShadow {
     // x = strength, y = minimum penumbra width in metres,
-    // z = max receiver distance, w = valid caster count.
+    // z = max receiver distance, w = valid capsule caster count.
     params: vec4<f32>,
+    // x = valid quad caster count, yzw reserved.
+    quad_params: vec4<f32>,
     // xyz = part top/near endpoint in render-space metres, w = endpoint radius.
-    caster_a_radius: array<vec4<f32>, 16>,
+    caster_a_radius: array<vec4<f32>, 24>,
     // xyz = part bottom/far endpoint in render-space metres, w = endpoint radius.
-    caster_b_radius: array<vec4<f32>, 16>,
+    caster_b_radius: array<vec4<f32>, 24>,
+    // Thin planform quads (lifting surfaces), corners in render-space metres
+    // wound root-LE -> tip-LE -> tip-TE -> root-TE; w unused.
+    quad_a: array<vec4<f32>, 8>,
+    quad_b: array<vec4<f32>, 8>,
+    quad_c: array<vec4<f32>, 8>,
+    quad_d: array<vec4<f32>, 8>,
 }
 
 // Debug overlay: see `BodyTerrainDebug` in `body_material.rs` for the
@@ -298,8 +314,92 @@ fn tapered_segment_shadow(
     }
 
     let silhouette_distance = length(closest);
-    let penumbra = max(terrain_extras.craft_shadow.params.y, max(radius * 0.18, 0.03));
+    // Penumbra widens with caster height (solar angular diameter) so contact
+    // shadows stay crisp while a high overflight softens out.
+    let penumbra = max(
+        terrain_extras.craft_shadow.params.y,
+        max(radius * 0.18, ray_t * SHADOW_PENUMBRA_PER_M),
+    );
     let coverage = 1.0 - smoothstep(radius, radius + penumbra, silhouette_distance);
+    let fade = 1.0 - smoothstep(terrain_extras.craft_shadow.params.z * 0.75, terrain_extras.craft_shadow.params.z, ray_t);
+    return 1.0 - terrain_extras.craft_shadow.params.x * coverage * fade;
+}
+
+// Distance from `p` to the segment `a`-`b`, all in the 2-D silhouette plane.
+fn segment_distance_2d(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let ab = b - a;
+    let h = clamp(dot(p - a, ab) / max(dot(ab, ab), 1.0e-8), 0.0, 1.0);
+    return length(p - a - ab * h);
+}
+
+fn cross_2d(a: vec2<f32>, b: vec2<f32>) -> f32 {
+    return a.x * b.y - a.y * b.x;
+}
+
+// Shadow factor for one thin planform quad (a lifting surface). The four
+// corners are projected along the sun ray onto the plane through the
+// terrain fragment; coverage is a signed-distance test against the
+// projected outline, so the silhouette is the true planform at any sun
+// angle — a wing edge-on to the sun casts (almost) nothing instead of the
+// chord-thick slab a capsule proxy would throw.
+fn planform_quad_shadow(
+    hit_ws: vec3<f32>,
+    sun_dir_ws: vec3<f32>,
+    qa: vec4<f32>,
+    qb: vec4<f32>,
+    qc: vec4<f32>,
+    qd: vec4<f32>,
+) -> f32 {
+    let delta_a = qa.xyz - hit_ws;
+    let delta_b = qb.xyz - hit_ws;
+    let delta_c = qc.xyz - hit_ws;
+    let delta_d = qd.xyz - hit_ws;
+    let t_a = dot(delta_a, sun_dir_ws);
+    let t_b = dot(delta_b, sun_dir_ws);
+    let t_c = dot(delta_c, sun_dir_ws);
+    let t_d = dot(delta_d, sun_dir_ws);
+    let ray_t = 0.25 * (t_a + t_b + t_c + t_d);
+    if ray_t <= 0.0 || ray_t > terrain_extras.craft_shadow.params.z {
+        return 1.0;
+    }
+
+    // 2-D basis on the plane perpendicular to the sun ray.
+    var basis_x = cross(sun_dir_ws, vec3(0.0, 1.0, 0.0));
+    if dot(basis_x, basis_x) < 1.0e-6 {
+        basis_x = cross(sun_dir_ws, vec3(1.0, 0.0, 0.0));
+    }
+    basis_x = normalize(basis_x);
+    let basis_y = cross(sun_dir_ws, basis_x);
+
+    let pa = vec2(dot(delta_a, basis_x), dot(delta_a, basis_y));
+    let pb = vec2(dot(delta_b, basis_x), dot(delta_b, basis_y));
+    let pc = vec2(dot(delta_c, basis_x), dot(delta_c, basis_y));
+    let pd = vec2(dot(delta_d, basis_x), dot(delta_d, basis_y));
+
+    // The fragment projects to the origin. Signed distance to the quad
+    // outline: winding-independent inside test via the two triangles, edge
+    // distance for the magnitude.
+    let origin = vec2(0.0, 0.0);
+    let edge_distance = min(
+        min(segment_distance_2d(origin, pa, pb), segment_distance_2d(origin, pb, pc)),
+        min(segment_distance_2d(origin, pc, pd), segment_distance_2d(origin, pd, pa)),
+    );
+    let s1 = cross_2d(pb - pa, origin - pa);
+    let s2 = cross_2d(pc - pb, origin - pb);
+    let s3 = cross_2d(pd - pc, origin - pc);
+    let s4 = cross_2d(pa - pd, origin - pd);
+    let all_neg = s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0 && s4 <= 0.0;
+    let all_pos = s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0 && s4 >= 0.0;
+    var signed_distance = edge_distance;
+    if all_neg || all_pos {
+        signed_distance = -edge_distance;
+    }
+
+    let penumbra = max(
+        terrain_extras.craft_shadow.params.y,
+        ray_t * SHADOW_PENUMBRA_PER_M,
+    );
+    let coverage = 1.0 - smoothstep(-0.5 * penumbra, 0.5 * penumbra, signed_distance);
     let fade = 1.0 - smoothstep(terrain_extras.craft_shadow.params.z * 0.75, terrain_extras.craft_shadow.params.z, ray_t);
     return 1.0 - terrain_extras.craft_shadow.params.x * coverage * fade;
 }
@@ -309,7 +409,11 @@ fn local_craft_shadow(hit_ws: vec3<f32>, sun_dir_ws: vec3<f32>) -> f32 {
         u32(max(terrain_extras.craft_shadow.params.w, 0.0)),
         MAX_TERRAIN_SHADOW_CASTERS,
     );
-    if caster_count == 0u {
+    let quad_count = min(
+        u32(max(terrain_extras.craft_shadow.quad_params.x, 0.0)),
+        MAX_TERRAIN_SHADOW_QUADS,
+    );
+    if caster_count == 0u && quad_count == 0u {
         return 1.0;
     }
 
@@ -325,6 +429,22 @@ fn local_craft_shadow(hit_ws: vec3<f32>, sun_dir_ws: vec3<f32>) -> f32 {
                 sun_dir_ws,
                 terrain_extras.craft_shadow.caster_a_radius[i],
                 terrain_extras.craft_shadow.caster_b_radius[i],
+            ),
+        );
+    }
+    for (var i = 0u; i < MAX_TERRAIN_SHADOW_QUADS; i = i + 1u) {
+        if i >= quad_count {
+            break;
+        }
+        shadow = min(
+            shadow,
+            planform_quad_shadow(
+                hit_ws,
+                sun_dir_ws,
+                terrain_extras.craft_shadow.quad_a[i],
+                terrain_extras.craft_shadow.quad_b[i],
+                terrain_extras.craft_shadow.quad_c[i],
+                terrain_extras.craft_shadow.quad_d[i],
             ),
         );
     }

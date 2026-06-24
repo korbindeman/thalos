@@ -486,11 +486,18 @@ pub fn expected_authority(inputs: &RegimeInputs, regime: &CraftRegime) -> Author
     let mut just_released = false;
     if authority == AuthorityKind::BodyFixed {
         if inputs.throttle_commanded > LANDED_THROTTLE_RELEASE {
-            // Landed release on commanded throttle. The settle dwell
-            // restarts from zero after a release (legacy resets the timer
-            // while `BodyFixed`), so the Settled collapse below must not
-            // re-pin the craft on the release frame — `regime.ground` was
-            // classified from the pre-release `BodyFixed` authority.
+            // Landed release on commanded throttle. The release routes through
+            // `OnRails` for the handoff frame *on purpose*: `OnRails` Kepler-
+            // propagates canonical so it keeps pace with the body's orbital
+            // motion (~hundreds of m/frame) while the backend takes over. A
+            // direct `BodyFixed → LocalRigidBody` instead holds canonical
+            // static in inertial space for that frame (see `Simulation::step`),
+            // so the body flies out from under the craft and the surface-local
+            // snap teleports it ~one orbital frame away. The settle dwell
+            // restarts from zero after a release (legacy resets the timer while
+            // `BodyFixed`), so the Settled collapse below must not re-pin the
+            // craft on the release frame — `regime.ground` was classified from
+            // the pre-release `BodyFixed` authority.
             authority = AuthorityKind::OnRails;
             just_released = true;
         } else {
@@ -679,7 +686,11 @@ mod tests {
         inputs.throttle_commanded = 0.5;
         let (regime, _) = resolve(&inputs, &RegimeMemory::default());
         // Effective throttle is still 0 this frame, so the release lands on
-        // OnRails; the backend takes over once thrust becomes effective.
+        // OnRails; the backend takes over once thrust becomes effective. The
+        // OnRails hop is deliberate — it keeps canonical co-moving with the
+        // body's orbit during the handoff frame (a direct jump to the backend
+        // would strand the craft ~one orbital frame away in the surface-local
+        // frame).
         assert_eq!(expected_authority(&inputs, &regime), AuthorityKind::OnRails);
     }
 

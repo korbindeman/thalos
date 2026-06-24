@@ -42,6 +42,9 @@ pub(super) struct AltitudeDisplay {
     /// Auto-picked datum from the previous frame, used to detect
     /// regime transitions that should clear the override.
     last_auto: Option<AltitudeDatum>,
+    /// The datum + altitude (m) resolved this frame, published for other
+    /// HUD consumers (the PFD altitude tape). **Sole writer:** [`update`].
+    pub(super) resolved: Option<(AltitudeDatum, f64)>,
 }
 
 #[derive(Component)]
@@ -371,6 +374,7 @@ pub fn update(
             (agl, "GND", theme.text_datum_gnd)
         }
     };
+    display.resolved = Some((chosen, alt_value));
 
     set_text(&mut alt_q, format::altitude(alt_value));
 

@@ -25,14 +25,18 @@ use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
     BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent,
-    GpuAtlasMirrorHandle, MAX_TERRAIN_SHADOW_CASTERS, PipelineTileProvider, SyntheticTerrainMode,
-    SyntheticTileProvider, TerrainShadingStyle, rendered_height_range,
+    GpuAtlasMirrorHandle, MAX_TERRAIN_SHADOW_CASTERS, MAX_TERRAIN_SHADOW_QUADS,
+    PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, TerrainShadingStyle,
+    rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
+use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
-    Adapter, AirIntake, AttachNodes, CommandPod, Decoupler, Engine, EngineGeometry, FuelTank, Part,
-    SurfaceMount, SurfaceMountKind,
+    Adapter, AirIntake, AttachNodes, CommandPod, Decoupler, Engine, EngineGeometry, FuelTank,
+    Fuselage, JetNacelleMount, Part, PodGeometry, SurfaceMount, SurfaceMountKind, Wing,
+    fuselage_skin_radius, fuselage_v_offset_at, host_mount_geometry, jet_nacelle_centers,
+    jet_nacelle_length, wing_panel_frame,
 };
 use thalos_terrain::{
     BakedSurface, DynamicSurfaceState, FlattenHandle, FlattenedSurface, PlanetSurface,
@@ -171,11 +175,15 @@ type ShadowPartQuery<'w, 's> = Query<
         Option<&'static Decoupler>,
         Option<&'static Adapter>,
         Option<&'static FuelTank>,
+        Option<&'static Fuselage>,
+        Option<&'static Wing>,
         Option<&'static Engine>,
         Option<&'static AirIntake>,
         Option<&'static SurfaceMount>,
     ),
-    With<Part>,
+    // The shipyard editor's build world shares this ECS; its parts sit near
+    // the render origin and would cast phantom shadows onto the terrain.
+    (With<Part>, Without<EditorPart>),
 >;
 
 #[derive(Clone, Copy)]
@@ -1382,13 +1390,26 @@ fn local_craft_shadow(
     if ship_q.single().is_ok() {
         let mut shadow = BodyTerrainShadow::default();
         let mut count = 0usize;
-        for (xform, nodes, pod, dec, adapter, tank, engine, intake, surface_mount) in part_q.iter()
+        let mut quad_count = 0usize;
+        for (xform, nodes, pod, dec, adapter, tank, fuselage, wing, engine, intake, surface_mount) in
+            part_q.iter()
         {
-            if matches!(
-                (engine, surface_mount.map(|m| m.kind)),
-                (Some(engine), Some(SurfaceMountKind::WingPylon))
-                    if engine.geometry == EngineGeometry::JetNacelle
-            ) {
+            // Aircraft-shaped parts get casters derived from the same shared
+            // shipyard geometry the renderer lofts, so the shadow silhouette
+            // tracks the visible craft by construction.
+            if let (Some(wing), Some(mount)) = (wing, surface_mount) {
+                push_wing_quad(&mut shadow, &mut quad_count, xform, wing, mount, part_q);
+                continue;
+            }
+            if let Some(fus) = fuselage {
+                push_fuselage_casters(&mut shadow, &mut count, xform, fus, nodes);
+                continue;
+            }
+            if let (Some(engine), Some(mount)) = (engine, surface_mount)
+                && engine.geometry == EngineGeometry::JetNacelle
+                && mount.kind == SurfaceMountKind::WingPylon
+            {
+                push_nacelle_caster(&mut shadow, &mut count, xform, engine, mount, part_q);
                 continue;
             }
             let Some(shape) = part_shadow_shape(nodes, pod, dec, adapter, tank, engine, intake)
@@ -1416,13 +1437,14 @@ fn local_craft_shadow(
             );
         }
 
-        if count > 0 {
+        if count > 0 || quad_count > 0 {
             shadow.params = Vec4::new(
                 CRAFT_SHADOW_STRENGTH,
                 SHIP_SHADOW_MIN_PENUMBRA_M,
                 CRAFT_SHADOW_MAX_DISTANCE_M,
                 count as f32,
             );
+            shadow.quad_params.x = quad_count as f32;
             return shadow;
         }
     }
@@ -1458,6 +1480,145 @@ fn local_craft_shadow(
     BodyTerrainShadow::default()
 }
 
+/// Largest |scale| axis of a part transform, for scaling caster radii the way
+/// `GlobalTransform::transform_point` scales the endpoint positions.
+fn max_abs_scale(xform: &GlobalTransform) -> f32 {
+    let scale = xform.compute_transform().scale;
+    scale.x.abs().max(scale.y.abs()).max(scale.z.abs()).max(1.0e-4)
+}
+
+/// Skin radius a surface-mounted part sits at on its host — the same
+/// `host_mount_geometry` lookup `ship_view` feeds the mesh builders, so the
+/// caster frame matches the rendered loft. Falls back to a plain cylinder
+/// radius when the host can't be resolved (mid-despawn).
+fn shadow_host_mount_radius(part_q: &ShadowPartQuery, mount: &SurfaceMount) -> f32 {
+    match part_q.get(mount.parent) {
+        Ok((_, nodes, _, _, _, _, fuselage, _, _, _, _)) => {
+            let top_d = nodes.get("top").map(|n| n.diameter).unwrap_or(2.0);
+            host_mount_geometry(fuselage, top_d, mount.station, mount.angle).0
+        }
+        Err(_) => 1.0,
+    }
+}
+
+/// One thin planform quad per lifting surface: corners at the root/tip
+/// leading and trailing edges from the same `wing_panel_frame` the mesh is
+/// lofted in. The shader projects the quad along the sun ray, so the shadow
+/// is the true planform at any sun elevation — sweep, taper, and dihedral
+/// included — and collapses to (nearly) nothing edge-on instead of the
+/// chord-thick slab a capsule proxy throws at low sun.
+fn push_wing_quad(
+    shadow: &mut BodyTerrainShadow,
+    quad_count: &mut usize,
+    xform: &GlobalTransform,
+    wing: &Wing,
+    mount: &SurfaceMount,
+    part_q: &ShadowPartQuery,
+) {
+    if *quad_count >= MAX_TERRAIN_SHADOW_QUADS {
+        return;
+    }
+    let parent_radius = shadow_host_mount_radius(part_q, mount);
+    let frame = wing_panel_frame(wing, mount.angle, parent_radius);
+    let root_half = frame.fore_dir * (wing.root_chord * 0.5);
+    let tip_half = frame.fore_dir * (wing.tip_chord * 0.5);
+    // Wound root-LE -> tip-LE -> tip-TE -> root-TE so consecutive corners
+    // trace the outline (the shader's edge test relies on the order).
+    let corners = [
+        frame.root_center + root_half,
+        frame.tip_center + tip_half,
+        frame.tip_center - tip_half,
+        frame.root_center - root_half,
+    ];
+    let world = corners.map(|c| xform.transform_point(c));
+    shadow.quad_a[*quad_count] = world[0].extend(0.0);
+    shadow.quad_b[*quad_count] = world[1].extend(0.0);
+    shadow.quad_c[*quad_count] = world[2].extend(0.0);
+    shadow.quad_d[*quad_count] = world[3].extend(0.0);
+    *quad_count += 1;
+}
+
+/// Three tapered segments tracing the fuselage loft — nose cap, barrel, tail
+/// cone — sampled from the same skin model the mesh is lofted from, so a
+/// pointed radome shadows to a point and an upswept tailcone lifts off the
+/// ground line. The part origin is the `top` attach node; the loft runs down
+/// local −Y (see `fuselage_mesh` frame docs).
+fn push_fuselage_casters(
+    shadow: &mut BodyTerrainShadow,
+    count: &mut usize,
+    xform: &GlobalTransform,
+    fus: &Fuselage,
+    nodes: &AttachNodes,
+) {
+    let diameter = nodes.get("top").map(|n| n.diameter).unwrap_or(fus.max_width);
+    let nose_end = fus.nose_fraction.clamp(0.0, 0.49);
+    let tail_start = (1.0 - fus.tail_fraction.clamp(0.0, 0.95)).max(nose_end);
+    let stations = [0.0, nose_end, tail_start, 1.0];
+    let scale = max_abs_scale(xform);
+    let point_at = |s: f32| {
+        xform.transform_point(Vec3::new(
+            0.0,
+            -s * fus.length,
+            fuselage_v_offset_at(fus, diameter, s),
+        ))
+    };
+    // Planform half-width: the skin radius along the lateral (+X) radial.
+    let radius_at =
+        |s: f32| fuselage_skin_radius(fus, diameter, s, std::f32::consts::FRAC_PI_2) * scale;
+    for window in stations.windows(2) {
+        if window[1] - window[0] < 1.0e-3 {
+            continue;
+        }
+        push_shadow_caster(
+            shadow,
+            count,
+            point_at(window[0]),
+            radius_at(window[0]),
+            point_at(window[1]),
+            radius_at(window[1]),
+        );
+    }
+}
+
+/// One segment along each podded nacelle's axis, placed by the same
+/// `jet_nacelle_centers` math that builds the pylon mesh (the mesh is in the
+/// engine part's local frame, so the part transform places both alike).
+fn push_nacelle_caster(
+    shadow: &mut BodyTerrainShadow,
+    count: &mut usize,
+    xform: &GlobalTransform,
+    engine: &Engine,
+    mount: &SurfaceMount,
+    part_q: &ShadowPartQuery,
+) {
+    let Ok((_, _, _, _, _, _, _, wing, _, _, wing_mount)) = part_q.get(mount.parent) else {
+        return;
+    };
+    let (Some(wing), Some(wing_mount)) = (wing, wing_mount) else {
+        return;
+    };
+    let nacelle_mount = JetNacelleMount {
+        wing,
+        wing_mount_angle: wing_mount.angle,
+        parent_radius: shadow_host_mount_radius(part_q, wing_mount),
+        span_fraction: mount.station,
+        chord_fraction: mount.angle,
+    };
+    let half_length = jet_nacelle_length(engine) * 0.5;
+    let scale = max_abs_scale(xform);
+    let radius = engine.diameter * 0.5 * scale;
+    for center in jet_nacelle_centers(engine, nacelle_mount) {
+        push_shadow_caster(
+            shadow,
+            count,
+            xform.transform_point(center + Vec3::Y * half_length),
+            radius,
+            xform.transform_point(center - Vec3::Y * half_length),
+            radius,
+        );
+    }
+}
+
 fn part_shadow_shape(
     nodes: &AttachNodes,
     pod: Option<&CommandPod>,
@@ -1468,6 +1629,11 @@ fn part_shadow_shape(
     intake: Option<&AirIntake>,
 ) -> Option<PartShadowShape> {
     if let Some(pod) = pod {
+        // An inline cockpit has no body mesh of its own (`visual_spec`
+        // returns None) — it must not cast a phantom shadow either.
+        if matches!(pod.geometry, PodGeometry::Inline) {
+            return None;
+        }
         let (radius_top, radius_bottom, height) =
             thalos_shipyard::pod_visual_profile(pod.diameter, pod.geometry);
         Some(PartShadowShape {

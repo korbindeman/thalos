@@ -24,6 +24,7 @@
 //! shipyard editor's staging preview and this live HUD share one derivation.
 //! This module is the ECS layer that feeds them from live part entities.
 
+use bevy::ecs::world::EntityRef;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -31,10 +32,10 @@ use std::collections::HashMap;
 use thalos_input::game::GameInputIntent;
 use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
-    Adapter, AirIntake, Attachment, CommandPod, Decoupler, Engine, EngineActivation, FuelTank,
-    Part, PartResources, PartRole, Resource, ResourceTotals, StageSummary,
-    SummaryEngine, SummaryPart, SummaryStageInput, SurfaceMount, compute_stage_summaries,
-    cylinder_principal_inertia, derive_stages, parallel_axis_inertia,
+    Attachment, CommandPod, Decoupler, Engine, EngineActivation, Part, PartResources, PartRole,
+    Resource, ResourceTotals, StageSummary, SummaryEngine, SummaryPart, SummaryStageInput,
+    SurfaceMount, compute_stage_summaries, derive_stages, live_part_dry_mass_kg,
+    live_part_self_inertia, live_part_total_mass_kg, parallel_axis_inertia,
 };
 
 use crate::SimStage;
@@ -274,27 +275,18 @@ fn attach_subtree(root: Entity, children: &HashMap<Entity, Vec<Entity>>) -> Vec<
 // Live inertia recompute
 // ---------------------------------------------------------------------------
 
-type InertiaPartQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Transform,
-        Option<&'static CommandPod>,
-        Option<&'static Engine>,
-        Option<&'static FuelTank>,
-        Option<&'static Decoupler>,
-        Option<&'static Adapter>,
-        Option<&'static PartResources>,
-        Option<&'static AirIntake>,
-        Option<&'static SurfaceMount>,
-    ),
-    (With<Part>, Without<EditorPart>),
->;
+type PartQuery<'w, 's> = Query<'w, 's, EntityRef<'static>, (With<Part>, Without<EditorPart>)>;
 
 /// Recompute the ship's aggregate moment of inertia and reaction-wheel
 /// torque from the live parts and push them into [`ShipParameters`]. Skips
 /// when there are no parts (e.g. EVA), leaving those parameters untouched.
-fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: InertiaPartQuery) {
+///
+/// Mass + per-part inertia come from the single `thalos_shipyard` live-part
+/// aggregation ([`live_part_total_mass_kg`] / [`live_part_self_inertia`]), so
+/// every mass-bearing kind — wings and gear included — contributes here exactly
+/// as it does to the flight mass in `fuel.rs`. The dominant inertia term is the
+/// parallel-axis offset, computed about the live CoM.
+fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
     if parts.is_empty() {
         return;
     }
@@ -302,31 +294,27 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: InertiaPartQu
     let mut total_mass = 0.0_f64;
     let mut weighted_center = DVec3::ZERO;
     let mut max_torque = 0.0_f64;
-    // (mass, body-frame position, radius, length) per part.
-    let mut bodies: Vec<(f64, DVec3, f64, f64)> = Vec::new();
+    // (mass, body-frame position, self-inertia about the part's own CoM) per
+    // part. Self-inertia is orientation/CoM-independent, so it's resolved here
+    // before the ship CoM is known; the parallel-axis term is added below.
+    let mut bodies: Vec<(f64, DVec3, DVec3)> = Vec::new();
 
-    for (transform, pod, engine, tank, decoupler, adapter, resources, intake, surface_mount) in
-        parts.iter()
-    {
-        if let Some(pod) = pod {
+    for part in parts.iter() {
+        if let Some(pod) = part.get::<CommandPod>() {
             max_torque += pod.reaction_wheel_torque as f64;
         }
-        let Some((mass, radius, length)) = part_cylinder_mass_dims(
-            pod,
-            engine,
-            tank,
-            decoupler,
-            adapter,
-            resources,
-            intake,
-            surface_mount,
-        ) else {
+        let mass = live_part_total_mass_kg(part) * surface_multiplier(part.get::<SurfaceMount>());
+        if mass <= 0.0 {
             continue;
-        };
-        let position = transform.translation.as_dvec3();
+        }
+        let position = part
+            .get::<Transform>()
+            .map(|t| t.translation.as_dvec3())
+            .unwrap_or(DVec3::ZERO);
+        let self_inertia = live_part_self_inertia(part, mass);
         total_mass += mass;
         weighted_center += position * mass;
-        bodies.push((mass, position, radius, length));
+        bodies.push((mass, position, self_inertia));
     }
 
     if bodies.is_empty() || total_mass <= 0.0 {
@@ -335,59 +323,14 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: InertiaPartQu
     let center_of_mass = weighted_center / total_mass;
 
     let mut moment_of_inertia = DVec3::ZERO;
-    for (mass, position, radius, length) in bodies {
-        moment_of_inertia += cylinder_principal_inertia(mass, radius, length)
-            + parallel_axis_inertia(mass, position - center_of_mass);
+    for (mass, position, self_inertia) in bodies {
+        moment_of_inertia += self_inertia + parallel_axis_inertia(mass, position - center_of_mass);
     }
 
     let mut params = *sim.simulation.ship_params();
     params.moment_of_inertia = moment_of_inertia;
     params.max_torque = DVec3::splat(max_torque);
     sim.simulation.set_ship_params(params);
-}
-
-/// `(mass_kg, radius_m, length_m)` for a live part, mirroring
-/// `stats::part_cylinder_dims` over live components. The dominant inertia
-/// term is the parallel-axis offset, so using each part's own diameter
-/// (rather than the propagated node diameter) stays well within the cylinder
-/// approximation the blueprint stats already make.
-fn part_cylinder_mass_dims(
-    pod: Option<&CommandPod>,
-    engine: Option<&Engine>,
-    tank: Option<&FuelTank>,
-    decoupler: Option<&Decoupler>,
-    adapter: Option<&Adapter>,
-    resources: Option<&PartResources>,
-    intake: Option<&AirIntake>,
-    surface_mount: Option<&SurfaceMount>,
-) -> Option<(f64, f64, f64)> {
-    let propellant: f64 = resources
-        .map(|r| r.pools.iter().map(|(&res, pool)| pool.mass_kg(res)).sum())
-        .unwrap_or(0.0);
-
-    let (dry, radius, length) = if let Some(p) = pod {
-        let d = p.diameter as f64;
-        (p.dry_mass as f64, d * 0.5, d * 0.9)
-    } else if let Some(e) = engine {
-        let d = e.diameter as f64;
-        (e.dry_mass as f64, d * 0.5, d * 0.9)
-    } else if let Some(t) = tank {
-        (t.dry_mass as f64, t.diameter as f64 * 0.5, t.length as f64)
-    } else if let Some(dec) = decoupler {
-        (dec.dry_mass as f64, dec.diameter as f64 * 0.5, 0.2)
-    } else if let Some(a) = adapter {
-        let avg = (a.diameter + a.target_diameter) as f64 * 0.5;
-        (a.dry_mass as f64, avg * 0.5, avg.max(0.4))
-    } else if let Some(i) = intake {
-        (i.dry_mass as f64, i.diameter as f64 * 0.5, i.length as f64)
-    } else {
-        return None;
-    };
-    Some((
-        (dry + propellant) * surface_multiplier(surface_mount),
-        radius,
-        length,
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -404,29 +347,13 @@ fn part_cylinder_mass_dims(
 #[derive(Resource, Default)]
 pub struct StagingSummaries(pub Vec<StageSummary>);
 
-type SummaryPartQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        Option<&'static Attachment>,
-        Option<&'static SurfaceMount>,
-        Option<&'static CommandPod>,
-        Option<&'static Engine>,
-        Option<&'static FuelTank>,
-        Option<&'static Decoupler>,
-        Option<&'static Adapter>,
-        Option<&'static PartResources>,
-        Option<&'static AirIntake>,
-    ),
-    (With<Part>, Without<EditorPart>),
->;
-
 /// Gather the live parts + plan into the pure summary inputs, compute, and
-/// publish [`StagingSummaries`] for the HUD.
+/// publish [`StagingSummaries`] for the HUD. Per-part dry mass comes from the
+/// single `thalos_shipyard` live-part enumeration ([`live_part_dry_mass_kg`]),
+/// so the HUD Δv readout counts every part kind the flight mass does.
 fn publish_staging_summaries(
     plans: Query<&StagingPlan>,
-    parts: SummaryPartQuery,
+    parts: PartQuery,
     mut summaries: ResMut<StagingSummaries>,
 ) {
     let Ok(plan) = plans.single() else {
@@ -440,39 +367,24 @@ fn publish_staging_summaries(
     let mut summary_parts: Vec<SummaryPart> = Vec::new();
     let mut parents: Vec<Option<Entity>> = Vec::new();
 
-    for (
-        entity,
-        attachment,
-        surface_mount,
-        pod,
-        engine,
-        tank,
-        decoupler,
-        adapter,
-        resources,
-        intake,
-    ) in parts.iter()
-    {
-        index.insert(entity, summary_parts.len());
+    for part in parts.iter() {
+        let surface_mount = part.get::<SurfaceMount>();
+        let multiplier = surface_multiplier(surface_mount);
+        index.insert(part.id(), summary_parts.len());
         parents.push(
-            attachment
+            part.get::<Attachment>()
                 .map(|a| a.parent)
                 .or_else(|| surface_mount.map(|m| m.parent)),
         );
         summary_parts.push(SummaryPart {
             parent: None,
-            dry_mass_kg: part_dry_mass(
-                pod,
-                engine,
-                tank,
-                decoupler,
-                adapter,
-                intake,
-                surface_mount,
-            ),
-            resources: resources.map(part_resource_totals).unwrap_or_default(),
-            engine: engine.map(|en| SummaryEngine {
-                thrust_n: en.thrust as f64 * surface_multiplier(surface_mount),
+            dry_mass_kg: live_part_dry_mass_kg(part) as f64 * multiplier,
+            resources: part
+                .get::<PartResources>()
+                .map(part_resource_totals)
+                .unwrap_or_default(),
+            engine: part.get::<Engine>().map(|en| SummaryEngine {
+                thrust_n: en.thrust as f64 * multiplier,
                 isp_s: en.isp as f64,
                 reactants: en
                     .reactants
@@ -506,33 +418,6 @@ fn publish_staging_summaries(
         .collect();
 
     summaries.0 = compute_stage_summaries(&stage_inputs, &summary_parts, plan.next);
-}
-
-fn part_dry_mass(
-    pod: Option<&CommandPod>,
-    engine: Option<&Engine>,
-    tank: Option<&FuelTank>,
-    decoupler: Option<&Decoupler>,
-    adapter: Option<&Adapter>,
-    intake: Option<&AirIntake>,
-    surface_mount: Option<&SurfaceMount>,
-) -> f64 {
-    let dry = if let Some(p) = pod {
-        p.dry_mass as f64
-    } else if let Some(e) = engine {
-        e.dry_mass as f64
-    } else if let Some(t) = tank {
-        t.dry_mass as f64
-    } else if let Some(d) = decoupler {
-        d.dry_mass as f64
-    } else if let Some(a) = adapter {
-        a.dry_mass as f64
-    } else if let Some(i) = intake {
-        i.dry_mass as f64
-    } else {
-        0.0
-    };
-    dry * surface_multiplier(surface_mount)
 }
 
 fn surface_multiplier(_surface_mount: Option<&SurfaceMount>) -> f64 {

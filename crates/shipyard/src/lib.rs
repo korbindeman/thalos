@@ -71,7 +71,8 @@ pub use staging::{
 pub use stats::{
     AeroSurfaceWindow, DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals,
     ShipStats, WingAeroPanel, aggregate_resource_totals, cylinder_principal_inertia,
-    estimate_delta_v, parallel_axis_inertia,
+    estimate_delta_v, live_part_dry_mass_kg, live_part_self_inertia, live_part_total_mass_kg,
+    parallel_axis_inertia,
 };
 pub use wing_mesh::{
     BuiltControlSurface, ControlSurfaceGeometry, WingPanelFrame, build_control_surface_mesh,

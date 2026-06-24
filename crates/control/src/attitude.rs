@@ -7,14 +7,24 @@
 //! velocity every frame and limit-cycled against continuous aero moments)
 //! and the scattered PD in the old `navigation::autopilot_command`.
 //!
-//! Two PD laws:
+//! Three control laws:
 //! - [`AttitudeController::hold`] — full-quaternion PD to a captured target
 //!   orientation (roll included). This is SAS / "centered stick = hold
-//!   current attitude". Critically damped, so it settles instead of
-//!   chattering.
+//!   current attitude" for spaceships. Critically damped, so it settles
+//!   instead of chattering.
 //! - [`AttitudeController::point_nose`] — nose-direction PD that constrains
 //!   only the `+Y` body axis and purely damps roll. Used for directional
 //!   nav-mode holds and scheduled-burn pointing, where roll is free.
+//! - The **flight-assist (fly-by-wire) law** — when the caller supplies a
+//!   [`FlightState`] (SAS armed on a winged craft flying in atmosphere), the
+//!   SAS hold becomes a pitch-attitude + bank-angle hold with sideslip
+//!   damping and a slow pitch **auto-trim** integrator, and every pitch
+//!   command (the hold *and* the deflected pilot stick) is clamped by the AoA
+//!   envelope ([`crate::flight::pitch_command_envelope`]) so the craft cannot
+//!   be pulled into a stall. A quaternion hold is wrong for a plane: holding
+//!   heading in a banked turn fights the natural turn with skidding yaw, and
+//!   holding attitude against the wing's restoring moment leaves a
+//!   steady-state pitch sag the trim integrator exists to null.
 //!
 //! Body frame convention: `X` = pitch axis, `Y` = nose (roll axis),
 //! `Z` = yaw axis. Output components map directly to
@@ -24,6 +34,10 @@ use glam::{DQuat, DVec3};
 use thalos_physics_canonical::types::{AttitudeState, ShipParameters};
 
 use crate::demand::AttitudeDemand;
+use crate::flight::{
+    ALPHA_PROTECT_LEAD_S, AssistStatus, FlightState, PlaneHoldTarget, pitch_command_envelope,
+    wrap_angle,
+};
 
 /// Body-frame nose axis. `+Y` is the nose for Apollo-style stacks and the
 /// shipyard's aircraft, matching the game's `SHIP_NOSE_BODY`.
@@ -35,19 +49,48 @@ pub const NOSE_BODY: DVec3 = DVec3::Y;
 /// reads this same constant so engagement windows match the controller.
 pub const SETTLE_TIME_S: f64 = 2.0;
 
-/// Stateful attitude controller. The only state is the captured hold target
-/// — the orientation SAS / "centered stick" returns to. It is captured on
-/// the first `Hold` frame and cleared whenever the pilot deflects the stick
-/// (`Rate`) or a pointing demand takes over, so releasing the stick recaptures
-/// and holds the *new* attitude.
+/// Stateful attitude controller. The state is the captured hold target — the
+/// orientation (spaceship) or pitch/bank pair (flight assist) SAS /
+/// "centered stick" returns to — plus the flight-assist pitch trim. Targets
+/// are captured on the first `Hold` frame and cleared whenever the pilot
+/// deflects the stick (`Rate`) or a pointing demand takes over, so releasing
+/// the stick recaptures and holds the *new* attitude. The trim survives stick
+/// deflections (releasing mid-maneuver stays in trim) and resets when SAS
+/// disengages (`Free`) or a pointing mode takes attitude.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AttitudeController {
     hold_target: Option<DQuat>,
+    plane_target: Option<PlaneHoldTarget>,
+    /// Flight-assist auto-trim: a slow integral on the held pitch error, in
+    /// normalized command units. Nulls the steady-state attitude sag the
+    /// pure PD leaves against the airframe's restoring moment.
+    pitch_trim: f64,
+    status: AssistStatus,
 }
 
 /// Magnitude below which a `Rate` command counts as "stick centered" — the
 /// controller treats it as no deflection so SAS can recapture a hold target.
 const RATE_DEADZONE: f64 = 1.0e-4;
+
+// --- Flight-assist (plane FBW) constants --------------------------------------
+/// Captured bank targets inside this of wings-level snap to exactly level, so
+/// releasing the stick after a roughly-level maneuver flies level rather than
+/// freezing a stray degree of bank.
+const LEVEL_SNAP_RAD: f64 = 5.0 * std::f64::consts::PI / 180.0;
+/// Captured bank targets are clamped to this: release the stick steeper and
+/// the assist rolls back to a sustainable turn instead of holding a spiral.
+const MAX_BANK_TARGET_RAD: f64 = 60.0 * std::f64::consts::PI / 180.0;
+/// Yaw command per radian of sideslip — active turn coordination on top of
+/// the airframe's own weathervane stability.
+const BETA_DAMP_GAIN: f64 = 2.0;
+/// Auto-trim integration rate: normalized pitch command per (rad of held
+/// pitch error × second). Slow against the PD (settles the residual over a
+/// few seconds) so it can never destabilize the loop.
+const TRIM_RATE_PER_S: f64 = 1.0;
+/// Anti-windup clamp on the trim command contribution.
+const TRIM_AUTHORITY: f64 = 0.4;
+/// Trim integration skips pathological frame gaps (loading hitches).
+const MAX_TRIM_STEP_S: f64 = 0.25;
 
 impl AttitudeController {
     pub fn new() -> Self {
@@ -57,6 +100,21 @@ impl AttitudeController {
     /// The currently held target orientation, if any. For diagnostics/HUD.
     pub fn hold_target(&self) -> Option<DQuat> {
         self.hold_target
+    }
+
+    /// The captured flight-assist pitch/bank hold target, if any.
+    pub fn plane_hold_target(&self) -> Option<PlaneHoldTarget> {
+        self.plane_target
+    }
+
+    /// What the flight assist did on the last `update`, for the HUD.
+    pub fn assist_status(&self) -> AssistStatus {
+        self.status
+    }
+
+    /// The flight-assist auto-trim contribution (normalized pitch command).
+    pub fn pitch_trim(&self) -> f64 {
+        self.pitch_trim
     }
 
     /// Drive the controller one frame and return the normalized body-frame
@@ -71,44 +129,157 @@ impl AttitudeController {
     /// surfaces vs. the wheels provide. Without this the command would either
     /// over-actuate (normalize by `max_torque`, drive both) or starve the aero
     /// surfaces (cap the total at `max_torque`).
+    ///
+    /// `flight` engages the flight assist: `Some` means SAS is armed on a
+    /// winged craft flying in atmosphere, switching `Hold` to the
+    /// pitch/bank law and envelope-protecting the pilot's `Rate`. `None`
+    /// (spaceships, vacuum, SAS off) is the unchanged quaternion path.
+    /// `dt_s` is the sim-time step the auto-trim integrates over (`0` while
+    /// paused).
     pub fn update(
         &mut self,
         demand: AttitudeDemand,
         attitude: &AttitudeState,
         params: &ShipParameters,
         aero_authority: DVec3,
+        flight: Option<&FlightState>,
+        dt_s: f64,
     ) -> DVec3 {
+        self.status = AssistStatus::default();
         match demand {
             AttitudeDemand::Free => {
                 self.hold_target = None;
+                self.plane_target = None;
+                self.pitch_trim = 0.0;
                 DVec3::ZERO
             }
-            AttitudeDemand::Hold => {
-                let target = *self.hold_target.get_or_insert(attitude.orientation);
-                self.hold(target, attitude, params, aero_authority)
-            }
+            AttitudeDemand::Hold => self.assisted_hold(attitude, params, aero_authority, flight, dt_s),
             AttitudeDemand::PointNose(dir) => {
                 // Pointing owns attitude; drop any captured hold so a later
                 // release back to Hold recaptures the resulting orientation.
                 self.hold_target = None;
+                self.plane_target = None;
+                self.pitch_trim = 0.0;
                 point_nose(dir, attitude, params, aero_authority)
             }
             AttitudeDemand::Rate(cmd) => {
                 if cmd.length_squared() <= RATE_DEADZONE * RATE_DEADZONE {
                     // Centered stick: behave as Hold (SAS recapture path).
-                    let target = *self.hold_target.get_or_insert(attitude.orientation);
-                    self.hold(target, attitude, params, aero_authority)
+                    self.assisted_hold(attitude, params, aero_authority, flight, dt_s)
                 } else {
                     // Deflected: a direct full-authority deflection demand — the
                     // allocator drives both effectors at this fraction, so full
                     // stick = full surface deflection + full wheels. Forget the
-                    // hold target so the next centered frame captures the new
+                    // hold targets so the next centered frame captures the new
                     // attitude.
                     self.hold_target = None;
-                    cmd.clamp(DVec3::splat(-1.0), DVec3::splat(1.0))
+                    self.plane_target = None;
+                    let mut c = cmd.clamp(DVec3::splat(-1.0), DVec3::splat(1.0));
+                    if let Some(flight) = flight {
+                        // Assisted manual flight: the stick rides the held
+                        // trim (centered ≈ trimmed flight, not zero surface)
+                        // and the AoA envelope caps the pull — full back
+                        // stick buys the stall angle, never past it.
+                        let raw = (c.x + self.pitch_trim).clamp(-1.0, 1.0);
+                        let (lo, hi) = pitch_command_envelope(
+                            predicted_alpha(flight, attitude),
+                            flight.stall_alpha,
+                        );
+                        c.x = raw.clamp(lo, hi);
+                        self.status = AssistStatus {
+                            fbw_active: true,
+                            protection_active: c.x != raw,
+                        };
+                    }
+                    c
                 }
             }
         }
+    }
+
+    /// The SAS hold, dispatched on regime: with a [`FlightState`] the craft is
+    /// an assisted plane and holds pitch attitude + bank angle; without one it
+    /// is a spaceship (or a plane that left the air) and holds the full
+    /// quaternion. Each path clears the other's target so a regime transition
+    /// recaptures cleanly from the current attitude.
+    fn assisted_hold(
+        &mut self,
+        attitude: &AttitudeState,
+        params: &ShipParameters,
+        aero_authority: DVec3,
+        flight: Option<&FlightState>,
+        dt_s: f64,
+    ) -> DVec3 {
+        match flight {
+            Some(flight) => {
+                self.hold_target = None;
+                self.plane_hold(flight, attitude, params, aero_authority, dt_s)
+            }
+            None => {
+                self.plane_target = None;
+                let target = *self.hold_target.get_or_insert(attitude.orientation);
+                self.hold(target, attitude, params, aero_authority)
+            }
+        }
+    }
+
+    /// The flight-assist hold law: pitch-attitude + bank-angle PD (same
+    /// deceleration-limited gains as the quaternion hold, applied per axis),
+    /// sideslip-damping yaw, pitch auto-trim, and the AoA envelope over the
+    /// summed pitch command. Heading is deliberately free — that is what
+    /// makes a stick-released banked turn coordinated instead of skidding.
+    fn plane_hold(
+        &mut self,
+        flight: &FlightState,
+        attitude: &AttitudeState,
+        params: &ShipParameters,
+        aero_authority: DVec3,
+        dt_s: f64,
+    ) -> DVec3 {
+        let pitch = flight.pitch();
+        let bank = flight.bank();
+        let target = *self.plane_target.get_or_insert_with(|| PlaneHoldTarget {
+            pitch_rad: pitch,
+            bank_rad: if bank.abs() < LEVEL_SNAP_RAD {
+                0.0
+            } else {
+                bank.clamp(-MAX_BANK_TARGET_RAD, MAX_BANK_TARGET_RAD)
+            },
+        });
+
+        let pitch_err = wrap_angle(target.pitch_rad - pitch);
+        let bank_err = wrap_angle(target.bank_rad - bank);
+        let omega = attitude.angular_velocity;
+        let moi = params.moment_of_inertia;
+        let authority = params.max_torque + aero_authority;
+        let omega_n = std::f64::consts::PI / SETTLE_TIME_S;
+        let kd = moi * (2.0 * omega_n);
+        let rate_gain = omega_n * 0.5;
+
+        let pd_pitch = slew_axis(pitch_err, omega.x, rate_gain, kd.x, authority.x, moi.x);
+        let roll = slew_axis(bank_err, omega.y, rate_gain, kd.y, authority.y, moi.y);
+        let yaw = (-BETA_DAMP_GAIN * flight.beta()).clamp(-1.0, 1.0);
+
+        let (lo, hi) =
+            pitch_command_envelope(predicted_alpha(flight, attitude), flight.stall_alpha);
+        let raw = (pd_pitch + self.pitch_trim).clamp(-1.0, 1.0);
+        let pitch_cmd = raw.clamp(lo, hi);
+        let protected = pitch_cmd != raw;
+
+        // Auto-trim: integrate the held pitch error while the loop is in its
+        // linear region. Skipping saturated / envelope-clamped frames is the
+        // anti-windup — trim must never wind up against a limit it cannot
+        // overcome.
+        if !protected && raw.abs() < 1.0 && dt_s > 0.0 && dt_s <= MAX_TRIM_STEP_S {
+            self.pitch_trim = (self.pitch_trim + TRIM_RATE_PER_S * pitch_err * dt_s)
+                .clamp(-TRIM_AUTHORITY, TRIM_AUTHORITY);
+        }
+
+        self.status = AssistStatus {
+            fbw_active: true,
+            protection_active: protected,
+        };
+        DVec3::new(pitch_cmd, roll, yaw)
     }
 
     /// Full-quaternion PD to `target`. Holds roll as well as pitch/yaw.
@@ -138,6 +309,16 @@ impl AttitudeController {
         let omega_body = attitude.angular_velocity;
         pd_to_normalized_torque(error_body, omega_body, params, aero_authority)
     }
+}
+
+/// The predictive AoA the envelope is evaluated at: current α led by the
+/// body pitch rate (`α̇ ≈ ω_pitch` over the short period — the flight path
+/// lags the nose). At zero rate this is exactly the static α; a fast pull
+/// fades authority before α reaches the band, which is what keeps the
+/// limiter from being blasted through by built-up pitch rate (flight test:
+/// a static clamp let a full pull at high q overshoot the stall by ~10°).
+fn predicted_alpha(flight: &FlightState, attitude: &AttitudeState) -> f64 {
+    flight.alpha() + attitude.angular_velocity.x * ALPHA_PROTECT_LEAD_S
 }
 
 /// Nose-pointing PD: constrain `+Y` body to `target_nose_world`, purely damp
@@ -268,7 +449,7 @@ mod tests {
             orientation: DQuat::IDENTITY,
             angular_velocity: DVec3::ZERO,
         };
-        let t = c.update(AttitudeDemand::Hold, &att, &params(), DVec3::ZERO);
+        let t = c.update(AttitudeDemand::Hold, &att, &params(), DVec3::ZERO, None, 0.0);
         // At target with zero rate → zero command, no chatter.
         assert_abs_diff_eq!(t.x, 0.0, epsilon = 1e-12);
         assert_abs_diff_eq!(t.y, 0.0, epsilon = 1e-12);
@@ -324,14 +505,21 @@ mod tests {
             angular_velocity: DVec3::ZERO,
         };
         // Capture a hold first.
-        c.update(AttitudeDemand::Hold, &att, &p, DVec3::ZERO);
+        c.update(AttitudeDemand::Hold, &att, &p, DVec3::ZERO, None, 0.0);
         assert!(c.hold_target().is_some());
         // Deflect → hold cleared, command passed through.
-        let t = c.update(AttitudeDemand::Rate(DVec3::new(0.8, 0.0, 0.0)), &att, &p, DVec3::ZERO);
+        let t = c.update(
+            AttitudeDemand::Rate(DVec3::new(0.8, 0.0, 0.0)),
+            &att,
+            &p,
+            DVec3::ZERO,
+            None,
+            0.0,
+        );
         assert_eq!(t.x, 0.8);
         assert!(c.hold_target().is_none());
         // Center (Rate ~0) → recaptures the *current* attitude.
-        c.update(AttitudeDemand::Rate(DVec3::ZERO), &att, &p, DVec3::ZERO);
+        c.update(AttitudeDemand::Rate(DVec3::ZERO), &att, &p, DVec3::ZERO, None, 0.0);
         assert_eq!(c.hold_target(), Some(att.orientation));
     }
 
@@ -426,5 +614,356 @@ mod tests {
         // Ask to point nose along +X: needs a yaw/pitch torque, nonzero.
         let t = point_nose(DVec3::X, &att, &p, DVec3::ZERO);
         assert!(t.length() > 0.0);
+    }
+
+    // --- Flight assist (plane FBW) -----------------------------------------
+
+    /// Aircraft-shaped parameters: no reaction wheels — all authority is aero.
+    fn plane_params() -> ShipParameters {
+        ShipParameters {
+            moment_of_inertia: DVec3::splat(1.0e5),
+            max_torque: DVec3::ZERO,
+            ..params()
+        }
+    }
+
+    const PLANE_AERO_AUTHORITY: DVec3 = DVec3::splat(5.0e4);
+
+    /// A level-flight `FlightState` at the given pitch attitude / bank angle,
+    /// with the relative wind on the nose (α = β = 0) so the envelope stays
+    /// out of the way unless a test wants it.
+    fn flight_at(pitch: f64, bank: f64) -> FlightState {
+        // Aerospace Euler order, roll innermost: q = R_pitch(X) · R_bank(Y),
+        // so both angles read back exactly from up_body.
+        let q = glam::DQuat::from_axis_angle(DVec3::X, pitch)
+            * glam::DQuat::from_axis_angle(DVec3::Y, bank);
+        FlightState {
+            up_body: q.inverse() * DVec3::Z,
+            vel_body: DVec3::new(0.0, 100.0, 0.0),
+            stall_alpha: 0.26,
+        }
+    }
+
+    fn still_attitude() -> AttitudeState {
+        AttitudeState {
+            orientation: DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+        }
+    }
+
+    #[test]
+    fn plane_hold_captures_pitch_and_bank() {
+        let mut c = AttitudeController::new();
+        let pitch = 0.12;
+        let bank = 0.4;
+        let f = flight_at(pitch, bank);
+        c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &plane_params(),
+            PLANE_AERO_AUTHORITY,
+            Some(&f),
+            1.0 / 60.0,
+        );
+        let target = c.plane_hold_target().expect("plane hold captured");
+        assert_abs_diff_eq!(target.pitch_rad, pitch, epsilon = 1e-9);
+        assert_abs_diff_eq!(target.bank_rad, bank, epsilon = 1e-9);
+        // The quaternion hold must not also engage — the plane law owns it.
+        assert!(c.hold_target().is_none());
+        assert!(c.assist_status().fbw_active);
+        assert!(!c.assist_status().protection_active);
+    }
+
+    #[test]
+    fn plane_hold_snaps_small_bank_level_and_clamps_steep_bank() {
+        // 3° of residual bank on release → wings-level target.
+        let mut c = AttitudeController::new();
+        let f = flight_at(0.0, 3.0_f64.to_radians());
+        c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &plane_params(),
+            PLANE_AERO_AUTHORITY,
+            Some(&f),
+            1.0 / 60.0,
+        );
+        assert_eq!(c.plane_hold_target().unwrap().bank_rad, 0.0);
+
+        // Released at 80° of bank → the target clamps to the 60° sustainable
+        // turn instead of holding a spiral.
+        let mut c = AttitudeController::new();
+        let f = flight_at(0.0, 80.0_f64.to_radians());
+        c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &plane_params(),
+            PLANE_AERO_AUTHORITY,
+            Some(&f),
+            1.0 / 60.0,
+        );
+        assert_abs_diff_eq!(
+            c.plane_hold_target().unwrap().bank_rad,
+            60.0_f64.to_radians(),
+            epsilon = 1e-9
+        );
+    }
+
+    #[test]
+    fn plane_hold_commands_recover_toward_the_target() {
+        // Capture straight-and-level, then disturb: nose below target must
+        // command nose-up (+X), banked right of target must command roll-left
+        // (−Y), and sideslip from the right must command coordinating yaw with
+        // the same sign as the weathervane (negative for +β).
+        let mut c = AttitudeController::new();
+        let p = plane_params();
+        c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&flight_at(0.0, 0.0)),
+            1.0 / 60.0,
+        );
+
+        let disturbed = flight_at(-0.1, 0.3);
+        let cmd = c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&disturbed),
+            1.0 / 60.0,
+        );
+        assert!(cmd.x > 0.0, "nose low must pull up, got {}", cmd.x);
+        assert!(cmd.y < 0.0, "banked right must roll left, got {}", cmd.y);
+
+        let slipping = FlightState {
+            vel_body: DVec3::new(10.0, 100.0, 0.0),
+            ..flight_at(0.0, 0.0)
+        };
+        let cmd = c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&slipping),
+            1.0 / 60.0,
+        );
+        assert!(cmd.z < 0.0, "+β must command coordinating yaw, got {}", cmd.z);
+    }
+
+    #[test]
+    fn assisted_stick_cannot_pull_past_the_stall() {
+        let mut c = AttitudeController::new();
+        let p = plane_params();
+        let full_pull = AttitudeDemand::Rate(DVec3::new(1.0, 0.0, 0.0));
+
+        // At the stall angle: the envelope zeroes the pull.
+        let stalling = FlightState {
+            vel_body: DVec3::new(0.0, 100.0, -100.0 * 0.26_f64.tan()),
+            ..flight_at(0.0, 0.0)
+        };
+        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, Some(&stalling), 1.0 / 60.0);
+        assert!(
+            cmd.x <= 1e-9,
+            "full pull at stall AoA must be zeroed, got {}",
+            cmd.x
+        );
+        assert!(c.assist_status().protection_active);
+
+        // Past the stall: a firm nose-down override even against full pull.
+        let deep = FlightState {
+            vel_body: DVec3::new(0.0, 100.0, -100.0 * 0.32_f64.tan()),
+            ..flight_at(0.0, 0.0)
+        };
+        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, Some(&deep), 1.0 / 60.0);
+        assert!(cmd.x < 0.0, "past stall must push, got {}", cmd.x);
+
+        // Same pull with no flight state (SAS off / spaceship): raw KSP
+        // passthrough, untouched.
+        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, None, 1.0 / 60.0);
+        assert_eq!(cmd.x, 1.0);
+        assert!(!c.assist_status().fbw_active);
+    }
+
+    #[test]
+    fn protection_leads_with_pitch_rate() {
+        // α still well below the band (5°), but pitching up hard at 20°/s:
+        // the predictive limiter must already be cutting the pull, where a
+        // static one would wait until α itself reached 12° and get blasted
+        // through (the ~10° overshoot seen in flight test). At zero rate the
+        // same α must remain unrestricted.
+        let mut c = AttitudeController::new();
+        let p = plane_params();
+        let full_pull = AttitudeDemand::Rate(DVec3::new(1.0, 0.0, 0.0));
+        let alpha = 5.0_f64.to_radians();
+        let flight = FlightState {
+            vel_body: DVec3::new(0.0, 100.0, -100.0 * alpha.tan()),
+            ..flight_at(0.0, 0.0)
+        };
+
+        let pitching_up = AttitudeState {
+            orientation: DQuat::IDENTITY,
+            angular_velocity: DVec3::new(20.0_f64.to_radians(), 0.0, 0.0),
+        };
+        let cmd = c.update(full_pull, &pitching_up, &p, PLANE_AERO_AUTHORITY, Some(&flight), 1.0 / 60.0);
+        assert!(
+            cmd.x < 1.0,
+            "fast pull must fade early via the predictive α, got {}",
+            cmd.x
+        );
+        assert!(c.assist_status().protection_active);
+
+        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, Some(&flight), 1.0 / 60.0);
+        assert_eq!(cmd.x, 1.0, "same α at zero rate must be unrestricted");
+        assert!(!c.assist_status().protection_active);
+    }
+
+    #[test]
+    fn plane_hold_protection_overrides_the_hold_itself() {
+        // Holding an attitude while AoA decays past the stall (speed bleeding
+        // off in a too-steep climb): the envelope must override the hold's
+        // nose-up demand with a push, even though the pitch target is above.
+        let mut c = AttitudeController::new();
+        let p = plane_params();
+        c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&flight_at(0.3, 0.0)),
+            1.0 / 60.0,
+        );
+        let stalled = FlightState {
+            vel_body: DVec3::new(0.0, 40.0, -40.0 * 0.30_f64.tan()),
+            ..flight_at(0.1, 0.0) // nose below target → PD wants to pull
+        };
+        let cmd = c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&stalled),
+            1.0 / 60.0,
+        );
+        assert!(cmd.x < 0.0, "stall protection must out-vote the hold, got {}", cmd.x);
+        assert!(c.assist_status().protection_active);
+    }
+
+    #[test]
+    fn auto_trim_nulls_steady_state_pitch_error() {
+        // Closed-loop single-axis pitch sim against a constant nose-down
+        // disturbance moment (the airframe's restoring moment held off-trim).
+        // The bare PD parks at a steady-state sag; the trim integrator must
+        // walk it out. Pitch kinematics only — attitude integrates the body
+        // pitch rate; α stays on the nose so the envelope is quiet.
+        let p = plane_params();
+        let authority = PLANE_AERO_AUTHORITY;
+        let disturbance = -0.2 * authority.x; // N·m, constant nose-down
+        let target_pitch = 0.05;
+
+        let mut c = AttitudeController::new();
+        let dt = 1.0 / 60.0;
+        let mut pitch = target_pitch; // start on target
+        let mut omega_x = 0.0;
+        // Capture the target at the initial attitude.
+        let mut last_pitch_err: f64 = f64::INFINITY;
+        for step in 0..(40 * 60) {
+            let f = flight_at(pitch, 0.0);
+            let att = AttitudeState {
+                orientation: DQuat::IDENTITY,
+                angular_velocity: DVec3::new(omega_x, 0.0, 0.0),
+            };
+            let cmd = c.update(AttitudeDemand::Hold, &att, &p, authority, Some(&f), dt);
+            let torque = cmd.x * authority.x + disturbance;
+            omega_x += torque / p.moment_of_inertia.x * dt;
+            pitch += omega_x * dt;
+            last_pitch_err = (pitch - target_pitch).abs();
+            if step == 120 {
+                // Two seconds in, before trim has integrated up: the PD alone
+                // must be sagging visibly (this is the error trim exists for).
+                assert!(
+                    last_pitch_err > 0.01,
+                    "expected an untrimmed PD sag, got {last_pitch_err}"
+                );
+            }
+        }
+        assert!(
+            last_pitch_err < 0.005,
+            "trim failed to null the hold error: {last_pitch_err} rad"
+        );
+        assert!(c.pitch_trim() > 0.0, "trim should hold nose-up, got {}", c.pitch_trim());
+    }
+
+    #[test]
+    fn trim_survives_stick_deflection_and_resets_on_free() {
+        let mut c = AttitudeController::new();
+        let p = plane_params();
+        let f = flight_at(0.0, 0.0);
+        // Build some trim by holding with a pitch error.
+        c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&f),
+            1.0 / 60.0,
+        );
+        let low = flight_at(-0.05, 0.0);
+        for _ in 0..120 {
+            c.update(
+                AttitudeDemand::Hold,
+                &still_attitude(),
+                &p,
+                PLANE_AERO_AUTHORITY,
+                Some(&low),
+                1.0 / 60.0,
+            );
+        }
+        let trim = c.pitch_trim();
+        assert!(trim > 0.0);
+
+        // Deflect: the command rides the trim, and the trim is untouched.
+        let cmd = c.update(
+            AttitudeDemand::Rate(DVec3::new(0.1, 0.0, 0.0)),
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&f),
+            1.0 / 60.0,
+        );
+        assert_abs_diff_eq!(cmd.x, 0.1 + trim, epsilon = 1e-12);
+        assert_eq!(c.pitch_trim(), trim);
+
+        // SAS off → everything resets.
+        c.update(AttitudeDemand::Free, &still_attitude(), &p, PLANE_AERO_AUTHORITY, None, 1.0 / 60.0);
+        assert_eq!(c.pitch_trim(), 0.0);
+        assert!(c.plane_hold_target().is_none());
+    }
+
+    #[test]
+    fn leaving_the_air_hands_back_to_the_quaternion_hold() {
+        let mut c = AttitudeController::new();
+        let p = plane_params();
+        c.update(
+            AttitudeDemand::Hold,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&flight_at(0.2, 0.0)),
+            1.0 / 60.0,
+        );
+        assert!(c.plane_hold_target().is_some());
+
+        // Climbed out of the atmosphere: no flight state. The quaternion hold
+        // captures the current orientation and the plane target clears.
+        let att = AttitudeState {
+            orientation: DQuat::from_axis_angle(DVec3::X, 0.3),
+            angular_velocity: DVec3::ZERO,
+        };
+        c.update(AttitudeDemand::Hold, &att, &p, DVec3::ZERO, None, 1.0 / 60.0);
+        assert!(c.plane_hold_target().is_none());
+        assert_eq!(c.hold_target(), Some(att.orientation));
+        assert!(!c.assist_status().fbw_active);
     }
 }

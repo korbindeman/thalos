@@ -34,9 +34,10 @@ const FLAP_TRAVEL_S: f64 = 6.0;
 const SPOILER_TRAVEL_S: f64 = 0.8;
 
 /// Flap lever + spoiler state. The lever detent is written by
-/// [`update_flight_config`] (the `F`/`R` keys) and the HUD flaps pill
-/// (`hud::flight_config_panel::handle_clicks`, click-to-cycle); the actuator
-/// fractions are solely [`update_flight_config`]'s. Read by the aero force
+/// [`update_flight_config`] (the `F`/`R` keys) and the HUD flap gate
+/// (`hud::flight_config_panel::handle_clicks`, click a segment to set that
+/// detent directly); the actuator fractions are solely
+/// [`update_flight_config`]'s. Read by the aero force
 /// system ([`crate::aero::apply_aero_forces`]), the control-surface visuals
 /// (`ship_view`), and the HUD flight-config pills.
 #[derive(Resource, Reflect, Clone, Copy, Default)]
@@ -51,9 +52,9 @@ pub struct FlightConfig {
 }
 
 impl FlightConfig {
-    /// HUD label for the current lever detent.
-    pub fn flap_label(&self) -> &'static str {
-        match self.flap_setting {
+    /// HUD label for a flap lever detent (0 = UP, `FLAP_DETENTS` = LANDING).
+    pub fn detent_label(detent: u8) -> &'static str {
+        match detent {
             0 => "UP",
             1 => "T/O",
             _ => "LDG",

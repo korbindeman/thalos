@@ -56,32 +56,61 @@ impl Default for BodySkyExtra {
 
 /// Maximum number of procedural craft parts projected onto terrain.
 ///
-/// The Apollo starter stack has far fewer parts than this, and excess parts
-/// are ignored rather than growing the terrain material's uniform every frame.
-pub const MAX_TERRAIN_SHADOW_CASTERS: usize = 16;
+/// Sized for an airliner-class craft: a fuselage loft contributes three
+/// tapered segments (nose / barrel / tail) and each podded nacelle one.
+/// Excess parts are ignored rather than growing the terrain material's
+/// uniform every frame. Must match `MAX_TERRAIN_SHADOW_CASTERS` (and the
+/// two array lengths) in `body_terrain.wgsl`.
+pub const MAX_TERRAIN_SHADOW_CASTERS: usize = 24;
+
+/// Maximum number of thin planform-quad casters (lifting surfaces). Must
+/// match `MAX_TERRAIN_SHADOW_QUADS` (and the four array lengths) in
+/// `body_terrain.wgsl`. The Meridian uses 5 (two wings, two tailplanes,
+/// one fin).
+pub const MAX_TERRAIN_SHADOW_QUADS: usize = 8;
 
 /// Local player-vessel shadow proxy consumed by `body_terrain.wgsl`.
 ///
 /// This is intentionally analytic rather than Bevy CSM state: the terrain
 /// pass is a custom UDLOD pipeline and the stock cascades are camera-sized,
 /// which makes tiny near-field craft shadows slide and vanish with zoom.
+///
+/// Two caster primitives: tapered capsule segments for bodies of revolution
+/// (tanks, fuselage barrels, nacelles), and thin planform quads for lifting
+/// surfaces — a wing modelled as a capsule reads chord-*thick* from the
+/// side, throwing an enormous slab at low sun, while the quad projects the
+/// true trapezoid at any sun angle and vanishes edge-on.
 #[derive(Clone, Copy, ShaderType)]
 pub struct BodyTerrainShadow {
     /// x = strength, y = minimum penumbra width in metres,
-    /// z = max receiver distance, w = valid caster count.
+    /// z = max receiver distance, w = valid capsule caster count.
     pub params: Vec4,
+    /// x = valid quad caster count, yzw reserved.
+    pub quad_params: Vec4,
     /// xyz = part top/near endpoint in render-space metres, w = endpoint radius.
     pub caster_a_radius: [Vec4; MAX_TERRAIN_SHADOW_CASTERS],
     /// xyz = part bottom/far endpoint in render-space metres, w = endpoint radius.
     pub caster_b_radius: [Vec4; MAX_TERRAIN_SHADOW_CASTERS],
+    /// Planform quad corners in render-space metres (w unused), wound
+    /// root-leading → tip-leading → tip-trailing → root-trailing so
+    /// consecutive corners trace the outline.
+    pub quad_a: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
+    pub quad_b: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
+    pub quad_c: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
+    pub quad_d: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
 }
 
 impl Default for BodyTerrainShadow {
     fn default() -> Self {
         Self {
             params: Vec4::ZERO,
+            quad_params: Vec4::ZERO,
             caster_a_radius: [Vec4::ZERO; MAX_TERRAIN_SHADOW_CASTERS],
             caster_b_radius: [Vec4::ZERO; MAX_TERRAIN_SHADOW_CASTERS],
+            quad_a: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
+            quad_b: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
+            quad_c: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
+            quad_d: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
         }
     }
 }

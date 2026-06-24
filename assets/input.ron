@@ -60,7 +60,7 @@
                 // Roll on the stick left/right axis.
                 "roll": (code: 65536, deadzone: 0.05),
                 // Yaw on the stick TWIST — the axis Bevy's gamepad layer drops.
-                "yaw": (code: 65538, deadzone: 0.05, invert: true),
+                "yaw": (code: 65538, deadzone: 0.05),
                 // Base throttle slider -> absolute throttle [0, 1]. The slider
                 // position becomes the throttle setting (MSFS-style) and takes
                 // over from the keyboard Z/X/Shift/Ctrl ramp. `min`/`max` are

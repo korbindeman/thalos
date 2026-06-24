@@ -486,11 +486,29 @@ into Thalos and wiring it to the revamped feature compiler.
   queries and terrain colliders still follow the normal rendered-height
   path rather than the analytic surface. The local craft-shadow proxy is
   on by default so nearby ships/EVA cast a stable sun-ray shadow onto the
-  custom UDLOD terrain receiver. Ships project per-part frustum/cylinder
-  silhouettes from the same procedural part dimensions as the visible mesh;
-  EVA keeps a small capsule proxy. Leave `THALOS_TERRAIN_CRAFT_SHADOW`
+  custom UDLOD terrain receiver. Ships project per-part silhouettes from
+  the same procedural part geometry as the visible mesh, using two caster
+  primitives: tapered capsule segments for bodies of revolution (stacked
+  pods/tanks/adapters/engines/intakes as their frustum/cylinder profiles,
+  a fuselage loft as nose/barrel/tail segments sampled from its skin
+  model, wing-pylon jet nacelles along their pod axes via
+  `jet_nacelle_centers`), and *thin planform quads* for lifting surfaces
+  (root/tip leading/trailing-edge corners from `wing_panel_frame`) — a
+  wing modelled as a capsule reads chord-thick from the side and throws a
+  huge slab at low sun, while the quad projects the true trapezoid at any
+  sun angle and vanishes edge-on. Penumbra on both primitives widens with
+  caster height at the star's angular diameter, so contact shadows are
+  crisp and overflight shadows soften. EVA keeps a small capsule proxy.
+  Leave `THALOS_TERRAIN_CRAFT_SHADOW`
   unset or set it to `on|auto` for the normal behavior, and set it to
-  `off` only when isolating material seams. If the real body's height range
+  `off` only when isolating material seams.
+  Bevy's cascade shadow maps are the *structure/hull* counterpart: the
+  craft casts CSM onto `StandardMaterial` receivers (runway slab, future
+  structures) and itself. The sun `DirectionalLight` must keep
+  `SHIP_LAYER` in its `RenderLayers` — `view::propagate_view_render_layers`
+  stamps the whole craft subtree onto `SHIP_LAYER`, and a light only
+  renders shadow casters whose layers intersect its own (the bug where
+  craft CSM shadows silently never existed). If the real body's height range
   makes the analytic field look flat, set
   `THALOS_TERRAIN_ANALYTIC_RANGE_M=500` (or another positive metre value)
   to widen the visual-only diagnostic height range.

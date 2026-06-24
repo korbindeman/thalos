@@ -22,8 +22,10 @@ pub mod allocator;
 pub mod arbiter;
 pub mod attitude;
 pub mod demand;
+pub mod flight;
 
 pub use allocator::{Allocation, allocate};
 pub use arbiter::{Arbitration, arbitrate};
 pub use attitude::{AttitudeController, NOSE_BODY, SETTLE_TIME_S, point_nose};
 pub use demand::{AttitudeDemand, ControlDemand, DemandSource};
+pub use flight::{AssistStatus, FlightState, PlaneHoldTarget, pitch_command_envelope};

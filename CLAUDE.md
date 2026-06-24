@@ -333,7 +333,14 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   `arbitrate`, the one `AttitudeController` (full-quaternion `Hold` PD +
   nose-`PointNose` PD, replacing the old per-frame deadbeat SAS damper),
   and the effector `allocate` (one torque → reaction wheels + aero control
-  surfaces, so they stop fighting). Depends one-way on `physics_canonical`;
+  surfaces, so they stop fighting). **SAS is regime-dispatched**: on a
+  winged craft flying in atmosphere (a `flight::FlightState` is supplied)
+  the same SAS hold becomes a plane fly-by-wire law — pitch-attitude +
+  bank-angle hold (heading free, so stick-free turns coordinate) with
+  pitch auto-trim, sideslip damping, and an AoA envelope that
+  stall-protects every pitch command including the pilot's stick —
+  while spaceships / vacuum / SAS-off keep the quaternion path unchanged.
+  Depends one-way on `physics_canonical`;
   no Bevy. The game-side glue is `thalos_game::control_bus`. See
   `docs/control.md`.
 - **`thalos_input`** — Bevy enhanced-input contexts, RON binding loader, and per-binary input intent resources
@@ -654,7 +661,16 @@ Key modules:
   surfaces (`RealizedControl::aero` → the aero force system). Attitude is
   no longer set anywhere else; the old `bridge::handle_attitude_controls`
   + `navigation::compute_attitude_control` + raw-stick aero paths are
-  gone, and the per-frame deadbeat SAS damper with them. Throttle still
+  gone, and the per-frame deadbeat SAS damper with them. `realize_control`
+  also arms the plane flight assist: when SAS is engaged on a winged craft
+  flying in atmosphere it builds the body-frame `FlightState` (local up via
+  `surface_local::radial_up`, air-relative velocity, the config's
+  `stall_alpha`) that switches the controller's SAS hold to the fly-by-wire
+  pitch/bank law with auto-trim + stall protection, and publishes
+  `RealizedControl::assist` for the HUD (the SAS button reads FBW /
+  warn-tints while protection clamps). **SAS defaults on** (`SasState`,
+  surviving destruction/respawn); the HUD SAS button toggles that same
+  switch as the `T` key. Throttle still
   rides its own setpoint path (`ThrottleState::commanded`, autopilot
   override, `ControlLocks`) pending a later fold-in. See `docs/control.md`.
 - `map_view` — snapshot/projection boundary for map rendering. Copies

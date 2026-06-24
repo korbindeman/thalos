@@ -702,6 +702,7 @@ pub fn handle_clicks(
     plan: Res<ManeuverPlan>,
     sim: Res<SimulationState>,
     mut nav: ResMut<NavigationState>,
+    mut sas: ResMut<crate::control_bus::SasState>,
     mut autopilot: ResMut<Autopilot>,
     mut warp_to: ResMut<WarpToManeuver>,
     mut maneuver_panel: ResMut<ManeuverPanelState>,
@@ -753,10 +754,17 @@ pub fn handle_clicks(
                 // Placeholder only: RCS authority is not wired into ControlInput yet.
             }
             NavAssistKind::Sas => {
-                if nav.mode == Some(NavigationMode::Stability) {
-                    nav.mode = None;
+                // The button drives the real SAS switch (`SasState`, same as
+                // the `T` key). The legacy Stability nav mode is folded in:
+                // if it is somehow set, turning SAS off clears it too, so the
+                // button can never read off while a stability hold still flies.
+                if sas.enabled || nav.mode == Some(NavigationMode::Stability) {
+                    sas.enabled = false;
+                    if nav.mode == Some(NavigationMode::Stability) {
+                        nav.mode = None;
+                    }
                 } else {
-                    nav.mode = Some(NavigationMode::Stability);
+                    sas.enabled = true;
                 }
             }
         }
@@ -769,6 +777,8 @@ pub fn update_button_visuals(
     locks: Res<ControlLocks>,
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
+    realized: Res<crate::control_bus::RealizedControl>,
+    sas: Res<crate::control_bus::SasState>,
     mut buttons: ParamSet<(
         Query<(
             &NavModeButton,
@@ -785,7 +795,7 @@ pub fn update_button_visuals(
         )>,
     )>,
     mut icons: Query<(&NavButtonIcon, &mut ImageNode)>,
-    mut text_q: Query<&mut TextColor>,
+    mut text_q: Query<(&mut Text, &mut TextColor)>,
 ) {
     if let Some(mode) = nav.mode
         && !mode_available(mode, &target, &plan)
@@ -809,7 +819,7 @@ pub fn update_button_visuals(
     for (button, interaction, mut border, mut bg, children) in &mut buttons.p1() {
         let available = button.kind.available();
         let active = matches!(button.kind, NavAssistKind::Sas)
-            && nav.mode == Some(NavigationMode::Stability);
+            && (sas.enabled || nav.mode == Some(NavigationMode::Stability));
         let (border_color, bg_color) = nav_button_colors(
             &theme,
             active,
@@ -819,20 +829,33 @@ pub fn update_button_visuals(
         );
         apply_button_colors(&mut border, &mut bg, border_color, bg_color);
 
-        let label_color = if !available {
-            disabled_text_color()
+        // The SAS button doubles as the flight-assist annunciator: it reads
+        // FBW while the plane fly-by-wire law is flying, and goes warn-tinted
+        // while stall protection is actively clamping the pitch command.
+        let (label, label_color) = if !available {
+            (button.kind.label(), disabled_text_color())
+        } else if matches!(button.kind, NavAssistKind::Sas)
+            && realized.assist.protection_active
+        {
+            ("FBW", theme.text_warn)
+        } else if matches!(button.kind, NavAssistKind::Sas) && realized.assist.fbw_active {
+            ("FBW", if active { theme.text_accent } else { theme.text_primary })
         } else if active {
-            theme.text_accent
+            (button.kind.label(), theme.text_accent)
         } else if locks.navigation_mode {
-            theme.text_dim
+            (button.kind.label(), theme.text_dim)
         } else {
-            theme.text_primary
+            (button.kind.label(), theme.text_primary)
         };
         if let Some(&child) = children.first()
-            && let Ok(mut tc) = text_q.get_mut(child)
-            && tc.0 != label_color
+            && let Ok((mut text, mut tc)) = text_q.get_mut(child)
         {
-            tc.0 = label_color;
+            if text.0 != label {
+                text.0 = label.to_string();
+            }
+            if tc.0 != label_color {
+                tc.0 = label_color;
+            }
         }
     }
 

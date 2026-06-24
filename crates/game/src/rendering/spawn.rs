@@ -847,8 +847,6 @@ pub(super) fn spawn_bodies(
             illuminance: 10_000.0,
             color: Color::WHITE,
             shadows_enabled: true,
-            shadow_depth_bias: 2.0,
-            shadow_normal_bias: 2.0,
             ..default()
         },
         // The ship is the only shadow caster — every body mesh is tagged
@@ -863,6 +861,14 @@ pub(super) fn spawn_bodies(
             overlap_proportion: 0.2,
         }
         .build(),
+        // The light must share a render layer with its shadow *casters*:
+        // `check_dir_light_mesh_visibility` intersects the light's layers
+        // with each mesh's before adding it to the cascade lists, and the
+        // craft's part visuals are re-stamped onto SHIP_LAYER every frame
+        // by `view::propagate_view_render_layers` (the `HideInMapView`
+        // subtree stamp). Without SHIP_LAYER here the craft never enters
+        // the shadow map and casts nothing on the runway or itself.
+        bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::coords::SHIP_LAYER]),
         Transform::default(),
         SunLight,
     ));

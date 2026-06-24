@@ -226,13 +226,18 @@ freshly placed `Lift` wing gets a default inboard flap + outboard aileron
 (`default_control_surfaces`).
 
 The HUD shows a **capability-gated flight-config cluster**
-(`hud/flight_config_panel.rs`, two clickable pills under the atmosphere
-readout, styled like the nav panel's SAS/RCS toggle buttons): the flap pill
-appears only when the craft's aero config derived flap authority from
-authored `Flap` windows (detent label, amber while the actuator is in
-transit; click cycles UP → T/O → LDG → UP), and the brakes pill only when
-the craft has gear wheels or spoilers (click toggles the latch, same as
-`B`). A rocket shows neither.
+(`hud/flight_config_panel.rs`, under the atmosphere readout, styled like the
+nav panel's SAS/RCS toggle buttons): flaps are a **segmented gate**
+`FLAPS [ UP · T/O · LDG ]` — clicking a segment drives the lever straight to
+that detent (one click to any position, never the wrong direction, and it
+doubles as a lever-position readout; the commanded detent is highlighted and
+glows amber while the actuator is in transit). The gate appears only when the
+craft's aero config derived flap authority from authored `Flap` windows. The
+brakes pill is a single latched toggle (click toggles the latch, same as `B`)
+and shows only when the craft has gear wheels or spoilers. A rocket shows
+neither. (The flap gate replaced an earlier single one-directional cycling
+pill — `UP → T/O → LDG → UP` — which couldn't express "retract" and needed
+two clicks to clean up after takeoff.)
 
 ## Authority & warp coupling
 
@@ -430,11 +435,12 @@ for directions). Both groups start disabled.
   per-surface authority pins (`meridian_control_authority_derives_from_surfaces`:
   derived pitch/roll/yaw in the transport band, bigger ailerons roll harder,
   no rudder → no yaw authority).
-- In `cruise`: `F`/`R` cycle FLAPS UP→T/O→LDG on the HUD flight-config pills
-  and the inboard trailing edges visibly run out; `B` pops the mid-span
-  spoilers ("BRAKES ON") and the craft decelerates; full throttle tops out
-  around M 0.8 instead of punching through Mach 1. In `orbit` (Apollo), the
-  flaps/brakes pills must not appear at all.
+- In `cruise`: `F`/`R` step FLAPS UP→T/O→LDG (or click a segment of the HUD
+  flap gate to jump straight to a detent) and the inboard trailing edges
+  visibly run out; `B` pops the mid-span spoilers ("BRAKES ON") and the craft
+  decelerates; full throttle tops out around M 0.8 instead of punching through
+  Mach 1. In `orbit` (Apollo), the flap gate and brakes pill must not appear at
+  all.
 - BRP: read `thalos_game::aero::AeroReadout` on the ship for non-zero
   `dynamic_pressure_pa` / `airspeed_ms` during descent; read
   `thalos_game::flight_config::FlightConfig` for lever/actuator state; read

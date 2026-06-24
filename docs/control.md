@@ -45,17 +45,25 @@ the whole pipeline:
      `Free`.
    - **NavMode** — `Stability` → `Hold`; a directional mode (prograde,
      target, maneuver, …) → `PointNose(dir)`; unresolved → `Free`.
-   - **Sas** (lowest) — the free-flight `T`-toggle hold → `Hold` when on.
+   - **Sas** (lowest) — the free-flight hold (`T` key / HUD SAS button) →
+     `Hold` when on. **Defaults on** for every craft (and survives
+     destruction/respawn): a spaceship spawns holding attitude, a plane
+     spawns flying FBW; switching SAS off is the deliberate act.
 2. **Arbitrate.** `thalos_control::arbitrate` picks the highest-priority
    *active* (non-`Free`) attitude demand. Throttle is arbitrated
    independently.
 3. **Control.** The single stateful `AttitudeController` turns the
    resolved demand into a normalized body-frame torque in `[-1, 1]`:
-   - `Hold` → **full-quaternion PD** to a captured target orientation
-     (roll included). Critically damped — it settles, it does not chatter.
+   - `Hold` → **regime-dispatched**. Spaceship (no `FlightState`, see
+     *Flight assist* below): **full-quaternion PD** to a captured target
+     orientation (roll included). Critically damped — it settles, it does
+     not chatter. Assisted plane (`FlightState` supplied): the
+     **fly-by-wire pitch/bank hold** instead.
    - `PointNose(dir)` → nose-direction PD constraining `+Y` body, purely
      damping roll (roll is free during a burn).
-   - `Rate(cmd)` → pass-through (deflected stick = direct command).
+   - `Rate(cmd)` → pass-through (deflected stick = direct command); on an
+     assisted plane the pitch axis additionally rides the auto-trim and is
+     clamped by the AoA envelope.
    - `Free` → zero.
 
    > **Damping is body-frame.** `AttitudeState::angular_velocity` is already
@@ -108,6 +116,64 @@ stick = hold current attitude" — push to rotate, release to hold where you
 let go. Directional nav modes (`PointNose`) take over from `Hold` when
 selected, and the pilot outranks both while the stick is touched.
 
+## Flight assist: SAS is fly-by-wire on a plane
+
+SAS means different things per regime. On a spaceship it is the KSP-style
+hold above. On a **winged craft flying in atmosphere** the same SAS toggle
+engages a fly-by-wire law instead (`thalos_control::flight` + the plane
+branch of the controller). The regime signal is the `Option<FlightState>`
+that `control_bus` passes into `AttitudeController::update`: it is `Some`
+only when SAS is *armed* (`SasState`, which **defaults on**, toggled by the
+`T` key and the HUD SAS button; the legacy Stability nav mode also arms
+it), the craft's aero config has lift (`lift_slope > 0`), the local
+density is nonzero, and airspeed is above a 15 m/s floor. Spaceships, vacuum, taxi
+speeds, and SAS-off never construct one, so those paths are byte-for-byte
+the old behaviour — a plane that climbs out of the atmosphere hands back
+to the quaternion hold automatically.
+
+The fly-by-wire law, all in the body frame (`FlightState` carries local-up
+and the air-relative velocity rotated into it):
+
+- **Centered stick holds pitch attitude + bank angle, heading free.** A
+  quaternion hold is wrong for a plane: holding heading in a banked turn
+  fights the natural turn with skidding yaw. The pitch/bank hold gives
+  coordinated stick-free turns. Captured bank inside 5° snaps to
+  wings-level; beyond ±60° it clamps, so releasing the stick in a steep
+  roll recovers to a sustainable turn instead of holding a spiral. The
+  per-axis PDs reuse the same deceleration-limited gain family
+  (`slew_axis`) as the quaternion hold, and a mild sideslip damper on yaw
+  adds turn coordination on top of the airframe's weathervane.
+- **Auto-trim.** A pure PD holding attitude against the wing's restoring
+  moment parks at a steady-state sag (~2° on the Meridian). A slow pitch
+  integrator (`TRIM_RATE_PER_S`, clamped to `TRIM_AUTHORITY` = 0.4, frozen
+  while the command saturates or protection clamps — that's the
+  anti-windup) nulls it, so hands-off flight holds the attitude exactly.
+  The trim survives stick deflections (the deflected stick *rides* it, so
+  centered stick ≈ trimmed flight rather than zero surface) and resets
+  when SAS disengages or a pointing mode takes attitude.
+- **Stall (AoA envelope) protection.** Every realized pitch command — the
+  hold law *and* the pilot's stick while SAS is on — is clamped by
+  `pitch_command_envelope`: above 80% of the config's `stall_alpha` the
+  available nose-up command fades linearly, reaching zero *at* the stall
+  angle (full back stick buys exactly stall AoA, never past), and beyond
+  it a firm nose-down override ramps to full push within one
+  protection-band width. Mirrored for negative AoA. The envelope is
+  evaluated at the **predictive** AoA `α + ω_pitch · 0.5 s`
+  (`ALPHA_PROTECT_LEAD_S`): a static clamp only reacts once α is in the
+  band, and flight test showed a full pull at high dynamic pressure
+  building enough pitch rate to bust ~10° past the stall before it bit —
+  leading with the rate fades authority while the pull is still building
+  (at zero rate it is exactly the static law; sustained full pull settles
+  ~13° vs the 15° stall). It also out-votes the
+  hold itself — a hold whose speed bleeds off toward the stall gets pushed
+  nose-down rather than held into departure. SAS off is fully manual
+  (KSP behaviour): aerobatics and spins stay possible, deliberately.
+
+The controller publishes an `AssistStatus { fbw_active, protection_active }`
+each frame (`RealizedControl::assist`); the HUD's SAS button reads it,
+relabelling to **FBW** while the plane law flies and warn-tinting while
+stall protection is actively clamping.
+
 ## Body-axis convention
 
 `X` = pitch, `Y` = nose (roll axis), `Z` = yaw. This matches
@@ -124,7 +190,10 @@ autopilot's lead-time sizing can't drift from the controller's gains.
   `ControlInput` / `aero::ControlInputs`):
   - `demand` — `AttitudeDemand`, `ControlDemand`, `DemandSource` priority.
   - `arbiter` — `arbitrate` + `Arbitration`.
-  - `attitude` — `AttitudeController` (the control laws).
+  - `attitude` — `AttitudeController` (the control laws, including the
+    plane fly-by-wire hold + auto-trim).
+  - `flight` — `FlightState` (body-frame α/β/pitch/bank), the AoA
+    envelope (`pitch_command_envelope`), `AssistStatus`.
   - `allocator` — `allocate` + `Allocation`.
 - **`thalos_game::control_bus`** — the Bevy glue: `ControlBusPlugin`, the
   `SasState` / `AttitudeControllerState` / `RealizedControl` resources, and

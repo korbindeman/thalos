@@ -60,12 +60,18 @@ use crate::solar_system_state::{SimulationState, SolarSystemState};
 use crate::spawn::{SpawnSituation, sample_site_relief_m};
 
 // ---------------------------------------------------------------------------
-// Runway dimensions (realistic large runway: 3 km × 60 m)
+// Runway dimensions (aerospace research runway: 5 km × 90 m)
 // ---------------------------------------------------------------------------
+//
+// Sized for spaceplane recovery with comfortable margins. The benchmarks are
+// the KSC Shuttle Landing Facility (4,572 m × 91 m) and Edwards AFB's main
+// paved runway (~4,580 m), both built for high-speed gliding returns; 5 km of
+// length leaves room above what the Shuttle actually needed, so any plane or
+// spaceplane can take off and land here without running out of strip.
 
-const RUNWAY_LENGTH_M: f64 = 3000.0;
+const RUNWAY_LENGTH_M: f64 = 5000.0;
 const RUNWAY_HALF_LENGTH_M: f64 = RUNWAY_LENGTH_M * 0.5;
-const RUNWAY_WIDTH_M: f64 = 60.0;
+const RUNWAY_WIDTH_M: f64 = 90.0;
 const RUNWAY_HALF_WIDTH_M: f64 = RUNWAY_WIDTH_M * 0.5;
 
 /// The flat terrain pad is levelled to this height above the highest natural

@@ -1,0 +1,1475 @@
+//! PFD-style HUD overlay — the navigation UI's "HUD mode".
+//!
+//! An aircraft primary-flight-display drawn over the centre of the ship
+//! view, replacing the navball cluster when active: a roll-rotating pitch
+//! ladder with heading ticks riding the horizon line, the navball's
+//! direction markers (prograde, retrograde, normal, radial, target,
+//! maneuver) projected into the view, a boresight at the craft's nose, a
+//! speed tape (left, active velocity frame, click to cycle) and an
+//! altitude tape (right, SEA/GND datum, click to toggle) with vertical
+//! speed, throttle, and heading readouts, plus FBW / A.PROT flight-assist
+//! annunciators.
+//!
+//! **Projection model:** the PFD is the view from the craft's nose,
+//! independent of the actual orbit camera. Pitch/bank/heading come from
+//! the craft attitude expressed in the local ENU frame at the craft
+//! (same construction as the navball, [`attitude_angles`]); markers are
+//! placed by their body-frame angular offsets from the nose at
+//! [`PX_PER_DEG`] pixels per degree, the same scale the ladder uses, so
+//! ladder and markers agree.
+//!
+//! **Mode switching:** [`NavDisplayMode`] (sole writer:
+//! [`handle_mode_clicks`]) selects BALL (classic navball) or HUD (this
+//! overlay) via a small selector in the top-left row.
+//! [`sync_visibility`] applies it every frame with diff-writes so it
+//! coexists with the photo-mode / shipyard-editor visibility writers
+//! (which also flip these roots; values converge within a frame).
+
+use bevy::math::{DQuat, DVec3};
+use bevy::prelude::*;
+use bevy::ui::Val2;
+use thalos_physics_canonical::velocity_frame::{VelocityReferenceFrame, nav_basis};
+
+use crate::control_bus::RealizedControl;
+use crate::fuel::ThrottleState;
+use crate::hud::HudPanel;
+use crate::hud::format;
+use crate::hud::theme::{HudTheme, panel_frame, panel_node};
+use crate::maneuver::ManeuverPlan;
+use crate::navball::markers::{
+    MarkerIconState, MarkerKind, MarkerVariants, compute_marker_directions, marker_icon_image,
+    orientation_icon_image,
+};
+use crate::navball::ui::NavballFrameRoot;
+use crate::rendering::{SimulationState, SolarSystemState};
+use crate::target::TargetBody;
+use crate::velocity_frame::VelocityFrameState;
+
+use super::TopLeftRowAnchor;
+use super::flight_panel::VelocityPanel;
+use super::orbital_panel::{AltitudeDatum, AltitudeDisplay, AltitudePanel};
+
+// ---------------------------------------------------------------------------
+// Geometry + style constants
+// ---------------------------------------------------------------------------
+
+/// Angular scale of the whole display: ladder rungs, heading ticks, and
+/// marker projection all share it so the overlay stays self-consistent.
+const PX_PER_DEG: f32 = 7.0;
+
+/// Rungs farther than this from the current pitch hide (no UI clipping —
+/// rotated-node clip rects are unreliable, so the ladder culls itself).
+const LADDER_HALF_RANGE_DEG: f32 = 26.0;
+
+const RUNG_BAR_LEN: f32 = 64.0;
+const RUNG_GAP_HALF: f32 = 46.0;
+const RUNG_MINOR_BAR_LEN: f32 = 24.0;
+const RUNG_MINOR_GAP_HALF: f32 = 52.0;
+const HORIZON_BAR_LEN: f32 = 250.0;
+const HORIZON_GAP_HALF: f32 = 60.0;
+
+const MARKER_ICON_SIZE: u32 = 30;
+/// Markers clamp to this radius from the boresight; a clamped (or
+/// behind-the-nose) marker shows the dimmed icon variant, mirroring the
+/// navball's back-hemisphere treatment.
+const MARKER_CLAMP_PX: f32 = 195.0;
+
+/// Distance from screen centre to each tape's inner edge, and tape size.
+const TAPE_INNER_X: f32 = 320.0;
+const TAPE_W: f32 = 84.0;
+const TAPE_H: f32 = 320.0;
+/// Vertical pixels per tape tick step (the step itself adapts, see
+/// [`nice_step`]).
+const TAPE_PX_PER_STEP: f32 = 34.0;
+const TAPE_TICK_SLOTS: i32 = 9;
+const HEADING_TICK_SLOTS: i32 = 4;
+
+/// The vertical-speed tape: a narrower, shorter column outboard of the
+/// altitude tape.
+const VS_TAPE_W: f32 = 56.0;
+const VS_TAPE_H: f32 = 240.0;
+const VS_TAPE_GAP: f32 = 10.0;
+const VS_TICK_SLOTS: i32 = 7;
+
+const HUD_GREEN: Color = Color::srgba(0.55, 1.0, 0.45, 0.95);
+const HUD_GREEN_DIM: Color = Color::srgba(0.55, 1.0, 0.45, 0.55);
+const HUD_TAPE_BG: Color = Color::srgba(0.0, 0.04, 0.0, 0.25);
+const HUD_BOX_BG: Color = Color::srgba(0.01, 0.05, 0.01, 0.80);
+
+// ---------------------------------------------------------------------------
+// Mode state + components
+// ---------------------------------------------------------------------------
+
+/// Which navigation display is active. **Sole writer:**
+/// [`handle_mode_clicks`]. Reflect-registered so agents can switch the
+/// display over BRP (`world_mutate_resources`).
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq, Reflect)]
+#[reflect(Resource)]
+pub enum NavDisplayMode {
+    /// Classic navball cluster (ball + velocity readout + throttle arc).
+    #[default]
+    Ball,
+    /// The PFD overlay in this module.
+    Hud,
+}
+
+#[derive(Component, Clone, Copy)]
+pub(super) struct NavDisplayButton {
+    pub target: NavDisplayMode,
+}
+
+/// Root of the whole PFD overlay (fullscreen wrapper).
+#[derive(Component)]
+pub(super) struct PfdRoot;
+
+/// The roll-rotated ladder container, centred on the boresight.
+#[derive(Component)]
+pub(super) struct PfdLadder;
+
+/// Child of [`PfdLadder`], translated vertically by pitch each frame.
+#[derive(Component)]
+pub(super) struct PfdPitchShift;
+
+#[derive(Component)]
+pub(super) struct PfdRung {
+    pitch_deg: f32,
+}
+
+/// Heading label riding the horizon rung; `slot` is the offset (in 10°
+/// steps) from the rounded current heading.
+#[derive(Component)]
+pub(super) struct PfdHeadingTick {
+    slot: i32,
+}
+
+/// A navball direction marker projected onto the PFD.
+#[derive(Component)]
+pub(super) struct PfdMarker {
+    kind: MarkerKind,
+}
+
+/// Marker for the PFD speed tape root, so [`sync_visibility`] can tell it
+/// apart from the classic velocity panel (both carry [`VelocityPanel`] for
+/// the shared click-to-cycle handler).
+#[derive(Component)]
+pub(super) struct PfdSpeedTape;
+
+#[derive(Component)]
+pub(super) struct PfdSpeedTick {
+    slot: i32,
+}
+
+#[derive(Component)]
+pub(super) struct PfdAltTick {
+    slot: i32,
+}
+
+#[derive(Component)]
+pub(super) struct PfdVsTick {
+    slot: i32,
+}
+
+/// Single-line text readouts, all updated through one query.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PfdReadout {
+    SpeedValue,
+    AltValue,
+    SpeedFrame,
+    AltDatum,
+    VerticalSpeed,
+    Throttle,
+    Heading,
+}
+
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PfdAnnunciator {
+    Fbw,
+    AlphaProt,
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
+
+pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, theme: Res<HudTheme>) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            PfdRoot,
+            HudPanel,
+            Visibility::Hidden,
+            Name::new("HudPfdRoot"),
+        ))
+        .with_children(|root| {
+            // Zero-size anchor at exact screen centre; every PFD element is
+            // an absolute-positioned child with offsets from this point.
+            root.spawn((Node::default(), Name::new("PfdAnchor")))
+                .with_children(|anchor| {
+                    spawn_ladder(anchor, &theme);
+                    spawn_markers(anchor, &mut images);
+                    spawn_boresight(anchor, &mut images);
+                    spawn_speed_tape(anchor, &theme);
+                    spawn_alt_tape(anchor, &theme);
+                    spawn_vs_tape(anchor, &theme);
+                    spawn_heading_readout(anchor, &theme);
+                    spawn_annunciators(anchor, &theme);
+                });
+        });
+}
+
+fn spawn_ladder(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    anchor
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                ..default()
+            },
+            UiTransform {
+                translation: Val2::ZERO,
+                scale: Vec2::ONE,
+                rotation: Rot2::IDENTITY,
+            },
+            PfdLadder,
+            Name::new("PfdLadder"),
+        ))
+        .with_children(|ladder| {
+            ladder
+                .spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(0.0),
+                        ..default()
+                    },
+                    PfdPitchShift,
+                    Name::new("PfdPitchShift"),
+                ))
+                .with_children(|shift| {
+                    spawn_horizon(shift, theme);
+                    for pitch_deg in (-85..=85).step_by(5) {
+                        if pitch_deg == 0 {
+                            continue;
+                        }
+                        spawn_rung(shift, theme, pitch_deg);
+                    }
+                });
+        });
+}
+
+fn spawn_horizon(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    shift
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                ..default()
+            },
+            PfdRung { pitch_deg: 0.0 },
+            Visibility::Inherited,
+            Name::new("PfdHorizon"),
+        ))
+        .with_children(|h| {
+            spawn_bar(h, -(HORIZON_GAP_HALF + HORIZON_BAR_LEN), HORIZON_BAR_LEN, 2.0, HUD_GREEN);
+            spawn_bar(h, HORIZON_GAP_HALF, HORIZON_BAR_LEN, 2.0, HUD_GREEN);
+            // Heading labels below the line; left offsets driven per frame.
+            for slot in -HEADING_TICK_SLOTS..=HEADING_TICK_SLOTS {
+                h.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(7.0),
+                        ..default()
+                    },
+                    Text::new(""),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(HUD_GREEN_DIM),
+                    PfdHeadingTick { slot },
+                    Visibility::Hidden,
+                    Name::new(format!("PfdHeadingTick_{slot}")),
+                ));
+            }
+        });
+}
+
+fn spawn_rung(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, pitch_deg: i32) {
+    let major = pitch_deg % 10 == 0;
+    let (bar_len, gap_half, thickness) = if major {
+        (RUNG_BAR_LEN, RUNG_GAP_HALF, 2.0)
+    } else {
+        (RUNG_MINOR_BAR_LEN, RUNG_MINOR_GAP_HALF, 1.0)
+    };
+    // Sky rungs solid green, ground rungs dimmed (stand-in for the
+    // conventional dashed negative rungs).
+    let color = if pitch_deg >= 0 { HUD_GREEN } else { HUD_GREEN_DIM };
+
+    shift
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(-(pitch_deg as f32) * PX_PER_DEG),
+                ..default()
+            },
+            PfdRung {
+                pitch_deg: pitch_deg as f32,
+            },
+            Visibility::Inherited,
+            Name::new(format!("PfdRung_{pitch_deg}")),
+        ))
+        .with_children(|r| {
+            spawn_bar(r, -(gap_half + bar_len), bar_len, thickness, color);
+            spawn_bar(r, gap_half, bar_len, thickness, color);
+            if major {
+                for x in [-(gap_half + bar_len + 34.0), gap_half + bar_len + 8.0] {
+                    r.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(x),
+                            top: Val::Px(-8.0),
+                            ..default()
+                        },
+                        Text::new(format!("{pitch_deg}")),
+                        TextFont {
+                            font: theme.font.clone(),
+                            font_size: 11.0,
+                            ..default()
+                        },
+                        TextColor(color),
+                    ));
+                }
+            }
+        });
+}
+
+fn spawn_bar(parent: &mut ChildSpawnerCommands<'_>, x: f32, len: f32, thickness: f32, color: Color) {
+    parent.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(x),
+            top: Val::Px(-thickness * 0.5),
+            width: Val::Px(len),
+            height: Val::Px(thickness),
+            ..default()
+        },
+        BackgroundColor(color),
+    ));
+}
+
+fn spawn_markers(anchor: &mut ChildSpawnerCommands<'_>, images: &mut Assets<Image>) {
+    let half = MARKER_ICON_SIZE as f32 * 0.5;
+    for kind in MarkerKind::ALL {
+        let variants = MarkerVariants {
+            front: images.add(marker_icon_image(kind, MARKER_ICON_SIZE, MarkerIconState::Visible)),
+            back: images.add(marker_icon_image(kind, MARKER_ICON_SIZE, MarkerIconState::Occluded)),
+        };
+        anchor.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(-half),
+                top: Val::Px(-half),
+                width: Val::Px(MARKER_ICON_SIZE as f32),
+                height: Val::Px(MARKER_ICON_SIZE as f32),
+                ..default()
+            },
+            ImageNode::new(variants.front.clone()),
+            PfdMarker { kind },
+            variants,
+            Visibility::Hidden,
+            ZIndex(3),
+            Name::new(format!("PfdMarker_{kind:?}")),
+        ));
+    }
+}
+
+fn spawn_boresight(anchor: &mut ChildSpawnerCommands<'_>, images: &mut Assets<Image>) {
+    let image = images.add(orientation_icon_image(40, 16));
+    anchor.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(-20.0),
+            top: Val::Px(-8.0),
+            width: Val::Px(40.0),
+            height: Val::Px(16.0),
+            ..default()
+        },
+        ImageNode::new(image),
+        ZIndex(4),
+        Name::new("PfdBoresight"),
+    ));
+}
+
+fn spawn_speed_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    let left = -(TAPE_INNER_X + TAPE_W);
+    anchor
+        .spawn((
+            Button,
+            tape_root_node(left),
+            BackgroundColor(HUD_TAPE_BG),
+            BorderColor::all(HUD_GREEN_DIM),
+            Interaction::None,
+            // Shared with the classic velocity readout: clicking cycles the
+            // speed reference frame via `flight_panel::handle_velocity_frame_click`.
+            VelocityPanel,
+            PfdSpeedTape,
+            Name::new("PfdSpeedTape"),
+        ))
+        .with_children(|tape| {
+            for slot in -TAPE_TICK_SLOTS..=TAPE_TICK_SLOTS {
+                tape.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        right: Val::Px(18.0),
+                        top: Val::Px(0.0),
+                        ..default()
+                    },
+                    Text::new(""),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(HUD_GREEN),
+                    PfdSpeedTick { slot },
+                    Visibility::Hidden,
+                ))
+                .with_children(|t| {
+                    t.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            right: Val::Px(-16.0),
+                            top: Val::Px(6.0),
+                            width: Val::Px(12.0),
+                            height: Val::Px(2.0),
+                            ..default()
+                        },
+                        BackgroundColor(HUD_GREEN),
+                    ));
+                });
+            }
+            spawn_value_box(tape, theme, PfdReadout::SpeedValue, TAPE_H, 26.0, 15.0);
+        });
+
+    spawn_tape_labels(
+        anchor,
+        theme,
+        left,
+        &[(PfdReadout::SpeedFrame, HUD_GREEN), (PfdReadout::Throttle, HUD_GREEN_DIM)],
+        "PfdSpeedLabels",
+    );
+}
+
+fn spawn_alt_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    let left = TAPE_INNER_X;
+    anchor
+        .spawn((
+            Button,
+            tape_root_node(left),
+            BackgroundColor(HUD_TAPE_BG),
+            BorderColor::all(HUD_GREEN_DIM),
+            Interaction::None,
+            // Shared with the top altitude panel: clicking toggles SEA/GND
+            // via `orbital_panel::handle_click`.
+            AltitudePanel,
+            Name::new("PfdAltTape"),
+        ))
+        .with_children(|tape| {
+            for slot in -TAPE_TICK_SLOTS..=TAPE_TICK_SLOTS {
+                tape.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(18.0),
+                        top: Val::Px(0.0),
+                        ..default()
+                    },
+                    Text::new(""),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(HUD_GREEN),
+                    PfdAltTick { slot },
+                    Visibility::Hidden,
+                ))
+                .with_children(|t| {
+                    t.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(-16.0),
+                            top: Val::Px(6.0),
+                            width: Val::Px(12.0),
+                            height: Val::Px(2.0),
+                            ..default()
+                        },
+                        BackgroundColor(HUD_GREEN),
+                    ));
+                });
+            }
+            spawn_value_box(tape, theme, PfdReadout::AltValue, TAPE_H, 26.0, 15.0);
+        });
+
+    spawn_tape_labels(
+        anchor,
+        theme,
+        left,
+        &[(PfdReadout::AltDatum, HUD_GREEN)],
+        "PfdAltLabels",
+    );
+}
+
+/// Vertical-speed tape: same scrolling-tape mechanics as speed/altitude,
+/// narrower and shorter, signed values, with a static V/S label below.
+fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    let left = TAPE_INNER_X + TAPE_W + VS_TAPE_GAP;
+    anchor
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(left),
+                top: Val::Px(-VS_TAPE_H * 0.5),
+                width: Val::Px(VS_TAPE_W),
+                height: Val::Px(VS_TAPE_H),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(HUD_TAPE_BG),
+            BorderColor::all(HUD_GREEN_DIM),
+            Name::new("PfdVsTape"),
+        ))
+        .with_children(|tape| {
+            for slot in -VS_TICK_SLOTS..=VS_TICK_SLOTS {
+                tape.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(14.0),
+                        top: Val::Px(0.0),
+                        ..default()
+                    },
+                    Text::new(""),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 11.0,
+                        ..default()
+                    },
+                    TextColor(HUD_GREEN),
+                    PfdVsTick { slot },
+                    Visibility::Hidden,
+                ))
+                .with_children(|t| {
+                    t.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(-12.0),
+                            top: Val::Px(6.0),
+                            width: Val::Px(8.0),
+                            height: Val::Px(2.0),
+                            ..default()
+                        },
+                        BackgroundColor(HUD_GREEN),
+                    ));
+                });
+            }
+            spawn_value_box(tape, theme, PfdReadout::VerticalSpeed, VS_TAPE_H, 22.0, 13.0);
+        });
+
+    anchor
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(left),
+                top: Val::Px(VS_TAPE_H * 0.5 + 8.0),
+                width: Val::Px(VS_TAPE_W),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Name::new("PfdVsLabel"),
+        ))
+        .with_children(|c| {
+            c.spawn((
+                Text::new("V/S"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(HUD_GREEN_DIM),
+            ));
+        });
+}
+
+fn tape_root_node(left: f32) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(left),
+        top: Val::Px(-TAPE_H * 0.5),
+        width: Val::Px(TAPE_W),
+        height: Val::Px(TAPE_H),
+        border: UiRect::all(Val::Px(1.0)),
+        ..default()
+    }
+}
+
+fn spawn_value_box(
+    tape: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    readout: PfdReadout,
+    tape_h: f32,
+    box_h: f32,
+    font_size: f32,
+) {
+    tape.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(3.0),
+            right: Val::Px(3.0),
+            top: Val::Px((tape_h - box_h) * 0.5),
+            height: Val::Px(box_h),
+            border: UiRect::all(Val::Px(1.0)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(HUD_BOX_BG),
+        BorderColor::all(HUD_GREEN),
+        ZIndex(2),
+    ))
+    .with_children(|b| {
+        b.spawn((
+            Text::new("—"),
+            TextFont {
+                font: theme.font.clone(),
+                font_size,
+                ..default()
+            },
+            TextColor(HUD_GREEN),
+            readout,
+        ));
+    });
+}
+
+fn spawn_tape_labels(
+    anchor: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    left: f32,
+    rows: &[(PfdReadout, Color)],
+    name: &str,
+) {
+    anchor
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(left),
+                top: Val::Px(TAPE_H * 0.5 + 8.0),
+                width: Val::Px(TAPE_W),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            Name::new(name.to_string()),
+        ))
+        .with_children(|c| {
+            for &(readout, color) in rows {
+                c.spawn((
+                    Text::new("—"),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(color),
+                    readout,
+                ));
+            }
+        });
+}
+
+fn spawn_heading_readout(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    anchor
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(-60.0),
+                top: Val::Px(TAPE_H * 0.5 + 40.0),
+                width: Val::Px(120.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Name::new("PfdHeading"),
+        ))
+        .with_children(|c| {
+            c.spawn((
+                Text::new("HDG —"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(HUD_GREEN),
+                PfdReadout::Heading,
+            ));
+        });
+}
+
+fn spawn_annunciators(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    let rows: [(PfdAnnunciator, &str, Color, f32); 2] = [
+        (PfdAnnunciator::Fbw, "FBW", HUD_GREEN, -150.0),
+        (PfdAnnunciator::AlphaProt, "A.PROT", theme.text_warn, 60.0),
+    ];
+    for (kind, label, color, x) in rows {
+        anchor.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(x),
+                top: Val::Px(-(TAPE_H * 0.5 + 36.0)),
+                ..default()
+            },
+            Text::new(label),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 14.0,
+                ..default()
+            },
+            TextColor(color),
+            kind,
+            Visibility::Hidden,
+            Name::new(format!("PfdAnnunciator_{label}")),
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mode toggle panel (top-left row, next to the SHIP/MAP selector)
+// ---------------------------------------------------------------------------
+
+const TOGGLE_BUTTON_WIDTH: f32 = 56.0;
+const TOGGLE_BUTTON_HEIGHT: f32 = 32.0;
+
+pub fn setup_toggle(mut commands: Commands, theme: Res<HudTheme>, anchor: Res<TopLeftRowAnchor>) {
+    let mut root = panel_node();
+    root.position_type = PositionType::Relative;
+    root.padding = UiRect::axes(Val::Px(10.0), Val::Px(8.0));
+    root.row_gap = Val::Px(6.0);
+    let (bg, border) = panel_frame(&theme);
+
+    commands.entity(anchor.0).with_children(|row_parent| {
+        row_parent
+            .spawn((root, bg, border, HudPanel, Name::new("HudNavDisplayMode")))
+            .with_children(|p| {
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    spawn_toggle_button(row, &theme, NavDisplayMode::Ball, "BALL");
+                    spawn_toggle_button(row, &theme, NavDisplayMode::Hud, "HUD");
+                });
+                p.spawn((
+                    Text::new("NAV"),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: 11.0,
+                        ..default()
+                    },
+                    TextColor(theme.text_subtitle),
+                ));
+            });
+    });
+}
+
+fn spawn_toggle_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    target: NavDisplayMode,
+    label: &str,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(TOGGLE_BUTTON_WIDTH),
+                height: Val::Px(TOGGLE_BUTTON_HEIGHT),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(theme.panel_bg),
+            BorderColor::all(theme.panel_border),
+            Interaction::None,
+            NavDisplayButton { target },
+            Name::new(format!("NavDisplay_{label}")),
+        ))
+        .with_children(|c| {
+            c.spawn((
+                Text::new(label),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(theme.text_dim),
+            ));
+        });
+}
+
+pub fn handle_mode_clicks(
+    interactions: Query<(&Interaction, &NavDisplayButton), Changed<Interaction>>,
+    mut mode: ResMut<NavDisplayMode>,
+) {
+    for (interaction, button) in &interactions {
+        if matches!(interaction, Interaction::Pressed) && *mode != button.target {
+            *mode = button.target;
+        }
+    }
+}
+
+pub fn update_mode_button_visuals(
+    mode: Res<NavDisplayMode>,
+    theme: Res<HudTheme>,
+    mut buttons: Query<(
+        &NavDisplayButton,
+        &Interaction,
+        &mut BorderColor,
+        &mut BackgroundColor,
+        &Children,
+    )>,
+    mut text_q: Query<&mut TextColor>,
+) {
+    for (button, interaction, mut border, mut bg, children) in &mut buttons {
+        let active = *mode == button.target;
+        let (border_color, bg_color) = match (active, interaction) {
+            (true, _) => (theme.text_accent, theme.panel_bg),
+            (false, Interaction::Pressed) => (theme.text_primary, theme.panel_border),
+            (false, Interaction::Hovered) => (theme.text_primary, theme.panel_bg),
+            (false, Interaction::None) => (theme.panel_border, theme.panel_bg),
+        };
+        let new_border = BorderColor::all(border_color);
+        if border.top != new_border.top {
+            *border = new_border;
+        }
+        if bg.0 != bg_color {
+            bg.0 = bg_color;
+        }
+        let label_color = if active {
+            theme.text_accent
+        } else {
+            theme.text_dim
+        };
+        if let Some(&child) = children.first()
+            && let Ok(mut tc) = text_q.get_mut(child)
+            && tc.0 != label_color
+        {
+            tc.0 = label_color;
+        }
+    }
+}
+
+/// Swap the navball cluster and the PFD according to [`NavDisplayMode`].
+///
+/// Runs every frame with diff-writes (not change-gated) because photo mode
+/// and the shipyard editor also write these roots' `Visibility` on their own
+/// transitions; re-asserting converges within a frame without ordering
+/// constraints against those private systems.
+pub fn sync_visibility(
+    mode: Res<NavDisplayMode>,
+    mut queries: ParamSet<(
+        Query<&mut Visibility, With<PfdRoot>>,
+        Query<&mut Visibility, With<NavballFrameRoot>>,
+        Query<&mut Visibility, (With<VelocityPanel>, Without<PfdSpeedTape>)>,
+    )>,
+) {
+    let hud_on = *mode == NavDisplayMode::Hud;
+    let pfd_target = if hud_on {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    let ball_target = if hud_on {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut vis in queries.p0().iter_mut() {
+        if *vis != pfd_target {
+            *vis = pfd_target;
+        }
+    }
+    for mut vis in queries.p1().iter_mut() {
+        if *vis != ball_target {
+            *vis = ball_target;
+        }
+    }
+    for mut vis in queries.p2().iter_mut() {
+        if *vis != ball_target {
+            *vis = ball_target;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame display updates
+// ---------------------------------------------------------------------------
+
+/// Body axes, matching the navball's conventions (`navball::attitude`).
+const BODY_NOSE: DVec3 = DVec3::Y;
+const BODY_RIGHT: DVec3 = DVec3::X;
+const BODY_DORSAL: DVec3 = DVec3::Z;
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_attitude_display(
+    mode: Res<NavDisplayMode>,
+    sim_state: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
+    velocity_frame: Res<VelocityFrameState>,
+    target: Res<TargetBody>,
+    plan: Res<ManeuverPlan>,
+    mut ladder_q: Query<&mut UiTransform, With<PfdLadder>>,
+    mut shift_q: Query<&mut Node, With<PfdPitchShift>>,
+    mut rung_q: Query<(&PfdRung, &mut Visibility), Without<PfdHeadingTick>>,
+    mut hdg_tick_q: Query<
+        (&PfdHeadingTick, &mut Node, &mut Text, &mut Visibility),
+        (Without<PfdPitchShift>, Without<PfdRung>, Without<PfdReadout>),
+    >,
+    mut marker_q: Query<
+        (
+            &PfdMarker,
+            &MarkerVariants,
+            &mut ImageNode,
+            &mut Node,
+            &mut Visibility,
+        ),
+        (
+            Without<PfdPitchShift>,
+            Without<PfdHeadingTick>,
+            Without<PfdRung>,
+        ),
+    >,
+    mut readout_q: Query<(&PfdReadout, &mut Text), Without<PfdHeadingTick>>,
+) {
+    if *mode != NavDisplayMode::Hud {
+        return;
+    }
+
+    let sim = &sim_state.simulation;
+    let craft = sim.craft_state();
+    let q_body_to_world = craft.attitude.orientation;
+    let craft_pos = craft.translation.position;
+
+    let soi_body_id = sim.dominant_body();
+    let Some(states) = solar_system.states.as_deref() else {
+        return;
+    };
+    let Some(body_state) = states.get(soi_body_id) else {
+        return;
+    };
+    let Some(angles) = attitude_angles(q_body_to_world, craft_pos, body_state.position) else {
+        return;
+    };
+
+    let pitch_deg = angles.pitch_rad.to_degrees();
+    let heading_deg = angles.heading_rad.to_degrees().rem_euclid(360.0);
+
+    // Ladder: roll about the boresight, then shift along the rolled
+    // vertical by pitch. Positive bank (right wing down) tilts the horizon
+    // right-end-up, which in UI rotation terms (positive = clockwise) is a
+    // negative angle.
+    if let Ok(mut transform) = ladder_q.single_mut() {
+        transform.rotation = Rot2::radians(-(angles.bank_rad as f32));
+    }
+    if let Ok(mut node) = shift_q.single_mut() {
+        node.top = Val::Px(pitch_deg as f32 * PX_PER_DEG);
+    }
+
+    for (rung, mut vis) in &mut rung_q {
+        let target_vis = if (pitch_deg as f32 - rung.pitch_deg).abs() <= LADDER_HALF_RANGE_DEG {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != target_vis {
+            *vis = target_vis;
+        }
+    }
+
+    // Heading labels ride the horizon line, one per 10°.
+    let base = (heading_deg / 10.0).round() as i32;
+    for (tick, mut node, mut text, mut vis) in &mut hdg_tick_q {
+        let tick_heading = (base + tick.slot) * 10;
+        let dx = wrap_deg(tick_heading as f64 - heading_deg) as f32 * PX_PER_DEG;
+        node.left = Val::Px(dx - 7.0);
+        let label = format!("{:02}", (tick_heading.rem_euclid(360)) / 10);
+        if text.0 != label {
+            text.0 = label;
+        }
+        let target_vis = if dx.abs() < HORIZON_GAP_HALF + HORIZON_BAR_LEN {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != target_vis {
+            *vis = target_vis;
+        }
+    }
+
+    // Direction markers, projected by body-frame angles from the nose.
+    let nose = q_body_to_world * BODY_NOSE;
+    let right = q_body_to_world * BODY_RIGHT;
+    let dorsal = q_body_to_world * BODY_DORSAL;
+    let directions = compute_marker_directions(
+        velocity_frame.active,
+        &sim_state,
+        &solar_system,
+        &target,
+        &plan,
+    );
+    let icon_half = MARKER_ICON_SIZE as f32 * 0.5;
+    for (marker, variants, mut image, mut node, mut vis) in &mut marker_q {
+        let Some(d_world) = directions.for_kind(marker.kind) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        let forward = d_world.dot(nose);
+        let az = d_world.dot(right).atan2(forward);
+        let el = d_world
+            .dot(dorsal)
+            .atan2(d_world.dot(right).hypot(forward));
+        let mut x = az.to_degrees() as f32 * PX_PER_DEG;
+        let mut y = -el.to_degrees() as f32 * PX_PER_DEG;
+        let dist = x.hypot(y);
+        let clamped = dist > MARKER_CLAMP_PX;
+        if clamped {
+            let scale = MARKER_CLAMP_PX / dist;
+            x *= scale;
+            y *= scale;
+        }
+        node.left = Val::Px(x - icon_half);
+        node.top = Val::Px(y - icon_half);
+        let target_handle = if clamped || forward < 0.0 {
+            &variants.back
+        } else {
+            &variants.front
+        };
+        if image.image != *target_handle {
+            image.image = target_handle.clone();
+        }
+        if *vis != Visibility::Inherited {
+            *vis = Visibility::Inherited;
+        }
+    }
+
+    for (readout, mut text) in &mut readout_q {
+        if *readout == PfdReadout::Heading {
+            let s = format!("HDG {:03}", (heading_deg.round() as i32).rem_euclid(360));
+            if text.0 != s {
+                text.0 = s;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_tapes(
+    mode: Res<NavDisplayMode>,
+    sim_state: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
+    velocity_frame: Res<VelocityFrameState>,
+    target: Res<TargetBody>,
+    throttle: Res<ThrottleState>,
+    display: Res<AltitudeDisplay>,
+    mut speed_ticks: Query<
+        (&PfdSpeedTick, &mut Node, &mut Text, &mut Visibility),
+        Without<PfdAltTick>,
+    >,
+    mut alt_ticks: Query<
+        (&PfdAltTick, &mut Node, &mut Text, &mut Visibility),
+        (Without<PfdSpeedTick>, Without<PfdVsTick>),
+    >,
+    mut vs_ticks: Query<
+        (&PfdVsTick, &mut Node, &mut Text, &mut Visibility),
+        (Without<PfdSpeedTick>, Without<PfdAltTick>),
+    >,
+    mut readout_q: Query<
+        (&PfdReadout, &mut Text),
+        (
+            Without<PfdSpeedTick>,
+            Without<PfdAltTick>,
+            Without<PfdVsTick>,
+        ),
+    >,
+) {
+    if *mode != NavDisplayMode::Hud {
+        return;
+    }
+
+    let sim = &sim_state.simulation;
+    let ship = sim.ship_state();
+    let body_id = sim.dominant_body();
+    let body = &sim.bodies()[body_id];
+    let Some(states) = solar_system.states.as_deref() else {
+        return;
+    };
+    let Some(body_state) = states.get(body_id) else {
+        return;
+    };
+    let target_state = target.target.and_then(|id| states.get(id));
+
+    // Speed in the active frame (same source as the classic readout).
+    let basis = nav_basis(velocity_frame.active, ship, body_state, target_state);
+    let speed = basis.map(|b| b.speed);
+
+    // Altitude: the resolved datum the top altitude panel published this
+    // frame; fall back to raw ASL before its first update.
+    let (datum, altitude) = display.resolved.unwrap_or_else(|| {
+        let asl = (ship.position - body_state.position).length() - body.radius_m;
+        (AltitudeDatum::Sea, asl)
+    });
+
+    // Vertical speed: surface-frame velocity projected on local up.
+    let up = (ship.position - body_state.position).try_normalize();
+    let vertical_speed = match (
+        nav_basis(VelocityReferenceFrame::Surface, ship, body_state, None),
+        up,
+    ) {
+        (Some(surf), Some(up)) => (ship.velocity - surf.reference_vel).dot(up),
+        _ => 0.0,
+    };
+
+    // Tick columns.
+    if let Some(speed) = speed {
+        let step = nice_step((speed * 0.04).max(4.0));
+        for (tick, mut node, mut text, mut vis) in &mut speed_ticks {
+            apply_tape_tick(
+                speed, step, tick.slot, false, TAPE_H, &mut node, &mut text, &mut vis,
+            );
+        }
+    } else {
+        for (_, _, _, mut vis) in &mut speed_ticks {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+        }
+    }
+    let alt_step = nice_step((altitude.abs() * 0.04).max(10.0));
+    for (tick, mut node, mut text, mut vis) in &mut alt_ticks {
+        apply_tape_tick(
+            altitude, alt_step, tick.slot, true, TAPE_H, &mut node, &mut text, &mut vis,
+        );
+    }
+    let vs_step = nice_step((vertical_speed.abs() * 0.08).max(2.0));
+    for (tick, mut node, mut text, mut vis) in &mut vs_ticks {
+        apply_tape_tick(
+            vertical_speed,
+            vs_step,
+            tick.slot,
+            true,
+            VS_TAPE_H,
+            &mut node,
+            &mut text,
+            &mut vis,
+        );
+    }
+
+    // Text readouts.
+    for (readout, mut text) in &mut readout_q {
+        let s = match readout {
+            PfdReadout::SpeedValue => match speed {
+                Some(v) => format::speed(v),
+                None => "—".to_string(),
+            },
+            PfdReadout::AltValue => format::altitude(altitude),
+            PfdReadout::SpeedFrame => match velocity_frame.active {
+                VelocityReferenceFrame::Orbit => "ORB".to_string(),
+                VelocityReferenceFrame::Surface => "SRF".to_string(),
+                VelocityReferenceFrame::Target => "TGT".to_string(),
+            },
+            PfdReadout::AltDatum => match datum {
+                AltitudeDatum::Sea => "SEA".to_string(),
+                AltitudeDatum::Ground => "GND".to_string(),
+            },
+            PfdReadout::VerticalSpeed => signed_speed(vertical_speed),
+            PfdReadout::Throttle => {
+                format!("THR {:3.0}%", throttle.commanded.clamp(0.0, 1.0) * 100.0)
+            }
+            PfdReadout::Heading => continue, // owned by update_attitude_display
+        };
+        if text.0 != s {
+            text.0 = s;
+        }
+    }
+}
+
+pub fn update_annunciators(
+    mode: Res<NavDisplayMode>,
+    realized: Res<RealizedControl>,
+    mut q: Query<(&PfdAnnunciator, &mut Visibility)>,
+) {
+    if *mode != NavDisplayMode::Hud {
+        return;
+    }
+    for (kind, mut vis) in &mut q {
+        let on = match kind {
+            PfdAnnunciator::Fbw => realized.assist.fbw_active,
+            PfdAnnunciator::AlphaProt => realized.assist.protection_active,
+        };
+        let target = if on {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != target {
+            *vis = target;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+struct AttitudeAngles {
+    pitch_rad: f64,
+    bank_rad: f64,
+    heading_rad: f64,
+}
+
+/// Craft attitude expressed as aviation pitch / bank / heading in the local
+/// ENU frame at the craft (up = radial-out from the dominant body, north =
+/// world-Y projected, matching `navball::attitude`).
+///
+/// Heading: 0 = north, 90° = east. Pitch: nose above horizon positive.
+/// Bank: right wing down positive, `(−π, π]`. Returns `None` only when the
+/// craft sits at the body centre. A vertical nose makes bank/heading
+/// degenerate; bank falls back to 0 there (gimbal-lock pole).
+fn attitude_angles(
+    q_body_to_world: DQuat,
+    craft_pos: DVec3,
+    body_pos: DVec3,
+) -> Option<AttitudeAngles> {
+    let up = (craft_pos - body_pos).try_normalize()?;
+    let mut north = DVec3::Y - DVec3::Y.dot(up) * up;
+    if north.length_squared() < 1e-12 {
+        north = DVec3::X - DVec3::X.dot(up) * up;
+    }
+    let north = north.try_normalize()?;
+    let east = north.cross(up);
+
+    let nose = q_body_to_world * BODY_NOSE;
+    let right = q_body_to_world * BODY_RIGHT;
+
+    let heading_rad = nose.dot(east).atan2(nose.dot(north));
+    let pitch_rad = nose.dot(up).clamp(-1.0, 1.0).asin();
+
+    // Zero-roll right = nose × up; bank is the actual right vector's angle
+    // from it, signed right-wing-down positive.
+    let bank_rad = match nose.cross(up).try_normalize() {
+        Some(r0) => {
+            let u0 = r0.cross(nose);
+            (-right.dot(u0)).atan2(right.dot(r0))
+        }
+        None => 0.0,
+    };
+
+    Some(AttitudeAngles {
+        pitch_rad,
+        bank_rad,
+        heading_rad,
+    })
+}
+
+/// Wrap a degree difference into `(−180, 180]`.
+fn wrap_deg(deg: f64) -> f64 {
+    let wrapped = (deg + 180.0).rem_euclid(360.0) - 180.0;
+    if wrapped == -180.0 { 180.0 } else { wrapped }
+}
+
+/// Smallest "nice" tick step (1/2/5 × 10ⁿ) at or above `target`.
+fn nice_step(target: f64) -> f64 {
+    let t = target.max(1e-9);
+    let pow10 = 10f64.powf(t.log10().floor());
+    let m = t / pow10;
+    let mult = if m <= 1.0 {
+        1.0
+    } else if m <= 2.0 {
+        2.0
+    } else if m <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    mult * pow10
+}
+
+/// Tick value + top offset (px in the tape rect) for `slot`, or `None`
+/// when the tick falls outside the tape (or below zero where the quantity
+/// can't go negative).
+fn tape_tick_layout(
+    value: f64,
+    step: f64,
+    slot: i32,
+    allow_negative: bool,
+    tape_h: f32,
+) -> Option<(f64, f32)> {
+    let base = (value / step).round();
+    let tick_value = (base + slot as f64) * step;
+    if tick_value < 0.0 && !allow_negative {
+        return None;
+    }
+    let top = tape_h * 0.5 - ((tick_value - value) / step) as f32 * TAPE_PX_PER_STEP - 7.0;
+    if !(4.0..=tape_h - 18.0).contains(&top) {
+        return None;
+    }
+    Some((tick_value, top))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_tape_tick(
+    value: f64,
+    step: f64,
+    slot: i32,
+    allow_negative: bool,
+    tape_h: f32,
+    node: &mut Node,
+    text: &mut Text,
+    vis: &mut Visibility,
+) {
+    match tape_tick_layout(value, step, slot, allow_negative, tape_h) {
+        Some((tick_value, top)) => {
+            node.top = Val::Px(top);
+            let label = tick_label(tick_value, step);
+            if text.0 != label {
+                text.0 = label;
+            }
+            if *vis != Visibility::Inherited {
+                *vis = Visibility::Inherited;
+            }
+        }
+        None => {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+        }
+    }
+}
+
+fn tick_label(value: f64, step: f64) -> String {
+    if step >= 1000.0 {
+        format!("{:.0}k", value / 1000.0)
+    } else {
+        format!("{:.0}", value)
+    }
+}
+
+/// Compact signed rate for the V/S readout.
+fn signed_speed(v: f64) -> String {
+    if v.abs() >= 1000.0 {
+        format!("{:+.1}k", v / 1000.0)
+    } else {
+        format!("{:+.0}", v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Craft on the body's +Z axis: local up = +Z, north = +Y, east = +X.
+    const CRAFT_POS: DVec3 = DVec3::new(0.0, 0.0, 1000.0);
+    const BODY_POS: DVec3 = DVec3::ZERO;
+
+    fn angles(q: DQuat) -> AttitudeAngles {
+        attitude_angles(q, CRAFT_POS, BODY_POS).expect("non-degenerate")
+    }
+
+    #[track_caller]
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn identity_attitude_reads_level_north() {
+        let a = angles(DQuat::IDENTITY);
+        assert_close(a.pitch_rad, 0.0);
+        assert_close(a.bank_rad, 0.0);
+        assert_close(a.heading_rad, 0.0);
+    }
+
+    #[test]
+    fn pitch_up_about_the_right_axis() {
+        // +30° about body X tips the nose (body +Y) toward local up (+Z).
+        let q = DQuat::from_axis_angle(DVec3::X, 30f64.to_radians());
+        let a = angles(q);
+        assert_close(a.pitch_rad.to_degrees(), 30.0);
+        assert_close(a.bank_rad, 0.0);
+    }
+
+    #[test]
+    fn bank_right_about_the_nose() {
+        // +40° about body Y dips the right wing (body +X) below the horizon.
+        let q = DQuat::from_axis_angle(DVec3::Y, 40f64.to_radians());
+        let a = angles(q);
+        assert_close(a.bank_rad.to_degrees(), 40.0);
+        assert_close(a.pitch_rad, 0.0);
+    }
+
+    #[test]
+    fn heading_east_reads_90() {
+        // −90° about local up (+Z) swings the nose from north to east.
+        let q = DQuat::from_axis_angle(DVec3::Z, -90f64.to_radians());
+        let a = angles(q);
+        assert_close(a.heading_rad.to_degrees(), 90.0);
+        assert_close(a.pitch_rad, 0.0);
+        assert_close(a.bank_rad, 0.0);
+    }
+
+    #[test]
+    fn nice_steps_snap_up_to_1_2_5() {
+        assert_eq!(nice_step(4.0), 5.0);
+        assert_eq!(nice_step(10.0), 10.0);
+        assert_eq!(nice_step(11.0), 20.0);
+        assert_eq!(nice_step(80.0), 100.0);
+        assert_eq!(nice_step(308.0), 500.0);
+    }
+
+    #[test]
+    fn wrap_deg_takes_the_short_way() {
+        assert_close(wrap_deg(190.0), -170.0);
+        assert_close(wrap_deg(-190.0), 170.0);
+        assert_close(wrap_deg(180.0), 180.0);
+    }
+
+    #[test]
+    fn tape_ticks_hide_outside_the_tape_and_below_zero() {
+        // Centre slot is always inside.
+        assert!(tape_tick_layout(100.0, 10.0, 0, false, TAPE_H).is_some());
+        // Far slot is off the tape.
+        assert!(tape_tick_layout(100.0, 10.0, 9, false, TAPE_H).is_none());
+        // Negative speed ticks hide; negative altitude/VS ticks may show.
+        assert!(tape_tick_layout(5.0, 10.0, -2, false, TAPE_H).is_none());
+        assert!(tape_tick_layout(5.0, 10.0, -2, true, TAPE_H).is_some());
+        // The shorter V/S tape culls sooner.
+        assert!(tape_tick_layout(0.0, 2.0, 4, true, VS_TAPE_H).is_none());
+        assert!(tape_tick_layout(0.0, 2.0, 3, true, VS_TAPE_H).is_some());
+    }
+}

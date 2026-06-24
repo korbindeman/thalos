@@ -28,11 +28,12 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_control::{
-    AttitudeController, AttitudeDemand, ControlDemand, DemandSource, allocate, arbitrate,
+    AssistStatus, AttitudeController, AttitudeDemand, ControlDemand, DemandSource, FlightState,
+    allocate, arbitrate,
 };
 use thalos_physics_canonical::aero::{ControlInputs, control_authority};
 use thalos_physics_canonical::types::ControlInput;
-use thalos_physics_local::avian::{LinearVelocity, Position};
+use thalos_physics_local::avian::{LinearVelocity, Position, Rotation};
 use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody};
 use thalos_input::game::GameInputIntent;
 
@@ -40,26 +41,53 @@ use crate::SimStage;
 use crate::aero::{AeroTuning, ShipAero, resolved_aero_config};
 use crate::autopilot::{Autopilot, autopilot_system};
 use crate::controls::ControlLocks;
-use crate::navigation::{NavigationState, nav_attitude_demand};
+use crate::navigation::{NavigationMode, NavigationState, nav_attitude_demand};
 use crate::rendering::SimulationState;
+use crate::sim_clock::SimClock;
 use crate::target::TargetBody;
 use crate::maneuver::ManeuverPlan;
 use crate::velocity_frame::VelocityFrameState;
 
 /// Query for the player craft's aero state, used to size the dynamic-pressure
-/// authority split in [`realize_control`].
-type CraftAeroQuery<'w, 's> = Query<'w, 's, (&'static Position, &'static LinearVelocity, &'static ShipAero), With<LocalCraftBody>>;
+/// authority split and build the flight-assist state in [`realize_control`].
+type CraftAeroQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Position,
+        &'static Rotation,
+        &'static LinearVelocity,
+        &'static ShipAero,
+    ),
+    With<LocalCraftBody>,
+>;
 
 /// Below this stick magnitude the pilot is "hands off" and the lower-priority
 /// holds (SAS / nav mode) own attitude.
 const STICK_DEADZONE_SQ: f64 = 1.0e-6;
 
-/// Free-flight SAS toggle state (the `T` key). When enabled and nothing
-/// higher-priority is engaged, the controller holds the current attitude.
-/// This is the "centered stick = hold current attitude" behaviour.
-#[derive(Resource, Debug, Default, Clone, Copy)]
+/// Airspeed floor for the flight assist: below this the control surfaces are
+/// mush and the angle math is degenerate (taxi / parked), so SAS falls back to
+/// the plain hold. Above it a winged craft in atmosphere flies fly-by-wire.
+const ASSIST_MIN_AIRSPEED_M_S: f64 = 15.0;
+
+/// Free-flight SAS toggle state (the `T` key / the HUD SAS button). When
+/// enabled and nothing higher-priority is engaged, the controller holds the
+/// current attitude — the "centered stick = hold current attitude" behaviour,
+/// and the arming switch for the plane fly-by-wire assist.
+///
+/// **Defaults on**: every craft spawns with SAS engaged (spaceships hold
+/// attitude, planes fly FBW with auto-trim + stall protection), and the flag
+/// survives destruction/respawn. Toggling off is the deliberate act.
+#[derive(Resource, Debug, Clone, Copy)]
 pub struct SasState {
     pub enabled: bool,
+}
+
+impl Default for SasState {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// The stateful attitude controller (holds the captured SAS target).
@@ -87,6 +115,10 @@ pub struct RealizedControl {
     /// authority dwarfs the reaction-wheel torque, so it is not a usable visual
     /// signal).
     pub command: DVec3,
+    /// Flight-assist status this frame: whether the plane fly-by-wire law is
+    /// engaged and whether stall protection is actively clamping the pitch
+    /// command. Read by the HUD's SAS button.
+    pub assist: AssistStatus,
 }
 
 pub struct ControlBusPlugin;
@@ -124,16 +156,18 @@ pub fn realize_control(
     autopilot: Res<Autopilot>,
     active: Res<ActiveLocalBubble>,
     tuning: Res<AeroTuning>,
+    clock: Res<SimClock>,
     craft_aero: CraftAeroQuery,
     mut sim: ResMut<SimulationState>,
     mut controller: ResMut<AttitudeControllerState>,
     mut sas: ResMut<SasState>,
     mut realized: ResMut<RealizedControl>,
 ) {
-    // A destroyed craft accepts no attitude command: drop SAS, clear the hold
-    // target, and emit inert control so the wreck tumbles freely.
+    // A destroyed craft accepts no attitude command: clear the hold target
+    // and emit inert control so the wreck tumbles freely. `SasState` itself
+    // is deliberately left alone — SAS is on by default, so the respawned
+    // craft comes back with it armed rather than silently disarmed.
     if sim.simulation.is_destroyed() {
-        sas.enabled = false;
         controller.0 = AttitudeController::new();
         sim.simulation.set_control(ControlInput::default());
         *realized = RealizedControl::default();
@@ -172,10 +206,19 @@ pub fn realize_control(
     // Pilot stick (highest priority) — unless a programmatic system holds the
     // attitude lock, in which case the player can't fight it (KSP behaviour).
     if !locks.attitude {
+        // Yaw convention: the pilot's +z means "nose right". In the body frame
+        // (X=right, Y=nose, Z=up) nose-right is a *negative* torque about +Z, so
+        // the effector chain (controller → allocator → aero / reaction wheels)
+        // realizes nose-right only at command.z < 0. Negate the pilot's yaw here
+        // so right stick / right twist (and keyboard D) yaw the nose right in the
+        // air and in orbit, matching the ground nosewheel steering — which reads
+        // intent.attitude.z directly and is already nose-right. We negate at this
+        // pilot→demand boundary, not in the effectors, because the SAS / nav /
+        // autopilot closed loops depend on +command.z → +τz for stability.
         let stick = DVec3::new(
             input.attitude.x as f64,
             input.attitude.y as f64,
-            input.attitude.z as f64,
+            -(input.attitude.z as f64),
         );
         if stick.length_squared() > STICK_DEADZONE_SQ {
             demands[3].1 = ControlDemand::attitude(AttitudeDemand::Rate(stick));
@@ -191,12 +234,25 @@ pub fn realize_control(
     // realizes exactly the PD's intended torque — no over-actuation in thick
     // air (which showed up as a yaw oscillation under SAS), and full pilot
     // deflection still maps to full surface throw (real roll authority).
-    let aero_authority = player_aero_authority(&sim, &active, &tuning, &craft_aero);
+    //
+    // The flight assist arms only while SAS is engaged (the `T` toggle or the
+    // HUD's Stability mode): a `Some` flight state switches the SAS hold to
+    // the plane fly-by-wire law (pitch/bank hold + auto-trim) and clamps every
+    // pitch command — the pilot's included — to the AoA envelope. SAS off is
+    // fully manual, KSP-style; spaceships and vacuum never get a flight state.
+    let assist_armed = sas.enabled || nav.mode == Some(NavigationMode::Stability);
+    let (aero_authority, flight) =
+        player_aero_environment(&sim, &active, &tuning, &craft_aero, assist_armed);
     let attitude = *sim.simulation.attitude();
     let params = *sim.simulation.ship_params();
-    let torque = controller
-        .0
-        .update(arb.attitude, &attitude, &params, aero_authority);
+    let torque = controller.0.update(
+        arb.attitude,
+        &attitude,
+        &params,
+        aero_authority,
+        flight.as_ref(),
+        clock.delta_secs_f64(),
+    );
 
     // --- Allocate to every effector. ---
     let alloc = allocate(torque);
@@ -213,27 +269,32 @@ pub fn realize_control(
 
     realized.aero = alloc.aero;
     realized.command = torque;
+    realized.assist = controller.0.assist_status();
 }
 
 /// Per-axis aero control-moment authority (N·m) for the player craft at the
-/// current dynamic pressure, or zero when there is no flying aero (no bubble,
-/// not a ship, in vacuum, or below the airspeed floor). Mirrors the density /
-/// airspeed / config resolve that [`crate::aero::apply_aero_forces`] uses so the
-/// authority the allocator splits against equals what the evaluator applies.
-fn player_aero_authority(
+/// current dynamic pressure — zero when there is no flying aero (no bubble,
+/// not a ship, in vacuum, or below the airspeed floor) — plus, when
+/// `assist_armed` and the craft is a winged vessel actually flying, the
+/// body-frame [`FlightState`] the controller's fly-by-wire law reads.
+/// Mirrors the density / airspeed / config resolve that
+/// [`crate::aero::apply_aero_forces`] uses so the authority the allocator
+/// splits against equals what the evaluator applies.
+fn player_aero_environment(
     sim: &SimulationState,
     active: &ActiveLocalBubble,
     tuning: &AeroTuning,
     craft_aero: &CraftAeroQuery,
-) -> DVec3 {
+    assist_armed: bool,
+) -> (DVec3, Option<FlightState>) {
     let Some(bubble) = active.bubble.as_ref() else {
-        return DVec3::ZERO;
+        return (DVec3::ZERO, None);
     };
-    let Ok((position, lin_vel, ship_aero)) = craft_aero.get(bubble.craft_entity) else {
-        return DVec3::ZERO;
+    let Ok((position, rotation, lin_vel, ship_aero)) = craft_aero.get(bubble.craft_entity) else {
+        return (DVec3::ZERO, None);
     };
     let Some(body) = sim.system.bodies.get(bubble.body_id) else {
-        return DVec3::ZERO;
+        return (DVec3::ZERO, None);
     };
     let density = match body.terrestrial_atmosphere.as_ref() {
         Some(atmosphere) => {
@@ -251,5 +312,25 @@ fn player_aero_authority(
         None => 0.0,
     };
     let config = resolved_aero_config(ship_aero.config, tuning);
-    control_authority(&config, density, lin_vel.0.length())
+    let airspeed = lin_vel.0.length();
+    let authority = control_authority(&config, density, airspeed);
+
+    // The bubble integrates in the surface-local (co-rotating) frame, so
+    // `LinearVelocity` is already air-relative (wind = 0) and the local
+    // radial up comes straight from the SLF; both rotate into the body frame
+    // with the craft's Avian rotation.
+    let flight = (assist_armed
+        && config.lift_slope > 0.0
+        && density > 0.0
+        && airspeed >= ASSIST_MIN_AIRSPEED_M_S)
+        .then(|| {
+            let to_body = rotation.0.inverse();
+            FlightState {
+                up_body: to_body
+                    * thalos_physics_canonical::surface_local::radial_up(&bubble.frame, position.0),
+                vel_body: to_body * lin_vel.0,
+                stall_alpha: config.stall_alpha,
+            }
+        });
+    (authority, flight)
 }
