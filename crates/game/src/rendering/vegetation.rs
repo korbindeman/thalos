@@ -23,15 +23,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::camera::visibility::RenderLayers;
-use bevy::math::DVec3;
+use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::light::NotShadowCaster;
+use bevy::math::{DVec3, Vec2};
 use bevy::prelude::*;
+use bevy::render::view::Hdr;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, CanopyStyle, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeMaterial,
-    TreeMeshData, TreeMeshParams, VegLayer, VegScatterInput, VegSpeciesPlacement, build_scatter_tile,
-    build_tree_mesh_data, combine_tree_tile_mesh,
+    AU_M, BakeParams, CanopyStyle, GrassParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout,
+    ImpostorParams, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeBakeMaterial,
+    TreeImpostorMaterial, TreeMaterial, TreeMeshData, TreeMeshParams, VegLayer, VegScatterInput,
+    VegSpeciesPlacement, build_scatter_tile, build_tree_mesh_data, combine_impostor_tile_mesh,
+    combine_tree_tile_mesh, hemioct_decode, impostor_bake_rotation, make_impostor_atlas,
+    recenter_tree_mesh, tree_bounding_sphere,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -46,17 +53,43 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 // ── Tuning ───────────────────────────────────────────────────────────────────
 /// Metric side of a scatter tile at a cube-face centre.
 const TREE_TILE_SIZE_M: f64 = 200.0;
-/// Build tiles out to here — beyond the fade-end by ~a tile, so a tile finishes
+/// Mesh-only reach, used until the impostor atlas is baked (the far band is then
+/// the minimal LOD3 mesh). Beyond the fade-end by ~a tile, so a tile finishes
 /// building while its nearest trees are scaled to ~0 (invisible build, no
-/// pop-in); they grow in as the craft approaches. Patch clumping leaves far
-/// clearings nearly empty, so the extra reach is cheap.
+/// pop-in); they grow in as the craft approaches.
 const TREE_RADIUS_M: f64 = 2200.0;
-/// Hysteresis: tiles despawn only past this distance.
+/// Hysteresis: tiles despawn only past this distance (mesh-only reach).
 const TREE_DESPAWN_RADIUS_M: f64 = 2400.0;
-/// Scale-fade band (shader-side, metres, from the craft anchor): trees full
-/// inside `start`, grown from zero out to `end`. Seamless — no dither, no pop.
+/// Scale-fade band (shader-side, metres, from the craft anchor) for the
+/// mesh-only reach: trees full inside `start`, grown from zero out to `end`.
 const TREE_FADE_START_M: f32 = 1850.0;
 const TREE_FADE_END_M: f32 = 2100.0;
+
+// ── Impostor far band (active once the octahedral atlas is baked) ──────────────
+/// Far reach once impostors are live: the LOD2 mesh hands off to octahedral
+/// impostors at `TREE_LOD_BANDS_M[2]` and they carry the forest out to here at a
+/// quad apiece — much farther than the mesh blob band, at a fraction of the cost.
+const TREE_IMPOSTOR_RADIUS_M: f64 = 3600.0;
+/// Hysteresis despawn radius while the impostor band is active.
+const TREE_IMPOSTOR_DESPAWN_RADIUS_M: f64 = 3900.0;
+/// Scale-fade band at the impostor far edge (m, from the craft anchor). Mesh
+/// trees are all well inside `start`, so only the far impostors fade here.
+const TREE_IMPOSTOR_FADE_START_M: f32 = 3000.0;
+const TREE_IMPOSTOR_FADE_END_M: f32 = 3450.0;
+/// Octahedral atlas: captured views per axis (`N`) and pixels per cell.
+const IMPOSTOR_CELLS: u32 = 8;
+const IMPOSTOR_CELL_PX: u32 = 128;
+/// Coverage below which an impostor pixel is discarded.
+const IMPOSTOR_ALPHA_CUTOFF: f32 = 0.35;
+/// Fraction of each atlas cell the captured tree fills (the rest is an
+/// anti-bleed gutter between cells).
+const IMPOSTOR_CELL_FILL: f32 = 0.84;
+/// Frames the off-screen bake rig renders before teardown — long enough to cover
+/// async render-pipeline compilation. Until ready the far band uses LOD3 mesh.
+const IMPOSTOR_BAKE_FRAMES: u32 = 90;
+/// Dedicated render layers for the two off-screen bake passes (albedo, normal).
+const IMPOSTOR_BAKE_ALBEDO_LAYER: usize = 6;
+const IMPOSTOR_BAKE_NORMAL_LAYER: usize = 7;
 /// Broadleaf candidate density per m² before gates (clumping, slope, altitude).
 const TREE_DENSITY_PER_M2: f32 = 0.011;
 /// Conifer candidate density per m² (mixed into the same tiles for variety).
@@ -105,17 +138,38 @@ fn lod_for_dist(d: f64) -> usize {
 
 /// The procedural species library, built once at startup. `placement` is also
 /// held as an `Arc<[…]>` for the async build; `lod_data[species][lod]` is the raw
-/// CPU mesh combined per tile. All species share one [`TreeMaterial`].
+/// CPU mesh combined per tile. All mesh-LOD species share one [`TreeMaterial`];
+/// the far band shares one [`TreeImpostorMaterial`] (the octahedral atlas).
 #[derive(Resource)]
 struct SpeciesLibrary {
     placement: Arc<[VegSpeciesPlacement]>,
     lod_data: Vec<Vec<Arc<TreeMeshData>>>,
     material: Handle<TreeMaterial>,
+    impostor_material: Handle<TreeImpostorMaterial>,
+    /// Per placement-species index → octahedral atlas layer, or `None` for
+    /// species with no impostor (shrubs). Snapshotted into the impostor build.
+    atlas_species: Vec<Option<u32>>,
 }
+
+/// State of the one-shot startup impostor-atlas bake. Until `ready`, the far
+/// band falls back to the LOD3 mesh at the mesh-only reach.
+#[derive(Resource, Default)]
+struct ImpostorBake {
+    ready: bool,
+    frames: u32,
+}
+
+/// Marker on every off-screen bake-rig entity (the two cameras + the per-cell
+/// instances), so the whole rig can be torn down once the atlas is captured.
+#[derive(Component)]
+struct ImpostorBakeRig;
 
 /// What one async tile build produces: the combined mesh + anchor/staleness meta.
 struct VegTileBuild {
     mesh: Mesh,
+    /// True if this is a far-band octahedral-impostor mesh (billboard quads),
+    /// false for a mesh-LOD batch.
+    impostor: bool,
     center_surface_body_m: DVec3,
     built_revision: u64,
     center_height_m: f32,
@@ -129,6 +183,9 @@ struct BuiltTile {
     center_height_m: f32,
     /// Mesh LOD this tile was baked at, so the driver can re-LOD on approach.
     lod: usize,
+    /// Whether the tile is realized as impostors (vs mesh) — drives re-LOD when
+    /// the impostor band flips on/off (atlas readiness).
+    impostor: bool,
 }
 
 /// Driver state. **Sole writer:** the systems in this module (run sequentially
@@ -138,8 +195,8 @@ struct VegTiles {
     body: Option<BodyId>,
     lattice: TileLattice,
     tiles: HashMap<TileKey, BuiltTile>,
-    /// In-flight builds: (task, source revision, target LOD).
-    in_flight: HashMap<TileKey, (Task<Option<VegTileBuild>>, u64, usize)>,
+    /// In-flight builds: (task, source revision, target LOD, want-impostor).
+    in_flight: HashMap<TileKey, (Task<Option<VegTileBuild>>, u64, usize, bool)>,
     rebuild_timer: f32,
 }
 
@@ -156,10 +213,12 @@ pub struct VegetationRenderPlugin;
 impl Plugin for VegetationRenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VegTiles>()
+            .init_resource::<ImpostorBake>()
             .add_systems(Startup, setup_species_library)
             .add_systems(
                 Update,
                 (
+                    tick_impostor_bake,
                     check_veg_rebuilds,
                     drive_veg_tiles.after(check_veg_rebuilds),
                     finalize_veg_tiles.after(drive_veg_tiles),
@@ -172,10 +231,19 @@ impl Plugin for VegetationRenderPlugin {
     }
 }
 
-/// Build the procedural species library once at startup: a broadleaf tree and a
-/// low shrub, each with a mesh-LOD chain of raw `TreeMeshData`, plus one shared
-/// `TreeMaterial` and the placement params handed to the async build.
-fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<TreeMaterial>>) {
+/// Build the procedural species library once at startup: a broadleaf tree, a
+/// conifer, and a low shrub, each with a mesh-LOD chain of raw `TreeMeshData`,
+/// plus one shared `TreeMaterial`; then bake the hemisphere octahedral impostor
+/// atlas for the tree species and spawn the one-shot off-screen bake rig.
+#[allow(clippy::too_many_arguments)]
+fn setup_species_library(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<TreeMaterial>>,
+    mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
+    mut bake_materials: ResMut<Assets<TreeBakeMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
     let mut lod_data: Vec<Vec<Arc<TreeMeshData>>> = Vec::new();
     let mut placement: Vec<VegSpeciesPlacement> = Vec::new();
 
@@ -252,11 +320,220 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
 
     let material = materials.add(TreeMaterial::default());
 
+    // --- Octahedral impostor atlas (tree species only; shrubs are mesh-only) ---
+    // Assign each tree species an atlas layer; build the albedo+coverage and
+    // normal+depth atlases, the shared impostor material, and the off-screen
+    // bake rig that fills them.
+    let tree_species: Vec<usize> = placement
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.layer == VegLayer::Tree)
+        .map(|(idx, _)| idx)
+        .collect();
+    let mut atlas_species: Vec<Option<u32>> = vec![None; placement.len()];
+    for (layer, &sp) in tree_species.iter().enumerate() {
+        atlas_species[sp] = Some(layer as u32);
+    }
+    let species_count = tree_species.len().min(IMPOSTOR_MAX_SPECIES) as u32;
+
+    let layout = ImpostorAtlasLayout {
+        cells: IMPOSTOR_CELLS,
+        cell_px: IMPOSTOR_CELL_PX,
+        species: species_count,
+    };
+    let albedo_atlas = images.add(make_impostor_atlas(layout));
+    let normal_atlas = images.add(make_impostor_atlas(layout));
+
+    // Per-species bounding geometry (authored units) the runtime billboard sizes
+    // from; index by atlas layer.
+    let mut species_geo = [Vec4::ZERO; IMPOSTOR_MAX_SPECIES];
+    for (layer, &sp) in tree_species.iter().enumerate().take(IMPOSTOR_MAX_SPECIES) {
+        let (center, radius) = tree_bounding_sphere(&lod_data[sp][0]);
+        species_geo[layer] = Vec4::new(radius, center.y, 0.0, 0.0);
+    }
+
+    let impostor_material = impostor_materials.add(TreeImpostorMaterial {
+        params: GrassParams::default(),
+        impostor: ImpostorParams {
+            grid: Vec4::new(
+                IMPOSTOR_CELLS as f32,
+                species_count.max(1) as f32,
+                IMPOSTOR_ALPHA_CUTOFF,
+                0.0,
+            ),
+            atlas: Vec4::new(IMPOSTOR_CELL_FILL, 0.0, 0.0, 0.0),
+            species_geo,
+        },
+        albedo: albedo_atlas.clone(),
+        normal: normal_atlas.clone(),
+    });
+
+    spawn_impostor_bake_rig(
+        &mut commands,
+        &mut bake_materials,
+        &mut meshes,
+        &lod_data,
+        &tree_species,
+        albedo_atlas,
+        normal_atlas,
+        species_count,
+    );
+
     commands.insert_resource(SpeciesLibrary {
         placement: Arc::from(placement),
         lod_data,
         material,
+        impostor_material,
+        atlas_species,
     });
+}
+
+/// Spawn the one-shot off-screen rig that bakes the octahedral atlas: for each
+/// tree species and each of the `N×N` hemisphere view directions, one instance
+/// of the recentred LOD0 mesh rotated so the bake camera sees that direction,
+/// laid out in a grid (cells across, species stacked down). Two cameras render
+/// the grid — one to the albedo+coverage atlas, one to the normal+depth atlas —
+/// using the same instances on two layers. The rig renders for a handful of
+/// frames (covering pipeline compilation) then `tick_impostor_bake` tears it
+/// down; the atlases retain the captured content.
+#[allow(clippy::too_many_arguments)]
+fn spawn_impostor_bake_rig(
+    commands: &mut Commands,
+    bake_materials: &mut Assets<TreeBakeMaterial>,
+    meshes: &mut Assets<Mesh>,
+    lod_data: &[Vec<Arc<TreeMeshData>>],
+    tree_species: &[usize],
+    albedo_atlas: Handle<Image>,
+    normal_atlas: Handle<Image>,
+    species_count: u32,
+) {
+    if tree_species.is_empty() {
+        return;
+    }
+    let n = IMPOSTOR_CELLS;
+    // World radius the bounding sphere fills inside a 1×1 world-unit cell, and the
+    // depth scale that maps cell-space view depth to [0,1].
+    let cell_fit = IMPOSTOR_CELL_FILL * 0.5;
+    let depth_scale = 0.5 / cell_fit;
+
+    let albedo_mat = bake_materials.add(TreeBakeMaterial {
+        params: BakeParams {
+            mode: Vec4::new(0.0, depth_scale, 0.0, 0.0),
+        },
+    });
+    let normal_mat = bake_materials.add(TreeBakeMaterial {
+        params: BakeParams {
+            mode: Vec4::new(1.0, depth_scale, 0.0, 0.0),
+        },
+    });
+
+    for (layer, &sp) in tree_species.iter().enumerate().take(IMPOSTOR_MAX_SPECIES) {
+        let (center, radius) = tree_bounding_sphere(&lod_data[sp][0]);
+        let mesh = meshes.add(recenter_tree_mesh(&lod_data[sp][0], center));
+        let scale = Vec3::splat(cell_fit / radius);
+        for j in 0..n {
+            for i in 0..n {
+                let uv = Vec2::new(
+                    (i as f32 + 0.5) / n as f32,
+                    (j as f32 + 0.5) / n as f32,
+                );
+                let rot = impostor_bake_rotation(hemioct_decode(uv));
+                let cell_xy = Vec3::new(
+                    i as f32 + 0.5,
+                    (layer as u32 * n + j) as f32 + 0.5,
+                    0.0,
+                );
+                let transform = Transform {
+                    translation: cell_xy,
+                    rotation: rot,
+                    scale,
+                };
+                commands.spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(albedo_mat.clone()),
+                    transform,
+                    Visibility::Visible,
+                    RenderLayers::layer(IMPOSTOR_BAKE_ALBEDO_LAYER),
+                    ImpostorBakeRig,
+                    Name::new("Impostor Bake (albedo)"),
+                ));
+                commands.spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(normal_mat.clone()),
+                    transform,
+                    Visibility::Visible,
+                    RenderLayers::layer(IMPOSTOR_BAKE_NORMAL_LAYER),
+                    ImpostorBakeRig,
+                    Name::new("Impostor Bake (normal)"),
+                ));
+            }
+        }
+    }
+
+    // The cameras frame the whole grid: `n` cells across, `n × species` down,
+    // each a 1×1 world-unit cell, viewed orthographically from +Z.
+    let grid_w = n as f32;
+    let grid_h = (n * species_count.max(1)) as f32;
+    let cam_center = Vec3::new(grid_w * 0.5, grid_h * 0.5, 0.0);
+    let bake_camera = |order: isize, layer: usize, target: Handle<Image>, name: &'static str| {
+        (
+            Camera3d::default(),
+            Camera {
+                order,
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+                ..default()
+            },
+            Hdr,
+            Tonemapping::None,
+            RenderTarget::Image(ImageRenderTarget::from(target)),
+            Projection::Orthographic(OrthographicProjection {
+                scaling_mode: ScalingMode::Fixed {
+                    width: grid_w,
+                    height: grid_h,
+                },
+                near: 0.1,
+                far: 100.0,
+                ..OrthographicProjection::default_3d()
+            }),
+            Transform::from_translation(cam_center + Vec3::Z * 10.0).looking_at(cam_center, Vec3::Y),
+            RenderLayers::layer(layer),
+            ImpostorBakeRig,
+            Name::new(name),
+        )
+    };
+    commands.spawn(bake_camera(
+        -20,
+        IMPOSTOR_BAKE_ALBEDO_LAYER,
+        albedo_atlas,
+        "Impostor Bake Camera (albedo)",
+    ));
+    commands.spawn(bake_camera(
+        -19,
+        IMPOSTOR_BAKE_NORMAL_LAYER,
+        normal_atlas,
+        "Impostor Bake Camera (normal)",
+    ));
+}
+
+/// Render the bake rig for a fixed number of frames (enough for the off-screen
+/// pipelines to compile and the atlases to fill), then tear it down and flag the
+/// impostor band ready. Until then `drive_veg_tiles` keeps the far band on the
+/// LOD3 mesh at the mesh-only reach.
+fn tick_impostor_bake(
+    mut bake: ResMut<ImpostorBake>,
+    rig: Query<Entity, With<ImpostorBakeRig>>,
+    mut commands: Commands,
+) {
+    if bake.ready {
+        return;
+    }
+    bake.frames += 1;
+    if bake.frames >= IMPOSTOR_BAKE_FRAMES {
+        for entity in &rig {
+            commands.entity(entity).despawn();
+        }
+        bake.ready = true;
+    }
 }
 
 /// Build the LOD0..LOD2 raw-mesh chain for a species template.
@@ -295,6 +572,7 @@ fn drive_veg_tiles(
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
+    bake: Res<ImpostorBake>,
     mut commands: Commands,
 ) {
     let Some(library) = library else {
@@ -373,6 +651,14 @@ fn drive_veg_tiles(
     let lattice = veg.lattice;
     let arc_dist = |center_dir: DVec3| -> f64 { center_dir.angle_between(cam_dir) * radius_m };
 
+    // Reach grows once the impostor atlas is baked (far band is impostors), else
+    // the mesh-only reach (far band is the LOD3 mesh).
+    let (reach, despawn_reach) = if bake.ready {
+        (TREE_IMPOSTOR_RADIUS_M, TREE_IMPOSTOR_DESPAWN_RADIUS_M)
+    } else {
+        (TREE_RADIUS_M, TREE_DESPAWN_RADIUS_M)
+    };
+
     // Despawn tiles past the hysteresis radius.
     let stale: Vec<TileKey> = veg
         .tiles
@@ -380,7 +666,7 @@ fn drive_veg_tiles(
         .filter(|key| {
             lattice
                 .frame(**key)
-                .is_none_or(|(center, _)| arc_dist(center) > TREE_DESPAWN_RADIUS_M)
+                .is_none_or(|(center, _)| arc_dist(center) > despawn_reach)
         })
         .copied()
         .collect();
@@ -403,10 +689,12 @@ fn drive_veg_tiles(
 
     // Candidate window around the camera's tile (nearest-first). A tile is a
     // candidate when it's missing OR its baked LOD no longer matches its distance
-    // (re-LOD) — the rebuild keeps the old mesh until the new is ready.
+    // (re-LOD), OR its impostor-ness no longer matches (atlas just became ready)
+    // — the rebuild keeps the old mesh until the new is ready.
+    let far_lod = TREE_LOD_COUNT - 1;
     let center_key = lattice.key_of(cam_dir);
-    let window = (TREE_RADIUS_M / (TREE_TILE_SIZE_M * 0.5)).ceil() as i64;
-    let mut candidates: Vec<(f64, TileKey, usize)> = Vec::new();
+    let window = (reach / (TREE_TILE_SIZE_M * 0.5)).ceil() as i64;
+    let mut candidates: Vec<(f64, TileKey, usize, bool)> = Vec::new();
     for dy in -window..=window {
         for dx in -window..=window {
             let key = TileKey {
@@ -421,13 +709,14 @@ fn drive_veg_tiles(
                 continue;
             };
             let d = arc_dist(center);
-            if d > TREE_RADIUS_M {
+            if d > reach {
                 continue;
             }
             let desired = lod_for_dist(d);
+            let want_impostor = desired == far_lod && bake.ready;
             match veg.tiles.get(&key) {
-                Some(tile) if tile.lod == desired => continue, // up to date
-                _ => candidates.push((d, key, desired)),
+                Some(tile) if tile.lod == desired && tile.impostor == want_impostor => continue,
+                _ => candidates.push((d, key, desired, want_impostor)),
             }
         }
     }
@@ -444,7 +733,7 @@ fn drive_veg_tiles(
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
-    for (_, key, desired) in candidates {
+    for (_, key, desired, want_impostor) in candidates {
         if dispatched >= slots {
             break;
         }
@@ -469,19 +758,37 @@ fn drive_veg_tiles(
             sea_level_m,
             flatten_exclusion,
         };
-        let species_lod = species_lod_for(&library, desired);
         let revision = height_source.revision();
-        let task = pool.spawn(async move {
-            let tile = build_scatter_tile(&input)?;
-            let mesh = combine_tree_tile_mesh(&tile.instances, &species_lod)?;
-            Some(VegTileBuild {
-                mesh,
-                center_surface_body_m: tile.center_surface_body_m,
-                built_revision: tile.built_revision,
-                center_height_m: tile.center_height_m,
+        let task = if want_impostor {
+            // Far band: one billboard quad per tree, sampling the octahedral atlas.
+            let atlas_species = library.atlas_species.clone();
+            pool.spawn(async move {
+                let tile = build_scatter_tile(&input)?;
+                let mesh = combine_impostor_tile_mesh(&tile.instances, &atlas_species)?;
+                Some(VegTileBuild {
+                    mesh,
+                    impostor: true,
+                    center_surface_body_m: tile.center_surface_body_m,
+                    built_revision: tile.built_revision,
+                    center_height_m: tile.center_height_m,
+                })
             })
-        });
-        veg.in_flight.insert(key, (task, revision, desired));
+        } else {
+            // Near/mid band: a batched mesh-LOD tile.
+            let species_lod = species_lod_for(&library, desired);
+            pool.spawn(async move {
+                let tile = build_scatter_tile(&input)?;
+                let mesh = combine_tree_tile_mesh(&tile.instances, &species_lod)?;
+                Some(VegTileBuild {
+                    mesh,
+                    impostor: false,
+                    center_surface_body_m: tile.center_surface_body_m,
+                    built_revision: tile.built_revision,
+                    center_height_m: tile.center_height_m,
+                })
+            })
+        };
+        veg.in_flight.insert(key, (task, revision, desired, want_impostor));
         dispatched += 1;
     }
 }
@@ -509,18 +816,20 @@ fn finalize_veg_tiles(
         return;
     };
 
-    let mut finished: Vec<(TileKey, u64, usize, Option<VegTileBuild>)> = Vec::new();
+    let mut finished: Vec<(TileKey, u64, usize, bool, Option<VegTileBuild>)> = Vec::new();
     veg.in_flight
-        .retain(|key, (task, revision, lod)| match block_on(poll_once(task)) {
-            Some(result) => {
-                finished.push((*key, *revision, *lod, result));
-                false
-            }
-            None => true,
-        });
+        .retain(
+            |key, (task, revision, lod, want)| match block_on(poll_once(task)) {
+                Some(result) => {
+                    finished.push((*key, *revision, *lod, *want, result));
+                    false
+                }
+                None => true,
+            },
+        );
 
     let orientation = body_state.orientation.normalize();
-    for (key, revision, lod, result) in finished {
+    for (key, revision, lod, want_impostor, result) in finished {
         let old_entity = veg.tiles.get(&key).and_then(|t| t.entity);
 
         let Some(build) = result else {
@@ -534,6 +843,7 @@ fn finalize_veg_tiles(
                     built_revision: revision,
                     center_height_m: 0.0,
                     lod,
+                    impostor: want_impostor,
                 },
             );
             continue;
@@ -542,26 +852,48 @@ fn finalize_veg_tiles(
         let center = build.center_surface_body_m;
         let center_world = body_state.position + orientation * center;
         let (cell, local) = real_space_grid().translation_to_grid(center_world);
-        let entity = commands
-            .spawn((
-                Mesh3d(meshes.add(build.mesh)),
-                MeshMaterial3d(library.material.clone()),
-                Transform {
-                    translation: local,
-                    rotation: orientation.as_quat(),
-                    scale: Vec3::ONE,
-                },
-                cell,
-                Visibility::Inherited,
-                RenderLayers::layer(SHIP_LAYER),
-                ChildOf(root.entity),
-                VegTileVisual {
-                    body_id,
-                    center_surface_body: center,
-                },
-                Name::new("Vegetation Tile"),
-            ))
-            .id();
+        let transform = Transform {
+            translation: local,
+            rotation: orientation.as_quat(),
+            scale: Vec3::ONE,
+        };
+        let visual = VegTileVisual {
+            body_id,
+            center_surface_body: center,
+        };
+        let mesh = Mesh3d(meshes.add(build.mesh));
+        // Impostor tiles carry a different material and don't cast shadows (past
+        // the shadow cutoff); mesh tiles keep the standard `TreeMaterial`.
+        let entity = if build.impostor {
+            commands
+                .spawn((
+                    mesh,
+                    MeshMaterial3d(library.impostor_material.clone()),
+                    transform,
+                    cell,
+                    Visibility::Inherited,
+                    RenderLayers::layer(SHIP_LAYER),
+                    NotShadowCaster,
+                    ChildOf(root.entity),
+                    visual,
+                    Name::new("Vegetation Impostor Tile"),
+                ))
+                .id()
+        } else {
+            commands
+                .spawn((
+                    mesh,
+                    MeshMaterial3d(library.material.clone()),
+                    transform,
+                    cell,
+                    Visibility::Inherited,
+                    RenderLayers::layer(SHIP_LAYER),
+                    ChildOf(root.entity),
+                    visual,
+                    Name::new("Vegetation Tile"),
+                ))
+                .id()
+        };
         // Replace the old (previous-LOD) entity only now that the new one exists.
         if let Some(old) = old_entity {
             commands.entity(old).despawn();
@@ -573,6 +905,7 @@ fn finalize_veg_tiles(
                 built_revision: build.built_revision,
                 center_height_m: build.center_height_m,
                 lod,
+                impostor: build.impostor,
             },
         );
     }
@@ -615,16 +948,15 @@ fn update_tree_material(
     sim: Res<SimulationState>,
     time: Res<Time>,
     exposure: Res<CameraExposure>,
+    bake: Res<ImpostorBake>,
     ship: Query<&GlobalTransform, With<PlayerShip>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
+    mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
 ) {
     let Some(library) = library else {
         return;
     };
     let (Some(body_id), Some(states)) = (veg.body, solar.states.as_deref()) else {
-        return;
-    };
-    let Some(material) = materials.get_mut(&library.material) else {
         return;
     };
     let Some(body_state) = states.get(body_id) else {
@@ -636,7 +968,6 @@ fn update_tree_material(
     let sun_dir = offset.normalize_or_zero().as_vec3();
     let au_over_d = (AU_M / offset.length().max(1.0)) as f32;
     let flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
-    material.params.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux);
 
     let t = time.elapsed_secs();
     let up = (sim.simulation.ship_state().position - body_state.position)
@@ -647,10 +978,6 @@ fn update_tree_material(
     let north = up.cross(east);
     let veer = t * 0.025;
     let wind_dir = (east * veer.cos() + north * veer.sin()).normalize_or_zero();
-    material.params.wind = Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, TREE_WIND_SWAY_M);
-    // time_fade: x = time, y = fade start, z = fade end (the scale-fade band).
-    material.params.time_fade = Vec4::new(t, TREE_FADE_START_M, TREE_FADE_END_M, 0.0);
-    material.params.sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
 
     let (tau, strength) = sim
         .system
@@ -660,17 +987,43 @@ fn update_tree_material(
         .and_then(|a| a.scattering.as_ref())
         .map(|s| (Vec3::from_array(s.vertical_optical_depth), s.strength))
         .unwrap_or((Vec3::ZERO, 0.0));
-    material.params.sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
+
+    // The scale-fade band sits at whichever reach is active (impostor far edge
+    // once baked, else the mesh-only edge). Mesh trees are well inside it either
+    // way, so only the far elements fade.
+    let (fade_start, fade_end) = if bake.ready {
+        (TREE_IMPOSTOR_FADE_START_M, TREE_IMPOSTOR_FADE_END_M)
+    } else {
+        (TREE_FADE_START_M, TREE_FADE_END_M)
+    };
 
     // Fade reference = the player craft's render-space position, so camera
     // zoom/orbit doesn't change what's drawn (EVA → camera fallback).
-    material.params.anchor = match ship.iter().next() {
+    let anchor = match ship.iter().next() {
         Some(gt) => {
             let p = gt.translation();
             Vec4::new(p.x, p.y, p.z, 1.0)
         }
         None => Vec4::ZERO,
     };
+
+    // Mesh trees and impostors share one lighting/fade parameter set so the
+    // mesh→impostor handoff is seamless.
+    let params = GrassParams {
+        sun_dir: Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux),
+        wind: Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, TREE_WIND_SWAY_M),
+        time_fade: Vec4::new(t, fade_start, fade_end, 0.0),
+        sky_up: Vec4::new(up.x, up.y, up.z, 0.0),
+        sky_tau: Vec4::new(tau.x, tau.y, tau.z, strength),
+        anchor,
+    };
+
+    if let Some(material) = materials.get_mut(&library.material) {
+        material.params = params;
+    }
+    if let Some(material) = impostor_materials.get_mut(&library.impostor_material) {
+        material.params = params;
+    }
 }
 
 /// Periodically rebuild tiles whose underlying height shifted (finer atlas tile

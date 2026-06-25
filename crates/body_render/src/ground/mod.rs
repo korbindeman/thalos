@@ -36,6 +36,7 @@ mod sky_material;
 mod synthetic;
 mod tile_lattice;
 mod tile_synthesis_pool;
+mod tree_impostor;
 mod tree_material;
 mod tree_mesh;
 mod vegetation;
@@ -60,12 +61,18 @@ pub use rendered_height::{
 };
 pub use scatter::{
     PlacementSample, VegInstance, VegLayer, VegScatterInput, VegScatterTile, VegSpeciesPlacement,
-    build_scatter_tile, clump_field, combine_tree_tile_mesh, placement_gate,
+    build_scatter_tile, clump_field, combine_impostor_tile_mesh, combine_tree_tile_mesh,
+    placement_gate,
 };
 pub use sky_material::BodySkyMaterial;
 pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
 pub use tile_synthesis_pool::tile_synthesis_pool;
+pub use tree_impostor::{
+    BakeParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout, ImpostorParams, TreeBakeMaterial,
+    TreeImpostorMaterial, hemioct_decode, impostor_bake_rotation, make_impostor_atlas,
+    recenter_tree_mesh, tree_bounding_sphere,
+};
 pub use tree_material::TreeMaterial;
 pub use tree_mesh::{
     CanopyStyle, TreeMeshData, TreeMeshParams, build_tree_mesh, build_tree_mesh_data,
@@ -104,11 +111,16 @@ impl Plugin for ThalosTerrainPlugin {
         // forward pipeline too — decoration meshes, not UDLOD geometry.
         app.add_plugins(MaterialPlugin::<GrassMaterial>::default());
         app.add_plugins(MaterialPlugin::<TreeMaterial>::default());
+        // Far-band tree impostors render through the forward pipeline too; the
+        // bake material is rendered only by the startup off-screen bake cameras.
+        app.add_plugins(MaterialPlugin::<TreeImpostorMaterial>::default());
+        app.add_plugins(MaterialPlugin::<TreeBakeMaterial>::default());
         body_material::embed_body_terrain_shader(app);
         sky_material::embed_body_sky_shader(app);
         water_material::embed_body_water_shader(app);
         vegetation::embed_grass_shader(app);
         tree_material::embed_tree_shader(app);
+        tree_impostor::embed_tree_impostor_shaders(app);
         #[cfg(feature = "playground")]
         playground_material::embed_playground_shader(app);
     }

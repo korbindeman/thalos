@@ -341,6 +341,64 @@ pub fn combine_tree_tile_mesh(
     Some(mesh)
 }
 
+/// Bake a tile's **tree** instances into ONE billboard-quad mesh for the
+/// octahedral impostor far band: 4 verts + 2 triangles per tree, no canopy
+/// geometry. Per vertex the tree base goes in `POSITION` (all four corners
+/// share it — degenerate for the standard prepass, expanded into a camera-facing
+/// card by `TreeImpostorMaterial`'s vertex shader), the terrain up in `NORMAL`,
+/// the card corner in `UV_0`, `(instance scale, atlas species index)` in `UV_1`,
+/// and `(tint.rgb, yaw / TAU)` in `COLOR`.
+///
+/// `atlas_species[species]` maps a placement species index to its atlas layer,
+/// or `None` for species without an impostor (shrubs) — those instances are
+/// skipped. Returns `None` if nothing was emitted.
+pub fn combine_impostor_tile_mesh(
+    instances: &[VegInstance],
+    atlas_species: &[Option<u32>],
+) -> Option<Mesh> {
+    const CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut uv0: Vec<[f32; 2]> = Vec::new();
+    let mut uv1: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for inst in instances {
+        let Some(Some(layer)) = atlas_species.get(inst.species as usize) else {
+            continue;
+        };
+        let base = inst.root_offset_body_m.to_array();
+        let up = inst.up_body.normalize_or(Vec3::Y).to_array();
+        let yaw01 = (inst.yaw / std::f32::consts::TAU).rem_euclid(1.0);
+        let start = positions.len() as u32;
+        for corner in CORNERS {
+            positions.push(base);
+            normals.push(up);
+            colors.push([1.0, 1.0, 1.0, yaw01]);
+            uv0.push(corner);
+            uv1.push([inst.scale, *layer as f32]);
+        }
+        indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+
+    if positions.is_empty() {
+        return None;
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
+    mesh.insert_indices(Indices::U32(indices));
+    Some(mesh)
+}
+
 // ---------------------------------------------------------------------------
 // Clumping field
 // ---------------------------------------------------------------------------
