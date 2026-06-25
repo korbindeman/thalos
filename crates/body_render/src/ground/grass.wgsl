@@ -84,9 +84,17 @@ fn screen_hash(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Distance fade: dithered discard so the grass ring has no hard edge.
+    // Clipmap cross-fade: each ring fades IN around its near edge and OUT around
+    // its far edge, so adjacent rings dither-blend through their shared boundary
+    // (no hard LOD seam). The innermost ring passes a large-negative near edge
+    // so it never fades in. Dithered discard keeps it in the opaque pass.
     let dist = distance(view.world_position, in.world_position);
-    let fade = 1.0 - smoothstep(grass.time_fade.y, grass.time_fade.z, dist);
+    let near_edge = grass.time_fade.y;
+    let far_edge = grass.time_fade.z;
+    let band = max(grass.time_fade.w, 1.0);
+    let fade_in = smoothstep(near_edge - band, near_edge + band, dist);
+    let fade_out = 1.0 - smoothstep(far_edge - band, far_edge + band, dist);
+    let fade = fade_in * fade_out;
     if fade < screen_hash(in.clip_position.xy + vec2<f32>(in.color.a * 64.0)) {
         discard;
     }
