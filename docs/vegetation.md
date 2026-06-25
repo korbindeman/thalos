@@ -25,11 +25,22 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 > ~1.4 km with seamless scale-fade. The Option-A→B→indirect escalation was
 > superseded by this lower-risk per-tile batch (see §6).
 >
+> **Octahedral impostors (Phase 2d) landed (2026-06-25), runtime-unverified.**
+> The far tree band is now hemisphere octahedral impostors (camera-facing quads
+> sampling a per-species angle atlas baked off-screen at startup) instead of the
+> minimal LOD3 mesh blob: the LOD2 mesh hands off to impostors at ~1.2 km and
+> they carry the forest out to ~3.6 km at one quad apiece, re-lit through the same
+> `thalos::lighting` model, with the existing craft-anchor scale-fade for a
+> seamless, zoom-independent handoff + far edge. See §7. (Built compile-/clippy-
+> /test-green; awaits a `just game` screenshot pass — the v-flip / normal-sign
+> conventions are the one likely tuning iteration.)
+>
 > **Remaining:** the geometry→terrain-albedo handoff polish (Phase 1d — grass
-> detail normal in `body_terrain.wgsl`, root blend); **octahedral impostors** for
-> the far tree band (Phase 2d — currently trees cull past LOD2 ~620 m and
-> scale-fade out by ~1.28 km); GPU-driven cull + `draw_indirect` only if per-tile
-> meshes ever become the ceiling; GPU-generated grass (Phase 5).
+> detail normal in `body_terrain.wgsl`, root blend); impostor polish (true
+> depth-channel parallax — the channel is baked but unused; per-tile frustum-cull
+> Aabb if far-tile draw count bites; a coarse impostor clipmap ring to reach the
+> horizon from altitude cheaply); GPU-driven cull + `draw_indirect` only if
+> per-tile meshes ever become the ceiling; GPU-generated grass (Phase 5).
 >
 > No silent rewrites — when a phase lands, fold its notes here and update the
 > roadmap.
@@ -348,6 +359,49 @@ one quad. Specifics:
 This is the piece most worth prototyping carefully — it is what sells
 mid-to-far forests.
 
+### 7.1 As implemented (2026-06-25)
+
+Engine side in `body_render/src/ground/tree_impostor.rs` (+ `tree_impostor.wgsl`,
+`tree_bake.wgsl`); driver + bake orchestration in
+`game/src/rendering/vegetation.rs`. The mesh-tree path is unchanged; the far
+band (`lod_for_dist` LOD3, ≥ ~1.2 km) swaps mesh → impostor.
+
+- **Atlas.** Per tree species, an `N×N` (default 8×8) grid of hemisphere views,
+  species stacked vertically in **two** linear `Rgba16Float` atlases: albedo +
+  coverage, and object-local normal + depth. One `ImpostorAtlasLayout`; adding
+  species or raising `N` is data-driven (constants in the driver).
+- **Bake (grid-of-rotated-copies, not N² cameras).** One instance of the
+  recentred species LOD0 mesh is spawned per (species, view cell), **rotated** so
+  a single orthographic camera's −Z view captures that cell's hemioctahedral
+  direction; the instances tile the atlas grid, so **one ortho camera per
+  channel** (two total) bakes everything in one pass. The off-screen rig
+  (`ImpostorBakeRig`, on dedicated layers 6/7, `Hdr` + `Tonemapping::None`)
+  renders for a fixed number of frames to cover async pipeline compilation, then
+  `tick_impostor_bake` tears it down and flags the band ready; the atlases retain
+  the captured content. Normals are stored **object-local** (not world) so the
+  runtime re-lights each tree in its own terrain frame.
+- **Runtime.** `combine_impostor_tile_mesh` emits one quad per tree (base in
+  `POSITION` — degenerate for the standard prepass, so impostors never touch a
+  custom prepass pipeline; terrain up in `NORMAL`; corner in `UV_0`;
+  `(scale, species)` in `UV_1`; `(tint, yaw)` in `COLOR`). The vertex billboards
+  the quad to the captured view basis, sizes it from the per-species bounding
+  sphere, and applies the **same craft-anchor scale-fade** the mesh trees use.
+  The fragment hemioctahedral-encodes the camera→tree direction, **bilinearly
+  blends the 4 surrounding captured views** (coverage-weighted, so silhouettes
+  don't ghost), alpha-tests, rotates the blended object-frame normal to world,
+  and lights it through `thalos::lighting` — matching the mesh trees and ground.
+- **Seamless / zoom-independent.** Both materials share one lighting + fade
+  parameter set; the fade band moves to the impostor far edge once baked, so mesh
+  trees (all well inside) never fade and only the far impostors grow/shrink at the
+  edge. The mesh→impostor swap is the existing in-place re-LOD (spawn new,
+  despawn old → no vanish). Impostor tiles are `NotShadowCaster`.
+- **Deferred (follow-ups):** true depth-channel parallax (the channel is baked
+  but the runtime blend doesn't ray-offset yet); per-tile frustum-cull `Aabb`
+  (impostor meshes are `RENDER_WORLD`, so currently never frustum-culled — fine
+  while clumping keeps far clearings empty, revisit if draw count bites); a
+  coarse impostor **clipmap ring** (bigger far tiles) to reach the true horizon
+  from altitude without growing the per-frame tile scan.
+
 ---
 
 ## 8. Wind
@@ -504,15 +558,16 @@ sends screenshots (agents do not launch it).
   fading in 150 m–1 km; far-clump color match; root blend; two-scale ground
   sampling. *Goal: grass visibly stretches to the horizon with no seam.*
 
-### Phase 2 — Trees ✅ 2a–2c landed · 2d (impostors) open
+### Phase 2 — Trees ✅ 2a–2d landed (2d runtime-unverified)
 - **2a** `SpeciesLibrary` with one tree species (LOD0 only); `build_scatter_tile`
   → Option A entity-per-instance; reuse gate + anchoring + rebuild. *Goal:
   anchored trees, rock-steady under warp.*
 - **2b** Clumping field + altitude/biome gating + shader-hashed per-instance
   variation (tint/phase/scale jitter).
 - **2c** Mesh LOD chain + dither cross-fade; CSM shadows on near LODs.
-- **2d** Hemisphere octahedral impostor far band + impostor bake; verify
-  fold-to-albedo from orbit.
+- **2d** ✅ Hemisphere octahedral impostor far band + off-screen startup bake
+  (§7.1): far band → impostors out to ~3.6 km, seamless mesh→impostor handoff.
+  Deferred polish: depth-parallax, far-tile frustum cull, impostor clipmap ring.
 
 ### Phase 3 — Shrubs / undergrowth ✅ 3a landed (basic species) · 3b open
 - **3a** `VegLayer::Shrub` on a finer clipmap; clusters at forest edges (reads
