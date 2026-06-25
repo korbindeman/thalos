@@ -34,8 +34,9 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    TerrainShadingStyle, TileKey, TileLattice, TreeMeshParams, VegInstance, VegLayer,
-    VegScatterInput, VegScatterTile, VegSpeciesPlacement, build_scatter_tile, build_tree_mesh,
+    AU_M, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeMaterial, TreeMeshParams,
+    VegInstance, VegLayer, VegScatterInput, VegScatterTile, VegSpeciesPlacement, build_scatter_tile,
+    build_tree_mesh,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -44,6 +45,7 @@ use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
+use crate::rendering::types::CameraExposure;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
@@ -80,8 +82,8 @@ const TREE_MAX_REBUILDS_PER_TICK: usize = 1;
 const TREE_GROUND_LOD_M: f32 = 2.0;
 /// Mesh-LOD band edges (ground distance, m): LOD0 < [0], LOD1 < [1], else LOD2.
 const TREE_LOD_BANDS_M: [f64; 2] = [240.0, 470.0];
-/// Number of per-species tint variants (auto-batched separately).
-const TINT_VARIANTS: usize = 3;
+/// Canopy wind sway amplitude at full weight, metres.
+const TREE_WIND_SWAY_M: f32 = 0.35;
 
 /// Mesh LOD index for a tile at ground distance `d`.
 fn lod_for_dist(d: f64) -> usize {
@@ -99,18 +101,17 @@ fn lod_for_dist(d: f64) -> usize {
 struct SpeciesAssets {
     /// Near→far mesh LODs (index clamped to the available range).
     lods: Vec<Handle<Mesh>>,
-    /// Per-instance tint variants, picked by hash so the species doesn't read
-    /// as copy-pasted. Each is its own auto-batch.
-    materials: Vec<Handle<StandardMaterial>>,
 }
 
 /// The procedural species library, built once at startup. The placement params
 /// are also held as an `Arc<[…]>` for the async scatter build (asset-handle
-/// free).
+/// free). All species share one [`TreeMaterial`] (wind + sky lighting +
+/// in-shader per-instance variation), so every plant auto-batches by mesh.
 #[derive(Resource)]
 struct SpeciesLibrary {
     placement: Arc<[VegSpeciesPlacement]>,
     species: Vec<SpeciesAssets>,
+    material: Handle<TreeMaterial>,
 }
 
 /// One finished scatter tile. `entity: None` means the tile built empty
@@ -156,6 +157,7 @@ impl Plugin for VegetationRenderPlugin {
                     drive_veg_tiles.after(check_veg_rebuilds),
                     finalize_veg_tiles.after(drive_veg_tiles),
                     update_veg_transforms.after(finalize_veg_tiles),
+                    update_tree_material,
                 )
                     .in_set(SimStage::Sync)
                     .after(sync_solar_system_state),
@@ -169,7 +171,7 @@ impl Plugin for VegetationRenderPlugin {
 fn setup_species_library(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<TreeMaterial>>,
 ) {
     let mut species: Vec<SpeciesAssets> = Vec::new();
     let mut placement: Vec<VegSpeciesPlacement> = Vec::new();
@@ -187,7 +189,6 @@ fn setup_species_library(
     };
     species.push(SpeciesAssets {
         lods: build_lod_meshes(&mut meshes, &tree),
-        materials: build_tint_variants(&mut materials),
     });
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Tree,
@@ -212,7 +213,6 @@ fn setup_species_library(
     };
     species.push(SpeciesAssets {
         lods: build_lod_meshes(&mut meshes, &shrub),
-        materials: build_tint_variants(&mut materials),
     });
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Shrub,
@@ -224,9 +224,14 @@ fn setup_species_library(
         min_grass_w: 0.30,
     });
 
+    // One shared material for every species; per-instance variation is hashed
+    // in-shader (no per-instance data, so plants still auto-batch by mesh).
+    let material = materials.add(TreeMaterial::default());
+
     commands.insert_resource(SpeciesLibrary {
         placement: Arc::from(placement),
         species,
+        material,
     });
 }
 
@@ -234,31 +239,6 @@ fn setup_species_library(
 fn build_lod_meshes(meshes: &mut Assets<Mesh>, base: &TreeMeshParams) -> Vec<Handle<Mesh>> {
     (0..3)
         .map(|lod| meshes.add(build_tree_mesh(&TreeMeshParams { lod, ..*base })))
-        .collect()
-}
-
-/// A few subtle base-colour tint variants (multiplied with the mesh's vertex
-/// colours) so a species doesn't look stamped from one mould.
-fn build_tint_variants(materials: &mut Assets<StandardMaterial>) -> Vec<Handle<StandardMaterial>> {
-    // Near-white multipliers: neutral, cooler/bluish, warmer/yellower.
-    let tints = [
-        Color::srgb(1.0, 1.0, 1.0),
-        Color::srgb(0.88, 1.0, 0.92),
-        Color::srgb(1.0, 0.97, 0.82),
-    ];
-    tints
-        .iter()
-        .take(TINT_VARIANTS)
-        .map(|&c| {
-            materials.add(StandardMaterial {
-                base_color: c,
-                perceptual_roughness: 0.95,
-                metallic: 0.0,
-                double_sided: true,
-                cull_mode: None,
-                ..default()
-            })
-        })
         .collect()
 }
 
@@ -534,10 +514,9 @@ fn finalize_veg_tiles(
                         continue;
                     }
                     let mesh = assets.lods[lod.min(assets.lods.len().saturating_sub(1))].clone();
-                    let material = assets.materials[tint_variant(inst, assets.materials.len())].clone();
                     parent.spawn((
                         Mesh3d(mesh),
-                        MeshMaterial3d(material),
+                        MeshMaterial3d(library.material.clone()),
                         instance_transform(inst),
                         Visibility::Inherited,
                         RenderLayers::layer(SHIP_LAYER),
@@ -558,14 +537,61 @@ fn finalize_veg_tiles(
     }
 }
 
-/// Per-instance tint-variant index, hashed from the instance's spatial fields so
-/// it's stable and varied (no extra per-instance data needed).
-fn tint_variant(inst: &VegInstance, count: usize) -> usize {
-    if count <= 1 {
-        return 0;
-    }
-    let h = inst.yaw.to_bits() ^ inst.scale.to_bits().rotate_left(13) ^ inst.tilt.to_bits();
-    (h as usize) % count
+/// Per-frame tree/shrub shading on the single shared [`TreeMaterial`]: sun
+/// direction + flux, a slowly veering wind (drives the canopy sway), and the
+/// shared `thalos::lighting` sky inputs (so plants light like the grass and
+/// ground). Mirrors `rendering::grass::update_grass_material`.
+fn update_tree_material(
+    library: Option<Res<SpeciesLibrary>>,
+    veg: Res<VegTiles>,
+    solar: Res<SolarSystemState>,
+    sim: Res<SimulationState>,
+    time: Res<Time>,
+    exposure: Res<CameraExposure>,
+    mut materials: ResMut<Assets<TreeMaterial>>,
+) {
+    let Some(library) = library else {
+        return;
+    };
+    let (Some(body_id), Some(states)) = (veg.body, solar.states.as_deref()) else {
+        return;
+    };
+    let Some(material) = materials.get_mut(&library.material) else {
+        return;
+    };
+    let Some(body_state) = states.get(body_id) else {
+        return;
+    };
+
+    let star_pos = states.first().map(|s| s.position).unwrap_or(DVec3::ZERO);
+    let offset = star_pos - body_state.position;
+    let sun_dir = offset.normalize_or_zero().as_vec3();
+    let au_over_d = (AU_M / offset.length().max(1.0)) as f32;
+    let flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
+    material.params.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux);
+
+    let t = time.elapsed_secs();
+    let up = (sim.simulation.ship_state().position - body_state.position)
+        .normalize_or_zero()
+        .as_vec3();
+    let seed = if up.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+    let east = seed.cross(up).normalize_or_zero();
+    let north = up.cross(east);
+    let veer = t * 0.025;
+    let wind_dir = (east * veer.cos() + north * veer.sin()).normalize_or_zero();
+    material.params.wind = Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, TREE_WIND_SWAY_M);
+    material.params.time_fade = Vec4::new(t, 0.0, 0.0, 0.0);
+    material.params.sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
+
+    let (tau, strength) = sim
+        .system
+        .bodies
+        .get(body_id)
+        .and_then(|b| b.terrestrial_atmosphere.as_ref())
+        .and_then(|a| a.scattering.as_ref())
+        .map(|s| (Vec3::from_array(s.vertical_optical_depth), s.strength))
+        .unwrap_or((Vec3::ZERO, 0.0));
+    material.params.sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 }
 
 /// Per-instance local transform in the tile's (body-fixed) frame: orient mesh

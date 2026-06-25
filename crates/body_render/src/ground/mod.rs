@@ -36,6 +36,7 @@ mod sky_material;
 mod synthetic;
 mod tile_lattice;
 mod tile_synthesis_pool;
+mod tree_material;
 mod tree_mesh;
 mod vegetation;
 mod water_material;
@@ -65,6 +66,7 @@ pub use sky_material::BodySkyMaterial;
 pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
 pub use tile_synthesis_pool::tile_synthesis_pool;
+pub use tree_material::TreeMaterial;
 pub use tree_mesh::{TreeMeshParams, build_tree_mesh};
 pub use vegetation::{
     GRASS_TILE_SIZE_M, GrassBladeLod, GrassMaterial, GrassParams, GrassTileBuildInput,
@@ -96,13 +98,15 @@ impl Plugin for ThalosTerrainPlugin {
         // icosphere mesh respectively), not thalos_udlod's UDLOD pipeline.
         app.add_plugins(MaterialPlugin::<BodySkyMaterial>::default());
         app.add_plugins(MaterialPlugin::<BodyWaterMaterial>::default());
-        // Grass blades render through the regular forward pipeline too — the
-        // decoration tiles are plain meshes, not UDLOD geometry.
+        // Grass blades + scattered trees/shrubs render through the regular
+        // forward pipeline too — decoration meshes, not UDLOD geometry.
         app.add_plugins(MaterialPlugin::<GrassMaterial>::default());
+        app.add_plugins(MaterialPlugin::<TreeMaterial>::default());
         body_material::embed_body_terrain_shader(app);
         sky_material::embed_body_sky_shader(app);
         water_material::embed_body_water_shader(app);
         vegetation::embed_grass_shader(app);
+        tree_material::embed_tree_shader(app);
         #[cfg(feature = "playground")]
         playground_material::embed_playground_shader(app);
     }

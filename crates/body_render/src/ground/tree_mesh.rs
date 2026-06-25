@@ -65,10 +65,13 @@ impl MeshBuild {
         }
     }
 
-    fn push_vert(&mut self, pos: Vec3, normal: Vec3, color: Vec3) {
+    /// `wind_weight` (stored in the colour alpha) drives the vertex wind sway:
+    /// 0 = rigid (trunk), → 1 = full sway (canopy top).
+    fn push_vert(&mut self, pos: Vec3, normal: Vec3, color: Vec3, wind_weight: f32) {
         self.positions.push(pos.to_array());
         self.normals.push(normal.normalize_or_zero().to_array());
-        self.colors.push([color.x, color.y, color.z, 1.0]);
+        self.colors
+            .push([color.x, color.y, color.z, wind_weight.clamp(0.0, 1.0)]);
     }
 }
 
@@ -112,8 +115,8 @@ fn push_trunk(b: &mut MeshBuild, params: &TreeMeshParams, segments: u32) {
         let n = Vec3::new(c, 0.0, s);
         // Trunk darkens slightly toward the base.
         let base_col = params.trunk_color * 0.85;
-        b.push_vert(Vec3::new(c * base_r, 0.0, s * base_r), n, base_col);
-        b.push_vert(Vec3::new(c * top_r, h, s * top_r), n, params.trunk_color);
+        b.push_vert(Vec3::new(c * base_r, 0.0, s * base_r), n, base_col, 0.0);
+        b.push_vert(Vec3::new(c * top_r, h, s * top_r), n, params.trunk_color, 0.05);
     }
 
     for i in 0..seg {
@@ -197,7 +200,12 @@ fn push_ellipsoid(
             // Darken the shaded underside; brighten the lit crown.
             let updown = ((pos.y - crown_base) / (center.y - crown_base + 0.001)).clamp(0.0, 1.4);
             let shade = 0.7 + 0.4 * updown;
-            b.push_vert(pos, normal, color * shade);
+            // Wind weight rises from the crown base to the top, so the canopy
+            // sways and the lower crown stays calmer; the trunk (weight 0) is
+            // rigid.
+            let top_y = center.y + ry;
+            let weight = ((pos.y - crown_base) / (top_y - crown_base).max(0.01)).clamp(0.0, 1.0);
+            b.push_vert(pos, normal, color * shade, weight);
         }
     }
 
