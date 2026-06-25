@@ -345,15 +345,17 @@ fn drive_grass_tiles(
         return;
     }
 
-    // Gather missing-tile candidates across every ring, nearest first. Each
-    // ring's annulus extends one fade band beyond its edges so neighbours
-    // overlap and cross-fade.
+    // Gather missing-tile candidates across every ring, nearest first. Each ring
+    // overlaps its neighbour at the near edge (one fade band) so they cross-fade,
+    // and extends a full tile *beyond* its outer (fade) edge so the outermost
+    // tiles build while their blades are scaled to ~0 — the build is invisible
+    // (no pop-in), and they grow in as the craft approaches.
     let mut candidates: Vec<(f64, RingTileKey)> = Vec::new();
     for (ring_idx, ring) in GRASS_RINGS.iter().enumerate() {
         let tps = ring_tps[ring_idx];
         let band = ring_band_m(ring) as f64;
         let lo = (ring.inner_m - band).max(0.0);
-        let hi = ring.outer_m + band;
+        let hi = ring.outer_m + ring.tile_size_m;
         let center_key = grass_tile_key(cam_dir, tps);
         let window = (hi / (ring.tile_size_m * 0.5)).ceil() as i64;
         for dy in -window..=window {

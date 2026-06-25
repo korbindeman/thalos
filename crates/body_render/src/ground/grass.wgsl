@@ -63,49 +63,47 @@ fn vertex(in: VertexInput) -> VertexOutput {
     var world_pos =
         mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(in.position, 1.0))
             .xyz;
+    let world_normal = normalize(mesh_functions::mesh_normal_local_to_world(in.normal, in.instance_index));
 
-    // Wind sway: two incommensurate sines per blade, displacing toward the
-    // wind direction in world space. The displacement is sub-half-metre, so
-    // applying it post-transform is exact enough and avoids inverse-rotating
-    // the wind into each tile's body-fixed frame.
-    let t = grass.time_fade.x;
-    let phase = in.uv.y * TAU;
-    let gust = 0.7 * sin(1.9 * t + phase) + 0.3 * sin(3.7 * t + 9.0 * in.uv.y);
-    world_pos += grass.wind.xyz * (in.uv.x * grass.wind.w * (0.6 + 0.4 * gust));
-
-    var out: VertexOutput;
-    out.world_position = world_pos;
-    out.clip_position = position_world_to_clip(world_pos);
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(in.normal, in.instance_index);
-    out.color = in.color;
-    return out;
-}
-
-// Small screen-space hash for the fade dither.
-fn screen_hash(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-}
-
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Clipmap cross-fade: each ring fades IN around its near edge and OUT around
-    // its far edge, so adjacent rings dither-blend through their shared boundary
-    // (no hard LOD seam). The innermost ring passes a large-negative near edge
-    // so it never fades in. Dithered discard keeps it in the opaque pass.
-    //
-    // Distance is measured from the vegetation focus (the player craft), NOT the
-    // camera, so zooming / orbiting the camera doesn't fade the field away.
+    // Clipmap scale-fade: each blade's HEIGHT scales 0 → full → 0 across the
+    // ring's near/far edges, so adjacent rings cross-fade by growing/shrinking
+    // (seamless — no dither, no pop-in; a 0-height blade is a flat invisible
+    // sliver). uv.x = height fraction (0 root → 1 tip); color.a = blade height H.
+    // Distance is from the focus anchor (craft), not the camera, so zoom/orbit
+    // doesn't change it. The innermost ring passes a large-negative near edge so
+    // it never fades in.
     let ref_pos = select(view.world_position, grass.anchor.xyz, grass.anchor.w > 0.5);
-    let dist = distance(ref_pos, in.world_position);
+    let dist = distance(ref_pos, world_pos);
     let near_edge = grass.time_fade.y;
     let far_edge = grass.time_fade.z;
     let band = max(grass.time_fade.w, 1.0);
     let fade_in = smoothstep(near_edge - band, near_edge + band, dist);
     let fade_out = 1.0 - smoothstep(far_edge - band, far_edge + band, dist);
-    let fade = fade_in * fade_out;
-    if fade < screen_hash(in.clip_position.xy + vec2<f32>(in.color.a * 64.0)) {
-        discard;
-    }
+    let grow = fade_in * fade_out;
+    // Collapse this vertex toward its root along the terrain up by its un-grown
+    // height.
+    let above = in.uv.x * in.color.a;
+    world_pos -= world_normal * (above * (1.0 - grow));
+
+    // Wind sway: two incommensurate sines per blade, displacing toward the wind
+    // direction in world space, scaled by `grow` so collapsed blades stay calm.
+    let t = grass.time_fade.x;
+    let phase = in.uv.y * TAU;
+    let gust = 0.7 * sin(1.9 * t + phase) + 0.3 * sin(3.7 * t + 9.0 * in.uv.y);
+    world_pos += grass.wind.xyz * (in.uv.x * grass.wind.w * (0.6 + 0.4 * gust) * grow);
+
+    var out: VertexOutput;
+    out.world_position = world_pos;
+    out.clip_position = position_world_to_clip(world_pos);
+    out.world_normal = world_normal;
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    // No edge discard: the seamless ring cross-fade is the vertex scale-fade
+    // (blades grow/shrink in height), so there's nothing to cut here.
 
     // Blades carry the *terrain* normal (not the card normal), so they light
     // like the ground they grow from and the card geometry doesn't read in

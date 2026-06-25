@@ -60,15 +60,27 @@ fn hash1(p: vec3<f32>) -> f32 {
     return fract(sin(dot(p, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
 }
 
-fn screen_hash(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-}
-
 @vertex
 fn vertex(in: VertexInput) -> VertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+
+    // Per-instance scale-fade: the tree GROWS from zero at the far edge and is
+    // full inside the near edge, scaled about its trunk base (local origin). This
+    // is seamless — no dither, no pop-in — and a fully-collapsed tree is a
+    // degenerate (invisible) mesh, so no discard is needed. Distance is measured
+    // from the focus anchor (craft), so camera zoom/orbit doesn't change it.
+    let instance_pos = world_from_local[3].xyz;
+    let ref_pos = select(view.world_position, tree.anchor.xyz, tree.anchor.w > 0.5);
+    let inst_dist = distance(ref_pos, instance_pos);
+    let fs = tree.time_fade.y;
+    let fe = tree.time_fade.z;
+    var grow = 1.0;
+    if fe > fs {
+        grow = clamp((fe - inst_dist) / (fe - fs), 0.0, 1.0);
+    }
+
     var world_pos =
-        mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(in.position, 1.0))
+        mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(in.position * grow, 1.0))
             .xyz;
 
     // Per-instance seed from the model matrix's rotation+scale columns (NOT the
@@ -79,12 +91,13 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let seed = hash1(basis);
 
     // Wind sway: two incommensurate sines, scaled by the per-vertex weight so
-    // the trunk is rigid and the canopy top moves most.
+    // the trunk is rigid and the canopy top moves most (and by `grow` so a
+    // shrinking tree doesn't sway oddly).
     let t = tree.time_fade.x;
     let phase = seed * TAU;
     let weight = in.color.a;
     let gust = 0.6 * sin(1.1 * t + phase) + 0.4 * sin(2.3 * t + phase * 1.7);
-    world_pos += tree.wind.xyz * (weight * tree.wind.w * (0.5 + 0.5 * gust));
+    world_pos += tree.wind.xyz * (weight * tree.wind.w * (0.5 + 0.5 * gust) * grow);
 
     var out: VertexOutput;
     out.world_position = world_pos;
@@ -97,21 +110,8 @@ fn vertex(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Radial view-distance fade: plants thin out smoothly toward the cull radius
-    // (a soft, circular edge) instead of stopping at a tile boundary. Dithered
-    // discard keeps it in the opaque pass. time_fade.y/.z = fade start/end (m);
-    // a degenerate (uninitialised) range disables the fade.
-    let fs = tree.time_fade.y;
-    let fe = tree.time_fade.z;
-    if fe > fs {
-        let ref_pos = select(view.world_position, tree.anchor.xyz, tree.anchor.w > 0.5);
-        let focus_dist = distance(ref_pos, in.world_position);
-        let fade = 1.0 - smoothstep(fs, fe, focus_dist);
-        if fade < screen_hash(in.clip_position.xy + vec2<f32>(in.seed * 64.0)) {
-            discard;
-        }
-    }
-
+    // No edge discard: the seamless far fade is the vertex scale-fade (trees grow
+    // from zero), so there's nothing to cut here.
     let n = normalize(in.world_normal);
     let sun_dir = tree.sun_dir.xyz;
     let up = tree.sky_up.xyz;

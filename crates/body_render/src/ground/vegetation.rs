@@ -250,8 +250,11 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let hue = (rng(11) as f32 - 0.5) * 0.30;
         let tinted = Vec3::new(base.x * (1.0 + hue), base.y, base.z * (1.0 - hue));
         let tint = tinted * (1.05 + 0.45 * rng(7) as f32);
-        let dither = rng(8) as f32;
-        let color_at = |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, dither];
+        // color.a carries the blade height (m): the shader scale-fade collapses
+        // each blade toward its root by `uv.x * color.a`, so far/edge blades
+        // shrink to nothing seamlessly (no dither, no pop).
+        let blade_h = height_m as f32;
+        let color_at = |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, blade_h];
         let phase = rng(9) as f32;
 
         let hw = width_m as f32 * 0.5;

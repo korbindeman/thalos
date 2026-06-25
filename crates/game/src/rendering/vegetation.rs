@@ -53,14 +53,16 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 /// trees are sparse, so a big tile still holds a useful clump and keeps the tile
 /// (entity-parent) count bounded.
 const TREE_TILE_SIZE_M: f64 = 200.0;
-/// Tiles whose centre is within this ground distance of the camera exist.
-const TREE_RADIUS_M: f64 = 800.0;
+/// Build tiles out to here — beyond the fade-end by ~a tile so a tile finishes
+/// building while its nearest trees are still scaled to ~0 (invisible build, no
+/// pop-in); they then grow in as the craft approaches.
+const TREE_RADIUS_M: f64 = 920.0;
 /// Hysteresis: tiles despawn only past this distance.
-const TREE_DESPAWN_RADIUS_M: f64 = 940.0;
-/// Radial view-distance fade band (shader-side, metres) so plants thin out into
-/// a soft, circular edge instead of a hard tile-boundary stop.
-const TREE_FADE_START_M: f32 = 600.0;
-const TREE_FADE_END_M: f32 = 800.0;
+const TREE_DESPAWN_RADIUS_M: f64 = 1040.0;
+/// Scale-fade band (shader-side, metres, from the craft anchor): trees are full
+/// inside `start`, grow from zero out to `end`. Seamless — no dither, no pop.
+const TREE_FADE_START_M: f32 = 560.0;
+const TREE_FADE_END_M: f32 = 760.0;
 /// Tree candidate density per m² before gates (clumping, slope, altitude).
 const TREE_DENSITY_PER_M2: f32 = 0.008;
 /// Shrub candidate density per m² (denser, but only realized in the near band).
@@ -84,6 +86,8 @@ const TREE_REBUILD_DELTA_M: f32 = 0.10;
 const TREE_MAX_REBUILDS_PER_TICK: usize = 1;
 /// LOD sample hint for the AGL ground probe.
 const TREE_GROUND_LOD_M: f32 = 2.0;
+/// Tiles whose instance meshes are re-LOD'd (in place, no despawn) per frame.
+const TREE_MAX_RELOD_PER_TICK: usize = 4;
 /// Mesh-LOD band edges (ground distance, m): LOD0 < [0], LOD1 < [1], else LOD2.
 const TREE_LOD_BANDS_M: [f64; 2] = [240.0, 470.0];
 /// Canopy wind sway amplitude at full weight, metres.
@@ -140,6 +144,12 @@ struct VegTiles {
     rebuild_timer: f32,
 }
 
+/// On each per-instance child entity: its species index, so the driver can swap
+/// its mesh LOD *in place* (no despawn) as the tile's distance changes — avoiding
+/// a re-LOD vanish/pop.
+#[derive(Component)]
+struct VegInstanceSpecies(u16);
+
 /// Marker on a spawned scatter-tile parent entity.
 #[derive(Component)]
 struct VegTileVisual {
@@ -160,6 +170,7 @@ impl Plugin for VegetationRenderPlugin {
                     check_veg_rebuilds,
                     drive_veg_tiles.after(check_veg_rebuilds),
                     finalize_veg_tiles.after(drive_veg_tiles),
+                    relod_veg_tiles.after(finalize_veg_tiles),
                     update_veg_transforms.after(finalize_veg_tiles),
                     update_tree_material,
                 )
@@ -335,21 +346,18 @@ fn drive_veg_tiles(
     let lattice = veg.lattice;
     let arc_dist = |center_dir: DVec3| -> f64 { center_dir.angle_between(cam_dir) * radius_m };
 
-    // Despawn tiles past the hysteresis radius, OR whose mesh LOD no longer
-    // matches their current distance (re-LOD on approach — rebuilds at the new
-    // detail). A one-band hysteresis avoids thrash at boundaries.
+    // Despawn tiles past the hysteresis radius. (LOD changes are handled in
+    // place by `relod_veg_tiles` — swapping the instance meshes, no despawn — so
+    // approaching trees gain detail without a vanish/pop.)
     let stale: Vec<TileKey> = veg
         .tiles
-        .iter()
-        .filter(|(key, tile)| match lattice.frame(**key) {
-            None => true,
-            Some((center, _)) => {
-                let d = arc_dist(center);
-                d > TREE_DESPAWN_RADIUS_M
-                    || (tile.entity.is_some() && lod_for_dist(d) != tile.lod)
-            }
+        .keys()
+        .filter(|key| {
+            lattice
+                .frame(**key)
+                .is_none_or(|(center, _)| arc_dist(center) > TREE_DESPAWN_RADIUS_M)
         })
-        .map(|(key, _)| *key)
+        .copied()
         .collect();
     for key in stale {
         if let Some(tile) = veg.tiles.remove(&key)
@@ -524,6 +532,7 @@ fn finalize_veg_tiles(
                         instance_transform(inst),
                         Visibility::Inherited,
                         RenderLayers::layer(SHIP_LAYER),
+                        VegInstanceSpecies(inst.species),
                     ));
                 }
             })
@@ -647,6 +656,75 @@ fn update_veg_transforms(
         *cell = next_cell;
         transform.translation = local;
         transform.rotation = orientation.as_quat();
+    }
+}
+
+/// Swap each tile's instance meshes to the LOD for its current distance, *in
+/// place* (no despawn) — so approaching trees gain detail without a re-LOD
+/// vanish/pop. Throttled to a few tiles per frame. Distance is from the
+/// canonical craft (same reference the scale-fade uses), so it's zoom-independent.
+fn relod_veg_tiles(
+    mut veg: ResMut<VegTiles>,
+    library: Option<Res<SpeciesLibrary>>,
+    solar: Res<SolarSystemState>,
+    sim: Res<SimulationState>,
+    children_q: Query<&Children>,
+    mut child_q: Query<(&VegInstanceSpecies, &mut Mesh3d)>,
+) {
+    let Some(library) = library else {
+        return;
+    };
+    let Some(states) = solar.states.as_deref() else {
+        return;
+    };
+    let Some(body_id) = veg.body else {
+        return;
+    };
+    let (Some(state), Some(body)) = (states.get(body_id), sim.system.bodies.get(body_id)) else {
+        return;
+    };
+    let radius_m = body.radius_m;
+    let cam_pos = sim.simulation.ship_state().position;
+    let cam_body = state.orientation.inverse() * (cam_pos - state.position);
+    let cam_r = cam_body.length();
+    if cam_r <= 0.0 {
+        return;
+    }
+    let cam_dir = cam_body / cam_r;
+    let lattice = veg.lattice;
+
+    // Collect tiles needing a LOD change (immutable pass), throttled.
+    let mut changes: Vec<(TileKey, Entity, usize)> = Vec::new();
+    for (key, tile) in veg.tiles.iter() {
+        let Some(entity) = tile.entity else {
+            continue;
+        };
+        let Some((center, _)) = lattice.frame(*key) else {
+            continue;
+        };
+        let desired = lod_for_dist(center.angle_between(cam_dir) * radius_m);
+        if desired != tile.lod {
+            changes.push((*key, entity, desired));
+            if changes.len() >= TREE_MAX_RELOD_PER_TICK {
+                break;
+            }
+        }
+    }
+
+    for (key, entity, desired) in changes {
+        if let Ok(children) = children_q.get(entity) {
+            for &child in children {
+                if let Ok((species, mut mesh)) = child_q.get_mut(child)
+                    && let Some(assets) = library.species.get(species.0 as usize)
+                {
+                    let idx = desired.min(assets.lods.len().saturating_sub(1));
+                    mesh.0 = assets.lods[idx].clone();
+                }
+            }
+        }
+        if let Some(tile) = veg.tiles.get_mut(&key) {
+            tile.lod = desired;
+        }
     }
 }
 
