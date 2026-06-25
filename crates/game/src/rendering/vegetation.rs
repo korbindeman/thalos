@@ -5,17 +5,22 @@
 //! in `thalos_body_render::ground::scatter`. Unlike grass (one batched blade
 //! mesh per tile), each scatter tile resolves to *discrete instances* realized
 //! as child entities that share a per-species `(Mesh, Material)` — so Bevy
-//! auto-batches every instance of a species into instanced draws ("Option A" in
-//! `docs/vegetation.md`).
+//! auto-batches every instance of a species+LOD+tint into instanced draws
+//! ("Option A" in `docs/vegetation.md`).
+//!
+//! Several species scatter in one pass (trees + shrubs); each instance carries
+//! its species index, and the driver picks the mesh LOD by tile distance and a
+//! tint variant by hash so a species never reads as copy-pasted. Shrubs only
+//! realize in the nearest LOD band (too small to read far) which bounds their
+//! entity count.
 //!
 //! Anchoring is the grass / runway pattern: each tile is a **root-grid
 //! big_space child** re-posed in f64 every frame, so the f32 `Transform`
-//! rotation only acts on the small (≤ ~tile) instance offsets and the trees
-//! stay rock-steady under high warp. Per-instance transforms are children of
-//! that tile node, in the body-fixed frame.
+//! rotation only acts on the small per-instance offsets and the trees stay
+//! rock-steady under high warp.
 //!
 //! Builds run on `AsyncComputeTaskPool` against the body's [`HeightSource`]
-//! (GPU-atlas mirror with CPU fallback), gated on terrain residency so trees
+//! (GPU-atlas mirror with CPU fallback), gated on terrain residency so plants
 //! seat on the streamed mesh instead of floating. A periodic revision check
 //! rebuilds tiles whose ground shifted.
 
@@ -29,8 +34,8 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    TileKey, TileLattice, TreeMeshParams, VegInstance, VegLayer, VegScatterInput, VegScatterTile,
-    VegSpeciesPlacement, build_scatter_tile, build_tree_mesh,
+    TerrainShadingStyle, TileKey, TileLattice, TreeMeshParams, VegInstance, VegLayer,
+    VegScatterInput, VegScatterTile, VegSpeciesPlacement, build_scatter_tile, build_tree_mesh,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -40,7 +45,6 @@ use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
-use thalos_body_render::TerrainShadingStyle;
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
 /// Metric side of a scatter tile at a cube-face centre. Coarser than grass —
@@ -48,20 +52,21 @@ use thalos_body_render::TerrainShadingStyle;
 /// (entity-parent) count bounded.
 const TREE_TILE_SIZE_M: f64 = 200.0;
 /// Tiles whose centre is within this ground distance of the camera exist.
-const TREE_RADIUS_M: f64 = 500.0;
+const TREE_RADIUS_M: f64 = 650.0;
 /// Hysteresis: tiles despawn only past this distance.
-const TREE_DESPAWN_RADIUS_M: f64 = 620.0;
-/// Candidate density per m² before gates (clumping, slope, altitude) thin it.
-const TREE_DENSITY_PER_M2: f32 = 0.010;
+const TREE_DESPAWN_RADIUS_M: f64 = 760.0;
+/// Tree candidate density per m² before gates (clumping, slope, altitude).
+const TREE_DENSITY_PER_M2: f32 = 0.008;
+/// Shrub candidate density per m² (denser, but only realized in the near band).
+const SHRUB_DENSITY_PER_M2: f32 = 0.030;
 /// Above this altitude over the local terrain no new tiles are built.
-const TREE_MAX_AGL_M: f64 = 350.0;
+const TREE_MAX_AGL_M: f64 = 380.0;
 /// Above this altitude all tiles are despawned (e.g. after launch).
 const TREE_DESPAWN_AGL_M: f64 = 2500.0;
 /// Maximum concurrent tile builds.
-const TREE_MAX_IN_FLIGHT: usize = 4;
-/// Don't build trees until the terrain under a tile is resident at this texel
-/// size or finer, so roots seat on the streamed mesh instead of the coarse
-/// pinned LOD-0 (the floating-tree bug; mirrors the grass residency gate).
+const TREE_MAX_IN_FLIGHT: usize = 6;
+/// Don't build until the terrain under a tile is resident at this texel size or
+/// finer, so roots seat on the streamed mesh (mirrors the grass residency gate).
 const TREE_MAX_TERRAIN_TEXEL_M: f32 = 16.0;
 /// World seed for placement hashes (distinct from grass).
 const TREE_SEED: u64 = 0x7472_6565_7331;
@@ -73,12 +78,30 @@ const TREE_REBUILD_DELTA_M: f32 = 0.10;
 const TREE_MAX_REBUILDS_PER_TICK: usize = 1;
 /// LOD sample hint for the AGL ground probe.
 const TREE_GROUND_LOD_M: f32 = 2.0;
+/// Mesh-LOD band edges (ground distance, m): LOD0 < [0], LOD1 < [1], else LOD2.
+const TREE_LOD_BANDS_M: [f64; 2] = [240.0, 470.0];
+/// Number of per-species tint variants (auto-batched separately).
+const TINT_VARIANTS: usize = 3;
+
+/// Mesh LOD index for a tile at ground distance `d`.
+fn lod_for_dist(d: f64) -> usize {
+    if d < TREE_LOD_BANDS_M[0] {
+        0
+    } else if d < TREE_LOD_BANDS_M[1] {
+        1
+    } else {
+        2
+    }
+}
 
 /// One species' shared render assets, paired by index with
 /// [`SpeciesLibrary::placement`].
 struct SpeciesAssets {
-    mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
+    /// Near→far mesh LODs (index clamped to the available range).
+    lods: Vec<Handle<Mesh>>,
+    /// Per-instance tint variants, picked by hash so the species doesn't read
+    /// as copy-pasted. Each is its own auto-batch.
+    materials: Vec<Handle<StandardMaterial>>,
 }
 
 /// The procedural species library, built once at startup. The placement params
@@ -96,6 +119,8 @@ struct BuiltTile {
     entity: Option<Entity>,
     built_revision: u64,
     center_height_m: f32,
+    /// Mesh LOD this tile was realized at, so the driver can re-LOD on approach.
+    lod: usize,
 }
 
 /// Driver state. **Sole writer:** the systems in this module (drive → finalize
@@ -105,7 +130,8 @@ struct VegTiles {
     body: Option<BodyId>,
     lattice: TileLattice,
     tiles: HashMap<TileKey, BuiltTile>,
-    in_flight: HashMap<TileKey, (Task<Option<VegScatterTile>>, u64)>,
+    /// In-flight builds: (task, source revision, target LOD).
+    in_flight: HashMap<TileKey, (Task<Option<VegScatterTile>>, u64, usize)>,
     rebuild_timer: f32,
 }
 
@@ -137,40 +163,33 @@ impl Plugin for VegetationRenderPlugin {
     }
 }
 
-/// Build the procedural species library once at startup: a broadleaf tree mesh
-/// + its shared PBR material, plus the placement params handed to the scatter
-/// build.
+/// Build the procedural species library once at startup: a broadleaf tree and a
+/// low shrub, each with a mesh-LOD chain and a few tint variants, plus the
+/// placement params handed to the scatter build.
 fn setup_species_library(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let trunk_color = Vec3::new(0.16, 0.090, 0.045);
-    let canopy_color = Vec3::new(0.055, 0.115, 0.040);
+    let mut species: Vec<SpeciesAssets> = Vec::new();
+    let mut placement: Vec<VegSpeciesPlacement> = Vec::new();
 
-    let mesh = meshes.add(build_tree_mesh(&TreeMeshParams {
+    // --- Tree (broadleaf) ---
+    let tree = TreeMeshParams {
         trunk_height_m: 4.8,
         trunk_radius_m: 0.30,
         canopy_radius_m: 2.8,
         canopy_height_m: 2.6,
-        trunk_color,
-        canopy_color,
+        trunk_color: Vec3::new(0.16, 0.090, 0.045),
+        canopy_color: Vec3::new(0.055, 0.115, 0.040),
         seed: 0xB1_05_50,
         lod: 0,
-    }));
-
-    // White base so the mesh's per-vertex trunk/canopy colours come through;
-    // matte, two-sided so thin crown silhouettes don't drop out.
-    let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.95,
-        metallic: 0.0,
-        double_sided: true,
-        cull_mode: None,
-        ..default()
+    };
+    species.push(SpeciesAssets {
+        lods: build_lod_meshes(&mut meshes, &tree),
+        materials: build_tint_variants(&mut materials),
     });
-
-    let placement: Arc<[VegSpeciesPlacement]> = Arc::from(vec![VegSpeciesPlacement {
+    placement.push(VegSpeciesPlacement {
         layer: VegLayer::Tree,
         density_per_m2: TREE_DENSITY_PER_M2,
         scale_range: (0.8, 1.5),
@@ -178,12 +197,69 @@ fn setup_species_library(
         altitude_band: (1800.0, 2900.0, 2400.0, 3100.0),
         clump_affinity: 0.75,
         min_grass_w: 0.25,
-    }]);
+    });
+
+    // --- Shrub (low bush) ---
+    let shrub = TreeMeshParams {
+        trunk_height_m: 0.35,
+        trunk_radius_m: 0.06,
+        canopy_radius_m: 0.78,
+        canopy_height_m: 0.62,
+        trunk_color: Vec3::new(0.13, 0.085, 0.050),
+        canopy_color: Vec3::new(0.062, 0.110, 0.044),
+        seed: 0x5_417,
+        lod: 0,
+    };
+    species.push(SpeciesAssets {
+        lods: build_lod_meshes(&mut meshes, &shrub),
+        materials: build_tint_variants(&mut materials),
+    });
+    placement.push(VegSpeciesPlacement {
+        layer: VegLayer::Shrub,
+        density_per_m2: SHRUB_DENSITY_PER_M2,
+        scale_range: (0.6, 1.3),
+        slope_limit: 0.46,
+        altitude_band: (1600.0, 2700.0, 2300.0, 3000.0),
+        clump_affinity: 0.5,
+        min_grass_w: 0.30,
+    });
 
     commands.insert_resource(SpeciesLibrary {
-        placement,
-        species: vec![SpeciesAssets { mesh, material }],
+        placement: Arc::from(placement),
+        species,
     });
+}
+
+/// Build the LOD0/1/2 mesh chain for a species template.
+fn build_lod_meshes(meshes: &mut Assets<Mesh>, base: &TreeMeshParams) -> Vec<Handle<Mesh>> {
+    (0..3)
+        .map(|lod| meshes.add(build_tree_mesh(&TreeMeshParams { lod, ..*base })))
+        .collect()
+}
+
+/// A few subtle base-colour tint variants (multiplied with the mesh's vertex
+/// colours) so a species doesn't look stamped from one mould.
+fn build_tint_variants(materials: &mut Assets<StandardMaterial>) -> Vec<Handle<StandardMaterial>> {
+    // Near-white multipliers: neutral, cooler/bluish, warmer/yellower.
+    let tints = [
+        Color::srgb(1.0, 1.0, 1.0),
+        Color::srgb(0.88, 1.0, 0.92),
+        Color::srgb(1.0, 0.97, 0.82),
+    ];
+    tints
+        .iter()
+        .take(TINT_VARIANTS)
+        .map(|&c| {
+            materials.add(StandardMaterial {
+                base_color: c,
+                perceptual_roughness: 0.95,
+                metallic: 0.0,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .collect()
 }
 
 /// Pick the active vegetated body and keep the scatter-tile set around the
@@ -275,16 +351,21 @@ fn drive_veg_tiles(
     let lattice = veg.lattice;
     let arc_dist = |center_dir: DVec3| -> f64 { center_dir.angle_between(cam_dir) * radius_m };
 
-    // Despawn tiles past the hysteresis radius.
+    // Despawn tiles past the hysteresis radius, OR whose mesh LOD no longer
+    // matches their current distance (re-LOD on approach — rebuilds at the new
+    // detail). A one-band hysteresis avoids thrash at boundaries.
     let stale: Vec<TileKey> = veg
         .tiles
-        .keys()
-        .filter(|key| {
-            lattice
-                .frame(**key)
-                .is_none_or(|(center, _)| arc_dist(center) > TREE_DESPAWN_RADIUS_M)
+        .iter()
+        .filter(|(key, tile)| match lattice.frame(**key) {
+            None => true,
+            Some((center, _)) => {
+                let d = arc_dist(center);
+                d > TREE_DESPAWN_RADIUS_M
+                    || (tile.entity.is_some() && lod_for_dist(d) != tile.lod)
+            }
         })
-        .copied()
+        .map(|(key, _)| *key)
         .collect();
     for key in stale {
         if let Some(tile) = veg.tiles.remove(&key)
@@ -320,8 +401,9 @@ fn drive_veg_tiles(
             let Some((center, _)) = lattice.frame(key) else {
                 continue;
             };
-            if arc_dist(center) <= TREE_RADIUS_M {
-                candidates.push((arc_dist(center), key));
+            let d = arc_dist(center);
+            if d <= TREE_RADIUS_M {
+                candidates.push((d, key));
             }
         }
     }
@@ -338,7 +420,7 @@ fn drive_veg_tiles(
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
-    for (_, key) in candidates {
+    for (dist, key) in candidates {
         if dispatched >= slots {
             break;
         }
@@ -362,8 +444,9 @@ fn drive_veg_tiles(
             flatten_exclusion,
         };
         let revision = height_source.revision();
+        let lod = lod_for_dist(dist);
         let task = pool.spawn(async move { build_scatter_tile(&input) });
-        veg.in_flight.insert(key, (task, revision));
+        veg.in_flight.insert(key, (task, revision, lod));
         dispatched += 1;
     }
 }
@@ -380,31 +463,27 @@ fn finalize_veg_tiles(
     if veg.in_flight.is_empty() {
         return;
     }
-    let (Some(library), Some(states), Some(root), Some(body_id)) = (
-        library,
-        solar.states.as_deref(),
-        root,
-        veg.body,
-    ) else {
+    let (Some(library), Some(states), Some(root), Some(body_id)) =
+        (library, solar.states.as_deref(), root, veg.body)
+    else {
         return;
     };
     let Some(body_state) = states.get(body_id) else {
         return;
     };
 
-    let mut finished: Vec<(TileKey, u64, Option<VegScatterTile>)> = Vec::new();
-    veg.in_flight.retain(|key, (task, revision)| {
-        match block_on(poll_once(task)) {
+    let mut finished: Vec<(TileKey, u64, usize, Option<VegScatterTile>)> = Vec::new();
+    veg.in_flight
+        .retain(|key, (task, revision, lod)| match block_on(poll_once(task)) {
             Some(result) => {
-                finished.push((*key, *revision, result));
+                finished.push((*key, *revision, *lod, result));
                 false
             }
             None => true,
-        }
-    });
+        });
 
     let orientation = body_state.orientation.normalize();
-    for (key, revision, result) in finished {
+    for (key, revision, lod, result) in finished {
         let Some(tile) = result else {
             veg.tiles.insert(
                 key,
@@ -412,6 +491,7 @@ fn finalize_veg_tiles(
                     entity: None,
                     built_revision: revision,
                     center_height_m: 0.0,
+                    lod,
                 },
             );
             continue;
@@ -421,6 +501,8 @@ fn finalize_veg_tiles(
         let (cell, local) = real_space_grid().translation_to_grid(center_world);
 
         let center = tile.center_surface_body_m;
+        let center_height_m = tile.center_height_m;
+        let built_revision = tile.built_revision;
         let instances = tile.instances;
         let entity = commands
             .spawn((
@@ -440,12 +522,22 @@ fn finalize_veg_tiles(
             ))
             .with_children(|parent| {
                 for inst in &instances {
-                    let Some(assets) = library.species.get(inst.species as usize) else {
+                    let sp_idx = inst.species as usize;
+                    let Some(assets) = library.species.get(sp_idx) else {
                         continue;
                     };
+                    // Shrubs only realize in the nearest band — too small to read
+                    // far, and this bounds their entity count.
+                    if library.placement.get(sp_idx).map(|p| p.layer) == Some(VegLayer::Shrub)
+                        && lod > 0
+                    {
+                        continue;
+                    }
+                    let mesh = assets.lods[lod.min(assets.lods.len().saturating_sub(1))].clone();
+                    let material = assets.materials[tint_variant(inst, assets.materials.len())].clone();
                     parent.spawn((
-                        Mesh3d(assets.mesh.clone()),
-                        MeshMaterial3d(assets.material.clone()),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
                         instance_transform(inst),
                         Visibility::Inherited,
                         RenderLayers::layer(SHIP_LAYER),
@@ -458,11 +550,22 @@ fn finalize_veg_tiles(
             key,
             BuiltTile {
                 entity: Some(entity),
-                built_revision: tile.built_revision,
-                center_height_m: tile.center_height_m,
+                built_revision,
+                center_height_m,
+                lod,
             },
         );
     }
+}
+
+/// Per-instance tint-variant index, hashed from the instance's spatial fields so
+/// it's stable and varied (no extra per-instance data needed).
+fn tint_variant(inst: &VegInstance, count: usize) -> usize {
+    if count <= 1 {
+        return 0;
+    }
+    let h = inst.yaw.to_bits() ^ inst.scale.to_bits().rotate_left(13) ^ inst.tilt.to_bits();
+    (h as usize) % count
 }
 
 /// Per-instance local transform in the tile's (body-fixed) frame: orient mesh
