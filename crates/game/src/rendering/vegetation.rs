@@ -50,13 +50,13 @@ const TREE_TILE_SIZE_M: f64 = 200.0;
 /// building while its nearest trees are scaled to ~0 (invisible build, no
 /// pop-in); they grow in as the craft approaches. Patch clumping leaves far
 /// clearings nearly empty, so the extra reach is cheap.
-const TREE_RADIUS_M: f64 = 1700.0;
+const TREE_RADIUS_M: f64 = 2200.0;
 /// Hysteresis: tiles despawn only past this distance.
-const TREE_DESPAWN_RADIUS_M: f64 = 1880.0;
+const TREE_DESPAWN_RADIUS_M: f64 = 2400.0;
 /// Scale-fade band (shader-side, metres, from the craft anchor): trees full
 /// inside `start`, grown from zero out to `end`. Seamless — no dither, no pop.
-const TREE_FADE_START_M: f32 = 1300.0;
-const TREE_FADE_END_M: f32 = 1560.0;
+const TREE_FADE_START_M: f32 = 1850.0;
+const TREE_FADE_END_M: f32 = 2100.0;
 /// Broadleaf candidate density per m² before gates (clumping, slope, altitude).
 const TREE_DENSITY_PER_M2: f32 = 0.011;
 /// Conifer candidate density per m² (mixed into the same tiles for variety).
@@ -82,12 +82,13 @@ const TREE_REBUILD_DELTA_M: f32 = 0.10;
 const TREE_MAX_REBUILDS_PER_TICK: usize = 2;
 /// LOD sample hint for the AGL ground probe.
 const TREE_GROUND_LOD_M: f32 = 2.0;
-/// Mesh-LOD band edges (ground distance, m): LOD0 < [0], LOD1 < [1], else LOD2.
-const TREE_LOD_BANDS_M: [f64; 2] = [260.0, 620.0];
+/// Mesh-LOD band edges (ground distance, m): LOD0 < [0], LOD1 < [1], LOD2 < [2],
+/// else the minimal far LOD3.
+const TREE_LOD_BANDS_M: [f64; 3] = [260.0, 620.0, 1200.0];
 /// Canopy wind sway amplitude at full weight, metres.
 const TREE_WIND_SWAY_M: f32 = 0.35;
 /// Number of mesh LODs per species.
-const TREE_LOD_COUNT: usize = 3;
+const TREE_LOD_COUNT: usize = 4;
 
 /// Mesh LOD index for a tile at ground distance `d`.
 fn lod_for_dist(d: f64) -> usize {
@@ -95,8 +96,10 @@ fn lod_for_dist(d: f64) -> usize {
         0
     } else if d < TREE_LOD_BANDS_M[1] {
         1
-    } else {
+    } else if d < TREE_LOD_BANDS_M[2] {
         2
+    } else {
+        3
     }
 }
 

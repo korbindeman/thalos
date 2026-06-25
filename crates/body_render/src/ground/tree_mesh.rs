@@ -101,7 +101,8 @@ pub fn build_tree_mesh_data(params: &TreeMeshParams) -> TreeMeshData {
     let (trunk_segs, rings, sectors, blobs) = match params.lod {
         0 => (8u32, 6u32, 10u32, 5u32),
         1 => (6, 4, 7, 3),
-        _ => (4, 3, 5, 1),
+        2 => (4, 3, 5, 1),
+        _ => (3, 2, 4, 1), // lod3+: minimal blob for the far distance band
     };
 
     push_trunk(&mut b, params, trunk_segs);
@@ -120,7 +121,8 @@ fn push_conifer(b: &mut TreeMeshData, params: &TreeMeshParams, sectors: u32) {
     let tiers = match params.lod {
         0 => 4u32,
         1 => 3,
-        _ => 2,
+        2 => 2,
+        _ => 1,
     };
     for i in 0..tiers {
         let t = i as f32 / tiers as f32;
