@@ -13,6 +13,7 @@
 #import bevy_pbr::{
     mesh_functions,
     view_transformations::position_world_to_clip,
+    mesh_view_bindings::view,
 }
 #import thalos::lighting::{SurfaceSky, compute_surface_sky, sky_ambient_irradiance}
 
@@ -55,6 +56,10 @@ fn hash1(p: vec3<f32>) -> f32 {
     return fract(sin(dot(p, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
 }
 
+fn screen_hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
 @vertex
 fn vertex(in: VertexInput) -> VertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
@@ -88,6 +93,20 @@ fn vertex(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Radial view-distance fade: plants thin out smoothly toward the cull radius
+    // (a soft, circular edge) instead of stopping at a tile boundary. Dithered
+    // discard keeps it in the opaque pass. time_fade.y/.z = fade start/end (m);
+    // a degenerate (uninitialised) range disables the fade.
+    let fs = tree.time_fade.y;
+    let fe = tree.time_fade.z;
+    if fe > fs {
+        let cam_dist = distance(view.world_position, in.world_position);
+        let fade = 1.0 - smoothstep(fs, fe, cam_dist);
+        if fade < screen_hash(in.clip_position.xy + vec2<f32>(in.seed * 64.0)) {
+            discard;
+        }
+    }
+
     let n = normalize(in.world_normal);
     let sun_dir = tree.sun_dir.xyz;
     let up = tree.sky_up.xyz;

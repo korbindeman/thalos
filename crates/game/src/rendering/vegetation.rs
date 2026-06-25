@@ -54,9 +54,13 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 /// (entity-parent) count bounded.
 const TREE_TILE_SIZE_M: f64 = 200.0;
 /// Tiles whose centre is within this ground distance of the camera exist.
-const TREE_RADIUS_M: f64 = 650.0;
+const TREE_RADIUS_M: f64 = 800.0;
 /// Hysteresis: tiles despawn only past this distance.
-const TREE_DESPAWN_RADIUS_M: f64 = 760.0;
+const TREE_DESPAWN_RADIUS_M: f64 = 940.0;
+/// Radial view-distance fade band (shader-side, metres) so plants thin out into
+/// a soft, circular edge instead of a hard tile-boundary stop.
+const TREE_FADE_START_M: f32 = 600.0;
+const TREE_FADE_END_M: f32 = 800.0;
 /// Tree candidate density per m² before gates (clumping, slope, altitude).
 const TREE_DENSITY_PER_M2: f32 = 0.008;
 /// Shrub candidate density per m² (denser, but only realized in the near band).
@@ -580,7 +584,7 @@ fn update_tree_material(
     let veer = t * 0.025;
     let wind_dir = (east * veer.cos() + north * veer.sin()).normalize_or_zero();
     material.params.wind = Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, TREE_WIND_SWAY_M);
-    material.params.time_fade = Vec4::new(t, 0.0, 0.0, 0.0);
+    material.params.time_fade = Vec4::new(t, TREE_FADE_START_M, TREE_FADE_END_M, 0.0);
     material.params.sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
 
     let (tau, strength) = sim

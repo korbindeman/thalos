@@ -71,8 +71,10 @@ struct GrassRing {
 }
 
 /// The clipmap: near full-detail blades → far wide clumps → terrain albedo
-/// carries the rest. Reaches ~1.5 km; densities/widths hold coverage so the
-/// field never goes bald (see `docs/vegetation.md`).
+/// carries the rest. Reaches ~1.5 km. Far rings are blade-count-capped per tile
+/// (`MAX_BLADES_PER_TILE`), so they widen + heighten the clumps aggressively to
+/// hold *coverage* — a distant grassfield reads from blade height occluding at
+/// grazing angles, not footprint area (see `docs/vegetation.md`).
 const GRASS_RINGS: [GrassRing; 5] = [
     GrassRing {
         tile_size_m: 25.0,
@@ -87,36 +89,36 @@ const GRASS_RINGS: [GrassRing; 5] = [
         tile_size_m: 50.0,
         inner_m: 55.0,
         outer_m: 140.0,
-        density_per_m2: 7.0,
-        width_scale: 2.2,
-        height_scale: 1.15,
+        density_per_m2: 10.0,
+        width_scale: 2.4,
+        height_scale: 1.2,
         blade_lod: GrassBladeLod::Wide,
     },
     GrassRing {
         tile_size_m: 100.0,
         inner_m: 140.0,
         outer_m: 340.0,
-        density_per_m2: 1.8,
-        width_scale: 4.6,
-        height_scale: 1.4,
+        density_per_m2: 3.5,
+        width_scale: 5.5,
+        height_scale: 1.6,
         blade_lod: GrassBladeLod::Wide,
     },
     GrassRing {
         tile_size_m: 200.0,
         inner_m: 340.0,
         outer_m: 760.0,
-        density_per_m2: 0.45,
-        width_scale: 9.5,
-        height_scale: 1.8,
+        density_per_m2: 1.0,
+        width_scale: 14.0,
+        height_scale: 2.4,
         blade_lod: GrassBladeLod::Wide,
     },
     GrassRing {
         tile_size_m: 400.0,
         inner_m: 760.0,
         outer_m: 1500.0,
-        density_per_m2: 0.12,
-        width_scale: 19.0,
-        height_scale: 2.4,
+        density_per_m2: 0.3,
+        width_scale: 32.0,
+        height_scale: 3.5,
         blade_lod: GrassBladeLod::Wide,
     },
 ];
@@ -402,8 +404,13 @@ fn drive_grass_tiles(
             let Some((center, _)) = grass_tile_frame(rk.key, tps) else {
                 continue;
             };
+            // Far rings tolerate coarser terrain — their clump blades are huge,
+            // so the residency threshold scales with tile size. Without this the
+            // distant rings (over coarse far terrain) never pass the gate and
+            // grass never reaches the horizon.
+            let texel_limit = ((ring.tile_size_m * 0.5) as f32).max(GRASS_MAX_TERRAIN_TEXEL_M);
             match guard.best_resident_texel_m(center.as_vec3()) {
-                Some(texel) if texel <= GRASS_MAX_TERRAIN_TEXEL_M => {}
+                Some(texel) if texel <= texel_limit => {}
                 _ => continue, // terrain not detailed here yet — retry next frame
             }
         }

@@ -227,8 +227,8 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let lean_dir = normal_body.cross(side_body).normalize();
         let up_body = (normal_body + lean_dir * lean).normalize();
 
-        let height_m = (0.22 + rng(5) * 0.33) * input.height_scale as f64; // base 0.22–0.55 m
-        let width_m = (0.028 + rng(6) * 0.022) * input.width_scale as f64;
+        let height_m = (0.28 + rng(5) * 0.38) * input.height_scale as f64; // base 0.28–0.66 m
+        let width_m = (0.045 + rng(6) * 0.035) * input.width_scale as f64; // chunkier → fuller field
 
         let root_body = dir * (input.radius_m + h as f64 - ROOT_SINK_M);
         let root = (root_body - center_surface_body_m).as_vec3();
