@@ -20,10 +20,16 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 > visually verified in a `just game` run** (the user owns that). Built alongside a
 > parallel grass **sky-lighting** track in the same tree.
 >
+> **Scaling (2026-06-25):** trees/shrubs now batch into **one mesh per tile**
+> (the grass path), removing the per-tree entity ceiling; range extends to
+> ~1.4 km with seamless scale-fade. The Option-A→B→indirect escalation was
+> superseded by this lower-risk per-tile batch (see §6).
+>
 > **Remaining:** the geometry→terrain-albedo handoff polish (Phase 1d — grass
 > detail normal in `body_terrain.wgsl`, root blend); **octahedral impostors** for
-> the far tree band (Phase 2d — currently trees just cull past LOD2); Option-B
-> instanced material + GPU culling (Phase 4); GPU-generated grass (Phase 5).
+> the far tree band (Phase 2d — currently trees cull past LOD2 ~620 m and
+> scale-fade out by ~1.28 km); GPU-driven cull + `draw_indirect` only if per-tile
+> meshes ever become the ceiling; GPU-generated grass (Phase 5).
 >
 > No silent rewrites — when a phase lands, fold its notes here and update the
 > roadmap.
@@ -292,30 +298,27 @@ discard needed. (Landed 2026-06-25.)
 
 ## 6. Rendering and instancing
 
-The placement, LOD, anchoring, and rebuild layers are **identical** across the
-realization strategies below; only how instances become draws differs. Adopt in
-order; each is a drop-in for the previous behind the same scatter list.
+The placement, LOD, anchoring, and rebuild layers are **identical** regardless of
+how instances become draws.
 
-- **Grass payload: batched megamesh per tile** (today's model). Blades batch
-  best as one mesh; keep it.
-- **Shrub/tree v1 — Option A: entity-per-instance + Bevy auto-batching.** One
-  re-anchored parent per tile; each instance a child sharing the species'
-  `Handle<Mesh>` + material, so Bevy batches identical mesh+material into
-  instanced draws. Per-instance variation rides the `Transform`
-  (position/yaw/tilt/scale) plus **shader-hashed** tint and wind phase derived
-  from the world-space root position — zero per-instance CPU data, no extra draw
-  calls, fully auto-batched. Matches how the rest of the codebase spawns
-  entities; ship this first.
-- **Shrub/tree v2 — Option B: instanced material with a per-tile instance
-  buffer.** One entity per (tile, species, LOD) carrying a packed
-  `InstanceBuffer` → one draw call (à la Bevy's `shader_instancing` example).
-  The single genuinely new render-plumbing piece (no general instancing
-  material exists in-repo today — the `InstanceBuffer` uses are all inside
-  `udlod`'s tile prepass). The density path; on-ramp to GPU culling.
-- **v3 — GPU-driven culling + indirect draw.** Compute pass does frustum +
-  distance + (optional Hi-Z occlusion) culling and writes a compacted
-  `draw_indirect` list. The real scaling ceiling — the lesson from Horizon Zero
-  Dawn's GPU placement, far more relevant here than Nanite.
+**Landed model: one batched mesh per tile** (2026-06-25) — every layer (grass,
+shrubs, trees) bakes a tile's instances into a single mesh and spawns *one*
+entity per tile. Grass bakes blades; trees/shrubs **combine** their pre-built
+species `TreeMeshData` per instance (transform + append) via
+`combine_tree_tile_mesh`, baking each tree's base into `UV_0`/`UV_1` so the
+shader still scale-fades and wind-varies per tree. This removes the per-tree ECS
+entity overhead (the real ceiling — draw calls were already fine via batching),
+so forests scale to dense/far with no custom render pipeline. Re-LOD and
+revision-rebuild bake a new tile mesh and swap on completion (old kept until
+ready → no vanish).
+
+> The earlier "Option A (entity per tree) → Option B (instance buffer) → GPU
+> indirect" escalation was the original sketch; the per-tile batched mesh (the
+> grass path, generalized to combine arbitrary species meshes) reached the same
+> scaling goal with far less risk and no new render plumbing, so it superseded
+> Option A/B. A true GPU-driven cull + `draw_indirect` path (Horizon-style)
+> remains the option if per-tile meshes ever become the ceiling — but the entity
+> ceiling, which was the actual limit, is gone.
 
 **Why not meshlets/Nanite for vegetation.** Foliage is *aggregate geometry*
 (disconnected leaf cards / thin twigs) — the worst case for cluster
