@@ -14,15 +14,16 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 > grass blade-LOD geometry + the **clipmap rings that take grass to the horizon**
 > (Phase 1a–c); and **procedural trees + shrubs** with a mesh-LOD chain,
 > clumping, per-instance tint/scale variation, terrain-residency-gated builds and
-> f64 anchoring (Phase 2 + Phase 3 shrub species). Compile- and unit-test-green,
-> **not yet visually verified in a `just game` run** (the user owns that). Built
-> alongside a parallel grass **sky-lighting** track in the same tree.
+> f64 anchoring (Phase 2 + Phase 3 shrub species), plus tree/shrub **wind** and
+> sky-consistent lighting via a custom `TreeMaterial` (vertex sway + the shared
+> `thalos::lighting` hemisphere model). Compile- and unit-test-green, **not yet
+> visually verified in a `just game` run** (the user owns that). Built alongside a
+> parallel grass **sky-lighting** track in the same tree.
 >
 > **Remaining:** the geometry→terrain-albedo handoff polish (Phase 1d — grass
-> detail normal in `body_terrain.wgsl`, root blend); tree/shrub **wind** (current
-> trees use `StandardMaterial`, no sway — the biggest open fidelity gap);
-> **octahedral impostors** for the far tree band (Phase 2d); Option-B instanced
-> material + GPU culling (Phase 4); GPU-generated grass (Phase 5).
+> detail normal in `body_terrain.wgsl`, root blend); **octahedral impostors** for
+> the far tree band (Phase 2d — currently trees just cull past LOD2); Option-B
+> instanced material + GPU culling (Phase 4); GPU-generated grass (Phase 5).
 >
 > No silent rewrites — when a phase lands, fold its notes here and update the
 > roadmap.
