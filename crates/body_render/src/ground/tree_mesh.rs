@@ -15,17 +15,28 @@ use bevy::asset::RenderAssetUsages;
 use bevy::math::Vec3;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 
+/// Canopy silhouette — gives the forest more than one tree shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanopyStyle {
+    /// Broadleaf: a billowy cluster of overlapping blobs.
+    #[default]
+    Round,
+    /// Conifer: stacked cones (a pine silhouette).
+    Conifer,
+}
+
 /// Parameters for one procedurally generated tree.
 #[derive(Debug, Clone, Copy)]
 pub struct TreeMeshParams {
     pub trunk_height_m: f32,
     pub trunk_radius_m: f32,
-    /// Canopy lateral radius (broadleaf crown half-width).
+    /// Canopy lateral radius (crown half-width).
     pub canopy_radius_m: f32,
     /// Canopy vertical radius (crown half-height).
     pub canopy_height_m: f32,
     pub trunk_color: Vec3,
     pub canopy_color: Vec3,
+    pub style: CanopyStyle,
     /// Deterministic shape seed (offsets the canopy blobs).
     pub seed: u64,
     /// Mesh level of detail: 0 = full, 1 = mid, 2+ = far. Reduces tessellation
@@ -42,6 +53,7 @@ impl Default for TreeMeshParams {
             canopy_height_m: 2.4,
             trunk_color: Vec3::new(0.16, 0.090, 0.045),
             canopy_color: Vec3::new(0.055, 0.115, 0.040),
+            style: CanopyStyle::Round,
             seed: 0,
             lod: 0,
         }
@@ -87,14 +99,83 @@ pub fn build_tree_mesh_data(params: &TreeMeshParams) -> TreeMeshData {
     let mut b = TreeMeshData::new();
 
     let (trunk_segs, rings, sectors, blobs) = match params.lod {
-        0 => (8u32, 6u32, 10u32, 3u32),
-        1 => (6, 4, 7, 2),
+        0 => (8u32, 6u32, 10u32, 5u32),
+        1 => (6, 4, 7, 3),
         _ => (4, 3, 5, 1),
     };
 
     push_trunk(&mut b, params, trunk_segs);
-    push_canopy(&mut b, params, rings, sectors, blobs);
+    match params.style {
+        CanopyStyle::Round => push_canopy(&mut b, params, rings, sectors, blobs),
+        CanopyStyle::Conifer => push_conifer(&mut b, params, sectors),
+    }
     b
+}
+
+/// Conifer canopy: overlapping cone tiers (a pine silhouette).
+fn push_conifer(b: &mut TreeMeshData, params: &TreeMeshParams, sectors: u32) {
+    let crown_base = params.trunk_height_m * 0.32;
+    let crown_top = params.trunk_height_m + params.canopy_height_m * 1.6;
+    let span = (crown_top - crown_base).max(0.5);
+    let tiers = match params.lod {
+        0 => 4u32,
+        1 => 3,
+        _ => 2,
+    };
+    for i in 0..tiers {
+        let t = i as f32 / tiers as f32;
+        let y_base = crown_base + span * t * 0.62; // overlap the tiers
+        let radius = params.canopy_radius_m * (1.0 - 0.6 * t);
+        let height = span * (0.55 - 0.18 * t);
+        push_cone(
+            b,
+            y_base,
+            radius.max(0.05),
+            height.max(0.2),
+            sectors,
+            params.canopy_color,
+            crown_base,
+            crown_top,
+        );
+    }
+}
+
+/// One cone tier: a base ring + a single apex, normals angled along the slope.
+#[allow(clippy::too_many_arguments)]
+fn push_cone(
+    b: &mut TreeMeshData,
+    y_base: f32,
+    radius: f32,
+    height: f32,
+    sectors: u32,
+    color: Vec3,
+    crown_base: f32,
+    crown_top: f32,
+) {
+    let seg = sectors.max(4);
+    let span = (crown_top - crown_base).max(0.01);
+    let weight_at = |y: f32| ((y - crown_base) / span).clamp(0.0, 1.0);
+    let start = b.positions.len() as u32;
+    for i in 0..=seg {
+        let a = i as f32 / seg as f32 * std::f32::consts::TAU;
+        let (s, c) = a.sin_cos();
+        let p = Vec3::new(c * radius, y_base, s * radius);
+        let n = Vec3::new(c, radius / height, s);
+        let shade = 0.68 + 0.42 * weight_at(p.y);
+        b.push_vert(p, n, color * shade, weight_at(p.y));
+    }
+    let apex_y = y_base + height;
+    let apex_idx = b.positions.len() as u32;
+    b.push_vert(
+        Vec3::new(0.0, apex_y, 0.0),
+        Vec3::Y,
+        color * (0.68 + 0.42 * weight_at(apex_y)),
+        weight_at(apex_y),
+    );
+    for i in 0..seg {
+        b.indices
+            .extend_from_slice(&[start + i, start + i + 1, apex_idx]);
+    }
 }
 
 /// Build a single standalone tree mesh from `params` (used by tests / previews;

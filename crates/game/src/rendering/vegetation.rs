@@ -29,8 +29,8 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeMaterial, TreeMeshData,
-    TreeMeshParams, VegLayer, VegScatterInput, VegSpeciesPlacement, build_scatter_tile,
+    AU_M, CanopyStyle, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeMaterial,
+    TreeMeshData, TreeMeshParams, VegLayer, VegScatterInput, VegSpeciesPlacement, build_scatter_tile,
     build_tree_mesh_data, combine_tree_tile_mesh,
 };
 use thalos_physics_local::HeightSourceRegistry;
@@ -56,8 +56,10 @@ const TREE_DESPAWN_RADIUS_M: f64 = 1560.0;
 /// inside `start`, grown from zero out to `end`. Seamless — no dither, no pop.
 const TREE_FADE_START_M: f32 = 1050.0;
 const TREE_FADE_END_M: f32 = 1280.0;
-/// Tree candidate density per m² before gates (clumping, slope, altitude).
-const TREE_DENSITY_PER_M2: f32 = 0.008;
+/// Broadleaf candidate density per m² before gates (clumping, slope, altitude).
+const TREE_DENSITY_PER_M2: f32 = 0.011;
+/// Conifer candidate density per m² (mixed into the same tiles for variety).
+const CONIFER_DENSITY_PER_M2: f32 = 0.006;
 /// Shrub candidate density per m² (denser, but only realized in the near band).
 const SHRUB_DENSITY_PER_M2: f32 = 0.030;
 /// Above this altitude over the local terrain no new tiles are built.
@@ -175,12 +177,13 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
 
     // --- Tree (broadleaf) ---
     let tree = TreeMeshParams {
-        trunk_height_m: 4.8,
-        trunk_radius_m: 0.30,
-        canopy_radius_m: 2.8,
-        canopy_height_m: 2.6,
+        trunk_height_m: 5.2,
+        trunk_radius_m: 0.32,
+        canopy_radius_m: 3.0,
+        canopy_height_m: 2.8,
         trunk_color: Vec3::new(0.16, 0.090, 0.045),
         canopy_color: Vec3::new(0.055, 0.115, 0.040),
+        style: CanopyStyle::Round,
         seed: 0xB1_05_50,
         lod: 0,
     };
@@ -188,11 +191,36 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Tree,
         density_per_m2: TREE_DENSITY_PER_M2,
-        scale_range: (0.8, 1.5),
-        slope_limit: 0.36,
+        scale_range: (0.8, 1.6),
+        slope_limit: 0.40,
         altitude_band: (1800.0, 2900.0, 2400.0, 3100.0),
-        clump_affinity: 0.75,
-        min_grass_w: 0.25,
+        // Mild clumping: groves, but trees still spread into the near ground
+        // instead of clustering into a single distant band.
+        clump_affinity: 0.40,
+        min_grass_w: 0.22,
+    });
+
+    // --- Conifer (pine) — a second, taller, narrower silhouette for variety ---
+    let conifer = TreeMeshParams {
+        trunk_height_m: 7.0,
+        trunk_radius_m: 0.26,
+        canopy_radius_m: 1.9,
+        canopy_height_m: 3.4,
+        trunk_color: Vec3::new(0.13, 0.080, 0.045),
+        canopy_color: Vec3::new(0.040, 0.090, 0.045),
+        style: CanopyStyle::Conifer,
+        seed: 0xC0_1F_E5,
+        lod: 0,
+    };
+    lod_data.push(build_lod_chain(&conifer));
+    placement.push(VegSpeciesPlacement {
+        layer: VegLayer::Tree,
+        density_per_m2: CONIFER_DENSITY_PER_M2,
+        scale_range: (0.85, 1.7),
+        slope_limit: 0.45,
+        altitude_band: (1900.0, 3000.0, 2600.0, 3300.0),
+        clump_affinity: 0.55,
+        min_grass_w: 0.20,
     });
 
     // --- Shrub (low bush) ---
@@ -203,6 +231,7 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
         canopy_height_m: 0.62,
         trunk_color: Vec3::new(0.13, 0.085, 0.050),
         canopy_color: Vec3::new(0.062, 0.110, 0.044),
+        style: CanopyStyle::Round,
         seed: 0x5_417,
         lod: 0,
     };
@@ -213,8 +242,8 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
         scale_range: (0.6, 1.3),
         slope_limit: 0.46,
         altitude_band: (1600.0, 2700.0, 2300.0, 3000.0),
-        clump_affinity: 0.5,
-        min_grass_w: 0.30,
+        clump_affinity: 0.45,
+        min_grass_w: 0.28,
     });
 
     let material = materials.add(TreeMaterial::default());

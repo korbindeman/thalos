@@ -67,7 +67,9 @@ pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_s
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
 pub use tile_synthesis_pool::tile_synthesis_pool;
 pub use tree_material::TreeMaterial;
-pub use tree_mesh::{TreeMeshData, TreeMeshParams, build_tree_mesh, build_tree_mesh_data};
+pub use tree_mesh::{
+    CanopyStyle, TreeMeshData, TreeMeshParams, build_tree_mesh, build_tree_mesh_data,
+};
 pub use vegetation::{
     GRASS_TILE_SIZE_M, GrassBladeLod, GrassMaterial, GrassParams, GrassTileBuildInput,
     GrassTileKey, GrassTileMesh, build_grass_tile_mesh, grass_tile_frame, grass_tile_key,
