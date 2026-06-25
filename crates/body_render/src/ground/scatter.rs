@@ -408,14 +408,23 @@ fn value_noise(p: DVec3) -> f32 {
 }
 
 fn lattice_value(ix: i64, iy: i64, iz: i64) -> f32 {
-    let mut h = 0x517c_c1b7_2722_0a95u64
-        ^ (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (iy as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
-        ^ (iz as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
-    h ^= h >> 31;
-    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-    h ^= h >> 32;
-    (h & 0x000F_FFFF_FFFF_FFFF) as f32 / (1u64 << 52) as f32
+    // u32 integer hash, kept **WGSL-portable** (no u64): the terrain shader
+    // replicates this exactly so the far-ground forest/grass-patch tint lines up
+    // with where the trees are placed. Mirror in `body_terrain.wgsl`:
+    //   var h = bitcast<u32>(cx)*374761393u + bitcast<u32>(cy)*668265263u
+    //         + bitcast<u32>(cz)*2246822519u;
+    //   h = (h ^ (h >> 13u)) * 1274126177u; h = h ^ (h >> 16u);
+    //   return f32(h) * (1.0 / 4294967296.0);
+    let x = (ix as i32) as u32;
+    let y = (iy as i32) as u32;
+    let z = (iz as i32) as u32;
+    let mut h = x
+        .wrapping_mul(374_761_393)
+        .wrapping_add(y.wrapping_mul(668_265_263))
+        .wrapping_add(z.wrapping_mul(2_246_822_519));
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    h ^= h >> 16;
+    h as f32 / 4_294_967_296.0
 }
 
 fn smooth01(t: f64) -> f64 {
