@@ -48,14 +48,21 @@ impl Default for TreeMeshParams {
     }
 }
 
-struct MeshBuild {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
-    indices: Vec<u32>,
+/// Raw CPU mesh arrays for one tree species at one LOD. Kept on the CPU (not
+/// just as a GPU `Handle<Mesh>`) so the scatter driver can *combine* many trees
+/// into one batched per-tile mesh — the same one-mesh-per-tile batching the
+/// grass uses, which removes the per-tree ECS entity overhead and lets forests
+/// scale to dense/far. `colors[i].w` is the per-vertex wind weight (0 trunk → 1
+/// canopy top).
+#[derive(Clone, Default)]
+pub struct TreeMeshData {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub colors: Vec<[f32; 4]>,
+    pub indices: Vec<u32>,
 }
 
-impl MeshBuild {
+impl TreeMeshData {
     fn new() -> Self {
         Self {
             positions: Vec::new(),
@@ -75,9 +82,9 @@ impl MeshBuild {
     }
 }
 
-/// Build a single combined tree mesh from `params`.
-pub fn build_tree_mesh(params: &TreeMeshParams) -> Mesh {
-    let mut b = MeshBuild::new();
+/// Build the raw CPU mesh arrays for one tree species at `params.lod`.
+pub fn build_tree_mesh_data(params: &TreeMeshParams) -> TreeMeshData {
+    let mut b = TreeMeshData::new();
 
     let (trunk_segs, rings, sectors, blobs) = match params.lod {
         0 => (8u32, 6u32, 10u32, 3u32),
@@ -87,7 +94,13 @@ pub fn build_tree_mesh(params: &TreeMeshParams) -> Mesh {
 
     push_trunk(&mut b, params, trunk_segs);
     push_canopy(&mut b, params, rings, sectors, blobs);
+    b
+}
 
+/// Build a single standalone tree mesh from `params` (used by tests / previews;
+/// the runtime scatter path combines `TreeMeshData` per tile instead).
+pub fn build_tree_mesh(params: &TreeMeshParams) -> Mesh {
+    let b = build_tree_mesh_data(params);
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
@@ -101,7 +114,7 @@ pub fn build_tree_mesh(params: &TreeMeshParams) -> Mesh {
 
 /// Tapered cylinder trunk (no caps), base ring at `y = 0`, top at
 /// `y = trunk_height`, narrowing toward the crown.
-fn push_trunk(b: &mut MeshBuild, params: &TreeMeshParams, segments: u32) {
+fn push_trunk(b: &mut TreeMeshData, params: &TreeMeshParams, segments: u32) {
     let base_r = params.trunk_radius_m;
     let top_r = params.trunk_radius_m * 0.62;
     let h = params.trunk_height_m;
@@ -129,7 +142,7 @@ fn push_trunk(b: &mut MeshBuild, params: &TreeMeshParams, segments: u32) {
 
 /// Canopy: one main ellipsoid blob plus a few smaller offset blobs for an
 /// irregular crown, all green, sitting on top of the trunk.
-fn push_canopy(b: &mut MeshBuild, params: &TreeMeshParams, rings: u32, sectors: u32, blobs: u32) {
+fn push_canopy(b: &mut TreeMeshData, params: &TreeMeshParams, rings: u32, sectors: u32, blobs: u32) {
     let crown_base = params.trunk_height_m * 0.92;
     let rx = params.canopy_radius_m;
     let ry = params.canopy_height_m;
@@ -170,7 +183,7 @@ fn push_canopy(b: &mut MeshBuild, params: &TreeMeshParams, rings: u32, sectors: 
 /// colour darkens toward the underside (`crown_base`) for soft self-shadowing.
 #[allow(clippy::too_many_arguments)]
 fn push_ellipsoid(
-    b: &mut MeshBuild,
+    b: &mut TreeMeshData,
     center: Vec3,
     rx: f32,
     ry: f32,

@@ -1,28 +1,23 @@
 //! Tree / shrub scatter driver.
 //!
 //! Maintains a camera-local set of body-fixed **scatter tiles** around the
-//! player on the nearest vegetated body, using the placement + scatter system
-//! in `thalos_body_render::ground::scatter`. Unlike grass (one batched blade
-//! mesh per tile), each scatter tile resolves to *discrete instances* realized
-//! as child entities that share a per-species `(Mesh, Material)` — so Bevy
-//! auto-batches every instance of a species+LOD+tint into instanced draws
-//! ("Option A" in `docs/vegetation.md`).
+//! player on the nearest vegetated body, using the placement + scatter system in
+//! `thalos_body_render::ground::scatter`. Each tile's trees/shrubs are baked into
+//! **one batched mesh per tile** (the same one-mesh-per-tile batching the grass
+//! uses) — so there is *no per-tree ECS entity*, and forests scale to dense/far.
+//! Per-tree variation (scale, rotation, tint, wind phase) and the seamless
+//! per-tree scale-fade survive because each tree's base is baked into the mesh
+//! UVs and read by `TreeMaterial`.
 //!
-//! Several species scatter in one pass (trees + shrubs); each instance carries
-//! its species index, and the driver picks the mesh LOD by tile distance and a
-//! tint variant by hash so a species never reads as copy-pasted. Shrubs only
-//! realize in the nearest LOD band (too small to read far) which bounds their
-//! entity count.
+//! Anchoring is the grass / runway pattern: each tile is a **root-grid big_space
+//! child** re-posed in f64 every frame, so the f32 transform only acts on the
+//! tile's small vertex offsets and trees stay rock-steady under high warp.
 //!
-//! Anchoring is the grass / runway pattern: each tile is a **root-grid
-//! big_space child** re-posed in f64 every frame, so the f32 `Transform`
-//! rotation only acts on the small per-instance offsets and the trees stay
-//! rock-steady under high warp.
-//!
-//! Builds run on `AsyncComputeTaskPool` against the body's [`HeightSource`]
-//! (GPU-atlas mirror with CPU fallback), gated on terrain residency so plants
-//! seat on the streamed mesh instead of floating. A periodic revision check
-//! rebuilds tiles whose ground shifted.
+//! Builds run on `AsyncComputeTaskPool` (scatter placement + mesh combine),
+//! gated on terrain residency so plants seat on the streamed mesh. Tiles are
+//! built a tile beyond the fade edge (invisible build → no pop-in), re-LOD'd by
+//! rebuilding the tile mesh at the new LOD (old kept until the new is ready → no
+//! vanish), and rebuilt when the height source revision advances.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,9 +29,9 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeMaterial, TreeMeshParams,
-    VegInstance, VegLayer, VegScatterInput, VegScatterTile, VegSpeciesPlacement, build_scatter_tile,
-    build_tree_mesh,
+    AU_M, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeMaterial, TreeMeshData,
+    TreeMeshParams, VegLayer, VegScatterInput, VegSpeciesPlacement, build_scatter_tile,
+    build_tree_mesh_data, combine_tree_tile_mesh,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -49,32 +44,30 @@ use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
-/// Metric side of a scatter tile at a cube-face centre. Coarser than grass —
-/// trees are sparse, so a big tile still holds a useful clump and keeps the tile
-/// (entity-parent) count bounded.
+/// Metric side of a scatter tile at a cube-face centre.
 const TREE_TILE_SIZE_M: f64 = 200.0;
-/// Build tiles out to here — beyond the fade-end by ~a tile so a tile finishes
-/// building while its nearest trees are still scaled to ~0 (invisible build, no
-/// pop-in); they then grow in as the craft approaches.
-const TREE_RADIUS_M: f64 = 920.0;
+/// Build tiles out to here — beyond the fade-end by ~a tile, so a tile finishes
+/// building while its nearest trees are scaled to ~0 (invisible build, no
+/// pop-in); they grow in as the craft approaches.
+const TREE_RADIUS_M: f64 = 1400.0;
 /// Hysteresis: tiles despawn only past this distance.
-const TREE_DESPAWN_RADIUS_M: f64 = 1040.0;
-/// Scale-fade band (shader-side, metres, from the craft anchor): trees are full
-/// inside `start`, grow from zero out to `end`. Seamless — no dither, no pop.
-const TREE_FADE_START_M: f32 = 560.0;
-const TREE_FADE_END_M: f32 = 760.0;
+const TREE_DESPAWN_RADIUS_M: f64 = 1560.0;
+/// Scale-fade band (shader-side, metres, from the craft anchor): trees full
+/// inside `start`, grown from zero out to `end`. Seamless — no dither, no pop.
+const TREE_FADE_START_M: f32 = 1050.0;
+const TREE_FADE_END_M: f32 = 1280.0;
 /// Tree candidate density per m² before gates (clumping, slope, altitude).
 const TREE_DENSITY_PER_M2: f32 = 0.008;
 /// Shrub candidate density per m² (denser, but only realized in the near band).
 const SHRUB_DENSITY_PER_M2: f32 = 0.030;
 /// Above this altitude over the local terrain no new tiles are built.
-const TREE_MAX_AGL_M: f64 = 380.0;
+const TREE_MAX_AGL_M: f64 = 500.0;
 /// Above this altitude all tiles are despawned (e.g. after launch).
-const TREE_DESPAWN_AGL_M: f64 = 2500.0;
+const TREE_DESPAWN_AGL_M: f64 = 3000.0;
 /// Maximum concurrent tile builds.
-const TREE_MAX_IN_FLIGHT: usize = 6;
+const TREE_MAX_IN_FLIGHT: usize = 8;
 /// Don't build until the terrain under a tile is resident at this texel size or
-/// finer, so roots seat on the streamed mesh (mirrors the grass residency gate).
+/// finer (mirrors the grass residency gate); scaled up for far tiles below.
 const TREE_MAX_TERRAIN_TEXEL_M: f32 = 16.0;
 /// World seed for placement hashes (distinct from grass).
 const TREE_SEED: u64 = 0x7472_6565_7331;
@@ -82,16 +75,16 @@ const TREE_SEED: u64 = 0x7472_6565_7331;
 const TREE_REBUILD_CHECK_S: f32 = 0.75;
 /// Rebuild a stale tile only when its centre height moved more than this.
 const TREE_REBUILD_DELTA_M: f32 = 0.10;
-/// Stale-tile rebuilds dispatched per scan tick.
-const TREE_MAX_REBUILDS_PER_TICK: usize = 1;
+/// Stale-tile rebuilds forgotten per scan tick (drive re-dispatches them).
+const TREE_MAX_REBUILDS_PER_TICK: usize = 2;
 /// LOD sample hint for the AGL ground probe.
 const TREE_GROUND_LOD_M: f32 = 2.0;
-/// Tiles whose instance meshes are re-LOD'd (in place, no despawn) per frame.
-const TREE_MAX_RELOD_PER_TICK: usize = 4;
 /// Mesh-LOD band edges (ground distance, m): LOD0 < [0], LOD1 < [1], else LOD2.
-const TREE_LOD_BANDS_M: [f64; 2] = [240.0, 470.0];
+const TREE_LOD_BANDS_M: [f64; 2] = [260.0, 620.0];
 /// Canopy wind sway amplitude at full weight, metres.
 const TREE_WIND_SWAY_M: f32 = 0.35;
+/// Number of mesh LODs per species.
+const TREE_LOD_COUNT: usize = 3;
 
 /// Mesh LOD index for a tile at ground distance `d`.
 fn lod_for_dist(d: f64) -> usize {
@@ -104,53 +97,47 @@ fn lod_for_dist(d: f64) -> usize {
     }
 }
 
-/// One species' shared render assets, paired by index with
-/// [`SpeciesLibrary::placement`].
-struct SpeciesAssets {
-    /// Near→far mesh LODs (index clamped to the available range).
-    lods: Vec<Handle<Mesh>>,
-}
-
-/// The procedural species library, built once at startup. The placement params
-/// are also held as an `Arc<[…]>` for the async scatter build (asset-handle
-/// free). All species share one [`TreeMaterial`] (wind + sky lighting +
-/// in-shader per-instance variation), so every plant auto-batches by mesh.
+/// The procedural species library, built once at startup. `placement` is also
+/// held as an `Arc<[…]>` for the async build; `lod_data[species][lod]` is the raw
+/// CPU mesh combined per tile. All species share one [`TreeMaterial`].
 #[derive(Resource)]
 struct SpeciesLibrary {
     placement: Arc<[VegSpeciesPlacement]>,
-    species: Vec<SpeciesAssets>,
+    lod_data: Vec<Vec<Arc<TreeMeshData>>>,
     material: Handle<TreeMaterial>,
 }
 
-/// One finished scatter tile. `entity: None` means the tile built empty
-/// (clearing, water, rock, alpine) — recorded so it isn't rebuilt every frame.
+/// What one async tile build produces: the combined mesh + anchor/staleness meta.
+struct VegTileBuild {
+    mesh: Mesh,
+    center_surface_body_m: DVec3,
+    built_revision: u64,
+    center_height_m: f32,
+}
+
+/// One finished tile. `entity: None` means the tile built empty (clearing,
+/// water, rock, alpine) — recorded so it isn't rebuilt every frame.
 struct BuiltTile {
     entity: Option<Entity>,
     built_revision: u64,
     center_height_m: f32,
-    /// Mesh LOD this tile was realized at, so the driver can re-LOD on approach.
+    /// Mesh LOD this tile was baked at, so the driver can re-LOD on approach.
     lod: usize,
 }
 
-/// Driver state. **Sole writer:** the systems in this module (drive → finalize
-/// → rebuild run sequentially via their `ResMut` access).
+/// Driver state. **Sole writer:** the systems in this module (run sequentially
+/// via their `ResMut` access).
 #[derive(Resource, Default)]
 struct VegTiles {
     body: Option<BodyId>,
     lattice: TileLattice,
     tiles: HashMap<TileKey, BuiltTile>,
     /// In-flight builds: (task, source revision, target LOD).
-    in_flight: HashMap<TileKey, (Task<Option<VegScatterTile>>, u64, usize)>,
+    in_flight: HashMap<TileKey, (Task<Option<VegTileBuild>>, u64, usize)>,
     rebuild_timer: f32,
 }
 
-/// On each per-instance child entity: its species index, so the driver can swap
-/// its mesh LOD *in place* (no despawn) as the tile's distance changes — avoiding
-/// a re-LOD vanish/pop.
-#[derive(Component)]
-struct VegInstanceSpecies(u16);
-
-/// Marker on a spawned scatter-tile parent entity.
+/// Marker on a spawned scatter-tile entity (one batched mesh).
 #[derive(Component)]
 struct VegTileVisual {
     body_id: BodyId,
@@ -170,7 +157,6 @@ impl Plugin for VegetationRenderPlugin {
                     check_veg_rebuilds,
                     drive_veg_tiles.after(check_veg_rebuilds),
                     finalize_veg_tiles.after(drive_veg_tiles),
-                    relod_veg_tiles.after(finalize_veg_tiles),
                     update_veg_transforms.after(finalize_veg_tiles),
                     update_tree_material,
                 )
@@ -181,14 +167,10 @@ impl Plugin for VegetationRenderPlugin {
 }
 
 /// Build the procedural species library once at startup: a broadleaf tree and a
-/// low shrub, each with a mesh-LOD chain and a few tint variants, plus the
-/// placement params handed to the scatter build.
-fn setup_species_library(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<TreeMaterial>>,
-) {
-    let mut species: Vec<SpeciesAssets> = Vec::new();
+/// low shrub, each with a mesh-LOD chain of raw `TreeMeshData`, plus one shared
+/// `TreeMaterial` and the placement params handed to the async build.
+fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<TreeMaterial>>) {
+    let mut lod_data: Vec<Vec<Arc<TreeMeshData>>> = Vec::new();
     let mut placement: Vec<VegSpeciesPlacement> = Vec::new();
 
     // --- Tree (broadleaf) ---
@@ -202,9 +184,7 @@ fn setup_species_library(
         seed: 0xB1_05_50,
         lod: 0,
     };
-    species.push(SpeciesAssets {
-        lods: build_lod_meshes(&mut meshes, &tree),
-    });
+    lod_data.push(build_lod_chain(&tree));
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Tree,
         density_per_m2: TREE_DENSITY_PER_M2,
@@ -226,9 +206,7 @@ fn setup_species_library(
         seed: 0x5_417,
         lod: 0,
     };
-    species.push(SpeciesAssets {
-        lods: build_lod_meshes(&mut meshes, &shrub),
-    });
+    lod_data.push(build_lod_chain(&shrub));
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Shrub,
         density_per_m2: SHRUB_DENSITY_PER_M2,
@@ -239,21 +217,37 @@ fn setup_species_library(
         min_grass_w: 0.30,
     });
 
-    // One shared material for every species; per-instance variation is hashed
-    // in-shader (no per-instance data, so plants still auto-batch by mesh).
     let material = materials.add(TreeMaterial::default());
 
     commands.insert_resource(SpeciesLibrary {
         placement: Arc::from(placement),
-        species,
+        lod_data,
         material,
     });
 }
 
-/// Build the LOD0/1/2 mesh chain for a species template.
-fn build_lod_meshes(meshes: &mut Assets<Mesh>, base: &TreeMeshParams) -> Vec<Handle<Mesh>> {
-    (0..3)
-        .map(|lod| meshes.add(build_tree_mesh(&TreeMeshParams { lod, ..*base })))
+/// Build the LOD0..LOD2 raw-mesh chain for a species template.
+fn build_lod_chain(base: &TreeMeshParams) -> Vec<Arc<TreeMeshData>> {
+    (0..TREE_LOD_COUNT as u32)
+        .map(|lod| Arc::new(build_tree_mesh_data(&TreeMeshParams { lod, ..*base })))
+        .collect()
+}
+
+/// Per-species mesh data for a given tile LOD, with shrubs skipped outside the
+/// nearest band (too small to read far; bounds their geometry).
+fn species_lod_for(library: &SpeciesLibrary, lod: usize) -> Vec<Option<Arc<TreeMeshData>>> {
+    library
+        .placement
+        .iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            if p.layer == VegLayer::Shrub && lod > 0 {
+                None
+            } else {
+                let chain = &library.lod_data[idx];
+                chain.get(lod.min(chain.len().saturating_sub(1))).cloned()
+            }
+        })
         .collect()
 }
 
@@ -346,9 +340,7 @@ fn drive_veg_tiles(
     let lattice = veg.lattice;
     let arc_dist = |center_dir: DVec3| -> f64 { center_dir.angle_between(cam_dir) * radius_m };
 
-    // Despawn tiles past the hysteresis radius. (LOD changes are handled in
-    // place by `relod_veg_tiles` — swapping the instance meshes, no despawn — so
-    // approaching trees gain detail without a vanish/pop.)
+    // Despawn tiles past the hysteresis radius.
     let stale: Vec<TileKey> = veg
         .tiles
         .keys()
@@ -376,10 +368,12 @@ fn drive_veg_tiles(
         return;
     }
 
-    // Candidate window around the camera's tile (nearest-first).
+    // Candidate window around the camera's tile (nearest-first). A tile is a
+    // candidate when it's missing OR its baked LOD no longer matches its distance
+    // (re-LOD) — the rebuild keeps the old mesh until the new is ready.
     let center_key = lattice.key_of(cam_dir);
     let window = (TREE_RADIUS_M / (TREE_TILE_SIZE_M * 0.5)).ceil() as i64;
-    let mut candidates: Vec<(f64, TileKey)> = Vec::new();
+    let mut candidates: Vec<(f64, TileKey, usize)> = Vec::new();
     for dy in -window..=window {
         for dx in -window..=window {
             let key = TileKey {
@@ -387,15 +381,20 @@ fn drive_veg_tiles(
                 x: center_key.x + dx,
                 y: center_key.y + dy,
             };
-            if veg.tiles.contains_key(&key) || veg.in_flight.contains_key(&key) {
+            if veg.in_flight.contains_key(&key) {
                 continue;
             }
             let Some((center, _)) = lattice.frame(key) else {
                 continue;
             };
             let d = arc_dist(center);
-            if d <= TREE_RADIUS_M {
-                candidates.push((d, key));
+            if d > TREE_RADIUS_M {
+                continue;
+            }
+            let desired = lod_for_dist(d);
+            match veg.tiles.get(&key) {
+                Some(tile) if tile.lod == desired => continue, // up to date
+                _ => candidates.push((d, key, desired)),
             }
         }
     }
@@ -412,17 +411,19 @@ fn drive_veg_tiles(
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
-    for (dist, key) in candidates {
+    for (_, key, desired) in candidates {
         if dispatched >= slots {
             break;
         }
+        // Far rings tolerate coarser terrain (their trees are scaled small).
+        let texel_limit = ((TREE_TILE_SIZE_M * 0.5) as f32).max(TREE_MAX_TERRAIN_TEXEL_M);
         if let Some(guard) = &mirror_guard {
             let Some((center, _)) = lattice.frame(key) else {
                 continue;
             };
             match guard.best_resident_texel_m(center.as_vec3()) {
-                Some(texel) if texel <= TREE_MAX_TERRAIN_TEXEL_M => {}
-                _ => continue, // terrain not detailed here yet — retry next frame
+                Some(texel) if texel <= texel_limit => {}
+                _ => continue,
             }
         }
         let input = VegScatterInput {
@@ -435,21 +436,32 @@ fn drive_veg_tiles(
             sea_level_m,
             flatten_exclusion,
         };
+        let species_lod = species_lod_for(&library, desired);
         let revision = height_source.revision();
-        let lod = lod_for_dist(dist);
-        let task = pool.spawn(async move { build_scatter_tile(&input) });
-        veg.in_flight.insert(key, (task, revision, lod));
+        let task = pool.spawn(async move {
+            let tile = build_scatter_tile(&input)?;
+            let mesh = combine_tree_tile_mesh(&tile.instances, &species_lod)?;
+            Some(VegTileBuild {
+                mesh,
+                center_surface_body_m: tile.center_surface_body_m,
+                built_revision: tile.built_revision,
+                center_height_m: tile.center_height_m,
+            })
+        });
+        veg.in_flight.insert(key, (task, revision, desired));
         dispatched += 1;
     }
 }
 
-/// Poll in-flight scatter builds; spawn finished tiles as root-grid big_space
-/// children with one child instance entity per placed plant.
+/// Poll in-flight builds; spawn each finished tile's batched mesh as a root-grid
+/// big_space child. A rebuild/re-LOD spawns the new entity, then despawns the old
+/// one (it stays visible until the new mesh is ready — no vanish).
 fn finalize_veg_tiles(
     mut veg: ResMut<VegTiles>,
-    library: Option<Res<SpeciesLibrary>>,
     solar: Res<SolarSystemState>,
     root: Option<Res<RealSpaceRoot>>,
+    library: Option<Res<SpeciesLibrary>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
 ) {
     if veg.in_flight.is_empty() {
@@ -464,7 +476,7 @@ fn finalize_veg_tiles(
         return;
     };
 
-    let mut finished: Vec<(TileKey, u64, usize, Option<VegScatterTile>)> = Vec::new();
+    let mut finished: Vec<(TileKey, u64, usize, Option<VegTileBuild>)> = Vec::new();
     veg.in_flight
         .retain(|key, (task, revision, lod)| match block_on(poll_once(task)) {
             Some(result) => {
@@ -476,7 +488,12 @@ fn finalize_veg_tiles(
 
     let orientation = body_state.orientation.normalize();
     for (key, revision, lod, result) in finished {
-        let Some(tile) = result else {
+        let old_entity = veg.tiles.get(&key).and_then(|t| t.entity);
+
+        let Some(build) = result else {
+            if let Some(old) = old_entity {
+                commands.entity(old).despawn();
+            }
             veg.tiles.insert(
                 key,
                 BuiltTile {
@@ -489,15 +506,13 @@ fn finalize_veg_tiles(
             continue;
         };
 
-        let center_world = body_state.position + orientation * tile.center_surface_body_m;
+        let center = build.center_surface_body_m;
+        let center_world = body_state.position + orientation * center;
         let (cell, local) = real_space_grid().translation_to_grid(center_world);
-
-        let center = tile.center_surface_body_m;
-        let center_height_m = tile.center_height_m;
-        let built_revision = tile.built_revision;
-        let instances = tile.instances;
         let entity = commands
             .spawn((
+                Mesh3d(meshes.add(build.mesh)),
+                MeshMaterial3d(library.material.clone()),
                 Transform {
                     translation: local,
                     rotation: orientation.as_quat(),
@@ -505,6 +520,7 @@ fn finalize_veg_tiles(
                 },
                 cell,
                 Visibility::Inherited,
+                RenderLayers::layer(SHIP_LAYER),
                 ChildOf(root.entity),
                 VegTileVisual {
                     body_id,
@@ -512,48 +528,53 @@ fn finalize_veg_tiles(
                 },
                 Name::new("Vegetation Tile"),
             ))
-            .with_children(|parent| {
-                for inst in &instances {
-                    let sp_idx = inst.species as usize;
-                    let Some(assets) = library.species.get(sp_idx) else {
-                        continue;
-                    };
-                    // Shrubs only realize in the nearest band — too small to read
-                    // far, and this bounds their entity count.
-                    if library.placement.get(sp_idx).map(|p| p.layer) == Some(VegLayer::Shrub)
-                        && lod > 0
-                    {
-                        continue;
-                    }
-                    let mesh = assets.lods[lod.min(assets.lods.len().saturating_sub(1))].clone();
-                    parent.spawn((
-                        Mesh3d(mesh),
-                        MeshMaterial3d(library.material.clone()),
-                        instance_transform(inst),
-                        Visibility::Inherited,
-                        RenderLayers::layer(SHIP_LAYER),
-                        VegInstanceSpecies(inst.species),
-                    ));
-                }
-            })
             .id();
-
+        // Replace the old (previous-LOD) entity only now that the new one exists.
+        if let Some(old) = old_entity {
+            commands.entity(old).despawn();
+        }
         veg.tiles.insert(
             key,
             BuiltTile {
                 entity: Some(entity),
-                built_revision,
-                center_height_m,
+                built_revision: build.built_revision,
+                center_height_m: build.center_height_m,
                 lod,
             },
         );
     }
 }
 
+/// Re-anchor every scatter tile in f64 each frame (the grass / runway pattern).
+fn update_veg_transforms(
+    solar: Res<SolarSystemState>,
+    root_grid: Query<&Grid, With<BigSpace>>,
+    mut tiles: Query<(&VegTileVisual, &mut CellCoord, &mut Transform)>,
+) {
+    let Some(states) = solar.states.as_deref() else {
+        return;
+    };
+    let Ok(grid) = root_grid.single() else {
+        return;
+    };
+    for (tile, mut cell, mut transform) in &mut tiles {
+        let Some(state) = states.get(tile.body_id) else {
+            continue;
+        };
+        let orientation = state.orientation.normalize();
+        let center_world = state.position + orientation * tile.center_surface_body;
+        let (next_cell, local) = grid.translation_to_grid(center_world);
+        *cell = next_cell;
+        transform.translation = local;
+        transform.rotation = orientation.as_quat();
+    }
+}
+
 /// Per-frame tree/shrub shading on the single shared [`TreeMaterial`]: sun
-/// direction + flux, a slowly veering wind (drives the canopy sway), and the
-/// shared `thalos::lighting` sky inputs (so plants light like the grass and
-/// ground). Mirrors `rendering::grass::update_grass_material`.
+/// direction + flux, a slowly veering wind (drives the canopy sway), the shared
+/// `thalos::lighting` sky inputs, and the scale-fade band + craft anchor (so the
+/// fade is zoom-independent). Mirrors `rendering::grass::update_grass_material`.
+#[allow(clippy::too_many_arguments)]
 fn update_tree_material(
     library: Option<Res<SpeciesLibrary>>,
     veg: Res<VegTiles>,
@@ -594,6 +615,7 @@ fn update_tree_material(
     let veer = t * 0.025;
     let wind_dir = (east * veer.cos() + north * veer.sin()).normalize_or_zero();
     material.params.wind = Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, TREE_WIND_SWAY_M);
+    // time_fade: x = time, y = fade start, z = fade end (the scale-fade band).
     material.params.time_fade = Vec4::new(t, TREE_FADE_START_M, TREE_FADE_END_M, 0.0);
     material.params.sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
 
@@ -608,7 +630,7 @@ fn update_tree_material(
     material.params.sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
     // Fade reference = the player craft's render-space position, so camera
-    // zoom/orbit doesn't fade the trees (EVA has no PlayerShip → camera fallback).
+    // zoom/orbit doesn't change what's drawn (EVA → camera fallback).
     material.params.anchor = match ship.iter().next() {
         Some(gt) => {
             let p = gt.translation();
@@ -618,124 +640,13 @@ fn update_tree_material(
     };
 }
 
-/// Per-instance local transform in the tile's (body-fixed) frame: orient mesh
-/// +Y to the terrain normal, yaw, a small lean, and uniform scale.
-fn instance_transform(inst: &VegInstance) -> Transform {
-    let up = inst.up_body.normalize_or(Vec3::Y);
-    let rotation = Quat::from_rotation_arc(Vec3::Y, up)
-        * Quat::from_rotation_y(inst.yaw)
-        * Quat::from_rotation_x(inst.tilt);
-    Transform {
-        translation: inst.root_offset_body_m,
-        rotation,
-        scale: Vec3::splat(inst.scale),
-    }
-}
-
-/// Re-anchor every scatter tile in f64 each frame (the grass / runway pattern):
-/// the multi-Mm body-fixed offset is rotated in f64 here; the f32 transform only
-/// acts on the small per-instance child offsets.
-fn update_veg_transforms(
-    solar: Res<SolarSystemState>,
-    root_grid: Query<&Grid, With<BigSpace>>,
-    mut tiles: Query<(&VegTileVisual, &mut CellCoord, &mut Transform)>,
-) {
-    let Some(states) = solar.states.as_deref() else {
-        return;
-    };
-    let Ok(grid) = root_grid.single() else {
-        return;
-    };
-    for (tile, mut cell, mut transform) in &mut tiles {
-        let Some(state) = states.get(tile.body_id) else {
-            continue;
-        };
-        let orientation = state.orientation.normalize();
-        let center_world = state.position + orientation * tile.center_surface_body;
-        let (next_cell, local) = grid.translation_to_grid(center_world);
-        *cell = next_cell;
-        transform.translation = local;
-        transform.rotation = orientation.as_quat();
-    }
-}
-
-/// Swap each tile's instance meshes to the LOD for its current distance, *in
-/// place* (no despawn) — so approaching trees gain detail without a re-LOD
-/// vanish/pop. Throttled to a few tiles per frame. Distance is from the
-/// canonical craft (same reference the scale-fade uses), so it's zoom-independent.
-fn relod_veg_tiles(
-    mut veg: ResMut<VegTiles>,
-    library: Option<Res<SpeciesLibrary>>,
-    solar: Res<SolarSystemState>,
-    sim: Res<SimulationState>,
-    children_q: Query<&Children>,
-    mut child_q: Query<(&VegInstanceSpecies, &mut Mesh3d)>,
-) {
-    let Some(library) = library else {
-        return;
-    };
-    let Some(states) = solar.states.as_deref() else {
-        return;
-    };
-    let Some(body_id) = veg.body else {
-        return;
-    };
-    let (Some(state), Some(body)) = (states.get(body_id), sim.system.bodies.get(body_id)) else {
-        return;
-    };
-    let radius_m = body.radius_m;
-    let cam_pos = sim.simulation.ship_state().position;
-    let cam_body = state.orientation.inverse() * (cam_pos - state.position);
-    let cam_r = cam_body.length();
-    if cam_r <= 0.0 {
-        return;
-    }
-    let cam_dir = cam_body / cam_r;
-    let lattice = veg.lattice;
-
-    // Collect tiles needing a LOD change (immutable pass), throttled.
-    let mut changes: Vec<(TileKey, Entity, usize)> = Vec::new();
-    for (key, tile) in veg.tiles.iter() {
-        let Some(entity) = tile.entity else {
-            continue;
-        };
-        let Some((center, _)) = lattice.frame(*key) else {
-            continue;
-        };
-        let desired = lod_for_dist(center.angle_between(cam_dir) * radius_m);
-        if desired != tile.lod {
-            changes.push((*key, entity, desired));
-            if changes.len() >= TREE_MAX_RELOD_PER_TICK {
-                break;
-            }
-        }
-    }
-
-    for (key, entity, desired) in changes {
-        if let Ok(children) = children_q.get(entity) {
-            for &child in children {
-                if let Ok((species, mut mesh)) = child_q.get_mut(child)
-                    && let Some(assets) = library.species.get(species.0 as usize)
-                {
-                    let idx = desired.min(assets.lods.len().saturating_sub(1));
-                    mesh.0 = assets.lods[idx].clone();
-                }
-            }
-        }
-        if let Some(tile) = veg.tiles.get_mut(&key) {
-            tile.lod = desired;
-        }
-    }
-}
-
 /// Periodically rebuild tiles whose underlying height shifted (finer atlas tile
-/// streamed in, or a flatten pad installed). Rebuild = despawn + forget;
-/// `drive_veg_tiles` re-dispatches on a later pass.
+/// streamed in, or a flatten pad installed): forget the stale tile so
+/// `drive_veg_tiles` re-dispatches it (the old mesh stays until the new is ready).
 fn check_veg_rebuilds(
     mut veg: ResMut<VegTiles>,
     height_sources: Res<HeightSourceRegistry>,
     time: Res<Time>,
-    mut commands: Commands,
 ) {
     veg.rebuild_timer += time.delta_secs();
     if veg.rebuild_timer < TREE_REBUILD_CHECK_S {
@@ -753,7 +664,6 @@ fn check_veg_rebuilds(
     let lattice = veg.lattice;
 
     let mut rebuilt = 0usize;
-    let mut to_remove: Vec<TileKey> = Vec::new();
     for (key, tile) in veg.tiles.iter_mut() {
         if tile.built_revision == revision {
             continue;
@@ -768,20 +678,15 @@ fn check_veg_rebuilds(
             && (h - tile.center_height_m).abs() > TREE_REBUILD_DELTA_M
             && rebuilt < TREE_MAX_REBUILDS_PER_TICK
         {
-            to_remove.push(*key);
+            // Force a re-dispatch by invalidating the recorded LOD; drive sees a
+            // mismatch and rebuilds (old mesh kept until the new is ready).
+            tile.lod = usize::MAX;
             rebuilt += 1;
         } else {
             tile.built_revision = revision;
             if tile.entity.is_some() {
                 tile.center_height_m = h;
             }
-        }
-    }
-    for key in to_remove {
-        if let Some(tile) = veg.tiles.remove(&key)
-            && let Some(entity) = tile.entity
-        {
-            commands.entity(entity).despawn();
         }
     }
 }

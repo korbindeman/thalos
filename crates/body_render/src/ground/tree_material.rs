@@ -11,7 +11,7 @@
 //! `(Mesh, Material)` and auto-batch.
 
 use bevy::asset::embedded_asset;
-use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -47,11 +47,23 @@ impl Material for TreeMaterial {
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
+        layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         // Two-sided: thin canopy silhouettes shouldn't drop their back faces.
         descriptor.primitive.cull_mode = None;
+        // Explicit vertex layout: the combined per-tile mesh carries the tree
+        // base in UV_0.xy + UV_1.x (for the per-tree scale-fade + wind/tint
+        // seed), so the custom vertex shader needs UV_1 (location 3) guaranteed
+        // in the buffer.
+        let vertex_layout = layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(2),
+            Mesh::ATTRIBUTE_UV_1.at_shader_location(3),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(5),
+        ])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())
     }
 }

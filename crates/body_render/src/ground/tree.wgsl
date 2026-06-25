@@ -44,6 +44,11 @@ struct VertexInput {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    // Tree base (this tree's root, tile-centre-relative), baked by the per-tile
+    // combiner: uv0 = base.xy, uv1.x = base.z. Drives the per-tree scale-fade and
+    // a stable wind/tint seed.
+    @location(2) uv0: vec2<f32>,
+    @location(3) uv1: vec2<f32>,
     // rgb = trunk/canopy tint (linear), a = wind weight (0 trunk → 1 canopy top).
     @location(5) color: vec4<f32>,
 }
@@ -64,31 +69,30 @@ fn hash1(p: vec3<f32>) -> f32 {
 fn vertex(in: VertexInput) -> VertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
 
-    // Per-instance scale-fade: the tree GROWS from zero at the far edge and is
-    // full inside the near edge, scaled about its trunk base (local origin). This
-    // is seamless — no dither, no pop-in — and a fully-collapsed tree is a
-    // degenerate (invisible) mesh, so no discard is needed. Distance is measured
-    // from the focus anchor (craft), so camera zoom/orbit doesn't change it.
-    let instance_pos = world_from_local[3].xyz;
+    // The mesh is ONE batched mesh for the whole tile; each tree's base (its
+    // root, tile-centre-relative) is baked into the UVs. Vertices are relative to
+    // the tile centre, so the per-tree seed (hashed from the base) is stable and
+    // rebase-invariant.
+    let base = vec3<f32>(in.uv0.x, in.uv0.y, in.uv1.x);
+    let seed = hash1(base);
+
+    // Per-tree scale-fade: each tree GROWS from zero at the far edge, full inside
+    // the near edge, scaled about ITS OWN base — seamless (no dither, no pop-in);
+    // a fully-collapsed tree is a degenerate (invisible) mesh, so no discard.
+    // Distance is from the focus anchor (craft), so camera zoom/orbit doesn't
+    // change it.
+    let base_world = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(base, 1.0)).xyz;
     let ref_pos = select(view.world_position, tree.anchor.xyz, tree.anchor.w > 0.5);
-    let inst_dist = distance(ref_pos, instance_pos);
+    let inst_dist = distance(ref_pos, base_world);
     let fs = tree.time_fade.y;
     let fe = tree.time_fade.z;
     var grow = 1.0;
     if fe > fs {
         grow = clamp((fe - inst_dist) / (fe - fs), 0.0, 1.0);
     }
-
+    let local = base + (in.position - base) * grow;
     var world_pos =
-        mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(in.position * grow, 1.0))
-            .xyz;
-
-    // Per-instance seed from the model matrix's rotation+scale columns (NOT the
-    // translation — that shifts on every big_space origin rebase, which would
-    // flicker phase + tint as the camera crosses cells). Rotation/scale are
-    // rebase-invariant, so the seed is fixed per instance.
-    let basis = world_from_local[0].xyz + world_from_local[2].xyz * 1.7;
-    let seed = hash1(basis);
+        mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local, 1.0)).xyz;
 
     // Wind sway: two incommensurate sines, scaled by the per-vertex weight so
     // the trunk is rigid and the canopy top moves most (and by `grow` so a

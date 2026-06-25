@@ -17,13 +17,16 @@
 
 use std::sync::Arc;
 
-use bevy::math::{DVec3, Vec3};
+use bevy::asset::RenderAssetUsages;
+use bevy::math::{DVec3, Quat, Vec3};
+use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use thalos_terrain::TerrainFlatten;
 
 use crate::ground::height_source::HeightSource;
 use crate::ground::pipeline::material_masks_from_heights;
 use crate::ground::rendered_height::TerrainPatchBasis;
 use crate::ground::tile_lattice::{TileKey, TileLattice, cube_dir};
+use crate::ground::tree_mesh::TreeMeshData;
 
 /// LOD sample hint for placement height queries — small enough to engage the
 /// full near-field cascade, matching what the player stands on.
@@ -252,6 +255,75 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
         built_revision,
         center_height_m,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Per-tile mesh combine (one batched mesh per tile, grass-style)
+// ---------------------------------------------------------------------------
+
+/// Bake all of a tile's instances into ONE mesh — the same one-mesh-per-tile
+/// batching the grass uses, so there's no per-tree ECS entity and forests scale
+/// to dense/far. Each instance's species mesh `species_lod[inst.species]`
+/// (`None` skips it — e.g. shrubs outside the near band) is transformed by the
+/// instance (orient to terrain normal, yaw, lean, scale) and appended.
+///
+/// Vertices are relative to the tile's surface centre (like the grass tile
+/// mesh, for f64 anchoring). The tree's **base** (its root offset from the tile
+/// centre) is baked into `UV_0.xy` + `UV_1.x` so the shader can scale-fade each
+/// tree about its own root and hash a stable per-tree wind/tint seed from it.
+/// `COLOR` carries the species tint (`rgb`) + per-vertex wind weight (`a`).
+///
+/// Returns `None` if nothing was emitted.
+pub fn combine_tree_tile_mesh(
+    instances: &[VegInstance],
+    species_lod: &[Option<Arc<TreeMeshData>>],
+) -> Option<Mesh> {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut uv0: Vec<[f32; 2]> = Vec::new();
+    let mut uv1: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for inst in instances {
+        let Some(Some(data)) = species_lod.get(inst.species as usize) else {
+            continue;
+        };
+        let rot = Quat::from_rotation_arc(Vec3::Y, inst.up_body.normalize_or(Vec3::Y))
+            * Quat::from_rotation_y(inst.yaw)
+            * Quat::from_rotation_x(inst.tilt);
+        let base = inst.root_offset_body_m; // tree base, tile-centre-relative
+        let base_uv0 = [base.x, base.y];
+        let base_uv1 = [base.z, 0.0];
+        let start = positions.len() as u32;
+        for i in 0..data.positions.len() {
+            let p = Vec3::from_array(data.positions[i]);
+            let n = Vec3::from_array(data.normals[i]);
+            let wp = base + rot * (p * inst.scale);
+            positions.push(wp.to_array());
+            normals.push((rot * n).normalize_or_zero().to_array());
+            colors.push(data.colors[i]);
+            uv0.push(base_uv0);
+            uv1.push(base_uv1);
+        }
+        indices.extend(data.indices.iter().map(|idx| start + idx));
+    }
+
+    if positions.is_empty() {
+        return None;
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
+    mesh.insert_indices(Indices::U32(indices));
+    Some(mesh)
 }
 
 // ---------------------------------------------------------------------------
