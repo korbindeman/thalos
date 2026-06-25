@@ -9,10 +9,23 @@ is the **foundation** this plan generalizes — its tile lattice, deterministic
 hashed placement, shared placement gate, f64 per-tile anchoring, and
 async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 
-> **Status: planned.** Phase 1.0 (grass blade near-ring) is shipped. Everything
-> below the *Current state* section is design, sequenced into phases at the end.
-> No silent rewrites — when a phase lands, fold its "shipped" notes back into
-> this doc and update the roadmap.
+> **Status: Phases 0–2 landed (2026-06-25), runtime-unverified.** Shipped:
+> the shared `tile_lattice` + `placement_gate` + `scatter` foundation (Phase 0);
+> grass blade-LOD geometry + the **clipmap rings that take grass to the horizon**
+> (Phase 1a–c); and **procedural trees + shrubs** with a mesh-LOD chain,
+> clumping, per-instance tint/scale variation, terrain-residency-gated builds and
+> f64 anchoring (Phase 2 + Phase 3 shrub species). Compile- and unit-test-green,
+> **not yet visually verified in a `just game` run** (the user owns that). Built
+> alongside a parallel grass **sky-lighting** track in the same tree.
+>
+> **Remaining:** the geometry→terrain-albedo handoff polish (Phase 1d — grass
+> detail normal in `body_terrain.wgsl`, root blend); tree/shrub **wind** (current
+> trees use `StandardMaterial`, no sway — the biggest open fidelity gap);
+> **octahedral impostors** for the far tree band (Phase 2d); Option-B instanced
+> material + GPU culling (Phase 4); GPU-generated grass (Phase 5).
+>
+> No silent rewrites — when a phase lands, fold its notes here and update the
+> roadmap.
 
 ---
 
@@ -451,7 +464,7 @@ is the natural home for downwash/player bending done in-shader.
 Each slice is screenshot-verifiable on its own. The user runs the game and
 sends screenshots (agents do not launch it).
 
-### Phase 0 — Foundations (no visible change)
+### Phase 0 — Foundations (no visible change) ✅ landed
 - **0a** Extract cube math → `ground::tile_lattice::TileLattice`; grass switches
   over, behavior identical.
 - **0b** Factor the grass slope/mask/normal/altitude/sea-level block into a
@@ -461,7 +474,7 @@ sends screenshots (agents do not launch it).
   skeleton `game::rendering::vegetation` (drive/finalize/anchor/rebuild),
   initially hosting nothing.
 
-### Phase 1 — Grass to the horizon (extends shipped grass)
+### Phase 1 — Grass to the horizon (extends shipped grass) ✅ 1a–1c landed · 1d open
 - **1a** Blade-mesh LODs: add 3-vert blade and crossed-quad clump to the grass
   builder, selected by a `lod` field; drive `density` + `clump_scale` from it
   (constant-coverage rule).
@@ -472,7 +485,7 @@ sends screenshots (agents do not launch it).
   fading in 150 m–1 km; far-clump color match; root blend; two-scale ground
   sampling. *Goal: grass visibly stretches to the horizon with no seam.*
 
-### Phase 2 — Trees
+### Phase 2 — Trees ✅ 2a–2c landed · 2d (impostors) open
 - **2a** `SpeciesLibrary` with one tree species (LOD0 only); `build_scatter_tile`
   → Option A entity-per-instance; reuse gate + anchoring + rebuild. *Goal:
   anchored trees, rock-steady under warp.*
@@ -482,7 +495,7 @@ sends screenshots (agents do not launch it).
 - **2d** Hemisphere octahedral impostor far band + impostor bake; verify
   fold-to-albedo from orbit.
 
-### Phase 3 — Shrubs / undergrowth
+### Phase 3 — Shrubs / undergrowth ✅ 3a landed (basic species) · 3b open
 - **3a** `VegLayer::Shrub` on a finer clipmap; clusters at forest edges (reads
   tree grove mask); mesh LODs → fade out (no impostor).
 - **3b** Root blend + integration with the grass ground cover.
