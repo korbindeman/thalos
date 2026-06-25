@@ -45,7 +45,7 @@ use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::types::CameraExposure;
+use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
@@ -552,6 +552,7 @@ fn update_tree_material(
     sim: Res<SimulationState>,
     time: Res<Time>,
     exposure: Res<CameraExposure>,
+    ship: Query<&GlobalTransform, With<PlayerShip>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
 ) {
     let Some(library) = library else {
@@ -596,6 +597,16 @@ fn update_tree_material(
         .map(|s| (Vec3::from_array(s.vertical_optical_depth), s.strength))
         .unwrap_or((Vec3::ZERO, 0.0));
     material.params.sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
+
+    // Fade reference = the player craft's render-space position, so camera
+    // zoom/orbit doesn't fade the trees (EVA has no PlayerShip → camera fallback).
+    material.params.anchor = match ship.iter().next() {
+        Some(gt) => {
+            let p = gt.translation();
+            Vec4::new(p.x, p.y, p.z, 1.0)
+        }
+        None => Vec4::ZERO,
+    };
 }
 
 /// Per-instance local transform in the tile's (body-fixed) frame: orient mesh

@@ -49,7 +49,7 @@ use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::types::CameraExposure;
+use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Clipmap rings ─────────────────────────────────────────────────────────────
@@ -574,6 +574,7 @@ fn update_grass_material(
     sim: Res<SimulationState>,
     time: Res<Time>,
     exposure: Res<CameraExposure>,
+    ship: Query<&GlobalTransform, With<PlayerShip>>,
     mut materials: ResMut<Assets<GrassMaterial>>,
 ) {
     let (Some(body_id), Some(states)) = (grass.body, solar.states.as_deref()) else {
@@ -622,6 +623,17 @@ fn update_grass_material(
         .unwrap_or((Vec3::ZERO, 0.0));
     let sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
+    // Fade reference = the player craft's render-space position (so camera
+    // zoom/orbit doesn't fade the field). EVA has no PlayerShip → w = 0, the
+    // shader falls back to the camera (fine, the camera rides the player there).
+    let anchor = match ship.iter().next() {
+        Some(gt) => {
+            let p = gt.translation();
+            Vec4::new(p.x, p.y, p.z, 1.0)
+        }
+        None => Vec4::ZERO,
+    };
+
     for (idx, handle) in grass.materials.iter().enumerate() {
         let Some(material) = materials.get_mut(handle) else {
             continue;
@@ -632,6 +644,7 @@ fn update_grass_material(
         material.params.time_fade = Vec4::new(t, near, far, band);
         material.params.sky_up = sky_up;
         material.params.sky_tau = sky_tau;
+        material.params.anchor = anchor;
     }
 }
 

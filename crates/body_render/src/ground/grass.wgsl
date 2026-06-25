@@ -30,6 +30,10 @@ struct GrassParams {
     sky_up: vec4<f32>,
     // xyz = Rayleigh vertical optical depth τ_v, w = atmosphere strength.
     sky_tau: vec4<f32>,
+    // xyz = vegetation focus (player craft) in render space; w = 1 valid / 0 use
+    // camera. The clipmap fade measures distance from THIS, not the camera, so
+    // zooming / orbiting the camera doesn't change what's drawn.
+    anchor: vec4<f32>,
 }
 
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3.
@@ -88,7 +92,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // its far edge, so adjacent rings dither-blend through their shared boundary
     // (no hard LOD seam). The innermost ring passes a large-negative near edge
     // so it never fades in. Dithered discard keeps it in the opaque pass.
-    let dist = distance(view.world_position, in.world_position);
+    //
+    // Distance is measured from the vegetation focus (the player craft), NOT the
+    // camera, so zooming / orbiting the camera doesn't fade the field away.
+    let ref_pos = select(view.world_position, grass.anchor.xyz, grass.anchor.w > 0.5);
+    let dist = distance(ref_pos, in.world_position);
     let near_edge = grass.time_fade.y;
     let far_edge = grass.time_fade.z;
     let band = max(grass.time_fade.w, 1.0);

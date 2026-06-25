@@ -386,6 +386,11 @@ pub struct GrassParams {
     /// per-channel zenith optical depth, scale-independent), w = artistic
     /// atmosphere strength. Drives the blue sky tint + sunset reddening.
     pub sky_tau: Vec4,
+    /// xyz = the vegetation focus (the player craft) in render space — used as
+    /// the LOD/fade reference *instead of the camera*, so zooming / orbiting the
+    /// camera doesn't change what's drawn. w = 1.0 when valid; 0.0 falls back to
+    /// the camera position in-shader.
+    pub anchor: Vec4,
 }
 
 /// Batched grass-blade material: vertex wind sway + wrap-diffuse shading that

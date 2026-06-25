@@ -29,6 +29,10 @@ struct TreeParams {
     sky_up: vec4<f32>,
     // xyz = Rayleigh vertical optical depth τ_v, w = atmosphere strength.
     sky_tau: vec4<f32>,
+    // xyz = vegetation focus (player craft) in render space; w = 1 valid / 0 use
+    // camera. The radial fade measures distance from THIS, not the camera, so
+    // zooming / orbiting the camera doesn't change what's drawn.
+    anchor: vec4<f32>,
 }
 
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3.
@@ -100,8 +104,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let fs = tree.time_fade.y;
     let fe = tree.time_fade.z;
     if fe > fs {
-        let cam_dist = distance(view.world_position, in.world_position);
-        let fade = 1.0 - smoothstep(fs, fe, cam_dist);
+        let ref_pos = select(view.world_position, tree.anchor.xyz, tree.anchor.w > 0.5);
+        let focus_dist = distance(ref_pos, in.world_position);
+        let fade = 1.0 - smoothstep(fs, fe, focus_dist);
         if fade < screen_hash(in.clip_position.xy + vec2<f32>(in.seed * 64.0)) {
             discard;
         }
