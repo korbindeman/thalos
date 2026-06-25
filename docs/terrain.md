@@ -818,6 +818,11 @@ home for the cheap dynamic re-pass.
 
 ## Vegetation decoration layer (grass blades)
 
+> This section describes the **shipped grass near-ring**. The full
+> planet-scale vegetation plan that generalizes it — grass to the horizon,
+> shrubs, trees, LOD cascades, clipmap rings, impostors, instancing, and the
+> phased roadmap — lives in `docs/vegetation.md`.
+
 Near-camera grass blades on vegetated bodies (Thalos), shipped 2026-06 as a
 **self-contained decoration layer on the consumer side of the tile contract** —
 it reads only the runtime seams (`HeightSource`, the material-mask gate,

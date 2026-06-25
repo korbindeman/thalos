@@ -31,8 +31,10 @@ mod pipeline;
 #[cfg(feature = "playground")]
 mod playground_material;
 mod rendered_height;
+mod scatter;
 mod sky_material;
 mod synthetic;
+mod tile_lattice;
 mod tile_synthesis_pool;
 mod vegetation;
 mod water_material;
@@ -54,7 +56,12 @@ pub use rendered_height::{
     TerrainPatchBasis, TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch,
     build_rendered_terrain_patch_from_source,
 };
+pub use scatter::{
+    PlacementSample, VegInstance, VegLayer, VegScatterInput, VegScatterTile, VegSpeciesPlacement,
+    build_scatter_tile, clump_field, placement_gate,
+};
 pub use sky_material::BodySkyMaterial;
+pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
 pub use tile_synthesis_pool::tile_synthesis_pool;
 pub use vegetation::{

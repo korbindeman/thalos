@@ -1,18 +1,19 @@
 //! Grass-blade decoration layer for vegetated bodies.
 //!
 //! A camera-local grid of body-fixed **grass tiles** (~25 m tangent squares on
-//! a cube-sphere lattice). Each tile is one batched [`Mesh`] of a few thousand
-//! tapered blade strips, built off-thread by sampling the body's
-//! [`HeightSource`] — the same source the terrain collider uses, so blades sit
-//! on the rendered ground by construction. Blade placement reuses the exact
-//! slope/curvature mask logic the terrain shader's grass channel is baked
-//! from ([`material_masks_from_heights`]), plus above-sea-level and
-//! altitude-band gates, so grass appears where the ground *looks* like
-//! grassland.
+//! the shared cube-sphere [`TileLattice`](crate::ground::tile_lattice)). Each
+//! tile is one batched [`Mesh`] of a few thousand tapered blade strips, built
+//! off-thread by sampling the body's [`HeightSource`] — the same source the
+//! terrain collider uses, so blades sit on the rendered ground by construction.
+//! Blade placement runs through the shared
+//! [`placement_gate`](crate::ground::scatter::placement_gate) (the slope /
+//! curvature material-mask gate the terrain shader bakes from), plus
+//! above-sea-level and altitude-band gates, so grass appears where the ground
+//! *looks* like grassland.
 //!
-//! This module is pure geometry + material types; the per-frame tile
-//! lifecycle (which tiles exist, big_space anchoring, wind/lighting updates)
-//! is driven by the game crate (`thalos_game::rendering::grass`).
+//! This module is pure geometry + material types; the per-frame tile lifecycle
+//! (which tiles exist, big_space anchoring, wind/lighting updates) is driven by
+//! the game crate (`thalos_game::rendering::grass`).
 
 use std::sync::Arc;
 
@@ -29,8 +30,9 @@ use bevy::shader::ShaderRef;
 use thalos_terrain::TerrainFlatten;
 
 use crate::ground::height_source::HeightSource;
-use crate::ground::pipeline::material_masks_from_heights;
 use crate::ground::rendered_height::TerrainPatchBasis;
+use crate::ground::scatter::placement_gate;
+use crate::ground::tile_lattice::{self, TileLattice, cube_dir};
 
 /// Nominal metric side of one grass tile at a cube-face centre. Toward face
 /// corners the cube projection shrinks tiles laterally (down to ~1/2 side);
@@ -41,11 +43,6 @@ pub const GRASS_TILE_SIZE_M: f64 = 25.0;
 /// `tile_lod_m` hint for height sampling — small enough to engage the full
 /// near-field procedural cascade, matching what the player stands on.
 const GRASS_SAMPLE_LOD_M: f32 = 0.5;
-
-/// Finite-difference step for the per-blade slope/curvature probe. Matches
-/// the lower clamp of the tile baker's mask step (`step_m.clamp(2.0, 250.0)`)
-/// so the CPU gate reproduces the shader's near-field grass mask.
-const MASK_STEP_M: f64 = 2.0;
 
 /// Hard ceiling on blades per tile, against pathological density configs.
 const MAX_BLADES_PER_TILE: usize = 8192;
@@ -70,91 +67,35 @@ const C_GRASS: Vec3 = Vec3::new(0.078, 0.112, 0.052);
 const C_DRYGRASS: Vec3 = Vec3::new(0.130, 0.132, 0.074);
 
 // ---------------------------------------------------------------------------
-// Cube-sphere tile lattice
+// Lattice wrappers
 // ---------------------------------------------------------------------------
+//
+// The cube-sphere lattice math now lives in `tile_lattice`, shared with the
+// shrub/tree scatter system. These thin wrappers preserve the grass driver's
+// existing `grass_*` call sites and the `GrassTileKey` name.
 
-/// One grass tile on the body's cube-sphere lattice. Faces are
-/// `0..6 = +X, -X, +Y, -Y, +Z, -Z`; `x, y` index the face's tile grid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GrassTileKey {
-    pub face: u8,
-    pub x: i64,
-    pub y: i64,
-}
+/// One grass tile on the body's cube-sphere lattice (see
+/// [`tile_lattice::TileKey`]).
+pub use crate::ground::tile_lattice::TileKey as GrassTileKey;
 
 /// Tiles along one cube-face edge for a body, sized so a tile at the face
-/// centre is ~`tile_size_m` across (`u = tan θ`, metric `≈ R·du` at centre).
+/// centre is ~`tile_size_m` across.
 pub fn grass_tiles_per_side(radius_m: f64, tile_size_m: f64) -> i64 {
-    ((2.0 * radius_m) / tile_size_m.max(1.0)).ceil().max(1.0) as i64
-}
-
-/// Cube face + face uv (each in `[-1, 1]`) of a body-fixed unit direction.
-fn cube_face_uv(dir: DVec3) -> (u8, f64, f64) {
-    let a = dir.abs();
-    if a.x >= a.y && a.x >= a.z {
-        if dir.x >= 0.0 {
-            (0, -dir.z / a.x, dir.y / a.x)
-        } else {
-            (1, dir.z / a.x, dir.y / a.x)
-        }
-    } else if a.y >= a.x && a.y >= a.z {
-        if dir.y >= 0.0 {
-            (2, dir.x / a.y, -dir.z / a.y)
-        } else {
-            (3, dir.x / a.y, dir.z / a.y)
-        }
-    } else if dir.z >= 0.0 {
-        (4, dir.x / a.z, dir.y / a.z)
-    } else {
-        (5, -dir.x / a.z, dir.y / a.z)
-    }
-}
-
-/// Inverse of [`cube_face_uv`]: unit direction of face uv coordinates.
-fn cube_dir(face: u8, u: f64, v: f64) -> DVec3 {
-    let d = match face {
-        0 => DVec3::new(1.0, v, -u),
-        1 => DVec3::new(-1.0, v, u),
-        2 => DVec3::new(u, 1.0, -v),
-        3 => DVec3::new(u, -1.0, v),
-        4 => DVec3::new(u, v, 1.0),
-        _ => DVec3::new(-u, v, -1.0),
-    };
-    d.normalize()
+    tile_lattice::tiles_per_side(radius_m, tile_size_m)
 }
 
 /// Tile containing a body-fixed unit direction.
 pub fn grass_tile_key(dir: DVec3, tiles_per_side: i64) -> GrassTileKey {
-    let (face, u, v) = cube_face_uv(dir.normalize());
-    let n = tiles_per_side as f64;
-    let to_index = |c: f64| (((c + 1.0) * 0.5 * n).floor() as i64).clamp(0, tiles_per_side - 1);
-    GrassTileKey {
-        face,
-        x: to_index(u),
-        y: to_index(v),
-    }
+    TileLattice { tiles_per_side }.key_of(dir)
 }
 
-/// Centre direction + tangent basis of a tile. Returns `None` for keys
-/// outside the face grid (callers enumerate raw neighbour offsets).
-pub fn grass_tile_frame(key: GrassTileKey, tiles_per_side: i64) -> Option<(DVec3, TerrainPatchBasis)> {
-    if key.face > 5 || key.x < 0 || key.y < 0 || key.x >= tiles_per_side || key.y >= tiles_per_side
-    {
-        return None;
-    }
-    let n = tiles_per_side as f64;
-    let u = -1.0 + (key.x as f64 + 0.5) * 2.0 / n;
-    let v = -1.0 + (key.y as f64 + 0.5) * 2.0 / n;
-    let center = cube_dir(key.face, u, v);
-    Some((center, TerrainPatchBasis::from_normal(center)))
-}
-
-/// Face-uv corner span of a tile (`u_lo..u_hi`, `v_lo..v_hi`).
-fn tile_uv_span(key: GrassTileKey, tiles_per_side: i64) -> (f64, f64, f64, f64) {
-    let n = tiles_per_side as f64;
-    let u_lo = -1.0 + key.x as f64 * 2.0 / n;
-    let v_lo = -1.0 + key.y as f64 * 2.0 / n;
-    (u_lo, u_lo + 2.0 / n, v_lo, v_lo + 2.0 / n)
+/// Centre direction + tangent basis of a tile. Returns `None` for keys outside
+/// the face grid (callers enumerate raw neighbour offsets).
+pub fn grass_tile_frame(
+    key: GrassTileKey,
+    tiles_per_side: i64,
+) -> Option<(DVec3, TerrainPatchBasis)> {
+    TileLattice { tiles_per_side }.frame(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +137,10 @@ pub struct GrassTileMesh {
 /// state); intended to run on `AsyncComputeTaskPool`. Returns `None` when no
 /// blade passes the placement gates (open water, rock, alpine, flattened pad).
 pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMesh> {
-    let (center_dir, basis) = grass_tile_frame(input.key, input.tiles_per_side)?;
+    let lattice = TileLattice {
+        tiles_per_side: input.tiles_per_side,
+    };
+    let (center_dir, basis) = lattice.frame(input.key)?;
     let source = input.height_source.as_ref();
     let built_revision = source.revision();
 
@@ -205,15 +149,8 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
 
     // Metric extents from the actual uv span (cube distortion shrinks tiles
     // toward face corners), so blade density stays uniform per square metre.
-    let (u_lo, u_hi, v_lo, v_hi) = tile_uv_span(input.key, input.tiles_per_side);
-    let u_mid = (u_lo + u_hi) * 0.5;
-    let v_mid = (v_lo + v_hi) * 0.5;
-    let ext_u_m = (cube_dir(input.key.face, u_hi, v_mid) - cube_dir(input.key.face, u_lo, v_mid))
-        .length()
-        * input.radius_m;
-    let ext_v_m = (cube_dir(input.key.face, u_mid, v_hi) - cube_dir(input.key.face, u_mid, v_lo))
-        .length()
-        * input.radius_m;
+    let (u_lo, u_hi, v_lo, v_hi) = lattice.uv_span(input.key);
+    let (ext_u_m, ext_v_m) = lattice.tile_extents_m(input.key, input.radius_m);
     let area_m2 = (ext_u_m * ext_v_m).max(0.0);
     let candidate_count =
         ((area_m2 * input.blades_per_m2 as f64).round() as usize).min(MAX_BLADES_PER_TILE);
@@ -240,90 +177,79 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
             continue;
         }
 
-        let Some(h) = source.sample_height_m(dir.as_vec3(), GRASS_SAMPLE_LOD_M) else {
-            continue;
-        };
-        if h <= input.sea_level_m + 1.0 {
-            continue;
-        }
-
-        // Slope/curvature probe — the same stencil + mask math the tile baker
+        // Shared placement gate: height, grass material-mask weight, slope, and
+        // the body-fixed terrain normal — the same stencil the tile baker
         // writes into the material attachment's grass channel.
-        let p = dir * input.radius_m;
-        let probe = |offset: DVec3| {
-            source.sample_height_m(((p + offset).normalize()).as_vec3(), GRASS_SAMPLE_LOD_M)
-        };
-        let (Some(h_l), Some(h_r), Some(h_d), Some(h_u)) = (
-            probe(basis.tangent_x * -MASK_STEP_M),
-            probe(basis.tangent_x * MASK_STEP_M),
-            probe(basis.tangent_z * -MASK_STEP_M),
-            probe(basis.tangent_z * MASK_STEP_M),
-        ) else {
+        let Some(sample) = placement_gate(source, &basis, dir, input.radius_m) else {
             continue;
         };
-        let masks = material_masks_from_heights(h, h_l, h_r, h_d, h_u, MASK_STEP_M as f32);
-        let grass_w = masks[0] as f32 / 255.0;
-
-        let grad_x = (h_r - h_l) / (2.0 * MASK_STEP_M as f32);
-        let grad_z = (h_u - h_d) / (2.0 * MASK_STEP_M as f32);
-        let slope = (grad_x * grad_x + grad_z * grad_z).sqrt();
-        if slope > 0.45 {
+        if sample.height_m <= input.sea_level_m + 1.0 {
             continue;
         }
+        if sample.slope > 0.45 {
+            continue;
+        }
+        let h = sample.height_m;
+        let grass_w = sample.grass_w;
+        let normal_body = sample.normal_body;
 
-        let accept = smoothstep(0.45, 0.8, grass_w) * (1.0 - smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h));
+        let accept = smoothstep(0.45, 0.8, grass_w)
+            * (1.0 - smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h));
         if (rng(2) as f32) >= accept {
             continue;
         }
 
-        // Terrain normal from the same gradients, in the tile tangent frame
-        // (X = tangent_x, Y = up, Z = tangent_z) → body-fixed.
-        let normal_body = basis
-            .local_to_body_vec(DVec3::new(-grad_x as f64, 1.0, -grad_z as f64))
-            .normalize();
-
         // Blade frame: yaw in the tangent plane + a small random lean.
         let yaw = rng(3) * std::f64::consts::TAU;
         let lean = rng(4) * 0.25;
-        let side_body =
-            (basis.tangent_x * yaw.cos() + basis.tangent_z * yaw.sin()).normalize();
+        let side_body = (basis.tangent_x * yaw.cos() + basis.tangent_z * yaw.sin()).normalize();
         let lean_dir = normal_body.cross(side_body).normalize();
         let up_body = (normal_body + lean_dir * lean).normalize();
 
-        let height_m = 0.20 + rng(5) * 0.25;
-        let width_m = 0.025 + rng(6) * 0.020;
+        let height_m = 0.22 + rng(5) * 0.33; // 0.22–0.55 m: taller blades overlap
+        let width_m = 0.028 + rng(6) * 0.022;
 
         let root_body = dir * (input.radius_m + h as f64 - ROOT_SINK_M);
         let root = (root_body - center_surface_body_m).as_vec3();
         let side = side_body.as_vec3();
         let up = up_body.as_vec3();
+        // Forward arc: the blade bends over in a tangent direction as it rises,
+        // so it reads as a natural curved blade instead of a stiff spike.
+        let bend_dir = lean_dir.as_vec3();
+        let bend = (0.18 + rng(10) as f32 * 0.30) * height_m as f32; // tip arc distance
         let normal = normal_body.as_vec3().to_array();
 
-        // Tint: terrain palette band by altitude, ± value jitter, lit tips.
+        // Tint: terrain palette band by altitude, ± value jitter + hue drift,
+        // brightening toward the tip (sun-through-blade glow at grazing angles).
         let lush = 1.0 - smoothstep(LUSH_LO_M, LUSH_HI_M, h);
         let dry = smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h);
-        // Lifted above the ground palette (×~1.3) so blades read against the
-        // terrain they colour-match; the tip lightening adds the sun-through-
-        // blade glow that sells grass at grazing angles.
         let base = C_GRASS.lerp(C_FOREST, lush * 0.6).lerp(C_DRYGRASS, dry);
-        let tint = base * (1.10 + 0.40 * rng(7) as f32);
+        // Per-blade warm(yellow)/cool(blue-green) hue drift breaks the uniform
+        // green; the multiplier lifts blades above the ground they colour-match.
+        let hue = (rng(11) as f32 - 0.5) * 0.30;
+        let tinted = Vec3::new(base.x * (1.0 + hue), base.y, base.z * (1.0 - hue));
+        let tint = tinted * (1.05 + 0.45 * rng(7) as f32);
         let dither = rng(8) as f32;
         let color_at = |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, dither];
         let phase = rng(9) as f32;
 
-        // Tapered two-segment strip: 5 verts, 3 triangles.
-        //   4        tip
-        //  2 3       mid (55 % height, 55 % width)
-        // 0   1      root
+        // Curved tapered blade: a centreline arcing forward along `bend_dir`,
+        // four cross-sections (root → 40 % → 72 % → tip) tapering to a point.
+        // 7 verts, 5 triangles. uv.x (0 root → 1 tip) drives the wind sway.
         let hw = width_m as f32 * 0.5;
         let h_f = height_m as f32;
-        let mid = up * (h_f * 0.55);
+        let arc = |t: f32| root + up * (h_f * t) + bend_dir * (bend * t * t);
+        let c1 = arc(0.40);
+        let c2 = arc(0.72);
+        let tip = arc(1.0);
         let verts = [
-            (root - side * hw, 0.0, 0.9),
-            (root + side * hw, 0.0, 0.9),
-            (root - side * (hw * 0.55) + mid, 0.30, 1.2),
-            (root + side * (hw * 0.55) + mid, 0.30, 1.2),
-            (root + up * h_f, 1.0, 1.5),
+            (root - side * hw, 0.0, 0.80),
+            (root + side * hw, 0.0, 0.80),
+            (c1 - side * (hw * 0.72), 0.18, 1.05),
+            (c1 + side * (hw * 0.72), 0.18, 1.05),
+            (c2 - side * (hw * 0.40), 0.55, 1.30),
+            (c2 + side * (hw * 0.40), 0.55, 1.30),
+            (tip, 1.0, 1.65),
         ];
         let base_index = positions.len() as u32;
         for (pos, sway, lighten) in verts {
@@ -342,10 +268,16 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
             base_index + 2,
             base_index + 3,
             base_index + 4,
+            base_index + 3,
+            base_index + 5,
+            base_index + 4,
+            base_index + 4,
+            base_index + 5,
+            base_index + 6,
         ]);
     }
 
-    let blade_count = (positions.len() / 5) as u32;
+    let blade_count = (positions.len() / 7) as u32;
     if blade_count == 0 {
         return None;
     }
@@ -394,9 +326,16 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Per-frame grass shading parameters.
+///
+/// Field order is load-bearing — the WGSL `GrassParams` mirror in `grass.wgsl`
+/// must match. The lighting fields (`sun_dir.w`, `sky_up`, `sky_tau`) feed the
+/// shared `thalos::lighting` sky model so blades light identically to the
+/// ground; see `crate::rendering::grass::update_grass_material` for the values.
 #[derive(Clone, Copy, ShaderType, Default)]
 pub struct GrassParams {
-    /// xyz = unit direction toward the star, world render space. w unused.
+    /// xyz = unit direction toward the star, world render space. w = sun flux
+    /// (lux × exposure gain — the same value the terrain `SceneLighting` star
+    /// carries), fed to the shared `compute_surface_sky`.
     pub sun_dir: Vec4,
     /// xyz = wind direction (world render space, roughly tangent at the
     /// camera), w = sway amplitude at the blade tip, metres.
@@ -404,6 +343,13 @@ pub struct GrassParams {
     /// x = animation time (seconds, wall clock), y = fade start distance (m),
     /// z = fade end distance (m), w unused.
     pub time_fade: Vec4,
+    /// xyz = local radial up (world render space) for the sky hemisphere split,
+    /// w unused.
+    pub sky_up: Vec4,
+    /// xyz = Rayleigh vertical optical depth τ_v (= β_R · H_R, the authored
+    /// per-channel zenith optical depth, scale-independent), w = artistic
+    /// atmosphere strength. Drives the blue sky tint + sunset reddening.
+    pub sky_tau: Vec4,
 }
 
 /// Batched grass-blade material: vertex wind sway + wrap-diffuse shading that
@@ -494,7 +440,11 @@ mod tests {
     #[test]
     fn no_grass_below_sea_level() {
         let input = GrassTileBuildInput {
-            key: GrassTileKey { face: 4, x: 100, y: 100 },
+            key: GrassTileKey {
+                face: 4,
+                x: 100,
+                y: 100,
+            },
             tiles_per_side: 255_000,
             height_source: Arc::new(ConstantHeightSource::new(-50.0)),
             radius_m: 3_186_000.0,
