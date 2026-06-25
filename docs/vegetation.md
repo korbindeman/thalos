@@ -268,10 +268,25 @@ A tile takes the LOD of the ring whose annulus contains it; the **same**
 
 ### 5.4 Smooth transitions
 
-Never hard-swap. In each LOD/ring overlap band, render both representations and
-**dither (alpha-hash) discard** per pixel against the fade factor — the exact
-trick `grass.wgsl` already uses for its 70→100 m distance fade, now applied at
-every ring and LOD boundary. TAA resolves the dither.
+Never hard-swap, and **no dither** — dither shimmers without TAA and reads as a
+visible "fade." Instead the transitions are **geometry scale-fade**: plants
+*grow from zero* as they enter range and shrink back at the far edge, so the edge
+is seamless and a fully-collapsed plant is a degenerate (invisible) mesh — no
+discard needed. (Landed 2026-06-25.)
+
+- **Trees** scale the whole mesh about the trunk base, per instance, by a grow
+  factor from the focus distance (`tree.wgsl`).
+- **Grass** collapses each blade's height toward its root (`uv.x · color.a`),
+  with the per-ring near/far cross-fade so adjacent clipmap rings grow/shrink
+  through their shared boundary (`grass.wgsl`).
+- **No build pop-in:** tiles are built a full tile *beyond* the fade-out edge, so
+  a tile finishes building while its content is scaled to ~0; it then grows in on
+  approach.
+- **No re-LOD vanish:** a tree tile's mesh LOD is swapped **in place**
+  (`relod_veg_tiles`) as it approaches — no despawn/rebuild gap.
+- **Zoom-independent:** all fade/LOD distances are measured from the **craft
+  anchor** (`GrassParams.anchor`), never the camera, so camera zoom/orbit can't
+  change what's drawn.
 
 ---
 
