@@ -300,6 +300,31 @@ impl GpuAtlasHeightMirror {
         None
     }
 
+    /// Metric texel size (m) of the finest atlas tile currently resident at
+    /// `dir`, or `None` if nothing is resident there. Note the pinned LOD-0 tile
+    /// is *always* resident but kilometres-coarse, so callers that need the
+    /// terrain to be genuinely detailed (e.g. grass building, so blades don't
+    /// float above a coarse mesh) must check this, not mere presence.
+    pub fn best_resident_texel_m(&self, dir: Vec3) -> Option<f32> {
+        let model = self.model.as_ref()?;
+        let dir = dir.normalize_or_zero();
+        if dir == Vec3::ZERO || self.lod_count == 0 || self.texture_size == 0 {
+            return None;
+        }
+        let inner = self.texture_size.saturating_sub(self.border_size * 2).max(1) as f32;
+        let sample_position = dir.as_dvec3() * model.scale();
+        let coordinate = Coordinate::from_world_position(sample_position, model);
+        for lod in (0..self.lod_count).rev() {
+            let (tile_coord, _) = tile_lookup_at_lod(coordinate, lod);
+            if self.tiles.contains_key(&tile_coord) {
+                let face_arc_m =
+                    std::f32::consts::FRAC_PI_2 * model.scale() as f32 / (1u32 << lod) as f32;
+                return Some((face_arc_m / inner).max(0.0));
+            }
+        }
+        None
+    }
+
     /// Build a collider mesh from the finest resident tile under `center_dir`,
     /// one vertex per height texel at the tile's native resolution, each placed
     /// at the exact cube-sphere position the renderer uses

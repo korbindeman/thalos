@@ -646,20 +646,34 @@ impl TileAtlas {
                 tile_atlas.state.release_tile(tile_coordinate);
             }
 
-            // Admit requests nearest-view-first so the tiles around the camera
-            // bake before far ones. (Coarse-before-fine within the queue is left
-            // to the natural request order: coarse tiles are cheap and give an
-            // immediate resident ancestor, while fine tiles are the most
-            // expensive to synthesise.)
-            let mut deferred_requests = Vec::new();
-            let mut requested_tiles: Vec<_> = tile_tree.requested_tiles.drain(..).collect();
+            // Admit coarse-first, then nearest-view-first within each LOD.
+            //
+            // On a cold view every desired tile is requested in a single frame,
+            // so this ordering *is* the cold-stream load order. Filling the
+            // low-LOD pyramid across the whole view before refining means the
+            // camera gets complete (coarse) coverage fast and then sharpens
+            // nearest-first — instead of building outward from the single
+            // closest tile and leaving the rest of the view an empty hole until
+            // late. Coarse tiles are also ~2× cheaper to synthesise and far
+            // fewer in number, so the broad cheap coverage front-loads cleanly;
+            // within one LOD the tile nearest the view still wins.
+            //
+            // Distances are computed once up front (not inside the comparator)
+            // so the sort is O(n log n) comparisons over precomputed keys rather
+            // than O(n log n) cube-sphere projections.
             let model = tile_atlas.model.clone();
-            requested_tiles.sort_by(|a, b| {
-                let da = tile_tree.tile_view_distance(*a, &model);
-                let db = tile_tree.tile_view_distance(*b, &model);
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            let coords: Vec<TileCoordinate> = tile_tree.requested_tiles.drain(..).collect();
+            let mut requested: Vec<(TileCoordinate, f64)> = coords
+                .into_iter()
+                .map(|coord| (coord, tile_tree.tile_view_distance(coord, &model)))
+                .collect();
+            requested.sort_by(|a, b| {
+                a.0.lod
+                    .cmp(&b.0.lod)
+                    .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             });
-            for tile_coordinate in requested_tiles {
+            let mut deferred_requests = Vec::new();
+            for (tile_coordinate, _) in requested {
                 if tile_atlas.state.request_tile(tile_coordinate) {
                     tile_tree.mark_atlas_request_admitted(tile_coordinate);
                 } else {

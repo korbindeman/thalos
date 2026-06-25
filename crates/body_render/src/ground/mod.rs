@@ -36,6 +36,7 @@ mod sky_material;
 mod synthetic;
 mod tile_lattice;
 mod tile_synthesis_pool;
+mod tree_mesh;
 mod vegetation;
 mod water_material;
 
@@ -64,9 +65,11 @@ pub use sky_material::BodySkyMaterial;
 pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
 pub use tile_synthesis_pool::tile_synthesis_pool;
+pub use tree_mesh::{TreeMeshParams, build_tree_mesh};
 pub use vegetation::{
-    GRASS_TILE_SIZE_M, GrassMaterial, GrassParams, GrassTileBuildInput, GrassTileKey,
-    GrassTileMesh, build_grass_tile_mesh, grass_tile_frame, grass_tile_key, grass_tiles_per_side,
+    GRASS_TILE_SIZE_M, GrassBladeLod, GrassMaterial, GrassParams, GrassTileBuildInput,
+    GrassTileKey, GrassTileMesh, build_grass_tile_mesh, grass_tile_frame, grass_tile_key,
+    grass_tiles_per_side,
 };
 pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 

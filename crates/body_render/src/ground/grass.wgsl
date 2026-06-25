@@ -4,12 +4,11 @@
 // weighted by UV.x (0 at the root, 1 at the tip) and phase-shifted per blade
 // by UV.y so the field doesn't move as one sheet.
 //
-// Fragment: wrap-diffuse Lambert against the primary star, with constants
-// mirroring `body_terrain.wgsl`'s vegetated path (`DIRECT_SUN_STRENGTH`,
-// day/night sky fill) so blades land in the same brightness range as the
-// ground they grow from. The vegetated terrain path deliberately ignores the
-// scene flux (see `body_terrain.wgsl`), so the only lighting input needed
-// here is the sun direction. Distance fade is a screen-space-dithered
+// Fragment: wrap-diffuse direct sun plus the SAME hemisphere sky model the
+// ground uses, both pulled from `thalos::lighting` (`compute_surface_sky` /
+// `sky_ambient_irradiance`) so blades and the ground they grow from can't drift.
+// The driver hands the blades the sun flux, radial up, and Rayleigh τ_v the
+// model needs (see `GrassParams`). Distance fade is a screen-space-dithered
 // `discard` in the opaque pass — no sorting, no blend state.
 
 #import bevy_pbr::{
@@ -17,23 +16,24 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
+#import thalos::lighting::{SurfaceSky, compute_surface_sky, sky_ambient_irradiance}
 
 struct GrassParams {
-    // xyz = unit direction toward the star (world render space), w unused.
+    // xyz = unit direction toward the star (world render space), w = sun flux
+    // (lux × exposure gain — the same value the terrain `SceneLighting` carries).
     sun_dir: vec4<f32>,
     // xyz = wind direction (world render space), w = tip sway amplitude (m).
     wind: vec4<f32>,
     // x = time (s), y = fade start (m), z = fade end (m), w unused.
     time_fade: vec4<f32>,
+    // xyz = local radial up (world render space) for the sky hemisphere, w unused.
+    sky_up: vec4<f32>,
+    // xyz = Rayleigh vertical optical depth τ_v, w = atmosphere strength.
+    sky_tau: vec4<f32>,
 }
 
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3.
 @group(3) @binding(0) var<uniform> grass: GrassParams;
-
-// Mirrors of `body_terrain.wgsl`'s vegetated lighting constants.
-const DIRECT_SUN_STRENGTH: f32 = 0.62;
-const NIGHT_FILL: f32 = 0.012;
-const DAY_FILL: f32 = 0.15;
 
 const TAU: f32 = 6.28318530717958647;
 
@@ -96,14 +96,21 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // the shading. Wrap diffuse stands in for transmission through the blade.
     let n = normalize(in.world_normal);
     let sun_dir = grass.sun_dir.xyz;
+    let up = grass.sky_up.xyz;
+
+    // Same atmosphere-derived sky/sun environment the ground builds, so the
+    // grass tracks the ground through the day and gets the same blue-sky fill.
+    let sky = compute_surface_sky(grass.sky_tau.xyz, grass.sky_tau.w, up, sun_dir, grass.sun_dir.w);
+
+    // Direct: wrap-diffuse (blades are translucent), reddened + exposure-scaled
+    // by the shared sun term.
     let n_dot_l = dot(n, sun_dir);
     let wrap = clamp((n_dot_l + 0.4) / 1.4, 0.0, 1.0);
+    let direct = in.color.rgb * (wrap * sky.sun_scale) * sky.sun_color;
 
-    // Sky fill mirrors the terrain's day/night ambient gate.
-    let daylight = smoothstep(-0.06, 0.12, n_dot_l);
-    let fill = mix(NIGHT_FILL, DAY_FILL, daylight);
-    let sky_tint = mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.74, 1.0), 0.25 * daylight);
+    // Ambient: the hemisphere sky model (blue sky-dome + warm ground bounce).
+    let ambient = in.color.rgb * sky_ambient_irradiance(sky, n, up);
 
-    let lit = in.color.rgb * (wrap * DIRECT_SUN_STRENGTH) + in.color.rgb * sky_tint * fill;
+    let lit = direct + ambient;
     return vec4<f32>(lit, 1.0);
 }

@@ -102,6 +102,18 @@ pub fn grass_tile_frame(
 // Tile mesh builder
 // ---------------------------------------------------------------------------
 
+/// Blade geometry level of detail. Near rings use the full curved 7-vertex
+/// blade; far rings use a cheap 3-vertex flat blade, widened into a clump so
+/// ground coverage holds as per-blade density drops (the constant-coverage
+/// rule — see `docs/vegetation.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrassBladeLod {
+    /// 7 vertices, curved + tapered. Near ring.
+    Full,
+    /// 3 vertices, flat triangle. Far rings, widened via `width_scale`.
+    Wide,
+}
+
 /// Everything [`build_grass_tile_mesh`] needs, snapshotted by the game-side
 /// driver so the build can run on the async compute pool without touching ECS.
 pub struct GrassTileBuildInput {
@@ -113,6 +125,14 @@ pub struct GrassTileBuildInput {
     /// `height > sea_level + 1 m`. Pass `f32::MIN` for bodies without oceans.
     pub sea_level_m: f32,
     pub blades_per_m2: f32,
+    /// Blade geometry LOD for this clipmap ring.
+    pub blade_lod: GrassBladeLod,
+    /// Width multiplier — coarser rings widen blades to hold ground coverage
+    /// as density drops.
+    pub width_scale: f32,
+    /// Height multiplier — far blades a touch taller so the field reads at
+    /// grazing angles.
+    pub height_scale: f32,
     pub seed: u64,
     /// Active terrain-flatten pad (e.g. the runway). Blades are skipped where
     /// the pad has meaningful weight so they never poke through the paving.
@@ -163,6 +183,7 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    let mut blade_count = 0u32;
 
     for blade in 0..candidate_count {
         let rng = |salt: u64| blade_hash(input.seed, input.key, blade as u64, salt);
@@ -206,8 +227,8 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let lean_dir = normal_body.cross(side_body).normalize();
         let up_body = (normal_body + lean_dir * lean).normalize();
 
-        let height_m = 0.22 + rng(5) * 0.33; // 0.22–0.55 m: taller blades overlap
-        let width_m = 0.028 + rng(6) * 0.022;
+        let height_m = (0.22 + rng(5) * 0.33) * input.height_scale as f64; // base 0.22–0.55 m
+        let width_m = (0.028 + rng(6) * 0.022) * input.width_scale as f64;
 
         let root_body = dir * (input.radius_m + h as f64 - ROOT_SINK_M);
         let root = (root_body - center_surface_body_m).as_vec3();
@@ -233,51 +254,64 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let color_at = |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, dither];
         let phase = rng(9) as f32;
 
-        // Curved tapered blade: a centreline arcing forward along `bend_dir`,
-        // four cross-sections (root → 40 % → 72 % → tip) tapering to a point.
-        // 7 verts, 5 triangles. uv.x (0 root → 1 tip) drives the wind sway.
         let hw = width_m as f32 * 0.5;
         let h_f = height_m as f32;
-        let arc = |t: f32| root + up * (h_f * t) + bend_dir * (bend * t * t);
-        let c1 = arc(0.40);
-        let c2 = arc(0.72);
-        let tip = arc(1.0);
-        let verts = [
-            (root - side * hw, 0.0, 0.80),
-            (root + side * hw, 0.0, 0.80),
-            (c1 - side * (hw * 0.72), 0.18, 1.05),
-            (c1 + side * (hw * 0.72), 0.18, 1.05),
-            (c2 - side * (hw * 0.40), 0.55, 1.30),
-            (c2 + side * (hw * 0.40), 0.55, 1.30),
-            (tip, 1.0, 1.65),
-        ];
         let base_index = positions.len() as u32;
-        for (pos, sway, lighten) in verts {
+        let mut push_vert = |pos: Vec3, sway: f32, lighten: f32| {
             positions.push(pos.to_array());
             normals.push(normal);
             uvs.push([sway, phase]);
             colors.push(color_at(lighten));
+        };
+        match input.blade_lod {
+            GrassBladeLod::Full => {
+                // Curved tapered blade: a centreline arcing forward along
+                // `bend_dir`, four cross-sections (root → 40 % → 72 % → tip)
+                // tapering to a point. 7 verts, 5 triangles. uv.x (0 root → 1
+                // tip) drives the wind sway.
+                let arc = |t: f32| root + up * (h_f * t) + bend_dir * (bend * t * t);
+                let c1 = arc(0.40);
+                let c2 = arc(0.72);
+                let tip = arc(1.0);
+                push_vert(root - side * hw, 0.0, 0.80);
+                push_vert(root + side * hw, 0.0, 0.80);
+                push_vert(c1 - side * (hw * 0.72), 0.18, 1.05);
+                push_vert(c1 + side * (hw * 0.72), 0.18, 1.05);
+                push_vert(c2 - side * (hw * 0.40), 0.55, 1.30);
+                push_vert(c2 + side * (hw * 0.40), 0.55, 1.30);
+                push_vert(tip, 1.0, 1.65);
+                indices.extend_from_slice(&[
+                    base_index,
+                    base_index + 1,
+                    base_index + 2,
+                    base_index + 1,
+                    base_index + 3,
+                    base_index + 2,
+                    base_index + 2,
+                    base_index + 3,
+                    base_index + 4,
+                    base_index + 3,
+                    base_index + 5,
+                    base_index + 4,
+                    base_index + 4,
+                    base_index + 5,
+                    base_index + 6,
+                ]);
+            }
+            GrassBladeLod::Wide => {
+                // Flat wide blade: a single triangle (root pair + tip), bent
+                // forward a little. Cheap far-LOD; `width_scale` makes it a
+                // clump card that holds coverage at low density.
+                let tip = root + up * h_f + bend_dir * (bend * 0.6);
+                push_vert(root - side * hw, 0.0, 0.85);
+                push_vert(root + side * hw, 0.0, 0.85);
+                push_vert(tip, 1.0, 1.5);
+                indices.extend_from_slice(&[base_index, base_index + 1, base_index + 2]);
+            }
         }
-        indices.extend_from_slice(&[
-            base_index,
-            base_index + 1,
-            base_index + 2,
-            base_index + 1,
-            base_index + 3,
-            base_index + 2,
-            base_index + 2,
-            base_index + 3,
-            base_index + 4,
-            base_index + 3,
-            base_index + 5,
-            base_index + 4,
-            base_index + 4,
-            base_index + 5,
-            base_index + 6,
-        ]);
+        blade_count += 1;
     }
 
-    let blade_count = (positions.len() / 7) as u32;
     if blade_count == 0 {
         return None;
     }
@@ -340,8 +374,10 @@ pub struct GrassParams {
     /// xyz = wind direction (world render space, roughly tangent at the
     /// camera), w = sway amplitude at the blade tip, metres.
     pub wind: Vec4,
-    /// x = animation time (seconds, wall clock), y = fade start distance (m),
-    /// z = fade end distance (m), w unused.
+    /// x = animation time (seconds), y = near-edge fade distance (m),
+    /// z = far-edge fade distance (m), w = fade band half-width (m). A ring's
+    /// blades fade in around its near edge and out around its far edge, so
+    /// adjacent clipmap rings cross-fade through their shared boundary.
     pub time_fade: Vec4,
     /// xyz = local radial up (world render space) for the sky hemisphere split,
     /// w unused.
@@ -424,6 +460,9 @@ mod tests {
             radius_m,
             sea_level_m: 0.0,
             blades_per_m2: 4.0,
+            blade_lod: GrassBladeLod::Full,
+            width_scale: 1.0,
+            height_scale: 1.0,
             seed: 7,
             flatten_exclusion: None,
         };
@@ -450,6 +489,9 @@ mod tests {
             radius_m: 3_186_000.0,
             sea_level_m: 0.0,
             blades_per_m2: 4.0,
+            blade_lod: GrassBladeLod::Full,
+            width_scale: 1.0,
+            height_scale: 1.0,
             seed: 7,
             flatten_exclusion: None,
         };

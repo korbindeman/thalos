@@ -261,3 +261,130 @@ fn shade_hapke_surface(
     let ambient_term = vec3<f32>(scene.ambient_intensity);
     return albedo * (sun_rgb + shine_rgb + ambient_term);
 }
+
+// ── Surface incident sky lighting (vegetated dielectric path) ─────────────────
+//
+// A cheap, analytic hemisphere-skylight model for the wet / vegetated ground
+// LOD (`body_terrain.wgsl`) and the grass that grows on it (`grass.wgsl`).
+// Factoring it here is what keeps the two from drifting: both shaders call
+// exactly these functions on exactly the same inputs.
+//
+// SCOPE: this is the *surface incident* lighting only — the direct sun reaching
+// the ground (reddened by its own slant path through the air) plus the diffuse
+// skylight and warm ground-bounce that fill faces the sun doesn't see. It does
+// NOT produce camera-path haze / aerial perspective: that is the fullscreen
+// `BodySky` pass (`body_sky.wgsl`), so the two never double-count. The sun→
+// surface reddening here is a *different* optical path from BodySky's camera→
+// surface haze, so reddening the beam is legitimate, not duplicated.
+//
+// Everything is expressed in the same flux units as `shade_hapke_surface`
+// (`sun_flux * SCENE_FLUX_SCALE`), so the dielectric ground, the Hapke regolith,
+// and the sky pass share one exposure scale and track `CameraExposure` together.
+
+// Direct-sun reflectance scale. Converts one unit of scene radiance
+// (`sun_flux * SCENE_FLUX_SCALE`) into surface direct lighting. At Thalos
+// (flux ~10, focus gain ~1) the resulting `sun_scale` = 10 · 0.5 · 0.20 = 1.0;
+// the old placeholder ignored flux and used a flat 0.62, so midday direct now
+// lifts ~1.6× — the previous ground read too dark. This is the single knob for
+// overall ground brightness; flux now carries exposure + sun-distance.
+const SURFACE_DIRECT_SCALE: f32 = 0.20;
+// Diffuse sky-dome (skylight) scale. Drives how strongly the blue sky fills
+// shadowed / up-facing ground at midday. Second-loudest knob after direct.
+const SURFACE_SKY_SCALE: f32 = 0.15;
+// Sky chroma gain: how saturated the blue sky tint reads. The tint is
+// `1 - exp(-tau_v · gain)`, so higher = more saturated blue (more Rayleigh
+// out-scatter). Brightness is separate (`SURFACE_SKY_SCALE`).
+const SURFACE_SKY_CHROMA_GAIN: f32 = 6.0;
+// Warm ground-bounce: a representative sunlit-land albedo and its scale. Lights
+// down-facing facets with a warm complement to the cool sky.
+const SURFACE_GROUND_ALBEDO: vec3<f32> = vec3<f32>(0.10, 0.085, 0.055);
+const SURFACE_GROUND_SCALE: f32 = 0.10;
+// Sunset reddening of the direct beam: how hard the lengthening slant path eats
+// blue as the sun drops. 1.0 = physical (per the column optical depth).
+const SURFACE_SUN_REDDEN_GAIN: f32 = 1.0;
+// Faint night floor so the dark side reads as *night*, not pure black. Cool,
+// roughly matching the old `night_fill = 0.012` luminance.
+const SURFACE_NIGHT_AMBIENT: vec3<f32> = vec3<f32>(0.008, 0.010, 0.014);
+
+// Resolved per-fragment lighting environment. Built once by
+// `compute_surface_sky`, then consumed by the BRDF (direct) and
+// `sky_ambient_irradiance` (ambient) so both shaders shade from one source.
+struct SurfaceSky {
+    // Direct-beam tint after its slant path through the atmosphere (≈ white at
+    // noon, orange near sunset). Multiply the direct BRDF response by this.
+    sun_color: vec3<f32>,
+    // Direct-beam radiance scale in scene-flux units. The caller multiplies the
+    // BRDF, the n·l cosine, and any shadow term by `sun_color * sun_scale`.
+    sun_scale: f32,
+    // Diffuse sky-dome radiance (blue), already elevation-scaled, plus the night
+    // floor. Lights up-facing normals; also reflected as ambient specular.
+    sky_radiance: vec3<f32>,
+    // Warm ground-bounce radiance, plus the night floor. Lights down-facing
+    // normals.
+    ground_radiance: vec3<f32>,
+}
+
+// Derive the surface lighting environment from the *vertical* Rayleigh optical
+// depth `tau_zenith` (= β_R · H_R = the authored τ_v; note this product is
+// independent of the meters-per-render-unit scale), the artistic atmosphere
+// `strength`, the local radial up, the sun direction, and the per-fragment sun
+// flux. Pure analytic — no raymarch.
+fn compute_surface_sky(
+    tau_zenith: vec3<f32>,
+    strength: f32,
+    up: vec3<f32>,
+    sun_dir: vec3<f32>,
+    sun_flux: f32,
+) -> SurfaceSky {
+    var out: SurfaceSky;
+    let scene_radiance = max(sun_flux, 0.0) * SCENE_FLUX_SCALE;
+    let sun_elev = dot(up, sun_dir);
+    // Daylight gate over the *geometric* horizon. Slightly wide on the dawn side
+    // so twilight keeps a dim band rather than snapping to black.
+    let day = smoothstep(-0.15, 0.12, sun_elev);
+    let sun_up = clamp(sun_elev, 0.0, 1.0);
+    let tau_eff = max(tau_zenith, vec3<f32>(0.0)) * max(strength, 0.0);
+
+    // Direct-beam reddening. The relative air mass along the sun ray grows from
+    // ~1 at the zenith toward the horizon; subtracting 1 keeps a high sun white.
+    // exp(-τ · (airmass−1)) eats blue first, leaving the orange sunset beam.
+    let airmass = clamp(1.0 / (sun_up + 0.10), 1.0, 8.0);
+    out.sun_color = exp(-tau_eff * (airmass - 1.0) * SURFACE_SUN_REDDEN_GAIN);
+    out.sun_scale = scene_radiance * SURFACE_DIRECT_SCALE;
+
+    // Blue sky-dome chroma from how much each wavelength scatters out of the
+    // vertical column (more blue → bluer sky). Brightness tracks sun elevation
+    // so shadows read blue by day, dim at sunset, and fall to the night floor.
+    let sky_chroma = vec3<f32>(1.0) - exp(-tau_eff * SURFACE_SKY_CHROMA_GAIN);
+    let sky_strength = scene_radiance * SURFACE_SKY_SCALE * day * (0.35 + 0.65 * sun_up);
+    out.sky_radiance = sky_chroma * sky_strength + SURFACE_NIGHT_AMBIENT;
+
+    // Warm ground bounce: representative sunlit land albedo, only while the
+    // ground itself is lit.
+    out.ground_radiance =
+        SURFACE_GROUND_ALBEDO * scene_radiance * SURFACE_GROUND_SCALE * sun_up
+        + SURFACE_NIGHT_AMBIENT;
+    return out;
+}
+
+// Hemispheric ambient irradiance for a surface normal: blue sky on up-facing
+// faces, warm ground-bounce on down-facing faces, blended by the normal's
+// elevation over the local horizon. Multiply by albedo (and AO) for the ambient
+// diffuse term.
+fn sky_ambient_irradiance(sky: SurfaceSky, normal: vec3<f32>, up: vec3<f32>) -> vec3<f32> {
+    let w_up = clamp(0.5 + 0.5 * dot(normal, up), 0.0, 1.0);
+    return mix(sky.ground_radiance, sky.sky_radiance, w_up);
+}
+
+// Karis' mobile split-sum environment-BRDF approximation ("Physically Based
+// Shading on Mobile", 2014). Returns the `(scale, bias)` pair such that the
+// specular environment response for reflectance `F0` is `F0 * scale + bias`,
+// and the white-furnace directional albedo (used for Kulla–Conty energy
+// compensation) is `scale + bias`. One MAD-heavy evaluation, no LUT binding.
+fn env_brdf_approx(roughness: f32, n_dot_v: f32) -> vec2<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+}

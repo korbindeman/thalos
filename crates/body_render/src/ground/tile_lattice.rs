@@ -25,8 +25,9 @@ pub struct TileKey {
     pub y: i64,
 }
 
-/// A cube-sphere tiling at a fixed resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A cube-sphere tiling at a fixed resolution. `Default` (`tiles_per_side = 0`)
+/// is an inert placeholder for resources initialized before a body is picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TileLattice {
     pub tiles_per_side: i64,
 }

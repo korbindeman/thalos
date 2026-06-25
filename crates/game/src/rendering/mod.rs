@@ -24,6 +24,7 @@ mod terrain_residency;
 mod trails;
 mod transforms;
 mod types;
+mod vegetation;
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
@@ -83,6 +84,7 @@ impl Plugin for RenderingPlugin {
             .add_plugins(TerrainResidencyPlugin)
             .add_plugins(clouds::CloudsRenderPlugin)
             .add_plugins(grass::GrassRenderPlugin)
+            .add_plugins(vegetation::VegetationRenderPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())

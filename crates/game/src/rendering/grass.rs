@@ -30,36 +30,45 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    GRASS_TILE_SIZE_M, GrassMaterial, GrassTileBuildInput, GrassTileKey, GrassTileMesh,
-    TerrainShadingStyle, build_grass_tile_mesh, grass_tile_frame, grass_tile_key,
-    grass_tiles_per_side,
+    AU_M, GRASS_TILE_SIZE_M, GrassBladeLod, GrassMaterial, GrassTileBuildInput, GrassTileKey,
+    GrassTileMesh, LIGHT_AT_1AU, TerrainShadingStyle, build_grass_tile_mesh, grass_tile_frame,
+    grass_tile_key, grass_tiles_per_side,
 };
-use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
+use crate::rendering::types::CameraExposure;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
 /// Tiles whose centre is within this ground distance of the camera exist.
-const GRASS_RADIUS_M: f64 = 100.0;
+const GRASS_RADIUS_M: f64 = 180.0;
 /// Hysteresis: tiles are despawned only past this distance.
-const GRASS_DESPAWN_RADIUS_M: f64 = 130.0;
+const GRASS_DESPAWN_RADIUS_M: f64 = 220.0;
 /// Dithered fade band (shader-side), metres from the camera.
-const GRASS_FADE_START_M: f32 = 70.0;
-const GRASS_FADE_END_M: f32 = 100.0;
+const GRASS_FADE_START_M: f32 = 140.0;
+const GRASS_FADE_END_M: f32 = 180.0;
 /// Blade candidate density. Per-blade gates (grass mask, slope, altitude)
 /// thin this out, so realized density is lower.
-const GRASS_BLADES_PER_M2: f32 = 12.0;
+const GRASS_BLADES_PER_M2: f32 = 24.0;
 /// Above this altitude over the local terrain no new tiles are built.
 const GRASS_MAX_AGL_M: f64 = 400.0;
 /// Above this altitude all tiles are despawned (e.g. after launch).
 const GRASS_DESPAWN_AGL_M: f64 = 2000.0;
-/// Maximum concurrent tile builds (each is ~10⁴ height-mirror samples).
-const GRASS_MAX_IN_FLIGHT: usize = 3;
+/// Maximum concurrent tile builds. Builds only dispatch for tiles whose terrain
+/// is already resident at a fine LOD (cheap GPU-mirror height samples), so this
+/// can run wider without hammering the CPU field.
+const GRASS_MAX_IN_FLIGHT: usize = 8;
+/// Don't build grass until the terrain under a tile is resident at this texel
+/// size or finer. The pinned LOD-0 tile is always present but kilometres-coarse;
+/// building against it puts blades hundreds of metres off the real surface (the
+/// floating-carpet bug). At grass-tile scale (~25 m) this only needs the terrain
+/// reasonably detailed; blades sample the finest resident height regardless.
+const GRASS_MAX_TERRAIN_TEXEL_M: f32 = 8.0;
 /// World seed for blade placement hashes.
 const GRASS_SEED: u64 = 0x6772_6173_7321;
 /// Wind sway amplitude at the blade tip, metres.
@@ -138,7 +147,6 @@ fn drive_grass_tiles(
     solar: Res<SolarSystemState>,
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
-    surfaces: Res<TerrainSurfaceRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     mut commands: Commands,
 ) {
@@ -152,9 +160,10 @@ fn drive_grass_tiles(
     // selection rule, narrowed to bodies that can grow grass.
     let mut best: Option<(BodyId, f64)> = None;
     for (id, body) in sim.system.bodies.iter().enumerate() {
+        // Eligibility is now the live HeightSource (GPU-atlas mirror over the
+        // runtime ProceduralSurface) — the dead PlanetSurface registry is gone.
         if terrain_shading_style_for(body) != TerrainShadingStyle::Vegetated
             || !height_sources.contains(id)
-            || surfaces.get(id).is_none()
         {
             continue;
         }
@@ -196,6 +205,8 @@ fn drive_grass_tiles(
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
+    // GPU height mirror for the resident-tile gate in the dispatch loop below.
+    let mirror = height_sources.gpu_mirror(body_id);
 
     // Camera in the body-fixed frame; AGL over the local terrain.
     let cam_body = state.orientation.inverse() * (cam_pos - state.position);
@@ -277,18 +288,42 @@ fn drive_grass_tiles(
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    let sea_level_m = surfaces
-        .get(body_id)
-        .and_then(|s| s.static_surface.sea_level_m)
-        .unwrap_or(f32::MIN);
+    // Water is disabled until the generator grows a sea level (terrain rewrite
+    // Slice 1), so there is no sea-level cull for now — grass grows wherever the
+    // mask / slope / altitude gates allow.
+    let sea_level_m = f32::MIN;
     let flatten_exclusion = flatten_registry
         .handle(body_id)
         .read()
         .ok()
         .and_then(|guard| *guard);
 
+    // Only build a grass tile once the terrain tile beneath it is resident in
+    // the GPU height mirror. That makes the per-blade height samples cheap
+    // (mirror lookups, not the CPU field) and — crucially — places blades on the
+    // streamed mesh height, so they're settled at load instead of floating /
+    // buried while the terrain is still coarse. Non-resident candidates are left
+    // for a later frame (the candidate set is rebuilt every frame).
+    let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
-    for (_, key) in candidates.into_iter().take(slots) {
+    let mut dispatched = 0usize;
+    for (_, key) in candidates {
+        if dispatched >= slots {
+            break;
+        }
+        if let Some(guard) = &mirror_guard {
+            let Some((center, _)) = grass_tile_frame(key, tiles_per_side) else {
+                continue;
+            };
+            // Gate on the finest resident *texel size*, not mere presence: the
+            // pinned LOD-0 tile is always resident but kilometres-coarse, so
+            // building against it floats blades hundreds of metres up. Wait
+            // until the terrain here is genuinely detailed.
+            match guard.best_resident_texel_m(center.as_vec3()) {
+                Some(texel) if texel <= GRASS_MAX_TERRAIN_TEXEL_M => {}
+                _ => continue, // terrain not detailed here yet — retry next frame
+            }
+        }
         let input = GrassTileBuildInput {
             key,
             tiles_per_side,
@@ -296,12 +331,23 @@ fn drive_grass_tiles(
             radius_m,
             sea_level_m,
             blades_per_m2: GRASS_BLADES_PER_M2,
+            // STOPGAP (lighting track): the foliage track's in-flight clipmap-LOD
+            // refactor added these fields to `GrassTileBuildInput` but hasn't
+            // wired this single dispatch site yet, leaving the workspace
+            // non-compiling. These values reproduce the pre-refactor single-LOD
+            // grass (full curved blade, no width/height scaling) so the build is
+            // green for lighting verification — the foliage track owns replacing
+            // this with per-ring LOD dispatch.
+            blade_lod: GrassBladeLod::Full,
+            width_scale: 1.0,
+            height_scale: 1.0,
             seed: GRASS_SEED,
             flatten_exclusion,
         };
         let revision = height_source.revision();
         let task = pool.spawn(async move { build_grass_tile_mesh(&input) });
         grass.in_flight.insert(key, (task, revision));
+        dispatched += 1;
     }
 }
 
@@ -427,14 +473,16 @@ fn update_grass_transforms(
     }
 }
 
-/// Per-frame shading parameters: sun direction toward the star (the vegetated
-/// terrain path needs no flux — see `grass.wgsl`), wall-clock sway time, and a
+/// Per-frame shading parameters: sun direction + flux toward the star, the
+/// radial up and Rayleigh τ_v feeding the shared `thalos::lighting` sky model
+/// (so blades light exactly like the ground), wall-clock sway time, and a
 /// slowly veering wind direction tangent to the surface under the camera.
 fn update_grass_material(
     grass: Res<GrassTiles>,
     solar: Res<SolarSystemState>,
     sim: Res<SimulationState>,
     time: Res<Time>,
+    exposure: Res<CameraExposure>,
     mut materials: ResMut<Assets<GrassMaterial>>,
 ) {
     let (Some(handle), Some(body_id), Some(states)) =
@@ -450,8 +498,13 @@ fn update_grass_material(
     };
 
     let star_pos = states.first().map(|s| s.position).unwrap_or(DVec3::ZERO);
-    let sun_dir = (star_pos - body_state.position).normalize_or_zero().as_vec3();
-    material.params.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
+    let offset = star_pos - body_state.position;
+    let sun_dir = offset.normalize_or_zero().as_vec3();
+    // Sun flux in the same units the terrain `SceneLighting` carries (lux ×
+    // exposure gain), so the shared sky model exposes grass identically.
+    let au_over_d = (AU_M / offset.length().max(1.0)) as f32;
+    let flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
+    material.params.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux);
 
     // Wind: tangent to the surface under the camera, veering slowly. Render
     // space is inertial-axis-aligned, so the world-space tangent basis comes
@@ -466,8 +519,22 @@ fn update_grass_material(
     let veer = t * 0.03;
     let wind = (east * veer.cos() + north * veer.sin()).normalize_or_zero();
     material.params.wind = Vec4::new(wind.x, wind.y, wind.z, GRASS_WIND_SWAY_M);
-    material.params.time_fade =
-        Vec4::new(t, GRASS_FADE_START_M, GRASS_FADE_END_M, 0.0);
+    material.params.time_fade = Vec4::new(t, GRASS_FADE_START_M, GRASS_FADE_END_M, 0.0);
+
+    // Sky hemisphere inputs: the local radial up and the body's authored
+    // Rayleigh τ_v + atmosphere strength. τ_v (= β_R · H_R) is the same value
+    // the terrain shader recovers from its `AtmosphereBlock`, so grass and
+    // ground derive one identical sky environment.
+    material.params.sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
+    let (tau, strength) = sim
+        .system
+        .bodies
+        .get(body_id)
+        .and_then(|b| b.terrestrial_atmosphere.as_ref())
+        .and_then(|a| a.scattering.as_ref())
+        .map(|s| (Vec3::from_array(s.vertical_optical_depth), s.strength))
+        .unwrap_or((Vec3::ZERO, 0.0));
+    material.params.sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 }
 
 /// Periodically reconcile tiles with the height source: when the source
