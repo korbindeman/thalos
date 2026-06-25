@@ -41,6 +41,11 @@ const MASK_STEP_M: f64 = 2.0;
 /// density configs at coarse (large-area) LOD rings.
 const MAX_CANDIDATES_PER_TILE: usize = 16_384;
 
+/// How far beyond a flatten pad's ramp the forest stays cleared (metres). The
+/// tree/shrub density fades from 0 at the pad edge to full over this margin, so
+/// the airfield sits in an open clearing instead of a wall of trees.
+const VEG_CLEARING_MARGIN_M: f32 = 320.0;
+
 // ---------------------------------------------------------------------------
 // Shared placement gate
 // ---------------------------------------------------------------------------
@@ -232,7 +237,17 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
 
             let alt = altitude_fade(sample.height_m, sp.altitude_band);
             let clump = clump_field(dir, sp.layer, sp.clump_affinity);
-            let accept = sample.grass_w * alt * clump;
+            let mut accept = sample.grass_w * alt * clump;
+            // Clearing around a flatten pad (e.g. the runway): the forest fades
+            // out approaching the airfield over a margin beyond the pad ramp, so
+            // trees don't crowd right up to the strip.
+            if let Some(flatten) = &input.flatten_exclusion {
+                let cos = dir.dot(flatten.center_dir).clamp(-1.0, 1.0);
+                let d = (cos.acos() * input.radius_m) as f32;
+                let pad_reach = (flatten.half_along_m.hypot(flatten.half_across_m) + flatten.ramp_m)
+                    as f32;
+                accept *= smoothstep(pad_reach, pad_reach + VEG_CLEARING_MARGIN_M, d);
+            }
             if (rng(2) as f32) >= accept {
                 continue;
             }
@@ -330,24 +345,33 @@ pub fn combine_tree_tile_mesh(
 // Clumping field
 // ---------------------------------------------------------------------------
 
-/// Forest/grove clumping in `[0, 1]`. Domain-warped value-noise fBM gated by
-/// the placement masks upstream — noise is legitimate here because this is
-/// placement *breakup*, not visible terrain height/albedo (CLAUDE.md's
-/// process-first rule). Shrubs hug the *tree* grove mask edges (undergrowth
-/// clusters at forest margins); ground cover dips slightly inside dense groves.
+/// Angular frequency of the forest-patch mask. At planet radius this sets the
+/// patch scale: `~ radius / FREQ` metres per lattice cell (≈ a few hundred m on
+/// a ~3000 km body), so groves read as patches the player can walk between — not
+/// the near-constant ~100 km blanket a low frequency gives.
+const FOREST_PATCH_FREQ: f64 = 8000.0;
+
+/// Forest-patch clumping in `[0, 1]`. A domain-warped value-noise fBM at
+/// patch scale ([`FOREST_PATCH_FREQ`]), **contrasted** (smoothstep) into real
+/// groves and real clearings rather than a smooth everywhere-gradient — noise is
+/// legitimate here because this is placement *breakup*, not visible terrain
+/// height/albedo (CLAUDE.md's process-first rule). Shrubs hug the grove edges;
+/// ground cover is full in clearings and sparser on the forest floor.
 pub fn clump_field(dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
-    // Low-frequency grove mask (warp then sample, so groves aren't grid-aligned).
-    let warp = fbm(dir * 6.0, 2) * 0.35;
-    let grove = fbm(dir * 18.0 + DVec3::splat(warp as f64), 3);
+    // Warp then sample so patch edges aren't grid-aligned; contrast into patches.
+    let warp = fbm(dir * (FOREST_PATCH_FREQ * 0.45), 2) as f64;
+    let mask = fbm(dir * FOREST_PATCH_FREQ + DVec3::splat(warp * 5.0), 4);
+    let forest = smoothstep(0.40, 0.60, mask);
     match layer {
-        VegLayer::Tree => lerp(1.0, smoothstep(0.35, 0.75, grove), affinity),
+        // affinity 0 = uniform; 1 = trees only in patches (clearings near zero).
+        VegLayer::Tree => lerp(1.0, forest, affinity),
         VegLayer::Shrub => {
-            // Peak at the grove edge band, plus a finer scatter of lone bushes.
-            let edge = 1.0 - (smoothstep(0.35, 0.55, grove) - smoothstep(0.55, 0.8, grove)).abs();
-            let lone = fbm(dir * 60.0, 2);
-            (edge * 0.7 + lone * 0.3).clamp(0.0, 1.0)
+            // Peak in the grove edge band (undergrowth margins) + a few lone bushes.
+            let edge = 1.0 - (forest - 0.5).abs() * 2.0;
+            let lone = fbm(dir * (FOREST_PATCH_FREQ * 2.5), 2);
+            lerp(lone * 0.35, (edge * 0.7 + forest * 0.4).clamp(0.0, 1.0), affinity)
         }
-        VegLayer::GroundCover => 1.0 - 0.4 * smoothstep(0.6, 0.9, grove),
+        VegLayer::GroundCover => 1.0 - 0.5 * forest,
     }
 }
 

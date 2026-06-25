@@ -48,14 +48,15 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 const TREE_TILE_SIZE_M: f64 = 200.0;
 /// Build tiles out to here — beyond the fade-end by ~a tile, so a tile finishes
 /// building while its nearest trees are scaled to ~0 (invisible build, no
-/// pop-in); they grow in as the craft approaches.
-const TREE_RADIUS_M: f64 = 1400.0;
+/// pop-in); they grow in as the craft approaches. Patch clumping leaves far
+/// clearings nearly empty, so the extra reach is cheap.
+const TREE_RADIUS_M: f64 = 1700.0;
 /// Hysteresis: tiles despawn only past this distance.
-const TREE_DESPAWN_RADIUS_M: f64 = 1560.0;
+const TREE_DESPAWN_RADIUS_M: f64 = 1880.0;
 /// Scale-fade band (shader-side, metres, from the craft anchor): trees full
 /// inside `start`, grown from zero out to `end`. Seamless — no dither, no pop.
-const TREE_FADE_START_M: f32 = 1050.0;
-const TREE_FADE_END_M: f32 = 1280.0;
+const TREE_FADE_START_M: f32 = 1300.0;
+const TREE_FADE_END_M: f32 = 1560.0;
 /// Broadleaf candidate density per m² before gates (clumping, slope, altitude).
 const TREE_DENSITY_PER_M2: f32 = 0.011;
 /// Conifer candidate density per m² (mixed into the same tiles for variety).
@@ -194,9 +195,9 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
         scale_range: (0.8, 1.6),
         slope_limit: 0.40,
         altitude_band: (1800.0, 2900.0, 2400.0, 3100.0),
-        // Mild clumping: groves, but trees still spread into the near ground
-        // instead of clustering into a single distant band.
-        clump_affinity: 0.40,
+        // Strong clumping → distinct forest patches with real clearings between
+        // them (the clump field is now patch-scale; see scatter::clump_field).
+        clump_affinity: 0.85,
         min_grass_w: 0.22,
     });
 
@@ -219,7 +220,7 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
         scale_range: (0.85, 1.7),
         slope_limit: 0.45,
         altitude_band: (1900.0, 3000.0, 2600.0, 3300.0),
-        clump_affinity: 0.55,
+        clump_affinity: 0.80,
         min_grass_w: 0.20,
     });
 
@@ -242,7 +243,7 @@ fn setup_species_library(mut commands: Commands, mut materials: ResMut<Assets<Tr
         scale_range: (0.6, 1.3),
         slope_limit: 0.46,
         altitude_band: (1600.0, 2700.0, 2300.0, 3000.0),
-        clump_affinity: 0.45,
+        clump_affinity: 0.60,
         min_grass_w: 0.28,
     });
 
