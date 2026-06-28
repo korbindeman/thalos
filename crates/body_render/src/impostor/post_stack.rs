@@ -30,7 +30,11 @@ pub fn space_camera_post_stack() -> impl Bundle {
             preset: SmaaPreset::High,
         },
         Hdr,
-        Tonemapping::TonyMcMapface,
+        // AgX: filmic, neutral highlight rolloff — pulls saturated daylight
+        // terrain/sky back toward a photoreal look (closer to the MSFS
+        // reference than TonyMcMapface's punchier transform). Global to all
+        // space/surface views; revert to `TonyMcMapface` here to A/B.
+        Tonemapping::AgX,
         // Intentional post-process dithering. Do not disable this when
         // investigating generic atmosphere/sky "noise" reports; it is part of
         // the desired camera look and should only change when explicitly named.

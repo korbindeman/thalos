@@ -16,6 +16,7 @@ use bevy::window::{Monitor, PrimaryMonitor};
 use bevy_egui::{EguiContexts, egui};
 use thalos_input::settings::{AxisSpec, BindingSection, BindingSpec, HotasDeviceSelector, InputSettings};
 
+use crate::graphics_settings::{self, GraphicsSettings};
 use crate::window_settings::{self, MonitorChoice, WindowSettings, WindowSettingsOverrides};
 
 // ── Resource ──────────────────────────────────────────────────────────────────
@@ -30,6 +31,7 @@ pub struct SettingsMenu {
 enum Tab {
     #[default]
     Window,
+    Graphics,
     Keyboard,
     Mouse,
     Controller,
@@ -56,6 +58,7 @@ fn settings_ui(
     mut settings_menu: ResMut<SettingsMenu>,
     mut input_settings: ResMut<InputSettings>,
     mut window_settings: ResMut<WindowSettings>,
+    mut graphics_settings: ResMut<GraphicsSettings>,
     window_overrides: Res<WindowSettingsOverrides>,
     monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
 ) {
@@ -90,6 +93,7 @@ fn settings_ui(
             ui.horizontal(|ui| {
                 for (t, label) in [
                     (Tab::Window, "Window"),
+                    (Tab::Graphics, "Graphics"),
                     (Tab::Keyboard, "Keyboard"),
                     (Tab::Mouse, "Mouse"),
                     (Tab::Controller, "Controller"),
@@ -123,6 +127,7 @@ fn settings_ui(
                         window_settings.set_changed();
                     }
                 }
+                Tab::Graphics => show_graphics_tab(ui, &mut graphics_settings),
                 Tab::Keyboard => show_keyboard_tab(ui, &input_settings),
                 Tab::Mouse => show_mouse_tab(ui, &input_settings),
                 Tab::Controller => show_controller_tab(ui, &input_settings),
@@ -133,6 +138,38 @@ fn settings_ui(
     if !open {
         settings_menu.open = false;
     }
+}
+
+// ── Graphics tab ────────────────────────────────────────────────────────────────
+
+fn show_graphics_tab(ui: &mut egui::Ui, settings: &mut GraphicsSettings) {
+    ui.checkbox(&mut settings.clouds, "Volumetric clouds");
+    ui.weak("Off parks the cloud raymarch (no GPU cost) and the sky renders clear.");
+
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Anti-aliasing");
+        egui::ComboBox::from_id_salt("msaa_setting")
+            .selected_text(settings.msaa.label())
+            .show_ui(ui, |ui| {
+                for option in graphics_settings::MsaaSetting::ALL {
+                    ui.selectable_value(&mut settings.msaa, option, option.label());
+                }
+            });
+    });
+    ui.weak("MSAA smooths geometry edges; any level replaces the SMAA post pass.");
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    if ui.button("Reset to defaults").clicked() {
+        *settings = GraphicsSettings::default();
+    }
+
+    ui.add_space(4.0);
+    ui.weak(format!("Saved to {}.", graphics_settings::SETTINGS_PATH));
 }
 
 // ── Keyboard tab ──────────────────────────────────────────────────────────────

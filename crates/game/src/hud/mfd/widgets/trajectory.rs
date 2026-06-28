@@ -1,12 +1,14 @@
-//! Burn-time local-system schematic (top-right HUD panel).
+//! Trajectory widget: a top-down (XZ ecliptic) schematic of the ship's local
+//! system — concentric orbit rings for the dominant body's satellites, the
+//! dominant body at the centre, the ship, its current ballistic trajectory
+//! (solid), and the maneuver-node projected trajectory (dotted).
 //!
-//! While the ship is burning in space (or has a pending maneuver node), this
-//! panel shows a simplified top-down plot of the ship's local system —
-//! concentric orbit rings for the dominant body's satellites, the dominant
-//! body at the centre, the ship, its current ballistic trajectory (solid), and
-//! the maneuver-node projected trajectory (dotted). It surfaces, in the ship
-//! ("main") view, the trajectory information that is otherwise only visible in
-//! the map view, so a burn can be reasoned about without leaving the cockpit.
+//! This is the ship-view surfacing of the trajectory information otherwise
+//! only visible in the map view, so a burn can be reasoned about without
+//! leaving the cockpit. Ported from the old `system_map_panel`; the only
+//! behavioural change is that it is **not relevant in atmosphere** (the old
+//! panel popped up during jet cruise), and the MFD selector — not this
+//! module — owns the root's visibility.
 //!
 //! Everything is drawn by `assets/shaders/system_map.wgsl`; this module
 //! projects the simulation state into the shader's normalised [-1, 1] space.
@@ -21,11 +23,10 @@ use thalos_physics_canonical::trajectory::TrajectoryBranchStack;
 use thalos_physics_canonical::types::BodyState;
 use thalos_world::BodyId;
 
-use crate::fuel::ThrottleState;
-use crate::hud::HudPanel;
-use crate::hud::theme::{HudTheme, label, panel_frame, panel_node};
+use crate::hud::theme::{HudTheme, label};
 use crate::rendering::{SimulationState, SolarSystemState};
-use crate::view::ViewMode;
+
+use super::super::{ActiveWidget, FlightContext, MfdWidgetRoot, WidgetKind};
 
 /// Max orbit rings (dominant-body satellites) drawn. Mirror in the shader.
 const MAX_RINGS: usize = 8;
@@ -36,8 +37,6 @@ const MAX_TRAJ: usize = 96;
 const MAP_SIZE_PX: f32 = 200.0;
 /// Fraction of the half-extent a zoom level's radius maps to (leaves a margin).
 const NDC_FIT: f64 = 0.82;
-/// Keep the panel up briefly after a burn ends so throttle blips don't flicker.
-const BURN_LINGER_SECS: f32 = 5.0;
 
 /// Discrete zoom ladder: each entry is the view radius (panel half-extent) in
 /// metres. The plot snaps to the smallest level that contains the relevant
@@ -65,7 +64,7 @@ const DASH_DUTY: f32 = 0.5;
 /// Uniform mirror of the WGSL `SystemMapData`. All fields are `Vec4`/arrays of
 /// `Vec4` so the std140 layout has no scalar-padding surprises.
 #[derive(Clone, ShaderType)]
-pub(super) struct SystemMapData {
+pub struct SystemMapData {
     /// x = ring_count, y = solid_count, z = dotted_count, w = node_flag.
     params: Vec4,
     /// x = central radius, y = ship radius, z = node radius, w = line half-width.
@@ -114,7 +113,7 @@ impl Default for SystemMapData {
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
-pub(super) struct SystemMapMaterial {
+pub struct SystemMapMaterial {
     #[uniform(0)]
     data: SystemMapData,
 }
@@ -125,121 +124,94 @@ impl UiMaterial for SystemMapMaterial {
     }
 }
 
-/// Marker on the panel root (drives visibility).
-#[derive(Component)]
-pub(super) struct SystemMapRoot;
-
 /// Marker on the `MaterialNode` canvas (carries the live material handle).
 #[derive(Component)]
-pub(super) struct SystemMapCanvas;
+pub(crate) struct SystemMapCanvas;
 
 /// Marker on the scale-readout text under the plot.
 #[derive(Component)]
-pub(super) struct SystemMapScale;
+pub(crate) struct SystemMapScale;
 
 /// Persistent zoom selection, kept across frames so the ladder snap has
 /// hysteresis (held in a `Local` on [`update`]). Reset when the dominant body
 /// changes, since the appropriate scale shifts by orders of magnitude.
 #[derive(Default)]
-pub(super) struct ZoomState {
+pub(crate) struct ZoomState {
     idx: usize,
     dominant: Option<BodyId>,
 }
 
-pub(super) fn setup(
-    mut commands: Commands,
-    mut materials: ResMut<Assets<SystemMapMaterial>>,
-    theme: Res<HudTheme>,
-) {
-    let mut root = panel_node();
-    // Right edge, between the top-right FPS overlay and the bottom-right
-    // staging stack.
-    root.right = Val::Px(20.0);
-    root.top = Val::Px(140.0);
-    root.row_gap = Val::Px(6.0);
+/// Relevant only outside an atmosphere with a live prediction and a reason to
+/// look at it (a recent burn or a pending maneuver node). The `!in_atmosphere`
+/// gate is the fix for the panel popping up during jet cruise.
+pub(crate) fn relevance(ctx: &FlightContext) -> Option<i32> {
+    (!ctx.in_atmosphere && ctx.prediction_shown && (ctx.recently_burning || ctx.has_nodes))
+        .then_some(60)
+}
 
-    let (bg, border) = panel_frame(&theme);
+pub(crate) fn build(
+    area: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    materials: &mut Assets<SystemMapMaterial>,
+) {
     let material = materials.add(SystemMapMaterial {
         data: SystemMapData::default(),
     });
-
-    commands
-        .spawn((
-            root,
-            bg,
-            border,
-            Visibility::Hidden,
-            SystemMapRoot,
-            HudPanel,
-            Name::new("HudSystemMap"),
-        ))
-        .with_children(|p| {
-            p.spawn(label(&theme, "TRAJECTORY"));
-            p.spawn((
-                Node {
-                    width: Val::Px(MAP_SIZE_PX),
-                    height: Val::Px(MAP_SIZE_PX),
-                    ..default()
-                },
-                MaterialNode(material),
-                SystemMapCanvas,
-                Name::new("HudSystemMapCanvas"),
-            ));
-            p.spawn((label(&theme, "—"), SystemMapScale, Name::new("HudSystemMapScale")));
-        });
+    area.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(6.0),
+            ..default()
+        },
+        Visibility::Hidden,
+        MfdWidgetRoot {
+            kind: WidgetKind::Trajectory,
+        },
+        Name::new("MfdTrajectory"),
+    ))
+    .with_children(|p| {
+        p.spawn(label(theme, "TRAJECTORY"));
+        p.spawn((
+            Node {
+                width: Val::Px(MAP_SIZE_PX),
+                height: Val::Px(MAP_SIZE_PX),
+                ..default()
+            },
+            MaterialNode(material),
+            SystemMapCanvas,
+            Name::new("MfdTrajectoryCanvas"),
+        ));
+        p.spawn((label(theme, "—"), SystemMapScale, Name::new("MfdTrajectoryScale")));
+    });
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn update(
+pub(crate) fn update(
+    active: Res<ActiveWidget>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
-    throttle: Res<ThrottleState>,
-    view: Res<ViewMode>,
-    time: Res<Time>,
     theme: Res<HudTheme>,
     mut materials: ResMut<Assets<SystemMapMaterial>>,
-    mut root_q: Query<&mut Visibility, With<SystemMapRoot>>,
     canvas_q: Query<&MaterialNode<SystemMapMaterial>, With<SystemMapCanvas>>,
     mut scale_q: Query<&mut Text, With<SystemMapScale>>,
-    mut last_burn: Local<Option<f32>>,
     mut zoom: Local<ZoomState>,
 ) {
-    let Ok(mut vis) = root_q.single_mut() else {
-        return;
-    };
-
-    // A live branch stack only exists for an in-space ballistic craft — the
-    // prediction is cleared while landed / grounded / in terrain contact (see
-    // `bridge::update_prediction`), so this doubles as the "in space" gate.
-    let branches = sim.simulation.trajectory_branches();
-    let has_nodes = branches.is_some_and(|b| !b.branches.is_empty());
-
-    let now = time.elapsed_secs();
-    if throttle.effective > 0.02 {
-        *last_burn = Some(now);
-    }
-    let recently_burning = last_burn.is_some_and(|t| now - t < BURN_LINGER_SECS);
-
-    let show =
-        matches!(*view, ViewMode::Ship) && branches.is_some() && (recently_burning || has_nodes);
-
-    if !show {
-        if *vis != Visibility::Hidden {
-            *vis = Visibility::Hidden;
-        }
+    if active.0 != Some(WidgetKind::Trajectory) {
         return;
     }
-    if *vis != Visibility::Inherited {
-        *vis = Visibility::Inherited;
-    }
-
-    let (Some(branches), Some(states)) = (branches, solar.states.as_deref()) else {
-        return;
-    };
     let Ok(canvas) = canvas_q.single() else {
         return;
     };
     let Some(material) = materials.get_mut(canvas) else {
+        return;
+    };
+
+    // Pinned with no live prediction (e.g. landed): blank rather than show a
+    // frozen pre-collapse orbit.
+    let (Some(branches), Some(states)) =
+        (sim.simulation.trajectory_branches(), solar.states.as_deref())
+    else {
+        material.data = SystemMapData::default();
         return;
     };
 
@@ -314,12 +286,12 @@ fn build_data(
     // Satellites of the dominant body → concentric rings + dots.
     let mut children: Vec<(f64, DVec2)> = Vec::new();
     for body in &sim.system.bodies {
-        if body.parent == Some(dominant) {
-            if let Some(bs) = states.get(body.id) {
-                let r = bs.position - center;
-                let p2 = DVec2::new(r.x, r.z);
-                children.push((p2.length(), p2));
-            }
+        if body.parent == Some(dominant)
+            && let Some(bs) = states.get(body.id)
+        {
+            let r = bs.position - center;
+            let p2 = DVec2::new(r.x, r.z);
+            children.push((p2.length(), p2));
         }
     }
 
@@ -370,9 +342,9 @@ fn build_data(
     if zoom.dominant != Some(dominant) {
         zoom.dominant = Some(dominant);
         zoom.idx = smallest_fit;
-    } else if content > ZOOM_LEVELS_M[zoom.idx] {
-        zoom.idx = smallest_fit;
-    } else if zoom.idx > 0 && content < ZOOM_LEVELS_M[zoom.idx - 1] * ZOOM_DOWN_HYSTERESIS {
+    } else if content > ZOOM_LEVELS_M[zoom.idx]
+        || (zoom.idx > 0 && content < ZOOM_LEVELS_M[zoom.idx - 1] * ZOOM_DOWN_HYSTERESIS)
+    {
         zoom.idx = smallest_fit;
     }
     let scale = NDC_FIT / ZOOM_LEVELS_M[zoom.idx]; // world metres → plot units

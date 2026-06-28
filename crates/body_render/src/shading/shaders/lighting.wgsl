@@ -287,14 +287,14 @@ fn shade_hapke_surface(
 // the old placeholder ignored flux and used a flat 0.62, so midday direct now
 // lifts ~1.6× — the previous ground read too dark. This is the single knob for
 // overall ground brightness; flux now carries exposure + sun-distance.
-const SURFACE_DIRECT_SCALE: f32 = 0.20;
+const SURFACE_DIRECT_SCALE: f32 = 0.23;
 // Diffuse sky-dome (skylight) scale. Drives how strongly the blue sky fills
 // shadowed / up-facing ground at midday. Second-loudest knob after direct.
 const SURFACE_SKY_SCALE: f32 = 0.15;
 // Sky chroma gain: how saturated the blue sky tint reads. The tint is
 // `1 - exp(-tau_v · gain)`, so higher = more saturated blue (more Rayleigh
 // out-scatter). Brightness is separate (`SURFACE_SKY_SCALE`).
-const SURFACE_SKY_CHROMA_GAIN: f32 = 6.0;
+const SURFACE_SKY_CHROMA_GAIN: f32 = 8.0;
 // Warm ground-bounce: a representative sunlit-land albedo and its scale. Lights
 // down-facing facets with a warm complement to the cool sky.
 const SURFACE_GROUND_ALBEDO: vec3<f32> = vec3<f32>(0.10, 0.085, 0.055);
@@ -387,4 +387,38 @@ fn env_brdf_approx(roughness: f32, n_dot_v: f32) -> vec2<f32> {
     let r = roughness * c0 + c1;
     let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
     return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+}
+
+// ── Geometric specular antialiasing ──────────────────────────────────────────
+// Sub-pixel variation in the shading normal makes a sharp GGX highlight sparkle
+// and crawl as the camera moves — the dominant aliasing on relief-normal
+// terrain, grass blades, and foliage, the kind an edge-AA pass (SMAA/MSAA) can't
+// touch. Following Kaplanyan "Stable Specular Highlights" (2016) / the filament
+// implementation, widen the roughness by the screen-space normal variance so the
+// specular lobe covers the pixel's normal cone, trading a hair of gloss for a
+// stable highlight.
+//
+// Split in two so the derivative builtins stay in uniform control flow: call
+// `specular_aa_variance` once on the shading normal *before* any non-uniform
+// branch, then feed its result to `specular_aa_apply` inside each BRDF path.
+
+const SPECULAR_AA_VARIANCE: f32 = 0.25;   // screen-space normal-variance gain
+const SPECULAR_AA_THRESHOLD: f32 = 0.18;  // clamp on the added kernel roughness
+
+// Screen-space normal variance for world-space normal `n`. Uses `dpdx`/`dpdy`,
+// so it MUST be evaluated in uniform control flow.
+fn specular_aa_variance(n: vec3<f32>) -> f32 {
+    let dndx = dpdx(n);
+    let dndy = dpdy(n);
+    return SPECULAR_AA_VARIANCE * (dot(dndx, dndx) + dot(dndy, dndy));
+}
+
+// Widen `perceptual_roughness` to cover the normal cone described by `variance`
+// (from `specular_aa_variance`). Works in GGX α = roughness² space; pure, so it
+// is safe to call inside any branch.
+fn specular_aa_apply(perceptual_roughness: f32, variance: f32) -> f32 {
+    let alpha = perceptual_roughness * perceptual_roughness;
+    let kernel = min(2.0 * variance, SPECULAR_AA_THRESHOLD);
+    let filtered_alpha = sqrt(clamp(alpha * alpha + kernel, 0.0, 1.0));
+    return sqrt(filtered_alpha);
 }

@@ -236,21 +236,37 @@ fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32)
     let step_m = tile_lod_m.clamp(2.0, 250.0);
 
     let heights: Vec<f32> = pixels.iter().map(|p| p.height_m).collect();
-    for y in 0..size {
-        let y_d = y.saturating_sub(1);
-        let y_u = (y + 1).min(size - 1);
-        for x in 0..size {
-            let x_l = x.saturating_sub(1);
-            let x_r = (x + 1).min(size - 1);
-            let idx = y * size + x;
-            let h_l = heights[y * size + x_l];
-            let h_r = heights[y * size + x_r];
-            let h_d = heights[y_d * size + x];
-            let h_u = heights[y_u * size + x];
-            pixels[idx].material_rgba =
-                material_masks_from_heights(heights[idx], h_l, h_r, h_d, h_u, step_m);
-        }
-    }
+    // Slope/curvature stencil over the (read-only) height buffer. Rows are
+    // independent — each writes only its own pixels' `material_rgba` and reads
+    // shared `heights` — so spread them across the same bounded eval pool the
+    // field sweep uses, rather than running this 262 k-pixel pass serially
+    // after every parallel field bake. Kept on `tile_eval_pool` (not rayon's
+    // implicit global pool) so it stays inside the synthesis isolation budget.
+    tile_eval_pool().install(|| {
+        pixels
+            .par_chunks_mut(size)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let y_d = y.saturating_sub(1);
+                let y_u = (y + 1).min(size - 1);
+                for (x, pixel) in row.iter_mut().enumerate() {
+                    let x_l = x.saturating_sub(1);
+                    let x_r = (x + 1).min(size - 1);
+                    let h_l = heights[y * size + x_l];
+                    let h_r = heights[y * size + x_r];
+                    let h_d = heights[y_d * size + x];
+                    let h_u = heights[y_u * size + x];
+                    pixel.material_rgba = material_masks_from_heights(
+                        heights[y * size + x],
+                        h_l,
+                        h_r,
+                        h_d,
+                        h_u,
+                        step_m,
+                    );
+                }
+            });
+    });
 }
 
 /// Slope/curvature/altitude → packed material masks (R = grass, G = soil,

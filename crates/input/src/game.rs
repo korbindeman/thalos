@@ -99,6 +99,10 @@ pub struct FlapsRetractAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
+pub struct GearToggleAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
 pub struct PitchPositiveAction;
 
 #[derive(InputAction)]
@@ -217,6 +221,8 @@ pub struct GameInputIntent {
     pub flaps_extend: bool,
     /// Edge-triggered: the player retracted the flaps one detent this frame.
     pub flaps_retract: bool,
+    /// Edge-triggered: the player toggled the landing gear up/down this frame.
+    pub gear_toggle: bool,
     pub throttle_up: bool,
     pub throttle_down: bool,
     /// Absolute HOTAS throttle command in `[0, 1]`. `None` leaves the
@@ -385,6 +391,11 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<FlapsRetractAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.flight.bindings("flaps_retract")),
+            ),
+            (
+                Action::<GearToggleAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.flight.bindings("gear_toggle")),
             ),
             (
                 Action::<PitchPositiveAction>::new(),
@@ -635,10 +646,12 @@ fn collect_throttle_axis_intent(
     parking_brake: Query<(&Action<ParkingBrakeAction>, &ActionEvents)>,
     flaps_extend: Query<(&Action<FlapsExtendAction>, &ActionEvents)>,
     flaps_retract: Query<(&Action<FlapsRetractAction>, &ActionEvents)>,
+    gear_toggle: Query<(&Action<GearToggleAction>, &ActionEvents)>,
 ) {
     intent.parking_brake_toggle = started(&parking_brake);
     intent.flaps_extend = started(&flaps_extend);
     intent.flaps_retract = started(&flaps_retract);
+    intent.gear_toggle = started(&gear_toggle);
     // Keep Shift/Ctrl available as throttle controls during normal flight, but
     // do not let OS command chords like cmd+shift-click or cmd+shift+2 leak
     // into gameplay as throttle input.

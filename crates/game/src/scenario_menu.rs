@@ -28,7 +28,7 @@ use bevy::prelude::*;
 
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::{ShipParameters, VesselKind};
-use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use thalos_world::BodyId;
 
 use crate::hud::theme::{HudTheme, panel_frame};
@@ -299,7 +299,6 @@ fn handle_button_clicks(
     mut sim: ResMut<SimulationState>,
     mut active: ResMut<ActiveLocalBubble>,
     height_sources: Res<HeightSourceRegistry>,
-    surfaces: Res<TerrainSurfaceRegistry>,
     mut eva_mode: ResMut<EvaMode>,
     player_ship: Query<Entity, With<PlayerShip>>,
     mut plan: ResMut<ManeuverPlan>,
@@ -319,7 +318,6 @@ fn handle_button_clicks(
             &mut sim,
             &mut active,
             &height_sources,
-            &surfaces,
             &mut eva_mode,
             &player_ship,
             &mut plan,
@@ -343,7 +341,6 @@ pub(crate) fn respawn_into(
     sim: &mut SimulationState,
     active: &mut ActiveLocalBubble,
     height_sources: &HeightSourceRegistry,
-    surfaces: &TerrainSurfaceRegistry,
     eva_mode: &mut EvaMode,
     player_ship: &Query<Entity, With<PlayerShip>>,
     plan: &mut ManeuverPlan,
@@ -390,7 +387,7 @@ pub(crate) fn respawn_into(
             // Terrain is resident (we just crashed on it), so this resolves on
             // the first try; the parking-orbit fallback is belt-and-braces for a
             // somehow-missing height source.
-            let (state, attitude) = compute_descent_state(situation, sim, height_sources, surfaces)
+            let (state, attitude) = compute_descent_state(situation, sim, height_sources)
                 .unwrap_or_else(|| {
                     warn!("respawn: terrain not resident for {situation:?}; using orbit");
                     orbit_respawn_state(sim, homeworld)

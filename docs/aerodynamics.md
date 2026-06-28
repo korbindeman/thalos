@@ -193,7 +193,7 @@ should not see a quartic surprise.
 
 Deliberately shallow (KSP-style): two controls, no trim/mixture/cowl-flap
 management. `crates/game/src/flight_config.rs` owns the state
-(`FlightConfig`, BRP-visible); `assets/input.ron` binds the keys.
+(`FlightConfig`); `assets/input.ron` binds the keys.
 
 - **Flap lever** — `F` extends a detent, `R` retracts: UP → T/O → LDG.
   The aero model scales flap lift linearly with deployment and flap drag
@@ -259,7 +259,7 @@ EVA is excluded throughout (no aero surfaces attached).
 ## Handling feel — coefficients from transport derivatives
 
 The **stability and damping** coefficients (`crates/game/src/aero.rs`,
-live-tunable via the `AeroTuning` resource over BRP) are mapped from standard
+held in the `AeroTuning` resource) are mapped from standard
 transport-category stability derivatives (Cm_α ≈ −1.2, Cm_q ≈ −25 including
 the α̇ lag this model lacks, Cl_p ≈ −0.45, Cn_r ≈ −0.3). The **control**
 coefficients are no longer constants: they derive per craft from the authored
@@ -342,8 +342,8 @@ per-surface strip sum, which is the thing that pumped energy when tried). On
 the Meridian the derived values land within ~10% of the previously hand-tuned
 transport constants (pitch 0.48 vs 0.5, yaw 0.032 vs 0.04, roll 0.037),
 pinned by `meridian_control_authority_derives_from_surfaces`. The `AeroTuning`
-BRP resource now carries `*_control_scale` multipliers (default 1) over the
-derived values instead of absolute control overrides, so a live feel-tweak
+resource now carries `*_control_scale` multipliers (default 1) over the
+derived values instead of absolute control overrides, so a feel-tweak
 can't erase the difference between a big and a small aileron.
 
 **Spacecraft (rockets, capsules).** A bluff-body config (reference area
@@ -441,8 +441,9 @@ for directions). Both groups start disabled.
   decelerates; full throttle tops out around M 0.8 instead of punching through
   Mach 1. In `orbit` (Apollo), the flap gate and brakes pill must not appear at
   all.
-- BRP: read `thalos_game::aero::AeroReadout` on the ship for non-zero
-  `dynamic_pressure_pa` / `airspeed_ms` during descent; read
-  `thalos_game::flight_config::FlightConfig` for lever/actuator state; read
-  `AvianRole` to confirm in-atmosphere → `Full`; confirm warp pins to 1×
-  below the Kármán line.
+- Verify in-atmosphere flight by watching the HUD during descent: airspeed
+  and dynamic pressure (`AeroReadout`'s `airspeed_ms` / `dynamic_pressure_pa`)
+  go non-zero, the flap/brake state tracks the `FlightConfig` lever, the
+  regime resolves to in-atmosphere → `Full`, and warp pins to 1× below the
+  Kármán line. Add an `info!` log on these resources if you need exact values
+  in the console.

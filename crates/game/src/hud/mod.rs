@@ -12,6 +12,10 @@
 //! - **Screen centre (HUD mode)**: PFD overlay replacing the navball
 //!   cluster — pitch ladder, speed/altitude tapes, direction markers
 //!   ([`pfd_panel`], toggled by the top-left BALL/HUD selector)
+//! - **Top-right (MFD slot)**: a contextual, customizable widget slot
+//!   ([`mfd`]) that auto-selects the widget relevant to the current
+//!   flight context (orbital trajectory plot, airliner navigation
+//!   display, …), with a manual pin/hide override
 //!
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
@@ -22,13 +26,14 @@ mod flight_config_panel;
 mod flight_panel;
 mod format;
 mod fps_overlay;
+mod geo;
 pub mod input_gate;
+mod mfd;
 mod nav_attitude;
 mod nav_panel;
 mod orbital_panel;
 mod pfd_panel;
 mod staging_panel;
-mod system_map_panel;
 pub mod theme;
 mod view_mode_panel;
 mod warp_time_panel;
@@ -70,7 +75,7 @@ fn setup_top_left_row(mut commands: Commands) {
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(UiMaterialPlugin::<flight_panel::ThrottleArcMaterial>::default())
-            .add_plugins(UiMaterialPlugin::<system_map_panel::SystemMapMaterial>::default())
+            .add_plugins(mfd::MfdPlugin)
             .init_resource::<UiPointerGate>()
             .init_resource::<TimeDisplayMode>()
             .init_resource::<nav_panel::ManeuverPanelState>()
@@ -97,7 +102,6 @@ impl Plugin for HudPlugin {
                     eva_panel::setup,
                     atmo_panel::setup,
                     flight_config_panel::setup,
-                    system_map_panel::setup,
                     pfd_panel::setup,
                 )
                     .after(theme::init_theme)
@@ -123,7 +127,7 @@ impl Plugin for HudPlugin {
                     orbital_panel::update,
                     orbital_panel::handle_click,
                     staging_panel::update,
-                    (flight_panel::update, system_map_panel::update),
+                    flight_panel::update,
                     flight_panel::handle_velocity_frame_click,
                     fps_overlay::update,
                     eva_panel::update,

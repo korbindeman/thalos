@@ -30,9 +30,11 @@ struct GrassParams {
     sky_up: vec4<f32>,
     // xyz = Rayleigh vertical optical depth τ_v, w = atmosphere strength.
     sky_tau: vec4<f32>,
-    // xyz = vegetation focus (player craft) in render space; w = 1 valid / 0 use
-    // camera. The clipmap fade measures distance from THIS, not the camera, so
-    // zooming / orbiting the camera doesn't change what's drawn.
+    // xyz = vegetation focus offset = (player craft − camera) in render space;
+    // w = 1 valid / 0 = fade around the camera. The fade reference is rebuilt as
+    // `view.world_position + offset`, i.e. the craft expressed in the CURRENT
+    // frame's render origin. Passing an *offset* (not an absolute anchor) makes
+    // it robust to big_space floating-origin recentres — see `vertex`.
     anchor: vec4<f32>,
 }
 
@@ -72,7 +74,16 @@ fn vertex(in: VertexInput) -> VertexOutput {
     // Distance is from the focus anchor (craft), not the camera, so zoom/orbit
     // doesn't change it. The innermost ring passes a large-negative near edge so
     // it never fades in.
-    let ref_pos = select(view.world_position, grass.anchor.xyz, grass.anchor.w > 0.5);
+    //
+    // The anchor is passed as an OFFSET from the camera, not an absolute world
+    // point: `view.world_position` is current-frame, but a CPU-supplied absolute
+    // anchor is one frame stale, so on a big_space floating-origin recentre (the
+    // origin jumps a whole cell while the parked craft co-rotates through space)
+    // the stale anchor sits in the previous origin and `dist` jumps by a cell —
+    // collapsing fade-band tiles for that frame ("tiles pop in/out while
+    // moving"). `(ship − camera)` is origin-invariant, so rebuilding the
+    // reference as camera + offset is recentre-safe. offset 0 → camera.
+    let ref_pos = view.world_position + grass.anchor.xyz;
     let dist = distance(ref_pos, world_pos);
     let near_edge = grass.time_fade.y;
     let far_edge = grass.time_fade.z;

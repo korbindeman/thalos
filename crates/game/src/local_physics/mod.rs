@@ -43,6 +43,7 @@ impl Plugin for GameLocalPhysicsPlugin {
             .init_resource::<AvianAuthority>()
             .init_resource::<AvianHandoffDiagnostics>()
             .init_resource::<GearTuning>()
+            .init_resource::<GearState>()
             .init_resource::<ParkingBrake>()
             .init_resource::<WeightOnWheels>()
             .init_resource::<SurfaceFriction>()
@@ -52,6 +53,7 @@ impl Plugin for GameLocalPhysicsPlugin {
             .register_type::<AvianAuthority>()
             .register_type::<AvianHandoffDiagnostics>()
             .register_type::<GearTuning>()
+            .register_type::<GearState>()
             .register_type::<ParkingBrake>()
             .register_type::<WeightOnWheels>()
             .register_type::<SurfaceFriction>()
@@ -83,6 +85,7 @@ impl Plugin for GameLocalPhysicsPlugin {
                     snap_avian_from_canonical,
                     apply_local_forces,
                     toggle_parking_brake,
+                    toggle_gear,
                     apply_landing_gear_forces,
                     terrain_floor_backstop,
                     apply_surface_friction,
@@ -193,8 +196,8 @@ impl AvianAuthority {
 /// each authority transition by the authority executor
 /// ([`crate::regime::apply_regime_authority`], direction + time) and
 /// [`readback_local_craft`] (the residual measured when Avian first takes
-/// translation). Reflect-registered so an agent can read it over BRP without
-/// attaching a debugger.
+/// translation). Reflect-registered (for a future debug overlay) so it can be
+/// read without attaching a debugger.
 ///
 /// `position_residual_m` / `velocity_residual_m_s` describe the **most recent
 /// take-translation** handoff: the gap between canonical's pre-handoff state

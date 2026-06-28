@@ -32,7 +32,7 @@ use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowCloseRequested};
 use thalos_input::game::GameInputIntent;
-use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
 use crate::hud::theme::{HudTheme, panel_frame};
 use crate::loading::{AppState, LoadDestination, LoadingTracker, steps_for};
@@ -320,7 +320,6 @@ fn apply_menu_action(
     respawn: (
         ResMut<ActiveLocalBubble>,
         Res<HeightSourceRegistry>,
-        Res<TerrainSurfaceRegistry>,
         ResMut<EvaMode>,
         ResMut<ManeuverPlan>,
         ResMut<SelectedNode>,
@@ -346,15 +345,7 @@ fn apply_menu_action(
     let Some(action) = pending.0.take() else {
         return;
     };
-    let (
-        mut active,
-        height_sources,
-        surfaces,
-        mut eva_mode,
-        mut plan,
-        mut selected,
-        homeworld,
-    ) = respawn;
+    let (mut active, height_sources, mut eva_mode, mut plan, mut selected, homeworld) = respawn;
     let (mut tracker, mut dest, mut settle, mut runway_placement, mut relaunch) = load;
     let (mut settings, mut open_shipyard) = ui;
     let (primary_window, mut close_requested, mut app_exit) = exit;
@@ -397,7 +388,6 @@ fn apply_menu_action(
                 &mut sim,
                 &mut active,
                 &height_sources,
-                &surfaces,
                 &mut eva_mode,
                 &player_ship,
                 &mut plan,

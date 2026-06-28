@@ -88,13 +88,16 @@ greys out the VSync control in the settings menu, without being written into
 the file. (Vsync can also be toggled live from the settings menu's Window
 tab, which *does* persist.)
 
-Pair it with the BRP MCP server (`bevy_brp_mcp`) for live, no-rebuild A/B
-profiling of a running session: `brp_extras_get_diagnostics` reports
-`frame_time_ms`; toggling the ship camera's `Camera.is_active` isolates
-GPU-vs-CPU bound (frame time unchanged with the 3D render off ⇒ CPU-bound);
-removing post-process components (`Bloom`, `Smaa`, …) or sending `Escape`
-(sim pause) attributes cost to specific subsystems. This is how the surface
-frame cost was traced to the Avian terrain collider (see `docs/surface.md`).
+For A/B attribution, have the user change one variable at a time and report
+the on-screen frame time (the FPS overlay) or capture a chrome trace
+(`--features profile-chrome`, see below). Useful no-rebuild toggles: sim pause
+(`Escape`) subtracts simulation cost; the settings menu's graphics toggles
+(e.g. volumetric clouds) subtract a renderer subsystem; map view / freecam
+change what the scene draws. Frame time unchanged with the heavy 3D path off ⇒
+CPU-bound. This is how the surface frame cost was traced to the Avian terrain
+collider (see `docs/surface.md`). The game has no remote-inspection channel —
+you analyze the artifacts (trace JSON, slow-frame JSONL, console logs), the
+user runs the game.
 
 ### Windows fast incremental loop
 

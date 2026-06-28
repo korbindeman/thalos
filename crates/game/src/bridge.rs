@@ -317,14 +317,14 @@ fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<Simulation
 }
 
 // ---------------------------------------------------------------------------
-// CraftStateMirror — Reflect-friendly snapshot of canonical ship state for BRP
+// CraftStateMirror — Reflect-friendly snapshot of canonical ship state
 // ---------------------------------------------------------------------------
 
 /// Reflect-registered mirror of the canonical `CraftState`, refreshed
 /// once per frame by [`refresh_craft_state_mirror`]. The canonical
 /// state lives in `thalos_physics_canonical` (no Bevy dependency), so it cannot
-/// derive `Reflect` directly; this resource is the read-only projection
-/// an agent inspects over BRP.
+/// derive `Reflect` directly; this resource is a read-only Reflect-registered
+/// projection (for the HUD / a future debug overlay).
 #[derive(Resource, Reflect, Default, Clone, Debug)]
 #[reflect(Resource)]
 pub struct CraftStateMirror {

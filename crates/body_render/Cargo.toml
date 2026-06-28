@@ -14,6 +14,7 @@ required-features = ["playground"]
 [dependencies]
 thalos_terrain = { path = "../terrain" }
 thalos_world = { path = "../world" }
+thalos_texgen = { path = "../texgen" }
 thalos_udlod = { workspace = true }
 bevy = { version = "0.18", features = ["wayland", "jpeg"] }
 bevy_erosion_filter = "0.1.2"

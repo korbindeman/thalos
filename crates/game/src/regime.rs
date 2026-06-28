@@ -17,7 +17,7 @@
 //! attach/detach/maintain gates, and `bridge::enforce_warp_altitude_limits`
 //! all read the record). Every per-frame regime decision now flows from the
 //! resolver; [`check_regime_drift`] remains as end-of-frame sanity checks
-//! plus the BRP-readable record snapshot in [`RegimeDriftDiagnostics`].
+//! plus the Reflect-registered record snapshot in [`RegimeDriftDiagnostics`].
 //!
 //! Input snapshot semantics (`docs/regimes.md` §3.2): physics-derived
 //! signals (contacts, weight-on-wheels, collider presence, speeds) are
@@ -68,7 +68,8 @@ pub struct CraftRegimeState {
     pub expected_authority: AuthorityKind,
 }
 
-/// BRP-readable drift observability. `*_blips` count one-frame mismatches
+/// Reflect-registered drift observability (in-process; for a future debug
+/// overlay). `*_blips` count one-frame mismatches
 /// (expected at regime edges, see module docs); `*_steady` count mismatches
 /// that persisted ≥ 2 consecutive checked frames (classifier bugs). The
 /// string fields snapshot the latest record for inspection.
@@ -87,7 +88,7 @@ pub struct RegimeDriftDiagnostics {
     pub prediction_steady: u64,
     pub prediction_consecutive: u32,
     pub last_mismatch: String,
-    // Latest record snapshot (strings for Reflect/BRP friendliness).
+    // Latest record snapshot (strings for Reflect friendliness).
     pub medium: String,
     pub ground: String,
     pub translation_owner: String,
@@ -413,7 +414,7 @@ fn check_regime_drift(
     // don't each count as a whole-resource borrow.
     let diag = &mut *diag;
 
-    // Snapshot the record for BRP inspection every frame, compared or not.
+    // Snapshot the record for inspection every frame, compared or not.
     diag.medium = format!("{:?}", state.regime.medium);
     diag.ground = format!("{:?}", state.regime.ground);
     diag.translation_owner = format!("{:?}", state.regime.translation_owner);

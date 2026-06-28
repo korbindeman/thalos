@@ -19,7 +19,6 @@ use thalos_body_render::{
 const PHYSICS_QUERY_TILE_LOD_M: f32 = 0.5;
 use thalos_physics_canonical::canonical::CraftId;
 use thalos_physics_canonical::surface_local::SurfaceLocalFrame;
-use thalos_terrain::PlanetSurface;
 use thalos_world::BodyId;
 
 pub mod avian {
@@ -97,11 +96,6 @@ impl Default for LocalBubbleConfig {
 }
 
 #[derive(Resource, Default, Clone)]
-pub struct TerrainSurfaceRegistry {
-    surfaces: HashMap<BodyId, Arc<PlanetSurface>>,
-}
-
-#[derive(Resource, Default, Clone)]
 pub struct HeightSourceRegistry {
     sources: HashMap<BodyId, Arc<dyn HeightSource>>,
     gpu_mirrors: HashMap<BodyId, GpuAtlasMirrorHandle>,
@@ -133,20 +127,6 @@ impl HeightSourceRegistry {
 
     pub fn gpu_mirror(&self, body_id: BodyId) -> Option<GpuAtlasMirrorHandle> {
         self.gpu_mirrors.get(&body_id).cloned()
-    }
-}
-
-impl TerrainSurfaceRegistry {
-    pub fn insert(&mut self, body_id: BodyId, surface: Arc<PlanetSurface>) {
-        self.surfaces.insert(body_id, surface);
-    }
-
-    pub fn get(&self, body_id: BodyId) -> Option<Arc<PlanetSurface>> {
-        self.surfaces.get(&body_id).cloned()
-    }
-
-    pub fn contains(&self, body_id: BodyId) -> bool {
-        self.surfaces.contains_key(&body_id)
     }
 }
 
@@ -298,7 +278,6 @@ impl Plugin for LocalPhysicsPlugin {
                 ..default()
             })
             .insert_resource(Gravity::ZERO)
-            .init_resource::<TerrainSurfaceRegistry>()
             .init_resource::<HeightSourceRegistry>()
             .init_resource::<ActiveLocalBubble>()
             .init_resource::<LocalBubbleConfig>();

@@ -13,9 +13,12 @@
 //! that `Image` via `AsBindGroup` and sample it as `texture_depth_2d` from
 //! WGSL. One extra full-screen depth copy per frame; trivial cost.
 //!
-//! Assumes MSAA = 1 (the default for `ShipCamera`). With MSAA the source
-//! is multisampled and the copy would need a resolve pass — fix when MSAA
-//! lands, not before.
+//! When the ship camera runs MSAA the main-pass depth is multisampled and a
+//! single-sample `copy_texture_to_texture` is illegal, so this node instead
+//! runs a tiny depth-only resolve pass ([`MsaaDepthResolve`]) that writes
+//! sample 0 of the multisampled depth straight into the destination Image. The
+//! atmosphere pass keeps sampling it as `texture_depth_2d` either way. The
+//! MSAA-off path stays the cheap direct copy.
 
 use crate::camera::ShipCamera;
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
@@ -26,13 +29,13 @@ use bevy::ecs::query::QueryItem;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::{
-    RenderApp,
+    RenderApp, RenderStartup,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
     render_graph::{
         NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
     },
-    render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
+    render_resource::{binding_types::*, *},
     renderer::RenderContext,
     texture::GpuImage,
     view::ViewDepthTexture,
@@ -87,16 +90,55 @@ impl ViewNode for CopySceneDepthNode {
         if src_size.width != dst_size.width || src_size.height != dst_size.height {
             return Ok(());
         }
-        // The ViewNode runs for every view in the render world. Shadow
-        // cascades, light views, and any future multisampled cameras may
-        // have a higher sample count than our single-sample destination
-        // Image. `copy_texture_to_texture` requires matching sample counts;
-        // skip the copy when they don't match. Atmosphere is only sampled
-        // from the ship camera's view anyway.
-        if depth.texture.sample_count() != dest.texture.sample_count() {
+
+        // MSAA path: the source depth is multisampled, so a single-sample copy
+        // is illegal. Resolve sample 0 into the destination with a depth-only
+        // fullscreen pass instead. Skipped silently until the resolve pipeline
+        // has compiled (the next frame closes the gap).
+        if depth.texture.sample_count() > 1 {
+            let Some(resolve) = world.get_resource::<MsaaDepthResolve>() else {
+                return Ok(());
+            };
+            let pipeline_cache = world.resource::<PipelineCache>();
+            let Some(pipeline) = pipeline_cache.get_render_pipeline(resolve.pipeline_id) else {
+                return Ok(());
+            };
+            let layout = pipeline_cache.get_bind_group_layout(&resolve.layout);
+            let bind_group = render_context.render_device().create_bind_group(
+                Some("msaa_depth_resolve_bind_group"),
+                &layout,
+                &BindGroupEntries::single(depth.view()),
+            );
+
+            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("msaa_depth_resolve_pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: &dest.texture_view,
+                    // The fullscreen triangle writes every pixel with
+                    // `depth_compare: Always`, so the clear value is overwritten
+                    // everywhere — only `store` matters.
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Clear(0.0),
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_render_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
             return Ok(());
         }
 
+        // MSAA-off path: both single-sample, so a straight copy is cheapest.
+        // (Other render-world views — shadow cascades, light views — never
+        // reach here; the node is filtered to the ship camera.)
+        if depth.texture.sample_count() != dest.texture.sample_count() {
+            return Ok(());
+        }
         render_context.command_encoder().copy_texture_to_texture(
             depth.texture.as_image_copy(),
             dest.texture.as_image_copy(),
@@ -116,6 +158,7 @@ impl Plugin for SceneDepthPlugin {
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
+                .add_systems(RenderStartup, init_msaa_depth_resolve)
                 .add_render_graph_node::<ViewNodeRunner<CopySceneDepthNode>>(Core3d, CopySceneDepth)
                 .add_render_graph_edges(
                     Core3d,
@@ -127,6 +170,65 @@ impl Plugin for SceneDepthPlugin {
                 );
         }
     }
+}
+
+/// Render-world pipeline for the MSAA scene-depth resolve pass. Reads the
+/// multisampled main-pass depth as a texture and writes sample 0 into the
+/// single-sample [`SceneDepthImage`] via a depth-only fullscreen draw, so the
+/// atmosphere pass can sample scene depth under MSAA exactly as it does without.
+#[derive(Resource)]
+struct MsaaDepthResolve {
+    layout: BindGroupLayoutDescriptor,
+    pipeline_id: CachedRenderPipelineId,
+}
+
+/// Build the resolve pipeline. Runs in [`RenderStartup`], matching the rest of
+/// the 0.18 render-pipeline init style (e.g. `udlod`'s terrain pipeline).
+fn init_msaa_depth_resolve(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    let layout = BindGroupLayoutDescriptor::new(
+        "msaa_depth_resolve_layout",
+        &BindGroupLayoutEntries::single(ShaderStages::FRAGMENT, texture_depth_2d_multisampled()),
+    );
+
+    let shader = asset_server.load("shaders/msaa_depth_resolve.wgsl");
+
+    let pipeline_id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("msaa_depth_resolve_pipeline".into()),
+        layout: vec![layout.clone()],
+        push_constant_ranges: vec![],
+        vertex: VertexState {
+            shader: shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some("vertex".into()),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        // Depth-only: no color targets, always write the resolved sample.
+        depth_stencil: Some(DepthStencilState {
+            format: TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::Always,
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }),
+        multisample: MultisampleState::default(),
+        fragment: Some(FragmentState {
+            shader,
+            shader_defs: vec![],
+            entry_point: Some("fragment".into()),
+            targets: vec![],
+        }),
+        zero_initialize_workgroup_memory: false,
+    });
+
+    commands.insert_resource(MsaaDepthResolve {
+        layout,
+        pipeline_id,
+    });
 }
 
 /// Create a 1×1 placeholder Image at startup. `resize_scene_depth_image`
@@ -147,7 +249,11 @@ pub(crate) fn setup_scene_depth_image(mut commands: Commands, mut images: ResMut
         TextureFormat::Depth32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
+    // COPY_DST for the MSAA-off direct copy; TEXTURE_BINDING so the atmosphere
+    // pass can sample it; RENDER_ATTACHMENT so the MSAA depth-resolve pass can
+    // write the resolved sample 0 straight into it.
+    image.texture_descriptor.usage =
+        TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
     let handle = images.add(image);
     commands.insert_resource(SceneDepthImage { handle });
 }

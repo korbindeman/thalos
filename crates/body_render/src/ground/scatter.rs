@@ -25,7 +25,7 @@ use thalos_terrain::TerrainFlatten;
 use crate::ground::height_source::HeightSource;
 use crate::ground::pipeline::material_masks_from_heights;
 use crate::ground::rendered_height::TerrainPatchBasis;
-use crate::ground::tile_lattice::{TileKey, TileLattice, cube_dir};
+use crate::ground::tile_lattice::{TileKey, TileLattice, cube_dir, tiles_per_side};
 use crate::ground::tree_mesh::TreeMeshData;
 
 /// LOD sample hint for placement height queries — small enough to engage the
@@ -37,9 +37,25 @@ const PLACEMENT_LOD_M: f32 = 0.5;
 /// shader's near-field grass mask.
 const MASK_STEP_M: f64 = 2.0;
 
-/// Hard ceiling on candidates per species per tile, against pathological
-/// density configs at coarse (large-area) LOD rings.
-const MAX_CANDIDATES_PER_TILE: usize = 16_384;
+/// Neighbourhood radius (in cells) the Poisson elimination scans. With a cell
+/// size of one `min_spacing`, any two candidates closer than the spacing fall
+/// within ±2 cells, so a 5×5 scan catches every conflict.
+const POISSON_HALO: i64 = 2;
+
+/// Safety clamp on the Poisson cell grid scanned per tile per axis, against a
+/// pathological tiny-spacing / huge-tile combination at a coarse LOD ring.
+const MAX_POISSON_CELLS_PER_AXIS: i64 = 512;
+
+/// Hash salts so the per-cell jitter, priority, accept roll, and per-instance
+/// variation are independent draws derived from the one global cell key.
+const SALT_JITTER_U: u64 = 0x01;
+const SALT_JITTER_V: u64 = 0x02;
+const SALT_PRIORITY: u64 = 0x03;
+const SALT_ACCEPT: u64 = 0x04;
+const SALT_YAW: u64 = 0x05;
+const SALT_SCALE: u64 = 0x06;
+const SALT_TILT: u64 = 0x07;
+const SALT_SPECIES: u64 = 0x08;
 
 /// How far beyond a flatten pad's ramp the forest stays cleared (metres). The
 /// tree/shrub density fades from 0 at the pad edge to full over this margin, so
@@ -62,6 +78,12 @@ pub struct PlacementSample {
     pub grass_w: f32,
     /// Slope magnitude `|∇h|` (rise over run).
     pub slope: f32,
+    /// Mean terrain curvature `∇²h` over the gate stencil, `1/m`. **Positive in
+    /// concave hollows** (the floor sits below its surroundings — moisture
+    /// collects, sheltered), **negative on convex ridges/knolls** (exposed). The
+    /// woody-plant terrain coupling reads this so forest correlates with the
+    /// landform.
+    pub curvature: f32,
     /// Body-fixed terrain normal at the sample.
     pub normal_body: DVec3,
 }
@@ -98,6 +120,11 @@ pub fn placement_gate(
     let grad_x = (h_r - h_l) / (2.0 * MASK_STEP_M as f32);
     let grad_z = (h_u - h_d) / (2.0 * MASK_STEP_M as f32);
     let slope = (grad_x * grad_x + grad_z * grad_z).sqrt();
+    // Discrete Laplacian over the 5-point stencil → mean curvature. Positive
+    // when the four neighbours sit above the centre (a hollow), negative on a
+    // ridge. Free: the four probes above are already in hand.
+    let step = MASK_STEP_M as f32;
+    let curvature = (h_l + h_r + h_d + h_u - 4.0 * height_m) / (step * step);
     let normal_body = basis
         .local_to_body_vec(DVec3::new(-grad_x as f64, 1.0, -grad_z as f64))
         .normalize();
@@ -106,6 +133,7 @@ pub fn placement_gate(
         height_m,
         grass_w,
         slope,
+        curvature,
         normal_body,
     })
 }
@@ -130,8 +158,20 @@ pub enum VegLayer {
 #[derive(Debug, Clone, Copy)]
 pub struct VegSpeciesPlacement {
     pub layer: VegLayer,
-    /// Candidate density per square metre before gates thin it out.
-    pub density_per_m2: f32,
+    /// Minimum spacing between instances of this species, metres. Placement is
+    /// blue-noise (Poisson-disk) on a body-global hashed cell grid at this
+    /// spacing: every instance is at least this far from every other of the same
+    /// species, so trunks never interpenetrate, while neighbouring canopies can
+    /// still touch (pick spacing above a trunk's width but below a canopy's
+    /// diameter for connected-but-distinct groves). Density falls out of the
+    /// spacing; the gates (slope / mask / altitude / clump) only thin it further.
+    pub min_spacing_m: f32,
+    /// Relative abundance of this species *within its layer*. All species of one
+    /// `VegLayer` share a single Poisson grid (so no two of them ever
+    /// interpenetrate, regardless of species); at each grid point the species is
+    /// drawn weighted by `mix_weight`. The layer's grid spacing is the largest
+    /// `min_spacing_m` among its members.
+    pub mix_weight: f32,
     /// Uniform-scale range `(min, max)` applied per instance.
     pub scale_range: (f32, f32),
     /// Reject candidates on terrain steeper than this (rise/run).
@@ -189,13 +229,105 @@ pub struct VegScatterInput {
     /// Active terrain-flatten pad (e.g. the runway); plants are skipped where
     /// the pad has meaningful weight.
     pub flatten_exclusion: Option<TerrainFlatten>,
+    /// Poisson-grid coarsening factor for the clipmap (`1.0` = the species'
+    /// authored `min_spacing_m`). Coarse far rings pass `> 1` to scatter fewer,
+    /// wider-spaced plants — the *decimation* half of the constant-coverage rule
+    /// — so a 2 km impostor tile holds a bounded instance count. Each placed
+    /// plant is then enlarged by the driver's `grove_scale` to hold ground
+    /// coverage. `< 1` is clamped to 1 (never denser than authored).
+    pub spacing_scale: f32,
 }
 
-/// Build one scatter tile: deterministic jittered-grid placement per species,
+/// One Poisson candidate: the body-global cell `(face, ci, cj)` hashes to a
+/// jittered direction on the unit sphere plus a priority. Pure function of the
+/// cell — so neighbouring tiles regenerate identical candidates and agree on
+/// every elimination, making placement seamless across tile (and most face)
+/// boundaries with no stored state.
+#[derive(Clone, Copy)]
+struct Candidate {
+    dir: DVec3,
+    u: f64,
+    v: f64,
+    priority: f64,
+}
+
+/// Deterministic candidate for a global Poisson cell. `cells` is the cell count
+/// per cube-face edge for this species (`tiles_per_side(radius, spacing)`).
+#[inline]
+fn cell_candidate(seed: u64, face: u8, ci: i64, cj: i64, cells_f: f64, grid_id: u64) -> Candidate {
+    let key = TileKey { face, x: ci, y: cj };
+    let ju = veg_hash(seed, key, grid_id, 0, SALT_JITTER_U);
+    let jv = veg_hash(seed, key, grid_id, 0, SALT_JITTER_V);
+    let priority = veg_hash(seed, key, grid_id, 0, SALT_PRIORITY);
+    let u = -1.0 + (ci as f64 + ju) * 2.0 / cells_f;
+    let v = -1.0 + (cj as f64 + jv) * 2.0 / cells_f;
+    Candidate {
+        dir: cube_dir(face, u, v),
+        u,
+        v,
+        priority,
+    }
+}
+
+/// Does `cell` survive Poisson elimination? It survives unless a strictly
+/// higher-priority candidate of the same species lies within `spacing` metres in
+/// the ±[`POISSON_HALO`] cell neighbourhood. Ties break on `(cj, ci)` so two
+/// candidates can never mutually eliminate. Evaluated identically from any tile.
+#[allow(clippy::too_many_arguments)]
+fn survives_elimination(
+    seed: u64,
+    face: u8,
+    ci: i64,
+    cj: i64,
+    cells: i64,
+    cells_f: f64,
+    grid_id: u64,
+    spacing: f64,
+    radius_m: f64,
+    me: &Candidate,
+) -> bool {
+    for dj in -POISSON_HALO..=POISSON_HALO {
+        for di in -POISSON_HALO..=POISSON_HALO {
+            if di == 0 && dj == 0 {
+                continue;
+            }
+            let (nci, ncj) = (ci + di, cj + dj);
+            // Cross-face neighbours are skipped (a small seam artifact, as with
+            // the rest of the lattice); within-face cells are global.
+            if nci < 0 || ncj < 0 || nci >= cells || ncj >= cells {
+                continue;
+            }
+            let other = cell_candidate(seed, face, nci, ncj, cells_f, grid_id);
+            let higher = other.priority > me.priority
+                || (other.priority == me.priority && (ncj, nci) > (cj, ci));
+            if higher && (me.dir - other.dir).length() * radius_m < spacing {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Stable per-layer grid discriminator, so all species of one layer share one
+/// Poisson grid (no intra-layer interpenetration, any species mix) while
+/// different layers are independent (shrubs may sit under trees as undergrowth).
+fn layer_grid_id(layer: VegLayer) -> u64 {
+    match layer {
+        VegLayer::GroundCover => 0,
+        VegLayer::Shrub => 1,
+        VegLayer::Tree => 2,
+    }
+}
+
+/// Build one scatter tile: blue-noise (Poisson-disk) placement on a body-global
+/// hashed cell grid — one grid per [`VegLayer`], sized to the layer's largest
+/// `min_spacing_m`, with the species at each point drawn by `mix_weight` — then
 /// gated by [`placement_gate`] + per-species slope/altitude/clump, with
 /// per-instance variation hashed from the candidate. Pure and deterministic for
-/// a given input + source state; intended for `AsyncComputeTaskPool`. Returns
-/// `None` when no instance passes the gates.
+/// a given input + source state, and seamless across tile boundaries (the
+/// candidate set and every elimination are global functions of the cell, not the
+/// tile); intended for `AsyncComputeTaskPool`. Returns `None` when no instance
+/// passes the gates.
 pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
     let (center_dir, basis) = input.lattice.frame(input.key)?;
     let source = input.height_source.as_ref();
@@ -205,62 +337,145 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
     let center_surface_body_m = center_dir * (input.radius_m + center_height_m as f64);
 
     let (u_lo, u_hi, v_lo, v_hi) = input.lattice.uv_span(input.key);
-    let (ext_u_m, ext_v_m) = input.lattice.tile_extents_m(input.key, input.radius_m);
-    let area_m2 = (ext_u_m * ext_v_m).max(0.0);
+    let face = input.key.face;
 
     let mut instances = Vec::new();
-    for (sp_idx, sp) in input.species.iter().enumerate() {
-        let count = ((area_m2 * sp.density_per_m2 as f64).round() as usize)
-            .min(MAX_CANDIDATES_PER_TILE);
-        for cand in 0..count {
-            let rng = |salt: u64| veg_hash(input.seed, input.key, sp_idx as u64, cand as u64, salt);
+    for layer in [VegLayer::Shrub, VegLayer::Tree] {
+        // Members of this layer + the combined grid spacing (the widest member,
+        // so even the largest canopy never interpenetrates a neighbour) + the
+        // total mix weight for the per-point species draw.
+        let members: Vec<usize> = input
+            .species
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.layer == layer)
+            .map(|(i, _)| i)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let grid_id = layer_grid_id(layer);
+        let spacing = members
+            .iter()
+            .map(|&i| input.species[i].min_spacing_m as f64)
+            .fold(0.0_f64, f64::max)
+            .max(0.25)
+            * input.spacing_scale.max(1.0) as f64;
+        let weight_sum: f32 = members
+            .iter()
+            .map(|&i| input.species[i].mix_weight.max(0.0))
+            .sum::<f32>()
+            .max(f32::EPSILON);
 
-            let u = u_lo + rng(0) * (u_hi - u_lo);
-            let v = v_lo + rng(1) * (v_hi - v_lo);
-            let dir = cube_dir(input.key.face, u, v);
+        // Global cell grid for this layer: one cell ≈ one `spacing` across, so a
+        // cell holds at most one survivor and the grid is identical from any tile
+        // observing this region.
+        let cells = tiles_per_side(input.radius_m, spacing).max(1);
+        let cells_f = cells as f64;
 
-            if let Some(flatten) = &input.flatten_exclusion
-                && flatten.weight(dir) > 0.05
-            {
-                continue;
-            }
+        // Cells whose owned region overlaps this tile, plus the elimination halo.
+        let to_cell = |c: f64| ((c + 1.0) * 0.5 * cells_f).floor() as i64;
+        let ci0 = (to_cell(u_lo) - POISSON_HALO).max(0);
+        let ci1 = (to_cell(u_hi) + POISSON_HALO).min(cells - 1);
+        let cj0 = (to_cell(v_lo) - POISSON_HALO).max(0);
+        let cj1 = (to_cell(v_hi) + POISSON_HALO).min(cells - 1);
+        if (ci1 - ci0) > MAX_POISSON_CELLS_PER_AXIS || (cj1 - cj0) > MAX_POISSON_CELLS_PER_AXIS {
+            // Spacing far too fine for this tile size — skip rather than stall the
+            // async build. (Tuning should keep near-ring tiles well under this.)
+            continue;
+        }
 
-            let Some(sample) = placement_gate(source, &basis, dir, input.radius_m) else {
-                continue;
-            };
-            if sample.height_m <= input.sea_level_m + 1.0 {
-                continue;
-            }
-            if sample.slope > sp.slope_limit || sample.grass_w < sp.min_grass_w {
-                continue;
-            }
+        for cj in cj0..=cj1 {
+            for ci in ci0..=ci1 {
+                let cand = cell_candidate(input.seed, face, ci, cj, cells_f, grid_id);
 
-            let alt = altitude_fade(sample.height_m, sp.altitude_band);
-            let clump = clump_field(dir, sp.layer, sp.clump_affinity);
-            let mut accept = sample.grass_w * alt * clump;
-            // Clearing around a flatten pad (e.g. the runway): the forest fades
-            // out approaching the airfield over a margin beyond the pad ramp, so
-            // trees don't crowd right up to the strip.
-            if let Some(flatten) = &input.flatten_exclusion {
-                let cos = dir.dot(flatten.center_dir).clamp(-1.0, 1.0);
-                let d = (cos.acos() * input.radius_m) as f32;
-                let pad_reach = (flatten.half_along_m.hypot(flatten.half_across_m) + flatten.ramp_m)
-                    as f32;
-                accept *= smoothstep(pad_reach, pad_reach + VEG_CLEARING_MARGIN_M, d);
-            }
-            if (rng(2) as f32) >= accept {
-                continue;
-            }
+                // A cell is owned by exactly one tile: the one containing its
+                // jittered position. Halo cells (outside the span) act only as
+                // elimination blockers, so there is no double-placement or gap.
+                if !(cand.u >= u_lo && cand.u < u_hi && cand.v >= v_lo && cand.v < v_hi) {
+                    continue;
+                }
+                if !survives_elimination(
+                    input.seed,
+                    face,
+                    ci,
+                    cj,
+                    cells,
+                    cells_f,
+                    grid_id,
+                    spacing,
+                    input.radius_m,
+                    &cand,
+                ) {
+                    continue;
+                }
 
-            let root_body = dir * (input.radius_m + sample.height_m as f64);
-            instances.push(VegInstance {
-                species: sp_idx as u16,
-                root_offset_body_m: (root_body - center_surface_body_m).as_vec3(),
-                up_body: sample.normal_body.as_vec3(),
-                yaw: (rng(3) * std::f64::consts::TAU) as f32,
-                scale: lerp(sp.scale_range.0, sp.scale_range.1, rng(4) as f32),
-                tilt: (rng(5) * 0.12) as f32,
-            });
+                let dir = cand.dir;
+                let key = TileKey { face, x: ci, y: cj };
+                let rng = |salt: u64| veg_hash(input.seed, key, grid_id, 0, salt);
+
+                // Draw the species at this point (weighted), spatially stable.
+                let pick = rng(SALT_SPECIES) as f32 * weight_sum;
+                let mut acc = 0.0_f32;
+                let mut chosen = members[0];
+                for &i in &members {
+                    acc += input.species[i].mix_weight.max(0.0);
+                    if pick < acc {
+                        chosen = i;
+                        break;
+                    }
+                }
+                let sp = &input.species[chosen];
+
+                if let Some(flatten) = &input.flatten_exclusion
+                    && flatten.weight(dir) > 0.05
+                {
+                    continue;
+                }
+
+                let Some(sample) = placement_gate(source, &basis, dir, input.radius_m) else {
+                    continue;
+                };
+                if sample.height_m <= input.sea_level_m + 1.0 {
+                    continue;
+                }
+                if sample.slope > sp.slope_limit || sample.grass_w < sp.min_grass_w {
+                    continue;
+                }
+
+                let alt = altitude_fade(sample.height_m, sp.altitude_band);
+                let clump = clump_field(dir, sp.layer, sp.clump_affinity);
+                // Tie the stand to the landform: thinner toward ridges/steeps,
+                // denser in sheltered hollows. This is what turns the noise
+                // patch into a terrain-correlated forest with real ecotones.
+                let terrain = woody_terrain_factor(sp.layer, &sample, sp.slope_limit);
+                let mut accept = sample.grass_w * alt * clump * terrain;
+                // Clearing around a flatten pad (e.g. the runway): the forest
+                // fades out approaching the airfield over a margin beyond the pad
+                // ramp, so trees don't crowd right up to the strip.
+                if let Some(flatten) = &input.flatten_exclusion {
+                    let cos = dir.dot(flatten.center_dir).clamp(-1.0, 1.0);
+                    let d = (cos.acos() * input.radius_m) as f32;
+                    let pad_reach = (flatten.half_along_m.hypot(flatten.half_across_m)
+                        + flatten.ramp_m) as f32;
+                    accept *= smoothstep(pad_reach, pad_reach + VEG_CLEARING_MARGIN_M, d);
+                }
+                // Thinning only ever *removes* points, so the min-spacing
+                // guarantee from elimination is preserved.
+                if rng(SALT_ACCEPT) as f32 >= accept {
+                    continue;
+                }
+
+                let root_body = dir * (input.radius_m + sample.height_m as f64);
+                instances.push(VegInstance {
+                    species: chosen as u16,
+                    root_offset_body_m: (root_body - center_surface_body_m).as_vec3(),
+                    up_body: sample.normal_body.as_vec3(),
+                    yaw: (rng(SALT_YAW) * std::f64::consts::TAU) as f32,
+                    scale: lerp(sp.scale_range.0, sp.scale_range.1, rng(SALT_SCALE) as f32),
+                    tilt: (rng(SALT_TILT) * 0.12) as f32,
+                });
+            }
         }
     }
 
@@ -309,7 +524,6 @@ pub fn combine_tree_tile_mesh(
             * Quat::from_rotation_x(inst.tilt);
         let base = inst.root_offset_body_m; // tree base, tile-centre-relative
         let base_uv0 = [base.x, base.y];
-        let base_uv1 = [base.z, 0.0];
         let start = positions.len() as u32;
         for i in 0..data.positions.len() {
             let p = Vec3::from_array(data.positions[i]);
@@ -319,7 +533,8 @@ pub fn combine_tree_tile_mesh(
             normals.push((rot * n).normalize_or_zero().to_array());
             colors.push(data.colors[i]);
             uv0.push(base_uv0);
-            uv1.push(base_uv1);
+            // UV_1 = (base.z for the per-tree scale-fade/seed, atlas leaf code).
+            uv1.push([base.z, data.leaf_code[i]]);
         }
         indices.extend(data.indices.iter().map(|idx| start + idx));
     }
@@ -351,10 +566,19 @@ pub fn combine_tree_tile_mesh(
 ///
 /// `atlas_species[species]` maps a placement species index to its atlas layer,
 /// or `None` for species without an impostor (shrubs) — those instances are
-/// skipped. Returns `None` if nothing was emitted.
+/// skipped.
+///
+/// `grove_scale` enlarges every billboard (the *coverage* half of the
+/// constant-coverage rule): a coarse clipmap ring scatters `1/grove²` as many
+/// trees (`spacing_scale = grove_scale`) and grows each impostor `grove×` so one
+/// card stands in for a clump of trees and ground coverage stays roughly
+/// constant out to the horizon. `1.0` = natural size (the near impostor band).
+///
+/// Returns `None` if nothing was emitted.
 pub fn combine_impostor_tile_mesh(
     instances: &[VegInstance],
     atlas_species: &[Option<u32>],
+    grove_scale: f32,
 ) -> Option<Mesh> {
     const CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -377,7 +601,7 @@ pub fn combine_impostor_tile_mesh(
             normals.push(up);
             colors.push([1.0, 1.0, 1.0, yaw01]);
             uv0.push(corner);
-            uv1.push([inst.scale, *layer as f32]);
+            uv1.push([inst.scale * grove_scale.max(0.0), *layer as f32]);
         }
         indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
     }
@@ -409,29 +633,114 @@ pub fn combine_impostor_tile_mesh(
 /// the near-constant ~100 km blanket a low frequency gives.
 const FOREST_PATCH_FREQ: f64 = 8000.0;
 
-/// Forest-patch clumping in `[0, 1]`. A domain-warped value-noise fBM at
-/// patch scale ([`FOREST_PATCH_FREQ`]), **contrasted** (smoothstep) into real
-/// groves and real clearings rather than a smooth everywhere-gradient — noise is
-/// legitimate here because this is placement *breakup*, not visible terrain
-/// height/albedo (CLAUDE.md's process-first rule). Shrubs hug the grove edges;
-/// ground cover is full in clearings and sparser on the forest floor.
-pub fn clump_field(dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
-    // Warp then sample so patch edges aren't grid-aligned; contrast into patches.
+/// Forest-stand window over the raw fBM mask — the centre of the ecotone ramp
+/// in [`forest_coverage`] (which widens it by ±0.06/0.12 for a soft transition).
+/// Deliberately **high**: only the upper part of the noise carries forest, so
+/// groves read as *stands over mostly-open ground* (large grassy plains between
+/// them) instead of the near-continuous blanket a centred `smoothstep(0.40,
+/// 0.60)` gives. Lower `FOREST_LO` for more forest, raise it for emptier plains.
+const FOREST_LO: f32 = 0.52;
+const FOREST_HI: f32 = 0.72;
+
+/// Raw domain-warped value-noise fBM forest field (≈ `[0, 1]`, centred near
+/// 0.5), before the [`FOREST_LO`]/[`FOREST_HI`] contrast. Warp-then-sample so
+/// patch edges aren't grid-aligned. Shared by [`forest_coverage`] and
+/// [`clump_field`] so they agree on where the groves are.
+fn forest_mask_raw(dir: DVec3) -> f32 {
     let warp = fbm(dir * (FOREST_PATCH_FREQ * 0.45), 2) as f64;
-    let mask = fbm(dir * FOREST_PATCH_FREQ + DVec3::splat(warp * 5.0), 4);
-    let forest = smoothstep(0.40, 0.60, mask);
+    fbm(dir * FOREST_PATCH_FREQ + DVec3::splat(warp * 5.0), 4)
+}
+
+/// Glade noise frequency (multiple of [`FOREST_PATCH_FREQ`]): the medium-scale
+/// field that opens internal clearings inside a stand. ~130 m glades on a
+/// ~3000 km body — clearing-sized, so the canopy interior isn't a solid fill.
+const GLADE_FREQ_MUL: f64 = 3.0;
+
+/// Position-only **canopy potential** in `[0, 1]`: how much closed forest a spot
+/// would carry from large-scale climate + stand structure alone, *before* the
+/// per-sample terrain-form coupling ([`woody_terrain_factor`]). Two scales give
+/// a forest that reads naturally instead of as a stamped patch:
+///
+/// - a **wide ecotone ramp** on the large-scale stand field (no hard edge, no
+///   flat plateau) so density feathers in over a broad transition band, and
+/// - a **medium-scale glade field** that carves real internal clearings and
+///   breaks the uniform interior.
+///
+/// Shared by tree/shrub/ground-cover placement *and* by the grass driver's
+/// far-ring cull (grass is occluded under closed canopy but should return in the
+/// glades), so all four agree on where the forest actually is.
+pub fn forest_coverage(dir: DVec3) -> f32 {
+    let mask = forest_mask_raw(dir);
+    // Wide ecotone: the stand ramps in gradually over a broad band around the
+    // FOREST_LO/HI window, so edges thin out instead of cutting off.
+    let stand = smoothstep(FOREST_LO - 0.06, FOREST_HI + 0.12, mask);
+    // Glades: medium-scale dips open clearings within the stand. Closed canopy
+    // is the majority (most of the field is above the upper edge), glades the
+    // minority — but they break the solid interior and feather the margins.
+    let glade = fbm(dir * (FOREST_PATCH_FREQ * GLADE_FREQ_MUL), 3);
+    let canopy = smoothstep(0.30, 0.60, glade);
+    stand * canopy
+}
+
+/// Forest-patch clumping in `[0, 1]`. Built from [`forest_coverage`] (ecotone +
+/// internal glades) — noise is legitimate here because this is placement
+/// *breakup*, not visible terrain height/albedo (CLAUDE.md's process-first
+/// rule). The per-sample terrain coupling (denser hollows, thinner ridges) is
+/// applied separately in [`build_scatter_tile`] via [`woody_terrain_factor`],
+/// because it needs the height sample this position-only field doesn't see.
+/// Shrubs hug the stand margins; ground cover is full in clearings and sparser
+/// under closed canopy.
+pub fn clump_field(dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
+    let canopy = forest_coverage(dir);
     match layer {
-        // affinity 0 = uniform; 1 = trees only in patches (clearings near zero).
-        VegLayer::Tree => lerp(1.0, forest, affinity),
+        // affinity 0 = uniform cover everywhere; 1 = patches only (plains truly
+        // clear). Trees run near affinity 1 so the plains stay open; the ecotone
+        // in `forest_coverage` supplies the gradual plain→forest falloff.
+        VegLayer::Tree => lerp(1.0, canopy, affinity),
         VegLayer::Shrub => {
-            // Peak in the grove edge band (undergrowth margins) + a few lone bushes.
-            let edge = 1.0 - (forest - 0.5).abs() * 2.0;
+            // Peak in the stand-margin band (undergrowth at the ecotone) + a few
+            // lone bushes out on the plain.
+            let edge = 1.0 - (canopy - 0.5).abs() * 2.0;
             let lone = fbm(dir * (FOREST_PATCH_FREQ * 2.5), 2);
-            lerp(lone * 0.35, (edge * 0.7 + forest * 0.4).clamp(0.0, 1.0), affinity)
+            lerp(lone * 0.35, (edge * 0.7 + canopy * 0.4).clamp(0.0, 1.0), affinity)
         }
-        VegLayer::GroundCover => 1.0 - 0.5 * forest,
+        VegLayer::GroundCover => 1.0 - 0.5 * canopy,
     }
 }
+
+/// Per-sample terrain-form density factor for **woody** plants (trees, shrubs):
+/// the coupling that ties the forest to the landform rather than floating it on
+/// noise alone. Returns `1.0` for ground cover (grass ignores landform here).
+///
+/// - **Slope**: full density on gentle ground, thinning to zero as the slope
+///   approaches the species' limit — ridgelines and steep faces open up.
+/// - **Curvature**: concave **hollows** (moisture + shelter) get a boost; convex
+///   **ridges/knolls** (exposed, thin soil) get cut.
+///
+/// The product is what produces ecotones that hug terrain: a stand thins as the
+/// ground steepens toward a ridge and thickens down in the sheltered hollow,
+/// instead of holding one flat interior density across both.
+fn woody_terrain_factor(layer: VegLayer, sample: &PlacementSample, slope_limit: f32) -> f32 {
+    if layer == VegLayer::GroundCover {
+        return 1.0;
+    }
+    let slope_factor = 1.0 - smoothstep(SLOPE_THIN_FRAC * slope_limit, slope_limit, sample.slope);
+    let concave = (sample.curvature * CURVATURE_GAIN).clamp(-3.0, 3.0).tanh();
+    let curve_factor = (1.0 + CURVATURE_STRENGTH * concave).clamp(CURVE_FLOOR, CURVE_CEIL);
+    (slope_factor * curve_factor).clamp(0.0, 1.0)
+}
+
+/// Slope at which woody density starts thinning, as a fraction of the species
+/// slope limit (below this, gentle ground carries full density).
+const SLOPE_THIN_FRAC: f32 = 0.5;
+/// Curvature → concavity gain before the `tanh` soft-clamp. Higher = a gentler
+/// hollow registers as fully concave. Tuned for the 2 m gate stencil.
+const CURVATURE_GAIN: f32 = 12.0;
+/// How far curvature pushes density around 1.0 (± this at full concave/convex).
+const CURVATURE_STRENGTH: f32 = 0.45;
+/// Clamp on the curvature factor (ridge floor / hollow ceiling).
+const CURVE_FLOOR: f32 = 0.45;
+const CURVE_CEIL: f32 = 1.45;
 
 /// Value-noise fBM over a direction (treated as a 3D position). Cheap,
 /// deterministic, no trig; for placement masks only.
@@ -532,16 +841,25 @@ mod tests {
     use super::*;
     use crate::ground::height_source::ConstantHeightSource;
 
+    const TEST_RADIUS: f64 = 3_186_000.0;
+    const TEST_SPACING: f32 = 12.0;
+
     fn test_species() -> Arc<[VegSpeciesPlacement]> {
         Arc::from(vec![VegSpeciesPlacement {
             layer: VegLayer::Tree,
-            density_per_m2: 0.02,
+            min_spacing_m: TEST_SPACING,
+            mix_weight: 1.0,
             scale_range: (0.8, 1.4),
             slope_limit: 0.4,
             altitude_band: (1800.0, 2900.0, 2400.0, 3100.0),
             clump_affinity: 0.0, // uniform, so flat ground reliably scatters
             min_grass_w: 0.3,
         }])
+    }
+
+    /// World position of an instance, body-fixed metres.
+    fn instance_pos(tile: &VegScatterTile, inst: &VegInstance) -> DVec3 {
+        tile.center_surface_body_m + inst.root_offset_body_m.as_dvec3()
     }
 
     #[test]
@@ -556,6 +874,7 @@ mod tests {
             seed: 7,
             sea_level_m: 0.0,
             flatten_exclusion: None,
+            spacing_scale: 1.0,
         };
         let a = build_scatter_tile(&input).expect("flat land scatters trees");
         let b = build_scatter_tile(&input).expect("flat land scatters trees");
@@ -583,7 +902,79 @@ mod tests {
             seed: 7,
             sea_level_m: 0.0,
             flatten_exclusion: None,
+            spacing_scale: 1.0,
         };
         assert!(build_scatter_tile(&input).is_none());
+    }
+
+    fn flat_input(lattice: TileLattice, key: TileKey) -> VegScatterInput {
+        VegScatterInput {
+            key,
+            lattice,
+            radius_m: TEST_RADIUS,
+            height_source: Arc::new(ConstantHeightSource::new(2000.0)),
+            species: test_species(),
+            seed: 7,
+            sea_level_m: 0.0,
+            flatten_exclusion: None,
+            spacing_scale: 1.0,
+        }
+    }
+
+    /// Blue-noise placement guarantees a minimum separation: no two trees of a
+    /// species sit closer than `min_spacing` — the fix for trees growing into
+    /// each other.
+    #[test]
+    fn min_spacing_is_respected_within_a_tile() {
+        let lattice = TileLattice::for_body(TEST_RADIUS, 250.0);
+        let key = lattice.key_of(DVec3::new(0.2, 0.3, 0.93).normalize());
+        let tile = build_scatter_tile(&flat_input(lattice, key)).expect("flat land scatters trees");
+        assert!(tile.instances.len() > 20, "expected a populated tile");
+
+        let pts: Vec<DVec3> = tile
+            .instances
+            .iter()
+            .map(|i| instance_pos(&tile, i))
+            .collect();
+        let mut min_d = f64::INFINITY;
+        for i in 0..pts.len() {
+            for j in (i + 1)..pts.len() {
+                min_d = min_d.min((pts[i] - pts[j]).length());
+            }
+        }
+        assert!(
+            min_d >= TEST_SPACING as f64 * 0.98,
+            "min pairwise distance {min_d:.2} m below spacing {TEST_SPACING} m"
+        );
+    }
+
+    /// Placement is seamless: two adjacent tiles share the body-global cell grid,
+    /// so the min-spacing guarantee holds across their boundary too (no clipping
+    /// where tiles meet).
+    #[test]
+    fn placement_is_seamless_across_adjacent_tiles() {
+        let lattice = TileLattice::for_body(TEST_RADIUS, 250.0);
+        let key = lattice.key_of(DVec3::new(0.2, 0.3, 0.93).normalize());
+        let key_right = TileKey {
+            x: key.x + 1,
+            ..key
+        };
+        let a = build_scatter_tile(&flat_input(lattice, key)).expect("tile a");
+        let b = build_scatter_tile(&flat_input(lattice, key_right)).expect("tile b");
+
+        let mut pts: Vec<DVec3> = a.instances.iter().map(|i| instance_pos(&a, i)).collect();
+        pts.extend(b.instances.iter().map(|i| instance_pos(&b, i)));
+
+        // No duplicate placement at the shared edge, and spacing still holds.
+        let mut min_d = f64::INFINITY;
+        for i in 0..pts.len() {
+            for j in (i + 1)..pts.len() {
+                min_d = min_d.min((pts[i] - pts[j]).length());
+            }
+        }
+        assert!(
+            min_d >= TEST_SPACING as f64 * 0.98,
+            "cross-tile min distance {min_d:.2} m below spacing {TEST_SPACING} m"
+        );
     }
 }

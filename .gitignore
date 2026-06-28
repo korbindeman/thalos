@@ -1,5 +1,9 @@
 /target
 /stage-bakes
+# Rendered output of the procedural-object previewer (`just preview`).
+/tools/preview/out/
+# Baked procedural textures (`cargo run -p thalos_texgen --example bake`).
+/tools/texgen/out/
 # Per-user runtime settings written by the game (window mode, UI scale, …).
 /user/
 Cargo.lock

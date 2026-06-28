@@ -16,3 +16,8 @@ noise = "0.9"
 # "physics crate has no Bevy" invariant (CI-guarded — see CLAUDE.md
 # Design invariants and .github/workflows/ci.yml).
 bevy_erosion_filter = { version = "0.1.2", default-features = false }
+
+[dev-dependencies]
+# Throwaway terrain-iteration examples render shaded-relief PNGs. Not Bevy, so
+# the no-Bevy CI guard is unaffected.
+image = { version = "0.25", default-features = false, features = ["png"] }

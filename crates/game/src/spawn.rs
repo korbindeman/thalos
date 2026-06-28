@@ -27,7 +27,7 @@ use bevy::prelude::*;
 use thalos_body_render::HeightSource;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
-use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
@@ -37,11 +37,11 @@ use crate::solar_system_state::SimulationState;
 /// Whether a fresh session resumes at 1× immediately instead of holding the
 /// paused-on-spawn default.
 ///
-/// **Every** spawn situation starts paused (warp 0×) so the player — or an
-/// agent driving the game over BRP — gets a beat to orient before sim time
-/// advances. Setting `THALOS_AUTO_RUN` (truthy) flips this on so the sim is
-/// live at 1× the instant the loading screen clears; this exists mainly for
-/// agents that want to observe motion without first issuing a warp input.
+/// **Every** spawn situation starts paused (warp 0×) so the player gets a beat
+/// to orient before sim time advances. Setting `THALOS_AUTO_RUN` (truthy) flips
+/// this on so the sim is live at 1× the instant the loading screen clears; this
+/// exists mainly for unattended runs that want motion without first issuing a
+/// warp input.
 ///
 /// Sole consumer: [`apply_initial_warp`].
 #[derive(Resource, Debug, Clone, Copy, Default)]
@@ -343,6 +343,11 @@ const LANDING_SITE_MAX_ABS_LAT_SIN: f32 = 0.82;
 /// the spawn isn't planted right on the waterline.
 const LANDING_SITE_FREEBOARD_M: f32 = 50.0;
 
+/// Sea-level datum (m above the reference radius). The runtime
+/// `ProceduralSurface` has no water layer; its continent-mask shoreline sits at
+/// the reference radius, so sea level is height 0.
+const SEA_LEVEL_M: f32 = 0.0;
+
 /// Re-armable trigger for the deferred descent/cruise placement, mirroring
 /// [`crate::runway::RunwayPlacement`]. Armed at startup when the boot
 /// scenario is a descent; **not** armed by runtime scenario starts (the start
@@ -607,13 +612,11 @@ fn refine_descent_spawn(
     mut settle: ResMut<crate::surface_settle::SurfaceSettle>,
     mut tracker: ResMut<crate::loading::LoadingTracker>,
     height_sources: Res<HeightSourceRegistry>,
-    surfaces: Res<TerrainSurfaceRegistry>,
 ) {
     if !placement.pending || situation.descent_profile().is_none() {
         return;
     }
-    let Some((state, attitude)) =
-        compute_descent_state(*situation, &sim, &height_sources, &surfaces)
+    let Some((state, attitude)) = compute_descent_state(*situation, &sim, &height_sources)
     else {
         return; // Terrain not registered yet — retry next frame.
     };
@@ -642,7 +645,6 @@ pub(crate) fn compute_descent_state(
     situation: SpawnSituation,
     sim: &SimulationState,
     height_sources: &HeightSourceRegistry,
-    surfaces: &TerrainSurfaceRegistry,
 ) -> Option<(StateVector, AttitudeState)> {
     let profile = situation.descent_profile()?;
     let body_id = sim.simulation.dominant_body();
@@ -661,9 +663,9 @@ pub(crate) fn compute_descent_state(
         (body_state.orientation.inverse() * sun_dir_inertial).normalize()
     };
 
-    let sea_level_m = surfaces
-        .get(body_id)
-        .and_then(|surface| surface.static_surface.sea_level_m);
+    // Sea level is the reference radius (height 0) — the runtime
+    // `ProceduralSurface` has no separate water layer.
+    let sea_level_m = Some(SEA_LEVEL_M);
     let site_dir = find_landing_site(
         height_source.as_ref(),
         sea_level_m,

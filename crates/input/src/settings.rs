@@ -509,6 +509,7 @@ pub mod defaults {
                 ("parking_brake", keys([KeyCode::KeyB])),
                 ("flaps_extend", keys([KeyCode::KeyF])),
                 ("flaps_retract", keys([KeyCode::KeyR])),
+                ("gear_toggle", keys([KeyCode::KeyG])),
             ],
             [
                 ("pitch", axis([KeyCode::KeyW], [KeyCode::KeyS])),
@@ -528,7 +529,8 @@ pub mod defaults {
     pub fn game_warp() -> BindingSection {
         section(
             [
-                ("warp_to_maneuver", keys([KeyCode::KeyG])),
+                // Moved off G (now landing gear) to the adjacent H.
+                ("warp_to_maneuver", keys([KeyCode::KeyH])),
                 ("warp_increase", keys([KeyCode::Period])),
                 ("warp_decrease", keys([KeyCode::Comma])),
                 ("warp_reset", keys([KeyCode::Backslash])),

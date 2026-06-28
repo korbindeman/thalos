@@ -1,18 +1,26 @@
-//! Trajectory-driven UDLOD terrain residency.
+//! Screen-size + trajectory-driven UDLOD terrain residency.
 //!
 //! Each procedural body's ground-LOD terrain entity owns a
-//! [`thalos_udlod::prelude::TileAtlas`] that allocates ~192 MB of GPU vRAM.
-//! Spawning terrain for every body at startup wastes most of that — the
-//! player only sees one body's ground at a time. This module decides
-//! which bodies should have terrain spawned ("resident") based on:
+//! [`thalos_udlod::prelude::TileAtlas`]. The near-tier atlas is large
+//! (~1.8 GB of GPU vRAM by the [`super::ground_terrain`] constants), so
+//! spawning a near atlas for every body does not scale. This module decides
+//! which bodies should have terrain spawned ("resident") and at which
+//! [`TerrainTier`]:
 //!
 //! 1. The canonical SOI body
 //!    ([`thalos_physics_canonical::simulation::Simulation::dominant_body`])
-//!    — always resident; the player is gravitationally bound to it.
-//! 2. Predicted encounters in the flight plan — resident when
-//!    `(closest_epoch - sim_time) < preload_lead_time_s`. Lead time
-//!    sized so the bake load + initial tile burst finish before the
-//!    camera reaches the `4 × radius` impostor-handoff threshold.
+//!    — always resident, `Near`; the player is gravitationally bound to it.
+//! 2. Predicted encounters in the flight plan — resident `Near` when
+//!    `(closest_epoch - sim_time) < preload_lead_time_s`. Lead time sized so
+//!    the initial tile burst finishes before the camera reaches the body.
+//! 3. Any other terrain-bearing body whose ship-view projected size exceeds the
+//!    icon dot — resident `Distant` (a tiny, cheap atlas, ~20 MB; see
+//!    [`RESIDENT_SCREEN_MARGIN`]). This is what lets a body bigger than a dot of
+//!    light render as real udlod terrain instead of a flat billboard, while
+//!    many such bodies stay resident at once.
+//!
+//! When a body crosses the near/distant boundary its terrain entity is
+//! despawned and respawned at the new tier (re-streaming from cold).
 //!
 //! A body falls out of residency
 //! [`TerrainResidencyConfig::despawn_debounce_s`] seconds after the
@@ -20,11 +28,10 @@
 //! maneuver edit briefly drops a body or warp jumps the prediction
 //! window.
 //!
-//! Non-resident bodies render as their impostor billboard (already up
-//! from [`super::generation::install_baked_planet`]). The visibility-
-//! swap system [`super::ground_terrain::sync_body_render_lod`] gates
-//! impostor hides on whether terrain is resident, so a non-resident
-//! body inside `4 × radius` does not silently disappear.
+//! Bodies with no resident terrain entity render via the impostor / icon path;
+//! the visibility-swap system [`super::ground_terrain::sync_body_render_lod`]
+//! gates the swap on whether terrain is resident, so a non-resident body does
+//! not silently disappear.
 //!
 //! # Dev teleport (future)
 //!
@@ -37,27 +44,26 @@
 //! result into [`BodyTerrainResidency`]. The helper isn't wired today
 //! because there is no teleport tool to consume it.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashMap;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use thalos_body_render::AtmosphereBlock;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileTree};
-use thalos_body_render::{BodyTerrainMaterial, BodyWaterMaterial};
-use thalos_physics_local::{HeightSourceRegistry, TerrainSurfaceRegistry};
-use thalos_terrain::PlanetSurface;
+use thalos_body_render::BodyTerrainMaterial;
+use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
-use super::ground_terrain::{spawn_body_terrain, spawn_body_water};
-use super::types::{RealSpaceBody, SimulationState, SolarSystemState};
+use super::ground_terrain::{TerrainTier, spawn_body_terrain};
+use super::screen_marker_radius;
+use super::types::{RealSpaceBody, SimulationState};
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_SCALE;
 use crate::loading::LoadingTracker;
 
 /// Tunables for the residency planner. Lives in a [`Resource`] so the
-/// values can be tweaked at runtime (via BRP, debug UI) without
-/// recompiling.
+/// values can be tweaked (edit the defaults and rebuild; a future debug UI
+/// could expose them).
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct TerrainResidencyConfig {
     /// Promote a body to resident when a predicted encounter or close
@@ -94,6 +100,10 @@ pub struct BodyTerrainResidency {
 struct ResidencyEntry {
     terrain: Entity,
     water: Option<Entity>,
+    /// Which atlas footprint this entity was spawned at. When the residency
+    /// planner re-classifies a body across the near/distant boundary, the
+    /// terrain entity is despawned and respawned at the new tier.
+    tier: TerrainTier,
 }
 
 impl BodyTerrainResidency {
@@ -105,8 +115,12 @@ impl BodyTerrainResidency {
 /// Wanted set produced by [`compute_wanted_residency`] each frame and
 /// consumed by [`apply_residency_changes`]. Pulled out as a `Resource`
 /// rather than a system-local so the loading-screen gate can read it.
+///
+/// The value is the [`TerrainTier`] the body should render at: `Near` for the
+/// dominant SOI body and predicted encounters (gameplay-relevant), `Distant`
+/// for bodies that are only big enough on screen to deserve real terrain.
 #[derive(Resource, Default)]
-struct WantedResidencySet(HashSet<BodyId>);
+struct WantedResidencySet(HashMap<BodyId, TerrainTier>);
 
 pub struct TerrainResidencyPlugin;
 
@@ -123,67 +137,105 @@ impl Plugin for TerrainResidencyPlugin {
                     apply_residency_changes.after(compute_wanted_residency),
                     initial_residency_loading_gate.after(apply_residency_changes),
                 )
-                    .in_set(crate::SimStage::Sync)
-                    // Run after `poll_planet_install_tasks` so a newly-
-                    // completed bake's `Arc<PlanetSurface>` is visible
-                    // to the executor on the same frame.
-                    .after(super::generation::poll_planet_install_tasks),
+                    .in_set(crate::SimStage::Sync),
             );
     }
 }
 
-/// Reads canonical sim state + flight plan and emits the wanted set.
+/// A body becomes [`TerrainTier::Distant`]-resident once its ship-view rendered
+/// radius reaches this fraction of the icon-dot radius
+/// ([`super::screen_marker_radius`]). Below 1.0 so the (cheap) distant terrain
+/// streams in slightly *before* the body grows past the dot, hiding the cold
+/// tile-load latency. 0.5 ≈ a ~4 screen-pixel radius at the ship camera's
+/// default ~45° vertical FOV on a 1080p viewport — "more than a dot of light".
+const RESIDENT_SCREEN_MARGIN: f32 = 0.5;
+
+/// Reads canonical sim state + flight plan and emits the wanted set, tagging
+/// each wanted body with the [`TerrainTier`] it should render at.
 ///
-/// **Edge case**: when the craft is `BodyFixed` (landed) or in surface
-/// contact under Avian, `Simulation::prediction()` returns `None`. Only
-/// `dominant_body()` drives residency in that case — which is the
-/// default EVA-on-Thalos spawn.
+/// Three rules, in priority order (a `Near` assignment always wins over a later
+/// `Distant` one for the same body):
+/// 1. The dominant SOI body → `Near` (the player is bound to it; landing/EVA
+///    colliders live here).
+/// 2. Predicted encounters / close approaches within the preload window →
+///    `Near` (the player is heading there).
+/// 3. Any *other* body whose ship-view projected size exceeds the icon dot →
+///    `Distant` (it is big enough to deserve real terrain instead of a flat
+///    billboard, but it is only scenery).
+///
+/// **Edge case**: when the craft is `BodyFixed` (landed) or in surface contact
+/// under Avian, `Simulation::prediction()` returns `None`; only rules 1 and 3
+/// drive residency then — which is the default EVA-on-Thalos spawn.
 fn compute_wanted_residency(
     sim: Res<SimulationState>,
     config: Res<TerrainResidencyConfig>,
+    ship_cam_q: Query<&GlobalTransform, With<ShipCamera>>,
+    body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
     mut wanted: ResMut<WantedResidencySet>,
 ) {
     wanted.0.clear();
     let now = sim.simulation.sim_time();
 
-    // (1) Always-resident: the body the craft is gravitationally bound
-    // to right now.
-    wanted.0.insert(sim.simulation.dominant_body());
+    // (1) Always-resident at full detail: the body the craft is gravitationally
+    // bound to right now.
+    wanted.0.insert(sim.simulation.dominant_body(), TerrainTier::Near);
 
-    // (2) Predicted encounters + close approaches within the preload
-    // lead-time window. `prediction()` is `None` when the craft is
-    // landed or in contact — that's fine, we still keep the dominant
-    // body resident from step 1.
+    // (2) Predicted encounters + close approaches within the preload lead-time
+    // window, at full detail. `prediction()` is `None` when the craft is landed
+    // or in contact — that's fine, we still keep the dominant body resident.
     if let Some(plan) = sim.simulation.prediction() {
         for enc in plan.encounters() {
             if enc.closest_epoch - now < config.preload_lead_time_s {
-                wanted.0.insert(enc.body);
+                wanted.0.insert(enc.body, TerrainTier::Near);
             }
         }
         for ap in plan.approaches() {
             if ap.epoch - now < config.preload_lead_time_s {
-                wanted.0.insert(ap.body);
+                wanted.0.insert(ap.body, TerrainTier::Near);
+            }
+        }
+    }
+
+    // (3) Screen-size residency: any terrain-bearing body whose ship-view
+    // rendered disc is bigger than the icon dot gets cheap distant terrain. The
+    // ship view renders at SHIP_SCALE (1 render unit = 1 m), so the body's
+    // rendered sphere radius is just `radius_m`, and the icon-dot radius is
+    // `screen_marker_radius(body_pos, cam_pos)`. Uses each body's render-space
+    // grid origin (`RealSpaceBody` GlobalTransform), matching the camera-to-body
+    // distance the LOD-swap system keys off. `entry` only inserts `Distant`
+    // where rules 1–2 haven't already claimed the body as `Near`.
+    if let Ok(cam_xform) = ship_cam_q.single() {
+        let cam_pos = cam_xform.translation();
+        for (rsb, xform) in &body_q {
+            let Some(body) = sim.system.bodies.get(rsb.body_id) else {
+                continue;
+            };
+            if !body.terrain.is_some() {
+                continue;
+            }
+            let body_pos = xform.translation();
+            let rendered_radius = (body.radius_m * SHIP_SCALE) as f32;
+            let dot_radius = screen_marker_radius(body_pos, cam_pos);
+            if rendered_radius >= dot_radius * RESIDENT_SCREEN_MARGIN {
+                wanted.0.entry(rsb.body_id).or_insert(TerrainTier::Distant);
             }
         }
     }
 }
 
-/// SystemParam bundle for the spawn / despawn path. Spawning needs the
-/// material asset registries, the tile-tree resource, the body's
-/// real-space parent entity, the ship camera entity, and the body's
-/// cached `Arc<PlanetSurface>` from the terrain registry.
+/// SystemParam bundle for the spawn / despawn path. Spawning needs the terrain
+/// material registry, the tile-tree resource, the GPU-atlas height-mirror
+/// registry (for the collider), the flatten registry, the body's real-space
+/// parent entity, and the ship camera entity.
 #[derive(SystemParam)]
 struct ResidencySpawnParams<'w, 's> {
     body_terrain_materials: ResMut<'w, Assets<BodyTerrainMaterial>>,
-    body_water_materials: ResMut<'w, Assets<BodyWaterMaterial>>,
-    meshes: ResMut<'w, Assets<Mesh>>,
     tile_trees: ResMut<'w, TerrainViewComponents<TileTree>>,
-    surfaces: Res<'w, TerrainSurfaceRegistry>,
     height_sources: Res<'w, HeightSourceRegistry>,
     flatten: ResMut<'w, super::ground_terrain::TerrainFlattenRegistry>,
-    solar_system: Res<'w, SolarSystemState>,
     bodies: Query<'w, 's, (&'static RealSpaceBody, Entity)>,
     ship_camera_q: Query<'w, 's, Entity, With<ShipCamera>>,
+    sun_shadow: Res<'w, super::sun_shadow::SunShadowImage>,
 }
 
 fn apply_residency_changes(
@@ -195,26 +247,45 @@ fn apply_residency_changes(
     mut params: ResidencySpawnParams,
 ) {
     let now = sim.simulation.sim_time();
+    let ship_camera = params.ship_camera_q.single().ok();
 
     // Refresh the "last wanted at" stamp for every currently-wanted
     // body, including those already resident. This is the debounce
     // baseline.
-    for body_id in &wanted.0 {
+    for body_id in wanted.0.keys() {
         residency.last_wanted_at.insert(*body_id, now);
     }
 
-    // Promote: spawn terrain (+ water) for any wanted body that isn't
-    // already resident. Returns `None` and silently retries next frame
-    // if the bake hasn't loaded yet or the ship camera isn't up.
-    let wanted_to_spawn: Vec<BodyId> = wanted
-        .0
-        .iter()
-        .copied()
-        .filter(|b| !residency.entries.contains_key(b))
-        .collect();
-    for body_id in wanted_to_spawn {
-        if let Some(entry) = try_spawn(body_id, &sim, &mut params, &mut commands) {
-            residency.entries.insert(body_id, entry);
+    // Promote new bodies and re-tier any whose classification changed across the
+    // near/distant boundary. Collect first so we don't borrow `residency.entries`
+    // while spawning. `try_spawn` returns `None` and is retried next frame if the
+    // ship camera or the body's real-space entity isn't up yet.
+    let wanted_entries: Vec<(BodyId, TerrainTier)> =
+        wanted.0.iter().map(|(b, t)| (*b, *t)).collect();
+    for (body_id, tier) in wanted_entries {
+        match residency.entries.get(&body_id).copied() {
+            // Already resident at the right tier — nothing to do.
+            Some(entry) if entry.tier == tier => {}
+            // Tier changed (e.g. a distant scenery body became a predicted
+            // encounter, or the dominant body left for a coarser one): drop the
+            // old atlas and rebuild at the new footprint. The new tiles re-stream
+            // from cold, which is acceptable for an infrequent re-classification.
+            Some(entry) => {
+                despawn_entry(&mut commands, &mut params, entry, ship_camera);
+                residency.entries.remove(&body_id);
+                if let Some(new_entry) = try_spawn(body_id, tier, &sim, &mut params, &mut commands) {
+                    residency.entries.insert(body_id, new_entry);
+                    info!(
+                        "re-tiered ground terrain for body_id {} -> {:?} tier",
+                        body_id, tier
+                    );
+                }
+            }
+            None => {
+                if let Some(entry) = try_spawn(body_id, tier, &sim, &mut params, &mut commands) {
+                    residency.entries.insert(body_id, entry);
+                }
+            }
         }
     }
 
@@ -223,7 +294,7 @@ fn apply_residency_changes(
     // the map while iterating.
     let mut to_despawn: Vec<(BodyId, ResidencyEntry)> = Vec::new();
     for (body_id, entry) in &residency.entries {
-        if wanted.0.contains(body_id) {
+        if wanted.0.contains_key(body_id) {
             continue;
         }
         let last = residency
@@ -235,26 +306,35 @@ fn apply_residency_changes(
             to_despawn.push((*body_id, *entry));
         }
     }
-    let ship_camera = params.ship_camera_q.single().ok();
     for (body_id, entry) in to_despawn {
         residency.entries.remove(&body_id);
         residency.last_wanted_at.remove(&body_id);
-        commands.entity(entry.terrain).despawn();
-        if let Some(water) = entry.water {
-            commands.entity(water).despawn();
-        }
-        if let Some(cam) = ship_camera {
-            // `TerrainViewComponents` is a per-`(terrain, view)`-pair
-            // map; clear the slot so the dropped entity doesn't linger
-            // as a stale key. Without this the next spawn would not
-            // reuse the entity id, but the map would grow unboundedly
-            // over a long session.
-            params.tile_trees.remove(&(entry.terrain, cam));
-        }
+        despawn_entry(&mut commands, &mut params, entry, ship_camera);
         info!(
             "despawned ground terrain for body_id {} (unwanted for ≥{:.0}s)",
             body_id, config.despawn_debounce_s
         );
+    }
+}
+
+/// Despawn a resident terrain (+ water) entity and clear its tile-tree slot.
+///
+/// `TerrainViewComponents` is a per-`(terrain, view)`-pair map; clearing the
+/// slot stops the dropped entity from lingering as a stale key. Without this the
+/// map would grow unboundedly over a long session (each re-tier / despawn /
+/// respawn cycle allocates a fresh entity id).
+fn despawn_entry(
+    commands: &mut Commands,
+    params: &mut ResidencySpawnParams,
+    entry: ResidencyEntry,
+    ship_camera: Option<Entity>,
+) {
+    commands.entity(entry.terrain).despawn();
+    if let Some(water) = entry.water {
+        commands.entity(water).despawn();
+    }
+    if let Some(cam) = ship_camera {
+        params.tile_trees.remove(&(entry.terrain, cam));
     }
 }
 
@@ -264,6 +344,7 @@ fn apply_residency_changes(
 /// next frame.
 fn try_spawn(
     body_id: BodyId,
+    tier: TerrainTier,
     sim: &SimulationState,
     params: &mut ResidencySpawnParams,
     commands: &mut Commands,
@@ -271,23 +352,17 @@ fn try_spawn(
     let body = sim.system.bodies.get(body_id)?;
 
     // Bodies without authored terrain never get a ground-LOD entity.
-    // (Stars, gas giants, the placeholder rocky bodies that haven't
-    // been given a `terrain: ...` block.) `dominant_body()` could in
-    // principle return one of these, so we have to guard.
+    // (Stars, gas giants.) `dominant_body()` could in principle return one of
+    // these, so we have to guard.
     if !body.terrain.is_some() {
         return None;
     }
 
-    // The bake might still be loading on the AsyncCompute pool —
-    // `install_baked_planet` writes the `Arc<PlanetSurface>` into this
-    // registry when it completes.
-    let surface: Arc<PlanetSurface> = params.surfaces.get(body_id)?;
-
     let ship_camera = params.ship_camera_q.single().ok()?;
 
-    // The real-space body entity (the BigSpace grid origin) is the
-    // parent for the terrain entity. `spawn.rs` creates one per
-    // procedural body at startup, so this lookup is stable.
+    // The real-space body entity (the BigSpace grid origin) is the parent for
+    // the terrain entity. `spawn.rs` creates one per procedural body at
+    // startup, so this lookup is stable.
     let ship_parent_entity = params
         .bodies
         .iter()
@@ -299,34 +374,39 @@ fn try_spawn(
         .as_ref()
         .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
         .unwrap_or_default();
-    let dynamic_state = params.solar_system.dynamic_surface_for(body_id, &surface);
-    let height_mirror = params.height_sources.gpu_mirror(body_id);
+    // The GPU-atlas height mirror feeds the collider / character controller /
+    // HUD altitude — only meaningful on the near tier (the body the player can
+    // touch). Distant scenery bodies skip it: nothing queries their height, and
+    // their tiny low-res atlas would only waste readback work mirroring it.
+    let height_mirror = match tier {
+        TerrainTier::Near => params.height_sources.gpu_mirror(body_id),
+        // `Distant` scenery and `Map` (orbital-map focus, spawned by its own
+        // path and never routed here) carry no collider/HUD height queries.
+        TerrainTier::Distant | TerrainTier::Map => None,
+    };
     let flatten = params.flatten.handle(body_id);
+    let sun_shadow_maps = params.sun_shadow.handles.clone();
 
     let terrain = spawn_body_terrain(
         commands,
         body,
-        surface.clone(),
         ship_parent_entity,
         &mut params.body_terrain_materials,
         &mut params.tile_trees,
         ship_camera,
         atmosphere,
-        dynamic_state,
         height_mirror,
         flatten,
+        tier,
+        sun_shadow_maps,
     );
 
-    let water = spawn_body_water(
-        commands,
-        body,
-        &surface,
-        ship_parent_entity,
-        &mut params.meshes,
-        &mut params.body_water_materials,
-    );
-
-    Some(ResidencyEntry { terrain, water })
+    // 0b-1: water is disabled until the generator grows a sea level (Slice 1).
+    Some(ResidencyEntry {
+        terrain,
+        water: None,
+        tier,
+    })
 }
 
 /// Loading-screen gate: once every body in the initial wanted set is
@@ -358,9 +438,15 @@ fn initial_residency_loading_gate(
     if !tracker.is_step_complete(crate::loading::step::BODIES) {
         return;
     }
-    // Every body the residency planner currently wants must either be
-    // (a) resident, or (b) have no authored terrain.
-    for body_id in &wanted.0 {
+    // Every *gameplay-relevant* (`Near`) body the residency planner wants must
+    // be either (a) resident, or (b) without authored terrain. Cosmetic
+    // `Distant` scenery bodies are intentionally not gated on — the loading
+    // screen waits for the ground under the player's feet, not distant terrain
+    // that streams in lazily behind a perfectly good icon dot.
+    for (body_id, tier) in &wanted.0 {
+        if *tier != TerrainTier::Near {
+            continue;
+        }
         let resident = residency.is_resident(*body_id);
         let no_terrain = sim
             .system

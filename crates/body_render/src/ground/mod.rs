@@ -36,6 +36,7 @@ mod sky_material;
 mod synthetic;
 mod tile_lattice;
 mod tile_synthesis_pool;
+mod tree_atlas;
 mod tree_impostor;
 mod tree_material;
 mod tree_mesh;
@@ -44,7 +45,8 @@ mod water_material;
 
 pub use body_material::{
     BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow,
-    MAX_TERRAIN_SHADOW_CASTERS, MAX_TERRAIN_SHADOW_QUADS, TerrainShadingStyle,
+    CASCADE_COUNT, MAX_TERRAIN_SHADOW_CASTERS, MAX_TERRAIN_SHADOW_QUADS, ShadowCascadeBlock,
+    TerrainShadingStyle,
 };
 pub use height_source::{
     ConstantHeightSource, CpuPipelineHeightSource, GpuAtlasHeightMirror,
@@ -73,14 +75,15 @@ pub use tree_impostor::{
     TreeImpostorMaterial, hemioct_decode, impostor_bake_rotation, make_impostor_atlas,
     recenter_tree_mesh, tree_bounding_sphere,
 };
-pub use tree_material::TreeMaterial;
+pub use tree_atlas::{ATLAS_N, BARK_CELL_COUNT, BARK_CELL_FIRST, build_foliage_atlas};
+pub use tree_material::{TreeMaterial, TreeMaterialPlugin, fallback_shadow_map};
 pub use tree_mesh::{
     CanopyStyle, TreeMeshData, TreeMeshParams, build_tree_mesh, build_tree_mesh_data,
 };
 pub use vegetation::{
-    GRASS_TILE_SIZE_M, GrassBladeLod, GrassMaterial, GrassParams, GrassTileBuildInput,
-    GrassTileKey, GrassTileMesh, build_grass_tile_mesh, grass_tile_frame, grass_tile_key,
-    grass_tiles_per_side,
+    GRASS_TILE_SIZE_M, GrassBladeLod, GrassClumpParams, GrassMaterial, GrassMaterialPlugin,
+    GrassParams, GrassTileBuildInput, GrassTileKey, GrassTileMesh, build_grass_clump_mesh,
+    build_grass_tile_mesh, grass_tile_frame, grass_tile_key, grass_tiles_per_side,
 };
 pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 

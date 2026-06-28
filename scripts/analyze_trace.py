@@ -9,17 +9,17 @@ suitable for feeding to an LLM or a human.
 Usage:
     python3 scripts/analyze_trace.py trace-2026-04-12_12-34-56.json [--top 40]
 
-Slow-frame windowing:
-    The game's `PerfLogPlugin` emits a `slow_frame` span every time a
-    frame exceeds `SlowFrameThresholdMs`. Aggregate just those windows:
+Event windowing:
+    Aggregate just the windows around a named span instead of the whole
+    capture:
 
         python3 scripts/analyze_trace.py trace-…json \
-            --around-name slow_frame --window-ms 200
+            --around-name <span> --window-ms 200
 
-    This finds every `slow_frame` event in the trace, builds a union of
+    This finds every occurrence of `<span>` in the trace, builds a union of
     ±window/2 windows around them, and reports the top spans within that
     union. Use it to skip past the "boring" frames in a long capture and
-    zoom in on the bad ones.
+    zoom in on a span of interest.
 """
 
 from __future__ import annotations
@@ -235,7 +235,7 @@ def main() -> int:
         type=str,
         default=None,
         help="Restrict aggregation to ±window_ms/2 windows around every "
-        "event with this span name (e.g. 'slow_frame').",
+        "event with this span name (e.g. 'Simulation::step').",
     )
     ap.add_argument(
         "--window-ms",

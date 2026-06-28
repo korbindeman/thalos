@@ -38,7 +38,7 @@ struct SkyAtmosExtra {
     sun_dir_flux:              vec4<f32>,  // xyz = sun dir (normalized), w = flux
     planet_center_radius:      vec4<f32>,  // xyz = planet center (render-space), w = radius
     world_to_body_orientation: vec4<f32>,  // render-space direction -> body-local cubemap direction
-    cloud_band_radii:          vec4<f32>,  // x = cloud base radius, y = cloud top radius (render units)
+    cloud_band_radii:          vec4<f32>,  // x = cloud base radius, y = cloud top radius (render units), z = airlight ratio, w = cloud-composite-enable flag (1 = bind live clouds)
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 
@@ -66,8 +66,10 @@ struct SkyAtmosExtra {
 // High-fidelity volumetric cloud layer (thalos_volumetric_clouds raymarch
 // output): rgb = premultiplied in-scatter, a = transmittance. Sampled in
 // screen space with textureLoad and composited over the atmosphere in-scatter
-// below. A 1×1 clear fallback (a = 1) makes this a no-op on bodies with no
-// active cloud layer.
+// below — but only when `cloud_band_radii.w >= 0.5` (the body whose live texture
+// is bound). Bodies with no active cloud layer carry a 1×1 blank here, which the
+// screen-space loads would read out of bounds (→ opaque black sky); the w flag
+// gates the composite so the blank is never sampled.
 @group(3) @binding(7) var cloud_layer_tex: texture_2d<f32>;
 
 // Per-pixel nearest cloud-hit distance from the same raymarch (R32F, metres
@@ -464,6 +466,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var fallback_t_surface: f32 = 1.0e30;
     var fallback_surface_fade: f32 = 0.0;
     var surface_fade: f32 = 0.0;
+    // Camera→surface distance on a geometry/fallback hit, for aerial perspective.
+    var surface_dist: f32 = 0.0;
     // Distance to opaque geometry at this pixel (ship hull, terrain), or a large
     // sentinel when the pixel is sky. Used below to keep the cloud layer from
     // painting over geometry that sits in front of the cloud band.
@@ -496,9 +500,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         scene_t = t_scene;
         t_exit = min(t_exit, t_scene);
         surface_fade = 1.0;
+        surface_dist = t_scene;
     } else if fallback_t_surface < 1.0e29 {
         t_exit = min(t_exit, fallback_t_surface);
         surface_fade = fallback_surface_fade;
+        surface_dist = fallback_t_surface;
     }
 
     if t_exit <= t_enter {
@@ -527,11 +533,31 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // changing how distance fades contrast. `0` is unset (airless / pre-first-
     // update); treat it as full strength so we never blank the in-scatter.
     let airlight_ratio = sky_atmos_extra.cloud_band_radii.z;
-    let airlight_scale = select(
-        mix(1.0, airlight_ratio, clamp(surface_fade, 0.0, 1.0)),
-        1.0,
-        airlight_ratio <= 0.0,
+
+    // Aerial perspective. The clear-weather airlight above keeps NEAR ground
+    // crisp, but real distant terrain desaturates and tints toward the sky as
+    // the air column between camera and surface grows. We drive an artistic
+    // veil from camera→surface distance and fade the surface toward the
+    // atmospheric in-scatter (haze) colour: it is folded into BOTH the additive
+    // in-scatter strength (here) and the dst-attenuation opacity (below), so the
+    // composite reduces to a clean mix(terrain, haze, veil) at range while
+    // leaving near ground at its tuned look. Physical extinction is untouched.
+    // Gated to bodies with an atmosphere (airlight_ratio > 0) so airless
+    // surfaces (Mira) are never veiled toward a black/near-zero in-scatter.
+    let aerial_near = 8000.0;
+    let aerial_far = 70000.0;
+    let aerial_max = 0.72;
+    let aerial = select(
+        0.0,
+        smoothstep(aerial_near, aerial_far, surface_dist)
+            * aerial_max
+            * clamp(surface_fade, 0.0, 1.0),
+        airlight_ratio > 0.0,
     );
+
+    let base_surface_airlight = mix(1.0, airlight_ratio, clamp(surface_fade, 0.0, 1.0));
+    let surface_airlight = max(base_surface_airlight, aerial);
+    let airlight_scale = select(surface_airlight, 1.0, airlight_ratio <= 0.0);
     scatter.in_scatter = scatter.in_scatter * airlight_scale;
 
     // Composite the high-fidelity volumetric cloud layer: a screen-space sample
@@ -607,7 +633,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let near = min(cloud_near, band_far);
         cloud_vis = clamp((scene_t - near) / max(band_far - near, 1.0), 0.0, 1.0);
     }
-    let cloud = CloudOverlay(cloud_sample.rgb * cloud_vis, (1.0 - cloud_sample.a) * cloud_vis);
+    // `cloud_band_radii.w` is the composite-enable flag, set to 1.0 by
+    // `update_body_terrain_atmosphere` only on the body whose live cloud texture
+    // is bound. On every other body — and when clouds are disabled in graphics
+    // settings (the active cloud body is then cleared) — it is 0.0 and the cloud
+    // layer is skipped. This guard is load-bearing: those bodies carry the 1×1
+    // blank `cloud_layer_tex`, but the screen-space `textureLoad`s above read
+    // texels up to 1919×1077 — out of bounds for a 1×1 texture, which returns
+    // (0,0,0,0) → transmittance 0 → an opaque black sky. Never composite the
+    // blank.
+    var cloud = CloudOverlay(vec3<f32>(0.0), 0.0);
+    if (sky_atmos_extra.cloud_band_radii.w >= 0.5) {
+        cloud = CloudOverlay(cloud_sample.rgb * cloud_vis, (1.0 - cloud_sample.a) * cloud_vis);
+    }
 
     // Premultiplied: `rgb` is already weighted by sun flux and β coefficients
     // inside `integrate_atmosphere`. Alpha is the mean opacity over the three
@@ -635,6 +673,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                           max(scatter.in_scatter.g, scatter.in_scatter.b));
         let lum_opacity = smoothstep(0.03, 0.20, sky_lum);
         opacity = max(opacity, lum_opacity);
+    } else {
+        // Surface aerial veil: lift the dst-attenuation to match the `aerial`
+        // in-scatter strength added above, so distant terrain's own colour is
+        // replaced by the haze colour (desaturate + tint) rather than merely
+        // brightened. Near ground keeps `physical_opacity` (aerial ≈ 0).
+        opacity = max(opacity, aerial);
     }
     let combined_opacity = clamp(
         1.0 - (1.0 - opacity) * (1.0 - cloud.opacity),

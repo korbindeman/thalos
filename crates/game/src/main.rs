@@ -2,7 +2,6 @@
 
 mod aero;
 mod autopilot;
-mod bake_check;
 mod body_tree_panel;
 mod bridge;
 mod camera;
@@ -15,6 +14,7 @@ mod flight_config;
 mod flight_plan_view;
 mod freecam;
 mod fuel;
+mod graphics_settings;
 mod hud;
 mod input;
 mod loading;
@@ -25,7 +25,6 @@ mod map_view;
 mod navball;
 mod navigation;
 mod pause_menu;
-mod perf_log;
 mod photo_mode;
 mod player_controller;
 mod reflection_probe;
@@ -56,6 +55,7 @@ mod window_settings;
 use std::sync::Arc;
 
 use bevy::asset::AssetPlugin;
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::render::{
@@ -97,7 +97,6 @@ use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use pause_menu::PauseMenuPlugin;
 use settings_menu::SettingsMenuPlugin;
-use perf_log::PerfLogPlugin;
 use photo_mode::PhotoModePlugin;
 use player_controller::PlayerControllerPlugin;
 use rendering::RenderingPlugin;
@@ -181,15 +180,11 @@ fn main() {
         .expect("Failed to load solar system from assets/");
 
     // ------------------------------------------------------------------
-    // 1a. Pre-flight: ensure every procedural body has a current bake.
-    //
-    // Missing or stale bakes are auto-repaired by shelling out to
-    // `thalos_bake_dump all` before Bevy boots, so a source edit under
-    // `crates/terrain_gen/` doesn't require the user to remember
-    // `just bake all` between iterations. When all bakes are current
-    // the check is microseconds (per-body `peek_key` only).
+    // 1a. (Retired in terrain-rewrite 0b-1.) Procedural bodies now generate
+    // terrain at runtime via `ProceduralSurface` behind the `SurfaceQuery`
+    // seam, so there is no pre-baked artifact to validate or auto-repair.
+    // `bake_check` is deleted in 0b-2.
     // ------------------------------------------------------------------
-    bake_check::ensure_bakes_or_exit(&system.bodies);
 
     // ------------------------------------------------------------------
     // 2. Print a startup banner.
@@ -430,14 +425,6 @@ fn main() {
         // libraries. Adding it again here would panic on duplicate
         // registration.
         .add_plugins(BodyRenderPlugin)
-        // BRP server (port 15702) for agent-driven inspection / mutation.
-        // Always on in dev; the listener is idle when no client is
-        // connected. See docs/tooling.md for the MCP workflow.
-        //
-        // `BrpExtrasPlugin` adds `FrameTimeDiagnosticsPlugin` itself
-        // (its `diagnostics` feature backs the `brp_extras/get_diagnostics`
-        // method), so we do not add it separately here.
-        .add_plugins(bevy_brp_extras::BrpExtrasPlugin)
         .add_plugins(bevy_egui::EguiPlugin::default())
         // The dedicated UI camera in `view::spawn_ui_camera` owns the
         // primary egui context; disable auto-attach so it doesn't bind
@@ -540,7 +527,9 @@ fn main() {
         .add_plugins(PauseMenuPlugin)
         .add_plugins(main_menu::MainMenuPlugin)
         .add_plugins(SettingsMenuPlugin)
-        .add_plugins(PerfLogPlugin)
+        // FPS/FRAME_TIME diagnostics for `hud/fps_overlay` (not part of
+        // `DefaultPlugins`, so add it explicitly).
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(ScenarioMenuPlugin)
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
@@ -549,6 +538,9 @@ fn main() {
         // windowed size) and folds the user UI scale into the fractional-HiDPI
         // crisp-text compensation. Persists edits to user/settings.ron.
         .add_plugins(window_settings::WindowSettingsPlugin)
+        // Persisted graphics preferences (user/graphics.ron) — e.g. the
+        // volumetric-cloud toggle read by `rendering::clouds::drive_clouds`.
+        .add_plugins(graphics_settings::GraphicsSettingsPlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
         .add_plugins(relaunch::RelaunchPlugin)

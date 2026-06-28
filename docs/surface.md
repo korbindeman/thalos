@@ -67,10 +67,10 @@ suppression); a separate pass will redesign landed-ship mechanics.
   the renderer share a single source of truth, so they agree
   exactly. The interface tolerates a future migration to GPU-side
   generation without churning the call sites.
-- The system is debuggable in production (`bevy_brp` queries against
-  `AvianAuthority`, `AuthorityMode`, `Position`, `LinearVelocity`)
-  and the few invariants that must hold (BodyFixed iff trajectory
-  suppressed, etc.) are checkable from outside the running game.
+- The system is debuggable: the relevant state (`AvianAuthority`,
+  `AuthorityMode`, `Position`, `LinearVelocity`) is Reflect-registered and
+  loggable, and the few invariants that must hold (BodyFixed iff trajectory
+  suppressed, etc.) are checkable from logs / a debug overlay.
 
 ## 2. Current state
 
@@ -255,8 +255,8 @@ overwrite paths all early-return for EVA. Open candidates:
   drift (BigSpace floating origin), the walk direction could be
   systematically wrong.
 
-**Verification**: BRP-watch `Position` and `LinearVelocity` on the
-player capsule across 10 frames while holding `W`. If Position
+**Verification**: log `Position` and `LinearVelocity` (add a temporary
+`info!`) on the player capsule across 10 frames while holding `W`. If Position
 oscillates frame-to-frame around a fixed point: solver writeback. If
 it advances then resets in a longer cycle: schedule race. If
 LinearVelocity is zeroed between walk writes: solver overwrite.
@@ -455,7 +455,8 @@ this doc only commits to the BodyFixed → surface-mode rule.
 
 ### 4.4 Debuggability invariants
 
-Two predicates that must hold and should be BRP-queryable:
+Two predicates that must hold and should be observable (logged or in a debug
+overlay):
 
 - **`BodyFixed ⇔ no Kepler line drawn`**. If a render system is
   drawing a Kepler line for a BodyFixed craft, that's a bug; flag
@@ -464,9 +465,8 @@ Two predicates that must hold and should be BRP-queryable:
   EVA in any other authority mode is a bug.
 
 Register `BodyFixedPose`, `AvianRole`, `AvianAuthority` for `Reflect`
-so a remote agent can inspect them via `world_get_resources` and
-`world_get_components`. (Today only `CraftStateMirror` is mirrored;
-see [docs/tooling.md](docs/tooling.md) for the registration policy.)
+so they can be surfaced in a debug overlay or logged. (Today only
+`CraftStateMirror` is mirrored.)
 
 ## 5. Migration plan
 
@@ -487,7 +487,7 @@ investigations that must complete and report before the corresponding
      prioritisation; pre-prioritise tiles inside a focus radius.
    - If `tile_lod_m` is correct but visual is still flat → cascade /
      erosion is at fault, not the LOD plan.
-2. **[research]** Diagnose §3.2 jitter. BRP-watch `Position`,
+2. **[research]** Diagnose §3.2 jitter. Log `Position`,
    `LinearVelocity`, `LocalCraftBody` on the player capsule across
    10 frames while walking forward. Decision tree:
    - Position oscillates frame-to-frame → solver writeback path;
@@ -1037,7 +1037,8 @@ pub fn repair(&mut self);   // clears on respawn/teleport
 ```
 
 Canonical ownership keeps the invariant "one craft state, one
-authority": HUD, control gating, and the BRP mirror all read one
+authority": HUD, control gating, and the Reflect state mirror
+(`CraftStateMirror`) all read one
 truth. It is deliberately *not* on `CraftState` (which is cloned and
 serialised widely) — there is no save/load yet, and a transient flag
 on `Simulation` avoids rippling through every `CraftState`
@@ -1089,7 +1090,7 @@ explosion FX yet):
   presentation effects can continue. A centered overlay (`scenario_menu.rs`)
   shows "VESSEL DESTROYED — impact NN m/s" above the four start scenarios,
   plus a log line at destruction time. `destroyed` is mirrored into
-  `CraftStateMirror` so it is BRP-queryable.
+  `CraftStateMirror` so the HUD / a debug overlay can read it.
 - **Recovery is an in-place respawn.** Each scenario button repairs the
   craft (`Simulation::repair()`) and rebuilds it for the chosen start
   without relaunching the process: the authored Thalos parking orbit, a
@@ -1323,7 +1324,8 @@ indefinitely, because nothing opposed surface-parallel motion.
 - **Gating.** Same as the backstop: only when Avian owns translation
   (`AvianRole::Full`) for a live, non-destroyed `Ship`.
 - **Tuning.** `SurfaceFriction` (`mu_static`, `mu_kinetic`,
-  `contact_margin_m`) is a Reflect-registered resource — live-tune over BRP.
+  `contact_margin_m`) is a Reflect-registered resource (tune by editing the
+  default and rebuilding).
 
 ## Functional landing gear (wheels)
 
@@ -1385,6 +1387,19 @@ acceleration accumulators.
   residual — though full takeoff thrust still overpowers it. Tap `B` to
   release and taxi. `toggle_parking_brake` flips the `ParkingBrake`
   resource on the key edge.
+- **Gear up/down.** A latched toggle (`G`, `flight.gear_toggle`; also the
+  HUD `GEAR` pill), defaulting **down** (`GearState::default` →
+  `down: true`). When up, `apply_landing_gear_forces` bails out entirely —
+  no raycast, no contact, `WeightOnWheels` stays false — and
+  `ship_view::sync_gear_visibility` hides the gear meshes. It is **binary**:
+  there is no retraction animation (the procedural gear mesh would only read
+  as a stiff geometric fold), so a half-deployed partial-load state never
+  exists. Retraction is **interlocked against weight-on-wheels** (`G` and
+  the pill route through `set_gear_down`): you cannot retract the legs you
+  are standing on; extending is always allowed. `GearState` is a persistent
+  resource, so the runway placement forces it back down on spawn
+  (`runway::finish_runway_spawn`) the same way it engages the brake. Gear
+  parasitic drag (down) is a deferred aero-model follow-up.
 - **Wings are colliders too.** `build_ship_collider_primitives` gives each
   `Wing` a thin oriented-cuboid collider matching its planform (via
   `wing_panel_frame`), so a wingtip catches the ground on an over-banked
@@ -1401,8 +1416,7 @@ acceleration accumulators.
 - **Tuning.** `GearTuning` (spring stiffness, damping ratio, friction
   `mu`, lateral stiffness, rolling `rolling_mu` + `rolling_hold_stiffness`,
   parking-brake stiffness, max steer, travel, ray margin) is a
-  Reflect-registered resource — live-tune over BRP while taxiing rather
-  than recompiling.
+  Reflect-registered resource (tune by editing the default and rebuilding).
 
 **Driving requires thrust, which requires staged + fuelled engines.** The
 demo aircraft's engines only produce thrust once *activated* (staging —
@@ -1413,6 +1427,8 @@ air-breathers to fire on genuinely airless bodies.)
 
 Not yet covered: powered wheels (drive torque from a throttle — the
 eventual goal so airless-body rovers can drive without thrust) and gear
-retraction. The parking brake's hold is a high-gain damper rather than a
-true static-friction latch, so under a sustained force above the friction
-circle (e.g. full thrust) it slips rather than holding.
+retraction *animation* + the gear-down drag penalty (the up/down latch
+itself is wired — see the gear bullet above). The parking brake's hold is a
+high-gain damper rather than a true static-friction latch, so under a
+sustained force above the friction circle (e.g. full thrust) it slips
+rather than holding.

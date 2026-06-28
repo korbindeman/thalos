@@ -117,12 +117,19 @@ pub fn tree_bounding_sphere(data: &TreeMeshData) -> (Vec3, f32) {
 /// A `Mesh` copy of `data` recentred so its bounding-sphere centre sits at the
 /// origin — the mesh handed to the bake instances, which are rotated about the
 /// origin per captured view direction and scaled to fill their atlas cell.
+/// `UV_1.y` carries the foliage-atlas leaf code (as in [`crate::ground::tree_mesh`]'s
+/// standalone mesh) so the bake shader samples the *same* leaf shape + colour the
+/// mesh trees do — without it the bake captures only the near-white vertex tint
+/// and the impostors render as solid pale quads.
 pub fn recenter_tree_mesh(data: &TreeMeshData, center: Vec3) -> Mesh {
     let positions: Vec<[f32; 3]> = data
         .positions
         .iter()
         .map(|p| (Vec3::from_array(*p) - center).to_array())
         .collect();
+    let count = positions.len();
+    let uv0 = vec![[0.0f32; 2]; count];
+    let uv1: Vec<[f32; 2]> = data.leaf_code.iter().map(|&c| [0.0, c]).collect();
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
@@ -130,6 +137,8 @@ pub fn recenter_tree_mesh(data: &TreeMeshData, center: Vec3) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, data.colors.clone());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     mesh
 }
@@ -256,13 +265,20 @@ pub struct BakeParams {
 
 /// Material used only at startup to render the octahedral atlas. One instance
 /// per (species, view cell) renders the recentred species mesh; `mode` selects
-/// the albedo atlas (vertex colour + coverage) or the normal atlas
-/// (object-local normal + depth). Object-local — not world — normals are stored
-/// so the runtime impostor re-lights each tree in its terrain frame.
+/// the albedo atlas (leaf colour × tint + leaf-shaped coverage) or the normal
+/// atlas (object-local normal + depth). The same procedural foliage atlas the
+/// mesh trees sample is bound so the captured leaf shape/colour matches the
+/// mesh→impostor handoff. Object-local — not world — normals are stored so the
+/// runtime impostor re-lights each tree in its terrain frame.
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
 pub struct TreeBakeMaterial {
     #[uniform(0)]
     pub params: BakeParams,
+    /// Procedural foliage atlas (leaf clusters + shell + bark), shared with
+    /// [`TreeMaterial`](crate::ground::TreeMaterial).
+    #[texture(1)]
+    #[sampler(2)]
+    pub atlas: Handle<Image>,
 }
 
 impl Material for TreeBakeMaterial {

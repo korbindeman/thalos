@@ -91,18 +91,30 @@ const VS_TAPE_H: f32 = 240.0;
 const VS_TAPE_GAP: f32 = 10.0;
 const VS_TICK_SLOTS: i32 = 7;
 
-const HUD_GREEN: Color = Color::srgba(0.55, 1.0, 0.45, 0.95);
-const HUD_GREEN_DIM: Color = Color::srgba(0.55, 1.0, 0.45, 0.55);
-const HUD_TAPE_BG: Color = Color::srgba(0.0, 0.04, 0.0, 0.25);
-const HUD_BOX_BG: Color = Color::srgba(0.01, 0.05, 0.01, 0.80);
+// Warm-amber HUD palette. The PFD used to render in a bright, saturated
+// green phosphor — that read as too bright/obnoxious and clashed with the
+// rest of the HUD's warm-amber accent identity (`HudTheme::text_accent`).
+// These colours are amber, dimmer, and a touch more translucent so the
+// overlay reads as a thin, softly-glowing real HUD instead.
+const HUD_AMBER: Color = Color::srgba(0.99, 0.75, 0.37, 0.85);
+const HUD_AMBER_DIM: Color = Color::srgba(0.96, 0.69, 0.32, 0.42);
+const HUD_TAPE_BG: Color = Color::srgba(0.05, 0.035, 0.012, 0.20);
+const HUD_BOX_BG: Color = Color::srgba(0.07, 0.048, 0.016, 0.66);
+/// Zero-offset blurred halo behind the thin lines and readout boxes — the
+/// "slight bloom". Bevy composites the UI pass *after* the camera's bloom
+/// node (`EndMainPass → Bloom → Tonemapping → … → UiPass`), so HDR UI
+/// colours never reach that bloom; a box-shadow glow is the closest a real
+/// HUD bloom the UI layer can produce. [`HUD_GLOW_SOFT`] is the fainter
+/// variant for the larger tape frames.
+const HUD_GLOW: Color = Color::srgba(1.0, 0.73, 0.32, 0.5);
+const HUD_GLOW_SOFT: Color = Color::srgba(1.0, 0.73, 0.32, 0.22);
 
 // ---------------------------------------------------------------------------
 // Mode state + components
 // ---------------------------------------------------------------------------
 
 /// Which navigation display is active. **Sole writer:**
-/// [`handle_mode_clicks`]. Reflect-registered so agents can switch the
-/// display over BRP (`world_mutate_resources`).
+/// [`handle_mode_clicks`]. Reflect-registered (for a future debug UI).
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 #[reflect(Resource)]
 pub enum NavDisplayMode {
@@ -281,8 +293,8 @@ fn spawn_horizon(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Name::new("PfdHorizon"),
         ))
         .with_children(|h| {
-            spawn_bar(h, -(HORIZON_GAP_HALF + HORIZON_BAR_LEN), HORIZON_BAR_LEN, 2.0, HUD_GREEN);
-            spawn_bar(h, HORIZON_GAP_HALF, HORIZON_BAR_LEN, 2.0, HUD_GREEN);
+            spawn_bar(h, -(HORIZON_GAP_HALF + HORIZON_BAR_LEN), HORIZON_BAR_LEN, 1.5, HUD_AMBER, true);
+            spawn_bar(h, HORIZON_GAP_HALF, HORIZON_BAR_LEN, 1.5, HUD_AMBER, true);
             // Heading labels below the line; left offsets driven per frame.
             for slot in -HEADING_TICK_SLOTS..=HEADING_TICK_SLOTS {
                 h.spawn((
@@ -298,7 +310,7 @@ fn spawn_horizon(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                         font_size: 12.0,
                         ..default()
                     },
-                    TextColor(HUD_GREEN_DIM),
+                    TextColor(HUD_AMBER_DIM),
                     PfdHeadingTick { slot },
                     Visibility::Hidden,
                     Name::new(format!("PfdHeadingTick_{slot}")),
@@ -310,13 +322,13 @@ fn spawn_horizon(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
 fn spawn_rung(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, pitch_deg: i32) {
     let major = pitch_deg % 10 == 0;
     let (bar_len, gap_half, thickness) = if major {
-        (RUNG_BAR_LEN, RUNG_GAP_HALF, 2.0)
+        (RUNG_BAR_LEN, RUNG_GAP_HALF, 1.5)
     } else {
         (RUNG_MINOR_BAR_LEN, RUNG_MINOR_GAP_HALF, 1.0)
     };
     // Sky rungs solid green, ground rungs dimmed (stand-in for the
     // conventional dashed negative rungs).
-    let color = if pitch_deg >= 0 { HUD_GREEN } else { HUD_GREEN_DIM };
+    let color = if pitch_deg >= 0 { HUD_AMBER } else { HUD_AMBER_DIM };
 
     shift
         .spawn((
@@ -333,8 +345,8 @@ fn spawn_rung(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, pitch_deg:
             Name::new(format!("PfdRung_{pitch_deg}")),
         ))
         .with_children(|r| {
-            spawn_bar(r, -(gap_half + bar_len), bar_len, thickness, color);
-            spawn_bar(r, gap_half, bar_len, thickness, color);
+            spawn_bar(r, -(gap_half + bar_len), bar_len, thickness, color, major);
+            spawn_bar(r, gap_half, bar_len, thickness, color, major);
             if major {
                 for x in [-(gap_half + bar_len + 34.0), gap_half + bar_len + 8.0] {
                     r.spawn((
@@ -357,8 +369,28 @@ fn spawn_rung(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, pitch_deg:
         });
 }
 
-fn spawn_bar(parent: &mut ChildSpawnerCommands<'_>, x: f32, len: f32, thickness: f32, color: Color) {
-    parent.spawn((
+/// A soft, zero-offset blurred halo behind a node — the HUD's "slight
+/// bloom". `blur` is the halo spread in logical px. See [`HUD_GLOW`] for
+/// why the glow is faked with a box shadow rather than the camera bloom.
+fn hud_glow(color: Color, blur: f32) -> BoxShadow {
+    BoxShadow(vec![ShadowStyle {
+        color,
+        x_offset: Val::Px(0.0),
+        y_offset: Val::Px(0.0),
+        spread_radius: Val::Px(0.0),
+        blur_radius: Val::Px(blur),
+    }])
+}
+
+fn spawn_bar(
+    parent: &mut ChildSpawnerCommands<'_>,
+    x: f32,
+    len: f32,
+    thickness: f32,
+    color: Color,
+    glow: bool,
+) {
+    let mut bar = parent.spawn((
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(x),
@@ -369,6 +401,11 @@ fn spawn_bar(parent: &mut ChildSpawnerCommands<'_>, x: f32, len: f32, thickness:
         },
         BackgroundColor(color),
     ));
+    // Only the prominent, persistent lines (horizon + major rungs) glow;
+    // the minor rungs stay crisp so the ladder doesn't smear into a haze.
+    if glow {
+        bar.insert(hud_glow(HUD_GLOW, 5.0));
+    }
 }
 
 fn spawn_markers(anchor: &mut ChildSpawnerCommands<'_>, images: &mut Assets<Image>) {
@@ -421,7 +458,7 @@ fn spawn_speed_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Button,
             tape_root_node(left),
             BackgroundColor(HUD_TAPE_BG),
-            BorderColor::all(HUD_GREEN_DIM),
+            BorderColor::all(HUD_AMBER_DIM),
             Interaction::None,
             // Shared with the classic velocity readout: clicking cycles the
             // speed reference frame via `flight_panel::handle_velocity_frame_click`.
@@ -444,7 +481,7 @@ fn spawn_speed_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                         font_size: 12.0,
                         ..default()
                     },
-                    TextColor(HUD_GREEN),
+                    TextColor(HUD_AMBER),
                     PfdSpeedTick { slot },
                     Visibility::Hidden,
                 ))
@@ -458,7 +495,7 @@ fn spawn_speed_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                             height: Val::Px(2.0),
                             ..default()
                         },
-                        BackgroundColor(HUD_GREEN),
+                        BackgroundColor(HUD_AMBER),
                     ));
                 });
             }
@@ -469,7 +506,7 @@ fn spawn_speed_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
         anchor,
         theme,
         left,
-        &[(PfdReadout::SpeedFrame, HUD_GREEN), (PfdReadout::Throttle, HUD_GREEN_DIM)],
+        &[(PfdReadout::SpeedFrame, HUD_AMBER), (PfdReadout::Throttle, HUD_AMBER_DIM)],
         "PfdSpeedLabels",
     );
 }
@@ -481,7 +518,7 @@ fn spawn_alt_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Button,
             tape_root_node(left),
             BackgroundColor(HUD_TAPE_BG),
-            BorderColor::all(HUD_GREEN_DIM),
+            BorderColor::all(HUD_AMBER_DIM),
             Interaction::None,
             // Shared with the top altitude panel: clicking toggles SEA/GND
             // via `orbital_panel::handle_click`.
@@ -503,7 +540,7 @@ fn spawn_alt_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                         font_size: 12.0,
                         ..default()
                     },
-                    TextColor(HUD_GREEN),
+                    TextColor(HUD_AMBER),
                     PfdAltTick { slot },
                     Visibility::Hidden,
                 ))
@@ -517,7 +554,7 @@ fn spawn_alt_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                             height: Val::Px(2.0),
                             ..default()
                         },
-                        BackgroundColor(HUD_GREEN),
+                        BackgroundColor(HUD_AMBER),
                     ));
                 });
             }
@@ -528,7 +565,7 @@ fn spawn_alt_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
         anchor,
         theme,
         left,
-        &[(PfdReadout::AltDatum, HUD_GREEN)],
+        &[(PfdReadout::AltDatum, HUD_AMBER)],
         "PfdAltLabels",
     );
 }
@@ -549,7 +586,8 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 ..default()
             },
             BackgroundColor(HUD_TAPE_BG),
-            BorderColor::all(HUD_GREEN_DIM),
+            BorderColor::all(HUD_AMBER_DIM),
+            hud_glow(HUD_GLOW_SOFT, 7.0),
             Name::new("PfdVsTape"),
         ))
         .with_children(|tape| {
@@ -567,7 +605,7 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                         font_size: 11.0,
                         ..default()
                     },
-                    TextColor(HUD_GREEN),
+                    TextColor(HUD_AMBER),
                     PfdVsTick { slot },
                     Visibility::Hidden,
                 ))
@@ -581,7 +619,7 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                             height: Val::Px(2.0),
                             ..default()
                         },
-                        BackgroundColor(HUD_GREEN),
+                        BackgroundColor(HUD_AMBER),
                     ));
                 });
             }
@@ -608,21 +646,24 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     font_size: 12.0,
                     ..default()
                 },
-                TextColor(HUD_GREEN_DIM),
+                TextColor(HUD_AMBER_DIM),
             ));
         });
 }
 
-fn tape_root_node(left: f32) -> Node {
-    Node {
-        position_type: PositionType::Absolute,
-        left: Val::Px(left),
-        top: Val::Px(-TAPE_H * 0.5),
-        width: Val::Px(TAPE_W),
-        height: Val::Px(TAPE_H),
-        border: UiRect::all(Val::Px(1.0)),
-        ..default()
-    }
+fn tape_root_node(left: f32) -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(left),
+            top: Val::Px(-TAPE_H * 0.5),
+            width: Val::Px(TAPE_W),
+            height: Val::Px(TAPE_H),
+            border: UiRect::all(Val::Px(1.0)),
+            ..default()
+        },
+        hud_glow(HUD_GLOW_SOFT, 7.0),
+    )
 }
 
 fn spawn_value_box(
@@ -646,7 +687,8 @@ fn spawn_value_box(
             ..default()
         },
         BackgroundColor(HUD_BOX_BG),
-        BorderColor::all(HUD_GREEN),
+        BorderColor::all(HUD_AMBER),
+        hud_glow(HUD_GLOW, 4.0),
         ZIndex(2),
     ))
     .with_children(|b| {
@@ -657,7 +699,7 @@ fn spawn_value_box(
                 font_size,
                 ..default()
             },
-            TextColor(HUD_GREEN),
+            TextColor(HUD_AMBER),
             readout,
         ));
     });
@@ -721,7 +763,7 @@ fn spawn_heading_readout(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme
                     font_size: 14.0,
                     ..default()
                 },
-                TextColor(HUD_GREEN),
+                TextColor(HUD_AMBER),
                 PfdReadout::Heading,
             ));
         });
@@ -729,7 +771,7 @@ fn spawn_heading_readout(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme
 
 fn spawn_annunciators(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
     let rows: [(PfdAnnunciator, &str, Color, f32); 2] = [
-        (PfdAnnunciator::Fbw, "FBW", HUD_GREEN, -150.0),
+        (PfdAnnunciator::Fbw, "FBW", HUD_AMBER, -150.0),
         (PfdAnnunciator::AlphaProt, "A.PROT", theme.text_warn, 60.0),
     ];
     for (kind, label, color, x) in rows {
@@ -1264,13 +1306,7 @@ fn attitude_angles(
     craft_pos: DVec3,
     body_pos: DVec3,
 ) -> Option<AttitudeAngles> {
-    let up = (craft_pos - body_pos).try_normalize()?;
-    let mut north = DVec3::Y - DVec3::Y.dot(up) * up;
-    if north.length_squared() < 1e-12 {
-        north = DVec3::X - DVec3::X.dot(up) * up;
-    }
-    let north = north.try_normalize()?;
-    let east = north.cross(up);
+    let (up, north, east) = super::geo::local_enu_basis(craft_pos, body_pos)?;
 
     let nose = q_body_to_world * BODY_NOSE;
     let right = q_body_to_world * BODY_RIGHT;

@@ -47,6 +47,8 @@ use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::coords::SHIP_LAYER;
+use crate::camera::ShipCamera;
+use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::rendering::types::{CameraExposure, PlayerShip};
@@ -61,13 +63,21 @@ struct GrassRing {
     inner_m: f64,
     /// Outer ground distance the ring covers.
     outer_m: f64,
-    /// Candidate blade density per m² before gates.
+    /// Candidate (placement-point) density per m² before gates.
     density_per_m2: f32,
+    /// Blades fanned per accepted point. Coverage = density × clump, but only
+    /// `density` pays the placement gate — so near rings get a thick carpet
+    /// cheaply, far rings stay at 1 (a single wide clump card).
+    blades_per_clump: u32,
     /// Blade width multiplier (constant-coverage rule: density ↓ ⇒ width ↑).
     width_scale: f32,
     /// Blade height multiplier.
     height_scale: f32,
     blade_lod: GrassBladeLod,
+    /// Forest-cull strength `[0, 1]`: how aggressively this ring thins grass
+    /// under tree canopy (occluded → pure overdraw). Near rings keep all grass
+    /// (`0`); far rings ramp up so distant grass survives only on open plains.
+    forest_cull: f32,
 }
 
 /// The clipmap: near full-detail blades → far wide clumps → terrain albedo
@@ -81,45 +91,56 @@ const GRASS_RINGS: [GrassRing; 5] = [
         inner_m: 0.0,
         outer_m: 55.0,
         density_per_m2: 24.0,
+        blades_per_clump: 5,
         width_scale: 1.0,
         height_scale: 1.0,
         blade_lod: GrassBladeLod::Full,
+        // Near band: keep all grass, including the forest floor between trunks.
+        forest_cull: 0.0,
     },
     GrassRing {
         tile_size_m: 50.0,
         inner_m: 55.0,
         outer_m: 140.0,
-        density_per_m2: 10.0,
-        width_scale: 2.4,
-        height_scale: 1.2,
+        density_per_m2: 12.0,
+        blades_per_clump: 4,
+        width_scale: 1.8,
+        height_scale: 1.1,
         blade_lod: GrassBladeLod::Wide,
+        forest_cull: 0.0,
     },
     GrassRing {
         tile_size_m: 100.0,
         inner_m: 140.0,
         outer_m: 340.0,
-        density_per_m2: 3.5,
-        width_scale: 5.5,
-        height_scale: 1.6,
+        density_per_m2: 6.0,
+        blades_per_clump: 3,
+        width_scale: 3.2,
+        height_scale: 1.3,
         blade_lod: GrassBladeLod::Wide,
+        forest_cull: 0.55,
     },
     GrassRing {
         tile_size_m: 200.0,
         inner_m: 340.0,
         outer_m: 760.0,
-        density_per_m2: 1.0,
-        width_scale: 14.0,
-        height_scale: 2.4,
+        density_per_m2: 2.5,
+        blades_per_clump: 2,
+        width_scale: 7.0,
+        height_scale: 1.8,
         blade_lod: GrassBladeLod::Wide,
+        forest_cull: 0.85,
     },
     GrassRing {
         tile_size_m: 400.0,
         inner_m: 760.0,
         outer_m: 1500.0,
-        density_per_m2: 0.3,
-        width_scale: 32.0,
-        height_scale: 3.5,
+        density_per_m2: 1.0,
+        blades_per_clump: 1,
+        width_scale: 16.0,
+        height_scale: 2.6,
         blade_lod: GrassBladeLod::Wide,
+        forest_cull: 0.95,
     },
 ];
 
@@ -157,7 +178,17 @@ const GRASS_WIND_SWAY_M: f32 = 0.06;
 /// Rebuild-staleness scan interval, seconds.
 const GRASS_REBUILD_CHECK_S: f32 = 0.5;
 /// Rebuild a stale tile only when its centre height moved more than this.
-const GRASS_REBUILD_DELTA_M: f32 = 0.05;
+///
+/// Must stay **above the height-sample noise floor**, or rotation-driven atlas
+/// re-streaming triggers a constant despawn→rebuild churn that pops tiles in and
+/// out (the despawn→async-rebuild gap is far more visible than the height change
+/// it chases). The GPU height mirror stores R16-quantized heights, so re-serving
+/// the same point from a different LOD/atlas slot shifts it by ~1 quantization
+/// step (~0.05–0.10 m on Thalos, measured). Terrain is LOD-invariant by design
+/// (see `docs/terrain.md`), so the only *real* change grass must chase is a
+/// flatten-pad install (the runway — metres); 0.5 m clears the noise with margin
+/// and still catches pads.
+const GRASS_REBUILD_DELTA_M: f32 = 0.5;
 /// Stale-tile rebuilds dispatched per scan tick.
 const GRASS_MAX_REBUILDS_PER_TICK: usize = 2;
 
@@ -190,6 +221,23 @@ struct GrassTiles {
     /// One material per ring (carries that ring's fade parameters).
     materials: Vec<Handle<GrassMaterial>>,
     rebuild_timer: f32,
+    /// Per-second churn counters (grass-flicker investigation; logged + reset
+    /// by `log_grass_diagnostics`). Remove once the flicker cause is pinned.
+    dbg: GrassDiag,
+}
+
+/// Diagnostic event counters accumulated over one second.
+#[derive(Default)]
+struct GrassDiag {
+    reach_despawns: u32,
+    rebuild_despawns: u32,
+    dispatched: u32,
+    empty: u32,
+    /// Largest |Δheight| that triggered a rebuild this second — tests whether
+    /// the sampled terrain height under a fixed tile actually wobbles.
+    max_rebuild_dh_m: f32,
+    log_timer: f32,
+    last_revision: u64,
 }
 
 /// Marker on a spawned grass-tile entity.
@@ -212,6 +260,7 @@ impl Plugin for GrassRenderPlugin {
                 finalize_grass_tiles.after(drive_grass_tiles),
                 update_grass_transforms.after(finalize_grass_tiles),
                 update_grass_material,
+                log_grass_diagnostics.after(update_grass_transforms),
             )
                 .in_set(SimStage::Sync)
                 .after(sync_solar_system_state),
@@ -233,12 +282,18 @@ fn drive_grass_tiles(
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
+    freecam: Res<FreeCam>,
+    ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     mut commands: Commands,
 ) {
     let Some(states) = solar.states.as_deref() else {
         return;
     };
-    let cam_pos = sim.simulation.ship_state().position;
+    let cam_pos = scatter_view_center(
+        &freecam,
+        ship_cam_q.single().ok(),
+        sim.simulation.ship_state().position,
+    );
 
     // Active body: nearest vegetated, terrain-backed body (the clouds driver's
     // selection rule, narrowed to bodies that can grow grass).
@@ -332,6 +387,7 @@ fn drive_grass_tiles(
             && let Some(entity) = tile.entity
         {
             commands.entity(entity).despawn();
+            grass.dbg.reach_despawns += 1;
         }
     }
 
@@ -423,16 +479,19 @@ fn drive_grass_tiles(
             radius_m,
             sea_level_m,
             blades_per_m2: ring.density_per_m2,
+            blades_per_clump: ring.blades_per_clump,
             blade_lod: ring.blade_lod,
             width_scale: ring.width_scale,
             height_scale: ring.height_scale,
             seed: GRASS_SEED,
             flatten_exclusion,
+            forest_cull: ring.forest_cull,
         };
         let revision = height_source.revision();
         let task = pool.spawn(async move { build_grass_tile_mesh(&input) });
         grass.in_flight.insert(rk, (task, revision));
         dispatched += 1;
+        grass.dbg.dispatched += 1;
     }
 }
 
@@ -482,6 +541,7 @@ fn finalize_grass_tiles(
                     center_height_m: 0.0,
                 },
             );
+            grass.dbg.empty += 1;
             continue;
         };
 
@@ -577,6 +637,8 @@ fn update_grass_material(
     time: Res<Time>,
     exposure: Res<CameraExposure>,
     ship: Query<&GlobalTransform, With<PlayerShip>>,
+    ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
+    freecam: Res<FreeCam>,
     mut materials: ResMut<Assets<GrassMaterial>>,
 ) {
     let (Some(body_id), Some(states)) = (grass.body, solar.states.as_deref()) else {
@@ -625,15 +687,21 @@ fn update_grass_material(
         .unwrap_or((Vec3::ZERO, 0.0));
     let sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
-    // Fade reference = the player craft's render-space position (so camera
-    // zoom/orbit doesn't fade the field). EVA has no PlayerShip → w = 0, the
-    // shader falls back to the camera (fine, the camera rides the player there).
-    let anchor = match ship.iter().next() {
-        Some(gt) => {
-            let p = gt.translation();
-            Vec4::new(p.x, p.y, p.z, 1.0)
+    // Fade reference = the player craft, passed as an OFFSET from the camera
+    // (`ship − camera`) so the shader can rebuild it in the current frame's
+    // render origin (`view.world_position + offset`). An absolute anchor is one
+    // frame stale and breaks across big_space floating-origin recentres — it
+    // jumps a whole cell while the parked craft co-rotates through space,
+    // popping fade-band tiles in/out (see `grass.wgsl`). The offset is
+    // origin-invariant, so the recentre cancels. EVA has no PlayerShip and
+    // freecam flies free of the player → offset 0 = fade around the camera.
+    let cam_render = ship_cam.iter().next().map(|gt| gt.translation());
+    let anchor = match (freecam.active, ship.iter().next(), cam_render) {
+        (false, Some(ship_gt), Some(cam)) => {
+            let off = ship_gt.translation() - cam;
+            Vec4::new(off.x, off.y, off.z, 1.0)
         }
-        None => Vec4::ZERO,
+        _ => Vec4::ZERO,
     };
 
     for (idx, handle) in grass.materials.iter().enumerate() {
@@ -681,6 +749,7 @@ fn check_grass_rebuilds(
 
     let mut rebuilt = 0usize;
     let mut to_remove: Vec<RingTileKey> = Vec::new();
+    let mut max_dh = 0.0f32;
     for (rk, tile) in grass.tiles.iter_mut() {
         if tile.built_revision == revision {
             continue;
@@ -695,6 +764,7 @@ fn check_grass_rebuilds(
             && (h - tile.center_height_m).abs() > GRASS_REBUILD_DELTA_M
             && rebuilt < GRASS_MAX_REBUILDS_PER_TICK
         {
+            max_dh = max_dh.max((h - tile.center_height_m).abs());
             to_remove.push(*rk);
             rebuilt += 1;
         } else {
@@ -704,6 +774,7 @@ fn check_grass_rebuilds(
             }
         }
     }
+    let removed = to_remove.len() as u32;
     for rk in to_remove {
         if let Some(tile) = grass.tiles.remove(&rk)
             && let Some(entity) = tile.entity
@@ -711,4 +782,62 @@ fn check_grass_rebuilds(
             commands.entity(entity).despawn();
         }
     }
+    grass.dbg.rebuild_despawns += removed;
+    grass.dbg.max_rebuild_dh_m = grass.dbg.max_rebuild_dh_m.max(max_dh);
+}
+
+/// **Diagnostic only** (grass-flicker investigation): once per second, append a
+/// JSON line of the tile-churn counters + the height-source revision delta to
+/// the file named by `THALOS_GRASS_LOG` (falls back to an `info!` line if the
+/// env var is unset). A non-zero `rev_delta` while parked means the terrain
+/// atlas is re-streaming under rotation; `rebuild_despawns` / `reach_despawns`
+/// say which path is popping tiles; `max_rebuild_dh_m` says whether the sampled
+/// height actually wobbled. Remove once the cause is pinned.
+fn log_grass_diagnostics(
+    mut grass: ResMut<GrassTiles>,
+    height_sources: Res<HeightSourceRegistry>,
+    time: Res<Time>,
+) {
+    grass.dbg.log_timer += time.delta_secs();
+    if grass.dbg.log_timer < 1.0 {
+        return;
+    }
+    grass.dbg.log_timer = 0.0;
+
+    let Some(body_id) = grass.body else {
+        return;
+    };
+    let revision = height_sources.get(body_id).map(|s| s.revision()).unwrap_or(0);
+    let rev_delta = revision.wrapping_sub(grass.dbg.last_revision);
+    grass.dbg.last_revision = revision;
+
+    let line = format!(
+        "{{\"t_s\":{:.1},\"tiles\":{},\"in_flight\":{},\"revision\":{},\"rev_delta\":{},\
+\"reach_despawns\":{},\"rebuild_despawns\":{},\"dispatched\":{},\"empty\":{},\
+\"max_rebuild_dh_m\":{:.3}}}",
+        time.elapsed_secs(),
+        grass.tiles.len(),
+        grass.in_flight.len(),
+        revision,
+        rev_delta,
+        grass.dbg.reach_despawns,
+        grass.dbg.rebuild_despawns,
+        grass.dbg.dispatched,
+        grass.dbg.empty,
+        grass.dbg.max_rebuild_dh_m,
+    );
+    // Always write to a file (default at the game's cwd = repo root) so the
+    // console slow-frame spam is irrelevant and there's nothing to set up.
+    let path =
+        std::env::var("THALOS_GRASS_LOG").unwrap_or_else(|_| "grass_churn.jsonl".to_string());
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+
+    grass.dbg.reach_despawns = 0;
+    grass.dbg.rebuild_despawns = 0;
+    grass.dbg.dispatched = 0;
+    grass.dbg.empty = 0;
+    grass.dbg.max_rebuild_dh_m = 0.0;
 }

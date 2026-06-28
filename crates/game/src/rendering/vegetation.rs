@@ -36,46 +36,122 @@ use thalos_body_render::{
     AU_M, BakeParams, CanopyStyle, GrassParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout,
     ImpostorParams, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeBakeMaterial,
     TreeImpostorMaterial, TreeMaterial, TreeMeshData, TreeMeshParams, VegLayer, VegScatterInput,
-    VegSpeciesPlacement, build_scatter_tile, build_tree_mesh_data, combine_impostor_tile_mesh,
-    combine_tree_tile_mesh, hemioct_decode, impostor_bake_rotation, make_impostor_atlas,
-    recenter_tree_mesh, tree_bounding_sphere,
+    VegSpeciesPlacement, build_foliage_atlas, build_scatter_tile, build_tree_mesh_data,
+    combine_impostor_tile_mesh, combine_tree_tile_mesh, fallback_shadow_map, hemioct_decode,
+    impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
+use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
+use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
+use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
-// ── Tuning ───────────────────────────────────────────────────────────────────
-/// Metric side of a scatter tile at a cube-face centre.
-const TREE_TILE_SIZE_M: f64 = 200.0;
-/// Mesh-only reach, used until the impostor atlas is baked (the far band is then
-/// the minimal LOD3 mesh). Beyond the fade-end by ~a tile, so a tile finishes
-/// building while its nearest trees are scaled to ~0 (invisible build, no
-/// pop-in); they grow in as the craft approaches.
-const TREE_RADIUS_M: f64 = 2200.0;
-/// Hysteresis: tiles despawn only past this distance (mesh-only reach).
-const TREE_DESPAWN_RADIUS_M: f64 = 2400.0;
-/// Scale-fade band (shader-side, metres, from the craft anchor) for the
-/// mesh-only reach: trees full inside `start`, grown from zero out to `end`.
-const TREE_FADE_START_M: f32 = 1850.0;
-const TREE_FADE_END_M: f32 = 2100.0;
+// ── Clipmap rings ──────────────────────────────────────────────────────────────
+/// One clipmap ring of the tree scatter: a cube-sphere lattice at `tile_size_m`,
+/// covering ground distances `[inner_m, outer_m]` from the player.
+///
+/// **Ring 0** is the fine near/mid band — full mesh-LOD trees (`lod_for_dist`)
+/// plus the natural-size octahedral impostor far band. **Rings ≥ 1** are coarse,
+/// **impostor-only grove** rings: they scatter `1/spacing_scale²` as many trees
+/// (a coarser Poisson grid) and enlarge each impostor `grove_scale×`, so ground
+/// *coverage* stays roughly constant while the quad count per tile does not — the
+/// constant-coverage rule. That is what carries the forest many km out at a
+/// bounded cost, handing off (eventually) to the terrain albedo.
+struct TreeRing {
+    tile_size_m: f64,
+    inner_m: f64,
+    outer_m: f64,
+    spacing_scale: f32,
+    grove_scale: f32,
+}
 
-// ── Impostor far band (active once the octahedral atlas is baked) ──────────────
-/// Far reach once impostors are live: the LOD2 mesh hands off to octahedral
-/// impostors at `TREE_LOD_BANDS_M[2]` and they carry the forest out to here at a
-/// quad apiece — much farther than the mesh blob band, at a fraction of the cost.
-const TREE_IMPOSTOR_RADIUS_M: f64 = 3600.0;
-/// Hysteresis despawn radius while the impostor band is active.
-const TREE_IMPOSTOR_DESPAWN_RADIUS_M: f64 = 3900.0;
-/// Scale-fade band at the impostor far edge (m, from the craft anchor). Mesh
-/// trees are all well inside `start`, so only the far impostors fade here.
-const TREE_IMPOSTOR_FADE_START_M: f32 = 3000.0;
-const TREE_IMPOSTOR_FADE_END_M: f32 = 3450.0;
+/// The tree clipmap. Ring 0 reproduces the near/mid mesh cascade + the near
+/// natural-size impostor band; the coarse rings carry impostor groves out to
+/// ~22 km. Tile sizes grow ~2× per ring so each ring is a thin annulus of a few
+/// hundred tiles, and `spacing_scale ≈ grove_scale ≈ tile_size / 200` keeps both
+/// the per-tile instance count and the ground coverage roughly constant across
+/// rings (so the far band costs little more than the near one while reaching far
+/// further). Tune from screenshots + frame timings.
+const TREE_RINGS: [TreeRing; 4] = [
+    TreeRing {
+        tile_size_m: 200.0,
+        inner_m: 0.0,
+        outer_m: 2400.0,
+        spacing_scale: 1.0,
+        grove_scale: 1.0,
+    },
+    TreeRing {
+        tile_size_m: 500.0,
+        inner_m: 2400.0,
+        outer_m: 6000.0,
+        spacing_scale: 2.5,
+        grove_scale: 2.5,
+    },
+    TreeRing {
+        tile_size_m: 1000.0,
+        inner_m: 6000.0,
+        outer_m: 12000.0,
+        spacing_scale: 5.0,
+        grove_scale: 5.0,
+    },
+    TreeRing {
+        tile_size_m: 2000.0,
+        inner_m: 12000.0,
+        outer_m: 22000.0,
+        spacing_scale: 10.0,
+        grove_scale: 10.0,
+    },
+];
+
+/// Reach of ring 0 before the impostor atlas is baked: the far band falls back to
+/// the minimal LOD3 mesh, so we keep it short — and the coarse impostor rings are
+/// skipped entirely until the atlas is ready (a second or two into the session).
+const TREE_MESH_ONLY_REACH_M: f64 = 2200.0;
+
+/// Fade-band half-width for a ring's near/far cross-fade (m), scaled from the
+/// ring span and clamped — like the grass clipmap rings.
+fn tree_ring_band_m(r: &TreeRing) -> f32 {
+    (((r.outer_m - r.inner_m) as f32) * 0.10).clamp(80.0, 600.0)
+}
+
+/// Near/far/band fade edges for a ring (ground distance, m), packed into
+/// `GrassParams.time_fade`. The shader grows each instance from zero across
+/// `[near, far]`: `fade_in = smoothstep(near-band, near+band, d)`,
+/// `fade_out = 1 - smoothstep(far-band, far+band, d)`.
+///
+/// **Overlap-full handoff** (the fix for the gap/dip bands between rings): a
+/// ring stays *full* through both its inner and outer nominal edges and fades
+/// only in the overlap zone where its neighbour is already full —
+/// `near = inner - band` (full by `inner`), `far = outer + band` (full until
+/// `outer`). So at every shared boundary `B = outer_N = inner_{N+1}` **both**
+/// rings are full (a thin band of harmless overdraw) instead of both being at
+/// half scale (a coverage dip that reads as a sparse ring). A coarse ring thus
+/// only fades to nothing once the finer ring is at full coverage over it — it
+/// "disappears only when the new one is ready". Ring 0 is full to the camera
+/// (`near = -∞`).
+fn tree_ring_fade(idx: usize) -> (f32, f32, f32) {
+    let r = &TREE_RINGS[idx];
+    let band = tree_ring_band_m(r);
+    let near = if idx == 0 {
+        -1.0e9
+    } else {
+        r.inner_m as f32 - band
+    };
+    (near, r.outer_m as f32 + band, band)
+}
+
+/// Pre-bake fade edges for the mesh material (the LOD3 far band fades out near
+/// the mesh-only reach so its edge isn't a hard ring).
+const TREE_MESH_ONLY_FADE: (f32, f32, f32) = (-1.0e9, 1975.0, 150.0);
+
+// ── Tuning ───────────────────────────────────────────────────────────────────
 /// Octahedral atlas: captured views per axis (`N`) and pixels per cell.
 const IMPOSTOR_CELLS: u32 = 8;
 const IMPOSTOR_CELL_PX: u32 = 128;
@@ -90,18 +166,29 @@ const IMPOSTOR_BAKE_FRAMES: u32 = 90;
 /// Dedicated render layers for the two off-screen bake passes (albedo, normal).
 const IMPOSTOR_BAKE_ALBEDO_LAYER: usize = 6;
 const IMPOSTOR_BAKE_NORMAL_LAYER: usize = 7;
-/// Broadleaf candidate density per m² before gates (clumping, slope, altitude).
-const TREE_DENSITY_PER_M2: f32 = 0.011;
-/// Conifer candidate density per m² (mixed into the same tiles for variety).
-const CONIFER_DENSITY_PER_M2: f32 = 0.006;
-/// Shrub candidate density per m² (denser, but only realized in the near band).
-const SHRUB_DENSITY_PER_M2: f32 = 0.030;
-/// Above this altitude over the local terrain no new tiles are built.
-const TREE_MAX_AGL_M: f64 = 500.0;
-/// Above this altitude all tiles are despawned (e.g. after launch).
-const TREE_DESPAWN_AGL_M: f64 = 3000.0;
-/// Maximum concurrent tile builds.
-const TREE_MAX_IN_FLIGHT: usize = 8;
+/// Minimum trunk spacing (m) for the broadleaf — the widest canopy, so it sets
+/// the shared tree grid's spacing. Below a canopy diameter so crowns touch into
+/// connected groves, above a trunk width so trunks never interpenetrate.
+const TREE_SPACING_M: f32 = 5.0;
+/// Minimum trunk spacing (m) for the conifer (narrower crown).
+const CONIFER_SPACING_M: f32 = 4.0;
+/// Minimum spacing (m) for shrubs — their own grid, so they may sit under trees.
+const SHRUB_SPACING_M: f32 = 1.6;
+/// Species mix within the tree layer (drawn per blue-noise point): mostly
+/// broadleaf with a conifer minority, for a mixed-but-coherent forest.
+const TREE_MIX_BROADLEAF: f32 = 0.62;
+const TREE_MIX_CONIFER: f32 = 0.38;
+/// Above this altitude over the local terrain no new tiles are built (existing
+/// ones persist). Generous so climbing aircraft keep their forest — the coarse
+/// impostor rings are cheap, and a forested surface should read from altitude
+/// (the far rings fold into the terrain albedo above this).
+const TREE_MAX_AGL_M: f64 = 6000.0;
+/// Above this altitude all tiles are despawned (e.g. after climb-out).
+const TREE_DESPAWN_AGL_M: f64 = 16000.0;
+/// Maximum concurrent tile builds. Higher than the original near-only driver
+/// because the clipmap fills many more (coarse) tiles on a cold view — slow fill
+/// is what shows the transient ring gaps.
+const TREE_MAX_IN_FLIGHT: usize = 12;
 /// Don't build until the terrain under a tile is resident at this texel size or
 /// finer (mirrors the grass residency gate); scaled up for far tiles below.
 const TREE_MAX_TERRAIN_TEXEL_M: f32 = 16.0;
@@ -145,7 +232,9 @@ struct SpeciesLibrary {
     placement: Arc<[VegSpeciesPlacement]>,
     lod_data: Vec<Vec<Arc<TreeMeshData>>>,
     material: Handle<TreeMaterial>,
-    impostor_material: Handle<TreeImpostorMaterial>,
+    /// One impostor material per clipmap ring (same atlases; each carries its
+    /// ring's cross-fade band in `params.time_fade`, written per frame).
+    impostor_materials: Vec<Handle<TreeImpostorMaterial>>,
     /// Per placement-species index → octahedral atlas layer, or `None` for
     /// species with no impostor (shrubs). Snapshotted into the impostor build.
     atlas_species: Vec<Option<u32>>,
@@ -175,6 +264,14 @@ struct VegTileBuild {
     center_height_m: f32,
 }
 
+/// A tile key tagged with its clipmap ring (the same `(face,x,y)` indexes
+/// different physical tiles at different ring lattices).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RingTileKey {
+    ring: u8,
+    key: TileKey,
+}
+
 /// One finished tile. `entity: None` means the tile built empty (clearing,
 /// water, rock, alpine) — recorded so it isn't rebuilt every frame.
 struct BuiltTile {
@@ -193,10 +290,11 @@ struct BuiltTile {
 #[derive(Resource, Default)]
 struct VegTiles {
     body: Option<BodyId>,
-    lattice: TileLattice,
-    tiles: HashMap<TileKey, BuiltTile>,
+    /// One lattice per clipmap ring, aligned to [`TREE_RINGS`].
+    lattices: Vec<TileLattice>,
+    tiles: HashMap<RingTileKey, BuiltTile>,
     /// In-flight builds: (task, source revision, target LOD, want-impostor).
-    in_flight: HashMap<TileKey, (Task<Option<VegTileBuild>>, u64, usize, bool)>,
+    in_flight: HashMap<RingTileKey, (Task<Option<VegTileBuild>>, u64, usize, bool)>,
     rebuild_timer: f32,
 }
 
@@ -254,21 +352,25 @@ fn setup_species_library(
         canopy_radius_m: 3.0,
         canopy_height_m: 2.8,
         trunk_color: Vec3::new(0.16, 0.090, 0.045),
-        canopy_color: Vec3::new(0.055, 0.115, 0.040),
-        style: CanopyStyle::Round,
+        // Light tint: the foliage atlas now carries the real leaf colour, so this
+        // only nudges hue (warm) and AO modulates brightness.
+        canopy_color: Vec3::new(0.92, 1.0, 0.82),
+        style: CanopyStyle::Broadleaf,
         seed: 0xB1_05_50,
         lod: 0,
     };
     lod_data.push(build_lod_chain(&tree));
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Tree,
-        density_per_m2: TREE_DENSITY_PER_M2,
+        min_spacing_m: TREE_SPACING_M,
+        mix_weight: TREE_MIX_BROADLEAF,
         scale_range: (0.8, 1.6),
         slope_limit: 0.40,
         altitude_band: (1800.0, 2900.0, 2400.0, 3100.0),
-        // Strong clumping → distinct forest patches with real clearings between
-        // them (the clump field is now patch-scale; see scatter::clump_field).
-        clump_affinity: 0.85,
+        // Full patch clumping → genuine treeless plains between distinct forest
+        // patches (with a light-woodland apron ahead of each grove). See
+        // scatter::clump_field / forest_coverage.
+        clump_affinity: 1.0,
         min_grass_w: 0.22,
     });
 
@@ -279,7 +381,8 @@ fn setup_species_library(
         canopy_radius_m: 1.9,
         canopy_height_m: 3.4,
         trunk_color: Vec3::new(0.13, 0.080, 0.045),
-        canopy_color: Vec3::new(0.040, 0.090, 0.045),
+        // Cooler light tint; the needle atlas cell is already a darker blue-green.
+        canopy_color: Vec3::new(0.78, 1.0, 0.90),
         style: CanopyStyle::Conifer,
         seed: 0xC0_1F_E5,
         lod: 0,
@@ -287,11 +390,12 @@ fn setup_species_library(
     lod_data.push(build_lod_chain(&conifer));
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Tree,
-        density_per_m2: CONIFER_DENSITY_PER_M2,
+        min_spacing_m: CONIFER_SPACING_M,
+        mix_weight: TREE_MIX_CONIFER,
         scale_range: (0.85, 1.7),
         slope_limit: 0.45,
         altitude_band: (1900.0, 3000.0, 2600.0, 3300.0),
-        clump_affinity: 0.80,
+        clump_affinity: 1.0,
         min_grass_w: 0.20,
     });
 
@@ -302,7 +406,7 @@ fn setup_species_library(
         canopy_radius_m: 0.78,
         canopy_height_m: 0.62,
         trunk_color: Vec3::new(0.13, 0.085, 0.050),
-        canopy_color: Vec3::new(0.062, 0.110, 0.044),
+        canopy_color: Vec3::new(0.95, 1.0, 0.86),
         style: CanopyStyle::Round,
         seed: 0x5_417,
         lod: 0,
@@ -310,7 +414,8 @@ fn setup_species_library(
     lod_data.push(build_lod_chain(&shrub));
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Shrub,
-        density_per_m2: SHRUB_DENSITY_PER_M2,
+        min_spacing_m: SHRUB_SPACING_M,
+        mix_weight: 1.0,
         scale_range: (0.6, 1.3),
         slope_limit: 0.46,
         altitude_band: (1600.0, 2700.0, 2300.0, 3000.0),
@@ -318,7 +423,19 @@ fn setup_species_library(
         min_grass_w: 0.28,
     });
 
-    let material = materials.add(TreeMaterial::default());
+    // Procedural foliage atlas (leaf clusters + crown shell + bark), built once
+    // and shared by every plant on the body.
+    let atlas = images.add(build_foliage_atlas());
+    let material = materials.add(TreeMaterial {
+        atlas: atlas.clone(),
+        // Valid depth textures from the start (the `texture_depth_2d` bindings
+        // have no usable fallback); `update_tree_material` swaps in the real
+        // per-cascade maps each frame, and `shadow.config.x` stays 0 until then.
+        sun_shadow_map_0: images.add(fallback_shadow_map()),
+        sun_shadow_map_1: images.add(fallback_shadow_map()),
+        sun_shadow_map_2: images.add(fallback_shadow_map()),
+        ..default()
+    });
 
     // --- Octahedral impostor atlas (tree species only; shrubs are mesh-only) ---
     // Assign each tree species an atlas layer; build the albedo+coverage and
@@ -352,21 +469,28 @@ fn setup_species_library(
         species_geo[layer] = Vec4::new(radius, center.y, 0.0, 0.0);
     }
 
-    let impostor_material = impostor_materials.add(TreeImpostorMaterial {
-        params: GrassParams::default(),
-        impostor: ImpostorParams {
-            grid: Vec4::new(
-                IMPOSTOR_CELLS as f32,
-                species_count.max(1) as f32,
-                IMPOSTOR_ALPHA_CUTOFF,
-                0.0,
-            ),
-            atlas: Vec4::new(IMPOSTOR_CELL_FILL, 0.0, 0.0, 0.0),
-            species_geo,
-        },
-        albedo: albedo_atlas.clone(),
-        normal: normal_atlas.clone(),
-    });
+    let impostor_block = ImpostorParams {
+        grid: Vec4::new(
+            IMPOSTOR_CELLS as f32,
+            species_count.max(1) as f32,
+            IMPOSTOR_ALPHA_CUTOFF,
+            0.0,
+        ),
+        atlas: Vec4::new(IMPOSTOR_CELL_FILL, 0.0, 0.0, 0.0),
+        species_geo,
+    };
+    // One impostor material per clipmap ring (shared atlases; each gets its
+    // ring's cross-fade band, written per frame by `update_tree_material`).
+    let ring_impostor_materials: Vec<Handle<TreeImpostorMaterial>> = (0..TREE_RINGS.len())
+        .map(|_| {
+            impostor_materials.add(TreeImpostorMaterial {
+                params: GrassParams::default(),
+                impostor: impostor_block,
+                albedo: albedo_atlas.clone(),
+                normal: normal_atlas.clone(),
+            })
+        })
+        .collect();
 
     spawn_impostor_bake_rig(
         &mut commands,
@@ -374,6 +498,7 @@ fn setup_species_library(
         &mut meshes,
         &lod_data,
         &tree_species,
+        atlas.clone(),
         albedo_atlas,
         normal_atlas,
         species_count,
@@ -383,7 +508,7 @@ fn setup_species_library(
         placement: Arc::from(placement),
         lod_data,
         material,
-        impostor_material,
+        impostor_materials: ring_impostor_materials,
         atlas_species,
     });
 }
@@ -403,6 +528,7 @@ fn spawn_impostor_bake_rig(
     meshes: &mut Assets<Mesh>,
     lod_data: &[Vec<Arc<TreeMeshData>>],
     tree_species: &[usize],
+    foliage_atlas: Handle<Image>,
     albedo_atlas: Handle<Image>,
     normal_atlas: Handle<Image>,
     species_count: u32,
@@ -420,11 +546,13 @@ fn spawn_impostor_bake_rig(
         params: BakeParams {
             mode: Vec4::new(0.0, depth_scale, 0.0, 0.0),
         },
+        atlas: foliage_atlas.clone(),
     });
     let normal_mat = bake_materials.add(TreeBakeMaterial {
         params: BakeParams {
             mode: Vec4::new(1.0, depth_scale, 0.0, 0.0),
         },
+        atlas: foliage_atlas,
     });
 
     for (layer, &sp) in tree_species.iter().enumerate().take(IMPOSTOR_MAX_SPECIES) {
@@ -573,6 +701,8 @@ fn drive_veg_tiles(
     height_sources: Res<HeightSourceRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     bake: Res<ImpostorBake>,
+    freecam: Res<FreeCam>,
+    ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     mut commands: Commands,
 ) {
     let Some(library) = library else {
@@ -581,7 +711,11 @@ fn drive_veg_tiles(
     let Some(states) = solar.states.as_deref() else {
         return;
     };
-    let cam_pos = sim.simulation.ship_state().position;
+    let cam_pos = scatter_view_center(
+        &freecam,
+        ship_cam_q.single().ok(),
+        sim.simulation.ship_state().position,
+    );
 
     // Active body: nearest vegetated, terrain-backed body (grass driver's rule).
     let mut best: Option<(BodyId, f64)> = None;
@@ -620,7 +754,10 @@ fn drive_veg_tiles(
         despawn_all(&mut veg, &mut commands);
         veg.body = Some(body_id);
         let radius_m = sim.system.bodies[body_id].radius_m;
-        veg.lattice = TileLattice::for_body(radius_m, TREE_TILE_SIZE_M);
+        veg.lattices = TREE_RINGS
+            .iter()
+            .map(|r| TileLattice::for_body(radius_m, r.tile_size_m))
+            .collect();
     }
 
     let body = &sim.system.bodies[body_id];
@@ -648,30 +785,52 @@ fn drive_veg_tiles(
         return;
     }
 
-    let lattice = veg.lattice;
+    let lattices = veg.lattices.clone();
+    if lattices.len() != TREE_RINGS.len() {
+        return;
+    }
     let arc_dist = |center_dir: DVec3| -> f64 { center_dir.angle_between(cam_dir) * radius_m };
 
-    // Reach grows once the impostor atlas is baked (far band is impostors), else
-    // the mesh-only reach (far band is the LOD3 mesh).
-    let (reach, despawn_reach) = if bake.ready {
-        (TREE_IMPOSTOR_RADIUS_M, TREE_IMPOSTOR_DESPAWN_RADIUS_M)
-    } else {
-        (TREE_RADIUS_M, TREE_DESPAWN_RADIUS_M)
-    };
+    // Only ring 0 is active until the impostor atlas is baked — the coarse rings
+    // are impostor-only, so they wait for it (a second or two into the session).
+    let rings_active = if bake.ready { TREE_RINGS.len() } else { 1 };
+    let far_lod = TREE_LOD_COUNT - 1;
 
-    // Despawn tiles past the hysteresis radius.
-    let stale: Vec<TileKey> = veg
+    // Build out to `build_hi`: the outer fade-out is fully covered (`+ 2·band`,
+    // matching `tree_ring_fade`) plus a tile of look-ahead, so tiles finish
+    // building while still scaled ~0 (invisible build, no pop-in). Despawn lags a
+    // *further* tile, so a tile is never removed right at the edge where it might
+    // immediately be needed again — combined with the overlap-full fade and the
+    // keep-old-until-new re-LOD, the handoff never shows a gap. Ring 0 before the
+    // atlas bakes uses the short mesh-only reach (LOD3 far band).
+    let ring_build_hi = |ring_idx: usize| -> f64 {
+        let r = &TREE_RINGS[ring_idx];
+        if ring_idx == 0 && !bake.ready {
+            TREE_MESH_ONLY_REACH_M + r.tile_size_m
+        } else {
+            r.outer_m + 2.0 * tree_ring_band_m(r) as f64 + r.tile_size_m
+        }
+    };
+    let ring_despawn_reach =
+        |ring_idx: usize| -> f64 { ring_build_hi(ring_idx) + TREE_RINGS[ring_idx].tile_size_m };
+
+    // Despawn tiles past their ring's despawn reach (or whose ring is no longer
+    // active). A re-LOD/rebuild of an in-range tile is NOT a despawn — it keeps
+    // the old mesh until the new is ready (see `finalize_veg_tiles`).
+    let stale: Vec<RingTileKey> = veg
         .tiles
         .keys()
-        .filter(|key| {
-            lattice
-                .frame(**key)
-                .is_none_or(|(center, _)| arc_dist(center) > despawn_reach)
+        .filter(|rk| {
+            let ring = rk.ring as usize;
+            ring >= rings_active
+                || lattices[ring]
+                    .frame(rk.key)
+                    .is_none_or(|(center, _)| arc_dist(center) > ring_despawn_reach(ring))
         })
         .copied()
         .collect();
-    for key in stale {
-        if let Some(tile) = veg.tiles.remove(&key)
+    for rk in stale {
+        if let Some(tile) = veg.tiles.remove(&rk)
             && let Some(entity) = tile.entity
         {
             commands.entity(entity).despawn();
@@ -687,36 +846,65 @@ fn drive_veg_tiles(
         return;
     }
 
-    // Candidate window around the camera's tile (nearest-first). A tile is a
-    // candidate when it's missing OR its baked LOD no longer matches its distance
-    // (re-LOD), OR its impostor-ness no longer matches (atlas just became ready)
-    // — the rebuild keeps the old mesh until the new is ready.
-    let far_lod = TREE_LOD_COUNT - 1;
-    let center_key = lattice.key_of(cam_dir);
-    let window = (reach / (TREE_TILE_SIZE_M * 0.5)).ceil() as i64;
-    let mut candidates: Vec<(f64, TileKey, usize, bool)> = Vec::new();
-    for dy in -window..=window {
-        for dx in -window..=window {
-            let key = TileKey {
-                face: center_key.face,
-                x: center_key.x + dx,
-                y: center_key.y + dy,
-            };
-            if veg.in_flight.contains_key(&key) {
-                continue;
-            }
-            let Some((center, _)) = lattice.frame(key) else {
-                continue;
-            };
-            let d = arc_dist(center);
-            if d > reach {
-                continue;
-            }
-            let desired = lod_for_dist(d);
-            let want_impostor = desired == far_lod && bake.ready;
-            match veg.tiles.get(&key) {
-                Some(tile) if tile.lod == desired && tile.impostor == want_impostor => continue,
-                _ => candidates.push((d, key, desired, want_impostor)),
+    // Gather candidate tiles across every active ring, nearest first. A tile is a
+    // candidate when it's missing, OR (ring 0) its baked LOD / impostor-ness no
+    // longer matches its distance — the rebuild keeps the old mesh until the new
+    // is ready (no vanish). Rings overlap by a fade band (cross-fade) and extend a
+    // tile beyond their outer edge (invisible build).
+    let mut candidates: Vec<(f64, RingTileKey, usize, bool)> = Vec::new();
+    for ring_idx in 0..rings_active {
+        let ring = &TREE_RINGS[ring_idx];
+        let lat = lattices[ring_idx];
+        let band = tree_ring_band_m(ring) as f64;
+        // Cover the full fade-in region (`inner - 2·band`, matching the
+        // overlap-full `tree_ring_fade`) so a ring's near tiles exist, already
+        // scaled ~0, before the finer ring fades out over them.
+        let lo = (ring.inner_m - 2.0 * band).max(0.0);
+        let hi = ring_build_hi(ring_idx);
+        let center_key = lat.key_of(cam_dir);
+        let window = (hi / (ring.tile_size_m * 0.5)).ceil() as i64;
+        for dy in -window..=window {
+            for dx in -window..=window {
+                let key = TileKey {
+                    face: center_key.face,
+                    x: center_key.x + dx,
+                    y: center_key.y + dy,
+                };
+                let rk = RingTileKey {
+                    ring: ring_idx as u8,
+                    key,
+                };
+                if veg.in_flight.contains_key(&rk) {
+                    continue;
+                }
+                let Some((center, _)) = lat.frame(key) else {
+                    continue;
+                };
+                let d = arc_dist(center);
+                if d < lo || d > hi {
+                    continue;
+                }
+                // Ring 0 runs the mesh-LOD cascade + near impostor band; coarse
+                // rings are always impostor groves.
+                //
+                // LOD is keyed by the **slant** distance (ground arc + altitude),
+                // not the ground arc alone: from the air a tree directly below is
+                // ~0 m of ground distance but kilometres away, so a ground-only
+                // metric picks the close high-detail mesh and you see LOD0 meshes
+                // (which read worse than the impostor) straight down. Folding AGL
+                // in makes everything below the climbing craft fall back to the
+                // impostor band, while a low pass (agl ≈ 0) is unchanged.
+                let view_d = (d * d + agl.max(0.0) * agl.max(0.0)).sqrt();
+                let (desired, want_impostor) = if ring_idx == 0 {
+                    let l = lod_for_dist(view_d);
+                    (l, l == far_lod && bake.ready)
+                } else {
+                    (far_lod, true)
+                };
+                match veg.tiles.get(&rk) {
+                    Some(tile) if tile.lod == desired && tile.impostor == want_impostor => continue,
+                    _ => candidates.push((d, rk, desired, want_impostor)),
+                }
             }
         }
     }
@@ -733,14 +921,17 @@ fn drive_veg_tiles(
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
-    for (_, key, desired, want_impostor) in candidates {
+    for (_, rk, desired, want_impostor) in candidates {
         if dispatched >= slots {
             break;
         }
-        // Far rings tolerate coarser terrain (their trees are scaled small).
-        let texel_limit = ((TREE_TILE_SIZE_M * 0.5) as f32).max(TREE_MAX_TERRAIN_TEXEL_M);
+        let ring = &TREE_RINGS[rk.ring as usize];
+        let lat = lattices[rk.ring as usize];
+        // Far rings tolerate coarser terrain (their groves are huge), so the
+        // residency threshold scales with tile size (mirrors the grass gate).
+        let texel_limit = ((ring.tile_size_m * 0.5) as f32).max(TREE_MAX_TERRAIN_TEXEL_M);
         if let Some(guard) = &mirror_guard {
-            let Some((center, _)) = lattice.frame(key) else {
+            let Some((center, _)) = lat.frame(rk.key) else {
                 continue;
             };
             match guard.best_resident_texel_m(center.as_vec3()) {
@@ -749,22 +940,25 @@ fn drive_veg_tiles(
             }
         }
         let input = VegScatterInput {
-            key,
-            lattice,
+            key: rk.key,
+            lattice: lat,
             radius_m,
             height_source: Arc::clone(&height_source),
             species: Arc::clone(&library.placement),
             seed: TREE_SEED,
             sea_level_m,
             flatten_exclusion,
+            spacing_scale: ring.spacing_scale,
         };
         let revision = height_source.revision();
         let task = if want_impostor {
-            // Far band: one billboard quad per tree, sampling the octahedral atlas.
+            // Impostor band: one billboard quad per tree, enlarged `grove_scale×`
+            // (coarse rings) to hold coverage at a bounded quad count.
             let atlas_species = library.atlas_species.clone();
+            let grove = ring.grove_scale;
             pool.spawn(async move {
                 let tile = build_scatter_tile(&input)?;
-                let mesh = combine_impostor_tile_mesh(&tile.instances, &atlas_species)?;
+                let mesh = combine_impostor_tile_mesh(&tile.instances, &atlas_species, grove)?;
                 Some(VegTileBuild {
                     mesh,
                     impostor: true,
@@ -788,7 +982,7 @@ fn drive_veg_tiles(
                 })
             })
         };
-        veg.in_flight.insert(key, (task, revision, desired, want_impostor));
+        veg.in_flight.insert(rk, (task, revision, desired, want_impostor));
         dispatched += 1;
     }
 }
@@ -816,12 +1010,12 @@ fn finalize_veg_tiles(
         return;
     };
 
-    let mut finished: Vec<(TileKey, u64, usize, bool, Option<VegTileBuild>)> = Vec::new();
+    let mut finished: Vec<(RingTileKey, u64, usize, bool, Option<VegTileBuild>)> = Vec::new();
     veg.in_flight
         .retain(
-            |key, (task, revision, lod, want)| match block_on(poll_once(task)) {
+            |rk, (task, revision, lod, want)| match block_on(poll_once(task)) {
                 Some(result) => {
-                    finished.push((*key, *revision, *lod, *want, result));
+                    finished.push((*rk, *revision, *lod, *want, result));
                     false
                 }
                 None => true,
@@ -829,15 +1023,15 @@ fn finalize_veg_tiles(
         );
 
     let orientation = body_state.orientation.normalize();
-    for (key, revision, lod, want_impostor, result) in finished {
-        let old_entity = veg.tiles.get(&key).and_then(|t| t.entity);
+    for (rk, revision, lod, want_impostor, result) in finished {
+        let old_entity = veg.tiles.get(&rk).and_then(|t| t.entity);
 
         let Some(build) = result else {
             if let Some(old) = old_entity {
                 commands.entity(old).despawn();
             }
             veg.tiles.insert(
-                key,
+                rk,
                 BuiltTile {
                     entity: None,
                     built_revision: revision,
@@ -865,10 +1059,15 @@ fn finalize_veg_tiles(
         // Impostor tiles carry a different material and don't cast shadows (past
         // the shadow cutoff); mesh tiles keep the standard `TreeMaterial`.
         let entity = if build.impostor {
+            let impostor_material = library
+                .impostor_materials
+                .get(rk.ring as usize)
+                .cloned()
+                .unwrap_or_else(|| library.impostor_materials[0].clone());
             commands
                 .spawn((
                     mesh,
-                    MeshMaterial3d(library.impostor_material.clone()),
+                    MeshMaterial3d(impostor_material),
                     transform,
                     cell,
                     Visibility::Inherited,
@@ -887,7 +1086,10 @@ fn finalize_veg_tiles(
                     transform,
                     cell,
                     Visibility::Inherited,
-                    RenderLayers::layer(SHIP_LAYER),
+                    // Also visible to the sun-shadow camera so mesh trees cast
+                    // into the directional shadow map (the leaf alpha-discard
+                    // gives leaf-shaped shadows). Impostor tiles stay off it.
+                    RenderLayers::from_layers(&[SHIP_LAYER, crate::rendering::sun_shadow::SHADOW_CASTER_LAYER]),
                     ChildOf(root.entity),
                     visual,
                     Name::new("Vegetation Tile"),
@@ -899,7 +1101,7 @@ fn finalize_veg_tiles(
             commands.entity(old).despawn();
         }
         veg.tiles.insert(
-            key,
+            rk,
             BuiltTile {
                 entity: Some(entity),
                 built_revision: build.built_revision,
@@ -950,6 +1152,9 @@ fn update_tree_material(
     exposure: Res<CameraExposure>,
     bake: Res<ImpostorBake>,
     ship: Query<&GlobalTransform, With<PlayerShip>>,
+    ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
+    freecam: Res<FreeCam>,
+    sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
     mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
 ) {
@@ -988,41 +1193,70 @@ fn update_tree_material(
         .map(|s| (Vec3::from_array(s.vertical_optical_depth), s.strength))
         .unwrap_or((Vec3::ZERO, 0.0));
 
-    // The scale-fade band sits at whichever reach is active (impostor far edge
-    // once baked, else the mesh-only edge). Mesh trees are well inside it either
-    // way, so only the far elements fade.
-    let (fade_start, fade_end) = if bake.ready {
-        (TREE_IMPOSTOR_FADE_START_M, TREE_IMPOSTOR_FADE_END_M)
-    } else {
-        (TREE_FADE_START_M, TREE_FADE_END_M)
-    };
+    let sun = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux);
+    let wind = Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, TREE_WIND_SWAY_M);
+    let sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
+    let sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
-    // Fade reference = the player craft's render-space position, so camera
-    // zoom/orbit doesn't change what's drawn (EVA → camera fallback).
-    let anchor = match ship.iter().next() {
-        Some(gt) => {
-            let p = gt.translation();
-            Vec4::new(p.x, p.y, p.z, 1.0)
+    // Fade reference = the player craft, passed as an OFFSET from the camera
+    // (`ship − camera`) so the shader rebuilds it in the current frame's render
+    // origin (`view.world_position + offset`). An absolute anchor is one frame
+    // stale and jumps a whole cell across a big_space floating-origin recentre
+    // while the parked craft co-rotates through space, popping fade-band
+    // instances in/out; the offset is origin-invariant so the recentre cancels
+    // (same fix as `rendering::grass`). EVA / freecam → offset 0 = camera.
+    let cam_render = ship_cam.iter().next().map(|gt| gt.translation());
+    let anchor = match (freecam.active, ship.iter().next(), cam_render) {
+        (false, Some(ship_gt), Some(cam)) => {
+            let off = ship_gt.translation() - cam;
+            Vec4::new(off.x, off.y, off.z, 1.0)
         }
-        None => Vec4::ZERO,
+        _ => Vec4::ZERO,
     };
 
-    // Mesh trees and impostors share one lighting/fade parameter set so the
-    // mesh→impostor handoff is seamless.
-    let params = GrassParams {
-        sun_dir: Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux),
-        wind: Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, TREE_WIND_SWAY_M),
-        time_fade: Vec4::new(t, fade_start, fade_end, 0.0),
-        sky_up: Vec4::new(up.x, up.y, up.z, 0.0),
-        sky_tau: Vec4::new(tau.x, tau.y, tau.z, strength),
+    // Each material carries the shared lighting + ITS clipmap ring's cross-fade
+    // band: `time_fade = (time, near_edge, far_edge, band)`. The shader grows each
+    // instance from zero across [near, far], so adjacent rings cross-fade through
+    // their shared boundary (no hard size step between groves) and the outermost
+    // edge melts away seamlessly.
+    let make_params = |near: f32, far: f32, band: f32| GrassParams {
+        sun_dir: sun,
+        wind,
+        time_fade: Vec4::new(t, near, far, band),
+        sky_up,
+        sky_tau,
         anchor,
     };
 
+    // Mesh material (ring 0 only): its trees are all in the near band, so once the
+    // atlas is baked it never actually fades; pre-bake, the LOD3 far band fades
+    // out near the mesh-only reach so its edge isn't a hard ring.
     if let Some(material) = materials.get_mut(&library.material) {
-        material.params = params;
+        let (near, far, band) = if bake.ready {
+            tree_ring_fade(0)
+        } else {
+            TREE_MESH_ONLY_FADE
+        };
+        material.params = make_params(near, far, band);
+        // Bind the live sun-shadow map so trees self-shadow, shadow one another,
+        // and pick up the ground's shadows. `params.x` is 0 off-surface, so the
+        // shader skips sampling there. Only the near mesh ring receives — the
+        // far impostor band is outside the ~1.2 km shadow region anyway.
+        if let Some(sun_shadow) = sun_shadow.as_deref() {
+            material.sun_shadow_map_0 = sun_shadow.images[0].clone();
+            material.sun_shadow_map_1 = sun_shadow.images[1].clone();
+            material.sun_shadow_map_2 = sun_shadow.images[2].clone();
+            material.shadow = sun_shadow.block;
+        }
     }
-    if let Some(material) = impostor_materials.get_mut(&library.impostor_material) {
-        material.params = params;
+
+    // One impostor material per clipmap ring, each with its own cross-fade band.
+    for (idx, handle) in library.impostor_materials.iter().enumerate() {
+        let Some(material) = impostor_materials.get_mut(handle) else {
+            continue;
+        };
+        let (near, far, band) = tree_ring_fade(idx);
+        material.params = make_params(near, far, band);
     }
 }
 
@@ -1047,14 +1281,17 @@ fn check_veg_rebuilds(
         return;
     };
     let revision = source.revision();
-    let lattice = veg.lattice;
+    let lattices = veg.lattices.clone();
+    if lattices.len() != TREE_RINGS.len() {
+        return;
+    }
 
     let mut rebuilt = 0usize;
-    for (key, tile) in veg.tiles.iter_mut() {
+    for (rk, tile) in veg.tiles.iter_mut() {
         if tile.built_revision == revision {
             continue;
         }
-        let Some((center_dir, _)) = lattice.frame(*key) else {
+        let Some((center_dir, _)) = lattices[rk.ring as usize].frame(rk.key) else {
             continue;
         };
         let Some(h) = source.sample_height_m(center_dir.as_vec3(), TREE_GROUND_LOD_M) else {

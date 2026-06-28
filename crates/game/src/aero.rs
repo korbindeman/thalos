@@ -164,13 +164,12 @@ pub(crate) fn resolved_aero_config(base: AeroConfig, tuning: &AeroTuning) -> Aer
     config
 }
 
-/// Runtime-tunable handling coefficients for **winged** aircraft, applied over
-/// the per-craft config's moment terms each frame. Reflect-registered so the
-/// feel (control authority, damping, static stability) can be dialled in live
-/// over BRP — e.g. `world_mutate_resources` on `thalos_game::aero::AeroTuning`
-/// — without a rebuild. Stability/damping defaults are the transport-derivative
-/// constants above; the control *scales* default to 1 (the per-surface derived
-/// authority is flown as-is).
+/// Handling coefficients for **winged** aircraft, applied over the per-craft
+/// config's moment terms each frame. Reflect-registered (for a future in-game
+/// debug UI); to change the feel (control authority, damping, static stability)
+/// edit the defaults and rebuild. Stability/damping defaults are the
+/// transport-derivative constants above; the control *scales* default to 1 (the
+/// per-surface derived authority is flown as-is).
 #[derive(Resource, Reflect, Clone, Copy)]
 #[reflect(Resource)]
 pub struct AeroTuning {
@@ -200,7 +199,7 @@ impl Default for AeroTuning {
     }
 }
 
-/// Flight readout for the HUD / BRP.
+/// Flight readout for the HUD.
 #[derive(Component, Default, Clone, Copy, Reflect)]
 #[reflect(Component)]
 pub struct AeroReadout {
@@ -601,8 +600,9 @@ fn apply_aero_forces(
         return;
     }
 
-    // For a winged craft, take the moment coefficients from the live-tunable
-    // resource (feel is iterated over BRP); bluff bodies keep their own config.
+    // For a winged craft, take the moment coefficients from the tuning
+    // resource (feel is iterated by editing its defaults); bluff bodies keep
+    // their own config.
     // The same resolve feeds the control allocator's authority estimate
     // (`control_bus`), so the split matches what we actually fly here.
     let config = resolved_aero_config(ship_aero.config, &tuning);

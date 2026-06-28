@@ -28,7 +28,7 @@ struct TreeParams {
     time_fade: vec4<f32>, // x = time, y = fade start, z = fade end
     sky_up: vec4<f32>,    // xyz = local radial up
     sky_tau: vec4<f32>,   // xyz = Rayleigh τ_v, w = atmosphere strength
-    anchor: vec4<f32>,    // xyz = craft focus (render space), w = 1 valid / 0 camera
+    anchor: vec4<f32>,    // xyz = (craft − camera) offset (render space), w = 1 valid / 0 camera; ref = view.world_position + offset
 }
 
 struct ImpostorParams {
@@ -127,15 +127,20 @@ fn vertex(in: VertexInput) -> VertexOutput {
     var half = geo.x * scale;
     let center_w = base_w + up_w * (geo.y * scale);
 
-    // Scale-fade (grow from zero at the far edge), measured from the craft anchor.
-    let ref_pos = select(view.world_position, tree.anchor.xyz, tree.anchor.w > 0.5);
+    // Clipmap scale-fade (grow from zero across the ring's near/far edges),
+    // measured from the craft anchor so adjacent rings cross-fade seamlessly.
+    // Anchor is a camera-relative OFFSET (ship − camera), rebuilt in the current
+    // frame's render origin so it survives big_space floating-origin recentres
+    // (an absolute anchor jumps a cell and pops impostors in/out while moving —
+    // see `rendering::grass`). offset 0 → camera.
+    let ref_pos = view.world_position + tree.anchor.xyz;
     let inst_dist = distance(ref_pos, base_w);
-    let fs = tree.time_fade.y;
-    let fe = tree.time_fade.z;
-    var grow = 1.0;
-    if fe > fs {
-        grow = clamp((fe - inst_dist) / (fe - fs), 0.0, 1.0);
-    }
+    let near_edge = tree.time_fade.y;
+    let far_edge = tree.time_fade.z;
+    let band = max(tree.time_fade.w, 1.0);
+    let fade_in = smoothstep(near_edge - band, near_edge + band, inst_dist);
+    let fade_out = 1.0 - smoothstep(far_edge - band, far_edge + band, inst_dist);
+    let grow = fade_in * fade_out;
     half = half * grow;
 
     let c = in.uv0 * 2.0 - 1.0;

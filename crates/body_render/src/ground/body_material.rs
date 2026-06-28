@@ -39,7 +39,13 @@ pub struct BodySkyExtra {
     /// Volumetric cloud band radii in render units: x = base (planet_radius +
     /// base altitude), y = top. Used by `body_sky.wgsl` to suppress the
     /// composited `cloud_layer` where opaque geometry (ship hull, terrain) sits
-    /// in front of the cloud band. Zero on bodies with no active cloud layer.
+    /// in front of the cloud band. z = aerial-perspective airlight ratio.
+    /// **w = cloud-composite-enable flag**: 1.0 only on the body whose live
+    /// cloud texture is bound; 0.0 everywhere else (and when clouds are disabled
+    /// in graphics settings). The shader skips the cloud composite when w < 0.5,
+    /// because the 1×1 blank fallback bound on inactive bodies is read out of
+    /// bounds by the screen-space `textureLoad` (→ opaque black sky) if
+    /// composited. Zero on bodies with no active cloud layer.
     pub cloud_band_radii: Vec4,
 }
 
@@ -197,6 +203,39 @@ impl TerrainShadingStyle {
     }
 }
 
+/// Number of sun-shadow cascades (near→far). Shared between the shadow camera
+/// rig (`thalos_game::rendering::sun_shadow`), the terrain + tree materials, and
+/// their shaders. Each cascade has its OWN `texture_depth_2d` (a known-good
+/// binding) — **not** a depth array, which broke terrain rendering. Keep in sync
+/// with the per-cascade texture bindings + unrolled sampling in the WGSL.
+pub const CASCADE_COUNT: usize = 3;
+
+/// Sun-shadow cascade transforms + per-cascade compare params (the UNIFORM half
+/// of the cascade binding; the depth maps are separate `texture_depth_2d`
+/// bindings per cascade, sampled unrolled in the shader). Mirrored in
+/// `body_terrain.wgsl` / `tree.wgsl`. `config.x == 0` ⇒ shader skips sampling.
+#[derive(Clone, Copy, ShaderType)]
+pub struct ShadowCascadeBlock {
+    /// Render-space → cascade clip (Bevy reverse-z orthographic), one per cascade.
+    pub view_proj: [Mat4; CASCADE_COUNT],
+    /// Per cascade: x = depth bias (clip units), yzw reserved.
+    pub params: [Vec4; CASCADE_COUNT],
+    /// x = strength (0 ⇒ skip), y = active cascade count, zw reserved. Named
+    /// `gate` (not `config`) because `body_terrain.wgsl` `#import`s a udlod
+    /// global called `config`, and a matching field name collides in naga_oil.
+    pub gate: Vec4,
+}
+
+impl Default for ShadowCascadeBlock {
+    fn default() -> Self {
+        Self {
+            view_proj: [Mat4::IDENTITY; CASCADE_COUNT],
+            params: [Vec4::ZERO; CASCADE_COUNT],
+            gate: Vec4::ZERO,
+        }
+    }
+}
+
 /// Packed bag of terrain-specific per-frame uniforms.
 ///
 /// Exists so the material lands a single uniform binding instead of three.
@@ -217,6 +256,10 @@ pub struct BodyTerrainExtras {
     /// ([`TerrainShadingStyle::shader_flag`]: 0 = vegetated, 1 = regolith),
     /// zw reserved.
     pub inspection: Vec4,
+    /// Cascaded sun-shadow transforms + per-cascade compare params (see
+    /// [`ShadowCascadeBlock`]). Packed here rather than as its own `#[uniform]`
+    /// to avoid a second vertex buffer (Metal 16-slot cap).
+    pub shadow: ShadowCascadeBlock,
 }
 
 impl Default for BodyTerrainExtras {
@@ -225,6 +268,7 @@ impl Default for BodyTerrainExtras {
             craft_shadow: BodyTerrainShadow::default(),
             debug: BodyTerrainDebug::default(),
             inspection: Vec4::ZERO,
+            shadow: ShadowCascadeBlock::default(),
         }
     }
 }
@@ -244,10 +288,22 @@ pub struct BodyTerrainMaterial {
     #[uniform(1)]
     pub scene: SceneLighting,
     /// Terrain-specific per-frame state (craft shadow, debug overlay,
-    /// inspection flags). Packed into one uniform — see
-    /// [`BodyTerrainExtras`] for the slot-budget rationale.
+    /// inspection flags, cascaded sun-shadow transforms). Packed into one uniform
+    /// — see [`BodyTerrainExtras`] for the slot-budget rationale.
     #[uniform(2)]
     pub extras: BodyTerrainExtras,
+    /// Per-cascade sun-shadow depth maps (near→far), rendered by the game's
+    /// `rendering::sun_shadow` rig. Each is a plain `texture_depth_2d` (the
+    /// known-good single-map binding, replicated per cascade — no depth array).
+    /// Sampled via `textureLoad` and projected through `extras.shadow.view_proj[c]`;
+    /// `extras.shadow.config.x == 0` skips them. Bound on every instance so the
+    /// depth `sample_type` always has a valid texture.
+    #[texture(3, sample_type = "depth")]
+    pub sun_shadow_map_0: Handle<Image>,
+    #[texture(4, sample_type = "depth")]
+    pub sun_shadow_map_1: Handle<Image>,
+    #[texture(5, sample_type = "depth")]
+    pub sun_shadow_map_2: Handle<Image>,
 }
 
 impl Material for BodyTerrainMaterial {

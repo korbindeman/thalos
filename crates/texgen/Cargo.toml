@@ -1,0 +1,18 @@
+[package]
+name = "thalos_texgen"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Procedural texture generation (foliage atlas, bark; rocks etc. later). Pure
+# Rust, no Bevy — usable by the runtime (wrapped into a GPU image), the object
+# preview, and an offline `bake` example that writes PNGs to prebake for the game.
+
+[dependencies]
+
+[dev-dependencies]
+# Only the `bake` example needs PNG encoding; the library stays dependency-free.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[[example]]
+name = "bake"

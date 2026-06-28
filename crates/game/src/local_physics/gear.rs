@@ -53,10 +53,9 @@ pub struct WheelSet {
     pub wheels: Vec<Wheel>,
 }
 
-/// Tunable landing-gear suspension/grip coefficients. Reflect-registered so an
-/// agent can live-tune them over BRP (`world_mutate_resources`) while taxiing,
-/// rather than recompiling. Forces are computed per wheel and summed into the
-/// craft's acceleration accumulators.
+/// Landing-gear suspension/grip coefficients. Reflect-registered (for a future
+/// debug UI); edit the defaults and rebuild to tune them. Forces are computed
+/// per wheel and summed into the craft's acceleration accumulators.
 #[derive(Resource, Clone, Debug, Reflect)]
 #[reflect(Resource)]
 pub struct GearTuning {
@@ -108,7 +107,7 @@ impl Default for GearTuning {
     fn default() -> Self {
         // Sized for the ~20–40 t demo aircraft on Thalos surface gravity. The
         // craft settles to a static squat of `(m·g/N)/k_spring`; these put that
-        // in the tens-of-cm range with near-critical damping. Live-tune via BRP.
+        // in the tens-of-cm range with near-critical damping.
         Self {
             // Stiff enough that the static sag `m·g/(n·k)` is ~cm-scale for the
             // demo aircraft (so the rigid wheel meshes don't visibly clip the
@@ -144,8 +143,7 @@ impl Default for GearTuning {
 /// Defaults **off** (most spawns are airborne and must not start with
 /// spoilers out); the parked runway placement engages it explicitly so a
 /// freshly-spawned aircraft holds on the strip
-/// (`runway::finish_runway_spawn`). Reflect-registered so it's
-/// visible/toggleable over BRP.
+/// (`runway::finish_runway_spawn`). Reflect-registered (for a future debug UI).
 #[derive(Resource, Clone, Copy, Debug, Default, Reflect)]
 #[reflect(Resource)]
 pub struct ParkingBrake {
@@ -159,7 +157,7 @@ pub struct ParkingBrake {
 /// below the taxi airspeed floor, where the AoA is degenerate (the velocity is
 /// suspension settle, not flow). Above that floor a grounded craft flies the
 /// full aero model — rotation authority and ground-roll damping are real
-/// aerodynamics. Reflect-registered for BRP inspection.
+/// aerodynamics. Reflect-registered (for a future debug UI).
 #[derive(Resource, Default, Debug, Clone, Copy, Reflect)]
 #[reflect(Resource)]
 pub struct WeightOnWheels {
@@ -167,10 +165,59 @@ pub struct WeightOnWheels {
 }
 
 
+/// Landing-gear up/down latch (KSP-style, the G key). When `down`,
+/// [`apply_landing_gear_forces`] runs the suspension; when up it stands down
+/// entirely (no contact, no weight on wheels) and the gear meshes are hidden
+/// (`ship_view::sync_gear_visibility`). Binary — there is no retraction
+/// animation, so a half-deployed load state never exists.
+///
+/// Defaults **down**: every ground/approach spawn (runway, final, descent) needs
+/// gear extended, and orbit/EVA craft have no wheels so the state is moot.
+/// Retraction is interlocked against weight-on-wheels (see [`toggle_gear`]).
+/// Reflect-registered (for a future debug UI).
+#[derive(Resource, Clone, Copy, Debug, Reflect)]
+#[reflect(Resource)]
+pub struct GearState {
+    pub down: bool,
+}
+
+impl Default for GearState {
+    fn default() -> Self {
+        Self { down: true }
+    }
+}
+
 /// Flip the parking brake on the toggle edge (B). Runs before the gear forces.
 pub(crate) fn toggle_parking_brake(intent: Res<GameInputIntent>, mut brake: ResMut<ParkingBrake>) {
     if intent.parking_brake_toggle {
         brake.engaged = !brake.engaged;
+    }
+}
+
+/// Flip the landing gear on the toggle edge (G), with the retract-on-ground
+/// interlock: a down→up request is **ignored** while weight is on the wheels
+/// (the craft can't retract the legs it is standing on). Extending is always
+/// allowed. Reads the previous frame's [`WeightOnWheels`] (set by
+/// [`apply_landing_gear_forces`], which runs later in the chain) — a one-frame
+/// lag that is immaterial for a manual latch. The HUD `GEAR` pill drives the
+/// same state through the same interlock (`hud::flight_config_panel`).
+pub(crate) fn toggle_gear(
+    intent: Res<GameInputIntent>,
+    weight_on_wheels: Res<WeightOnWheels>,
+    mut gear: ResMut<GearState>,
+) {
+    if intent.gear_toggle {
+        let target = !gear.down;
+        set_gear_down(&mut gear, &weight_on_wheels, target);
+    }
+}
+
+/// Apply a requested gear position through the weight-on-wheels interlock.
+/// Shared by the key ([`toggle_gear`]) and the HUD pill so both honour the same
+/// rule: extending is always allowed; retracting is refused while grounded.
+pub(crate) fn set_gear_down(gear: &mut GearState, weight_on_wheels: &WeightOnWheels, down: bool) {
+    if down || !weight_on_wheels.grounded {
+        gear.down = down;
     }
 }
 
@@ -264,6 +311,7 @@ pub(crate) fn apply_landing_gear_forces(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
     tuning: Res<GearTuning>,
+    gear_state: Res<GearState>,
     parking_brake: Res<ParkingBrake>,
     intent: Res<GameInputIntent>,
     spatial: SpatialQuery,
@@ -286,6 +334,11 @@ pub(crate) fn apply_landing_gear_forces(
     // front so every early-return path (not owning translation, no gear, etc.)
     // correctly reports "no weight on wheels".
     weight_on_wheels.grounded = false;
+    // Gear retracted → no ground interface at all (weight-on-wheels stays
+    // false, set above). Binary: there is no partial-deploy load state.
+    if !gear_state.down {
+        return;
+    }
     // Full only: Avian must own translation for the integrated force to mean
     // anything. Ships only — EVA has no gear — and never a destroyed wreck.
     if !authority.owns_translation()

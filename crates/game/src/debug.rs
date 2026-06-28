@@ -7,7 +7,7 @@ use bevy::math::{DMat3, DQuat, DVec3, Isometry3d, Quat, Vec3};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
-use thalos_body_render::{TerrainPatchBasis, rendered_height_m};
+use thalos_body_render::TerrainPatchBasis;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::{
     body_fixed::body_fixed_pose_from_inertial,
@@ -19,7 +19,7 @@ use thalos_physics_canonical::{
 use thalos_physics_local::avian::{AngularVelocity, LinearVelocity, Position, Rotation};
 use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalCraftBody, LocalCraftColliderPrimitives,
-    LocalPrimitiveCollider, LocalPrimitiveShape, TerrainSurfaceRegistry,
+    LocalPrimitiveCollider, LocalPrimitiveShape,
 };
 use thalos_world::{BodyDefinition, BodyId, BodyKind, StateVector};
 
@@ -62,8 +62,8 @@ pub struct DebugMode {
     /// aircraft can taxi/fly on airless bodies for ground/wheel testing.
     /// Contradicts the atmosphere model; **off by default** now that Thalos
     /// has air (leaving it on pinned every jet at rated thrust and defeated
-    /// the thrust lapse / transonic wall). Toggle live over BRP
-    /// (`world_mutate_resources`).
+    /// the thrust lapse / transonic wall). Edit the default and rebuild to
+    /// toggle it (Reflect-registered for a future debug UI).
     pub jets_in_vacuum: bool,
 }
 
@@ -108,7 +108,7 @@ impl Plugin for DebugPlugin {
             enabled: true,
             show_hitboxes: false,
             // Off: Thalos has an atmosphere now, so the runway scenarios fly
-            // on real air. Flip on over BRP for airless-body ground testing.
+            // on real air. Flip the default on for airless-body ground testing.
             jets_in_vacuum: false,
         })
         .register_type::<DebugMode>()
@@ -435,7 +435,7 @@ fn update_debug_surface_teleport_cursor(
     mut teleport: ResMut<DebugSurfaceTeleport>,
     sim: Res<SimulationState>,
     body_states: Res<SolarSystemState>,
-    surfaces: Res<TerrainSurfaceRegistry>,
+    height_sources: Res<HeightSourceRegistry>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), (With<ActiveCamera>, With<MapCamera>)>,
     bodies: Query<(&CelestialBody, &Transform)>,
@@ -450,7 +450,7 @@ fn update_debug_surface_teleport_cursor(
         &teleport,
         &sim,
         &body_states,
-        &surfaces,
+        &height_sources,
         &windows,
         &cameras,
         &bodies,
@@ -620,7 +620,7 @@ fn raycast_debug_surface_cursor(
     teleport: &DebugSurfaceTeleport,
     sim: &SimulationState,
     body_states: &SolarSystemState,
-    surfaces: &TerrainSurfaceRegistry,
+    height_sources: &HeightSourceRegistry,
     windows: &Query<&Window, With<PrimaryWindow>>,
     cameras: &Query<(&Camera, &GlobalTransform), (With<ActiveCamera>, With<MapCamera>)>,
     bodies: &Query<(&CelestialBody, &Transform)>,
@@ -646,15 +646,12 @@ fn raycast_debug_surface_cursor(
 
     let dir_world = dir_render.as_dvec3().normalize();
     let dir_body = (body_state.orientation.inverse() * dir_world).normalize();
-    let (surface_height_m, used_rendered_surface) = if let Some(surface) = surfaces.get(body_id) {
-        let dynamic_state = body_states.dynamic_surface_for(body_id, &surface);
-        let query = thalos_terrain::BakedSurface::new(surface.clone(), dynamic_state);
-        (
-            rendered_height_m(&query, dir_body.as_vec3(), 1.0) as f64,
+    let (surface_height_m, used_rendered_surface) = match height_sources.get(body_id) {
+        Some(hs) => (
+            hs.sample_height_m(dir_body.as_vec3(), 1.0).unwrap_or(0.0) as f64,
             true,
-        )
-    } else {
-        (0.0, false)
+        ),
+        None => (0.0, false),
     };
     let normal_render = (body_state.orientation * dir_body)
         .as_vec3()

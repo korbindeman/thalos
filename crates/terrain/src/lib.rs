@@ -19,6 +19,7 @@ pub mod height_generator;
 pub mod icosphere;
 pub mod noise;
 pub mod pipeline;
+pub mod procedural;
 pub mod query;
 pub mod sample;
 pub mod seeding;
@@ -43,6 +44,7 @@ pub use field_surface::FieldSurface;
 pub use generic_terrestrial_field::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
+pub use procedural::ProceduralSurface;
 pub use query::{
     BakedSurface, FlattenHandle, FlattenedSurface, Region, SurfaceQuery, SurfaceRef,
     TerrainFlatten, flatten_handle, surface_height_m, surface_height_range_m, surface_normal,

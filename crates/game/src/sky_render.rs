@@ -147,7 +147,8 @@ impl Plugin for SkyRenderPlugin {
 /// per-pixel star crush in `body_sky.wgsl`: a single bright twilight sky hides
 /// the *entire* starfield, not just the patches that happen to be locally lit.
 /// `1.0` = full backdrop (orbit, true night, airless-body surface); `0.0` =
-/// fully hidden (sun up inside an atmosphere). BRP-readable for live tuning.
+/// fully hidden (sun up inside an atmosphere). Reflect-registered (for a future
+/// debug UI).
 ///
 /// **Sole writer:** [`update_atmospheric_star_visibility`].
 #[derive(Resource, Reflect, Clone, Copy)]

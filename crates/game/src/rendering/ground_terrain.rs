@@ -24,7 +24,7 @@ use thalos_body_render::udlod::prelude::*;
 use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
-    BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, GpuAtlasHeightMirrorComponent,
+    BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, GpuAtlasHeightMirrorComponent,
     GpuAtlasMirrorHandle, MAX_TERRAIN_SHADOW_CASTERS, MAX_TERRAIN_SHADOW_QUADS,
     PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, TerrainShadingStyle,
     rendered_height_range,
@@ -39,13 +39,13 @@ use thalos_shipyard::{
     jet_nacelle_length, wing_panel_frame,
 };
 use thalos_terrain::{
-    BakedSurface, DynamicSurfaceState, FlattenHandle, FlattenedSurface, PlanetSurface,
-    SurfaceQuery, flatten_handle,
+    FlattenHandle, FlattenedSurface, PlanetSurface, ProceduralSurface, SurfaceQuery, flatten_handle,
 };
 use thalos_world::{BodyDefinition, BodyId};
 
 use std::collections::HashMap;
 
+use super::SCREEN_MARKER_RADIUS;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::player_controller::{EvaMode, PlayerControllerState, PlayerControllerVisual};
@@ -121,6 +121,107 @@ const TILE_LOAD_QUEUE_SIZE: u32 = TILE_LOAD_SLOTS * 8;
 /// 384 leaves room without ballooning per-body memory.
 const ATLAS_SIZE: u32 = 384;
 
+// ── Distant tier ─────────────────────────────────────────────────────────
+//
+// A second, deliberately tiny atlas configuration for bodies that are only
+// *visible* (bigger than the icon dot in the ship view) but not gameplay-
+// relevant — not the dominant SOI body and not a predicted encounter. The
+// near tier above is ~1.8 GB/body (`ATLAS_SIZE` × 512² × 4 attachments), so
+// "every visible planet at full resolution" does not scale; the distant tier
+// trades detail for footprint so a dozen bodies can stay resident at once.
+//
+// Memory ≈ `ATLAS_SIZE_DISTANT` × `TILE_TEXTURE_SIZE_DISTANT`² × 14 B × ~1.33
+// (mips) ≈ 64 × 128² × 14 × 1.33 ≈ 20 MB/body. The body is a small disc on
+// screen at distant range, so 128² tiles and an 8-LOD cap resolve its
+// silhouette and broad relief without the deep cascade the near tier needs for
+// the player standing on the surface. Attachment *set* is unchanged (the
+// shrink that drops baked albedo/roughness attachments touches the shared
+// shader + pipeline and is deferred), so the same `BodyTerrainMaterial` and
+// `body_terrain.wgsl` render both tiers with no shader branch.
+const LOD_COUNT_DISTANT: u32 = 8;
+const TILE_TEXTURE_SIZE_DISTANT: u32 = 128;
+const ATLAS_SIZE_DISTANT: u32 = 64;
+
+// ── Map tier ───────────────────────────────────────────────────────────────
+//
+// The orbital map renders the *focused* body filling the screen — a full sphere
+// seen from outside, not the small disc the `Distant` tier targets. Covering a
+// whole sphere even at LOD 2 already needs ~96 tiles (6 faces × 4²), so the
+// 64-slot `Distant` atlas is slot-starved for this view and gets stuck on a
+// coarse LOD whose 128² texels read as visible pixels. This tier is sized for a
+// single full-screen body instead: enough slots to cover the visible hemisphere
+// at a fine LOD (with the back side and the 2:1 balance ring on coarser tiles),
+// a deeper LOD cap so it keeps refining as the map zooms in, and 256² tiles for
+// crisper texels. Only ever one body uses it at a time (the map focus), so the
+// footprint is a single-body cost, not multiplied across every visible planet.
+//
+// Memory ≈ `ATLAS_SIZE_MAP` × `TILE_TEXTURE_SIZE_MAP`² × 14 B × ~1.33 (mips)
+//        ≈ 256 × 256² × 14 × 1.33 ≈ 310 MB for the one focused body.
+const LOD_COUNT_MAP: u32 = 12;
+const TILE_TEXTURE_SIZE_MAP: u32 = 256;
+const ATLAS_SIZE_MAP: u32 = 256;
+
+/// Detail tier for a body's ground-LOD terrain. Assigned by the residency
+/// planner ([`crate::rendering::terrain_residency`]) from how gameplay-relevant
+/// the body is: `Near` for the dominant SOI body and predicted encounters
+/// (collider-backed, deep LODs, full atlas), `Distant` for bodies that are only
+/// big enough on screen to deserve real terrain instead of the icon dot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerrainTier {
+    Near,
+    Distant,
+    /// The orbital-map focused body: a full-screen single sphere. Larger atlas /
+    /// deeper LODs / bigger tiles than `Distant` so it isn't slot-starved.
+    Map,
+}
+
+/// Concrete atlas/LOD knobs for one [`TerrainTier`]. The attachment *border* and
+/// *mip count* are shared across tiers; only the slot count, LOD depth, and tile
+/// resolution differ.
+struct TierConfig {
+    lod_count: u32,
+    atlas_size: u32,
+    tile_texture_size: u32,
+    load_slots: u32,
+    load_queue: u32,
+}
+
+impl TerrainTier {
+    fn config(self) -> TierConfig {
+        match self {
+            TerrainTier::Near => TierConfig {
+                lod_count: LOD_COUNT,
+                atlas_size: ATLAS_SIZE,
+                tile_texture_size: TILE_TEXTURE_SIZE,
+                load_slots: TILE_LOAD_SLOTS,
+                load_queue: TILE_LOAD_QUEUE_SIZE,
+            },
+            TerrainTier::Distant => TierConfig {
+                lod_count: LOD_COUNT_DISTANT,
+                atlas_size: ATLAS_SIZE_DISTANT,
+                tile_texture_size: TILE_TEXTURE_SIZE_DISTANT,
+                load_slots: TILE_LOAD_SLOTS,
+                load_queue: TILE_LOAD_QUEUE_SIZE,
+            },
+            TerrainTier::Map => TierConfig {
+                lod_count: LOD_COUNT_MAP,
+                atlas_size: ATLAS_SIZE_MAP,
+                tile_texture_size: TILE_TEXTURE_SIZE_MAP,
+                load_slots: TILE_LOAD_SLOTS,
+                load_queue: TILE_LOAD_QUEUE_SIZE,
+            },
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            TerrainTier::Near => "near",
+            TerrainTier::Distant => "distant",
+            TerrainTier::Map => "map",
+        }
+    }
+}
+
 /// Marker on the ground-LOD terrain entity spawned for a procedural body.
 /// Carries the body id so the impostor↔terrain LOD swap can pair it with the
 /// matching impostor without walking parents.
@@ -193,22 +294,27 @@ struct PartShadowShape {
     radius_bottom: f32,
 }
 
-/// Camera-to-body-centre distance, expressed as a multiple of body radius,
-/// at which the impostor billboard hands off to the ground-LOD terrain.
+/// Terrain↔impostor handoff, in units of the icon-dot radius: ground-LOD
+/// terrain takes over once the body's ship-view rendered radius reaches this
+/// many [`super::screen_marker_radius`]s.
 ///
-/// 4× radius keeps the impostor active while the body covers less than ~28°
-/// of the view (its silhouette is well-defined as a disc); below 4× the body
-/// fills enough of the frame that the 3-D mesh + heightfield reads better.
+/// Slice 6 goal: "anything bigger than a dot of light gets terrain, not a
+/// billboard." So the handoff is keyed to apparent *screen size*, not a fixed
+/// multiple of body radius — the old `4 × radius` kept the impostor active until
+/// the body filled ~28° of the view, far closer than a small disc. At `1.0` the
+/// swap happens exactly when the body grows past the icon dot, which for a
+/// Thalos-size body is ~530,000 km (vs the old ~12,700 km). The residency
+/// planner promotes the body to a resident terrain entity earlier still
+/// (`RESIDENT_SCREEN_MARGIN`, ~2× this distance) so the tiles have streamed by
+/// the time the swap fires.
 ///
-/// Both halves of the swap are still using the same baked cubemap data, so
-/// at the threshold the visible texture matches; the discontinuity is in
-/// projection (flat billboard ↔ 3-D mesh) and lighting (impostor PBR ↔ flat
-/// albedo until M4 wires lighting through the terrain shader).
+/// The handoff distance is `radius_m / (SCREEN_MARKER_RADIUS × this)`; `dist <
+/// that` ⟺ `radius_m > screen_marker_radius × this`.
 ///
-/// Smooth crossfade requires opacity uniforms on `PlanetMaterial` and
-/// `BodyTerrainMaterial`; deferred to M4 along with the rest of the
-/// terrain-side PBR work.
-const TERRAIN_HANDOFF_RADIUS_FACTOR: f32 = 4.0;
+/// The swap is still a hard cut (flat billboard ↔ 3-D mesh); a smooth crossfade
+/// needs opacity uniforms on both materials and is deferred. At dot size the
+/// body is only a few pixels across, so the cut is barely visible.
+const TERRAIN_HANDOFF_SCREEN_MARKERS: f32 = 1.0;
 
 /// Selects which provider feeds tile data to the UDLOD renderer. `Pipeline` is
 /// the production path; `Analytic3d` and `Flat` are diagnostic stand-ins via
@@ -350,7 +456,7 @@ const SURFACE_WARP_STREAMING_PAUSE_SPEED: f64 = 100.0;
 /// upstream default plus a much larger high-precision threshold so the
 /// Taylor branch actually fires; everything else stays at the upstream
 /// tuning.
-fn body_terrain_view_config(body_radius_m: f64) -> TerrainViewConfig {
+pub(crate) fn body_terrain_view_config(body_radius_m: f64) -> TerrainViewConfig {
     TerrainViewConfig {
         morph_range: TERRAIN_MORPH_RANGE,
         blend_range: TERRAIN_BLEND_RANGE,
@@ -373,6 +479,87 @@ pub(crate) fn terrain_shading_style_for(body: &BodyDefinition) -> TerrainShading
     }
 }
 
+/// Build the UDLOD `TerrainConfig` (atlas dimensions + the four attachments)
+/// for a body terrain at a given detail [`TerrainTier`] and geometric `model`.
+///
+/// The `model` carries the scale (sphere radius + height range): the ship-view
+/// terrain passes a true-metre model, the map-view terrain passes a `MAP_SCALE`
+/// model. Everything else — attachment formats, atlas size, LOD count — is a
+/// pure function of the tier, so both views stream the *same* procedural surface
+/// through identical attachments (no shader branch). Shared by
+/// [`spawn_body_terrain`] and `rendering::map_terrain`.
+pub(crate) fn build_terrain_config(model: TerrainModel, tier: TerrainTier) -> TerrainConfig {
+    let tc = tier.config();
+    TerrainConfig {
+        lod_count: tc.lod_count,
+        model,
+        atlas_size: tc.atlas_size,
+        max_concurrent_tile_loads: tc.load_slots,
+        max_queued_tile_loads: tc.load_queue,
+        ..Default::default()
+    }
+    .add_attachment(AttachmentConfig {
+        name: "height".to_string(),
+        texture_size: tc.tile_texture_size,
+        border_size: TILE_BORDER_SIZE,
+        mip_level_count: TILE_MIP_LEVELS,
+        // Height uses two UNORM16 channels: x stores the coarse normalized
+        // height and y stores a residual decoded in the shader. The shader
+        // must decode each texel before bilinear filtering; hardware-filtering
+        // the packed channels directly is invalid because the residual wraps at
+        // every coarse LSB and creates false contour/terrace bands. Plain R16
+        // made Thalos' broad, shallow slopes visible as quantized rings;
+        // R32Float would need the optional FLOAT32_FILTERABLE wgpu feature
+        // that the game intentionally does not request.
+        format: AttachmentFormat::Rg16,
+    })
+    .add_attachment(AttachmentConfig {
+        name: "albedo".to_string(),
+        texture_size: tc.tile_texture_size,
+        border_size: TILE_BORDER_SIZE,
+        mip_level_count: TILE_MIP_LEVELS,
+        format: AttachmentFormat::Rgba8,
+    })
+    .add_attachment(AttachmentConfig {
+        name: "roughness".to_string(),
+        texture_size: tc.tile_texture_size,
+        border_size: TILE_BORDER_SIZE,
+        mip_level_count: TILE_MIP_LEVELS,
+        // thalos_udlod has no single-channel 8-bit format; the source
+        // cubemap is u8 and we upscale to u16 in the tile provider.
+        format: AttachmentFormat::R16,
+    })
+    .add_attachment(AttachmentConfig {
+        name: "material".to_string(),
+        texture_size: tc.tile_texture_size,
+        border_size: TILE_BORDER_SIZE,
+        mip_level_count: TILE_MIP_LEVELS,
+        // R = grass/vegetation, G = soil/peat, B = exposed rock, A = wetness.
+        // These masks drive near-ground material blending; the albedo atlas
+        // remains the macro/body-colour anchor for orbital continuity.
+        format: AttachmentFormat::Rgba8,
+    })
+}
+
+/// Pin LOD 0 on every cube face for the atlas's entire lifetime. This gives
+/// `get_best_tile` a guaranteed resident ancestor for any tile coordinate, so
+/// the GPU shader never samples `INVALID_ATLAS_INDEX` (which decodes to 0 →
+/// `min_height` → vertex sits at `-terrain_height_range` below the ellipsoid:
+/// visible "void" holes wherever a draw tile has no streamed ancestor).
+///
+/// `is_spherical` is true for body terrain (`TerrainModel::sphere`), giving six
+/// faces; the planar fallback (single side) is harmless to pin defensively.
+pub(crate) fn pin_root_tiles(tile_atlas: &mut TileAtlas) {
+    let side_count = if tile_atlas.model().is_spherical() {
+        6
+    } else {
+        1
+    };
+    for side in 0..side_count {
+        tile_atlas.pin_tile(TileCoordinate::new(side, 0, 0, 0));
+    }
+}
+
 /// Spawn the UDLOD terrain for one procedural body.
 ///
 /// `ship_parent_entity` is the body's `RealSpaceBody` entity (the 1 km-cell
@@ -384,30 +571,39 @@ pub(crate) fn terrain_shading_style_for(body: &BodyDefinition) -> TerrainShading
 /// ship-view render units (same scale used by the impostor's `ship_atmosphere`).
 /// Airless bodies pass `AtmosphereBlock::default()` (all zeros) and no
 /// sky-dome entity is spawned.
+///
+/// `tier` picks the atlas footprint (see [`TerrainTier`]): `Near` for the body
+/// the player is on/heading toward (full atlas, deep LODs), `Distant` for a body
+/// that is merely visible (tiny atlas so many stay resident cheaply).
 pub(crate) fn spawn_body_terrain(
     commands: &mut Commands,
     body: &BodyDefinition,
-    surface: Arc<PlanetSurface>,
     ship_parent_entity: Entity,
     materials: &mut Assets<BodyTerrainMaterial>,
     tile_trees: &mut TerrainViewComponents<TileTree>,
     ship_camera: Entity,
     atmosphere: AtmosphereBlock,
-    dynamic_state: DynamicSurfaceState,
     height_mirror: Option<GpuAtlasMirrorHandle>,
     flatten: FlattenHandle,
+    tier: TerrainTier,
+    sun_shadow_maps: [Handle<Image>; CASCADE_COUNT],
 ) -> Entity {
     let radius_m = body.radius_m as f32;
+    let tc = tier.config();
     // The construction site is the one place that names the concrete generation
     // type: wrap it as `Arc<dyn SurfaceQuery>` so the provider and the
     // height-range query see only the black-box seam. The flatten decorator sits
     // on top so a runtime-set pad (the runway) levels the rendered tiles — and,
     // via the GPU-atlas height mirror, the collider and CPU height queries too.
-    let terrain_surface: Arc<dyn SurfaceQuery> =
-        Arc::new(FlattenedSurface::new(
-            Arc::new(BakedSurface::new(surface, dynamic_state)),
-            flatten,
-        ));
+    //
+    // Slice 0: the runtime procedural generator replaces the baked cubemap. It
+    // is built from the same body params as the near-surface height source
+    // (`install_baked_planet`), so the drawn ground and the collider stay in
+    // lockstep without sharing an `Arc`.
+    let terrain_surface: Arc<dyn SurfaceQuery> = Arc::new(FlattenedSurface::new(
+        Arc::new(ProceduralSurface::new(body.radius_m as f32, body.id as u32)),
+        flatten,
+    ));
     let height_range = rendered_height_range(terrain_surface.as_ref());
     let provider_mode = terrain_tile_provider_mode();
     let terrain_height_range = match provider_mode {
@@ -423,55 +619,7 @@ pub(crate) fn spawn_body_terrain(
         terrain_height_range,
     );
 
-    let config = TerrainConfig {
-        lod_count: LOD_COUNT,
-        model,
-        atlas_size: ATLAS_SIZE,
-        max_concurrent_tile_loads: TILE_LOAD_SLOTS,
-        max_queued_tile_loads: TILE_LOAD_QUEUE_SIZE,
-        ..Default::default()
-    }
-    .add_attachment(AttachmentConfig {
-        name: "height".to_string(),
-        texture_size: TILE_TEXTURE_SIZE,
-        border_size: TILE_BORDER_SIZE,
-        mip_level_count: TILE_MIP_LEVELS,
-        // Height uses two UNORM16 channels: x stores the coarse normalized
-        // height and y stores a residual decoded in the shader. The shader
-        // must decode each texel before bilinear filtering; hardware-filtering
-        // the packed channels directly is invalid because the residual wraps at
-        // every coarse LSB and creates false contour/terrace bands. Plain R16
-        // made Thalos' broad, shallow slopes visible as quantized rings;
-        // R32Float would need the optional FLOAT32_FILTERABLE wgpu feature
-        // that the game intentionally does not request.
-        format: AttachmentFormat::Rg16,
-    })
-    .add_attachment(AttachmentConfig {
-        name: "albedo".to_string(),
-        texture_size: TILE_TEXTURE_SIZE,
-        border_size: TILE_BORDER_SIZE,
-        mip_level_count: TILE_MIP_LEVELS,
-        format: AttachmentFormat::Rgba8,
-    })
-    .add_attachment(AttachmentConfig {
-        name: "roughness".to_string(),
-        texture_size: TILE_TEXTURE_SIZE,
-        border_size: TILE_BORDER_SIZE,
-        mip_level_count: TILE_MIP_LEVELS,
-        // thalos_udlod has no single-channel 8-bit format; the source
-        // cubemap is u8 and we upscale to u16 in the tile provider.
-        format: AttachmentFormat::R16,
-    })
-    .add_attachment(AttachmentConfig {
-        name: "material".to_string(),
-        texture_size: TILE_TEXTURE_SIZE,
-        border_size: TILE_BORDER_SIZE,
-        mip_level_count: TILE_MIP_LEVELS,
-        // R = grass/vegetation, G = soil/peat, B = exposed rock, A = wetness.
-        // These masks drive near-ground material blending; the albedo atlas
-        // remains the macro/body-colour anchor for orbital continuity.
-        format: AttachmentFormat::Rgba8,
-    });
+    let config = build_terrain_config(model, tier);
 
     let provider: Box<dyn TileProvider> = match provider_mode {
         TerrainTileProviderMode::Pipeline => Box::new(PipelineTileProvider::new(
@@ -503,24 +651,7 @@ pub(crate) fn spawn_body_terrain(
         }
     };
     let mut tile_atlas = TileAtlas::with_provider(&config, provider);
-    // Pin LOD 0 on every cube face for the atlas's entire lifetime. This
-    // gives `get_best_tile` a guaranteed resident ancestor for any tile
-    // coordinate, so the GPU shader never samples `INVALID_ATLAS_INDEX`
-    // (which decodes to 0 → `min_height` → vertex sits at
-    // `-terrain_height_range` below the ellipsoid: visible "void" holes
-    // wherever a draw tile has no streamed ancestor).
-    //
-    // `is_spherical` is true for body terrain (`TerrainModel::sphere`),
-    // giving six faces; the planar fallback (single side) is harmless to
-    // pin defensively.
-    let side_count = if tile_atlas.model().is_spherical() {
-        6
-    } else {
-        1
-    };
-    for side in 0..side_count {
-        tile_atlas.pin_tile(TileCoordinate::new(side, 0, 0, 0));
-    }
+    pin_root_tiles(&mut tile_atlas);
     let view_config = body_terrain_view_config(body.radius_m);
     let tile_tree = TileTree::new(&tile_atlas, &view_config);
 
@@ -569,7 +700,11 @@ pub(crate) fn spawn_body_terrain(
             craft_shadow: BodyTerrainShadow::default(),
             debug,
             inspection: Vec4::new(0.0, shading_style.shader_flag(), 0.0, 0.0),
+            ..Default::default()
         },
+        sun_shadow_map_0: sun_shadow_maps[0].clone(),
+        sun_shadow_map_1: sun_shadow_maps[1].clone(),
+        sun_shadow_map_2: sun_shadow_maps[2].clone(),
     };
 
     let mut terrain = commands.spawn((
@@ -593,12 +728,15 @@ pub(crate) fn spawn_body_terrain(
     tile_trees.insert((terrain_entity, ship_camera), tile_tree);
 
     info!(
-        "spawned ground terrain for '{}' (provider {}, radius {:.0} km, height range ±{:.0} m, atlas size {})",
+        "spawned ground terrain for '{}' ({} tier, provider {}, radius {:.0} km, height range ±{:.0} m, atlas size {}, lod {}, tile {})",
         body.name,
+        tier.label(),
         provider_mode.label(),
         radius_m / 1000.0,
         terrain_height_range,
-        ATLAS_SIZE,
+        tc.atlas_size,
+        tc.lod_count,
+        tc.tile_texture_size,
     );
 
     terrain_entity
@@ -634,6 +772,9 @@ const FALLBACK_WATER_COLOR_DEPTH: [f32; 4] = [0.012, 0.040, 0.090, 120.0];
 /// `sea_level_m` (airless bodies); otherwise creates a single icosphere
 /// entity parented to the body's grid, hidden at start so
 /// `sync_body_render_lod` can flip it in step with [`BodyTerrain`].
+// 0b-1: water is disabled until the generator grows a sea level (Slice 1);
+// this is rewritten/removed then. Uncalled for now.
+#[allow(dead_code)]
 pub(crate) fn spawn_body_water(
     commands: &mut Commands,
     body: &BodyDefinition,
@@ -719,33 +860,39 @@ pub(crate) fn spawn_body_water(
 /// entities are active for this frame, based on a single camera-to-body
 /// distance. Two orthogonal axes:
 ///
-/// * **Surface LOD** — `dist < TERRAIN_HANDOFF_RADIUS_FACTOR × radius`
-///   selects the 3-D terrain mesh; otherwise the flat impostor billboard.
-///   Logically the same body at two projections; never draw both.
+/// * **Surface LOD** — the body's rendered radius exceeds the icon dot
+///   (`radius_m > screen_marker_radius × TERRAIN_HANDOFF_SCREEN_MARKERS`,
+///   equivalently `dist < radius_m / (SCREEN_MARKER_RADIUS × markers)`) selects
+///   the 3-D terrain mesh; otherwise the flat impostor billboard / icon. Slice 6
+///   keys this to apparent screen size, not a fixed `4 × radius`, so anything
+///   bigger than a dot of light gets real terrain. Logically the same body at
+///   two projections; never draw both.
 /// * **Atmosphere LOD** — terrain uses `BodySky`, impostor uses `BodyHalo`.
 ///   `BodySky` covers every screen pixel and clips at scene depth, which is
 ///   what gives ground LOD terrain aerial perspective and the detached cloud
-///   shell. `BodyHalo` covers only the billboard shell silhouette, matching
-///   the impostor body's inline atmosphere/cloud composite.
+///   shell — and (Slice 6) the limb/rim glow once it is visible from outside the
+///   shell too. `BodyHalo` covers only the billboard shell silhouette; it is not
+///   spawned today, so beyond the swap a sub-dot body shows no halo (just the
+///   impostor disc).
 ///
-/// Three altitude bands fall out for a body with an atmosphere:
+/// Two bands fall out for a body with an atmosphere (`markers` =
+/// `TERRAIN_HANDOFF_SCREEN_MARKERS`):
 ///
-/// | distance           | surface  | atmosphere |
-/// |--------------------|----------|------------|
-/// | `d < 4 × radius`   | terrain  | BodySky    |
-/// | `d ≥ 4 × radius`   | impostor | halo       |
+/// | apparent size                    | surface  | atmosphere |
+/// |----------------------------------|----------|------------|
+/// | bigger than `markers` icon dots  | terrain  | BodySky    |
+/// | smaller (sub-dot)                | impostor | halo/none  |
 ///
 /// Airless bodies skip the BodySky entity entirely (never spawned) and
 /// the halo's shader early-outs to a no-op; we still toggle its visibility
 /// for consistency.
 ///
-/// **Terrain residency gate.** Ground-LOD terrain entities are spawned
-/// lazily by [`crate::rendering::terrain_residency`] only for bodies the
-/// player is plausibly going to encounter. For a body without a resident
-/// `BodyTerrain` entity, the impostor stays visible at all distances and
-/// the halo stays visible at all distances — otherwise the body would
-/// silently vanish when the camera passed inside `4 × radius` with no
-/// terrain to take over.
+/// **Terrain residency gate.** Ground-LOD terrain entities are spawned lazily by
+/// [`crate::rendering::terrain_residency`] only for bodies that are
+/// gameplay-relevant or big enough on screen. For a body without a resident
+/// `BodyTerrain` entity, the impostor stays visible at all distances — otherwise
+/// the body would silently vanish once it grew past the dot with no terrain to
+/// take over.
 ///
 /// The map-layer impostor and map halo live on `MAP_LAYER` and are not
 /// touched here.
@@ -851,8 +998,8 @@ pub(super) fn sync_body_render_lod(
     // LODs have finished loading*. With lazy residency (see
     // `terrain_residency`), most bodies have no `BodyTerrain` at all — the
     // impostor / halo must then stay visible at every distance, otherwise
-    // the body silently disappears inside `4 × radius`. The same applies
-    // briefly at spawn while LOD 0 streams: until the pinned tiles are
+    // the body silently disappears once it grows past the icon dot. The same
+    // applies briefly at spawn while LOD 0 streams: until the pinned tiles are
     // ready, treat the body as non-resident so the impostor stays up; the
     // terrain entity is only flipped to `Inherited` once it has a complete
     // resident-ancestor chain (otherwise the GPU samples
@@ -864,10 +1011,15 @@ pub(super) fn sync_body_render_lod(
         .collect();
 
     // Returns (distance, swap_threshold, shell_radius) for one body, or
-    // None if the body or its render-space position is missing. The shell
-    // radius is kept here for diagnostics / future atmosphere-specific LOD
-    // tuning; today's visibility choice keys atmosphere to the surface LOD
-    // so terrain always gets the fullscreen in-front pass.
+    // None if the body or its render-space position is missing. The swap
+    // threshold is the camera distance at which the body's rendered radius
+    // equals `TERRAIN_HANDOFF_SCREEN_MARKERS` icon-dot radii: terrain shows
+    // inside it, impostor/icon outside. `screen_marker_radius(p, cam) =
+    // |p - cam| × SCREEN_MARKER_RADIUS`, so `radius_m > marker × markers`
+    // ⟺ `dist < radius_m / (SCREEN_MARKER_RADIUS × markers)`. The shell radius
+    // is kept for diagnostics / future atmosphere-specific LOD tuning; today's
+    // visibility choice keys atmosphere to the surface LOD so terrain always
+    // gets the fullscreen in-front pass.
     let body_metrics = |body_id: BodyId| -> Option<(f32, f32, f32)> {
         let body = sim.system.bodies.get(body_id)?;
         let body_pos = body_pos_by_id.get(&body_id)?;
@@ -878,11 +1030,8 @@ pub(super) fn sync_body_render_lod(
             .map(|a| a.karman_line_m)
             .unwrap_or(0.0);
         let dist = (cam_pos - *body_pos).length();
-        Some((
-            dist,
-            TERRAIN_HANDOFF_RADIUS_FACTOR * radius,
-            radius + karman,
-        ))
+        let swap_distance = radius / (SCREEN_MARKER_RADIUS * TERRAIN_HANDOFF_SCREEN_MARKERS);
+        Some((dist, swap_distance, radius + karman))
     };
 
     let set_vis = |vis: &mut Visibility, want: Visibility| {
@@ -965,8 +1114,10 @@ pub(super) fn sync_body_render_lod(
             continue;
         };
         // Halo is the atmosphere visual for the impostor. Show it whenever
-        // we're showing the impostor: outside `4 × radius`, OR at any
-        // distance if terrain isn't resident.
+        // we're showing the impostor: beyond the screen-size swap, OR at any
+        // distance if terrain isn't resident. (No `BodyHalo` entity is spawned
+        // today, so this loop is a no-op; `BodySky`'s limb now covers the
+        // from-space rim glow.)
         let resident = terrain_resident.contains(&halo.body_id);
         let want = if !resident || dist >= swap {
             Visibility::Inherited
@@ -977,8 +1128,8 @@ pub(super) fn sync_body_render_lod(
     }
 }
 
-/// Aerial-perspective (distance-haze) controls + live sky-dome dev overrides
-/// (BRP-mutable; `#[reflect(Resource)]`).
+/// Aerial-perspective (distance-haze) controls + sky-dome dev overrides
+/// (Reflect-registered via `#[reflect(Resource)]` for a future debug UI).
 ///
 /// **Why this exists.** A body's authored `scattering.strength` /
 /// `multi_scatter_gain` brighten the **sky dome** so a clear midday sky reads
@@ -1003,11 +1154,10 @@ pub(super) fn sync_body_render_lod(
 /// **Dev overrides.** `strength` / `multi_scatter_gain`, when `>= 0`, override
 /// `atmos_geom.z` / `atmos_geom.w` on every body's sky+terrain material this
 /// frame (`< 0` keeps the authored spawn-time value). Both are pure runtime
-/// multipliers — they do **not** feed the multi-scatter LUT bake — so overriding
-/// them live is exact. Handy for live sky tuning; not needed for normal play.
-///
-/// Mutate live, e.g.:
-///   `world_mutate_resources thalos_game::rendering::ground_terrain::AtmosphereTuning .aerial_perspective_strength 0.10`
+/// multipliers — they do **not** feed the multi-scatter LUT bake — so changing
+/// them is exact (no LUT rebake). Handy for sky tuning; not needed for normal
+/// play. Edit the default below (Reflect-registered for a future debug UI) and
+/// rebuild to change them.
 #[derive(Resource, Debug, Clone, Copy, Reflect)]
 #[reflect(Resource)]
 pub struct AtmosphereTuning {
@@ -1020,14 +1170,16 @@ impl Default for AtmosphereTuning {
     fn default() -> Self {
         Self {
             // Negative sentinels: keep each body's authored sky-dome strength /
-            // gain until explicitly overridden over BRP.
+            // gain until explicitly overridden.
             strength: -1.0,
             multi_scatter_gain: -1.0,
             // Clear-weather default. Tuned against the in-atmosphere flight view:
             // ground reads crisply from altitude with only a subtle haze building
-            // toward the horizon, instead of a uniform veil. Weather will later
-            // drive this up for hazy/humid conditions.
-            aerial_perspective_strength: 0.15,
+            // toward the horizon, instead of a uniform veil. Lowered from 0.15
+            // alongside the Mie cut (thalos.ron) — together they keep the noon
+            // distance crisp instead of washing to a grey-tan band. Weather will
+            // later drive this up for hazy/humid conditions.
+            aerial_perspective_strength: 0.10,
         }
     }
 }
@@ -1064,7 +1216,9 @@ pub(super) fn update_body_terrain_atmosphere(
     // .2 = per-pixel cloud-hit distance texture, .3 = which body the cloud
     // raymarch is currently rendered for (sole writer: `clouds::drive_clouds`),
     // .4 = blank fallbacks to rebind on bodies that are not the active one,
-    // .5 = live atmosphere airlight tuning.
+    // .5 = live atmosphere airlight tuning,
+    // .6 = sun-shadow map handle + view_proj + params (folded in to stay under
+    //      Bevy's 16-system-arg limit).
     cloud_io: (
         Option<Res<thalos_volumetric_clouds::CloudRenderTexture>>,
         Option<Res<thalos_volumetric_clouds::CloudsConfig>>,
@@ -1072,6 +1226,7 @@ pub(super) fn update_body_terrain_atmosphere(
         Res<super::clouds::ActiveCloudBody>,
         Option<Res<super::spawn::BlankCloudTextures>>,
         Res<AtmosphereTuning>,
+        Res<super::sun_shadow::SunShadowState>,
     ),
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut water_materials: ResMut<Assets<BodyWaterMaterial>>,
@@ -1087,7 +1242,7 @@ pub(super) fn update_body_terrain_atmosphere(
     };
 
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
-    // Live atmosphere airlight tuning (BRP-mutable; see `AtmosphereTuning`).
+    // Atmosphere airlight tuning (see `AtmosphereTuning`).
     let tuning = &cloud_io.5;
 
     // Planet center and orientation in render space from each body's grid
@@ -1155,7 +1310,15 @@ pub(super) fn update_body_terrain_atmosphere(
                         planet_radius + cfg.clouds_bottom_height,
                         planet_radius + cfg.clouds_top_height,
                         0.0,
-                        0.0,
+                        // w = composite-enable flag: 1.0 only on the body whose
+                        // live cloud texture is bound below. The sky shader skips
+                        // the cloud composite when this is 0.0 — every other body
+                        // carries the 1×1 blank fallback, which the screen-space
+                        // `textureLoad` would otherwise read out of bounds (→
+                        // (0,0,0,0), an opaque black sky). `drive_clouds` clears
+                        // `ActiveCloudBody` when clouds are disabled in graphics
+                        // settings, so this flag goes 0.0 there too.
+                        1.0,
                     )
                 })
                 .unwrap_or(Vec4::ZERO)
@@ -1201,6 +1364,15 @@ pub(super) fn update_body_terrain_atmosphere(
         mat.scene =
             build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
         mat.extras.craft_shadow = craft_shadow;
+        // Sun-shadow map: the camera + matrix are owned by `sun_shadow`; bind
+        // the handle and the render-space → shadow-clip transform. `params.x`
+        // is 0 when the pass is inactive (orbit / off-surface), so the shader
+        // skips sampling entirely.
+        let sun_shadow = &cloud_io.6;
+        mat.sun_shadow_map_0 = sun_shadow.images[0].clone();
+        mat.sun_shadow_map_1 = sun_shadow.images[1].clone();
+        mat.sun_shadow_map_2 = sun_shadow.images[2].clone();
+        mat.extras.shadow = sun_shadow.block;
         // Live strength/gain override (keeps the terrain's atmosphere-driven
         // ambient sky fill in step with the sky dome). `< 0` = keep authored.
         if tuning.strength >= 0.0 {
@@ -1334,7 +1506,12 @@ pub(super) fn update_body_terrain_atmosphere(
 /// `build_scene_lighting` in `rendering::lighting`, but specialised so the
 /// occluder vec is keyed by `BodyId` directly and uses the SHIP-frame
 /// (1 m = 1 render unit) body grid positions cached above.
-fn build_terrain_scene_lighting(
+///
+/// The star direction and flux are computed from the real (metre) ephemeris
+/// positions, so they are scale-invariant: the map-view terrain
+/// (`rendering::map_terrain`) reuses this with an empty occluder list (the map
+/// schematic skips eclipse shadows) and a `MAP_SCALE` body.
+pub(crate) fn build_terrain_scene_lighting(
     body_id: BodyId,
     states: &thalos_physics_canonical::types::BodyStates,
     occluders: &[(BodyId, Vec3, f32)],

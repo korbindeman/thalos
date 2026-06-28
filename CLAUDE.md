@@ -24,23 +24,20 @@ just game cruise          # Meridian at ~15,000 ft, level cruise over dry land
 just game shipyard        # open straight into the in-game ship editor
                           #   (also: the pause menu's SHIPYARD button
                           #    from any running mode)
-just edit <body>          # cargo run -p thalos_body_editor -- <body>
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
+just preview              # headless procedural-object gallery → PNGs in
+                          #   tools/preview/out/ (trees/conifer/shrub; rocks etc.
+                          #   later). No window — agents can run it and inspect
+                          #   the images. See "Running and inspecting" below.
+just preview-window       # interactive variant of `just preview`: a window with
+                          #   an orbit camera (drag/scroll, ←/→ cycle, S = shot).
+                          #   User-run (opens a window).
 just shipyard             # standalone egui ship editor (secondary front-end
                           #   over the same thalos_shipyard::editor core)
 just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics_canonical
 just clippy               # cargo clippy --workspace
 just trace                # cargo run --release -p thalos_game --features profile-tracy
-just bake Thalos          # full-res local bake → target/bakes/Thalos.bin
-                          #                    + stage-bakes/Thalos/full/*.png
-just bake Thalos --preview # fast 512² PNG previews → stage-bakes/Thalos/preview/
-                          #                          (no local game bake)
-just bake all             # bake every body with a terrain block
-                          #   (skips bodies whose local bake hash is
-                          #    already current; add --force to rebake)
-just clear-terrain-cache  # wipe target/terrain_cache/ (editor only — game and
-                          # `just bake` no longer use this directory)
 just release patch        # bump version, commit, tag, and push (patch|minor|major|x.y.z)
 
 # Run a single test
@@ -73,147 +70,98 @@ Planet generation is in an iterative development phase. Do not add or run
 planet/terrain generation tests for now, including per-body generation
 tests. This applies anywhere a test compiles or validates generated planet
 data, even outside `thalos_terrain`; these tests slow down the visual
-iteration loop. Use `just bake <body> --preview` (see below) for visual
-feedback against the real compiler.
+iteration loop.
 
 For faster speculative design, use `just terrain-lab` and open
 `http://127.0.0.1:8787/tools/terrain-lab/`. Terrain Lab is a dev-only static
 browser sketchpad with Google-Maps-style panning/zooming and lazily generated
 LOD tiles. It is for process-map exploration before porting good ideas into
-`crates/terrain`; the Rust terrain compiler and bake/query pipeline remain the
-source of truth for game output.
+`crates/terrain`; the runtime `ProceduralSurface` generator is the source of
+truth for game output.
 
-Terrain fields should be process-first, not naked-noise-first. Smooth fBM,
-ridged noise, and domain warps may drive masks, placement, breakup, and
-small local texture, but broad visible height/albedo/bathymetry must come
-from named terrain processes/features (coast shelves, seamounts, fractures,
-mountain patches, basins, etc.) with explicit spatial windows. Do not write
-global macro fBM/ridged fields directly into visible terrain; they produce
-unrealistic smoky/streaky contours across the planet.
+## Terrain generation (runtime — no bake)
 
-## Bakes: production vs preview
+Terrain is **generated at runtime**, not baked. Each procedural body builds one
+`thalos_terrain::ProceduralSurface` (an impl of the `SurfaceQuery` seam) in
+`rendering::ground_terrain` as `ProceduralSurface::new(radius, body.id)` — a pure
+analytic function of `(direction, lod)` in f64 body-local coordinates, with no
+disk artifact. There is **no `just bake`, no `target/bakes/`, no cache, no
+startup bake check**. Every terrain-height consumer reads the *same* surface:
 
-The game **loads pre-baked terrain only** — it never compiles. Bakes live
-at `target/bakes/<body>.bin` and are produced locally by either
-`just bake` (headless `bake_dump`) or the planet editor's Full button.
-Bakes are developer-local build artifacts: they are ignored by Git, are not
-tracked with Git LFS, and are not the distribution path for release assets.
-Missing or stale bakes are auto-repaired at startup: `crates/game/src/bake_check.rs`
-runs a `peek_key`-only pre-flight against every procedural body and, on
-any mismatch, shells out to `cargo run --quiet --release -p thalos_bake_dump -- all`
-(inherits stdio so the indicatif progress bars render normally) before
-launching Bevy. The game still panics if a bake is somehow invalid
-*after* auto-repair, which would indicate a bake_dump bug worth
-surfacing. Bodies without authored terrain (`TerrainConfig::None` or no
-`terrain` field) fall through to a solid-color impostor tinted with
-`body.color`, so release builds ship with un-authored bodies still
-rendering.
+- **Ground LOD render** — a `FlattenedSurface`-wrapped `ProceduralSurface` feeds
+  the UDLOD tile provider.
+- **Collider / camera terrain floor / runway / descent site / HUD altitude / EVA**
+  — the near-surface `HeightSourceRegistry` (a GPU-atlas height mirror over the
+  same `ProceduralSurface`, with a CPU fallback), via
+  `HeightSource::sample_height_m`.
+- **Propagator collision** — `GameTerrainRegistry` mirrors the `ProceduralSurface`.
 
-### `just bake` — two modes
+There is **no sea-level layer**: the continent mask puts the shoreline at height
+0 (the reference radius), so "sea level" is the constant **0 m** wherever a datum
+is needed (dry-land checks, the camera's terrain floor). Do not read sea level
+from a baked surface — that path is gone.
 
-**Default (full-res):**
+`ProceduralSurface` is the **Slice 0** generator (competent but simple; height
+tuning and procedural materials/shading are later slices). The old baked pipeline
+— `thalos_bake_dump` (the "dumps"), `thalos_body_editor`, and the game's startup
+`bake_check` — has been **deleted**. The remaining baked-pipeline modules in
+`thalos_terrain` (the `Feature`/`Ocean` compiler, `PlanetSurface`/
+`StaticSurfaceData`, `cache`, stages/tectonics/fields) and the
+`body_render` impostor-bake path are now **dead code slated for removal**; the
+distant-body view is an interim solid-color impostor (Slice 6 replaces it). Do
+not reintroduce a bake/disk-artifact path — extend `ProceduralSurface` (or add a
+new `SurfaceQuery` impl) instead.
 
-- Runs the compiler at the body's full authored / radius-derived resolution.
-- Writes the local bake `target/bakes/<body>.bin` (this is what `just game` loads).
-- Writes full-resolution equirect PNGs to `stage-bakes/<body>/full/`, plus the
-  ground-scale patch tile columns to `stage-bakes/<body>/full/patch/<biome>/`.
-- Slow — Thalos (3186 km, 4096² cubemap) takes several minutes.
+## Running and inspecting the game
 
-**Preview (`just bake <body> --preview`):**
+**Do not launch the game yourself.** Building and type-checking are fine and
+encouraged (`just build`, `cargo check -p thalos_game`, `just clippy`), but
+*running* the game is the user's job — they have the display, the input
+devices, and the judgment for what "looks right". When you need to see visual
+or runtime behaviour, ask the user to run `just game [mode]` and **send a
+screenshot** (or describe what they see). There is no remote-inspection
+channel: don't try to drive or observe a live session programmatically.
 
-- 512² cubemap; PNG dumps only, **no local game bake**.
-- Writes equirects to `stage-bakes/<body>/preview/`.
-- Emits the equirect set **plus the ground-scale shaded-relief patch set** as
-  per-biome tile columns: `stage-bakes/<body>/preview/patch/<biome>/<span>.png`,
-  where each biome dir (`hill`, `plain`) holds the LOD cascade
-  (`context-120km.png`, `close-12km.png`, `micro-3km.png`, `fine-300m.png`,
-  `ultra-60m.png`). One preview run shows both orbital coloration and on-foot
-  relief. These patches *are* the tiles that exist on the planet — the same
-  thing the planet editor's tile view shows.
-- Fast — primary visual-feedback loop for iteration on the compiler.
-- Doesn't touch `target/bakes/`, so iterating doesn't invalidate the loaded
-  local bake in `just game`.
+**Procedural objects, though, you *can* see yourself.** `just preview`
+(`crates/body_render/examples/object_preview.rs`) is a **headless** renderer:
+it draws each procedural object (trees, conifer, shrub today; rocks etc. later)
+to a PNG under `tools/preview/out/` and exits — no window. It renders on the
+real GPU off-screen (verified working from an agent shell: NVIDIA/Vulkan), lit
+with the actual `TreeMaterial` + `thalos::lighting` sky model so it matches the
+in-game look. So when iterating on a procedural asset's *geometry/material*,
+run `just preview` and **Read the output PNGs directly** instead of round-
+tripping a screenshot through the user. (Whole-scene composition, terrain,
+lighting-in-context, and "does it feel right" still need a real `just game`
+run — that stays the user's call.) Extend the gallery by adding an entry to
+`object_preview.rs`.
 
-### PNG outputs (per run, overwrites)
+**Getting data out of a running session: write it to a file.** When you need
+runtime numbers rather than a picture, don't reach for live inspection — have
+the game *log* the data and read the file afterwards. JSONL (one JSON object
+per line) is the house style for machine-readable runtime data. Existing
+sinks:
+- **`tracing` / `info!` logs** — the game's stdout. Add an
+  `info!(target: "thalos::…", …)` where you need a signal, then ask the user
+  to run the game and paste the relevant console output.
+- **Chrome trace** — `--features profile-chrome` writes `trace-*.json` (see
+  Profiling below).
 
-- `albedo-equirect.png` — baked albedo cubemap in a 2:1 lat/lon projection;
-  on ocean worlds this is still raw land/seabed albedo, not water-composited.
-- `orbit-color-equirect.png` — ocean worlds only: preview composite of the
-  separate water layer over the raw terrain substrate, for judging from-orbit
-  coloration without violating the "water is not terrain material" invariant.
-- `height-equirect.png` — grayscale height normalized to the body's
-  encoded ± range (range reported in `info.txt`).
-- `roughness-equirect.png` — grayscale roughness (R8Unorm).
-- `normal-equirect.png` — object-space normal map (RGBA8).
-- `info.txt` — range, resolution, route (Feature/Ocean/None), feature counts.
-- `patch/<biome>/{context-120km…ultra-60m}.png` — ground-scale shaded-relief
-  patch tile columns of the runtime walkable height (`surface_height_m`),
-  emitted in both full and `--preview` runs. Each biome dir is one tile site:
-  `hill` = highest-relief, `plain` = flattest. Within a biome the five PNGs zoom
-  from a 120 km context down to a 60 m on-foot view. These read ground character
-  the equirects are far too coarse to show, and map directly to the planet
-  editor's tile view. The patch grid is built in **f64** (mirroring the game
-  tile path `pixel_direction`): an f32 grid would quantise sample positions to
-  the ~0.25 m f32 lattice at planet scale and render a grid/checkerboard moiré
-  the field doesn't contain.
-- (Tectonic and debug overlays when `--debug` is passed or the body has tectonics.)
-
-### Workflow
-
-- **Iterating on the compiler:** `just bake <body> --preview`, then `Read`
-  the equirect PNG. No game launch needed, no display needed, fast loop.
-- **Producing a local game bake:** `just bake <body>` (slow). Verifies the
-  full pipeline and produces the artifact your local game will load.
-- **Hash invariant:** the cache key hashes the body config + a FNV walk of
-  `crates/terrain/src/**`. Any source edit there moves the key, so
-  yesterday's local bake is detected as stale. Re-bake before `just game`.
-- **Up-to-date skip:** in production (non-`--preview`) mode, `just bake`
-  reads the stored key from `target/bakes/<body>.bin` via
-  `cache::peek_key` and skips recompile + PNG dump when the key already
-  matches. `just bake all` becomes a no-op when nothing's changed. Pass
-  `--force` to bypass and rebake unconditionally.
-- **Loading from the bake** is read-only: `crates/terrain/src/cache.rs`
-  provides `load(path, key) -> Result<_, LoadError>` with explicit
-  `Missing` / `HashMismatch` / `Decode` variants, plus `peek_key(path)`
-  for fast staleness checks that avoid decompressing the full payload.
-  `crates/game/src/bake_check.rs` uses `peek_key` as a startup
-  pre-flight and auto-bakes any mismatch via `thalos_bake_dump`
-  before Bevy boots; the spawn-path `load` panics remain as
-  defense-in-depth assertions that should be unreachable in practice.
-- **Erosion shader source:** `thalos_bake_dump` depends on
-  `bevy_erosion_filter` 0.1.2 from crates.io and imports the WGSL source
-  via the crate's public `EROSION_WGSL` constant (works with
-  `default-features = false`, no Bevy pull-in). Do not restore the old
-  sibling-checkout `../../../../bevy_erosion_filter/...` include or the
-  prior `build.rs` registry-source lookup. See `docs/tooling.md`.
-
-## Agent-driven inspection (bevy_brp)
-
-`just game` always exposes Bevy's Remote Protocol on `localhost:15702`
-via `BrpExtrasPlugin`. A project-local `.mcp.json` wires
-`bevy_brp_mcp` (install once with `cargo install bevy_brp_mcp`) as an
-MCP server, so an agent can query/mutate live ECS state, watch
-components, screenshot, send key/mouse input, and read FPS without
-restarting the game.
-
-Only `Reflect`-registered types are visible to BRP. Keep the set
-small and grow on demand — see `docs/tooling.md` for the registration
-policy and the canonical→Bevy mirror pattern used at the bridge
-(`CraftStateMirror`). Do not derive `Reflect` in `thalos_physics_canonical`;
-mirror into a Bevy-side resource at the bridge instead.
+When a new runtime signal is needed, add a small file/JSONL log for it rather
+than a live query, and have the user reproduce. Keep the physics core
+Bevy-free: do not derive `Reflect` in `thalos_physics_canonical`; if a
+Bevy-side `Reflect` projection is needed for a HUD or debug overlay, mirror
+canonical state into a Bevy resource at the bridge (`CraftStateMirror`).
 
 **Every spawn situation starts paused (warp 0×).** All `just game [mode]`
 scenarios — orbit, eva, landing, final, cruise, runway(-approach) — hold time
 at 0× once the loading screen clears, so the sim is frozen until something
-advances warp. An agent inspecting over BRP will see *no* motion until it
-unpauses. Two ways to start time:
+advances warp. Two ways to start time:
 - Launch with `THALOS_AUTO_RUN=1` (also `true`/`yes`/`on`) — resumes to 1× the
-  instant `Loading → Running` fires. Preferred for autonomous agents. It also
-  **skips the start screen** a bare `just game` would otherwise boot to, so
-  agents never sit at a menu; alternatively name a mode explicitly
+  instant `Loading → Running` fires. It also **skips the start screen** a bare
+  `just game` would otherwise boot to; alternatively name a mode explicitly
   (`just game orbit`).
-- At runtime, advance warp (`world_mutate`/key input) — the warp `.`/`,` keys
-  step up/down, and `,` at the bottom is pause.
+- At runtime, advance warp with the `.`/`,` keys — they step warp up/down, and
+  `,` at the bottom is pause.
 The single source of truth is `spawn::apply_initial_warp` (on
 `OnEnter(AppState::Running)` — which fires on every entry, including
 start-screen scenario launches), gated by the `spawn::AutoRun` resource;
@@ -227,13 +175,19 @@ Two backends, both gated on cargo features so default builds stay clean.
 Profiler GUI v0.11.x running on localhost before launch. Version must
 match the linked `tracy-client` (Bevy 0.18 → tracy-client 0.18.x).
 
-**Chrome tracing (Claude-driven, autonomous):** run this when the user
-asks to investigate performance. Not wired into `just` because it's a
-workflow, not a one-shot command:
+**Chrome tracing (artifact-based):** when the user asks to investigate
+performance, ask them to run the profile build and reproduce the issue. It's
+not wired into `just` because it's a workflow, not a one-shot command — have
+the user run:
 
 ```bash
 cargo run --release -p thalos_game --features profile-chrome
 # play ~5–10 s, Ctrl-C → trace-<date>.json in cwd
+```
+
+then you analyze the artifact:
+
+```bash
 python3 scripts/analyze_trace.py trace-<date>.json
 ```
 
@@ -243,28 +197,10 @@ name, and prints a top-N table to identify hot spots. Custom
 `compute_preview_flight_plan`, `advance_simulation`, `update_prediction`,
 `sync_maneuver_plan`.
 
-**Slow-frame log + windowed trace analysis.** `PerfLogPlugin`
-(`crates/game/src/perf_log.rs`) detects frames above
-`SlowFrameThresholdMs` (default 25 ms; override at startup with
-`THALOS_SLOW_FRAME_MS=…` or live via BRP `world_mutate_resources` on
-`thalos_game::perf_log::SlowFrameThresholdMs`), pushes a record into the
-`SlowFrameLog` resource (BRP-readable; ring of 64), and emits a
-`slow_frame` `info_span!` so the chrome trace contains a marker at the
-exact `ts`. An agent can:
-
-1. `world_get_resources` `thalos_game::perf_log::SlowFrameLog` while the
-   game runs to confirm spikes happened and grab their frame indices.
-2. After Ctrl-C, scope `analyze_trace.py` to just those windows:
-
-```bash
-python3 scripts/analyze_trace.py trace-<date>.json \
-    --around-name slow_frame --window-ms 200
-```
-
-This builds a union of ±100 ms windows around each `slow_frame` event
-and ranks spans within that union, instead of averaging the whole
-capture. A long session full of mostly-fine frames is still useful —
-the bad frames don't get washed out.
+`analyze_trace.py` can also scope its aggregation to a window around a named
+event with `--around-name <span> --window-ms <ms>` (a union of ±window/2
+windows around each occurrence) instead of averaging the whole capture, so a
+long session full of mostly-fine frames doesn't wash out the bad windows.
 
 ## Bug fixing
 
@@ -347,14 +283,20 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_game`** — Bevy consumer of physics + terrain outputs
 - **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
+- **`thalos_texgen`** — procedural texture generation (no Bevy): CPU-rasterizes
+  `TextureData` (sRGBA8), today the **foliage atlas** (small multi-toned leaf
+  clusters + conifer needles + bark) the tree meshes sample. Shared by the
+  runtime (`body_render` wraps it in a GPU `Image` via `build_foliage_atlas`),
+  the object preview, and an offline bake (`cargo run -p thalos_texgen --example
+  bake` → `tools/texgen/out/*.png`, to inspect or prebake for the game). The
+  atlas layout + `leaf_code` packing live here as the source of truth. Rocks /
+  other procedural textures will live here too.
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
 - **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/game/src/local_physics.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/game/src/local_physics.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
 - **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + two backends. Three modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render`. A backend chooses geometry, never its own lighting/atmosphere/cloud math.
-- **`thalos_body_editor`** — interactive celestial-body editor tool
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The original fork at `~/dev/bevy_terrain` is kept around only as a reference point for diffing against upstream; daily edits happen here. The fork is now **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess/`DiskTileProvider` path has been removed; if persistent reuse is needed, build it as a Thalos cache provider/wrapper keyed by body config + tile coordinate, not as `assets/<terrain>/data/*.bin`. CPU draw-tile selection is the current correctness path because it enforces 2:1 LOD balance across cube-face seams; tile *production* is the intended GPU extension point (job queue writes directly into atlas slots, later including diffusion). **`big_space` integration is unconditional** — the upstream `high_precision` Cargo feature has been removed, along with the runtime `DebugTerrain.high_precision` toggle and the `HIGH_PRECISION` shader define / pipeline flag. The Taylor-series relative-position path (`compute_relative_position` in `shaders/functions.wgsl`) is the only viable precision path at planet scale; gating it behind a feature only forced defensive `#[cfg]` plumbing in every consumer.
 - **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). The interactive editor is split **core/front-end**: `thalos_shipyard::editor` (`ShipEditorCorePlugin`) owns all UI-agnostic editing behaviour — `EditorState` command/state hub, attach-node + surface-mount placement, KSP linked symmetry, live mesh rebuilds, tank-resize handle, placement-preview ghost, shrouds, blueprint save/load against `ships/*.ron` — and two front-ends drive it: the **in-game Bevy-UI editor** (`thalos_game::shipyard_editor`, the primary) and the standalone egui binary (`just shipyard`, secondary). Every editor-owned entity carries the `EditorPart` marker and every core query filters on it; host systems that aggregate the same part components for the *flight* craft (fuel, staging, gear, ship visuals, colliders) must filter `Without<EditorPart>` — that marker is the only thing separating the build world from the flying craft in the same ECS `World`. Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
-- **`thalos_bake_dump`** — headless terrain-bake CLI used by `just bake`
 - **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
   (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
   layer (Perlin-Worley atlas + 3-D Worley detail, dual-lobe HG; compute →
@@ -374,9 +316,9 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   separate quad (which sorts unreliably against the fullscreen sky under
   big_space). See `docs/atmosphere.md` *Cloud rendering*.
 
-Core separation: `world`, `physics_canonical`, `control`, `terrain`, and
-`celestial` are pure Rust libraries; `input`, `game`, `body_render`,
-`physics_local`, `body_editor`, and `shipyard` are Bevy consumers. Within
+Core separation: `world`, `physics_canonical`, `control`, `terrain`,
+`celestial`, and `texgen` are pure Rust libraries; `input`, `game`, `body_render`,
+`physics_local`, and `shipyard` are Bevy consumers. Within
 `body_render`, the `shading` module is the single source of truth for
 `SceneLighting`, `AtmosphereBlock`, and the surface BRDF that both the
 `impostor` and `ground` backends consume — no field-by-field mirror types.
@@ -529,10 +471,15 @@ Key modules:
   the Thalos surface, owned by `crate::runway`. Like the descent modes
   these are deferred and terrain-aware: `runway::finish_runway_spawn`
   runs once per arming of `RunwayPlacement` (boot, or a start-screen
-  runway launch) and picks a flat dry low-latitude site by a fixed
-  body-fixed grid scan, **daylight-first** (sunlit candidates win so the
-  player never spawns parked in the dark; at boot epoch ≈ 0 the choice
-  is still deterministic). After placing, it tears down any live Avian
+  runway launch) and places the runway at a **fixed body-fixed site**
+  (constant lat/lon + heading, `runway::fixed_runway_site` from the
+  `RUNWAY_SITE_*` constants, overridable at runtime with
+  `THALOS_RUNWAY_SITE="lat,lon[,heading]"`). This replaced the former
+  flat/dry/sunlit grid scan, whose night-side fallback could spawn the
+  craft in the dark; the pad is flattened under the footprint regardless,
+  so the coordinates only need to be dry land sunlit at the spawn epoch
+  (the author's call — a below-sea-level sample is warned, not corrected).
+  After placing, it tears down any live Avian
   bubble so the rebuild seeds from the placed state (a bubble seeded
   from the pre-placement placeholder orbit would leave the rendered
   craft coasting the wrong trajectory). **The terrain itself is
@@ -585,8 +532,12 @@ Key modules:
   Cold tile streaming to a fresh surface site is slow (~15 s for Thalos) because
   each tile is an expensive CPU field bake; `body_render`'s `compute_tile_pixels`
   is rayon-parallelised on a bounded pool and `udlod`'s `TileAtlas::update`
-  admits tile loads nearest-view-first, which is what makes that wait tolerable
-  rather than minutes — see the cold-streaming memory note.
+  admits tile loads **coarse-first, then nearest-view-first within each LOD** —
+  so a cold view fills the low-LOD pyramid (complete coarse coverage, cheaply)
+  before refining the nearest tiles, instead of building outward from the single
+  closest tile and leaving the rest of the view an empty hole. That progressive
+  coarse→fine fill is what makes the wait tolerable rather than minutes — see the
+  cold-streaming memory note.
 - **EVA is a full craft with a real character controller and a
   grounded/airborne split.** The `EvaMode` resource
   (`player_controller.rs`, `Grounded` | `Airborne`, defaults `Grounded`)
@@ -677,6 +628,17 @@ Key modules:
   `CraftState`, body states, and `FlightPlan` into `MapSnapshot`; map
   systems consume the snapshot and never mutate canonical simulation
   state.
+- `hud/` — Bevy-UI HUD panels (`HudPlugin`), one file per panel, sharing
+  the `theme::HudTheme` style. Includes the **MFD slot** (`hud/mfd/`): a
+  contextual, customizable ship-view widget slot that auto-selects the
+  widget relevant to the current flight context (orbital `Trajectory`
+  plot, airliner `NavDisplay`, with `Docking`/`Interplanetary` stubs)
+  with a manual pin/hide override. Each widget exposes `build` /
+  `relevance(&FlightContext)` / optional `update`; `select_active_widget`
+  is the single owner of widget + slot visibility, and `HudPanel` lives on
+  the slot container only. This replaced the old single hardcoded
+  "TRAJECTORY" panel, which surfaced an orbital plot during atmospheric
+  flight. See `docs/hud_widgets.md`.
 - `rendering/` — Every system that turns simulation state into
   rendered geometry. Submodules:
   - `types` — rendering-shared resources (`CameraExposure`,
@@ -770,6 +732,16 @@ Key modules:
   known flaky Windows driver path (generic surface-acquire panic in Bevy's
   `prepare_windows`) can turn into a crash — pre-existing platform issue,
   newly reachable at runtime.
+- `graphics_settings` — persisted graphics/rendering preferences, stored as RON
+  at the gitignored `user/graphics.ron` and edited live from the settings menu's
+  Graphics tab (`settings_menu`). Loaded when `GraphicsSettingsPlugin` builds;
+  `save_graphics_settings` value-compares against the last write so an open tab
+  doesn't churn the file. Today the only knob is the **volumetric-cloud toggle**
+  (`GraphicsSettings::clouds`), read by `rendering::clouds::drive_clouds` — when
+  off it parks the cloud raymarch via the existing no-cloud-body path (`ActiveCloudBody = None`
+  → blank fallback bound onto `BodySkyMaterial`), so the sky renders clear at
+  near-zero GPU cost. Add new render knobs here as fields + a control in
+  `show_graphics_tab`.
 
 Systems run in `SimStage` order: `Physics → Sync → Camera`
 (configured in `main.rs`), ensuring deterministic state flow each
@@ -969,14 +941,6 @@ re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no
 other crate depends on the fork directly. Replacing the ground backend stays
 localized to the `ground` module + that re-export.
 
-### Body editor (`crates/body_editor/`)
-
-Standalone Bevy binary for interactive celestial-body preview. Loads
-`solar_system.ron` + per-body files, selects a body, runs
-`compile_terrain_config`, renders with `PlanetMaterial` via billboard
-mesh. Uses `bevy_egui` for UI. Live rebake, sketch tool, tectonic
-overlay.
-
 ### Data flow
 
 ```
@@ -1085,7 +1049,7 @@ Each major system has a unified spec doc.
   behind a swappable executor layer; parry-direct re-evaluated at
   Phase C). **Phase A2 (shadow mode) landed 2026-06-12**: pure
   classifier in `thalos_physics_canonical::regime`, sole-writer
-  resolver + BRP-readable drift checker in `crates/game/src/regime.rs`
+  resolver + Reflect-registered drift checker in `crates/game/src/regime.rs`
   (`RegimeDriftDiagnostics`); legacy machinery still drives everything.
   Orbit + EVA scenarios verified drift-free; remaining scenario matrix
   + the A3 consumer ports are next.
@@ -1123,6 +1087,11 @@ Each major system has a unified spec doc.
   stations. Target: M6. Design-only, no code yet.
 - `input.md` — enhanced-input context model, binding file rules, and
   per-binary intent resources.
+- `hud_widgets.md` — the **MFD slot**: the contextual/customizable ship-view
+  HUD widget framework (`hud/mfd/`). The `WidgetKind`/`FlightContext`/
+  relevance model, the container-only-`HudPanel` + selector-owns-visibility +
+  one-pass-one-visible invariants, how to add a widget, and the shared
+  `local_enu_basis` + navigation-display projection recipe.
 - `control.md` — the **fly-by-wire control layer** (`thalos_control` +
   `game::control_bus`): the demand vocabulary + source priority, the one
   attitude controller (quaternion `Hold` PD / nose `PointNose` PD,
@@ -1134,6 +1103,14 @@ Each major system has a unified spec doc.
   and dynamic features. Terrain *generation* is treated as a black box behind
   the tile contract; its previous design is archived (see below) and a new
   generator is being built against the contract.
+- `vegetation.md` — the **planet-scale vegetation plan**: grass/ground-cover to
+  the horizon, shrubs, and trees as one unified consumer-side layer over the
+  tile contract. Representation cascades that end in the terrain albedo,
+  deterministic hashed placement, the constant-coverage rule, the tile-LOD
+  clipmap, octahedral tree impostors, instancing paths (entity auto-batch →
+  instanced material → GPU-driven indirect; not meshlets/Nanite for foliage),
+  and the phased roadmap. Generalizes the shipped grass near-ring (see
+  `terrain.md` *Vegetation decoration layer*).
 - `atmosphere.md` — gas giants, rocky-atmosphere single-scattering
   raymarch (unified per-body fullscreen pass with scene-depth
   coupling for aerial perspective), Kármán-line authoring, ocean

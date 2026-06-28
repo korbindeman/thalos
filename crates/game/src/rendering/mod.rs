@@ -16,10 +16,12 @@ mod generation;
 mod grass;
 pub(crate) mod ground_terrain;
 mod lighting;
+mod map_terrain;
 mod materials;
 pub(crate) mod real_space;
 mod scene_depth;
 mod spawn;
+pub(crate) mod sun_shadow;
 mod terrain_residency;
 mod trails;
 mod transforms;
@@ -28,7 +30,7 @@ mod vegetation;
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
-use generation::{PendingPlanetInstalls, patch_reference_cloud_covers, poll_planet_install_tasks};
+use generation::patch_reference_cloud_covers;
 use ground_terrain::{
     pause_surface_terrain_streaming_at_high_warp, sync_body_render_lod,
     update_body_terrain_atmosphere,
@@ -81,7 +83,9 @@ pub struct RenderingPlugin;
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(SceneDepthPlugin)
+            .add_plugins(sun_shadow::SunShadowPlugin)
             .add_plugins(TerrainResidencyPlugin)
+            .add_plugins(map_terrain::MapTerrainPlugin)
             .add_plugins(clouds::CloudsRenderPlugin)
             .add_plugins(grass::GrassRenderPlugin)
             .add_plugins(vegetation::VegetationRenderPlugin)
@@ -95,7 +99,6 @@ impl Plugin for RenderingPlugin {
             .init_resource::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()
-            .init_resource::<PendingPlanetInstalls>()
             .add_systems(
                 Startup,
                 (
@@ -133,10 +136,7 @@ impl Plugin for RenderingPlugin {
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),
                     update_real_space_body_positions.after(sync_solar_system_state),
-                    poll_planet_install_tasks.after(update_real_space_body_positions),
-                    patch_reference_cloud_covers
-                        .after(convert_reference_clouds_when_ready)
-                        .after(poll_planet_install_tasks),
+                    patch_reference_cloud_covers.after(convert_reference_clouds_when_ready),
                     update_sun_light.after(sync_solar_system_state),
                     update_camera_exposure.after(sync_solar_system_state),
                     sync_film_grain_to_exposure.after(update_camera_exposure),

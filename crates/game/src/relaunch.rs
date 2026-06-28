@@ -34,7 +34,7 @@ use bevy::prelude::*;
 
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
-use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use thalos_shipyard::ShipBlueprint;
 
 use crate::SimStage;
@@ -106,7 +106,6 @@ fn begin_relaunch(
     mut sim: ResMut<SimulationState>,
     mut active: ResMut<ActiveLocalBubble>,
     height_sources: Res<HeightSourceRegistry>,
-    surfaces: Res<TerrainSurfaceRegistry>,
     homeworld: Res<Homeworld>,
     mut plan: ResMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
@@ -145,7 +144,7 @@ fn begin_relaunch(
     // the destruction respawn uses, so a relaunch matches the `just game` boot.
     let (state, attitude) = match spec.situation {
         SpawnSituation::Cruise => {
-            compute_descent_state(SpawnSituation::Cruise, &sim, &height_sources, &surfaces)
+            compute_descent_state(SpawnSituation::Cruise, &sim, &height_sources)
                 .unwrap_or_else(|| {
                     warn!("relaunch: terrain not resident for cruise; using orbit");
                     orbit_respawn_state(&sim, homeworld.0)

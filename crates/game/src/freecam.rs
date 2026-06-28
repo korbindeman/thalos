@@ -52,6 +52,32 @@ impl Default for FreeCam {
     }
 }
 
+/// Inertial (heliocentric, f64) position that surface-scatter clipmaps (grass,
+/// trees) should center on.
+///
+/// Normally this is the canonical player state passed as `fallback` — the camera
+/// orbits the player and its big_space cell lags a frame (km-scale at orbital
+/// speed), so the player state is the steadier reference. But while the debug
+/// freecam is active the camera flies free of the player; if the scatter kept
+/// centering on the player it would stay stranded around them while the camera
+/// looks elsewhere. So when freecam is on, reconstruct the camera's inertial
+/// position from its big_space cell + local translation (f64-precise at planet
+/// radius) and center the scatter there instead.
+pub fn scatter_view_center(
+    freecam: &FreeCam,
+    ship_cam: Option<(&CellCoord, &Transform)>,
+    fallback: DVec3,
+) -> DVec3 {
+    if freecam.active
+        && let Some((cell, transform)) = ship_cam
+    {
+        return DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
+            * crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M as f64
+            + transform.translation.as_dvec3();
+    }
+    fallback
+}
+
 const FREECAM_DEFAULT_SPEED_M_S: f64 = 100.0;
 const FREECAM_MIN_SPEED_M_S: f64 = 1.0;
 const FREECAM_MAX_SPEED_M_S: f64 = 1.0e7;

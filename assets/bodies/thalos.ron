@@ -35,8 +35,15 @@
         scattering: Some((
             vertical_optical_depth: (0.046, 0.108, 0.264),
             rayleigh_scale_height_m: 8000.0,
-            mie_optical_depth: 0.06,
-            mie_scale_height_m: 1600.0,
+            // Clean-continental Mie. Was 0.06 ("hazier humid day"), which veiled
+            // the noon distance into a grey-tan band and washed the ground — Mie
+            // is wavelength-independent grey haze, so high values desaturate
+            // everything at range. 0.025 keeps crisp distance + a bluer horizon
+            // while leaving enough forward-scatter for a sunset glow.
+            mie_optical_depth: 0.025,
+            // Lowered so the remaining haze hugs the valley floors instead of
+            // climbing the visible distance and greying out mid-relief.
+            mie_scale_height_m: 1200.0,
             mie_asymmetry: 0.76,
             // Sky in-scatter brightness. The shader's flux units are arbitrary
             // (LIGHT_AT_1AU = 10, SCENE_FLUX_SCALE = 0.5), and at strength 1.0

@@ -8,8 +8,10 @@
 //! height source is resident.
 //!
 //! **The terrain itself is flattened into a pad; the runway sits flush on it.**
-//! A coarse body-fixed search picks a flat dry low-latitude site, then a single
-//! fixed elevation `E = max(natural terrain over the pad) + margin` is chosen.
+//! The runway centre is a **fixed body-fixed location** (constant lat/lon, see
+//! [`fixed_runway_site`]) — not an auto-chosen flattest/dry/sunlit site, which
+//! could land on the night side. A single fixed elevation
+//! `E = max(natural terrain over the pad) + margin` is then chosen.
 //! A [`thalos_terrain::TerrainFlatten`] pad is installed via the body's shared
 //! [`crate::rendering::ground_terrain::TerrainFlattenRegistry`] handle: the
 //! terrain tile provider reads it as it bakes, so the *rendered* ground — and,
@@ -45,7 +47,7 @@ use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::avian::{
     AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation,
 };
-use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, TerrainSurfaceRegistry};
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use thalos_shipyard::{AttachNodes, EngineActivation, Gear, Part, SurfaceMount};
 use thalos_world::{BodyId, StateVector};
 
@@ -57,7 +59,7 @@ use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
-use crate::spawn::{SpawnSituation, sample_site_relief_m};
+use crate::spawn::SpawnSituation;
 
 // ---------------------------------------------------------------------------
 // Runway dimensions (aerospace research runway: 5 km × 90 m)
@@ -134,28 +136,48 @@ fn enable_cruise_engines(
 }
 
 // ---------------------------------------------------------------------------
-// Site & heading search (deterministic, body-fixed)
+// Fixed runway site (constant body-fixed location)
 // ---------------------------------------------------------------------------
+//
+// The runway lives at one constant spot on the sphere rather than auto-choosing
+// a flattest/dry/sunlit site each spawn (which could fall on the night side).
+// The terrain under the footprint is flattened into a level pad regardless (see
+// the `TerrainFlatten` install in `finish_runway_spawn`), so the only thing the
+// coordinates must satisfy is "dry land, sunlit at the spawn epoch" — the
+// author's call, since only the rendered map shows where that is. Override at
+// runtime for iteration with `THALOS_RUNWAY_SITE="lat_deg,lon_deg[,heading_deg]"`.
+//
+// The default below was chosen with the `runway_site` probe
+// (`cargo run --release -p thalos_bake_dump --example runway_site`), which
+// samples the **runtime** terrain — `ProceduralSurface::new(radius, body.id)`,
+// the same generator `rendering::ground_terrain` builds — computes the
+// sub-stellar (local-noon) point at the boot epoch (lat 0°, lon 180°), and ranks
+// dry near-equator land by how well-lit and gently-rolling it is. This site is a
+// low coastal plain (~80 m above sea level), ~8° north of the equator at ~178°
+// (essentially under the noon sun, ~82° up) — brightly lit, plausible, and well
+// clear of the water. NOTE: the spot is specific to the procedural seed (Thalos
+// = `body.id`); if the terrain generator changes, re-run the probe and update
+// these constants, or the runway can land below sea level (which also pins the
+// chase camera overhead — the camera floor won't follow it under the surface).
 
-/// Coarse LOD for the land/flatness search — the baked macro height that
-/// defines coastlines and broad relief, not fine procedural texture.
-const SITE_SEARCH_LOD_M: f32 = 2000.0;
-/// Freeboard above sea level for a sample to count as dry land.
+/// Runway-centre latitude (deg, body-fixed, +north).
+const RUNWAY_SITE_LAT_DEG: f64 = 7.6;
+/// Runway-centre longitude (deg, body-fixed, +east; `atan2(z, x)`, matching the
+/// site log line).
+const RUNWAY_SITE_LON_DEG: f64 = 178.0;
+/// Takeoff-heading azimuth (deg) in the local tangent frame, measured from
+/// `TerrainPatchBasis::tangent_x` toward `tangent_z`. Any fixed value gives a
+/// constant strip; the pad is flat regardless of which way it points.
+const RUNWAY_SITE_HEADING_DEG: f64 = 30.0;
+
+/// Sea-level datum (m above the reference radius). The runtime
+/// `ProceduralSurface` has no water layer; its continent-mask shoreline sits at
+/// the reference radius, so sea level is height 0.
+const SEA_LEVEL_M: f32 = 0.0;
+/// Freeboard above sea level below which the fixed site is warned as likely
+/// underwater. A constant spot isn't validated against the ocean mask — this
+/// just flags a bad coordinate in the log instead of silently submerging it.
 const SITE_FREEBOARD_M: f32 = 50.0;
-/// Keep the site well away from the ice caps (sin(lat); ~44°).
-const SITE_MAX_ABS_LAT_SIN: f64 = 0.70;
-const SITE_LAT_MIN_DEG: f64 = -40.0;
-const SITE_LAT_MAX_DEG: f64 = 40.0;
-const SITE_LAT_STEP_DEG: f64 = 5.0;
-const SITE_LON_STEP_DEG: f64 = 5.0;
-/// Flatness probe radius around a candidate site (≈ runway half-length so the
-/// whole footprint is judged).
-const SITE_PROBE_RADIUS_M: f64 = RUNWAY_HALF_LENGTH_M;
-
-/// Azimuths tried for the takeoff heading (0..π; a runway is symmetric).
-const HEADING_AZIMUTH_STEPS: usize = 18;
-/// Height samples along the strip per candidate azimuth.
-const HEADING_SAMPLES: usize = 13;
 
 /// Footprint grid sampled to find the platform elevation (max/min terrain).
 const FOOTPRINT_SAMPLES_LEN: usize = 40;
@@ -293,8 +315,9 @@ fn arm_boot_runway_placement(
     placement.pending = situation.is_runway();
 }
 
-/// Deferred finisher: pick the site, build the flat platform + collider, and
-/// place the aircraft. Runs once per arming of [`RunwayPlacement`], retrying
+/// Deferred finisher: resolve the fixed site, build the flat platform +
+/// collider, and place the aircraft. Runs once per arming of
+/// [`RunwayPlacement`], retrying
 /// each frame until the terrain height source is resident. (Each run builds a
 /// fresh runway; today it can only ever run once per process — the boot
 /// scenario *or* the one-shot start screen — so there is no stale-runway
@@ -307,7 +330,6 @@ fn finish_runway_spawn(
     mut settle: ResMut<crate::surface_settle::SurfaceSettle>,
     mut tracker: ResMut<crate::loading::LoadingTracker>,
     height_sources: Res<HeightSourceRegistry>,
-    surfaces: Res<TerrainSurfaceRegistry>,
     // Bundled to stay within Bevy's 16-param system limit (like `gear_geometry`).
     registries: (
         ResMut<TerrainFlattenRegistry>,
@@ -378,29 +400,28 @@ fn finish_runway_spawn(
     };
 
     let body_radius_m = sim.system.bodies[body_id].radius_m;
-    let surface = surfaces.get(body_id);
-    let sea_level_m = surface.as_ref().and_then(|s| s.static_surface.sea_level_m);
 
-    // Sub-stellar (daylight) direction in the body-fixed frame at placement
-    // time, so the site search can prefer a sunlit pad — same convention as
-    // the descent site search (`spawn::compute_descent_state`).
-    let placement_body_state = sim.ephemeris.state(
-        body_id,
-        thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time()),
-    );
-    let sun_dir_inertial = (-placement_body_state.position).normalize_or_zero();
-    let sun_dir_body_fixed = if sun_dir_inertial == DVec3::ZERO {
-        DVec3::Y
-    } else {
-        (placement_body_state.orientation.inverse() * sun_dir_inertial).normalize()
-    };
-
-    let (center_dir, relief_m) = find_runway_site(hs, sea_level_m, body_radius_m, sun_dir_body_fixed);
+    // Fixed body-fixed site (constant lat/lon + heading), instead of the old
+    // flattest/dry/sunlit search that could land on the night side. The pad is
+    // flattened under the footprint regardless, so the coordinates only need to
+    // be dry sunlit land — the author's call (see `fixed_runway_site`).
+    let (center_dir, heading_tangent) = fixed_runway_site();
     let center_h = hs
         .sample_height_m(center_dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
         .unwrap_or(0.0) as f64;
-    let heading_tangent = choose_runway_heading(hs, center_dir, body_radius_m, center_h);
     let across = center_dir.cross(heading_tangent).normalize();
+
+    // The runtime `ProceduralSurface` has no separate water layer; its shoreline
+    // is the reference radius (height 0). Flag a site that samples at/below it,
+    // so a bad coordinate is obvious in the log rather than a mysteriously
+    // underwater runway.
+    if center_h <= (SEA_LEVEL_M + SITE_FREEBOARD_M) as f64 {
+        warn!(
+            "runway: fixed site samples {:.0} m, at/below sea level — likely ocean; \
+             adjust RUNWAY_SITE_LAT_DEG/LON_DEG or set THALOS_RUNWAY_SITE",
+            center_h
+        );
+    }
 
     // Flat pad half-extents: the painted strip plus the levelled shoulder.
     let pad_half_along = RUNWAY_HALF_LENGTH_M + RUNWAY_PAD_MARGIN_M;
@@ -464,7 +485,7 @@ fn finish_runway_spawn(
     let lat_deg = center_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     let lon_deg = center_dir.z.atan2(center_dir.x).to_degrees();
     info!(
-        "runway: {} on {} at lat {:.1}°, lon {:.1}° — flat pad at {:.0} m (terrain {:.0}..{:.0} m, site relief {:.0} m), {:.0} m × {:.0} m",
+        "runway: {} on {} at lat {:.1}°, lon {:.1}° — flat pad at {:.0} m (terrain {:.0}..{:.0} m), {:.0} m × {:.0} m",
         if matches!(*situation, SpawnSituation::Runway) {
             "parked"
         } else {
@@ -476,7 +497,6 @@ fn finish_runway_spawn(
         elevation_m,
         min_h,
         max_h,
-        relief_m,
         RUNWAY_LENGTH_M,
         RUNWAY_WIDTH_M,
     );
@@ -515,6 +535,12 @@ fn finish_runway_spawn(
         }
         _ => {}
     }
+
+    // Both runway scenarios rest the craft on its wheels, so force the gear
+    // down — `GearState` is a persistent resource, and a respawn after the
+    // player retracted gear in flight would otherwise spawn the aircraft
+    // belly-down on the strip.
+    commands.insert_resource(crate::local_physics::GearState { down: true });
 
     commands.insert_resource(site);
     placement.pending = false;
@@ -576,7 +602,7 @@ fn enable_runway_engines(
 }
 
 // ---------------------------------------------------------------------------
-// Site & heading search
+// Fixed site & heading
 // ---------------------------------------------------------------------------
 
 fn latlon_dir(lat_deg: f64, lon_deg: f64) -> DVec3 {
@@ -585,123 +611,50 @@ fn latlon_dir(lat_deg: f64, lon_deg: f64) -> DVec3 {
     DVec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin()).normalize()
 }
 
-/// Minimum cosine between a candidate site direction and the sub-stellar
-/// direction for the site to count as comfortably sunlit: cos(60°) → the sun
-/// at least 30° above the local horizon.
-const SITE_MIN_SUN_COS: f64 = 0.5;
+/// The fixed runway site: a constant body-fixed centre direction plus the
+/// takeoff-heading tangent, from the compile-time `RUNWAY_SITE_*` constants and
+/// overridable at runtime with `THALOS_RUNWAY_SITE="lat_deg,lon_deg[,heading_deg]"`.
+/// No terrain sampling and no epoch dependence — the same spot every spawn.
+fn fixed_runway_site() -> (DVec3, DVec3) {
+    let (lat_deg, lon_deg, heading_deg) = std::env::var("THALOS_RUNWAY_SITE")
+        .ok()
+        .and_then(|raw| match parse_site_override(&raw) {
+            Some(site) => Some(site),
+            None => {
+                warn!("THALOS_RUNWAY_SITE=\"{raw}\" is not \"lat,lon[,heading]\" — using defaults");
+                None
+            }
+        })
+        .unwrap_or((
+            RUNWAY_SITE_LAT_DEG,
+            RUNWAY_SITE_LON_DEG,
+            RUNWAY_SITE_HEADING_DEG,
+        ));
 
-/// Scan a fixed low-latitude lat/lon grid for the flattest dry-land patch,
-/// preferring **sunlit** sites (sun ≥ 30° up at `sun_dir_body_fixed`) so the
-/// player never spawns parked in the dark. Falls back to the flattest dry
-/// site anywhere if no daylight candidate exists (pathological coastlines).
-/// Returns `(center_dir, relief_m)`. The grid itself is fixed, so at a given
-/// epoch (e.g. every boot, at epoch ≈ 0) the choice is deterministic.
-fn find_runway_site(
-    hs: &dyn HeightSource,
-    sea_level_m: Option<f32>,
-    body_radius_m: f64,
-    sun_dir_body_fixed: DVec3,
-) -> (DVec3, f32) {
-    let Some(sea_level_m) = sea_level_m else {
-        return (DVec3::X, 0.0);
-    };
-    let land_threshold = sea_level_m + SITE_FREEBOARD_M;
-    let sun = sun_dir_body_fixed.try_normalize().unwrap_or(DVec3::Y);
-
-    let mut best_lit: Option<(f32, DVec3)> = None; // (relief, dir) — sunlit dry
-    let mut best_dry: Option<(f32, DVec3)> = None; // (relief, dir) — any dry
-    let mut best_any: Option<(f32, DVec3)> = None; // (height, dir)
-
-    let mut lat = SITE_LAT_MIN_DEG;
-    while lat <= SITE_LAT_MAX_DEG {
-        let mut lon = 0.0;
-        while lon < 360.0 {
-            let dir = latlon_dir(lat, lon);
-            lon += SITE_LON_STEP_DEG;
-            if dir.y.abs() > SITE_MAX_ABS_LAT_SIN {
-                continue;
-            }
-            let Some(h) = hs.sample_height_m(dir.as_vec3(), SITE_SEARCH_LOD_M) else {
-                continue;
-            };
-            if best_any.is_none_or(|(bh, _)| h > bh) {
-                best_any = Some((h, dir));
-            }
-            if h <= land_threshold {
-                continue;
-            }
-            let relief = sample_site_relief_m(
-                hs,
-                dir,
-                body_radius_m,
-                SITE_PROBE_RADIUS_M,
-                SITE_SEARCH_LOD_M,
-            )
-            .unwrap_or(f32::INFINITY);
-            if best_dry.is_none_or(|(br, _)| relief < br) {
-                best_dry = Some((relief, dir));
-            }
-            if dir.dot(sun) >= SITE_MIN_SUN_COS
-                && best_lit.is_none_or(|(br, _)| relief < br)
-            {
-                best_lit = Some((relief, dir));
-            }
-        }
-        lat += SITE_LAT_STEP_DEG;
-    }
-
-    if let Some((relief, dir)) = best_lit {
-        return (dir, relief);
-    }
-    if let Some((relief, dir)) = best_dry {
-        return (dir, relief);
-    }
-    if let Some((_, dir)) = best_any {
-        return (dir, f32::INFINITY);
-    }
-    (DVec3::X, 0.0)
+    let center_dir = latlon_dir(lat_deg, lon_deg);
+    let basis = TerrainPatchBasis::from_normal(center_dir);
+    let az = heading_deg.to_radians();
+    let heading = (basis.tangent_x * az.cos() + basis.tangent_z * az.sin())
+        .try_normalize()
+        .unwrap_or(basis.tangent_x);
+    (center_dir, heading)
 }
 
-/// Pick the takeoff heading whose along-strip height profile is flattest.
-fn choose_runway_heading(
-    hs: &dyn HeightSource,
-    center_dir: DVec3,
-    body_radius_m: f64,
-    center_h: f64,
-) -> DVec3 {
-    let basis = TerrainPatchBasis::from_normal(center_dir);
-    let center_point = center_dir * (body_radius_m + center_h);
-    let mut best: Option<(f32, DVec3)> = None;
-    for k in 0..HEADING_AZIMUTH_STEPS {
-        let theta = std::f64::consts::PI * k as f64 / HEADING_AZIMUTH_STEPS as f64;
-        let axis = (basis.tangent_x * theta.cos() + basis.tangent_z * theta.sin()).normalize();
-        let mut min_h = f32::INFINITY;
-        let mut max_h = f32::NEG_INFINITY;
-        let mut ok = true;
-        for s in 0..HEADING_SAMPLES {
-            let t = s as f64 / (HEADING_SAMPLES as f64 - 1.0);
-            let along = -RUNWAY_HALF_LENGTH_M + RUNWAY_LENGTH_M * t;
-            let dir = (center_point + axis * along).normalize();
-            match hs.sample_height_m(dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M) {
-                Some(h) => {
-                    min_h = min_h.min(h);
-                    max_h = max_h.max(h);
-                }
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if !ok {
-            continue;
-        }
-        let relief = max_h - min_h;
-        if best.is_none_or(|(br, _)| relief < br) {
-            best = Some((relief, axis));
-        }
+/// Parse `"lat,lon"` or `"lat,lon,heading"` (degrees). Returns `None` (defaults
+/// used, with a warning at the call site) on any malformed field.
+fn parse_site_override(raw: &str) -> Option<(f64, f64, f64)> {
+    let mut parts = raw.split(',').map(|p| p.trim());
+    let lat = parts.next()?.parse::<f64>().ok()?;
+    let lon = parts.next()?.parse::<f64>().ok()?;
+    let heading = match parts.next() {
+        Some(h) => h.parse::<f64>().ok()?,
+        None => RUNWAY_SITE_HEADING_DEG,
+    };
+    // Reject trailing garbage like "0,0,0,extra".
+    if parts.next().is_some() {
+        return None;
     }
-    best.map(|(_, a)| a).unwrap_or(basis.tangent_x)
+    Some((lat, lon, heading))
 }
 
 /// Max/min terrain height over the flat-pad footprint (the painted strip plus

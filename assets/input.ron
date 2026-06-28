@@ -28,6 +28,9 @@
                 // move flaps to the bracket keys.)
                 "flaps_extend": [Key(KeyF)],
                 "flaps_retract": [Key(KeyR)],
+                // Landing gear up/down latch (KSP's G). Retraction is ignored
+                // while weight is on the wheels.
+                "gear_toggle": [Key(KeyG)],
             },
             axes: {
                 "pitch": (positive: [Key(KeyW)], negative: [Key(KeyS)]),
@@ -75,7 +78,9 @@
         ),
         warp: (
             bindings: {
-                "warp_to_maneuver": [Key(KeyG)],
+                // Moved off G (now landing gear, the flight-sim standard) to
+                // the adjacent H.
+                "warp_to_maneuver": [Key(KeyH)],
                 "warp_increase": [Key(Period)],
                 "warp_decrease": [Key(Comma)],
                 "warp_reset": [Key(Backslash)],

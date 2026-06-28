@@ -27,23 +27,18 @@ use bevy::prelude::*;
 use big_space::prelude::Grid;
 use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_body_render::{
-    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, MULTI_SCATTER_LUT_HEIGHT,
-    MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial, RingParams, SceneLighting,
-    SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut, build_ring_mesh,
-    cloud_cover_image_for_body, prepare_planet_bake,
+    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, GpuAtlasMirrorHeightSource,
+    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial,
+    RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut,
+    build_ring_mesh, cloud_cover_image_for_body,
 };
 use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
 use thalos_physics_canonical::canonical::Epoch;
-use thalos_terrain::{
-    DynamicSurfaceState, PlanetSurface, TerrainCompileContext, TerrainCompileOptions,
-    TerrainConfig, cache, compile_dynamic_surface_layers, compile_tectonics_from_config,
-};
+use thalos_terrain::{ProceduralSurface, TerrainConfig};
 use thalos_world::BodyKind;
 
-use super::generation::{
-    PendingPlanetInstall, PendingPlanetInstalls, PlanetBakeOutput, WorldStateAssets,
-};
-use super::ground_terrain::BodySky;
+use super::generation::{ProceduralInstallExtras, WorldStateAssets};
+use super::ground_terrain::{BodySky, RealSpaceImpostor};
 use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::scene_depth::SceneDepthImage;
 use super::types::{
@@ -54,24 +49,10 @@ use super::types::{
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::loading::LoadingTracker;
 use crate::view::HideInShipView;
-use bevy::tasks::AsyncComputeTaskPool;
+use std::sync::Arc;
 
-/// Crater-count scale factor used in the cache-key computation. Must
-/// match whatever `bake_dump` (and the editor's Full button) used when
-/// the bake was produced; mismatch fails load with `HashMismatch`.
-///
-/// Local bakes always use 1.0 (full crater authoring), so the game
-/// uses 1.0 unconditionally. The old `DEV_CRATER_SCALE` knob existed
-/// to speed up the game's own bake in dev — obsolete now that the game
-/// never compiles.
-const BAKE_CRATER_COUNT_SCALE: f32 = 1.0;
-
-/// Directory holding local bake artifacts. Mirror of
-/// `crates/bake_dump/src/main.rs::local_bake_dir` — both must resolve to
-/// the same workspace-relative path so producer and consumer agree.
-fn local_bake_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/bakes")
-}
+// (Bake cache-key + local-bake-dir helpers removed in 0b-1 — procedural bodies
+// generate terrain at runtime and need no bake.)
 
 /// Bake the atmosphere's multi-scatter LUT and upload it as a small
 /// linear-sampled image for `BodySkyMaterial` / `body_sky.wgsl`.
@@ -193,13 +174,12 @@ pub(super) fn spawn_bodies(
     real_root: Res<RealSpaceRoot>,
     scene_depth: Res<SceneDepthImage>,
     reference_clouds: Res<ReferenceClouds>,
-    mut pending_installs: ResMut<PendingPlanetInstalls>,
+    mut procedural_install: ProceduralInstallExtras,
     mut loading_tracker: ResMut<LoadingTracker>,
     mut world_state: WorldStateAssets,
 ) {
     let bodies = &sim.system.bodies;
     let initial_states = sim.ephemeris.states(Epoch::ZERO);
-    let mut bake_task_count = 0usize;
 
     // Shared meshes.
     let icon_mesh = meshes.add(Circle::new(1.0));
@@ -378,40 +358,17 @@ pub(super) fn spawn_bodies(
 
             body_entity
         } else if body.terrain.is_some() {
-            // Procedural body. The pre-baked surface (`target/bakes/<name>.bin`)
-            // can be hundreds of MB and several seconds to decompress; loading
-            // it on the main thread froze startup. Spawn the always-present
-            // shell entities here (body root, optional tidal-lock tags, icon)
-            // and dispatch the bake load + `prepare_planet_bake` to
-            // `AsyncComputeTaskPool`. The polling system
-            // (`poll_planet_install_tasks`) finishes the install when each
-            // task resolves: GPU upload, impostor billboards, halo, ground
-            // terrain, water sphere. The loading screen counts these tasks.
-            let body_name = body.name.clone();
-            let body_radius_m = body.radius_m as f32;
-            let gravity_m_s2 = (body.gm / (body.radius_m * body.radius_m)) as f32;
-            // Tidally-locked moons get their local +Z axis as the parent
-            // direction, matching the editor.
+            // Procedural body. Terrain is generated at runtime by
+            // `ProceduralSurface` behind the `SurfaceQuery` seam (no bake), so
+            // there is nothing heavy to load off-thread: spawn the shell + a
+            // solid-color impostor synchronously, register the runtime surface
+            // for the near-surface height source and the propagator, and let
+            // `terrain_residency` spawn the ground-LOD terrain on demand.
+            //
+            // 0b-1 interim: the impostor is a lit solid-color sphere tinted by
+            // the body colour. The real distant view (udlod everywhere visible
+            // + unified atmosphere) is Slice 6, which deletes this stand-in.
             let tidal_axis = matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z);
-            let axial_tilt_rad = body.axial_tilt_rad as f32;
-
-            let context = TerrainCompileContext {
-                body_name: body_name.clone(),
-                radius_m: body_radius_m,
-                gravity_m_s2,
-                rotation_hours: None,
-                obliquity_deg: Some(axial_tilt_rad.to_degrees()),
-                tidal_axis,
-                axial_tilt_rad,
-            };
-            let options = TerrainCompileOptions {
-                crater_count_scale: BAKE_CRATER_COUNT_SCALE,
-                cubemap_resolution_override: None,
-            };
-            let key =
-                cache::terrain_cache_key(&body.terrain, body.tectonics.as_ref(), &context, options);
-            let bake_dir = local_bake_dir();
-            let path = cache::cache_path(&bake_dir, &body_name);
 
             let body_entity = commands
                 .spawn((
@@ -423,14 +380,13 @@ pub(super) fn spawn_bodies(
                         render_radius,
                         radius_m: body.radius_m,
                     },
-                    Name::new(body_name.clone()),
+                    Name::new(body.name.clone()),
                 ))
                 .id();
 
-            // Moons with a tidal axis and a parent body render tidally
-            // locked: the map/ship impostor material uploads world→body,
-            // while the real-space body grid (and therefore ground terrain)
-            // uses the inverse body→world rotation.
+            // Tidally-locked moons get their local +Z axis as the parent
+            // direction (matches the editor); both the body entity and the
+            // real-space grid carry the tag.
             if tidal_axis.is_some()
                 && let Some(parent_id) = body.parent
             {
@@ -442,8 +398,8 @@ pub(super) fn spawn_bodies(
                     .insert(TidallyLocked { parent_id });
             }
 
-            // Icon child — visible at far distance, crossfaded with the
-            // impostor by `sync_body_icons` once it spawns.
+            // Icon child — visible at far distance, crossfaded by
+            // `sync_body_icons`.
             commands.spawn((
                 Mesh3d(icon_mesh.clone()),
                 MeshMaterial3d(icon_material),
@@ -456,83 +412,74 @@ pub(super) fn spawn_bodies(
                 ChildOf(body_entity),
             ));
 
-            // Off-thread half: disk I/O + bincode decode + dynamic-layer /
-            // tectonics compile + CPU bake prep. Owns clones of the body's
-            // terrain/tectonics config so the task outlives the borrow on
-            // `sim.system.bodies`. The cache load and the two pure-CPU
-            // compiles only share `context` immutably and have no data
-            // dependency, so they run concurrently via `rayon::join`.
-            let terrain_cfg = body.terrain.clone();
-            let tectonics_cfg = body.tectonics.clone();
-            let task = AsyncComputeTaskPool::get().spawn(async move {
-                let body_name_for_panics = body_name.clone();
-                let load_path = path.clone();
-                let (static_surface, (dynamic_layers, tectonics_built)) = rayon::join(
-                    || match cache::load(&load_path, key) {
-                        Ok(s) => s,
-                        Err(cache::LoadError::Missing { path }) => panic!(
-                            "missing bake for body '{name}' at {path} (key {key:016x}). \
-                             Run `just bake {name}` (or `just bake all`) to produce it.",
-                            name = body_name_for_panics,
-                            path = path.display(),
-                        ),
-                        Err(cache::LoadError::HashMismatch {
-                            path,
-                            expected,
-                            found,
-                        }) => panic!(
-                            "stale bake for body '{name}' at {path}: stored key {found:016x}, \
-                             expected {expected:016x}. The body config or `thalos_terrain` \
-                             source has changed since the bake was produced. \
-                             Run `just bake {name}` to regenerate.",
-                            name = body_name_for_panics,
-                            path = path.display(),
-                        ),
-                        Err(cache::LoadError::Decode { path, message }) => panic!(
-                            "corrupt bake for body '{name}' at {path}: {message}. \
-                             Delete and run `just bake {name}` to regenerate.",
-                            name = body_name_for_panics,
-                            path = path.display(),
-                        ),
-                    },
-                    || {
-                        rayon::join(
-                            || {
-                                compile_dynamic_surface_layers(&terrain_cfg, &context)
-                                    .unwrap_or_else(|e| {
-                                        panic!(
-                                            "dynamic layer compile failed for {}: {e}",
-                                            body_name
-                                        )
-                                    })
-                            },
-                            || compile_tectonics_from_config(tectonics_cfg.as_ref(), &context),
-                        )
-                    },
-                );
-                let surface = PlanetSurface {
-                    static_surface,
-                    dynamic_layers,
-                    tectonics: tectonics_built,
-                };
-                let dynamic_state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
-                let prepared = prepare_planet_bake(&surface, &dynamic_state);
-                PlanetBakeOutput {
-                    surface,
-                    dynamic_state,
-                    prepared,
-                }
+            // Interim solid-color lit impostor (map + ship). The ship-layer
+            // billboard is tagged `RealSpaceImpostor` so `sync_body_render_lod`
+            // hides it whenever the ground-LOD terrain is resident.
+            let albedo_linear = Color::srgb(r, g, b).to_linear();
+            let albedo = Vec4::new(
+                albedo_linear.red,
+                albedo_linear.green,
+                albedo_linear.blue,
+                0.0,
+            );
+            let map_mat = solid_planet_materials.add(SolidPlanetMaterial {
+                params: SolidPlanetParams {
+                    radius: render_radius,
+                    albedo,
+                    scene: SceneLighting::default(),
+                },
+            });
+            let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
+                params: SolidPlanetParams {
+                    radius: ship_render_radius,
+                    albedo,
+                    scene: SceneLighting::default(),
+                },
+            });
+            commands.spawn((
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(map_mat.clone()),
+                BodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
+                NoFrustumCulling,
+                NotShadowCaster,
+                NotShadowReceiver,
+                ChildOf(body_entity),
+            ));
+            commands.spawn((
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(ship_mat.clone()),
+                ShipBodyMesh,
+                bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                NoFrustumCulling,
+                NotShadowCaster,
+                NotShadowReceiver,
+                RealSpaceImpostor { body_id: body.id },
+                ChildOf(real_body_entity),
+            ));
+            commands.entity(body_entity).insert(SolidPlanetMaterials {
+                map: map_mat,
+                ship: ship_mat,
             });
 
-            bake_task_count += 1;
-            pending_installs.0.push(PendingPlanetInstall {
-                body_id: body.id,
-                body_name: body.name.clone(),
-                body_entity,
-                real_body_entity,
-                render_radius,
-                task,
-            });
+            // Register the runtime surface for (a) the near-surface height
+            // source — collider / character controller / HUD altitude, via the
+            // GPU-atlas mirror with a CPU fallback — and (b) the propagator's
+            // coarse orbital collision. Built from the same body params as the
+            // ground tile provider (`spawn_body_terrain`) so all three agree.
+            let proc_surface = ProceduralSurface::new(body.radius_m as f32, body.id as u32);
+            procedural_install.height_sources.insert_gpu_mirror_source(
+                body.id,
+                GpuAtlasMirrorHeightSource::new(Arc::new(proc_surface)),
+            );
+            procedural_install
+                .terrain_registry
+                .0
+                .insert(body.id, proc_surface);
+            world_state.planetshine.by_body.insert(
+                body.id,
+                [albedo_linear.red, albedo_linear.green, albedo_linear.blue],
+            );
 
             body_entity
         } else if let Some(atmos) = &body.atmosphere {
@@ -880,8 +827,8 @@ pub(super) fn spawn_bodies(
         ..default()
     });
 
-    // Seed the bake-install step's total now that every task is dispatched.
-    // The tracker treats an unseeded counter as incomplete, so the loading
-    // screen can't tick over on frame 0 before this runs.
-    loading_tracker.set_total(crate::loading::step::BODIES, bake_task_count);
+    // No async bake installs anymore — procedural bodies generate terrain at
+    // runtime. Seed the bake-install step's total to 0 so it completes
+    // immediately and the loading screen advances to the terrain-residency gate.
+    loading_tracker.set_total(crate::loading::step::BODIES, 0);
 }

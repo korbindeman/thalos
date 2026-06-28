@@ -7,7 +7,7 @@ game-side resolver + drift checker in `crates/game/src/regime.rs`
 (`RegimePlugin`); the legacy machinery still drives everything and no
 consumer reads the record yet.
 
-A2 acceptance results (~51 k drift-checked frames over BRP, reading
+A2 acceptance results (~51 k drift-checked frames, reading
 `thalos_game::regime::RegimeDriftDiagnostics`): **zero steady-state
 mismatches in every check** (role, authority, warp cap, prediction);
 three single-frame blips total, all on the documented §3.2 edges
@@ -358,7 +358,7 @@ Phase A — behavior parity at every step:
   a drift-check system derives the legacy values (`AvianRole`,
   authority transitions, warp caps, prediction gating) from the
   record and `warn!`s on mismatch. A Reflect-registered
-  `RegimeDriftDiagnostics` resource makes mismatches BRP-readable.
+  `RegimeDriftDiagnostics` resource records mismatches.
   Acceptance: zero steady-state mismatches across the scenario
   matrix (`orbit`, `eva`, `landing`, `final`, `runway`,
   `runway-approach`, `cruise`); transient mismatches only on the
@@ -437,8 +437,8 @@ Phase A — behavior parity at every step:
   escalation; on-foot at-rest 100× warp engaged and walking clamped
   it straight back to 1×; zero sanity-check failures. The drift
   checker's role/authority/warp comparisons are now tautological by
-  construction and reduced to debug sanity asserts + the BRP record
-  snapshot.
+  construction and reduced to debug sanity asserts + the
+  `RegimeDriftDiagnostics` record snapshot.
 - **A4. Consolidate warp policy** into `CraftRegime.warp`:
   `enforce_warp_altitude_limits` shrinks to "apply the record";
   the HUD gains the constraint reason.

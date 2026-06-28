@@ -26,7 +26,8 @@ use crate::sim_clock::SimClock;
 /// with a static and a kinetic coefficient, so a landed craft comes to a true
 /// rest in finite time rather than the indefinite frictionless slide it had
 /// before (the only ground force was the floor backstop, which removes the
-/// into-surface velocity component only). Reflect-registered for BRP tuning.
+/// into-surface velocity component only). Reflect-registered (for a future
+/// debug UI); edit the defaults and rebuild to tune.
 #[derive(Resource, Clone, Copy, Debug, Reflect)]
 #[reflect(Resource)]
 pub struct SurfaceFriction {
@@ -165,9 +166,9 @@ pub(crate) fn terrain_floor_backstop(
     }
 }
 
-/// Tuning + kill-switch for [`terrain_floor_backstop`]. Reflect-registered so it
-/// can be toggled / tuned live over BRP (`world_mutate_resources`) while
-/// diagnosing ground contact.
+/// Tuning + kill-switch for [`terrain_floor_backstop`]. Reflect-registered
+/// (for a future debug UI); edit the defaults and rebuild to toggle / tune it
+/// while diagnosing ground contact.
 #[derive(Resource, Debug, Clone, Copy, Reflect)]
 #[reflect(Resource)]
 pub struct TerrainFloorBackstop {

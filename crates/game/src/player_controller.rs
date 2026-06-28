@@ -613,7 +613,7 @@ fn step_eva_controller(
     // even though we keep `AuthorityMode::LocalRigidBody` so the player can
     // resume walking at 1× without rebuilding authority. Publish the analytic
     // body-fixed pose to canonical immediately after the controller writes the
-    // capsule so every downstream system in this frame (camera focus, BRP,
+    // capsule so every downstream system in this frame (camera focus,
     // HUD/map snapshots, and the next warp tick) sees a craft stationary on
     // the rotating planet instead of a one-frame-old inertial position.
     sim.simulation.install_local_rigid_body_state(

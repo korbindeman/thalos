@@ -108,10 +108,9 @@ impl StructureRegistry {
         id
     }
 
-    /// All structures on a body. The accessor a per-body structure-attach
-    /// system (collider/visual spawn as the surface bubble streams in) will
-    /// query; unused while the runway is the only kind and owns its own spawn.
-    #[allow(dead_code)]
+    /// All structures on a body. Read by the MFD navigation-display widget
+    /// (runway projection) and, later, per-body structure-attach systems
+    /// (collider/visual spawn as the surface bubble streams in).
     pub fn sites_on(&self, body_id: BodyId) -> &[StructureSite] {
         self.sites.get(&body_id).map_or(&[], |v| v.as_slice())
     }

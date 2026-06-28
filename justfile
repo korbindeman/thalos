@@ -23,15 +23,25 @@ game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_g
 game mode=env_var_or_default("THALOS_SPAWN", "menu"):
     {{game_command}} -- {{mode}}
 
-# Edit a planet's terrain. Usage: just edit auron
-edit body:
-    cargo run -p thalos_body_editor -- {{body}}
-
 # Standalone egui ship editor — the secondary front-end over the shared
 # editor core (`thalos_shipyard::editor`). The primary, Bevy-UI editor is
 # integrated in the game: `just game shipyard`.
 shipyard:
     cargo run -p thalos_shipyard --bin ship_editor
+
+# Headless procedural-object gallery: renders each object (trees, conifer,
+# shrub; rocks etc. later) to a PNG under tools/preview/out/, then exits. No
+# window — both a human and an agent can run it and inspect the images. Lit with
+# the real TreeMaterial + sky model so it matches the in-game look. Add objects
+# in crates/body_render/examples/object_preview.rs.
+preview:
+    cargo run -p thalos_body_render --example object_preview
+
+# Interactive window variant of `just preview`: opens a window with an orbit
+# camera — drag to orbit, scroll to zoom, ←/→ cycle objects, S saves a
+# screenshot to tools/preview/out/<object>_view.png.
+preview-window:
+    cargo run -p thalos_body_render --example object_preview -- --window
 
 # Build everything
 build:
@@ -68,34 +78,3 @@ clippy:
 trace:
     cargo run --release -p thalos_game --features profile-tracy
 
-# Wipe the editor's on-disk terrain cache. The game and `just bake`
-# don't use this directory — only the planet editor does, for
-# iteration speed. Source-tree edits already invalidate cached entries
-# via the build-time hash key in `crates/terrain/src/cache.rs`, so
-# you rarely need to wipe manually.
-clear-terrain-cache:
-    rm -rf target/terrain_cache
-
-# Headless terrain bake.
-#
-# Default (full): writes the local bake to `target/bakes/<body>.bin`
-# (ignored by Git, what your local game loads), full-resolution equirect
-# PNGs to `stage-bakes/<body>/full/`, and the ground-scale patch tile
-# columns to `stage-bakes/<body>/full/patch/<biome>/`. Slow.
-#
-# `--preview`: 512² preview run. Equirect PNGs plus the same ground-scale
-# shaded-relief patch tile columns (hill + plain biomes, 120 km → 60 m
-# spans) under `stage-bakes/<body>/preview/patch/<biome>/`, no local game
-# bake. Fast iteration loop — read the PNGs to inspect both orbital
-# coloration and on-foot relief without launching the game.
-#
-# Body name is case-insensitive; pass `all` to bake every body with a
-# terrain block.
-#
-# Examples:
-#   just bake Thalos              # full-res local bake + PNGs
-#   just bake Thalos --preview    # fast preview PNGs, no local game bake
-#   just bake all
-#   just bake all --preview
-bake body *args:
-    cargo run --release -p thalos_bake_dump -- {{body}} {{args}}

@@ -283,7 +283,7 @@ ground) simply over-contributes relative to surface albedo in the engine's
 flux units.
 
 The fix decouples the two. `crates/game/src/rendering/ground_terrain.rs`
-holds an `AtmosphereTuning` resource (BRP-mutable, `#[reflect(Resource)]`)
+holds an `AtmosphereTuning` resource (`#[reflect(Resource)]`)
 with an **absolute** `aerial_perspective_strength` (default `0.15` =
 clear weather). Each frame the per-body shader multiplier is computed as
 `aerial_perspective_strength / effective_sky_strength` and passed in
@@ -303,7 +303,7 @@ future per-region visibility field. `AtmosphereTuning` also carries
 `strength` / `multi_scatter_gain` dev overrides (sentinel `< 0` = keep the
 authored value) for live sky-dome tuning — both are pure runtime
 multipliers that do **not** feed the multi-scatter LUT bake, so overriding
-them over BRP is exact.
+them at runtime is exact (no LUT rebake).
 
 ### Backlog
 
@@ -377,8 +377,8 @@ stages:
    feeds the crate the camera's planet-centred position and view basis
    rotated by the inverse body orientation (`CameraMatrices`), plus the
    body-fixed sun (scene-matched flux) and planet radius. Static
-   appearance (coverage/density/scale/heights) is set once and is
-   BRP-tunable (`CloudsConfig` is `Reflect`-registered). A landed/parked
+   appearance (coverage/density/scale/heights) is set once
+   (`CloudsConfig` is `Reflect`-registered). A landed/parked
    camera is *static* in this frame, so temporal reprojection converges
    exactly when the view is steady.
 3. **Composite (body_render, `body_sky.wgsl`).** The cloud texture is

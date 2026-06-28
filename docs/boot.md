@@ -139,12 +139,17 @@ mind for new code:
   sync — the craft freezes in the inertial frame while the planet sails
   away at orbital speed (the "parked at 5 m AGL but floating in space"
   bug).
-- The runway site scan is **daylight-first** (sunlit dry candidates win,
-  scored by flatness; sun ≥ 30° up) so parked spawns never reveal in the
-  dark; at boot (epoch ≈ 0) the pick is still deterministic. The settle
-  gate logs a bounded diagnostic line every ~5 s (resident LOD + the tile
-  tree's view radius) — if a settle ever times out, that view radius says
-  immediately whether the streamer's view actually reached the site.
+- The runway site is a **fixed body-fixed location** (constant lat/lon +
+  heading via `runway::fixed_runway_site`, overridable with
+  `THALOS_RUNWAY_SITE="lat,lon[,heading]"`), not an auto-chosen scan. This
+  replaced the former daylight-first flat/dry scan, whose night-side
+  fallback could reveal a parked spawn in the dark; the pad is flattened
+  under the footprint regardless, so the coordinates only need to be dry
+  land sunlit at the spawn epoch (a below-sea-level sample is warned in the
+  log, not corrected). The settle gate logs a bounded diagnostic line every
+  ~5 s (resident LOD + the tile tree's view radius) — if a settle ever
+  times out, that view radius says immediately whether the streamer's view
+  actually reached the site.
 - The destruction picker (`scenario_menu`) deliberately does *not* write
   `SpawnSituation` — respawns keep the boot scenario's per-frame consumers
   unchanged.

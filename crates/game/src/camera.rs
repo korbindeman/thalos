@@ -1,16 +1,19 @@
+use bevy::anti_alias::smaa::{Smaa, SmaaPreset};
 use bevy::camera::visibility::RenderLayers;
 use bevy::math::{DQuat, DVec3};
+use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy_egui::EguiContexts;
 use big_space::prelude::CellCoord;
-use thalos_body_render::rendered_height_m;
+use thalos_body_render::HeightSource;
 use thalos_body_render::space_camera_post_stack;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::types::BodyState;
-use thalos_physics_local::TerrainSurfaceRegistry;
-use thalos_terrain::{DynamicSurfaceState, PlanetSurface, SurfaceRef};
+use thalos_physics_local::{HeightSourceRegistry, LocalCraftBody};
 use thalos_world::{BodyDefinition, BodyId};
+
+use crate::aero::AeroReadout;
 
 /// `tile_lod_m` passed to `rendered_height_m` for the camera boom's
 /// ray-vs-terrain check. The boom rarely runs in tight sub-metre proximity
@@ -19,8 +22,15 @@ use thalos_world::{BodyDefinition, BodyId};
 /// over-sampling.
 const CAMERA_HEIGHT_QUERY_TILE_LOD_M: f32 = 1.0;
 
+/// Sea-level datum for the camera's terrain floor. The runtime
+/// `ProceduralSurface` has no separate water layer — its shoreline sits at the
+/// reference radius (height 0) — so the camera floors at 0 to avoid dipping
+/// below the waterline, while otherwise following the real terrain height.
+const SURFACE_SEA_LEVEL_M: f64 = 0.0;
+
 use crate::coords::{MAP_LAYER, RenderGhostFocus, SHIP_LAYER};
 use crate::freecam::FreeCam;
+use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
 use crate::rendering::{CelestialBody, PlayerShip, SimulationState, SolarSystemState};
 use crate::view::ViewMode;
 
@@ -38,6 +48,7 @@ impl Plugin for CameraPlugin {
             // `SkyRenderPlugin` draws stars additively on top.
             .insert_resource(ClearColor(Color::BLACK))
             .add_systems(Startup, spawn_camera)
+            .add_systems(Update, (apply_graphics_msaa, tune_auto_exposure))
             .add_systems(
                 Update,
                 (
@@ -425,9 +436,12 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
             // Add COPY_SRC so the scene-depth-copy render-graph node
             // (`CopySceneDepthNode` in `rendering::scene_depth`) can copy
             // the main depth attachment into our sampleable depth Image
-            // each frame.
+            // each frame. TEXTURE_BINDING lets that node instead *bind* the
+            // depth as a `texture_depth_multisampled_2d` and resolve it when
+            // MSAA is on (single-sample copy is illegal for an MSAA source).
             depth_texture_usages: (bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT
-                | bevy::render::render_resource::TextureUsages::COPY_SRC)
+                | bevy::render::render_resource::TextureUsages::COPY_SRC
+                | bevy::render::render_resource::TextureUsages::TEXTURE_BINDING)
                 .into(),
             ..default()
         },
@@ -455,6 +469,105 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
     ));
     if !map_active {
         ship_cam.insert((ActiveCamera, IsDefaultUiCamera));
+    }
+}
+
+/// Apply the [`GraphicsSettings::msaa`] level to the ship-view camera and keep
+/// SMAA mutually exclusive with it: `Off` runs the post-process SMAA pass (the
+/// default the space post stack installs), any multisampled level replaces SMAA
+/// with hardware MSAA (running both just double-softens). Scoped to the ship
+/// camera — the 3D world the aliasing shows in; the map camera keeps SMAA.
+///
+/// Only reacts when the setting changes (`Local` latch), so it doesn't churn
+/// camera components every frame.
+fn apply_graphics_msaa(
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
+    cameras: Query<Entity, With<ShipCamera>>,
+    mut applied: Local<Option<MsaaSetting>>,
+) {
+    if *applied == Some(settings.msaa) {
+        return;
+    }
+    let mut touched_any = false;
+    for entity in &cameras {
+        let mut entity = commands.entity(entity);
+        entity.insert(settings.msaa.to_msaa());
+        if settings.msaa.is_multisampled() {
+            entity.remove::<Smaa>();
+        } else {
+            entity.insert(Smaa {
+                preset: SmaaPreset::High,
+            });
+        }
+        touched_any = true;
+    }
+    // Don't latch until the camera actually exists, so a settings load that
+    // lands before `spawn_camera` still gets applied on a later frame.
+    if touched_any {
+        *applied = Some(settings.msaa);
+    }
+}
+
+// AutoExposure metering presets, blended by local atmospheric density so the
+// ship camera meters the scene it is actually in. The post stack ships the
+// VACUUM preset (most of the frame is black void, so the histogram filter
+// ignores the dark half and the EV range is wide). Inside a daylit atmosphere
+// the frame is full of bright terrain + sky instead, so that preset meters
+// against the wrong assumption — it leaves the histogram void-biased and the
+// headroom too generous, washing the surface flat. The SURFACE preset includes
+// more of the (now meaningful) dark end, tightens the EV range so a bright
+// ground/sky scene settles near neutral, and eases the adaptation speed for
+// smoother flight. We lerp between them on `density`, so a descent from orbit
+// transitions continuously rather than snapping.
+//
+// Tunable: the band edges are deliberately in absolute kg/m³ rather than tied
+// to a body's sea-level density — adjust against a `just game cruise` capture.
+const AE_VAC_RANGE: (f32, f32) = (-4.0, 6.0);
+const AE_VAC_FILTER: (f32, f32) = (0.30, 0.95);
+const AE_VAC_SPEED: (f32, f32) = (2.0, 1.0); // (brighten, darken)
+const AE_SURF_RANGE: (f32, f32) = (-2.0, 2.0);
+const AE_SURF_FILTER: (f32, f32) = (0.18, 0.85);
+const AE_SURF_SPEED: (f32, f32) = (1.5, 1.2);
+/// Density band (kg/m³) over which metering blends vacuum → surface. Below the
+/// low edge is pure vacuum metering; above the high edge is pure surface.
+const AE_DENSITY_LO: f64 = 0.05;
+const AE_DENSITY_HI: f64 = 0.50;
+
+/// Blend the ship camera's `AutoExposure` between the vacuum and surface presets
+/// based on the craft's current atmospheric density (`AeroReadout`). Falls back
+/// to the vacuum preset when there is no aero-bearing craft (e.g. on-foot EVA —
+/// a later pass can give the controller its own density readout).
+fn tune_auto_exposure(
+    craft: Query<&AeroReadout, With<LocalCraftBody>>,
+    mut cameras: Query<&mut AutoExposure, With<ShipCamera>>,
+) {
+    let density = craft.iter().next().map(|r| r.density_kgm3).unwrap_or(0.0);
+    let raw = ((density - AE_DENSITY_LO) / (AE_DENSITY_HI - AE_DENSITY_LO)).clamp(0.0, 1.0) as f32;
+    let t = raw * raw * (3.0 - 2.0 * raw); // smoothstep
+
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    let range = (lerp(AE_VAC_RANGE.0, AE_SURF_RANGE.0), lerp(AE_VAC_RANGE.1, AE_SURF_RANGE.1));
+    let filter = (lerp(AE_VAC_FILTER.0, AE_SURF_FILTER.0), lerp(AE_VAC_FILTER.1, AE_SURF_FILTER.1));
+    let speed_brighten = lerp(AE_VAC_SPEED.0, AE_SURF_SPEED.0);
+    let speed_darken = lerp(AE_VAC_SPEED.1, AE_SURF_SPEED.1);
+    let new_range = range.0..=range.1;
+    let new_filter = filter.0..=filter.1;
+
+    for mut ae in &mut cameras {
+        // Skip identical writes so a steady scene (deep space, level cruise)
+        // doesn't re-flag the component changed every frame.
+        if ae.range == new_range
+            && ae.filter == new_filter
+            && ae.speed_brighten == speed_brighten
+            && ae.speed_darken == speed_darken
+        {
+            continue;
+        }
+        ae.range = new_range.clone();
+        ae.filter = new_filter.clone();
+        ae.speed_brighten = speed_brighten;
+        ae.speed_darken = speed_darken;
     }
 }
 
@@ -661,31 +774,18 @@ struct TerrainClearance {
     surface_radius_m: f64,
 }
 
-fn blocking_surface_height_m(
-    surface: &PlanetSurface,
-    dynamic_state: &DynamicSurfaceState,
-    dir_body: Vec3,
-) -> f64 {
-    let terrain_height_m = rendered_height_m(
-        &SurfaceRef {
-            surface,
-            dynamic_state,
-        },
-        dir_body,
-        CAMERA_HEIGHT_QUERY_TILE_LOD_M,
-    ) as f64;
-    surface
-        .static_surface
-        .sea_level_m
-        .map(|sea_level_m| terrain_height_m.max(sea_level_m as f64))
-        .unwrap_or(terrain_height_m)
+fn blocking_surface_height_m(height_source: &dyn HeightSource, dir_body: Vec3) -> f64 {
+    let terrain_height_m = height_source
+        .sample_height_m(dir_body, CAMERA_HEIGHT_QUERY_TILE_LOD_M)
+        .unwrap_or(0.0) as f64;
+    terrain_height_m.max(SURFACE_SEA_LEVEL_M)
 }
 
 fn terrain_clearance_at_physics_pos(
     body_position: DVec3,
     body_inv_orientation: DQuat,
     body_radius_m: f64,
-    surface: Option<(&PlanetSurface, &DynamicSurfaceState)>,
+    height_source: Option<&dyn HeightSource>,
     position: DVec3,
 ) -> Option<TerrainClearance> {
     let from_body = position - body_position;
@@ -702,8 +802,8 @@ fn terrain_clearance_at_physics_pos(
         return None;
     }
 
-    let surface_height_m = surface
-        .map(|(surface, dynamic_state)| blocking_surface_height_m(surface, dynamic_state, dir_body))
+    let surface_height_m = height_source
+        .map(|hs| blocking_surface_height_m(hs, dir_body))
         .unwrap_or(0.0);
     let surface_radius_m = body_radius_m + surface_height_m;
     Some(TerrainClearance {
@@ -717,14 +817,14 @@ fn clamp_physics_pos_above_terrain(
     body_position: DVec3,
     body_inv_orientation: DQuat,
     body_radius_m: f64,
-    surface: Option<(&PlanetSurface, &DynamicSurfaceState)>,
+    height_source: Option<&dyn HeightSource>,
     position: DVec3,
 ) -> Option<DVec3> {
     let clearance = terrain_clearance_at_physics_pos(
         body_position,
         body_inv_orientation,
         body_radius_m,
-        surface,
+        height_source,
         position,
     )?;
     if clearance.agl_m >= CAMERA_TERRAIN_MARGIN_M {
@@ -750,17 +850,14 @@ fn clamp_camera_position_above_body_terrain(
     body_id: BodyId,
     body_states: &SolarSystemState,
     sim: &SimulationState,
-    surfaces: &TerrainSurfaceRegistry,
+    height_sources: &HeightSourceRegistry,
 ) -> Option<Vec3> {
     if render_scale <= 0.0 {
         return None;
     }
 
     let states = body_states.states.as_deref()?;
-    let surface = surfaces.get(body_id);
-    let dynamic_state = surface
-        .as_ref()
-        .map(|surface| body_states.dynamic_surface_for(body_id, surface));
+    let height_source = height_sources.get(body_id);
     let body = &sim.system.bodies[body_id];
     let body_state = states.get(body_id)?;
 
@@ -770,7 +867,7 @@ fn clamp_camera_position_above_body_terrain(
         body_state.position,
         body_state.orientation.inverse(),
         body.radius_m,
-        surface.as_deref().zip(dynamic_state.as_ref()),
+        height_source.as_deref(),
         camera_physics_pos,
     )?;
 
@@ -800,17 +897,14 @@ fn camera_boom_collision_length_m(
     body_id: BodyId,
     body_states: &SolarSystemState,
     sim: &SimulationState,
-    surfaces: &TerrainSurfaceRegistry,
+    height_sources: &HeightSourceRegistry,
 ) -> Option<f64> {
     if render_scale <= 0.0 {
         return None;
     }
 
     let states = body_states.states.as_deref()?;
-    let surface = surfaces.get(body_id);
-    let dynamic_state = surface
-        .as_ref()
-        .map(|surface| body_states.dynamic_surface_for(body_id, surface));
+    let height_source = height_sources.get(body_id);
     let body = &sim.system.bodies[body_id];
     let body_state = states.get(body_id)?;
 
@@ -820,7 +914,7 @@ fn camera_boom_collision_length_m(
     }
     let body_inv = body_state.orientation.inverse();
 
-    let surface_with_state = surface.as_deref().zip(dynamic_state.as_ref());
+    let height_source = height_source.as_deref();
 
     // AGL of the point `t` of the way from target to camera. Negative = inside terrain.
     let agl = |t: f64| -> f64 {
@@ -828,7 +922,7 @@ fn camera_boom_collision_length_m(
             body_state.position,
             body_inv,
             body.radius_m,
-            surface_with_state,
+            height_source,
             target_physics_pos + camera_offset * t,
         )
         .map(|clearance| clearance.agl_m)
@@ -898,7 +992,7 @@ fn clamp_ship_camera_against_terrain(
     scale: f64,
     body_states: &SolarSystemState,
     sim: &SimulationState,
-    surfaces: &TerrainSurfaceRegistry,
+    height_sources: &HeightSourceRegistry,
     time: &Time<Real>,
     collision: &mut CameraCollisionState,
 ) -> Vec3 {
@@ -919,7 +1013,7 @@ fn clamp_ship_camera_against_terrain(
         body_id,
         body_states,
         sim,
-        surfaces,
+        height_sources,
     )
     .unwrap_or(desired_boom_m)
     .clamp(0.0, desired_boom_m);
@@ -947,7 +1041,7 @@ fn clamp_ship_camera_against_terrain(
         body_id,
         body_states,
         sim,
-        surfaces,
+        height_sources,
     )
     .unwrap_or(corrected)
 }
@@ -959,7 +1053,7 @@ fn clamp_body_focus_camera_against_terrain(
     body_id: BodyId,
     body_states: &SolarSystemState,
     sim: &SimulationState,
-    surfaces: &TerrainSurfaceRegistry,
+    height_sources: &HeightSourceRegistry,
 ) -> Vec3 {
     let Some(states) = body_states.states.as_deref() else {
         return camera_pos;
@@ -976,7 +1070,7 @@ fn clamp_body_focus_camera_against_terrain(
         body_id,
         body_states,
         sim,
-        surfaces,
+        height_sources,
     )
     .unwrap_or(camera_pos)
 }
@@ -1008,7 +1102,7 @@ pub fn camera_transform_system(
     freecam: Res<FreeCam>,
     sim: Option<Res<SimulationState>>,
     body_states: Res<SolarSystemState>,
-    surfaces: Res<TerrainSurfaceRegistry>,
+    height_sources: Res<HeightSourceRegistry>,
     mut collision: ResMut<CameraCollisionState>,
     body_targets: Query<(&CelestialBody, &Transform), Without<OrbitCamera>>,
     ship_targets: Query<
@@ -1167,7 +1261,7 @@ pub fn camera_transform_system(
                     scale,
                     &body_states,
                     sim_ref,
-                    &surfaces,
+                    &height_sources,
                     &time,
                     &mut collision,
                 )
@@ -1179,7 +1273,7 @@ pub fn camera_transform_system(
                 body_id,
                 &body_states,
                 sim_ref,
-                &surfaces,
+                &height_sources,
             ),
             _ => camera_pos,
         };

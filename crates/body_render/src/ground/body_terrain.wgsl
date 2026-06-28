@@ -24,7 +24,11 @@
 #import thalos_udlod::fragment::{FragmentInput, FragmentOutput, fragment_info}
 #import thalos_udlod::functions::{lookup_tile, tile_count}
 #import thalos::atmosphere::AtmosphereBlock
-#import thalos::lighting::{SceneLighting, SCENE_FLUX_SCALE, shade_hapke_surface}
+#import thalos::lighting::{
+    SceneLighting, shade_hapke_surface,
+    SurfaceSky, compute_surface_sky, sky_ambient_irradiance, env_brdf_approx,
+    specular_aa_variance, specular_aa_apply,
+}
 
 // Must match `MAX_TERRAIN_SHADOW_CASTERS` / `MAX_TERRAIN_SHADOW_QUADS` in
 // `body_material.rs`.
@@ -73,15 +77,108 @@ struct BodyTerrainDebug {
 // `BodyTerrainExtras` in `body_material.rs` for the slot-budget rationale
 // (Metal vertex stage caps at 16 buffers and AsBindGroup forces vertex
 // visibility on every `#[uniform(N)]`).
+// Cascaded sun-shadow transforms + compare params. Mirrors `ShadowCascadeBlock`
+// in `body_material.rs` (array sizes == CASCADE_COUNT). The depth maps are
+// SEPARATE `texture_depth_2d` bindings (one per cascade), sampled unrolled.
+struct ShadowCascadeBlock {
+    view_proj: array<mat4x4<f32>, 3>,
+    // per cascade: x = depth bias (clip), yzw reserved.
+    params: array<vec4<f32>, 3>,
+    // x = strength (0 ⇒ skip), y = active cascade count, zw reserved. Named
+    // `gate` (not `config`) — this shader `#import`s a udlod global `config`,
+    // and a matching field name collides in naga_oil.
+    gate: vec4<f32>,
+}
+
 struct BodyTerrainExtras {
     craft_shadow: BodyTerrainShadow,
     debug: BodyTerrainDebug,
     inspection: vec4<f32>,
+    shadow: ShadowCascadeBlock,
 }
 
 @group(3) @binding(0) var<uniform> terrain_atmos: AtmosphereBlock;
 @group(3) @binding(1) var<uniform> terrain_scene: SceneLighting;
 @group(3) @binding(2) var<uniform> terrain_extras: BodyTerrainExtras;
+// Per-cascade sun-shadow depth maps (near→far), rendered by the game's
+// `rendering::sun_shadow` rig. Each a plain `texture_depth_2d` (no depth array).
+@group(3) @binding(3) var sun_shadow_map_0: texture_depth_2d;
+@group(3) @binding(4) var sun_shadow_map_1: texture_depth_2d;
+@group(3) @binding(5) var sun_shadow_map_2: texture_depth_2d;
+
+// One cascade's shadow factor at a render-space point. Returns the factor in
+// `[1 - strength, 1]`, or a NEGATIVE sentinel if the point is outside this
+// cascade's box (caller falls through to the next, coarser cascade). `inset`
+// shrinks inner cascades so an edge fragment hands off cleanly; `fade` edge-
+// softens the outermost cascade (nothing covers beyond it).
+fn cascade_factor(
+    world_pos: vec3<f32>,
+    vp: mat4x4<f32>,
+    bias: f32,
+    strength: f32,
+    tex: texture_depth_2d,
+    inset: f32,
+    fade: bool,
+) -> f32 {
+    let clip = vp * vec4<f32>(world_pos, 1.0);
+    if (clip.w <= 0.0) {
+        return -1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if (any(ndc.xy < vec2<f32>(-inset)) || any(ndc.xy > vec2<f32>(inset)) ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    let dims = vec2<f32>(textureDimensions(tex));
+    // 3×3 PCF. Reverse-z: a caster closer to the sun has a LARGER stored depth,
+    // so the receiver is shadowed when `stored > frag_depth + bias`.
+    var lit = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let texel = vec2<i32>(uv * dims) + vec2<i32>(dx, dy);
+            let stored = textureLoad(tex, texel, 0);
+            lit = lit + select(1.0, 0.0, stored > ndc.z + bias);
+        }
+    }
+    lit = lit / 9.0;
+    var edge_fade = 1.0;
+    if (fade) {
+        let edge = max(abs(ndc.x), abs(ndc.y));
+        edge_fade = 1.0 - smoothstep(0.85, 1.0, edge);
+    }
+    return 1.0 - strength * (1.0 - lit) * edge_fade;
+}
+
+// Directional shadow factor: walk the cascades near→far and use the tightest one
+// that contains the fragment (highest resolution). `config.x == 0` (inactive
+// pass) early-outs to fully lit. Unrolled because WGSL can't index textures.
+fn sun_shadow_factor(world_pos: vec3<f32>) -> f32 {
+    let s = terrain_extras.shadow.gate.x;
+    if (s <= 0.0) {
+        return 1.0;
+    }
+    var f = cascade_factor(
+        world_pos, terrain_extras.shadow.view_proj[0], terrain_extras.shadow.params[0].x,
+        s, sun_shadow_map_0, 0.98, false,
+    );
+    if (f < 0.0) {
+        f = cascade_factor(
+            world_pos, terrain_extras.shadow.view_proj[1], terrain_extras.shadow.params[1].x,
+            s, sun_shadow_map_1, 0.98, false,
+        );
+    }
+    if (f < 0.0) {
+        f = cascade_factor(
+            world_pos, terrain_extras.shadow.view_proj[2], terrain_extras.shadow.params[2].x,
+            s, sun_shadow_map_2, 1.0, true,
+        );
+    }
+    if (f < 0.0) {
+        return 1.0;
+    }
+    return f;
+}
 
 // Blend the atlas-derived macro height normal into the smooth geometric normal.
 // Height is sampled through decode-then-filter RG16 interpolation in
@@ -125,8 +222,11 @@ const ROCK_STRENGTH: f32 = 0.0;
 // colour's value (plus a faint warm/cool hue drift) at the tens-of-metres
 // scale, so the ground stops reading as one flat tint.
 const BREAKUP_SCALE: f32 = 0.05;     // 1/period_m → ~20 m base patches
-const BREAKUP_VALUE_AMT: f32 = 0.18; // ± fractional value variation
-const BREAKUP_HUE_AMT: f32 = 0.04;   // ± warm/cool drift
+const BREAKUP_VALUE_AMT: f32 = 0.20; // ± fractional value variation
+// Warm/cool drift. Kept low: a large value pushed bright patches toward
+// red/brown, which read as muddy smears over the green. Stylized-vivid wants
+// clean value patchiness, not a brown wash.
+const BREAKUP_HUE_AMT: f32 = 0.035;  // ± warm/cool drift
 
 // Regolith fine detail. Airless particulate regolith reads as a fairly uniform
 // gray at the macro level (the baked albedo is the body's mare/highland tone),
@@ -168,19 +268,36 @@ const SNOW_LINE_NOISE_M: f32 = 400.0; // ± snow/treeline jitter from macro nois
 const SNOW_SLOPE_LO: f32 = 0.32;     // snow holds on slopes up to ~47°…
 const SNOW_SLOPE_HI: f32 = 0.62;     // …gone by ~68° (cliffs stay bare rock)
 const MACRO_VAR_SCALE: f32 = 0.004;  // 1/period_m → ~250 m biome-mottle patches
-const MACRO_VAR_AMT: f32 = 0.10;     // ± low-frequency value mottle
+const MACRO_VAR_AMT: f32 = 0.14;     // ± low-frequency value mottle
+// Mid-scale moisture: lush ↔ dry grass (and soil in the driest spots) so flat
+// lowland reads as a varied carpet, not one flat green. Primary monotone knob.
+const MOISTURE_SCALE: f32 = 0.008;          // 1/period_m → ~125 m medium patches
+const LANDCOVER_COARSE_SCALE: f32 = 0.002;  // 1/period_m → ~500 m forest/clearing stands
+// Large-scale (~1 km) landcover/tone variation: the low-frequency PARENT of the
+// 500 m / 125 m / 20 m cascade — the same body-fixed value-noise family — so a
+// broad lush/dry region resolves INTO the finer patches as the camera descends
+// instead of fighting them. It never distance-fades (it lives in the material
+// stack, not the detail tint), so it carries the far field. Wavelength is held
+// near the 4 km coordinate wrap (4 lattice cells/period) to avoid visible tiling.
+const LANDCOVER_REGION_SCALE: f32 = 0.001;  // 1/period_m → ~1 km lush/dry regions
+const MACRO_REGION_SCALE: f32 = 0.001;      // 1/period_m → ~1 km tone-drift patches
+const MOISTURE_CONTRAST: f32 = 1.35;        // widen spread so regions reach forest/dry extremes
 
 // Earthy linear-space material anchors. Deliberately lower-value and less
 // saturated than neon grass; direct sun and sky fill lift them in the lighting
 // pass. Snow is kept well below 1.0 so a sunlit cap doesn't blow out.
-const C_FOREST: vec3<f32>   = vec3<f32>(0.040, 0.066, 0.030); // lowland lush (dark green)
-const C_GRASS: vec3<f32>    = vec3<f32>(0.078, 0.112, 0.052); // temperate grass (olive)
-const C_DRYGRASS: vec3<f32> = vec3<f32>(0.130, 0.132, 0.074); // alpine dry grass / tundra
-const C_SOIL: vec3<f32>     = vec3<f32>(0.092, 0.068, 0.044); // earthy soil / peat
-const C_ROCK_LO: vec3<f32>  = vec3<f32>(0.106, 0.094, 0.080); // lower rock (warm grey-brown)
-const C_ROCK_HI: vec3<f32>  = vec3<f32>(0.140, 0.138, 0.132); // alpine scree (cool grey)
+// Stylized-vivid pass: chroma pushed back up from the prior desaturated anchors
+// (which read as drab felt) — greens get a wider green-vs-red/blue gap so the
+// land reads alive, without returning to the old "grating chartreuse". Still
+// linear-space and below the lighting blow-out ceiling.
+const C_FOREST: vec3<f32>   = vec3<f32>(0.034, 0.084, 0.028); // lowland lush (deep saturated green)
+const C_GRASS: vec3<f32>    = vec3<f32>(0.072, 0.152, 0.050); // temperate grass (vivid olive-green)
+const C_DRYGRASS: vec3<f32> = vec3<f32>(0.142, 0.158, 0.072); // alpine dry grass / tundra (savanna)
+const C_SOIL: vec3<f32>     = vec3<f32>(0.112, 0.074, 0.042); // earthy soil / peat (warmer)
+const C_ROCK_LO: vec3<f32>  = vec3<f32>(0.112, 0.096, 0.078); // lower rock (warm grey-brown)
+const C_ROCK_HI: vec3<f32>  = vec3<f32>(0.142, 0.140, 0.134); // alpine scree (cool grey)
 const C_SNOW: vec3<f32>     = vec3<f32>(0.600, 0.640, 0.720); // snow (faint blue)
-const C_WET: vec3<f32>      = vec3<f32>(0.030, 0.050, 0.028); // wet hollow (dark)
+const C_WET: vec3<f32>      = vec3<f32>(0.028, 0.058, 0.026); // wet hollow (dark green)
 
 // Step 3 — micro-relief normal. A detail height field whose gradient tilts the
 // lighting normal, giving the surface the light/dark micro-contrast under a
@@ -188,9 +305,10 @@ const C_WET: vec3<f32>      = vec3<f32>(0.030, 0.050, 0.028); // wet hollow (dar
 const DETAIL_SCALE: f32 = 0.8;            // 1/period_m → ~1.25 m base relief
 const DETAIL_OCTAVES: i32 = 3;
 const DETAIL_EPS: f32 = 0.25;             // finite-difference step, metres
-const DETAIL_NORMAL_STRENGTH: f32 = 0.0;  // facet-tilt amount — TEMP 0.0 to confirm
-                                          // this value-noise detail normal is the
-                                          // grid "weave" artifact (restore after).
+const DETAIL_NORMAL_STRENGTH: f32 = 0.35; // facet-tilt amount. Derives from
+                                          // gradient (Perlin) noise (no weave);
+                                          // kept modest so a grazing (sunset) sun
+                                          // doesn't churn the ground into sandpaper.
 
 // Both detail layers fade out with camera distance: their period goes
 // sub-pixel on the far field and would shimmer. The macro/slope colour carries
@@ -198,37 +316,6 @@ const DETAIL_NORMAL_STRENGTH: f32 = 0.0;  // facet-tilt amount — TEMP 0.0 to c
 const DETAIL_FADE_NEAR: f32 = 180.0;  // full detail within this range (m)
 const DETAIL_FADE_FAR: f32  = 1800.0; // no detail beyond this range (m)
 const DETAIL_COORD_PERIOD_M: f32 = 4000.0;
-
-fn atmospheric_surface_fill(geo_n_dot_l: f32, sun_flux: f32) -> vec3<f32> {
-    let atmosphere_strength = max(terrain_atmos.atmos_geom.z, 0.0);
-    if (atmosphere_strength <= 0.0 || sun_flux <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-
-    let rayleigh_tau = max(
-        terrain_atmos.rayleigh_beta_h.xyz * terrain_atmos.rayleigh_beta_h.w,
-        vec3<f32>(0.0),
-    );
-    let mie_tau = max(
-        terrain_atmos.mie_beta_g.xyz * terrain_atmos.atmos_geom.y,
-        vec3<f32>(0.0),
-    );
-    let tau_rgb = (rayleigh_tau + mie_tau) * atmosphere_strength;
-    let tau_mean = max(dot(tau_rgb, vec3<f32>(0.3333333)), 1.0e-5);
-
-    // This is not the camera-path haze; BodySky handles that fullscreen.
-    // It is the missing diffuse sky irradiance on terrain faces that are
-    // visible under a lit atmosphere but not directly sun-facing.
-    let daylight = smoothstep(-0.45, 0.12, geo_n_dot_l);
-    let fill_strength = clamp(tau_mean * 0.28, 0.0, 0.08) * daylight;
-    let spectral_tint = clamp(
-        mix(vec3<f32>(1.0), tau_rgb / tau_mean, 0.25),
-        vec3<f32>(0.55),
-        vec3<f32>(1.35),
-    );
-
-    return spectral_tint * sun_flux * SCENE_FLUX_SCALE * fill_strength;
-}
 
 // Bilinear roughness sample. Mirrors the `sample_attachment1` helper but
 // returns the red channel (the only one populated by the tile provider's
@@ -617,6 +704,7 @@ fn eval_material_stack(
     altitude_m: f32,
     slope_t: f32,
     variation: f32,
+    moisture: f32,
 ) -> TerrainMaterialSample {
     var masks = max(masks_in, vec4<f32>(0.0));
     let weight_sum = max(masks.r + masks.g + masks.b, 1.0e-4);
@@ -631,12 +719,19 @@ fn eval_material_stack(
     let steep = clamp(max(slope_t, rock_w), 0.0, 1.0);
     let jitter = variation * SNOW_LINE_NOISE_M;
 
-    // Vegetation column: dark lush lowland → temperate grass → pale dry alpine
-    // grass approaching the treeline.
+    // Landcover classes from the moisture field, kept fairly contrasty so they
+    // read as distinct patches from the air (as in real aerials): wet/low →
+    // forest (dark canopy), mid → grassland, dry → tan dry grass, driest → bare
+    // soil. Forest only takes hold on lush low ground; above the treeline the
+    // whole column dries to alpine grass.
     let lush = smoothstep(LUSH_HI_M, LUSH_LO_M, altitude_m + jitter); // 1 low, 0 high
     let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m + jitter);
-    let grass_c = mix(C_GRASS, C_FOREST, lush * 0.6);
-    let veg = mix(grass_c, C_DRYGRASS, alpine);
+    let dryness = clamp(0.5 - 0.5 * moisture, 0.0, 1.0); // moisture: + wet, − dry
+    let forest_amt = smoothstep(0.46, 0.20, dryness) * lush;
+    var grass_c = mix(C_GRASS, C_DRYGRASS, smoothstep(0.40, 0.78, dryness));
+    grass_c = mix(grass_c, C_SOIL, smoothstep(0.80, 0.96, dryness));
+    var veg = mix(grass_c, C_FOREST, forest_amt);
+    veg = mix(veg, C_DRYGRASS, alpine);
 
     // Rock cools and greys with altitude (warm soil-stained rock low down,
     // lichen-free scree up high).
@@ -794,11 +889,107 @@ fn fbm3_grad(p_in: vec3<f32>, octaves: i32, period_in: f32) -> vec4<f32> {
     return vec4<f32>(sum * inv, grad * inv);
 }
 
+// ── Periodic gradient (Perlin) noise with analytic derivative ──────────────
+// Value noise (above) interpolates random *scalars* on the integer lattice, so
+// its gradient is strongly axis-aligned — the cubic grid shows through as a
+// "weave" in any normal derived from it (which is why the detail normal was
+// switched off). Gradient noise puts the randomness in per-corner *gradient
+// vectors*, so its derivative is far more isotropic — the right basis for a
+// detail normal. Periodic (corners wrapped on `period`) so it stays seamless
+// across the floating-origin phase fold, and analytic-derivative so the normal
+// costs a single evaluation. Derivative form from Inigo Quilez's
+// gradient-noise-with-derivatives (https://iquilezles.org/articles/gradientnoise/).
+
+// Hash a (wrapped) integer lattice corner to a pseudo-random gradient in
+// [-1,1]^3. Unnormalised (gradient noise tolerates varied magnitudes and it
+// avoids a per-corner normalize); the fBm renormalises by amplitude sum.
+fn hash33(p_in: vec3<f32>) -> vec3<f32> {
+    var p3 = fract(p_in * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 = p3 + dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yzz) * p3.zyx) * 2.0 - 1.0;
+}
+
+// Returns vec4(value, d/dx, d/dy, d/dz). value ~ roughly [-1, 1].
+fn perlin3_periodic_grad(x: vec3<f32>, period: f32) -> vec4<f32> {
+    let i = floor(x);
+    let f = fract(x);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+
+    let ga = hash33(wrap_lattice(i + vec3<f32>(0.0, 0.0, 0.0), period));
+    let gb = hash33(wrap_lattice(i + vec3<f32>(1.0, 0.0, 0.0), period));
+    let gc = hash33(wrap_lattice(i + vec3<f32>(0.0, 1.0, 0.0), period));
+    let gd = hash33(wrap_lattice(i + vec3<f32>(1.0, 1.0, 0.0), period));
+    let ge = hash33(wrap_lattice(i + vec3<f32>(0.0, 0.0, 1.0), period));
+    let gf = hash33(wrap_lattice(i + vec3<f32>(1.0, 0.0, 1.0), period));
+    let gg = hash33(wrap_lattice(i + vec3<f32>(0.0, 1.0, 1.0), period));
+    let gh = hash33(wrap_lattice(i + vec3<f32>(1.0, 1.0, 1.0), period));
+
+    let va = dot(ga, f - vec3<f32>(0.0, 0.0, 0.0));
+    let vb = dot(gb, f - vec3<f32>(1.0, 0.0, 0.0));
+    let vc = dot(gc, f - vec3<f32>(0.0, 1.0, 0.0));
+    let vd = dot(gd, f - vec3<f32>(1.0, 1.0, 0.0));
+    let ve = dot(ge, f - vec3<f32>(0.0, 0.0, 1.0));
+    let vf = dot(gf, f - vec3<f32>(1.0, 0.0, 1.0));
+    let vg = dot(gg, f - vec3<f32>(0.0, 1.0, 1.0));
+    let vh = dot(gh, f - vec3<f32>(1.0, 1.0, 1.0));
+
+    let value = va
+        + u.x * (vb - va) + u.y * (vc - va) + u.z * (ve - va)
+        + u.x * u.y * (va - vb - vc + vd)
+        + u.y * u.z * (va - vc - ve + vg)
+        + u.z * u.x * (va - vb - ve + vf)
+        + u.x * u.y * u.z * (-va + vb + vc - vd + ve - vf - vg + vh);
+
+    let derivative = ga
+        + u.x * (gb - ga) + u.y * (gc - ga) + u.z * (ge - ga)
+        + u.x * u.y * (ga - gb - gc + gd)
+        + u.y * u.z * (ga - gc - ge + gg)
+        + u.z * u.x * (ga - gb - ge + gf)
+        + u.x * u.y * u.z * (-ga + gb + gc - gd + ge - gf - gg + gh)
+        + du * vec3<f32>(
+            (vb - va) + u.y * (va - vb - vc + vd) + u.z * (va - vb - ve + vf)
+                + u.y * u.z * (-va + vb + vc - vd + ve - vf - vg + vh),
+            (vc - va) + u.z * (va - vc - ve + vg) + u.x * (va - vb - vc + vd)
+                + u.z * u.x * (-va + vb + vc - vd + ve - vf - vg + vh),
+            (ve - va) + u.x * (va - vb - ve + vf) + u.y * (va - vc - ve + vg)
+                + u.x * u.y * (-va + vb + vc - vd + ve - vf - vg + vh),
+        );
+
+    return vec4<f32>(value, derivative);
+}
+
+// fBm value + analytic gradient over gradient (Perlin) noise, matching the
+// octave schedule of `fbm3_grad` (frequency doubles, amplitude halves; each
+// octave's gradient is chain-rule-scaled by its frequency).
+fn fbm3_perlin_grad(p_in: vec3<f32>, octaves: i32, period_in: f32) -> vec4<f32> {
+    var p = p_in;
+    var period = period_in;
+    var amp = 0.5;
+    var freq = 1.0;
+    var sum = 0.0;
+    var grad = vec3<f32>(0.0);
+    var norm = 0.0;
+    for (var o = 0; o < octaves; o = o + 1) {
+        let vg = perlin3_periodic_grad(p, period);
+        sum = sum + amp * vg.x;
+        grad = grad + amp * freq * vg.yzw;
+        norm = norm + amp;
+        p = p * 2.0;
+        period = period * 2.0;
+        amp = amp * 0.5;
+        freq = freq * 2.0;
+    }
+    let inv = 1.0 / max(norm, 1.0e-5);
+    return vec4<f32>(sum * inv, grad * inv);
+}
+
 // `detail_height` value and gradient w.r.t. body-space metres. The fBm runs in
 // scaled coordinates (`p_body * DETAIL_SCALE`), so one more `DETAIL_SCALE`
-// factor folds into the gradient by the chain rule.
+// factor folds into the gradient by the chain rule. Uses gradient (Perlin)
+// noise so the resulting normal is weave-free.
 fn detail_height_grad(p_body: vec3<f32>) -> vec4<f32> {
-    let g = fbm3_grad(
+    let g = fbm3_perlin_grad(
         p_body * DETAIL_SCALE,
         DETAIL_OCTAVES,
         DETAIL_COORD_PERIOD_M * DETAIL_SCALE,
@@ -904,10 +1095,23 @@ fn regolith_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> S
 const PI_BRDF: f32 = 3.14159265358979323846;
 // Non-metallic surface normal reflectance at normal incidence (~4%).
 const DIELECTRIC_F0: f32 = 0.04;
-// Weight of the direct-sun lobe relative to the sky fill. Carried over from
-// the placeholder so overall ground brightness stays in the tonemapper's
-// range; the primary knob to nudge after a preview.
-const DIRECT_SUN_STRENGTH: f32 = 0.62;
+
+// Ambient occlusion from the procedural cavity field. The Step-2 albedo breakup
+// (`detail.tint`) doubles as a cheap cavity signal — darker breakup ≈ a hollow —
+// so we fold its luminance into an AO factor on the sky/ground ambient (never on
+// the direct sun, which has its own shadow terms). `AO_FROM_DETAIL` is the blend
+// amount, `AO_MIN` the floor so creases darken without going black.
+const AO_FROM_DETAIL: f32 = 0.5;
+const AO_MIN: f32 = 0.45;
+
+// Canopy AO: a tree/object that occludes the sun also blocks a chunk of the sky
+// dome, so its sun-shadow footprint should darken the *ambient* term too — not
+// just the direct beam. Without this the only thing a shadow removes is direct
+// sun, which the bright hemisphere fill then washes back out (shadows read as
+// barely-there). Bled from the sun-shadow factor ONLY (terrain self-shadow is
+// excluded — a self-shadowed slope still sees open sky). 0 = no bleed, 1 = a
+// fully tree-shadowed pixel loses all ambient.
+const AMBIENT_SHADOW_BLEED: f32 = 0.6;
 
 // GGX / Trowbridge–Reitz normal distribution.
 fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
@@ -975,7 +1179,18 @@ fn surface_brdf(
     let f = fresnel_schlick(l_dot_h, DIELECTRIC_F0);
     let d = ggx_distribution(n_dot_h, roughness);
     let vis = smith_visibility(n_dot_l, max(n_dot_v, 1.0e-4), roughness);
-    let spec = d * vis * f;
+
+    // Kulla–Conty multiple-scattering energy compensation. Single-scattering
+    // GGX drops the energy from microfacet rays that bounce more than once, so a
+    // rough surface loses reflectance and reads muddy. The directional albedo
+    // `E_ss = scale + bias` (white-furnace split-sum) tells us how much survives;
+    // scaling the lobe by `1 + F0·(1/E_ss − 1)` puts the lost energy back. For a
+    // dielectric (F0 ≈ 0.04) the factor is small, but it keeps wet ground / snow
+    // from dimming at grazing angles and is the correct thing to do.
+    let dfg = env_brdf_approx(roughness, max(n_dot_v, 1.0e-4));
+    let e_ss = max(dfg.x + dfg.y, 1.0e-3);
+    let ms = 1.0 + DIELECTRIC_F0 * (1.0 / e_ss - 1.0);
+    let spec = d * vis * f * ms;
 
     let diff = oren_nayar_term(n_dot_l, n_dot_v, l, v, roughness);
     let diffuse = albedo * diff * (1.0 - f);
@@ -1015,6 +1230,15 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // path; airless regolith (Mira) uses the baked gray albedo + Hapke, matching
     // its orbital impostor across the LOD swap.
     let style_regolith = terrain_extras.inspection.y >= 0.5;
+
+    // Distant schematic (orbital map terrain). The map view draws the whole body
+    // from far outside at MAP_SCALE, where one screen pixel integrates many km of
+    // terrain. The baked normal atlas has no mip chain and the screen-space
+    // specular-AA widening is clamped (tuned for ground viewing), so the sharp
+    // GGX highlight aliases into a crawling gleam as the camera moves. The map is
+    // a stand-in for the smooth impostor across the LOD swap, so shade its
+    // specular fully matte — the relief/diffuse topography stays.
+    let distant_schematic = terrain_extras.inspection.z >= 0.5;
 
     // Procedural surface detail (Step 2 breakup + Step 3 micro-relief normal),
     // synthesised from body-fixed metres so it remains static under time warp.
@@ -1059,17 +1283,46 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // Low-frequency value variation in [-1,1]; jitters the treeline/snowline
         // and mottles vegetation so the altitude bands don't read as clean
         // contour rings.
-        let macro_var = (fbm3_periodic(
+        let macro_fine = (fbm3_periodic(
             detail_p_body * MACRO_VAR_SCALE,
             3,
             DETAIL_COORD_PERIOD_M * MACRO_VAR_SCALE,
         ) - 0.5) * 2.0;
+        let macro_region = (fbm3_periodic(
+            detail_p_body * MACRO_REGION_SCALE,
+            2,
+            DETAIL_COORD_PERIOD_M * MACRO_REGION_SCALE,
+        ) - 0.5) * 2.0;
+        // Region-dominant: whole ~1 km areas drift in tone (and snow/treeline
+        // jitter) with the 250 m mottle riding on top. Bounded to [-1,1].
+        let macro_var = clamp(mix(macro_fine, macro_region, 0.55), -1.0, 1.0);
+        // Landcover moisture, three scales: ~1 km lush/dry regions (dominant),
+        // 500 m forest/clearing stands, 125 m breakup — coarse-dominant so the
+        // canopy reads as large regions that refine into smaller patches up close.
+        let lc_region = fbm3_periodic(
+            detail_p_body * LANDCOVER_REGION_SCALE,
+            2,
+            DETAIL_COORD_PERIOD_M * LANDCOVER_REGION_SCALE,
+        );
+        let lc_coarse = fbm3_periodic(
+            detail_p_body * LANDCOVER_COARSE_SCALE,
+            3,
+            DETAIL_COORD_PERIOD_M * LANDCOVER_COARSE_SCALE,
+        );
+        let lc_med = fbm3_periodic(
+            detail_p_body * MOISTURE_SCALE,
+            3,
+            DETAIL_COORD_PERIOD_M * MOISTURE_SCALE,
+        );
+        let moisture_raw = mix(mix(lc_region, lc_coarse, 0.45), lc_med, 0.22);
+        let moisture = clamp((moisture_raw - 0.5) * 2.0 * MOISTURE_CONTRAST, -1.0, 1.0);
         material = eval_material_stack(
             material_masks,
             grade_surface(albedo.rgb, material_masks.b),
             altitude_m,
             geo_slope_t,
             macro_var,
+            moisture,
         );
         surface_rgb = material.albedo;
         if (!debug_on) {
@@ -1141,15 +1394,41 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // below stands in for skylight reaching shadowed ground.
     let craft_shadow = local_craft_shadow(hit_ws, sun_dir_ws);
     var self_shadow = 1.0;
-    if (!debug_on) {
+    // Skip the height-atlas self-shadow march on the orbital map: at planetary
+    // distance it samples the height atlas sub-pixel and its result shifts as the
+    // LOD tiles change under camera motion, adding to the crawling shimmer.
+    if (!debug_on && !distant_schematic) {
         self_shadow = terrain_self_shadow(tile, geo_normal, sun_dir_ws);
     }
-    let external_shadow = craft_shadow * self_shadow;
+    // Tree/craft directional shadows from the sun-shadow map fold into the same
+    // direct-sun gate as the analytic craft proxy and the self-shadow march.
+    // `tree_shadow` is kept separate so it can also bleed into the ambient term
+    // (canopy AO) below — terrain self-shadow must not, so it's excluded there.
+    let tree_shadow = sun_shadow_factor(hit_ws);
+    let external_shadow = craft_shadow * self_shadow * tree_shadow;
 
     // Surface lighting. The shading normal is pulled most of the way toward the
     // relief normal but kept anchored to the geometric normal so steep micro-
     // facets near the terminator can't out-light the body curvature.
-    let stable_normal = normalize(mix(geo_normal, normal, 0.85));
+    //
+    // On the orbital map (`distant_schematic`) the shading normal is forced to the
+    // pure geometric sphere normal. At planetary distance the baked terrain normal
+    // is sub-pixel — its high-frequency tilt aliases the *diffuse* shading into a
+    // crawling gleam as the camera moves (matte specular alone can't fix it). The
+    // per-pixel-averaged normal at that distance IS the sphere normal, which is
+    // also why the impostor this stands in for doesn't shimmer. Visible relief on
+    // the map then comes from the baked albedo bands, not normal shading.
+    let stable_normal = select(
+        normalize(mix(geo_normal, normal, 0.85)),
+        geo_normal,
+        distant_schematic,
+    );
+
+    // Geometric specular AA: measure the shading normal's screen-space variance
+    // once here — in uniform control flow, before the regolith/dielectric branch
+    // (the derivative builtins require it) — then widen each path's specular
+    // roughness to cover the sub-pixel normal cone, killing highlight sparkle.
+    let spec_aa_var = specular_aa_variance(stable_normal);
 
     var lit: vec3<f32>;
     if (style_regolith) {
@@ -1159,7 +1438,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // atmospheric sky fill (airless); ambient comes from the scene floor
         // inside the Hapke helper. Roughness drives the opposition-surge width;
         // dry regolith has no wet-hollow tightening.
-        let surf_roughness = clamp(roughness, 0.06, 1.0);
+        let surf_roughness = specular_aa_apply(clamp(roughness, 0.06, 1.0), spec_aa_var);
         lit = shade_hapke_surface(
             albedo.rgb,
             surf_roughness,
@@ -1173,7 +1452,10 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
             external_shadow,
         );
     } else {
-        // Rough-dielectric surface lighting (see the BRDF block above).
+        // Rough-dielectric surface lighting: direct sun (BRDF) + an
+        // atmosphere-derived hemisphere sky IBL (blue sky-dome + warm ground
+        // bounce) + a subtle ambient sky specular. The sky model is shared with
+        // the grass shader through `thalos::lighting` so the two can't drift.
         let n_dot_l = max(dot(stable_normal, sun_dir_ws), 0.0);
         let n_dot_v = max(dot(stable_normal, view_dir), 1.0e-4);
 
@@ -1182,8 +1464,33 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // highlight while dry, rough ground stays matte. Clamped away from 0 to
         // keep the GGX lobe from collapsing to a firefly.
         let wetness = clamp(material_masks.a, 0.0, 1.0);
-        let surf_roughness = clamp(mix(roughness, roughness * 0.45, wetness), 0.06, 1.0);
+        // Force matte on the orbital map (see `distant_schematic`): a fully rough
+        // GGX lobe is flat in `n·h`, so the highlight can't concentrate and alias.
+        let surf_roughness = select(
+            specular_aa_apply(
+                clamp(mix(roughness, roughness * 0.45, wetness), 0.06, 1.0),
+                spec_aa_var,
+            ),
+            1.0,
+            distant_schematic,
+        );
 
+        // Lighting environment from the bound atmosphere. The vertical Rayleigh
+        // optical depth τ_v = β_R · H_R is independent of the render-unit scale,
+        // and the strength gate matches the live `BodySky` value, so the surface
+        // ambient tracks the sky dome through sunrise → noon → sunset.
+        let tau_zenith = terrain_atmos.rayleigh_beta_h.xyz * terrain_atmos.rayleigh_beta_h.w;
+        let sky = compute_surface_sky(
+            tau_zenith,
+            terrain_atmos.atmos_geom.z,
+            geo_normal,
+            sun_dir_ws,
+            sun_flux,
+        );
+
+        // ── Direct sun ────────────────────────────────────────────────────
+        // BRDF × cosine × shadow, tinted by the reddened beam and scaled into
+        // the shared scene-flux exposure.
         let brdf = surface_brdf(
             albedo.rgb,
             surf_roughness,
@@ -1193,28 +1500,34 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
             n_dot_l,
             n_dot_v,
         );
-        // Irradiance cosine + direct-sun shadowing applied here; flux is folded
-        // into DIRECT_SUN_STRENGTH below to stay in the placeholder's brightness
-        // range until the scene exposure path is unified.
-        let direct_rgb = brdf * n_dot_l * external_shadow;
+        let direct = brdf * (n_dot_l * external_shadow) * sky.sun_color * sky.sun_scale;
 
-        // Sky fill (diffuse skylight). A constant ambient floor used to light the
-        // night side as brightly as a hazy daytime shadow. Real skylight only
-        // exists while the sun illuminates the atmosphere, so drive the fill by
-        // the sun's elevation over the *macro* horizon (geometric normal, not
-        // the relief normal) and let it fade to a faint starlight floor at night.
-        // The daytime level is well under the old 0.28 floor so the overhead-sun
-        // case stops washing the flat ground out into the tonemapper's grey
-        // shoulder; a gentle cool tint stands in for blue-sky scatter and keeps
-        // daylight shadows from reading as flat grey.
-        let sun_elevation = dot(geo_normal, sun_dir_ws);
-        let daylight = smoothstep(-0.06, 0.12, sun_elevation);
-        let night_fill = 0.012;
-        let day_fill = 0.15;
-        let fill = mix(night_fill, day_fill, daylight) * material.occlusion;
-        let sky_tint = mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.74, 1.0), 0.25 * daylight);
+        // ── Ambient occlusion ─────────────────────────────────────────────
+        // Cavity AO from the procedural detail breakup × the material mask's
+        // occlusion. Applied to the ambient terms only.
+        let detail_luma = dot(detail.tint, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let cavity = clamp(mix(1.0, detail_luma, AO_FROM_DETAIL), AO_MIN, 1.0);
+        let ao = clamp(material.occlusion * cavity, 0.0, 1.0);
+        // Specular occlusion: smooth (wet/snow) surfaces keep more of their sky
+        // reflection out of creases than rough matte ground does.
+        let spec_occ = clamp(ao + (1.0 - surf_roughness) * 0.4, 0.0, 1.0);
 
-        lit = direct_rgb * DIRECT_SUN_STRENGTH + albedo.rgb * sky_tint * fill;
+        // ── Hemispheric sky ambient (diffuse) ─────────────────────────────
+        // Blue sky on up-facing normals, warm ground bounce on down-facing.
+        // Canopy AO: tree/object shadow bleeds into the ambient too (a canopy
+        // overhead blocks the sky, not only the sun), so shadowed ground reads.
+        let canopy_ambient = mix(1.0, tree_shadow, AMBIENT_SHADOW_BLEED);
+        let ambient_irr = sky_ambient_irradiance(sky, stable_normal, geo_normal);
+        let ambient_diffuse = albedo.rgb * ambient_irr * ao * canopy_ambient;
+
+        // ── Ambient sky specular ──────────────────────────────────────────
+        // Split-sum environment reflection of the sky dome. Negligible on rough
+        // ground; a believable cool sheen on wet ground and snow.
+        let dfg = env_brdf_approx(surf_roughness, n_dot_v);
+        let env_spec = dfg.x * DIELECTRIC_F0 + dfg.y;
+        let ambient_spec = sky.sky_radiance * env_spec * spec_occ * canopy_ambient;
+
+        lit = direct + ambient_diffuse + ambient_spec;
     }
 
     var output: FragmentOutput;

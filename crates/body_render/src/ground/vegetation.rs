@@ -44,7 +44,8 @@ pub const GRASS_TILE_SIZE_M: f64 = 25.0;
 /// near-field procedural cascade, matching what the player stands on.
 const GRASS_SAMPLE_LOD_M: f32 = 0.5;
 
-/// Hard ceiling on blades per tile, against pathological density configs.
+/// Hard ceiling on placement *candidates* per tile, against pathological
+/// density configs. Final blade count is this × `blades_per_clump`.
 const MAX_BLADES_PER_TILE: usize = 8192;
 
 /// Sink blade roots slightly below the sampled surface so bilinear
@@ -125,6 +126,10 @@ pub struct GrassTileBuildInput {
     /// `height > sea_level + 1 m`. Pass `f32::MIN` for bodies without oceans.
     pub sea_level_m: f32,
     pub blades_per_m2: f32,
+    /// Blades emitted per accepted placement point — a fanned tuft. Multiplies
+    /// ground coverage *without* re-paying the placement gate (the expensive
+    /// part), so a sparse scatter reads as a thick field. Far rings use 1.
+    pub blades_per_clump: u32,
     /// Blade geometry LOD for this clipmap ring.
     pub blade_lod: GrassBladeLod,
     /// Width multiplier — coarser rings widen blades to hold ground coverage
@@ -137,6 +142,11 @@ pub struct GrassTileBuildInput {
     /// Active terrain-flatten pad (e.g. the runway). Blades are skipped where
     /// the pad has meaningful weight so they never poke through the paving.
     pub flatten_exclusion: Option<TerrainFlatten>,
+    /// Far-ring forest cull strength in `[0, 1]`. Distant grass under a tree
+    /// canopy is occluded by the trees in front of it, so the far clipmap rings
+    /// thin grass by `forest_cull × forest_coverage(dir)` — full grass on open
+    /// plains, ~none deep inside a grove. `0` (near rings) keeps all grass.
+    pub forest_cull: f32,
 }
 
 /// A finished grass tile: one batched mesh whose vertex positions are small
@@ -214,105 +224,152 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let grass_w = sample.grass_w;
         let normal_body = sample.normal_body;
 
-        let accept = smoothstep(0.45, 0.8, grass_w)
+        // Acceptance: keep (near-)all candidates on real grassland — the old
+        // `smoothstep(0.45, 0.8)` halved density even where the ground *is*
+        // grass, which is the main reason the field read sparse. We still reject
+        // rock/soil (grass_w low) and fade out toward the treeline.
+        let mut accept = smoothstep(0.20, 0.50, grass_w)
             * (1.0 - smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h));
+        // Far rings cull grass under canopy — the trees occlude it, so the
+        // distant blades are pure overdraw. Near rings pass `forest_cull = 0`.
+        if input.forest_cull > 0.0 {
+            accept *= 1.0 - input.forest_cull * crate::ground::scatter::forest_coverage(dir);
+        }
         if (rng(2) as f32) >= accept {
             continue;
         }
 
-        // Blade frame: yaw in the tangent plane + a small random lean.
-        let yaw = rng(3) * std::f64::consts::TAU;
-        let lean = rng(4) * 0.25;
-        let side_body = (basis.tangent_x * yaw.cos() + basis.tangent_z * yaw.sin()).normalize();
-        let lean_dir = normal_body.cross(side_body).normalize();
-        let up_body = (normal_body + lean_dir * lean).normalize();
+        // Per-clump (shared by every blade in the tuft): the surface root, the
+        // local tangent frame the tuft fans out in, and the altitude colour band.
+        let clump_root_body = dir * (input.radius_m + h as f64 - ROOT_SINK_M);
+        let clump_root = (clump_root_body - center_surface_body_m).as_vec3();
+        let tan_x = basis.tangent_x.as_vec3();
+        let tan_z = basis.tangent_z.as_vec3();
+        let normal = normal_body.as_vec3();
+        // Tuft spread grows gently with blade width so far (wide) clumps stay
+        // cohesive tufts rather than isolated cards.
+        let spread = (0.14 * input.width_scale as f64).clamp(0.10, 0.50) as f32;
 
-        let height_m = (0.28 + rng(5) * 0.38) * input.height_scale as f64; // base 0.28–0.66 m
-        let width_m = (0.045 + rng(6) * 0.035) * input.width_scale as f64; // chunkier → fuller field
-
-        let root_body = dir * (input.radius_m + h as f64 - ROOT_SINK_M);
-        let root = (root_body - center_surface_body_m).as_vec3();
-        let side = side_body.as_vec3();
-        let up = up_body.as_vec3();
-        // Forward arc: the blade bends over in a tangent direction as it rises,
-        // so it reads as a natural curved blade instead of a stiff spike.
-        let bend_dir = lean_dir.as_vec3();
-        let bend = (0.18 + rng(10) as f32 * 0.30) * height_m as f32; // tip arc distance
-        let normal = normal_body.as_vec3().to_array();
-
-        // Tint: terrain palette band by altitude, ± value jitter + hue drift,
-        // brightening toward the tip (sun-through-blade glow at grazing angles).
         let lush = 1.0 - smoothstep(LUSH_LO_M, LUSH_HI_M, h);
         let dry = smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h);
-        let base = C_GRASS.lerp(C_FOREST, lush * 0.6).lerp(C_DRYGRASS, dry);
-        // Per-blade warm(yellow)/cool(blue-green) hue drift breaks the uniform
-        // green; the multiplier lifts blades above the ground they colour-match.
-        let hue = (rng(11) as f32 - 0.5) * 0.30;
-        let tinted = Vec3::new(base.x * (1.0 + hue), base.y, base.z * (1.0 - hue));
-        let tint = tinted * (1.05 + 0.45 * rng(7) as f32);
-        // color.a carries the blade height (m): the shader scale-fade collapses
-        // each blade toward its root by `uv.x * color.a`, so far/edge blades
-        // shrink to nothing seamlessly (no dither, no pop).
-        let blade_h = height_m as f32;
-        let color_at = |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, blade_h];
-        let phase = rng(9) as f32;
+        let band = C_GRASS.lerp(C_FOREST, lush * 0.6).lerp(C_DRYGRASS, dry);
 
-        let hw = width_m as f32 * 0.5;
-        let h_f = height_m as f32;
-        let base_index = positions.len() as u32;
-        let mut push_vert = |pos: Vec3, sway: f32, lighten: f32| {
-            positions.push(pos.to_array());
-            normals.push(normal);
-            uvs.push([sway, phase]);
-            colors.push(color_at(lighten));
-        };
-        match input.blade_lod {
-            GrassBladeLod::Full => {
-                // Curved tapered blade: a centreline arcing forward along
-                // `bend_dir`, four cross-sections (root → 40 % → 72 % → tip)
-                // tapering to a point. 7 verts, 5 triangles. uv.x (0 root → 1
-                // tip) drives the wind sway.
-                let arc = |t: f32| root + up * (h_f * t) + bend_dir * (bend * t * t);
-                let c1 = arc(0.40);
-                let c2 = arc(0.72);
-                let tip = arc(1.0);
-                push_vert(root - side * hw, 0.0, 0.80);
-                push_vert(root + side * hw, 0.0, 0.80);
-                push_vert(c1 - side * (hw * 0.72), 0.18, 1.05);
-                push_vert(c1 + side * (hw * 0.72), 0.18, 1.05);
-                push_vert(c2 - side * (hw * 0.40), 0.55, 1.30);
-                push_vert(c2 + side * (hw * 0.40), 0.55, 1.30);
-                push_vert(tip, 1.0, 1.65);
-                indices.extend_from_slice(&[
-                    base_index,
-                    base_index + 1,
-                    base_index + 2,
-                    base_index + 1,
-                    base_index + 3,
-                    base_index + 2,
-                    base_index + 2,
-                    base_index + 3,
-                    base_index + 4,
-                    base_index + 3,
-                    base_index + 5,
-                    base_index + 4,
-                    base_index + 4,
-                    base_index + 5,
-                    base_index + 6,
-                ]);
+        // Fan a small cluster of blades per accepted point. Coverage multiplies
+        // without re-paying the placement gate, turning a sparse scatter into a
+        // thick field (the single biggest lush-vs-sparse lever).
+        for clump in 0..input.blades_per_clump.max(1) {
+            // Distinct per (candidate, blade-in-tuft); offset salts off the
+            // per-clump `rng` so the tuft doesn't correlate with placement.
+            let brng = |salt: u64| {
+                blade_hash(input.seed, input.key, blade as u64 * 131 + clump as u64, salt ^ 0x55)
+            };
+
+            // Sub-offset within the clump, in the tangent plane.
+            let ox = (brng(0) as f32 - 0.5) * spread;
+            let oz = (brng(1) as f32 - 0.5) * spread;
+            let root = clump_root + tan_x * ox + tan_z * oz;
+
+            // Blade frame: yaw in the tangent plane + a small forward lean.
+            let yaw = brng(3) * std::f64::consts::TAU;
+            let lean = 0.10 + brng(4) * 0.28;
+            let side_body =
+                (basis.tangent_x * yaw.cos() + basis.tangent_z * yaw.sin()).normalize();
+            let lean_dir = normal_body.cross(side_body).normalize();
+            let up_body = (normal_body + lean_dir * lean).normalize();
+            let side = side_body.as_vec3();
+            let up = up_body.as_vec3();
+            let bend_dir = lean_dir.as_vec3();
+
+            let height_m = (0.22 + brng(5) * 0.32) * input.height_scale as f64; // 0.22–0.54 m
+            let width_m = (0.050 + brng(6) * 0.040) * input.width_scale as f64;
+            // Pronounced forward arch — blades flop over rather than spike up.
+            let bend = (0.32 + brng(10) as f32 * 0.45) * height_m as f32;
+
+            // Tint: ground-palette band + a *gentle* per-blade hue drift and a
+            // small value jitter, kept CLOSE to the ground colour so the field
+            // reads as one continuous green mass instead of pale spikes.
+            let hue = (brng(11) as f32 - 0.5) * 0.12;
+            let tinted = Vec3::new(band.x * (1.0 + hue), band.y, band.z * (1.0 - hue));
+            let tint = tinted * (0.85 + 0.28 * brng(7) as f32);
+            // color.a carries the blade height (m) for the shader's scale-fade.
+            let blade_h = height_m as f32;
+            // Root darker (melts into the ground) → tip a touch brighter; far
+            // less lift than before, so no washed-out look.
+            let color_at =
+                |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, blade_h];
+            let phase = brng(9) as f32;
+
+            let hw = width_m as f32 * 0.5;
+            let h_f = height_m as f32;
+            let base_index = positions.len() as u32;
+            let mut push_vert = |pos: Vec3, sway: f32, lighten: f32| {
+                positions.push(pos.to_array());
+                normals.push(normal.to_array());
+                uvs.push([sway, phase]);
+                colors.push(color_at(lighten));
+            };
+            match input.blade_lod {
+                GrassBladeLod::Full => {
+                    // Curved tapered blade: a centreline arcing forward along
+                    // `bend_dir`, four cross-sections (root → 40 % → 72 % → tip)
+                    // tapering to a point. 7 verts, 5 triangles. uv.x (0 root → 1
+                    // tip) drives the wind sway.
+                    let arc = |t: f32| root + up * (h_f * t) + bend_dir * (bend * t * t);
+                    let c1 = arc(0.40);
+                    let c2 = arc(0.72);
+                    let tip = arc(1.0);
+                    push_vert(root - side * hw, 0.0, 0.60);
+                    push_vert(root + side * hw, 0.0, 0.60);
+                    push_vert(c1 - side * (hw * 0.74), 0.18, 0.84);
+                    push_vert(c1 + side * (hw * 0.74), 0.18, 0.84);
+                    push_vert(c2 - side * (hw * 0.42), 0.55, 1.02);
+                    push_vert(c2 + side * (hw * 0.42), 0.55, 1.02);
+                    push_vert(tip, 1.0, 1.16);
+                    indices.extend_from_slice(&[
+                        base_index,
+                        base_index + 1,
+                        base_index + 2,
+                        base_index + 1,
+                        base_index + 3,
+                        base_index + 2,
+                        base_index + 2,
+                        base_index + 3,
+                        base_index + 4,
+                        base_index + 3,
+                        base_index + 5,
+                        base_index + 4,
+                        base_index + 4,
+                        base_index + 5,
+                        base_index + 6,
+                    ]);
+                }
+                GrassBladeLod::Wide => {
+                    // Tapered 5-vertex blade (root pair → mid pair → tip), bent
+                    // forward — a soft tuft card when widened, NOT a single flat
+                    // shard. Holds coverage at low density without the billboard
+                    // look the old single triangle had.
+                    let mid = root + up * (h_f * 0.55) + bend_dir * (bend * 0.32);
+                    let tip = root + up * h_f + bend_dir * (bend * 0.6);
+                    push_vert(root - side * hw, 0.0, 0.62);
+                    push_vert(root + side * hw, 0.0, 0.62);
+                    push_vert(mid - side * (hw * 0.60), 0.5, 0.92);
+                    push_vert(mid + side * (hw * 0.60), 0.5, 0.92);
+                    push_vert(tip, 1.0, 1.12);
+                    indices.extend_from_slice(&[
+                        base_index,
+                        base_index + 1,
+                        base_index + 2,
+                        base_index + 1,
+                        base_index + 3,
+                        base_index + 2,
+                        base_index + 2,
+                        base_index + 3,
+                        base_index + 4,
+                    ]);
+                }
             }
-            GrassBladeLod::Wide => {
-                // Flat wide blade: a single triangle (root pair + tip), bent
-                // forward a little. Cheap far-LOD; `width_scale` makes it a
-                // clump card that holds coverage at low density.
-                let tip = root + up * h_f + bend_dir * (bend * 0.6);
-                push_vert(root - side * hw, 0.0, 0.85);
-                push_vert(root + side * hw, 0.0, 0.85);
-                push_vert(tip, 1.0, 1.5);
-                indices.extend_from_slice(&[base_index, base_index + 1, base_index + 2]);
-            }
+            blade_count += 1;
         }
-        blade_count += 1;
     }
 
     if blade_count == 0 {
@@ -336,6 +393,177 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         built_revision,
         center_height_m,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Standalone clump (impostor asset)
+// ---------------------------------------------------------------------------
+
+/// Parameters for a single dense grass *tuft*, built on its own rather than as
+/// part of a tile.
+///
+/// Unlike [`build_grass_tile_mesh`] this is `HeightSource`-free: blades sit on a
+/// flat XZ plane with `+Y` up, centred on the origin, so the tuft can be rendered
+/// from a hemisphere of view directions into an octahedral impostor atlas (the
+/// "billboard a clump, not a blade" path — see `docs/vegetation.md` §5/§7) and
+/// previewed on its own with [`GrassMaterial`]. The blade geometry mirrors
+/// [`GrassBladeLod::Full`] so the impostor and the near blades read as the same
+/// grass.
+#[derive(Clone, Copy)]
+pub struct GrassClumpParams {
+    /// Footprint radius of the tuft (m); blades scatter within this disc.
+    pub radius_m: f32,
+    /// Number of blades fanned in the tuft.
+    pub blade_count: u32,
+    /// Nominal blade height (m); a per-blade factor jitters around it.
+    pub height_m: f32,
+    /// Base blade colour (linear); a gentle per-blade hue/value drift applies
+    /// around it, as in the tile builder. Use the terrain `C_GRASS` band so the
+    /// clump matches the ground.
+    pub color: Vec3,
+    pub seed: u64,
+}
+
+impl Default for GrassClumpParams {
+    fn default() -> Self {
+        Self {
+            // A small but real footprint so blades root at distinct spots
+            // instead of all stacking at one point.
+            radius_m: 0.16,
+            blade_count: 22,
+            height_m: 0.45,
+            color: C_GRASS,
+            seed: 0x6_8A55,
+        }
+    }
+}
+
+/// Build a single dense grass tuft, origin-centred on flat ground (`+Y` up), as a
+/// vertex-coloured blade mesh. Pure + deterministic for a given `params`. The
+/// asset baked into the clump octahedral impostor and previewed on its own; the
+/// blade geometry deliberately mirrors the [`GrassBladeLod::Full`] arm of
+/// [`build_grass_tile_mesh`] so the impostor matches the near field by
+/// construction.
+pub fn build_grass_clump_mesh(params: &GrassClumpParams) -> Mesh {
+    // Synthetic tile key — the clump is placement-free, so any fixed key gives a
+    // stable per-blade RNG stream off `params.seed`.
+    let key = GrassTileKey {
+        face: 0,
+        x: 0,
+        y: 0,
+    };
+    let n = params.blade_count.max(1);
+    let r = params.radius_m.max(1.0e-3);
+    let up = Vec3::Y;
+
+    // Clump-level prevailing direction: every blade arches roughly this way
+    // (a tuft combed one direction), with only a moderate fan of variation —
+    // not a chaotic every-which-way ball. Per-clump variety in the field comes
+    // from the per-instance billboard yaw, not from scrambling each blade here.
+    let phi0 = blade_hash(params.seed, key, 0xC1, 0) as f32 * std::f32::consts::TAU;
+    // Total fan spread of blade arch azimuth around `phi0` (radians).
+    const FAN: f32 = 0.85;
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for blade in 0..n {
+        let rng = |salt: u64| blade_hash(params.seed, key, blade as u64, salt) as f32;
+
+        // Uniform-density disc placement (sqrt radius), in the tangent plane.
+        let ang = rng(0) * std::f32::consts::TAU;
+        let rad = r * rng(1).sqrt();
+        let root = Vec3::new(rad * ang.cos(), 0.0, rad * ang.sin());
+
+        // Arch azimuth clustered around the clump's prevailing direction `phi0`
+        // (± FAN/2): blades mostly arch the same way, with some variation.
+        let az = phi0 + (rng(3) - 0.5) * FAN;
+        let lean_dir = Vec3::new(az.cos(), 0.0, az.sin());
+        // The blade's flat-face (width) axis gets an INDEPENDENT yaw twist, so
+        // blades that share an arch direction still cross at angles instead of
+        // stacking as identical coplanar sheets ("all inside each other").
+        let fy = az + std::f32::consts::FRAC_PI_2 + (rng(8) - 0.5) * 1.3;
+        let side = Vec3::new(fy.cos(), 0.0, fy.sin());
+        // Mostly upright with a slight, shared lean — not flopped over.
+        let lean = 0.07 + rng(4) * 0.18;
+        let blade_up = (up + lean_dir * lean).normalize();
+        let bend_dir = lean_dir;
+
+        let height_m = params.height_m * (0.70 + rng(5) * 0.6); // ~0.70–1.30×
+        let width_m = 0.030 + rng(6) * 0.022; // thin blades
+        // Gentle forward arch — a soft bend, not a curl-over.
+        let bend = (0.24 + rng(10) * 0.28) * height_m;
+
+        // Tint: ground-palette band + gentle per-blade hue/value drift (kept
+        // close to the base so the tuft reads as one green mass).
+        let hue = (rng(11) - 0.5) * 0.12;
+        let tinted = Vec3::new(
+            params.color.x * (1.0 + hue),
+            params.color.y,
+            params.color.z * (1.0 - hue),
+        );
+        let tint = tinted * (0.85 + 0.28 * rng(7));
+        let blade_h = height_m;
+        let phase = rng(9);
+        let color_at =
+            |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, blade_h];
+
+        let hw = width_m * 0.5;
+        let base_index = positions.len() as u32;
+        let mut push_vert = |pos: Vec3, sway: f32, lighten: f32| {
+            positions.push(pos.to_array());
+            normals.push(up.to_array());
+            uvs.push([sway, phase]);
+            colors.push(color_at(lighten));
+        };
+
+        // Curved tapered blade (root → 40 % → 72 % → tip), arching forward along
+        // `bend_dir` — the `GrassBladeLod::Full` shape.
+        let arc = |t: f32| root + blade_up * (height_m * t) + bend_dir * (bend * t * t);
+        let c1 = arc(0.40);
+        let c2 = arc(0.72);
+        let tip = arc(1.0);
+        // Soft root→tip value gradient (gentle, so blades don't read as
+        // high-contrast toony shards).
+        push_vert(root - side * hw, 0.0, 0.72);
+        push_vert(root + side * hw, 0.0, 0.72);
+        push_vert(c1 - side * (hw * 0.74), 0.18, 0.86);
+        push_vert(c1 + side * (hw * 0.74), 0.18, 0.86);
+        push_vert(c2 - side * (hw * 0.42), 0.55, 0.97);
+        push_vert(c2 + side * (hw * 0.42), 0.55, 0.97);
+        push_vert(tip, 1.0, 1.03);
+        indices.extend_from_slice(&[
+            base_index,
+            base_index + 1,
+            base_index + 2,
+            base_index + 1,
+            base_index + 3,
+            base_index + 2,
+            base_index + 2,
+            base_index + 3,
+            base_index + 4,
+            base_index + 3,
+            base_index + 5,
+            base_index + 4,
+            base_index + 4,
+            base_index + 5,
+            base_index + 6,
+        ]);
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
 }
 
 /// Integer-mix hash → `[0, 1)`. Deterministic per (seed, tile, blade, salt);
@@ -389,10 +617,14 @@ pub struct GrassParams {
     /// per-channel zenith optical depth, scale-independent), w = artistic
     /// atmosphere strength. Drives the blue sky tint + sunset reddening.
     pub sky_tau: Vec4,
-    /// xyz = the vegetation focus (the player craft) in render space — used as
-    /// the LOD/fade reference *instead of the camera*, so zooming / orbiting the
-    /// camera doesn't change what's drawn. w = 1.0 when valid; 0.0 falls back to
-    /// the camera position in-shader.
+    /// xyz = vegetation focus OFFSET = (player craft − camera), render space.
+    /// The shader rebuilds the LOD/fade reference as `view.world_position +
+    /// offset` — the craft in the *current* frame's render origin. Passing an
+    /// offset (not an absolute world point) keeps the fade craft-anchored
+    /// (zoom/orbit-independent) while staying robust to big_space floating-origin
+    /// recentres: an absolute anchor is read one frame stale and jumps a whole
+    /// cell on recentre, popping fade-band instances in/out while the craft
+    /// moves. w = 1.0 when valid; 0.0 → offset 0 = fade around the camera.
     pub anchor: Vec4,
 }
 
@@ -435,6 +667,22 @@ pub(crate) fn embed_grass_shader(app: &mut App) {
     embedded_asset!(app, "grass.wgsl");
 }
 
+/// Standalone plugin that registers [`GrassMaterial`] and embeds its shader, for
+/// consumers that render grass without the full [`ThalosTerrainPlugin`](crate::ground::ThalosTerrainPlugin)
+/// (e.g. the headless object preview). The terrain plugin registers the same
+/// material directly, so don't add both.
+pub struct GrassMaterialPlugin;
+
+impl Plugin for GrassMaterialPlugin {
+    fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::shading::PlanetLightingPlugin>() {
+            app.add_plugins(crate::shading::PlanetLightingPlugin);
+        }
+        app.add_plugins(MaterialPlugin::<GrassMaterial>::default());
+        embed_grass_shader(app);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,11 +716,13 @@ mod tests {
             radius_m,
             sea_level_m: 0.0,
             blades_per_m2: 4.0,
+            blades_per_clump: 4,
             blade_lod: GrassBladeLod::Full,
             width_scale: 1.0,
             height_scale: 1.0,
             seed: 7,
             flatten_exclusion: None,
+            forest_cull: 0.0,
         };
         let a = build_grass_tile_mesh(&input).expect("flat land grows grass");
         let b = build_grass_tile_mesh(&input).expect("flat land grows grass");
@@ -497,11 +747,13 @@ mod tests {
             radius_m: 3_186_000.0,
             sea_level_m: 0.0,
             blades_per_m2: 4.0,
+            blades_per_clump: 4,
             blade_lod: GrassBladeLod::Full,
             width_scale: 1.0,
             height_scale: 1.0,
             seed: 7,
             flatten_exclusion: None,
+            forest_cull: 0.0,
         };
         assert!(build_grass_tile_mesh(&input).is_none());
     }

@@ -44,6 +44,7 @@ use thalos_volumetric_clouds::{
 use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
+use crate::graphics_settings::GraphicsSettings;
 use crate::solar_system_state::CloudWeatherState;
 
 use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemState};
@@ -56,7 +57,7 @@ const BASE_ALTITUDE_M: f32 = 2000.0;
 const THICKNESS_M: f32 = 1300.0;
 /// Global scale on the planet-fixed weather coverage map (which carries the
 /// local overcast fraction, mean ≈ `CloudWeatherState::coverage_mean`).
-/// 1.0 = trust the weather field; BRP-tunable global trim.
+/// 1.0 = trust the weather field; global trim.
 const COVERAGE_SCALE: f32 = 1.0;
 /// Extinction density multiplier. Some core contrast, but not so high that the
 /// flat deck base reads as a hard sliced edge.
@@ -114,7 +115,7 @@ impl Plugin for CloudsRenderPlugin {
 
 /// One-time static appearance setup. Kept out of the per-frame [`drive_clouds`]
 /// (which writes only the dynamic fields — sun, planet radius, camera) so
-/// runtime BRP edits to coverage/density/scale/heights persist instead of being
+/// runtime edits to coverage/density/scale/heights persist instead of being
 /// overwritten every frame. Runs in `PostStartup`, after `CloudsPlugin` inserts
 /// the default config at `Startup`.
 fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
@@ -130,7 +131,7 @@ fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
     // 4 self-shadow steps (upstream 6): each view sample pays this many extra
     // density evaluations, and the adaptive view step already raised the
     // sample count through the band — the lighting difference is subtle, the
-    // cost is not. BRP-tunable back up if shadow gradients look flat.
+    // cost is not. Raise it back up if shadow gradients look flat.
     config.clouds_shadow_raymarch_steps_count = 4;
 }
 
@@ -146,12 +147,23 @@ fn drive_clouds(
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
+    graphics: Res<GraphicsSettings>,
     mut active: ResMut<ActiveCloudBody>,
     mut cam_mat: ResMut<CameraMatrices>,
     mut config: ResMut<CloudsConfig>,
     time: Res<Time>,
     mut wind_angle: Local<f32>,
 ) {
+    // Clouds disabled in graphics settings: park the raymarch camera far
+    // outside any shell (same as the no-cloud-body case below) so every ray
+    // misses and `update_body_terrain_atmosphere` binds the blank fallback,
+    // leaving the sky clear at near-zero GPU cost.
+    if !graphics.clouds {
+        active.0 = None;
+        cam_mat.translation = Vec3::new(0.0, config.planet_radius * 1.0e3 + 1.0e9, 0.0);
+        return;
+    }
+
     let Ok((cam_gt, camera)) = ship_cam_q.single() else {
         return;
     };
@@ -242,7 +254,7 @@ fn drive_clouds(
     let scene_flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
 
     // Drive only the dynamic config (static appearance is set once in
-    // `init_cloud_appearance`, leaving it BRP-tunable at runtime).
+    // `init_cloud_appearance`, leaving it editable at runtime).
     config.planet_radius = radius;
     config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
     let sun_rgb = Vec3::new(1.0, 0.97, 0.92) * scene_flux * SUN_FLUX_SCALE;

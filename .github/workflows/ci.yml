@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           # Design invariant (CLAUDE.md): world, physics_canonical, control,
-          # terrain, and celestial are pure Rust libraries with no Bevy
+          # terrain, celestial, and texgen are pure Rust libraries with no Bevy
           # dependency. This is
           # a `cargo tree` boundary check, not a build — it stays fast and
           # catches transitive leaks (e.g. a registry dep pulling Bevy via its
@@ -39,7 +39,8 @@ jobs:
             thalos_physics_canonical \
             thalos_control \
             thalos_terrain \
-            thalos_celestial; do
+            thalos_celestial \
+            thalos_texgen; do
             offenders="$(cargo tree -p "$crate" -e normal \
               | grep -oE '\bbevy[a-z0-9_]* v[0-9][^ ]*' \
               | grep -vE '^bevy_erosion_filter ' \

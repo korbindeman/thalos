@@ -87,6 +87,7 @@ impl Plugin for ShipViewPlugin {
                     animate_ship_control_surfaces.after(rebuild_ship_wing_visuals),
                     rebuild_ship_nacelle_visuals,
                     rebuild_ship_gear_visuals,
+                    sync_gear_visibility.after(rebuild_ship_gear_visuals),
                     update_ship_part_transforms.after(rebuild_ship_visuals),
                     update_ship_part_shader_params.after(rebuild_ship_visuals),
                     update_ship_camera_offset.after(update_ship_part_transforms),
@@ -106,6 +107,12 @@ impl Plugin for ShipViewPlugin {
 /// material it should mutate.
 #[derive(Component)]
 pub(crate) struct PartVisual;
+
+/// Marker on the gear gearbox's rendered mesh child, so
+/// [`sync_gear_visibility`] can hide it when the gear is retracted
+/// (`local_physics::GearState`). Binary show/hide — no retraction animation.
+#[derive(Component)]
+pub(crate) struct GearVisual;
 
 /// A hinged control-surface sub-mesh of a wing. Carries everything
 /// [`animate_ship_control_surfaces`] needs to deflect it from the
@@ -994,9 +1001,30 @@ fn rebuild_ship_gear_visuals(
                 Visibility::default(),
                 NoFrustumCulling,
                 PartVisual,
+                GearVisual,
             ))
             .id();
         commands.entity(e).add_child(body);
+    }
+}
+
+/// Hide/show the gear meshes to match [`GearState`]. Binary — there is no
+/// retraction animation (the gear is a simple procedural mesh, so a sweep would
+/// read as a stiff geometric fold rather than a real undercarriage). Touches
+/// each [`GearVisual`] only when its target visibility changes.
+fn sync_gear_visibility(
+    gear_state: Res<crate::local_physics::GearState>,
+    mut visuals: Query<&mut Visibility, With<GearVisual>>,
+) {
+    let target = if gear_state.down {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut vis in &mut visuals {
+        if *vis != target {
+            *vis = target;
+        }
     }
 }
 
