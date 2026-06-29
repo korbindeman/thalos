@@ -8,8 +8,9 @@
 //!   PNGs — to inspect, or to prebake for the game.
 //!
 //! Today it generates the **foliage atlas** (leaf clusters + conifer needles +
-//! bark) the tree meshes sample. Rocks and other procedural textures will live
-//! here too.
+//! bark) the tree meshes sample, plus a companion **foliage material atlas**
+//! (bark normal + roughness). Rocks and other procedural textures will live here
+//! too.
 //!
 //! ## Foliage atlas layout
 //! An `ATLAS_N × ATLAS_N` grid of `CELL_PX` cells. A tree vertex carries a packed
@@ -74,6 +75,41 @@ pub fn foliage_atlas() -> TextureData {
         }
     }
 
+    pack(&px)
+}
+
+/// Generate the **foliage material atlas** (normal + roughness), mirroring the
+/// [`foliage_atlas`] layout cell-for-cell. **Linear** data (NOT sRGB): RGB is a
+/// tangent-space normal (`xyz·0.5+0.5`), A is perceptual roughness. Only the bark
+/// cells carry real detail — derived from the *same* [`bark_height`] field the
+/// albedo uses, so cracks/ridges line up across albedo, normal, and roughness.
+/// Every other cell is left flat (normal `(0,0,1)`, mid roughness): leaves and
+/// needles are matte and never sample this map. Bind alongside [`foliage_atlas`]
+/// on the tree material as a `TextureFormat::Rgba8Unorm` image.
+pub fn foliage_material_atlas() -> TextureData {
+    // Flat default: normal (0,0,1) encoded, roughness 0.9.
+    let mut px = vec![[0.5f32, 0.5, 1.0, 0.9]; SIZE * SIZE];
+    let cell = CELL_PX as usize;
+
+    for c in 0..(ATLAS_N * ATLAS_N) {
+        let ox = (c % ATLAS_N) as usize * cell;
+        let oy = (c / ATLAS_N) as usize * cell;
+        if (BARK_CELL_FIRST..BARK_CELL_FIRST + BARK_CELL_COUNT).contains(&c) {
+            // Same per-cell seed as the albedo bark (see `foliage_atlas`).
+            draw_bark_material(&mut px, ox, oy, c as u64 * 733 + 3);
+        } else if (LEAF_CELL_FIRST..LEAF_CELL_FIRST + LEAF_CELL_COUNT).contains(&c) {
+            // Leaf cells carry a real normal/roughness now (not flat): a per-leaf
+            // height→normal so individual leaves catch light differently → depth.
+            // SAME per-cell seed as the albedo leaf cluster, so they line up.
+            draw_leaf_cluster_material(&mut px, ox, oy, c as u64 * 1009 + 7);
+        }
+    }
+
+    pack(&px)
+}
+
+/// Pack a straight-alpha linear scratch buffer into a [`TextureData`].
+fn pack(px: &[[f32; 4]]) -> TextureData {
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
     for (i, p) in px.iter().enumerate() {
         rgba[i * 4] = to_u8(p[0]);
@@ -90,47 +126,138 @@ pub fn foliage_atlas() -> TextureData {
 
 // ── Cell rasterizers ───────────────────────────────────────────────────────────
 
-/// A dense clump of **many small, multi-toned leaves**: a faint deep-green base
-/// for card coverage, then hundreds of tiny coloured leaves (a green palette,
-/// lighter toward the top/outer rim) that build an opaque centre by overlap and
-/// break into a leafy silhouette at the edges.
-fn draw_leaf_cluster(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
-    let cell = CELL_PX as usize;
+/// Leaf normal map: each leaf is a near-flat blade tilted a little in a random
+/// direction so neighbours catch light differently and read as separate leaves —
+/// NOT embossed midrib relief. `LEAF_TILT_*` is the tangent-space tilt (xy) amount
+/// (kept small/gentle); roughness is fixed (waxy, a touch glossier than bark).
+const LEAF_TILT_MIN: f32 = 0.10;
+const LEAF_TILT_VAR: f32 = 0.16;
+const LEAF_ROUGHNESS: f32 = 0.6;
+
+/// One leaf to stamp: centre, orientation, size, palette `tone`, and stack
+/// `layer` (0 = bottom of the clump .. 1 = top). Shared by the albedo cell and
+/// the height→normal cell so they line up exactly.
+struct LeafStamp {
+    s: u64,
+    cx: f32,
+    cy: f32,
+    ang: f32,
+    len: f32,
+    wid: f32,
+    tone: f32,
+    layer: f32,
+}
+
+/// Emit every leaf of one fluffy cluster, deterministic from `seed` — the SINGLE
+/// source of leaf placement, consumed by both [`draw_leaf_cluster`] (albedo) and
+/// [`draw_leaf_cluster_material`] (normal/roughness). A dense body, a sparse
+/// outward fringe + stragglers, and a finer highlight pass, over an irregular
+/// lobed outline with per-cell aspect / lean / lobe-count (so the 11 cells are
+/// all different shapes, not the same disc).
+fn each_leaf(seed: u64, mut emit: impl FnMut(LeafStamp)) {
     let w = CELL_PX as f32;
     let half = w * 0.5;
+    // Body pulled in from the border so the fringe + stragglers can poke out
+    // without hard-cutting at the cell edge.
+    let base = half * 0.76;
+    let asx = 0.82 + 0.40 * hash01(seed, 20);
+    let asy = 0.82 + 0.40 * hash01(seed, 21);
+    let lean = (hash01(seed, 22) - 0.5) * 0.55;
+    let lobes = 3.0 + (3.0 * hash01(seed, 23)).floor(); // 3..5 integer lobes (wraps)
+    let lobe_phase = hash01(seed, 24) * TAU;
+    let edge_at = |a: f32| -> f32 {
+        let nz = value_noise(a.cos() * 1.8 + 4.0, a.sin() * 1.8 + 4.0, seed ^ 0x77);
+        let lobe = 0.5 + 0.5 * (a * lobes + lobe_phase).sin();
+        (0.56 + 0.26 * nz + 0.20 * lobe).clamp(0.40, 1.12)
+    };
+    let place = |a: f32, rr: f32| -> (f32, f32) {
+        let rad = rr * edge_at(a) * base;
+        let (ca, sa) = (a.cos(), a.sin());
+        (half + (ca * asx + sa * lean) * rad, half + sa * asy * rad)
+    };
 
-    // Faint deep-green base — guarantees the card's centre is opaque (so heavily
-    // overlapping cards never see through), mostly hidden by the leaves on top.
-    for y in 0..cell {
-        for x in 0..cell {
-            let dx = (x as f32 + 0.5 - half) / half;
-            let dy = (y as f32 + 0.5 - half) / half;
-            let d = (dx * dx + dy * dy).sqrt();
-            let bump = 0.16 * (value_noise(x as f32 * 0.045, y as f32 * 0.045, seed ^ 0x51) - 0.5);
-            let cover = smooth01((0.74 + bump - d) / 0.22) * 0.55;
-            if cover <= 0.01 {
-                continue;
-            }
-            let idx = (oy + y) * SIZE + (ox + x);
-            over(&mut px[idx], [0.13, 0.26, 0.12, cover]);
-        }
-    }
-
-    // Many small leaves.
-    for li in 0..340u32 {
+    // Body (bottom layers): dense, mildly centre-biased (opaque core, thinner rim).
+    let n_body = 230u32;
+    for li in 0..n_body {
         let s = seed.wrapping_add((li as u64).wrapping_mul(GOLD));
-        let rr = hash01(s, 1).powf(0.55); // centre-biased
-        let r = rr * half * 1.04;
         let a = hash01(s, 2) * TAU;
-        let cx = half + r * a.cos();
-        let cy = half + r * a.sin();
-        let ang = hash01(s, 3) * TAU;
-        let len = w * (0.035 + 0.028 * hash01(s, 4)); // ~9–16 px in a 256 cell
-        let wid = len * (0.42 + 0.22 * hash01(s, 5));
+        let (cx, cy) = place(a, hash01(s, 1).powf(0.6));
+        let len = w * (0.055 + 0.044 * hash01(s, 4));
+        let wid = len * (0.46 + 0.20 * hash01(s, 5));
         let topness = (1.0 - cy / w).clamp(0.0, 1.0);
-        let t = (0.18 + 0.50 * hash01(s, 6) + 0.28 * topness).clamp(0.0, 1.0);
-        stamp_leaf(px, ox, oy, cx, cy, ang, len, wid, leaf_palette(t, s));
+        emit(LeafStamp {
+            s,
+            cx,
+            cy,
+            ang: hash01(s, 3) * TAU,
+            len,
+            wid,
+            tone: (0.16 + 0.40 * hash01(s, 6) + 0.22 * topness).clamp(0.0, 1.0),
+            layer: 0.42 * (li as f32 / n_body as f32),
+        });
     }
+
+    // Fringe + stragglers (middle layers): individual leaves at / just past the
+    // outline, sparse / gappy and pointing outward → leafy bumps + leaves sticking
+    // out instead of a terminating disc.
+    let n_fringe = 110u32;
+    for li in 0..n_fringe {
+        let s = seed.wrapping_add((li as u64 + 700).wrapping_mul(GOLD));
+        let a = hash01(s, 2) * TAU;
+        let (cx, cy) = place(a, 0.86 + 0.26 * hash01(s, 1));
+        let outward = (cy - half).atan2(cx - half);
+        let len = w * (0.050 + 0.046 * hash01(s, 4));
+        let wid = len * (0.42 + 0.18 * hash01(s, 5));
+        let topness = (1.0 - cy / w).clamp(0.0, 1.0);
+        emit(LeafStamp {
+            s,
+            cx,
+            cy,
+            ang: outward + (hash01(s, 3) - 0.5) * 1.1,
+            len,
+            wid,
+            tone: (0.30 + 0.40 * hash01(s, 6) + 0.20 * topness).clamp(0.0, 1.0),
+            layer: 0.42 + 0.20 * (li as f32 / n_fringe as f32),
+        });
+    }
+
+    // Highlight (top layers): finer, brighter leaves on the top/outer for dapple.
+    let n_hi = 170u32;
+    for li in 0..n_hi {
+        let s = seed.wrapping_add((li as u64 + 1500).wrapping_mul(GOLD));
+        let a = hash01(s, 2) * TAU;
+        let rr = hash01(s, 1).powf(0.8);
+        let (cx, cy) = place(a, rr);
+        let len = w * (0.038 + 0.032 * hash01(s, 4));
+        let wid = len * (0.44 + 0.20 * hash01(s, 5));
+        let topness = (1.0 - cy / w).clamp(0.0, 1.0);
+        emit(LeafStamp {
+            s,
+            cx,
+            cy,
+            ang: hash01(s, 3) * TAU,
+            len,
+            wid,
+            tone: (0.46 + 0.34 * hash01(s, 6) + 0.18 * topness + 0.12 * rr).clamp(0.0, 1.0),
+            layer: 0.62 + 0.38 * (li as f32 / n_hi as f32),
+        });
+    }
+}
+
+/// Albedo leaf-cluster cell: stamp every leaf with its palette colour. Shape +
+/// placement come from [`each_leaf`]; see it for the fluffy-silhouette design.
+fn draw_leaf_cluster(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
+    each_leaf(seed, |l| {
+        stamp_leaf(px, ox, oy, l.cx, l.cy, l.ang, l.len, l.wid, leaf_palette(l.tone, l.s));
+    });
+}
+
+/// Material leaf-cluster cell: a per-leaf **normal + roughness**, so neighbouring
+/// leaves catch light slightly differently and read as separate leaves (gentle —
+/// no embossed relief). Each leaf is a near-flat blade tilted a little; see
+/// `stamp_leaf_normal`.
+fn draw_leaf_cluster_material(mat: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
+    each_leaf(seed, |l| stamp_leaf_normal(mat, ox, oy, l));
 }
 
 /// Leaf colour from a green palette (deep → mid → yellow-green highlight) by
@@ -186,18 +313,17 @@ fn draw_needle_spray(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
     }
 }
 
-/// Composite one rotated soft-edged leaf (a tapered ellipse with a faint midrib).
-#[allow(clippy::too_many_arguments)]
-fn stamp_leaf(
-    px: &mut [[f32; 4]],
-    ox: usize,
-    oy: usize,
+/// Iterate the covered texels of one rotated leaf (a tapered ellipse), yielding
+/// `(lx, ly, alpha, u, v)` — `u` along the length, `v` across the width — with a
+/// crisp anti-aliased edge. Shared by the albedo stamp and the height bake so
+/// both see identical leaf coverage.
+fn leaf_footprint(
     cx: f32,
     cy: f32,
     ang: f32,
     len: f32,
     wid: f32,
-    color: [f32; 3],
+    mut f: impl FnMut(i32, i32, f32, f32, f32),
 ) {
     let cell = CELL_PX as i32;
     let (sa, ca) = ang.sin_cos();
@@ -218,16 +344,59 @@ fn stamp_leaf(
             if d >= 1.0 {
                 continue;
             }
-            let alpha = smooth01(1.0 - (d - 0.65) / 0.35).clamp(0.0, 1.0);
-            if alpha <= 0.003 {
-                continue;
+            let alpha = smooth01((1.0 - d) / 0.24).clamp(0.0, 1.0);
+            if alpha > 0.003 {
+                f(lx, ly, alpha, u, v);
             }
-            let rib = 1.0 - 0.16 * smooth01(1.0 - (v.abs() / 0.18).min(1.0));
-            let src = [color[0] * rib, color[1] * rib, color[2] * rib, alpha];
-            let idx = (oy + ly as usize) * SIZE + (ox + lx as usize);
-            over(&mut px[idx], src);
         }
     }
+}
+
+/// Composite one leaf into the albedo (a faint midrib darkens the centre line).
+#[allow(clippy::too_many_arguments)]
+fn stamp_leaf(
+    px: &mut [[f32; 4]],
+    ox: usize,
+    oy: usize,
+    cx: f32,
+    cy: f32,
+    ang: f32,
+    len: f32,
+    wid: f32,
+    color: [f32; 3],
+) {
+    leaf_footprint(cx, cy, ang, len, wid, |lx, ly, alpha, _u, v| {
+        let rib = 1.0 - 0.16 * smooth01(1.0 - (v.abs() / 0.18).min(1.0));
+        let src = [color[0] * rib, color[1] * rib, color[2] * rib, alpha];
+        let idx = (oy + ly as usize) * SIZE + (ox + lx as usize);
+        over(&mut px[idx], src);
+    });
+}
+
+/// Bake one leaf's tangent-space normal: a near-flat blade tilted a little in a
+/// per-leaf random direction, blended in by coverage so the top leaf wins and the
+/// edges stay soft. Neighbouring leaves face slightly differently, so they read as
+/// SEPARATE leaves catching light — without the embossed midrib relief the old
+/// height ridge produced.
+fn stamp_leaf_normal(mat: &mut [[f32; 4]], ox: usize, oy: usize, l: LeafStamp) {
+    let ta = hash01(l.s, 30) * TAU;
+    // Small per-leaf tilt; top leaves (higher `layer`) tilt a touch more.
+    let tmag = (LEAF_TILT_MIN + LEAF_TILT_VAR * hash01(l.s, 31)) * (0.7 + 0.3 * l.layer);
+    let nx = tmag * ta.cos();
+    let ny = tmag * ta.sin();
+    let nz = (1.0 - (nx * nx + ny * ny)).max(0.25).sqrt();
+    let (ex, ey, ez) = (nx * 0.5 + 0.5, ny * 0.5 + 0.5, nz * 0.5 + 0.5);
+    leaf_footprint(l.cx, l.cy, l.ang, l.len, l.wid, |lx, ly, alpha, _u, _v| {
+        // Blend this leaf's flat normal in by coverage (top leaf wins; soft edges).
+        let idx = (oy + ly as usize) * SIZE + (ox + lx as usize);
+        let cur = mat[idx];
+        mat[idx] = [
+            cur[0] * (1.0 - alpha) + ex * alpha,
+            cur[1] * (1.0 - alpha) + ey * alpha,
+            cur[2] * (1.0 - alpha) + ez * alpha,
+            LEAF_ROUGHNESS,
+        ];
+    });
 }
 
 /// Opaque flat-green cell (kept for layout stability; the current mesh is core-less).
@@ -242,20 +411,114 @@ fn fill_shell(px: &mut [[f32; 4]], ox: usize, oy: usize) {
     }
 }
 
-/// Opaque bark for the trunk: a subtle soft vertical grain with sparse furrows
-/// (luminance detail; the mesh's `trunk_color` supplies the brown).
+// ── Bark ─────────────────────────────────────────────────────────────────────
+// Smooth-stem tree bark, authored as a coherent little material: a single height
+// field (`bark_height` — fine continuous vertical grain lines, no furrows) drives
+// BOTH the albedo (one consistent brown modulated in value) and the companion
+// normal/roughness map (`draw_bark_material`), so the grain lines up across every
+// channel. The field is **toroidally periodic** (over CELL_PX in both axes), so
+// the mesh wrap-tiles ONE cell around the stem and up it seamlessly (see
+// `push_trunk`) — no mirror, no seam, no dark-blob landmark to track the repeat.
+// Colours are authored in display sRGB and stored straight — bark colour comes
+// from the texture, not the mesh's dark `trunk_color` tint.
+
+// ONE warm-brown stem tone. Bark variation is **value-only** (fine vertical grain
+// + a gentle broad undulation), so the stem reads as a single consistent brown
+// with lines running up it — not a patchwork of light/dark zones, and never dark
+// spots. Authored in display sRGB, stored straight.
+/// The stem brown; everything else is a value modulation of it. A deep, warm
+/// walnut brown — dark and rich rather than pale tan.
+const BARK_BROWN: [f32; 3] = [0.44, 0.32, 0.20];
+/// Height→normal slope gain. Low — the relief is shallow smooth grain, not furrows.
+const BARK_NORMAL_STRENGTH: f32 = 4.5;
+
+/// The bark's structural fields at a texel — the shared source for both the albedo
+/// and the normal/roughness map. `height` is the shallow smooth relief (grain a
+/// touch recessed); `line` is the signed fine vertical grain (−dark .. +light);
+/// `broad` is a gentle large-scale value undulation.
+struct BarkH {
+    height: f32,
+    line: f32,
+    broad: f32,
+}
+
+/// Evaluate the bark height field at texel `(x, y)`. The look is a **smooth young
+/// stem**: fine continuous vertical grain lines running up it, no furrows or
+/// blobs. Higher frequency across the stem (`x`), very low along it (`y`) → long
+/// vertical lines. Every field is **periodic over `CELL_PX` in BOTH axes**, so one
+/// cell wrap-tiles seamlessly around the stem (x) and up it (y) — no seam, no
+/// mirror, no repeating landmark.
+fn bark_height(x: f32, y: f32, seed: u64) -> BarkH {
+    // Gentle wander so the grain bows organically up the stem (not ruler-straight).
+    // Periodic so it doesn't break the wrap.
+    let xw = x + (grad_noise_per(x, 0.005, y, 0.013, seed ^ 0xA11) - 0.5) * 12.0;
+
+    // Fine vertical GRAIN: high x-freq, very low y-freq → long thin striations. Two
+    // layers for richness, combined as a CONTINUOUS signed value (never
+    // thresholded), so it reads as smooth lines, never dark spots.
+    let g0 = grad_noise_per(xw, 0.060, y, 0.011, seed ^ 0x1234) - 0.5;
+    let g1 = grad_noise_per(xw, 0.150, y, 0.020, seed ^ 0x5151) - 0.5;
+    let line = g0 * 0.72 + g1 * 0.28;
+
+    // A gentle broad undulation so the stem isn't perfectly uniform.
+    let broad = grad_noise_per(xw, 0.013, y, 0.007, seed ^ 0x9D) - 0.5;
+
+    // Shallow smooth relief: grain a touch recessed; no deep furrows.
+    let height = (0.6 + 0.55 * line + 0.30 * broad).clamp(0.0, 1.0);
+
+    BarkH { height, line, broad }
+}
+
+/// Opaque bark albedo: ONE warm-brown stem tone modulated in value only by the
+/// fine vertical grain + the broad undulation — consistent brown, lines running up
+/// the stem, no dark spots.
 fn draw_bark(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
     let cell = CELL_PX as usize;
     for y in 0..cell {
         for x in 0..cell {
-            let grain = value_noise(x as f32 * 0.09, y as f32 * 0.018, seed);
-            let fine = value_noise(x as f32 * 0.3, y as f32 * 0.3, seed ^ 0x9E37);
-            let crack = value_noise(x as f32 * 0.045, y as f32 * 0.01, seed ^ 0x1234);
-            let furrow = smooth01((crack - 0.66) / 0.06);
-            let lum =
-                (0.72 + 0.08 * (grain - 0.5) + 0.05 * (fine - 0.5) - 0.16 * furrow).clamp(0.45, 0.92);
+            let (fx, fy) = (x as f32, y as f32);
+            let h = bark_height(fx, fy, seed);
+
+            // Value modulation only: grain darkens its recessed side + lightens the
+            // raised side, broad adds gentle large-scale light/dark. A touch more
+            // depth for richness, while staying one consistent brown.
+            let v = (1.0 + 0.22 * h.line + 0.11 * h.broad).clamp(0.5, 1.3);
+            let col = [BARK_BROWN[0] * v, BARK_BROWN[1] * v, BARK_BROWN[2] * v];
+
             let idx = (oy + y) * SIZE + (ox + x);
-            px[idx] = [lum, lum * 0.95, lum * 0.86, 1.0];
+            px[idx] = [
+                col[0].clamp(0.0, 1.0),
+                col[1].clamp(0.0, 1.0),
+                col[2].clamp(0.0, 1.0),
+                1.0,
+            ];
+        }
+    }
+}
+
+/// Companion bark normal + roughness, in the [`foliage_material_atlas`]. RGB is a
+/// tangent-space normal from the central difference of [`bark_height`]; A is
+/// roughness (furrows rougher, ridges a touch smoother). Linear data.
+fn draw_bark_material(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
+    let cell = CELL_PX as usize;
+    let h = |xx: f32, yy: f32| bark_height(xx, yy, seed).height;
+    for y in 0..cell {
+        for x in 0..cell {
+            let (fx, fy) = (x as f32, y as f32);
+            let c = bark_height(fx, fy, seed);
+
+            // Tangent-space normal from the height slope (OpenGL +Y convention;
+            // the shader builds its TBN from screen-space derivatives to match).
+            let dx = (h(fx + 1.0, fy) - h(fx - 1.0, fy)) * BARK_NORMAL_STRENGTH;
+            let dy = (h(fx, fy + 1.0) - h(fx, fy - 1.0)) * BARK_NORMAL_STRENGTH;
+            let inv = 1.0 / (dx * dx + dy * dy + 1.0).sqrt();
+            let (nx, ny, nz) = (-dx * inv, -dy * inv, inv);
+
+            // Near-uniform, a touch rougher in the recessed grain.
+            let rough = (0.84 - 0.08 * c.line).clamp(0.7, 0.94);
+
+            let idx = (oy + y) * SIZE + (ox + x);
+            px[idx] = [nx * 0.5 + 0.5, ny * 0.5 + 0.5, nz * 0.5 + 0.5, rough];
         }
     }
 }
@@ -406,6 +669,46 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
+/// 2D **gradient (Perlin) noise** in `[0, 1]`, **periodic in BOTH axes** with
+/// period `CELL_PX` px. Gradient noise (not value noise) because its derivative is
+/// near-isotropic, so differencing it for a normal map shows no axis-aligned
+/// lattice "weave" (see the `wgsl-bevy` skill note). The toroidal periodicity lets
+/// one cell wrap-tile seamlessly **around** a trunk (x) and **up** it (y): each
+/// lattice wraps, and `fx`/`fy` are snapped to a whole number of lattice cells per
+/// `CELL_PX`.
+fn grad_noise_per(x: f32, fx: f32, y: f32, fy: f32, seed: u64) -> f32 {
+    let px = (CELL_PX as f32 * fx).round().max(1.0);
+    let py = (CELL_PX as f32 * fy).round().max(1.0);
+    let (xs, ys) = (x * (px / CELL_PX as f32), y * (py / CELL_PX as f32));
+    let (xi, yi) = (xs.floor(), ys.floor());
+    let (fxf, fyf) = (xs - xi, ys - yi);
+    // Hash a lattice corner to a unit gradient (both axes wrapped mod their
+    // periods), dotted with the corner→point offset.
+    let grad = |gx: f32, gy: f32, dx: f32, dy: f32| {
+        let gxp = gx.rem_euclid(px);
+        let gyp = gy.rem_euclid(py);
+        let h = (gxp as i64 as u64)
+            .wrapping_mul(GOLD)
+            .wrapping_add((gyp as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+            .wrapping_add(seed.wrapping_mul(0x1656_67B1_9E37_79F9));
+        let a = hash_to_unit(h) * TAU;
+        dx * a.cos() + dy * a.sin()
+    };
+    let (u, v) = (smooth01(fxf), smooth01(fyf));
+    let nx0 = {
+        let a = grad(xi, yi, fxf, fyf);
+        let b = grad(xi + 1.0, yi, fxf - 1.0, fyf);
+        a + u * (b - a)
+    };
+    let nx1 = {
+        let a = grad(xi, yi + 1.0, fxf, fyf - 1.0);
+        let b = grad(xi + 1.0, yi + 1.0, fxf - 1.0, fyf - 1.0);
+        a + u * (b - a)
+    };
+    let n = nx0 + v * (nx1 - nx0);
+    (n * 0.9 + 0.5).clamp(0.0, 1.0)
+}
+
 /// Value noise in `[0, 1]` over a 2D coordinate (cheap, for texture mottling).
 fn value_noise(x: f32, y: f32, seed: u64) -> f32 {
     let (xi, yi) = (x.floor(), y.floor());
@@ -449,6 +752,36 @@ mod tests {
         let max_a = tex.rgba.iter().skip(3).step_by(4).copied().max().unwrap();
         assert_eq!(max_a, 255, "opaque bark expected");
         assert!(min_a < 16, "transparent leaf gaps expected, got {min_a}");
+    }
+
+    #[test]
+    fn material_atlas_matches_albedo_layout() {
+        let tex = foliage_material_atlas();
+        assert_eq!(tex.width, SIZE as u32);
+        assert_eq!(tex.height, SIZE as u32);
+        assert_eq!(tex.rgba.len(), SIZE * SIZE * 4);
+        // A bark cell's centre normal should point mostly +Z (blue ≳ red/green).
+        let bx = (BARK_CELL_FIRST % ATLAS_N) as usize * CELL_PX as usize + CELL_PX as usize / 2;
+        let by = (BARK_CELL_FIRST / ATLAS_N) as usize * CELL_PX as usize + CELL_PX as usize / 2;
+        let i = (by * SIZE + bx) * 4;
+        assert!(
+            tex.rgba[i + 2] > tex.rgba[i] && tex.rgba[i + 2] > tex.rgba[i + 1],
+            "bark normal should be +Z dominant (blue)"
+        );
+    }
+
+    #[test]
+    fn bark_height_is_toroidally_periodic() {
+        // The bark height field must repeat over CELL_PX in BOTH axes so one cell
+        // wrap-tiles seamlessly around a trunk (x) and up it (y) — no seam, no
+        // mirror. Check periodicity along each axis at a few offsets.
+        let p = CELL_PX as f32;
+        for &t in &[10.0, 73.0, 128.0, 201.0] {
+            let yx = (bark_height(t, 0.0, 99).height - bark_height(t, p, 99).height).abs();
+            assert!(yx < 1e-4, "bark height not y-periodic at x={t}");
+            let xx = (bark_height(0.0, t, 99).height - bark_height(p, t, 99).height).abs();
+            assert!(xx < 1e-4, "bark height not x-periodic at y={t}");
+        }
     }
 
     #[test]

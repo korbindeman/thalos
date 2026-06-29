@@ -11,15 +11,13 @@ use thalos_physics_canonical::surface_local::{
 };
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::avian::{
-    AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity, Position, Rotation,
+    AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity,
+    Position, Rotation,
 };
-use thalos_physics_local::{
-    ActiveLocalBubble, HeightSourceRegistry, LocalCraftBody,
-};
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry, LocalCraftBody};
 
 use crate::player_controller::EvaMode;
 use crate::rendering::SimulationState;
-
 
 /// Push canonical state into Avian's components, with what we push
 /// depending on Avian's current role:
@@ -150,7 +148,6 @@ pub(crate) fn snap_avian_from_canonical(
     }
 }
 
-
 /// Pull Avian's integrated state back into canonical, with what we install
 /// depending on Avian's role:
 ///
@@ -231,7 +228,6 @@ pub(crate) fn readback_local_craft(
         sim.simulation.set_attitude(attitude);
     }
 }
-
 
 /// Horizontal drift from the anchor that triggers a re-anchor. Keeps the
 /// craft's SLF coordinates small near the ground; each re-anchor is an exact
@@ -314,4 +310,3 @@ pub(crate) fn reanchor_surface_frame(
     angular_velocity.0 = moved.orientation_frame * moved.angular_velocity_body;
     bubble.frame = new_frame;
 }
-

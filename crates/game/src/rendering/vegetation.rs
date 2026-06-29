@@ -36,7 +36,8 @@ use thalos_body_render::{
     AU_M, BakeParams, CanopyStyle, GrassParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout,
     ImpostorParams, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeBakeMaterial,
     TreeImpostorMaterial, TreeMaterial, TreeMeshData, TreeMeshParams, VegLayer, VegScatterInput,
-    VegSpeciesPlacement, build_foliage_atlas, build_scatter_tile, build_tree_mesh_data,
+    VegSpeciesPlacement, build_foliage_atlas, build_foliage_material_atlas, build_scatter_tile,
+    build_tree_mesh_data,
     combine_impostor_tile_mesh, combine_tree_tile_mesh, fallback_shadow_map, hemioct_decode,
     impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
 };
@@ -170,14 +171,8 @@ const IMPOSTOR_BAKE_NORMAL_LAYER: usize = 7;
 /// the shared tree grid's spacing. Below a canopy diameter so crowns touch into
 /// connected groves, above a trunk width so trunks never interpenetrate.
 const TREE_SPACING_M: f32 = 5.0;
-/// Minimum trunk spacing (m) for the conifer (narrower crown).
-const CONIFER_SPACING_M: f32 = 4.0;
 /// Minimum spacing (m) for shrubs — their own grid, so they may sit under trees.
 const SHRUB_SPACING_M: f32 = 1.6;
-/// Species mix within the tree layer (drawn per blue-noise point): mostly
-/// broadleaf with a conifer minority, for a mixed-but-coherent forest.
-const TREE_MIX_BROADLEAF: f32 = 0.62;
-const TREE_MIX_CONIFER: f32 = 0.38;
 /// Above this altitude over the local terrain no new tiles are built (existing
 /// ones persist). Generous so climbing aircraft keep their forest — the coarse
 /// impostor rings are cheap, and a forested surface should read from altitude
@@ -329,10 +324,10 @@ impl Plugin for VegetationRenderPlugin {
     }
 }
 
-/// Build the procedural species library once at startup: a broadleaf tree, a
-/// conifer, and a low shrub, each with a mesh-LOD chain of raw `TreeMeshData`,
-/// plus one shared `TreeMaterial`; then bake the hemisphere octahedral impostor
-/// atlas for the tree species and spawn the one-shot off-screen bake rig.
+/// Build the procedural species library once at startup: a broadleaf tree and a
+/// low shrub, each with a mesh-LOD chain of raw `TreeMeshData`, plus one shared
+/// `TreeMaterial`; then bake the hemisphere octahedral impostor atlas for the
+/// tree species and spawn the one-shot off-screen bake rig.
 #[allow(clippy::too_many_arguments)]
 fn setup_species_library(
     mut commands: Commands,
@@ -363,7 +358,7 @@ fn setup_species_library(
     placement.push(VegSpeciesPlacement {
         layer: VegLayer::Tree,
         min_spacing_m: TREE_SPACING_M,
-        mix_weight: TREE_MIX_BROADLEAF,
+        mix_weight: 1.0,
         scale_range: (0.8, 1.6),
         slope_limit: 0.40,
         altitude_band: (1800.0, 2900.0, 2400.0, 3100.0),
@@ -374,30 +369,9 @@ fn setup_species_library(
         min_grass_w: 0.22,
     });
 
-    // --- Conifer (pine) — a second, taller, narrower silhouette for variety ---
-    let conifer = TreeMeshParams {
-        trunk_height_m: 7.0,
-        trunk_radius_m: 0.26,
-        canopy_radius_m: 1.9,
-        canopy_height_m: 3.4,
-        trunk_color: Vec3::new(0.13, 0.080, 0.045),
-        // Cooler light tint; the needle atlas cell is already a darker blue-green.
-        canopy_color: Vec3::new(0.78, 1.0, 0.90),
-        style: CanopyStyle::Conifer,
-        seed: 0xC0_1F_E5,
-        lod: 0,
-    };
-    lod_data.push(build_lod_chain(&conifer));
-    placement.push(VegSpeciesPlacement {
-        layer: VegLayer::Tree,
-        min_spacing_m: CONIFER_SPACING_M,
-        mix_weight: TREE_MIX_CONIFER,
-        scale_range: (0.85, 1.7),
-        slope_limit: 0.45,
-        altitude_band: (1900.0, 3000.0, 2600.0, 3300.0),
-        clump_affinity: 1.0,
-        min_grass_w: 0.20,
-    });
+    // (Pine/conifer species removed for now — to be rebuilt from scratch once the
+    // broadleaf is dialled in. The `CanopyStyle::Conifer` mesh path still exists
+    // for when it returns.)
 
     // --- Shrub (low bush) ---
     let shrub = TreeMeshParams {
@@ -428,6 +402,7 @@ fn setup_species_library(
     let atlas = images.add(build_foliage_atlas());
     let material = materials.add(TreeMaterial {
         atlas: atlas.clone(),
+        material_atlas: images.add(build_foliage_material_atlas()),
         // Valid depth textures from the start (the `texture_depth_2d` bindings
         // have no usable fallback); `update_tree_material` swaps in the real
         // per-cascade maps each frame, and `shadow.config.x` stays 0 until then.
@@ -561,16 +536,9 @@ fn spawn_impostor_bake_rig(
         let scale = Vec3::splat(cell_fit / radius);
         for j in 0..n {
             for i in 0..n {
-                let uv = Vec2::new(
-                    (i as f32 + 0.5) / n as f32,
-                    (j as f32 + 0.5) / n as f32,
-                );
+                let uv = Vec2::new((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
                 let rot = impostor_bake_rotation(hemioct_decode(uv));
-                let cell_xy = Vec3::new(
-                    i as f32 + 0.5,
-                    (layer as u32 * n + j) as f32 + 0.5,
-                    0.0,
-                );
+                let cell_xy = Vec3::new(i as f32 + 0.5, (layer as u32 * n + j) as f32 + 0.5, 0.0);
                 let transform = Transform {
                     translation: cell_xy,
                     rotation: rot,
@@ -623,7 +591,8 @@ fn spawn_impostor_bake_rig(
                 far: 100.0,
                 ..OrthographicProjection::default_3d()
             }),
-            Transform::from_translation(cam_center + Vec3::Z * 10.0).looking_at(cam_center, Vec3::Y),
+            Transform::from_translation(cam_center + Vec3::Z * 10.0)
+                .looking_at(cam_center, Vec3::Y),
             RenderLayers::layer(layer),
             ImpostorBakeRig,
             Name::new(name),
@@ -916,7 +885,7 @@ fn drive_veg_tiles(
         .handle(body_id)
         .read()
         .ok()
-        .and_then(|guard| *guard);
+        .and_then(|guard| thalos_terrain::nearest_flatten(&guard, cam_dir));
 
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
@@ -982,7 +951,8 @@ fn drive_veg_tiles(
                 })
             })
         };
-        veg.in_flight.insert(rk, (task, revision, desired, want_impostor));
+        veg.in_flight
+            .insert(rk, (task, revision, desired, want_impostor));
         dispatched += 1;
     }
 }
@@ -1011,16 +981,15 @@ fn finalize_veg_tiles(
     };
 
     let mut finished: Vec<(RingTileKey, u64, usize, bool, Option<VegTileBuild>)> = Vec::new();
-    veg.in_flight
-        .retain(
-            |rk, (task, revision, lod, want)| match block_on(poll_once(task)) {
-                Some(result) => {
-                    finished.push((*rk, *revision, *lod, *want, result));
-                    false
-                }
-                None => true,
-            },
-        );
+    veg.in_flight.retain(
+        |rk, (task, revision, lod, want)| match block_on(poll_once(task)) {
+            Some(result) => {
+                finished.push((*rk, *revision, *lod, *want, result));
+                false
+            }
+            None => true,
+        },
+    );
 
     let orientation = body_state.orientation.normalize();
     for (rk, revision, lod, want_impostor, result) in finished {
@@ -1089,7 +1058,10 @@ fn finalize_veg_tiles(
                     // Also visible to the sun-shadow camera so mesh trees cast
                     // into the directional shadow map (the leaf alpha-discard
                     // gives leaf-shaped shadows). Impostor tiles stay off it.
-                    RenderLayers::from_layers(&[SHIP_LAYER, crate::rendering::sun_shadow::SHADOW_CASTER_LAYER]),
+                    RenderLayers::from_layers(&[
+                        SHIP_LAYER,
+                        crate::rendering::sun_shadow::SHADOW_CASTER_LAYER,
+                    ]),
                     ChildOf(root.entity),
                     visual,
                     Name::new("Vegetation Tile"),

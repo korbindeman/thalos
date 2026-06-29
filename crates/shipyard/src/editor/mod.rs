@@ -31,6 +31,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 pub mod commands;
+pub mod debug_log;
 pub mod files;
 pub mod format;
 pub mod placement;
@@ -45,6 +46,7 @@ use crate::ShipyardPlugin;
 use crate::sizing::propagate_node_sizes;
 
 pub use commands::{CollectQuery, collect_blueprint};
+pub use debug_log::SelectionLog;
 pub use files::{
     SHIPS_DIR, SavedShip, list_ships, schema_ship_name, ship_name_from_ron, ship_path_for_name,
     ship_path_for_slug, slugify_ship_name,
@@ -143,7 +145,8 @@ impl Plugin for ShipEditorCorePlugin {
             app.add_plugins(MeshPickingPlugin);
         }
 
-        app.init_resource::<EditorState>()
+        app.insert_resource(debug_log::SelectionLog::from_env())
+            .init_resource::<EditorState>()
             .init_resource::<TankResizeDrag>()
             .init_resource::<DeselectTracker>()
             .init_resource::<BuildOrientation>()
@@ -187,6 +190,7 @@ impl Plugin for ShipEditorCorePlugin {
                     visuals::update_part_shader_params.after(visuals::rebuild_visuals),
                     visuals::update_part_shader_highlight.after(visuals::rebuild_visuals),
                     placement::deselect_on_empty_click,
+                    debug_log::log_selection_changes.after(placement::deselect_on_empty_click),
                     visuals::propagate_coupled_material.after(visuals::rebuild_visuals),
                     shrouds::sync_shrouds.after(visuals::update_part_transforms),
                     shrouds::update_shroud_transparency.after(shrouds::sync_shrouds),

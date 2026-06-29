@@ -6,9 +6,7 @@
 
 use bevy::prelude::*;
 use std::collections::HashMap;
-use thalos_body_render::{
-    GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial, SolidPlanetMaterial,
-};
+use thalos_body_render::{GasGiantMaterial, RingMaterial, SolidPlanetMaterial};
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 
@@ -118,23 +116,7 @@ pub(super) struct ShipBodyMesh;
 #[derive(Component)]
 pub(super) struct BodyIcon;
 
-/// Material handles a procedural body owns: a depth-writing body pass
-/// plus a depth-testing/no-depth-write halo pass, each baked at
-/// [`MAP_SCALE`](crate::coords::MAP_SCALE) for [`BodyMesh`] and
-/// [`SHIP_SCALE`](crate::coords::SHIP_SCALE) for [`ShipBodyMesh`].
-///
-/// Heavy assets (cubemaps, SSBOs) are shared via `Handle<…>`; only the
-/// scale-dependent uniforms (radius, atmosphere `rim_shape`, occluder
-/// positions in `params.scene`) differ between the two instances.
-#[derive(Component)]
-pub struct PlanetMaterials {
-    pub map: Handle<PlanetMaterial>,
-    pub ship: Handle<PlanetMaterial>,
-    pub map_halo: Handle<PlanetHaloMaterial>,
-    pub ship_halo: Handle<PlanetHaloMaterial>,
-}
-
-/// Same idea as [`PlanetMaterials`] but for [`SolidPlanetMaterial`] —
+/// Material handles for a [`SolidPlanetMaterial`] placeholder body —
 /// the placeholder used by bodies that don't have a terrain pipeline.
 #[derive(Component)]
 pub struct SolidPlanetMaterials {
@@ -142,7 +124,7 @@ pub struct SolidPlanetMaterials {
     pub ship: Handle<SolidPlanetMaterial>,
 }
 
-/// Same idea as [`PlanetMaterials`] but for [`GasGiantMaterial`].
+/// Material handles for a [`GasGiantMaterial`] body.
 #[derive(Component)]
 pub struct GasGiantMaterials {
     pub map: Handle<GasGiantMaterial>,

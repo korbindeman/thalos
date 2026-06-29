@@ -362,26 +362,48 @@ impl TerrainFlatten {
         let t = 1.0 - dist / self.ramp_m;
         t * t * (3.0 - 2.0 * t)
     }
-
-    /// Apply the flatten to a natural height (m above the reference radius).
-    fn apply_height(&self, dir: DVec3, natural_m: f32) -> f32 {
-        let w = self.weight(dir);
-        if w <= 0.0 {
-            return natural_m;
-        }
-        (natural_m as f64 * (1.0 - w) + self.elevation_m * w) as f32
-    }
 }
 
-/// Shared, runtime-settable flatten region. `None` means "no flattening", so a
-/// [`FlattenedSurface`] wrapping an empty handle is a transparent passthrough.
-/// The handle is read on every tile-pixel synthesis, so writing a region takes
-/// effect on tiles baked afterward without rebuilding the provider.
-pub type FlattenHandle = Arc<RwLock<Option<TerrainFlatten>>>;
+/// One identified flatten region in a body's shared handle. The `id` is the
+/// owning [`StructureSite`](../../game/src/structures.rs)'s id (so a structure
+/// can update or remove exactly its own pad); the terrain crate treats it as an
+/// opaque tag.
+#[derive(Debug, Clone, Copy)]
+pub struct FlattenRegion {
+    pub id: u64,
+    pub flatten: TerrainFlatten,
+}
+
+/// Shared, runtime-settable set of flatten regions for one body. Empty means
+/// "no flattening", so a [`FlattenedSurface`] wrapping an empty handle is a
+/// transparent passthrough. Multiple regions coexist (e.g. the runway pad plus
+/// a player-placed base site); they are assumed not to overlap, so the surface
+/// applies the single highest-weight region at any direction rather than
+/// stacking ramps. The handle is read on every tile-pixel synthesis, so writing
+/// a region takes effect on tiles baked afterward without rebuilding the
+/// provider.
+pub type FlattenHandle = Arc<RwLock<Vec<FlattenRegion>>>;
 
 /// Create an empty [`FlattenHandle`] (no flattening).
 pub fn flatten_handle() -> FlattenHandle {
-    Arc::new(RwLock::new(None))
+    Arc::new(RwLock::new(Vec::new()))
+}
+
+/// Pick the flatten region whose pad centre is nearest the body-fixed unit
+/// direction `dir`, for consumers that want a single representative pad rather
+/// than the full set (e.g. vegetation exclusion, which tests one pad per
+/// dispatch). Pads don't overlap, so the nearest pad is the only one that can
+/// matter near `dir`. Returns `None` when there are no regions.
+pub fn nearest_flatten(regions: &[FlattenRegion], dir: DVec3) -> Option<TerrainFlatten> {
+    regions
+        .iter()
+        .max_by(|a, b| {
+            a.flatten
+                .center_dir
+                .dot(dir)
+                .total_cmp(&b.flatten.center_dir.dot(dir))
+        })
+        .map(|r| r.flatten)
 }
 
 /// [`SurfaceQuery`] decorator that overlays an optional [`TerrainFlatten`] on a
@@ -398,13 +420,27 @@ impl FlattenedSurface {
     }
 
     fn flatten_height(&self, dir: DVec3, natural_m: f32) -> f32 {
-        match self.flatten.read() {
-            Ok(guard) => match guard.as_ref() {
-                Some(f) => f.apply_height(dir, natural_m),
-                None => natural_m,
-            },
-            Err(_) => natural_m,
+        let Ok(guard) = self.flatten.read() else {
+            return natural_m;
+        };
+        // Apply the single region with the greatest blend weight at this
+        // direction. Pads are assumed not to overlap (runway plus a distant
+        // base site), so max-weight selection avoids stacking two ramps into a
+        // double blend. The common case (zero or one region) costs one cheap
+        // angular reject per region.
+        let mut best_w = 0.0_f64;
+        let mut best_elev = 0.0_f64;
+        for region in guard.iter() {
+            let w = region.flatten.weight(dir);
+            if w > best_w {
+                best_w = w;
+                best_elev = region.flatten.elevation_m;
+            }
         }
+        if best_w <= 0.0 {
+            return natural_m;
+        }
+        (natural_m as f64 * (1.0 - best_w) + best_elev * best_w) as f32
     }
 }
 

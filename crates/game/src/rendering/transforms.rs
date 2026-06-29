@@ -4,14 +4,11 @@
 
 use bevy::math::DQuat;
 use bevy::prelude::*;
-use thalos_body_render::{PlanetHaloMaterial, PlanetMaterial};
 use thalos_physics_canonical::types::BodyState;
 use thalos_world::{BodyDefinition, BodyId};
 
 use super::screen_marker_radius;
-use super::types::{
-    CelestialBody, PlanetMaterials, ShipMarker, SimulationState, SolarSystemState, TidallyLocked,
-};
+use super::types::{CelestialBody, ShipMarker, SimulationState, SolarSystemState, TidallyLocked};
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{
     MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, WorldScale, to_render_pos,
@@ -350,60 +347,13 @@ pub(super) fn surface_body_to_world_orientation_f64(
         .map(|state| state.orientation.normalize())
 }
 
+#[cfg(test)]
 fn surface_world_to_body_orientation(
     body_id: BodyId,
     lock: Option<&TidallyLocked>,
     states: &[BodyState],
 ) -> Option<Quat> {
     surface_body_to_world_orientation(body_id, lock, states).map(|q| q.inverse().normalize())
-}
-
-/// Rewrite each baked planet's material `orientation` quaternion every frame.
-///
-/// Tidally-locked bodies point their baked +Z axis at the parent (mare /
-/// tidal asymmetry baked into `BodyBuilder::tidal_axis`) while their local
-/// +Y stays tied to the orbit plane. Free-spinning bodies use the same
-/// [`BodyState::orientation`] that drives the real-space terrain entity.
-/// The shader expects world-space → body-local, so this material uniform is
-/// the inverse of the terrain entity's body-local → world rotation.
-pub(super) fn update_planet_orientations(
-    query: Query<(&CelestialBody, Option<&TidallyLocked>, &PlanetMaterials)>,
-    mut materials: ResMut<Assets<PlanetMaterial>>,
-    mut halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
-    cache: Res<SolarSystemState>,
-    view: Res<ViewMode>,
-) {
-    let Some(ref states) = cache.states else {
-        return;
-    };
-
-    // See note on `update_planet_light_dirs` — gate inactive scale.
-    let force_both = view.is_changed();
-    let do_map = force_both || matches!(*view, ViewMode::Map);
-    let do_ship = force_both || matches!(*view, ViewMode::Ship);
-
-    for (body, lock, mats) in &query {
-        let Some(q) = surface_world_to_body_orientation(body.body_id, lock, states) else {
-            continue;
-        };
-
-        // Orientation is scale-independent — same value for both materials.
-        let q4 = Vec4::new(q.x, q.y, q.z, q.w);
-        for (handle, halo_handle, want) in [
-            (&mats.map, &mats.map_halo, do_map),
-            (&mats.ship, &mats.ship_halo, do_ship),
-        ] {
-            if !want {
-                continue;
-            }
-            if let Some(mat) = materials.get_mut(handle) {
-                mat.params.orientation = q4;
-            }
-            if let Some(mat) = halo_materials.get_mut(halo_handle) {
-                mat.params.orientation = q4;
-            }
-        }
-    }
 }
 
 #[cfg(test)]

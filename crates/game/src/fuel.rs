@@ -373,8 +373,7 @@ fn propulsion_config_changed(prev: &ActivePropulsion, next: &ActivePropulsion) -
     // engines (the density lapse), so compare with a relative threshold —
     // an absolute epsilon would re-dirty the trajectory prediction every
     // frame of a climb.
-    let rel_changed =
-        |a: f64, b: f64| (a - b).abs() > EPS + 0.01 * a.abs().max(b.abs());
+    let rel_changed = |a: f64, b: f64| (a - b).abs() > EPS + 0.01 * a.abs().max(b.abs());
     rel_changed(prev.total_thrust_n, next.total_thrust_n)
         || rel_changed(prev.mass_flow_kg_per_s, next.mass_flow_kg_per_s)
         || (prev.power_draw_kw - next.power_draw_kw).abs() > EPS
@@ -512,7 +511,11 @@ fn refresh_active_propulsion(
         // Jets lapse with density; rockets carry their own oxidizer. Mass
         // flow follows the lapsed thrust (fixed Isp), so fuel burn falls off
         // with altitude too.
-        let lapse = if engine.requires_atmosphere { air_lapse } else { 1.0 };
+        let lapse = if engine.requires_atmosphere {
+            air_lapse
+        } else {
+            1.0
+        };
         let thrust_n = engine.thrust as f64 * multiplier * intake_scale * lapse;
         let mdot = thrust_n / (engine.isp as f64 * G0);
 

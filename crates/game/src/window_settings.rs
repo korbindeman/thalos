@@ -11,8 +11,8 @@
 //! pins the window scale-factor override, a diagnostic lever distinct from
 //! the user-facing UI scale here.)
 //!
-//! Writers of `WindowSettings`: the settings menu's Window tab (user edits,
-//! via [`show_window_tab`]) and [`apply_window_settings`] (which writes back
+//! Writers of `WindowSettings`: the settings menu's Window tab (user edits, in
+//! `crate::settings_menu`) and [`apply_window_settings`] (which writes back
 //! OS-side window resizes in windowed mode so a drag-resized size sticks).
 //! `apply_window_settings` pushes the effective settings onto the primary
 //! `Window` each frame — value-compared, so untouched frames mark nothing
@@ -26,7 +26,6 @@ use bevy::window::{
     Monitor, MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode,
     WindowResolution,
 };
-use bevy_egui::egui;
 use serde::{Deserialize, Serialize};
 
 /// Where user settings persist, relative to the working directory the game
@@ -34,10 +33,10 @@ use serde::{Deserialize, Serialize};
 /// missing or unparseable.
 pub const SETTINGS_PATH: &str = "user/settings.ron";
 
-const UI_SCALE_MIN: f32 = 0.5;
-const UI_SCALE_MAX: f32 = 2.0;
+pub(crate) const UI_SCALE_MIN: f32 = 0.5;
+pub(crate) const UI_SCALE_MAX: f32 = 2.0;
 
-const RESOLUTION_PRESETS: &[(u32, u32)] = &[
+pub(crate) const RESOLUTION_PRESETS: &[(u32, u32)] = &[
     (1280, 720),
     (1600, 900),
     (1920, 1080),
@@ -371,10 +370,9 @@ fn apply_window_settings(
 /// logical-size-preserving and physically resizes the window — on a 150 %
 /// display the borderless-fullscreen window grew to 4/3 of the monitor. The
 /// window is left untouched now: `UiScale` covers Bevy UI (rasterised at
-/// `window scale × UiScale`) and `EguiContextSettings::scale_factor` covers
-/// the egui panels (`window scale × scale_factor`), so the two stay mutually
-/// consistent. A `THALOS_SCALE` window-scale pin skips the compensation
-/// (winit honours it from creation) but the user UI scale still applies.
+/// `window scale × UiScale`). A `THALOS_SCALE` window-scale pin skips the
+/// compensation (winit honours it from creation) but the user UI scale still
+/// applies.
 ///
 /// Remove the snapping once the upstream Bevy fractional-scale text bug is
 /// fixed; the user-preference multiply stays.
@@ -382,7 +380,6 @@ fn apply_ui_scale(
     settings: Res<WindowSettings>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut ui_scale: ResMut<UiScale>,
-    mut egui_settings: Query<&mut bevy_egui::EguiContextSettings>,
     mut compensated_log: Local<bool>,
 ) {
     let Ok(window) = windows.single() else {
@@ -411,148 +408,16 @@ fn apply_ui_scale(
     if (ui_scale.0 - target).abs() > 1.0e-4 {
         ui_scale.0 = target;
     }
-    // Egui contexts can spawn after startup (and after the ratio is known),
-    // so keep late arrivals in step instead of writing once.
-    for mut egui in &mut egui_settings {
-        if (egui.scale_factor - target).abs() > 1.0e-4 {
-            egui.scale_factor = target;
-        }
-    }
 }
 
-// ── Settings-menu tab ─────────────────────────────────────────────────────────
+// ── Settings-menu helpers ───────────────────────────────────────────────────
 
 /// A selectable fullscreen monitor, prepared by the settings menu from the
 /// `Monitor` entity query (unnamed monitors are skipped — they can't be
-/// persisted).
+/// persisted). Used to populate the Window tab's monitor picker.
 pub struct MonitorChoice {
     /// [`Monitor::name`], the persisted key.
     pub name: String,
     /// Display label: name, size, primary marker.
     pub label: String,
-}
-
-/// The Window tab body. `settings` is the raw (change-detection-bypassed)
-/// resource; the caller compares before/after and flags the change.
-pub fn show_window_tab(
-    ui: &mut egui::Ui,
-    settings: &mut WindowSettings,
-    overrides: &WindowSettingsOverrides,
-    monitors: &[MonitorChoice],
-) {
-    // Mode
-    let mode_pinned = overrides.mode.is_some();
-    let mut mode = overrides.mode.unwrap_or(settings.mode);
-    ui.horizontal(|ui| {
-        ui.label("Mode:");
-        ui.add_enabled_ui(!mode_pinned, |ui| {
-            ui.radio_value(&mut mode, WindowModeSetting::Windowed, "Windowed");
-            ui.radio_value(&mut mode, WindowModeSetting::Borderless, "Borderless");
-            ui.radio_value(&mut mode, WindowModeSetting::Exclusive, "Fullscreen");
-        });
-    });
-    if mode_pinned {
-        ui.weak("Pinned by THALOS_WINDOW_MODE for this session.");
-    } else {
-        settings.mode = mode;
-    }
-
-    ui.add_space(4.0);
-
-    // Resolution (windowed only)
-    let resolution_pinned = overrides.resolution.is_some();
-    let resolution = overrides.resolution.unwrap_or(settings.resolution);
-    ui.horizontal(|ui| {
-        ui.label("Resolution:");
-        ui.add_enabled_ui(
-            mode == WindowModeSetting::Windowed && !resolution_pinned,
-            |ui| {
-                egui::ComboBox::from_id_salt("window_resolution")
-                    .selected_text(format!("{} × {}", resolution.0, resolution.1))
-                    .show_ui(ui, |ui| {
-                        for &(width, height) in RESOLUTION_PRESETS {
-                            ui.selectable_value(
-                                &mut settings.resolution,
-                                (width, height),
-                                format!("{width} × {height}"),
-                            );
-                        }
-                    });
-            },
-        );
-    });
-    if resolution_pinned {
-        ui.weak("Pinned by THALOS_WINDOW_SIZE for this session.");
-    } else if mode == WindowModeSetting::Windowed {
-        ui.weak("Drag-resizing the window updates this too.");
-    }
-
-    ui.add_space(4.0);
-
-    // Monitor (fullscreen modes only)
-    ui.horizontal(|ui| {
-        ui.label("Monitor:");
-        let selected = match settings.monitor.as_deref() {
-            None => "Primary".to_string(),
-            Some(name) => monitors
-                .iter()
-                .find(|choice| choice.name == name)
-                .map(|choice| choice.label.clone())
-                .unwrap_or_else(|| format!("{name} (not connected)")),
-        };
-        ui.add_enabled_ui(mode != WindowModeSetting::Windowed, |ui| {
-            egui::ComboBox::from_id_salt("window_monitor")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.monitor, None, "Primary");
-                    for choice in monitors {
-                        ui.selectable_value(
-                            &mut settings.monitor,
-                            Some(choice.name.clone()),
-                            &choice.label,
-                        );
-                    }
-                });
-        });
-    });
-
-    ui.add_space(4.0);
-
-    // VSync
-    let vsync_pinned = overrides.vsync.is_some();
-    let mut vsync = overrides.vsync.unwrap_or(settings.vsync);
-    ui.add_enabled_ui(!vsync_pinned, |ui| {
-        ui.checkbox(&mut vsync, "VSync");
-    });
-    if vsync_pinned {
-        ui.weak("Pinned by THALOS_VSYNC for this session.");
-    } else {
-        settings.vsync = vsync;
-    }
-
-    ui.add_space(4.0);
-
-    // UI scale
-    ui.horizontal(|ui| {
-        ui.label("UI scale:");
-        ui.add(
-            egui::Slider::new(&mut settings.ui_scale, UI_SCALE_MIN..=UI_SCALE_MAX)
-                .step_by(0.05)
-                .fixed_decimals(2),
-        );
-    });
-
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    if ui.button("Reset to defaults").clicked() {
-        *settings = WindowSettings::default();
-    }
-
-    ui.add_space(4.0);
-    ui.weak(format!(
-        "Saved to {SETTINGS_PATH}. THALOS_WINDOW_MODE / THALOS_WINDOW_SIZE / \
-         THALOS_VSYNC override for one session without touching the file."
-    ));
 }

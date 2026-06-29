@@ -11,6 +11,9 @@ playground = []
 name = "playground"
 required-features = ["playground"]
 
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dependencies]
 thalos_terrain = { path = "../terrain" }
 thalos_world = { path = "../world" }

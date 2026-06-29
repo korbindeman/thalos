@@ -273,6 +273,16 @@ is only that nothing *new* bakes in single-craft assumptions.
 
 ## 4. Backend seam — the Avian decision
 
+> **Superseded (2026-06-28) — see `docs/physics.md`.** The re-evaluation
+> below has happened: the decision is now to **replace Avian** with an owned
+> solver (`thalos_physics`, TGS-Soft on `parry3d-f64`), driven by the
+> BeamNG-style deformation endgame and the dual-integrator impedance
+> mismatch. The seam-tightening this section scopes becomes **Phase 0** of
+> the `docs/physics.md` roadmap (still the right first step — it makes the
+> swap surgical). One override: `docs/physics.md` chooses **fixed-dt**
+> stepping for stability/determinism, *not* the "variable-dt for free" this
+> section floated. The original analysis is kept below for context.
+
 **Decision: Avian stays through Phases A–B, behind a tightened seam;
 re-evaluate at the start of Phase C.**
 

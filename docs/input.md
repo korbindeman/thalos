@@ -2,9 +2,11 @@
 
 Thalos routes semantic player input through `bevy_enhanced_input`
 contexts owned by `thalos_input`. Raw Bevy input should remain only for
-spatial data and third-party UI internals: cursor position, ray
-projection, Bevy picking hover/click/drag events, egui widget input, and
-shipyard pinch gestures.
+spatial data and UI internals: cursor position, ray projection, Bevy
+picking hover/click/drag events, native-UI text-field input
+(`thalos_game::ui_widgets`), and shipyard pinch gestures. (The game UI is
+native Bevy UI; `bevy_egui` is no longer a `thalos_game` dependency — only
+the standalone `just shipyard` binary uses egui.)
 
 ## Crate Boundary
 
@@ -103,8 +105,8 @@ Game:
 - `GameViewContext` for HUD toggle, map toggle, and camera cycle
 - `GameFlightContext` for attitude, SAS, throttle, and HOTAS flight axes
 - `GameWarpContext` for sim-time meta-controls (pause, warp speed,
-  warp-to-maneuver) — always active except during egui text input, so
-  pause is reachable from EVA, freecam, etc.
+  warp-to-maneuver) — always active except while a UI text field is focused,
+  so pause is reachable from EVA, freecam, etc.
 - `GameViewContext` for view and camera mode toggles
 - `GameCameraContext` for orbit drag and zoom
 - `GameManeuverContext` for node placement and deletion
@@ -129,8 +131,8 @@ Shipyard:
 
 Use `ActionSettings::consume_input` for semantic keyboard actions that
 should not bleed into lower-priority actions. Mouse camera actions stay
-pass-through and are gated by pointer/egui spatial state in the
-consumer systems.
+pass-through and are gated by the Bevy-UI pointer state
+(`hud::UiPointerGate`) in the consumer systems.
 
 ## Escape Policy
 

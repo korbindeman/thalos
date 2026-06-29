@@ -9,11 +9,11 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use thalos_control::AttitudeDemand;
 use thalos_physics_canonical::maneuver::delta_v_to_world;
 use thalos_physics_canonical::simulation::Simulation;
 use thalos_physics_canonical::trajectory::Trajectory;
 use thalos_physics_canonical::velocity_frame::{NavBasis, VelocityReferenceFrame, nav_basis};
-use thalos_control::AttitudeDemand;
 
 use crate::maneuver::{GameNode, ManeuverPlan};
 use crate::target::TargetBody;

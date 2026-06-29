@@ -293,7 +293,14 @@ fn spawn_horizon(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Name::new("PfdHorizon"),
         ))
         .with_children(|h| {
-            spawn_bar(h, -(HORIZON_GAP_HALF + HORIZON_BAR_LEN), HORIZON_BAR_LEN, 1.5, HUD_AMBER, true);
+            spawn_bar(
+                h,
+                -(HORIZON_GAP_HALF + HORIZON_BAR_LEN),
+                HORIZON_BAR_LEN,
+                1.5,
+                HUD_AMBER,
+                true,
+            );
             spawn_bar(h, HORIZON_GAP_HALF, HORIZON_BAR_LEN, 1.5, HUD_AMBER, true);
             // Heading labels below the line; left offsets driven per frame.
             for slot in -HEADING_TICK_SLOTS..=HEADING_TICK_SLOTS {
@@ -328,7 +335,11 @@ fn spawn_rung(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, pitch_deg:
     };
     // Sky rungs solid green, ground rungs dimmed (stand-in for the
     // conventional dashed negative rungs).
-    let color = if pitch_deg >= 0 { HUD_AMBER } else { HUD_AMBER_DIM };
+    let color = if pitch_deg >= 0 {
+        HUD_AMBER
+    } else {
+        HUD_AMBER_DIM
+    };
 
     shift
         .spawn((
@@ -412,8 +423,16 @@ fn spawn_markers(anchor: &mut ChildSpawnerCommands<'_>, images: &mut Assets<Imag
     let half = MARKER_ICON_SIZE as f32 * 0.5;
     for kind in MarkerKind::ALL {
         let variants = MarkerVariants {
-            front: images.add(marker_icon_image(kind, MARKER_ICON_SIZE, MarkerIconState::Visible)),
-            back: images.add(marker_icon_image(kind, MARKER_ICON_SIZE, MarkerIconState::Occluded)),
+            front: images.add(marker_icon_image(
+                kind,
+                MARKER_ICON_SIZE,
+                MarkerIconState::Visible,
+            )),
+            back: images.add(marker_icon_image(
+                kind,
+                MARKER_ICON_SIZE,
+                MarkerIconState::Occluded,
+            )),
         };
         anchor.spawn((
             Node {
@@ -506,7 +525,10 @@ fn spawn_speed_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
         anchor,
         theme,
         left,
-        &[(PfdReadout::SpeedFrame, HUD_AMBER), (PfdReadout::Throttle, HUD_AMBER_DIM)],
+        &[
+            (PfdReadout::SpeedFrame, HUD_AMBER),
+            (PfdReadout::Throttle, HUD_AMBER_DIM),
+        ],
         "PfdSpeedLabels",
     );
 }
@@ -623,7 +645,14 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     ));
                 });
             }
-            spawn_value_box(tape, theme, PfdReadout::VerticalSpeed, VS_TAPE_H, 22.0, 13.0);
+            spawn_value_box(
+                tape,
+                theme,
+                PfdReadout::VerticalSpeed,
+                VS_TAPE_H,
+                22.0,
+                13.0,
+            );
         });
 
     anchor
@@ -989,7 +1018,11 @@ pub fn update_attitude_display(
     mut rung_q: Query<(&PfdRung, &mut Visibility), Without<PfdHeadingTick>>,
     mut hdg_tick_q: Query<
         (&PfdHeadingTick, &mut Node, &mut Text, &mut Visibility),
-        (Without<PfdPitchShift>, Without<PfdRung>, Without<PfdReadout>),
+        (
+            Without<PfdPitchShift>,
+            Without<PfdRung>,
+            Without<PfdReadout>,
+        ),
     >,
     mut marker_q: Query<
         (
@@ -1091,9 +1124,7 @@ pub fn update_attitude_display(
         };
         let forward = d_world.dot(nose);
         let az = d_world.dot(right).atan2(forward);
-        let el = d_world
-            .dot(dorsal)
-            .atan2(d_world.dot(right).hypot(forward));
+        let el = d_world.dot(dorsal).atan2(d_world.dot(right).hypot(forward));
         let mut x = az.to_degrees() as f32 * PX_PER_DEG;
         let mut y = -el.to_degrees() as f32 * PX_PER_DEG;
         let dist = x.hypot(y);

@@ -2,7 +2,7 @@
 //!
 //! `cargo run -p thalos_texgen --example bake` → `tools/texgen/out/*.png`.
 
-use thalos_texgen::{TextureData, foliage_atlas, grass_blades};
+use thalos_texgen::{TextureData, foliage_atlas, foliage_material_atlas, grass_blades};
 
 fn main() {
     let out_dir = "tools/texgen/out";
@@ -10,6 +10,7 @@ fn main() {
 
     for (name, tex) in [
         ("foliage_atlas", foliage_atlas()),
+        ("foliage_material_atlas", foliage_material_atlas()),
         ("grass_blades", grass_blades()),
     ] {
         write_png(out_dir, name, tex);

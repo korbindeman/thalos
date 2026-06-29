@@ -25,10 +25,13 @@
 #import thalos_udlod::functions::{lookup_tile, tile_count}
 #import thalos::atmosphere::AtmosphereBlock
 #import thalos::lighting::{
-    SceneLighting, shade_hapke_surface,
-    SurfaceSky, compute_surface_sky, sky_ambient_irradiance, env_brdf_approx,
+    SceneLighting, ThalosSurface, shade_surface, SURFACE_DIELECTRIC, SURFACE_REGOLITH,
+    SurfaceSky, compute_surface_sky,
     specular_aa_variance, specular_aa_apply,
 }
+// Shared vegetated-ground colour + moisture field, also mirrored CPU-side by
+// `ground/landcover.rs` so the grass blades read the exact same green.
+#import thalos::landcover::{moisture_at, macro_variation, vegetation_color}
 
 // Must match `MAX_TERRAIN_SHADOW_CASTERS` / `MAX_TERRAIN_SHADOW_QUADS` in
 // `body_material.rs`.
@@ -724,14 +727,13 @@ fn eval_material_stack(
     // forest (dark canopy), mid → grassland, dry → tan dry grass, driest → bare
     // soil. Forest only takes hold on lush low ground; above the treeline the
     // whole column dries to alpine grass.
-    let lush = smoothstep(LUSH_HI_M, LUSH_LO_M, altitude_m + jitter); // 1 low, 0 high
     let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m + jitter);
-    let dryness = clamp(0.5 - 0.5 * moisture, 0.0, 1.0); // moisture: + wet, − dry
-    let forest_amt = smoothstep(0.46, 0.20, dryness) * lush;
-    var grass_c = mix(C_GRASS, C_DRYGRASS, smoothstep(0.40, 0.78, dryness));
-    grass_c = mix(grass_c, C_SOIL, smoothstep(0.80, 0.96, dryness));
-    var veg = mix(grass_c, C_FOREST, forest_amt);
-    veg = mix(veg, C_DRYGRASS, alpine);
+    // The vegetated ground colour comes from the shared `thalos::landcover`
+    // library — the SAME function the grass blades' CPU mirror
+    // (`ground/landcover.rs`) reads — so the ground and the blades growing from
+    // it are literally the same green. The macro-value mottle is applied to the
+    // whole `ground` below (so it can be exempted under snow).
+    let veg = vegetation_color(altitude_m, moisture, variation);
 
     // Rock cools and greys with altitude (warm soil-stained rock low down,
     // lichen-free scree up high).
@@ -1081,21 +1083,6 @@ fn regolith_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> S
     return out;
 }
 
-// ── Rough-dielectric surface BRDF ─────────────────────────────────────────
-// Thalos is a wet, vegetated terrestrial body — soil, grass, rock, snow,
-// water — not airless particulate regolith, so its ground LOD shades with a
-// standard rough-dielectric BRDF rather than the Hapke radiative-transfer
-// model (the impostor still uses Hapke for genuinely airless bodies). Two
-// lobes: an Oren–Nayar rough-diffuse term that degrades gracefully at grazing
-// angles — the harsh opposition-surge contour bands near the terminator were
-// the Hapke artefact that motivated the prior P2A placeholder — plus a
-// Cook–Torrance GGX microfacet specular with a dielectric F0, so wet ground
-// and snow pick up a tight highlight that Hapke cannot express.
-
-const PI_BRDF: f32 = 3.14159265358979323846;
-// Non-metallic surface normal reflectance at normal incidence (~4%).
-const DIELECTRIC_F0: f32 = 0.04;
-
 // Ambient occlusion from the procedural cavity field. The Step-2 albedo breakup
 // (`detail.tint`) doubles as a cheap cavity signal — darker breakup ≈ a hollow —
 // so we fold its luminance into an AO factor on the sky/ground ambient (never on
@@ -1112,91 +1099,6 @@ const AO_MIN: f32 = 0.45;
 // excluded — a self-shadowed slope still sees open sky). 0 = no bleed, 1 = a
 // fully tree-shadowed pixel loses all ambient.
 const AMBIENT_SHADOW_BLEED: f32 = 0.6;
-
-// GGX / Trowbridge–Reitz normal distribution.
-fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
-    let a = roughness * roughness;
-    let a2 = a * a;
-    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / max(PI_BRDF * d * d, 1.0e-7);
-}
-
-// Smith height-correlated visibility term for GGX, with the specular
-// denominator 1/(4·n·l·n·v) folded in.
-fn smith_visibility(n_dot_l: f32, n_dot_v: f32, roughness: f32) -> f32 {
-    let a = roughness * roughness;
-    let a2 = a * a;
-    let lambda_v = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
-    let lambda_l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
-    return 0.5 / max(lambda_v + lambda_l, 1.0e-5);
-}
-
-// Schlick Fresnel for a scalar (achromatic dielectric) F0.
-fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
-    let m = clamp(1.0 - cos_theta, 0.0, 1.0);
-    let m2 = m * m;
-    return f0 + (1.0 - f0) * (m2 * m2 * m);
-}
-
-// Oren–Nayar rough-diffuse BRDF scalar (sans albedo, sans cosine). Uses the
-// trig-free `s/t` formulation so there is no `acos`/`tan`/`normalize`-of-zero
-// hazard; `s = L·V − (N·L)(N·V)` reconstructs cos(Δφ)·sinθᵢ·sinθᵣ directly.
-fn oren_nayar_term(
-    n_dot_l: f32,
-    n_dot_v: f32,
-    l: vec3<f32>,
-    v: vec3<f32>,
-    roughness: f32,
-) -> f32 {
-    let sigma2 = roughness * roughness;
-    let a = 1.0 - 0.5 * sigma2 / (sigma2 + 0.33);
-    let b = 0.45 * sigma2 / (sigma2 + 0.09);
-    let s = dot(l, v) - n_dot_l * n_dot_v;
-    let t = select(max(n_dot_l, n_dot_v), 1.0, s <= 0.0);
-    return a + b * s / max(t, 1.0e-4);
-}
-
-// Combined rough-dielectric reflectance for one light direction. Returns the
-// reflected radiance factor (diffuse albedo-tinted + white dielectric
-// specular), excluding the irradiance cosine and incident flux, which the
-// caller applies.
-fn surface_brdf(
-    albedo: vec3<f32>,
-    roughness: f32,
-    n: vec3<f32>,
-    l: vec3<f32>,
-    v: vec3<f32>,
-    n_dot_l: f32,
-    n_dot_v: f32,
-) -> vec3<f32> {
-    if (n_dot_l <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    let h = normalize(l + v);
-    let n_dot_h = max(dot(n, h), 0.0);
-    let l_dot_h = max(dot(l, h), 0.0);
-
-    let f = fresnel_schlick(l_dot_h, DIELECTRIC_F0);
-    let d = ggx_distribution(n_dot_h, roughness);
-    let vis = smith_visibility(n_dot_l, max(n_dot_v, 1.0e-4), roughness);
-
-    // Kulla–Conty multiple-scattering energy compensation. Single-scattering
-    // GGX drops the energy from microfacet rays that bounce more than once, so a
-    // rough surface loses reflectance and reads muddy. The directional albedo
-    // `E_ss = scale + bias` (white-furnace split-sum) tells us how much survives;
-    // scaling the lobe by `1 + F0·(1/E_ss − 1)` puts the lost energy back. For a
-    // dielectric (F0 ≈ 0.04) the factor is small, but it keeps wet ground / snow
-    // from dimming at grazing angles and is the correct thing to do.
-    let dfg = env_brdf_approx(roughness, max(n_dot_v, 1.0e-4));
-    let e_ss = max(dfg.x + dfg.y, 1.0e-3);
-    let ms = 1.0 + DIELECTRIC_F0 * (1.0 / e_ss - 1.0);
-    let spec = d * vis * f * ms;
-
-    let diff = oren_nayar_term(n_dot_l, n_dot_v, l, v, roughness);
-    let diffuse = albedo * diff * (1.0 - f);
-
-    return diffuse + vec3<f32>(spec);
-}
 
 @fragment
 fn fragment(input: FragmentInput) -> FragmentOutput {
@@ -1280,42 +1182,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // bands (treeline, alpine scree, snow caps) computed here from the
         // height attachment and the geometric slope.
         //
-        // Low-frequency value variation in [-1,1]; jitters the treeline/snowline
-        // and mottles vegetation so the altitude bands don't read as clean
-        // contour rings.
-        let macro_fine = (fbm3_periodic(
-            detail_p_body * MACRO_VAR_SCALE,
-            3,
-            DETAIL_COORD_PERIOD_M * MACRO_VAR_SCALE,
-        ) - 0.5) * 2.0;
-        let macro_region = (fbm3_periodic(
-            detail_p_body * MACRO_REGION_SCALE,
-            2,
-            DETAIL_COORD_PERIOD_M * MACRO_REGION_SCALE,
-        ) - 0.5) * 2.0;
-        // Region-dominant: whole ~1 km areas drift in tone (and snow/treeline
-        // jitter) with the 250 m mottle riding on top. Bounded to [-1,1].
-        let macro_var = clamp(mix(macro_fine, macro_region, 0.55), -1.0, 1.0);
-        // Landcover moisture, three scales: ~1 km lush/dry regions (dominant),
-        // 500 m forest/clearing stands, 125 m breakup — coarse-dominant so the
-        // canopy reads as large regions that refine into smaller patches up close.
-        let lc_region = fbm3_periodic(
-            detail_p_body * LANDCOVER_REGION_SCALE,
-            2,
-            DETAIL_COORD_PERIOD_M * LANDCOVER_REGION_SCALE,
-        );
-        let lc_coarse = fbm3_periodic(
-            detail_p_body * LANDCOVER_COARSE_SCALE,
-            3,
-            DETAIL_COORD_PERIOD_M * LANDCOVER_COARSE_SCALE,
-        );
-        let lc_med = fbm3_periodic(
-            detail_p_body * MOISTURE_SCALE,
-            3,
-            DETAIL_COORD_PERIOD_M * MOISTURE_SCALE,
-        );
-        let moisture_raw = mix(mix(lc_region, lc_coarse, 0.45), lc_med, 0.22);
-        let moisture = clamp((moisture_raw - 0.5) * 2.0 * MOISTURE_CONTRAST, -1.0, 1.0);
+        // Large-scale value variation + the 3-scale landcover moisture, both
+        // from the shared `thalos::landcover` library (mirrored CPU-side by
+        // `ground/landcover.rs`), so the grass blades read the exact same field.
+        let macro_var = macro_variation(detail_p_body);
+        let moisture = moisture_at(detail_p_body);
         material = eval_material_stack(
             material_masks,
             grade_surface(albedo.rgb, material_masks.b),
@@ -1430,43 +1301,51 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // roughness to cover the sub-pixel normal cone, killing highlight sparkle.
     let spec_aa_var = specular_aa_variance(stable_normal);
 
+    // Build the canonical surface description and shade through the shared
+    // `thalos::lighting::shade_surface`. Everything terrain-specific (the
+    // ecological albedo, the AA-widened roughness, the wet-hollow tightening, the
+    // atmosphere-derived sky environment, the cavity/canopy occlusion) is still
+    // resolved here per-fragment; `shade_surface` owns only the BRDF composition,
+    // so the regolith impostor, the vegetated ground, and (later) foliage/ships
+    // all reconverge on one lighting path. Atmosphere/aerial-perspective is
+    // composited on top by the `BodySky` pass, not here.
     var lit: vec3<f32>;
+    var surf: ThalosSurface;
+    surf.albedo = albedo.rgb;
+    surf.normal_ws = stable_normal;
+    surf.geo_normal_ws = geo_normal;
+    surf.emissive = vec3<f32>(0.0);
+    surf.metallic = 0.0;
+    surf.translucency = 0.0;
     if (style_regolith) {
-        // Airless regolith: Hapke radiative-transfer BRDF — the exact routine
-        // the orbital impostor uses (`shade_hapke_surface`), so the two render
-        // paths shade identically at the impostor↔ground LOD swap. No
-        // atmospheric sky fill (airless); ambient comes from the scene floor
-        // inside the Hapke helper. Roughness drives the opposition-surge width;
-        // dry regolith has no wet-hollow tightening.
-        let surf_roughness = specular_aa_apply(clamp(roughness, 0.06, 1.0), spec_aa_var);
-        lit = shade_hapke_surface(
-            albedo.rgb,
-            surf_roughness,
-            stable_normal,
-            geo_normal,
-            view_dir,
-            hit_ws,
-            sun_dir_ws,
-            sun_flux,
-            terrain_scene,
-            external_shadow,
+        // Airless regolith: Hapke radiative-transfer BRDF — the exact routine the
+        // orbital impostor uses, so the two render paths shade identically at the
+        // impostor↔ground LOD swap. No atmospheric sky fill (airless); ambient
+        // comes from the scene floor inside the Hapke helper. Roughness drives the
+        // opposition-surge width; dry regolith has no wet-hollow tightening.
+        surf.style = SURFACE_REGOLITH;
+        surf.roughness = specular_aa_apply(clamp(roughness, 0.06, 1.0), spec_aa_var);
+        surf.occlusion = 1.0;
+        // Regolith ignores the sky environment (airless); pass a zeroed one.
+        let no_sky = SurfaceSky(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
+        lit = shade_surface(
+            surf, view_dir, hit_ws, sun_dir_ws, sun_flux,
+            terrain_scene, no_sky, external_shadow, 1.0,
         );
     } else {
-        // Rough-dielectric surface lighting: direct sun (BRDF) + an
-        // atmosphere-derived hemisphere sky IBL (blue sky-dome + warm ground
-        // bounce) + a subtle ambient sky specular. The sky model is shared with
-        // the grass shader through `thalos::lighting` so the two can't drift.
-        let n_dot_l = max(dot(stable_normal, sun_dir_ws), 0.0);
-        let n_dot_v = max(dot(stable_normal, view_dir), 1.0e-4);
+        // Rough-dielectric surface: direct sun + an atmosphere-derived hemisphere
+        // sky IBL (blue sky-dome + warm ground bounce) + a subtle ambient sky
+        // specular. The sky model is shared with the grass shader through
+        // `thalos::lighting` so the two can't drift.
+        surf.style = SURFACE_DIELECTRIC;
 
         // Specular roughness from the sampled attachment, tightened in wet
         // hollows (material mask .a) so puddles and wet rock get a sharper
         // highlight while dry, rough ground stays matte. Clamped away from 0 to
-        // keep the GGX lobe from collapsing to a firefly.
+        // keep the GGX lobe from collapsing to a firefly. Forced fully matte on
+        // the orbital map (see `distant_schematic`) so the highlight can't alias.
         let wetness = clamp(material_masks.a, 0.0, 1.0);
-        // Force matte on the orbital map (see `distant_schematic`): a fully rough
-        // GGX lobe is flat in `n·h`, so the highlight can't concentrate and alias.
-        let surf_roughness = select(
+        surf.roughness = select(
             specular_aa_apply(
                 clamp(mix(roughness, roughness * 0.45, wetness), 0.06, 1.0),
                 spec_aa_var,
@@ -1488,46 +1367,20 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
             sun_flux,
         );
 
-        // ── Direct sun ────────────────────────────────────────────────────
-        // BRDF × cosine × shadow, tinted by the reddened beam and scaled into
-        // the shared scene-flux exposure.
-        let brdf = surface_brdf(
-            albedo.rgb,
-            surf_roughness,
-            stable_normal,
-            sun_dir_ws,
-            view_dir,
-            n_dot_l,
-            n_dot_v,
-        );
-        let direct = brdf * (n_dot_l * external_shadow) * sky.sun_color * sky.sun_scale;
-
-        // ── Ambient occlusion ─────────────────────────────────────────────
         // Cavity AO from the procedural detail breakup × the material mask's
-        // occlusion. Applied to the ambient terms only.
+        // occlusion, applied (inside `shade_surface`) to the ambient terms only.
         let detail_luma = dot(detail.tint, vec3<f32>(0.2126, 0.7152, 0.0722));
         let cavity = clamp(mix(1.0, detail_luma, AO_FROM_DETAIL), AO_MIN, 1.0);
-        let ao = clamp(material.occlusion * cavity, 0.0, 1.0);
-        // Specular occlusion: smooth (wet/snow) surfaces keep more of their sky
-        // reflection out of creases than rough matte ground does.
-        let spec_occ = clamp(ao + (1.0 - surf_roughness) * 0.4, 0.0, 1.0);
+        surf.occlusion = clamp(material.occlusion * cavity, 0.0, 1.0);
 
-        // ── Hemispheric sky ambient (diffuse) ─────────────────────────────
-        // Blue sky on up-facing normals, warm ground bounce on down-facing.
-        // Canopy AO: tree/object shadow bleeds into the ambient too (a canopy
+        // Canopy AO: a tree/object shadow bleeds into the ambient too (a canopy
         // overhead blocks the sky, not only the sun), so shadowed ground reads.
         let canopy_ambient = mix(1.0, tree_shadow, AMBIENT_SHADOW_BLEED);
-        let ambient_irr = sky_ambient_irradiance(sky, stable_normal, geo_normal);
-        let ambient_diffuse = albedo.rgb * ambient_irr * ao * canopy_ambient;
 
-        // ── Ambient sky specular ──────────────────────────────────────────
-        // Split-sum environment reflection of the sky dome. Negligible on rough
-        // ground; a believable cool sheen on wet ground and snow.
-        let dfg = env_brdf_approx(surf_roughness, n_dot_v);
-        let env_spec = dfg.x * DIELECTRIC_F0 + dfg.y;
-        let ambient_spec = sky.sky_radiance * env_spec * spec_occ * canopy_ambient;
-
-        lit = direct + ambient_diffuse + ambient_spec;
+        lit = shade_surface(
+            surf, view_dir, hit_ws, sun_dir_ws, sun_flux,
+            terrain_scene, sky, external_shadow, canopy_ambient,
+        );
     }
 
     var output: FragmentOutput;

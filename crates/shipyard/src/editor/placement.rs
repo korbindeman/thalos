@@ -14,6 +14,7 @@ use crate::{
     SurfaceMountKind, SymmetryGroup, SymmetryRole, Wing, wing_panel_frame,
 };
 
+use super::debug_log::{Field, SelectionLog};
 use super::state::{
     AttachNodePin, BuildOrientation, CLICK_THRESHOLD_PX, DeselectTracker, EditorState,
     EditorUiGate, PartBody, TankResizeArrow,
@@ -33,12 +34,23 @@ pub(super) fn on_body_click(
     wings: Query<(), With<Wing>>,
     catalog: Res<PartCatalog>,
     ui_gate: Res<EditorUiGate>,
+    log: Res<SelectionLog>,
     mut state: ResMut<EditorState>,
 ) {
     if ui_gate.pointer_busy {
+        log.event(&[
+            ("event", "body_click".into()),
+            ("clicked", click.entity.into()),
+            ("action", "blocked_ui_busy".into()),
+        ]);
         return;
     }
     let Ok(body) = bodies.get(click.entity) else {
+        log.event(&[
+            ("event", "body_click".into()),
+            ("clicked", click.entity.into()),
+            ("action", "no_part_body".into()),
+        ]);
         return;
     };
     let pending_surface_kind = state.pending.as_ref().and_then(|pending| {
@@ -61,15 +73,37 @@ pub(super) fn on_body_click(
         }
     });
     if let Some(kind) = pending_surface_kind {
+        let has_hit = click.hit.position.is_some();
         if let Some(pos) = click.hit.position {
             state.place_surface_at = Some((body.0, pos, kind));
         }
+        log.event(&[
+            ("event", "body_click".into()),
+            ("clicked", click.entity.into()),
+            ("part", body.0.into()),
+            ("action", "place_surface".into()),
+            ("surface_kind", format!("{kind:?}").into()),
+            ("has_hit_pos", has_hit.into()),
+        ]);
         return;
     }
     if state.pending.is_some() {
         state.status = "Pick a compatible surface or attach node for the pending part".into();
+        log.event(&[
+            ("event", "body_click".into()),
+            ("clicked", click.entity.into()),
+            ("part", body.0.into()),
+            ("action", "pending_incompatible".into()),
+        ]);
         return;
     }
+    log.event(&[
+        ("event", "body_click".into()),
+        ("clicked", click.entity.into()),
+        ("part", body.0.into()),
+        ("action", "select".into()),
+        ("prev_selected", state.selected.into()),
+    ]);
     state.selected = Some(body.0);
 }
 
@@ -77,15 +111,34 @@ pub(super) fn on_pin_click(
     click: On<Pointer<Click>>,
     pins: Query<&AttachNodePin>,
     ui_gate: Res<EditorUiGate>,
+    log: Res<SelectionLog>,
     mut state: ResMut<EditorState>,
 ) {
     if ui_gate.pointer_busy {
+        log.event(&[
+            ("event", "pin_click".into()),
+            ("clicked", click.entity.into()),
+            ("action", "blocked_ui_busy".into()),
+        ]);
         return;
     }
     if let Ok(pin) = pins.get(click.entity) {
         if state.pending.is_some() {
             state.place_at = Some((pin.part, pin.node_id.clone()));
+            log.event(&[
+                ("event", "pin_click".into()),
+                ("part", pin.part.into()),
+                ("node", pin.node_id.as_str().into()),
+                ("action", "place_at".into()),
+            ]);
         } else {
+            log.event(&[
+                ("event", "pin_click".into()),
+                ("part", pin.part.into()),
+                ("node", pin.node_id.as_str().into()),
+                ("action", "select".into()),
+                ("prev_selected", state.selected.into()),
+            ]);
             state.selected = Some(pin.part);
         }
     }
@@ -101,6 +154,7 @@ pub(super) fn deselect_on_empty_click(
     windows: Query<&Window, With<PrimaryWindow>>,
     hover_map: Res<HoverMap>,
     pickables: Query<(), Or<(With<PartBody>, With<AttachNodePin>, With<TankResizeArrow>)>>,
+    log: Res<SelectionLog>,
     mut state: ResMut<EditorState>,
 ) {
     let Ok(window) = windows.single() else {
@@ -118,13 +172,35 @@ pub(super) fn deselect_on_empty_click(
                 .any(|hovers| hovers.keys().any(|e| pickables.get(*e).is_ok()));
             tracker.press_cursor = if on_pickable { None } else { cursor };
         }
+        if log.enabled() {
+            log.event(&[
+                ("event", "deselect_press".into()),
+                ("ui_busy", ui_gate.pointer_busy.into()),
+                ("armed", tracker.press_cursor.is_some().into()),
+                ("selected", state.selected.into()),
+            ]);
+        }
     }
 
-    if input.primary_released
-        && let (Some(press), Some(current)) = (tracker.press_cursor.take(), cursor)
-        && (current - press).length() < CLICK_THRESHOLD_PX
-    {
-        state.selected = None;
+    if input.primary_released {
+        let press = tracker.press_cursor.take();
+        let dist = match (press, cursor) {
+            (Some(p), Some(c)) => Some((c - p).length()),
+            _ => None,
+        };
+        let will_deselect = dist.is_some_and(|d| d < CLICK_THRESHOLD_PX);
+        if log.enabled() && (press.is_some() || state.selected.is_some()) {
+            log.event(&[
+                ("event", "deselect_release".into()),
+                ("armed", press.is_some().into()),
+                ("drag_px", dist.map_or(Field::Null, Into::into)),
+                ("deselect", will_deselect.into()),
+                ("selected", state.selected.into()),
+            ]);
+        }
+        if will_deselect {
+            state.selected = None;
+        }
     }
 }
 

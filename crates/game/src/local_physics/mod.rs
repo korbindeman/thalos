@@ -1,15 +1,13 @@
 //! Game-side orchestration for the M5 aggregate local-physics bubble.
 
-
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_body_render::HeightSource;
 use thalos_physics_canonical::types::BodyState;
-use thalos_physics_local::avian::{
-    Physics, PhysicsTime,
-};
+use thalos_physics_local::avian::{Physics, PhysicsTime};
 use thalos_physics_local::{
-    ActiveLocalBubble, LocalCraftBody, LocalPhysicsPlugin,
+    ActiveLocalBubble, LocalCraftBody, LocalPhysicsPlugin, publish_local_craft_kinematics,
+    sync_structure_collider_pose,
 };
 use thalos_world::BodyId;
 
@@ -105,6 +103,14 @@ impl Plugin for GameLocalPhysicsPlugin {
                     reanchor_surface_frame,
                     maintain_terrain_patch,
                     sync_terrain_collider_pose,
+                    // Pose terrain-anchored structure colliders (runway slab)
+                    // static in the SLF — generic executor home for what was
+                    // runway.rs's `sync_runway_collider_pose` (Phase 0 seam).
+                    sync_structure_collider_pose,
+                    // Last: snapshot the post-re-anchor craft SLF state into the
+                    // Avian-free `LocalCraftKinematics` readout for next frame's
+                    // non-executor readers (control bus). See `docs/physics.md`.
+                    publish_local_craft_kinematics,
                 )
                     .chain()
                     .in_set(SimStage::Physics)
@@ -322,24 +328,23 @@ fn agl_above_rendered_surface(
     Some((position_body.length() - radius, dir, position_body))
 }
 
-
 // Submodules of the local-physics layer (Phase B split; see docs/regimes.md).
-mod spawn;
-mod terrain_patch;
-mod snap;
+mod colliders;
 mod forces;
+mod frames;
 mod gear;
 mod ground;
-mod frames;
-mod colliders;
-pub(crate) use spawn::*;
-pub(crate) use terrain_patch::*;
-pub(crate) use snap::*;
+mod snap;
+mod spawn;
+mod terrain_patch;
+pub(crate) use colliders::*;
 pub(crate) use forces::*;
+pub(crate) use frames::*;
 pub(crate) use gear::*;
 pub(crate) use ground::*;
-pub(crate) use frames::*;
-pub(crate) use colliders::*;
+pub(crate) use snap::*;
+pub(crate) use spawn::*;
+pub(crate) use terrain_patch::*;
 
 #[cfg(test)]
 mod tests {
@@ -583,4 +588,3 @@ mod tests {
         assert!((offset - DVec3::Y * -(height * 0.5)).length() < 1e-12);
     }
 }
-

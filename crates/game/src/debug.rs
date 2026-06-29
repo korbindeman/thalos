@@ -6,7 +6,6 @@ use bevy::math::primitives::{Capsule3d, Cone, Cuboid, Cylinder, Sphere};
 use bevy::math::{DMat3, DQuat, DVec3, Isometry3d, Quat, Vec3};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::EguiContexts;
 use thalos_body_render::TerrainPatchBasis;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::{
@@ -289,15 +288,16 @@ fn draw_debug_hitboxes(
         let body = &sim.system.bodies[bubble.body_id];
         let basis = TerrainPatchBasis::from_normal(dir_craft);
         let ground_color = Color::srgba(1.0, 0.5, 0.0, 0.7);
-        let cell = |i: usize| (i as f64 / GROUND_GRID_STEPS as f64 * 2.0 - 1.0) * GROUND_GRID_HALF_M;
+        let cell =
+            |i: usize| (i as f64 / GROUND_GRID_STEPS as f64 * 2.0 - 1.0) * GROUND_GRID_HALF_M;
         let mut grid: Vec<Vec<Vec3>> = Vec::with_capacity(GROUND_GRID_STEPS + 1);
         for iz in 0..=GROUND_GRID_STEPS {
             let z = cell(iz);
             let mut row = Vec::with_capacity(GROUND_GRID_STEPS + 1);
             for ix in 0..=GROUND_GRID_STEPS {
                 let x = cell(ix);
-                let dir =
-                    (dir_craft * body.radius_m + basis.tangent_x * x + basis.tangent_z * z).normalize();
+                let dir = (dir_craft * body.radius_m + basis.tangent_x * x + basis.tangent_z * z)
+                    .normalize();
                 let h = height_source
                     .sample_height_m(dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
                     .unwrap_or(0.0) as f64;
@@ -469,7 +469,7 @@ fn commit_debug_surface_teleport(
     mut commands: Commands,
     debug: Res<DebugMode>,
     input: Res<GameInputIntent>,
-    mut contexts: EguiContexts,
+    ui_pointer_gate: Res<crate::hud::UiPointerGate>,
     mut teleport: ResMut<DebugSurfaceTeleport>,
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
     mut sim: ResMut<SimulationState>,
@@ -499,11 +499,7 @@ fn commit_debug_surface_teleport(
     if !input.primary_started {
         return;
     }
-    let egui_pointer_busy = contexts
-        .ctx_mut()
-        .map(|ctx| ctx.wants_pointer_input())
-        .unwrap_or(false);
-    if egui_pointer_busy {
+    if ui_pointer_gate.hovered {
         return;
     }
 

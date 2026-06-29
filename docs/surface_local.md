@@ -259,7 +259,13 @@ sync: `update_runway_transform` and `sync_runway_collider_pose` retire
 **rendering** distant/at-warp structures — the documented f32-quaternion
 jitter fix — since render placement is independent of physics.)
 
-### 6.4 Player placement / editing (future-proofing, not built now)
+### 6.4 Player placement / editing (built — see `base_building.md`)
+
+> **Landed 2026-06-29** as the in-world base editor (`crates/game/src/base_editor/`).
+> The region invalidation below took the **coarse-hammer** path (despawn +
+> respawn the whole body terrain, reusing the persistent flatten handle) rather
+> than scoped per-AABB invalidation; the scoped version (item 1) is the
+> optimization follow-up. Full design in `base_building.md`.
 
 Placement = write a `StructureSite` at runtime + install its terrain
 modifier + spawn its visuals/colliders. The one genuinely new mechanism
@@ -269,14 +275,15 @@ placing a building stands on already-streamed tiles. Required:
 
 1. Scoped invalidation in the tile pipeline — bump a region-scoped
    revision when a `TerrainFlatten`/modifier is installed or edited, so
-   UDLOD reloads only tiles overlapping the modified AABB.
+   UDLOD reloads only tiles overlapping the modified AABB. *(MVP shipped a
+   whole-body despawn/respawn instead; scoped invalidation is deferred.)*
 2. SLF heightfield rebuild for the affected window (already the §3
    revision-change path).
 3. Collider/visual respawn for the edited structure.
 
 Everything else (records, registry, modifiers, static colliders) is the
-same machinery as authored structures. Design the registry now so this
-slots in; build the invalidation when placement gameplay arrives.
+same machinery as authored structures. The registry was designed for this,
+and the base editor now writes player-placed sites/buildings into it.
 
 ## 7. Relation to the Avian question
 
@@ -307,9 +314,11 @@ decision to replace Avian:
    assertion; delete the per-frame collider pose syncs.
 4. **EVA folds into the SLF**; delete its special-case exemptions.
 5. **Structures registry**: port the runway to a `StructureSite`; add a
-   second structure kind (a simple building) to prove generality.
+   second structure kind (a simple building) to prove generality. *(Done —
+   `BaseSite`/`Building` kinds added by the base editor.)*
 6. **Runtime placement** (region tile invalidation) when placement
-   gameplay needs it.
+   gameplay needs it. *(Done 2026-06-29 — the in-world base editor, via the
+   coarse despawn/respawn invalidation MVP; see `base_building.md`.)*
 
 ## 9. Open questions
 
@@ -419,4 +428,7 @@ and installs its pad through this path; a future building is a data entry
   (on re-anchor / height-source revision change) — a possible hitch near
   terrain streaming; async rebuild with atomic swap is the planned upgrade.
 - **Runtime structure placement / region tile invalidation** (design §6.4)
-  is unbuilt — only authored (runway) sites exist so far.
+  is **built** (2026-06-29) as the in-world base editor — player-placed sites
+  and buildings, with a coarse despawn/respawn invalidation MVP. Scoped
+  per-AABB invalidation remains the optimization follow-up. See
+  `base_building.md`.

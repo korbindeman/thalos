@@ -182,7 +182,11 @@ pub(crate) fn build(
             SystemMapCanvas,
             Name::new("MfdTrajectoryCanvas"),
         ));
-        p.spawn((label(theme, "—"), SystemMapScale, Name::new("MfdTrajectoryScale")));
+        p.spawn((
+            label(theme, "—"),
+            SystemMapScale,
+            Name::new("MfdTrajectoryScale"),
+        ));
     });
 }
 
@@ -208,14 +212,22 @@ pub(crate) fn update(
 
     // Pinned with no live prediction (e.g. landed): blank rather than show a
     // frozen pre-collapse orbit.
-    let (Some(branches), Some(states)) =
-        (sim.simulation.trajectory_branches(), solar.states.as_deref())
-    else {
+    let (Some(branches), Some(states)) = (
+        sim.simulation.trajectory_branches(),
+        solar.states.as_deref(),
+    ) else {
         material.data = SystemMapData::default();
         return;
     };
 
-    build_data(&mut material.data, &sim, branches, states, &theme, &mut zoom);
+    build_data(
+        &mut material.data,
+        &sim,
+        branches,
+        states,
+        &theme,
+        &mut zoom,
+    );
 
     if let Ok(mut text) = scale_q.single_mut() {
         let s = fmt_view_radius(ZOOM_LEVELS_M[zoom.idx]);

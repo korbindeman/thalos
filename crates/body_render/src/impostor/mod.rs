@@ -51,8 +51,6 @@ impl Plugin for PlanetRenderingPlugin {
         bevy::shader::load_shader_library!(app, "shaders/noise.wgsl");
         app.add_plugins(bevy_erosion_filter::ErosionFilterPlugin);
         app.add_plugins((
-            MaterialPlugin::<PlanetMaterial>::default(),
-            MaterialPlugin::<PlanetHaloMaterial>::default(),
             MaterialPlugin::<GasGiantMaterial>::default(),
             MaterialPlugin::<RingMaterial>::default(),
             MaterialPlugin::<SolidPlanetMaterial>::default(),

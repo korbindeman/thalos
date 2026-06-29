@@ -107,9 +107,7 @@ fn build_multi_scatter_lut(
 /// body keeps this, so the cloud composite in `body_sky.wgsl` is a no-op there.
 fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::asset::RenderAssetUsages;
-    use bevy::render::render_resource::{
-        Extent3d, TextureDimension, TextureFormat, TextureUsages,
-    };
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
     // RGBA32F (0.0, 0.0, 0.0, 1.0), little-endian (1.0f32 = 0x3F80_0000).
     let data = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x3F];
     let mut image = Image::new(
@@ -142,9 +140,7 @@ pub(super) struct BlankCloudTextures {
 /// [`blank_cloud_layer`].
 fn blank_cloud_distance(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::asset::RenderAssetUsages;
-    use bevy::render::render_resource::{
-        Extent3d, TextureDimension, TextureFormat, TextureUsages,
-    };
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
     let data = 1.0e9_f32.to_le_bytes().to_vec();
     let mut image = Image::new(
         Extent3d {

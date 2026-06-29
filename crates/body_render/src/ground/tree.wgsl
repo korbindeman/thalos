@@ -18,7 +18,8 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
-#import thalos::lighting::{SurfaceSky, compute_surface_sky, sky_ambient_irradiance}
+#import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage, SurfaceSky}
+#import thalos::foliage::{foliage_base_albedo, foliage_hue_tint}
 
 struct TreeParams {
     // xyz = unit direction toward the star (world render space), w = sun flux
@@ -44,6 +45,9 @@ struct TreeParams {
 @group(3) @binding(0) var<uniform> tree: TreeParams;
 @group(3) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(3) @binding(2) var atlas_samp: sampler;
+// Companion material atlas: bark tangent-space normal (rgb) + roughness (a).
+// Linear data; shares `atlas_samp`. Only bark fragments read it.
+@group(3) @binding(7) var material_tex: texture_2d<f32>;
 
 // Cascaded sun-shadow maps (the SAME depth maps the terrain samples, published
 // by the game's `rendering::sun_shadow`). Separate `texture_depth_2d` per
@@ -134,12 +138,22 @@ fn sun_shadow_factor(world_pos: vec3<f32>) -> f32 {
 // well as direct sun. Keeps shaded trees from staying ambient-bright (the same
 // idea as `AMBIENT_SHADOW_BLEED` on the ground).
 const TREE_AMBIENT_SHADOW_BLEED: f32 = 0.5;
+// How strongly the baked leaf normal map perturbs the smooth crown normal (0 =
+// flat cards, 1 = full per-leaf tilt). Gentle — just enough that neighbouring
+// leaves catch light differently and read as separate, not embossed/noisy.
+const LEAF_NORMAL_MIX: f32 = 0.55;
 
 const TAU: f32 = 6.28318530717958647;
-// Foliage atlas: 4×4 cells, 128 px each (512²). Cells 0..=11 are translucent
-// foliage (leaves / needles); 12 = opaque shell; 13..=15 = opaque bark.
+const PI: f32 = 3.14159265358979324;
+// Foliage atlas: 4×4 cells, 256 px each (1024²). Cells 0..=11 are translucent
+// foliage (leaves / needles); 12 = opaque shell; 13..=15 = opaque bark. The
+// companion `material_tex` mirrors this layout (bark normal + roughness).
 const ATLAS_N: f32 = 4.0;
 const ATLAS_TEXEL: f32 = 1.0 / 1024.0;
+
+// Soft sun sheen on bark ridges — bark is near-matte, so a weak, broad lobe.
+const BARK_SPEC_F0: f32 = 0.04;
+const BARK_SPEC_STRENGTH: f32 = 0.6;
 
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
@@ -240,6 +254,45 @@ fn vertex(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// Perturb the geometric normal `n` by the tangent-space `tn`, building the TBN
+// from screen-space derivatives of world position + atlas UV (Schüler's
+// cotangent frame). No mesh tangents needed — and it tracks the wrap-tiled bark
+// UV per-fragment (the tangent follows the local UV gradient automatically).
+fn perturb_normal(n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>, tn: vec3<f32>) -> vec3<f32> {
+    let dp1 = dpdx(world_pos);
+    let dp2 = dpdy(world_pos);
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+    let dp2perp = cross(dp2, n);
+    let dp1perp = cross(n, dp1);
+    let t = dp2perp * duv1.x + dp1perp * duv2.x;
+    let b = dp2perp * duv1.y + dp1perp * duv2.y;
+    let invmax = inverseSqrt(max(dot(t, t), dot(b, b)));
+    let tbn = mat3x3<f32>(t * invmax, b * invmax, n);
+    return normalize(tbn * tn);
+}
+
+// Weak, broad GGX sun sheen for bark ridges (bark is near-matte). Gated by the
+// sun shadow; scaled by the same `sun_color * sun_scale` as the diffuse so it
+// stays photometrically consistent with the sky model.
+fn bark_specular(
+    n: vec3<f32>, view_dir: vec3<f32>, sun_dir: vec3<f32>,
+    roughness: f32, sky: SurfaceSky, shadow: f32,
+) -> vec3<f32> {
+    let n_dot_l = dot(n, sun_dir);
+    if (n_dot_l <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let h = normalize(sun_dir + view_dir);
+    let n_dot_h = max(dot(n, h), 0.0);
+    let a = max(roughness * roughness, 0.02);
+    let a2 = a * a;
+    let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    let d = a2 / (PI * denom * denom);
+    let spec = d * BARK_SPEC_F0 * n_dot_l * shadow * BARK_SPEC_STRENGTH;
+    return sky.sun_color * sky.sun_scale * spec;
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Leaf shape + coverage from the procedural atlas; alpha-test the leaf cards.
@@ -247,48 +300,73 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if tex.a < 0.5 {
         discard;
     }
+    // The foliage atlas is composited over transparent BLACK, so partial-coverage
+    // texels store premultiplied colour (rgb = colour × alpha). Un-premultiply, or
+    // the kept alpha-test fringe (alpha 0.5→1) reads as colour fading to black — a
+    // dark rim around every leaf. Bark/shell are opaque (alpha 1), so this is a
+    // no-op there.
+    let atlas_rgb = tex.rgb / max(tex.a, 1.0e-3);
 
-    let n = normalize(in.world_normal);
     let sun_dir = tree.sun_dir.xyz;
     let up = tree.sky_up.xyz;
+    let view_dir = normalize(view.world_position - in.world_position);
 
     // Same atmosphere-derived sky/sun environment the grass + ground build.
     let sky = compute_surface_sky(tree.sky_tau.xyz, tree.sky_tau.w, up, sun_dir, tree.sun_dir.w);
-
-    // Per-instance hue jitter (warm/cool) so a species isn't visibly stamped; the
-    // atlas RGB supplies leaf luminance detail, the vertex colour the hue × AO.
-    let hue = (in.seed - 0.5) * 0.22;
-    let tint = in.color.rgb * vec3<f32>(1.0 + hue, 1.0, 1.0 - hue);
-    let albedo = tex.rgb * tint;
 
     // Sun-shadow: tree-on-tree, canopy self-shadow, and the ground's shadows
     // cast onto trunks/low foliage. Gates the direct + transmitted sun terms,
     // and bleeds partially into ambient (a shaded canopy sees less sky too).
     let shadow = sun_shadow_factor(in.world_position);
 
-    // Direct: wrap diffuse — foliage scatters a lot, so wrap past the terminator
-    // so the shaded side stays leafy rather than black. Eased from 0.55 → 0.40
-    // so canopies keep a readable shaded side (less flat-blob, more form).
-    let n_dot_l = dot(n, sun_dir);
-    let wrap = clamp((n_dot_l + 0.40) / 1.40, 0.0, 1.0);
-    let direct = albedo * (wrap * sky.sun_scale * shadow) * sky.sun_color;
+    let is_bark = in.leaf < 0.5;
+    var n = normalize(in.world_normal);
+    var albedo: vec3<f32>;
+    var roughness = 0.9;
 
-    // Ambient: the hemisphere sky model (blue sky-dome + warm ground bounce).
-    // Kept modest — too much and the blue sky-dome washes the upward-facing top
-    // leaves to grey-blue; the wrap term above already lifts the shadow side.
-    let ambient = albedo * sky_ambient_irradiance(sky, n, up)
-        * (0.8 * mix(1.0, shadow, TREE_AMBIENT_SHADOW_BLEED));
+    if (is_bark) {
+        // Bark / shell: painterly atlas colour (decoupled from the dark
+        // `trunk_color` tint) from the SHARED foliage material model, normal-mapped
+        // + roughness from the material atlas.
+        let mat = textureSample(material_tex, atlas_samp, in.atlas_uv);
+        n = perturb_normal(n, in.world_position, in.atlas_uv, mat.xyz * 2.0 - 1.0);
+        roughness = mat.w;
+        albedo = foliage_base_albedo(atlas_rgb, in.color.g, in.leaf, in.seed);
+    } else {
+        // Foliage: intrinsic leaf colour from the SHARED `thalos::foliage` material
+        // model (exposure grade + olive naturalize) — the SAME function the impostor
+        // bake (`tree_bake.wgsl`) calls, so the near canopy and the far impostor band
+        // cannot drift. Per-instance hue is applied here (and identically on the
+        // impostor), never baked into the atlas. Directional sunlit-leaf pop is the
+        // lighting model's job below, so the albedo stays view-independent.
+        albedo = foliage_base_albedo(atlas_rgb, in.color.g, in.leaf, in.seed)
+            * foliage_hue_tint(in.seed);
 
-    // Two-sided translucency: backlit leaves transmit a warm forward-scattered
-    // glow. A view-dependent lobe (looking toward the sun through the leaf) plus
-    // a softer isotropic through-scatter, so the whole sunlit-from-behind canopy
-    // glows, not just the rim.
-    let v = normalize(view.world_position - in.world_position);
-    let lt_dir = normalize(sun_dir + n * 0.30);
-    let back = pow(clamp(dot(v, -lt_dir), 0.0, 1.0), 2.5);
-    let warm = vec3<f32>(1.30, 1.05, 0.50); // green → yellow/orange shift
-    let thru = (back + 0.16 * clamp(-n_dot_l, 0.0, 1.0)) * in.leaf;
-    let transmit = albedo * warm * (thru * sky.sun_scale * shadow) * sky.sun_color;
+        // Per-leaf normal: perturb the smooth crown-outward normal with the baked
+        // leaf normal map so individual leaves catch light differently — depth,
+        // instead of the whole card shading flat. Eased by LEAF_NORMAL_MIX so it
+        // textures the lighting without reading as noisy.
+        let lmat = textureSample(material_tex, atlas_samp, in.atlas_uv);
+        let lnrm = normalize(mix(vec3<f32>(0.0, 0.0, 1.0), lmat.xyz * 2.0 - 1.0, LEAF_NORMAL_MIX));
+        n = perturb_normal(n, in.world_position, in.atlas_uv, lnrm);
+    }
 
-    return vec4<f32>(direct + ambient + transmit, 1.0);
+    // Shade through the shared `shade_foliage`: wrap-diffuse direct + hemisphere
+    // sky IBL + the two-sided leaf transmit. Canopies dim their ambient (0.8) and
+    // bleed the sun-shadow into it; the per-vertex `leaf` flag drives the transmit
+    // (1 = foliage, 0 = bark/shell).
+    var s: FoliageSurface;
+    s.albedo = albedo;
+    s.normal_ws = n;
+    s.translucency = in.leaf;
+    s.ambient_scale = 0.8;
+    s.ambient_bleed = TREE_AMBIENT_SHADOW_BLEED;
+    var lit = shade_foliage(s, view_dir, up, sun_dir, sky, shadow);
+
+    // Bark catches a soft sun sheen on its ridges (foliage stays matte).
+    if (is_bark) {
+        lit += bark_specular(n, view_dir, sun_dir, roughness, sky, shadow);
+    }
+
+    return vec4<f32>(lit, 1.0);
 }

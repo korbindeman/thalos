@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use thalos_terrain::TerrainFlatten;
+use thalos_terrain::{FlattenRegion, TerrainFlatten};
 use thalos_world::BodyId;
 
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
@@ -33,9 +33,25 @@ pub struct StructureId(pub u64);
 /// What kind of structure a site is. Drives visuals/colliders (owned by the
 /// kind's own systems — e.g. `crate::runway` for `Runway`); the registry and
 /// flatten path are kind-agnostic. New kinds (buildings, pads) extend this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum StructureKind {
     Runway,
+    /// A player-flattened building site. Owns the `FlattenTo` terrain pad;
+    /// buildings placed on it drape on the levelled ground.
+    BaseSite,
+    /// A placed building — a simple parametric box for now, draped on its
+    /// parent site's flattened pad. Half-extents are along the site's heading
+    /// (`x`) and across it (`z`); `height_m` rises along the local vertical.
+    Building {
+        half_x_m: f32,
+        half_z_m: f32,
+        height_m: f32,
+    },
+    /// A launchpad — a circular slab draped on the pad that a craft can be
+    /// placed on / launched from (the base editor's **L** action).
+    Launchpad {
+        radius_m: f32,
+    },
 }
 
 /// How a structure meets the terrain.
@@ -66,6 +82,10 @@ pub struct StructureSite {
     pub heading_tangent: DVec3,
     pub placement: StructurePlacement,
     pub kind: StructureKind,
+    /// For a building, the [`BaseSite`](StructureKind::BaseSite) it sits on, so
+    /// deleting a site can take its buildings with it. `None` for top-level
+    /// structures (runway, sites).
+    pub parent_site: Option<StructureId>,
 }
 
 /// Every terrain-anchored structure, grouped by body.
@@ -95,6 +115,7 @@ impl StructureRegistry {
         heading_tangent: DVec3,
         placement: StructurePlacement,
         kind: StructureKind,
+        parent_site: Option<StructureId>,
     ) -> StructureId {
         let id = self.allocate_id();
         self.sites.entry(body_id).or_default().push(StructureSite {
@@ -104,6 +125,7 @@ impl StructureRegistry {
             heading_tangent,
             placement,
             kind,
+            parent_site,
         });
         id
     }
@@ -117,6 +139,26 @@ impl StructureRegistry {
 
     pub fn get(&self, id: StructureId) -> Option<&StructureSite> {
         self.sites.values().flatten().find(|s| s.id == id)
+    }
+
+    /// Mutate a registered structure in place (e.g. an inspector edit to a
+    /// building's footprint). No-op if the id is unknown.
+    pub fn update(&mut self, id: StructureId, f: impl FnOnce(&mut StructureSite)) {
+        if let Some(site) = self.sites.values_mut().flatten().find(|s| s.id == id) {
+            f(site);
+        }
+    }
+
+    /// Remove a structure, returning it if found. Callers that remove a
+    /// `FlattenTo` structure should also call [`remove_structure_flatten`] and
+    /// trigger a terrain rebuild so the pad reverts.
+    pub fn remove(&mut self, id: StructureId) -> Option<StructureSite> {
+        for sites in self.sites.values_mut() {
+            if let Some(pos) = sites.iter().position(|s| s.id == id) {
+                return Some(sites.remove(pos));
+            }
+        }
+        None
     }
 }
 
@@ -153,7 +195,32 @@ pub fn apply_structure_flatten(
         body_radius_m,
     );
     if let Ok(mut guard) = flatten_registry.handle(site.body_id).write() {
-        *guard = Some(flatten);
+        let region = FlattenRegion {
+            id: site.id.0,
+            flatten,
+        };
+        // Upsert by id so re-applying an edited site replaces its own pad
+        // rather than stacking a duplicate region, and other structures'
+        // pads (the runway) are left untouched.
+        if let Some(existing) = guard.iter_mut().find(|r| r.id == region.id) {
+            *existing = region;
+        } else {
+            guard.push(region);
+        }
+    }
+}
+
+/// Remove a structure's terrain flatten from the body's shared handle, reverting
+/// its footprint to natural terrain on tiles baked afterward. The inverse of
+/// [`apply_structure_flatten`]; call it when a `FlattenTo` structure is deleted
+/// (and trigger a terrain rebuild so already-resident tiles re-bake unflattened).
+pub fn remove_structure_flatten(
+    id: StructureId,
+    body_id: BodyId,
+    flatten_registry: &mut TerrainFlattenRegistry,
+) {
+    if let Ok(mut guard) = flatten_registry.handle(body_id).write() {
+        guard.retain(|r| r.id != id.0);
     }
 }
 

@@ -39,18 +39,19 @@ use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
     AU_M, GrassBladeLod, GrassMaterial, GrassTileBuildInput, GrassTileKey, GrassTileMesh,
-    LIGHT_AT_1AU, TerrainShadingStyle, build_grass_tile_mesh, grass_tile_frame, grass_tile_key,
-    grass_tiles_per_side,
+    LIGHT_AT_1AU, TerrainShadingStyle, build_grass_tile_mesh, fallback_shadow_map, grass_tile_frame,
+    grass_tile_key, grass_tiles_per_side,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
-use crate::coords::SHIP_LAYER;
 use crate::camera::ShipCamera;
+use crate::coords::SHIP_LAYER;
 use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
+use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
@@ -80,16 +81,18 @@ struct GrassRing {
     forest_cull: f32,
 }
 
-/// The clipmap: near full-detail blades → far wide clumps → terrain albedo
-/// carries the rest. Reaches ~1.5 km. Far rings are blade-count-capped per tile
-/// (`MAX_BLADES_PER_TILE`), so they widen + heighten the clumps aggressively to
-/// hold *coverage* — a distant grassfield reads from blade height occluding at
-/// grazing angles, not footprint area (see `docs/vegetation.md`).
-const GRASS_RINGS: [GrassRing; 5] = [
+/// The clipmap: near full-detail blades → one far wide-clump ring → **terrain
+/// albedo carries the rest** (the shared `landcover` field paints the ground the
+/// same grass colour, so beyond the blades the field still reads as grass — see
+/// `docs/vegetation.md`). Cut from 5 rings/1.5 km to 3 rings/~340 m: the far
+/// rings were heavy churn + visible LOD bands for blades that, from any altitude,
+/// the terrain albedo already covers. Gentle width progression + two Full rings
+/// keep the ring boundaries subtle.
+const GRASS_RINGS: [GrassRing; 3] = [
     GrassRing {
         tile_size_m: 25.0,
         inner_m: 0.0,
-        outer_m: 55.0,
+        outer_m: 60.0,
         density_per_m2: 24.0,
         blades_per_clump: 5,
         width_scale: 1.0,
@@ -100,47 +103,25 @@ const GRASS_RINGS: [GrassRing; 5] = [
     },
     GrassRing {
         tile_size_m: 50.0,
-        inner_m: 55.0,
-        outer_m: 140.0,
-        density_per_m2: 12.0,
+        inner_m: 60.0,
+        outer_m: 160.0,
+        density_per_m2: 11.0,
         blades_per_clump: 4,
-        width_scale: 1.8,
-        height_scale: 1.1,
-        blade_lod: GrassBladeLod::Wide,
-        forest_cull: 0.0,
+        width_scale: 1.3,
+        height_scale: 1.05,
+        blade_lod: GrassBladeLod::Full,
+        forest_cull: 0.35,
     },
     GrassRing {
         tile_size_m: 100.0,
-        inner_m: 140.0,
+        inner_m: 160.0,
         outer_m: 340.0,
-        density_per_m2: 6.0,
+        density_per_m2: 5.0,
         blades_per_clump: 3,
-        width_scale: 3.2,
-        height_scale: 1.3,
+        width_scale: 2.4,
+        height_scale: 1.25,
         blade_lod: GrassBladeLod::Wide,
-        forest_cull: 0.55,
-    },
-    GrassRing {
-        tile_size_m: 200.0,
-        inner_m: 340.0,
-        outer_m: 760.0,
-        density_per_m2: 2.5,
-        blades_per_clump: 2,
-        width_scale: 7.0,
-        height_scale: 1.8,
-        blade_lod: GrassBladeLod::Wide,
-        forest_cull: 0.85,
-    },
-    GrassRing {
-        tile_size_m: 400.0,
-        inner_m: 760.0,
-        outer_m: 1500.0,
-        density_per_m2: 1.0,
-        blades_per_clump: 1,
-        width_scale: 16.0,
-        height_scale: 2.6,
-        blade_lod: GrassBladeLod::Wide,
-        forest_cull: 0.95,
+        forest_cull: 0.7,
     },
 ];
 
@@ -161,10 +142,21 @@ fn ring_fade(idx: usize) -> (f32, f32, f32) {
 }
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
-/// Above this altitude over the local terrain no new tiles are built.
-const GRASS_MAX_AGL_M: f64 = 600.0;
-/// Above this altitude all tiles are despawned (e.g. after launch).
-const GRASS_DESPAWN_AGL_M: f64 = 2500.0;
+/// Grass blades are fully present below this AGL. Above it they collapse toward
+/// the ground (a smooth height fade in `grass.wgsl` driven by `sky_up.w`): from
+/// a plane the blades subtend ~no pixels and the terrain albedo already carries
+/// the grass colour, so the whole blade layer is pure cost up there. This is the
+/// "don't render full LOD at altitude, prioritize visible masses" fix.
+const GRASS_FADE_LO_AGL_M: f64 = 150.0;
+/// Grass blades fully collapsed (invisible) at/above this AGL.
+const GRASS_FADE_HI_AGL_M: f64 = 300.0;
+/// Above this altitude no new tiles are built — a little into the fade, so we
+/// don't pay to build near-collapsed blades. (Below it, building resumes on
+/// descent in time to populate before the blades are full at `FADE_LO`.)
+const GRASS_MAX_AGL_M: f64 = 185.0;
+/// Above this altitude all live tiles are despawned. Past the collapse, so the
+/// despawn is invisible — blades are already 0-height by `GRASS_FADE_HI_AGL_M`.
+const GRASS_DESPAWN_AGL_M: f64 = 340.0;
 /// Maximum concurrent tile builds across all rings. Builds only dispatch for
 /// tiles whose terrain is resident at a fine LOD (cheap GPU-mirror samples).
 const GRASS_MAX_IN_FLIGHT: usize = 8;
@@ -220,6 +212,9 @@ struct GrassTiles {
     in_flight: HashMap<RingTileKey, (Task<Option<GrassTileMesh>>, u64)>,
     /// One material per ring (carries that ring's fade parameters).
     materials: Vec<Handle<GrassMaterial>>,
+    /// Player AGL over the local terrain (m), written by `drive_grass_tiles` and
+    /// read by `update_grass_material` for the altitude-collapse fade.
+    agl_m: f64,
     rebuild_timer: f32,
     /// Per-second churn counters (grass-flicker investigation; logged + reset
     /// by `log_grass_diagnostics`). Remove once the flicker cause is pinned.
@@ -357,6 +352,7 @@ fn drive_grass_tiles(
         .sample_height_m(cam_dir.as_vec3(), 25.0)
         .unwrap_or(0.0) as f64;
     let agl = cam_r - (radius_m + ground_h);
+    grass.agl_m = agl;
     if agl > GRASS_DESPAWN_AGL_M {
         if !grass.tiles.is_empty() || !grass.in_flight.is_empty() {
             despawn_all(&mut grass, &mut commands);
@@ -447,7 +443,7 @@ fn drive_grass_tiles(
         .handle(body_id)
         .read()
         .ok()
-        .and_then(|guard| *guard);
+        .and_then(|guard| thalos_terrain::nearest_flatten(&guard, cam_dir));
 
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
@@ -497,12 +493,15 @@ fn drive_grass_tiles(
 
 /// Poll in-flight builds; spawn finished tiles as root-grid big_space children
 /// (the runway visual pattern), each on its ring's material.
+#[allow(clippy::too_many_arguments)]
 fn finalize_grass_tiles(
     mut grass: ResMut<GrassTiles>,
     solar: Res<SolarSystemState>,
     root: Option<Res<RealSpaceRoot>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GrassMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    sun_shadow: Option<Res<SunShadowState>>,
     mut commands: Commands,
 ) {
     if grass.in_flight.is_empty() {
@@ -516,7 +515,7 @@ fn finalize_grass_tiles(
         return;
     };
 
-    ensure_ring_materials(&mut grass, &mut materials);
+    ensure_ring_materials(&mut grass, &mut materials, &mut images, sun_shadow.as_deref());
     let ring_materials = grass.materials.clone();
 
     let mut finished: Vec<(RingTileKey, u64, Option<GrassTileMesh>)> = Vec::new();
@@ -581,10 +580,26 @@ fn finalize_grass_tiles(
 }
 
 /// Lazily create one material per clipmap ring, each seeded with its fade band.
-fn ensure_ring_materials(grass: &mut GrassTiles, materials: &mut Assets<GrassMaterial>) {
+/// Each ring receives the cascaded sun-shadows trees cast — the same maps the
+/// ground + tree materials bind. The depth bindings need a valid texture at
+/// creation, so seed them with the live cascade maps (or a 1×1 fallback before
+/// the rig exists); `update_grass_material` rebinds the live block each frame.
+fn ensure_ring_materials(
+    grass: &mut GrassTiles,
+    materials: &mut Assets<GrassMaterial>,
+    images: &mut Assets<Image>,
+    sun_shadow: Option<&SunShadowState>,
+) {
     if grass.materials.len() == GRASS_RINGS.len() {
         return;
     }
+    let maps: [Handle<Image>; 3] = match sun_shadow {
+        Some(s) => s.images.clone(),
+        None => {
+            let fb = images.add(fallback_shadow_map());
+            [fb.clone(), fb.clone(), fb]
+        }
+    };
     grass.materials = (0..GRASS_RINGS.len())
         .map(|idx| {
             let (near, far, band) = ring_fade(idx);
@@ -593,6 +608,10 @@ fn ensure_ring_materials(grass: &mut GrassTiles, materials: &mut Assets<GrassMat
                     time_fade: Vec4::new(0.0, near, far, band),
                     ..default()
                 },
+                sun_shadow_map_0: maps[0].clone(),
+                sun_shadow_map_1: maps[1].clone(),
+                sun_shadow_map_2: maps[2].clone(),
+                ..default()
             })
         })
         .collect();
@@ -630,6 +649,7 @@ fn update_grass_transforms(
 /// (so blades light exactly like the ground), wall-clock sway time, and a
 /// slowly veering wind direction tangent to the surface under the camera. The
 /// shared fields are written to every ring material; each keeps its own fade.
+#[allow(clippy::too_many_arguments)]
 fn update_grass_material(
     grass: Res<GrassTiles>,
     solar: Res<SolarSystemState>,
@@ -639,6 +659,7 @@ fn update_grass_material(
     ship: Query<&GlobalTransform, With<PlayerShip>>,
     ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
     freecam: Res<FreeCam>,
+    sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<GrassMaterial>>,
 ) {
     let (Some(body_id), Some(states)) = (grass.body, solar.states.as_deref()) else {
@@ -673,7 +694,13 @@ fn update_grass_material(
     let veer = t * 0.03;
     let wind_dir = (east * veer.cos() + north * veer.sin()).normalize_or_zero();
     let wind = Vec4::new(wind_dir.x, wind_dir.y, wind_dir.z, GRASS_WIND_SWAY_M);
-    let sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
+    // Altitude collapse (sky_up.w): 0 near the ground (full blades), ramping to 1
+    // above `GRASS_FADE_HI_AGL_M` so the shader sinks the blade layer into the
+    // ground from a plane (terrain albedo carries the grass colour up there).
+    let ramp = (grass.agl_m - GRASS_FADE_LO_AGL_M) / (GRASS_FADE_HI_AGL_M - GRASS_FADE_LO_AGL_M);
+    let ramp = ramp.clamp(0.0, 1.0);
+    let altitude_collapse = (ramp * ramp * (3.0 - 2.0 * ramp)) as f32;
+    let sky_up = Vec4::new(up.x, up.y, up.z, altitude_collapse);
 
     // Sky hemisphere inputs: the body's authored Rayleigh τ_v + strength (the
     // same value the terrain shader recovers from its `AtmosphereBlock`).
@@ -715,6 +742,16 @@ fn update_grass_material(
         material.params.sky_up = sky_up;
         material.params.sky_tau = sky_tau;
         material.params.anchor = anchor;
+        // Bind the live sun-shadow cascade so blades take the trees' (and the
+        // ground's) shadows. `gate.x` is 0 off-surface, so the shader skips the
+        // per-vertex sample there. Grass lives within the near cascade's reach,
+        // so only cascade 0 is sampled in practice.
+        if let Some(sun_shadow) = sun_shadow.as_deref() {
+            material.shadow = sun_shadow.block;
+            material.sun_shadow_map_0 = sun_shadow.images[0].clone();
+            material.sun_shadow_map_1 = sun_shadow.images[1].clone();
+            material.sun_shadow_map_2 = sun_shadow.images[2].clone();
+        }
     }
 }
 
@@ -807,7 +844,10 @@ fn log_grass_diagnostics(
     let Some(body_id) = grass.body else {
         return;
     };
-    let revision = height_sources.get(body_id).map(|s| s.revision()).unwrap_or(0);
+    let revision = height_sources
+        .get(body_id)
+        .map(|s| s.revision())
+        .unwrap_or(0);
     let rev_delta = revision.wrapping_sub(grass.dbg.last_revision);
     grass.dbg.last_revision = revision;
 
@@ -831,7 +871,11 @@ fn log_grass_diagnostics(
     let path =
         std::env::var("THALOS_GRASS_LOG").unwrap_or_else(|_| "grass_churn.jsonl".to_string());
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{line}");
     }
 

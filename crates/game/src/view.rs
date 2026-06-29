@@ -15,7 +15,6 @@
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, PrimaryEguiContext};
 use thalos_input::game::GameInputIntent;
 
 use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
@@ -49,7 +48,6 @@ impl Plugin for ViewPlugin {
             .init_resource::<crate::coords::WorldScale>()
             .add_observer(attach_map_layer_for_hide_in_ship)
             .add_observer(attach_ship_layer_for_hide_in_map)
-            .add_systems(Startup, spawn_ui_camera)
             .add_systems(
                 Update,
                 toggle_view_input.run_if(crate::pause_menu::not_game_paused),
@@ -63,42 +61,6 @@ impl Plugin for ViewPlugin {
             )
             .add_systems(PostUpdate, propagate_view_render_layers);
     }
-}
-
-/// Layer index reserved for the UI overlay camera. No game entity is
-/// placed on this layer, so the camera's 3D main pass renders nothing.
-/// We use a real (but empty) layer rather than `RenderLayers::none()`
-/// because the latter short-circuits the camera's render graph and
-/// takes the egui sub-graph node down with it.
-const UI_LAYER: usize = 31;
-
-/// Dedicated overlay camera that owns the primary egui context.
-///
-/// `bevy_egui` skips inactive cameras when extracting render output, so
-/// pinning the egui context to either [`MapCamera`] or [`ShipCamera`]
-/// would make the UI vanish whenever the other view is active. This
-/// camera is always active and sits above the scene cameras via a
-/// higher `order` so the egui pass composites over whichever scene
-/// camera is currently rendering. The alpha-blended output mode mirrors
-/// `bevy_egui`'s `split_screen` example — without it, the camera's
-/// transparent intermediate texture would overwrite the scene cameras'
-/// output instead of compositing over it.
-fn spawn_ui_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            order: 10,
-            clear_color: ClearColorConfig::Custom(Color::NONE),
-            output_mode: bevy::camera::CameraOutputMode::Write {
-                blend_state: Some(bevy::render::render_resource::BlendState::ALPHA_BLENDING),
-                clear_color: ClearColorConfig::None,
-            },
-            ..default()
-        },
-        RenderLayers::layer(UI_LAYER),
-        PrimaryEguiContext,
-        Name::new("UiCamera"),
-    ));
 }
 
 /// On insertion of [`HideInShipView`], attach `RenderLayers(MAP_LAYER)`
@@ -176,9 +138,8 @@ fn propagate_view_render_layers(
 /// Flip [`ActiveCamera`] + `Camera::is_active` to track the current
 /// [`ViewMode`]. Replaces the per-frame visibility-flip mechanism.
 ///
-/// Filtered to scene cameras only — the UI overlay camera in
-/// [`spawn_ui_camera`] must stay active across both views, otherwise
-/// `bevy_egui` skips extracting its render output and the UI vanishes.
+/// Filtered to scene cameras only. The active scene camera also carries
+/// `IsDefaultUiCamera`, so the Bevy-UI HUD renders on whichever view is live.
 fn apply_active_camera(
     view: Res<ViewMode>,
     shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
@@ -230,15 +191,13 @@ pub fn in_map_view(view: Res<ViewMode>) -> bool {
 
 fn toggle_view_input(
     input: Res<GameInputIntent>,
-    mut contexts: EguiContexts,
+    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
     mut view: ResMut<ViewMode>,
 ) {
     if !input.toggle_view {
         return;
     }
-    if let Ok(ctx) = contexts.ctx_mut()
-        && ctx.wants_keyboard_input()
-    {
+    if ui_text.is_focused() {
         return;
     }
     *view = match *view {

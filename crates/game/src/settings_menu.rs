@@ -1,23 +1,41 @@
-//! Settings overlay.
+//! Settings overlay (native Bevy UI).
 //!
-//! Opens from the pause menu / start screen via the "SETTINGS" button. The
-//! Window tab live-edits the persisted `WindowSettings` (see
-//! `crate::window_settings`); the input tabs show all keyboard / mouse /
-//! controller bindings (read-only in this version) and a live-editable HOTAS
-//! axis configuration — HOTAS changes take effect immediately because the
-//! runtime reader polls `InputSettings` every frame.
+//! Opens from the pause menu / start screen via the "SETTINGS" button. A
+//! centred modal with a tab strip; the body is rebuilt from the current tab +
+//! model whenever the tab changes, the menu opens, or a structural edit bumps
+//! [`SettingsMenu::rebuild`] (HOTAS add/remove, device-mode switch). Interactive
+//! widgets come from [`crate::ui_widgets`]; per-tab apply systems read
+//! `Changed<Widget>` and write the backing resource (value-compared, so an open
+//! tab never churns change detection).
 //!
-//! **Escape priority:** the escape-priority chain in `pause_menu` checks
-//! `SettingsMenu::open` before `GamePause::active`, so Escape closes this
-//! panel while leaving the pause backdrop up.
+//! - **Window** — live-edits the persisted [`WindowSettings`].
+//! - **Graphics** — live-edits the persisted [`GraphicsSettings`].
+//! - **Keyboard / Mouse / Controller** — read-only binding lists.
+//! - **HOTAS** — live-editable axis configuration (`InputSettings`); the runtime
+//!   reader polls `InputSettings` each frame, so changes apply immediately.
+//!
+//! **Escape priority:** the chain in `pause_menu` checks `SettingsMenu::open`
+//! before `GamePause::active`, so Escape closes this panel while leaving the
+//! pause backdrop up.
 
+use bevy::picking::Pickable;
 use bevy::prelude::*;
+use bevy::ui::RelativeCursorPosition;
 use bevy::window::{Monitor, PrimaryMonitor};
-use bevy_egui::{EguiContexts, egui};
-use thalos_input::settings::{AxisSpec, BindingSection, BindingSpec, HotasDeviceSelector, InputSettings};
+use thalos_input::settings::{
+    AxisSpec, BindingSection, BindingSpec, HotasAxisBinding, HotasDeviceSelector, InputSettings,
+};
 
-use crate::graphics_settings::{self, GraphicsSettings};
-use crate::window_settings::{self, MonitorChoice, WindowSettings, WindowSettingsOverrides};
+use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
+use crate::hud::theme::{HudTheme, panel_frame};
+use crate::ui_widgets::{
+    ScrollableColumn, SliderFormat, TextField, UiButton, UiCheckbox, UiCycle, UiSlider,
+    spawn_button, spawn_checkbox_row, spawn_cycle_row, spawn_slider_row, spawn_text_field,
+};
+use crate::window_settings::{
+    MonitorChoice, RESOLUTION_PRESETS, UI_SCALE_MAX, UI_SCALE_MIN, WindowModeSetting,
+    WindowSettings, WindowSettingsOverrides,
+};
 
 // ── Resource ──────────────────────────────────────────────────────────────────
 
@@ -25,9 +43,18 @@ use crate::window_settings::{self, MonitorChoice, WindowSettings, WindowSettings
 pub struct SettingsMenu {
     pub open: bool,
     tab: Tab,
+    /// Bumped to force a tab-body rebuild after a structural change (HOTAS
+    /// add/remove, device-mode switch, reset-to-defaults).
+    rebuild: u32,
 }
 
-#[derive(Default, PartialEq, Clone, Copy)]
+impl SettingsMenu {
+    fn dirty(&mut self) {
+        self.rebuild = self.rebuild.wrapping_add(1);
+    }
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum Tab {
     #[default]
     Window,
@@ -38,39 +65,387 @@ enum Tab {
     Hotas,
 }
 
+impl Tab {
+    const ALL: [Tab; 6] = [
+        Tab::Window,
+        Tab::Graphics,
+        Tab::Keyboard,
+        Tab::Mouse,
+        Tab::Controller,
+        Tab::Hotas,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Window => "Window",
+            Tab::Graphics => "Graphics",
+            Tab::Keyboard => "Keyboard",
+            Tab::Mouse => "Mouse",
+            Tab::Controller => "Controller",
+            Tab::Hotas => "HOTAS",
+        }
+    }
+}
+
+const HOTAS_AXES: [&str; 4] = ["pitch", "yaw", "roll", "throttle"];
+
+// ── Markers ─────────────────────────────────────────────────────────────────
+
+#[derive(Component)]
+struct SettingsRoot;
+
+#[derive(Component)]
+struct SettingsTabBody;
+
+#[derive(Component, Clone, Copy)]
+struct TabButton(Tab);
+
+#[derive(Component)]
+struct CloseButton;
+
+// Window tab
+#[derive(Component)]
+struct WindowModeControl;
+#[derive(Component)]
+struct ResolutionControl {
+    values: Vec<(u32, u32)>,
+}
+#[derive(Component)]
+struct MonitorControl {
+    names: Vec<Option<String>>,
+}
+#[derive(Component)]
+struct VsyncControl;
+#[derive(Component)]
+struct UiScaleControl;
+#[derive(Component)]
+struct ResetWindowControl;
+
+// Graphics tab
+#[derive(Component)]
+struct CloudsControl;
+#[derive(Component)]
+struct MsaaControl;
+#[derive(Component)]
+struct ResetGraphicsControl;
+
+// HOTAS tab
+#[derive(Component)]
+struct HotasEnabledControl;
+#[derive(Component)]
+struct HotasDeviceModeControl;
+#[derive(Component)]
+struct HotasDeviceNameControl;
+#[derive(Component)]
+struct HotasCodeControl {
+    axis: &'static str,
+}
+#[derive(Component)]
+struct HotasInvertControl {
+    axis: &'static str,
+}
+#[derive(Component)]
+struct HotasDeadzoneControl {
+    axis: &'static str,
+}
+#[derive(Component)]
+struct HotasAddControl {
+    axis: &'static str,
+}
+#[derive(Component)]
+struct HotasRemoveControl {
+    axis: &'static str,
+}
+
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
 pub struct SettingsMenuPlugin;
 
 impl Plugin for SettingsMenuPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SettingsMenu>().add_systems(
-            bevy_egui::EguiPrimaryContextPass,
-            settings_ui.after(crate::hud::theme::apply_egui_theme),
-        );
+        app.init_resource::<SettingsMenu>()
+            .add_systems(Startup, setup_ui.after(crate::hud::theme::init_theme))
+            .add_systems(
+                Update,
+                (
+                    sync_visibility,
+                    handle_close_click,
+                    handle_tab_clicks,
+                    update_tab_latches,
+                    rebuild_tab_body,
+                    apply_window_controls,
+                    apply_graphics_controls,
+                    apply_hotas_controls,
+                ),
+            );
     }
 }
 
-// ── Main UI system ─────────────────────────────────────────────────────────────
+// ── Setup ─────────────────────────────────────────────────────────────────────
 
-fn settings_ui(
-    mut contexts: EguiContexts,
-    mut settings_menu: ResMut<SettingsMenu>,
-    mut input_settings: ResMut<InputSettings>,
-    mut window_settings: ResMut<WindowSettings>,
-    mut graphics_settings: ResMut<GraphicsSettings>,
-    window_overrides: Res<WindowSettingsOverrides>,
-    monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
-) {
-    if !settings_menu.open {
+fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
+    let (bg, border) = panel_frame(&theme);
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
+                top: Val::Px(0.0),
+                bottom: Val::Px(0.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+            // Above the pause menu backdrop (z 100) so settings stacks over it.
+            GlobalZIndex(110),
+            Pickable {
+                is_hoverable: false,
+                should_block_lower: true,
+            },
+            Visibility::Hidden,
+            SettingsRoot,
+            Name::new("SettingsMenu"),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    width: Val::Px(560.0),
+                    height: Val::Px(540.0),
+                    max_height: Val::Percent(92.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    padding: UiRect::axes(Val::Px(16.0), Val::Px(12.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
+                    ..default()
+                },
+                bg,
+                border,
+                Name::new("SettingsPanel"),
+            ))
+            .with_children(|panel| {
+                // Title row + close.
+                panel
+                    .spawn(Node {
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new("SETTINGS"),
+                            TextFont {
+                                font: theme.font.clone(),
+                                font_size: 15.0,
+                                ..default()
+                            },
+                            TextColor(theme.text_accent),
+                        ));
+                        spawn_button(row, &theme, CloseButton, "×", 14.0, 24.0);
+                    });
+
+                divider(panel, &theme);
+
+                // Tab strip.
+                panel
+                    .spawn(Node {
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(4.0),
+                        flex_wrap: FlexWrap::Wrap,
+                        row_gap: Val::Px(4.0),
+                        ..default()
+                    })
+                    .with_children(|strip| {
+                        for tab in Tab::ALL {
+                            spawn_button(strip, &theme, TabButton(tab), tab.label(), 11.0, 24.0);
+                        }
+                    });
+
+                divider(panel, &theme);
+
+                // Scrollable body (children rebuilt per tab).
+                panel.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_grow: 1.0,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(6.0),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    RelativeCursorPosition::default(),
+                    Interaction::None,
+                    ScrollableColumn,
+                    SettingsTabBody,
+                    Name::new("SettingsTabBody"),
+                ));
+            });
+        });
+}
+
+fn divider(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    parent.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Px(1.0),
+            ..default()
+        },
+        BackgroundColor(theme.panel_border),
+    ));
+}
+
+// ── Chrome systems ──────────────────────────────────────────────────────────
+
+fn sync_visibility(menu: Res<SettingsMenu>, mut roots: Query<&mut Visibility, With<SettingsRoot>>) {
+    if !menu.is_changed() {
         return;
     }
-    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let target = if menu.open {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut vis in &mut roots {
+        if *vis != target {
+            *vis = target;
+        }
+    }
+}
 
-    let mut monitor_choices: Vec<MonitorChoice> = monitors
+fn handle_close_click(
+    interactions: Query<&Interaction, (Changed<Interaction>, With<CloseButton>)>,
+    mut menu: ResMut<SettingsMenu>,
+) {
+    for interaction in &interactions {
+        if matches!(interaction, Interaction::Pressed) {
+            menu.open = false;
+        }
+    }
+}
+
+fn handle_tab_clicks(
+    interactions: Query<(&Interaction, &TabButton), Changed<Interaction>>,
+    mut menu: ResMut<SettingsMenu>,
+) {
+    for (interaction, tab) in &interactions {
+        if matches!(interaction, Interaction::Pressed) && menu.tab != tab.0 {
+            menu.tab = tab.0;
+        }
+    }
+}
+
+fn update_tab_latches(menu: Res<SettingsMenu>, mut tabs: Query<(&TabButton, &mut UiButton)>) {
+    for (tab, mut button) in &mut tabs {
+        let latched = tab.0 == menu.tab;
+        if button.latched != latched {
+            button.latched = latched;
+        }
+    }
+}
+
+// ── Tab body rebuild ──────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn rebuild_tab_body(
+    mut commands: Commands,
+    menu: Res<SettingsMenu>,
+    theme: Res<HudTheme>,
+    window: Res<WindowSettings>,
+    overrides: Res<WindowSettingsOverrides>,
+    graphics: Res<GraphicsSettings>,
+    input: Res<InputSettings>,
+    monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
+    body: Query<(Entity, Option<&Children>), With<SettingsTabBody>>,
+    mut shown: Local<Option<(bool, Tab, u32)>>,
+) {
+    let key = (menu.open, menu.tab, menu.rebuild);
+    if *shown == Some(key) {
+        return;
+    }
+    *shown = Some(key);
+
+    let Ok((body_entity, children)) = body.single() else {
+        return;
+    };
+    if let Some(children) = children {
+        for child in children.iter() {
+            commands.entity(child).despawn();
+        }
+    }
+    if !menu.open {
+        return;
+    }
+
+    let theme = theme.clone();
+    commands.entity(body_entity).with_children(|b| match menu.tab {
+        Tab::Window => build_window_tab(b, &theme, &window, &overrides, &monitors),
+        Tab::Graphics => build_graphics_tab(b, &theme, &graphics),
+        Tab::Keyboard => build_binding_tab(b, &theme, &input, BindingKind::Keyboard),
+        Tab::Mouse => build_binding_tab(b, &theme, &input, BindingKind::Mouse),
+        Tab::Controller => build_binding_tab(b, &theme, &input, BindingKind::Controller),
+        Tab::Hotas => build_hotas_tab(b, &theme, &input),
+    });
+}
+
+// ── Window tab ────────────────────────────────────────────────────────────────
+
+fn build_window_tab(
+    b: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    settings: &WindowSettings,
+    overrides: &WindowSettingsOverrides,
+    monitors: &Query<(&Monitor, Has<PrimaryMonitor>)>,
+) {
+    // Mode.
+    if let Some(mode) = overrides.mode {
+        pinned_row(b, theme, "Mode", mode_label(mode), "THALOS_WINDOW_MODE");
+    } else {
+        let index = match settings.mode {
+            WindowModeSetting::Windowed => 0,
+            WindowModeSetting::Borderless => 1,
+            WindowModeSetting::Exclusive => 2,
+        };
+        spawn_cycle_row(
+            b,
+            theme,
+            "Mode",
+            vec![
+                "Windowed".into(),
+                "Borderless".into(),
+                "Fullscreen".into(),
+            ],
+            index,
+            WindowModeControl,
+        );
+    }
+
+    // Resolution (windowed).
+    if let Some((w, h)) = overrides.resolution {
+        pinned_row(b, theme, "Resolution", format!("{w} × {h}"), "THALOS_WINDOW_SIZE");
+    } else {
+        let mut values: Vec<(u32, u32)> = RESOLUTION_PRESETS.to_vec();
+        if !values.contains(&settings.resolution) {
+            values.insert(0, settings.resolution);
+        }
+        let index = values
+            .iter()
+            .position(|&r| r == settings.resolution)
+            .unwrap_or(0);
+        let options = values.iter().map(|(w, h)| format!("{w} × {h}")).collect();
+        spawn_cycle_row(b, theme, "Resolution", options, index, ResolutionControl { values });
+        note(b, theme, "Applies in windowed mode; drag-resizing updates it too.");
+    }
+
+    // Monitor.
+    let mut choices: Vec<MonitorChoice> = monitors
         .iter()
         .filter_map(|(monitor, primary)| {
-            // Unnamed monitors are skipped — the name is the persisted key.
             let name = monitor.name.clone()?;
             let label = format!(
                 "{name} — {}×{}{}",
@@ -81,148 +456,653 @@ fn settings_ui(
             Some(MonitorChoice { name, label })
         })
         .collect();
-    monitor_choices.sort_by(|a, b| a.name.cmp(&b.name));
+    choices.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let mut open = true;
-    egui::Window::new("Settings")
-        .open(&mut open)
-        .resizable(false)
-        .default_width(540.0)
-        .collapsible(false)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (t, label) in [
-                    (Tab::Window, "Window"),
-                    (Tab::Graphics, "Graphics"),
-                    (Tab::Keyboard, "Keyboard"),
-                    (Tab::Mouse, "Mouse"),
-                    (Tab::Controller, "Controller"),
-                    (Tab::Hotas, "HOTAS"),
-                ] {
-                    if ui
-                        .selectable_label(settings_menu.tab == t, label)
-                        .clicked()
-                    {
-                        settings_menu.tab = t;
-                    }
-                }
-            });
-            ui.separator();
-
-            match settings_menu.tab {
-                Tab::Window => {
-                    // Bypass change detection while egui holds &mut, then flag
-                    // only on a real value change — a blanket `ResMut` deref
-                    // would mark the resource changed every frame the tab is
-                    // open and confuse `apply_window_settings`' push/pull
-                    // arbitration.
-                    let before = window_settings.clone();
-                    window_settings::show_window_tab(
-                        ui,
-                        window_settings.bypass_change_detection(),
-                        &window_overrides,
-                        &monitor_choices,
-                    );
-                    if *window_settings != before {
-                        window_settings.set_changed();
-                    }
-                }
-                Tab::Graphics => show_graphics_tab(ui, &mut graphics_settings),
-                Tab::Keyboard => show_keyboard_tab(ui, &input_settings),
-                Tab::Mouse => show_mouse_tab(ui, &input_settings),
-                Tab::Controller => show_controller_tab(ui, &input_settings),
-                Tab::Hotas => show_hotas_tab(ui, &mut input_settings),
-            }
-        });
-
-    if !open {
-        settings_menu.open = false;
+    let mut options = vec!["Primary".to_string()];
+    let mut names: Vec<Option<String>> = vec![None];
+    for choice in &choices {
+        options.push(choice.label.clone());
+        names.push(Some(choice.name.clone()));
     }
+    let mut index = match settings.monitor.as_deref() {
+        None => 0,
+        Some(wanted) => names
+            .iter()
+            .position(|n| n.as_deref() == Some(wanted))
+            .unwrap_or(usize::MAX),
+    };
+    // Persisted-but-unplugged monitor: keep it selectable so it round-trips.
+    if index == usize::MAX
+        && let Some(wanted) = settings.monitor.as_deref()
+    {
+        options.push(format!("{wanted} (not connected)"));
+        names.push(Some(wanted.to_string()));
+        index = names.len() - 1;
+    }
+    spawn_cycle_row(b, theme, "Monitor", options, index, MonitorControl { names });
+    note(b, theme, "Used by the fullscreen modes.");
+
+    // VSync.
+    if let Some(vsync) = overrides.vsync {
+        let label = if vsync { "On" } else { "Off" };
+        pinned_row(b, theme, "VSync", label.to_string(), "THALOS_VSYNC");
+    } else {
+        spawn_checkbox_row(b, theme, "VSync", settings.vsync, VsyncControl);
+    }
+
+    // UI scale.
+    spawn_slider_row(
+        b,
+        theme,
+        "UI scale",
+        UiSlider {
+            min: UI_SCALE_MIN,
+            max: UI_SCALE_MAX,
+            value: settings.ui_scale,
+            step: 0.05,
+            format: SliderFormat::Scale2,
+        },
+        UiScaleControl,
+    );
+
+    spacer(b);
+    spawn_button(b, theme, ResetWindowControl, "Reset to defaults", 11.0, 26.0);
+    note(
+        b,
+        theme,
+        "Saved to user/settings.ron. THALOS_WINDOW_MODE / _SIZE / _VSYNC override for one session.",
+    );
 }
 
 // ── Graphics tab ────────────────────────────────────────────────────────────────
 
-fn show_graphics_tab(ui: &mut egui::Ui, settings: &mut GraphicsSettings) {
-    ui.checkbox(&mut settings.clouds, "Volumetric clouds");
-    ui.weak("Off parks the cloud raymarch (no GPU cost) and the sky renders clear.");
+fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings: &GraphicsSettings) {
+    spawn_checkbox_row(b, theme, "Volumetric clouds", settings.clouds, CloudsControl);
+    note(
+        b,
+        theme,
+        "Off parks the cloud raymarch (no GPU cost); the sky renders clear.",
+    );
 
-    ui.add_space(8.0);
+    spacer(b);
 
-    ui.horizontal(|ui| {
-        ui.label("Anti-aliasing");
-        egui::ComboBox::from_id_salt("msaa_setting")
-            .selected_text(settings.msaa.label())
-            .show_ui(ui, |ui| {
-                for option in graphics_settings::MsaaSetting::ALL {
-                    ui.selectable_value(&mut settings.msaa, option, option.label());
-                }
-            });
-    });
-    ui.weak("MSAA smooths geometry edges; any level replaces the SMAA post pass.");
+    let index = MsaaSetting::ALL
+        .iter()
+        .position(|m| *m == settings.msaa)
+        .unwrap_or(0);
+    let options = MsaaSetting::ALL.iter().map(|m| m.label().to_string()).collect();
+    spawn_cycle_row(b, theme, "Anti-aliasing", options, index, MsaaControl);
+    note(
+        b,
+        theme,
+        "MSAA smooths geometry edges; any level replaces the SMAA post pass.",
+    );
 
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    if ui.button("Reset to defaults").clicked() {
-        *settings = GraphicsSettings::default();
-    }
-
-    ui.add_space(4.0);
-    ui.weak(format!("Saved to {}.", graphics_settings::SETTINGS_PATH));
+    spacer(b);
+    spawn_button(b, theme, ResetGraphicsControl, "Reset to defaults", 11.0, 26.0);
+    note(b, theme, "Saved to user/graphics.ron.");
 }
 
-// ── Keyboard tab ──────────────────────────────────────────────────────────────
+// ── Binding-list tabs ───────────────────────────────────────────────────────────
 
-fn show_keyboard_tab(ui: &mut egui::Ui, settings: &InputSettings) {
-    egui::ScrollArea::vertical()
-        .id_salt("kb_scroll")
-        .max_height(420.0)
-        .show(ui, |ui| {
-            let sections: &[(&str, &BindingSection)] = &[
-                ("Flight", &settings.game.flight),
-                ("Warp", &settings.game.warp),
-                ("View", &settings.game.view),
-                ("EVA", &settings.game.eva),
-                ("EVA Move", &settings.game.eva_move),
-                ("Maneuver", &settings.game.maneuver),
-                ("Maneuver Precision", &settings.game.maneuver_precision),
-                ("System", &settings.game.system),
-            ];
-            for (title, section) in sections {
-                show_binding_group(ui, title, section, is_keyboard_spec);
-            }
+#[derive(Clone, Copy)]
+enum BindingKind {
+    Keyboard,
+    Mouse,
+    Controller,
+}
+
+fn build_binding_tab(
+    b: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    settings: &InputSettings,
+    kind: BindingKind,
+) {
+    let game = &settings.game;
+    let sections: &[(&str, &BindingSection)] = match kind {
+        BindingKind::Keyboard | BindingKind::Controller => &[
+            ("Flight", &game.flight),
+            ("Warp", &game.warp),
+            ("View", &game.view),
+            ("EVA", &game.eva),
+            ("EVA Move", &game.eva_move),
+            ("Maneuver", &game.maneuver),
+            ("Maneuver Precision", &game.maneuver_precision),
+            ("System", &game.system),
+        ],
+        BindingKind::Mouse => &[
+            ("Camera", &game.camera),
+            ("Flight", &game.flight),
+            ("Warp", &game.warp),
+            ("Maneuver", &game.maneuver),
+        ],
+    };
+    let filter: fn(&BindingSpec) -> bool = match kind {
+        BindingKind::Keyboard => is_keyboard_spec,
+        BindingKind::Mouse => is_mouse_spec,
+        BindingKind::Controller => is_gamepad_spec,
+    };
+
+    let any = sections
+        .iter()
+        .any(|(_, s)| section_has_spec(s, filter));
+    if !any {
+        let msg = match kind {
+            BindingKind::Mouse => "No mouse bindings configured.",
+            BindingKind::Controller => "No controller bindings configured.",
+            BindingKind::Keyboard => "No keyboard bindings configured.",
+        };
+        note(b, theme, msg);
+        if matches!(kind, BindingKind::Controller) {
+            note(b, theme, "Add GamepadButton(…) entries to assets/input.ron.");
+        }
+        return;
+    }
+
+    for (title, section) in sections {
+        build_binding_group(b, theme, title, section, filter);
+    }
+}
+
+fn build_binding_group(
+    b: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    title: &str,
+    section: &BindingSection,
+    filter: fn(&BindingSpec) -> bool,
+) {
+    if !section_has_spec(section, filter) {
+        return;
+    }
+    section_header(b, theme, &title.to_uppercase());
+
+    for (action, specs) in &section.bindings {
+        let bound: Vec<String> = specs.iter().filter(|s| filter(s)).map(format_binding).collect();
+        if bound.is_empty() {
+            continue;
+        }
+        binding_row(b, theme, &format_action(action), &bound.join(" / "));
+    }
+    for (axis_name, axis) in &section.axes {
+        let pos: Vec<String> = axis.positive.iter().filter(|s| filter(s)).map(format_binding).collect();
+        let neg: Vec<String> = axis.negative.iter().filter(|s| filter(s)).map(format_binding).collect();
+        if pos.is_empty() && neg.is_empty() {
+            continue;
+        }
+        let value = match (pos.is_empty(), neg.is_empty()) {
+            (false, false) => format!("{} / {}", pos.join(", "), neg.join(", ")),
+            (false, true) => pos.join(", "),
+            (true, false) => neg.join(", "),
+            (true, true) => String::new(),
+        };
+        binding_row(b, theme, &format!("{} +/−", format_action(axis_name)), &value);
+    }
+}
+
+fn binding_row(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, action: &str, value: &str) {
+    b.spawn(Node {
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        justify_content: JustifyContent::SpaceBetween,
+        column_gap: Val::Px(16.0),
+        ..default()
+    })
+    .with_children(|row| {
+        row.spawn((
+            Text::new(action.to_string()),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 10.0,
+                ..default()
+            },
+            TextColor(theme.text_dim),
+        ));
+        row.spawn((
+            Text::new(value.to_string()),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 10.0,
+                ..default()
+            },
+            TextColor(theme.text_primary),
+        ));
+    });
+}
+
+// ── HOTAS tab ───────────────────────────────────────────────────────────────────
+
+fn build_hotas_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings: &InputSettings) {
+    let hotas = &settings.game.hotas;
+    spawn_checkbox_row(b, theme, "HOTAS enabled", hotas.enabled, HotasEnabledControl);
+
+    spacer(b);
+
+    // Device selector: Any / Name contains (+ name field).
+    let is_name = matches!(hotas.device, HotasDeviceSelector::NameContains(_));
+    spawn_cycle_row(
+        b,
+        theme,
+        "Device",
+        vec!["Any".into(), "Name contains".into()],
+        if is_name { 1 } else { 0 },
+        HotasDeviceModeControl,
+    );
+    if let HotasDeviceSelector::NameContains(name) = &hotas.device {
+        b.spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(8.0),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new("Name:"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(theme.text_dim),
+                Node {
+                    width: Val::Px(120.0),
+                    ..default()
+                },
+            ));
+            spawn_text_field(row, theme, name, 220.0, HotasDeviceNameControl);
         });
+    }
+
+    spacer(b);
+
+    if !hotas.enabled {
+        note(b, theme, "Enable HOTAS to configure axes.");
+        return;
+    }
+
+    section_header(b, theme, "AXES");
+    for axis in HOTAS_AXES {
+        match hotas.axes.get(axis) {
+            Some(binding) => build_hotas_axis_row(b, theme, axis, binding),
+            None => build_hotas_axis_empty(b, theme, axis),
+        }
+    }
+    note(
+        b,
+        theme,
+        "Raw codes are platform-specific — find yours with the gamepad_axes example. \
+         Edit assets/input.ron to persist.",
+    );
+}
+
+fn build_hotas_axis_row(
+    b: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    axis: &'static str,
+    binding: &HotasAxisBinding,
+) {
+    b.spawn(Node {
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        ..default()
+    })
+    .with_children(|row| {
+        row.spawn((
+            Text::new(axis.to_string()),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(theme.text_primary),
+            Node {
+                width: Val::Px(70.0),
+                flex_shrink: 0.0,
+                ..default()
+            },
+        ));
+        row.spawn((
+            Text::new("code"),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 10.0,
+                ..default()
+            },
+            TextColor(theme.text_dim),
+        ));
+        spawn_text_field(row, theme, &binding.code.to_string(), 56.0, HotasCodeControl { axis });
+        spawn_button(row, theme, HotasRemoveControl { axis }, "✕", 10.0, 20.0);
+    });
+
+    // Invert + deadzone, each on its own full-width row (indented under the axis).
+    indented(b, |row| {
+        spawn_checkbox_row(row, theme, "invert", binding.invert, HotasInvertControl { axis });
+    });
+    indented(b, |row| {
+        spawn_slider_row(
+            row,
+            theme,
+            "deadzone",
+            UiSlider {
+                min: 0.0,
+                max: 0.9,
+                value: binding.deadzone,
+                step: 0.01,
+                format: SliderFormat::Plain2,
+            },
+            HotasDeadzoneControl { axis },
+        );
+    });
+}
+
+/// Spawn a full-width row indented under a HOTAS axis header, calling `build`
+/// to populate it.
+fn indented(b: &mut ChildSpawnerCommands<'_>, build: impl FnOnce(&mut ChildSpawnerCommands<'_>)) {
+    b.spawn(Node {
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        padding: UiRect::left(Val::Px(70.0)),
+        ..default()
+    })
+    .with_children(|row| build(row));
+}
+
+fn build_hotas_axis_empty(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, axis: &'static str) {
+    b.spawn(Node {
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        ..default()
+    })
+    .with_children(|row| {
+        row.spawn((
+            Text::new(axis.to_string()),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(theme.text_dim),
+            Node {
+                width: Val::Px(70.0),
+                flex_shrink: 0.0,
+                ..default()
+            },
+        ));
+        spawn_button(row, theme, HotasAddControl { axis }, "Add", 10.0, 20.0);
+    });
+}
+
+// ── Apply systems ───────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn apply_window_controls(
+    mut settings: ResMut<WindowSettings>,
+    mut menu: ResMut<SettingsMenu>,
+    mode_q: Query<&UiCycle, (Changed<UiCycle>, With<WindowModeControl>)>,
+    res_q: Query<(&UiCycle, &ResolutionControl), Changed<UiCycle>>,
+    monitor_q: Query<(&UiCycle, &MonitorControl), Changed<UiCycle>>,
+    vsync_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<VsyncControl>)>,
+    scale_q: Query<&UiSlider, (Changed<UiSlider>, With<UiScaleControl>)>,
+    reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetWindowControl>)>,
+) {
+    for cycle in &mode_q {
+        let mode = match cycle.index {
+            0 => WindowModeSetting::Windowed,
+            1 => WindowModeSetting::Borderless,
+            _ => WindowModeSetting::Exclusive,
+        };
+        if settings.mode != mode {
+            settings.mode = mode;
+        }
+    }
+    for (cycle, control) in &res_q {
+        if let Some(&value) = control.values.get(cycle.index)
+            && settings.resolution != value
+        {
+            settings.resolution = value;
+        }
+    }
+    for (cycle, control) in &monitor_q {
+        if let Some(name) = control.names.get(cycle.index)
+            && settings.monitor != *name
+        {
+            settings.monitor = name.clone();
+        }
+    }
+    for checkbox in &vsync_q {
+        if settings.vsync != checkbox.checked {
+            settings.vsync = checkbox.checked;
+        }
+    }
+    for slider in &scale_q {
+        if (settings.ui_scale - slider.value).abs() > 1.0e-4 {
+            settings.ui_scale = slider.value;
+        }
+    }
+    for interaction in &reset_q {
+        if matches!(interaction, Interaction::Pressed) {
+            *settings = WindowSettings::default();
+            menu.dirty();
+        }
+    }
+}
+
+fn apply_graphics_controls(
+    mut settings: ResMut<GraphicsSettings>,
+    mut menu: ResMut<SettingsMenu>,
+    clouds_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
+    msaa_q: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
+    reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
+) {
+    for checkbox in &clouds_q {
+        if settings.clouds != checkbox.checked {
+            settings.clouds = checkbox.checked;
+        }
+    }
+    for cycle in &msaa_q {
+        if let Some(&msaa) = MsaaSetting::ALL.get(cycle.index)
+            && settings.msaa != msaa
+        {
+            settings.msaa = msaa;
+        }
+    }
+    for interaction in &reset_q {
+        if matches!(interaction, Interaction::Pressed) {
+            *settings = GraphicsSettings::default();
+            menu.dirty();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_hotas_controls(
+    mut settings: ResMut<InputSettings>,
+    mut menu: ResMut<SettingsMenu>,
+    enabled_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<HotasEnabledControl>)>,
+    mode_q: Query<&UiCycle, (Changed<UiCycle>, With<HotasDeviceModeControl>)>,
+    name_q: Query<&TextField, (Changed<TextField>, With<HotasDeviceNameControl>)>,
+    code_q: Query<(&TextField, &HotasCodeControl), Changed<TextField>>,
+    invert_q: Query<(&UiCheckbox, &HotasInvertControl), Changed<UiCheckbox>>,
+    deadzone_q: Query<(&UiSlider, &HotasDeadzoneControl), Changed<UiSlider>>,
+    add_q: Query<(&Interaction, &HotasAddControl), Changed<Interaction>>,
+    remove_q: Query<(&Interaction, &HotasRemoveControl), Changed<Interaction>>,
+) {
+    let hotas = &mut settings.game.hotas;
+
+    for checkbox in &enabled_q {
+        if hotas.enabled != checkbox.checked {
+            hotas.enabled = checkbox.checked;
+            menu.dirty(); // enabling shows/hides the axis rows
+        }
+    }
+    for cycle in &mode_q {
+        let want_name = cycle.index == 1;
+        let is_name = matches!(hotas.device, HotasDeviceSelector::NameContains(_));
+        if want_name != is_name {
+            hotas.device = if want_name {
+                HotasDeviceSelector::NameContains(String::new())
+            } else {
+                HotasDeviceSelector::Any
+            };
+            menu.dirty(); // shows/hides the name field
+        }
+    }
+    for field in &name_q {
+        if let HotasDeviceSelector::NameContains(name) = &mut hotas.device
+            && *name != field.text
+        {
+            *name = field.text.clone();
+        }
+    }
+    for (field, control) in &code_q {
+        if let Some(binding) = hotas.axes.get_mut(control.axis)
+            && let Ok(code) = field.text.trim().parse::<u32>()
+            && binding.code != code
+        {
+            binding.code = code;
+        }
+    }
+    for (checkbox, control) in &invert_q {
+        if let Some(binding) = hotas.axes.get_mut(control.axis)
+            && binding.invert != checkbox.checked
+        {
+            binding.invert = checkbox.checked;
+        }
+    }
+    for (slider, control) in &deadzone_q {
+        if let Some(binding) = hotas.axes.get_mut(control.axis)
+            && (binding.deadzone - slider.value).abs() > 1.0e-4
+        {
+            binding.deadzone = slider.value;
+        }
+    }
+    for (interaction, control) in &add_q {
+        if matches!(interaction, Interaction::Pressed) {
+            hotas.axes.insert(
+                control.axis.to_string(),
+                HotasAxisBinding {
+                    code: 0,
+                    device: None,
+                    invert: false,
+                    deadzone: 0.05,
+                    min: -1.0,
+                    max: 1.0,
+                },
+            );
+            menu.dirty();
+        }
+    }
+    for (interaction, control) in &remove_q {
+        if matches!(interaction, Interaction::Pressed) {
+            hotas.axes.remove(control.axis);
+            menu.dirty();
+        }
+    }
+}
+
+// ── Small layout helpers ──────────────────────────────────────────────────────
+
+fn spacer(b: &mut ChildSpawnerCommands<'_>) {
+    b.spawn(Node {
+        height: Val::Px(6.0),
+        ..default()
+    });
+}
+
+fn section_header(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, text: &str) {
+    b.spawn((
+        Node {
+            margin: UiRect::top(Val::Px(4.0)),
+            ..default()
+        },
+        Text::new(text.to_string()),
+        TextFont {
+            font: theme.font.clone(),
+            font_size: 10.0,
+            ..default()
+        },
+        TextColor(theme.text_subtitle),
+    ));
+}
+
+fn note(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, text: &str) {
+    b.spawn((
+        Text::new(text.to_string()),
+        TextFont {
+            font: theme.font.clone(),
+            font_size: 9.0,
+            ..default()
+        },
+        TextColor(theme.text_dim),
+    ));
+}
+
+fn pinned_row(
+    b: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    label: &str,
+    value: String,
+    env_var: &str,
+) {
+    b.spawn(Node {
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        column_gap: Val::Px(8.0),
+        align_items: AlignItems::Center,
+        ..default()
+    })
+    .with_children(|row| {
+        row.spawn((
+            Text::new(label.to_string()),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(theme.text_dim),
+            Node {
+                width: Val::Px(120.0),
+                ..default()
+            },
+        ));
+        row.spawn((
+            Text::new(format!("{value}  (pinned by {env_var})")),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(theme.text_dim),
+        ));
+    });
+}
+
+fn mode_label(mode: WindowModeSetting) -> String {
+    match mode {
+        WindowModeSetting::Windowed => "Windowed",
+        WindowModeSetting::Borderless => "Borderless",
+        WindowModeSetting::Exclusive => "Fullscreen",
+    }
+    .to_string()
+}
+
+// ── Binding spec filters / formatting ─────────────────────────────────────────
+
+fn section_has_spec(section: &BindingSection, filter: fn(&BindingSpec) -> bool) -> bool {
+    section.bindings.values().any(|v| v.iter().any(filter))
+        || section
+            .axes
+            .values()
+            .any(|a: &AxisSpec| a.positive.iter().any(filter) || a.negative.iter().any(filter))
 }
 
 fn is_keyboard_spec(spec: &BindingSpec) -> bool {
     matches!(spec, BindingSpec::Key(_))
-}
-
-// ── Mouse tab ─────────────────────────────────────────────────────────────────
-
-fn show_mouse_tab(ui: &mut egui::Ui, settings: &InputSettings) {
-    egui::ScrollArea::vertical()
-        .id_salt("mouse_scroll")
-        .max_height(420.0)
-        .show(ui, |ui| {
-            let sections: &[(&str, &BindingSection)] = &[
-                ("Camera", &settings.game.camera),
-                ("Flight", &settings.game.flight),
-                ("Warp", &settings.game.warp),
-                ("Maneuver", &settings.game.maneuver),
-            ];
-            let any = sections
-                .iter()
-                .any(|(_, s)| section_has_spec(s, is_mouse_spec));
-            if any {
-                for (title, section) in sections {
-                    show_binding_group(ui, title, section, is_mouse_spec);
-                }
-            } else {
-                empty_hint(ui, "No mouse bindings configured.");
-            }
-        });
 }
 
 fn is_mouse_spec(spec: &BindingSpec) -> bool {
@@ -232,233 +1112,12 @@ fn is_mouse_spec(spec: &BindingSpec) -> bool {
     )
 }
 
-// ── Controller tab ────────────────────────────────────────────────────────────
-
-fn show_controller_tab(ui: &mut egui::Ui, settings: &InputSettings) {
-    egui::ScrollArea::vertical()
-        .id_salt("ctrl_scroll")
-        .max_height(420.0)
-        .show(ui, |ui| {
-            let sections: &[(&str, &BindingSection)] = &[
-                ("Flight", &settings.game.flight),
-                ("Warp", &settings.game.warp),
-                ("View", &settings.game.view),
-                ("EVA", &settings.game.eva),
-                ("EVA Move", &settings.game.eva_move),
-                ("Maneuver", &settings.game.maneuver),
-                ("System", &settings.game.system),
-            ];
-            let any = sections
-                .iter()
-                .any(|(_, s)| section_has_spec(s, is_gamepad_spec));
-            if any {
-                for (title, section) in sections {
-                    show_binding_group(ui, title, section, is_gamepad_spec);
-                }
-            } else {
-                empty_hint(ui, "No controller bindings configured.");
-                ui.add_space(4.0);
-                ui.weak("Add GamepadButton(…) entries to assets/input.ron.");
-            }
-        });
-}
-
 fn is_gamepad_spec(spec: &BindingSpec) -> bool {
     matches!(
         spec,
         BindingSpec::GamepadButton(_) | BindingSpec::GamepadAxis(_)
     )
 }
-
-// ── HOTAS tab ─────────────────────────────────────────────────────────────────
-
-fn show_hotas_tab(ui: &mut egui::Ui, settings: &mut InputSettings) {
-    let hotas = &mut settings.game.hotas;
-
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut hotas.enabled, "HOTAS enabled");
-    });
-
-    ui.add_space(6.0);
-
-    // Device selector
-    ui.horizontal(|ui| {
-        ui.label("Device:");
-        let is_any = matches!(hotas.device, HotasDeviceSelector::Any);
-        let is_name = matches!(hotas.device, HotasDeviceSelector::NameContains(_));
-
-        if ui.selectable_label(is_any, "Any").clicked() && !is_any {
-            hotas.device = HotasDeviceSelector::Any;
-        }
-        if ui.selectable_label(is_name, "Name contains").clicked() && !is_name {
-            hotas.device = HotasDeviceSelector::NameContains(String::new());
-        }
-        if let HotasDeviceSelector::NameContains(ref mut name) = hotas.device {
-            ui.text_edit_singleline(name);
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    let axes_order = ["pitch", "yaw", "roll", "throttle"];
-
-    ui.add_enabled_ui(hotas.enabled, |ui| {
-        egui::Grid::new("hotas_axes_grid")
-            .num_columns(5)
-            .spacing([8.0, 4.0])
-            .striped(true)
-            .show(ui, |ui| {
-                ui.strong("Axis");
-                ui.strong("Raw code");
-                ui.strong("Invert");
-                ui.strong("Deadzone");
-                ui.strong("");
-                ui.end_row();
-
-                for axis_name in axes_order.iter() {
-                    let has_binding = hotas.axes.contains_key(*axis_name);
-
-                    ui.label(*axis_name);
-
-                    if has_binding {
-                        // Clone for safe independent mutation
-                        let mut binding = hotas.axes.get(*axis_name).unwrap().clone();
-                        let mut remove = false;
-
-                        // Raw platform axis code (gilrs Code::into_u32). Discover
-                        // values via `cargo run -p thalos_input --example
-                        // gamepad_axes`; codes are platform-specific.
-                        ui.add(
-                            egui::DragValue::new(&mut binding.code)
-                                .speed(1.0)
-                                .prefix("code "),
-                        );
-
-                        ui.checkbox(&mut binding.invert, "");
-                        ui.add(
-                            egui::Slider::new(&mut binding.deadzone, 0.0..=0.9)
-                                .step_by(0.01)
-                                .fixed_decimals(2),
-                        );
-                        if ui.small_button("✕").clicked() {
-                            remove = true;
-                        }
-
-                        if remove {
-                            hotas.axes.remove(*axis_name);
-                        } else {
-                            hotas.axes.insert(axis_name.to_string(), binding);
-                        }
-                    } else {
-                        ui.weak("—");
-                        ui.label("");
-                        ui.label("");
-                        if ui.small_button("Add").clicked() {
-                            hotas.axes.insert(
-                                axis_name.to_string(),
-                                thalos_input::settings::HotasAxisBinding {
-                                    code: 0,
-                                    device: None,
-                                    invert: false,
-                                    deadzone: 0.05,
-                                    min: -1.0,
-                                    max: 1.0,
-                                },
-                            );
-                        }
-                    }
-
-                    ui.end_row();
-                }
-            });
-    });
-
-    ui.add_space(8.0);
-    ui.weak(
-        "Raw codes are platform-specific — find yours with the gamepad_axes \
-         example. Changes apply immediately; edit assets/input.ron to persist.",
-    );
-}
-
-// ── Shared helpers ─────────────────────────────────────────────────────────────
-
-fn section_has_spec(section: &BindingSection, filter: fn(&BindingSpec) -> bool) -> bool {
-    section.bindings.values().any(|v| v.iter().any(filter))
-        || section.axes.values().any(|a: &AxisSpec| {
-            a.positive.iter().any(filter) || a.negative.iter().any(filter)
-        })
-}
-
-fn show_binding_group(
-    ui: &mut egui::Ui,
-    title: &str,
-    section: &BindingSection,
-    filter: fn(&BindingSpec) -> bool,
-) {
-    if !section_has_spec(section, filter) {
-        return;
-    }
-
-    ui.add_space(4.0);
-    ui.label(egui::RichText::new(title.to_uppercase()).strong().size(10.0));
-
-    egui::Grid::new(format!("bindings_{title}"))
-        .num_columns(2)
-        .spacing([16.0, 2.0])
-        .show(ui, |ui| {
-            for (action, specs) in &section.bindings {
-                let filtered: Vec<String> = specs
-                    .iter()
-                    .filter(|s| filter(s))
-                    .map(format_binding)
-                    .collect();
-                if filtered.is_empty() {
-                    continue;
-                }
-                ui.weak(format_action(action));
-                ui.label(filtered.join(" / "));
-                ui.end_row();
-            }
-
-            for (axis_name, axis) in &section.axes {
-                let pos: Vec<String> = axis
-                    .positive
-                    .iter()
-                    .filter(|s| filter(s))
-                    .map(format_binding)
-                    .collect();
-                let neg: Vec<String> = axis
-                    .negative
-                    .iter()
-                    .filter(|s| filter(s))
-                    .map(format_binding)
-                    .collect();
-                if pos.is_empty() && neg.is_empty() {
-                    continue;
-                }
-                ui.weak(format!("{} +/−", format_action(axis_name)));
-                let label = match (pos.is_empty(), neg.is_empty()) {
-                    (false, false) => format!("{} / {}", pos.join(", "), neg.join(", ")),
-                    (false, true) => pos.join(", "),
-                    (true, false) => neg.join(", "),
-                    (true, true) => unreachable!(),
-                };
-                ui.label(label);
-                ui.end_row();
-            }
-        });
-}
-
-fn empty_hint(ui: &mut egui::Ui, msg: &str) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(20.0);
-        ui.weak(msg);
-    });
-}
-
-// ── Formatting helpers ─────────────────────────────────────────────────────────
 
 fn format_binding(spec: &BindingSpec) -> String {
     match spec {

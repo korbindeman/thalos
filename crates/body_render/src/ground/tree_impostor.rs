@@ -309,3 +309,24 @@ pub(crate) fn embed_tree_impostor_shaders(app: &mut App) {
     embedded_asset!(app, "tree_impostor.wgsl");
     embedded_asset!(app, "tree_bake.wgsl");
 }
+
+/// Lean plugin to render [`TreeImpostorMaterial`] (and run the [`TreeBakeMaterial`]
+/// off-screen bake) in a standalone / headless app — the object preview, examples
+/// — **without** the full UDLOD terrain stack. Mirrors
+/// [`TreeMaterialPlugin`](crate::ground::TreeMaterialPlugin): registers both
+/// materials, embeds their shaders, and ensures the shared shader libraries
+/// (`thalos::lighting` / `thalos::foliage`) are present. The game gets all this
+/// from `ThalosTerrainPlugin`; this is the minimal entry point for tools that want
+/// to verify the mesh↔impostor handoff in isolation.
+pub struct TreeImpostorMaterialPlugin;
+
+impl Plugin for TreeImpostorMaterialPlugin {
+    fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::shading::PlanetLightingPlugin>() {
+            app.add_plugins(crate::shading::PlanetLightingPlugin);
+        }
+        app.add_plugins(bevy::pbr::MaterialPlugin::<TreeImpostorMaterial>::default());
+        app.add_plugins(bevy::pbr::MaterialPlugin::<TreeBakeMaterial>::default());
+        embed_tree_impostor_shaders(app);
+    }
+}

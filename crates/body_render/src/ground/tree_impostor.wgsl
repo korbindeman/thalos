@@ -18,7 +18,8 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
-#import thalos::lighting::{SurfaceSky, compute_surface_sky, sky_ambient_irradiance}
+#import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage}
+#import thalos::foliage::foliage_hue_tint
 
 // Mirror of GrassParams (shared with grass.wgsl / tree.wgsl) — field order
 // load-bearing.
@@ -208,7 +209,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
             let a = textureSampleLevel(albedo_tex, albedo_smp, auv, 0.0);
             let nd = textureSampleLevel(normal_tex, normal_smp, auv, 0.0);
-            acc_alb += a.rgb * a.a * w;
+            // `a.rgb` is ALREADY premultiplied by coverage: the atlas is cleared to
+            // transparent black, so the bilinear filter blends covered (rgb, a=1)
+            // with cleared (0, a=0) → rgb = colour × coverage near the silhouette.
+            // Accumulate it straight (÷ acc_cov below un-premultiplies); multiplying
+            // by `a.a` again would darken the silhouette edge to black (the toon
+            // rim). Normals aren't premultiplied that way, so they keep the `a.a`
+            // coverage weight to down-weight the garbage edge normals.
+            acc_alb += a.rgb * w;
             acc_n += (nd.rgb * 2.0 - 1.0) * a.a * w;
             acc_cov += a.a * w;
         }
@@ -228,14 +236,23 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let up = tree.sky_up.xyz;
     let sky = compute_surface_sky(tree.sky_tau.xyz, tree.sky_tau.w, up, sun_dir, tree.sun_dir.w);
 
-    let seed = in.tint_seed.a;
-    let hue = (seed - 0.5) * 0.22;
-    let tint = albedo * in.tint_seed.rgb * vec3<f32>(1.0 + hue, 1.0, 1.0 - hue);
+    // Per-instance hue via the SHARED `foliage_hue_tint` — the SAME jitter the
+    // mesh trees apply, so a stand varies identically across the mesh→impostor
+    // handoff. The baked albedo is already the near-tree colour (the bake calls
+    // the same `foliage_base_albedo`), so impostor and mesh now read continuous.
+    let tint = albedo * in.tint_seed.rgb * foliage_hue_tint(in.tint_seed.a);
 
-    let n_dot_l = dot(n_world, sun_dir);
-    let wrap = clamp((n_dot_l + 0.3) / 1.3, 0.0, 1.0);
-    let direct = tint * (wrap * sky.sun_scale) * sky.sun_color;
-    let ambient = tint * sky_ambient_irradiance(sky, n_world, up);
-
-    return vec4<f32>(direct + ambient, 1.0);
+    // Shade through the shared `shade_foliage` with the SAME canopy parameters as
+    // the mesh trees (0.8 ambient, leaf transmit, 0.40 wrap), so the forest reads
+    // continuous across the mesh→impostor handoff. The card is canopy foliage, so
+    // it transmits; sun-shadow on impostors lands in Phase 2b (fully lit for now).
+    var s: FoliageSurface;
+    s.albedo = tint;
+    s.normal_ws = n_world;
+    s.translucency = 1.0;
+    s.ambient_scale = 0.8;
+    s.ambient_bleed = 0.5;
+    let view_dir = normalize(view.world_position - in.world_position);
+    let lit = shade_foliage(s, view_dir, up, sun_dir, sky, 1.0);
+    return vec4<f32>(lit, 1.0);
 }

@@ -451,7 +451,11 @@ fn descent_approach_state(
     // Nose (+Y): forward (prograde) for cruise, retrograde for descents.
     // Dorsal (+Z) toward radial-out — same convention as the orbit spawn.
     let flight_dir = descent.try_normalize().unwrap_or(east);
-    let nose = if profile.nose_forward { flight_dir } else { -flight_dir };
+    let nose = if profile.nose_forward {
+        flight_dir
+    } else {
+        -flight_dir
+    };
     let dorsal = (up - nose * up.dot(nose)).try_normalize().unwrap_or(east);
     let right = nose.cross(dorsal).normalize();
     let basis = DMat3::from_cols(right, nose, dorsal);
@@ -616,8 +620,7 @@ fn refine_descent_spawn(
     if !placement.pending || situation.descent_profile().is_none() {
         return;
     }
-    let Some((state, attitude)) = compute_descent_state(*situation, &sim, &height_sources)
-    else {
+    let Some((state, attitude)) = compute_descent_state(*situation, &sim, &height_sources) else {
         return; // Terrain not registered yet — retry next frame.
     };
     sim.simulation.set_ship_state(state);

@@ -867,6 +867,18 @@ impl Simulation {
         self.sim_time
     }
 
+    /// Set the simulation clock to an absolute epoch (seconds). Used by deferred
+    /// spawn placements that want to seat the craft at a specific time of day —
+    /// e.g. the runway scenario boots at a morning epoch so the fixed surface
+    /// site is lit by a low, climbing sun rather than the epoch-0 noon sun. Keeps
+    /// `craft.epoch` in lockstep and marks prediction dirty so the next rebuild
+    /// re-propagates from the new clock.
+    pub fn set_sim_time(&mut self, sim_time: f64) {
+        self.sim_time = sim_time;
+        self.craft.epoch = Epoch(sim_time);
+        self.prediction_state.mark_dirty();
+    }
+
     /// SOI body the ship is currently inside — the innermost body whose
     /// sphere of influence contains the live ship position. The autopilot
     /// uses this as the reference frame for prograde/normal/radial modes

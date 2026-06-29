@@ -422,3 +422,246 @@ fn specular_aa_apply(perceptual_roughness: f32, variance: f32) -> f32 {
     let filtered_alpha = sqrt(clamp(alpha * alpha + kernel, 0.0, 1.0));
     return sqrt(filtered_alpha);
 }
+
+// ── Rough-dielectric surface BRDF ─────────────────────────────────────────────
+// The shared physically-based BRDF for every non-regolith surface (vegetated
+// ground, water, rock, ship hull). Two lobes: an Oren–Nayar rough-diffuse term
+// that degrades gracefully at grazing angles (no opposition-surge contour bands)
+// plus a Cook–Torrance GGX microfacet specular with a dielectric F0, so wet
+// ground and snow pick up a tight highlight Hapke cannot express. Moved here from
+// `body_terrain.wgsl` so every dielectric surface shades through one BRDF.
+
+const PI_BRDF: f32 = 3.14159265358979323846;
+// Non-metallic surface normal reflectance at normal incidence (~4%).
+const DIELECTRIC_F0: f32 = 0.04;
+
+// GGX / Trowbridge–Reitz normal distribution.
+fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / max(PI_BRDF * d * d, 1.0e-7);
+}
+
+// Smith height-correlated visibility term for GGX, with the specular
+// denominator 1/(4·n·l·n·v) folded in.
+fn smith_visibility(n_dot_l: f32, n_dot_v: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let lambda_v = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
+    let lambda_l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
+    return 0.5 / max(lambda_v + lambda_l, 1.0e-5);
+}
+
+// Schlick Fresnel for a scalar (achromatic dielectric) F0.
+fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
+    let m = clamp(1.0 - cos_theta, 0.0, 1.0);
+    let m2 = m * m;
+    return f0 + (1.0 - f0) * (m2 * m2 * m);
+}
+
+// Oren–Nayar rough-diffuse BRDF scalar (sans albedo, sans cosine). Uses the
+// trig-free `s/t` formulation so there is no `acos`/`tan`/`normalize`-of-zero
+// hazard; `s = L·V − (N·L)(N·V)` reconstructs cos(Δφ)·sinθᵢ·sinθᵣ directly.
+fn oren_nayar_term(
+    n_dot_l: f32,
+    n_dot_v: f32,
+    l: vec3<f32>,
+    v: vec3<f32>,
+    roughness: f32,
+) -> f32 {
+    let sigma2 = roughness * roughness;
+    let a = 1.0 - 0.5 * sigma2 / (sigma2 + 0.33);
+    let b = 0.45 * sigma2 / (sigma2 + 0.09);
+    let s = dot(l, v) - n_dot_l * n_dot_v;
+    let t = select(max(n_dot_l, n_dot_v), 1.0, s <= 0.0);
+    return a + b * s / max(t, 1.0e-4);
+}
+
+// Combined rough-dielectric reflectance for one light direction. Returns the
+// reflected radiance factor (diffuse albedo-tinted + white dielectric
+// specular), excluding the irradiance cosine and incident flux, which the
+// caller applies.
+fn surface_brdf(
+    albedo: vec3<f32>,
+    roughness: f32,
+    n: vec3<f32>,
+    l: vec3<f32>,
+    v: vec3<f32>,
+    n_dot_l: f32,
+    n_dot_v: f32,
+) -> vec3<f32> {
+    if (n_dot_l <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let h = normalize(l + v);
+    let n_dot_h = max(dot(n, h), 0.0);
+    let l_dot_h = max(dot(l, h), 0.0);
+
+    let f = fresnel_schlick(l_dot_h, DIELECTRIC_F0);
+    let d = ggx_distribution(n_dot_h, roughness);
+    let vis = smith_visibility(n_dot_l, max(n_dot_v, 1.0e-4), roughness);
+
+    // Kulla–Conty multiple-scattering energy compensation. Single-scattering
+    // GGX drops the energy from microfacet rays that bounce more than once, so a
+    // rough surface loses reflectance and reads muddy. The directional albedo
+    // `E_ss = scale + bias` (white-furnace split-sum) tells us how much survives;
+    // scaling the lobe by `1 + F0·(1/E_ss − 1)` puts the lost energy back. For a
+    // dielectric (F0 ≈ 0.04) the factor is small, but it keeps wet ground / snow
+    // from dimming at grazing angles and is the correct thing to do.
+    let dfg = env_brdf_approx(roughness, max(n_dot_v, 1.0e-4));
+    let e_ss = max(dfg.x + dfg.y, 1.0e-3);
+    let ms = 1.0 + DIELECTRIC_F0 * (1.0 / e_ss - 1.0);
+    let spec = d * vis * f * ms;
+
+    let diff = oren_nayar_term(n_dot_l, n_dot_v, l, v, roughness);
+    let diffuse = albedo * diff * (1.0 - f);
+
+    return diffuse + vec3<f32>(spec);
+}
+
+// ── The canonical surface-shading entry point ─────────────────────────────────
+// Every ship-view surface fills a `ThalosSurface` and calls `shade_surface`,
+// which dispatches on `style` to the matching BRDF and returns the surface-side
+// radiance the camera observes BEFORE atmosphere / aerial-perspective is
+// composited on top (that lives in the `BodySky` fullscreen pass, keyed on scene
+// depth — same split `shade_hapke_surface` documents). Stylization is dialed in
+// on the inputs the caller writes into `ThalosSurface`, never in the BRDF.
+
+const SURFACE_DIELECTRIC: u32 = 0u; // vegetated ground, rock, ship hull, water-ish
+const SURFACE_REGOLITH: u32 = 1u;   // airless ground + impostor (Hapke)
+const SURFACE_FOLIAGE: u32 = 2u;    // grass, leaves (wrap-diffuse + translucency)
+const SURFACE_WATER: u32 = 3u;      // low-roughness dielectric + sky reflection
+
+// Per-fragment material description shared by every surface material.
+struct ThalosSurface {
+    albedo: vec3<f32>,        // linear diffuse reflectance
+    roughness: f32,           // perceptual GGX roughness (caller pre-clamps / AA-widens)
+    normal_ws: vec3<f32>,     // shading normal, world render space, unit
+    geo_normal_ws: vec3<f32>, // geometric (sphere-outward) normal — terminator anchor
+    emissive: vec3<f32>,      // self-emission, pre-exposure (engines etc.)
+    occlusion: f32,           // [0,1] ambient occlusion applied to ambient terms
+    metallic: f32,            // 0 dielectric … 1 metal (reserved; ships)
+    translucency: f32,        // foliage two-sided lobe weight (reserved; 0 opaque)
+    style: u32,               // SURFACE_DIELECTRIC | _REGOLITH | _FOLIAGE | _WATER
+}
+
+// Surface-side radiance only. `direct_shadow` gates the direct sun term (craft ×
+// self × cascade); `ambient_shadow` gates the ambient terms (canopy bleed). The
+// resolved `SurfaceSky` carries the per-fragment direct/sky/ground environment
+// for the dielectric path; the regolith path folds its ambient into the Hapke
+// helper and ignores `sky` / `ambient_shadow`.
+fn shade_surface(
+    s: ThalosSurface,
+    view_dir_ws: vec3<f32>,
+    hit_ws: vec3<f32>,
+    sun_dir_ws: vec3<f32>,
+    sun_flux: f32,
+    scene: SceneLighting,
+    sky: SurfaceSky,
+    direct_shadow: f32,
+    ambient_shadow: f32,
+) -> vec3<f32> {
+    if (s.style == SURFACE_REGOLITH) {
+        return shade_hapke_surface(
+            s.albedo,
+            s.roughness,
+            s.normal_ws,
+            s.geo_normal_ws,
+            view_dir_ws,
+            hit_ws,
+            sun_dir_ws,
+            sun_flux,
+            scene,
+            direct_shadow,
+        ) + s.emissive;
+    }
+
+    // Rough-dielectric (foliage/water fall through here for now): direct sun
+    // (BRDF × cosine × shadow, tinted by the reddened beam, scaled into the
+    // shared scene-flux exposure) + hemisphere sky IBL (blue sky-dome + warm
+    // ground bounce) + a subtle split-sum sky specular.
+    let n_dot_l = max(dot(s.normal_ws, sun_dir_ws), 0.0);
+    let n_dot_v = max(dot(s.normal_ws, view_dir_ws), 1.0e-4);
+
+    let brdf = surface_brdf(
+        s.albedo,
+        s.roughness,
+        s.normal_ws,
+        sun_dir_ws,
+        view_dir_ws,
+        n_dot_l,
+        n_dot_v,
+    );
+    let direct = brdf * (n_dot_l * direct_shadow) * sky.sun_color * sky.sun_scale;
+
+    // Specular occlusion: smooth (wet/snow) surfaces keep more of their sky
+    // reflection out of creases than rough matte ground does.
+    let spec_occ = clamp(s.occlusion + (1.0 - s.roughness) * 0.4, 0.0, 1.0);
+
+    // Hemispheric sky ambient (diffuse): blue sky on up-facing normals, warm
+    // ground bounce on down-facing, gated by AO and the canopy ambient shadow.
+    let ambient_irr = sky_ambient_irradiance(sky, s.normal_ws, s.geo_normal_ws);
+    let ambient_diffuse = s.albedo * ambient_irr * s.occlusion * ambient_shadow;
+
+    // Ambient sky specular: split-sum environment reflection of the sky dome.
+    let dfg = env_brdf_approx(s.roughness, n_dot_v);
+    let env_spec = dfg.x * DIELECTRIC_F0 + dfg.y;
+    let ambient_spec = sky.sky_radiance * env_spec * spec_occ * ambient_shadow;
+
+    return direct + ambient_diffuse + ambient_spec + s.emissive;
+}
+
+// ── Foliage wrap-diffuse shading ──────────────────────────────────────────────
+// The one lighting routine for grass blades, mesh trees, and tree impostors, so
+// they read consistently and the mesh→impostor handoff stays photometrically
+// continuous. Wrap diffuse (foliage scatters past the terminator) + the shared
+// hemisphere sky IBL + an optional two-sided translucency for backlit leaves. No
+// specular — foliage is matte. `translucency` / `ambient_scale` / `ambient_bleed`
+// carry the few legitimate per-type differences: grass matches the ground fill;
+// canopies dim their ambient and bleed shadow into it; only leaves transmit.
+
+const FOLIAGE_WRAP_BIAS: f32 = 0.40;
+
+struct FoliageSurface {
+    albedo: vec3<f32>,
+    normal_ws: vec3<f32>,
+    translucency: f32,  // 0 = opaque blade/bark, 1 = leaf (two-sided transmit)
+    ambient_scale: f32, // hemisphere fill scale (grass 1.0 ground-match; canopy 0.8)
+    ambient_bleed: f32, // shadow → ambient bleed (0 grass, ~0.5 canopy)
+}
+
+fn shade_foliage(
+    s: FoliageSurface,
+    view_dir_ws: vec3<f32>,
+    up: vec3<f32>,
+    sun_dir_ws: vec3<f32>,
+    sky: SurfaceSky,
+    shadow: f32,
+) -> vec3<f32> {
+    let n = s.normal_ws;
+    let n_dot_l = dot(n, sun_dir_ws);
+
+    // Direct: wrap diffuse so the shaded side stays leafy rather than black.
+    let wrap = clamp((n_dot_l + FOLIAGE_WRAP_BIAS) / (1.0 + FOLIAGE_WRAP_BIAS), 0.0, 1.0);
+    let direct = s.albedo * (wrap * sky.sun_scale * shadow) * sky.sun_color;
+
+    // Ambient: hemisphere sky-dome + warm ground bounce, scaled per type and bled
+    // by the shadow (a shaded canopy sees less sky too).
+    let ambient = s.albedo * sky_ambient_irradiance(sky, n, up)
+        * (s.ambient_scale * mix(1.0, shadow, s.ambient_bleed));
+
+    // Two-sided translucency: backlit leaves transmit a warm forward-scattered
+    // glow — a view-dependent lobe (looking toward the sun through the leaf) plus
+    // a softer isotropic through-scatter.
+    var transmit = vec3<f32>(0.0);
+    if (s.translucency > 0.0) {
+        let lt_dir = normalize(sun_dir_ws + n * 0.30);
+        let back = pow(clamp(dot(view_dir_ws, -lt_dir), 0.0, 1.0), 2.5);
+        let warm = vec3<f32>(1.30, 1.05, 0.50); // green → yellow/orange shift
+        let thru = (back + 0.16 * clamp(-n_dot_l, 0.0, 1.0)) * s.translucency;
+        transmit = s.albedo * warm * (thru * sky.sun_scale * shadow) * sky.sun_color;
+    }
+
+    return direct + ambient + transmit;
+}

@@ -10,22 +10,20 @@ use thalos_physics_canonical::canonical::{AuthorityMode, TranslationalState};
 use thalos_physics_canonical::surface_local::SurfaceLocalFrame;
 use thalos_physics_canonical::types::{AttitudeState, VesselKind};
 use thalos_physics_local::avian::{
-    AngularVelocity, CenterOfMass, Collider, CustomPositionIntegration, LinearVelocity, LockedAxes, NoAutoCenterOfMass, Position, RigidBody, Rotation,
+    AngularVelocity, CenterOfMass, Collider, CustomPositionIntegration, LinearVelocity, LockedAxes,
+    NoAutoCenterOfMass, Position, RigidBody, Rotation,
 };
 use thalos_physics_local::{
-    ActiveLocalBubble, HeightSourceRegistry, LocalBubble, LocalBubbleConfig, LocalCraftBody, LocalCraftSpawn, LocalPrimitiveCollider,
-    LocalPrimitiveShape, spawn_local_craft_body,
+    ActiveLocalBubble, HeightSourceRegistry, LocalBubble, LocalBubbleConfig, LocalCraftBody,
+    LocalCraftSpawn, LocalPrimitiveCollider, LocalPrimitiveShape, spawn_local_craft_body,
 };
-use thalos_shipyard::{
-    AttachNodes, Gear, Part, SurfaceMount,
-};
+use thalos_shipyard::{AttachNodes, Gear, Part, SurfaceMount};
 use thalos_world::BodyId;
 
 use crate::debug::DebugMode;
 use crate::player_controller::{EvaMode, PlayerControllerBody};
 use crate::rendering::{PlayerShip, SimulationState};
 use crate::view::ViewMode;
-
 
 /// Spawn the player's Avian rigid body the first time the simulation is
 /// ready to host it. Ships live in the **surface-local frame** (a body-fixed
@@ -53,7 +51,10 @@ pub(crate) fn spawn_player_avian_body(
     height_sources: Res<HeightSourceRegistry>,
     player_ship: Query<&GlobalTransform, With<PlayerShip>>,
     parts: PartColliderQuery,
-    gear_q: Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
+    gear_q: Query<
+        (&Gear, &SurfaceMount),
+        (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
+    >,
     host_nodes: Query<&AttachNodes>,
 ) {
     if active.bubble.is_some() || *view != ViewMode::Ship {
@@ -377,7 +378,6 @@ pub(crate) fn rebase_bubble_to_dominant_body(
     );
 }
 
-
 pub(crate) fn debug_surface_drop(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -505,7 +505,6 @@ pub(crate) fn debug_surface_drop(
     );
 }
 
-
 /// Plant a grounded EVA player at a surface pose, in place.
 ///
 /// EVA keeps its persistent bubble across teleports (KSP-on-foot never tears
@@ -567,4 +566,3 @@ pub(crate) fn place_eva_on_surface(
     linear_velocity.0 = frame.linear_velocity_m_s;
     angular_velocity.0 = DVec3::ZERO;
 }
-

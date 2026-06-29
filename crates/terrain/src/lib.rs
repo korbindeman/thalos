@@ -46,9 +46,9 @@ pub use height_generator::*;
 pub use icosphere::Icosphere;
 pub use procedural::ProceduralSurface;
 pub use query::{
-    BakedSurface, FlattenHandle, FlattenedSurface, Region, SurfaceQuery, SurfaceRef,
-    TerrainFlatten, flatten_handle, surface_height_m, surface_height_range_m, surface_normal,
-    surface_sample,
+    BakedSurface, FlattenHandle, FlattenRegion, FlattenedSurface, Region, SurfaceQuery, SurfaceRef,
+    TerrainFlatten, flatten_handle, nearest_flatten, surface_height_m, surface_height_range_m,
+    surface_normal, surface_sample,
 };
 pub use sample::{
     SurfaceSample, apply_dynamic_surface_layers, sample_static_surface, sample_surface,

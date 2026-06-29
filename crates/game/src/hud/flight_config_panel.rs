@@ -233,18 +233,36 @@ pub(super) fn update(
     craft: Query<(&ShipAero, Option<&WheelSet>), With<LocalCraftBody>>,
     mut row_q: Query<
         &mut Visibility,
-        (With<FlightConfigRow>, Without<FlapsGate>, Without<BrakesPill>),
+        (
+            With<FlightConfigRow>,
+            Without<FlapsGate>,
+            Without<BrakesPill>,
+        ),
     >,
     mut gate_q: Query<
         &mut Visibility,
-        (With<FlapsGate>, Without<FlightConfigRow>, Without<BrakesPill>),
+        (
+            With<FlapsGate>,
+            Without<FlightConfigRow>,
+            Without<BrakesPill>,
+        ),
     >,
     mut segments_q: Query<
-        (&FlapsSegment, &Interaction, &mut BorderColor, &mut BackgroundColor),
+        (
+            &FlapsSegment,
+            &Interaction,
+            &mut BorderColor,
+            &mut BackgroundColor,
+        ),
         Without<BrakesPill>,
     >,
     mut brakes_pill_q: Query<
-        (&mut Visibility, &Interaction, &mut BorderColor, &mut BackgroundColor),
+        (
+            &mut Visibility,
+            &Interaction,
+            &mut BorderColor,
+            &mut BackgroundColor,
+        ),
         (
             With<BrakesPill>,
             Without<FlightConfigRow>,
@@ -253,7 +271,12 @@ pub(super) fn update(
         ),
     >,
     mut gear_pill_q: Query<
-        (&mut Visibility, &Interaction, &mut BorderColor, &mut BackgroundColor),
+        (
+            &mut Visibility,
+            &Interaction,
+            &mut BorderColor,
+            &mut BackgroundColor,
+        ),
         (
             With<GearPill>,
             Without<FlightConfigRow>,
@@ -265,11 +288,19 @@ pub(super) fn update(
     mut segment_text_q: Query<(&FlapsSegmentText, &mut TextColor), Without<BrakesText>>,
     mut brakes_text_q: Query<
         (&mut Text, &mut TextColor),
-        (With<BrakesText>, Without<FlapsSegmentText>, Without<GearText>),
+        (
+            With<BrakesText>,
+            Without<FlapsSegmentText>,
+            Without<GearText>,
+        ),
     >,
     mut gear_text_q: Query<
         (&mut Text, &mut TextColor),
-        (With<GearText>, Without<FlapsSegmentText>, Without<BrakesText>),
+        (
+            With<GearText>,
+            Without<FlapsSegmentText>,
+            Without<BrakesText>,
+        ),
     >,
 ) {
     // Capability of the *current* craft: flap/spoiler authority from the wing

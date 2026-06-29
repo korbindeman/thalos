@@ -7,18 +7,14 @@ use super::*;
 
 use bevy::math::{DQuat, DVec3};
 use thalos_physics_canonical::types::VesselKind;
-use thalos_physics_local::avian::{
-    ContactGraph, LinearVelocity, Position, Rotation,
-};
+use thalos_physics_local::avian::{ContactGraph, LinearVelocity, Position, Rotation};
 use thalos_physics_local::{
-    ActiveLocalBubble, HeightSourceRegistry, LocalCraftBody,
-    LocalCraftColliderPrimitives,
+    ActiveLocalBubble, HeightSourceRegistry, LocalCraftBody, LocalCraftColliderPrimitives,
     LocalPrimitiveShape, craft_contacts_terrain,
 };
 
 use crate::rendering::SimulationState;
 use crate::sim_clock::SimClock;
-
 
 /// Coulomb friction tuning for a ship resting/sliding on its **hull** — gearless
 /// craft (landers, rockets) or a craft on its belly. Wheeled craft get their
@@ -54,7 +50,6 @@ impl Default for SurfaceFriction {
         }
     }
 }
-
 
 /// Analytic ground backstop — a deterministic safety net that guarantees the
 /// craft hull can never tunnel through the terrain, independent of the collision
@@ -350,7 +345,6 @@ pub(crate) fn shape_min_support(shape: LocalPrimitiveShape, a: DVec3) -> f64 {
     }
 }
 
-
 /// Short ring buffer of recent surface-relative approach speeds. The
 /// impact detector reads its **peak** at contact onset rather than the
 /// instantaneous speed because `SweptCcd` books the velocity arrest a frame
@@ -457,4 +451,3 @@ pub(crate) fn detect_terrain_impact(
         sim.simulation.mark_destroyed(impact_speed);
     }
 }
-

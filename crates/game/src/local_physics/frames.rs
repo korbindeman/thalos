@@ -12,11 +12,10 @@ use thalos_physics_canonical::body_centered::{
 };
 use thalos_physics_canonical::canonical::TranslationalState;
 use thalos_physics_canonical::surface_local::{
-    SurfaceAnchor, SurfaceLocalFrame, SurfaceLocalState, inertial_to_surface_local, surface_local_to_inertial,
+    SurfaceAnchor, SurfaceLocalFrame, SurfaceLocalState, inertial_to_surface_local,
+    surface_local_to_inertial,
 };
 use thalos_physics_canonical::types::{AttitudeState, BodyState, VesselKind};
-
-
 
 pub(crate) struct BubbleFrame {
     pub(crate) position_m: DVec3,
@@ -49,7 +48,6 @@ pub(crate) fn inertial_to_bubble_frame(
         angular_velocity_rad_s: state.attitude.orientation * state.attitude.angular_velocity,
     }
 }
-
 
 pub(crate) fn bubble_frame_to_inertial(
     body_state: &BodyState,
@@ -199,4 +197,3 @@ pub(crate) fn level_attitude_for_body_dir(body_orientation: DQuat, up_body: DVec
     let craft_to_body = DMat3::from_cols(right_body, nose_body, dorsal_body);
     (body_orientation * DQuat::from_mat3(&craft_to_body)).normalize()
 }
-

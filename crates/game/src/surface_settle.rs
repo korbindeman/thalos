@@ -239,8 +239,8 @@ fn update_surface_settle(
         tracker.set_detail(step::SETTLE, format!("{:.0} m/texel", settle.best_lod_m));
     }
 
-    let plateaued = settle.best_lod_m <= SETTLE_TARGET_LOD_M
-        && settle.stable_frames >= SETTLE_STABLE_FRAMES;
+    let plateaued =
+        settle.best_lod_m <= SETTLE_TARGET_LOD_M && settle.stable_frames >= SETTLE_STABLE_FRAMES;
     if plateaued || settle.elapsed_s >= MAX_SETTLE_S {
         settle.done = true;
         tracker.complete(step::SETTLE);

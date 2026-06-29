@@ -128,7 +128,9 @@ pub struct ShipAeroLayout {
 
 impl Default for ShipAeroLayout {
     fn default() -> Self {
-        Self { config: AeroConfig::default() }
+        Self {
+            config: AeroConfig::default(),
+        }
     }
 }
 
@@ -336,7 +338,8 @@ pub fn build_ship_aero_config(
                             * w.max_deflection_rad.sin().powi(2);
                     }
                     ControlSurfaceRole::Spoiler => {
-                        spoiler_dcd += SPOILER_DRAG_FACTOR * (w.area_m2 / total_area)
+                        spoiler_dcd += SPOILER_DRAG_FACTOR
+                            * (w.area_m2 / total_area)
                             * w.max_deflection_rad.sin();
                         spoiler_dcl -= spanned_frac * w.max_deflection_rad.sin();
                     }
@@ -347,13 +350,8 @@ pub fn build_ship_aero_config(
 
         let mean_chord = mac_acc / total_area;
         let reference_span = full_span.max(1.0);
-        let (pitch_control, roll_control, yaw_control) = derive_control_coefficients(
-            panels,
-            com_body_m,
-            total_area,
-            mean_chord,
-            reference_span,
-        );
+        let (pitch_control, roll_control, yaw_control) =
+            derive_control_coefficients(panels, com_body_m, total_area, mean_chord, reference_span);
 
         AeroConfig {
             reference_area_m2: total_area,
@@ -492,7 +490,9 @@ fn attach_ship_aero(
     }
     for ship in &ships {
         commands.entity(ship).insert((
-            ShipAero { config: layout.config },
+            ShipAero {
+                config: layout.config,
+            },
             AeroReadout::default(),
             AeroForceViz::default(),
             ConstantForce::default(),
@@ -537,17 +537,8 @@ fn apply_aero_forces(
     if sim.simulation.vessel_kind() != VesselKind::Ship {
         return;
     }
-    let Ok((
-        position,
-        rotation,
-        lin_vel,
-        ang_vel,
-        ship_aero,
-        mut cf,
-        mut ct,
-        mut readout,
-        mut viz,
-    )) = craft.get_mut(bubble.craft_entity)
+    let Ok((position, rotation, lin_vel, ang_vel, ship_aero, mut cf, mut ct, mut readout, mut viz)) =
+        craft.get_mut(bubble.craft_entity)
     else {
         return;
     };
@@ -606,7 +597,14 @@ fn apply_aero_forces(
     // The same resolve feeds the control allocator's authority estimate
     // (`control_bus`), so the split matches what we actually fly here.
     let config = resolved_aero_config(ship_aero.config, &tuning);
-    let out = evaluate_aero(vel_body, omega_body, density, speed_of_sound, &config, controls);
+    let out = evaluate_aero(
+        vel_body,
+        omega_body,
+        density,
+        speed_of_sound,
+        &config,
+        controls,
+    );
 
     // Parked / slow taxi: below the airspeed floor the AoA is degenerate (the
     // velocity is mostly suspension settle, not flow), so a grounded craft gets
@@ -643,7 +641,11 @@ fn apply_aero_forces(
     *readout = AeroReadout {
         airspeed_ms: speed,
         dynamic_pressure_pa: 0.5 * density * speed * speed,
-        mach: if speed_of_sound > 0.0 { speed / speed_of_sound } else { 0.0 },
+        mach: if speed_of_sound > 0.0 {
+            speed / speed_of_sound
+        } else {
+            0.0
+        },
         density_kgm3: density,
         force_n: force_body.length(),
         alpha_deg: alpha.to_degrees(),
@@ -777,14 +779,74 @@ mod tests {
         vec![
             // Main wings (slightly ahead of the CoM; the lever that matters
             // for roll is spanwise, so the fore/aft arm is irrelevant here).
-            panel(15.0, 5.2, 1.5, 0.52, 0.11, 1.5708, WingRole::Lift, DVec3::X, DVec3::Z, 1.0, &wing_windows),
-            panel(15.0, 5.2, 1.5, 0.52, 0.11, -1.5708, WingRole::Lift, -DVec3::X, DVec3::Z, 1.0, &wing_windows),
+            panel(
+                15.0,
+                5.2,
+                1.5,
+                0.52,
+                0.11,
+                1.5708,
+                WingRole::Lift,
+                DVec3::X,
+                DVec3::Z,
+                1.0,
+                &wing_windows,
+            ),
+            panel(
+                15.0,
+                5.2,
+                1.5,
+                0.52,
+                0.11,
+                -1.5708,
+                WingRole::Lift,
+                -DVec3::X,
+                DVec3::Z,
+                1.0,
+                &wing_windows,
+            ),
             // Tailplanes — the pitch lever.
-            panel(4.6, 2.6, 1.1, 0.55, 0.10, 1.5708, WingRole::Stabilizer, DVec3::X, DVec3::Z, TAILPLANE_ARM_M, &elevator),
-            panel(4.6, 2.6, 1.1, 0.55, 0.10, -1.5708, WingRole::Stabilizer, -DVec3::X, DVec3::Z, TAILPLANE_ARM_M, &elevator),
+            panel(
+                4.6,
+                2.6,
+                1.1,
+                0.55,
+                0.10,
+                1.5708,
+                WingRole::Stabilizer,
+                DVec3::X,
+                DVec3::Z,
+                TAILPLANE_ARM_M,
+                &elevator,
+            ),
+            panel(
+                4.6,
+                2.6,
+                1.1,
+                0.55,
+                0.10,
+                -1.5708,
+                WingRole::Stabilizer,
+                -DVec3::X,
+                DVec3::Z,
+                TAILPLANE_ARM_M,
+                &elevator,
+            ),
             // Vertical fin — the yaw lever. Skipped by the lifting-area
             // aggregation (vertical), but its rudder still derives authority.
-            panel(4.4, 3.4, 1.4, 0.62, 0.10, 0.0, WingRole::Stabilizer, DVec3::Z, DVec3::X, FIN_ARM_M, &rudder),
+            panel(
+                4.4,
+                3.4,
+                1.4,
+                0.62,
+                0.10,
+                0.0,
+                WingRole::Stabilizer,
+                DVec3::Z,
+                DVec3::X,
+                FIN_ARM_M,
+                &rudder,
+            ),
         ]
     }
 
@@ -918,8 +980,32 @@ mod tests {
             (ControlSurfaceRole::Aileron, 0.54, 0.97, 0.25, 0.35),
         ];
         let big = vec![
-            panel(15.0, 5.2, 1.5, 0.52, 0.11, 1.5708, WingRole::Lift, DVec3::X, DVec3::Z, 1.0, &wing_windows),
-            panel(15.0, 5.2, 1.5, 0.52, 0.11, -1.5708, WingRole::Lift, -DVec3::X, DVec3::Z, 1.0, &wing_windows),
+            panel(
+                15.0,
+                5.2,
+                1.5,
+                0.52,
+                0.11,
+                1.5708,
+                WingRole::Lift,
+                DVec3::X,
+                DVec3::Z,
+                1.0,
+                &wing_windows,
+            ),
+            panel(
+                15.0,
+                5.2,
+                1.5,
+                0.52,
+                0.11,
+                -1.5708,
+                WingRole::Lift,
+                -DVec3::X,
+                DVec3::Z,
+                1.0,
+                &wing_windows,
+            ),
         ];
         let big_cfg = build_ship_aero_config(&big, 8.0, 0.5, DVec3::ZERO);
         assert!(

@@ -144,11 +144,12 @@ fn begin_relaunch(
     // the destruction respawn uses, so a relaunch matches the `just game` boot.
     let (state, attitude) = match spec.situation {
         SpawnSituation::Cruise => {
-            compute_descent_state(SpawnSituation::Cruise, &sim, &height_sources)
-                .unwrap_or_else(|| {
+            compute_descent_state(SpawnSituation::Cruise, &sim, &height_sources).unwrap_or_else(
+                || {
                     warn!("relaunch: terrain not resident for cruise; using orbit");
                     orbit_respawn_state(&sim, homeworld.0)
-                })
+                },
+            )
         }
         _ => orbit_respawn_state(&sim, homeworld.0),
     };

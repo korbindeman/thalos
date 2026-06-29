@@ -29,7 +29,6 @@ pub mod ui;
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
 
 use thalos_input::shipyard::ShipyardInputPlugin;
 use thalos_shipyard::editor::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
@@ -38,6 +37,7 @@ use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
 use crate::coords::EDITOR_LAYER;
 use crate::hud::HudPanel;
 use crate::loading::AppState;
+use crate::photo_mode::HideInPhotoMode;
 use crate::view::ViewMode;
 
 pub use ui::EditorTextFocus;
@@ -107,7 +107,10 @@ fn open_on_start(mut flag: ResMut<OpenShipyardOnStart>, mut editor: ResMut<Shipy
 }
 
 /// React to open/close: flip the cameras, show/hide the build world, and
-/// hide/restore the flight HUD (photo-mode pattern). Sim pause is handled
+/// hide/restore the flight overlays — both `HudPanel`s and the photo-mode
+/// (`HideInPhotoMode`) set, since the editor camera becomes the default UI
+/// camera and would otherwise draw any flight UI left visible (the navball
+/// leaked through when only `HudPanel`s were hidden). Sim pause is handled
 /// by `sim_clock::sync_sim_clock` reading [`ShipyardEditor`] directly.
 fn apply_open_state(
     editor: Res<ShipyardEditor>,
@@ -118,8 +121,21 @@ fn apply_open_state(
         Query<(Entity, &mut Camera), With<scene::EditorCamera>>,
     )>,
     mut visibilities: ParamSet<(
-        Query<&mut Visibility, Or<(With<EditorPart>, With<PreviewGhost>, With<scene::EditorSceneEntity>)>>,
+        Query<
+            &mut Visibility,
+            Or<(
+                With<EditorPart>,
+                With<PreviewGhost>,
+                With<scene::EditorSceneEntity>,
+            )>,
+        >,
         Query<&mut Visibility, With<HudPanel>>,
+        // Flight overlays that opt out of the clean scene via the photo-mode
+        // marker rather than `HudPanel` — the navball above all. These are
+        // `bevy_ui` nodes / world overlays that would otherwise render into the
+        // editor (the editor camera becomes the default UI camera), so the
+        // editor must hide the *same* set photo mode does, not just `HudPanel`.
+        Query<&mut Visibility, With<HideInPhotoMode>>,
     )>,
 ) {
     if !editor.is_changed() {
@@ -178,21 +194,21 @@ fn apply_open_state(
             *vis = hud_target;
         }
     }
+    for mut vis in visibilities.p2().iter_mut() {
+        if *vis != hud_target {
+            *vis = hud_target;
+        }
+    }
 }
 
-/// Mirror the Bevy-UI hover gate (plus egui, for the debug overlays) into
-/// the editor core's [`EditorUiGate`], so its picking observers and the
-/// placement preview stand down while the cursor is over panels.
+/// Mirror the Bevy-UI hover gate into the editor core's [`EditorUiGate`], so its
+/// picking observers and the placement preview stand down while the cursor is
+/// over panels.
 fn sync_editor_ui_gate(
     ui_pointer: Res<crate::hud::UiPointerGate>,
-    mut contexts: EguiContexts,
     mut gate: ResMut<EditorUiGate>,
 ) {
-    let egui_busy = contexts
-        .ctx_mut()
-        .map(|ctx| ctx.is_pointer_over_area() || ctx.wants_pointer_input())
-        .unwrap_or(false);
-    let busy = ui_pointer.hovered || egui_busy;
+    let busy = ui_pointer.hovered;
     if gate.pointer_busy != busy {
         gate.pointer_busy = busy;
     }

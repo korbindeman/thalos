@@ -6,7 +6,6 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::EguiContexts;
 use thalos_input::game::GameInputIntent;
 use thalos_world::BodyKind;
 
@@ -229,7 +228,7 @@ pub(super) fn focus_camera_on_homeworld(
 /// icons because we test the parent entity's transform, not the mesh child.
 pub(super) fn double_click_focus_system(
     input: Res<GameInputIntent>,
-    mut contexts: EguiContexts,
+    ui_pointer_gate: Res<crate::hud::UiPointerGate>,
     time: Res<Time<Real>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), (With<ActiveCamera>, With<OrbitCamera>)>,
@@ -283,13 +282,9 @@ pub(super) fn double_click_focus_system(
     if !input.primary_started {
         return;
     }
-    // Skip clicks consumed by egui — otherwise clicking a button or
-    // dragging a window would also pick a body behind it.
-    if contexts
-        .ctx_mut()
-        .map(|ctx| ctx.wants_pointer_input())
-        .unwrap_or(false)
-    {
+    // Skip clicks over an interactive HUD element — otherwise clicking a
+    // button or panel would also pick a body behind it.
+    if ui_pointer_gate.hovered {
         return;
     }
 

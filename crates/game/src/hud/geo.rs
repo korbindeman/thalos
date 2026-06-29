@@ -14,10 +14,7 @@ use bevy::math::DVec3;
 ///
 /// Returns `None` only when the craft sits exactly at the body centre
 /// (degenerate up).
-pub(crate) fn local_enu_basis(
-    craft_pos: DVec3,
-    body_pos: DVec3,
-) -> Option<(DVec3, DVec3, DVec3)> {
+pub(crate) fn local_enu_basis(craft_pos: DVec3, body_pos: DVec3) -> Option<(DVec3, DVec3, DVec3)> {
     let up = (craft_pos - body_pos).try_normalize()?;
     let mut north = DVec3::Y - DVec3::Y.dot(up) * up;
     if north.length_squared() < 1e-12 {

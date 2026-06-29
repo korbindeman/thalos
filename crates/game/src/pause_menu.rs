@@ -30,6 +30,7 @@ struct PauseMenuRoot;
 enum PauseMenuAction {
     Resume,
     Shipyard,
+    BaseEditor,
     Settings,
     Quit,
 }
@@ -174,6 +175,12 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                     .with_children(|buttons| {
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Resume, "RESUME");
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Shipyard, "SHIPYARD");
+                        spawn_menu_button(
+                            buttons,
+                            &theme,
+                            PauseMenuAction::BaseEditor,
+                            "SURFACE BASE",
+                        );
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Settings, "SETTINGS");
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Quit, "QUIT");
                     });
@@ -225,6 +232,7 @@ pub(crate) fn handle_escape_input(
     mut pause: ResMut<GamePause>,
     mut settings_menu: ResMut<SettingsMenu>,
     shipyard: Option<ResMut<crate::shipyard_editor::ShipyardEditor>>,
+    base_editor: Option<ResMut<crate::base_editor::BaseEditor>>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
@@ -251,6 +259,14 @@ pub(crate) fn handle_escape_input(
         && shipyard.open
     {
         shipyard.open = false;
+        return;
+    }
+
+    // The base editor closes before the pause menu opens, same as the shipyard.
+    if let Some(mut base_editor) = base_editor
+        && base_editor.open
+    {
+        base_editor.open = false;
         return;
     }
 
@@ -283,6 +299,7 @@ fn handle_button_clicks(
     mut pause: ResMut<GamePause>,
     mut settings_menu: ResMut<SettingsMenu>,
     mut shipyard: ResMut<crate::shipyard_editor::ShipyardEditor>,
+    mut base_editor: ResMut<crate::base_editor::BaseEditor>,
     mut close_requested: MessageWriter<WindowCloseRequested>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -295,6 +312,12 @@ fn handle_button_clicks(
             PauseMenuAction::Shipyard => {
                 pause.active = false;
                 shipyard.open = true;
+            }
+            PauseMenuAction::BaseEditor => {
+                pause.active = false;
+                base_editor.open = true;
+                base_editor.mode = crate::base_editor::BaseEditorMode::PickSite;
+                base_editor.active_site = None;
             }
             PauseMenuAction::Settings => settings_menu.open = true,
             PauseMenuAction::Quit => {

@@ -26,7 +26,9 @@ use bevy::prelude::*;
 use thalos_udlod::prelude::{TerrainMaterialPlugin, TerrainPlugin};
 
 mod body_material;
+mod ground_patch;
 mod height_source;
+mod landcover;
 mod pipeline;
 #[cfg(feature = "playground")]
 mod playground_material;
@@ -48,10 +50,12 @@ pub use body_material::{
     CASCADE_COUNT, MAX_TERRAIN_SHADOW_CASTERS, MAX_TERRAIN_SHADOW_QUADS, ShadowCascadeBlock,
     TerrainShadingStyle,
 };
+pub use ground_patch::{GroundPatchMaterial, GroundPatchMaterialPlugin};
 pub use height_source::{
     ConstantHeightSource, CpuPipelineHeightSource, GpuAtlasHeightMirror,
     GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, GpuAtlasMirrorHeightSource, HeightSource,
 };
+pub use landcover::{LandcoverSample, sample_landcover};
 pub use pipeline::{
     PipelineTileProvider, rendered_height_m, rendered_height_range, renderer_tile_lod_m_at,
 };
@@ -67,23 +71,26 @@ pub use scatter::{
     placement_gate,
 };
 pub use sky_material::BodySkyMaterial;
-pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
+pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
 pub use tile_synthesis_pool::tile_synthesis_pool;
+pub use tree_atlas::{
+    ATLAS_N, BARK_CELL_COUNT, BARK_CELL_FIRST, build_foliage_atlas, build_foliage_material_atlas,
+};
 pub use tree_impostor::{
     BakeParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout, ImpostorParams, TreeBakeMaterial,
-    TreeImpostorMaterial, hemioct_decode, impostor_bake_rotation, make_impostor_atlas,
-    recenter_tree_mesh, tree_bounding_sphere,
+    TreeImpostorMaterial, TreeImpostorMaterialPlugin, hemioct_decode, impostor_bake_rotation,
+    make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
 };
-pub use tree_atlas::{ATLAS_N, BARK_CELL_COUNT, BARK_CELL_FIRST, build_foliage_atlas};
 pub use tree_material::{TreeMaterial, TreeMaterialPlugin, fallback_shadow_map};
 pub use tree_mesh::{
     CanopyStyle, TreeMeshData, TreeMeshParams, build_tree_mesh, build_tree_mesh_data,
 };
 pub use vegetation::{
-    GRASS_TILE_SIZE_M, GrassBladeLod, GrassClumpParams, GrassMaterial, GrassMaterialPlugin,
-    GrassParams, GrassTileBuildInput, GrassTileKey, GrassTileMesh, build_grass_clump_mesh,
-    build_grass_tile_mesh, grass_tile_frame, grass_tile_key, grass_tiles_per_side,
+    GRASS_TILE_SIZE_M, GrassBladeLod, GrassClumpParams, GrassFieldParams, GrassMaterial,
+    GrassMaterialPlugin, GrassParams, GrassTileBuildInput, GrassTileKey, GrassTileMesh,
+    build_grass_clump_mesh, build_grass_field_mesh, build_grass_tile_mesh, grass_tile_frame,
+    grass_tile_key, grass_tiles_per_side,
 };
 pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 

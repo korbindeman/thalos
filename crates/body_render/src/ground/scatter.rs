@@ -456,8 +456,8 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                 if let Some(flatten) = &input.flatten_exclusion {
                     let cos = dir.dot(flatten.center_dir).clamp(-1.0, 1.0);
                     let d = (cos.acos() * input.radius_m) as f32;
-                    let pad_reach = (flatten.half_along_m.hypot(flatten.half_across_m)
-                        + flatten.ramp_m) as f32;
+                    let pad_reach =
+                        (flatten.half_along_m.hypot(flatten.half_across_m) + flatten.ramp_m) as f32;
                     accept *= smoothstep(pad_reach, pad_reach + VEG_CLEARING_MARGIN_M, d);
                 }
                 // Thinning only ever *removes* points, so the min-spacing
@@ -702,7 +702,11 @@ pub fn clump_field(dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
             // lone bushes out on the plain.
             let edge = 1.0 - (canopy - 0.5).abs() * 2.0;
             let lone = fbm(dir * (FOREST_PATCH_FREQ * 2.5), 2);
-            lerp(lone * 0.35, (edge * 0.7 + canopy * 0.4).clamp(0.0, 1.0), affinity)
+            lerp(
+                lone * 0.35,
+                (edge * 0.7 + canopy * 0.4).clamp(0.0, 1.0),
+                affinity,
+            )
         }
         VegLayer::GroundCover => 1.0 - 0.5 * canopy,
     }

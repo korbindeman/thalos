@@ -9,16 +9,14 @@ use bevy::math::{DQuat, DVec3};
 use thalos_physics_canonical::surface_local::surface_local_acceleration;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::avian::{
-    AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity, Position, Rotation,
+    AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity,
+    Position, Rotation,
 };
-use thalos_physics_local::{
-    ActiveLocalBubble, LocalCraftBody,
-};
+use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody};
 
 use crate::fuel::ThrottleState;
 use crate::rendering::SimulationState;
 use crate::sim_clock::SimClock;
-
 
 /// Write Avian's per-frame `ConstantLinearAcceleration` and
 /// `ConstantAngularAcceleration` accumulators.
@@ -173,4 +171,3 @@ pub(crate) fn compute_angular_acceleration(
     let accel_body = torque_body * inv_i;
     rotation * accel_body
 }
-

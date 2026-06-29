@@ -4,7 +4,6 @@ use bevy::math::{DQuat, DVec3};
 use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
-use bevy_egui::EguiContexts;
 use big_space::prelude::CellCoord;
 use thalos_body_render::HeightSource;
 use thalos_body_render::space_camera_post_stack;
@@ -547,8 +546,14 @@ fn tune_auto_exposure(
     let t = raw * raw * (3.0 - 2.0 * raw); // smoothstep
 
     let lerp = |a: f32, b: f32| a + (b - a) * t;
-    let range = (lerp(AE_VAC_RANGE.0, AE_SURF_RANGE.0), lerp(AE_VAC_RANGE.1, AE_SURF_RANGE.1));
-    let filter = (lerp(AE_VAC_FILTER.0, AE_SURF_FILTER.0), lerp(AE_VAC_FILTER.1, AE_SURF_FILTER.1));
+    let range = (
+        lerp(AE_VAC_RANGE.0, AE_SURF_RANGE.0),
+        lerp(AE_VAC_RANGE.1, AE_SURF_RANGE.1),
+    );
+    let filter = (
+        lerp(AE_VAC_FILTER.0, AE_SURF_FILTER.0),
+        lerp(AE_VAC_FILTER.1, AE_SURF_FILTER.1),
+    );
     let speed_brighten = lerp(AE_VAC_SPEED.0, AE_SURF_SPEED.0);
     let speed_darken = lerp(AE_VAC_SPEED.1, AE_SURF_SPEED.1);
     let new_range = range.0..=range.1;
@@ -576,19 +581,17 @@ fn tune_auto_exposure(
 // ---------------------------------------------------------------------------
 
 /// `V` toggles ship-view camera mode (Free ↔ Locked). Suppressed in map view
-/// and while egui is consuming keyboard input (e.g. text fields).
+/// and while a UI text field is consuming keyboard input.
 fn ship_camera_mode_input(
     input: Res<GameInputIntent>,
-    mut contexts: EguiContexts,
+    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
     view: Res<ViewMode>,
     mut mode: ResMut<ShipCameraMode>,
 ) {
     if *view != ViewMode::Ship || !input.cycle_ship_camera {
         return;
     }
-    if let Ok(ctx) = contexts.ctx_mut()
-        && ctx.wants_keyboard_input()
-    {
+    if ui_text.is_focused() {
         return;
     }
     *mode = mode.cycle();
@@ -599,12 +602,11 @@ fn ship_camera_mode_input(
 /// - Left-button drag  → rotate (azimuth / elevation)
 /// - Scroll wheel      → sets `target_distance` (actual zoom is interpolated by `camera_zoom_interpolation_system`)
 ///
-/// Suppressed while egui is consuming pointer input — without this guard,
-/// dragging an egui window would simultaneously rotate the camera, and
-/// scrolling over a window would zoom both.
+/// Suppressed while the pointer is over an interactive HUD element — without
+/// this guard, dragging a panel would simultaneously rotate the camera, and
+/// scrolling over it would zoom both.
 pub fn camera_input_system(
     block: Res<BlockCameraInput>,
-    mut contexts: EguiContexts,
     ui_pointer_gate: Res<crate::hud::UiPointerGate>,
     view: Res<ViewMode>,
     input: Res<GameInputIntent>,
@@ -617,14 +619,9 @@ pub fn camera_input_system(
     }
     const ROTATION_SENSITIVITY: f32 = 0.005; // rad per pixel
 
-    let egui_wants_pointer = contexts
-        .ctx_mut()
-        .map(|ctx| ctx.wants_pointer_input())
-        .unwrap_or(false);
-    // Bevy-UI interactive HUD elements (the new HUD nav buttons, etc.)
-    // also block the camera so clicking a button doesn't double up as a
-    // camera drag/zoom.
-    let ui_pointer_busy = egui_wants_pointer || ui_pointer_gate.hovered;
+    // Bevy-UI interactive HUD elements (nav buttons, panels, etc.) block the
+    // camera so clicking a button doesn't double up as a camera drag/zoom.
+    let ui_pointer_busy = ui_pointer_gate.hovered;
     let debug_surface_armed = debug_surface_teleport
         .as_deref()
         .and_then(|teleport| teleport.armed_body)

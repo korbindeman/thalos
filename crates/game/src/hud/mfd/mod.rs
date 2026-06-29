@@ -185,10 +185,7 @@ impl Plugin for MfdPlugin {
             .register_type::<WidgetKind>()
             .init_resource::<ActiveWidget>()
             .init_resource::<FlightContext>()
-            .add_systems(
-                Startup,
-                setup_mfd.after(super::theme::init_theme),
-            )
+            .add_systems(Startup, setup_mfd.after(super::theme::init_theme))
             .add_systems(
                 Update,
                 (

@@ -19,7 +19,20 @@ pub use thalos_texgen::{
 /// `TreeMaterial`. Filterable, clamped, mip-free (the scale-fade shrinks far
 /// cards, so leaf shimmer is bounded without mips for now).
 pub fn build_foliage_atlas() -> Image {
-    let tex = thalos_texgen::foliage_atlas();
+    upload(thalos_texgen::foliage_atlas(), TextureFormat::Rgba8UnormSrgb)
+}
+
+/// Build the companion **foliage material atlas** (bark normal + roughness) as a
+/// GPU `Image`, ready to bind on `TreeMaterial` next to [`build_foliage_atlas`].
+/// **Linear** (`Rgba8Unorm`, NOT sRGB): RGB is a tangent-space normal, A is
+/// roughness — neither is colour data. Same layout/sampler as the albedo atlas.
+pub fn build_foliage_material_atlas() -> Image {
+    upload(thalos_texgen::foliage_material_atlas(), TextureFormat::Rgba8Unorm)
+}
+
+/// Upload a CPU [`thalos_texgen::TextureData`] into a filterable, clamped,
+/// mip-free GPU `Image` in the given format.
+fn upload(tex: thalos_texgen::TextureData, format: TextureFormat) -> Image {
     let mut img = Image::new(
         Extent3d {
             width: tex.width,
@@ -28,7 +41,7 @@ pub fn build_foliage_atlas() -> Image {
         },
         TextureDimension::D2,
         tex.rgba,
-        TextureFormat::Rgba8UnormSrgb,
+        format,
         RenderAssetUsages::RENDER_WORLD,
     );
     img.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;

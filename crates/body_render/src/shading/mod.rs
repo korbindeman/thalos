@@ -42,5 +42,10 @@ impl Plugin for PlanetLightingPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/landcover.wgsl");
+        // Shared foliage MATERIAL model (the albedo analogue of `shade_foliage`),
+        // imported by both the near mesh trees and the impostor bake so the two
+        // cannot drift. See `shaders/foliage.wgsl`.
+        bevy::shader::load_shader_library!(app, "shaders/foliage.wgsl");
     }
 }

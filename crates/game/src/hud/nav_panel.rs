@@ -834,12 +834,17 @@ pub fn update_button_visuals(
         // while stall protection is actively clamping the pitch command.
         let (label, label_color) = if !available {
             (button.kind.label(), disabled_text_color())
-        } else if matches!(button.kind, NavAssistKind::Sas)
-            && realized.assist.protection_active
-        {
+        } else if matches!(button.kind, NavAssistKind::Sas) && realized.assist.protection_active {
             ("FBW", theme.text_warn)
         } else if matches!(button.kind, NavAssistKind::Sas) && realized.assist.fbw_active {
-            ("FBW", if active { theme.text_accent } else { theme.text_primary })
+            (
+                "FBW",
+                if active {
+                    theme.text_accent
+                } else {
+                    theme.text_primary
+                },
+            )
         } else if active {
             (button.kind.label(), theme.text_accent)
         } else if locks.navigation_mode {

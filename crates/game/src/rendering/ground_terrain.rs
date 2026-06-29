@@ -24,10 +24,10 @@ use thalos_body_render::udlod::prelude::*;
 use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
-    BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, GpuAtlasHeightMirrorComponent,
-    GpuAtlasMirrorHandle, MAX_TERRAIN_SHADOW_CASTERS, MAX_TERRAIN_SHADOW_QUADS,
-    PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, TerrainShadingStyle,
-    rendered_height_range,
+    BodyTerrainShadow, BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT,
+    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, MAX_TERRAIN_SHADOW_CASTERS,
+    MAX_TERRAIN_SHADOW_QUADS, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
+    TerrainShadingStyle, rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
@@ -1568,8 +1568,19 @@ fn local_craft_shadow(
         let mut shadow = BodyTerrainShadow::default();
         let mut count = 0usize;
         let mut quad_count = 0usize;
-        for (xform, nodes, pod, dec, adapter, tank, fuselage, wing, engine, intake, surface_mount) in
-            part_q.iter()
+        for (
+            xform,
+            nodes,
+            pod,
+            dec,
+            adapter,
+            tank,
+            fuselage,
+            wing,
+            engine,
+            intake,
+            surface_mount,
+        ) in part_q.iter()
         {
             // Aircraft-shaped parts get casters derived from the same shared
             // shipyard geometry the renderer lofts, so the shadow silhouette
@@ -1661,7 +1672,12 @@ fn local_craft_shadow(
 /// `GlobalTransform::transform_point` scales the endpoint positions.
 fn max_abs_scale(xform: &GlobalTransform) -> f32 {
     let scale = xform.compute_transform().scale;
-    scale.x.abs().max(scale.y.abs()).max(scale.z.abs()).max(1.0e-4)
+    scale
+        .x
+        .abs()
+        .max(scale.y.abs())
+        .max(scale.z.abs())
+        .max(1.0e-4)
 }
 
 /// Skin radius a surface-mounted part sits at on its host — the same
@@ -1727,7 +1743,10 @@ fn push_fuselage_casters(
     fus: &Fuselage,
     nodes: &AttachNodes,
 ) {
-    let diameter = nodes.get("top").map(|n| n.diameter).unwrap_or(fus.max_width);
+    let diameter = nodes
+        .get("top")
+        .map(|n| n.diameter)
+        .unwrap_or(fus.max_width);
     let nose_end = fus.nose_fraction.clamp(0.0, 0.49);
     let tail_start = (1.0 - fus.tail_fraction.clamp(0.0, 0.95)).max(nose_end);
     let stations = [0.0, nose_end, tail_start, 1.0];

@@ -100,7 +100,7 @@ restart**:
 - **SHIPYARD** — arms `OpenShipyardOnStart` and starts the orbit scenario;
   the editor opens on entry to `Running` (it must never open during a
   load — it gates off the very systems that complete one).
-- **SETTINGS** — opens the existing egui settings overlay in place.
+- **SETTINGS** — opens the native Bevy-UI settings overlay in place.
 
 Escape on the menu only closes the settings overlay; the pause-menu Escape
 chain is gated to `Running`.

@@ -31,36 +31,28 @@ use thalos_control::{
     AssistStatus, AttitudeController, AttitudeDemand, ControlDemand, DemandSource, FlightState,
     allocate, arbitrate,
 };
+use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::aero::{ControlInputs, control_authority};
 use thalos_physics_canonical::types::ControlInput;
-use thalos_physics_local::avian::{LinearVelocity, Position, Rotation};
-use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody};
-use thalos_input::game::GameInputIntent;
+use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody, LocalCraftKinematics};
 
 use crate::SimStage;
 use crate::aero::{AeroTuning, ShipAero, resolved_aero_config};
 use crate::autopilot::{Autopilot, autopilot_system};
 use crate::controls::ControlLocks;
+use crate::maneuver::ManeuverPlan;
 use crate::navigation::{NavigationMode, NavigationState, nav_attitude_demand};
 use crate::rendering::SimulationState;
 use crate::sim_clock::SimClock;
 use crate::target::TargetBody;
-use crate::maneuver::ManeuverPlan;
 use crate::velocity_frame::VelocityFrameState;
 
-/// Query for the player craft's aero state, used to size the dynamic-pressure
-/// authority split and build the flight-assist state in [`realize_control`].
-type CraftAeroQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Position,
-        &'static Rotation,
-        &'static LinearVelocity,
-        &'static ShipAero,
-    ),
-    With<LocalCraftBody>,
->;
+/// Query for the player craft's authored aero config, used to size the
+/// dynamic-pressure authority split and build the flight-assist state in
+/// [`realize_control`]. The craft *kinematics* (SLF pose / air-relative
+/// velocity) come from the Avian-free [`LocalCraftKinematics`] readout, not
+/// from Avian components — the backend seam (`docs/physics.md`).
+type ShipAeroQuery<'w, 's> = Query<'w, 's, &'static ShipAero, With<LocalCraftBody>>;
 
 /// Below this stick magnitude the pilot is "hands off" and the lower-priority
 /// holds (SAS / nav mode) own attitude.
@@ -157,7 +149,8 @@ pub fn realize_control(
     active: Res<ActiveLocalBubble>,
     tuning: Res<AeroTuning>,
     clock: Res<SimClock>,
-    craft_aero: CraftAeroQuery,
+    kin: Res<LocalCraftKinematics>,
+    ship_aero: ShipAeroQuery,
     mut sim: ResMut<SimulationState>,
     mut controller: ResMut<AttitudeControllerState>,
     mut sas: ResMut<SasState>,
@@ -242,7 +235,7 @@ pub fn realize_control(
     // fully manual, KSP-style; spaceships and vacuum never get a flight state.
     let assist_armed = sas.enabled || nav.mode == Some(NavigationMode::Stability);
     let (aero_authority, flight) =
-        player_aero_environment(&sim, &active, &tuning, &craft_aero, assist_armed);
+        player_aero_environment(&sim, &active, &tuning, &kin, &ship_aero, assist_armed);
     let attitude = *sim.simulation.attitude();
     let params = *sim.simulation.ship_params();
     let torque = controller.0.update(
@@ -284,23 +277,31 @@ fn player_aero_environment(
     sim: &SimulationState,
     active: &ActiveLocalBubble,
     tuning: &AeroTuning,
-    craft_aero: &CraftAeroQuery,
+    kin: &LocalCraftKinematics,
+    ship_aero: &ShipAeroQuery,
     assist_armed: bool,
 ) -> (DVec3, Option<FlightState>) {
     let Some(bubble) = active.bubble.as_ref() else {
         return (DVec3::ZERO, None);
     };
-    let Ok((position, rotation, lin_vel, ship_aero)) = craft_aero.get(bubble.craft_entity) else {
+    if !kin.valid {
+        return (DVec3::ZERO, None);
+    }
+    let Ok(ship_aero) = ship_aero.get(bubble.craft_entity) else {
         return (DVec3::ZERO, None);
     };
     let Some(body) = sim.system.bodies.get(bubble.body_id) else {
         return (DVec3::ZERO, None);
     };
+    // SLF kinematics from the Avian-free readout (published last frame, after
+    // re-anchoring, so it is consistent with `bubble.frame` here). These are
+    // the same values the old direct Avian reads produced; see the seam note.
+    let position = kin.slf_position_m;
     let density = match body.terrestrial_atmosphere.as_ref() {
         Some(atmosphere) => {
-            // Mirrors `apply_aero_forces`: Avian `Position` is surface-local.
+            // Mirrors `apply_aero_forces`: the SLF position is surface-local.
             let altitude_m =
-                thalos_physics_canonical::surface_local::altitude_asl_m(&bubble.frame, position.0);
+                thalos_physics_canonical::surface_local::altitude_asl_m(&bubble.frame, position);
             atmosphere
                 .sample_at_altitude_m(
                     altitude_m,
@@ -312,23 +313,23 @@ fn player_aero_environment(
         None => 0.0,
     };
     let config = resolved_aero_config(ship_aero.config, tuning);
-    let airspeed = lin_vel.0.length();
+    let airspeed = kin.slf_linear_velocity_m_s.length();
     let authority = control_authority(&config, density, airspeed);
 
-    // The bubble integrates in the surface-local (co-rotating) frame, so
-    // `LinearVelocity` is already air-relative (wind = 0) and the local
-    // radial up comes straight from the SLF; both rotate into the body frame
-    // with the craft's Avian rotation.
+    // The bubble integrates in the surface-local (co-rotating) frame, so the SLF
+    // velocity is already air-relative (wind = 0) and the local radial up comes
+    // straight from the SLF; both rotate into the body frame with the craft's
+    // orientation.
     let flight = (assist_armed
         && config.lift_slope > 0.0
         && density > 0.0
         && airspeed >= ASSIST_MIN_AIRSPEED_M_S)
         .then(|| {
-            let to_body = rotation.0.inverse();
+            let to_body = kin.orientation.inverse();
             FlightState {
                 up_body: to_body
-                    * thalos_physics_canonical::surface_local::radial_up(&bubble.frame, position.0),
-                vel_body: to_body * lin_vel.0,
+                    * thalos_physics_canonical::surface_local::radial_up(&bubble.frame, position),
+                vel_body: to_body * kin.slf_linear_velocity_m_s,
                 stall_alpha: config.stall_alpha,
             }
         });

@@ -16,7 +16,7 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
-#import thalos::lighting::{SurfaceSky, compute_surface_sky, sky_ambient_irradiance}
+#import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage}
 
 struct GrassParams {
     // xyz = unit direction toward the star (world render space), w = sun flux
@@ -41,7 +41,73 @@ struct GrassParams {
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3.
 @group(3) @binding(0) var<uniform> grass: GrassParams;
 
+// Cascaded sun-shadow maps — the SAME depth maps the terrain + trees sample,
+// so a tree's shadow falls on the grass beneath it. Sampled PER-VERTEX (the
+// blade is small; a per-vertex factor reads the same as per-fragment on this
+// overdraw-heavy material) so the depth bindings carry `vertex` visibility.
+// Mirrors `tree.wgsl` / `body_terrain.wgsl`.
+struct ShadowCascadeBlock {
+    view_proj: array<mat4x4<f32>, 3>,
+    // per cascade: x = depth bias (clip), yzw reserved.
+    params: array<vec4<f32>, 3>,
+    // x = strength (0 ⇒ skip), y = active cascade count, zw reserved.
+    gate: vec4<f32>,
+}
+@group(3) @binding(1) var<uniform> grass_shadow: ShadowCascadeBlock;
+@group(3) @binding(2) var sun_shadow_map_0: texture_depth_2d;
+@group(3) @binding(3) var sun_shadow_map_1: texture_depth_2d;
+@group(3) @binding(4) var sun_shadow_map_2: texture_depth_2d;
+
 const TAU: f32 = 6.28318530717958647;
+
+// One cascade's shadow factor, or a negative sentinel if outside its box (the
+// caller falls through to the next cascade). A single tap — grass interpolates
+// the factor up the blade, so PCF is wasted here. Mirrors `tree.wgsl`'s box test.
+fn cascade_factor(
+    world_pos: vec3<f32>,
+    vp: mat4x4<f32>,
+    bias: f32,
+    strength: f32,
+    tex: texture_depth_2d,
+    inset: f32,
+) -> f32 {
+    let clip = vp * vec4<f32>(world_pos, 1.0);
+    if (clip.w <= 0.0) {
+        return -1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if (any(ndc.xy < vec2<f32>(-inset)) || any(ndc.xy > vec2<f32>(inset)) ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    let dims = vec2<f32>(textureDimensions(tex));
+    let texel = vec2<i32>(uv * dims);
+    let stored = textureLoad(tex, texel, 0);
+    let lit = select(1.0, 0.0, stored > ndc.z + bias);
+    return 1.0 - strength * (1.0 - lit);
+}
+
+// Walk cascades near→far, use the tightest hit. `gate.x == 0` ⇒ fully lit. Grass
+// only exists within the near cascade's reach, so this returns from cascade 0 in
+// practice (1+2 are the fallthrough for blades near a cascade seam).
+fn sun_shadow_factor(world_pos: vec3<f32>) -> f32 {
+    let s = grass_shadow.gate.x;
+    if (s <= 0.0) {
+        return 1.0;
+    }
+    var f = cascade_factor(world_pos, grass_shadow.view_proj[0], grass_shadow.params[0].x, s, sun_shadow_map_0, 0.98);
+    if (f < 0.0) {
+        f = cascade_factor(world_pos, grass_shadow.view_proj[1], grass_shadow.params[1].x, s, sun_shadow_map_1, 0.98);
+    }
+    if (f < 0.0) {
+        f = cascade_factor(world_pos, grass_shadow.view_proj[2], grass_shadow.params[2].x, s, sun_shadow_map_2, 1.0);
+    }
+    if (f < 0.0) {
+        return 1.0;
+    }
+    return f;
+}
 
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
@@ -57,6 +123,8 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     // rgb = blade tint (linear), a = per-blade dither jitter.
     @location(2) color: vec4<f32>,
+    // Per-vertex sun-shadow factor (sampled at this vertex's world position).
+    @location(3) shadow: f32,
 }
 
 @vertex
@@ -90,7 +158,13 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let band = max(grass.time_fade.w, 1.0);
     let fade_in = smoothstep(near_edge - band, near_edge + band, dist);
     let fade_out = 1.0 - smoothstep(far_edge - band, far_edge + band, dist);
-    let grow = fade_in * fade_out;
+    // Altitude collapse: from a plane the blades subtend ~no pixels and the
+    // terrain albedo already carries the grass colour, so the whole blade layer
+    // sinks into the ground as the craft climbs (driver writes `sky_up.w` =
+    // collapse, 0 near the ground → 1 high up). 0 by default, so ground-level and
+    // the preview are unaffected.
+    let altitude_grow = clamp(1.0 - grass.sky_up.w, 0.0, 1.0);
+    let grow = fade_in * fade_out * altitude_grow;
     // Collapse this vertex toward its root along the terrain up by its un-grown
     // height.
     let above = in.uv.x * in.color.a;
@@ -108,6 +182,9 @@ fn vertex(in: VertexInput) -> VertexOutput {
     out.clip_position = position_world_to_clip(world_pos);
     out.world_normal = world_normal;
     out.color = in.color;
+    // Per-vertex sun-shadow: tree (and self) shadows on the grass, sampled at
+    // the blade's final (swayed) world position and interpolated up the blade.
+    out.shadow = sun_shadow_factor(world_pos);
     return out;
 }
 
@@ -117,8 +194,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // (blades grow/shrink in height), so there's nothing to cut here.
 
     // Blades carry the *terrain* normal (not the card normal), so they light
-    // like the ground they grow from and the card geometry doesn't read in
-    // the shading. Wrap diffuse stands in for transmission through the blade.
+    // like the ground they grow from and the card geometry doesn't read in the
+    // shading. Shaded through the shared `shade_foliage` with a ground-matching
+    // hemisphere fill (ambient_scale 1.0) and no leaf-transmit term.
     let n = normalize(in.world_normal);
     let sun_dir = grass.sun_dir.xyz;
     let up = grass.sky_up.xyz;
@@ -127,15 +205,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // grass tracks the ground through the day and gets the same blue-sky fill.
     let sky = compute_surface_sky(grass.sky_tau.xyz, grass.sky_tau.w, up, sun_dir, grass.sun_dir.w);
 
-    // Direct: wrap-diffuse (blades are translucent), reddened + exposure-scaled
-    // by the shared sun term.
-    let n_dot_l = dot(n, sun_dir);
-    let wrap = clamp((n_dot_l + 0.4) / 1.4, 0.0, 1.0);
-    let direct = in.color.rgb * (wrap * sky.sun_scale) * sky.sun_color;
-
-    // Ambient: the hemisphere sky model (blue sky-dome + warm ground bounce).
-    let ambient = in.color.rgb * sky_ambient_irradiance(sky, n, up);
-
-    let lit = direct + ambient;
+    var s: FoliageSurface;
+    s.albedo = in.color.rgb;
+    s.normal_ws = n;
+    s.translucency = 0.0;
+    s.ambient_scale = 1.0;
+    s.ambient_bleed = 0.0;
+    let view_dir = normalize(view.world_position - in.world_position);
+    // Per-vertex sun-shadow factor (tree/self shadows), gating the direct term.
+    let lit = shade_foliage(s, view_dir, up, sun_dir, sky, clamp(in.shadow, 0.0, 1.0));
     return vec4<f32>(lit, 1.0);
 }

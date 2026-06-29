@@ -7,13 +7,13 @@
 //!   the CPU and uploaded to the planet material each frame)
 
 use bevy::prelude::*;
-use thalos_body_render::{GasGiantMaterial, PlanetHaloMaterial, PlanetMaterial, RingMaterial};
+use thalos_body_render::{GasGiantMaterial, RingMaterial};
 use thalos_physics_canonical::types::BodyStates;
 
 use super::lighting::{build_scene_lighting, collect_occluders};
 use super::types::{
-    CameraExposure, CelestialBody, GasGiantMaterials, MapRingMaterial, PlanetMaterials,
-    ShipRingMaterial, SimulationState, SolarSystemState,
+    CameraExposure, CelestialBody, GasGiantMaterials, MapRingMaterial, ShipRingMaterial,
+    SimulationState, SolarSystemState,
 };
 use crate::coords::{MAP_SCALE, RenderOrigin, SHIP_SCALE};
 use crate::view::ViewMode;
@@ -242,10 +242,6 @@ pub(super) fn update_cloud_bands(
     mut last_time: ResMut<LastCloudBandUpdate>,
     sim: Res<SimulationState>,
     mut solar_system: ResMut<SolarSystemState>,
-    query: Query<(&CelestialBody, &PlanetMaterials)>,
-    mut materials: ResMut<Assets<PlanetMaterial>>,
-    mut halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
-    view: Res<ViewMode>,
 ) {
     let now = sim.simulation.sim_time();
     let dt = last_time.0.map(|prev| now - prev).unwrap_or(0.0);
@@ -254,54 +250,25 @@ pub(super) fn update_cloud_bands(
         return;
     }
 
-    // See note on `update_planet_light_dirs` — gate inactive scale.
-    let force_both = view.is_changed();
-    let do_map = force_both || matches!(*view, ViewMode::Map);
-    let do_ship = force_both || matches!(*view, ViewMode::Ship);
-
-    for (body, mats) in &query {
-        // Cloud drift is physical runtime state, not a render-material
-        // side effect. Advance the canonical body environment once, then
-        // mirror the packed phases to every projection material.
-        let Some(clouds) = solar_system
-            .environment_mut(body.body_id)
+    // Advance each cloudy body's canonical cloud-band drift. These phases are
+    // physical runtime state (not a render-material side effect): the live
+    // `BodySky` / terrain atmosphere reads them every frame in
+    // `rendering::ground_terrain`. This advance was previously gated behind the
+    // never-inserted `PlanetMaterials` query of the deleted impostor path, so
+    // it never ran; it is now decoupled and runs over whatever bodies carry
+    // installed cloud-band state.
+    //
+    // NOTE: no body currently installs `CloudBandEnvironmentState`
+    // (`SolarSystemState::install_cloud_band_state` has no callers yet), so this
+    // loop is a no-op in practice until banded-cloud installation is wired at
+    // spawn. The advance is kept here, correct and ready, so it lights up the
+    // moment a body is given cloud bands.
+    for body_id in 0..solar_system.environment.len() {
+        if let Some(clouds) = solar_system
+            .environment_mut(body_id)
             .and_then(|env| env.cloud_bands.as_mut())
-        else {
-            continue;
-        };
-        clouds.advance(dt);
-        let p = clouds.phases;
-
-        let bands_a = Vec4::new(p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32);
-        let bands_b = Vec4::new(p[4] as f32, p[5] as f32, p[6] as f32, p[7] as f32);
-        let bands_c = Vec4::new(p[8] as f32, p[9] as f32, p[10] as f32, p[11] as f32);
-        let bands_d = Vec4::new(p[12] as f32, p[13] as f32, p[14] as f32, p[15] as f32);
-        for (handle, halo_handle, want) in [
-            (&mats.map, &mats.map_halo, do_map),
-            (&mats.ship, &mats.ship_halo, do_ship),
-        ] {
-            if !want {
-                continue;
-            }
-            let Some(mat) = materials.get_mut(handle) else {
-                if let Some(mat) = halo_materials.get_mut(halo_handle) {
-                    mat.atmosphere.cloud_bands_a = bands_a;
-                    mat.atmosphere.cloud_bands_b = bands_b;
-                    mat.atmosphere.cloud_bands_c = bands_c;
-                    mat.atmosphere.cloud_bands_d = bands_d;
-                }
-                continue;
-            };
-            mat.atmosphere.cloud_bands_a = bands_a;
-            mat.atmosphere.cloud_bands_b = bands_b;
-            mat.atmosphere.cloud_bands_c = bands_c;
-            mat.atmosphere.cloud_bands_d = bands_d;
-            if let Some(mat) = halo_materials.get_mut(halo_handle) {
-                mat.atmosphere.cloud_bands_a = bands_a;
-                mat.atmosphere.cloud_bands_b = bands_b;
-                mat.atmosphere.cloud_bands_c = bands_c;
-                mat.atmosphere.cloud_bands_d = bands_d;
-            }
+        {
+            clouds.advance(dt);
         }
     }
 }

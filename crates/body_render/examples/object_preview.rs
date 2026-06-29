@@ -9,47 +9,88 @@
 //!   you can fly around the objects, cycle between them, and grab screenshots.
 //!   `just preview-window` / `… --example object_preview -- --window`.
 //!
-//! Both light objects with the real `TreeMaterial` + `thalos::lighting` sky
-//! model, so the preview matches the in-game appearance. Add an object by
-//! extending [`objects`].
+//! Each object is staged as a small **diorama** so it reads like the in-game
+//! surface, not a floating cutout: a sky-model-lit [`GroundPatchMaterial`] ground
+//! (the same `thalos::lighting` BRDF the in-game terrain uses), a carpet of the
+//! real grass blades around plants, and a self-managed **sun-shadow** pass so the
+//! tree casts a leaf-shaped shadow on the ground and on itself — exactly the rig
+//! the game runs (`thalos_game::rendering::sun_shadow`), trimmed to one cascade.
+//! The camera mirrors the game's post stack (AgX tonemap + bloom + SMAA), minus
+//! the sensor-sim grain / chromatic aberration that only muddy small asset shots.
+//! Add an object by extending [`objects`].
 
 use std::time::Duration;
 
+use bevy::anti_alias::contrast_adaptive_sharpening::ContrastAdaptiveSharpening;
+use bevy::anti_alias::smaa::{Smaa, SmaaPreset};
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget};
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{
+    ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode,
+};
+use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
+use bevy::ecs::query::QueryItem;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::Hdr;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
+use bevy::render::{
+    RenderApp,
+    extract_component::{ExtractComponent, ExtractComponentPlugin},
+    extract_resource::{ExtractResource, ExtractResourcePlugin},
+    render_asset::RenderAssets,
+    render_graph::{
+        NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
+    },
+    renderer::RenderContext,
+    texture::GpuImage,
+    view::ViewDepthTexture,
+};
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
 use thalos_body_render::{
-    CanopyStyle, GrassClumpParams, GrassMaterial, GrassMaterialPlugin, GrassParams, TreeMaterial,
-    TreeMaterialPlugin, TreeMeshParams, build_foliage_atlas, build_grass_clump_mesh, build_tree_mesh,
-    fallback_shadow_map,
+    BakeParams, CanopyStyle, GrassClumpParams, GrassFieldParams, GrassMaterial, GrassMaterialPlugin,
+    GrassParams, GroundPatchMaterial, GroundPatchMaterialPlugin, IMPOSTOR_MAX_SPECIES,
+    ImpostorAtlasLayout, ImpostorParams, LIGHT_AT_1AU, ShadowCascadeBlock, TreeBakeMaterial,
+    TreeImpostorMaterial, TreeImpostorMaterialPlugin, TreeMaterial, TreeMaterialPlugin,
+    TreeMeshParams, VegInstance, build_foliage_atlas, build_foliage_material_atlas,
+    build_grass_clump_mesh, build_grass_field_mesh, build_tree_mesh, build_tree_mesh_data,
+    combine_impostor_tile_mesh, fallback_shadow_map, hemioct_decode, impostor_bake_rotation,
+    make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
 };
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 960;
 /// Frames to render before the first capture (pipeline compile + atlas upload).
-const WARMUP: u32 = 64;
-/// Frames between one object's capture and the next (pose → render → capture).
-const DWELL: u32 = 6;
+const WARMUP: u32 = 72;
+/// Frames between one object's capture and the next (pose → shadow → capture).
+const DWELL: u32 = 8;
 /// Frames to keep running after the last capture so the async readback flushes.
 const TAIL: u32 = 24;
 const OUT_DIR: &str = "tools/preview/out";
 const OBJECT_SPACING: f32 = 40.0;
 
-/// Sun direction (toward the star) and clear-sky atmosphere shared by every
-/// object, so they light exactly like the game's vegetation. The flux matches
-/// the game's `LIGHT_AT_1AU` (10.0) at ~1 AU with unit exposure gain.
-const SUN_DIR: Vec3 = Vec3::new(0.52, 0.62, 0.42);
-const SUN_FLUX: f32 = 9.0;
-const SKY: Color = Color::srgb(0.55, 0.70, 0.86);
+/// Sun direction (toward the star) shared by every object, so they light exactly
+/// like the game's vegetation. A side-key at ~36° elevation, offset well to the
+/// camera's side so it rakes form across the objects and throws their cast
+/// shadows *across* the visible ground rather than hiding them behind the plant.
+const SUN_DIR: Vec3 = Vec3::new(0.62, 0.46, -0.05);
+/// Surface sun flux in the same units the terrain `SceneLighting` carries. The
+/// game's exposure gain keeps the surface value ~`LIGHT_AT_1AU` regardless of the
+/// body's orbital distance (`rendering::lighting`), so that's the value here.
+const SUN_FLUX: f32 = LIGHT_AT_1AU;
+/// Thalos's authored clear-sky scattering (`assets/bodies/thalos.ron`):
+/// Rayleigh τ_v + atmosphere strength, fed to the shared `compute_surface_sky`
+/// so the preview sky tint + ambient match the game's surface exactly.
+const SKY_TAU: Vec3 = Vec3::new(0.046, 0.108, 0.264);
+const SKY_STRENGTH: f32 = 3.0;
+/// Background clear colour — a tuned daylight horizon blue behind the diorama.
+const SKY: Color = Color::srgb(0.46, 0.62, 0.82);
 
 fn main() {
     std::fs::create_dir_all(OUT_DIR).ok();
@@ -67,8 +108,16 @@ fn main() {
             }),
             ..default()
         }))
-        .add_systems(Startup, (setup_scene, setup_window_camera).chain())
-        .add_systems(Update, (orbit_camera, screenshot_key));
+        .add_systems(
+            Startup,
+            (setup_impostor_bake, setup_scene, setup_window_camera).chain(),
+        )
+        .add_systems(
+            Update,
+            (orbit_camera, update_preview_shadow, screenshot_key)
+                .chain(),
+        )
+        .add_systems(Update, teardown_impostor_bake);
     } else {
         app.add_plugins(
             DefaultPlugins
@@ -83,23 +132,42 @@ fn main() {
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
-        .add_systems(Startup, (setup_scene, setup_headless_camera).chain())
-        .add_systems(Update, drive_capture);
+        .add_systems(
+            Startup,
+            (setup_impostor_bake, setup_scene, setup_headless_camera).chain(),
+        )
+        .add_systems(
+            Update,
+            (drive_capture, update_preview_shadow, teardown_impostor_bake).chain(),
+        );
     }
-    app.add_plugins((TreeMaterialPlugin, GrassMaterialPlugin)).run();
+    app.add_plugins((
+        TreeMaterialPlugin,
+        TreeImpostorMaterialPlugin,
+        GrassMaterialPlugin,
+        GroundPatchMaterialPlugin,
+        PreviewShadowPlugin,
+    ))
+    .run();
 }
 
-/// What an object is built from — a procedural tree/shrub mesh (`TreeMaterial`)
-/// or a standalone grass tuft (`GrassMaterial`).
+/// What an object is built from — a procedural tree/shrub mesh (`TreeMaterial`),
+/// the SAME species as an octahedral **impostor** card (`TreeImpostorMaterial`,
+/// the far-LOD billboard) for a mesh↔impostor parity check, or a standalone grass
+/// tuft / field (`GrassMaterial`).
 #[derive(Clone)]
 enum AssetKind {
     Tree(TreeMeshParams),
+    /// The [`broadleaf`] rendered as its far-band impostor (the preview bakes one
+    /// species). Frame it identically to the matching mesh `Tree` object and the
+    /// two PNGs should read continuous — the regression check that the bake still
+    /// derives from the near material.
+    TreeImpostor,
     GrassClump(GrassClumpParams),
+    GrassField(GrassFieldParams),
 }
 
-/// Camera angle a preview is framed from. The grass clump is the asset for the
-/// "billboard a clump, not a blade" impostor, so it's framed from above (the
-/// aerial regime), level (the grazing-horizon regime), and 3/4.
+/// Camera angle a preview is framed from.
 #[derive(Clone, Copy)]
 enum ViewKind {
     ThreeQuarter,
@@ -118,45 +186,103 @@ struct Preview {
     distance: f32,
 }
 
+impl Preview {
+    /// Side length (m) of the diorama ground patch under this object — wide
+    /// enough to fill the framed view's lower half. Trees grow a grass carpet
+    /// out to the same extent (no bare-ground ring); grass objects bring their
+    /// own blades, so their patch is just the surrounding clearing.
+    fn patch_size_m(&self) -> f32 {
+        match self.kind {
+            AssetKind::Tree(_) | AssetKind::TreeImpostor => (self.distance * 1.8).clamp(6.0, 24.0),
+            _ => (self.distance * 2.4).clamp(3.0, 40.0),
+        }
+    }
+}
+
+/// The broadleaf species used for the mesh↔impostor comparison shots. Shared by
+/// the `tree_broadleaf` mesh object, its impostor counterpart, and the off-screen
+/// impostor bake, so all three describe the SAME tree.
+fn broadleaf() -> TreeMeshParams {
+    TreeMeshParams {
+        trunk_height_m: 4.8,
+        trunk_radius_m: 0.30,
+        canopy_radius_m: 3.2,
+        canopy_height_m: 3.0,
+        trunk_color: Vec3::new(0.16, 0.090, 0.045),
+        canopy_color: Vec3::new(0.92, 1.0, 0.82),
+        style: CanopyStyle::Broadleaf,
+        seed: 0xB1_05_50,
+        lod: 0,
+    }
+}
+
 fn objects() -> Vec<Preview> {
-    // The grass clump asset (same params from every angle), framed three ways so
-    // the two viewing regimes can be judged independently: `_top` is the aerial
-    // look (aircraft overhead), `_side` is the grazing horizon, `_3q` is general.
     let clump = GrassClumpParams::default();
     vec![
         Preview {
             name: "tree_broadleaf",
+            kind: AssetKind::Tree(broadleaf()),
+            view: ViewKind::ThreeQuarter,
+            focus_y: 4.4,
+            distance: 16.0,
+        },
+        // The SAME broadleaf as its far-band octahedral impostor, framed
+        // identically — the mesh↔impostor parity check. `tree_broadleaf.png` and
+        // `tree_broadleaf_impostor.png` should read as the same tree (colour +
+        // value); if they diverge, the bake has drifted from the near material.
+        Preview {
+            name: "tree_broadleaf_impostor",
+            kind: AssetKind::TreeImpostor,
+            view: ViewKind::ThreeQuarter,
+            focus_y: 4.4,
+            distance: 16.0,
+        },
+        // Side view of the same impostor — silhouette + coverage against the mesh
+        // side shot (`tree_broadleaf_b`, same species).
+        Preview {
+            name: "tree_broadleaf_impostor_side",
+            kind: AssetKind::TreeImpostor,
+            view: ViewKind::Side,
+            focus_y: 4.8,
+            distance: 17.0,
+        },
+        // A second broadleaf (different seed, framed level) to judge silhouette +
+        // shape variation between trees of the same species.
+        Preview {
+            name: "tree_broadleaf_b",
             kind: AssetKind::Tree(TreeMeshParams {
                 trunk_height_m: 5.2,
                 trunk_radius_m: 0.32,
                 canopy_radius_m: 3.0,
-                canopy_height_m: 2.8,
+                canopy_height_m: 3.4,
                 trunk_color: Vec3::new(0.16, 0.090, 0.045),
                 canopy_color: Vec3::new(0.92, 1.0, 0.82),
                 style: CanopyStyle::Broadleaf,
-                seed: 0xB1_05_50,
+                seed: 0x2E_3A_77,
                 lod: 0,
             }),
-            view: ViewKind::ThreeQuarter,
-            focus_y: 4.6,
+            view: ViewKind::Side,
+            focus_y: 4.8,
             distance: 17.0,
         },
+        // A fat, short trunk framed close and side-on so the bark material fills
+        // the view (its canopy sits above frame) — the bark study shot.
         Preview {
-            name: "tree_conifer",
+            name: "bark_log",
             kind: AssetKind::Tree(TreeMeshParams {
-                trunk_height_m: 7.0,
-                trunk_radius_m: 0.26,
-                canopy_radius_m: 1.9,
-                canopy_height_m: 3.4,
-                trunk_color: Vec3::new(0.13, 0.080, 0.045),
-                canopy_color: Vec3::new(0.78, 1.0, 0.90),
-                style: CanopyStyle::Conifer,
-                seed: 0xC0_1F_E5,
+                trunk_height_m: 4.0,
+                trunk_radius_m: 0.62,
+                canopy_radius_m: 1.4,
+                canopy_height_m: 1.4,
+                trunk_color: Vec3::new(0.16, 0.090, 0.045),
+                canopy_color: Vec3::new(0.92, 1.0, 0.82),
+                style: CanopyStyle::Broadleaf,
+                seed: 0xBA_12_09,
                 lod: 0,
             }),
-            view: ViewKind::ThreeQuarter,
-            focus_y: 5.6,
-            distance: 20.0,
+            view: ViewKind::Side,
+            focus_y: 1.5,
+            distance: 2.4,
         },
         Preview {
             name: "shrub",
@@ -196,6 +322,55 @@ fn objects() -> Vec<Preview> {
             focus_y: clump.height_m * 0.5,
             distance: 1.5,
         },
+        // A field of fountain clumps — the real test of "fluffy" and "looks good
+        // from above". `_top` is the aerial regime (aircraft overhead), `_3q` a
+        // grazing eye-line, `_dry_3q` the windswept dry-prairie look.
+        {
+            let field = GrassFieldParams::default();
+            Preview {
+                name: "grass_field_top",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::Top,
+                focus_y: 0.0,
+                distance: 4.5,
+            }
+        },
+        {
+            let field = GrassFieldParams::default();
+            Preview {
+                name: "grass_field_3q",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::ThreeQuarter,
+                focus_y: field.height_m * 0.5,
+                distance: 4.0,
+            }
+        },
+        {
+            let field = GrassFieldParams::default();
+            Preview {
+                name: "grass_field_side",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::Side,
+                focus_y: field.height_m * 0.55,
+                distance: 3.0,
+            }
+        },
+        {
+            // Dry windswept prairie: golden straw colour + a baked wind lean.
+            let field = GrassFieldParams {
+                color: Vec3::new(0.150, 0.115, 0.034),
+                wind_lean: 0.45,
+                height_m: 0.42,
+                ..GrassFieldParams::default()
+            };
+            Preview {
+                name: "grass_field_dry_3q",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::ThreeQuarter,
+                focus_y: field.height_m * 0.5,
+                distance: 4.0,
+            }
+        },
     ]
 }
 
@@ -205,12 +380,21 @@ struct Scene {
     objects: Vec<Preview>,
 }
 
+/// Shared diorama material handles, so the sun-shadow driver can push the live
+/// cascade block + depth maps onto the ground + grass + tree materials each frame.
+#[derive(Resource)]
+struct DioramaMaterials {
+    ground: Handle<GroundPatchMaterial>,
+    grass: Handle<GrassMaterial>,
+    tree: Handle<TreeMaterial>,
+}
+
 /// World focus point of object `i` (its spot along +X at its framing height).
 fn object_focus(objects: &[Preview], i: usize) -> Vec3 {
     Vec3::new(i as f32 * OBJECT_SPACING, objects[i].focus_y, 0.0)
 }
 
-/// Camera transform framing object `index` from its `view` angle (headless).
+/// Camera transform framing object `index` from its `view` angle.
 fn frame_transform(obj: &Preview, index: usize) -> Transform {
     let focus = Vec3::new(index as f32 * OBJECT_SPACING, obj.focus_y, 0.0);
     let d = obj.distance;
@@ -232,75 +416,142 @@ fn frame_transform(obj: &Preview, index: usize) -> Transform {
     }
 }
 
-/// Spawn the ground, sun, objects and the shared tree material (both modes).
+/// Shared sky/sun lighting parameters — identical for every material, so the
+/// ground, grass, and trees light from one source exactly like the game.
+fn veg_params() -> GrassParams {
+    GrassParams {
+        sun_dir: SUN_DIR.normalize().extend(SUN_FLUX),
+        wind: Vec4::ZERO,
+        // Always full size (no clipmap fade): near edge well below any distance,
+        // far edge well above.
+        time_fade: Vec4::new(0.0, -1.0e9, 1.0e9, 1.0),
+        sky_up: Vec3::Y.extend(0.0),
+        sky_tau: SKY_TAU.extend(SKY_STRENGTH),
+        anchor: Vec4::ZERO,
+    }
+}
+
+/// Spawn each object's diorama: a sky-model-lit ground patch, a grass carpet
+/// around plants, and the object itself (trees tagged onto the shadow-caster
+/// layer so they cast into the sun-shadow pass).
 fn setup_scene(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut tree_materials: ResMut<Assets<TreeMaterial>>,
     mut grass_materials: ResMut<Assets<GrassMaterial>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut ground_materials: ResMut<Assets<GroundPatchMaterial>>,
+    impostor_rig: Res<ImpostorRig>,
 ) {
-    // Shared sky/sun parameters — identical for tree and grass materials so the
-    // preview lights both exactly like the game's vegetation.
-    let veg_params = GrassParams {
-        sun_dir: SUN_DIR.normalize().extend(SUN_FLUX),
-        wind: Vec4::ZERO,
-        // Always full size (no clipmap fade): near edge well below any
-        // distance, far edge well above.
-        time_fade: Vec4::new(0.0, -1.0e9, 1.0e9, 1.0),
-        sky_up: Vec3::Y.extend(0.0),
-        sky_tau: Vec4::new(0.06, 0.12, 0.28, 1.0),
-        anchor: Vec4::ZERO,
-    };
+    let params = veg_params();
+    let fallback = images.add(fallback_shadow_map());
 
     // One shared tree material with the procedural foliage atlas + sky lighting.
     let tree_material = tree_materials.add(TreeMaterial {
         atlas: images.add(build_foliage_atlas()),
-        params: veg_params,
-        // No sun-shadow pass here; bind valid depth textures so the per-cascade
-        // `texture_depth_2d` slots resolve. `shadow.config.x` stays 0 (default),
-        // so they're never sampled.
-        sun_shadow_map_0: images.add(fallback_shadow_map()),
-        sun_shadow_map_1: images.add(fallback_shadow_map()),
-        sun_shadow_map_2: images.add(fallback_shadow_map()),
+        material_atlas: images.add(build_foliage_material_atlas()),
+        params,
+        // The sun-shadow driver rebinds cascade 0's real depth map each frame;
+        // 1 + 2 stay on the fallback (the preview runs a single cascade).
+        sun_shadow_map_0: fallback.clone(),
+        sun_shadow_map_1: fallback.clone(),
+        sun_shadow_map_2: fallback.clone(),
         ..default()
     });
-    // One shared grass material (vertex-coloured blades, same sky model).
+    // One shared grass material (vertex-coloured blades, same sky model). It
+    // receives the tree's cast shadow via the same cascade the ground samples;
+    // the driver rebinds cascade 0's real depth map each frame.
     let grass_material = grass_materials.add(GrassMaterial {
-        params: veg_params,
+        params,
+        sun_shadow_map_0: fallback.clone(),
+        sun_shadow_map_1: fallback.clone(),
+        sun_shadow_map_2: fallback.clone(),
+        ..default()
+    });
+    // One shared sky-model-lit ground material (receives the tree shadows).
+    let ground_material = ground_materials.add(GroundPatchMaterial {
+        params,
+        sun_shadow_map_0: fallback.clone(),
+        sun_shadow_map_1: fallback.clone(),
+        sun_shadow_map_2: fallback.clone(),
+        ..default()
     });
 
     let objects = objects();
 
-    let ground = std_materials.add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.38, 0.24),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-
     for (i, obj) in objects.iter().enumerate() {
         let transform = Transform::from_xyz(i as f32 * OBJECT_SPACING, 0.0, 0.0);
+        let patch = obj.patch_size_m();
+
+        // Ground patch (shadow receiver) under every object.
+        commands.spawn((
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(patch, patch))),
+            MeshMaterial3d(ground_material.clone()),
+            transform,
+        ));
+
         match &obj.kind {
             AssetKind::Tree(params) => {
-                // A ground patch under each tree for grounding/contact shadows.
+                // A grass carpet filling the whole ground patch so the plant sits
+                // in a continuous meadow (no bare-ground ring around the blades).
+                let carpet = GrassFieldParams {
+                    size_m: patch,
+                    ..GrassFieldParams::default()
+                };
                 commands.spawn((
-                    Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 30.0))),
-                    MeshMaterial3d(ground.clone()),
+                    Mesh3d(meshes.add(build_grass_field_mesh(&carpet))),
+                    MeshMaterial3d(grass_material.clone()),
                     transform,
                 ));
+                // The plant — on the shadow-caster layer so the same TreeMaterial
+                // draw writes leaf-shaped depth into the sun-shadow cascade.
                 commands.spawn((
                     Mesh3d(meshes.add(build_tree_mesh(params))),
                     MeshMaterial3d(tree_material.clone()),
                     transform,
+                    RenderLayers::from_layers(&[0, CASTER_LAYER]),
                 ));
             }
+            AssetKind::TreeImpostor => {
+                // Same grass meadow as the mesh tree, for an identical context.
+                let carpet = GrassFieldParams {
+                    size_m: patch,
+                    ..GrassFieldParams::default()
+                };
+                commands.spawn((
+                    Mesh3d(meshes.add(build_grass_field_mesh(&carpet))),
+                    MeshMaterial3d(grass_material.clone()),
+                    transform,
+                ));
+                // One impostor billboard for this tree at the object origin —
+                // built exactly like a single-tree scatter tile; the material's
+                // vertex shader billboards + sizes it from the per-species bounds.
+                let inst = VegInstance {
+                    species: 0,
+                    root_offset_body_m: Vec3::ZERO,
+                    up_body: Vec3::Y,
+                    yaw: 0.0,
+                    scale: 1.0,
+                    tilt: 0.0,
+                };
+                if let Some(card) = combine_impostor_tile_mesh(&[inst], &[Some(0)], 1.0) {
+                    commands.spawn((
+                        Mesh3d(meshes.add(card)),
+                        MeshMaterial3d(impostor_rig.material.clone()),
+                        transform,
+                    ));
+                }
+            }
             AssetKind::GrassClump(params) => {
-                // No ground plane: the clump is the impostor asset, judged
-                // against the sky (transparent at bake time) so its silhouette
-                // and coverage read instead of blending into matching ground.
                 commands.spawn((
                     Mesh3d(meshes.add(build_grass_clump_mesh(params))),
+                    MeshMaterial3d(grass_material.clone()),
+                    transform,
+                ));
+            }
+            AssetKind::GrassField(params) => {
+                commands.spawn((
+                    Mesh3d(meshes.add(build_grass_field_mesh(params))),
                     MeshMaterial3d(grass_material.clone()),
                     transform,
                 ));
@@ -308,26 +559,256 @@ fn setup_scene(
         }
     }
 
-    // Sun (lights the ground; trees self-light via the sky model).
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 9000.0,
-            shadows_enabled: false,
-            ..default()
-        },
-        Transform::from_translation(Vec3::ZERO).looking_at(-SUN_DIR, Vec3::Y),
-    ));
-
+    commands.insert_resource(DioramaMaterials {
+        ground: ground_material,
+        grass: grass_material,
+        tree: tree_material,
+    });
     commands.insert_resource(Scene { objects });
 }
 
-/// `AmbientLight` is a per-view component in this Bevy; lifts the shadowed side.
-fn ambient() -> AmbientLight {
-    AmbientLight {
-        color: Color::srgb(0.6, 0.72, 0.9),
-        brightness: 600.0,
-        ..default()
+// ---------------------------------------------------------------------------
+// Octahedral impostor bake (mesh↔impostor parity check)
+// ---------------------------------------------------------------------------
+//
+// The far-LOD tree is a single billboard sampling a pre-baked hemisphere
+// octahedral atlas of the species (the game's `tree_impostor` path). The atlas
+// is rendered off-screen at startup by an orthographic camera over a grid of the
+// recentred species mesh rotated to each captured view — a trimmed copy of the
+// game's `spawn_impostor_bake_rig` for ONE species. Because the bake shader
+// (`tree_bake.wgsl`) and the near shader (`tree.wgsl`) now both derive their leaf
+// colour from the shared `thalos::foliage` material model, the impostor card and
+// the mesh tree must read as the same tree — this harness makes that
+// self-verifiable on every future tree/shrub change.
+
+/// Captured views per octahedral axis + pixels per cell. Lighter than the game
+/// (8×8 / 128 px) because this is a colour-parity check, not the shipped atlas:
+/// the off-screen bake renders every cell's tree each frame until teardown, and
+/// too many full-LOD trees per frame backs the GPU queue up into a device-wait
+/// timeout on the headless exit drain. A 4×4 grid of the lighter [`BAKE_LOD`]
+/// mesh stays well under that while giving a representative impostor.
+const IMPOSTOR_CELLS: u32 = 4;
+const IMPOSTOR_CELL_PX: u32 = 96;
+/// Mesh LOD baked into the preview's parity atlas — LOD1 (not the game's LOD0) so
+/// the per-frame off-screen vertex load stays low enough to avoid the exit-drain
+/// timeout. Colour parity is per-fragment (atlas sample × shared
+/// `foliage_base_albedo`), so it is LOD-independent; only the silhouette is a
+/// touch sparser than the shipped LOD0 atlas.
+const BAKE_LOD: u32 = 1;
+const IMPOSTOR_ALPHA_CUTOFF: f32 = 0.35;
+const IMPOSTOR_CELL_FILL: f32 = 0.84;
+/// Dedicated off-screen render layers for the two bake passes (albedo, normal),
+/// distinct from the main (0) and shadow-caster ([`CASTER_LAYER`]) layers so the
+/// bake grid never bleeds into a captured shot.
+const BAKE_ALBEDO_LAYER: usize = 6;
+const BAKE_NORMAL_LAYER: usize = 7;
+/// Frames the off-screen bake rig renders before teardown — long enough to cover
+/// async pipeline compilation + fill the atlas, then despawned so it isn't
+/// re-rendering 128 instances × 2 cameras every frame for the rest of the run
+/// (which backs the GPU queue up into a device-wait timeout at exit). The atlas
+/// Image persists after teardown, so impostors keep sampling it. Kept below the
+/// first impostor capture's warmup so the heavy bake phase is short.
+const IMPOSTOR_BAKE_FRAMES: u32 = 60;
+
+/// The shared far-band impostor material the `TreeImpostor` objects billboard.
+#[derive(Resource)]
+struct ImpostorRig {
+    material: Handle<TreeImpostorMaterial>,
+}
+
+/// Marker on every off-screen bake-rig entity (the 2·N² rotated instances + the
+/// two cameras), so the whole rig can be torn down once the atlas is captured.
+#[derive(Component)]
+struct ImpostorBakeRig;
+
+/// Render the bake rig for [`IMPOSTOR_BAKE_FRAMES`] frames (enough to compile the
+/// off-screen pipelines and fill the atlas), then despawn it — the atlas keeps
+/// its captured content. Without this the rig re-renders every frame and the
+/// final device drain on exit times out.
+fn teardown_impostor_bake(
+    mut frames: Local<u32>,
+    rig: Query<Entity, With<ImpostorBakeRig>>,
+    mut commands: Commands,
+) {
+    *frames += 1;
+    if *frames == IMPOSTOR_BAKE_FRAMES {
+        for entity in &rig {
+            commands.entity(entity).despawn();
+        }
     }
+}
+
+/// Bake the broadleaf's hemisphere octahedral atlas off-screen and build the
+/// shared [`TreeImpostorMaterial`]. Runs before `setup_scene`, which reads the
+/// resulting [`ImpostorRig`]; the bake cameras keep the atlas filled while the
+/// app runs (the scene is static, so re-rendering is harmless and avoids a
+/// teardown system).
+fn setup_impostor_bake(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut bake_materials: ResMut<Assets<TreeBakeMaterial>>,
+    mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
+) {
+    let foliage_atlas = images.add(build_foliage_atlas());
+
+    // The species captured into the atlas (the same broadleaf the mesh shows),
+    // at the lighter `BAKE_LOD` to keep the per-frame off-screen load down.
+    let data = build_tree_mesh_data(&TreeMeshParams {
+        lod: BAKE_LOD,
+        ..broadleaf()
+    });
+    let (center, radius) = tree_bounding_sphere(&data);
+
+    let layout = ImpostorAtlasLayout {
+        cells: IMPOSTOR_CELLS,
+        cell_px: IMPOSTOR_CELL_PX,
+        species: 1,
+    };
+    let albedo_atlas = images.add(make_impostor_atlas(layout));
+    let normal_atlas = images.add(make_impostor_atlas(layout));
+
+    let cell_fit = IMPOSTOR_CELL_FILL * 0.5;
+    let depth_scale = 0.5 / cell_fit;
+    let albedo_mat = bake_materials.add(TreeBakeMaterial {
+        params: BakeParams {
+            mode: Vec4::new(0.0, depth_scale, 0.0, 0.0),
+        },
+        atlas: foliage_atlas.clone(),
+    });
+    let normal_mat = bake_materials.add(TreeBakeMaterial {
+        params: BakeParams {
+            mode: Vec4::new(1.0, depth_scale, 0.0, 0.0),
+        },
+        atlas: foliage_atlas,
+    });
+
+    // One rotated copy of the recentred mesh per (i, j) view cell, on both bake
+    // layers; the two cameras frame the whole N×N grid orthographically.
+    let mesh = meshes.add(recenter_tree_mesh(&data, center));
+    let scale = Vec3::splat(cell_fit / radius);
+    let n = IMPOSTOR_CELLS;
+    for j in 0..n {
+        for i in 0..n {
+            let uv = Vec2::new((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
+            let rot = impostor_bake_rotation(hemioct_decode(uv));
+            let cell_xy = Vec3::new(i as f32 + 0.5, j as f32 + 0.5, 0.0);
+            let t = Transform {
+                translation: cell_xy,
+                rotation: rot,
+                scale,
+            };
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(albedo_mat.clone()),
+                t,
+                Visibility::Visible,
+                RenderLayers::layer(BAKE_ALBEDO_LAYER),
+                ImpostorBakeRig,
+                Name::new("Impostor Bake (albedo)"),
+            ));
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(normal_mat.clone()),
+                t,
+                Visibility::Visible,
+                RenderLayers::layer(BAKE_NORMAL_LAYER),
+                ImpostorBakeRig,
+                Name::new("Impostor Bake (normal)"),
+            ));
+        }
+    }
+
+    let grid = n as f32;
+    let cam_center = Vec3::new(grid * 0.5, grid * 0.5, 0.0);
+    let bake_camera = |order: isize, layer: usize, target: Handle<Image>, name: &'static str| {
+        (
+            Camera3d::default(),
+            Camera {
+                order,
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+                ..default()
+            },
+            Hdr,
+            Tonemapping::None,
+            RenderTarget::Image(ImageRenderTarget::from(target)),
+            Projection::Orthographic(OrthographicProjection {
+                scaling_mode: ScalingMode::Fixed {
+                    width: grid,
+                    height: grid,
+                },
+                near: 0.1,
+                far: 100.0,
+                ..OrthographicProjection::default_3d()
+            }),
+            Transform::from_translation(cam_center + Vec3::Z * 10.0).looking_at(cam_center, Vec3::Y),
+            RenderLayers::layer(layer),
+            ImpostorBakeRig,
+            Name::new(name),
+        )
+    };
+    commands.spawn(bake_camera(
+        -20,
+        BAKE_ALBEDO_LAYER,
+        albedo_atlas.clone(),
+        "Impostor Bake Camera (albedo)",
+    ));
+    commands.spawn(bake_camera(
+        -19,
+        BAKE_NORMAL_LAYER,
+        normal_atlas.clone(),
+        "Impostor Bake Camera (normal)",
+    ));
+
+    let mut species_geo = [Vec4::ZERO; IMPOSTOR_MAX_SPECIES];
+    species_geo[0] = Vec4::new(radius, center.y, 0.0, 0.0);
+    let material = impostor_materials.add(TreeImpostorMaterial {
+        // Constant sun / full-size fade (the diorama doesn't move): the SAME
+        // shared sky inputs the mesh trees use, so both light identically.
+        params: veg_params(),
+        impostor: ImpostorParams {
+            grid: Vec4::new(n as f32, 1.0, IMPOSTOR_ALPHA_CUTOFF, 0.0),
+            atlas: Vec4::new(IMPOSTOR_CELL_FILL, 0.0, 0.0, 0.0),
+            species_geo,
+        },
+        albedo: albedo_atlas,
+        normal: normal_atlas,
+    });
+    commands.insert_resource(ImpostorRig { material });
+}
+
+/// The game's space/surface post stack, minus the sensor-sim effects (film
+/// grain + chromatic aberration) that only add noise to small asset thumbnails:
+/// HDR + AgX filmic tonemap + subtle bloom + SMAA + CAS sharpening. Matches the
+/// in-game tonemapping/exposure/AA so the preview reads like a real screenshot.
+fn studio_camera_post_stack() -> impl Bundle {
+    (
+        Msaa::Off,
+        Smaa {
+            preset: SmaaPreset::High,
+        },
+        Hdr,
+        // AgX: the same filmic tonemap the game's `space_camera_post_stack` uses.
+        Tonemapping::AgX,
+        DebandDither::Enabled,
+        Bloom {
+            intensity: 0.30,
+            low_frequency_boost: 0.0,
+            low_frequency_boost_curvature: 0.0,
+            high_pass_frequency: 1.0,
+            prefilter: BloomPrefilter {
+                threshold: 0.6,
+                threshold_softness: 0.3,
+            },
+            composite_mode: BloomCompositeMode::Additive,
+            ..Bloom::NATURAL
+        },
+        ContrastAdaptiveSharpening {
+            enabled: true,
+            sharpening_strength: 0.3,
+            denoise: false,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +825,11 @@ struct Capture {
 #[derive(Component)]
 struct PreviewCamera;
 
-fn setup_headless_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>, scene: Res<Scene>) {
+fn setup_headless_camera(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    scene: Res<Scene>,
+) {
     // Off-screen render target the camera draws into and the screenshot reads.
     let mut target = Image::new_fill(
         Extent3d {
@@ -357,24 +842,19 @@ fn setup_headless_camera(mut commands: Commands, mut images: ResMut<Assets<Image
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    target.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
-        | TextureUsages::COPY_SRC
-        | TextureUsages::RENDER_ATTACHMENT;
+    target.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
     let target = images.add(target);
 
     commands.spawn((
         Camera3d::default(),
         Camera {
             clear_color: ClearColorConfig::Custom(SKY),
+            order: 0,
             ..default()
         },
         RenderTarget::Image(ImageRenderTarget::from(target.clone())),
-        Hdr,
-        // Match the game's main camera (Bevy default) so the preview is
-        // representative — AgX desaturates highlights much harder and faked a
-        // grey "hole" on the sunlit canopy top.
-        Tonemapping::TonyMcMapface,
-        ambient(),
+        studio_camera_post_stack(),
         frame_transform(&scene.objects[0], 0),
         PreviewCamera,
     ));
@@ -387,6 +867,7 @@ fn drive_capture(
     mut commands: Commands,
     mut cap: ResMut<Capture>,
     scene: Res<Scene>,
+    mut focus: ResMut<ShadowFocus>,
     mut cam: Query<&mut Transform, With<PreviewCamera>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -395,11 +876,13 @@ fn drive_capture(
 
     for i in 0..n {
         let pose = WARMUP + i * DWELL;
-        let shot = pose + 2;
+        let shot = pose + 3;
         if cap.frame == pose
             && let Ok(mut t) = cam.single_mut()
         {
             *t = frame_transform(&scene.objects[i as usize], i as usize);
+            // Re-aim the sun-shadow cascade over this object's ground.
+            focus.center = Vec3::new(i as f32 * OBJECT_SPACING, 1.0, 0.0);
         }
         if cap.frame == shot {
             let path = format!("{OUT_DIR}/{}.png", scene.objects[i as usize].name);
@@ -410,7 +893,7 @@ fn drive_capture(
         }
     }
 
-    if cap.frame >= WARMUP + (n.saturating_sub(1)) * DWELL + 2 + TAIL {
+    if cap.frame >= WARMUP + (n.saturating_sub(1)) * DWELL + 3 + TAIL {
         exit.write(AppExit::Success);
     }
 }
@@ -451,11 +934,10 @@ fn setup_window_camera(mut commands: Commands, scene: Res<Scene>) {
         Camera3d::default(),
         Camera {
             clear_color: ClearColorConfig::Custom(SKY),
+            order: 0,
             ..default()
         },
-        Hdr,
-        Tonemapping::TonyMcMapface,
-        ambient(),
+        studio_camera_post_stack(),
         transform,
         orbit,
     ));
@@ -471,6 +953,7 @@ fn orbit_camera(
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     scene: Res<Scene>,
+    mut focus: ResMut<ShadowFocus>,
     mut q: Query<(&mut Transform, &mut OrbitCamera)>,
 ) {
     let Ok((mut t, mut o)) = q.single_mut() else {
@@ -498,6 +981,8 @@ fn orbit_camera(
         o.distance = scene.objects[i].distance;
     }
 
+    // Keep the sun-shadow cascade over whichever object is centred.
+    focus.center = Vec3::new(o.current as f32 * OBJECT_SPACING, 1.0, 0.0);
     apply_orbit(&mut t, &o);
 }
 
@@ -522,4 +1007,262 @@ fn screenshot_key(
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path.clone()));
     info!("saved {path}");
+}
+
+// ---------------------------------------------------------------------------
+// Sun-shadow rig (single cascade)
+// ---------------------------------------------------------------------------
+//
+// A trimmed copy of `thalos_game::rendering::sun_shadow`: an orthographic camera
+// on the caster layer aimed down the sun over the current object renders the
+// trees' leaf-shaped depth, a render-graph node copies that depth into a
+// sample-able map, and `update_preview_shadow` publishes the cascade transform +
+// strength onto the ground + tree materials (which sample it exactly as in game).
+// One cascade is enough for a single-object diorama; cascades 1 + 2 are parked
+// (zero view-proj → the shader's sentinel skips them).
+
+/// Render layer the caster (tree) meshes + the sun-shadow camera share.
+const CASTER_LAYER: usize = 8;
+/// Cascade depth-map resolution; ~0.02 m/texel over the 22 m half-extent box.
+const SHADOW_MAP_SIZE: u32 = 2048;
+const SHADOW_HALF_EXTENT_M: f32 = 22.0;
+const SHADOW_NEAR_M: f32 = 0.1;
+const SHADOW_FAR_M: f32 = 220.0;
+/// How far back along the sun the ortho camera sits above the object.
+const SHADOW_BACK_M: f32 = 90.0;
+/// Depth-compare bias in metres (orthographic z is linear).
+const SHADOW_BIAS_M: f32 = 0.18;
+/// Darkening strength (0 = off, 1 = black).
+const SHADOW_STRENGTH: f32 = 0.7;
+
+/// Depth map the cascade camera's depth is copied into. Extracted to the render
+/// world for [`CopyShadowDepthNode`]; the same handle is bound on the materials.
+#[derive(Resource, Clone, ExtractResource)]
+struct ShadowImage {
+    handle: Handle<Image>,
+}
+
+/// Marker on the orthographic sun-shadow camera (extracted so the copy node
+/// runs for its view).
+#[derive(Component, Clone, Copy, ExtractComponent)]
+struct ShadowCascadeCam;
+
+/// Main-world shadow state: the live cascade block + the depth-map handles bound
+/// on materials. **Sole writer:** [`update_preview_shadow`].
+#[derive(Resource)]
+struct ShadowRig {
+    image: Handle<Image>,
+    fallback: Handle<Image>,
+    block: ShadowCascadeBlock,
+}
+
+/// Where the cascade is centred (the framed object's ground point). Written by
+/// the capture / orbit drivers, read by [`update_preview_shadow`].
+#[derive(Resource, Default)]
+struct ShadowFocus {
+    center: Vec3,
+}
+
+#[derive(RenderLabel, Hash, PartialEq, Eq, Debug, Clone)]
+struct CopyShadowDepth;
+
+#[derive(Default)]
+struct CopyShadowDepthNode;
+
+impl ViewNode for CopyShadowDepthNode {
+    type ViewQuery = (&'static ViewDepthTexture, &'static ShadowCascadeCam);
+
+    fn run<'w>(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        (depth, _cam): QueryItem<'w, '_, Self::ViewQuery>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        let Some(shadow) = world.get_resource::<ShadowImage>() else {
+            return Ok(());
+        };
+        let render_assets = world.resource::<RenderAssets<GpuImage>>();
+        let Some(dest) = render_assets.get(&shadow.handle) else {
+            return Ok(());
+        };
+        let src_size = depth.texture.size();
+        let dst_size = dest.texture.size();
+        if src_size.width != dst_size.width
+            || src_size.height != dst_size.height
+            || depth.texture.sample_count() != dest.texture.sample_count()
+        {
+            return Ok(());
+        }
+        render_context.command_encoder().copy_texture_to_texture(
+            depth.texture.as_image_copy(),
+            dest.texture.as_image_copy(),
+            src_size,
+        );
+        Ok(())
+    }
+}
+
+struct PreviewShadowPlugin;
+
+impl Plugin for PreviewShadowPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(ExtractResourcePlugin::<ShadowImage>::default())
+            .add_plugins(ExtractComponentPlugin::<ShadowCascadeCam>::default())
+            .init_resource::<ShadowFocus>()
+            .add_systems(Startup, setup_shadow_rig);
+
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .add_render_graph_node::<ViewNodeRunner<CopyShadowDepthNode>>(Core3d, CopyShadowDepth)
+                .add_render_graph_edges(
+                    Core3d,
+                    (
+                        Node3d::MainOpaquePass,
+                        CopyShadowDepth,
+                        Node3d::MainTransparentPass,
+                    ),
+                );
+        }
+    }
+}
+
+fn setup_shadow_rig(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    // Sample-able depth map the camera's depth is copied into.
+    let mut depth = Image::new_uninit(
+        Extent3d {
+            width: SHADOW_MAP_SIZE,
+            height: SHADOW_MAP_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Depth32Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    depth.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
+    let depth_handle = images.add(depth);
+
+    // The cascade camera needs a colour attachment (only the depth is read).
+    let mut color = Image::new_uninit(
+        Extent3d {
+            width: SHADOW_MAP_SIZE,
+            height: SHADOW_MAP_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    color.texture_descriptor.usage =
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
+    let color_handle = images.add(color);
+
+    commands.spawn((
+        Camera3d {
+            // COPY_SRC so the node can copy this camera's depth into its map.
+            depth_texture_usages: (TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC)
+                .into(),
+            ..default()
+        },
+        Camera {
+            // Render before the main view (order 0) so the copied depth is ready.
+            order: -1,
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            ..default()
+        },
+        RenderTarget::Image(ImageRenderTarget::from(color_handle)),
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::Fixed {
+                width: SHADOW_HALF_EXTENT_M * 2.0,
+                height: SHADOW_HALF_EXTENT_M * 2.0,
+            },
+            near: SHADOW_NEAR_M,
+            far: SHADOW_FAR_M,
+            ..OrthographicProjection::default_3d()
+        }),
+        Msaa::Off,
+        RenderLayers::layer(CASTER_LAYER),
+        ShadowCascadeCam,
+        Name::new("Preview Sun Shadow"),
+    ));
+
+    commands.insert_resource(ShadowImage {
+        handle: depth_handle.clone(),
+    });
+    commands.insert_resource(ShadowRig {
+        image: depth_handle,
+        fallback: images.add(fallback_shadow_map()),
+        block: ShadowCascadeBlock::default(),
+    });
+}
+
+/// Bevy reverse-z orthographic clip matrix (near/far swapped, as
+/// `OrthographicProjection::get_clip_from_view` does), built by hand so it stays
+/// in lockstep with the camera regardless of system ordering.
+fn cascade_clip_from_view(half: f32, far: f32) -> Mat4 {
+    Mat4::orthographic_rh(-half, half, -half, half, far, SHADOW_NEAR_M)
+}
+
+/// Aim the cascade camera down the sun over the framed object, publish its
+/// transform + strength, and bind the live block + depth maps onto the ground +
+/// tree materials. **Sole writer** of [`ShadowRig`].
+fn update_preview_shadow(
+    focus: Res<ShadowFocus>,
+    rig: Option<ResMut<ShadowRig>>,
+    mats: Option<Res<DioramaMaterials>>,
+    mut cam: Query<(&mut Transform, &mut Camera), With<ShadowCascadeCam>>,
+    mut ground_materials: ResMut<Assets<GroundPatchMaterial>>,
+    mut grass_materials: ResMut<Assets<GrassMaterial>>,
+    mut tree_materials: ResMut<Assets<TreeMaterial>>,
+) {
+    let (Some(mut rig), Some(mats)) = (rig, mats) else {
+        return;
+    };
+
+    let sun_dir = SUN_DIR.normalize();
+    let center = focus.center;
+    let eye = center + sun_dir * SHADOW_BACK_M;
+    let up = if sun_dir.dot(Vec3::Y).abs() > 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let look = Transform::from_translation(eye).looking_at(center, up);
+
+    if let Ok((mut tf, mut camera)) = cam.single_mut() {
+        *tf = look;
+        camera.is_active = true;
+    }
+
+    let view = look.to_matrix().inverse();
+    let mut block = ShadowCascadeBlock::default();
+    block.view_proj[0] = cascade_clip_from_view(SHADOW_HALF_EXTENT_M, SHADOW_FAR_M) * view;
+    // Orthographic z is linear → clip-space bias = metres / (far − near).
+    block.params[0] = Vec4::new(SHADOW_BIAS_M / (SHADOW_FAR_M - SHADOW_NEAR_M), 0.0, 0.0, 0.0);
+    // Park the unused cascades: a zero view-proj makes `clip.w <= 0`, so the
+    // shader's `cascade_factor` returns its skip sentinel and never samples them.
+    block.view_proj[1] = Mat4::ZERO;
+    block.view_proj[2] = Mat4::ZERO;
+    block.gate = Vec4::new(SHADOW_STRENGTH, 1.0, 0.0, 0.0);
+    rig.block = block;
+
+    let (image, fallback) = (rig.image.clone(), rig.fallback.clone());
+    if let Some(m) = ground_materials.get_mut(&mats.ground) {
+        m.shadow = block;
+        m.sun_shadow_map_0 = image.clone();
+        m.sun_shadow_map_1 = fallback.clone();
+        m.sun_shadow_map_2 = fallback.clone();
+    }
+    if let Some(m) = grass_materials.get_mut(&mats.grass) {
+        m.shadow = block;
+        m.sun_shadow_map_0 = image.clone();
+        m.sun_shadow_map_1 = fallback.clone();
+        m.sun_shadow_map_2 = fallback.clone();
+    }
+    if let Some(m) = tree_materials.get_mut(&mats.tree) {
+        m.shadow = block;
+        m.sun_shadow_map_0 = image;
+        m.sun_shadow_map_1 = fallback.clone();
+        m.sun_shadow_map_2 = fallback;
+    }
 }

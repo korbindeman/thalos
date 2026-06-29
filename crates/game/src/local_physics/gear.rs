@@ -7,20 +7,16 @@ use super::*;
 use std::collections::HashMap;
 
 use bevy::math::{DQuat, DVec3};
+use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::avian::{
-    AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity, Position, Rotation, SpatialQuery, SpatialQueryFilter,
+    AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity,
+    Position, Rotation, SpatialQuery, SpatialQueryFilter,
 };
-use thalos_physics_local::{
-    ActiveLocalBubble, LocalCraftBody,
-};
-use thalos_shipyard::{
-    AttachNodes, Gear, Part, SurfaceMount, SurfaceMountKind, gear_leg_frames,
-};
-use thalos_input::game::GameInputIntent;
+use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody};
+use thalos_shipyard::{AttachNodes, Gear, Part, SurfaceMount, SurfaceMountKind, gear_leg_frames};
 
 use crate::rendering::SimulationState;
-
 
 /// One landing-gear wheel as a **raycast suspension**, in the craft body frame.
 ///
@@ -164,7 +160,6 @@ pub struct WeightOnWheels {
     pub grounded: bool,
 }
 
-
 /// Landing-gear up/down latch (KSP-style, the G key). When `down`,
 /// [`apply_landing_gear_forces`] runs the suspension; when up it stands down
 /// entirely (no contact, no weight on wheels) and the gear meshes are hidden
@@ -241,7 +236,10 @@ pub(crate) fn set_gear_down(gear: &mut GearState, weight_on_wheels: &WeightOnWhe
 /// already loaded — see [`crate::runway`].
 pub(crate) fn gear_contact_geometry(
     parts: &PartColliderQuery,
-    gear_q: &Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
+    gear_q: &Query<
+        (&Gear, &SurfaceMount),
+        (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
+    >,
     host_nodes: &Query<&AttachNodes>,
 ) -> Option<(f64, usize)> {
     let positions = compute_part_collider_positions(parts);
@@ -257,7 +255,10 @@ pub(crate) fn gear_contact_geometry(
 }
 
 pub(crate) fn build_wheel_set(
-    gear_q: &Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
+    gear_q: &Query<
+        (&Gear, &SurfaceMount),
+        (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
+    >,
     host_nodes: &Query<&AttachNodes>,
     positions: &HashMap<Entity, DVec3>,
 ) -> Vec<Wheel> {
@@ -356,8 +357,14 @@ pub(crate) fn apply_landing_gear_forces(
     if wheelset.wheels.is_empty() {
         return;
     }
-    let Ok((position, rotation, linear_velocity, angular_velocity, mut linear_accel, mut angular_accel)) =
-        craft_q.get_mut(bubble.craft_entity)
+    let Ok((
+        position,
+        rotation,
+        linear_velocity,
+        angular_velocity,
+        mut linear_accel,
+        mut angular_accel,
+    )) = craft_q.get_mut(bubble.craft_entity)
     else {
         return;
     };
@@ -496,9 +503,21 @@ pub(crate) fn apply_landing_gear_forces(
 
     let torque_body = rot.inverse() * net_torque;
     let inv_i = DVec3::new(
-        if inertia_body.x > 0.0 { 1.0 / inertia_body.x } else { 0.0 },
-        if inertia_body.y > 0.0 { 1.0 / inertia_body.y } else { 0.0 },
-        if inertia_body.z > 0.0 { 1.0 / inertia_body.z } else { 0.0 },
+        if inertia_body.x > 0.0 {
+            1.0 / inertia_body.x
+        } else {
+            0.0
+        },
+        if inertia_body.y > 0.0 {
+            1.0 / inertia_body.y
+        } else {
+            0.0
+        },
+        if inertia_body.z > 0.0 {
+            1.0 / inertia_body.z
+        } else {
+            0.0
+        },
     );
     let ang_accel = torque_body * inv_i;
     let ang_len = ang_accel.length();
@@ -509,4 +528,3 @@ pub(crate) fn apply_landing_gear_forces(
     };
     angular_accel.0 += rot * ang_accel;
 }
-

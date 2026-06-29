@@ -200,44 +200,59 @@ pub fn build_tree_mesh(params: &TreeMeshParams) -> Mesh {
 
 /// Tapered cylinder trunk (no caps), base ring at `y = 0`, top at
 /// `y = trunk_height`, narrowing toward the crown.
+///
+/// The bark cell **wrap-tiles in both axes** (NOT mirror): one cell per segment
+/// around, and stacked bands up the trunk, each tile sampling the full cell
+/// `0→1`. Because the bark cell is **toroidally periodic** (see `bark_height`),
+/// every tile-to-tile join — around and up — is seamless, with no reflection
+/// (the mirror seam) and no axis-aligned symmetry. Bands are sized so a tile is
+/// ~square (no vertical stretch). Tiles are independent quads (the wrap needs
+/// distinct cell-edge vertices on each side of every join).
 fn push_trunk(b: &mut TreeMeshData, params: &TreeMeshParams, segments: u32) {
     let base_r = params.trunk_radius_m;
     let top_r = params.trunk_radius_m * 0.62;
     let h = params.trunk_height_m;
     let seg = segments.max(3);
-    let start = b.positions.len() as u32;
     let bark = BARK_CELL_FIRST + (params.seed % BARK_CELL_COUNT as u64) as u32;
 
-    for i in 0..=seg {
-        let a = i as f32 / seg as f32 * TAU;
-        let (s, c) = a.sin_cos();
-        // Outward horizontal normal (taper is gentle; horizontal is close enough).
-        let n = Vec3::new(c, 0.0, s);
-        // Trunk darkens slightly toward the base. Bark cell, base/top corners
-        // alternate per segment so the swatch maps across each quad.
-        let base_col = params.trunk_color * 0.85;
-        let (cb, ct) = if i & 1 == 0 { (0, 3) } else { (1, 2) };
-        b.push_vert(
-            Vec3::new(c * base_r, 0.0, s * base_r),
-            n,
-            base_col,
-            0.0,
-            leaf_code(bark, cb),
-        );
-        b.push_vert(
-            Vec3::new(c * top_r, h, s * top_r),
-            n,
-            params.trunk_color,
-            0.05,
-            leaf_code(bark, ct),
-        );
-    }
+    // One cell per segment around → cell width ≈ circumference/seg. Make a tile a
+    // few× taller than wide: the content is vertical grain LINES, which read
+    // naturally when elongated and run longer up the stem with fewer band joins.
+    let r_avg = 0.5 * (base_r + top_r);
+    let cell_w = std::f32::consts::TAU * r_avg.max(0.05) / seg as f32;
+    let bands = (h / (cell_w * 2.6)).round().clamp(1.0, 8.0) as u32;
 
-    for i in 0..seg {
-        let r0 = start + i * 2;
-        let r1 = start + (i + 1) * 2;
-        // (base_i, top_i, base_i+1) and (base_i+1, top_i, top_i+1)
-        b.indices.extend_from_slice(&[r0, r1, r0 + 1, r1, r1 + 1, r0 + 1]);
+    let ring_y = |j: u32| h * j as f32 / bands as f32;
+    let ring_r = |j: u32| base_r + (top_r - base_r) * (j as f32 / bands as f32);
+    // Trunk darkens slightly toward the base (an AO nudge; the bark fragment takes
+    // colour from the texture, but the tint is kept for any vertex-colour consumer).
+    let ring_col = |j: u32| params.trunk_color * (0.85 + 0.15 * j as f32 / bands as f32);
+    let weight = |j: u32| 0.05 * j as f32 / bands as f32;
+
+    for band in 0..bands {
+        let (yb, rb, cb, wb) = (ring_y(band), ring_r(band), ring_col(band), weight(band));
+        let (yt, rt, ct, wt) = (
+            ring_y(band + 1),
+            ring_r(band + 1),
+            ring_col(band + 1),
+            weight(band + 1),
+        );
+        for i in 0..seg {
+            let a0 = i as f32 / seg as f32 * TAU;
+            let a1 = (i + 1) as f32 / seg as f32 * TAU;
+            let (s0, c0) = a0.sin_cos();
+            let (s1, c1) = a1.sin_cos();
+            // Outward horizontal normals (taper is gentle; horizontal is fine).
+            let (n0, n1) = (Vec3::new(c0, 0.0, s0), Vec3::new(c1, 0.0, s1));
+            // One independent quad = the full cell: BL/BR/TL/TR → corners 0/1/3/2.
+            let start = b.positions.len() as u32;
+            b.push_vert(Vec3::new(c0 * rb, yb, s0 * rb), n0, cb, wb, leaf_code(bark, 0));
+            b.push_vert(Vec3::new(c1 * rb, yb, s1 * rb), n1, cb, wb, leaf_code(bark, 1));
+            b.push_vert(Vec3::new(c0 * rt, yt, s0 * rt), n0, ct, wt, leaf_code(bark, 3));
+            b.push_vert(Vec3::new(c1 * rt, yt, s1 * rt), n1, ct, wt, leaf_code(bark, 2));
+            b.indices
+                .extend_from_slice(&[start, start + 1, start + 2, start + 1, start + 3, start + 2]);
+        }
     }
 }
 
@@ -272,7 +287,9 @@ fn push_canopy(b: &mut TreeMeshData, params: &TreeMeshParams) {
         let s = params.seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5C1;
         let dir = fib_dir(i, skin, s);
         let size = rx * sz * (0.85 + 0.4 * hash01(s, 8));
-        push_skin_card(b, params, center, rx, ry, rz, crown_base, crown_top, s, dir, size);
+        push_skin_card(
+            b, params, center, rx, ry, rz, crown_base, crown_top, s, dir, size,
+        );
     }
 
     // 2. Lobes: a few puffs protruding past the skin, to break the perfect-ball
@@ -290,7 +307,17 @@ fn push_canopy(b: &mut TreeMeshData, params: &TreeMeshParams) {
             let cs = s ^ (c as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
             let size = rx * sz * (0.8 + 0.5 * hash01(cs, 8));
             push_lobe_card(
-                b, params, center, crown_base, crown_top, lobe_center, lobe_r, cs, size, 0.12, 1.0,
+                b,
+                params,
+                center,
+                crown_base,
+                crown_top,
+                lobe_center,
+                lobe_r,
+                cs,
+                size,
+                0.12,
+                1.0,
                 true,
             );
         }
@@ -302,7 +329,18 @@ fn push_canopy(b: &mut TreeMeshData, params: &TreeMeshParams) {
         let cs = params.seed ^ (c as u64).wrapping_mul(0xA24B_AED4_963E_E407) ^ 0xF111;
         let size = rx * sz * 1.1;
         push_lobe_card(
-            b, params, center, crown_base, crown_top, center, rx * 0.6, cs, size, 0.05, 0.85, false,
+            b,
+            params,
+            center,
+            crown_base,
+            crown_top,
+            center,
+            rx * 0.6,
+            cs,
+            size,
+            0.05,
+            0.85,
+            false,
         );
     }
 }
@@ -346,7 +384,17 @@ fn push_skin_card(
     let ao = 0.52 + 0.4 * h01;
     let wind = (0.3 + 0.7 * h01).clamp(0.0, 1.0);
     let cell = LEAF_CELL_FIRST + (hash_u(seed, 12) % LEAF_CELL_COUNT.max(1));
-    push_leaf_card(b, pos, face, n_light, size, roll, cell, params.canopy_color * ao, wind);
+    push_leaf_card(
+        b,
+        pos,
+        face,
+        n_light,
+        size,
+        roll,
+        cell,
+        params.canopy_color * ao,
+        wind,
+    );
 }
 
 /// Place one leaf-cluster card on a crown **lobe** (a puff centred at
@@ -387,127 +435,298 @@ fn push_lobe_card(
     let ao = (0.4 + 0.6 * h01) * ao_scale;
     let wind = (0.3 + 0.7 * h01).clamp(0.0, 1.0);
     let cell = LEAF_CELL_FIRST + (hash_u(seed, 12) % LEAF_CELL_COUNT.max(1));
-    push_leaf_card(b, pos, face, n_light, size, roll, cell, params.canopy_color * ao, wind);
+    push_leaf_card(
+        b,
+        pos,
+        face,
+        n_light,
+        size,
+        roll,
+        cell,
+        params.canopy_color * ao,
+        wind,
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Broadleaf: dense volumetric crown of small foliage puffs (no visible branches)
+// Broadleaf: a recursive branch skeleton with foliage clusters at the tips.
 // ---------------------------------------------------------------------------
 
-/// Broadleaf crown: a **cluster of distinct rounded florets** (sub-crowns), not a
-/// single ball or a branched skeleton. Each floret is its own dense little
-/// puff-ball placed to *bulge separately*, so the crown reads as broccoli-like
-/// lumps with structure instead of one uniform speckled mass. Each floret shades
-/// as its own soft dome (its crown catches light, its flanks a touch less — but
-/// floored well above black, so there's **no dark cavity inside**), and a
-/// per-floret brightness jitter gives tonal variety between neighbouring lumps.
-/// The branch armature is intentionally *not* drawn — only the trunk shows at the
-/// base; the florets pack densely enough to hide the limbs and the sky.
+/// One node in the broadleaf branch-growth recursion: a tapered limb segment
+/// growing from `base` along `dir` for `length`, starting at `radius`.
+struct Limb {
+    base: Vec3,
+    dir: Vec3,
+    length: f32,
+    radius: f32,
+    depth: u32,
+}
+
+/// Shared constants for one broadleaf grow pass (keeps the recursion arg list
+/// short).
+struct BroadleafCtx {
+    depth_max: u32,
+    seg: u32,
+    bark: u32,
+    crown_base: f32,
+    crown_top: f32,
+}
+
+/// Broadleaf crown: grow a small **recursive branch skeleton** (trunk-top fork →
+/// a few main limbs → each splits a couple of times, spreading outward and
+/// reaching up via a phototropic bias, with Pipe-Model tapering) and hang a dense
+/// rounded **foliage cluster** off every branch tip. The crown shape therefore
+/// *emerges from the branching* — irregular, lobed, reaching — rather than being a
+/// packed ellipsoid of puffs, which is what makes it read as a real tree. Only the
+/// trunk and the thick first limbs are drawn; the twigs stay hidden inside the
+/// overlapping clusters (the prior "barren skeleton" failure was sparse clusters
+/// on visible branches, so here the clusters are big and overlap to cover them).
 fn push_broadleaf_canopy(b: &mut TreeMeshData, params: &TreeMeshParams) {
     let rx = params.canopy_radius_m;
     let ry = params.canopy_height_m;
-    let rz = rx;
-    // Crown sits low on the trunk (so the trunk is clearly visible at the base).
-    let crown_base = params.trunk_height_m * 0.55;
-    let center = Vec3::new(0.0, crown_base + ry * 0.92, 0.0);
+    let th = params.trunk_height_m;
 
-    // (florets, surface puffs per floret, gap-fill puffs, cards per puff, card m).
-    // The surface is deliberately DENSE so you can't see into the (darker)
-    // interior through gaps — the up-close "dark inside" came from too few/thin
-    // surface cards letting the shaded core show through.
-    let (n_florets, surf_per, fill, puff_cards, card_sz) = match params.lod {
-        0 => (8u32, 20u32, 6u32, 4u32, 1.15f32),
-        1 => (5, 12, 2, 3, 1.35),
-        2 => (3, 7, 0, 2, 1.7),
-        _ => (1, 5, 0, 1, 2.2),
+    // (main limbs, recursion depth, limb radial segments, cards per cluster,
+    // central fill clusters).
+    let (n_main, depth_max, seg, cluster_cards, fill, shell) = match params.lod {
+        0 => (4u32, 2u32, 6u32, 14u32, 3u32, 14u32),
+        1 => (3, 1, 5, 10, 2, 8),
+        2 => (3, 0, 4, 7, 0, 5),
+        _ => (1, 0, 3, 5, 0, 0),
     };
 
-    for f in 0..n_florets {
-        let fs = params.seed ^ (f as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ 0xB07;
-        // Floret 0 fills the core; the rest sit in an upper DOME around it (lifted
-        // out of the lower hemisphere so they don't droop into awkward side-lobes
-        // and don't expose the underside/interior).
-        let (fc, fr) = if f == 0 {
-            (center, rx * 0.55)
-        } else {
-            let mut dir = fib_dir(f, n_florets, fs);
-            dir.y = dir.y * 0.55 + 0.28; // bias florets into the upper dome
-            // Pulled in / larger so neighbouring florets overlap — closes the dark
-            // gaps you could otherwise see into between them.
-            let spread = 0.42 + 0.18 * hash01(fs, 1);
-            let fcenter =
-                center + Vec3::new(dir.x * rx * spread, dir.y * ry, dir.z * rz * spread);
-            (fcenter, rx * (0.42 + 0.12 * hash01(fs, 2)))
-        };
-        // Per-floret tone: some lumps read brighter, some duller (kept high — never
-        // dark) so the crown has variation without any black recesses.
-        let bright = 0.86 + 0.14 * hash01(fs, 3);
+    let ctx = BroadleafCtx {
+        depth_max,
+        seg,
+        bark: BARK_CELL_FIRST + (params.seed % BARK_CELL_COUNT as u64) as u32,
+        crown_base: th * 0.45,
+        crown_top: th + ry * 1.1,
+    };
+    let top_r = params.trunk_radius_m * 0.62;
+    let span = (ctx.crown_top - ctx.crown_base).max(0.01);
 
-        for i in 0..surf_per {
-            let s = fs ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            let dir = fib_dir(i, surf_per, s);
-            // Hug the floret surface (small protrusion) so its outline is a clean
-            // rounded lump, not stray tufts.
-            let bump = 0.93 + 0.09 * hash01(s, 9);
-            let pos = fc + dir * fr * bump;
-            let n_out = dir.normalize_or(Vec3::Y);
-            // Floret-local vertical form gives each lump roundness; floor ~0.8 so
-            // even shaded flanks stay a bright leafy green, never dark.
-            let form = dir.y * 0.5 + 0.5;
-            let ao = bright * (0.86 + 0.14 * form);
-            let wind = (0.35 + 0.55 * ((pos.y - crown_base) / (ry * 2.0)).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-            let puff_r = fr * (0.20 + 0.08 * hash01(s, 10));
-            push_puff(b, params, pos, n_out, puff_r, card_sz, ao, wind, puff_cards, s);
-        }
+    // Grow the skeleton, collecting (centre, radius, height01) per cluster.
+    let mut clusters: Vec<(Vec3, f32, f32)> = Vec::new();
+    for m in 0..n_main.max(1) {
+        let s = params.seed ^ (m as u64 + 1).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ 0x10BE;
+        // Main limbs fan out around the trunk, leaning upward by a varying amount
+        // (some near-vertical, some spreading); their bases stagger down the upper
+        // trunk so it isn't one candelabra fork.
+        let az = (m as f32 / n_main.max(1) as f32) * TAU + hash01(s, 1) * 0.7;
+        let (sa, ca) = az.sin_cos();
+        let lean = 0.46 + 0.22 * hash01(s, 2);
+        let up_bias = 0.80 + 0.35 * hash01(s, 6);
+        let dir = Vec3::new(ca * lean, up_bias, sa * lean).normalize_or(Vec3::Y);
+        let base_y = th - hash01(s, 3) * th * 0.18;
+        let limb = Limb {
+            base: Vec3::new(0.0, base_y, 0.0),
+            dir,
+            length: rx * (0.42 + 0.14 * hash01(s, 4)),
+            radius: top_r * (0.5 + 0.2 * hash01(s, 5)),
+            depth: 0,
+        };
+        grow_branch(b, params, &ctx, limb, s, &mut clusters);
     }
 
-    // A few interior puffs ONLY to plug stray sky lines between florets — kept
-    // bright, so even where one peeks through it reads as foliage, not a dark hole.
+    // Base crown shell: clusters spread evenly over an (egg-bound) ellipsoid so
+    // the crown is ALWAYS a full rounded mass — the branch tips above add the
+    // irregular outer bumps and the lower limbs poke out the base, but this
+    // guarantees no holes or pinched waist however the skeleton happened to grow.
+    let cy = ctx.crown_base + ry * 0.92;
+    for i in 0..shell {
+        let s = params.seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5E11;
+        let n = fib_dir(i, shell, s).normalize_or(Vec3::Y);
+        let pos = Vec3::new(n.x * rx * 0.85, cy + n.y * ry * 0.95, n.z * rx * 0.85);
+        let h01 = ((pos.y - ctx.crown_base) / span).clamp(0.0, 1.0);
+        clusters.push((pos, rx * 0.46, h01));
+    }
+
+    // A few central fill clusters so grazing lines of sight through the crown
+    // centre still hit foliage, not sky.
+    let core = Vec3::new(0.0, ctx.crown_base + ry * 0.85, 0.0);
     for i in 0..fill {
-        let s = params.seed ^ (i as u64).wrapping_mul(0xA24B_AED4_963E_E407) ^ 0xF111;
+        let s = params.seed ^ (i as u64 + 1).wrapping_mul(0xA24B_AED4_963E_E407) ^ 0xF111;
         let dir = rand_unit(s, 1);
-        let rr = 0.35 + 0.45 * hash01(s, 2);
-        let pos = center
-            + Vec3::new(dir.x * rx * 0.6 * rr, dir.y * ry * 0.5 * rr, dir.z * rz * 0.6 * rr);
-        let up = (dir + Vec3::Y * 0.5).normalize_or(Vec3::Y); // face up → catches sky
-        let cards = puff_cards.saturating_sub(1).max(1);
-        push_puff(b, params, pos, up, rx * 0.18, card_sz, 0.72, 0.5, cards, s);
+        let pos = core + Vec3::new(dir.x * rx * 0.5, dir.y * ry * 0.5, dir.z * rx * 0.5);
+        let h01 = ((pos.y - ctx.crown_base) / span).clamp(0.0, 1.0).max(0.45);
+        clusters.push((pos, rx * 0.44, h01));
+    }
+
+    // Shape the collected clusters toward a rounded egg envelope (narrow base,
+    // widest in the upper-middle, rounding off at the top) by scaling each
+    // cluster's horizontal offset from the trunk axis, so the branch-driven crown
+    // stays a coherent tree silhouette instead of an occasional pinched peanut.
+    for (center, _, h01) in clusters.iter_mut() {
+        let profile = crown_profile(*h01);
+        center.x *= profile;
+        center.z *= profile;
+    }
+
+    for &(center, radius, h01) in &clusters {
+        let cs = params.seed ^ center.x.to_bits() as u64 ^ ((center.z.to_bits() as u64) << 1);
+        push_foliage_cluster(b, params, center, radius, cluster_cards, h01, cs);
     }
 }
 
-/// One foliage **puff**: a tight little cluster of a few small leaf cards jittered
-/// around `center`, all carrying the outward `normal` so the puff reads as a
-/// single rounded dome — the broccoli/cauliflower bump the broadleaf crown is
-/// built from. `puff_r` is the cluster's local spread, `card` the card size.
-#[allow(clippy::too_many_arguments)]
-fn push_puff(
+/// Horizontal radius scale for a crown cluster at height fraction `t ∈ [0,1]`:
+/// an egg/teardrop profile — pinched at the base, widest through the upper
+/// middle, tapering again at the very crown.
+fn crown_profile(t: f32) -> f32 {
+    let smooth = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    let rise = smooth(t / 0.5);
+    let top = smooth((t - 0.7) / 0.3);
+    (0.45 + 0.55 * rise) * (1.0 - 0.40 * top)
+}
+
+/// Recursively grow one limb: draw it (only the thick near-trunk limbs), then
+/// either drop a foliage cluster at its tip (terminal) or split into a couple of
+/// child limbs that spread outward and reach up (phototropism), each thinned by
+/// the Pipe Model (`r_parent² = Σ r_child²`).
+fn grow_branch(
+    b: &mut TreeMeshData,
+    params: &TreeMeshParams,
+    ctx: &BroadleafCtx,
+    limb: Limb,
+    seed: u64,
+    clusters: &mut Vec<(Vec3, f32, f32)>,
+) {
+    let tip = limb.base + limb.dir * limb.length;
+    let span = (ctx.crown_top - ctx.crown_base).max(0.01);
+    let h1 = ((tip.y - ctx.crown_base) / span).clamp(0.0, 1.0);
+
+    // Only the trunk-adjacent limbs are drawn; deeper twigs hide inside foliage.
+    if limb.depth <= 1 {
+        let h0 = ((limb.base.y - ctx.crown_base) / span).clamp(0.0, 1.0);
+        push_limb(
+            b,
+            limb.base,
+            tip,
+            limb.radius,
+            limb.radius * 0.66,
+            ctx.bark,
+            ctx.seg,
+            params.trunk_color,
+            h0 * 0.25,
+            h1 * 0.25,
+        );
+    }
+
+    if limb.depth >= ctx.depth_max {
+        let cr = params.canopy_radius_m * (0.48 - 0.05 * limb.depth as f32).max(0.26);
+        clusters.push((tip, cr, h1));
+        return;
+    }
+
+    let nch = 2 + (hash_u(seed, 10) % 2);
+    let (t, bi) = ortho_basis(limb.dir);
+    for c in 0..nch {
+        let cs = seed ^ (c as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        let caz = (c as f32 / nch as f32) * TAU + hash01(cs, 1) * 1.2;
+        let spread = 0.36 + 0.26 * hash01(cs, 2);
+        let (ss, cc) = spread.sin_cos();
+        let (sa, ca) = caz.sin_cos();
+        let outdir = t * ca + bi * sa;
+        let mut cdir = limb.dir * cc + outdir * ss + Vec3::Y * 0.38;
+        cdir.y = cdir.y.max(-0.05); // keep child limbs from drooping below the crown
+        let cdir = cdir.normalize_or(limb.dir);
+        let child = Limb {
+            base: tip,
+            dir: cdir,
+            length: limb.length * (0.62 + 0.12 * hash01(cs, 3)),
+            radius: limb.radius / (nch as f32).sqrt() * (0.82 + 0.3 * hash01(cs, 4)),
+            depth: limb.depth + 1,
+        };
+        grow_branch(b, params, ctx, child, cs, clusters);
+    }
+}
+
+/// One foliage **cluster**: a rounded lobe of leaf-cluster cards spread evenly
+/// over a small sphere (`fib_dir`), each facing outward so the lobe shades as a
+/// soft dome. `h01` (the cluster's height in the crown) darkens lower lobes and
+/// brightens the sunlit top; the per-card light normal is lifted toward the sky
+/// so flank cards still catch the blue ambient and never read as a dark hole.
+fn push_foliage_cluster(
     b: &mut TreeMeshData,
     params: &TreeMeshParams,
     center: Vec3,
-    normal: Vec3,
-    puff_r: f32,
-    card: f32,
-    ao: f32,
-    wind: f32,
+    radius: f32,
     cards: u32,
+    h01: f32,
     seed: u64,
 ) {
-    let n_out = normal.normalize_or(Vec3::Y);
+    let bright = 0.88 + 0.12 * hash01(seed, 3);
     for i in 0..cards {
-        let s = seed ^ (i as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93) ^ 0x9F1;
-        let jitter = rand_unit(s, 1) * puff_r * (0.3 + 0.6 * hash01(s, 2));
-        let pos = center + jitter;
-        // Cards face out from the puff centre (scattered), but light from the puff
-        // outward normal dappled per card so the bump shades like a soft dome.
-        let face = (n_out + rand_unit(s, 3) * 0.5).normalize_or(n_out);
-        // Lift the lighting normal slightly toward the sky so even inward/flank
-        // cards pick up the blue-sky ambient and don't read as dark interior.
-        let n_light = (n_out + Vec3::Y * 0.22 + rand_unit(s, 4) * 0.26).normalize_or(n_out);
+        let s = seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let dir = fib_dir(i, cards, s);
+        let n_out = dir.normalize_or(Vec3::Y);
+        let pos = center + n_out * radius * (0.85 + 0.16 * hash01(s, 9));
+        let form = n_out.y * 0.5 + 0.5;
+        let ao = bright * (0.80 + 0.20 * form) * (0.62 + 0.38 * h01);
+        let wind = (0.4 + 0.6 * h01).clamp(0.0, 1.0);
+        let face = (n_out + rand_unit(s, 3) * 0.32).normalize_or(n_out);
+        let n_light = (n_out + Vec3::Y * 0.24 + rand_unit(s, 4) * 0.20).normalize_or(n_out);
         let roll = hash01(s, 5) * TAU;
-        let size = card * (0.78 + 0.5 * hash01(s, 6));
+        let size = radius * (1.1 + 0.5 * hash01(s, 6));
         let cell = LEAF_CELL_FIRST + (hash_u(s, 7) % LEAF_CELL_COUNT.max(1));
-        push_leaf_card(b, pos, face, n_light, size, roll, cell, params.canopy_color * ao, wind);
+        push_leaf_card(
+            b,
+            pos,
+            face,
+            n_light,
+            size,
+            roll,
+            cell,
+            params.canopy_color * ao,
+            wind,
+        );
     }
+}
+
+/// A tapered branch cylinder from `base` (radius `r0`) to `tip` (radius `r1`)
+/// along an arbitrary axis, bark-textured. Wind weight ramps base→tip.
+#[allow(clippy::too_many_arguments)]
+fn push_limb(
+    b: &mut TreeMeshData,
+    base: Vec3,
+    tip: Vec3,
+    r0: f32,
+    r1: f32,
+    bark: u32,
+    segments: u32,
+    color: Vec3,
+    wind0: f32,
+    wind1: f32,
+) {
+    let axis = (tip - base).normalize_or(Vec3::Y);
+    let (t, bi) = ortho_basis(axis);
+    let seg = segments.max(3);
+    let start = b.positions.len() as u32;
+    for i in 0..=seg {
+        let a = i as f32 / seg as f32 * TAU;
+        let (s, c) = a.sin_cos();
+        let radial = (t * c + bi * s).normalize_or(t);
+        let (cb, ct) = if i & 1 == 0 { (0, 3) } else { (1, 2) };
+        b.push_vert(base + radial * r0, radial, color * 0.85, wind0, leaf_code(bark, cb));
+        b.push_vert(tip + radial * r1, radial, color, wind1, leaf_code(bark, ct));
+    }
+    for i in 0..seg {
+        let r0i = start + i * 2;
+        let r1i = start + (i + 1) * 2;
+        b.indices
+            .extend_from_slice(&[r0i, r1i, r0i + 1, r1i, r1i + 1, r0i + 1]);
+    }
+}
+
+/// An orthonormal basis `(tangent, bitangent)` spanning the plane perpendicular
+/// to `axis`.
+fn ortho_basis(axis: Vec3) -> (Vec3, Vec3) {
+    let up_ref = if axis.y.abs() > 0.95 { Vec3::X } else { Vec3::Y };
+    let t = axis.cross(up_ref).normalize_or(Vec3::X);
+    let bi = axis.cross(t).normalize_or(Vec3::Z);
+    (t, bi)
 }
 
 /// One leaf-cluster card: a quad centred at `pos`, in the plane spanned by a
@@ -526,7 +745,11 @@ fn push_leaf_card(
     tint: Vec3,
     wind: f32,
 ) {
-    let up_ref = if face.y.abs() > 0.95 { Vec3::X } else { Vec3::Y };
+    let up_ref = if face.y.abs() > 0.95 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let t = face.cross(up_ref).normalize_or(Vec3::X);
     let bi = face.cross(t).normalize_or(Vec3::Z);
     let (sr, cr) = roll.sin_cos();
@@ -566,9 +789,7 @@ fn hash_u(seed: u64, salt: u64) -> u32 {
 
 /// Integer hash → `[0, 1)`, deterministic per (seed, salt).
 fn hash01(seed: u64, salt: u64) -> f32 {
-    let mut h = seed
-        ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ 0x2545_F491_4F6C_DD1D;
+    let mut h = seed ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x2545_F491_4F6C_DD1D;
     h ^= h >> 31;
     h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
     h ^= h >> 32;

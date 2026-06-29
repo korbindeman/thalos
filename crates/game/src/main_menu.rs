@@ -93,7 +93,11 @@ const SCREEN_BG: Color = Color::srgb(0.040, 0.038, 0.034);
 const MENU_WIDTH: f32 = 380.0;
 
 const SCENARIOS: &[(SpawnSituation, &str, &str)] = &[
-    (SpawnSituation::ShipOrbit, "ORBIT", "low Thalos parking orbit"),
+    (
+        SpawnSituation::ShipOrbit,
+        "ORBIT",
+        "low Thalos parking orbit",
+    ),
     (
         SpawnSituation::Landing,
         "LANDING APPROACH",
@@ -224,8 +228,20 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>) {
                     BackgroundColor(theme.panel_border),
                     Name::new("MainMenuDivider"),
                 ));
-                spawn_menu_button(panel, &theme, MenuAction::Shipyard, "SHIPYARD", "design a craft");
-                spawn_menu_button(panel, &theme, MenuAction::Settings, "SETTINGS", "window & input");
+                spawn_menu_button(
+                    panel,
+                    &theme,
+                    MenuAction::Shipyard,
+                    "SHIPYARD",
+                    "design a craft",
+                );
+                spawn_menu_button(
+                    panel,
+                    &theme,
+                    MenuAction::Settings,
+                    "SETTINGS",
+                    "window & input",
+                );
                 spawn_menu_button(panel, &theme, MenuAction::Quit, "QUIT", "");
             });
         });

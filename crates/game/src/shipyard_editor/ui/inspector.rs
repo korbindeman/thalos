@@ -10,12 +10,10 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
-use thalos_shipyard::editor::{
-    EditorPart, EditorState, inspector_params, symmetry_edit_target,
-};
+use thalos_shipyard::editor::{EditorPart, EditorState, inspector_params, symmetry_edit_target};
 use thalos_shipyard::{
-    Adapter, AirIntake, AttachNodes, CatalogRef, CommandPod, Decoupler, Engine, FuelTank,
-    Fuselage, Gear, PartCatalog, PartResources, Resource, ResourcePool, SymmetryGroup, Wing,
+    Adapter, AirIntake, AttachNodes, CatalogRef, CommandPod, Decoupler, Engine, FuelTank, Fuselage,
+    Gear, PartCatalog, PartResources, Resource, ResourcePool, SymmetryGroup, Wing,
     resource_capacity_for,
 };
 
@@ -268,7 +266,9 @@ pub(super) fn rebuild_inspector(
     let pools: Vec<(Resource, ResourcePool)> = resources
         .map(|r| r.pools.iter().map(|(res, p)| (*res, *p)).collect())
         .unwrap_or_default();
-    let kind = kind_label(pod, dec, adapter, tank, fuselage, engine, intake, wing, gear);
+    let kind = kind_label(
+        pod, dec, adapter, tank, fuselage, engine, intake, wing, gear,
+    );
     let tank_max_len = nodes
         .get("top")
         .map(|n| n.diameter)
@@ -331,11 +331,27 @@ pub(super) fn rebuild_inspector(
         use SliderFormat as F;
         if let Some(d) = &dec_v {
             if is_root {
-                slider(c, "DIAMETER", d.diameter, 0.3, 6.0, F::Meters, B::DecouplerDiameter);
+                slider(
+                    c,
+                    "DIAMETER",
+                    d.diameter,
+                    0.3,
+                    6.0,
+                    F::Meters,
+                    B::DecouplerDiameter,
+                );
             }
         } else if let Some(a) = &adapter_v {
             if is_root {
-                slider(c, "DIAMETER", a.diameter, 0.3, 6.0, F::Meters, B::AdapterDiameter);
+                slider(
+                    c,
+                    "DIAMETER",
+                    a.diameter,
+                    0.3,
+                    6.0,
+                    F::Meters,
+                    B::AdapterDiameter,
+                );
             }
             slider(
                 c,
@@ -348,16 +364,64 @@ pub(super) fn rebuild_inspector(
             );
         } else if let Some(t) = &tank_v {
             if is_root {
-                slider(c, "DIAMETER", t.diameter, 0.3, 6.0, F::Meters, B::TankDiameter);
+                slider(
+                    c,
+                    "DIAMETER",
+                    t.diameter,
+                    0.3,
+                    6.0,
+                    F::Meters,
+                    B::TankDiameter,
+                );
             }
-            slider(c, "LENGTH", t.length, 0.5, tank_max_len, F::Meters, B::TankLength);
+            slider(
+                c,
+                "LENGTH",
+                t.length,
+                0.5,
+                tank_max_len,
+                F::Meters,
+                B::TankLength,
+            );
         } else if let Some(f) = &fuselage_v {
-            slider(c, "LENGTH", f.length, 2.0, 60.0, F::Meters, B::FuselageLength);
+            slider(
+                c,
+                "LENGTH",
+                f.length,
+                2.0,
+                60.0,
+                F::Meters,
+                B::FuselageLength,
+            );
             if is_root {
-                slider(c, "WIDTH (Ø)", f.max_width, 0.5, 8.0, F::Meters, B::FuselageWidth);
+                slider(
+                    c,
+                    "WIDTH (Ø)",
+                    f.max_width,
+                    0.5,
+                    8.0,
+                    F::Meters,
+                    B::FuselageWidth,
+                );
             }
-            slider(c, "HEIGHT", f.max_height, 0.5, 8.0, F::Meters, B::FuselageHeight);
-            slider(c, "ROUNDNESS", f.roundness, 0.0, 1.0, F::Plain2, B::FuselageRoundness);
+            slider(
+                c,
+                "HEIGHT",
+                f.max_height,
+                0.5,
+                8.0,
+                F::Meters,
+                B::FuselageHeight,
+            );
+            slider(
+                c,
+                "ROUNDNESS",
+                f.roundness,
+                0.0,
+                1.0,
+                F::Plain2,
+                B::FuselageRoundness,
+            );
             slider(
                 c,
                 "NOSE FRAC",
@@ -385,7 +449,15 @@ pub(super) fn rebuild_inspector(
                 F::Plain2,
                 B::FuselageTailFraction,
             );
-            slider(c, "NOSE DROOP", f.nose_droop, 0.0, 2.0, F::Meters, B::FuselageNoseDroop);
+            slider(
+                c,
+                "NOSE DROOP",
+                f.nose_droop,
+                0.0,
+                2.0,
+                F::Meters,
+                B::FuselageNoseDroop,
+            );
             slider(
                 c,
                 "TAIL UPSWEEP",
@@ -415,8 +487,24 @@ pub(super) fn rebuild_inspector(
             );
         } else if let Some(w) = &wing_v {
             slider(c, "SPAN /SIDE", w.span, 0.5, 30.0, F::Meters, B::WingSpan);
-            slider(c, "ROOT CHORD", w.root_chord, 0.3, 15.0, F::Meters, B::WingRootChord);
-            slider(c, "TIP CHORD", w.tip_chord, 0.1, 15.0, F::Meters, B::WingTipChord);
+            slider(
+                c,
+                "ROOT CHORD",
+                w.root_chord,
+                0.3,
+                15.0,
+                F::Meters,
+                B::WingRootChord,
+            );
+            slider(
+                c,
+                "TIP CHORD",
+                w.tip_chord,
+                0.1,
+                15.0,
+                F::Meters,
+                B::WingTipChord,
+            );
             slider(
                 c,
                 "SWEEP",
@@ -444,10 +532,34 @@ pub(super) fn rebuild_inspector(
                 F::Degrees,
                 B::WingIncidenceDeg,
             );
-            slider(c, "THICK t/c", w.thickness, 0.04, 0.25, F::Plain2, B::WingThickness);
+            slider(
+                c,
+                "THICK t/c",
+                w.thickness,
+                0.04,
+                0.25,
+                F::Plain2,
+                B::WingThickness,
+            );
         } else if let Some(g) = &gear_v {
-            slider(c, "STRUT LEN", g.strut_length, 0.3, 4.0, F::Meters, B::GearStrutLength);
-            slider(c, "WHEEL R", g.wheel_radius, 0.1, 1.2, F::Meters, B::GearWheelRadius);
+            slider(
+                c,
+                "STRUT LEN",
+                g.strut_length,
+                0.3,
+                4.0,
+                F::Meters,
+                B::GearStrutLength,
+            );
+            slider(
+                c,
+                "WHEEL R",
+                g.wheel_radius,
+                0.1,
+                1.2,
+                F::Meters,
+                B::GearWheelRadius,
+            );
         }
 
         // ---- Resources -----------------------------------------------------
@@ -529,7 +641,14 @@ pub(super) fn rebuild_inspector(
         ))
         .with_children(|row| {
             if !is_root {
-                widgets::spawn_button(row, &theme, InspectorAction::SetRoot, "SET ROOT", 10.0, 24.0);
+                widgets::spawn_button(
+                    row,
+                    &theme,
+                    InspectorAction::SetRoot,
+                    "SET ROOT",
+                    10.0,
+                    24.0,
+                );
             }
             widgets::spawn_button(row, &theme, InspectorAction::Delete, "DELETE", 10.0, 24.0);
         });

@@ -311,7 +311,10 @@ impl GpuAtlasHeightMirror {
         if dir == Vec3::ZERO || self.lod_count == 0 || self.texture_size == 0 {
             return None;
         }
-        let inner = self.texture_size.saturating_sub(self.border_size * 2).max(1) as f32;
+        let inner = self
+            .texture_size
+            .saturating_sub(self.border_size * 2)
+            .max(1) as f32;
         let sample_position = dir.as_dvec3() * model.scale();
         let coordinate = Coordinate::from_world_position(sample_position, model);
         for lod in (0..self.lod_count).rev() {

@@ -8,18 +8,15 @@ use super::*;
 use bevy::math::DVec3;
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_local::avian::{
-    AngularVelocity,
-    ContactGraph, LinearVelocity, Position, Rotation,
+    AngularVelocity, ContactGraph, LinearVelocity, Position, Rotation,
 };
 use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalBubble, LocalBubbleConfig, LocalCraftBody,
-    TerrainColliderPatch, craft_contacts_terrain,
-    spawn_terrain_collider_patch,
+    TerrainColliderPatch, craft_contacts_terrain, spawn_terrain_collider_patch,
 };
 
 use crate::player_controller::{PlayerControllerBody, PlayerControllerState};
 use crate::rendering::SimulationState;
-
 
 /// Attach a terrain collider patch when the ship enters the AGL handoff
 /// band over a body whose surface is registered. The collider is
@@ -50,7 +47,10 @@ pub(crate) fn attach_terrain_patch_when_close(
     // craft's compound collider resolves contacts against both at once — a
     // double penetration-recovery push that launches it off its gear. Skip the
     // patch on that body and let the runway collider be the sole ground.
-    if runway.as_deref().is_some_and(|r| r.body_id == bubble.body_id) {
+    if runway
+        .as_deref()
+        .is_some_and(|r| r.body_id == bubble.body_id)
+    {
         return;
     }
     // Regime gate (A3 port, `docs/regimes.md`): the record's
@@ -178,7 +178,6 @@ pub(crate) fn clear_terrain_patch(commands: &mut Commands, bubble: &mut LocalBub
     bubble.patch_half_extent_m = 0.0;
     bubble.terrain_built_at_revision = 0;
 }
-
 
 pub(crate) fn maintain_terrain_patch(
     mut commands: Commands,
@@ -315,4 +314,3 @@ pub(crate) fn sync_terrain_collider_pose(
     linear_velocity.0 = DVec3::ZERO;
     angular_velocity.0 = DVec3::ZERO;
 }
-

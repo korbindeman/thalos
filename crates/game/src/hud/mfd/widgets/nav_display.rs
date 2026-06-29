@@ -25,7 +25,9 @@ use crate::hud::theme::{HudTheme, label};
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::structures::{StructureKind, StructureRegistry};
 
-use super::super::{ActiveWidget, FlightContext, MfdWidgetRoot, WidgetKind, runway_surface_inertial};
+use super::super::{
+    ActiveWidget, FlightContext, MfdWidgetRoot, WidgetKind, runway_surface_inertial,
+};
 
 /// Body nose axis, matching the navball / PFD conventions.
 const BODY_NOSE: DVec3 = DVec3::Y;

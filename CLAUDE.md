@@ -126,14 +126,21 @@ channel: don't try to drive or observe a live session programmatically.
 (`crates/body_render/examples/object_preview.rs`) is a **headless** renderer:
 it draws each procedural object (trees, conifer, shrub today; rocks etc. later)
 to a PNG under `tools/preview/out/` and exits — no window. It renders on the
-real GPU off-screen (verified working from an agent shell: NVIDIA/Vulkan), lit
-with the actual `TreeMaterial` + `thalos::lighting` sky model so it matches the
-in-game look. So when iterating on a procedural asset's *geometry/material*,
-run `just preview` and **Read the output PNGs directly** instead of round-
-tripping a screenshot through the user. (Whole-scene composition, terrain,
+real GPU off-screen (verified working from an agent shell: NVIDIA/Vulkan). Each
+object is staged as a small **diorama** so it reads like the in-game surface,
+not a floating cutout: a sky-model-lit ground (`GroundPatchMaterial` — the same
+`thalos::lighting` BRDF the in-game terrain uses), a carpet of the real grass
+blades around plants, a self-managed **sun-shadow** cascade (a trimmed copy of
+`rendering::sun_shadow`, so trees cast leaf-shaped shadows on the ground and
+themselves), and the game's camera post stack (AgX tonemap + bloom + SMAA),
+minus the sensor-sim grain / chromatic aberration that only muddy small asset
+shots. So when iterating on a procedural asset's *geometry/material*, run `just
+preview` and **Read the output PNGs directly** instead of round-tripping a
+screenshot through the user. (Whole-scene composition, terrain,
 lighting-in-context, and "does it feel right" still need a real `just game`
 run — that stays the user's call.) Extend the gallery by adding an entry to
-`object_preview.rs`.
+`object_preview.rs`; a larger composed scene (a patch of grass, a mountain
+ringed by trees) is the planned next phase.
 
 **Getting data out of a running session: write it to a file.** When you need
 runtime numbers rather than a picture, don't reach for live inspection — have
@@ -285,12 +292,19 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
 - **`thalos_texgen`** — procedural texture generation (no Bevy): CPU-rasterizes
   `TextureData` (sRGBA8), today the **foliage atlas** (small multi-toned leaf
-  clusters + conifer needles + bark) the tree meshes sample. Shared by the
-  runtime (`body_render` wraps it in a GPU `Image` via `build_foliage_atlas`),
-  the object preview, and an offline bake (`cargo run -p thalos_texgen --example
-  bake` → `tools/texgen/out/*.png`, to inspect or prebake for the game). The
-  atlas layout + `leaf_code` packing live here as the source of truth. Rocks /
-  other procedural textures will live here too.
+  clusters + conifer needles + full-colour painterly bark) the tree meshes
+  sample, plus a companion **foliage material atlas** (`foliage_material_atlas`,
+  linear `Rgba8Unorm`: bark tangent-space normal in RGB + roughness in A). Bark
+  albedo, normal, and roughness are all derived from one shared `bark_height`
+  field, so cracks/ridges line up across channels; the height field uses
+  **gradient (Perlin) noise**, not value noise, so the derived normal shows no
+  lattice "weave" (see the `wgsl-bevy` skill note). Shared by the runtime
+  (`body_render` wraps each in a GPU `Image` via `build_foliage_atlas` /
+  `build_foliage_material_atlas`), the object preview, and an offline bake
+  (`cargo run -p thalos_texgen --example bake` → `tools/texgen/out/*.png`, to
+  inspect or prebake for the game). The atlas layout + `leaf_code` packing live
+  here as the source of truth. Rocks / other procedural textures will live here
+  too.
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
 - **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/game/src/local_physics.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/game/src/local_physics.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
@@ -479,7 +493,13 @@ Key modules:
   craft in the dark; the pad is flattened under the footprint regardless,
   so the coordinates only need to be dry land sunlit at the spawn epoch
   (the author's call — a below-sea-level sample is warned, not corrected).
-  After placing, it tears down any live Avian
+  The scenario also seats the sim clock at a **morning boot epoch**
+  (`runway::RUNWAY_MORNING_EPOCH_S`, via `Simulation::set_sim_time`) so the
+  fixed site is lit by a low rising sun instead of the epoch-0 noon sun the
+  sub-stellar point gives it — time-of-day is a planet-rotation lever, the
+  authored site stays put. Re-derive the epoch with the `morning_probe`
+  example if the site or Thalos's rotation changes. After placing, it tears
+  down any live Avian
   bubble so the rebuild seeds from the placed state (a bubble seeded
   from the pre-placement placeholder orbit would leave the rendered
   craft coasting the wrong trajectory). **The terrain itself is
@@ -716,6 +736,25 @@ Key modules:
   `ship_view::build_player_ship` core. The new craft carries no `EditorPart`,
   so staging/bubble rebuild through the existing systems. Runway relaunch is
   deferred (one-shot terrain-aware startup placement).
+- `base_editor/` — the **in-world surface base editor** (Cities:Skylines-style):
+  pick a building site on the real terrain, flatten the land into a level pad,
+  then click-and-place / edit placeholder buildings on it. Unlike the shipyard
+  editor it is an **in-world overlay**, not a separate scene — the planet stays
+  visible, the sim pauses (`BaseEditor::open` is a `sim_clock` pause source, and
+  the three `SimStage` sets gate on `base_editor::base_editor_closed`), and the
+  existing `ShipCamera` is repositioned to a god-view (`camera.rs`) rather than
+  swapped. Reuses the `StructureSite`/`StructureRegistry`/`apply_structure_flatten`
+  layer (`structures.rs`, grown with `BaseSite`/`Building` kinds + `remove`/
+  `update`) and the runway's per-frame f64 anchoring. Entry: the pause menu's
+  SURFACE BASE button; Esc closes. The one new mechanism is **live runtime
+  terrain invalidation** — UDLOD has no per-tile re-bake path, so a flatten
+  installed after tiles stream is applied by `TerrainRebuildRequest`
+  (`rendering::terrain_residency`) despawning + respawning the body terrain
+  (reusing the persistent `TerrainFlattenRegistry` handle). Tab toggles placing
+  a building vs a **launchpad** (a craft can be placed on it with **L**, reusing
+  the runway's parked-placement helpers), and a tarmac **auto-connection** mesh
+  (an MST over the site's structures) regenerates as structures change. See
+  `docs/base_building.md`.
 - `window_settings` — persisted window/display preferences (mode, windowed
   resolution, vsync, fullscreen monitor, user UI scale), stored as RON at the
   gitignored `user/settings.ron` and edited live from the settings menu's
@@ -727,8 +766,8 @@ Key modules:
   primary `Window` (value-compared) and writes back windowed drag-resizes so
   they persist; `apply_ui_scale` (which absorbed the former
   `compensate_fractional_ui_scale`) multiplies the user UI scale into the
-  fractional-HiDPI crisp-text snap and drives `UiScale` + egui scale
-  together. Caveat: runtime mode switches recreate the swapchain, which the
+  fractional-HiDPI crisp-text snap and drives `UiScale`. Caveat: runtime mode
+  switches recreate the swapchain, which the
   known flaky Windows driver path (generic surface-acquire panic in Bevy's
   `prepare_windows`) can turn into a crash — pre-existing platform issue,
   newly reachable at runtime.
@@ -935,6 +974,13 @@ reads from. No materials of its own.
   `thalos_game::rendering::grass` (runway-style f64 body-fixed anchoring,
   revision-based rebuilds). See `docs/terrain.md` *Vegetation decoration
   layer*.
+- `ground_patch` — `GroundPatchMaterial` / `GroundPatchMaterialPlugin`: a flat,
+  sky-model-lit ground plane (the shared `thalos::lighting` dielectric BRDF, not
+  the UDLOD stack) that **receives** the same cascaded sun-shadows trees cast —
+  the diorama ground for the object preview, and the seed for the planned larger
+  composed scenes. Deliberately simple: a flat-ground analogue of
+  `body_terrain.wgsl` for tooling, sharing `TreeMaterial`'s cascade binding
+  layout so one shadow rig feeds both.
 
 `body_render` is the **sole consumer** of the vendored `thalos_udlod`,
 re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no
@@ -1078,7 +1124,14 @@ Each major system has a unified spec doc.
   kinematic seam** (intentional — it has no collider and gains nothing from
   the SLF), the runway keeps a solid cuboid collider, the physics step is
   still fixed-timestep, and the backstop demotion / async heightfield
-  rebuild / runtime structure placement are deferred follow-ups.
+  rebuild are deferred follow-ups. (Runtime structure placement is **now
+  built** — see `base_building.md`.)
+- `base_building.md` — the **in-world surface base editor** (`base_editor/`):
+  pick a site, live-flatten the land, click-and-place / edit buildings. The
+  in-world-overlay design, the god-view camera, the runtime terrain-invalidation
+  MVP (despawn/respawn the body terrain), the multi-flatten `FlattenRegion`
+  change, and the ordered follow-ups (launchpad, auto-connections, slider
+  inspector, disk persistence, scoped-AABB invalidation).
 - `construction.md` — next-gen shipyard / construction model design:
   one Module primitive (end-node / footprint+morph / end-cap / host /
   connector / reservation), stationed-loft fuselages and wings, a

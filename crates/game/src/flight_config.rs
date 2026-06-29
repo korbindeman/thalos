@@ -97,8 +97,11 @@ fn update_flight_config(
     let flap_target = config.flap_setting as f64 / FLAP_DETENTS as f64;
     config.flap_fraction = approach(config.flap_fraction, flap_target, dt / FLAP_TRAVEL_S);
     let spoiler_target = if brake.engaged { 1.0 } else { 0.0 };
-    config.spoiler_fraction =
-        approach(config.spoiler_fraction, spoiler_target, dt / SPOILER_TRAVEL_S);
+    config.spoiler_fraction = approach(
+        config.spoiler_fraction,
+        spoiler_target,
+        dt / SPOILER_TRAVEL_S,
+    );
 }
 
 /// Move `current` toward `target` by at most `max_step`.

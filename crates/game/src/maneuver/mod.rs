@@ -13,7 +13,7 @@ use interaction::{
     arrow_drag_end, arrow_drag_start, handle_maneuver_events, maneuver_input,
     slide_sphere_drag_end, slide_sphere_drag_start, sync_node_delta_v,
 };
-use panel::node_editor_panel;
+use panel::{handle_buttons as maneuver_editor_buttons, setup as setup_maneuver_editor, update_editor as update_maneuver_editor};
 use render::{
     manage_arrow_handles, manage_node_markers, spawn_snap_indicator, update_arrow_transforms,
     update_snap_indicator,
@@ -144,6 +144,10 @@ impl Plugin for ManeuverPlugin {
             .init_resource::<ArrowStretchState>()
             .add_systems(Startup, spawn_snap_indicator)
             .add_systems(
+                Startup,
+                setup_maneuver_editor.after(crate::hud::theme::init_theme),
+            )
+            .add_systems(
                 Update,
                 (
                     update_camera_block,
@@ -172,13 +176,10 @@ impl Plugin for ManeuverPlugin {
             .add_observer(arrow_drag_end)
             .add_observer(slide_sphere_drag_start)
             .add_observer(slide_sphere_drag_end)
-            .add_systems(
-                bevy_egui::EguiPrimaryContextPass,
-                node_editor_panel.run_if(
-                    crate::pause_menu::not_game_paused
-                        .and(crate::photo_mode::not_in_photo_mode)
-                        .and(crate::view::in_map_view),
-                ),
-            );
+            // The maneuver editor is native Bevy UI: `update_maneuver_editor`
+            // owns its visibility (selection + map-view gate), so it runs
+            // unconditionally; `maneuver_editor_buttons` only fires on visible
+            // (pickable) controls.
+            .add_systems(Update, (update_maneuver_editor, maneuver_editor_buttons));
     }
 }

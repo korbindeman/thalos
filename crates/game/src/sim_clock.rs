@@ -61,6 +61,7 @@ impl Plugin for SimClockPlugin {
 /// - start screen (`AppState::MainMenu`)
 /// - freecam (`FreeCam::active`)
 /// - shipyard editor (`ShipyardEditor::open`)
+/// - base editor (`BaseEditor::open`)
 /// - warp pause (`warp.speed() == 0`)
 ///
 /// Loading is deliberately **not** a pause source: the deferred surface
@@ -73,17 +74,20 @@ pub(crate) fn sync_sim_clock(
     app_state: Res<State<AppState>>,
     freecam: Option<Res<FreeCam>>,
     shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
+    base_editor: Option<Res<crate::base_editor::BaseEditor>>,
     sim: Res<SimulationState>,
     mut clock: ResMut<SimClock>,
 ) {
     let wall_delta_s = time.delta_secs_f64();
     let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
     let shipyard_open = shipyard.as_deref().map(|s| s.open).unwrap_or(false);
+    let base_editor_open = base_editor.as_deref().map(|e| e.open).unwrap_or(false);
     let paused = pause.active
         || scenario.open
         || *app_state.get() == AppState::MainMenu
         || freecam_active
         || shipyard_open
+        || base_editor_open
         || sim.simulation.warp.speed() == 0.0;
 
     *clock = SimClock {

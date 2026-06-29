@@ -115,7 +115,14 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             StatsText,
         ));
 
-        widgets::spawn_button(bar, theme, TopBarAction::ToggleMirror, "MIRROR 2×", 10.0, 24.0);
+        widgets::spawn_button(
+            bar,
+            theme,
+            TopBarAction::ToggleMirror,
+            "MIRROR 2×",
+            10.0,
+            24.0,
+        );
         widgets::spawn_button(bar, theme, TopBarAction::ToggleSnap, "SNAP 15°", 10.0, 24.0);
         widgets::spawn_button(bar, theme, TopBarAction::ToggleLayout, "HANGAR", 10.0, 24.0);
         // LAUNCH is the headline action — fly the current design. The play

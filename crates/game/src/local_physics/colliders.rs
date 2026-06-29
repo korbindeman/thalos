@@ -7,16 +7,11 @@ use super::*;
 use std::collections::{HashMap, VecDeque};
 
 use bevy::math::{DMat3, DQuat, DVec3};
-use thalos_physics_local::{
-    LocalPrimitiveCollider,
-    LocalPrimitiveShape,
-};
+use thalos_physics_local::{LocalPrimitiveCollider, LocalPrimitiveShape};
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
     FuelTank, Part, SurfaceMount, SurfaceMountKind, Wing, wing_panel_frame,
 };
-
-
 
 pub(crate) type PartColliderQuery<'w, 's> = Query<
     'w,
@@ -39,7 +34,9 @@ pub(crate) type PartColliderQuery<'w, 's> = Query<
     (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
 >;
 
-pub(crate) fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<LocalPrimitiveCollider> {
+pub(crate) fn build_ship_collider_primitives(
+    parts: &PartColliderQuery,
+) -> Vec<LocalPrimitiveCollider> {
     let part_positions = compute_part_collider_positions(parts);
     let nodes_by_entity: HashMap<Entity, &AttachNodes> =
         parts.iter().map(|(e, nodes, ..)| (e, nodes)).collect();
@@ -59,7 +56,12 @@ pub(crate) fn build_ship_collider_primitives(parts: &PartColliderQuery) -> Vec<L
                 .and_then(|n| n.get("top"))
                 .map(|node| node.diameter * 0.5)
                 .unwrap_or(1.0);
-            primitives.push(wing_collider_primitive(wing, mount, parent_radius, part_position));
+            primitives.push(wing_collider_primitive(
+                wing,
+                mount,
+                parent_radius,
+                part_position,
+            ));
             continue;
         }
         if matches!(
@@ -280,4 +282,3 @@ pub(crate) fn part_collider_shape(
         None
     }
 }
-

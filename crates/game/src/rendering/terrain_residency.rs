@@ -49,8 +49,8 @@ use std::collections::HashMap;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use thalos_body_render::AtmosphereBlock;
-use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileTree};
 use thalos_body_render::BodyTerrainMaterial;
+use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileTree};
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
@@ -112,6 +112,32 @@ impl BodyTerrainResidency {
     }
 }
 
+/// Bodies whose resident terrain must be rebuilt from cold this frame because
+/// their flatten set changed *after* tiles had already streamed in (the base
+/// editor's flatten-confirm, a deleted pad). Written by gameplay; drained by
+/// [`apply_terrain_rebuild_requests`].
+///
+/// **Why a full despawn/respawn rather than a per-tile re-bake:** UDLOD bakes
+/// each resident tile exactly once and has no per-tile invalidation path, so a
+/// [`thalos_terrain::TerrainFlatten`] written after a tile is resident stays
+/// invisible until that tile is rebuilt. Dropping and respawning the body's
+/// terrain entity re-streams every tile through the body's *persistent* flatten
+/// handle (which already carries the new region), and the GPU-atlas height
+/// mirror + surface-local collider follow via their existing revision chain
+/// with no extra work. The event is rare (one confirm per site) and the world is
+/// paused under the editor, so the ~1–2 s cold re-stream is acceptable.
+#[derive(Resource, Default)]
+pub struct TerrainRebuildRequest {
+    bodies: std::collections::HashSet<BodyId>,
+}
+
+impl TerrainRebuildRequest {
+    /// Queue `body_id` for a cold terrain rebuild. Idempotent within a frame.
+    pub fn request(&mut self, body_id: BodyId) {
+        self.bodies.insert(body_id);
+    }
+}
+
 /// Wanted set produced by [`compute_wanted_residency`] each frame and
 /// consumed by [`apply_residency_changes`]. Pulled out as a `Resource`
 /// rather than a system-local so the loading-screen gate can read it.
@@ -129,6 +155,7 @@ impl Plugin for TerrainResidencyPlugin {
         app.init_resource::<TerrainResidencyConfig>()
             .init_resource::<BodyTerrainResidency>()
             .init_resource::<WantedResidencySet>()
+            .init_resource::<TerrainRebuildRequest>()
             .init_resource::<super::ground_terrain::TerrainFlattenRegistry>()
             .add_systems(
                 Update,
@@ -138,7 +165,12 @@ impl Plugin for TerrainResidencyPlugin {
                     initial_residency_loading_gate.after(apply_residency_changes),
                 )
                     .in_set(crate::SimStage::Sync),
-            );
+            )
+            // Ungated (not in `SimStage::Sync`) so a flatten-confirm under the
+            // base editor — which pauses the sim — still re-streams the terrain.
+            // The UDLOD streaming + height-mirror sync it relies on also run
+            // ungated in `Last`.
+            .add_systems(Update, apply_terrain_rebuild_requests);
     }
 }
 
@@ -178,7 +210,9 @@ fn compute_wanted_residency(
 
     // (1) Always-resident at full detail: the body the craft is gravitationally
     // bound to right now.
-    wanted.0.insert(sim.simulation.dominant_body(), TerrainTier::Near);
+    wanted
+        .0
+        .insert(sim.simulation.dominant_body(), TerrainTier::Near);
 
     // (2) Predicted encounters + close approaches within the preload lead-time
     // window, at full detail. `prediction()` is `None` when the craft is landed
@@ -273,7 +307,8 @@ fn apply_residency_changes(
             Some(entry) => {
                 despawn_entry(&mut commands, &mut params, entry, ship_camera);
                 residency.entries.remove(&body_id);
-                if let Some(new_entry) = try_spawn(body_id, tier, &sim, &mut params, &mut commands) {
+                if let Some(new_entry) = try_spawn(body_id, tier, &sim, &mut params, &mut commands)
+                {
                     residency.entries.insert(body_id, new_entry);
                     info!(
                         "re-tiered ground terrain for body_id {} -> {:?} tier",
@@ -314,6 +349,42 @@ fn apply_residency_changes(
             "despawned ground terrain for body_id {} (unwanted for ≥{:.0}s)",
             body_id, config.despawn_debounce_s
         );
+    }
+}
+
+/// Consume [`TerrainRebuildRequest`]: despawn and respawn each requested body's
+/// resident terrain at its current tier, so a flatten region installed after the
+/// body's tiles streamed in takes effect (see the resource's doc for why a full
+/// rebuild is necessary). Mirrors the re-tier branch of [`apply_residency_changes`]
+/// but keeps the same tier. Bodies that aren't resident are dropped silently —
+/// nothing has streamed yet, so the flatten applies when their tiles first bake.
+///
+/// **Ungated** so it runs while the base editor pauses the sim.
+fn apply_terrain_rebuild_requests(
+    mut commands: Commands,
+    mut request: ResMut<TerrainRebuildRequest>,
+    sim: Res<SimulationState>,
+    mut residency: ResMut<BodyTerrainResidency>,
+    mut params: ResidencySpawnParams,
+) {
+    if request.bodies.is_empty() {
+        return;
+    }
+    let ship_camera = params.ship_camera_q.single().ok();
+    let bodies: Vec<BodyId> = request.bodies.drain().collect();
+    for body_id in bodies {
+        let Some(entry) = residency.entries.get(&body_id).copied() else {
+            continue;
+        };
+        despawn_entry(&mut commands, &mut params, entry, ship_camera);
+        residency.entries.remove(&body_id);
+        if let Some(new_entry) = try_spawn(body_id, entry.tier, &sim, &mut params, &mut commands) {
+            residency.entries.insert(body_id, new_entry);
+            info!(
+                "rebuilt ground terrain for body_id {} (flatten changed)",
+                body_id
+            );
+        }
     }
 }
 

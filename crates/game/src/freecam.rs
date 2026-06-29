@@ -26,7 +26,6 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_input::game::GameInputIntent;
 
@@ -109,7 +108,7 @@ fn toggle_freecam_system(
     input: Res<GameInputIntent>,
     shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     mut freecam: ResMut<FreeCam>,
-    mut egui: EguiContexts,
+    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
 ) {
     // Auto-disable when leaving ship view — map view has no freecam analogue
     // and we don't want input gating to drift while the user can't recover.
@@ -126,9 +125,7 @@ fn toggle_freecam_system(
     if shipyard.as_deref().map(|s| s.open).unwrap_or(false) {
         return;
     }
-    if let Ok(ctx) = egui.ctx_mut()
-        && ctx.wants_keyboard_input()
-    {
+    if ui_text.is_focused() {
         return;
     }
     if *view != ViewMode::Ship {

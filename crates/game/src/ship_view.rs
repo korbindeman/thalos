@@ -27,9 +27,9 @@ use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial,
-    Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams, ShipyardPlugin,
-    SurfaceMount, PodGeometry, SurfaceMountKind, Wing, build_control_surface_mesh,
-    build_cockpit_mesh, build_fuselage_mesh, build_gear_mesh, build_jet_nacelle_body_mesh,
+    PodGeometry, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams,
+    ShipyardPlugin, SurfaceMount, SurfaceMountKind, Wing, build_cockpit_mesh,
+    build_control_surface_mesh, build_fuselage_mesh, build_gear_mesh, build_jet_nacelle_body_mesh,
     build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
     landing_gear_base, pod_visual_profile, stainless_steel_base,
 };
@@ -803,8 +803,12 @@ fn rebuild_ship_wing_visuals(
             }
         }
         let top_d = host_top_diameter(&host_nodes, mount.parent);
-        let (parent_radius, _) =
-            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
+        let (parent_radius, _) = host_mount_geometry(
+            hosts.get(mount.parent).ok(),
+            top_d,
+            mount.station,
+            mount.angle,
+        );
         let mesh = meshes.add(build_wing_mesh(wing, mount.angle, parent_radius));
         let mat = std_materials.add(StandardMaterial {
             double_sided: true,
@@ -985,8 +989,12 @@ fn rebuild_ship_gear_visuals(
             }
         }
         let top_d = host_top_diameter(&host_nodes, mount.parent);
-        let (parent_radius, _) =
-            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
+        let (parent_radius, _) = host_mount_geometry(
+            hosts.get(mount.parent).ok(),
+            top_d,
+            mount.station,
+            mount.angle,
+        );
         let mesh = meshes.add(build_gear_mesh(gear, mount.angle, parent_radius));
         let mat = std_materials.add(StandardMaterial {
             double_sided: true,
@@ -1161,9 +1169,9 @@ fn update_ship_camera_offset(
             else {
                 continue;
             };
-            let Some((height, radius)) =
-                visual_extent(nodes, pod, dec, adapter, tank, fuselage, engine, intake, wing, gear)
-            else {
+            let Some((height, radius)) = visual_extent(
+                nodes, pod, dec, adapter, tank, fuselage, engine, intake, wing, gear,
+            ) else {
                 continue;
             };
             let lo = Vec3::new(
@@ -1273,7 +1281,14 @@ fn update_ship_part_shader_params(
         let Some(mat) = ship_materials.get_mut(&handle.0) else {
             continue;
         };
-        let params = ship_part_params(nodes, tank, fuselage, dec, adapter, mat.extension.params.seed);
+        let params = ship_part_params(
+            nodes,
+            tank,
+            fuselage,
+            dec,
+            adapter,
+            mat.extension.params.seed,
+        );
         mat.extension.params.length = params.length;
         mat.extension.params.radius_top = params.radius_top;
         mat.extension.params.radius_bottom = params.radius_bottom;

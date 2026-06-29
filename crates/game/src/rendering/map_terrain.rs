@@ -279,12 +279,7 @@ fn spawn_map_terrain(
     let scale = MAP_SCALE as f32;
     let map_radius = body.radius_m * MAP_SCALE;
     let map_height_range = height_range_m * scale;
-    let model = TerrainModel::sphere(
-        DVec3::ZERO,
-        map_radius,
-        -map_height_range,
-        map_height_range,
-    );
+    let model = TerrainModel::sphere(DVec3::ZERO, map_radius, -map_height_range, map_height_range);
 
     let config = build_terrain_config(model, TerrainTier::Map);
     let provider: Box<dyn TileProvider> =
@@ -393,9 +388,7 @@ fn update_map_terrain(
     // Position: coincide with the focused body's billboard so the terrain
     // sphere sits exactly where the map expects the body. The `CelestialBody`
     // transform is already the origin-relative MAP_SCALE position.
-    let Some((_, body_tf, lock)) = bodies
-        .iter()
-        .find(|(b, _, _)| b.body_id == terrain.body_id)
+    let Some((_, body_tf, lock)) = bodies.iter().find(|(b, _, _)| b.body_id == terrain.body_id)
     else {
         return;
     };

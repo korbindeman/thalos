@@ -16,8 +16,8 @@ use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError, TextureDimension,
-    TextureFormat, TextureUsages,
+    AsBindGroup, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy::shader::ShaderRef;
 
@@ -58,6 +58,11 @@ pub struct TreeMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub atlas: Handle<Image>,
+    /// Companion **material atlas** (bark normal + roughness), built by
+    /// [`crate::ground::build_foliage_material_atlas`]. Linear data; shares the
+    /// albedo atlas's sampler (binding 2). Only bark fragments sample it.
+    #[texture(7)]
+    pub material_atlas: Handle<Image>,
     /// Cascaded sun-shadow transforms + strength (see [`ShadowCascadeBlock`]).
     #[uniform(3)]
     pub shadow: ShadowCascadeBlock,

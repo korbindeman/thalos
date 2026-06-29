@@ -2,6 +2,7 @@
 
 mod aero;
 mod autopilot;
+mod base_editor;
 mod body_tree_panel;
 mod bridge;
 mod camera;
@@ -47,6 +48,7 @@ mod structures;
 mod surface_settle;
 mod target;
 mod terrain_registry;
+mod ui_widgets;
 mod velocity_frame;
 mod view;
 mod warp_to_maneuver;
@@ -96,12 +98,12 @@ use map_view::MapViewPlugin;
 use navball::NavballPlugin;
 use navigation::NavigationPlugin;
 use pause_menu::PauseMenuPlugin;
-use settings_menu::SettingsMenuPlugin;
 use photo_mode::PhotoModePlugin;
 use player_controller::PlayerControllerPlugin;
 use rendering::RenderingPlugin;
 use scenario_menu::ScenarioMenuPlugin;
 use screenshot::ScreenshotPlugin;
+use settings_menu::SettingsMenuPlugin;
 use ship_view::ShipViewPlugin;
 use sim_clock::SimClockPlugin;
 use solar_system_state::{SimulationState, SolarSystemStatePlugin};
@@ -373,11 +375,18 @@ fn main() {
         .configure_sets(
             Update,
             (
-                SimStage::Physics
-                    .run_if(pause_menu::not_game_paused.and(shipyard_editor::editor_closed)),
-                SimStage::Sync.run_if(shipyard_editor::editor_closed),
-                SimStage::Camera
-                    .run_if(pause_menu::not_game_paused.and(shipyard_editor::editor_closed)),
+                SimStage::Physics.run_if(
+                    pause_menu::not_game_paused
+                        .and(shipyard_editor::editor_closed)
+                        .and(base_editor::base_editor_closed),
+                ),
+                SimStage::Sync
+                    .run_if(shipyard_editor::editor_closed.and(base_editor::base_editor_closed)),
+                SimStage::Camera.run_if(
+                    pause_menu::not_game_paused
+                        .and(shipyard_editor::editor_closed)
+                        .and(base_editor::base_editor_closed),
+                ),
             )
                 .chain(),
         )
@@ -411,7 +420,7 @@ fn main() {
                     filter: "info,\
                              wgpu=error,naga=warn,bevy_app=warn,\
                              bevy_render=warn,bevy_diagnostic=warn,\
-                             bevy_winit=warn,bevy_egui=warn,\
+                             bevy_winit=warn,\
                              bevy_pbr=warn,bevy_asset=warn,\
                              cosmic_text=warn,gilrs_core=warn,gilrs=warn,\
                              offset_allocator=warn"
@@ -425,15 +434,6 @@ fn main() {
         // libraries. Adding it again here would panic on duplicate
         // registration.
         .add_plugins(BodyRenderPlugin)
-        .add_plugins(bevy_egui::EguiPlugin::default())
-        // The dedicated UI camera in `view::spawn_ui_camera` owns the
-        // primary egui context; disable auto-attach so it doesn't bind
-        // to whichever scene camera spawns first and disappear when that
-        // camera goes inactive.
-        .insert_resource(bevy_egui::EguiGlobalSettings {
-            auto_create_primary_context: false,
-            ..default()
-        })
         .insert_resource({
             let mut simulation = Simulation::new(
                 ship_state,
@@ -523,6 +523,7 @@ fn main() {
         .add_plugins(ControlLocksPlugin)
         .add_plugins(control_bus::ControlBusPlugin)
         .add_plugins(WarpToManeuverPlugin)
+        .add_plugins(ui_widgets::UiWidgetsPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)
         .add_plugins(main_menu::MainMenuPlugin)
@@ -545,6 +546,7 @@ fn main() {
         .add_plugins(ShipViewPlugin)
         .add_plugins(relaunch::RelaunchPlugin)
         .add_plugins(shipyard_editor::ShipyardEditorPlugin)
+        .add_plugins(base_editor::BaseEditorPlugin)
         .add_plugins(BodyTreePanelPlugin)
         .add_plugins(DebugPlugin)
         .run();

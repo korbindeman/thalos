@@ -252,9 +252,7 @@ pub fn spawn_slider_row(
 /// latches for the whole drag, and `RelativeCursorPosition` keeps reporting
 /// outside the node, so the drag keeps tracking when the cursor overshoots —
 /// clamp to the range.
-pub fn drive_sliders(
-    mut sliders: Query<(&Interaction, &RelativeCursorPosition, &mut UiSlider)>,
-) {
+pub fn drive_sliders(mut sliders: Query<(&Interaction, &RelativeCursorPosition, &mut UiSlider)>) {
     for (interaction, rel, mut slider) in &mut sliders {
         if !matches!(interaction, Interaction::Pressed) {
             continue;
@@ -308,10 +306,7 @@ pub struct ScrollableColumn;
 /// Wheel-scroll whichever scrollable column the cursor is over.
 pub fn scroll_scrollables(
     mut wheel: MessageReader<MouseWheel>,
-    mut scrollables: Query<
-        (&RelativeCursorPosition, &mut ScrollPosition),
-        With<ScrollableColumn>,
-    >,
+    mut scrollables: Query<(&RelativeCursorPosition, &mut ScrollPosition), With<ScrollableColumn>>,
 ) {
     for event in wheel.read() {
         let dy = match event.unit {

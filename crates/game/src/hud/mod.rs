@@ -83,7 +83,6 @@ impl Plugin for HudPlugin {
             .init_resource::<pfd_panel::NavDisplayMode>()
             .register_type::<pfd_panel::NavDisplayMode>()
             .add_systems(Startup, theme::init_theme)
-            .add_systems(bevy_egui::EguiPrimaryContextPass, theme::apply_egui_theme)
             .add_systems(Startup, setup_top_left_row.after(theme::init_theme))
             .add_systems(
                 Startup,

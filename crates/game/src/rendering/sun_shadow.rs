@@ -334,7 +334,11 @@ fn log_shadow_state(line: &str) {
     let Ok(path) = std::env::var("THALOS_SHADOW_LOG") else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -450,8 +454,19 @@ fn update_sun_shadow_camera(
                 "{{\"frame\":{},\"reason\":\"{}\",\"active\":true,\"alt_m\":{:.1},\
                  \"body\":\"{}\",\"n_terrain\":{},\"strength\":{:.3},\"cascades\":{},\
                  \"eye\":[{:.1},{:.1},{:.1}],\"sun\":[{:.3},{:.3},{:.3}]}}",
-                *frame, reason, altitude_m, body_dbg, n_terrain_bodies, SHADOW_STRENGTH,
-                CASCADE_COUNT, eye_dbg.x, eye_dbg.y, eye_dbg.z, sun_dbg.x, sun_dbg.y, sun_dbg.z,
+                *frame,
+                reason,
+                altitude_m,
+                body_dbg,
+                n_terrain_bodies,
+                SHADOW_STRENGTH,
+                CASCADE_COUNT,
+                eye_dbg.x,
+                eye_dbg.y,
+                eye_dbg.z,
+                sun_dbg.x,
+                sun_dbg.y,
+                sun_dbg.z,
             ));
         }
         return;

@@ -77,7 +77,11 @@ pub(super) fn rebuild_staging(
     let header;
     match &cache.staging {
         Some(Ok(summaries)) if !summaries.is_empty() => {
-            let total_dv: f64 = summaries.iter().map(|s| s.delta_v_m_s).sum::<f64>().max(0.0);
+            let total_dv: f64 = summaries
+                .iter()
+                .map(|s| s.delta_v_m_s)
+                .sum::<f64>()
+                .max(0.0);
             header = format!("TOTAL Δv {}", format_delta_v(total_dv));
             for s in summaries {
                 let dv = if s.has_engine {

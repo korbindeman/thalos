@@ -22,9 +22,7 @@ pub mod widgets;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
-use thalos_shipyard::editor::{
-    CollectQuery, EditorPart, EditorState, collect_blueprint,
-};
+use thalos_shipyard::editor::{CollectQuery, EditorPart, EditorState, collect_blueprint};
 use thalos_shipyard::{
     Attachment, PartCatalog, PartParams, Ship, ShipBlueprint, ShipStats, StageSummary,
     SurfaceMount, SymmetryGroup,
@@ -253,7 +251,10 @@ fn refresh_stats_cache(
         .map(|s| s.name.clone())
         .unwrap_or_default();
     let blueprint = state.ship_root.and_then(|root| {
-        let ship = Ship { name: name.clone(), root };
+        let ship = Ship {
+            name: name.clone(),
+            root,
+        };
         collect_blueprint(&ship, &parts, &attachments, &surface_mounts, &groups)
     });
     cache.stats = blueprint

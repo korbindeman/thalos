@@ -322,9 +322,7 @@ fn generate_coverage_map(state: &CloudWeatherState) -> Vec<u8> {
             let lon = std::f32::consts::TAU * ((col as f32 + 0.5) / w as f32 - 0.5);
             let dir = Vec3::new(sin_c * lon.cos(), cos_c, sin_c * lon.sin());
             let n = fbm3(dir * WEATHER_NOISE_FREQ, state.seed, 4);
-            let c = state.coverage_mean
-                + state.band_strength * band
-                + state.variation * (n - 0.5);
+            let c = state.coverage_mean + state.band_strength * band + state.variation * (n - 0.5);
             data[row * w + col] = (c.clamp(0.0, 1.0) * 255.0) as u8;
         }
     }

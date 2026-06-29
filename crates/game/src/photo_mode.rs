@@ -10,7 +10,6 @@
 //! aperture, exposure) and a dedicated photo-mode panel.
 
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
 use thalos_input::game::GameInputIntent;
 
 /// Global photo-mode state.
@@ -50,16 +49,14 @@ pub fn not_in_photo_mode(photo_mode: Res<PhotoMode>) -> bool {
 
 fn toggle_photo_mode_input(
     input: Res<GameInputIntent>,
-    mut contexts: EguiContexts,
+    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
     mut photo_mode: ResMut<PhotoMode>,
 ) {
     if !input.toggle_photo_mode {
         return;
     }
-    // Don't steal P while the user is typing into an egui widget.
-    if let Ok(ctx) = contexts.ctx_mut()
-        && ctx.wants_keyboard_input()
-    {
+    // Don't steal P while the user is typing into a UI text field.
+    if ui_text.is_focused() {
         return;
     }
     photo_mode.active = !photo_mode.active;

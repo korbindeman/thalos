@@ -1,255 +1,653 @@
-//! Body hierarchy popup for the map view.
+//! Body hierarchy popup for the map view (native Bevy UI).
 //!
 //! Shows every body in `SolarSystemDefinition` as an indented tree
-//! (Star → Planets → Moons), with a separate "Minor bodies" collapsing
-//! group for dwarf planets, centaurs, and comets. Clicking a row focuses
-//! the map camera on that body, mirroring the smooth-transition pattern
-//! used by `double_click_focus_system` in `rendering.rs`.
+//! (Star → Planets → Moons), with a separate "Minor bodies" collapsing group
+//! for dwarf planets, centaurs, and comets. Clicking a row focuses the map
+//! camera on that body, mirroring the smooth-transition pattern used by
+//! `double_click_focus_system` in `rendering`.
+//!
+//! The row set is rebuilt only when its structure changes (the ship's SOI body,
+//! the debug flag, or the minor-group collapse); focus highlighting and the
+//! debug drop/aim state are per-frame visual updates. Debug cmd-click teleports
+//! a body to low orbit; the per-row drop button arms the surface cursor.
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy::ui::RelativeCursorPosition;
 use std::collections::HashMap;
-use thalos_physics_canonical::canonical::AuthorityMode;
+use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
 use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::debug::{DebugMode, DebugSurfaceTeleport, low_orbit_state};
+use crate::hud::theme::{HudTheme, panel_frame};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
-use crate::pause_menu::not_game_paused;
-use crate::photo_mode::not_in_photo_mode;
+use crate::pause_menu::GamePause;
+use crate::photo_mode::PhotoMode;
 use crate::player_controller::EvaMode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
-use crate::view::in_map_view;
+use crate::scenario_menu::ScenarioMenu;
+use crate::shipyard_editor::ShipyardEditor;
+use crate::ui_widgets::{ScrollableColumn, UiButton};
+use crate::view::ViewMode;
 
-/// Default framing distance (metres) when the ship row is clicked. Matches
-/// the value `sync_view_mode_changed` uses when entering map view, so
-/// picking the ship from the tree lands at the same zoom as switching to
-/// map view from ship view.
+/// Default framing distance (metres) when the ship row is clicked. Matches the
+/// value `sync_view_mode_changed` uses when entering map view.
 const SHIP_TREE_FOCUS_DISTANCE_M: f64 = 2.0e7;
+
+const INDENT_PX: f32 = 14.0;
+
+// ── Resources / markers ─────────────────────────────────────────────────────────
+
+#[derive(Resource)]
+struct BodyTreeState {
+    collapsed_minor: bool,
+}
+
+impl Default for BodyTreeState {
+    fn default() -> Self {
+        Self {
+            collapsed_minor: true,
+        }
+    }
+}
+
+#[derive(Component)]
+struct BodyTreePanelRoot;
+
+#[derive(Component)]
+struct BodyTreeContent;
+
+#[derive(Component, Clone, Copy)]
+struct BodyRowButton {
+    body_id: BodyId,
+}
+
+#[derive(Component)]
+struct ShipRowButton;
+
+#[derive(Component, Clone, Copy)]
+struct DropButton {
+    body_id: BodyId,
+}
+
+#[derive(Component)]
+struct MinorToggle;
+
+// ── Plugin ────────────────────────────────────────────────────────────────────
 
 pub struct BodyTreePanelPlugin;
 
 impl Plugin for BodyTreePanelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            bevy_egui::EguiPrimaryContextPass,
-            body_tree_panel.run_if(
-                not_game_paused
-                    .and(not_in_photo_mode)
-                    .and(in_map_view)
-                    .and(crate::shipyard_editor::editor_closed),
-            ),
-        );
+        app.init_resource::<BodyTreeState>()
+            .add_systems(Startup, setup_ui.after(crate::hud::theme::init_theme))
+            .add_systems(
+                Update,
+                (
+                    update_visibility,
+                    rebuild_body_tree,
+                    update_row_visuals,
+                    handle_minor_toggle,
+                    handle_tree_clicks,
+                ),
+            );
     }
 }
 
-fn body_tree_panel(
-    mut commands: Commands,
-    mut contexts: EguiContexts,
-    mut sim: ResMut<SimulationState>,
-    bodies: Query<(Entity, &CelestialBody, &Transform)>,
-    ship_marker: Query<&Name, With<ShipMarker>>,
-    origin: Res<RenderOrigin>,
-    mut focus: ResMut<CameraFocus>,
-    debug: Res<DebugMode>,
-    mut surface_teleport: ResMut<DebugSurfaceTeleport>,
-    mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
-    mut eva_mode: ResMut<EvaMode>,
-    mut plan: ResMut<ManeuverPlan>,
-    mut selected: ResMut<SelectedNode>,
-) {
-    let Ok(ctx) = contexts.ctx_mut() else { return };
+fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
+    let (bg, border) = panel_frame(&theme);
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(12.0),
+                top: Val::Px(56.0),
+                width: Val::Px(212.0),
+                max_height: Val::Percent(70.0),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            bg,
+            border,
+            Visibility::Hidden,
+            BodyTreePanelRoot,
+            Name::new("BodyTreePanel"),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("CELESTIAL BODIES"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 10.0,
+                    ..default()
+                },
+                TextColor(theme.text_subtitle),
+            ));
+            panel.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(2.0),
+                    overflow: Overflow::scroll_y(),
+                    flex_grow: 1.0,
+                    ..default()
+                },
+                ScrollPosition::default(),
+                RelativeCursorPosition::default(),
+                Interaction::None,
+                ScrollableColumn,
+                BodyTreeContent,
+                Name::new("BodyTreeContent"),
+            ));
+        });
+}
 
-    let body_entities: HashMap<BodyId, Entity> =
-        bodies.iter().map(|(e, cb, _)| (cb.body_id, e)).collect();
+// ── Visibility ──────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn update_visibility(
+    view: Res<ViewMode>,
+    pause: Res<GamePause>,
+    scenario: Res<ScenarioMenu>,
+    photo: Res<PhotoMode>,
+    shipyard: Option<Res<ShipyardEditor>>,
+    mut roots: Query<&mut Visibility, With<BodyTreePanelRoot>>,
+) {
+    let editor_open = shipyard.as_deref().map(|e| e.open).unwrap_or(false);
+    let visible = *view == ViewMode::Map
+        && !pause.active
+        && !scenario.open
+        && !photo.active
+        && !editor_open;
+    let target = if visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut vis in &mut roots {
+        if *vis != target {
+            *vis = target;
+        }
+    }
+}
+
+// ── Rebuild ───────────────────────────────────────────────────────────────────
+
+fn rebuild_body_tree(
+    mut commands: Commands,
+    sim: Option<Res<SimulationState>>,
+    state: Res<BodyTreeState>,
+    debug: Res<DebugMode>,
+    theme: Res<HudTheme>,
+    ship_marker: Query<&Name, With<ShipMarker>>,
+    content: Query<(Entity, Option<&Children>), With<BodyTreeContent>>,
+    mut shown: Local<Option<(BodyId, bool, bool, usize)>>,
+) {
+    let Some(sim) = sim else {
+        return;
+    };
+    let soi = sim.simulation.dominant_body();
+    let key = (
+        soi,
+        debug.enabled,
+        state.collapsed_minor,
+        sim.system.bodies.len(),
+    );
+    if *shown == Some(key) {
+        return;
+    }
+    *shown = Some(key);
+
+    let Ok((content_entity, children)) = content.single() else {
+        return;
+    };
+    if let Some(children) = children {
+        for child in children.iter() {
+            commands.entity(child).despawn();
+        }
+    }
 
     let system = &sim.system;
+    let Some(root) = system.bodies.iter().find(|b| b.parent.is_none()) else {
+        return;
+    };
+
     let mut children_of: HashMap<BodyId, Vec<&BodyDefinition>> = HashMap::new();
     for body in &system.bodies {
         if let Some(parent) = body.parent {
             children_of.entry(parent).or_default().push(body);
         }
     }
-    // Stable order: the file's listing order.
     for kids in children_of.values_mut() {
         kids.sort_by_key(|b| b.id);
     }
 
-    let Some(root) = system.bodies.iter().find(|b| b.parent.is_none()) else {
-        return;
-    };
-
-    // Anchor the ship row under whichever body's SOI currently contains
-    // the ship — same rule the propagator uses, so the tree position
-    // tracks SOI transitions live.
-    let soi_id = sim.simulation.dominant_body();
     let ship: Option<&str> = ship_marker.single().ok().map(|n| n.as_str());
+    let debug_enabled = debug.enabled;
+    let collapsed = state.collapsed_minor;
+    let theme = theme.clone();
 
-    let mut clicked: Option<BodyId> = None;
-    let mut cmd_clicked: Option<BodyId> = None;
-    let mut drop_clicked: Option<BodyId> = None;
-    let mut clicked_ship = false;
-
-    let initial_pos = ctx.available_rect().left_top() + egui::vec2(8.0, 8.0);
-
-    egui::Window::new("Celestial bodies")
-        .default_pos(initial_pos)
-        .resizable(false)
-        .show(ctx, |ui| {
-            ui.set_min_width(180.0);
-
-            // Major tree: star and its non-minor descendants.
-            render_row(
-                ui,
-                root,
-                &body_entities,
-                focus.target,
-                debug.enabled,
-                surface_teleport.armed_body,
-                &mut clicked,
-                &mut cmd_clicked,
-                &mut drop_clicked,
-                0,
-            );
-            if root.id == soi_id
-                && let Some(name) = ship
-            {
-                render_ship_row(ui, name, focus.target, &mut clicked_ship, 1);
+    commands.entity(content_entity).with_children(|c| {
+        // Major tree.
+        spawn_body_row(c, &theme, root, debug_enabled, 0);
+        if root.id == soi
+            && let Some(name) = ship
+        {
+            spawn_ship_row(c, &theme, name, 1);
+        }
+        if let Some(kids) = children_of.get(&root.id) {
+            for child in kids.iter().filter(|b| !is_minor(b.kind)) {
+                build_subtree(c, &theme, child, &children_of, debug_enabled, 1, soi, ship);
             }
-            if let Some(kids) = children_of.get(&root.id) {
-                for child in kids.iter().filter(|b| !is_minor(b.kind)) {
-                    render_subtree(
-                        ui,
-                        child,
-                        &children_of,
-                        &body_entities,
-                        focus.target,
-                        debug.enabled,
-                        surface_teleport.armed_body,
-                        &mut clicked,
-                        &mut cmd_clicked,
-                        &mut drop_clicked,
-                        1,
-                        ship,
-                        soi_id,
-                        &mut clicked_ship,
-                    );
+        }
+
+        // Minor bodies.
+        let minor: Vec<&BodyDefinition> = children_of
+            .get(&root.id)
+            .map(|kids| kids.iter().copied().filter(|b| is_minor(b.kind)).collect())
+            .unwrap_or_default();
+        if !minor.is_empty() {
+            spawn_minor_toggle(c, &theme, collapsed);
+            if !collapsed {
+                for body in minor {
+                    build_subtree(c, &theme, body, &children_of, debug_enabled, 1, soi, ship);
                 }
             }
+        }
+    });
+}
 
-            // Minor bodies: collapsing group of dwarf planets / centaurs /
-            // comets that orbit the star, with their own descendants nested.
-            let minor: Vec<&BodyDefinition> = children_of
-                .get(&root.id)
-                .map(|kids| kids.iter().copied().filter(|b| is_minor(b.kind)).collect())
-                .unwrap_or_default();
-            if !minor.is_empty() {
-                ui.collapsing("Minor bodies", |ui| {
-                    for body in minor {
-                        render_subtree(
-                            ui,
-                            body,
-                            &children_of,
-                            &body_entities,
-                            focus.target,
-                            debug.enabled,
-                            surface_teleport.armed_body,
-                            &mut clicked,
-                            &mut cmd_clicked,
-                            &mut drop_clicked,
-                            0,
-                            ship,
-                            soi_id,
-                            &mut clicked_ship,
-                        );
-                    }
-                });
-            }
-        });
-
-    if clicked_ship && ship.is_some() && focus.target != CameraFocusTarget::Ship {
-        focus.focus_on_ship(origin.position);
-        focus.target_distance = SHIP_TREE_FOCUS_DISTANCE_M;
-    }
-
-    if let Some(body_id) = clicked
-        && let Some(&target_entity) = body_entities.get(&body_id)
-        && focus.target != CameraFocusTarget::Body(body_id)
+#[allow(clippy::too_many_arguments)]
+fn build_subtree(
+    c: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    body: &BodyDefinition,
+    children_of: &HashMap<BodyId, Vec<&BodyDefinition>>,
+    debug_enabled: bool,
+    depth: u32,
+    soi: BodyId,
+    ship: Option<&str>,
+) {
+    spawn_body_row(c, theme, body, debug_enabled, depth);
+    if body.id == soi
+        && let Some(name) = ship
     {
-        focus.focus_on_body(body_id, origin.position);
-        focus.frame_for_radius(system.bodies[body_id].radius_m);
+        spawn_ship_row(c, theme, name, depth + 1);
+    }
+    if let Some(kids) = children_of.get(&body.id) {
+        for child in kids {
+            build_subtree(c, theme, child, children_of, debug_enabled, depth + 1, soi, ship);
+        }
+    }
+}
 
-        // Aim from the lit side, biased slightly above and to the
-        // camera's right so the body has a soft terminator instead of
-        // looking flat (true full-phase). Skipped when the target is the
-        // star itself (sun_dir collapses to zero).
-        if let Some((_, _, sun_t)) = bodies.iter().find(|(_, cb, _)| cb.body_id == root.id)
-            && let Ok((_, _, target_t)) = bodies.get(target_entity)
+fn spawn_body_row(
+    c: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    body: &BodyDefinition,
+    debug_enabled: bool,
+    depth: u32,
+) {
+    let [r, g, b] = body.color;
+    let dot = Color::srgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+    let body_id = body.id;
+    let name = body.name.clone();
+    let show_drop = debug_enabled && !matches!(body.kind, BodyKind::Star);
+
+    c.spawn(row_node(depth)).with_children(|row| {
+        spawn_dot(row, dot);
+        // Frameless selectable name button; colour driven by `update_row_visuals`.
+        row.spawn((
+            Button,
+            Node {
+                padding: UiRect::axes(Val::Px(2.0), Val::Px(1.0)),
+                ..default()
+            },
+            Interaction::None,
+            BodyRowButton { body_id },
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(name),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(theme.text_primary),
+            ));
+        });
+        if show_drop {
+            spawn_drop_button(row, theme, body_id);
+        }
+    });
+}
+
+/// Small bordered debug button (`drop`/`aim`). Like `ui_widgets::spawn_button`
+/// but its label carries [`DropLabel`] so `update_row_visuals` can swap the
+/// text; `style_buttons` still owns its colour via [`UiButton`].
+fn spawn_drop_button(row: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, body_id: BodyId) {
+    row.spawn((
+        Button,
+        Node {
+            height: Val::Px(18.0),
+            border: UiRect::all(Val::Px(1.0)),
+            border_radius: BorderRadius::all(Val::Px(3.0)),
+            padding: UiRect::axes(Val::Px(6.0), Val::Px(1.0)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(theme.panel_bg),
+        BorderColor::all(theme.panel_border),
+        Interaction::None,
+        UiButton::default(),
+        DropButton { body_id },
+    ))
+    .with_children(|c| {
+        c.spawn((
+            Text::new("drop"),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 9.0,
+                ..default()
+            },
+            TextColor(theme.text_primary),
+            DropLabel,
+        ));
+    });
+}
+
+fn spawn_ship_row(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, name: &str, depth: u32) {
+    c.spawn(row_node(depth)).with_children(|row| {
+        spawn_dot(row, Color::WHITE);
+        row.spawn((
+            Button,
+            Node {
+                padding: UiRect::axes(Val::Px(2.0), Val::Px(1.0)),
+                ..default()
+            },
+            Interaction::None,
+            ShipRowButton,
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(name.to_string()),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(theme.text_primary),
+            ));
+        });
+    });
+}
+
+fn spawn_minor_toggle(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, collapsed: bool) {
+    let glyph = if collapsed { "▸" } else { "▾" };
+    c.spawn((
+        Button,
+        Node {
+            padding: UiRect::axes(Val::Px(2.0), Val::Px(2.0)),
+            margin: UiRect::top(Val::Px(2.0)),
+            ..default()
+        },
+        Interaction::None,
+        MinorToggle,
+    ))
+    .with_children(|b| {
+        b.spawn((
+            Text::new(format!("{glyph} Minor bodies")),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(theme.text_dim),
+        ));
+    });
+}
+
+fn row_node(depth: u32) -> Node {
+    Node {
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(4.0),
+        padding: UiRect::left(Val::Px(depth as f32 * INDENT_PX)),
+        ..default()
+    }
+}
+
+fn spawn_dot(row: &mut ChildSpawnerCommands<'_>, color: Color) {
+    row.spawn((
+        Node {
+            width: Val::Px(8.0),
+            height: Val::Px(8.0),
+            border_radius: BorderRadius::all(Val::Percent(50.0)),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(color),
+    ));
+}
+
+// ── Per-frame visuals ───────────────────────────────────────────────────────────
+
+#[allow(clippy::type_complexity)]
+fn update_row_visuals(
+    focus: Res<CameraFocus>,
+    teleport: Res<DebugSurfaceTeleport>,
+    theme: Res<HudTheme>,
+    body_btns: Query<(&BodyRowButton, &Children)>,
+    ship_btns: Query<&Children, With<ShipRowButton>>,
+    mut drop_btns: Query<(&DropButton, &mut UiButton, &Children)>,
+    mut name_text: Query<&mut TextColor, Without<DropLabel>>,
+    mut drop_text: Query<&mut Text, With<DropLabel>>,
+) {
+    for (button, children) in &body_btns {
+        let focused = focus.target == CameraFocusTarget::Body(button.body_id);
+        let color = if focused {
+            theme.text_accent
+        } else {
+            theme.text_primary
+        };
+        if let Some(&child) = children.first()
+            && let Ok(mut tc) = name_text.get_mut(child)
+            && tc.0 != color
         {
-            const TILT_UP: f32 = 0.2;
-            const TILT_RIGHT: f32 = 0.2;
-            let sun_dir = (sun_t.translation - target_t.translation).normalize_or_zero();
-            if sun_dir != Vec3::ZERO {
-                // Camera-right (world space) when sitting on the Sun side
-                // and looking back at the target: `Y × sun_dir`. Falls
-                // back to zero when the Sun is directly above/below the
-                // target (degenerate); only the up-tilt applies then.
-                let camera_right = Vec3::Y.cross(sun_dir).normalize_or_zero();
-                let aim_dir = (sun_dir + Vec3::Y * TILT_UP + camera_right * TILT_RIGHT).normalize();
-                focus.aim_from(aim_dir);
-            }
+            tc.0 = color;
         }
     }
 
-    if debug.enabled
-        && let Some(body_id) = drop_clicked
-    {
-        if matches!(sim.system.bodies[body_id].kind, BodyKind::Star) {
+    let ship_focused = focus.target == CameraFocusTarget::Ship;
+    let ship_color = if ship_focused {
+        theme.text_accent
+    } else {
+        theme.text_primary
+    };
+    for children in &ship_btns {
+        if let Some(&child) = children.first()
+            && let Ok(mut tc) = name_text.get_mut(child)
+            && tc.0 != ship_color
+        {
+            tc.0 = ship_color;
+        }
+    }
+
+    for (drop, mut button, children) in &mut drop_btns {
+        let armed = teleport.armed_body == Some(drop.body_id);
+        if button.latched != armed {
+            button.latched = armed;
+        }
+        let label = if armed { "aim" } else { "drop" };
+        if let Some(&child) = children.first()
+            && let Ok(mut text) = drop_text.get_mut(child)
+            && **text != *label
+        {
+            **text = label.to_string();
+        }
+    }
+}
+
+/// Marker on the drop-button label so `update_row_visuals` can disambiguate it
+/// from the name-button labels (whose colour it owns; the drop label's colour
+/// is owned by `ui_widgets::style_buttons` via [`UiButton`]).
+#[derive(Component)]
+struct DropLabel;
+
+// ── Interaction ───────────────────────────────────────────────────────────────
+
+fn handle_minor_toggle(
+    interactions: Query<&Interaction, (Changed<Interaction>, With<MinorToggle>)>,
+    mut state: ResMut<BodyTreeState>,
+) {
+    for interaction in &interactions {
+        if matches!(interaction, Interaction::Pressed) {
+            state.collapsed_minor = !state.collapsed_minor;
+        }
+    }
+}
+
+type TreeInteractions<'w, 's> = (
+    Query<'w, 's, (&'static Interaction, &'static BodyRowButton), Changed<Interaction>>,
+    Query<'w, 's, &'static Interaction, (Changed<Interaction>, With<ShipRowButton>)>,
+    Query<'w, 's, (&'static Interaction, &'static DropButton), Changed<Interaction>>,
+);
+
+#[allow(clippy::too_many_arguments)]
+fn handle_tree_clicks(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    interactions: TreeInteractions,
+    mut sim: ResMut<SimulationState>,
+    mut focus: ResMut<CameraFocus>,
+    origin: Res<RenderOrigin>,
+    debug: Res<DebugMode>,
+    mut surface_teleport: ResMut<DebugSurfaceTeleport>,
+    mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
+    mut eva_mode: ResMut<EvaMode>,
+    mut plan: ResMut<ManeuverPlan>,
+    mut selected: ResMut<SelectedNode>,
+    bodies: Query<(Entity, &CelestialBody, &Transform)>,
+) {
+    let (body_q, ship_q, drop_q) = interactions;
+    let cmd = keys.any_pressed([
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
+
+    let body_entities: HashMap<BodyId, Entity> =
+        bodies.iter().map(|(e, cb, _)| (cb.body_id, e)).collect();
+
+    // Ship row → focus the ship.
+    for interaction in &ship_q {
+        if matches!(interaction, Interaction::Pressed)
+            && focus.target != CameraFocusTarget::Ship
+        {
+            focus.focus_on_ship(origin.position);
+            focus.target_distance = SHIP_TREE_FOCUS_DISTANCE_M;
+        }
+    }
+
+    // Drop button → arm the surface cursor (debug).
+    for (interaction, drop) in &drop_q {
+        if !matches!(interaction, Interaction::Pressed) || !debug.enabled {
+            continue;
+        }
+        if matches!(sim.system.bodies[drop.body_id].kind, BodyKind::Star) {
             warn!(
                 "surface drop ignored for star {}",
-                sim.system.bodies[body_id].name
+                sim.system.bodies[drop.body_id].name
             );
         } else {
-            surface_teleport.arm(body_id);
+            surface_teleport.arm(drop.body_id);
         }
     }
 
-    // Debug: cmd-click teleports the craft to a low circular orbit. Surface
-    // placement is now explicit via each row's `drop` button and cursor.
-    if debug.enabled
-        && let Some(body_id) = cmd_clicked
-    {
-        let is_eva = sim.simulation.vessel_kind() == VesselKind::Eva;
-        let sim_time = sim.simulation.sim_time();
-        let body_state = sim.ephemeris.state(
-            body_id,
-            thalos_physics_canonical::canonical::Epoch(sim_time),
-        );
-        // EVA keeps its persistent bubble (in-place teleport); only ships tear
-        // down and respawn. Clearing the EVA bubble would despawn the capsule
-        // and the next spawn would re-ground it on the surface.
-        if !is_eva {
-            clear_active_local_bubble(&mut commands, &mut active_bubble);
+    // Body name → focus (+ cmd-click teleport to low orbit, debug).
+    for (interaction, button) in &body_q {
+        if !matches!(interaction, Interaction::Pressed) {
+            continue;
         }
-        let (state, attitude) = low_orbit_state(&sim.system.bodies[body_id], &body_state);
-        sim.simulation
-            .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
-        sim.simulation.set_ship_state(state);
-        sim.simulation.set_attitude(attitude);
-        // Teleporting to orbit hands the player a fresh craft — clear any
-        // structural failure so a wreck can be recovered. See docs/surface.md.
-        sim.simulation.repair();
-        sim.simulation.warp.reset();
-        // Airborne: Kepler owns translation, the canonical→Avian snap drives
-        // the capsule, and `step_eva_controller` stands down.
-        if is_eva {
-            *eva_mode = EvaMode::Airborne;
+        let body_id = button.body_id;
+
+        if focus.target != CameraFocusTarget::Body(body_id)
+            && let Some(&target_entity) = body_entities.get(&body_id)
+        {
+            focus.focus_on_body(body_id, origin.position);
+            focus.frame_for_radius(sim.system.bodies[body_id].radius_m);
+
+            // Aim from the lit side, biased above/right for a soft terminator.
+            if let Some(root) = sim.system.bodies.iter().find(|b| b.parent.is_none())
+                && let Some((_, _, sun_t)) =
+                    bodies.iter().find(|(_, cb, _)| cb.body_id == root.id)
+                && let Ok((_, _, target_t)) = bodies.get(target_entity)
+            {
+                const TILT_UP: f32 = 0.2;
+                const TILT_RIGHT: f32 = 0.2;
+                let sun_dir = (sun_t.translation - target_t.translation).normalize_or_zero();
+                if sun_dir != Vec3::ZERO {
+                    let camera_right = Vec3::Y.cross(sun_dir).normalize_or_zero();
+                    let aim_dir =
+                        (sun_dir + Vec3::Y * TILT_UP + camera_right * TILT_RIGHT).normalize();
+                    focus.aim_from(aim_dir);
+                }
+            }
         }
 
-        clear_debug_teleport_maneuvers(&mut plan, &mut selected);
+        if debug.enabled && cmd {
+            teleport_to_low_orbit(
+                body_id,
+                &mut commands,
+                &mut sim,
+                &mut active_bubble,
+                &mut eva_mode,
+                &mut plan,
+                &mut selected,
+            );
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn teleport_to_low_orbit(
+    body_id: BodyId,
+    commands: &mut Commands,
+    sim: &mut SimulationState,
+    active_bubble: &mut Option<ResMut<ActiveLocalBubble>>,
+    eva_mode: &mut EvaMode,
+    plan: &mut ManeuverPlan,
+    selected: &mut SelectedNode,
+) {
+    let is_eva = sim.simulation.vessel_kind() == VesselKind::Eva;
+    let sim_time = sim.simulation.sim_time();
+    let body_state = sim.ephemeris.state(body_id, Epoch(sim_time));
+    // EVA keeps its persistent bubble (in-place teleport); only ships tear down.
+    if !is_eva {
+        clear_active_local_bubble(commands, active_bubble);
+    }
+    let (state, attitude) = low_orbit_state(&sim.system.bodies[body_id], &body_state);
+    sim.simulation
+        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+    sim.simulation.set_ship_state(state);
+    sim.simulation.set_attitude(attitude);
+    // A fresh craft — clear any structural failure so a wreck can be recovered.
+    sim.simulation.repair();
+    sim.simulation.warp.reset();
+    if is_eva {
+        *eva_mode = EvaMode::Airborne;
+    }
+    clear_debug_teleport_maneuvers(plan, selected);
 }
 
 fn clear_active_local_bubble(
@@ -269,9 +667,6 @@ fn clear_active_local_bubble(
 }
 
 fn clear_debug_teleport_maneuvers(plan: &mut ManeuverPlan, selected: &mut SelectedNode) {
-    // The pre-teleport flight plan is meaningless once the ship jumps to a
-    // new orbit or surface pose. The next bridge sync pushes the empty plan
-    // into physics, which dirties prediction and rebuilds from the new state.
     if !plan.nodes.is_empty() {
         plan.nodes.clear();
         plan.dirty = true;
@@ -284,144 +679,4 @@ fn is_minor(kind: BodyKind) -> bool {
         kind,
         BodyKind::DwarfPlanet | BodyKind::Centaur | BodyKind::Comet
     )
-}
-
-fn render_subtree(
-    ui: &mut egui::Ui,
-    body: &BodyDefinition,
-    children_of: &HashMap<BodyId, Vec<&BodyDefinition>>,
-    body_entities: &HashMap<BodyId, Entity>,
-    focused_target: CameraFocusTarget,
-    debug_enabled: bool,
-    armed_drop_body: Option<BodyId>,
-    clicked: &mut Option<BodyId>,
-    cmd_clicked: &mut Option<BodyId>,
-    drop_clicked: &mut Option<BodyId>,
-    depth: u32,
-    ship: Option<&str>,
-    soi_id: BodyId,
-    clicked_ship: &mut bool,
-) {
-    render_row(
-        ui,
-        body,
-        body_entities,
-        focused_target,
-        debug_enabled,
-        armed_drop_body,
-        clicked,
-        cmd_clicked,
-        drop_clicked,
-        depth,
-    );
-    if body.id == soi_id
-        && let Some(name) = ship
-    {
-        render_ship_row(ui, name, focused_target, clicked_ship, depth + 1);
-    }
-    if let Some(kids) = children_of.get(&body.id) {
-        for child in kids {
-            render_subtree(
-                ui,
-                child,
-                children_of,
-                body_entities,
-                focused_target,
-                debug_enabled,
-                armed_drop_body,
-                clicked,
-                cmd_clicked,
-                drop_clicked,
-                depth + 1,
-                ship,
-                soi_id,
-                clicked_ship,
-            );
-        }
-    }
-}
-
-/// Row rendering the player ship under its SOI body. Mirrors
-/// [`render_row`]'s layout and selection styling, with a white marker
-/// dot matching the in-world `ShipMarker` billboard.
-fn render_ship_row(
-    ui: &mut egui::Ui,
-    name: &str,
-    focused_target: CameraFocusTarget,
-    clicked: &mut bool,
-    depth: u32,
-) {
-    let is_focused = focused_target == CameraFocusTarget::Ship;
-
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 14.0);
-
-        let dot_color = egui::Color32::WHITE;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-        ui.add_space(4.0);
-
-        let label = ui.add(egui::Button::selectable(is_focused, name).frame(false));
-        if label.clicked() {
-            *clicked = true;
-        }
-    });
-}
-
-fn render_row(
-    ui: &mut egui::Ui,
-    body: &BodyDefinition,
-    body_entities: &HashMap<BodyId, Entity>,
-    focused_target: CameraFocusTarget,
-    debug_enabled: bool,
-    armed_drop_body: Option<BodyId>,
-    clicked: &mut Option<BodyId>,
-    cmd_clicked: &mut Option<BodyId>,
-    drop_clicked: &mut Option<BodyId>,
-    depth: u32,
-) {
-    let entity = body_entities.get(&body.id).copied();
-    let is_focused = focused_target == CameraFocusTarget::Body(body.id);
-
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 14.0);
-
-        let [r, g, b] = body.color;
-        let dot_color = egui::Color32::from_rgb(
-            (r.clamp(0.0, 1.0) * 255.0) as u8,
-            (g.clamp(0.0, 1.0) * 255.0) as u8,
-            (b.clamp(0.0, 1.0) * 255.0) as u8,
-        );
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-        ui.add_space(4.0);
-
-        let label = ui.add_enabled(
-            entity.is_some(),
-            egui::Button::selectable(is_focused, &body.name).frame(false),
-        );
-        if label.clicked() {
-            // `command` is cmd on macOS, ctrl on Windows/Linux — egui's
-            // standard cross-platform "primary modifier." Cmd-click
-            // teleports to low orbit (handled below) and focuses.
-            *clicked = Some(body.id);
-            let modifiers = ui.input(|i| i.modifiers);
-            if modifiers.command {
-                *cmd_clicked = Some(body.id);
-            }
-        }
-
-        if debug_enabled && !matches!(body.kind, BodyKind::Star) {
-            ui.add_space(4.0);
-            let armed = armed_drop_body == Some(body.id);
-            let text = if armed { "aim" } else { "drop" };
-            let drop = ui
-                .add_enabled(entity.is_some(), egui::Button::selectable(armed, text))
-                .on_hover_text("Arm terrain cursor");
-            if drop.clicked() {
-                *clicked = Some(body.id);
-                *drop_clicked = Some(body.id);
-            }
-        }
-    });
 }

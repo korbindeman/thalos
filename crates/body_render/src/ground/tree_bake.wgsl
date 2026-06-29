@@ -22,6 +22,7 @@
     mesh_functions,
     view_transformations::position_world_to_clip,
 }
+#import thalos::foliage::foliage_base_albedo
 
 struct BakeParams {
     // x = mode (0 albedo, 1 normal), y = depth scale, z/w unused.
@@ -50,6 +51,9 @@ struct VertexOutput {
     @location(1) color: vec4<f32>,
     @location(2) view_z: f32,
     @location(3) atlas_uv: vec2<f32>,
+    // 1 = translucent foliage (leaf/needle), 0 = opaque shell/bark. Drives the
+    // shared `foliage_base_albedo` branch so the bake matches `tree.wgsl`.
+    @location(4) leaf: f32,
 }
 
 // Decode `cell·4 + corner` into the atlas UV, half-texel inset (matches
@@ -83,6 +87,9 @@ fn vertex(in: VertexInput) -> VertexOutput {
     // recentred + scaled tree spans roughly ±cell-fit in z about 0.
     out.view_z = world_pos.z;
     out.atlas_uv = atlas_uv_of(in.uv1.y);
+    // Cells 0..=11 are translucent foliage; 12 shell, 13..=15 bark (mirror of
+    // `tree.wgsl`). Mark opaque so the shared albedo takes the bark/shell branch.
+    out.leaf = select(0.0, 1.0, floor(in.uv1.y / 4.0) < 11.5);
     return out;
 }
 
@@ -94,10 +101,18 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if tex.a < 0.5 {
         discard;
     }
+    // Un-premultiply the atlas (composited over transparent black) so the baked
+    // leaf colour is the true colour, not colour×alpha — same fix as `tree.wgsl`,
+    // so the impostor's internal leaves don't inherit the dark fringe.
+    let atlas_rgb = tex.rgb / max(tex.a, 1.0e-3);
 
     if bake.mode.x < 0.5 {
-        // Albedo + coverage. Leaf colour × per-vertex tint (× AO); both linear.
-        return vec4<f32>(tex.rgb * in.color.rgb, 1.0);
+        // Albedo + coverage from the SHARED foliage material model — the SAME
+        // `foliage_base_albedo` the near mesh trees (`tree.wgsl`) call, on the same
+        // atlas sample + baked AO, so the impostor captures EXACTLY the near-tree
+        // colour and the two cannot drift. Per-instance hue is applied at runtime
+        // by the impostor (neutral seed 0.5 here), never baked in.
+        return vec4<f32>(foliage_base_albedo(atlas_rgb, in.color.g, in.leaf, 0.5), 1.0);
     }
     let n = normalize(in.local_normal) * 0.5 + vec3<f32>(0.5);
     let depth = clamp(in.view_z * bake.mode.y + 0.5, 0.0, 1.0);

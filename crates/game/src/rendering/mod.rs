@@ -22,7 +22,7 @@ pub(crate) mod real_space;
 mod scene_depth;
 mod spawn;
 pub(crate) mod sun_shadow;
-mod terrain_residency;
+pub(crate) mod terrain_residency;
 mod trails;
 mod transforms;
 mod types;
@@ -30,14 +30,13 @@ mod vegetation;
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
-use generation::patch_reference_cloud_covers;
 use ground_terrain::{
     pause_surface_terrain_streaming_at_high_warp, sync_body_render_lod,
     update_body_terrain_atmosphere,
 };
 use lighting::{
-    sync_film_grain_to_exposure, update_camera_exposure, update_planet_light_dirs,
-    update_solid_planet_params, update_sun_light,
+    sync_film_grain_to_exposure, update_camera_exposure, update_solid_planet_params,
+    update_sun_light,
 };
 use materials::{
     LastCloudBandUpdate, update_cloud_bands, update_gas_giant_params, update_ring_params,
@@ -50,7 +49,7 @@ use scene_depth::{SceneDepthPlugin, setup_scene_depth_image};
 use spawn::spawn_bodies;
 use terrain_residency::TerrainResidencyPlugin;
 use trails::{draw_orbits, recompute_orbit_trails};
-use transforms::{update_body_positions, update_planet_orientations, update_ship_position};
+use transforms::{update_body_positions, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
 pub use types::{
     CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, RealSpaceBody, ShipMarker,
@@ -136,18 +135,9 @@ impl Plugin for RenderingPlugin {
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),
                     update_real_space_body_positions.after(sync_solar_system_state),
-                    patch_reference_cloud_covers.after(convert_reference_clouds_when_ready),
                     update_sun_light.after(sync_solar_system_state),
                     update_camera_exposure.after(sync_solar_system_state),
                     sync_film_grain_to_exposure.after(update_camera_exposure),
-                    // Planet materials are inserted synchronously by
-                    // `spawn_bodies` (no more async finalize), so these
-                    // per-frame updaters no longer need to order against a
-                    // generation system.
-                    update_planet_light_dirs
-                        .after(sync_solar_system_state)
-                        .after(update_camera_exposure),
-                    update_planet_orientations.after(sync_solar_system_state),
                     // Unified per-body render-LOD: one pass toggles
                     // terrain ↔ impostor (surface LOD) and BodySky ↔ halo
                     // (atmosphere vantage) from a single camera-to-body

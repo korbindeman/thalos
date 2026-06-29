@@ -4,14 +4,14 @@
 
 use bevy::prelude::*;
 use thalos_body_render::{
-    AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, PlanetHaloMaterial, PlanetMaterial,
-    SceneLighting, SolidPlanetMaterial, StarLight,
+    AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, SceneLighting, SolidPlanetMaterial,
+    StarLight,
 };
 use thalos_physics_canonical::types::BodyStates;
 
 use super::types::{
-    CameraExposure, CelestialBody, PlanetMaterials, PlanetshineTints, SimulationState,
-    SolarSystemState, SolidPlanetMaterials, SunLight,
+    CameraExposure, CelestialBody, PlanetshineTints, SimulationState, SolarSystemState,
+    SolidPlanetMaterials, SunLight,
 };
 use crate::camera::{CameraFocus, CameraFocusTarget};
 use crate::coords::{MAP_SCALE, RenderOrigin, SHIP_SCALE};
@@ -175,146 +175,9 @@ pub(super) fn collect_occluders<'a>(
     }
 }
 
-/// Updates each planet material's `light_dir` uniform to point from the body
-/// toward the star.  Must run after `sync_solar_system_state`.
-pub(super) fn update_planet_light_dirs(
-    query: Query<(&CelestialBody, &PlanetMaterials)>,
-    mut materials: ResMut<Assets<PlanetMaterial>>,
-    mut halo_materials: ResMut<Assets<PlanetHaloMaterial>>,
-    cache: Res<SolarSystemState>,
-    origin: Res<RenderOrigin>,
-    sim: Res<SimulationState>,
-    exposure: Res<CameraExposure>,
-    view: Res<ViewMode>,
-    planetshine: Res<PlanetshineTints>,
-    mut map_occluders: Local<Vec<(usize, Vec3, f32)>>,
-    mut ship_occluders: Local<Vec<(usize, Vec3, f32)>>,
-) {
-    let Some(ref states) = cache.states else {
-        return;
-    };
-    let body_defs = sim.simulation.bodies();
-    let gain = exposure.gain;
-
-    // Each `materials.get_mut` below marks the asset changed and forces
-    // a full re-prepare in the render world. The inactive view's
-    // material isn't being rendered (`RenderLayers` excludes it), so
-    // pushing fresh uniforms into it every frame is wasted work — gate
-    // it on `view.is_changed()` so the inactive scale catches up exactly
-    // once per view toggle and stays quiet otherwise.
-    let force_both = view.is_changed();
-    let do_map = force_both || matches!(*view, ViewMode::Map);
-    let do_ship = force_both || matches!(*view, ViewMode::Ship);
-
-    // Compute occluder lists at both scales once per frame. Buffers are
-    // `Local`s, so we pay the allocation once and reuse on subsequent
-    // frames.
-    let body_iter = || query.iter().map(|(b, _)| b);
-    collect_occluders(&mut map_occluders, states, &origin, MAP_SCALE, body_iter());
-    collect_occluders(
-        &mut ship_occluders,
-        states,
-        &origin,
-        SHIP_SCALE,
-        body_iter(),
-    );
-
-    // Legacy cloud time uniform: kept in sync from canonical cloud-band
-    // state for materials/shaders that still read `cloud_dynamics.y`.
-    let sim_time = sim.simulation.sim_time();
-
-    let map_slice: &[(usize, Vec3, f32)] = &map_occluders;
-    let ship_slice: &[(usize, Vec3, f32)] = &ship_occluders;
-    for (body, mats) in &query {
-        let body_def = &body_defs[body.body_id];
-        let cloud_time = cache
-            .environment
-            .get(body.body_id)
-            .and_then(|env| env.cloud_bands.as_ref())
-            .map(|clouds| {
-                let scroll = clouds.scroll_rate_rad_s.abs();
-                let period = if scroll > 1.0e-9 {
-                    std::f64::consts::TAU / scroll
-                } else {
-                    86_400.0
-                };
-                sim_time.rem_euclid(period) as f32
-            })
-            .unwrap_or(0.0);
-        // Same scale-independent inputs feed both materials; only the
-        // scale-dependent fields (radius, occluders, planetshine pos)
-        // differ.
-        for (handle, halo_handle, occluders, scale, want) in [
-            (&mats.map, &mats.map_halo, map_slice, MAP_SCALE, do_map),
-            (&mats.ship, &mats.ship_halo, ship_slice, SHIP_SCALE, do_ship),
-        ] {
-            if !want {
-                continue;
-            }
-            let radius = (body.radius_m * scale) as f32;
-            let mut scene = build_scene_lighting(body.body_id, states, occluders, gain);
-
-            // Planetshine: pick the orbital parent, skipping the star.
-            // The parent's mean albedo (from its baked surface, or its
-            // cloud palette for gas giants) drives the tint. Bodies the
-            // resource hasn't been populated for contribute no shine.
-            if let Some(parent_id) = body_def.parent {
-                let parent_def = &body_defs[parent_id];
-                if !matches!(parent_def.kind, thalos_world::BodyKind::Star)
-                    && let Some(parent_state) = states.get(parent_id)
-                    && let Some(tint) = planetshine.by_body.get(&parent_id)
-                {
-                    let parent_render_pos =
-                        ((parent_state.position - origin.position) * scale).as_vec3();
-                    let parent_radius = (parent_def.radius_m * scale) as f32;
-                    scene.planetshine_pos_radius = Vec4::new(
-                        parent_render_pos.x,
-                        parent_render_pos.y,
-                        parent_render_pos.z,
-                        parent_radius,
-                    );
-                    scene.planetshine_tint_flag = Vec4::new(tint[0], tint[1], tint[2], 1.0);
-                }
-            }
-
-            // Peek before mutating: `get_mut` flags the asset changed and
-            // triggers a full re-extract in the render world, so skip it
-            // when the inputs are bit-identical (paused sim, no view drift).
-            let primary_dirty = matches!(
-                materials.get(handle),
-                Some(mat) if mat.params.radius != radius
-                    || mat.params.scene != scene
-                    || mat.atmosphere.cloud_dynamics.y != cloud_time
-            );
-            if primary_dirty && let Some(mat) = materials.get_mut(handle) {
-                mat.params.radius = radius;
-                mat.params.scene = scene.clone();
-                // Drive the cloud layer's time uniform. Bodies without a
-                // cloud layer have `cloud_albedo_coverage.w = 0`, so the
-                // shader skips the layer entirely and this value is ignored.
-                // Scroll rate is scale-independent (rad/s on the unit
-                // sphere), so the period is the same for both materials.
-                mat.atmosphere.cloud_dynamics.y = cloud_time;
-            }
-
-            let halo_dirty = matches!(
-                halo_materials.get(halo_handle),
-                Some(mat) if mat.params.radius != radius
-                    || mat.params.scene != scene
-                    || mat.atmosphere.cloud_dynamics.y != cloud_time
-            );
-            if halo_dirty && let Some(mat) = halo_materials.get_mut(halo_handle) {
-                mat.params.radius = radius;
-                mat.params.scene = scene;
-                mat.atmosphere.cloud_dynamics.y = cloud_time;
-            }
-        }
-    }
-}
-
 /// Push lighting state into every [`SolidPlanetMaterial`] each frame.
 ///
-/// Mirrors [`update_planet_light_dirs`] for placeholder bodies (no terrain
+/// Mirrors the terrestrial planet light update for placeholder bodies (no terrain
 /// pipeline yet): same scene-lighting build, same planetshine logic for
 /// moons. The placeholder has no orientation, atmosphere, or cloud state,
 /// so the work stops at `params.scene`.

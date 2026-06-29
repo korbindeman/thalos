@@ -33,9 +33,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bevy::math::{DVec3, UVec2, Vec3};
-use rayon::prelude::*;
 use bevy::prelude::*;
 use bevy::tasks::Task;
+use rayon::prelude::*;
 use thalos_terrain::SurfaceQuery;
 use thalos_udlod::math::TileCoordinate;
 use thalos_udlod::prelude::*;

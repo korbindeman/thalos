@@ -2,6 +2,18 @@
 //!
 //! This crate deliberately contains the Avian dependency so `thalos_physics_canonical`
 //! remains pure Rust and rails/canonical code does not learn Avian APIs.
+//!
+//! # Backend seam (`docs/physics.md`)
+//!
+//! This crate is the **backend executor boundary**: the Avian types it wraps
+//! (re-exported as [`avian`]) may only be named by the executor layer — this
+//! crate, `thalos_game::local_physics::*`, `thalos_game::aero` (force layer),
+//! `thalos_game::regime` (authority executor), and the documented EVA exception
+//! (`player_controller` / `debug`). Everything else reads the canonical state /
+//! the `CraftRegime` record, or the Avian-free [`LocalCraftKinematics`] readout
+//! this crate publishes. A CI guard (`.github/workflows/ci.yml`) enforces the
+//! allowlist. Avian is scheduled for replacement by the owned `thalos_physics`
+//! solver; keeping the surface small is what makes that swap surgical.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -198,6 +210,35 @@ impl ActiveLocalBubble {
     }
 }
 
+/// Neutral, Avian-free snapshot of the player craft's **surface-local frame**
+/// (SLF) rigid-body kinematics, published once per frame by
+/// [`publish_local_craft_kinematics`] at the end of the physics chain (after
+/// re-anchoring), so it is frame-consistent with [`ActiveLocalBubble`]'s
+/// `bubble.frame` for the next frame's readers.
+///
+/// It exists so **non-executor** code (e.g. the fly-by-wire control bus) can
+/// read the craft's SLF pose / air-relative velocity without naming Avian types
+/// — the backend seam (`docs/physics.md`). The fields are the live Avian body
+/// state relabelled as plain `glam` types. Note these are the **co-rotating SLF**
+/// kinematics (air-relative velocity, frame-anchored position), *not* the
+/// canonical *inertial* state (that is `thalos_game`'s `CraftStateMirror`).
+///
+/// **Sole writer:** [`publish_local_craft_kinematics`].
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct LocalCraftKinematics {
+    /// `false` when there is no active bubble / craft body this frame; readers
+    /// must treat the other fields as stale.
+    pub valid: bool,
+    /// Craft origin in SLF coordinates (metres from the frame anchor).
+    pub slf_position_m: DVec3,
+    /// Craft orientation: rotation from craft-body axes into the SLF.
+    pub orientation: DQuat,
+    /// SLF (co-rotating ⇒ air-relative, wind = 0) linear velocity (m/s).
+    pub slf_linear_velocity_m_s: DVec3,
+    /// Body angular velocity (rad/s) in the SLF.
+    pub slf_angular_velocity_rad_s: DVec3,
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalCraftBody {
     pub craft_id: CraftId,
@@ -209,6 +250,21 @@ pub struct TerrainColliderPatch {
     pub center_dir: DVec3,
     pub half_extent_m: f64,
     pub resolution: u32,
+}
+
+/// Marker on a terrain-anchored **structure** collider (e.g. the runway slab):
+/// a kinematic ground collider posed static in the active surface-local frame
+/// by [`sync_structure_collider_pose`], exactly like the terrain heightfield
+/// patch. Spawn it with [`spawn_structure_collider`]; the consumer supplies the
+/// body-fixed geometry and this executor owns the Avian construction + per-frame
+/// pose, so structure code never names Avian types (`docs/physics.md`).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct StructureCollider {
+    pub body_id: BodyId,
+    /// Collider centre in body-fixed coordinates.
+    pub center_body_m: DVec3,
+    /// Rotation from the structure-local tangent frame into body-fixed axes.
+    pub basis_body_quat: DQuat,
 }
 
 #[derive(Component, Debug, Clone)]
@@ -280,6 +336,7 @@ impl Plugin for LocalPhysicsPlugin {
             .insert_resource(Gravity::ZERO)
             .init_resource::<HeightSourceRegistry>()
             .init_resource::<ActiveLocalBubble>()
+            .init_resource::<LocalCraftKinematics>()
             .init_resource::<LocalBubbleConfig>();
     }
 }
@@ -380,6 +437,97 @@ pub fn spawn_terrain_collider_patch(
         basis,
         half_extent_m: half,
     }
+}
+
+/// Spawn a terrain-anchored **structure** collider — a kinematic ground
+/// collider whose body-fixed geometry is `shape`, posed static in the active
+/// surface-local frame each frame by [`sync_structure_collider_pose`]. The
+/// consumer passes neutral geometry (no Avian types); this executor owns the
+/// Avian body and its per-frame pose. Returns the spawned entity.
+///
+/// Generalises the runway slab into a reusable structure-collider primitive
+/// (the runway's former bespoke `RunwayCollider`); future terrain-anchored
+/// structures reuse it. See `docs/physics.md` (backend seam).
+pub fn spawn_structure_collider(
+    commands: &mut Commands,
+    body_id: BodyId,
+    shape: LocalPrimitiveShape,
+    center_body_m: DVec3,
+    basis_body_quat: DQuat,
+    name: &str,
+) -> Entity {
+    commands
+        .spawn((
+            // Kinematic, not Static: re-posed each frame from the SLF frame, so
+            // Avian refreshes its collider transform. Zero velocity — the pose
+            // is written directly, never integrated.
+            RigidBody::Kinematic,
+            primitive_collider(shape),
+            Position(center_body_m),
+            Rotation(basis_body_quat),
+            LinearVelocity(DVec3::ZERO),
+            AngularVelocity(DVec3::ZERO),
+            ground_collision_layers(),
+            StructureCollider {
+                body_id,
+                center_body_m,
+                basis_body_quat,
+            },
+            Name::new(name.to_string()),
+        ))
+        .id()
+}
+
+/// Pose every [`StructureCollider`] static in the active surface-local frame
+/// (mirrors [`super::ActiveLocalBubble`]-driven terrain-collider posing):
+/// `Position = R·(centre − anchor)`, `Rotation = R · basis`, where `R` is the
+/// bubble's body-fixed→SLF rotation. Idempotent; keeps the pose consistent when
+/// the bubble frame re-anchors. Scheduled by `game::local_physics` after the
+/// re-anchor step.
+pub fn sync_structure_collider_pose(
+    active: Res<ActiveLocalBubble>,
+    mut q: Query<(&StructureCollider, &mut Position, &mut Rotation)>,
+) {
+    let Some(bubble) = active.bubble.as_ref() else {
+        return;
+    };
+    let frame = &bubble.frame;
+    for (sc, mut position, mut rotation) in &mut q {
+        if sc.body_id != bubble.body_id {
+            continue;
+        }
+        position.0 = frame.rotation_body_to_frame * (sc.center_body_m - frame.anchor_point_body_m);
+        rotation.0 = frame.rotation_body_to_frame * sc.basis_body_quat;
+    }
+}
+
+/// Publish the player craft's live SLF rigid-body state into the Avian-free
+/// [`LocalCraftKinematics`] readout. Runs at the **end** of the physics chain
+/// (after re-anchoring) so the snapshot is frame-consistent with the bubble's
+/// `frame` for the next frame's non-executor readers — the backend seam
+/// (`docs/physics.md`).
+///
+/// **Sole writer of [`LocalCraftKinematics`].**
+pub fn publish_local_craft_kinematics(
+    active: Res<ActiveLocalBubble>,
+    q: Query<(&Position, &Rotation, &LinearVelocity, &AngularVelocity), With<LocalCraftBody>>,
+    mut out: ResMut<LocalCraftKinematics>,
+) {
+    let Some(bubble) = active.bubble.as_ref() else {
+        *out = LocalCraftKinematics::default();
+        return;
+    };
+    let Ok((position, rotation, lin_vel, ang_vel)) = q.get(bubble.craft_entity) else {
+        *out = LocalCraftKinematics::default();
+        return;
+    };
+    *out = LocalCraftKinematics {
+        valid: true,
+        slf_position_m: position.0,
+        orientation: rotation.0,
+        slf_linear_velocity_m_s: lin_vel.0,
+        slf_angular_velocity_rad_s: ang_vel.0,
+    };
 }
 
 pub fn spawn_local_craft_body(commands: &mut Commands, spawn: LocalCraftSpawn) -> Entity {

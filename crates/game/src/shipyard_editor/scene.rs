@@ -42,8 +42,7 @@ impl Plugin for EditorScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_editor_scene).add_systems(
             Update,
-            (orbit_editor_camera, recenter_on_orientation_change)
-                .run_if(super::editor_open),
+            (orbit_editor_camera, recenter_on_orientation_change).run_if(super::editor_open),
         );
     }
 }
@@ -66,6 +65,12 @@ fn setup_editor_scene(
             ..default()
         },
         layer.clone(),
+        // The game runs mesh picking with `require_markers: true` (main.rs),
+        // so a camera without this marker casts no picking rays — the editor's
+        // part meshes could never be clicked or hovered. The flight cameras
+        // carry it too (camera.rs); the standalone editor instead runs with
+        // `require_markers: false`.
+        bevy::picking::mesh_picking::MeshPickingCamera,
         Transform::from_xyz(8.0, 4.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
         EditorOrbit {
             focus: Vec3::new(0.0, -2.0, 0.0),

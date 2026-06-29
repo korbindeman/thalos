@@ -35,11 +35,7 @@ pub(super) struct DeleteShipButton {
 #[derive(Component)]
 pub(super) struct SavedShipsSection;
 
-pub(super) fn spawn(
-    root: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
-    catalog: &PartCatalog,
-) {
+pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, catalog: &PartCatalog) {
     let (bg, border) = panel_frame(theme);
     root.spawn((
         Node {

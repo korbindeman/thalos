@@ -10,7 +10,10 @@
 //! **The terrain itself is flattened into a pad; the runway sits flush on it.**
 //! The runway centre is a **fixed body-fixed location** (constant lat/lon, see
 //! [`fixed_runway_site`]) — not an auto-chosen flattest/dry/sunlit site, which
-//! could land on the night side. A single fixed elevation
+//! could land on the night side. The scenario also seats the world at a
+//! **morning boot epoch** ([`RUNWAY_MORNING_EPOCH_S`]) so the fixed site is lit
+//! by a low, rising sun instead of the high noon sun the epoch-0 sub-stellar
+//! point gives it. A single fixed elevation
 //! `E = max(natural terrain over the pad) + margin` is then chosen.
 //! A [`thalos_terrain::TerrainFlatten`] pad is installed via the body's shared
 //! [`crate::rendering::ground_terrain::TerrainFlattenRegistry`] handle: the
@@ -31,9 +34,9 @@
 //! resting on its gear at static-sag equilibrium (no launch clamp); the pilot
 //! flies it off with the throttle.
 
+use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
-use bevy::camera::primitives::MeshAabb;
 use bevy::math::{DMat3, DQuat, DVec3, Vec3, Vec3A};
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
@@ -44,10 +47,9 @@ use thalos_physics_canonical::body_fixed::{
 };
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch, TranslationalState};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
-use thalos_physics_local::avian::{
-    AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation,
+use thalos_physics_local::{
+    ActiveLocalBubble, HeightSourceRegistry, LocalPrimitiveShape, spawn_structure_collider,
 };
-use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use thalos_shipyard::{AttachNodes, EngineActivation, Gear, Part, SurfaceMount};
 use thalos_world::{BodyId, StateVector};
 
@@ -56,8 +58,8 @@ use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
-use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
+use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
 use crate::spawn::SpawnSituation;
 
@@ -110,10 +112,7 @@ fn enable_cruise_engines(
     mut lit: Local<Option<Entity>>,
     situation: Res<SpawnSituation>,
     ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
-    mut activations: Query<
-        &mut EngineActivation,
-        Without<thalos_shipyard::editor::EditorPart>,
-    >,
+    mut activations: Query<&mut EngineActivation, Without<thalos_shipyard::editor::EditorPart>>,
 ) {
     if !matches!(*situation, SpawnSituation::Cruise) {
         return;
@@ -144,21 +143,26 @@ fn enable_cruise_engines(
 // The terrain under the footprint is flattened into a level pad regardless (see
 // the `TerrainFlatten` install in `finish_runway_spawn`), so the only thing the
 // coordinates must satisfy is "dry land, sunlit at the spawn epoch" — the
-// author's call, since only the rendered map shows where that is. Override at
-// runtime for iteration with `THALOS_RUNWAY_SITE="lat_deg,lon_deg[,heading_deg]"`.
+// author's call, since only the rendered map shows where that is. The spawn
+// epoch is the morning boot epoch (`RUNWAY_MORNING_EPOCH_S`), not epoch 0, so
+// "sunlit" means sunlit *in the morning* (the site sits ~13° below the rising
+// sun there). Override the site at runtime for iteration with
+// `THALOS_RUNWAY_SITE="lat_deg,lon_deg[,heading_deg]"`.
 //
 // The default below was chosen with the `runway_site` probe
 // (`cargo run --release -p thalos_bake_dump --example runway_site`), which
 // samples the **runtime** terrain — `ProceduralSurface::new(radius, body.id)`,
 // the same generator `rendering::ground_terrain` builds — computes the
-// sub-stellar (local-noon) point at the boot epoch (lat 0°, lon 180°), and ranks
+// sub-stellar (local-noon) point at epoch 0 (lat 0°, lon 180°), and ranks
 // dry near-equator land by how well-lit and gently-rolling it is. This site is a
-// low coastal plain (~80 m above sea level), ~8° north of the equator at ~178°
-// (essentially under the noon sun, ~82° up) — brightly lit, plausible, and well
-// clear of the water. NOTE: the spot is specific to the procedural seed (Thalos
-// = `body.id`); if the terrain generator changes, re-run the probe and update
-// these constants, or the runway can land below sea level (which also pins the
-// chase camera overhead — the camera floor won't follow it under the surface).
+// low coastal plain (~80 m above sea level), ~8° north of the equator at ~178°.
+// At epoch 0 it sits almost under the noon sun (~82° up); the scenario instead
+// boots at `RUNWAY_MORNING_EPOCH_S`, which rotates the planet so the same fixed
+// site is lit by a low rising sun. NOTE: the spot is specific to the procedural
+// seed (Thalos = `body.id`); if the terrain generator changes, re-run the probe
+// and update these constants, or the runway can land below sea level (which also
+// pins the chase camera overhead — the camera floor won't follow it under the
+// surface).
 
 /// Runway-centre latitude (deg, body-fixed, +north).
 const RUNWAY_SITE_LAT_DEG: f64 = 7.6;
@@ -169,6 +173,27 @@ const RUNWAY_SITE_LON_DEG: f64 = 178.0;
 /// `TerrainPatchBasis::tangent_x` toward `tangent_z`. Any fixed value gives a
 /// constant strip; the pad is flat regardless of which way it points.
 const RUNWAY_SITE_HEADING_DEG: f64 = 30.0;
+
+/// Boot epoch (s) the runway scenario seats the world at, so the fixed site is
+/// lit by a low **morning** sun instead of the noon sun the epoch-0 sub-stellar
+/// point gives it.
+///
+/// At epoch 0 the sub-stellar (local-noon) point is lat 0°, lon 180°, putting
+/// the runway site (lat 7.6°, lon 178°) almost directly under the sun (~82° up
+/// — high noon). Thalos spins about +Y (prograde, 76,680 s day), so the sun
+/// climbs across the second half of the day at this site; advancing the clock
+/// to ~59,100 s rotates the planet so the same fixed site sees a ~13° sun that
+/// is *rising* — early-to-mid morning, long shadows down the strip. The whole
+/// authored runway terrain (continent land bias, plains suppression, horizon
+/// massifs in `thalos_terrain::procedural`) is body-fixed, so only the lighting
+/// changes; the site stays put.
+///
+/// Derived with the `morning_probe` example
+/// (`cargo run -p thalos_physics_canonical --example morning_probe`), which
+/// reuses the real ephemeris to sweep one Thalos day and report the sun
+/// elevation/trend at the site. Re-run it and update this constant if the site
+/// lat/lon or Thalos's rotation/orbit changes.
+const RUNWAY_MORNING_EPOCH_S: f64 = 59_100.0;
 
 /// Sea-level datum (m above the reference radius). The runtime
 /// `ProceduralSurface` has no water layer; its continent-mask shoreline sits at
@@ -244,18 +269,6 @@ struct RunwayVisual {
     center_surface_body: DVec3,
 }
 
-/// Marker on the solid runway collider slab. Posed each frame from the active
-/// surface-local frame so it sits flush and static under the craft.
-#[derive(Component, Debug)]
-struct RunwayCollider {
-    body_id: BodyId,
-    /// Cuboid centre in body-fixed coordinates (its top face is the pad at `E`).
-    center_body_m: DVec3,
-    /// Rotation from the runway-local tangent frame (`X = across`, `Y = up`,
-    /// `Z = heading`) into body-fixed axes.
-    basis_body_quat: DQuat,
-}
-
 /// Re-armable trigger for the deferred runway placement. Armed at startup
 /// when the boot scenario is a runway start, and again by the start screen
 /// when a runway scenario is picked there ([`crate::main_menu`]).
@@ -273,36 +286,32 @@ impl Plugin for RunwayPlugin {
         app.init_resource::<RunwayPlacement>()
             .add_systems(Startup, arm_boot_runway_placement)
             .add_systems(
-            Update,
-            (
-                // Runs during `AppState::Loading` (not gated on `Running`): the
-                // site selection + flatten install + aircraft placement happen
-                // behind the loading screen so the camera reaches the surface
-                // and the terrain streams/settles before the reveal. Self-gated
-                // by `RunwayPlacement::pending` + the height-source residency
-                // check; `relaunch_idle` keeps it from measuring/parking the
-                // outgoing craft while a runtime craft swap is in flight.
-                finish_runway_spawn
-                    .run_if(crate::relaunch::relaunch_idle)
-                    .before(SimStage::Physics),
-                update_runway_transform
-                    .in_set(SimStage::Sync)
-                    .after(crate::solar_system_state::sync_solar_system_state),
-                sync_runway_visibility
-                    .in_set(SimStage::Sync)
-                    .after(update_runway_transform),
-                enable_runway_engines,
-                enable_cruise_engines,
-            ),
-        )
-        .add_systems(
-            Update,
-            sync_runway_collider_pose
-                .in_set(SimStage::Physics)
-                // After a re-anchor swaps the bubble frame, so the runway
-                // collider's SLF pose is never a frame stale mid-takeoff-roll.
-                .after(crate::local_physics::reanchor_surface_frame),
-        );
+                Update,
+                (
+                    // Runs during `AppState::Loading` (not gated on `Running`): the
+                    // site selection + flatten install + aircraft placement happen
+                    // behind the loading screen so the camera reaches the surface
+                    // and the terrain streams/settles before the reveal. Self-gated
+                    // by `RunwayPlacement::pending` + the height-source residency
+                    // check; `relaunch_idle` keeps it from measuring/parking the
+                    // outgoing craft while a runtime craft swap is in flight.
+                    finish_runway_spawn
+                        .run_if(crate::relaunch::relaunch_idle)
+                        .before(SimStage::Physics),
+                    update_runway_transform
+                        .in_set(SimStage::Sync)
+                        .after(crate::solar_system_state::sync_solar_system_state),
+                    sync_runway_visibility
+                        .in_set(SimStage::Sync)
+                        .after(update_runway_transform),
+                    enable_runway_engines,
+                    enable_cruise_engines,
+                ),
+            );
+        // The runway slab collider is posed each frame by the executor's
+        // generic `sync_structure_collider_pose` (scheduled by
+        // `local_physics`), so no runway-local pose system is needed — see
+        // `docs/physics.md` (backend seam).
     }
 }
 
@@ -389,11 +398,12 @@ fn finish_runway_spawn(
                 let sag = mass * g / (wheel_count.max(1) as f64 * k);
                 (depth_m - sag).max(0.0)
             }
-            None => match craft_ground_clearance(ship_entity, ship_gt, &children_q, &mesh_q, &meshes)
-            {
-                Some(c) => c + RUNWAY_GEAR_REST_MARGIN_M,
-                None => return, // craft geometry not ready yet — retry
-            },
+            None => {
+                match craft_ground_clearance(ship_entity, ship_gt, &children_q, &mesh_q, &meshes) {
+                    Some(c) => c + RUNWAY_GEAR_REST_MARGIN_M,
+                    None => return, // craft geometry not ready yet — retry
+                }
+            }
         }
     } else {
         0.0
@@ -462,9 +472,14 @@ fn finish_runway_spawn(
             ramp_m: RUNWAY_PAD_RAMP_M,
         },
         crate::structures::StructureKind::Runway,
+        None,
     );
     if let Some(structure) = structure_registry.get(structure_id).copied() {
-        crate::structures::apply_structure_flatten(&structure, body_radius_m, &mut flatten_registry);
+        crate::structures::apply_structure_flatten(
+            &structure,
+            body_radius_m,
+            &mut flatten_registry,
+        );
     }
 
     let site = RunwaySite {
@@ -500,6 +515,14 @@ fn finish_runway_spawn(
         RUNWAY_LENGTH_M,
         RUNWAY_WIDTH_M,
     );
+
+    // Seat the world at the morning boot epoch so the fixed site is lit by a
+    // low, climbing sun rather than the epoch-0 noon sun (see
+    // `RUNWAY_MORNING_EPOCH_S`). This must happen before the body state is read
+    // below — and before the per-frame lighting/terrain transforms run off
+    // `sim_time` — so the placement pose, the rendered ground, and the sun all
+    // agree on the same time of day. Idempotent across the placement's retries.
+    sim.simulation.set_sim_time(RUNWAY_MORNING_EPOCH_S);
 
     // Read the body state once (immutable) before any sim mutation below.
     let epoch = Epoch(sim.simulation.sim_time());
@@ -576,10 +599,7 @@ fn enable_runway_engines(
     situation: Res<SpawnSituation>,
     site: Option<Res<RunwaySite>>,
     ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
-    mut activations: Query<
-        &mut EngineActivation,
-        Without<thalos_shipyard::editor::EditorPart>,
-    >,
+    mut activations: Query<&mut EngineActivation, Without<thalos_shipyard::editor::EditorPart>>,
 ) {
     if !situation.is_runway() || site.is_none() {
         return;
@@ -733,7 +753,10 @@ fn build_mesh(
 ) -> Mesh {
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::{Indices, PrimitiveTopology};
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -741,7 +764,11 @@ fn build_mesh(
     mesh
 }
 
-fn flat_runway_material(materials: &mut Assets<StandardMaterial>, color: Color, rough: f32) -> Handle<StandardMaterial> {
+fn flat_runway_material(
+    materials: &mut Assets<StandardMaterial>,
+    color: Color,
+    rough: f32,
+) -> Handle<StandardMaterial> {
     materials.add(StandardMaterial {
         base_color: color,
         perceptual_roughness: rough,
@@ -864,25 +891,75 @@ fn build_markings_mesh(frame: &RunwayFrame) -> Mesh {
     let edge_c = half_w - 1.5;
     for sign in [-1.0, 1.0] {
         let c = sign * edge_c;
-        push_marking_strip(&mut p, &mut n, &mut u, &mut idx, frame, -half_l + 60.0, half_l - 60.0, c - 0.5, c + 0.5);
+        push_marking_strip(
+            &mut p,
+            &mut n,
+            &mut u,
+            &mut idx,
+            frame,
+            -half_l + 60.0,
+            half_l - 60.0,
+            c - 0.5,
+            c + 0.5,
+        );
     }
     // Dashed centreline (1 m wide; 30 m dash / 20 m gap).
     let mut a = -half_l + 120.0;
     while a + 30.0 < half_l - 120.0 {
-        push_marking_strip(&mut p, &mut n, &mut u, &mut idx, frame, a, a + 30.0, -0.5, 0.5);
+        push_marking_strip(
+            &mut p,
+            &mut n,
+            &mut u,
+            &mut idx,
+            frame,
+            a,
+            a + 30.0,
+            -0.5,
+            0.5,
+        );
         a += 50.0;
     }
     // Threshold bars (solid, ~10 m along, near each end).
     let bar_in = half_w - 3.0;
-    push_marking_strip(&mut p, &mut n, &mut u, &mut idx, frame, -half_l + 30.0, -half_l + 40.0, -bar_in, bar_in);
-    push_marking_strip(&mut p, &mut n, &mut u, &mut idx, frame, half_l - 40.0, half_l - 30.0, -bar_in, bar_in);
+    push_marking_strip(
+        &mut p,
+        &mut n,
+        &mut u,
+        &mut idx,
+        frame,
+        -half_l + 30.0,
+        -half_l + 40.0,
+        -bar_in,
+        bar_in,
+    );
+    push_marking_strip(
+        &mut p,
+        &mut n,
+        &mut u,
+        &mut idx,
+        frame,
+        half_l - 40.0,
+        half_l - 30.0,
+        -bar_in,
+        bar_in,
+    );
     // Touchdown aiming blocks (a pair flanking the centreline near each end).
     for end in [-1.0, 1.0] {
         let a0 = end * (half_l - 360.0);
         let a1 = end * (half_l - 280.0);
         let (lo, hi) = if a0 < a1 { (a0, a1) } else { (a1, a0) };
         for off in [-9.0, 5.0] {
-            push_marking_strip(&mut p, &mut n, &mut u, &mut idx, frame, lo, hi, off, off + 4.0);
+            push_marking_strip(
+                &mut p,
+                &mut n,
+                &mut u,
+                &mut idx,
+                frame,
+                lo,
+                hi,
+                off,
+                off + 4.0,
+            );
         }
     }
 
@@ -945,7 +1022,11 @@ fn spawn_runway_posts(
     parent: Entity,
 ) {
     let post_mesh = meshes.add(Cuboid::new(POST_SIZE_M, POST_HEIGHT_M, POST_SIZE_M));
-    let thresh_mesh = meshes.add(Cuboid::new(POST_SIZE_M, POST_THRESHOLD_HEIGHT_M, POST_SIZE_M));
+    let thresh_mesh = meshes.add(Cuboid::new(
+        POST_SIZE_M,
+        POST_THRESHOLD_HEIGHT_M,
+        POST_SIZE_M,
+    ));
     let white = materials.add(post_material(Color::srgb(0.9, 0.9, 0.9)));
     let green = materials.add(post_material(Color::srgb(0.1, 0.8, 0.2)));
     let red = materials.add(post_material(Color::srgb(0.9, 0.15, 0.1)));
@@ -1019,55 +1100,22 @@ fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, _body_sta
     // on the bare pad a paving-thickness below it.
     let center_body_m = frame.center_surface()
         + frame.center_dir * (RUNWAY_ASPHALT_LIFT_M - RUNWAY_SLAB_HALF_THICKNESS_M);
-    // `Collider::cuboid` takes full side lengths; local axes (X=across, Y=up,
-    // Z=along) match `basis_body_quat`.
-    let collider = Collider::cuboid(
-        2.0 * half_across,
-        2.0 * RUNWAY_SLAB_HALF_THICKNESS_M,
-        2.0 * half_along,
-    );
-    commands.spawn((
-        // Kinematic (not Static): re-posed each frame from the SLF frame, so
-        // Avian must refresh its collider transform. Zero velocity — the pose
-        // is written directly.
-        RigidBody::Kinematic,
-        collider,
-        Position(center_body_m),
-        Rotation(basis_body_quat),
-        LinearVelocity(DVec3::ZERO),
-        AngularVelocity(DVec3::ZERO),
-        thalos_physics_local::ground_collision_layers(),
-        RunwayCollider {
-            body_id: frame.body_id,
-            center_body_m,
-            basis_body_quat,
+    // Full side lengths; local axes (X = across, Y = up, Z = along) match
+    // `basis_body_quat`. The executor owns the Avian body and its per-frame SLF
+    // pose (`sync_structure_collider_pose`) — see `docs/physics.md` (backend
+    // seam). This replaced the bespoke `RunwayCollider` + `sync_runway_collider_pose`.
+    spawn_structure_collider(
+        commands,
+        frame.body_id,
+        LocalPrimitiveShape::Cuboid {
+            x: 2.0 * half_across,
+            y: 2.0 * RUNWAY_SLAB_HALF_THICKNESS_M,
+            z: 2.0 * half_along,
         },
-        Name::new("Runway collider slab"),
-    ));
-}
-
-/// Pose the solid runway slab **static in the surface-local frame** (mirrors
-/// `local_physics::sync_terrain_collider_pose`): `Position = R·(centre − anchor)`,
-/// `Rotation = R · runway_basis`, where `R` is the active bubble's
-/// body-fixed→SLF rotation. The pose is constant between re-anchors; this
-/// idempotent write keeps it consistent when `reanchor_surface_frame` swaps the
-/// bubble's frame.
-fn sync_runway_collider_pose(
-    active: Res<thalos_physics_local::ActiveLocalBubble>,
-    mut q: Query<(&RunwayCollider, &mut Position, &mut Rotation)>,
-) {
-    let Some(bubble) = active.bubble.as_ref() else {
-        return;
-    };
-    let frame = &bubble.frame;
-    for (rc, mut position, mut rotation) in &mut q {
-        if rc.body_id != bubble.body_id {
-            continue;
-        }
-        position.0 =
-            frame.rotation_body_to_frame * (rc.center_body_m - frame.anchor_point_body_m);
-        rotation.0 = frame.rotation_body_to_frame * rc.basis_body_quat;
-    }
+        center_body_m,
+        basis_body_quat,
+        "Runway collider slab",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,13 +1123,22 @@ fn sync_runway_collider_pose(
 // ---------------------------------------------------------------------------
 
 /// Attitude with the nose along `heading_body` and the dorsal along `up_body`
-/// — level on the ground, lined up with the runway.
-fn level_heading_attitude(body_state: &BodyState, up_body: DVec3, heading_body: DVec3) -> AttitudeState {
+/// — level on the ground, lined up with the runway. Reused by the base editor's
+/// launchpad placement.
+pub(crate) fn level_heading_attitude(
+    body_state: &BodyState,
+    up_body: DVec3,
+    heading_body: DVec3,
+) -> AttitudeState {
     let dorsal = up_body.normalize();
     let nose = (heading_body - dorsal * heading_body.dot(dorsal))
         .try_normalize()
         .unwrap_or_else(|| {
-            let seed = if dorsal.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
+            let seed = if dorsal.x.abs() < 0.9 {
+                DVec3::X
+            } else {
+                DVec3::Z
+            };
             (seed - dorsal * seed.dot(dorsal)).normalize()
         });
     let right = nose.cross(dorsal).normalize();
@@ -1104,8 +1161,9 @@ fn level_heading_attitude(body_state: &BodyState, up_body: DVec3, heading_body: 
 /// most-negative Z. The craft frame is `+Y` nose / `+Z` dorsal (up), so the
 /// lowest point is the minimum Z. Returns `None` if no descendant mesh is ready
 /// yet so the caller can retry. Uses local-to-root affines, so the result is
-/// independent of the craft's current (placeholder-orbit) pose.
-fn craft_ground_clearance(
+/// independent of the craft's current (placeholder-orbit) pose. Reused by the
+/// base editor's launchpad placement to rest any craft on the pad.
+pub(crate) fn craft_ground_clearance(
     root_entity: Entity,
     root_gt: &GlobalTransform,
     children_q: &Query<&Children>,
@@ -1185,7 +1243,8 @@ fn place_parked(
     let up_body = site.center_dir;
     // The paved (drive) surface at the parked station — the same flat plane the
     // collider's top face and the asphalt mesh use.
-    let drive_point = center_surface + site.heading_tangent * along + up_body * RUNWAY_ASPHALT_LIFT_M;
+    let drive_point =
+        center_surface + site.heading_tangent * along + up_body * RUNWAY_ASPHALT_LIFT_M;
     // Rest the gear on it: lift the origin off the paving by the gear-contact
     // depth minus static sag (already folded into `clearance_m`).
     let position_body = drive_point + up_body * clearance_m;
@@ -1216,7 +1275,12 @@ fn place_parked(
 /// Put the aircraft on short final, lined up with the centreline and sinking,
 /// coasting on rails until the local-physics bubble takes over. Referenced to
 /// the fixed elevation `E`.
-fn place_approach(sim: &mut SimulationState, body_state: &BodyState, site: &RunwaySite, body_radius_m: f64) {
+fn place_approach(
+    sim: &mut SimulationState,
+    body_state: &BodyState,
+    site: &RunwaySite,
+    body_radius_m: f64,
+) {
     let surface_radius = body_radius_m + site.elevation_m;
     let center_surface = site.center_dir * surface_radius;
     let threshold_point = center_surface - site.heading_tangent * RUNWAY_HALF_LENGTH_M;
@@ -1244,7 +1308,8 @@ fn place_approach(sim: &mut SimulationState, body_state: &BodyState, site: &Runw
         angular_velocity: DVec3::ZERO,
     };
 
-    sim.simulation.set_ship_state(StateVector { position, velocity });
+    sim.simulation
+        .set_ship_state(StateVector { position, velocity });
     sim.simulation.set_attitude(attitude);
     sim.simulation
         .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
