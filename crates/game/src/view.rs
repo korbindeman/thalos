@@ -19,6 +19,7 @@ use thalos_input::game::GameInputIntent;
 
 use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
 use crate::coords::{MAP_LAYER, SHIP_LAYER};
+use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
@@ -102,6 +103,14 @@ fn attach_ship_layer_for_hide_in_map(
 /// the layer on every descendant each frame so reparenting, late-spawned
 /// children (ship parts that load after the root), and rebuilt mesh
 /// children all stay tied to the right view.
+///
+/// Ship-view solid geometry ([`HideInMapView`] — the craft + the EVA player) is
+/// *also* placed on [`SHADOW_CASTER_LAYER`] so it casts into the custom sun-shadow
+/// cascades and grounds with a shadow on the terrain/grass, exactly like trees +
+/// rocks (F6 of the graphics-fidelity unification — `docs/graphics_fidelity.md`
+/// §4.2). The cascade cameras read only depth, so this adds the mesh to the shadow
+/// map without changing how the craft itself is shaded (it does not yet *receive*
+/// the cascade — that is F6b, in `ship_part.wgsl`).
 fn propagate_view_render_layers(
     mut commands: Commands,
     roots: Query<
@@ -115,7 +124,7 @@ fn propagate_view_render_layers(
         let target = if hide_ship {
             RenderLayers::layer(MAP_LAYER)
         } else if hide_map {
-            RenderLayers::layer(SHIP_LAYER)
+            RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER])
         } else {
             continue;
         };

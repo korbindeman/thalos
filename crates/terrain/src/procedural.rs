@@ -113,17 +113,30 @@ const LAND_PLATFORM_M: f64 = 420.0;
 const LAND_K: f64 = 0.10;
 const LAND_INTERIOR_GAIN_M: f64 = 650.0;
 
-/// Ocean hypsometry: a shallow continental shelf shoulder dropping over the
-/// continental slope to a flat abyssal plain. Widths are in continentalness.
-const SHELF_DEPTH_M: f64 = 180.0;
+/// Ocean hypsometry: a broad shallow continental shelf shoulder dropping over
+/// the continental slope to the abyssal plain. Widths are in continentalness;
+/// the wide shelf gives a gentle shallow band at the coast (the natural-coast
+/// look) rather than land plunging straight to deep water.
+const SHELF_DEPTH_M: f64 = 150.0;
 const ABYSS_DEPTH_M: f64 = 4_000.0;
-const SHELF_WIDTH_C: f64 = 0.05;
-const SLOPE_WIDTH_C: f64 = 0.12;
+const SHELF_WIDTH_C: f64 = 0.09;
+const SLOPE_WIDTH_C: f64 = 0.16;
+
+/// Seabed relief: a rolling abyssal-hills / seamount layer so the deep ocean
+/// floor is not a dead-flat plane (which reads as a uniform flat ocean and feeds
+/// the water renderer no depth variation). Gated to deep water (see
+/// `deep_factor` in the height path) so it never churns the shelf or the coast.
+const SEABED_WL_M: f64 = 170_000.0;
+const SEABED_AMP_M: f64 = 950.0;
+/// Depth band over which seabed relief fades in: none on the shelf (shallower
+/// than `SEABED_FADE_HI_M`), full in the deep (below `SEABED_FADE_LO_M`).
+const SEABED_FADE_HI_M: f64 = -300.0;
+const SEABED_FADE_LO_M: f64 = -1_500.0;
 
 /// Soft cap on how far sub-sea relief may breach the surface, so shallow
 /// shelves crinkle into low islets/beaches instead of a field of flat-topped
 /// mesas at the waterline.
-const SHELF_BREACH_CAP_M: f64 = 28.0;
+const SHELF_BREACH_CAP_M: f64 = 14.0;
 
 /// Rolling hills layer: mid wavelength, land-masked, LOD-aware octaves.
 const HILLS_WL_M: f64 = 6_000.0;
@@ -148,6 +161,15 @@ const PLAINS_MTN_AMP_M: f64 = 220.0;
 /// Ridged amplitude in montane regions (tall enough that peaks reach the
 /// shader's treeline/snow bands once the uplift is added).
 const MONTANE_MTN_AMP_M: f64 = 3_500.0;
+
+/// Medium-scale ridged band riding on the coarse mountain field. fBm amplitude
+/// decays geometrically, so a single ridged layer's mid-frequency octaves carry
+/// almost no relief and ranges read "melted"/soft. This second band restores
+/// visible relief in the ~0.5–3 km gap. It is **multifractal-coupled** — scaled
+/// by the coarse ridged value so the detail sharpens crests and stays quiet in
+/// the basins — and gated to montane land so plains/ocean stay smooth.
+const MID_MOUNTAIN_WL_M: f64 = 5_000.0;
+const MID_MOUNTAIN_AMP_M: f64 = 700.0;
 
 /// Orogeny field: a long-wavelength fBm **decorrelated** from the continent
 /// field (own seed), thresholded into a montane weight in `[0, 1]`. It governs
@@ -274,8 +296,17 @@ const MASSIF_BASE_AMP_M: f64 = 950.0;
 const MASSIF_RIDGE_AMP_M: f64 = 3_050.0;
 /// Wavelength of the largest ridged feature (m) and its octave count. Shorter
 /// than the range length so several distinct summits march along the crest.
-const MASSIF_RIDGE_WL_M: f64 = 17_000.0;
+/// Kept fairly short so the skyline reads as many summits + spurs (rich at the
+/// medium-to-far distance the range is actually viewed from), not a few big
+/// lumps.
+const MASSIF_RIDGE_WL_M: f64 = 11_000.0;
 const MASSIF_RIDGE_OCTAVES: f64 = 7.0;
+/// Medium domain warp applied to the ridged spine so its summits fold into
+/// curved ridgelines and side-spurs (geological) instead of radially smooth
+/// blobs — the main lever for a non-simplistic medium-far skyline. Independent
+/// of the planet-scale `WARP_*`.
+const MASSIF_WARP_WL_M: f64 = 7_000.0;
+const MASSIF_WARP_AMP_M: f64 = 1_800.0;
 /// Wavelength of the along-crest tall/short modulation (m).
 const MASSIF_CREST_WL_M: f64 = 48_000.0;
 
@@ -308,7 +339,7 @@ static MASSIF_FRAMES: LazyLock<[(DVec3, DVec3, DVec3); MASSIF_SITES.len()]> = La
 const LAND_PEAK_M: f64 = LAND_PLATFORM_M
     + LAND_INTERIOR_GAIN_M
     + MONTANE_UPLIFT_M
-    + MONTANE_MTN_AMP_M.max(MASSIF_PEAK_M)
+    + (MONTANE_MTN_AMP_M + MID_MOUNTAIN_AMP_M).max(MASSIF_PEAK_M)
     + HILLS_AMP_M
     + SWELL_AMP_M
     + 600.0;
@@ -384,11 +415,12 @@ impl ProceduralSurface {
         // treeline / snow bands.
         let uplift = MONTANE_UPLIFT_M * orogeny * land_mask;
 
-        // Rolling hills, stronger on land.
+        // Rolling hills, mostly on land — only a low floor at sea so the shelf
+        // stays smooth and doesn't speckle into islets at the waterline.
         let hills_oct = octaves_for_lod(lod_m, HILLS_WL_M);
         let hills = fbm(pw / HILLS_WL_M, self.seed ^ 0x5151, hills_oct)
             * HILLS_AMP_M
-            * (0.35 + 0.65 * land_mask);
+            * (0.18 + 0.82 * land_mask);
 
         // Lowland / seabed swell: barely land-gated so neither plains nor the
         // abyssal floor go dead flat. fBm, so the LOD octave plan fades finer
@@ -398,16 +430,32 @@ impl ProceduralSurface {
             * SWELL_AMP_M
             * (0.55 + 0.45 * land_mask);
 
-        // Ridged mountains: amplitude blends plains↔montane by orogeny, gated to
-        // land.
+        // Ridged mountains: a coarse range-defining band (amplitude blends
+        // plains↔montane by orogeny, gated to land) plus a medium band that
+        // rides on it. The medium band is multiplied by the coarse ridged value
+        // (multifractal coupling: sharp on the ranges, quiet in the basins) and
+        // gated to montane land, so ranges carry visible relief down to a few
+        // hundred metres instead of melting into a single fBm's vanishing tail.
         let mtn_oct = octaves_for_lod(lod_m, MOUNTAIN_WL_M);
         let mtn_amp = lerp(orogeny, PLAINS_MTN_AMP_M, MONTANE_MTN_AMP_M) * land_mask;
-        let mountains = ridged(pw / MOUNTAIN_WL_M, self.seed ^ 0x9A9A, mtn_oct) * mtn_amp;
+        let mtn_base = ridged(pw / MOUNTAIN_WL_M, self.seed ^ 0x9A9A, mtn_oct);
+        let mid_oct = octaves_for_lod(lod_m, MID_MOUNTAIN_WL_M);
+        let mid = ridged(pw / MID_MOUNTAIN_WL_M, self.seed ^ 0x3D7B, mid_oct);
+        let mountains =
+            mtn_base * mtn_amp + mid * MID_MOUNTAIN_AMP_M * mtn_base * (orogeny * land_mask);
+
+        // Seabed relief: rolling abyssal hills / seamounts, faded in by depth so
+        // the deep floor isn't a flat plane while the shelf and coast stay clean.
+        // (`smoothstep` needs increasing edges, so invert the shallow→deep ramp.)
+        let deep = 1.0 - smoothstep(SEABED_FADE_LO_M, SEABED_FADE_HI_M, macro_h);
+        let seabed_oct = octaves_for_lod(lod_m, SEABED_WL_M);
+        let seabed = fbm(pw / SEABED_WL_M, self.seed ^ 0x5EAB, seabed_oct) * SEABED_AMP_M * deep;
 
         // Combine relief with the macro base, soft-capping how far sub-sea relief
         // may breach the surface (so shallow shelves crinkle into islets, not a
         // field of waterline mesas).
-        let height = combine_macro_and_relief(macro_h, uplift + hills + swell + mountains);
+        let height =
+            combine_macro_and_relief(macro_h, uplift + hills + swell + mountains + seabed);
 
         // Authored, erosion-sculpted mountain ranges near the runway. Additive
         // and footprint-gated (zero outside every envelope), so they don't
@@ -544,9 +592,18 @@ impl ProceduralSurface {
         if env <= 0.0 {
             return 0.0;
         }
+        // Medium domain warp: fold the ridged spine into curved ridgelines /
+        // spurs instead of a radially smooth swell. Warps the (x, y) sample
+        // position before the ridged slice; `y` (along-crest) stays un-warped for
+        // the tall/short crest modulation below.
+        let w = DVec3::new(x, y, 0.0) / MASSIF_WARP_WL_M;
+        let wx = x + fbm(w, self.seed ^ 0x7A11 ^ site.salt, 3.0) * MASSIF_WARP_AMP_M;
+        let wy = y + fbm(w + DVec3::splat(13.7), self.seed ^ 0x7A22 ^ site.salt, 3.0)
+            * MASSIF_WARP_AMP_M;
+
         // 2-D ridged slice (z = 0): deterministic, multi-ridge spine.
         let ridge = ridged(
-            DVec3::new(x, y, 0.0) / MASSIF_RIDGE_WL_M,
+            DVec3::new(wx, wy, 0.0) / MASSIF_RIDGE_WL_M,
             self.seed ^ 0x4D54 ^ site.salt,
             MASSIF_RIDGE_OCTAVES,
         );
@@ -582,8 +639,8 @@ impl ProceduralSurface {
         // Linear-RGB band anchors.
         let shore = Vec3::new(0.30, 0.27, 0.18); // tan/sand near 0 m
         let lowland = Vec3::new(0.08, 0.16, 0.06); // green
-        let upland = Vec3::new(0.12, 0.11, 0.08); // brown
-        let rock = Vec3::new(0.13, 0.12, 0.11); // grey rock
+        let upland = Vec3::new(0.092, 0.104, 0.082); // grey-green upland (temperate, not brown)
+        let rock = Vec3::new(0.118, 0.120, 0.122); // neutral grey rock
         let snow = Vec3::new(0.62, 0.64, 0.68); // snow
 
         let h = height_m;
@@ -876,18 +933,31 @@ fn massif_envelope(x: f64, y: f64, site: &MassifSite) -> f64 {
 }
 
 /// Erosion-filter parameters tuned for a km-scale mountain range (the crate
-/// defaults target a ~22-unit toy mesh). `scale` is the largest erosion
-/// wavelength in metres; effective per-octave displacement is `scale * strength`
-/// (~1.4 km here), accumulated over the octaves. `onset` is eased down so the
-/// gentle base flanks still trigger the gully carving.
+/// defaults target a ~22-unit toy mesh).
+///
+/// Two independent knobs to keep straight (see `bevy_erosion_filter::cpu`):
+/// - **Feature scale.** The largest carved gully wavelength ≈ `scale *
+///   cell_scale` (`cell_scale` defaults to 0.7). `octaves` extend the drainage
+///   `octaves-1` halvings finer (each ×2 finer, ×`gain` = 0.5 shallower), so the
+///   finest detail ≈ `scale * cell_scale / 2^(octaves-1)`.
+/// - **Carve depth ∝ `scale * strength`**, summed over the octaves. So to make
+///   the gullies *finer* without making them *shallower*, drop `scale` and raise
+///   `strength` to hold that product.
+///
+/// Here: dominant gully ≈ 4000 × 0.7 ≈ 2.8 km, finest ≈ 90 m over **6** octaves
+/// — deliberately stopping short of the sub-100 m detail that only reads in an
+/// extreme close-up (which the player never gets), keeping the carve energy in
+/// the medium band that's visible at flying/approach distance. Depth ∝ 4000 ×
+/// 0.23 ≈ 920 (≈ unchanged). `onset` is eased down so the gentle base flanks
+/// still carve.
 fn massif_erosion_params() -> ErosionFilterParams {
     let d = ErosionFilterParams::default();
     ErosionFilterParams {
-        scale: 6_500.0,
-        strength: 0.14,
+        scale: 4_000.0,
+        strength: 0.23,
         gully_weight: 0.55,
         detail: 1.7,
-        octaves: 7,
+        octaves: 6,
         onset: d.onset * 0.16,
         assumed_slope: Vec2::new(0.5, 0.95),
         ..d

@@ -61,6 +61,7 @@ pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {
 
 pub fn update(
     ship_q: Query<&AeroReadout, With<LocalCraftBody>>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut panel_q: Query<&mut Visibility, With<AtmoPanel>>,
     mut text_q: Query<&mut Text, With<AtmoText>>,
 ) {
@@ -84,11 +85,16 @@ pub fn update(
         && let Ok(flight) = ship_q.single()
         && let Ok(mut text) = text_q.single_mut()
     {
-        let q_kpa = flight.dynamic_pressure_pa / 1000.0;
-        let value = format!(
-            "TAS {:.0} m/s  ·  q {:.1} kPa  ·  M {:.2}",
-            flight.airspeed_ms, q_kpa, flight.mach
-        );
+        // TAS reuses the shared speed formatter (m/s or knots); dynamic
+        // pressure is kPa metric / psf imperial; Mach is dimensionless.
+        let tas = crate::hud::format::speed(flight.airspeed_ms, units.system);
+        let value = if units.system.is_imperial() {
+            let q_psf = flight.dynamic_pressure_pa * 0.020_885_434;
+            format!("TAS {tas}  ·  q {q_psf:.0} psf  ·  M {:.2}", flight.mach)
+        } else {
+            let q_kpa = flight.dynamic_pressure_pa / 1000.0;
+            format!("TAS {tas}  ·  q {q_kpa:.1} kPa  ·  M {:.2}", flight.mach)
+        };
         if text.0 != value {
             text.0 = value;
         }

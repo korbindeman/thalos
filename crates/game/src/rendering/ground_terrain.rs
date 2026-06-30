@@ -1363,6 +1363,13 @@ pub(super) fn update_body_terrain_atmosphere(
         };
         mat.scene =
             build_terrain_scene_lighting(terrain.body_id, states, &occluders, exposure.gain);
+        // Moonlight: the brightest child moon (e.g. Mira over Thalos) reflecting
+        // the star back down, so a full moon lights the night landscape. Filled
+        // only for the surface terrain path — the orbital map terrain skips it.
+        let (moon_dir_flux, moon_color) =
+            compute_moonlight(terrain.body_id, &sim.system.bodies, states, exposure.gain);
+        mat.scene.moonlight_dir_flux = moon_dir_flux;
+        mat.scene.moonlight_color = moon_color;
         mat.extras.craft_shadow = craft_shadow;
         // Sun-shadow map: the camera + matrix are owned by `sun_shadow`; bind
         // the handle and the render-space → shadow-clip transform. `params.x`
@@ -1557,6 +1564,105 @@ pub(crate) fn build_terrain_scene_lighting(
     // swap happens far enough from the body that planetshine contributes
     // little to the direct-light path; revisit when we drop the swap radius.
     scene
+}
+
+/// Moonlight contribution for one body's surface: the brightest child moon
+/// reflecting the star back down, packed for `SceneLighting.moonlight_*`. This
+/// is the reverse of planetshine (parent → moon) — a child moon lighting its
+/// parent's night side, so a full Mira overhead lights the Thalos landscape.
+///
+/// Returns `(moonlight_dir_flux, moonlight_color)`:
+///   - `dir_flux.xyz` = unit direction from the body toward the moon in world
+///     render space (= the inertial direction; the big_space render frame shares
+///     inertial axes, so a normalised inertial direction is already render-space).
+///     `.w` = artistic flux folded with the moon's Lambert phase and a per-moon
+///     relative-brightness from its size / albedo / distance.
+///   - `color.xyz` = the moon's normalised linear hue, `.w` = enable flag.
+///
+/// Physical moonlight is ~1e-6 of sunlight — invisible after tonemapping — so
+/// the flux is an artistic night-lift, not lux. `MOON_FULL_FLUX` is the single
+/// brightness knob (the lift from a full, bright moon overhead); tune it from a
+/// night screenshot.
+fn compute_moonlight(
+    body_id: BodyId,
+    bodies: &[thalos_world::BodyDefinition],
+    states: &thalos_physics_canonical::types::BodyStates,
+    gain: f32,
+) -> (Vec4, Vec4) {
+    // Full-moon night lift in final surface-radiance units (~0..1). The shader
+    // multiplies it by ground albedo × cosine × night/horizon gates, so ~0.12
+    // lands clearly above the SURFACE_NIGHT_AMBIENT starlight floor (~0.01)
+    // without reading as daylight.
+    const MOON_FULL_FLUX: f32 = 0.12;
+    // Reference "bright moon" reflectance shape (albedo_luminance × (R/d)²) that
+    // maps to full brightness. Mira ≈ 0.14 × (8.69e5 / 1.91e8)² ≈ 2.9e-6.
+    const MOON_REF_SHAPE: f64 = 3.0e-6;
+
+    let none = (Vec4::ZERO, Vec4::ZERO);
+    let Some(body_state) = states.get(body_id) else {
+        return none;
+    };
+    let star_pos = states.first().map(|s| s.position).unwrap_or_default();
+    let body_pos = body_state.position;
+
+    let mut best_flux = 0.0f32;
+    let mut best_dir = Vec3::Y;
+    let mut best_tint = Vec3::ONE;
+
+    for moon in bodies {
+        if !matches!(moon.kind, thalos_world::BodyKind::Moon) || moon.parent != Some(body_id) {
+            continue;
+        }
+        let Some(moon_state) = states.get(moon.id) else {
+            continue;
+        };
+        let to_moon = moon_state.position - body_pos;
+        let d = to_moon.length();
+        if d <= 0.0 {
+            continue;
+        }
+        // Lambert phase of the moon as seen from the body: the angle AT the moon
+        // between the star and the body (full moon → 0 → phase 1; new moon → π → 0).
+        let to_star_from_moon = (star_pos - moon_state.position).normalize_or_zero();
+        let to_body_from_moon = (body_pos - moon_state.position).normalize_or_zero();
+        let cos_g = to_star_from_moon.dot(to_body_from_moon).clamp(-1.0, 1.0);
+        let g = cos_g.acos();
+        let phase = ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI)
+            .clamp(0.0, 1.0);
+
+        // Per-moon reflectance shape: albedo luminance × (angular radius)².
+        let color_lin = Color::srgb(moon.color[0], moon.color[1], moon.color[2]).to_linear();
+        let albedo_lum = (0.2126 * color_lin.red + 0.7152 * color_lin.green
+            + 0.0722 * color_lin.blue) as f64;
+        let ang = moon.radius_m / d;
+        let shape = albedo_lum * ang * ang;
+        let rel = (shape / MOON_REF_SHAPE).clamp(0.0, 1.5);
+
+        let flux = MOON_FULL_FLUX * (phase * rel) as f32 * gain;
+        if flux > best_flux {
+            best_flux = flux;
+            best_dir = (to_moon / d).as_vec3();
+            // Normalise hue so flux carries brightness and the tint only colour.
+            let max_c = color_lin
+                .red
+                .max(color_lin.green)
+                .max(color_lin.blue)
+                .max(1.0e-4);
+            best_tint = Vec3::new(
+                color_lin.red / max_c,
+                color_lin.green / max_c,
+                color_lin.blue / max_c,
+            );
+        }
+    }
+
+    if best_flux <= 0.0 {
+        return none;
+    }
+    (
+        Vec4::new(best_dir.x, best_dir.y, best_dir.z, best_flux),
+        Vec4::new(best_tint.x, best_tint.y, best_tint.z, 1.0),
+    )
 }
 
 fn local_craft_shadow(

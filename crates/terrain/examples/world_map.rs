@@ -44,6 +44,15 @@ fn main() {
         return;
     }
 
+    // Transect mode: WORLD_TRANSECT="lat,lon,az_deg,length_km" walks a straight
+    // tangent line and prints a height profile — used to measure shelf width and
+    // continental-slope steepness (is the land→abyss transition a natural ramp
+    // or a cliff?).
+    if let Ok(spec) = std::env::var("WORLD_TRANSECT") {
+        print_transect(&surface, radius_m, &spec);
+        return;
+    }
+
     // Equirectangular grid. Coarse LOD: the macro continent/ocean shape is
     // LOD-invariant, so this just controls how many relief octaves come in.
     let w = 2048usize;
@@ -220,6 +229,40 @@ fn render_zoom(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
     let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/world_zoom.png");
     img.save(out).expect("save png");
     println!("wrote {out}  (north = up, east = right)");
+}
+
+/// Walk a straight tangent line and print a height profile (a depth/altitude
+/// transect), so the shelf width and continental-slope steepness are legible as
+/// numbers, not just pixels.
+fn print_transect(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
+    let parts: Vec<f64> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    let [clat, clon, az_deg, len_km] = parts.as_slice() else {
+        eprintln!("WORLD_TRANSECT must be \"lat,lon,az_deg,length_km\"");
+        return;
+    };
+    let center = latlon_dir(*clat, *clon);
+    let east = DVec3::Y.cross(center).normalize();
+    let north = center.cross(east).normalize();
+    let az = az_deg.to_radians();
+    let dir_step = (north * az.cos() + east * az.sin()).normalize();
+    let len_m = len_km * 1000.0;
+    let steps = 60usize;
+    println!("transect from (lat {clat}, lon {clon}) az {az_deg}° over {len_km} km:");
+    let mut prev_h = None::<f64>;
+    for i in 0..=steps {
+        let d = (i as f64 / steps as f64 - 0.5) * len_m;
+        let p = center * radius_m + dir_step * d;
+        let h = surface.sample_height_m(p.normalize().as_vec3(), 60.0) as f64;
+        let slope = prev_h.map(|p| (h - p) / (len_m / steps as f64) * 1000.0); // m per km
+        println!(
+            "{:+6.0} km  {:+6.0} m {} {}",
+            d / 1000.0,
+            h,
+            if h >= 0.0 { "L" } else { "~" },
+            slope.map(|s| format!("({s:+.0} m/km)")).unwrap_or_default(),
+        );
+        prev_h = Some(h);
+    }
 }
 
 /// Hypsometric colour ramp (sRGB-ish, for eyeballing). Ocean = depth ramp;

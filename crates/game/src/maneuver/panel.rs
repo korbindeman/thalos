@@ -240,6 +240,7 @@ pub(super) fn update_editor(
     scenario: Res<ScenarioMenu>,
     photo: Res<PhotoMode>,
     theme: Res<HudTheme>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut roots: Query<&mut Visibility, (With<ManeuverEditorRoot>, Without<NudgeContainer>)>,
     mut nudge: Query<&mut Visibility, (With<NudgeContainer>, Without<ManeuverEditorRoot>)>,
     mut texts: Query<(&EditorField, &mut Text)>,
@@ -300,14 +301,22 @@ pub(super) fn update_editor(
             EditorField::NodeNum => format!("Node #{}", sel_id.0),
             EditorField::Status => status.to_string(),
             EditorField::Time => format!("T{time_until:+.0}s"),
-            EditorField::DvTotal => format!("Δv {total_dv:.1} m/s"),
+            EditorField::DvTotal => {
+                format!("Δv {}", crate::hud::format::delta_v_fine(total_dv, units.system))
+            }
             EditorField::Burn => burn_text.clone(),
             EditorField::DeleteLabel => {
                 if executed { "Dismiss".into() } else { "Delete".into() }
             }
-            EditorField::AxisValue(DvAxis::Prograde) => format!("{:.1} m/s", node_dv.prograde),
-            EditorField::AxisValue(DvAxis::Normal) => format!("{:.1} m/s", node_dv.normal),
-            EditorField::AxisValue(DvAxis::Radial) => format!("{:.1} m/s", node_dv.radial),
+            EditorField::AxisValue(DvAxis::Prograde) => {
+                crate::hud::format::delta_v_fine(node_dv.prograde, units.system)
+            }
+            EditorField::AxisValue(DvAxis::Normal) => {
+                crate::hud::format::delta_v_fine(node_dv.normal, units.system)
+            }
+            EditorField::AxisValue(DvAxis::Radial) => {
+                crate::hud::format::delta_v_fine(node_dv.radial, units.system)
+            }
         };
         if **text != value {
             **text = value;

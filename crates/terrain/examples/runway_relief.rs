@@ -25,6 +25,9 @@ fn main() {
     // Region centred between the runway and the massif so both are framed.
     let (clat, clon, half_km) = match std::env::var("RELIEF_ZOOM").ok().as_deref() {
         Some("massif") => (7.105, 177.137, 85.0),
+        // Tight crop over the down-runway massif to judge erosion gully *scale*
+        // (the wide presets are too coarse to resolve drainage texture).
+        Some("massif_zoom") => (7.105, 177.137, 18.0),
         Some("ne") => (8.48, 178.51, 100.0),
         _ => (7.35, 177.57, 130.0),
     };
@@ -35,7 +38,9 @@ fn main() {
 
     let half_m = half_km * 1000.0_f64;
     let n = 1024usize;
-    let lod = 30.0_f32;
+    // Sample roughly at the pixel footprint so a tight crop actually resolves
+    // fine gullies instead of LOD-averaging them away.
+    let lod = (2.0 * half_m / n as f64 * 0.75).clamp(4.0, 30.0) as f32;
 
     let sample = |ex: f64, ny: f64| -> f64 {
         let p = up * radius_m + east * ex + north * ny;

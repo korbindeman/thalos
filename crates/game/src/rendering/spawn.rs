@@ -42,9 +42,8 @@ use super::ground_terrain::{BodySky, RealSpaceImpostor};
 use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::scene_depth::SceneDepthImage;
 use super::types::{
-    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, RealSpaceBody,
-    SharedPlanetMeshes, ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials,
-    SunLight, TidallyLocked,
+    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, MoonLight, RealSpaceBody,
+    ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight, TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::loading::LoadingTracker;
@@ -195,9 +194,6 @@ pub(super) fn spawn_bodies(
     // camera-facing quads (`billboard_mesh`); solid-impostor bodies
     // likewise. No body needs an icosphere any more.
     let unit_sphere_star = meshes.add(Sphere::new(1.0).mesh().ico(5).unwrap());
-    commands.insert_resource(SharedPlanetMeshes {
-        billboard: billboard_mesh.clone(),
-    });
 
     for body in bodies {
         let state = &initial_states[body.id];
@@ -814,6 +810,25 @@ pub(super) fn spawn_bodies(
         bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::coords::SHIP_LAYER]),
         Transform::default(),
         SunLight,
+    ));
+
+    // Secondary directional light for moonlight — driven each frame by
+    // `lighting::update_moon_light` from the brightest child moon of the body
+    // the craft is on (e.g. Mira over Thalos), so the `StandardMaterial` hull +
+    // surface structures catch moonlight at night the way the terrain shader's
+    // own moonlight term lights the ground. No shadows (soft fill) and no
+    // cascade config; starts dark (illuminance 0) until a lit moon is up. Shares
+    // SHIP_LAYER with the craft for the same reason `SunLight` does.
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 0.0,
+            color: Color::WHITE,
+            shadows_enabled: false,
+            ..default()
+        },
+        bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::coords::SHIP_LAYER]),
+        Transform::default(),
+        MoonLight,
     ));
 
     // Dim ambient light so shadowed sides of planets aren't pitch black.

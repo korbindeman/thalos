@@ -8,6 +8,7 @@
 //! | A / D          | Strafe left / right          |
 //! | R / F          | Up / down (raise / fall)     |
 //! | Q / E          | Roll left / right            |
+//! | Z (hold)       | Zoom in (telephoto FOV)      |
 //! | LMB-drag       | Yaw + pitch (mouse look)     |
 //! | Shift / Ctrl   | 5× / 0.2× speed              |
 //! | Scroll wheel   | Adjust base cruise speed     |
@@ -88,6 +89,12 @@ const FREECAM_SCROLL_LOG_STEP: f64 = 0.20;
 /// re-level from inverted in a couple of seconds without making fine
 /// roll adjustments impossible.
 const FREECAM_ROLL_RATE_RAD_S: f32 = 1.5;
+/// Telephoto zoom factor while Z is held: the field of view narrows to 1/this
+/// of the normal FOV (≈45° → ≈11°), magnifying the view ~4×.
+const FREECAM_ZOOM_FACTOR: f32 = 4.0;
+/// Exponential smoothing rate (1/s) for easing the freecam FOV toward its zoom
+/// target, so zoom in/out reads like racking a lens rather than a hard snap.
+const FREECAM_ZOOM_LERP_RATE: f32 = 12.0;
 
 pub struct FreeCamPlugin;
 
@@ -95,7 +102,11 @@ impl Plugin for FreeCamPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FreeCam>().add_systems(
             Update,
-            (toggle_freecam_system, freecam_drive_system)
+            (
+                toggle_freecam_system,
+                freecam_drive_system,
+                freecam_zoom_system,
+            )
                 .chain()
                 .in_set(crate::SimStage::Camera),
         );
@@ -248,4 +259,47 @@ fn freecam_drive_system(
     let (next_cell, local) = grid.translation_to_grid(world);
     *cell = next_cell;
     transform.translation = local;
+}
+
+/// Hold Z to zoom the freecam view in (narrow the field of view) like a
+/// telephoto lens; release to return to the normal FOV.
+///
+/// Runs regardless of `freecam.active` so that toggling freecam off — or
+/// switching out of ship view — while still zoomed eases the FOV back to
+/// normal instead of stranding the camera at a magnified projection.
+fn freecam_zoom_system(
+    time: Res<Time<Real>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    freecam: Res<FreeCam>,
+    mut cam_q: Query<
+        &mut Projection,
+        (With<OrbitCamera>, With<ActiveCamera>, With<ShipCamera>),
+    >,
+) {
+    let Ok(mut projection) = cam_q.single_mut() else {
+        return;
+    };
+    // Read the current FOV without yet triggering change detection — most
+    // frames the projection is already settled and shouldn't be re-marked.
+    let Projection::Perspective(perspective) = projection.as_ref() else {
+        return;
+    };
+    let current = perspective.fov;
+
+    let base_fov = PerspectiveProjection::default().fov;
+    let target = if freecam.active && keys.pressed(KeyCode::KeyZ) {
+        base_fov / FREECAM_ZOOM_FACTOR
+    } else {
+        base_fov
+    };
+
+    if (current - target).abs() < 1.0e-4 {
+        return;
+    }
+
+    let smoothing = 1.0 - (-FREECAM_ZOOM_LERP_RATE * time.delta_secs()).exp();
+    let next = current + (target - current) * smoothing;
+    if let Projection::Perspective(perspective) = projection.as_mut() {
+        perspective.fov = next;
+    }
 }

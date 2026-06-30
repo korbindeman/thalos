@@ -109,3 +109,45 @@ way.
   paths; a `just game` launch should confirm shaders load and bodies render.
 - **Phase 3** — rename `planet_editor` → `body_editor`. *(done)* Migrating
   "planet" terminology in the render layer to celestial-body terms remains.
+- **Phase 4** — render *mechanism* consolidation (state-in / pixels-out).
+  *(planned — sequenced AFTER the graphics-fidelity foundation, `docs/graphics_fidelity.md`
+  §3.)* The scene-level rendering mechanism is currently split between crates: the
+  camera/post bundle (`body_render::impostor::post_stack`, mis-filed under
+  `impostor/`), the `scene_depth` and `sun_shadow` render-graph nodes (in
+  `game::rendering`), the env probe (`game::reflection_probe`), and the hull
+  material (`thalos_shipyard::material`). These consolidate into
+  `thalos_body_render` — the de-facto render crate, already consumed by both
+  `game` and `shipyard` — which is then renamed **`thalos_render`**. **Drivers stay
+  put:** `game::rendering` is ~90% sim-coupled systems (read `SolarSystemState` /
+  `CraftState` → uniforms / LOD swaps / spawns) and remains in `game`. The boundary
+  is **state-in / pixels-out**: the render crate owns *how* to shade; `game` owns
+  *what* to shade this frame. Deferred so the full mechanism set — including the new
+  AO / sky-view-LUT / env-IBL render-graph nodes the fidelity foundation adds — is
+  extracted in one pass rather than twice.
+- **Phase 4a** — decouple rendering from `thalos_shipyard`. The construction crate
+  carries rendering only because it began as a self-contained egui editor with its
+  own viewport; now that the in-game Bevy-UI editor is primary, `thalos_shipyard`
+  should own *ship definition + construction* (parts, blueprints, geometry mesh
+  builders, sizing/stats/staging, editor command/state logic) and **none of the
+  shading**.
+  - **Done (2026-06-30, compile + clippy clean):** the craft hull material
+    (`ShipPartMaterial` / `ShipPartExtension` / `ShipPartParams` + the base
+    constructors) moved from `thalos_shipyard::material` to
+    `thalos_body_render::craft`; the duplicated dims→`ShipPartParams` derivation
+    unified into one `thalos_shipyard::appearance::ship_part_params` (was copy-pasted
+    in `game::ship_view` and the editor's `editor::visuals`). This **unblocks the
+    craft hull *receiving* the shared sun-shadow cascade** (graphics-fidelity
+    F6b/F7 — `docs/graphics_fidelity.md`), since `thalos::shadow` + the metallic
+    BRDF branch now live alongside the material.
+  - **Interim debt:** `thalos_shipyard` *temporarily* depends on
+    `thalos_body_render` — the editor core still *uses* the material, re-exported
+    through the `shipyard::material` shim. This is a backwards edge (construction
+    shouldn't pull in the render stack), removed by the follow-up.
+  - **Deferred follow-up:** (1) move material *application* out of the editor core
+    (`editor::visuals` / `editor::shrouds` attach `ShipPartMaterial` + sync uniforms
+    today) into a render-side appearance plugin the front-ends drive; (2) **flip the
+    dependency** to the clean `body_render → shipyard` direction — render reads the
+    construction model to shade it, exactly as it already reads `thalos_world` to
+    shade bodies — and drop the interim edge; (3) relocate the standalone
+    `ship_editor` binary out of the crate; (4) drop `bevy_egui` + `thalos_celestial`
+    from `thalos_shipyard`.

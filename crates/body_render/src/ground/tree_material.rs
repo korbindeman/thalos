@@ -87,6 +87,18 @@ impl Material for TreeMaterial {
         "embedded://thalos_body_render/ground/tree.wgsl".into()
     }
 
+    // Stay OUT of the depth prepass. The camera runs a `DepthPrepass` (grass early-Z),
+    // but the broadleaf canopy is dozens of overlapping double-sided *translucent*
+    // leaf cards at near-identical depths, and pre-populating depth for them washes
+    // the canopy out pale — **empirically confirmed** with both an Equal and a forced
+    // GreaterEqual depth test (and the vertex-layout override isolated as NOT the
+    // cause: prepass-off + override = green). Early-Z for trees therefore needs a
+    // canopy redesign into a more depth-coherent surface, not a render tweak. Grass
+    // (free-standing opaque blades) has no such issue and opts in via its prepass.
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Opaque
     }
@@ -100,10 +112,27 @@ impl Material for TreeMaterial {
         // Two-sided: thin canopy silhouettes shouldn't drop their back faces.
         // Do NOT override `descriptor.vertex.buffers` — Bevy's mesh pipeline
         // auto-includes every attribute the mesh has (POSITION/NORMAL/UV_0/UV_1/
-        // COLOR at their standard locations) for both the main and prepass
-        // pipelines. Overriding it truncated the layout the standard prepass
-        // vertex shader needs (a location-7 input) and failed pipeline creation.
+        // COLOR at their standard locations). Overriding it truncated the layout the
+        // standard prepass vertex shader needs (a location-7 input) and failed
+        // pipeline creation. (Trees opt out of the prepass via `enable_prepass`.)
         descriptor.primitive.cull_mode = None;
+
+        // Anti-aliased foliage under MSAA. The leaf cards are a 1-bit alpha
+        // cutout (`tex.a < 0.5 → discard`), and plain MSAA can't touch that — it
+        // super-samples geometry coverage, not the alpha test — so leaf edges
+        // crawl no matter the sample count. When the camera runs MSAA, switch the
+        // leaf fragments to hardware **alpha-to-coverage**: the shader writes a
+        // sharpened fractional coverage (the `TREE_ALPHA_TO_COVERAGE` branch in
+        // `tree.wgsl`) and the GPU turns it into a per-sample mask, so the canopy
+        // edges resolve smooth. `descriptor.multisample.count` is already set from
+        // the MSAA pipeline key here, so the sample-count-1 (MSAA off) path is left
+        // exactly as it was — the default look is unchanged.
+        if descriptor.multisample.count > 1 {
+            descriptor.multisample.alpha_to_coverage_enabled = true;
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("TREE_ALPHA_TO_COVERAGE".into());
+            }
+        }
         Ok(())
     }
 }

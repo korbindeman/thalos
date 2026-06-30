@@ -43,9 +43,17 @@ impl Plugin for PlanetLightingPlugin {
         bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/landcover.wgsl");
+        // Shared cascaded sun-shadow sampler, imported by the terrain, tree,
+        // grass, and ground-patch materials (one copy instead of four). See
+        // `shaders/shadow.wgsl`.
+        bevy::shader::load_shader_library!(app, "shaders/shadow.wgsl");
         // Shared foliage MATERIAL model (the albedo analogue of `shade_foliage`),
         // imported by both the near mesh trees and the impostor bake so the two
         // cannot drift. See `shaders/foliage.wgsl`.
         bevy::shader::load_shader_library!(app, "shaders/foliage.wgsl");
+        // Shared grass-blade vertex displacement, imported by BOTH the main grass
+        // shader and its depth-prepass so their depths match (early-Z correctness).
+        // See `shaders/grass_displace.wgsl`.
+        bevy::shader::load_shader_library!(app, "shaders/grass_displace.wgsl");
     }
 }

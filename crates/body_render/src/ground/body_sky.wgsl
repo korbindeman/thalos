@@ -498,9 +498,22 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let view_pos   = view_pos_h.xyz / view_pos_h.w;
         let t_scene    = length(view_pos);
         scene_t = t_scene;
-        t_exit = min(t_exit, t_scene);
-        surface_fade = 1.0;
-        surface_dist = t_scene;
+        // Distinguish NEAR geometry (terrain, ship hull — always within the
+        // atmosphere shell plus a small margin) from a FAR background celestial
+        // body (a moon/planet impostor seen through this atmosphere, millions of
+        // metres away). For near geometry, clip the raymarch at it and run the
+        // surface aerial-perspective path. For a far body, leave `t_exit` at the
+        // shell exit and `surface_fade = 0` so this pixel is treated exactly like
+        // a SKY pixel: the in-scatter integrates the full air column and the
+        // perceptual sky-luminance opacity boost below CRUSHES the body by day
+        // (the same way it crushes stars), while a dim night sky lets it show.
+        // Without this the impostor was veiled as if it were distant *terrain*
+        // 190,000 km away, leaving Mira far too prominent in daylight.
+        if t_scene <= atmos_top_r * 4.0 {
+            t_exit = min(t_exit, t_scene);
+            surface_fade = 1.0;
+            surface_dist = t_scene;
+        }
     } else if fallback_t_surface < 1.0e29 {
         t_exit = min(t_exit, fallback_t_surface);
         surface_fade = fallback_surface_fade;

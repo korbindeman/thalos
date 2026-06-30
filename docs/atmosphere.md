@@ -305,6 +305,39 @@ authored value) for live sky-dome tuning — both are pure runtime
 multipliers that do **not** feed the multi-scatter LUT bake, so overriding
 them at runtime is exact (no LUT rebake).
 
+### Object aerial recession (foliage/objects fade earlier than terrain)
+
+`BodySky` applies aerial perspective to **every** opaque pixel uniformly,
+keyed on scene depth — so trees, grass, impostors, and buildings already get
+the *same* haze as terrain at the same distance (they are opaque geometry on
+`SHIP_LAYER` that writes depth before `CopySceneDepthNode`). But surface
+**objects** read more saturated / higher-contrast than the ground, so at the
+same distance they pop out against terrain `BodySky` has hazed. `BodySky`
+can't help — it has only depth and can't tell an object pixel from a terrain
+pixel.
+
+So each object material recedes its own lit colour toward the air **in the
+shader**, via the shared `object_aerial_recession` helper in
+`thalos::lighting` (`shading/shaders/lighting.wgsl`), called at the end of
+`tree.wgsl`, `tree_impostor.wgsl`, and `grass.wgsl`. It blends the lit colour
+toward the `SurfaceSky` sky-dome radiance by `smoothstep(NEAR, FAR, camera_dist)`,
+deliberately starting **closer** than `BodySky`'s ~8 km terrain onset
+(`OBJECT_AERIAL_NEAR_M` ≈ 1.5 km). The haze target is **clamped to a small
+multiple of the object's own luminance** (`OBJECT_AERIAL_BRIGHTEN_CAP`) — the
+analytic sky radiance runs several × brighter than lit foliage, so fading
+straight toward it blows distant canopies out to white instead of hazing them;
+the cap makes it read as haze (desaturate + gentle bluish lift). `MAX` is kept
+low (≈0.32) so objects fade only a touch more than terrain, never a full
+dissolve, and the ramp is stretched over a long distance (NEAR ≈ 1 km → FAR
+≈ 35 km, well past the tree band) so the haze builds up gradually instead of
+piling into a narrow transition band that reads as an abrupt "haze line". The
+`OBJECT_AERIAL_*` consts are the tuning dials (tune from a
+`just game` surface screenshot — the `just preview` camera sits inside NEAR and
+shows no effect).
+This stacks on top of the `BodySky` veil past 8 km, which is intended (objects
+recede *more/earlier* than terrain). Buildings (`StandardMaterial`) don't get
+this yet — they'd need an `ExtendedMaterial` to reach a fragment hook; deferred.
+
 ### Backlog
 
 - **Unify impostor and terrain cloud shadows.** `planet_impostor.wgsl`

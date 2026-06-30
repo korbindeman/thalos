@@ -214,7 +214,7 @@ pub const CASCADE_COUNT: usize = 3;
 /// of the cascade binding; the depth maps are separate `texture_depth_2d`
 /// bindings per cascade, sampled unrolled in the shader). Mirrored in
 /// `body_terrain.wgsl` / `tree.wgsl`. `config.x == 0` ⇒ shader skips sampling.
-#[derive(Clone, Copy, ShaderType)]
+#[derive(Clone, Copy, Debug, ShaderType)]
 pub struct ShadowCascadeBlock {
     /// Render-space → cascade clip (Bevy reverse-z orthographic), one per cascade.
     pub view_proj: [Mat4; CASCADE_COUNT],

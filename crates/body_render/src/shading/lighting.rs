@@ -97,6 +97,23 @@ pub struct SceneLighting {
     /// per-wavelength reflectance the parent sends back at zero phase),
     /// w = enable flag (1.0 active, 0.0 disabled).
     pub planetshine_tint_flag: Vec4,
+
+    /// Moonlight onto this body's surface — the reverse of planetshine: the
+    /// brightest child moon, treated as a single soft directional light, so a
+    /// full moon overhead lights the night landscape. xyz = unit direction
+    /// from the surface toward the moon in world-render space (≈ moon dir from
+    /// the body centre — the moon is far enough that per-fragment parallax is
+    /// negligible). w = artistic flux already folded with the moon's phase,
+    /// size, albedo, and distance (NOT physical lux — physical moonlight is
+    /// ~1e-6 of sunlight and would be invisible after tonemapping; this is the
+    /// tuned night-lift). Consumed by `shade_surface`, night- and
+    /// horizon-gated; `0` flux disables it.
+    pub moonlight_dir_flux: Vec4,
+
+    /// Moonlight tint: xyz = the moon's linear-RGB hue (normalised so the flux
+    /// carries the brightness, the tint only the colour), w = enable flag
+    /// (1.0 active, 0.0 disabled — bodies with no lit child moon leave it 0).
+    pub moonlight_color: Vec4,
 }
 
 impl Default for SceneLighting {
@@ -110,6 +127,8 @@ impl Default for SceneLighting {
             occluders: [Vec4::ZERO; MAX_ECLIPSE_OCCLUDERS],
             planetshine_pos_radius: Vec4::ZERO,
             planetshine_tint_flag: Vec4::ZERO,
+            moonlight_dir_flux: Vec4::ZERO,
+            moonlight_color: Vec4::ZERO,
         }
     }
 }

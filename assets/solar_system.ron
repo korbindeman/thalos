@@ -75,7 +75,13 @@
             physical: (
                 mass_kg: 1.374e22,
                 radius_m: 869000.0,
-                color: "#A6A09A",
+                // Regolith grey (~0.14 linear). The display/fallback colour is
+                // also used as the impostor albedo by the interim
+                // SolidPlanetMaterial; the authored #A6A09A (~0.4 linear) read
+                // brighter than Thalos's sunlit ground. Lunar Bond albedo is
+                // ~0.07–0.12, so this is still on the bright side but reads as a
+                // real moon. Tune alongside the moonlight knobs.
+                color: "#6B655C",
                 rotation_period_s: 1373760.0,
                 axial_tilt_deg: 1.2,
             ),

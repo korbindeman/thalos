@@ -1,150 +1,453 @@
 # Graphics fidelity plan
 
-Living tracking doc for the push toward MSFS / KSP2-tier visuals. Visual
-direction: **stylized but high fidelity** — lean on lighting, shading, and a
-controlled-but-rich palette, *not* photo textures. KSP2 (not 1) and MSFS are
-the references.
+Living tracking doc for the push toward MSFS / KSP2-tier visuals.
+
+**Visual direction:** *stylized but high fidelity* — lean on lighting, shading,
+and a controlled-but-rich palette, *not* photo textures. MSFS is the reference
+for **outdoor-HDR rendering technique** (atmosphere, aerial perspective,
+exposure, soft shadows); KSP2 is the reference for **art intent** (readable,
+slightly heightened palette). Not KSP1, not photoreal terrain.
+
+This doc was restructured 2026-06-30 after a full architecture review (see
+§7 Decision log). It is organised around the realisation that the renderer is
+**one shared substrate with many consuming surfaces** — and that the biggest
+structural debt is that crafts/structures don't yet consume that substrate.
 
 ## Status legend
 
 - ☐ not started · ◐ in progress · ☑ landed (compile-verified) · ✅ runtime-verified by a `just game` screenshot
 
-## Where the renderer already is
+---
+
+# 1. The renderer as a system
 
 The pipeline is feature-rich; the flatness in current screenshots is a few
-specific gaps + tuning, not missing machinery. Already wired:
+specific gaps + tuning + one structural split, not missing machinery.
 
-- TonyMcMapface tonemap, distance-driven `CameraExposure`, auto-exposure, film
-  grain (`impostor/post_stack.rs`, `rendering/lighting.rs`).
-- Bloom, SMAA, CAS sharpening, mild chromatic aberration, deband dither
-  (`impostor/post_stack.rs`).
-- Physically-integrated per-body atmosphere with **aerial perspective** keyed to
-  scene depth, multi-scatter LUT, volumetric cloud slab (`ground/body_sky.wgsl`,
-  `AtmosphereTuning`).
-- Terrain: rough-dielectric BRDF (Oren–Nayar + Cook–Torrance + Kulla–Conty) with
-  altitude/slope **ecological albedo bands**, material masks, ~20 m albedo
-  breakup noise, ~1.25 m micro-relief normals (`ground/body_terrain.wgsl`).
-- Vegetation: meshed trees w/ octahedral far impostors, 5-ring grass clipmap to
-  ~1.5 km, wind on both, shared scene lighting (`ground/tree.wgsl`,
-  `grass.wgsl`, `scatter.rs`, `vegetation.rs`).
+**Already wired (the strong base):**
 
-## The gaps (ranked by visual impact)
+- **Shared lighting spine** — `thalos::lighting` (`shade_surface` / `ThalosSurface`)
+  is a real single dispatch point. `body_terrain.wgsl` fills one `ThalosSurface`
+  and the airless impostor (`solid_planet.wgsl`) shades through the *same*
+  `shade_hapke_surface`, so a body's orbital disc and its ground LOD reconverge
+  across the LOD swap. The BRDF kit is production-grade and `vec3`-ready (GGX D,
+  Smith height-correlated vis, Schlick Fresnel, Oren–Nayar, Karis split-sum
+  env-BRDF, Kulla–Conty energy compensation, Kaplanyan specular AA).
+- **Scene lighting** — `SceneLighting` is one clean CPU mirror feeding every
+  body material; eclipse occluders + planetshine come free to anything binding it.
+- **Atmosphere** — custom per-body single-scatter raymarch (`body_sky.wgsl` /
+  BodySky) with aerial perspective keyed to a copied **scene-depth** texture, a
+  CPU-baked multi-scatter LUT, and a vendored volumetric cloud slab.
+- **Shadows** — a self-managed **3-cascade** ortho sun-shadow rig
+  (`rendering/sun_shadow.rs`, `SHADOW_CASTER_LAYER = 8`, 4096², copy-node →
+  `Depth32Float`) sampled by terrain/trees/grass/rocks via `thalos::shadow`.
+- **Terrain** — runtime-generated (`ProceduralSurface`, no bake), streamed by
+  the vendored UDLOD renderer; per-tile height/albedo/roughness/**material-mask**
+  atlases; rough-dielectric BRDF over analytic ecological albedo bands.
+- **Vegetation** — meshed trees w/ octahedral far impostors, grass clipmap to
+  ~1.5 km, scattered rocks/pebbles, wind, all shading through the spine's
+  `shade_foliage`.
+- **Camera/post (shared by both lighting paths)** — HDR target, **AgX** tonemap,
+  bloom, SMAA, CAS, mild chromatic aberration, deband, exposure-driven film grain.
 
-1. **Nothing in the world casts shadows.** CSM is ship-only, 2 cascades, 500 m;
-   all terrain/vegetation tagged `NotShadowCaster`/`NotShadowReceiver`. The
-   forest is a uniformly-lit carpet → reads flat. *Dominant tell.*
-2. **No ambient occlusion** (SSAO/GTAO off). Trees/aircraft float; canopies have
-   no interior depth.
-3. **Monochrome desaturated palette.** One olive green everywhere; all broadleaf
-   trees share one leaf atlas, ±11% hue jitter only.
-4. **Uniform forest composition.** Clump field exists but reads as even fill.
-5. **Muddy aerial perspective + plastic aircraft.** Distance goes grey-green not
-   blue-haze; hull has no IBL/reflection probe.
+---
 
-## Workstreams
+# 2. Architecture
 
-### 1. World shadows — *highest impact*
+## 2.1 The shared lighting spine
 
-**Architecture finding (2026-06-27).** Terrain does **not** receive shadows via
-Bevy CSM — the UDLOD pass is custom and receives shadows only in its own shader:
-the analytic craft proxy (`BodyTerrainShadow`, capped at 24 capsules + 8 quads,
-CPU-uploaded each frame in `local_craft_shadow`, `rendering/ground_terrain.rs`)
-plus a height-field self-shadow march (`terrain_self_shadow`,
-`body_terrain.wgsl`). Trees/grass use fully custom WGSL lighting (wrap-diffuse +
-hemisphere sky) and sample no shadow map, so they neither receive CSM nor cast
-on each other/the ground visibly. Consequence: the originally-planned "extend the
-craft proxy to trees" is unworkable — thousands of trees can't go through a
-32-slot analytic uniform.
+`thalos::lighting::shade_surface(s: ThalosSurface, …)` is the canonical
+per-fragment shading entry. The caller fills `ThalosSurface { albedo, roughness,
+normal_ws, geo_normal_ws, emissive, occlusion, metallic, translucency, style }`
+and the function dispatches on `style` (DIELECTRIC / REGOLITH / FOLIAGE / WATER).
+Terrain, vegetation, water, rock, and impostors all flow through it. **The
+unification work is mostly extending and connecting to this spine, not building
+a new one.**
 
-- ☐ **1a. Blob/contact shadow discs.** Soft dark disc baked into each tree's
-  instanced draw at its base. Grounds trees, scales trivially, touches neither
-  terrain shader nor CSM. Contact-AO, not directional. *Quick low-risk win.*
-- ✅ **1b. Sun-aligned shadow texture sampled by the terrain shader.**
-  *Runtime-verified 2026-06-27 — runway + craft shadows visible on the ground.*
-  Tree-on-tree + grass-receiving **deferred** at user's call. Increment 1: tree
-  **mesh** tiles cast; **terrain receives**. Tree-on-tree, grass-receiving, and
-  craft-as-caster are follow-ups. Implemented in
-  [`rendering/sun_shadow.rs`](crates/game/src/rendering/sun_shadow.rs) +
-  `body_terrain.wgsl` (`sun_shadow_factor`) + `BodyTerrainExtras`/material
-  binding. Matrix convention verified against `bevy_camera` source (orthographic
-  reverse-z, `(far, near)` swap). Tunables: `SHADOW_STRENGTH`,
-  `SHADOW_DEPTH_BIAS`, `SHADOW_REGION_HALF_EXTENT_M`, `SHADOW_MAX_ALTITUDE_M`,
-  3×3 PCF. **Open risks for the screenshot:** compare-direction sign, acne/peter-
-  pan bias, and whether `tree.wgsl` alpha-discards (leaf-shaped vs blocky
-  shadows).
+## 2.2 The central fault line: two lighting universes
 
-  **Design (chosen against the real code):**
-  - New module `rendering/sun_shadow.rs`. A plain orthographic `Camera3d`
-    *outside* big_space (like the map camera), on a dedicated
-    `SHADOW_CASTER_LAYER = 8`, render target a 2048² color image, `Msaa::Off`,
-    `order = -1`. Positioned each frame from the ship camera's render-space
-    position + the active body's render-space sun direction (inertial dirs ==
-    render-space dirs; no rotation). Active only near a vegetated surface
-    (gated on `ActiveCloudBody` + camera altitude) to avoid a 2048² pass in
-    orbit.
-  - Reuse the `scene_depth` pattern: a render-graph `ViewNode`
-    (`CopySunShadowDepth`, filtered to the `SunShadowCamera` marker) copies the
-    shadow view's `ViewDepthTexture` into a `Depth32Float` `SunShadowImage`
-    (`COPY_DST | TEXTURE_BINDING`), sampled as `texture_depth_2d` via
-    `textureLoad` (manual PCF, no comparison sampler — matches `body_sky.wgsl`).
-  - Caster tagging: tree **mesh** tiles (`vegetation.rs`) get
-    `RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER])` so the same
-    `TreeMaterial` draw (with its leaf alpha-discard) writes leaf-shaped depth.
-    Impostor tiles stay non-casters. Craft parts added in a later pass.
-  - The shadow `view_proj` (Bevy reverse-z ortho, `Mat4::orthographic_rh` with
-    near/far swapped to match Bevy) + params packed into the existing
-    `BodyTerrainExtras` uniform (avoids a new vertex buffer — Metal 16-slot
-    cap). New `#[texture(3, sample_type="depth")]` binding on
-    `BodyTerrainMaterial` bound to `SunShadowImage` on every instance (map
-    terrain too, gated off via `params.x = 0`).
-  - `body_terrain.wgsl`: project fragment render-space pos → shadow clip →
-    `textureLoad` depth → biased reverse-z compare with PCF → multiply the
-    direct sun term. Sign/bias are screenshot-tunable.
-  - Convention risk (matrix/reverse-z/compare direction) is the main blind
-    spot; built to match Bevy's ortho, flipped after the first screenshot.
-- ✗ **1c. Wire custom shaders into Bevy CSM.** Rejected — couples the custom
-  UDLOD/tree pipelines to Bevy shadow bind groups, exactly what the project
-  deliberately sidestepped.
+Terrain / vegetation / water / rock / impostors shade through the spine.
+**Crafts and structures do not** — `assets/shaders/ship_part.wgsl` extends Bevy
+`StandardMaterial` → `bevy_pbr::apply_pbr_lighting`; base-editor buildings, pads,
+tanks, and the runway are plain `StandardMaterial`. These are a second
+Cook–Torrance, a second shadow system, a second IBL, a second exposure authority,
+and a third terminator definition.
 
-### 2. Ambient occlusion (GTAO)
-- ☐ Add `ScreenSpaceAmbientOcclusion` to the ship camera; verify coexistence with
-  the `scene_depth` copy node + depth prepass. Tune low/stylized.
+The two universes are reconciled today only by a **CPU day/night scalar** in
+`rendering/lighting.rs::update_sun_light`: it evaluates the terrain's terminator
+function, then scales a Bevy `DirectionalLight` (`SUN_DAY_ILLUMINANCE = 10000`
+lux — **no inverse-square**), a separate `MoonLight`, and `GlobalAmbientLight`
+(`AMBIENT_NIGHT 4` → `AMBIENT_DAY 50`) to *mimic* what the spine computes
+physically. Verified drift hazards:
 
-### 3. Palette & lighting — *stylized-vivid target (user's call)*
-- ◐ **Ground palette + lighting pass 1** (`body_terrain.wgsl` + `lighting.wgsl`).
-  Pushed `C_*` anchor chroma back up (greens get a wider green-vs-red/blue gap;
-  drab→alive without the old chartreuse), cut `BREAKUP_HUE_AMT` 0.07→0.035 +
-  `BREAKUP_VALUE_AMT` 0.24→0.20 (kills the brown muddy smears), and in the shared
-  lighting lib `SURFACE_DIRECT_SCALE` 0.20→0.23 (punchier sun) +
-  `SURFACE_SKY_CHROMA_GAIN` 6.0→8.0 (more saturated blue sky/shadows). *Awaiting
-  screenshot to dial in.* These lighting knobs are shared by grass/trees/impostor
-  too, so the whole surface family stays in sync.
-- ☐ Tree hue/value variance + species palettes + leaf-atlas variants. *(Deferred
-  with the rest of the vegetation work.)*
+- **Three terminator definitions** (`body_terrain.wgsl`, `update_sun_light`,
+  `update_moon_light`) re-derive the same smoothstep from near-duplicate constants.
+- **The hull doesn't track heliocentric distance** — flat 10k lux (lighting.rs:373)
+  vs every spine surface scaling by `LIGHT_AT_1AU·(AU/d)²` (lighting.rs:126). A
+  ship at Nyx is lit like one at Thalos.
+- **Two exposure authorities** the code itself notes "compound": `CameraExposure`
+  distance-gain × Bevy `AutoExposure` histogram, forced into agreement only by AgX.
+- **Two moonlight models**, **two IBL systems** (spine analytic hemisphere vs the
+  hull's crude CPU-painted `reflection_probe.rs` cubemap), **two shadow systems**.
 
-### 5b. Atmosphere retune + aircraft IBL
-- ◐ **Atmosphere pass 1** — the noon distance washed to a grey-tan band. Root
-  cause: authored `mie_optical_depth: 0.06` ("hazier humid day"); Mie is
-  wavelength-independent grey haze so it desaturates everything at range. Cut to
-  `0.025` (clean continental) + `mie_scale_height_m` 1600→1200 (haze hugs
-  valleys) in `thalos.ron`, and `aerial_perspective_strength` 0.15→0.10
-  (`AtmosphereTuning`). *Awaiting noon screenshot.* (thalos.ron is a runtime
-  asset — Mie tweaks only need a restart, not a rebuild.)
-- ☐ Reflection probe / `EnvironmentMapLight` on the hull so it reads as metal,
-  not grey clay; tune hull metallic/roughness.
+**Important nuance:** the two universes *already share the camera* — same HDR
+target, AgX, bloom, SMAA, post. The divergence is purely in **shading inputs**
+(BRDF + how sun/sky/shadow/atmosphere/IBL are evaluated). That's why this is
+fixable without touching the post stack.
 
-### 4. Forest composition
-- ☐ Strengthen clump contrast (clearings/meadows), tie density to moisture/slope
-  masks, treeline falloff.
+## 2.3 The one-world principle — everything interacts
 
-### 5. Atmosphere retune + aircraft IBL
-- ☐ Retune Mie/Rayleigh + `aerial_perspective_strength` for crisp blue haze.
-- ☐ Add reflection probe / `EnvironmentMapLight` to the ship; tune hull material.
+This is the organising invariant for the whole sprint. **Thalos is one physical
+world; every renderable surface — terrain, terrain detail, vegetation, rocks,
+crafts, landing gear, buildings, pads, tanks, runway, water — must obey the same
+light, cast into the same shadows, occlude each other, and recede into the same
+air.** A surface that opts out of any of these reads as a pasted-on cut-out.
 
-## Verification
+Concretely, the invariants every surface must satisfy:
 
-I can't see the game — every item lands behind a `just game [mode]` screenshot
-from the user. Tuning items (3/4/5) need several screenshot rounds. Structural
-changes (esp. 1b CSM caster re-tagging) get announced before they're made, per
-CLAUDE.md, and the shadow/AO/atmosphere additions get reflected into
-`docs/terrain.md` / `docs/vegetation.md` / `docs/atmosphere.md` as they land.
+1. **One light environment.** One sun (with heliocentric flux + eclipse), one
+   moon, one sky/ambient, one exposure, one tonemap. Time of day, eclipse,
+   altitude, and weather change *every* surface identically. No surface carries
+   its own private sun or ambient.
+2. **One shadow world — every solid object is both caster and receiver.** Trees,
+   rocks, **craft, gear, buildings, tanks, pads, runway** all cast into and
+   receive from the *same* cascade rig. A ship shadows the grass; a hangar
+   shadows the ship; a tree shadows the hull.
+3. **Terrain occludes the sun for everything on it.** A mountain shadows the
+   valley *and the ship parked in it*. This is a shared terrain-relief shadow
+   term (horizon-angle), sampled by terrain **and** by every object standing on
+   the terrain — not just terrain-on-terrain. (See §4.2.)
+4. **Mutual contact/ambient occlusion.** Where any object meets the ground or
+   another object, the crease darkens — regardless of which subsystem owns each
+   surface. One screen-space occlusion field feeds every surface's ambient term.
+5. **One atmosphere for everyone.** Aerial perspective + recession apply to every
+   surface by camera distance, so nothing stays a crisp saturated cut-out against
+   terrain the air has already hazed.
+6. **Reflections reflect the real world.** Water and the hull reflect the actual
+   sky/sun/terrain (driven from the atmosphere), not a fiction pinned to `t=0`.
+
+Today, items 1–6 hold *within* the spine (terrain ↔ vegetation ↔ rock), partially
+for water, and **almost none of them hold for crafts/structures** (which only get
+shared aerial perspective, because BodySky is a fullscreen depth-keyed pass the
+hull happens to fall under). The foundation (§3) is what makes 1–6 hold for
+*everything*.
+
+## 2.4 The shared-substrate contract
+
+Every surface must agree on **one** of each substrate. This table is the
+load-bearing artifact of the plan: each bold cell is a parallel re-implementation
+to be collapsed into the spine column.
+
+| Surface | Lighting | Terminator | Exposure | Shadow | IBL | AO | Atmosphere |
+|---|---|---|---|---|---|---|---|
+| Terrain | spine | shared | gain | rig (recv) | analytic | analytic | BodySky |
+| Vegetation | `shade_foliage` | shared | gain | rig (cast+recv) | analytic | baked vtx | recession |
+| Rock | spine | shared | gain | rig (cast+recv) | analytic | baked vtx | recession |
+| Water | own GGX | shared | manual | SceneLighting | tint hack | — | BodySky |
+| Impostor | spine (Hapke) | shared | gain | — | analytic | — | own/BodySky |
+| **Craft** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | BodySky (depth) |
+| **Structures** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | BodySky (depth) |
+
+The spine already covers ~4 of 8 columns; the craft path re-implements all 8 in
+parallel and is missing shadow + AO entirely. **Foundation = collapse the
+parallel path into projections of the spine** so the one-world invariants hold.
+
+## 2.5 The frequency-band terrain-material model
+
+"Terrain should create textures" is a **frequency-band** question, not yes/no.
+Generating unique per-texel planet textures violates the no-bake invariant and is
+petabyte-class — the wrong answer. The production-correct architecture (which
+Thalos *already has the skeleton of*) is a band split:
+
+- **Macro (low-freq):** per-tile material-weight mask (grass/soil/rock/wet) +
+  analytic ecological bands by altitude/slope/moisture. *Already shipping.*
+- **Detail (high-freq, near-field):** small **tiling material** library
+  (albedo+normal+roughness), height-blended by the mask weights, faded in by
+  distance, de-repeated by stochastic (hex) tiling. *This is the gap* — today the
+  detail layer is noise-modulated *flat colour*, so close-ups read as "luminous
+  ground" the shader fights with normal hacks.
+
+The brittleness to retire: **four overlapping palettes** (`landcover.wgsl`,
+`body_terrain.wgsl`, `procedural.rs::albedo_at`, `synthetic.rs`) and a
+hand-maintained bit-for-bit `landcover.wgsl ↔ ground/landcover.rs` CPU/WGSL
+mirror with no automated guard. See §4.6.
+
+---
+
+# 3. The unification foundation (do this first)
+
+The structural moves that make every later fidelity item cheaper and make the
+one-world invariants (§2.3) hold. **Decision: shared INPUTS first (B), shared
+BRDF second (A)** — B is low-risk, retires the magic-number bridge immediately,
+and is a prerequisite for A (a metallic hull on `shade_surface` leans hard on the
+IBL that B builds). See §7 for the rationale.
+
+| ID | Foundation step | Status | Effort | Sprint |
+|---|---|---|---|---|
+| **F1** | One `terminator(elev, alt)` helper + Bevy sun/moon/ambient driven as a *projection* of `SceneLighting` + heliocentric hull flux. Retires 3 terminators → 1 and the flat-lux bug. `rendering/lighting.rs` becomes sole writer. | ✅ | Med | THIS |
+| **F2** | One EV100 luminance-metered exposure authority; stop the distance-gain × histogram fight. | ☐ | Med | THIS |
+| **F3** | Hillaire-style **sky-view LUT** built from the existing `integrate_atmosphere` (multi-scatter LUT already exists, so the pattern is in-codebase). | ☐ | Med-High | THIS |
+| **F4** | Integrate the LUT → 9 SH coeffs feeding **both** the spine ambient *and* the `StandardMaterial` ambient from one physical source. Deletes the hand-tuned `GlobalAmbientLight`. *(Prototypable on the current analytic sky before F3 lands.)* | ☐ | Med | THIS |
+| **F5** | Screen-space AO pass → `ThalosSurface.occlusion` (and the Bevy ambient). **Ship with F4** — sky-IBL ambient is flat in crevices without AO. | ☐ | Med | THIS |
+| **F6** | Shadow-rig unification: stamp craft + structures onto `SHADOW_CASTER_LAYER`; make the `StandardMaterial` path sample `thalos::shadow`. Now everything casts + receives one shadow. | ◐ | Low-Med | THIS |
+| **F7** | Metallic conductor branch in `surface_brdf` + **one shared view-level scene+atmosphere bind group** + roughness-mip prefiltered env from the F3 LUT. | ☐ | High | next |
+| **F8a** | Port **structures** (runway/pads/buildings/tanks) onto `shade_surface` (low-risk half — simple metallic/dielectric, already f64-posed). | ☐ | Med | next |
+| **F8b** | Port **hull** onto `shade_surface`; retire Bevy stock CSM, the CPU reflection probe, and the magic constants. | ☐ | Med-High | next |
+| **F9** | Wire the stubbed `FOLIAGE` / `WATER` branches into `shade_surface`; retire the parallel `shade_foliage` + `body_water.wgsl` BRDFs; re-enable ground-LOD water (`TERRAIN_PATH_WATER_ENABLED`). | ☐ | Med | next |
+
+**The keystone is F3+F4+F5+F6** — one atmosphere-derived environment + one
+occlusion field + one shadow world is what delivers the one-world invariants.
+
+**Caveats baked into the steps:**
+- *F1:* `update_sun_light` currently rewrites illuminance + `GlobalAmbientLight`
+  every frame; the projection must be the *sole writer* or runtime overrides get
+  clobbered (see memory `craft-shadow-caster-layer`).
+- *F3:* the standard sky-view LUT assumes one dominant light; Thalos has sun +
+  moon + stars + eclipse. **Open Q8** — LUT the sun only (keep moon/star analytic)
+  or rebuild per dominant light.
+- *F6 / shadows under big_space:* cascade texel-snap and origin must be computed
+  in **floating-origin-relative** coordinates, not planet-centric f64 (at Mm
+  radius, f32 light-space ULPs are texel-sized). Preserve the existing
+  craft-centred (not camera-centred) framing that dodges the frame-lagged crawl.
+- *F7:* the ground module already fights Metal's 16-vertex-buffer cap +
+  `AsBindGroup` forcing vertex visibility on every `#[uniform]`. A hull/structure
+  material calling `shade_surface` re-trips exactly that gauntlet — plan the
+  shared scene/atmosphere bind group *with* the metallic branch or the port
+  stalls on per-material packing.
+
+---
+
+# 4. Workstream tracking
+
+Grouped by **substrate**, not as a flat list. Each item: `status · effort ·
+sprint · deps · technique/source`. THIS = surface/vegetation/atmosphere on Thalos
++ the §3 foundation. Items are ranked roughly by visual-impact-per-effort within
+each group.
+
+## 4.1 Lighting inputs
+
+| ID | Item | Status | Effort | Sprint | Notes |
+|---|---|---|---|---|---|
+| W9 | Lighting-input unification (= F1): one terminator, `SceneLighting`-driven Bevy lights, heliocentric hull flux | ◐ | Med | THIS | compile+clippy clean 2026-06-30; sun→heliocentric flux (`LUX_PER_SPINE_FLUX`), `surface_daylight` helper unifies sun+moon terminators. **Awaiting noon screenshot to tune the calibration constant** |
+| W10 | Single EV100 exposure (= F2) | ☐ | Med | THIS | ends the gain×histogram compounding |
+| — | Moonlight onto ground + hull (`moonlight_radiance` + `MoonLight`) | ◐ | — | THIS | moon **night-gate** now shares F1's `surface_daylight` terminator; two moon models still to fully merge |
+
+## 4.2 Shadows — the one-world shadow model
+
+Two layers deliver "objects aren't lit when terrain/things block the sun":
+
+- **Near cascade (object scale):** every solid object casts + receives in the
+  same 3-cascade rig. *Object-on-object and object-on-ground.*
+- **Terrain-relief shadow (planet scale):** a shared **horizon-angle** term so a
+  mountain shadows the valley *and the objects standing in it*. Sampled by terrain
+  and by every object, not just terrain.
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| — | Cascaded sun-shadow rig (terrain/trees/grass/rocks receive; trees+rocks cast) | ✅ | — | done | `sun_shadow.rs` + `thalos::shadow`. Open tuning: region size, bias, PCF |
+| W5 | **Caster + receiver unification** (= F6): craft, gear, buildings, pads, tanks, runway cast into and receive the rig | ◐ | Low | THIS | the core "everything interacts" shadow fix. **F6a done** (craft + EVA cast via `propagate_view_render_layers` adding `SHADOW_CASTER_LAYER`). **F6b (craft RECEIVE) wired** (compile + clippy clean 2026-06-30, awaiting screenshot): `ship_part.wgsl` samples `thalos::shadow::sun_shadow_factor`; `body_render::craft::CraftRenderPlugin` adds the cascade bindings + a `CraftShadowMaps` resource + a 1×1 depth fallback (valid binding in the standalone editor); game `sync_craft_shadow` pushes the live `SunShadowState` each frame; shadowed hull attenuates to a stylized `CRAFT_SHADOW_FLOOR` (F8 does it properly via `shade_surface`). **Structures CAST** done (building/pad/tank stamped `SHADOW_CASTER_LAYER`). **Still pending:** structures *receive* (StandardMaterial → a cascade-receiver), runway cast. **Related (this iteration):** Bevy `GlobalAmbientLight` lifted 50→700 lux + sky-blue tint so dielectric structures' shadowed faces aren't black — interim until the proper hemispheric sky ambient (F4); does NOT help the metallic hull (needs IBL, F7) |
+| W2 | **Cloud shadows on the ground** (+ objects): project the planet-fixed `CloudCoverageMap` along the sun, attenuate sun + aerial in-scatter | ☐ | Low | THIS | Skybolt / UE Volumetric Cloud |
+| W6 | Stable CSM: bounding-sphere fit + **floating-origin-relative** texel snap; slope-scaled normal-offset bias per cascade | ☐ | Low-Med | THIS | MJP / Valient / Tardif; kills crawl + low-sun acne |
+| W12 | **Terrain horizon-angle self-shadow** sampled by *all* surfaces (mountain shadows valley + objects) | ☐ | Med-High | next | raymarch height atlas to sun, max-mip accelerated; body-local → big_space-stable. *Direct answer to "object not lit because terrain blocks the sun" at planet scale* |
+| W18 | Contact shadows + PCSS contact-hardening | ☐ | Med | later | short screen-space depth march (reuse `SceneDepthImage`); grounds objects, fixes peter-panning |
+
+## 4.3 Ambient occlusion & GI
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| W8 | **Visibility-Bitmask AO (VBAO)** → `ThalosSurface.occlusion` + Bevy ambient | ☐ | Med | THIS | Therrien 2023 / XeGTAO. VBAO not plain GTAO (thickness heuristic for thin grass/trunks). Custom render-graph node mirroring `CopySceneDepthNode`; half-res; viewspace-only (f32-safe); small world radius. **Ship with F4.** Delivers one-world invariant #4 (mutual contact AO) |
+| W20 | Per-tile sky-visibility (basins ambiently darker) | ☐ | Med-High | later | horizon scan in `PipelineTileProvider`, new attachment channel (coarse/cached; adds cold-stream cost) |
+| — | Bent normals / SSGI | ☐ | High | later | after VBAO + IBL prove out |
+
+## 4.4 IBL / reflections
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| W7 | **Atmosphere → SH ambient → prefiltered env** (= F3+F4): one environment for spine ambient + `StandardMaterial` ambient + hull specular | ☐ | Med-High | THIS | Hillaire 2020 / Frostbite. Replaces the CPU-painted `reflection_probe.rs`. Keystone — resolves three divergences |
+| W19 | Water onto `shade_surface WATER` (sky/sun reflection) + re-enable ground-LOD water | ☐ | Med | next (F9) | retires 3 hand-calibrated water BRDFs; `TERRAIN_PATH_WATER_ENABLED=false` today |
+| — | Screen-space reflections (SSR) | ☐ | Med | later | only if env-map reflections read too static on water/hull |
+
+## 4.5 Atmosphere / aerial / clouds / water
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| — | Atmosphere Mie retune (clean continental haze) | ◐ | — | THIS | `assets/bodies/thalos.ron`; awaiting noon screenshot |
+| — | Object aerial recession (foliage/rocks → sky haze) | ◐ | — | THIS | `object_aerial_recession`; fold inside `shade_surface` so it can't be forgotten (one-world invariant #5) |
+| W11 | Hillaire aerial-perspective **froxel** LUT | ☐ | High | later | keep the raymarch as the space/upper-atmosphere fallback; 3-channel transmittance for sunset |
+| W15 | Nubis cloud lighting (powder + multi-scatter octaves + isotropic floor) | ☐ | Med | later | Schneider 2023 |
+| W16 | Quarter-res + Bayer + neighborhood-clamp cloud reprojection (**body-fixed** motion vectors) | ☐ | Med | later | fixes cloud "not ready" ghosting; gated on W13 |
+
+## 4.6 Terrain material
+
+The mask + bands already ship; the upgrade is making weights select **tiling
+materials** instead of constant colours.
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| — | Landcover palette/altitude bands rework (green→grey→white, wider forest, `C_ALPINE`) | ◐ | — | THIS | in working tree; awaiting screenshot |
+| TM1 | **Material-ID weight blending**: ~4–8 tiling PBR materials in `texgen`, bound as `texArray`, height-biased (not linear) weight blend | ☐ | Med | THIS-adj | COD MLTM / Star Citizen 0.5-midpoint heightlerp. Mind the Metal buffer budget (F7 note) |
+| TM2 | Repetition + projection polish (near-field): hex-tiling on detail materials gated by `DETAIL_FADE`; selective triplanar on rock/cliff weight | ☐ | Med | next | Mikkelsen 2022 + Heitz-Neyret. WGSL: needs `textureSampleGrad` in the randomized-UV loop (check `wgsl-bevy` skill) |
+| TM3 | **Collapse the palette/mirror debt**: moisture/landcover field onto the `SurfaceQuery` seam, baked into the material attachment; shader + grass read the baked field; retire `albedo_at` + the hand-mirror | ☐ | Med | THIS-adj | pairs with W1 (both read `forest_coverage`); also kills the W1 CPU/GPU hash mirror |
+| TM4 | RVT-style cached tile synthesis | ☐ | High | **defer** | UDLOD is already a sparse-tile VT substrate, but **profile first** — surface frames are CPU/collision-bound; atlas array is not `STORAGE` yet (GPU tile production genuinely unbuilt) |
+
+## 4.7 Vegetation (this sprint's headline surface work)
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| W1 | **Aggregate canopy/grass colour baked into terrain albedo** | ☐ | Low | THIS | `forest_coverage`-driven `C_FOREST` tint, faded as geometry coverage ramps in. Kills the orbit→ground descent pop. Star Citizen Planet Tech. **Tint-out and geometry-in as one coupled curve** |
+| W3 | **GoT grass shader tricks**: view-space blade widening + curved normals + fractional-width distance LOD | ☐ | Low | THIS | Wohllaib GDC 2021 / GPUOpen. Kills edge-on shimmer |
+| W4 | **Two-sided foliage translucency** (reserved `translucency` field) + **bake the term into the impostor** | ☐ | Low | THIS | Habel 2007 / UE two-sided foliage. Backlit leaves glow |
+| W21 | Foliage atlas mips (far leaf cards shimmer) | ☐ | Low | THIS | pull forward if W4 ships — impostor leaf shimmer compounds with translucency |
+| — | Clump-card (billboard tuft) far/mid rings (`BladeKind::Card`) | ◐ | — | THIS | in working tree; verify visually |
+| W14 | HLOD forest cluster impostors (mid-altitude band) | ☐ | Med-High | later | per coarse cube cell; proxy colour = W1 aggregate canopy |
+| W22 | `#[bindless]` foliage materials (regain MDI/GPU-cull) | ☐ | Low-Med | later | verify GPU-cull composes with the big_space relative-position vertex path |
+| VEG-R | **Driver unification**: fold `grass.rs`/`vegetation.rs`/`rocks.rs` into one `VegLayer` driver (they triplicate the clipmap lifecycle and **diverge on base-clearing**) | ☐ | Med | THIS? | pure refactor, no screenshot payoff — but prevents drift while we touch all three for W1/W3/W4. **Open Q5** |
+
+## 4.8 Distant bodies & orbit-to-floor LOD chain
+
+| ID | Item | Status | Effort | Sprint | Notes |
+|---|---|---|---|---|---|
+| W13 | **TAA / temporal resolve** in the **body-fixed** frame | ☐ | Med-High | later | unblocks dithered LOD cross-fade + cloud resolve + veg shimmer (gates 4 items). Motion-vector story under big_space/dual-camera is the deferral reason. **Open Q7** |
+| 6b | Dithered mesh↔impostor LOD cross-fade | ☐ | Med | later | gated on W13 |
+| W17 | Slice-6 distant-body view: UDLOD at all ranges, delete the flat-colour impostor branch, re-home limb glow onto BodySky | ☐ | High | later | the interim solid-colour impostor breaks Hapke↔Vegetated reconvergence at the swap. **Open Q6** |
+
+## 4.9 Color management & post
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| C1 | **Tonemapper base decision**: keep AgX or switch to Khronos PBR Neutral (keeps an authored analytic palette faithful — i.e. `landcover`). **Reject ACES** (saturated sky + green veg + bright sun = textbook hue skew) | ☐ | Low | THIS | one A/B; **Open Q2** |
+| C2 | CA + grain: reduce/gate for a long-sightline planet sim (the `just preview` tool already strips them) | ☐ | Low | THIS? | **Open Q4** |
+| — | Single exposure authority | see W10/F2 | — | THIS | tonemapper A/B should run *after* W9 changes the inputs underneath it |
+
+---
+
+# 5. Shared shader library architecture
+
+All surface shading routes through one set of libraries registered in
+`PlanetLightingPlugin` (`shading/mod.rs`).
+
+| Library | Import path | Provides |
+|---|---|---|
+| `lighting.wgsl` | `thalos::lighting` | `SceneLighting`, `ThalosSurface`, `shade_surface`, `shade_foliage`, `shade_hapke_surface`, `surface_brdf`, `compute_surface_sky`, `moonlight_radiance`, `object_aerial_recession`, `sun_daylight`, specular AA |
+| `atmosphere.wgsl` | `thalos::atmosphere` | `AtmosphereBlock`, `integrate_atmosphere`, `composite_clouds` |
+| `landcover.wgsl` | `thalos::landcover` | `vegetation_color`, `forest_coverage`, `snow_coverage` (CPU mirror: `ground/landcover.rs` — to be retired, see TM3) |
+| `shadow.wgsl` | `thalos::shadow` | `ShadowCascadeBlock`, `sun_shadow_factor` |
+| `foliage.wgsl` | `thalos::foliage` | foliage albedo model (near mesh + impostor bake) |
+| `grass_displace.wgsl` | `thalos::grass_displace` | `grass_blade_world_pos`, `grass_tuft_alpha` |
+
+**Invariant:** every surface material derives lighting from these libraries. No
+material-local BRDF or palette fork. When a parameter moves, it moves in one place.
+
+**Planned growth (the foundation, §3):**
+- **Metallic conductor branch** in `surface_brdf`: lerp F0 from `DIELECTRIC_F0`
+  toward `albedo` by `ThalosSurface.metallic` (read *nowhere* today), make
+  Fresnel/env-reflection `vec3`, zero the diffuse lobe as metallic→1.
+- **One shared view-level scene+atmosphere bind group** so any material
+  (incl. the `StandardMaterial`-derived hull/structure path) can call
+  `shade_surface` without re-tripping the Metal buffer budget.
+- **`ThalosSurface.occlusion`** fed by the screen-space AO pass (W8).
+- **Prefiltered env IBL** from the sky-view LUT (W7) replacing the analytic
+  hemisphere specular for low-roughness/metallic surfaces.
+- **Wire `FOLIAGE` / `WATER` branches** and retire the parallel `shade_foliage`
+  + `body_water.wgsl` paths.
+
+## Crate boundary — mechanism vs drivers
+
+Rendering splits into two concerns on a **state-in / pixels-out** boundary
+(see `docs/architecture.md` Phase 4):
+
+- **Mechanism — "how to shade":** materials, shaders, the `thalos::lighting`
+  spine, the camera/post bundle, and the render-graph nodes (scene-depth, the
+  sun-shadow rig, and the planned AO + sky-view-LUT + env-IBL passes). Sim-agnostic,
+  reusable across binaries. **Home: `thalos_body_render`** — already the de-facto
+  render crate (consumed by both `thalos_game` and `thalos_shipyard`). It grows
+  toward a renamed `thalos_render`; moving the remaining stragglers (`scene_depth` /
+  `sun_shadow` nodes from `game`, the env probe) + the rename is **one focused
+  follow-up AFTER the foundation lands**, so the full mechanism set is extracted
+  once. *(The craft **hull material** already moved here — `body_render::craft`,
+  Phase 4a in `docs/architecture.md` — which is what unblocks F6b: the hull can now
+  sample `thalos::shadow`. The editor-core material-application split + standalone
+  `ship_editor` relocation are the deferred Phase-4a follow-up.)*
+- **Drivers — "what to shade this frame":** systems that read `SolarSystemState` /
+  `CraftState` / `Simulation` → fill uniforms, decide LOD swaps, spawn bodies,
+  anchor grass/clouds/shadow in f64. Inherently sim-coupled (~90% of
+  `game::rendering` today, by sim-state reference count). **Home: `thalos_game`** —
+  these stay in `game`; they are *not* extracted.
+
+**Rule for foundation (F1–F9) code:** new *mechanism* (AO node, sky-view LUT,
+env-IBL, the shared scene/atmosphere bind group, the metallic branch) lands in
+`thalos_body_render`; systems that read sim state (e.g. F1's `SceneLighting`
+projection) stay in `thalos_game`. New code lands in its final home once — no
+double churn.
+
+---
+
+# 6. Verification
+
+I can't see the game — every visual item lands behind a `just game [mode]`
+screenshot from the user. Structural changes are announced before they're made
+(per CLAUDE.md) and reflected into `docs/terrain.md` / `vegetation.md` /
+`atmosphere.md` / `control.md` as they land.
+
+- **Headless regression check:** `just preview` renders the diorama gallery at a
+  distance well inside `OBJECT_AERIAL_NEAR_M`, so close-up objects must look
+  identical pre/post aerial-recession changes. Use it for geometry/material work.
+- **Distance/atmosphere/shadow tuning:** needs a `just game runway` / `cruise` /
+  `landing` screenshot.
+- **The one-world checks** (§2.3): a ship should shadow the grass and be shadowed
+  by a hangar/tree (W5); a ship parked behind a hill should be in shade (W12); a
+  ship at Nyx should be dramatically dimmer than at Thalos (F1); the hull, ground,
+  and buildings should all warm/cool together through a sunset (F1/F4).
+
+---
+
+# 7. Decision log & open questions
+
+## Decisions taken (2026-06-30 architecture review)
+
+- **Foundation before fidelity.** Land the §3 unification (F1–F6) + Tier-1
+  vegetation (W1–W6) this sprint, rather than front-loading eye-candy on top of
+  the two-universes split.
+- **Shared inputs (B) before shared BRDF (A).** B is low-risk and a prerequisite
+  for A. Within A, **structures port before the hull** (the low-risk half).
+- **Terrain stays analytic-backbone + tiling-detail** (frequency-band model),
+  *not* unique-per-texel textures and *not* runtime VT/GPU-synthesis yet.
+- **One environment from the atmosphere** (sky-view LUT → SH → prefiltered env) is
+  the keystone — it unifies ambient + IBL across both universes.
+
+## Open questions for the lead
+
+1. **Hull-port scope** — commit to the full hull `shade_surface` port this cycle,
+   or land B + IBL + AO + the *structures* port and re-evaluate whether the hull's
+   gap justifies losing `StandardMaterial`'s clearcoat/anisotropy?
+2. **Tonemapper base** — keep AgX or A/B against Khronos PBR Neutral? (ACES
+   rejected regardless.) Run the A/B before or after W9 changes the inputs?
+3. **Exposure authority** — single EV100 luminance metering (needs re-tuning
+   intensities to physical-ish EV + accepting eye-adaptation on orbit↔surface), or
+   keep the artist `CameraExposure` curve and just *freeze* `AutoExposure`?
+4. **CA + film grain** — reduce/gate for a long-sightline sim, or keep "mild CA +
+   grain" as the intended sensor-sim identity?
+5. **Vegetation driver unification (VEG-R)** — fold the three clipmap drivers into
+   one `VegLayer` now (prevents fade/AGL/churn/clearing drift while we touch all
+   three for W1/W3/W4), or defer the pure refactor?
+6. **Slice-6 distant-body view (W17)** — in scope this cycle (UDLOD at all ranges
+   + delete the impostor branch + ~2.5k lines of dead bake code), or ride the
+   interim impostor and mask the swap with W1?
+7. **TAA gate (W13)** — sanction it as a mid-term track (unblocks 4 items; needs
+   body-fixed motion vectors under big_space), or stay SMAA-only?
+8. **Sky-view LUT light model** — LUT the sun only (keep moon/star analytic;
+   simpler, recommended) or rebuild sky-view per dominant light (correct moonlit
+   reflections, more cost)? Blocks W7's parameterization.
+
+---
+
+*Key file anchors:* spine `crates/body_render/src/shading/shaders/lighting.wgsl`
+(metallic stub @564, F0 @455); craft divergence `assets/shaders/ship_part.wgsl` +
+`crates/game/src/rendering/lighting.rs` (magic constants @267/272/273/388,
+physical flux @126, flat hull lux @373); terrain material
+`crates/body_render/src/ground/body_terrain.wgsl` + `landcover.wgsl` ↔
+`crates/body_render/src/ground/landcover.rs`; shadow rig
+`crates/game/src/rendering/sun_shadow.rs` + `shading/shaders/shadow.wgsl`;
+atmosphere `crates/body_render/src/shading/{atmosphere.rs,multi_scatter.rs}` +
+`ground/body_sky.wgsl`; reflection probe `crates/game/src/reflection_probe.rs`;
+post `crates/body_render/src/impostor/post_stack.rs` (AgX @37).

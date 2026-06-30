@@ -669,7 +669,11 @@ fn push_foliage_cluster(
         let face = (n_out + rand_unit(s, 3) * 0.32).normalize_or(n_out);
         let n_light = (n_out + Vec3::Y * 0.24 + rand_unit(s, 4) * 0.20).normalize_or(n_out);
         let roll = hash01(s, 5) * TAU;
-        let size = radius * (1.1 + 0.5 * hash01(s, 6));
+        // Full-size cards so the clusters overlap into opaque coverage (no
+        // see-through to the branches). The airy, broken silhouette comes from
+        // the leaf-cluster card's own tapered, detached-leaf edge — not from
+        // shrinking or removing cards.
+        let size = radius * (0.95 + 0.45 * hash01(s, 6));
         let cell = LEAF_CELL_FIRST + (hash_u(s, 7) % LEAF_CELL_COUNT.max(1));
         push_leaf_card(
             b,

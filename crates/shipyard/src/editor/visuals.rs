@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use thalos_input::shipyard::ShipyardInputIntent;
 
-use crate::material::{ShipPartExtension, ShipPartMaterial, ShipPartParams};
+use crate::material::{ShipPartExtension, ShipPartMaterial};
 use crate::{
     Adapter, AirIntake, AttachNodes, Attachment, CatalogEntry, CommandPod, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, MaterialKind, Part, PartCatalog,
@@ -231,45 +231,11 @@ pub fn engine_visual_profile(diameter: f32) -> (f32, f32, f32) {
     (diameter * 0.35, diameter * 0.5, diameter * 0.9)
 }
 
-/// Pick `ShipPartMaterial` uniforms for a given part. Length / radius
-/// drive the procedural panel + rivet layout; each part picks its own
-/// dimensions so the pattern reads consistently across tank–decoupler
-/// boundaries without sharing an asset handle.
-pub fn ship_part_params(
-    nodes: &AttachNodes,
-    tank: Option<&FuelTank>,
-    fuselage: Option<&Fuselage>,
-    dec: Option<&Decoupler>,
-    adapter: Option<&Adapter>,
-    seed: u32,
-) -> ShipPartParams {
-    let top_r = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
-    // Tanks and decouplers are cylinders; adapters are conical frustums
-    // from `top_r` at the mesh's +Y end to `target_diameter / 2` at -Y.
-    let (radius_top, radius_bottom, length) = if let Some(t) = tank {
-        (top_r, top_r, t.length)
-    } else if let Some(f) = fuselage {
-        // Near-cylindrical barrel: the panel shader treats it like a tank.
-        (top_r, top_r, f.length)
-    } else if dec.is_some() {
-        (top_r, top_r, 0.2)
-    } else if let Some(a) = adapter {
-        let bot_r = a.target_diameter * 0.5;
-        let h = (top_r + bot_r).max(0.4); // same formula as `visual_spec`
-        let dr = top_r - bot_r;
-        let slant = (h * h + dr * dr).sqrt();
-        (top_r, bot_r, slant)
-    } else {
-        (top_r, top_r, 1.0)
-    };
-    ShipPartParams {
-        length,
-        radius_top,
-        radius_bottom,
-        seed,
-        ..default()
-    }
-}
+// `ship_part_params` (part dims → material uniform) is shared with the flight
+// view; it now lives in `crate::appearance` (re-exported at the crate root) so
+// the two no longer drift. Re-exported here so `editor::ship_part_params` (the
+// existing path consumers use) keeps resolving.
+pub use crate::ship_part_params;
 
 type VisualQuery<'w, 's> = Query<
     'w,
@@ -347,7 +313,10 @@ pub(super) fn rebuild_visuals(
                     None => {
                         let h = ship_materials.add(ShipPartMaterial {
                             base: stainless_steel_base(),
-                            extension: ShipPartExtension { params },
+                            extension: ShipPartExtension {
+                                params,
+                                ..Default::default()
+                            },
                         });
                         commands.entity(e).insert(PartShaderHandle(h.clone()));
                         h

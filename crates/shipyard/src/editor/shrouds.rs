@@ -158,6 +158,7 @@ pub(super) fn sync_shrouds(
                     seed: provider.index_u32() ^ 0x5A5A_5A5A,
                     ..default()
                 },
+                ..Default::default()
             },
         });
 

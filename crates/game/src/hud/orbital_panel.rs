@@ -243,6 +243,7 @@ pub fn update(
     active: Res<ActiveLocalBubble>,
     height_sources: Res<HeightSourceRegistry>,
     theme: Res<HudTheme>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut display: ResMut<AltitudeDisplay>,
     mut alt_q: Query<&mut Text, With<AltitudeText>>,
     mut anchor_q: Query<(&mut Text, &mut TextColor), (With<AnchorBodyText>, Without<AltitudeText>)>,
@@ -306,11 +307,11 @@ pub fn update(
     let (ap_str, pe_str) = match elements {
         Some(el) => {
             let ap = if el.apoapsis_m.is_finite() {
-                format::altitude(el.apoapsis_m - body.radius_m)
+                format::altitude(el.apoapsis_m - body.radius_m, units.system)
             } else {
                 "—".to_string()
             };
-            let pe = format::altitude(el.periapsis_m - body.radius_m);
+            let pe = format::altitude(el.periapsis_m - body.radius_m, units.system);
             (ap, pe)
         }
         None => ("—".to_string(), "—".to_string()),
@@ -376,7 +377,7 @@ pub fn update(
     };
     display.resolved = Some((chosen, alt_value));
 
-    set_text(&mut alt_q, format::altitude(alt_value));
+    set_text(&mut alt_q, format::altitude(alt_value, units.system));
 
     let anchor_str = format!("{} {}", body.name, datum_label);
     if let Ok((mut text, mut color)) = anchor_q.single_mut() {

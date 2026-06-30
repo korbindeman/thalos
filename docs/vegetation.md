@@ -180,8 +180,22 @@ the canonical description; summarized here because the plan extends it.
   (`GRASS_TILE_SIZE_M`), `GrassTileKey { face, x, y }`.
 - **Placement:** deterministic `blade_hash` jittered grid; gate = above
   `sea_level_m + 1 m`, slope ≤ 0.45, grass material-mask dominant, altitude
-  fade 2400→3100 m, `TerrainFlatten` (runway) exclusion. ~24 candidate
-  blades/m² before gates.
+  fade 2400→3100 m, plus the **building-terrain scatter regions** (below). ~24
+  candidate blades/m² before gates.
+
+**Building-terrain scatter (`scatter::ScatterRegion`/`ScatterTreatment`/`classify_scatter`).**
+A base's flattened ground is grassland, so the scatter layer treats it as
+*managed* terrain instead of excluding it wholesale: each per-frame footprint
+declares `Clear` (paving / building / pad / tank — skip every blade) or `Lawn`
+(force a tidy short-thick `GrassProfile::lawn` cover, bypassing the natural
+grass-mask / coverage gates). `Clear` always wins over `Lawn`. The grass driver
+(`game::rendering::grass`) derives the regions from the `StructureRegistry`
+(`BaseSite` → `Lawn`, runway/building/launchpad/tank → `Clear`), so a spaceport
+reads as lawn between the structures with bare paving under them. This is the
+seam the future tree/prop scatter on a base plugs into (thread the same regions
+into `build_scatter_tile`); see `docs/base_building.md` *Ground scatter*. Off-base
+the region set is empty, so wild terrain is unaffected. Trees/rocks still use the
+older `TerrainFlatten` `nearest_flatten` exclusion.
 - **Payload:** one batched `Mesh` per tile of curved tapered 7-vertex blade
   strips, built on `AsyncComputeTaskPool`.
 - **Anchoring:** root-grid big_space child re-posed in f64 every frame (runway
@@ -378,6 +392,32 @@ the rest. From altitude, far grass is sub-pixel and the cascade costs nothing.
 **Tree** — mesh LODs → octahedral impostor → terrain fold:
 0–150 m LOD0, 150–500 m LOD1, 500–1200 m LOD2, 1200 m–`TREE_IMPOSTOR_MAX`
 hemisphere octahedral impostor, beyond → culled (already in terrain albedo).
+
+**Rock (`Rock`)** — near-only, **no impostor, no clipmap** (landed 2026-06-29,
+runtime-unverified). Scattered pebbles / cobbles resolve only up close, so the
+whole cascade is one fine ring out to ~100 m (mesh fades out at the reach,
+nothing beyond). Two things make rocks distinct from the woody layers:
+
+- **Placed inversely to grass.** The `Rock` branch of `build_scatter_tile`
+  weights acceptance by `bare = 1 − grass_w` (the terrain shader's grass mask):
+  stones gather on bare / rocky ground and thin to a small floor density
+  (`ROCK_GRASS_FLOOR`) under thick grass, which visually covers the smaller ones
+  anyway — so pebbles show in the rocky gaps between tufts, where real ones do.
+  A medium-scale `rock_scatter_field` gathers them into loose scree clusters;
+  they tolerate much steeper slopes than plants and ignore the runway clearing
+  margin (gravel may approach the apron). They take any orientation (worn stones
+  lie / half-bury at a jaunty angle), unlike near-upright plants.
+- **A deformed-icosphere mesh, not a card.** `ground::rock_mesh` deforms a
+  subdivided icosphere by 3-D gradient noise (lumps) + an ellipsoid squash
+  (flattened, water-worn pebbles), smooth or faceted normals, with a baked
+  cavity-AO / sun-bleach gradient on the vertex colour. A small library of a few
+  distinct shapes/tones is scattered through one Poisson grid (so no two stones
+  interpenetrate) and combined into one batched mesh per tile
+  (`combine_rock_tile_mesh`), lit through the shared `thalos::lighting`
+  rough-dielectric BRDF (`RockMaterial` / `rock.wgsl`) — the same surface model
+  the ground uses — and receiving (and casting into) the trees' sun-shadow
+  cascade. The driver (`game::rendering::rocks`) is a trimmed single-ring copy
+  of the grass driver.
 
 ### 5.3 Tile-LOD clipmap
 

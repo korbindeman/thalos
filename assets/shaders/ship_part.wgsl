@@ -42,6 +42,12 @@
     mesh_view_bindings::view,
 }
 
+// Shared cascaded sun-shadow sampler, so the hull RECEIVES the same shadows the
+// terrain / trees cast into (graphics-fidelity F6b). Registered by
+// `body_render::shading::PlanetLightingPlugin` (pulled in defensively by
+// `CraftRenderPlugin`, so this resolves even in the standalone editor).
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
+
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
     prepass_io::{VertexOutput, FragmentOutput},
@@ -73,6 +79,24 @@ struct ShipPartParams {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var<uniform> part: ShipPartParams;
+
+// Sun-shadow cascade — the RECEIVING side. `gate.x == 0` (off-surface, or the
+// standalone editor) makes `sun_shadow_factor` skip sampling. Bindings mirror
+// `ShipPartExtension` in `body_render::craft` (uniform 101, depth maps 102–104).
+@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+var<uniform> craft_shadow: ShadowCascadeBlock;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102)
+var craft_shadow_map_0: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+var craft_shadow_map_1: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+var craft_shadow_map_2: texture_depth_2d;
+
+// How dark a fully-shadowed hull gets. `apply_pbr_lighting` returns direct+ambient
+// combined, so we can't gate only the sun term yet (F8 ports the hull onto
+// `shade_surface` for that) — instead attenuate toward this floor so a shadowed
+// hull keeps its ambient / IBL fill rather than going black. Tunable.
+const CRAFT_SHADOW_FLOOR: f32 = 0.4;
 
 const PI: f32 = 3.14159265358979;
 const TAU: f32 = 6.28318530717958;
@@ -321,6 +345,20 @@ fn fragment(
 #else
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
+    // Receive the shared sun-shadow cascade (terrain relief, trees, other craft,
+    // structures): walk the cascades at this fragment's render-space position and
+    // attenuate the lit hull toward `CRAFT_SHADOW_FLOOR` in shadow.
+    let craft_shadow_f = sun_shadow_factor(
+        pbr_input.world_position.xyz,
+        craft_shadow,
+        craft_shadow_map_0,
+        craft_shadow_map_1,
+        craft_shadow_map_2,
+    );
+    out.color = vec4<f32>(
+        out.color.rgb * max(craft_shadow_f, CRAFT_SHADOW_FLOOR),
+        out.color.a,
+    );
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 #endif
 

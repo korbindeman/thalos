@@ -513,19 +513,31 @@ fn apply_graphics_msaa(
 // VACUUM preset (most of the frame is black void, so the histogram filter
 // ignores the dark half and the EV range is wide). Inside a daylit atmosphere
 // the frame is full of bright terrain + sky instead, so that preset meters
-// against the wrong assumption — it leaves the histogram void-biased and the
-// headroom too generous, washing the surface flat. The SURFACE preset includes
-// more of the (now meaningful) dark end, tightens the EV range so a bright
-// ground/sky scene settles near neutral, and eases the adaptation speed for
-// smoother flight. We lerp between them on `density`, so a descent from orbit
-// transitions continuously rather than snapping.
+// against the wrong assumption — it leaves the histogram void-biased, so the
+// SURFACE preset re-centres the filter on the (now meaningful) dark/mid end and
+// eases the adaptation speed for smoother flight. We lerp between them on
+// `density`, so a descent from orbit transitions continuously rather than
+// snapping.
+//
+// `range` is the *histogram domain* in EV-100, NOT a clamp on the applied
+// exposure: pixels brighter than the high edge all pile into the top bin (their
+// true brightness is undercounted), and pixels darker than the low edge are
+// ignored. The SURFACE high edge was once tightened to +2, which backfired at
+// the substellar noon — the bright sunlit ground + sky sit well above +2, so
+// the histogram metered the scene as far dimmer than it was, AutoExposure
+// applied too little downward exposure, and the daylit surface stayed
+// over-bright and washed flat (AgX then rolls the bright result toward white).
+// The high edge is kept wide (matches the vacuum +6) so those bright daylit
+// pixels bin at their true value and metering pulls the noon scene down to
+// neutral. The low edge stays at −2 so a low-sun scene (few pixels above +2)
+// meters and reads exactly as before — this widening is noon-targeted.
 //
 // Tunable: the band edges are deliberately in absolute kg/m³ rather than tied
 // to a body's sea-level density — adjust against a `just game cruise` capture.
 const AE_VAC_RANGE: (f32, f32) = (-4.0, 6.0);
 const AE_VAC_FILTER: (f32, f32) = (0.30, 0.95);
 const AE_VAC_SPEED: (f32, f32) = (2.0, 1.0); // (brighten, darken)
-const AE_SURF_RANGE: (f32, f32) = (-2.0, 2.0);
+const AE_SURF_RANGE: (f32, f32) = (-2.0, 6.0);
 const AE_SURF_FILTER: (f32, f32) = (0.18, 0.85);
 const AE_SURF_SPEED: (f32, f32) = (1.5, 1.2);
 /// Density band (kg/m³) over which metering blends vacuum → surface. Below the

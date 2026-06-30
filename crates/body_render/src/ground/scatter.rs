@@ -25,6 +25,7 @@ use thalos_terrain::TerrainFlatten;
 use crate::ground::height_source::HeightSource;
 use crate::ground::pipeline::material_masks_from_heights;
 use crate::ground::rendered_height::TerrainPatchBasis;
+use crate::ground::rock_mesh::RockMeshData;
 use crate::ground::tile_lattice::{TileKey, TileLattice, cube_dir, tiles_per_side};
 use crate::ground::tree_mesh::TreeMeshData;
 
@@ -61,6 +62,96 @@ const SALT_SPECIES: u64 = 0x08;
 /// tree/shrub density fades from 0 at the pad edge to full over this margin, so
 /// the airfield sits in an open clearing instead of a wall of trees.
 const VEG_CLEARING_MARGIN_M: f32 = 320.0;
+
+// ---------------------------------------------------------------------------
+// Building-terrain scatter regions
+// ---------------------------------------------------------------------------
+
+/// How a built footprint on the surface overrides the *natural* scatter
+/// (grass / shrubs / trees / rocks). Derived per frame from the structure
+/// registry — the spaceport basin, runway strip, launchpads, buildings, tanks —
+/// and threaded into the tile builders so a base reads as *managed* ground (a
+/// tidy grass lawn between the structures, bare paving under them) instead of
+/// either wild meadow or one blanket dead zone.
+///
+/// This is the seam for "scatter on the building terrain": a footprint declares
+/// its surface treatment here, and every scatter layer (grass today, trees and
+/// rocks later) honours it through [`classify_scatter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScatterTreatment {
+    /// Suppress all scatter under the footprint: the runway strip, launchpad
+    /// slabs, building footprints, tanks — anything paved or built on.
+    Clear,
+    /// Managed lawn: force a tidy grass cover (the consuming layer picks the
+    /// concrete blade profile) and suppress woody scatter. The spaceport's
+    /// flattened grassy ground.
+    Lawn,
+}
+
+/// One building-terrain scatter footprint: a rectangle on the body surface plus
+/// how it treats scatter. The rectangle reuses the flatten pad's tangent-plane
+/// SDF ([`TerrainFlatten::weight`]) — only the weight is read here, the
+/// `elevation_m` the pad carries is irrelevant — so a structure's clearing and
+/// its terrain levelling share one geometry definition. A circular structure
+/// (launchpad / tank) is represented by its bounding square: a slightly generous
+/// clear under a round pad, which reads fine since grass never wants to meet a
+/// hard built edge anyway.
+#[derive(Debug, Clone, Copy)]
+pub struct ScatterRegion {
+    pub footprint: TerrainFlatten,
+    pub treatment: ScatterTreatment,
+}
+
+/// The scatter class resolved at one candidate direction by
+/// [`classify_scatter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScatterClass {
+    /// No building footprint here — use the natural placement gates.
+    Natural,
+    /// Inside a cleared footprint — place nothing.
+    Clear,
+    /// Inside a lawn footprint — force the consuming layer's managed cover.
+    Lawn,
+}
+
+/// Weight above which a clearing suppresses scatter — just inside the footprint
+/// ramp, so blades never poke at a paved edge.
+const SCATTER_CLEAR_W: f64 = 0.05;
+/// Weight above which a lawn forces managed cover — well inside the flat pad, so
+/// the natural meadow blends in across the lawn's outer ramp rather than ending
+/// at a hard line at the basin edge.
+const SCATTER_LAWN_W: f64 = 0.5;
+
+/// Classify one body-fixed unit direction against a base's building-terrain
+/// scatter regions. A clearing always wins over a lawn (a building sitting on
+/// the lawn clears the grass under it), so every region is checked for a
+/// covering clear before a lawn can apply. Empty `regions` → [`ScatterClass::Natural`]
+/// everywhere, so off-base terrain is unaffected.
+pub fn classify_scatter(regions: &[ScatterRegion], dir: DVec3) -> ScatterClass {
+    let mut best_lawn = 0.0;
+    let mut in_lawn = false;
+    for region in regions {
+        let w = region.footprint.weight(dir);
+        match region.treatment {
+            ScatterTreatment::Clear => {
+                if w > SCATTER_CLEAR_W {
+                    return ScatterClass::Clear;
+                }
+            }
+            ScatterTreatment::Lawn => {
+                if w > SCATTER_LAWN_W && w > best_lawn {
+                    best_lawn = w;
+                    in_lawn = true;
+                }
+            }
+        }
+    }
+    if in_lawn {
+        ScatterClass::Lawn
+    } else {
+        ScatterClass::Natural
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared placement gate
@@ -144,12 +235,17 @@ pub fn placement_gate(
 
 /// Which vegetation layer a species belongs to — selects the payload and the
 /// far end of its LOD cascade (grass → terrain albedo, shrub → fade out, tree
-/// → impostor → fold).
+/// → impostor → fold, rock → short near-only fade).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VegLayer {
     GroundCover,
     Shrub,
     Tree,
+    /// Scattered pebbles / rocks. Unlike the woody layers, rocks are placed
+    /// **inversely** to grass — dense on bare / rocky ground, thinning under
+    /// thick grass (which hides them) to a small floor density — and resolve
+    /// only up close (no impostor band).
+    Rock,
 }
 
 /// Placement parameters for one species. Asset-handle-free, so it can be
@@ -316,6 +412,7 @@ fn layer_grid_id(layer: VegLayer) -> u64 {
         VegLayer::GroundCover => 0,
         VegLayer::Shrub => 1,
         VegLayer::Tree => 2,
+        VegLayer::Rock => 3,
     }
 }
 
@@ -340,7 +437,7 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
     let face = input.key.face;
 
     let mut instances = Vec::new();
-    for layer in [VegLayer::Shrub, VegLayer::Tree] {
+    for layer in [VegLayer::Shrub, VegLayer::Tree, VegLayer::Rock] {
         // Members of this layer + the combined grid spacing (the widest member,
         // so even the largest canopy never interpenetrates a neighbour) + the
         // total mix weight for the per-point species draw.
@@ -444,16 +541,31 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                 }
 
                 let alt = altitude_fade(sample.height_m, sp.altitude_band);
-                let clump = clump_field(dir, sp.layer, sp.clump_affinity);
-                // Tie the stand to the landform: thinner toward ridges/steeps,
-                // denser in sheltered hollows. This is what turns the noise
-                // patch into a terrain-correlated forest with real ecotones.
-                let terrain = woody_terrain_factor(sp.layer, &sample, sp.slope_limit);
-                let mut accept = sample.grass_w * alt * clump * terrain;
-                // Clearing around a flatten pad (e.g. the runway): the forest
+                let mut accept = if sp.layer == VegLayer::Rock {
+                    // Rocks are placed *inversely* to grass: `bare = 1 - grass_w`
+                    // is ~1 on rock/soil, ~0 on lush grassland. They thin to a
+                    // small floor density under thick grass (which would hide
+                    // them anyway) and fill in on bare patches, gathered into
+                    // loose scree clusters by a medium-scale field.
+                    let bare = (1.0 - sample.grass_w).clamp(0.0, 1.0);
+                    let density = ROCK_GRASS_FLOOR + (1.0 - ROCK_GRASS_FLOOR) * bare;
+                    density * alt * rock_scatter_field(dir, sp.clump_affinity)
+                } else {
+                    // Woody: grass-mask-correlated, forest-clumped, and tied to
+                    // the landform — thinner toward ridges/steeps, denser in
+                    // sheltered hollows (the real ecotones, not a noise patch).
+                    let clump = clump_field(dir, sp.layer, sp.clump_affinity);
+                    let terrain = woody_terrain_factor(sp.layer, &sample, sp.slope_limit);
+                    sample.grass_w * alt * clump * terrain
+                };
+                // Clearing around a flatten pad (e.g. the runway): the *forest*
                 // fades out approaching the airfield over a margin beyond the pad
-                // ramp, so trees don't crowd right up to the strip.
-                if let Some(flatten) = &input.flatten_exclusion {
+                // ramp, so trees don't crowd right up to the strip. Rocks are
+                // ground-level gravel — fine right up to the apron — so they only
+                // honour the pad itself (the `flatten_exclusion` gate above).
+                if sp.layer != VegLayer::Rock
+                    && let Some(flatten) = &input.flatten_exclusion
+                {
                     let cos = dir.dot(flatten.center_dir).clamp(-1.0, 1.0);
                     let d = (cos.acos() * input.radius_m) as f32;
                     let pad_reach =
@@ -466,6 +578,9 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     continue;
                 }
 
+                // Rocks take any orientation (worn stones lying or half-buried at
+                // a jaunty angle); woody plants stand near-upright off the normal.
+                let tilt_range = if sp.layer == VegLayer::Rock { 0.60 } else { 0.12 };
                 let root_body = dir * (input.radius_m + sample.height_m as f64);
                 instances.push(VegInstance {
                     species: chosen as u16,
@@ -473,7 +588,7 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     up_body: sample.normal_body.as_vec3(),
                     yaw: (rng(SALT_YAW) * std::f64::consts::TAU) as f32,
                     scale: lerp(sp.scale_range.0, sp.scale_range.1, rng(SALT_SCALE) as f32),
-                    tilt: (rng(SALT_TILT) * 0.12) as f32,
+                    tilt: (rng(SALT_TILT) * tilt_range) as f32,
                 });
             }
         }
@@ -535,6 +650,69 @@ pub fn combine_tree_tile_mesh(
             uv0.push(base_uv0);
             // UV_1 = (base.z for the per-tree scale-fade/seed, atlas leaf code).
             uv1.push([base.z, data.leaf_code[i]]);
+        }
+        indices.extend(data.indices.iter().map(|idx| start + idx));
+    }
+
+    if positions.is_empty() {
+        return None;
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
+    mesh.insert_indices(Indices::U32(indices));
+    Some(mesh)
+}
+
+/// Bake all of a tile's **rock** instances into ONE mesh — the same
+/// one-mesh-per-tile batching the trees and grass use. Each instance's species
+/// mesh `species_lod[inst.species]` (`None` skips it) is oriented to the terrain
+/// normal, yawed, tilted, and scaled, then appended.
+///
+/// Vertices are relative to the tile's surface centre (for f64 anchoring). The
+/// stone's **base** (its root offset from the tile centre) is baked into
+/// `UV_0.xy` + `UV_1.x` so [`RockMaterial`](crate::ground::RockMaterial) can
+/// scale-grow each stone about its own root across the near-band fade. `COLOR`
+/// carries the per-vertex stone albedo × baked cavity-AO / top-bleach.
+///
+/// Returns `None` if nothing was emitted.
+pub fn combine_rock_tile_mesh(
+    instances: &[VegInstance],
+    species_lod: &[Option<Arc<RockMeshData>>],
+) -> Option<Mesh> {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut uv0: Vec<[f32; 2]> = Vec::new();
+    let mut uv1: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for inst in instances {
+        let Some(Some(data)) = species_lod.get(inst.species as usize) else {
+            continue;
+        };
+        let rot = Quat::from_rotation_arc(Vec3::Y, inst.up_body.normalize_or(Vec3::Y))
+            * Quat::from_rotation_y(inst.yaw)
+            * Quat::from_rotation_x(inst.tilt);
+        let base = inst.root_offset_body_m; // stone base, tile-centre-relative
+        let base_uv0 = [base.x, base.y];
+        let start = positions.len() as u32;
+        for i in 0..data.positions.len() {
+            let p = Vec3::from_array(data.positions[i]);
+            let n = Vec3::from_array(data.normals[i]);
+            let wp = base + rot * (p * inst.scale);
+            positions.push(wp.to_array());
+            normals.push((rot * n).normalize_or_zero().to_array());
+            colors.push(data.colors[i]);
+            uv0.push(base_uv0);
+            uv1.push([base.z, 0.0]);
         }
         indices.extend(data.indices.iter().map(|idx| start + idx));
     }
@@ -698,18 +876,41 @@ pub fn clump_field(dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
         // in `forest_coverage` supplies the gradual plain→forest falloff.
         VegLayer::Tree => lerp(1.0, canopy, affinity),
         VegLayer::Shrub => {
-            // Peak in the stand-margin band (undergrowth at the ecotone) + a few
-            // lone bushes out on the plain.
+            // Bushes are mostly lone individuals on the open plain, with a thin
+            // fringe at the stand margin (ecotone undergrowth) and very few under
+            // closed canopy — shade thins the forest floor. The forest-correlated
+            // terms (`edge`, `canopy`) are deliberately small so bush density drops
+            // considerably around and inside forests rather than crowding them.
             let edge = 1.0 - (canopy - 0.5).abs() * 2.0;
             let lone = fbm(dir * (FOREST_PATCH_FREQ * 2.5), 2);
             lerp(
                 lone * 0.35,
-                (edge * 0.7 + canopy * 0.4).clamp(0.0, 1.0),
+                (edge * 0.45 + canopy * 0.12).clamp(0.0, 1.0),
                 affinity,
             )
         }
         VegLayer::GroundCover => 1.0 - 0.5 * canopy,
+        // Rocks don't use the forest field (they're placed inversely to grass,
+        // not correlated with canopy); their clustering is `rock_scatter_field`.
+        VegLayer::Rock => 1.0,
     }
+}
+
+/// Floor density for rocks under fully lush grass (`grass_w = 1`): a few stones
+/// still poke through a meadow, but rocks gather on the bare / rocky patches.
+const ROCK_GRASS_FLOOR: f32 = 0.12;
+
+/// Angular frequency of the rock-scatter clustering field. Finer than the forest
+/// patches: `~ radius / FREQ` metres per cell ≈ ~50 m scree clusters on a
+/// ~3000 km body, so stones gather in loose patches rather than an even sprinkle.
+const ROCK_PATCH_FREQ: f64 = 60_000.0;
+
+/// Medium-scale rock-scatter clustering in `[0, 1]`: loose scree patches instead
+/// of a uniform sprinkle. `affinity` 0 = uniform everywhere, 1 = tight clusters.
+fn rock_scatter_field(dir: DVec3, affinity: f32) -> f32 {
+    let f = fbm(dir * ROCK_PATCH_FREQ, 3);
+    let patch = smoothstep(0.34, 0.70, f);
+    lerp(1.0, patch, affinity.clamp(0.0, 1.0))
 }
 
 /// Per-sample terrain-form density factor for **woody** plants (trees, shrubs):

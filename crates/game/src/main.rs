@@ -49,6 +49,7 @@ mod surface_settle;
 mod target;
 mod terrain_registry;
 mod ui_widgets;
+mod units_settings;
 mod velocity_frame;
 mod view;
 mod warp_to_maneuver;
@@ -372,16 +373,18 @@ fn main() {
         // (on top of the pause gate) freezes physics, world sync, and the game
         // camera so the editor owns the frame entirely — the flight world is
         // suspended, not just hidden. See `crate::shipyard_editor`.
+        // The shipyard editor is a separate scene that hides the world, so it
+        // gates all three sets off. The base editor is an *in-world* overlay: it
+        // keeps the world visible and frozen (via `SimClock`, like a warp-0
+        // pause), so only the **Camera** set is gated for it — its god-view
+        // camera owns the view, but the render/terrain-streaming sync in `Sync`
+        // must keep running or the ground stops streaming and goes black.
         .configure_sets(
             Update,
             (
-                SimStage::Physics.run_if(
-                    pause_menu::not_game_paused
-                        .and(shipyard_editor::editor_closed)
-                        .and(base_editor::base_editor_closed),
-                ),
-                SimStage::Sync
-                    .run_if(shipyard_editor::editor_closed.and(base_editor::base_editor_closed)),
+                SimStage::Physics
+                    .run_if(pause_menu::not_game_paused.and(shipyard_editor::editor_closed)),
+                SimStage::Sync.run_if(shipyard_editor::editor_closed),
                 SimStage::Camera.run_if(
                     pause_menu::not_game_paused
                         .and(shipyard_editor::editor_closed)
@@ -542,6 +545,9 @@ fn main() {
         // Persisted graphics preferences (user/graphics.ron) — e.g. the
         // volumetric-cloud toggle read by `rendering::clouds::drive_clouds`.
         .add_plugins(graphics_settings::GraphicsSettingsPlugin)
+        // Persisted measurement-unit preference (user/units.ron) — metric vs
+        // imperial, read by the HUD formatters in `hud::format`.
+        .add_plugins(units_settings::UnitsSettingsPlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
         .add_plugins(relaunch::RelaunchPlugin)

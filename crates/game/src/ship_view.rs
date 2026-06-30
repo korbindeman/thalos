@@ -27,7 +27,7 @@ use thalos_shipyard::editor::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial,
-    PodGeometry, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipPartParams,
+    PodGeometry, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial,
     ShipyardPlugin, SurfaceMount, SurfaceMountKind, Wing, build_cockpit_mesh,
     build_control_surface_mesh, build_fuselage_mesh, build_gear_mesh, build_jet_nacelle_body_mesh,
     build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
@@ -618,38 +618,10 @@ fn visual_spec(
     }
 }
 
-fn ship_part_params(
-    nodes: &AttachNodes,
-    tank: Option<&FuelTank>,
-    fuselage: Option<&Fuselage>,
-    dec: Option<&Decoupler>,
-    adapter: Option<&Adapter>,
-    seed: u32,
-) -> ShipPartParams {
-    let top_r = nodes.get("top").map(|n| n.diameter * 0.5).unwrap_or(0.5);
-    let (radius_top, radius_bottom, length) = if let Some(t) = tank {
-        (top_r, top_r, t.length)
-    } else if let Some(f) = fuselage {
-        (top_r, top_r, f.length)
-    } else if dec.is_some() {
-        (top_r, top_r, 0.2)
-    } else if let Some(a) = adapter {
-        let bot_r = a.target_diameter * 0.5;
-        let h = (top_r + bot_r).max(0.4);
-        let dr = top_r - bot_r;
-        let slant = (h * h + dr * dr).sqrt();
-        (top_r, bot_r, slant)
-    } else {
-        (top_r, top_r, 1.0)
-    };
-    ShipPartParams {
-        length,
-        radius_top,
-        radius_bottom,
-        seed,
-        ..default()
-    }
-}
+// `ship_part_params` (part dims → material uniform) is shared with the in-game
+// editor; it lives in `thalos_shipyard::appearance` (re-exported at the crate
+// root) so the flight build and the editor build can't drift.
+use thalos_shipyard::ship_part_params;
 
 /// `top` node diameter of a host part, or a sensible default — the basis for
 /// surface-mount radius lookups (see [`host_mount_geometry`]).
@@ -739,7 +711,10 @@ fn rebuild_ship_visuals(
                 None => {
                     let h = ship_materials.add(ShipPartMaterial {
                         base: stainless_steel_base(),
-                        extension: ShipPartExtension { params },
+                        extension: ShipPartExtension {
+                            params,
+                            ..Default::default()
+                        },
                     });
                     commands.entity(e).insert(PartShaderHandle(h.clone()));
                     h

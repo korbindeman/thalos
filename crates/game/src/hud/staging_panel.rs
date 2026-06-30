@@ -218,6 +218,7 @@ fn spawn_resource_bar(
 pub fn update(
     summaries: Res<StagingSummaries>,
     theme: Res<HudTheme>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut card_q: Query<
         (
             &StageCard,
@@ -270,7 +271,7 @@ pub fn update(
             ),
             StageField::DeltaV => {
                 let s = if stage.has_engine {
-                    format::delta_v(stage.delta_v_m_s)
+                    format::delta_v(stage.delta_v_m_s, units.system)
                 } else {
                     "drop only".to_string()
                 };
@@ -278,7 +279,7 @@ pub fn update(
             }
             StageField::Fuel => {
                 let s = if stage.fuel_kg > 0.0 {
-                    format::mass(stage.fuel_kg)
+                    format::mass(stage.fuel_kg, units.system)
                 } else {
                     "—".to_string()
                 };
@@ -332,7 +333,11 @@ pub fn update(
             .get(am.card)
             .and_then(|s| s.resources.get(&am.resource))
             .map(|t| {
-                format::resource_ratio(t.mass_kg, t.capacity * am.resource.density_kg_per_unit())
+                format::resource_ratio(
+                    t.mass_kg,
+                    t.capacity * am.resource.density_kg_per_unit(),
+                    units.system,
+                )
             })
             .unwrap_or_else(|| "—".to_string());
         if text.0 != s {

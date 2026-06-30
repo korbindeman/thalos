@@ -32,6 +32,7 @@
 // Shared vegetated-ground colour + moisture field, also mirrored CPU-side by
 // `ground/landcover.rs` so the grass blades read the exact same green.
 #import thalos::landcover::{moisture_at, macro_variation, vegetation_color}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
 
 // Must match `MAX_TERRAIN_SHADOW_CASTERS` / `MAX_TERRAIN_SHADOW_QUADS` in
 // `body_material.rs`.
@@ -80,18 +81,8 @@ struct BodyTerrainDebug {
 // `BodyTerrainExtras` in `body_material.rs` for the slot-budget rationale
 // (Metal vertex stage caps at 16 buffers and AsBindGroup forces vertex
 // visibility on every `#[uniform(N)]`).
-// Cascaded sun-shadow transforms + compare params. Mirrors `ShadowCascadeBlock`
-// in `body_material.rs` (array sizes == CASCADE_COUNT). The depth maps are
-// SEPARATE `texture_depth_2d` bindings (one per cascade), sampled unrolled.
-struct ShadowCascadeBlock {
-    view_proj: array<mat4x4<f32>, 3>,
-    // per cascade: x = depth bias (clip), yzw reserved.
-    params: array<vec4<f32>, 3>,
-    // x = strength (0 ⇒ skip), y = active cascade count, zw reserved. Named
-    // `gate` (not `config`) — this shader `#import`s a udlod global `config`,
-    // and a matching field name collides in naga_oil.
-    gate: vec4<f32>,
-}
+// `ShadowCascadeBlock` + `sun_shadow_factor` are shared from `thalos::shadow`.
+// The depth maps are SEPARATE `texture_depth_2d` bindings (one per cascade).
 
 struct BodyTerrainExtras {
     craft_shadow: BodyTerrainShadow,
@@ -108,80 +99,6 @@ struct BodyTerrainExtras {
 @group(3) @binding(3) var sun_shadow_map_0: texture_depth_2d;
 @group(3) @binding(4) var sun_shadow_map_1: texture_depth_2d;
 @group(3) @binding(5) var sun_shadow_map_2: texture_depth_2d;
-
-// One cascade's shadow factor at a render-space point. Returns the factor in
-// `[1 - strength, 1]`, or a NEGATIVE sentinel if the point is outside this
-// cascade's box (caller falls through to the next, coarser cascade). `inset`
-// shrinks inner cascades so an edge fragment hands off cleanly; `fade` edge-
-// softens the outermost cascade (nothing covers beyond it).
-fn cascade_factor(
-    world_pos: vec3<f32>,
-    vp: mat4x4<f32>,
-    bias: f32,
-    strength: f32,
-    tex: texture_depth_2d,
-    inset: f32,
-    fade: bool,
-) -> f32 {
-    let clip = vp * vec4<f32>(world_pos, 1.0);
-    if (clip.w <= 0.0) {
-        return -1.0;
-    }
-    let ndc = clip.xyz / clip.w;
-    if (any(ndc.xy < vec2<f32>(-inset)) || any(ndc.xy > vec2<f32>(inset)) ||
-        ndc.z < 0.0 || ndc.z > 1.0) {
-        return -1.0;
-    }
-    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
-    let dims = vec2<f32>(textureDimensions(tex));
-    // 3×3 PCF. Reverse-z: a caster closer to the sun has a LARGER stored depth,
-    // so the receiver is shadowed when `stored > frag_depth + bias`.
-    var lit = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let texel = vec2<i32>(uv * dims) + vec2<i32>(dx, dy);
-            let stored = textureLoad(tex, texel, 0);
-            lit = lit + select(1.0, 0.0, stored > ndc.z + bias);
-        }
-    }
-    lit = lit / 9.0;
-    var edge_fade = 1.0;
-    if (fade) {
-        let edge = max(abs(ndc.x), abs(ndc.y));
-        edge_fade = 1.0 - smoothstep(0.85, 1.0, edge);
-    }
-    return 1.0 - strength * (1.0 - lit) * edge_fade;
-}
-
-// Directional shadow factor: walk the cascades near→far and use the tightest one
-// that contains the fragment (highest resolution). `config.x == 0` (inactive
-// pass) early-outs to fully lit. Unrolled because WGSL can't index textures.
-fn sun_shadow_factor(world_pos: vec3<f32>) -> f32 {
-    let s = terrain_extras.shadow.gate.x;
-    if (s <= 0.0) {
-        return 1.0;
-    }
-    var f = cascade_factor(
-        world_pos, terrain_extras.shadow.view_proj[0], terrain_extras.shadow.params[0].x,
-        s, sun_shadow_map_0, 0.98, false,
-    );
-    if (f < 0.0) {
-        f = cascade_factor(
-            world_pos, terrain_extras.shadow.view_proj[1], terrain_extras.shadow.params[1].x,
-            s, sun_shadow_map_1, 0.98, false,
-        );
-    }
-    if (f < 0.0) {
-        f = cascade_factor(
-            world_pos, terrain_extras.shadow.view_proj[2], terrain_extras.shadow.params[2].x,
-            s, sun_shadow_map_2, 1.0, true,
-        );
-    }
-    if (f < 0.0) {
-        return 1.0;
-    }
-    return f;
-}
 
 // Blend the atlas-derived macro height normal into the smooth geometric normal.
 // Height is sampled through decode-then-filter RG16 interpolation in
@@ -261,15 +178,19 @@ const REGOLITH_VALUE_TRIM: f32 = 0.90;
 // treeline/snowline so the bands don't read as clean contour rings, and the
 // snow gate excludes steep faces (snow sloughs off cliffs) — both standard
 // altitude/slope/noise snow-line practice (see sources in the summary).
-const LUSH_LO_M: f32 = 1800.0;       // full lowland lushness at/below here
-const LUSH_HI_M: f32 = 2900.0;       // lushness gone above here
-const TREELINE_LO_M: f32 = 3100.0;   // grass starts giving way to dry alpine
-const TREELINE_HI_M: f32 = 4000.0;   // fully dry alpine grass / tundra
-const SNOW_LINE_LO_M: f32 = 3700.0;  // snow begins (on gentle ground)
-const SNOW_LINE_HI_M: f32 = 4600.0;  // permanent snow cap
+const LUSH_LO_M: f32 = 1500.0;       // full lowland/flank forest at/below here
+const LUSH_HI_M: f32 = 2400.0;       // forest gone above here
+const TREELINE_LO_M: f32 = 2400.0;   // alpine zone begins (cover greys out)
+const TREELINE_HI_M: f32 = 3000.0;   // fully alpine: bare scree + patchy tundra
+const SNOW_LINE_LO_M: f32 = 3100.0;  // snow begins (on gentle ground)
+const SNOW_LINE_HI_M: f32 = 4000.0;  // permanent snow cap
 const SNOW_LINE_NOISE_M: f32 = 400.0; // ± snow/treeline jitter from macro noise
 const SNOW_SLOPE_LO: f32 = 0.32;     // snow holds on slopes up to ~47°…
 const SNOW_SLOPE_HI: f32 = 0.62;     // …gone by ~68° (cliffs stay bare rock)
+// How strongly the alpine zone greys out to bare scree above the treeline even
+// on moderate ground (0 = pure tundra colour, 1 = full scree). The temperate
+// look wants the upper mountain reading grey rock + snow, not green/tan.
+const BARREN_STRENGTH: f32 = 0.65;
 const MACRO_VAR_SCALE: f32 = 0.004;  // 1/period_m → ~250 m biome-mottle patches
 const MACRO_VAR_AMT: f32 = 0.14;     // ± low-frequency value mottle
 // Mid-scale moisture: lush ↔ dry grass (and soil in the driest spots) so flat
@@ -295,10 +216,10 @@ const MOISTURE_CONTRAST: f32 = 1.35;        // widen spread so regions reach for
 // linear-space and below the lighting blow-out ceiling.
 const C_FOREST: vec3<f32>   = vec3<f32>(0.034, 0.084, 0.028); // lowland lush (deep saturated green)
 const C_GRASS: vec3<f32>    = vec3<f32>(0.072, 0.152, 0.050); // temperate grass (vivid olive-green)
-const C_DRYGRASS: vec3<f32> = vec3<f32>(0.142, 0.158, 0.072); // alpine dry grass / tundra (savanna)
+const C_DRYGRASS: vec3<f32> = vec3<f32>(0.138, 0.150, 0.074); // dry grass (drier regions only)
 const C_SOIL: vec3<f32>     = vec3<f32>(0.112, 0.074, 0.042); // earthy soil / peat (warmer)
-const C_ROCK_LO: vec3<f32>  = vec3<f32>(0.112, 0.096, 0.078); // lower rock (warm grey-brown)
-const C_ROCK_HI: vec3<f32>  = vec3<f32>(0.142, 0.140, 0.134); // alpine scree (cool grey)
+const C_ROCK_LO: vec3<f32>  = vec3<f32>(0.108, 0.104, 0.098); // lower rock (near-neutral grey)
+const C_ROCK_HI: vec3<f32>  = vec3<f32>(0.140, 0.143, 0.150); // alpine scree (cool grey)
 const C_SNOW: vec3<f32>     = vec3<f32>(0.600, 0.640, 0.720); // snow (faint blue)
 const C_WET: vec3<f32>      = vec3<f32>(0.028, 0.058, 0.026); // wet hollow (dark green)
 
@@ -308,10 +229,14 @@ const C_WET: vec3<f32>      = vec3<f32>(0.028, 0.058, 0.026); // wet hollow (dar
 const DETAIL_SCALE: f32 = 0.8;            // 1/period_m → ~1.25 m base relief
 const DETAIL_OCTAVES: i32 = 3;
 const DETAIL_EPS: f32 = 0.25;             // finite-difference step, metres
-const DETAIL_NORMAL_STRENGTH: f32 = 0.35; // facet-tilt amount. Derives from
+const DETAIL_NORMAL_STRENGTH: f32 = 0.22; // facet-tilt amount. Derives from
                                           // gradient (Perlin) noise (no weave);
                                           // kept modest so a grazing (sunset) sun
                                           // doesn't churn the ground into sandpaper.
+                                          // Trimmed: this only shows in extreme
+                                          // close-ups (it fades out by ~1.8 km),
+                                          // which isn't the play distance, so it
+                                          // was just adding close-up speckle.
 
 // Both detail layers fade out with camera distance: their period goes
 // sub-pixel on the far field and would shimmer. The macro/slope colour carries
@@ -319,6 +244,22 @@ const DETAIL_NORMAL_STRENGTH: f32 = 0.35; // facet-tilt amount. Derives from
 const DETAIL_FADE_NEAR: f32 = 180.0;  // full detail within this range (m)
 const DETAIL_FADE_FAR: f32  = 1800.0; // no detail beyond this range (m)
 const DETAIL_COORD_PERIOD_M: f32 = 4000.0;
+
+// ── Grass-clump detail (the "fluffy grass at any distance" layer) ───────────
+// A value mottle + soft fluffy normal at the grass-tuft/clump scale, GATED on the
+// grass mask and reaching far past the blade clipmap (blades stop at ~340 m). So
+// the mid/far grassland reads as a textured grass surface instead of flat green,
+// AND the blade→albedo handoff disappears (the ground is already grassy there). The
+// NORMAL is what sells it under a grazing sun — light/dark tuft micro-contrast.
+// Coarser than the fine breakup (so clump features stay above sub-pixel further
+// out); full within `GRASS_DETAIL_HOLD_M`, then fades by `GRASS_DETAIL_FADE_M` so
+// it can't shimmer on the far field (the macro green carries it from there).
+const GRASS_DETAIL_SCALE: f32 = 0.6;            // 1/period_m → ~1.7 m base clumps
+const GRASS_DETAIL_OCTAVES: i32 = 3;
+const GRASS_DETAIL_VALUE_AMT: f32 = 0.22;       // ± value mottle (tuft light/dark)
+const GRASS_DETAIL_NORMAL_STRENGTH: f32 = 0.34; // fluffy facet tilt (the grazing read)
+const GRASS_DETAIL_HOLD_M: f32 = 1500.0;        // full grass texture within this range
+const GRASS_DETAIL_FADE_M: f32 = 3200.0;        // gone beyond (macro green carries)
 
 // Bilinear roughness sample. Mirrors the `sample_attachment1` helper but
 // returns the red channel (the only one populated by the tile provider's
@@ -640,6 +581,56 @@ fn terrain_self_shadow(tile: AtlasTile, geo_normal: vec3<f32>, sun_dir_ws: vec3<
     return 1.0 - occ * TERRAIN_SHADOW_STRENGTH;
 }
 
+// Large-scale valley ambient occlusion from the height atlas.
+// Marches in 4 cardinal UV directions, finds the maximum horizon elevation
+// angle in each, and derives a sky-visibility factor. A valley floor enclosed
+// by high terrain on all sides loses ambient; an open hilltop stays bright.
+// Applied only to the ambient term (surf.occlusion), not the direct sun.
+const VALLEY_AO_STEPS: u32 = 8u;
+const VALLEY_AO_STEP0_TEXELS: f32 = 2.0;
+const VALLEY_AO_STEP_GROWTH: f32 = 1.7;
+// At LOD where m_per_texel ≈ 15 m the march reaches ~2.5 km; at coarser LOD it
+// scales proportionally, so the AO always captures mountain-valley distances.
+const VALLEY_AO_STRENGTH: f32 = 0.55; // 0 = off, 1 = full black in enclosed valleys
+const VALLEY_AO_MAX_ANGLE: f32 = 0.9; // horizon angle (rad, ~52°) that maps to full AO
+
+fn terrain_valley_ao(tile: AtlasTile) -> f32 {
+    let tex_size = attachments[0u].size;
+    let inv_size = 1.0 / tex_size;
+    let side_length = 3.14159265359 / 4.0 * config.scale;
+    let m_per_texel = side_length / (tex_size * tile_count(tile.coordinate.lod));
+
+    let base_uv = attachment_uv(tile.coordinate.uv, 0u);
+    let h0 = sample_height_atlas_uv_m(tile, base_uv);
+
+    let dirs = array<vec2<f32>, 4>(
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(-1.0, 0.0),
+        vec2<f32>(0.0, -1.0),
+    );
+
+    var total_horizon = 0.0;
+    for (var d = 0u; d < 4u; d = d + 1u) {
+        var max_slope = 0.0;
+        var dist_texels = 0.0;
+        var step_sz = VALLEY_AO_STEP0_TEXELS;
+        for (var k = 0u; k < VALLEY_AO_STEPS; k = k + 1u) {
+            dist_texels = dist_texels + step_sz;
+            let suv = base_uv + dirs[d] * (dist_texels * inv_size);
+            let h = sample_height_atlas_uv_m(tile, suv);
+            let d_m = dist_texels * m_per_texel;
+            max_slope = max(max_slope, (h - h0) / max(d_m, 1.0e-3));
+            step_sz = step_sz * VALLEY_AO_STEP_GROWTH;
+        }
+        total_horizon = total_horizon + atan(max(max_slope, 0.0));
+    }
+
+    let avg_horizon = total_horizon * 0.25;
+    let occ = clamp(avg_horizon / VALLEY_AO_MAX_ANGLE, 0.0, 1.0);
+    return 1.0 - occ * VALLEY_AO_STRENGTH;
+}
+
 // Standard quaternion rotation `v' = q * v * q⁻¹`, expanded into the
 // `v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)` identity that avoids
 // the explicit quat product and stays in vec3 land.
@@ -725,8 +716,8 @@ fn eval_material_stack(
     // Landcover classes from the moisture field, kept fairly contrasty so they
     // read as distinct patches from the air (as in real aerials): wet/low →
     // forest (dark canopy), mid → grassland, dry → tan dry grass, driest → bare
-    // soil. Forest only takes hold on lush low ground; above the treeline the
-    // whole column dries to alpine grass.
+    // soil. Forest is the default cover up to the treeline; above it the cover
+    // cools to alpine tundra and greys out to bare scree (the `barren` term).
     let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m + jitter);
     // The vegetated ground colour comes from the shared `thalos::landcover`
     // library — the SAME function the grass blades' CPU mirror
@@ -743,6 +734,16 @@ fn eval_material_stack(
     var ground = veg * grass_w + C_SOIL * soil_w + rock_col * rock_w;
     ground = mix(ground, C_WET, wet * (1.0 - rock_w * 0.55));
 
+    // Alpine barren: above the treeline the alpine zone is mostly bare scree /
+    // boulder field with only patchy tundra, so exposed grey rock takes over
+    // even on MODERATE ground — not just on the steep faces `rock_w` already
+    // catches. Without this, gentle high slopes read as the (now cool) alpine
+    // tundra green; with it they grey out toward scree the way a real temperate
+    // range does above the trees. Held off wet hollows and where rock is already
+    // dominant. Snow then caps it above the snowline.
+    let barren = alpine * (1.0 - wet) * (1.0 - 0.6 * rock_w);
+    ground = mix(ground, C_ROCK_HI, barren * BARREN_STRENGTH);
+
     // Snow: above a noise-jittered snowline, only where the ground is not too
     // steep. Permanent cap once well clear of the line.
     let snow_alt = smoothstep(SNOW_LINE_LO_M + jitter, SNOW_LINE_HI_M + jitter, altitude_m);
@@ -755,10 +756,12 @@ fn eval_material_stack(
     ground = ground * (1.0 + variation * MACRO_VAR_AMT * (1.0 - snow));
 
     // Keep a little of the baked macro albedo as broad climate/body identity,
-    // but the altitude/slope model is the local truth. Drop it under snow.
+    // but the altitude/slope model is the local truth. Drop it under snow, and
+    // keep the blend light so the (cooled, but still climate-warm) macro band
+    // can't reintroduce a brown wash over the green/grey local model.
     let macro_tint = desaturate(macro_albedo, 0.86);
     var out: TerrainMaterialSample;
-    out.albedo = mix(ground, macro_tint, 0.16 * (1.0 - snow));
+    out.albedo = mix(ground, macro_tint, 0.10 * (1.0 - snow));
     out.normal_strength = mix(mix(0.45, 0.85, rock_w) + soil_w * 0.12, 0.25, snow);
     out.occlusion = 1.0 - wet * 0.18 - soil_w * 0.05 - rock_w * 0.04;
     return out;
@@ -1041,6 +1044,41 @@ fn surface_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> Su
     return out;
 }
 
+// Grass-clump detail for the VEGETATED ground (see the GRASS_DETAIL_* constants).
+// One gradient-noise eval gives BOTH the value mottle (`.x`) and the fluffy normal
+// (`.yzw`). `grass_w` is the grass coverage at this fragment (0 off grass / above
+// the treeline → early-out, so non-grass ground and the far field pay nothing).
+fn grass_far_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32, grass_w: f32) -> SurfaceDetail {
+    var out: SurfaceDetail;
+    out.tint = vec3<f32>(1.0);
+    out.normal_offset = vec3<f32>(0.0);
+
+    let fade = (1.0 - smoothstep(GRASS_DETAIL_HOLD_M, GRASS_DETAIL_FADE_M, cam_dist))
+        * clamp(grass_w, 0.0, 1.0);
+    if (fade <= 0.0) {
+        return out;
+    }
+
+    let g = fbm3_perlin_grad(
+        p_body * GRASS_DETAIL_SCALE,
+        GRASS_DETAIL_OCTAVES,
+        DETAIL_COORD_PERIOD_M * GRASS_DETAIL_SCALE,
+    );
+    // Value mottle: clumps of brighter (sunlit tuft tops) and darker (shaded
+    // between-tuft) grass — the grassy colour texture.
+    let dv = clamp(g.x, -1.0, 1.0);
+    out.tint = mix(vec3<f32>(1.0), vec3<f32>(1.0 + dv * GRASS_DETAIL_VALUE_AMT), fade);
+    // Soft fluffy normal: tilt facets so the low sun rakes the grass texture (the
+    // grazing-angle "fluffy" read). Tangent to the sphere; magnitude capped so a
+    // steep gradient can't fold the normal past the horizon.
+    let grad = g.yzw * GRASS_DETAIL_SCALE;
+    let grad_t = grad - geo_normal * dot(grad, geo_normal);
+    var off = -grad_t * (GRASS_DETAIL_NORMAL_STRENGTH * fade);
+    let off_len = length(off);
+    out.normal_offset = off * (0.8 / max(0.8, off_len));
+    return out;
+}
+
 // Airless regolith fine detail: value-only albedo mottle + speckle and a
 // micro-relief normal. Same body-fixed coordinate basis as `surface_detail`, so
 // it stays glued to the surface under time warp / floating-origin shifts, and
@@ -1087,9 +1125,9 @@ fn regolith_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> S
 // (`detail.tint`) doubles as a cheap cavity signal — darker breakup ≈ a hollow —
 // so we fold its luminance into an AO factor on the sky/ground ambient (never on
 // the direct sun, which has its own shadow terms). `AO_FROM_DETAIL` is the blend
-// amount, `AO_MIN` the floor so creases darken without going black.
-const AO_FROM_DETAIL: f32 = 0.5;
-const AO_MIN: f32 = 0.45;
+// amount, `AO_MIN` the floor so creases darken without going fully black.
+const AO_FROM_DETAIL: f32 = 0.65;
+const AO_MIN: f32 = 0.15;
 
 // Canopy AO: a tree/object that occludes the sun also blocks a chunk of the sky
 // dome, so its sun-shadow footprint should darken the *ambient* term too — not
@@ -1162,6 +1200,8 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // Regolith micro-relief normal, set in the regolith branch and consumed by
     // the lighting-normal section below (the vegetated path uses `detail`).
     var regolith_normal_offset = vec3<f32>(0.0);
+    // Grass-clump fluffy normal, set in the vegetated branch (see `grass_far_detail`).
+    var grass_normal_offset = vec3<f32>(0.0);
 
     var surface_rgb: vec3<f32>;
     if (style_regolith) {
@@ -1198,6 +1238,17 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         surface_rgb = material.albedo;
         if (!debug_on) {
             surface_rgb = surface_rgb * detail.tint;
+            // Grass-clump detail: textures the mid/far grassland so it reads as a
+            // fluffy grass surface (not flat green) and hides the blade→albedo line.
+            // Gated on the normalized grass mask, faded out above the treeline so
+            // alpine scree isn't grass-textured.
+            let grass_w_frag = material_masks.r
+                / max(material_masks.r + material_masks.g + material_masks.b, 1e-3);
+            let grass_gate =
+                grass_w_frag * (1.0 - smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m));
+            let gd = grass_far_detail(detail_p_body, geo_normal, cam_dist, grass_gate);
+            surface_rgb = surface_rgb * gd.tint;
+            grass_normal_offset = gd.normal_offset;
         }
     }
     albedo = vec4<f32>(surface_rgb, albedo.a);
@@ -1254,7 +1305,9 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         if (style_regolith) {
             normal = normalize(height_n + regolith_normal_offset);
         } else {
-            normal = normalize(height_n + detail.normal_offset * material.normal_strength);
+            normal = normalize(
+                height_n + detail.normal_offset * material.normal_strength + grass_normal_offset,
+            );
         }
     }
     let view_dir = normalize(info.view_vector);
@@ -1275,7 +1328,9 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // direct-sun gate as the analytic craft proxy and the self-shadow march.
     // `tree_shadow` is kept separate so it can also bleed into the ambient term
     // (canopy AO) below — terrain self-shadow must not, so it's excluded there.
-    let tree_shadow = sun_shadow_factor(hit_ws);
+    let tree_shadow = sun_shadow_factor(
+        hit_ws, terrain_extras.shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
+    );
     let external_shadow = craft_shadow * self_shadow * tree_shadow;
 
     // Surface lighting. The shading normal is pulled most of the way toward the
@@ -1371,7 +1426,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // occlusion, applied (inside `shade_surface`) to the ambient terms only.
         let detail_luma = dot(detail.tint, vec3<f32>(0.2126, 0.7152, 0.0722));
         let cavity = clamp(mix(1.0, detail_luma, AO_FROM_DETAIL), AO_MIN, 1.0);
-        surf.occlusion = clamp(material.occlusion * cavity, 0.0, 1.0);
+        // Large-scale valley AO: enclosed valley floors lose ambient light because
+        // high surrounding terrain blocks the sky hemisphere — mul onto cavity so
+        // both small-scale hollows and large-scale valleys compound correctly.
+        let valley_ao = select(terrain_valley_ao(tile), 1.0, distant_schematic);
+        surf.occlusion = clamp(material.occlusion * cavity * valley_ao, 0.0, 1.0);
 
         // Canopy AO: a tree/object shadow bleeds into the ambient too (a canopy
         // overhead blocks the sky, not only the sun), so shadowed ground reads.

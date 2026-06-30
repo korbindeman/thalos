@@ -16,7 +16,7 @@
 
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::mesh_functions::get_world_from_local
-#import thalos::lighting::{SceneLighting, eclipse_factor, planetshine_sample}
+#import thalos::lighting::{SceneLighting, shade_hapke_surface}
 
 const PI: f32 = 3.14159265358979323846;
 
@@ -108,17 +108,28 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let sun_dir  = star.dir_flux.xyz;
     let sun_flux = star.dir_flux.w;
 
-    let n_dot_l = max(dot(normal, sun_dir), 0.0);
-    let eclipse = eclipse_factor(params.scene, hit, sun_dir);
-    var lit = params.albedo.xyz * sun_flux * n_dot_l * eclipse * (1.0 / PI);
-
-    let shine = planetshine_sample(params.scene, hit, sun_dir, sun_flux);
-    if shine.enabled {
-        let n_dot_p = max(dot(normal, shine.dir), 0.0);
-        lit = lit + params.albedo.xyz * shine.tint * shine.flux * n_dot_p * (1.0 / PI);
-    }
-
-    lit = lit + params.albedo.xyz * params.scene.ambient_intensity * (1.0 / PI);
+    // Shade through the shared Hapke regolith BRDF — the SAME routine the ground
+    // LOD uses for airless bodies (`body_terrain.wgsl`, SURFACE_REGOLITH) and the
+    // procedural-body impostor. A moon's distant disc then reads as a real lit
+    // sphere (opposition surge, limb behaviour, correct terminator so phases show)
+    // and reconverges with its own ground across the LOD swap, instead of the old
+    // flat Lambert disc. The billboard has no relief, so the shading and geometric
+    // normals are both the sphere normal; planetshine (earthshine from the parent)
+    // and eclipse occlusion are folded in by the helper. Roughness ~0.85 ≈ lunar
+    // regolith.
+    let view_dir = normalize(cam_pos - hit);
+    let lit = shade_hapke_surface(
+        params.albedo.xyz,
+        0.85,
+        normal,
+        normal,
+        view_dir,
+        hit,
+        sun_dir,
+        sun_flux,
+        params.scene,
+        1.0,
+    );
 
     let clip = view.clip_from_world * vec4(hit, 1.0);
     return FragOutput(vec4(lit, 1.0), clip.z / clip.w);

@@ -8,9 +8,9 @@
 //! Serialization goes through a flat `ShipBlueprint` struct so that the ECS
 //! representation stays query-friendly while the on-disk format stays stable.
 
-use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 
+pub mod appearance;
 pub mod attach;
 pub mod blueprint;
 pub mod catalog;
@@ -28,6 +28,7 @@ pub mod staging;
 pub mod stats;
 pub mod wing_mesh;
 
+pub use appearance::ship_part_params;
 pub use attach::{
     AttachNode, AttachNodes, Attachment, NodeId, Ship, SurfaceMount, SurfaceMountKind,
     SymmetryGroup, SymmetryRole,
@@ -83,7 +84,11 @@ pub struct ShipyardPlugin;
 
 impl Plugin for ShipyardPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<ShipPartMaterial>::default())
+        // The craft hull material + its sun-shadow receiving live in the render
+        // crate now (Phase 4a); `CraftRenderPlugin` registers the material plugin,
+        // the shadow-receive plumbing, and (defensively) the `thalos::shadow`
+        // library the hull shader imports, for whichever binary adds us.
+        app.add_plugins(thalos_body_render::CraftRenderPlugin)
             .add_systems(
                 Update,
                 (

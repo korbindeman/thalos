@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Thalos
 
 Thalos is in **pre-alpha development**. Architecture and tooling are
@@ -7,6 +11,55 @@ matures. **Do this explicitly**: announce the change before you make
 it, explain why the existing approach falls short, and update this
 file (and the relevant spec under `docs/`) so the next agent inherits
 the new shape, not the old one. No silent rewrites.
+
+## Current focus: graphics fidelity
+
+The active sprint is pushing toward MSFS/KSP2-tier visuals. The full plan is in
+`docs/graphics_fidelity.md` (restructured 2026-06-30 around a full architecture
+review). The doc is now organised around two ideas, not a flat task list:
+
+- **The one-world principle** — Thalos is one physical world; *every* surface
+  (terrain, terrain detail, vegetation, rocks, **crafts, gear, buildings, pads,
+  tanks, runway**, water) must obey the same light, cast into and receive from the
+  same shadows, occlude each other, and recede into the same air. A surface that
+  opts out reads as a pasted-on cut-out. See `docs/graphics_fidelity.md` §2.3.
+- **The unification foundation** — the central debt is **two lighting universes**:
+  terrain/vegetation/water/rock/impostors shade through the shared
+  `thalos::lighting` spine (`shade_surface`/`ThalosSurface`), but **crafts and
+  structures still use Bevy stock PBR**, reconciled only by a CPU day/night scalar
+  in `rendering/lighting.rs`. The foundation (doc §3, steps **F1–F9**) collapses
+  the craft/structure path into projections of the spine: one terminator, one
+  heliocentric flux, one exposure, one atmosphere-derived environment (sky-view
+  LUT → SH ambient → prefiltered IBL), one screen-space AO field, one shadow rig
+  that everything casts into.
+
+Status of in-flight work (now tracked by substrate in the doc's §4):
+
+- **Shadows** ✅ — cascaded sun-shadow via `thalos::shadow`; terrain/trees/grass/
+  rocks receive, trees+rocks cast. *Next:* craft/structures as casters+receivers
+  (the core "everything interacts" fix), stable CSM, terrain horizon self-shadow.
+- **Landcover + palette / aerial recession / moonlight** ◐ — in `thalos::lighting`
+  / `thalos::landcover`; awaiting screenshots. Moonlight converges into F1 (the
+  two moon models become one); aerial recession folds inside `shade_surface`.
+- **Lighting-input unification (F1), exposure (F2), sky-view-LUT→IBL (F3/F4), AO
+  (F5), shadow-rig unification (F6)** ☐ — this sprint's foundation.
+- **Terrain tiling-material detail, hull/structure spine port, LOD chain** ☐ — next.
+
+### Shared shader library rule
+
+Every surface material (`body_terrain.wgsl`, `tree.wgsl`, `grass.wgsl`,
+`rock.wgsl`, `ground_patch.wgsl`, `tree_impostor.wgsl`) **must** import from
+the shared libraries, never re-implement lighting/palette locally:
+
+| Import path | Key exports |
+|---|---|
+| `thalos::lighting` | `shade_surface`, `shade_foliage`, `compute_surface_sky`, `moonlight_radiance`, `object_aerial_recession`, `sun_daylight` |
+| `thalos::shadow` | `ShadowCascadeBlock`, `sun_shadow_factor` |
+| `thalos::landcover` | `vegetation_color`, `forest_coverage` (CPU mirror: `ground/landcover.rs`) |
+| `thalos::foliage` | foliage albedo model (near mesh + impostor bake) |
+| `thalos::grass_displace` | `grass_blade_world_pos`, `grass_tuft_alpha` (shared with depth-prepass) |
+
+When a palette or BRDF constant moves, it moves in one place.
 
 ## Commands
 
@@ -26,8 +79,9 @@ just game shipyard        # open straight into the in-game ship editor
                           #    from any running mode)
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just preview              # headless procedural-object gallery → PNGs in
-                          #   tools/preview/out/ (trees/conifer/shrub; rocks etc.
-                          #   later). No window — agents can run it and inspect
+                          #   tools/preview/out/ (trees/shrub, grass, rocks/
+                          #   pebbles, landcover preview). No window — agents
+                          #   can run it and inspect
                           #   the images. See "Running and inspecting" below.
 just preview-window       # interactive variant of `just preview`: a window with
                           #   an orbit camera (drag/scroll, ←/→ cycle, S = shot).
@@ -124,7 +178,7 @@ channel: don't try to drive or observe a live session programmatically.
 
 **Procedural objects, though, you *can* see yourself.** `just preview`
 (`crates/body_render/examples/object_preview.rs`) is a **headless** renderer:
-it draws each procedural object (trees, conifer, shrub today; rocks etc. later)
+it draws each procedural object (trees, shrub, grass, and pebbles/rocks)
 to a PNG under `tools/preview/out/` and exits — no window. It renders on the
 real GPU off-screen (verified working from an agent shell: NVIDIA/Vulkan). Each
 object is staged as a small **diorama** so it reads like the in-game surface,
@@ -505,15 +559,17 @@ Key modules:
   craft coasting the wrong trajectory). **The terrain itself is
   flattened into a pad and the runway
   sits flush on it** (replacing the former raised-slab + skirt/runoff
-  platform): a single fixed elevation `E = max(natural terrain over the pad)
-  + margin` is chosen, then a `thalos_terrain::TerrainFlatten` pad is
+  platform): a single fixed elevation `E = mean(natural terrain over the
+  basin)` — levelling to the *mean*, not the max, so the wide basin balances
+  cut against fill instead of becoming an all-fill plateau towering over its
+  surroundings — is chosen, then a `thalos_terrain::TerrainFlatten` pad is
   installed through the body's shared
   `rendering::ground_terrain::TerrainFlattenRegistry` handle. The terrain
   tile provider (`PipelineTileProvider`, wrapped in
   `thalos_terrain::FlattenedSurface`) reads that handle as it bakes, so the
   *rendered* ground — and, via the GPU-atlas height mirror, the collider and
-  CPU height queries — level out to `E` across the pad (runway + ~50 m
-  shoulder) and smoothstep-blend back to natural terrain over a ~150 m ramp.
+  CPU height queries — level out to `E` across the basin and smoothstep-blend
+  back to natural terrain over a wide (~500 m) ramp.
   The handle is read per tile-pixel, so setting the region affects tiles
   baked afterward — no UDLOD tile-reload needed, because the pad is set
   before the aircraft/camera jump to the site, so the tiles that stream in
@@ -740,21 +796,39 @@ Key modules:
   pick a building site on the real terrain, flatten the land into a level pad,
   then click-and-place / edit placeholder buildings on it. Unlike the shipyard
   editor it is an **in-world overlay**, not a separate scene — the planet stays
-  visible, the sim pauses (`BaseEditor::open` is a `sim_clock` pause source, and
-  the three `SimStage` sets gate on `base_editor::base_editor_closed`), and the
-  existing `ShipCamera` is repositioned to a god-view (`camera.rs`) rather than
+  visible, the sim pauses (`BaseEditor::open` is a `sim_clock` pause source —
+  like a warp-0 pause, so only the **Camera** `SimStage` set gates on
+  `base_editor::base_editor_closed`; Physics/Sync keep running so the ground
+  stays streamed/lit, just frozen), and the existing `ShipCamera` is
+  repositioned to a god-view (`camera.rs`, WASD-pan + orbit/zoom) rather than
   swapped. Reuses the `StructureSite`/`StructureRegistry`/`apply_structure_flatten`
-  layer (`structures.rs`, grown with `BaseSite`/`Building` kinds + `remove`/
-  `update`) and the runway's per-frame f64 anchoring. Entry: the pause menu's
+  layer (`structures.rs`, grown with `BaseSite`/`Building`/`Launchpad`/`Tank`
+  kinds + `remove`/`update`) and the runway's per-frame f64 anchoring. Entry: the pause menu's
   SURFACE BASE button; Esc closes. The one new mechanism is **live runtime
   terrain invalidation** — UDLOD has no per-tile re-bake path, so a flatten
   installed after tiles stream is applied by `TerrainRebuildRequest`
   (`rendering::terrain_residency`) despawning + respawning the body terrain
   (reusing the persistent `TerrainFlattenRegistry` handle). Tab toggles placing
   a building vs a **launchpad** (a craft can be placed on it with **L**, reusing
-  the runway's parked-placement helpers), and a tarmac **auto-connection** mesh
-  (an MST over the site's structures) regenerates as structures change. See
-  `docs/base_building.md`.
+  the runway's parked-placement helpers — runway spawn is horizontal-on-gear, a
+  launchpad spawn is **vertical** nose-up), and a tarmac **auto-connection** mesh
+  (an MST over the site's structures) regenerates as structures change. The
+  **default base is a small spaceport on a flat basin**: `runway::finish_runway_spawn`
+  registers a wide `BaseSite` basin — *offset toward the launch-complex side* of
+  the runway, sized to hold the whole layout — and the runway drapes on it (no
+  longer its own pad), then `base_editor::spawn_default_base` authors the complex
+  coplanar on it: two large launchpads with clearing, per-pad flame diverters +
+  tank farms (`Tank` cylinders), a VAB-scale building and hangars on the far edge,
+  blockhouses/ops near the strip, and a tarmac MST linking the road structures —
+  so the surface scenarios present a whole base. Spawn
+  points are **intrinsic** to runways/launchpads (the shipyard create-craft→fly
+  flow is the next step). The base's flattened ground reads as a **grass lawn**
+  (thick short `GrassProfile::lawn`) with its paved/built footprints (runway,
+  launchpads, buildings, tanks) **cleared** — the building-terrain scatter layer:
+  `body_render::ground::scatter`'s `ScatterRegion`/`ScatterTreatment`/`classify_scatter`,
+  derived from the `StructureRegistry` by `rendering::grass` and honoured by the
+  grass tile builder (the seam future base trees/props extend). See
+  `docs/base_building.md` *Ground scatter*.
 - `window_settings` — persisted window/display preferences (mode, windowed
   resolution, vsync, fullscreen monitor, user UI scale), stored as RON at the
   gitignored `user/settings.ron` and edited live from the settings menu's

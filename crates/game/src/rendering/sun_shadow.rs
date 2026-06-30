@@ -35,6 +35,7 @@ use bevy::camera::{Camera, ClearColorConfig, ImageRenderTarget, RenderTarget, Sc
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::ecs::query::QueryItem;
 use bevy::image::Image;
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::render::{
     RenderApp,
@@ -50,13 +51,13 @@ use bevy::render::{
     view::ViewDepthTexture,
 };
 
-use thalos_body_render::{CASCADE_COUNT, ShadowCascadeBlock};
+use thalos_body_render::{CASCADE_COUNT, CraftShadowMaps, ShadowCascadeBlock};
 use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::rendering::real_space::update_real_space_body_positions;
-use crate::rendering::types::{PlayerShip, RealSpaceBody};
+use crate::rendering::types::RealSpaceBody;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 /// Render layer the sun-shadow cameras render. Casters (tree mesh tiles, craft
@@ -64,9 +65,9 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 /// 6/7 are the impostor-bake layers; 8 is the first free index.
 pub const SHADOW_CASTER_LAYER: usize = 8;
 
-/// Per-cascade square resolution. 2048² at the extents below is ~0.4 m/texel for
-/// the near cascade and ~3.9 m for the far one.
-const SHADOW_MAP_SIZE: u32 = 2048;
+/// Per-cascade square resolution. 4096² at the extents below is ~0.2 m/texel for
+/// the near cascade and ~2.0 m for the far one — crisper cliff and ridge shadows.
+const SHADOW_MAP_SIZE: u32 = 4096;
 
 /// Half-width (m) of each cascade's orthographic box, near→far. Centred on the
 /// craft; cascade 0 is tight + crisp, the last reaches out to cover the whole
@@ -92,8 +93,9 @@ const SHADOW_NEAR_M: f32 = 0.5;
 /// ground-level effect; rendering cascades from orbit is pure waste.
 const SHADOW_MAX_ALTITUDE_M: f32 = 6000.0;
 
-/// Default shadow darkening strength (0 = off, 1 = black). Tunable.
-const SHADOW_STRENGTH: f32 = 0.7;
+/// Default shadow darkening strength (0 = off, 1 = black). Higher values give
+/// hard cliff/ridge contrast; ambient fill keeps shadowed ground from going pure black.
+const SHADOW_STRENGTH: f32 = 0.88;
 
 /// Handles to the per-cascade depth maps the cascade cameras' depth attachments
 /// are copied into. Extracted to the render world for [`CopySunShadowDepthNode`];
@@ -112,6 +114,20 @@ pub struct SunShadowState {
     pub images: [Handle<Image>; CASCADE_COUNT],
     /// Per-cascade transforms + compare params + `config.x` strength gate.
     pub block: ShadowCascadeBlock,
+}
+
+/// Optional override for the sun-shadow cascade centre, in the physics inertial
+/// frame (same frame as `ship_state().position`). When `Some`, the cascade
+/// centres there and the camera-altitude gate is bypassed — so the base editor's
+/// god view follows the panned focus across the whole base, instead of leaving
+/// shadows in a box around the (possibly off-screen) parked craft. `None` ⇒
+/// centre on the craft + gate as normal.
+///
+/// **Sole writer:** the base editor (`base_editor::camera`), which sets it to the
+/// god-view focus each frame while open and clears it on close.
+#[derive(Resource, Default)]
+pub struct ShadowFocusOverride {
+    pub center_world: Option<DVec3>,
 }
 
 /// Marker + cascade index on each orthographic sun-shadow camera. Extracted so
@@ -195,18 +211,40 @@ impl ViewNode for CopySunShadowDepthNode {
     }
 }
 
+/// Mirror the live sun-shadow cascade (`SunShadowState`, owned by the rig) into
+/// the render crate's `CraftShadowMaps`, so the craft hull / gear — Bevy-PBR
+/// `ShipPartMaterial` — RECEIVE the same cascade the terrain / trees cast into
+/// (graphics-fidelity F6b). `apply_craft_shadow` (render crate, PostUpdate) fans
+/// it onto the materials. No-op until the rig's state exists and the craft
+/// material is registered.
+fn sync_craft_shadow(state: Option<Res<SunShadowState>>, maps: Option<ResMut<CraftShadowMaps>>) {
+    let (Some(state), Some(mut maps)) = (state, maps) else {
+        return;
+    };
+    maps.images = state.images.clone();
+    maps.block = state.block;
+}
+
 pub struct SunShadowPlugin;
 
 impl Plugin for SunShadowPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractResourcePlugin::<SunShadowImage>::default())
             .add_plugins(ExtractComponentPlugin::<SunShadowCascade>::default())
+            .init_resource::<ShadowFocusOverride>()
             .add_systems(Startup, setup_sun_shadow)
             .add_systems(
                 Update,
-                update_sun_shadow_camera
-                    .after(update_real_space_body_positions)
-                    .after(sync_solar_system_state)
+                (
+                    update_sun_shadow_camera
+                        .after(update_real_space_body_positions)
+                        .after(sync_solar_system_state)
+                        .after(crate::rendering::update_render_origin),
+                    // Mirror the live cascade onto the craft hull/gear so they
+                    // RECEIVE it (the render crate's `apply_craft_shadow` fans
+                    // `CraftShadowMaps` onto the materials in PostUpdate).
+                    sync_craft_shadow.after(update_sun_shadow_camera),
+                )
                     .in_set(SimStage::Sync),
             );
 
@@ -351,7 +389,8 @@ fn update_sun_shadow_camera(
     cache: Res<SolarSystemState>,
     bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
     ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
-    ship: Query<&GlobalTransform, With<PlayerShip>>,
+    origin: Res<crate::rendering::RenderOrigin>,
+    focus_override: Res<ShadowFocusOverride>,
     mut shadow_cams: Query<(&mut Transform, &mut Camera, &SunShadowCascade), Without<ShipCamera>>,
     mut state: ResMut<SunShadowState>,
     mut frame: Local<u64>,
@@ -362,8 +401,6 @@ fn update_sun_shadow_camera(
     let mut reason = "ok";
     let mut altitude_m = -1.0_f32;
     let mut body_dbg = String::from("none");
-    let mut eye_dbg = Vec3::ZERO;
-    let mut sun_dbg = Vec3::ZERO;
     let mut n_terrain_bodies = 0u32;
 
     'resolve: {
@@ -377,7 +414,7 @@ fn update_sun_shadow_camera(
         };
         let cam_pos = cam_xform.translation();
 
-        let mut best: Option<(BodyId, f32)> = None;
+        let mut best: Option<(BodyId, f32, f32)> = None;
         for (b, xform) in &bodies {
             let Some(def) = sim.system.bodies.get(b.body_id) else {
                 continue;
@@ -386,18 +423,21 @@ fn update_sun_shadow_camera(
                 continue;
             }
             n_terrain_bodies += 1;
-            let altitude = (cam_pos - xform.translation()).length() - def.radius_m as f32;
-            if best.is_none_or(|(_, a)| altitude < a) {
-                best = Some((b.body_id, altitude));
+            let radius = def.radius_m as f32;
+            let altitude = (cam_pos - xform.translation()).length() - radius;
+            if best.is_none_or(|(_, a, _)| altitude < a) {
+                best = Some((b.body_id, altitude, radius));
             }
         }
-        let Some((active_id, altitude)) = best else {
+        let Some((active_id, altitude, body_radius_m)) = best else {
             reason = "no_terrain_body";
             break 'resolve;
         };
         altitude_m = altitude;
         body_dbg = format!("{active_id:?}");
-        if altitude > SHADOW_MAX_ALTITUDE_M {
+        // The base editor's god view (override active) bypasses the gate: it can
+        // boom out several km but is always inspecting the near-surface base.
+        if focus_override.center_world.is_none() && altitude > SHADOW_MAX_ALTITUDE_M {
             reason = "too_high";
             break 'resolve;
         }
@@ -413,39 +453,76 @@ fn update_sun_shadow_camera(
             Vec3::Y
         };
 
-        // Centre on the craft (near the ground), not the camera: the shadowed
-        // area stays put when the view orbits, and the ortho depth range stays
-        // shallow regardless of camera altitude. Falls back to the camera for
-        // EVA / freecam (no craft).
-        let center = ship
-            .iter()
-            .next()
-            .map(|gt| gt.translation())
-            .unwrap_or(cam_pos);
-        let eye = center + sun_dir * SHADOW_BACK_DISTANCE_M;
+        // Centre the cascades on the ground point BELOW THE CAMERA, so the crisp
+        // near cascade follows the player as they move/fly. Centring on the
+        // (possibly parked, possibly distant) craft instead smeared you into the
+        // coarse far cascade — or out of coverage entirely — the moment you
+        // walked or flew away from it. `up_radial` is the local vertical (the
+        // direction of a huge vector, so f32-precise); `altitude` carries the
+        // small big_space cancellation error, which only nudges the box height.
+        // Centre on the CANONICAL player position (this-frame, f64-derived from
+        // ship_state − render origin), NOT the ShipCamera GlobalTransform — whose
+        // big_space cell lags a frame (km-scale at the surface's ~260 m/s
+        // co-rotation), which made the cascade crawl the instant the sim ran. The
+        // casters (tree tiles) + receivers render at THIS-frame body orientation,
+        // so the cascade centre must use a this-frame reference too. (The same
+        // camera lag is documented on `scatter_view_center`.) The radial + altitude
+        // come from the canonical state as well, so the ground projection stays
+        // coherent.
+        // Centre on the base editor's god-view focus when it is driving (so the
+        // cascade follows the panned view across the whole base), else the
+        // canonical craft. Both are in the physics inertial frame; the focus point
+        // already sits on the ground so its projection below is ~a no-op.
+        let player_inertial = focus_override
+            .center_world
+            .unwrap_or_else(|| sim.simulation.ship_state().position);
+        let radial = player_inertial - body_state.position;
+        let r = radial.length();
+        let up_radial = if r > 1.0e-3 { (radial / r).as_vec3() } else { Vec3::Y };
+        let player_alt = (r - body_radius_m as f64) as f32;
+        let player_render = (player_inertial - origin.position).as_vec3();
+        let center = player_render - up_radial * player_alt;
         let up = if sun_dir.dot(Vec3::Y).abs() > 0.99 {
             Vec3::Z
         } else {
             Vec3::Y
         };
-        let look = Transform::from_translation(eye).looking_at(center, up);
-        let view = look.to_matrix().inverse();
-        eye_dbg = eye;
-        sun_dbg = sun_dir;
+        // Base light rotation — identical for every cascade (only the
+        // texel-snapped translation differs). Looks down the sun over `center`.
+        let base_look =
+            Transform::from_translation(center + sun_dir * SHADOW_BACK_DISTANCE_M).looking_at(center, up);
+        let light_right = base_look.rotation * Vec3::X;
+        let light_up = base_look.rotation * Vec3::Y;
+        let eye_dbg = center + sun_dir * SHADOW_BACK_DISTANCE_M;
+        let sun_dbg = sun_dir;
 
         let mut block = ShadowCascadeBlock::default();
+        let mut looks = [Transform::IDENTITY; CASCADE_COUNT];
         for i in 0..CASCADE_COUNT {
             let half = CASCADE_HALF_EXTENTS_M[i];
             let far = CASCADE_FARS_M[i];
-            block.view_proj[i] = cascade_clip_from_view(half, far) * view;
+            // Texel-snap the cascade centre to ITS shadow-map grid in the light
+            // plane, so the ortho frustum slides in whole-texel steps and shadow
+            // edges stop crawling as the camera moves (stable CSM). Each cascade
+            // snaps to its own (coarser, near→far) grid.
+            let texel = (2.0 * half) / SHADOW_MAP_SIZE as f32;
+            let cr = center.dot(light_right);
+            let cu = center.dot(light_up);
+            let snap = ((cr / texel).round() * texel - cr) * light_right
+                + ((cu / texel).round() * texel - cu) * light_up;
+            let center_i = center + snap;
+            let eye_i = center_i + sun_dir * SHADOW_BACK_DISTANCE_M;
+            let look_i = Transform::from_translation(eye_i).looking_at(center_i, up);
+            block.view_proj[i] = cascade_clip_from_view(half, far) * look_i.to_matrix().inverse();
             // Orthographic z is linear → clip-space bias = metres / (far − near).
             block.params[i] = Vec4::new(CASCADE_BIAS_M[i] / (far - SHADOW_NEAR_M), 0.0, 0.0, 0.0);
+            looks[i] = look_i;
         }
         block.gate = Vec4::new(SHADOW_STRENGTH, CASCADE_COUNT as f32, 0.0, 0.0);
         state.block = block;
 
-        for (mut tf, mut cam, _cascade) in &mut shadow_cams {
-            *tf = look;
+        for (mut tf, mut cam, cascade) in &mut shadow_cams {
+            *tf = looks[cascade.index as usize];
             cam.is_active = true;
         }
 

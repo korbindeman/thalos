@@ -53,13 +53,6 @@ pub struct CameraExposure {
     pub ev: f32,
 }
 
-/// Shared meshes reused across every procedural planet, cached once at
-/// startup so `finalize_planet_generation` doesn't need to re-add them.
-#[derive(Resource)]
-pub(super) struct SharedPlanetMeshes {
-    pub(super) billboard: Handle<Mesh>,
-}
-
 // ---------------------------------------------------------------------------
 // Components
 // ---------------------------------------------------------------------------
@@ -99,6 +92,15 @@ pub struct PlayerShip;
 /// Marker for the directional light that simulates sunlight toward the focus body.
 #[derive(Component)]
 pub(super) struct SunLight;
+
+/// Marker for the secondary directional light that simulates moonlight — the
+/// brightest child moon reflecting the star onto the body the craft is on.
+/// Driven by [`crate::rendering::lighting::update_moon_light`]; lights the
+/// `StandardMaterial` craft hull + surface structures at night (the terrain has
+/// its own moonlight term in `body_terrain.wgsl`). Shadows are disabled — soft
+/// moonlight doesn't need a second cascade pass.
+#[derive(Component)]
+pub(super) struct MoonLight;
 
 /// Marker for the map-view mesh child of a celestial body. Inherits the
 /// parent's transform, which is updated at [`MAP_SCALE`](crate::coords::MAP_SCALE)

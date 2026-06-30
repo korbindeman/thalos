@@ -915,6 +915,7 @@ pub fn update_maneuver_visuals(
     sim: Res<SimulationState>,
     warp_to: Res<WarpToManeuver>,
     theme: Res<HudTheme>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut panel_state: ResMut<ManeuverPanelState>,
     mut panel_roots: Query<&mut Visibility, With<ManeuverPanelRoot>>,
     mut burn_text: Query<
@@ -1035,7 +1036,7 @@ pub fn update_maneuver_visuals(
         (
             format_duration_compact(directive.duration_s),
             theme.text_primary,
-            format!("{:.0} m/s", remaining_dv),
+            crate::hud::format::delta_v(remaining_dv, units.system),
             theme.text_primary,
             start_label,
             if burn_start - now <= 0.0 {

@@ -1168,6 +1168,7 @@ pub fn update_tapes(
     target: Res<TargetBody>,
     throttle: Res<ThrottleState>,
     display: Res<AltitudeDisplay>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut speed_ticks: Query<
         (&PfdSpeedTick, &mut Node, &mut Text, &mut Visibility),
         Without<PfdAltTick>,
@@ -1226,8 +1227,9 @@ pub fn update_tapes(
         _ => 0.0,
     };
 
-    // Tick columns.
-    if let Some(speed) = speed {
+    // Tick columns. The tapes render in the active display unit so their ticks
+    // match the readouts below (m/ft, m/s/kn, m/s / ft·min⁻¹).
+    if let Some(speed) = speed.map(|v| format::speed_tape_value(v, units.system)) {
         let step = nice_step((speed * 0.04).max(4.0));
         for (tick, mut node, mut text, mut vis) in &mut speed_ticks {
             apply_tape_tick(
@@ -1241,16 +1243,18 @@ pub fn update_tapes(
             }
         }
     }
-    let alt_step = nice_step((altitude.abs() * 0.04).max(10.0));
+    let altitude_disp = format::altitude_tape_value(altitude, units.system);
+    let alt_step = nice_step((altitude_disp.abs() * 0.04).max(10.0));
     for (tick, mut node, mut text, mut vis) in &mut alt_ticks {
         apply_tape_tick(
-            altitude, alt_step, tick.slot, true, TAPE_H, &mut node, &mut text, &mut vis,
+            altitude_disp, alt_step, tick.slot, true, TAPE_H, &mut node, &mut text, &mut vis,
         );
     }
-    let vs_step = nice_step((vertical_speed.abs() * 0.08).max(2.0));
+    let vs_disp = format::vertical_speed_value(vertical_speed, units.system);
+    let vs_step = nice_step((vs_disp.abs() * 0.08).max(2.0));
     for (tick, mut node, mut text, mut vis) in &mut vs_ticks {
         apply_tape_tick(
-            vertical_speed,
+            vs_disp,
             vs_step,
             tick.slot,
             true,
@@ -1265,10 +1269,10 @@ pub fn update_tapes(
     for (readout, mut text) in &mut readout_q {
         let s = match readout {
             PfdReadout::SpeedValue => match speed {
-                Some(v) => format::speed(v),
+                Some(v) => format::speed(v, units.system),
                 None => "—".to_string(),
             },
-            PfdReadout::AltValue => format::altitude(altitude),
+            PfdReadout::AltValue => format::altitude(altitude, units.system),
             PfdReadout::SpeedFrame => match velocity_frame.active {
                 VelocityReferenceFrame::Orbit => "ORB".to_string(),
                 VelocityReferenceFrame::Surface => "SRF".to_string(),
@@ -1278,7 +1282,7 @@ pub fn update_tapes(
                 AltitudeDatum::Sea => "SEA".to_string(),
                 AltitudeDatum::Ground => "GND".to_string(),
             },
-            PfdReadout::VerticalSpeed => signed_speed(vertical_speed),
+            PfdReadout::VerticalSpeed => signed_speed(vertical_speed, units.system),
             PfdReadout::Throttle => {
                 format!("THR {:3.0}%", throttle.commanded.clamp(0.0, 1.0) * 100.0)
             }
@@ -1445,9 +1449,13 @@ fn tick_label(value: f64, step: f64) -> String {
     }
 }
 
-/// Compact signed rate for the V/S readout.
-fn signed_speed(v: f64) -> String {
-    if v.abs() >= 1000.0 {
+/// Compact signed rate for the V/S readout, in the active display unit (m/s or
+/// ft/min). The `k`-suffix threshold is unit-relative so feet-per-minute values
+/// (~200× larger) don't collapse to `k` during normal flight.
+fn signed_speed(v: f64, system: crate::units_settings::UnitSystem) -> String {
+    let v = format::vertical_speed_value(v, system);
+    let k_threshold = if system.is_imperial() { 10_000.0 } else { 1000.0 };
+    if v.abs() >= k_threshold {
         format!("{:+.1}k", v / 1000.0)
     } else {
         format!("{:+.0}", v)

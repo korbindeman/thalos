@@ -18,8 +18,9 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
-#import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage, SurfaceSky}
+#import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage, SurfaceSky, object_aerial_recession, sun_daylight}
 #import thalos::foliage::{foliage_base_albedo, foliage_hue_tint}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
 
 struct TreeParams {
     // xyz = unit direction toward the star (world render space), w = sun flux
@@ -50,89 +51,12 @@ struct TreeParams {
 @group(3) @binding(7) var material_tex: texture_2d<f32>;
 
 // Cascaded sun-shadow maps (the SAME depth maps the terrain samples, published
-// by the game's `rendering::sun_shadow`). Separate `texture_depth_2d` per
-// cascade (no depth array). Mirrors `body_terrain.wgsl`.
-struct ShadowCascadeBlock {
-    view_proj: array<mat4x4<f32>, 3>,
-    // per cascade: x = depth bias (clip), yzw reserved.
-    params: array<vec4<f32>, 3>,
-    // x = strength (0 ⇒ skip), y = active cascade count, zw reserved. Named
-    // `gate` to match `body_terrain.wgsl` (where `config` collides with a udlod
-    // import); layout is by field order, so the name is free to choose.
-    gate: vec4<f32>,
-}
+// by the game's `rendering::sun_shadow`). `ShadowCascadeBlock` + `sun_shadow_factor`
+// are shared from `thalos::shadow`. One `texture_depth_2d` per cascade (no array).
 @group(3) @binding(3) var<uniform> tree_shadow: ShadowCascadeBlock;
 @group(3) @binding(4) var sun_shadow_map_0: texture_depth_2d;
 @group(3) @binding(5) var sun_shadow_map_1: texture_depth_2d;
 @group(3) @binding(6) var sun_shadow_map_2: texture_depth_2d;
-
-// One cascade's shadow factor, or a negative sentinel if outside its box (caller
-// falls through to the next cascade). See `body_terrain.wgsl::cascade_factor`.
-fn cascade_factor(
-    world_pos: vec3<f32>,
-    vp: mat4x4<f32>,
-    bias: f32,
-    strength: f32,
-    tex: texture_depth_2d,
-    inset: f32,
-    fade: bool,
-) -> f32 {
-    let clip = vp * vec4<f32>(world_pos, 1.0);
-    if (clip.w <= 0.0) {
-        return -1.0;
-    }
-    let ndc = clip.xyz / clip.w;
-    if (any(ndc.xy < vec2<f32>(-inset)) || any(ndc.xy > vec2<f32>(inset)) ||
-        ndc.z < 0.0 || ndc.z > 1.0) {
-        return -1.0;
-    }
-    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
-    let dims = vec2<f32>(textureDimensions(tex));
-    var lit = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let texel = vec2<i32>(uv * dims) + vec2<i32>(dx, dy);
-            let stored = textureLoad(tex, texel, 0);
-            lit = lit + select(1.0, 0.0, stored > ndc.z + bias);
-        }
-    }
-    lit = lit / 9.0;
-    var edge_fade = 1.0;
-    if (fade) {
-        let edge = max(abs(ndc.x), abs(ndc.y));
-        edge_fade = 1.0 - smoothstep(0.85, 1.0, edge);
-    }
-    return 1.0 - strength * (1.0 - lit) * edge_fade;
-}
-
-// Canopy/ground shadow factor: walk cascades near→far, use the tightest hit.
-// `config.x == 0` (inactive / preview) early-outs to fully lit.
-fn sun_shadow_factor(world_pos: vec3<f32>) -> f32 {
-    let s = tree_shadow.gate.x;
-    if (s <= 0.0) {
-        return 1.0;
-    }
-    var f = cascade_factor(
-        world_pos, tree_shadow.view_proj[0], tree_shadow.params[0].x,
-        s, sun_shadow_map_0, 0.98, false,
-    );
-    if (f < 0.0) {
-        f = cascade_factor(
-            world_pos, tree_shadow.view_proj[1], tree_shadow.params[1].x,
-            s, sun_shadow_map_1, 0.98, false,
-        );
-    }
-    if (f < 0.0) {
-        f = cascade_factor(
-            world_pos, tree_shadow.view_proj[2], tree_shadow.params[2].x,
-            s, sun_shadow_map_2, 1.0, true,
-        );
-    }
-    if (f < 0.0) {
-        return 1.0;
-    }
-    return f;
-}
 
 // Canopy shadow bleed into the ambient term — a tree in shade loses skylight as
 // well as direct sun. Keeps shaded trees from staying ambient-bright (the same
@@ -297,9 +221,27 @@ fn bark_specular(
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Leaf shape + coverage from the procedural atlas; alpha-test the leaf cards.
     let tex = textureSample(atlas_tex, atlas_samp, in.atlas_uv);
+    // Framebuffer alpha written below. Stays 1.0 (fully opaque) on the MSAA-off
+    // path, so the result is byte-identical to a plain opaque draw; under MSAA the
+    // alpha-to-coverage branch rewrites it to a sharpened fractional coverage.
+    var coverage = 1.0;
+#ifdef TREE_ALPHA_TO_COVERAGE
+    // Anti-aliased alpha test (Castano): the leaf cards are a 1-bit cutout that
+    // crawls on every edge. Rescale the sampled alpha to a ~1px ramp around the
+    // 0.5 cutoff with screen-space derivatives, then let hardware
+    // alpha-to-coverage convert it to an MSAA sample mask so leaf edges resolve
+    // smooth. Enabled (with the pipeline's A2C flag) only when the camera runs
+    // MSAA — see `TreeMaterial::specialize`. Bark/shell are alpha 1, so they stay
+    // fully covered (coverage 1) and are unaffected.
+    coverage = clamp((tex.a - 0.5) / max(fwidth(tex.a), 1.0e-4) + 0.5, 0.0, 1.0);
+    if coverage <= 0.0 {
+        discard;
+    }
+#else
     if tex.a < 0.5 {
         discard;
     }
+#endif
     // The foliage atlas is composited over transparent BLACK, so partial-coverage
     // texels store premultiplied colour (rgb = colour × alpha). Un-premultiply, or
     // the kept alpha-test fringe (alpha 0.5→1) reads as colour fading to black — a
@@ -317,7 +259,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sun-shadow: tree-on-tree, canopy self-shadow, and the ground's shadows
     // cast onto trunks/low foliage. Gates the direct + transmitted sun terms,
     // and bleeds partially into ambient (a shaded canopy sees less sky too).
-    let shadow = sun_shadow_factor(in.world_position);
+    let shadow = sun_shadow_factor(
+        in.world_position, tree_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
+    );
 
     let is_bark = in.leaf < 0.5;
     var n = normalize(in.world_normal);
@@ -363,10 +307,21 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     s.ambient_bleed = TREE_AMBIENT_SHADOW_BLEED;
     var lit = shade_foliage(s, view_dir, up, sun_dir, sky, shadow);
 
-    // Bark catches a soft sun sheen on its ridges (foliage stays matte).
+    // Bark catches a soft sun sheen on its ridges (foliage stays matte). Gated by
+    // the sun's own horizon (`sun_daylight`): a trunk facet whose horizontal normal
+    // points at the buried sun still passes `bark_specular`'s n·l>0 test at night,
+    // so without this the trunk keeps a faint sun glint after dark.
     if (is_bark) {
-        lit += bark_specular(n, view_dir, sun_dir, roughness, sky, shadow);
+        lit += bark_specular(n, view_dir, sun_dir, roughness, sky, shadow)
+            * sun_daylight(dot(up, sun_dir));
     }
 
-    return vec4<f32>(lit, 1.0);
+    // Recede toward the air with distance, earlier than the terrain's BodySky
+    // veil, so the canopy doesn't stay crisp-green against hazed terrain.
+    lit = object_aerial_recession(lit, sky, in.world_position, view.world_position);
+
+    // `coverage` is 1.0 on the MSAA-off path (identical opaque output) and the
+    // sharpened A2C coverage under MSAA. Colour is written un-premultiplied — the
+    // hardware sample mask handles coverage, not the blend.
+    return vec4<f32>(lit, coverage);
 }

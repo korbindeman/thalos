@@ -52,6 +52,14 @@ pub enum StructureKind {
     Launchpad {
         radius_m: f32,
     },
+    /// A storage tank (propellant / fluids) — a vertical cylinder draped on the
+    /// pad. A stand-in for the tank-farm volume that flanks a launchpad;
+    /// authored as part of the default base, and a first-class editable kind
+    /// (select / move / delete) like any other structure.
+    Tank {
+        radius_m: f32,
+        height_m: f32,
+    },
 }
 
 /// How a structure meets the terrain.
@@ -214,6 +222,9 @@ pub fn apply_structure_flatten(
 /// its footprint to natural terrain on tiles baked afterward. The inverse of
 /// [`apply_structure_flatten`]; call it when a `FlattenTo` structure is deleted
 /// (and trigger a terrain rebuild so already-resident tiles re-bake unflattened).
+// Inverse of `apply_structure_flatten`, ready for the base editor's
+// `FlattenTo` structure-delete path; no caller wires it yet.
+#[allow(dead_code)]
 pub fn remove_structure_flatten(
     id: StructureId,
     body_id: BodyId,

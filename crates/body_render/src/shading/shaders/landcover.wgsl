@@ -21,15 +21,25 @@ const MACRO_REGION_SCALE: f32 = 0.001;      // ~1 km tone drift
 const MOISTURE_CONTRAST: f32 = 1.35;
 const SNOW_LINE_NOISE_M: f32 = 400.0;
 
-const LUSH_LO_M: f32 = 1800.0;
-const LUSH_HI_M: f32 = 2900.0;
-const TREELINE_LO_M: f32 = 3100.0;
-const TREELINE_HI_M: f32 = 4000.0;
+// Temperate altitude bands: forest dominant on the lower flanks up to a
+// treeline ~2.4 km, then cool alpine tundra (grey scree is exposed on top of
+// this in the terrain's `eval_material_stack`), then snow. Forest is the
+// DEFAULT cover below the treeline (not gated to valley floors), so mountains
+// read green → grey → white the way a wet temperate range does, rather than
+// brown dry-grass across the whole mid-flank.
+const LUSH_LO_M: f32 = 1500.0;
+const LUSH_HI_M: f32 = 2400.0;
+const TREELINE_LO_M: f32 = 2400.0;
+const TREELINE_HI_M: f32 = 3000.0;
 
 const C_FOREST: vec3<f32>   = vec3<f32>(0.034, 0.084, 0.028);
 const C_GRASS: vec3<f32>    = vec3<f32>(0.072, 0.152, 0.050);
-const C_DRYGRASS: vec3<f32> = vec3<f32>(0.142, 0.158, 0.072);
+const C_DRYGRASS: vec3<f32> = vec3<f32>(0.138, 0.150, 0.074);
 const C_SOIL: vec3<f32>     = vec3<f32>(0.112, 0.074, 0.042);
+// Alpine tundra / sparse meadow above the treeline: cool, desaturated grey-green
+// — the living cover between bare scree patches. Replaces the old tan dry-grass
+// alpine tint that read as brown across the upper mountain.
+const C_ALPINE: vec3<f32>   = vec3<f32>(0.082, 0.094, 0.074);
 
 fn hash13(p_in: vec3<f32>) -> f32 {
     var p3 = fract(p_in * 0.1031);
@@ -103,10 +113,15 @@ fn vegetation_color(altitude_m: f32, moisture: f32, macro_var: f32) -> vec3<f32>
     let lush = smoothstep(LUSH_HI_M, LUSH_LO_M, altitude_m + jitter);
     let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m + jitter);
     let dryness = clamp(0.5 - 0.5 * moisture, 0.0, 1.0);
-    let forest_amt = smoothstep(0.46, 0.20, dryness) * lush;
-    var grass_c = mix(C_GRASS, C_DRYGRASS, smoothstep(0.40, 0.78, dryness));
-    grass_c = mix(grass_c, C_SOIL, smoothstep(0.80, 0.96, dryness));
+    // Forest is the default cover below the treeline across a wide moisture
+    // range; only genuinely dry ground reads as grass, and only the driest as
+    // tan dry-grass / bare soil.
+    let forest_amt = smoothstep(0.58, 0.28, dryness) * lush;
+    var grass_c = mix(C_GRASS, C_DRYGRASS, smoothstep(0.55, 0.88, dryness));
+    grass_c = mix(grass_c, C_SOIL, smoothstep(0.88, 0.98, dryness));
     var veg = mix(grass_c, C_FOREST, forest_amt);
-    veg = mix(veg, C_DRYGRASS, alpine);
+    // Above the treeline the cover cools to alpine tundra (grey scree is
+    // exposed on top in `eval_material_stack`), not tan dry-grass.
+    veg = mix(veg, C_ALPINE, alpine);
     return veg;
 }

@@ -22,11 +22,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::NotShadowCaster;
-use bevy::math::{DVec3, Vec2};
+use bevy::math::{DVec3, Vec2, Vec3A};
 use bevy::prelude::*;
 use bevy::render::view::Hdr;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
@@ -170,9 +171,9 @@ const IMPOSTOR_BAKE_NORMAL_LAYER: usize = 7;
 /// Minimum trunk spacing (m) for the broadleaf — the widest canopy, so it sets
 /// the shared tree grid's spacing. Below a canopy diameter so crowns touch into
 /// connected groves, above a trunk width so trunks never interpenetrate.
-const TREE_SPACING_M: f32 = 5.0;
+const TREE_SPACING_M: f32 = 5.5;
 /// Minimum spacing (m) for shrubs — their own grid, so they may sit under trees.
-const SHRUB_SPACING_M: f32 = 1.6;
+const SHRUB_SPACING_M: f32 = 2.3;
 /// Above this altitude over the local terrain no new tiles are built (existing
 /// ones persist). Generous so climbing aircraft keep their forest — the coarse
 /// impostor rings are cheap, and a forested surface should read from altitude
@@ -204,6 +205,9 @@ const TREE_LOD_BANDS_M: [f64; 3] = [260.0, 620.0, 1200.0];
 const TREE_WIND_SWAY_M: f32 = 0.35;
 /// Number of mesh LODs per species.
 const TREE_LOD_COUNT: usize = 4;
+/// Largest per-instance scale any tree is placed at (the `scale_range` upper
+/// bound). The impostor frustum-cull AABB pad uses it to bound the biggest card.
+const TREE_SCALE_MAX: f32 = 1.6;
 
 /// Mesh LOD index for a tile at ground distance `d`.
 fn lod_for_dist(d: f64) -> usize {
@@ -233,6 +237,12 @@ struct SpeciesLibrary {
     /// Per placement-species index → octahedral atlas layer, or `None` for
     /// species with no impostor (shrubs). Snapshotted into the impostor build.
     atlas_species: Vec<Option<u32>>,
+    /// Maximum tree canopy-top extent above the trunk base (authored units,
+    /// `center.y + radius` of the LOD0 bounding sphere) over all tree species — the
+    /// half-extent an impostor billboard can reach from a tile's tree bases. Used
+    /// to pad an impostor tile's (degenerate-mesh) AABB so frustum culling keeps
+    /// tall cards near the frustum edge instead of clipping them.
+    max_tree_extent_m: f32,
 }
 
 /// State of the one-shot startup impostor-atlas bake. Until `ready`, the far
@@ -439,9 +449,11 @@ fn setup_species_library(
     // Per-species bounding geometry (authored units) the runtime billboard sizes
     // from; index by atlas layer.
     let mut species_geo = [Vec4::ZERO; IMPOSTOR_MAX_SPECIES];
+    let mut max_tree_extent_m = 0.0f32;
     for (layer, &sp) in tree_species.iter().enumerate().take(IMPOSTOR_MAX_SPECIES) {
         let (center, radius) = tree_bounding_sphere(&lod_data[sp][0]);
         species_geo[layer] = Vec4::new(radius, center.y, 0.0, 0.0);
+        max_tree_extent_m = max_tree_extent_m.max(center.y + radius);
     }
 
     let impostor_block = ImpostorParams {
@@ -485,6 +497,7 @@ fn setup_species_library(
         material,
         impostor_materials: ring_impostor_materials,
         atlas_species,
+        max_tree_extent_m,
     });
 }
 
@@ -879,8 +892,10 @@ fn drive_veg_tiles(
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    // Water disabled until the generator grows a sea level (grass driver note).
-    let sea_level_m = f32::MIN;
+    // Sea level is the project datum: the constant 0 m (= reference radius), the
+    // shoreline the bimodal continent/ocean generator (Slice 1) puts at height 0.
+    // Trees require `height > sea_level + 1 m`, so the seabed stays bare.
+    let sea_level_m = 0.0;
     let flatten_exclusion = flatten_registry
         .handle(body_id)
         .read()
@@ -1024,6 +1039,12 @@ fn finalize_veg_tiles(
             body_id,
             center_surface_body: center,
         };
+        // Explicit frustum-cull AABB: these meshes are `RENDER_WORLD`-only, so Bevy
+        // never auto-computes one (see `docs/vegetation.md`), and without it the
+        // full 360° ring of tree tiles around the camera is processed every frame
+        // (in every view). Per-view culling still feeds the sun-shadow pass from its
+        // own frustum, so off-screen casters whose shadows fall into view stay.
+        let local_aabb = build.mesh.compute_aabb();
         let mesh = Mesh3d(meshes.add(build.mesh));
         // Impostor tiles carry a different material and don't cast shadows (past
         // the shadow cutoff); mesh tiles keep the standard `TreeMaterial`.
@@ -1033,40 +1054,68 @@ fn finalize_veg_tiles(
                 .get(rk.ring as usize)
                 .cloned()
                 .unwrap_or_else(|| library.impostor_materials[0].clone());
-            commands
-                .spawn((
-                    mesh,
-                    MeshMaterial3d(impostor_material),
-                    transform,
-                    cell,
-                    Visibility::Inherited,
-                    RenderLayers::layer(SHIP_LAYER),
-                    NotShadowCaster,
-                    ChildOf(root.entity),
-                    visual,
-                    Name::new("Vegetation Impostor Tile"),
-                ))
-                .id()
+            // Impostor quads are degenerate in the mesh (all 4 corners share the
+            // tree base; the vertex shader billboards them into camera-facing cards),
+            // so the mesh AABB bounds only the bases. Pad it by the tallest canopy a
+            // card can reach (`max_tree_extent × max scale × grove_scale`) so a tile
+            // whose bases are just off-screen but whose cards are visible isn't
+            // wrongly culled.
+            let aabb = local_aabb.map(|mut a| {
+                let grove = TREE_RINGS[rk.ring as usize].grove_scale;
+                a.half_extents += Vec3A::splat(library.max_tree_extent_m * TREE_SCALE_MAX * grove);
+                a
+            });
+            let mut tile_cmd = commands.spawn((
+                mesh,
+                MeshMaterial3d(impostor_material),
+                transform,
+                cell,
+                Visibility::Inherited,
+                // Also cast into the custom sun-shadow cascades so DISTANT
+                // (impostor-band) trees ground with a shadow too — not just the
+                // near mesh trees. The billboard orients to `view.world_position`,
+                // which in the cascade caster pass is the cascade camera (up-sun),
+                // so it faces the SUN and renders the canopy silhouette from the
+                // sun angle (octahedral atlas sampled there) → casts the right
+                // shape. `NotShadowCaster` still excludes it from Bevy's stock CSM.
+                RenderLayers::from_layers(&[
+                    SHIP_LAYER,
+                    crate::rendering::sun_shadow::SHADOW_CASTER_LAYER,
+                ]),
+                NotShadowCaster,
+                ChildOf(root.entity),
+                visual,
+                Name::new("Vegetation Impostor Tile"),
+            ));
+            if let Some(aabb) = aabb {
+                tile_cmd.insert(aabb);
+            }
+            tile_cmd.id()
         } else {
-            commands
-                .spawn((
-                    mesh,
-                    MeshMaterial3d(library.material.clone()),
-                    transform,
-                    cell,
-                    Visibility::Inherited,
-                    // Also visible to the sun-shadow camera so mesh trees cast
-                    // into the directional shadow map (the leaf alpha-discard
-                    // gives leaf-shaped shadows). Impostor tiles stay off it.
-                    RenderLayers::from_layers(&[
-                        SHIP_LAYER,
-                        crate::rendering::sun_shadow::SHADOW_CASTER_LAYER,
-                    ]),
-                    ChildOf(root.entity),
-                    visual,
-                    Name::new("Vegetation Tile"),
-                ))
-                .id()
+            // Mesh tiles have real geometry, so the computed AABB is exact.
+            let mut tile_cmd = commands.spawn((
+                mesh,
+                MeshMaterial3d(library.material.clone()),
+                transform,
+                cell,
+                Visibility::Inherited,
+                // Also visible to the sun-shadow camera so mesh trees cast
+                // into the directional shadow map (the leaf alpha-discard
+                // gives leaf-shaped shadows). The impostor tiles now cast too
+                // (oriented to the sun in the caster pass), so distant trees
+                // ground as well — see that branch above.
+                RenderLayers::from_layers(&[
+                    SHIP_LAYER,
+                    crate::rendering::sun_shadow::SHADOW_CASTER_LAYER,
+                ]),
+                ChildOf(root.entity),
+                visual,
+                Name::new("Vegetation Tile"),
+            ));
+            if let Some(aabb) = local_aabb {
+                tile_cmd.insert(aabb);
+            }
+            tile_cmd.id()
         };
         // Replace the old (previous-LOD) entity only now that the new one exists.
         if let Some(old) = old_entity {

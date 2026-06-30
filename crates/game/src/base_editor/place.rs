@@ -19,15 +19,18 @@ use bevy::window::PrimaryWindow;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::body_fixed::{body_fixed_pose_from_inertial, body_fixed_surface_velocity};
 use thalos_physics_canonical::canonical::{AuthorityMode, TranslationalState};
-use thalos_physics_canonical::types::BodyState;
+use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::ActiveLocalBubble;
 use thalos_world::{BodyId, StateVector};
 
+use crate::SimStage;
 use crate::camera::{ActiveCamera, ShipCamera};
 use crate::coords::{SHIP_LAYER, SHIP_SCALE};
+use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 use crate::rendering::real_space::RealSpaceRoot;
 use crate::rendering::{PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
-use crate::runway::{craft_ground_clearance, level_heading_attitude};
+use crate::runway::craft_extent_below;
+use crate::solar_system_state::sync_solar_system_state;
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
 
 use super::{BaseEditor, BaseEditorMode, base_editor_open, ray_vs_sphere_dir};
@@ -59,7 +62,7 @@ impl Default for BuildingDims {
     }
 }
 
-/// Which kind of structure the next click places.
+/// Which kind of structure a placement makes.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum PendingKind {
     #[default]
@@ -67,35 +70,104 @@ pub enum PendingKind {
     Launchpad,
 }
 
-/// Placement state. Public so the editor UI/overlay can read the pending kind +
-/// footprint and the current selection.
+/// The active editing tool. **Select** is the default — clicking picks a
+/// structure to move (drag) or delete, and never places. **Place** is armed by
+/// picking an item from the palette; then clicks place that item (right-click
+/// returns to Select).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tool {
+    #[default]
+    Select,
+    Place,
+}
+
+/// Placement state. Public so the editor UI/palette can read/write the tool,
+/// pending footprint, and selection.
 #[derive(Resource)]
 pub struct BaseBuildState {
+    pub tool: Tool,
     pub pending: BuildingDims,
     pub pending_kind: PendingKind,
     pub pending_radius_m: f32,
     pub selected: Option<StructureId>,
+    /// Bumped on any structural change (place / delete / move-commit) so the
+    /// connection layer knows to rebuild.
+    pub(super) structures_rev: u32,
     yaw: f32,
+    /// Structure being dragged in Select mode (between press and release).
+    dragging: Option<StructureId>,
     hover: Option<HoverPad>,
-    material: Option<Handle<StandardMaterial>>,
-    pad_material: Option<Handle<StandardMaterial>>,
-    ring_material: Option<Handle<StandardMaterial>>,
 }
 
 impl Default for BaseBuildState {
     fn default() -> Self {
         Self {
+            tool: Tool::Select,
             pending: BuildingDims::default(),
             pending_kind: PendingKind::Building,
             pending_radius_m: 18.0,
             selected: None,
+            structures_rev: 0,
             yaw: 0.0,
+            dragging: None,
             hover: None,
-            material: None,
-            pad_material: None,
-            ring_material: None,
         }
     }
+}
+
+/// Structure materials, created once at startup and shared by the editor and
+/// the authored default base (so they look identical and there's one source).
+#[derive(Resource)]
+pub(super) struct BaseMaterials {
+    building: Handle<StandardMaterial>,
+    pad: Handle<StandardMaterial>,
+    ring: Handle<StandardMaterial>,
+    tank: Handle<StandardMaterial>,
+    pub(super) tarmac: Handle<StandardMaterial>,
+}
+
+impl BaseMaterials {
+    /// Build the shared structure materials. Used by the startup init and by the
+    /// authored default base ([`super::spawn_default_base`]).
+    pub(super) fn create(materials: &mut Assets<StandardMaterial>) -> Self {
+        Self {
+            building: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.62, 0.64, 0.68),
+                perceptual_roughness: 0.85,
+                metallic: 0.0,
+                ..default()
+            }),
+            pad: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.10, 0.10, 0.12),
+                perceptual_roughness: 0.9,
+                metallic: 0.0,
+                ..default()
+            }),
+            ring: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.95, 0.78, 0.15),
+                perceptual_roughness: 0.6,
+                metallic: 0.0,
+                ..default()
+            }),
+            tank: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.80, 0.82, 0.85),
+                perceptual_roughness: 0.35,
+                metallic: 0.5,
+                ..default()
+            }),
+            tarmac: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.14, 0.14, 0.16),
+                perceptual_roughness: 0.92,
+                metallic: 0.0,
+                ..default()
+            }),
+        }
+    }
+}
+
+fn init_base_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+    let mats = BaseMaterials::create(&mut materials);
+    commands.insert_resource(mats);
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +188,9 @@ pub(super) struct PlacedVisual {
     /// Visual-local axes → body-fixed rotation.
     pub(super) basis_body: DQuat,
     pub(super) kind: StructureKind,
+    /// Heading rotation relative to the site, kept so a move re-derives the
+    /// frame without changing the structure's orientation.
+    yaw: f32,
 }
 
 pub(super) struct BaseEditorPlacePlugin;
@@ -123,15 +198,36 @@ pub(super) struct BaseEditorPlacePlugin;
 impl Plugin for BaseEditorPlacePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BaseBuildState>()
+            .add_systems(Startup, init_base_materials)
             .add_systems(
                 Update,
-                (update_structure_placement, launch_from_pad, draw_placement_ghost)
+                (
+                    reset_build_state_on_open,
+                    update_structure_placement,
+                    launch_from_pad,
+                    draw_placement_ghost,
+                )
                     .chain()
                     .run_if(base_editor_open),
             )
-            // Ungated so placed structures stay anchored in flight too (not just
-            // while the editor is open).
-            .add_systems(Update, update_placed_transforms);
+            // Anchored every frame like the runway (`update_runway_transform`).
+            // Must run in `SimStage::Sync` strictly after `sync_solar_system_state`
+            // so the body orientation it reads is the *current* frame's — the same
+            // snapshot the body mesh, runway, terrain, and camera/floating-origin
+            // all use. As a bare unordered `Update` system it read a body pose that
+            // was one frame stale (and, under the nondeterministic executor order,
+            // inconsistent frame-to-frame), so at warp > 1× the structures slewed
+            // off the pad and jittered relative to the correctly-synced ground —
+            // invisible while paused, since the body pose is then constant.
+            // `SimStage::Sync` still runs while the base editor is open (only the
+            // `Camera` set is gated for it), so structures stay anchored both in
+            // flight and while editing.
+            .add_systems(
+                Update,
+                update_placed_transforms
+                    .in_set(SimStage::Sync)
+                    .after(sync_solar_system_state),
+            );
     }
 }
 
@@ -147,13 +243,13 @@ fn update_structure_placement(
     mouse: Res<ButtonInput<MouseButton>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mats: Res<BaseMaterials>,
     root: Res<RealSpaceRoot>,
+    mut placed_q: Query<(Entity, &mut PlacedVisual)>,
     queries: (
         Query<&Window, With<PrimaryWindow>>,
         Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
         Query<(&RealSpaceBody, &GlobalTransform)>,
-        Query<(Entity, &PlacedVisual)>,
     ),
 ) {
     if editor.mode != BaseEditorMode::PlaceBuildings {
@@ -193,7 +289,7 @@ fn update_structure_placement(
     let heading = site.heading_tangent;
     let across = center_dir.cross(heading).normalize();
 
-    let (windows, cameras, bodies, placed_q) = &queries;
+    let (windows, cameras, bodies) = &queries;
 
     // Tab toggles the pending kind.
     if keys.just_pressed(KeyCode::Tab) {
@@ -258,7 +354,7 @@ fn update_structure_placement(
         footprint_half,
     );
 
-    // Delete the selected structure.
+    // Delete the selected structure (either tool).
     if (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::KeyX))
         && let Some(sel) = state.selected.take()
     {
@@ -268,37 +364,116 @@ fn update_structure_placement(
                 commands.entity(entity).despawn();
             }
         }
+        state.dragging = None;
+        state.structures_rev = state.structures_rev.wrapping_add(1);
         return;
     }
 
-    if ui_gate.hovered || !mouse.just_pressed(MouseButton::Left) {
+    // Right-click cancels placement → back to the Select tool.
+    if mouse.just_pressed(MouseButton::Right) && state.tool == Tool::Place {
+        state.tool = Tool::Select;
         return;
     }
+
+    let over_ui = ui_gate.hovered;
     let Some(hover) = state.hover else {
+        state.dragging = None;
         return;
     };
 
-    // Click on an existing structure selects it; otherwise place a new one.
-    if let Some(existing) = structure_under(placed_q, body_id, hover.building_dir, pad_r) {
-        state.selected = Some(existing);
-        return;
+    match state.tool {
+        Tool::Place => {
+            if !over_ui && mouse.just_pressed(MouseButton::Left) {
+                let new_id = spawn_structure(
+                    &mut commands,
+                    &mut meshes,
+                    &mats,
+                    &mut registry,
+                    &mut state,
+                    root.entity,
+                    site_id,
+                    body_id,
+                    hover.building_dir,
+                    heading,
+                    across,
+                    pad_r,
+                );
+                state.selected = Some(new_id);
+                state.structures_rev = state.structures_rev.wrapping_add(1);
+            }
+        }
+        Tool::Select => {
+            // Press picks the structure under the cursor (or clears selection);
+            // a press over a structure also begins a drag-move.
+            if !over_ui && mouse.just_pressed(MouseButton::Left) {
+                let hit = structure_under(&placed_q, body_id, hover.building_dir, pad_r);
+                state.selected = hit;
+                state.dragging = hit;
+            }
+            // Drag the held structure to the cursor.
+            if mouse.pressed(MouseButton::Left)
+                && !over_ui
+                && let Some(id) = state.dragging
+            {
+                reposition_structure(
+                    id,
+                    hover.building_dir,
+                    heading,
+                    across,
+                    pad_r,
+                    &mut registry,
+                    &mut placed_q,
+                );
+            }
+            // Release commits the move.
+            if mouse.just_released(MouseButton::Left) && state.dragging.take().is_some() {
+                state.structures_rev = state.structures_rev.wrapping_add(1);
+            }
+        }
     }
+}
 
-    let new_id = spawn_structure(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut registry,
-        &mut state,
-        root.entity,
-        site_id,
-        body_id,
-        hover.building_dir,
-        heading,
-        across,
-        pad_r,
-    );
-    state.selected = Some(new_id);
+/// Reset the editing tool to Select (and clear selection/drag) each time the
+/// editor opens, so a fresh session never starts mid-placement.
+fn reset_build_state_on_open(editor: Res<BaseEditor>, mut state: ResMut<BaseBuildState>) {
+    if editor.is_changed() && editor.open {
+        state.tool = Tool::Select;
+        state.selected = None;
+        state.dragging = None;
+    }
+}
+
+/// Move a placed structure to `new_dir` on the pad, keeping its size + heading.
+fn reposition_structure(
+    id: StructureId,
+    new_dir: DVec3,
+    heading: DVec3,
+    across: DVec3,
+    pad_r: f64,
+    registry: &mut StructureRegistry,
+    placed_q: &mut Query<(Entity, &mut PlacedVisual)>,
+) {
+    for (_, mut pv) in placed_q.iter_mut() {
+        if pv.structure_id != id {
+            continue;
+        }
+        let center_height = match pv.kind {
+            StructureKind::Building { height_m, .. } => height_m * 0.5,
+            StructureKind::Launchpad { .. } => LAUNCHPAD_SLAB_H * 0.5,
+            StructureKind::Tank { height_m, .. } => height_m * 0.5,
+            _ => 0.0,
+        };
+        let (center_body, basis_body) =
+            placement_frame(new_dir, heading, across, pv.yaw, pad_r, center_height);
+        pv.center_body = center_body;
+        pv.basis_body = basis_body;
+        let heading_proj = (heading - new_dir * heading.dot(new_dir)).normalize();
+        registry.update(id, |s| {
+            s.anchor_dir = new_dir;
+            s.heading_tangent = heading_proj;
+        });
+        break;
+    }
 }
 
 /// Half-footprint of the pending structure (for cursor clamping), metres.
@@ -351,7 +526,7 @@ fn compute_pad_hover(
 /// The structure (on `body_id`) whose footprint the pad point `dir` falls
 /// within, nearest first. Approximate (ignores rotation), fine for selection.
 fn structure_under(
-    placed_q: &Query<(Entity, &PlacedVisual)>,
+    placed_q: &Query<(Entity, &mut PlacedVisual)>,
     body_id: BodyId,
     dir: DVec3,
     pad_r: f64,
@@ -378,6 +553,7 @@ pub(super) fn kind_bounding_m(kind: &StructureKind) -> f64 {
             half_x_m, half_z_m, ..
         } => half_x_m.hypot(*half_z_m) as f64,
         StructureKind::Launchpad { radius_m } => *radius_m as f64,
+        StructureKind::Tank { radius_m, .. } => *radius_m as f64,
         _ => 1.0,
     }
 }
@@ -405,11 +581,30 @@ fn placement_frame(
     (center_body, basis_body)
 }
 
+/// Attitude for a craft standing vertically on a pad: nose (`+Y`) along local
+/// up, dorsal (`+Z`) toward `heading_body`. Mirror of
+/// `runway::level_heading_attitude` with up/heading swapped.
+fn vertical_attitude(body_state: &BodyState, up_body: DVec3, heading_body: DVec3) -> AttitudeState {
+    let nose = up_body.normalize();
+    let dorsal = (heading_body - nose * heading_body.dot(nose))
+        .try_normalize()
+        .unwrap_or_else(|| {
+            let seed = if nose.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
+            (seed - nose * seed.dot(nose)).normalize()
+        });
+    let right = nose.cross(dorsal).normalize();
+    let craft_to_body = DMat3::from_cols(right, nose, dorsal);
+    AttitudeState {
+        orientation: (body_state.orientation * DQuat::from_mat3(&craft_to_body)).normalize(),
+        angular_velocity: DVec3::ZERO,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_structure(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    mats: &BaseMaterials,
     registry: &mut StructureRegistry,
     state: &mut BaseBuildState,
     root: Entity,
@@ -420,110 +615,131 @@ fn spawn_structure(
     across: DVec3,
     pad_r: f64,
 ) -> StructureId {
-    let heading_proj = (heading - building_dir * heading.dot(building_dir)).normalize();
-    match state.pending_kind {
-        PendingKind::Building => {
-            let dims = state.pending;
-            let (center_body, basis_body) =
-                placement_frame(building_dir, heading, across, state.yaw, pad_r, dims.height_m * 0.5);
-            let kind = StructureKind::Building {
-                half_x_m: dims.half_x_m,
-                half_z_m: dims.half_z_m,
-                height_m: dims.height_m,
-            };
-            let id = registry.register(
-                body_id,
-                building_dir,
-                heading_proj,
-                StructurePlacement::Drape,
-                kind,
-                Some(site_id),
-            );
-            let material = state
-                .material
-                .get_or_insert_with(|| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::srgb(0.62, 0.64, 0.68),
-                        perceptual_roughness: 0.85,
-                        metallic: 0.0,
-                        ..default()
-                    })
-                })
-                .clone();
-            let mesh = meshes.add(Cuboid::new(dims.half_x_m * 2.0, dims.height_m, dims.half_z_m * 2.0));
+    let kind = match state.pending_kind {
+        PendingKind::Building => StructureKind::Building {
+            half_x_m: state.pending.half_x_m,
+            half_z_m: state.pending.half_z_m,
+            height_m: state.pending.height_m,
+        },
+        PendingKind::Launchpad => StructureKind::Launchpad {
+            radius_m: state.pending_radius_m,
+        },
+    };
+    place_structure(
+        commands,
+        meshes,
+        mats,
+        registry,
+        root,
+        body_id,
+        Some(site_id),
+        building_dir,
+        heading,
+        across,
+        pad_r,
+        kind,
+        state.yaw,
+    )
+}
+
+/// Register a structure (`Drape` on its parent site) and spawn its visual.
+/// Shared by the editor's click-place and the authored default base
+/// (`super::spawn_default_base`). Returns the new structure id.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_structure(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &BaseMaterials,
+    registry: &mut StructureRegistry,
+    root: Entity,
+    body_id: BodyId,
+    parent_site: Option<StructureId>,
+    anchor_dir: DVec3,
+    heading: DVec3,
+    across: DVec3,
+    pad_r: f64,
+    kind: StructureKind,
+    yaw: f32,
+) -> StructureId {
+    let center_height = match kind {
+        StructureKind::Building { height_m, .. } => height_m * 0.5,
+        StructureKind::Launchpad { .. } => LAUNCHPAD_SLAB_H * 0.5,
+        StructureKind::Tank { height_m, .. } => height_m * 0.5,
+        _ => 0.0,
+    };
+    let (center_body, basis_body) = placement_frame(anchor_dir, heading, across, yaw, pad_r, center_height);
+    let heading_proj = (heading - anchor_dir * heading.dot(anchor_dir)).normalize();
+    let id = registry.register(
+        body_id,
+        anchor_dir,
+        heading_proj,
+        StructurePlacement::Drape,
+        kind,
+        parent_site,
+    );
+    spawn_structure_entity(commands, meshes, mats, root, id, body_id, center_body, basis_body, kind, yaw);
+    id
+}
+
+/// Spawn the visual entity for a placed structure (cuboid building, or cylinder
+/// launchpad + ring). The big_space anchor is set each frame by
+/// [`update_placed_transforms`].
+#[allow(clippy::too_many_arguments)]
+fn spawn_structure_entity(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &BaseMaterials,
+    root: Entity,
+    id: StructureId,
+    body_id: BodyId,
+    center_body: DVec3,
+    basis_body: DQuat,
+    kind: StructureKind,
+    yaw: f32,
+) {
+    let placed = PlacedVisual {
+        structure_id: id,
+        body_id,
+        center_body,
+        basis_body,
+        kind,
+        yaw,
+    };
+    match kind {
+        StructureKind::Building {
+            half_x_m,
+            half_z_m,
+            height_m,
+        } => {
+            let mesh = meshes.add(Cuboid::new(half_x_m * 2.0, height_m, half_z_m * 2.0));
             commands.spawn((
                 Mesh3d(mesh),
-                MeshMaterial3d(material),
+                MeshMaterial3d(mats.building.clone()),
                 Transform::default(),
                 Visibility::Inherited,
                 CellCoord::ZERO,
                 ChildOf(root),
-                RenderLayers::layer(SHIP_LAYER),
-                PlacedVisual {
-                    structure_id: id,
-                    body_id,
-                    center_body,
-                    basis_body,
-                    kind,
-                },
+                // Cast into the custom sun-shadow cascade so the building grounds
+                // with a shadow on the terrain, like the craft + trees (F6b).
+                RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
+                placed,
                 Name::new("Base Building"),
             ));
-            id
         }
-        PendingKind::Launchpad => {
-            let radius_m = state.pending_radius_m;
-            let (center_body, basis_body) =
-                placement_frame(building_dir, heading, across, state.yaw, pad_r, LAUNCHPAD_SLAB_H * 0.5);
-            let kind = StructureKind::Launchpad { radius_m };
-            let id = registry.register(
-                body_id,
-                building_dir,
-                heading_proj,
-                StructurePlacement::Drape,
-                kind,
-                Some(site_id),
-            );
-            let pad_material = state
-                .pad_material
-                .get_or_insert_with(|| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::srgb(0.10, 0.10, 0.12),
-                        perceptual_roughness: 0.9,
-                        metallic: 0.0,
-                        ..default()
-                    })
-                })
-                .clone();
-            let ring_material = state
-                .ring_material
-                .get_or_insert_with(|| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::srgb(0.95, 0.78, 0.15),
-                        perceptual_roughness: 0.6,
-                        metallic: 0.0,
-                        ..default()
-                    })
-                })
-                .clone();
+        StructureKind::Launchpad { radius_m } => {
             let slab = meshes.add(Cylinder::new(radius_m, LAUNCHPAD_SLAB_H));
             let ring_outer = radius_m * 0.85;
             let ring = meshes.add(Torus::new((ring_outer - 0.6).max(0.1), ring_outer));
             let pad_entity = commands
                 .spawn((
                     Mesh3d(slab),
-                    MeshMaterial3d(pad_material),
+                    MeshMaterial3d(mats.pad.clone()),
                     Transform::default(),
                     Visibility::Inherited,
                     CellCoord::ZERO,
                     ChildOf(root),
-                    RenderLayers::layer(SHIP_LAYER),
-                    PlacedVisual {
-                        structure_id: id,
-                        body_id,
-                        center_body,
-                        basis_body,
-                        kind,
-                    },
+                    RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
+                    placed,
                     Name::new("Launchpad"),
                 ))
                 .id();
@@ -531,15 +747,29 @@ fn spawn_structure(
             // inherit through the hierarchy).
             commands.spawn((
                 Mesh3d(ring),
-                MeshMaterial3d(ring_material),
+                MeshMaterial3d(mats.ring.clone()),
                 Transform::from_xyz(0.0, LAUNCHPAD_SLAB_H * 0.5 + 0.02, 0.0),
                 Visibility::Inherited,
                 RenderLayers::layer(SHIP_LAYER),
                 ChildOf(pad_entity),
                 Name::new("Launchpad Ring"),
             ));
-            id
         }
+        StructureKind::Tank { radius_m, height_m } => {
+            let mesh = meshes.add(Cylinder::new(radius_m, height_m));
+            commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mats.tank.clone()),
+                Transform::default(),
+                Visibility::Inherited,
+                CellCoord::ZERO,
+                ChildOf(root),
+                RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
+                placed,
+                Name::new("Storage Tank"),
+            ));
+        }
+        _ => {}
     }
 }
 
@@ -597,10 +827,11 @@ fn launch_from_pad(
     let Ok((ship_entity, ship_gt)) = ship_q.single() else {
         return;
     };
-    // How far the craft's lowest point sits below its origin — lift it that much
-    // so it rests on the pad top. None ⇒ meshes not ready; retry next press.
+    // Spawn vertical (rocket nose-up). Rest on the craft's lower end, which for a
+    // vertical craft is its `-Y` extent (the engine bell), not its belly `-Z`.
+    // None ⇒ meshes not ready; retry next press.
     let Some(clearance_m) =
-        craft_ground_clearance(ship_entity, ship_gt, &children_q, &mesh_q, &meshes)
+        craft_extent_below(ship_entity, ship_gt, &children_q, &mesh_q, &meshes, Vec3::NEG_Y)
     else {
         return;
     };
@@ -612,7 +843,7 @@ fn launch_from_pad(
     let position = body_state.position + body_state.orientation * position_body;
     let velocity = body_fixed_surface_velocity(body_state, position_body);
     let state = StateVector { position, velocity };
-    let attitude = level_heading_attitude(body_state, up, heading);
+    let attitude = vertical_attitude(body_state, up, heading);
 
     sim.simulation.set_ship_state(state);
     sim.simulation.set_attitude(attitude);
@@ -633,8 +864,9 @@ fn launch_from_pad(
     info!("launched player ship onto launchpad {:?}", sel);
 }
 
-/// Re-place every structure in the body-fixed frame each frame (ungated, like
-/// `runway::update_runway_transform`): a root-grid big_space child posed in f64.
+/// Re-place every structure in the body-fixed frame each frame, exactly like
+/// `runway::update_runway_transform`: a root-grid big_space child posed in f64,
+/// scheduled in `SimStage::Sync` after `sync_solar_system_state`.
 fn update_placed_transforms(
     solar: Res<SolarSystemState>,
     root_grid: Query<&Grid, With<BigSpace>>,
@@ -772,6 +1004,7 @@ fn draw_kind_outline(gizmos: &mut Gizmos, kind: &StructureKind, center: Vec3, ro
             color,
         ),
         StructureKind::Launchpad { radius_m } => draw_ring(gizmos, center, rot, *radius_m, color),
+        StructureKind::Tank { radius_m, .. } => draw_ring(gizmos, center, rot, *radius_m, color),
         _ => {}
     }
 }

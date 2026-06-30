@@ -38,6 +38,14 @@ struct SceneLighting {
     planetshine_pos_radius: vec4<f32>,
     // xyz = Bond albedo × tint, w = enable flag.
     planetshine_tint_flag:  vec4<f32>,
+
+    // Moonlight onto this surface (reverse of planetshine — the brightest child
+    // moon as one soft directional light). xyz = unit dir toward the moon
+    // (world render space), w = artistic flux (phase × size × albedo × distance,
+    // already night-lift-tuned). 0 flux disables.
+    moonlight_dir_flux: vec4<f32>,
+    // xyz = moon hue (normalised), w = enable flag (1 active).
+    moonlight_color: vec4<f32>,
 }
 
 // Analytical sphere-shadow test along a star ray.
@@ -306,6 +314,17 @@ const SURFACE_SUN_REDDEN_GAIN: f32 = 1.0;
 // roughly matching the old `night_fill = 0.012` luminance.
 const SURFACE_NIGHT_AMBIENT: vec3<f32> = vec3<f32>(0.008, 0.010, 0.014);
 
+// Daylight gate over the *geometric* horizon, from the sun's elevation
+// `dot(up, sun_dir)`. 1 = sun well up, 0 = sun below the horizon, with a soft
+// twilight band on the dawn side so direct light fades instead of snapping to
+// black. This is the single definition of the terminator band: `compute_surface_sky`
+// gates the sky/ground fill with it, and `shade_foliage` gates the wrap-diffuse
+// direct/transmit with it (the wrap intentionally bleeds past the *normal's*
+// terminator, so it needs this *sun's* terminator to vanish at night).
+fn sun_daylight(sun_elev: f32) -> f32 {
+    return smoothstep(-0.15, 0.12, sun_elev);
+}
+
 // Resolved per-fragment lighting environment. Built once by
 // `compute_surface_sky`, then consumed by the BRDF (direct) and
 // `sky_ambient_irradiance` (ambient) so both shaders shade from one source.
@@ -339,9 +358,10 @@ fn compute_surface_sky(
     var out: SurfaceSky;
     let scene_radiance = max(sun_flux, 0.0) * SCENE_FLUX_SCALE;
     let sun_elev = dot(up, sun_dir);
-    // Daylight gate over the *geometric* horizon. Slightly wide on the dawn side
-    // so twilight keeps a dim band rather than snapping to black.
-    let day = smoothstep(-0.15, 0.12, sun_elev);
+    // Daylight gate over the *geometric* horizon (soft twilight band — see
+    // `sun_daylight`). Slightly wide on the dawn side so twilight keeps a dim band
+    // rather than snapping to black.
+    let day = sun_daylight(sun_elev);
     let sun_up = clamp(sun_elev, 0.0, 1.0);
     let tau_eff = max(tau_zenith, vec3<f32>(0.0)) * max(strength, 0.0);
 
@@ -546,6 +566,37 @@ struct ThalosSurface {
     style: u32,               // SURFACE_DIELECTRIC | _REGOLITH | _FOLIAGE | _WATER
 }
 
+// Soft directional moonlight onto a surface fragment — the reverse of
+// planetshine (a child moon reflecting the star back onto its parent). A plain
+// Lambert lobe (moonlight is soft, no need for a microfacet model), gated so it
+// only appears at NIGHT (sun below the local horizon) and only where the moon is
+// itself above the local horizon. `scene.moonlight_dir_flux.w` already carries
+// the phase/size/albedo/distance-weighted artistic flux, so this is just the
+// cosine term × the two gates. Returns zero when disabled.
+fn moonlight_radiance(
+    scene: SceneLighting,
+    albedo: vec3<f32>,
+    normal_ws: vec3<f32>,
+    geo_normal_ws: vec3<f32>,
+    sun_dir_ws: vec3<f32>,
+) -> vec3<f32> {
+    if (scene.moonlight_color.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+    let moon_flux = scene.moonlight_dir_flux.w;
+    if (moon_flux <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let moon_dir = scene.moonlight_dir_flux.xyz;
+    // Night gate: fade out wherever the sun lights this facet's horizon, so
+    // moonlight never brightens the day side (where it is invisible anyway).
+    let night = 1.0 - smoothstep(-0.10, 0.06, dot(geo_normal_ws, sun_dir_ws));
+    // The moon must be above the local horizon to cast light here.
+    let moon_up = smoothstep(-0.03, 0.06, dot(geo_normal_ws, moon_dir));
+    let n_dot_m = max(dot(normal_ws, moon_dir), 0.0);
+    return albedo * scene.moonlight_color.xyz * (moon_flux * n_dot_m * night * moon_up);
+}
+
 // Surface-side radiance only. `direct_shadow` gates the direct sun term (craft ×
 // self × cascade); `ambient_shadow` gates the ambient terms (canopy bleed). The
 // resolved `SurfaceSky` carries the per-fragment direct/sky/ground environment
@@ -574,7 +625,8 @@ fn shade_surface(
             sun_flux,
             scene,
             direct_shadow,
-        ) + s.emissive;
+        ) + s.emissive
+            + moonlight_radiance(scene, s.albedo, s.normal_ws, s.geo_normal_ws, sun_dir_ws);
     }
 
     // Rough-dielectric (foliage/water fall through here for now): direct sun
@@ -609,7 +661,8 @@ fn shade_surface(
     let env_spec = dfg.x * DIELECTRIC_F0 + dfg.y;
     let ambient_spec = sky.sky_radiance * env_spec * spec_occ * ambient_shadow;
 
-    return direct + ambient_diffuse + ambient_spec + s.emissive;
+    let moon = moonlight_radiance(scene, s.albedo, s.normal_ws, s.geo_normal_ws, sun_dir_ws);
+    return direct + ambient_diffuse + ambient_spec + s.emissive + moon;
 }
 
 // ── Foliage wrap-diffuse shading ──────────────────────────────────────────────
@@ -642,9 +695,18 @@ fn shade_foliage(
     let n = s.normal_ws;
     let n_dot_l = dot(n, sun_dir_ws);
 
+    // Daylight gate on the DIRECT terms. The wrap-diffuse below bleeds light past
+    // the leaf-normal terminator (any n·l > −FOLIAGE_WRAP_BIAS), which is right
+    // while the sun is up but would keep leaves facing the buried sun lit at night
+    // — the ground avoids this because its `max(n·l, 0)` cosine zeroes once the sun
+    // drops below the horizon, but the wrap has no such floor. `sun_scale` itself
+    // isn't elevation-gated, so gate the wrap by the sun's own horizon here (the
+    // ambient terms already fall to `SURFACE_NIGHT_AMBIENT` via `compute_surface_sky`).
+    let daylight = sun_daylight(dot(up, sun_dir_ws));
+
     // Direct: wrap diffuse so the shaded side stays leafy rather than black.
     let wrap = clamp((n_dot_l + FOLIAGE_WRAP_BIAS) / (1.0 + FOLIAGE_WRAP_BIAS), 0.0, 1.0);
-    let direct = s.albedo * (wrap * sky.sun_scale * shadow) * sky.sun_color;
+    let direct = s.albedo * (wrap * sky.sun_scale * shadow * daylight) * sky.sun_color;
 
     // Ambient: hemisphere sky-dome + warm ground bounce, scaled per type and bled
     // by the shadow (a shaded canopy sees less sky too).
@@ -660,8 +722,68 @@ fn shade_foliage(
         let back = pow(clamp(dot(view_dir_ws, -lt_dir), 0.0, 1.0), 2.5);
         let warm = vec3<f32>(1.30, 1.05, 0.50); // green → yellow/orange shift
         let thru = (back + 0.16 * clamp(-n_dot_l, 0.0, 1.0)) * s.translucency;
-        transmit = s.albedo * warm * (thru * sky.sun_scale * shadow) * sky.sun_color;
+        transmit = s.albedo * warm * (thru * sky.sun_scale * shadow * daylight) * sky.sun_color;
     }
 
     return direct + ambient + transmit;
+}
+
+// ── Object aerial recession ───────────────────────────────────────────────────
+// Surface objects (foliage today; buildings next) read more saturated and
+// higher-contrast than the ground, so at the SAME camera distance they pop
+// against terrain that the fullscreen `BodySky` pass (`body_sky.wgsl`) has
+// already hazed. BodySky can't fix this — it is keyed on scene depth alone and
+// can't tell an object pixel from a terrain pixel — so each object material
+// recedes its OWN lit colour toward the local air colour HERE, starting CLOSER
+// than BodySky's ~8 km terrain-aerial onset. The target is the sky-dome radiance
+// the same `SurfaceSky` already carries, so the recession tracks time-of-day and
+// converges toward the same air the terrain fades into. It is deliberately
+// earlier/stronger than the terrain veil: a distant forest should read as a flat
+// blue-grey mass ("blue ridge"), not crisp green cut-outs. Below
+// `OBJECT_AERIAL_NEAR_M` it is a no-op, so the foreground stays crisp.
+//
+// These are the tuning dials — adjust from a `just game` surface screenshot. (The
+// headless `just preview` camera sits well inside NEAR, so it shows no effect —
+// that's the regression check: close-up objects must look unchanged.)
+// The ramp is spread over a LONG distance (1 → 35 km) on purpose: a short ramp
+// concentrates the whole fade into a narrow transition band (the smoothstep's
+// steep middle) that reads as an abrupt "haze line". Stretching it makes the
+// recession build up gradually from near to far, with no band, and keeps the
+// far trees near the terrain's own gentle veil instead of racing past it.
+const OBJECT_AERIAL_NEAR_M: f32 = 1000.0;  // recession begins (crisp below this)
+const OBJECT_AERIAL_FAR_M: f32  = 35000.0; // strongest veil reached by here (well past
+                                           // the tree band, so it never plateaus into
+                                           // a saturated horizon band)
+const OBJECT_AERIAL_MAX: f32    = 0.32;    // max blend toward air (low: only a touch
+                                           // more than the terrain veil)
+// The analytic sky-dome radiance is several × brighter than lit foliage, so
+// fading straight toward it BRIGHTENS distant canopies to white instead of
+// hazing them. Cap the haze target to a small multiple of the object's own
+// luminance so the fade reads as HAZE (desaturate + gentle bluish lift), matched
+// to how the terrain recedes — not a white blow-out.
+const OBJECT_AERIAL_BRIGHTEN_CAP: f32 = 1.5;
+
+fn object_aerial_recession(
+    color: vec3<f32>,
+    sky: SurfaceSky,
+    world_pos: vec3<f32>,
+    cam_pos: vec3<f32>,
+) -> vec3<f32> {
+    let dist = distance(cam_pos, world_pos);
+    let t = smoothstep(OBJECT_AERIAL_NEAR_M, OBJECT_AERIAL_FAR_M, dist) * OBJECT_AERIAL_MAX;
+    if (t <= 0.0) {
+        return color;
+    }
+    let lum_w = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let obj_lum = dot(color, lum_w);
+    // Air the object recedes into: the bluish sky-dome radiance the terrain also
+    // fades toward, but clamped so it can't get much brighter than the object —
+    // the analytic radiance outruns foliage brightness, and an over-bright target
+    // is exactly the white-out. At night `sky_radiance` falls to the cool floor,
+    // so distant objects correctly dim rather than fade toward a daytime blue.
+    let haze = sky.sky_radiance;
+    let haze_lum = max(dot(haze, lum_w), 1.0e-4);
+    let cap = (obj_lum + 0.02) * OBJECT_AERIAL_BRIGHTEN_CAP;
+    let haze_capped = haze * min(1.0, cap / haze_lum);
+    return mix(color, haze_capped, t);
 }

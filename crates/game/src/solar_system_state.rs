@@ -28,6 +28,9 @@ pub struct CloudBandEnvironmentState {
 }
 
 impl CloudBandEnvironmentState {
+    // Constructed once banded-cloud bodies are wired at spawn (see
+    // `install_cloud_band_state`); kept as the clamping constructor.
+    #[allow(dead_code)]
     pub fn new(scroll_rate_rad_s: f64, differential_rotation: f64) -> Self {
         Self {
             phases: [0.0; CLOUD_BAND_COUNT],
@@ -128,11 +131,18 @@ impl SolarSystemState {
         }
     }
 
+    // Forward environment-install API, ready for spawn-time wiring: the
+    // dynamic-surface slot pairs with the terrain rewrite's runtime overlays
+    // and `install_cloud_band_state` lights up the `update_cloud_bands` drift
+    // loop the moment a body is given cloud bands. Kept symmetric with the live
+    // `install_cloud_weather`.
+    #[allow(dead_code)]
     pub fn install_dynamic_surface_state(&mut self, body_id: BodyId, state: DynamicSurfaceState) {
         self.ensure_body_capacity(body_id + 1);
         self.environment[body_id].dynamic_surface = Some(state);
     }
 
+    #[allow(dead_code)]
     pub fn install_cloud_band_state(&mut self, body_id: BodyId, state: CloudBandEnvironmentState) {
         self.ensure_body_capacity(body_id + 1);
         self.environment[body_id].cloud_bands = Some(state);
@@ -149,6 +159,7 @@ impl SolarSystemState {
     /// to [`thalos_body_render::rendered_height_m`]; pair it with
     /// `TerrainSurfaceRegistry::get` so every height query sees the same
     /// dynamic overlays that the renderer baked into its atlas.
+    #[allow(dead_code)]
     pub fn dynamic_surface_for(
         &self,
         body_id: BodyId,

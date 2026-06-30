@@ -186,6 +186,10 @@ impl LoadingTracker {
     }
 
     /// Advance a counted step; completes it when `done` reaches the total.
+    /// (Counted-step incrementing isn't wired to a producer yet — the only
+    /// counted step today is seeded with `set_total(.., 0)` and completes
+    /// immediately — but it's the documented complement of `set_total`.)
+    #[allow(dead_code)]
     pub fn advance(&mut self, id: &str, n: usize) {
         if let Some(s) = self.get_mut(id) {
             s.done += n;

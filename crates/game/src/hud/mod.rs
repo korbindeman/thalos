@@ -24,7 +24,7 @@ mod atmo_panel;
 mod eva_panel;
 mod flight_config_panel;
 mod flight_panel;
-mod format;
+pub(crate) mod format;
 mod fps_overlay;
 mod geo;
 pub mod input_gate;

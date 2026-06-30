@@ -22,13 +22,15 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_world::BodyId;
 
+use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::real_space::RealSpaceRoot;
 use crate::rendering::{SimulationState, SolarSystemState};
+use crate::solar_system_state::sync_solar_system_state;
 use crate::structures::{StructureId, StructurePlacement, StructureRegistry};
 
-use super::place::kind_bounding_m;
-use super::{BaseEditor, BaseEditorMode, base_editor_open};
+use super::place::{BaseMaterials, kind_bounding_m};
+use super::{BaseBuildState, BaseEditor, BaseEditorMode, base_editor_open};
 
 /// Tarmac strip width, metres.
 const STRIP_W: f64 = 3.0;
@@ -48,7 +50,7 @@ struct ConnectionVisual {
 /// the active site's structure set changes.
 #[derive(Resource, Default)]
 struct ConnectionsState {
-    built: Option<(StructureId, usize)>,
+    built: Option<(StructureId, u32)>,
     material: Option<Handle<StandardMaterial>>,
 }
 
@@ -58,14 +60,23 @@ impl Plugin for BaseEditorConnectionsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ConnectionsState>()
             .add_systems(Update, rebuild_connections.run_if(base_editor_open))
-            // Ungated so the network stays anchored in flight too.
-            .add_systems(Update, update_connection_transforms);
+            // Same anchoring contract as `place::update_placed_transforms`: in
+            // `SimStage::Sync` after `sync_solar_system_state` so it reads the
+            // current-frame body pose (a bare unordered `Update` jittered the
+            // tarmac at warp > 1×). Sync still runs while the editor is open.
+            .add_systems(
+                Update,
+                update_connection_transforms
+                    .in_set(SimStage::Sync)
+                    .after(sync_solar_system_state),
+            );
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn rebuild_connections(
     editor: Res<BaseEditor>,
+    build: Res<BaseBuildState>,
     registry: Res<StructureRegistry>,
     sim: Res<SimulationState>,
     mut commands: Commands,
@@ -113,11 +124,13 @@ fn rebuild_connections(
         });
     }
 
-    let count = nodes.len();
-    if state.built == Some((site_id, count)) {
+    // Rebuild when the site's structures change (place / delete / move), keyed
+    // off the build-state revision the placement system bumps.
+    let rev = build.structures_rev;
+    if state.built == Some((site_id, rev)) {
         return;
     }
-    state.built = Some((site_id, count));
+    state.built = Some((site_id, rev));
 
     // Drop the stale mesh for this site.
     for (entity, cv) in existing.iter() {
@@ -125,7 +138,7 @@ fn rebuild_connections(
             commands.entity(entity).despawn();
         }
     }
-    if count < 2 {
+    if nodes.len() < 2 {
         return; // nothing to connect
     }
 
@@ -262,8 +275,63 @@ fn build_connection_mesh(nodes: &[Node], edges: &[(usize, usize)]) -> Option<Mes
     Some(mesh)
 }
 
-/// Anchor the connection mesh in the body-fixed frame each frame (ungated, like
-/// `place::update_placed_transforms`).
+/// Build a one-shot tarmac mesh connecting authored structures (the default
+/// base). `nodes` are `(along, across, bounding)` in the site tangent frame at
+/// `center_dir`/`heading`/`pad_r`. Single spawn (no rev tracking); shares the
+/// `site_id` so the editor's `rebuild_connections` replaces it if that base is
+/// later edited.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_authored(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &BaseMaterials,
+    root: Entity,
+    body_id: BodyId,
+    site_id: StructureId,
+    center_dir: DVec3,
+    heading: DVec3,
+    pad_r: f64,
+    nodes: &[(f64, f64, f64)],
+) {
+    if nodes.len() < 2 {
+        return;
+    }
+    let across = heading.cross(center_dir).normalize();
+    let node_vec: Vec<Node> = nodes
+        .iter()
+        .map(|&(a, c, b)| Node {
+            along: a,
+            across: c,
+            bounding: b,
+        })
+        .collect();
+    let edges = minimum_spanning_tree(&node_vec);
+    let Some(mesh) = build_connection_mesh(&node_vec, &edges) else {
+        return;
+    };
+    let basis_body = DQuat::from_mat3(&DMat3::from_cols(heading, center_dir, across));
+    commands.spawn((
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(mats.tarmac.clone()),
+        Transform::default(),
+        Visibility::Inherited,
+        CellCoord::ZERO,
+        ChildOf(root),
+        RenderLayers::layer(SHIP_LAYER),
+        NotShadowCaster,
+        ConnectionVisual {
+            site_id,
+            body_id,
+            center_body: center_dir * pad_r,
+            basis_body,
+        },
+        Name::new("Base Connections"),
+    ));
+}
+
+/// Anchor the connection mesh in the body-fixed frame each frame, like
+/// `place::update_placed_transforms` (in `SimStage::Sync` after
+/// `sync_solar_system_state`, so it reads the current-frame body pose).
 fn update_connection_transforms(
     solar: Res<SolarSystemState>,
     root_grid: Query<&Grid, With<BigSpace>>,

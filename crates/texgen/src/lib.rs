@@ -157,9 +157,12 @@ struct LeafStamp {
 fn each_leaf(seed: u64, mut emit: impl FnMut(LeafStamp)) {
     let w = CELL_PX as f32;
     let half = w * 0.5;
-    // Body pulled in from the border so the fringe + stragglers can poke out
-    // without hard-cutting at the cell edge.
-    let base = half * 0.76;
+    // The clump FILLS the cell (base ≈0.80 of the cell radius). A thin
+    // transparent margin is reserved (the `place` clamp) so the ragged rim never
+    // hard-cuts at the cell border — the "blocky billboard" tell. Airiness comes
+    // from the rim DENSITY tapering off, not from shrinking the body.
+    let base = half * 0.80;
+    let margin = half - 8.0;
     let asx = 0.82 + 0.40 * hash01(seed, 20);
     let asy = 0.82 + 0.40 * hash01(seed, 21);
     let lean = (hash01(seed, 22) - 0.5) * 0.55;
@@ -171,19 +174,23 @@ fn each_leaf(seed: u64, mut emit: impl FnMut(LeafStamp)) {
         (0.56 + 0.26 * nz + 0.20 * lobe).clamp(0.40, 1.12)
     };
     let place = |a: f32, rr: f32| -> (f32, f32) {
-        let rad = rr * edge_at(a) * base;
+        let rad = (rr * edge_at(a) * base).min(margin);
         let (ca, sa) = (a.cos(), a.sin());
         (half + (ca * asx + sa * lean) * rad, half + sa * asy * rad)
     };
 
-    // Body (bottom layers): dense, mildly centre-biased (opaque core, thinner rim).
-    let n_body = 230u32;
+    // Body: a full clump that FILLS the cell, SOLID through the middle and
+    // thinning toward the rim (radius ∝ u^0.70 → centre-dense, edge-sparse), so
+    // the interior covers opaquely (branches never show through a stack of these
+    // cards) yet the boundary still fades from solid mass into scattered leaves
+    // instead of ending at a hard disc. Small leaves so each reads individually.
+    let n_body = 290u32;
     for li in 0..n_body {
         let s = seed.wrapping_add((li as u64).wrapping_mul(GOLD));
         let a = hash01(s, 2) * TAU;
-        let (cx, cy) = place(a, hash01(s, 1).powf(0.6));
-        let len = w * (0.055 + 0.044 * hash01(s, 4));
-        let wid = len * (0.46 + 0.20 * hash01(s, 5));
+        let (cx, cy) = place(a, hash01(s, 1).powf(0.70));
+        let len = w * (0.052 + 0.040 * hash01(s, 4));
+        let wid = len * (0.40 + 0.18 * hash01(s, 5));
         let topness = (1.0 - cy / w).clamp(0.0, 1.0);
         emit(LeafStamp {
             s,
@@ -197,39 +204,40 @@ fn each_leaf(seed: u64, mut emit: impl FnMut(LeafStamp)) {
         });
     }
 
-    // Fringe + stragglers (middle layers): individual leaves at / just past the
-    // outline, sparse / gappy and pointing outward → leafy bumps + leaves sticking
-    // out instead of a terminating disc.
-    let n_fringe = 110u32;
-    for li in 0..n_fringe {
+    // Detached rim: small leaves out at / just past the body's ragged outline
+    // (rr 0.96..1.18, following the lobed `edge_at`), sparse and pointing
+    // outward so they sit APART as individual leaves — the broken, irregular
+    // silhouette of a real canopy rather than a clean clump edge.
+    let n_rim = 64u32;
+    for li in 0..n_rim {
         let s = seed.wrapping_add((li as u64 + 700).wrapping_mul(GOLD));
         let a = hash01(s, 2) * TAU;
-        let (cx, cy) = place(a, 0.86 + 0.26 * hash01(s, 1));
+        let (cx, cy) = place(a, 0.96 + 0.22 * hash01(s, 1));
         let outward = (cy - half).atan2(cx - half);
-        let len = w * (0.050 + 0.046 * hash01(s, 4));
-        let wid = len * (0.42 + 0.18 * hash01(s, 5));
+        let len = w * (0.040 + 0.032 * hash01(s, 4));
+        let wid = len * (0.36 + 0.16 * hash01(s, 5));
         let topness = (1.0 - cy / w).clamp(0.0, 1.0);
         emit(LeafStamp {
             s,
             cx,
             cy,
-            ang: outward + (hash01(s, 3) - 0.5) * 1.1,
+            ang: outward + (hash01(s, 3) - 0.5) * 1.2,
             len,
             wid,
             tone: (0.30 + 0.40 * hash01(s, 6) + 0.20 * topness).clamp(0.0, 1.0),
-            layer: 0.42 + 0.20 * (li as f32 / n_fringe as f32),
+            layer: 0.45 + 0.25 * (li as f32 / n_rim as f32),
         });
     }
 
-    // Highlight (top layers): finer, brighter leaves on the top/outer for dapple.
-    let n_hi = 170u32;
+    // Highlight: a few finer, brighter leaves over the body top for dapple.
+    let n_hi = 34u32;
     for li in 0..n_hi {
         let s = seed.wrapping_add((li as u64 + 1500).wrapping_mul(GOLD));
         let a = hash01(s, 2) * TAU;
         let rr = hash01(s, 1).powf(0.8);
         let (cx, cy) = place(a, rr);
-        let len = w * (0.038 + 0.032 * hash01(s, 4));
-        let wid = len * (0.44 + 0.20 * hash01(s, 5));
+        let len = w * (0.036 + 0.028 * hash01(s, 4));
+        let wid = len * (0.42 + 0.20 * hash01(s, 5));
         let topness = (1.0 - cy / w).clamp(0.0, 1.0);
         emit(LeafStamp {
             s,
@@ -352,7 +360,12 @@ fn leaf_footprint(
     }
 }
 
-/// Composite one leaf into the albedo (a faint midrib darkens the centre line).
+/// Composite one leaf into the albedo as a painterly blade with a gentle
+/// lengthwise gradient — no centre-line midrib stripe. The tone shades softly
+/// along the leaf's length (`u`: darker toward one end, lighter toward the
+/// other), giving a hand-painted falloff instead of a flat sheet. Each leaf also
+/// carries its own palette tone (see [`leaf_palette`]), so a cluster reads as
+/// varied foliage from the leaf-to-leaf colour spread on top of this gradient.
 #[allow(clippy::too_many_arguments)]
 fn stamp_leaf(
     px: &mut [[f32; 4]],
@@ -365,9 +378,10 @@ fn stamp_leaf(
     wid: f32,
     color: [f32; 3],
 ) {
-    leaf_footprint(cx, cy, ang, len, wid, |lx, ly, alpha, _u, v| {
-        let rib = 1.0 - 0.16 * smooth01(1.0 - (v.abs() / 0.18).min(1.0));
-        let src = [color[0] * rib, color[1] * rib, color[2] * rib, alpha];
+    leaf_footprint(cx, cy, ang, len, wid, |lx, ly, alpha, u, _v| {
+        // Soft ±12% lengthwise shade — `u` runs −1..1 along the blade.
+        let grad = 1.0 + 0.12 * u;
+        let src = [color[0] * grad, color[1] * grad, color[2] * grad, alpha];
         let idx = (oy + ly as usize) * SIZE + (ox + lx as usize);
         over(&mut px[idx], src);
     });
@@ -453,12 +467,13 @@ fn bark_height(x: f32, y: f32, seed: u64) -> BarkH {
     // Periodic so it doesn't break the wrap.
     let xw = x + (grad_noise_per(x, 0.005, y, 0.013, seed ^ 0xA11) - 0.5) * 12.0;
 
-    // Fine vertical GRAIN: high x-freq, very low y-freq → long thin striations. Two
-    // layers for richness, combined as a CONTINUOUS signed value (never
-    // thresholded), so it reads as smooth lines, never dark spots.
-    let g0 = grad_noise_per(xw, 0.060, y, 0.011, seed ^ 0x1234) - 0.5;
-    let g1 = grad_noise_per(xw, 0.150, y, 0.020, seed ^ 0x5151) - 0.5;
-    let line = g0 * 0.72 + g1 * 0.28;
+    // Vertical GRAIN: x-freq sets the line width (chunky, not hairline), very low
+    // y-freq → long striations. Two layers — a dominant chunky band plus a finer
+    // accent — combined as a CONTINUOUS signed value (never thresholded), so it
+    // reads as lines, never dark spots.
+    let g0 = grad_noise_per(xw, 0.030, y, 0.009, seed ^ 0x1234) - 0.5;
+    let g1 = grad_noise_per(xw, 0.075, y, 0.017, seed ^ 0x5151) - 0.5;
+    let line = g0 * 0.76 + g1 * 0.24;
 
     // A gentle broad undulation so the stem isn't perfectly uniform.
     let broad = grad_noise_per(xw, 0.013, y, 0.007, seed ^ 0x9D) - 0.5;

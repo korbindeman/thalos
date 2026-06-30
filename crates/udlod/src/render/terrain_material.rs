@@ -13,7 +13,7 @@
 //! On top of that we add our own `queue_terrain<M>` system that walks `RenderVisibleEntities`
 //! filtered by [`TileAtlas`], pulls the matching material instance out of `RenderMaterialInstances`
 //! (filtered by `TypeId::of::<M>()`), specializes our `TerrainRenderPipeline<M>` against the
-//! `TerrainPipelineFlags` for the view's MSAA + debug state, and queues an [`Opaque3d`] phase
+//! `TerrainPipelineFlags` for the view's MSAA + prepass + debug state, and queues an [`Opaque3d`] phase
 //! item with our [`DrawTerrain`] command tuple. The draw command then invokes
 //! [`DrawTerrainCommand`] which issues the indirect draw whose parameters were filled in by the
 //! compute prepass in [`crate::render::tiling_prepass`].
@@ -34,7 +34,10 @@ use bevy::pbr::{PreparedMaterial, RenderMaterialInstances};
 use bevy::render::erased_render_asset::ErasedRenderAssets;
 use bevy::render::renderer::RenderDevice;
 use bevy::{
-    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
+    core_pipeline::{
+        core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
+        prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass},
+    },
     ecs::system::SystemChangeTick,
     image::BevyDefault,
     pbr::{
@@ -115,6 +118,17 @@ bitflags::bitflags! {
         const TEST2              = 1 << 15;
         const TEST3              = 1 << 16;
         const HDR                = 1 << 17;
+        // View-prepass bits. These do not change the terrain shader; they exist
+        // only so the pipeline selects the mesh-view bind-group layout that matches
+        // the view's actual prepass configuration. `SetMeshViewBindGroup<0>` binds
+        // the view's bind group, which Bevy builds with `_depth` / `_normal` / …
+        // layout variants whenever the camera carries the corresponding prepass
+        // marker — so the pipeline layout at index 0 must agree or wgpu rejects the
+        // draw (binding mismatch). Mirrors `MeshPipelineViewLayoutKey`.
+        const DEPTH_PREPASS          = 1 << 18;
+        const NORMAL_PREPASS         = 1 << 19;
+        const MOTION_VECTOR_PREPASS  = 1 << 20;
+        const DEFERRED_PREPASS       = 1 << 21;
         const MSAA_RESERVED_BITS = TerrainPipelineFlags::MSAA_MASK_BITS << TerrainPipelineFlags::MSAA_SHIFT_BITS;
     }
 }
@@ -184,6 +198,32 @@ impl TerrainPipelineFlags {
         ((self.bits() >> Self::MSAA_SHIFT_BITS) & Self::MSAA_MASK_BITS) + 1
     }
 
+    /// The mesh-view bind-group layout this view requires, derived from MSAA + the
+    /// prepass bits. Must match the key Bevy uses to build the view's bind group
+    /// (`MeshPipelineViewLayoutKey::from(Msaa) | from(ViewPrepassTextures)`), since
+    /// `SetMeshViewBindGroup<0>` binds that group against this pipeline's layout-0.
+    /// OIT / Bevy-atmosphere bits are intentionally omitted: the terrain camera uses
+    /// neither (Thalos has its own atmosphere pass). Extend here if that changes.
+    pub fn view_layout_key(&self) -> MeshPipelineViewLayoutKey {
+        let mut key = MeshPipelineViewLayoutKey::empty();
+        if self.msaa_samples() > 1 {
+            key |= MeshPipelineViewLayoutKey::MULTISAMPLED;
+        }
+        if self.contains(TerrainPipelineFlags::DEPTH_PREPASS) {
+            key |= MeshPipelineViewLayoutKey::DEPTH_PREPASS;
+        }
+        if self.contains(TerrainPipelineFlags::NORMAL_PREPASS) {
+            key |= MeshPipelineViewLayoutKey::NORMAL_PREPASS;
+        }
+        if self.contains(TerrainPipelineFlags::MOTION_VECTOR_PREPASS) {
+            key |= MeshPipelineViewLayoutKey::MOTION_VECTOR_PREPASS;
+        }
+        if self.contains(TerrainPipelineFlags::DEFERRED_PREPASS) {
+            key |= MeshPipelineViewLayoutKey::DEFERRED_PREPASS;
+        }
+        key
+    }
+
     pub fn polygon_mode(&self) -> PolygonMode {
         match self.contains(TerrainPipelineFlags::WIREFRAME) {
             true => PolygonMode::Line,
@@ -247,8 +287,10 @@ impl TerrainPipelineFlags {
 /// The pipeline used to render the terrain entities.
 #[derive(Resource)]
 pub struct TerrainRenderPipeline<M: Material> {
-    pub(crate) view_layout: BindGroupLayoutDescriptor,
-    pub(crate) view_layout_multisampled: BindGroupLayoutDescriptor,
+    /// All possible mesh-view bind-group layouts (indexed by `MeshPipelineViewLayoutKey`),
+    /// so `specialize` can pick the one matching the view's MSAA + prepass state. Cheap to
+    /// hold — it's an `Arc` over the layout array, shared with Bevy's own mesh pipeline.
+    pub(crate) mesh_view_layouts: MeshPipelineViewLayouts,
     pub(crate) terrain_layout: BindGroupLayoutDescriptor,
     pub(crate) terrain_view_layout: BindGroupLayoutDescriptor,
     pub(crate) material_layout: BindGroupLayoutDescriptor,
@@ -267,14 +309,6 @@ pub fn init_terrain_render_pipeline<M: Material>(
     mesh_view_layouts: Res<MeshPipelineViewLayouts>,
     render_device: Res<RenderDevice>,
 ) {
-    let view_layout = mesh_view_layouts
-        .get_view_layout(MeshPipelineViewLayoutKey::empty())
-        .main_layout
-        .clone();
-    let view_layout_multisampled = mesh_view_layouts
-        .get_view_layout(MeshPipelineViewLayoutKey::MULTISAMPLED)
-        .main_layout
-        .clone();
     let material_layout = M::bind_group_layout_descriptor(&render_device);
 
     let vertex_shader = match M::vertex_shader() {
@@ -289,8 +323,7 @@ pub fn init_terrain_render_pipeline<M: Material>(
     };
 
     commands.insert_resource(TerrainRenderPipeline::<M> {
-        view_layout,
-        view_layout_multisampled,
+        mesh_view_layouts: mesh_view_layouts.clone(),
         terrain_layout: terrain_layout_descriptor(),
         terrain_view_layout: terrain_view_layout_descriptor(),
         material_layout,
@@ -309,13 +342,18 @@ where
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         let mut shader_defs = key.flags.shader_defs();
 
-        let mut layout = match key.flags.msaa_samples() {
-            1 => vec![self.view_layout.clone()],
-            _ => {
-                shader_defs.push("MULTISAMPLED".into());
-                vec![self.view_layout_multisampled.clone()]
-            }
-        };
+        if key.flags.msaa_samples() > 1 {
+            shader_defs.push("MULTISAMPLED".into());
+        }
+
+        // Pick the mesh-view layout that matches this view's MSAA + prepass state, so
+        // layout-0 agrees with the bind group `SetMeshViewBindGroup<0>` will bind.
+        let mut layout = vec![
+            self.mesh_view_layouts
+                .get_view_layout(key.flags.view_layout_key())
+                .main_layout
+                .clone(),
+        ];
 
         layout.push(self.terrain_layout.clone());
         layout.push(self.terrain_view_layout.clone());
@@ -405,7 +443,7 @@ pub(crate) type DrawTerrain = (
 /// class), looks up its material via [`RenderMaterialInstances`], filters to material type `M`,
 /// builds a [`TerrainPipelineKey`] from the view's MSAA + the (optional) [`DebugTerrain`] state,
 /// specializes the pipeline, and adds it to the phase as a non-mesh binned item.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn queue_terrain<M: Material>(
     draw_functions: Res<DrawFunctions<Opaque3d>>,
     debug: Option<Res<DebugTerrain>>,
@@ -416,7 +454,19 @@ pub(crate) fn queue_terrain<M: Material>(
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     gpu_tile_atlases: Res<TerrainComponents<GpuTileAtlas>>,
     render_material_instances: Res<RenderMaterialInstances>,
-    views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
+    views: Query<(
+        &ExtractedView,
+        &RenderVisibleEntities,
+        &Msaa,
+        // Prepass markers drive which mesh-view bind-group layout the view binds in the
+        // main pass; read them here (at queue time, like Bevy's own mesh pipeline) so the
+        // specialized terrain pipeline's layout-0 matches. `ViewPrepassTextures` isn't
+        // prepared until after Queue, so the markers are the correct source.
+        Has<DepthPrepass>,
+        Has<NormalPrepass>,
+        Has<MotionVectorPrepass>,
+        Has<DeferredPrepass>,
+    )>,
     change_tick: SystemChangeTick,
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
@@ -425,7 +475,16 @@ pub(crate) fn queue_terrain<M: Material>(
         return;
     };
 
-    for (view, visible_entities, msaa) in &views {
+    for (
+        view,
+        visible_entities,
+        msaa,
+        depth_prepass,
+        normal_prepass,
+        motion_vector_prepass,
+        deferred_prepass,
+    ) in &views
+    {
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -447,6 +506,19 @@ pub(crate) fn queue_terrain<M: Material>(
             };
 
             let mut flags = TerrainPipelineFlags::from_msaa_samples(msaa.samples());
+
+            if depth_prepass {
+                flags |= TerrainPipelineFlags::DEPTH_PREPASS;
+            }
+            if normal_prepass {
+                flags |= TerrainPipelineFlags::NORMAL_PREPASS;
+            }
+            if motion_vector_prepass {
+                flags |= TerrainPipelineFlags::MOTION_VECTOR_PREPASS;
+            }
+            if deferred_prepass {
+                flags |= TerrainPipelineFlags::DEFERRED_PREPASS;
+            }
 
             if gpu_tile_atlas.is_spherical {
                 flags |= TerrainPipelineFlags::SPHERICAL;

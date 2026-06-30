@@ -27,12 +27,11 @@ use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
-use thalos_terrain::TerrainFlatten;
 
 use crate::ground::body_material::ShadowCascadeBlock;
 use crate::ground::height_source::HeightSource;
 use crate::ground::rendered_height::TerrainPatchBasis;
-use crate::ground::scatter::placement_gate;
+use crate::ground::scatter::{ScatterClass, ScatterRegion, classify_scatter, placement_gate};
 use crate::ground::tile_lattice::{self, TileLattice, cube_dir};
 
 /// Nominal metric side of one grass tile at a cube-face centre. Toward face
@@ -49,14 +48,22 @@ const GRASS_SAMPLE_LOD_M: f32 = 0.5;
 /// density configs. Final blade count is this × `blades_per_clump`.
 const MAX_BLADES_PER_TILE: usize = 8192;
 
+/// Raised candidate ceiling for a **lawn** tile only. A lawn force-accepts every
+/// candidate (no gate thinning), so its placement spacing is what reads — a
+/// denser grid closes the gaps that look patchy. Scoped to lawn tiles (a small
+/// area near a base) so wild/far grass and their cost are untouched by the
+/// higher density.
+const MAX_LAWN_BLADES_PER_TILE: usize = 14336;
+
 /// Sink blade roots slightly below the sampled surface so bilinear
 /// height-mirror error can't leave a row of floating root quads.
 const ROOT_SINK_M: f64 = 0.03;
 
 // Altitude gate for grass density: fades out approaching the treeline (where
-// the terrain shader paints dry alpine scree).
-const GRASS_FADE_LO_M: f32 = 2400.0;
-const GRASS_FADE_HI_M: f32 = 3100.0;
+// the terrain shader paints grey alpine scree). Tracks the temperate treeline
+// (TREELINE_LO/HI ~2400–3000 m) so blades are gone before the scree takes over.
+const GRASS_FADE_LO_M: f32 = 2000.0;
+const GRASS_FADE_HI_M: f32 = 2700.0;
 
 // Fallback flat blade tint for the HeightSource-free standalone clump/field
 // preview assets. The in-game tiles colour per-clump from the shared
@@ -110,6 +117,146 @@ pub enum GrassBladeLod {
     Full,
     /// 3 vertices, flat triangle. Far rings, widened via `width_scale`.
     Wide,
+    /// **Clump card** — two crossed vertical quads (8 verts) for the *whole* clump
+    /// instead of a fountain of blades (~100 verts). The far/mid bands are
+    /// **vertex-bound** (the cost is blade vertex throughput, not fragment
+    /// overdraw — a depth prepass didn't help), so one billboard tuft per clump is
+    /// the lever there. The grass shader paints a procedural tuft alpha across the
+    /// card (`thalos::grass_displace::grass_tuft_alpha`) and discards the gaps, so
+    /// it reads as grass at distance; the card reuses the blade displacement (it
+    /// sways + fade-shrinks like a tall blade). See `docs/vegetation.md` §6.
+    Card,
+}
+
+/// The tunable *shape* of a grass clump — its **type**. Bundles the levers that
+/// decide whether grass reads short-and-fluffy or tall-and-wispy, so the in-game
+/// distribution can blend between named types per clump (long grass in some
+/// clumps, thick short grass in others) and the previews can dial them in.
+///
+/// A clump is a fountain tussock: blades root in a small disc and arch radially
+/// outward, drooping more toward the rim, so the tuft closes into a rounded
+/// fluffy dome. `droop`/`dome` shape that dome; `width_m`/`height_m` set the
+/// blade thickness and length; `blades_per_clump` sets how densely the tuft is
+/// packed (the primary fluffiness lever, since it multiplies coverage without
+/// re-paying the placement gate).
+#[derive(Clone, Copy, Debug)]
+pub struct GrassProfile {
+    /// Nominal blade length (m); a per-blade factor jitters around it. The
+    /// **length** lever.
+    pub height_m: f32,
+    /// Base blade width at the root (m); tapers to a point at the tip. The
+    /// **thickness** lever — fat blades read soft/fluffy, thin blades wispy.
+    pub width_m: f32,
+    /// Blades fanned per clump — the primary **fluffiness** lever. More blades
+    /// per accepted placement point thicken the tuft without re-paying the
+    /// (expensive) placement gate.
+    pub blades_per_clump: u32,
+    /// Footprint radius of the tuft (m); blade roots scatter within this disc.
+    pub radius_m: f32,
+    /// Outward fountain droop in `[0, 1]`: `0` = bolt-upright spikes, `1` = blades
+    /// arch strongly outward and bow over toward the rim — the rounded fluffy
+    /// dome. Graded by each blade's root radius, so rim blades droop most.
+    pub droop: f32,
+    /// Dome height taper in `[0, 1]`: how much shorter rim blades are than the
+    /// centre, rounding the tuft's top (`0` = flat-topped, `1` = strong dome).
+    pub dome: f32,
+}
+
+impl GrassProfile {
+    /// Manicured **lawn** clump — short, thick, tidy. The managed-ground cover
+    /// for spaceport/base terrain (see [`ScatterTreatment::Lawn`](crate::ground::scatter::ScatterTreatment)):
+    /// low and dense with many short, near-upright blades and only a gentle
+    /// dome, so a carpet of these tufts reads as kept grass rather than a wild
+    /// drooping meadow. Shorter than [`fluffy_short`](Self::fluffy_short) and far
+    /// less droopy.
+    pub const fn lawn() -> Self {
+        Self {
+            // A touch longer + fluffier than the first manicured cut: more blades
+            // arching off a wider footprint so neighbouring tufts overlap into a
+            // continuous soft carpet instead of reading as separated patches.
+            height_m: 0.16,
+            width_m: 0.027,
+            blades_per_clump: 30,
+            radius_m: 0.13,
+            droop: 0.42,
+            dome: 0.6,
+        }
+    }
+
+    /// Short, thick, very fluffy lawn/meadow clump — the soft dense reference
+    /// look. Many wide blades, a strong droopy dome. Bumped to a lawn-like blade
+    /// count + a wider footprint so wild tufts overlap into a continuous lush
+    /// carpet (the near ring is small, so the extra blades are affordable).
+    pub const fn fluffy_short() -> Self {
+        Self {
+            height_m: 0.26,
+            width_m: 0.036,
+            blades_per_clump: 28,
+            radius_m: 0.18,
+            droop: 0.80,
+            dome: 0.60,
+        }
+    }
+
+    /// Taller, thinner, more upright wispy/prairie clump. Narrow arching blades —
+    /// denser + a wider footprint now so the prairie reads full, not spiky/bald.
+    pub const fn wispy_tall() -> Self {
+        Self {
+            height_m: 0.58,
+            width_m: 0.016,
+            blades_per_clump: 20,
+            radius_m: 0.15,
+            droop: 0.32,
+            dome: 0.25,
+        }
+    }
+
+    /// Linear blend between two types — the per-clump distribution mixes the
+    /// body's `dry`/`lush` profiles by a `[0, 1]` factor. `blades_per_clump`
+    /// rounds to the nearest whole blade.
+    pub fn lerp(a: GrassProfile, b: GrassProfile, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let mix = |x: f32, y: f32| x + (y - x) * t;
+        Self {
+            height_m: mix(a.height_m, b.height_m),
+            width_m: mix(a.width_m, b.width_m),
+            blades_per_clump: mix(a.blades_per_clump as f32, b.blades_per_clump as f32).round()
+                as u32,
+            radius_m: mix(a.radius_m, b.radius_m),
+            droop: mix(a.droop, b.droop),
+            dome: mix(a.dome, b.dome),
+        }
+    }
+
+    /// Apply a clipmap ring's LOD scalars (constant-coverage rule): far rings
+    /// widen + lengthen blades and thin the tuft as per-blade density drops. The
+    /// footprint widens gently with the blades so a thinned wide tuft stays a
+    /// cohesive clump rather than isolated cards.
+    pub fn scaled(self, width_scale: f32, height_scale: f32, clump_scale: f32) -> Self {
+        Self {
+            height_m: self.height_m * height_scale,
+            width_m: self.width_m * width_scale,
+            blades_per_clump: ((self.blades_per_clump as f32 * clump_scale).round() as u32).max(1),
+            radius_m: self.radius_m * (0.7 + 0.3 * width_scale),
+            droop: self.droop,
+            dome: self.dome,
+        }
+    }
+}
+
+impl Default for GrassProfile {
+    /// A lush fluffy meadow clump — the new baseline (thicker, denser, and
+    /// droopier than the old spiky upright blades).
+    fn default() -> Self {
+        Self {
+            height_m: 0.34,
+            width_m: 0.024,
+            blades_per_clump: 14,
+            radius_m: 0.13,
+            droop: 0.55,
+            dome: 0.45,
+        }
+    }
 }
 
 /// Everything [`build_grass_tile_mesh`] needs, snapshotted by the game-side
@@ -123,22 +270,42 @@ pub struct GrassTileBuildInput {
     /// `height > sea_level + 1 m`. Pass `f32::MIN` for bodies without oceans.
     pub sea_level_m: f32,
     pub blades_per_m2: f32,
-    /// Blades emitted per accepted placement point — a fanned tuft. Multiplies
-    /// ground coverage *without* re-paying the placement gate (the expensive
-    /// part), so a sparse scatter reads as a thick field. Far rings use 1.
-    pub blades_per_clump: u32,
+    /// The two grass *types* this body's meadow blends between, per clump, by the
+    /// landcover moisture field: `profile_dry` on the drier ground, `profile_lush`
+    /// on the wetter. Both clipmap rings carry the same pair so the meadow reads
+    /// consistent across LOD; only the LOD scalars below differ per ring. This is
+    /// the "long grass in some clumps, thick short grass in others" lever.
+    pub profile_dry: GrassProfile,
+    pub profile_lush: GrassProfile,
     /// Blade geometry LOD for this clipmap ring.
     pub blade_lod: GrassBladeLod,
-    /// Width multiplier — coarser rings widen blades to hold ground coverage
-    /// as density drops.
+    /// Blade-width LOD multiplier — coarser rings widen blades to hold ground
+    /// coverage as per-blade density drops (the constant-coverage rule).
     pub width_scale: f32,
-    /// Height multiplier — far blades a touch taller so the field reads at
-    /// grazing angles.
+    /// Blade-height LOD multiplier — far blades a touch taller so the field reads
+    /// at grazing angles.
     pub height_scale: f32,
+    /// Blades-per-clump LOD multiplier in `(0, 1]` — far rings thin each tuft
+    /// (the profile's blade count × this), trading per-clump density for the
+    /// wider blades above so total coverage stays roughly constant.
+    pub clump_scale: f32,
     pub seed: u64,
-    /// Active terrain-flatten pad (e.g. the runway). Blades are skipped where
-    /// the pad has meaningful weight so they never poke through the paving.
-    pub flatten_exclusion: Option<TerrainFlatten>,
+    /// Building-terrain scatter footprints near this tile (the spaceport basin,
+    /// runway strip, launchpads, buildings, tanks). Resolved per candidate by
+    /// [`classify_scatter`]: blades are skipped under a clearing (paving), and
+    /// forced to a tidy [`lawn_profile`](Self::lawn_profile) cover (ignoring the
+    /// natural moisture/coverage gates) inside a lawn footprint. Empty off-base.
+    /// Cheaply shared (`Arc`) across every in-flight tile build in a frame.
+    pub scatter_regions: Arc<Vec<ScatterRegion>>,
+    /// The grass *type* forced inside a lawn footprint — short, thick, managed
+    /// (typically [`GrassProfile::lawn`]). Ring LOD scalars still apply.
+    pub lawn_profile: GrassProfile,
+    /// Placement-point density (per m²) inside a lawn, used in place of
+    /// `blades_per_m2` when the tile sits in a lawn footprint. Higher than the
+    /// wild density (the lawn force-accepts every point, so the spacing is what
+    /// shows), and capped by [`MAX_LAWN_BLADES_PER_TILE`] rather than the wild
+    /// ceiling. `0` falls back to `blades_per_m2`.
+    pub lawn_density_per_m2: f32,
     /// Far-ring forest cull strength in `[0, 1]`. Distant grass under a tree
     /// canopy is occluded by the trees in front of it, so the far clipmap rings
     /// thin grass by `forest_cull × forest_coverage(dir)` — full grass on open
@@ -179,8 +346,21 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
     let (u_lo, u_hi, v_lo, v_hi) = lattice.uv_span(input.key);
     let (ext_u_m, ext_v_m) = lattice.tile_extents_m(input.key, input.radius_m);
     let area_m2 = (ext_u_m * ext_v_m).max(0.0);
-    let candidate_count =
-        ((area_m2 * input.blades_per_m2 as f64).round() as usize).min(MAX_BLADES_PER_TILE);
+    // A lawn tile places at its (higher) lawn density under a raised ceiling, so
+    // the forced-full cover reads as a continuous carpet rather than a sparse
+    // grid of tufts. Decided from the tile centre; per-candidate classification
+    // below still clears any paving and grades the lawn edge.
+    let lawn_tile =
+        classify_scatter(&input.scatter_regions, center_dir) == ScatterClass::Lawn;
+    let (density, cap) = if lawn_tile {
+        (
+            input.lawn_density_per_m2.max(input.blades_per_m2),
+            MAX_LAWN_BLADES_PER_TILE,
+        )
+    } else {
+        (input.blades_per_m2, MAX_BLADES_PER_TILE)
+    };
+    let candidate_count = ((area_m2 * density as f64).round() as usize).min(cap);
     if candidate_count == 0 {
         return None;
     }
@@ -195,11 +375,14 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let v = v_lo + rng(1) * (v_hi - v_lo);
         let dir = cube_dir(input.key.face, u, v);
 
-        if let Some(flatten) = &input.flatten_exclusion
-            && flatten.weight(dir) > 0.05
-        {
-            continue;
-        }
+        // Building-terrain treatment: a clearing (paving / footprint) removes
+        // the blade outright; a lawn forces a tidy managed cover, bypassing the
+        // natural grassland/coverage gates below; off-base it's a no-op.
+        let lawn = match classify_scatter(&input.scatter_regions, dir) {
+            ScatterClass::Clear => continue,
+            ScatterClass::Lawn => true,
+            ScatterClass::Natural => false,
+        };
 
         // Shared placement gate: height, grass material-mask weight, slope, and
         // the body-fixed terrain normal — the same stencil the tile baker
@@ -217,19 +400,23 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let grass_w = sample.grass_w;
         let normal_body = sample.normal_body;
 
-        // Acceptance: keep (near-)all candidates on real grassland — the old
-        // `smoothstep(0.45, 0.8)` halved density even where the ground *is*
-        // grass, which is the main reason the field read sparse. We still reject
-        // rock/soil (grass_w low) and fade out toward the treeline.
-        let mut accept = smoothstep(0.20, 0.50, grass_w)
-            * (1.0 - smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h));
-        // Far rings cull grass under canopy — the trees occlude it, so the
-        // distant blades are pure overdraw. Near rings pass `forest_cull = 0`.
-        if input.forest_cull > 0.0 {
-            accept *= 1.0 - input.forest_cull * crate::ground::scatter::forest_coverage(dir);
-        }
-        if (rng(2) as f32) >= accept {
-            continue;
+        // Natural grassland gates — skipped inside a lawn, which is groomed grass
+        // by construction regardless of the underlying material/moisture field.
+        if !lawn {
+            // Acceptance: keep (near-)all candidates on real grassland — the old
+            // `smoothstep(0.45, 0.8)` halved density even where the ground *is*
+            // grass, which is the main reason the field read sparse. We still
+            // reject rock/soil (grass_w low) and fade out toward the treeline.
+            let mut accept = smoothstep(0.20, 0.50, grass_w)
+                * (1.0 - smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h));
+            // Far rings cull grass under canopy — the trees occlude it, so the
+            // distant blades are pure overdraw. Near rings pass `forest_cull = 0`.
+            if input.forest_cull > 0.0 {
+                accept *= 1.0 - input.forest_cull * crate::ground::scatter::forest_coverage(dir);
+            }
+            if (rng(2) as f32) >= accept {
+                continue;
+            }
         }
 
         // Shared landcover field — the SAME moisture→colour model the terrain
@@ -238,27 +425,43 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         // dry/bare patches the ground shows. Sampled only past the cheap gates
         // above; `coverage` is a keep-probability (research: coverage = a hash vs
         // the field), so plains stay full and the carpet breaks up where it dries.
+        // A lawn samples it only for the ground-matched colour — its coverage is
+        // forced full so the kept grass reads as a continuous manicured carpet.
         let landcover =
             crate::ground::landcover::sample_landcover(dir * (input.radius_m + h as f64), h);
-        if (rng(14) as f32) >= landcover.coverage {
+        // Floor the keep-probability so lush grassland stays a continuous carpet —
+        // the raw coverage dipped enough to read as bald patches in the fields. Only
+        // the genuinely dry/bare areas (coverage well below the floor) still thin.
+        if !lawn && (rng(14) as f32) >= landcover.coverage.max(0.85) {
             continue;
         }
 
-        // Per accepted point: emit one fountain tussock (the shared
-        // [`emit_grass_clump`] — same shape as the standalone clump/field and
-        // the preview), rooted on the surface in the tile's local tangent frame.
-        // Per-blade hue/value drift, the rounded normals, and the dark-AO→bright
-        // tip gradient all live in the emitter, so near grass matches the preview.
+        // Per accepted point: emit one fountain tussock of the clump's resolved
+        // grass *type* (the shared [`emit_grass_clump`] — same shape as the
+        // standalone clump/field and the preview), rooted on the surface in the
+        // tile's local tangent frame. Per-blade hue/value drift, the rounded
+        // normals, and the dark-AO→bright tip gradient live in the emitter, so
+        // near grass matches the preview.
         let clump_root_body = dir * (input.radius_m + h as f64 - ROOT_SINK_M);
         let origin = (clump_root_body - center_surface_body_m).as_vec3();
-        // Tuft spread grows gently with blade width so far (wide) clumps stay
-        // cohesive tufts rather than isolated cards.
-        let spread = (0.14 * input.width_scale as f64).clamp(0.10, 0.50) as f32;
 
         // Per-clump base colour from the landcover field (large-scale palette
         // variation that matches the terrain ground); the per-blade root→tip
         // gradient + hue drift in `push_grass_blade` sit on top.
         let band = landcover.veg_color;
+
+        // Grass *type* per clump. On a lawn every tuft is the one managed
+        // (short, thick) profile so the cover reads uniform; off-lawn, blend the
+        // body's two profiles by moisture so the meadow carries thick short grass
+        // on drier patches and longer wispy grass on wetter ones. Either way this
+        // ring's LOD scalars (width / height / clump density) then apply.
+        let base_profile = if lawn {
+            input.lawn_profile
+        } else {
+            let type_mix = smoothstep(-0.55, 0.55, landcover.moisture);
+            GrassProfile::lerp(input.profile_dry, input.profile_lush, type_mix)
+        };
+        let profile = base_profile.scaled(input.width_scale, input.height_scale, input.clump_scale);
 
         // Distinct per-clump RNG stream off the tile key + candidate index (the
         // emitter's internal blade key is fixed, so all per-tuft variation must
@@ -269,27 +472,25 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
             ^ (input.key.y as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
             ^ (blade as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
 
-        blade_count += emit_grass_clump(
-            &mut buf,
-            &ClumpSpec {
-                origin,
-                right: basis.tangent_x.as_vec3(),
-                up: normal_body.as_vec3(),
-                fwd: basis.tangent_z.as_vec3(),
-                color: band,
-                seed: clump_seed,
-                blade_count: input.blades_per_clump.max(1),
-                radius_m: spread,
-                // Nominal height ~0.40 m; the emitter jitters around it. Folds
-                // the ring's `height_scale` (far rings taller to read at grazing
-                // angles).
-                height_m: 0.40 * input.height_scale,
-                width_scale: input.width_scale,
-                lod: input.blade_lod,
-                // No baked lean — the wind shader animates near grass.
-                lean: Vec3::ZERO,
-            },
-        );
+        let spec = ClumpSpec {
+            origin,
+            right: basis.tangent_x.as_vec3(),
+            up: normal_body.as_vec3(),
+            fwd: basis.tangent_z.as_vec3(),
+            color: band,
+            seed: clump_seed,
+            profile,
+            lod: input.blade_lod,
+            // No baked lean — the wind shader animates near grass.
+            lean: Vec3::ZERO,
+        };
+        // Far/mid rings draw one cheap billboard tuft per clump (vertex-bound band);
+        // near rings draw the full fountain of blades.
+        blade_count += if input.blade_lod == GrassBladeLod::Card {
+            emit_grass_card(&mut buf, &spec)
+        } else {
+            emit_grass_clump(&mut buf, &spec)
+        };
     }
 
     if blade_count == 0 {
@@ -323,12 +524,9 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
 /// grass.
 #[derive(Clone, Copy)]
 pub struct GrassClumpParams {
-    /// Footprint radius of the tuft (m); blades scatter within this disc.
-    pub radius_m: f32,
-    /// Number of blades fanned in the tuft.
-    pub blade_count: u32,
-    /// Nominal blade height (m); a per-blade factor jitters around it.
-    pub height_m: f32,
+    /// The grass *type* — thickness, length, fluffiness, droop (see
+    /// [`GrassProfile`]).
+    pub profile: GrassProfile,
     /// Base blade colour (linear); a gentle per-blade hue/value drift applies
     /// around it, as in the tile builder. Use the terrain `C_GRASS` band so the
     /// clump matches the ground.
@@ -339,14 +537,7 @@ pub struct GrassClumpParams {
 impl Default for GrassClumpParams {
     fn default() -> Self {
         Self {
-            // A small but real footprint so blades root at distinct spots
-            // instead of all stacking at one point.
-            radius_m: 0.13,
-            // Dense but SEPARATED: an even sunflower spread of near-upright blades
-            // that touch without interpenetrating (vs the old 140-in-a-point mess
-            // where everything stabbed through the centre).
-            blade_count: 55,
-            height_m: 0.36,
+            profile: GrassProfile::default(),
             color: C_GRASS,
             seed: 0x6_8A55,
         }
@@ -370,10 +561,7 @@ pub fn build_grass_clump_mesh(params: &GrassClumpParams) -> Mesh {
             fwd: Vec3::Z,
             color: params.color,
             seed: params.seed,
-            blade_count: params.blade_count,
-            radius_m: params.radius_m,
-            height_m: params.height_m,
-            width_scale: 1.0,
+            profile: params.profile,
             lod: GrassBladeLod::Full,
             lean: Vec3::ZERO,
         },
@@ -401,6 +589,16 @@ struct GrassMeshBuf {
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
+    /// Per-vertex BLADE ROOT (tile-local position), shared by all verts of a
+    /// blade. Carried in the standard `ATTRIBUTE_TANGENT` slot (xyz; w unused) so
+    /// the shader's clipmap height-fade can shrink each blade *uniformly toward
+    /// its own root* instead of collapsing only the vertical component — which
+    /// flattened the blade's baked horizontal lean onto the ground (the "flat
+    /// triangle shards in the LOD cross-fade bands" artifact). Reusing a standard
+    /// attribute keeps Bevy's auto-generated vertex layout intact (a custom
+    /// attribute would force a layout override that breaks the prepass — see the
+    /// note in `tree_material::specialize`).
+    roots: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
@@ -414,6 +612,7 @@ impl GrassMeshBuf {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, self.roots);
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
     }
@@ -431,18 +630,15 @@ struct ClumpSpec {
     fwd: Vec3,
     color: Vec3,
     seed: u64,
-    blade_count: u32,
-    radius_m: f32,
-    height_m: f32,
-    /// Blade width multiplier (far LOD rings widen blades to hold coverage as
-    /// per-blade density drops). `1.0` for the hero clump/field.
-    width_scale: f32,
+    /// The resolved grass type for this clump (already LOD-scaled by the caller
+    /// via [`GrassProfile::scaled`] where it's part of a clipmap ring).
+    profile: GrassProfile,
     lod: GrassBladeLod,
     lean: Vec3,
 }
 
 /// Push a fountain tussock of blades around `spec.origin` into `buf`. Returns
-/// the number of blades emitted (always `spec.blade_count.max(1)`).
+/// the number of blades emitted (`spec.profile.blades_per_clump.max(1)`).
 fn emit_grass_clump(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
     // Synthetic tile key — placement-free, so any fixed key gives a stable
     // per-blade RNG stream off `spec.seed`.
@@ -451,8 +647,9 @@ fn emit_grass_clump(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
         x: 0,
         y: 0,
     };
-    let n = spec.blade_count.max(1);
-    let r = spec.radius_m.max(1.0e-3);
+    let p = spec.profile;
+    let n = p.blades_per_clump.max(1);
+    let r = p.radius_m.max(1.0e-3);
     let (right, up, fwd) = (spec.right, spec.up, spec.fwd);
 
     // Sunflower (phyllotaxis) placement: blades root on an even, well-separated
@@ -464,20 +661,28 @@ fn emit_grass_clump(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
     for blade in 0..n {
         let jit = |salt: u64| blade_hash(spec.seed, key, blade as u64, salt) as f32;
         let t = (blade as f32 + 0.5) / n as f32;
-        let rad = r * t.sqrt() * (0.86 + jit(12) * 0.26);
+        // `rf` = normalized root radius (0 centre → 1 rim); drives the fountain
+        // droop/dome so the tuft closes into a rounded mass.
+        let rf = t.sqrt();
+        let rad = r * rf * (0.86 + jit(12) * 0.26);
         let ang = blade as f32 * GOLDEN_ANGLE + (jit(13) - 0.5) * 0.7;
-        let root = spec.origin + (right * ang.cos() + fwd * ang.sin()) * rad;
+        // Outward (clump-radial) direction this blade arches along.
+        let outward = (right * ang.cos() + fwd * ang.sin()).normalize_or(right);
+        let root = spec.origin + outward * rad;
         push_grass_blade(
             buf,
             root,
-            right,
-            up,
-            fwd,
+            BladeFrame {
+                right,
+                up,
+                fwd,
+                outward,
+                rf,
+            },
             spec.color,
             spec.seed,
             blade as u64,
-            spec.height_m,
-            spec.width_scale,
+            &p,
             spec.lod,
             spec.lean,
         );
@@ -485,25 +690,82 @@ fn emit_grass_clump(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
     n
 }
 
-/// Emit one mostly-upright grass blade rooted at `root` in the (`right`, `up`,
-/// `fwd`) tangent frame (`up` = surface normal). The STATIC blade stays orderly
-/// — a small random lean + a gentle tip bow — so densely-packed neighbours touch
-/// without stabbing through each other; the in-game wind shader supplies the
-/// motion, so the resting geometry can stay separated. `seed` + `idx` drive the
-/// per-blade variation; `lean_comb` is an optional steady wind comb (metres of
-/// tip lean per unit height) for the dry-prairie look.
+/// Emit one grass **clump card**: two crossed vertical quads (8 verts, 12 indices)
+/// standing for the whole clump, instead of a fountain of blades (~100 verts) — the
+/// vertex-count cut the far/mid bands need. The card reuses the blade displacement:
+/// `uv.x` is the height fraction (so it sways at the top and fade-shrinks toward its
+/// base like a tall blade), `uv.y` is the across-card fraction, and `root.w = 1`
+/// marks it a CARD so the shader paints a procedural grass-tuft alpha across it and
+/// discards the gaps (`thalos::grass_displace::grass_tuft_alpha`). Lit with the
+/// terrain-up normal like the blades, so it matches the ground. Returns 1.
+fn emit_grass_card(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
+    let p = spec.profile;
+    let hw = (p.radius_m * 2.4).max(0.08); // wide patch — a slice of lawn, not a spike
+    let h = (p.height_m * 0.85).max(0.04); // short, so it reads as a carpet
+    let up = spec.up;
+    let base = spec.origin;
+    let tint = spec.color;
+    // Root = the card base; the fade shrinks the card toward it. w = 1 → CARD.
+    let root_attr = [base.x, base.y, base.z, 1.0];
+    // Two crossed quads (along `right` and `fwd`) so the tuft reads from any
+    // horizontal angle without per-frame billboarding.
+    for across in [spec.right, spec.fwd] {
+        let across = across.normalize_or(spec.right);
+        let start = buf.positions.len() as u32;
+        // BL, BR, TR, TL — uv = (height_frac, across_frac).
+        let corners = [
+            (base - across * hw, 0.0, 0.0),
+            (base + across * hw, 0.0, 1.0),
+            (base + across * hw + up * h, 1.0, 1.0),
+            (base - across * hw + up * h, 1.0, 0.0),
+        ];
+        for (pos, vfrac, ufrac) in corners {
+            buf.positions.push(pos.to_array());
+            buf.normals.push(up.to_array());
+            buf.uvs.push([vfrac, ufrac]);
+            buf.colors.push([tint.x, tint.y, tint.z, 1.0]);
+            buf.roots.push(root_attr);
+        }
+        buf.indices.extend_from_slice(&[
+            start,
+            start + 1,
+            start + 2,
+            start,
+            start + 2,
+            start + 3,
+        ]);
+    }
+    1
+}
+
+/// The tangent frame + fountain placement of one blade within its clump.
+struct BladeFrame {
+    right: Vec3,
+    up: Vec3,
+    fwd: Vec3,
+    /// Outward clump-radial direction this blade arches along.
+    outward: Vec3,
+    /// Normalized root radius within the clump: 0 centre → 1 rim.
+    rf: f32,
+}
+
+/// Emit one grass blade rooted at `root`, arching along its clump-radial
+/// direction so the tuft reads as a **fountain**: centre blades stand near
+/// upright (the dome's spire), rim blades arch outward and bow over (the soft
+/// fluffy edge), with their length tapered toward the rim so the top rounds off.
+/// The resting geometry stays separated (no interpenetration); the in-game wind
+/// shader supplies the motion. `seed` + `idx` drive the per-blade variation;
+/// `lean_comb` is an optional steady wind comb (metres of tip lean per unit
+/// height) for the dry-prairie look.
 #[allow(clippy::too_many_arguments)]
 fn push_grass_blade(
     buf: &mut GrassMeshBuf,
     root: Vec3,
-    right: Vec3,
-    up: Vec3,
-    fwd: Vec3,
+    frame: BladeFrame,
     color: Vec3,
     seed: u64,
     idx: u64,
-    height_m: f32,
-    width_scale: f32,
+    profile: &GrassProfile,
     lod: GrassBladeLod,
     lean_comb: Vec3,
 ) {
@@ -513,22 +775,35 @@ fn push_grass_blade(
         y: 0,
     };
     let rng = |salt: u64| blade_hash(seed, key, idx, salt) as f32;
+    let (right, up, fwd) = (frame.right, frame.up, frame.fwd);
+    let rf = frame.rf;
 
-    // Lean azimuth is random, but the lean ANGLE is small, so blades stay
-    // near-upright and roughly parallel and don't cross through one another.
-    let az = rng(2) * std::f32::consts::TAU;
-    let arch = (right * az.cos() + fwd * az.sin()).normalize_or(right);
+    // Arch direction = the blade's OUTWARD radial direction (so the tuft opens
+    // like a fountain), with a little azimuth jitter so the fan isn't a perfect
+    // star. The very centre blades (rf≈0) have no meaningful outward dir, so
+    // they take a random azimuth and stay near-upright — the spire of the dome.
+    let arch = if rf > 0.06 {
+        let jaz = (rng(2) - 0.5) * 1.1;
+        (Quat::from_axis_angle(up, jaz) * frame.outward).normalize_or(frame.outward)
+    } else {
+        let az = rng(2) * std::f32::consts::TAU;
+        (right * az.cos() + fwd * az.sin()).normalize_or(right)
+    };
 
-    let h = height_m * (0.80 + rng(3) * 0.40);
-    let lean = 0.04 + rng(4) * 0.12;
-    let bow = 0.10 + rng(10) * 0.16;
+    // Length: per-blade jitter, then the dome taper (rim blades shorter → the
+    // tuft's top rounds off instead of a flat brush).
+    let h = profile.height_m * (0.82 + rng(3) * 0.36) * (1.0 - profile.dome * rf * 0.45);
 
-    // Quadratic-Bézier centreline: rises nearly straight up, the tip easing out
-    // by `lean` and bowing forward by `bow`, staying tall so blades read upright.
-    let tip_out = h * (lean + bow * 0.5);
-    let tip_up = h * (0.99 - 0.12 * lean);
-    let ctrl_up = h * 0.60;
-    let ctrl_out = h * (lean * 0.30);
+    // Droop grows toward the rim: centre upright, rim arches out and bows over.
+    let d = profile.droop * (0.20 + 0.80 * rf);
+
+    // Quadratic-Bézier centreline. The control point lifts up and a touch out;
+    // the tip eases outward by `tip_out` and drops from vertical by `d` (the
+    // "over" of the fountain) — together a smooth arch filling the clump volume.
+    let tip_out = h * (0.10 + d * 0.95);
+    let tip_up = h * (1.0 - d * 0.60);
+    let ctrl_up = h * (0.62 - d * 0.12);
+    let ctrl_out = h * (d * 0.40);
     let p0 = root;
     let p1 = root + up * ctrl_up + arch * ctrl_out + lean_comb * (h * 0.35);
     let p2 = root + up * tip_up + arch * tip_out + lean_comb * (h * 1.0);
@@ -539,7 +814,7 @@ fn push_grass_blade(
     let twist = (rng(5) - 0.5) * 0.7;
     let side = (perp + up * (twist * 0.30)).normalize_or(perp);
 
-    let width_m = (0.018 + rng(6) * 0.016) * width_scale;
+    let width_m = profile.width_m * (0.78 + rng(6) * 0.50);
 
     // Tint: base palette + gentle per-blade hue/value drift.
     let hue = (rng(11) - 0.5) * 0.10;
@@ -597,11 +872,13 @@ fn push_curved_blade(
     let n_r = edge_n(1.0);
     let n_tip = (normal + face * 0.12).normalize_or(normal);
 
+    let root_attr = [p0.x, p0.y, p0.z, 0.0];
     let mut push = |pos: Vec3, sway: f32, lighten: f32, nrm: Vec3| {
         buf.positions.push(pos.to_array());
         buf.normals.push(nrm.to_array());
         buf.uvs.push([sway, phase]);
         buf.colors.push(color_at(lighten));
+        buf.roots.push(root_attr);
     };
     match lod {
         GrassBladeLod::Full => {
@@ -639,7 +916,9 @@ fn push_curved_blade(
                 base + 6,
             ]);
         }
-        GrassBladeLod::Wide => {
+        // `Card` clumps don't reach here (they route through `emit_grass_card`);
+        // fold into `Wide` defensively so the match stays exhaustive.
+        GrassBladeLod::Wide | GrassBladeLod::Card => {
             // 3 cross-sections (root, mid, tip) — a soft tuft card when widened.
             // Tip = 1.0 = the ground colour (see the Full arm), so far clumps
             // fade into the matching terrain albedo with no brightness seam.
@@ -679,12 +958,9 @@ pub struct GrassFieldParams {
     pub size_m: f32,
     /// Clump (placement-point) density per m².
     pub clumps_per_m2: f32,
-    /// Blades fanned per clump.
-    pub blades_per_clump: u32,
-    /// Footprint radius of each clump, metres.
-    pub clump_radius_m: f32,
-    /// Nominal blade height, metres.
-    pub height_m: f32,
+    /// The grass *type* every clump in the field is built from (see
+    /// [`GrassProfile`]).
+    pub profile: GrassProfile,
     /// Base blade colour (linear).
     pub color: Vec3,
     /// Steady "windswept" comb toward `+X`, as a fraction of blade height the
@@ -692,22 +968,25 @@ pub struct GrassFieldParams {
     /// those); a positive value bakes the dry-prairie wind lean into the mesh.
     pub wind_lean: f32,
     pub seed: u64,
+    /// Blade geometry LOD: `Full`/`Wide` build a fountain of blades per clump;
+    /// `Card` builds one crossed-quad billboard tuft per clump (the far-band
+    /// representation) — set this to preview the clump-card look.
+    pub lod: GrassBladeLod,
 }
 
 impl Default for GrassFieldParams {
     fn default() -> Self {
         Self {
-            // Distinct tufts, spaced so they just touch (≈0.25 m apart, ≈0.22 m
-            // wide) — a dense field of SEPARATED clumps, not a merged mass. Each
-            // tuft's blades are sunflower-spread so they don't interpenetrate.
+            // Dense fluffy meadow: overlapping fountain tufts whose droopy domes
+            // close into a continuous soft mass (the reference look), not a spray
+            // of separated spikes.
             size_m: 5.0,
-            clumps_per_m2: 16.0,
-            blades_per_clump: 14,
-            clump_radius_m: 0.11,
-            height_m: 0.34,
+            clumps_per_m2: 22.0,
+            profile: GrassProfile::default(),
             color: C_GRASS,
             wind_lean: 0.0,
             seed: 0x47_1E_1D,
+            lod: GrassBladeLod::Full,
         }
     }
 }
@@ -731,24 +1010,23 @@ pub fn build_grass_field_mesh(params: &GrassFieldParams) -> Mesh {
         let rng = |salt: u64| blade_hash(params.seed ^ 0x0091_513D, key, c as u64, salt) as f32;
         let x = (rng(0) - 0.5) * params.size_m;
         let z = (rng(1) - 0.5) * params.size_m;
-        emit_grass_clump(
-            &mut buf,
-            &ClumpSpec {
-                origin: Vec3::new(x, 0.0, z),
-                right: Vec3::X,
-                up: Vec3::Y,
-                fwd: Vec3::Z,
-                color: params.color,
-                // Distinct per-clump RNG stream so neighbouring clumps differ.
-                seed: params.seed ^ (c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-                blade_count: params.blades_per_clump,
-                radius_m: params.clump_radius_m,
-                height_m: params.height_m,
-                width_scale: 1.0,
-                lod: GrassBladeLod::Full,
-                lean,
-            },
-        );
+        let spec = ClumpSpec {
+            origin: Vec3::new(x, 0.0, z),
+            right: Vec3::X,
+            up: Vec3::Y,
+            fwd: Vec3::Z,
+            color: params.color,
+            // Distinct per-clump RNG stream so neighbouring clumps differ.
+            seed: params.seed ^ (c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            profile: params.profile,
+            lod: params.lod,
+            lean,
+        };
+        if params.lod == GrassBladeLod::Card {
+            emit_grass_card(&mut buf, &spec);
+        } else {
+            emit_grass_clump(&mut buf, &spec);
+        }
     }
     buf.into_mesh()
 }
@@ -855,6 +1133,9 @@ impl Material for GrassMaterial {
     }
 
     fn alpha_mode(&self) -> AlphaMode {
+        // Opaque with a fragment `discard` on the far clump cards (KSP-style): the
+        // main opaque pass writes depth where the tuft alpha passes, so cards occlude
+        // correctly without a transparent sort. Blades have no discard.
         AlphaMode::Opaque
     }
 
@@ -864,7 +1145,7 @@ impl Material for GrassMaterial {
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        // Blades are single-card strips seen from both sides.
+        // Blades / cards are single strips seen from both sides.
         descriptor.primitive.cull_mode = None;
         Ok(())
     }
@@ -923,12 +1204,16 @@ mod tests {
             radius_m,
             sea_level_m: 0.0,
             blades_per_m2: 4.0,
-            blades_per_clump: 4,
+            profile_dry: GrassProfile::fluffy_short(),
+            profile_lush: GrassProfile::wispy_tall(),
             blade_lod: GrassBladeLod::Full,
             width_scale: 1.0,
             height_scale: 1.0,
+            clump_scale: 1.0,
             seed: 7,
-            flatten_exclusion: None,
+            scatter_regions: Arc::new(Vec::new()),
+            lawn_profile: GrassProfile::lawn(),
+            lawn_density_per_m2: 22.0,
             forest_cull: 0.0,
         };
         let a = build_grass_tile_mesh(&input).expect("flat land grows grass");
@@ -954,14 +1239,84 @@ mod tests {
             radius_m: 3_186_000.0,
             sea_level_m: 0.0,
             blades_per_m2: 4.0,
-            blades_per_clump: 4,
+            profile_dry: GrassProfile::fluffy_short(),
+            profile_lush: GrassProfile::wispy_tall(),
             blade_lod: GrassBladeLod::Full,
             width_scale: 1.0,
             height_scale: 1.0,
+            clump_scale: 1.0,
             seed: 7,
-            flatten_exclusion: None,
+            scatter_regions: Arc::new(Vec::new()),
+            lawn_profile: GrassProfile::lawn(),
+            lawn_density_per_m2: 22.0,
             forest_cull: 0.0,
         };
         assert!(build_grass_tile_mesh(&input).is_none());
+    }
+
+    #[test]
+    fn clearing_suppresses_grass_lawn_forces_it() {
+        use crate::ground::scatter::{ScatterRegion, ScatterTreatment};
+        use thalos_terrain::TerrainFlatten;
+
+        let radius_m = 3_186_000.0;
+        let tiles_per_side = 255_000;
+        let key = grass_tile_key(DVec3::new(0.2, 0.3, 0.93).normalize(), tiles_per_side);
+        let lattice = TileLattice { tiles_per_side };
+        let (center_dir, basis) = lattice.frame(key).unwrap();
+
+        let input = |regions: Vec<ScatterRegion>| GrassTileBuildInput {
+            key,
+            tiles_per_side,
+            height_source: Arc::new(ConstantHeightSource::new(2000.0)),
+            radius_m,
+            sea_level_m: 0.0,
+            blades_per_m2: 4.0,
+            profile_dry: GrassProfile::fluffy_short(),
+            profile_lush: GrassProfile::wispy_tall(),
+            blade_lod: GrassBladeLod::Full,
+            width_scale: 1.0,
+            height_scale: 1.0,
+            clump_scale: 1.0,
+            seed: 7,
+            scatter_regions: Arc::new(regions),
+            lawn_profile: GrassProfile::lawn(),
+            lawn_density_per_m2: 22.0,
+            forest_cull: 0.0,
+        };
+
+        // A footprint comfortably larger than one tile, centred on it, so every
+        // candidate falls well inside it.
+        let region = |treatment| ScatterRegion {
+            footprint: TerrainFlatten::new(
+                center_dir,
+                basis.tangent_x,
+                basis.tangent_z,
+                500.0,
+                500.0,
+                50.0,
+                2000.0,
+                radius_m,
+            ),
+            treatment,
+        };
+
+        // A clearing over the whole tile removes every blade (paving/footprint).
+        assert!(build_grass_tile_mesh(&input(vec![region(ScatterTreatment::Clear)])).is_none());
+
+        // A lawn over the same tile still grows a full carpet (forced cover).
+        let lawn = build_grass_tile_mesh(&input(vec![region(ScatterTreatment::Lawn)]))
+            .expect("lawn grows grass");
+        assert!(lawn.blade_count > 0);
+
+        // A clearing wins over a co-located lawn (a building on the lawn clears
+        // the grass under it), regardless of region order.
+        assert!(
+            build_grass_tile_mesh(&input(vec![
+                region(ScatterTreatment::Lawn),
+                region(ScatterTreatment::Clear),
+            ]))
+            .is_none()
+        );
     }
 }

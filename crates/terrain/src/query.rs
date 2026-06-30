@@ -276,7 +276,12 @@ impl SurfaceQuery for SurfaceRef<'_> {
 ///
 /// The pad is defined in the body-fixed frame: a rectangle of half-extents
 /// `(half_along_m, half_across_m)` on the tangent plane at `center_dir`, raised
-/// (or cut) to the constant elevation `elevation_m` above the reference radius.
+/// (or cut) to the **flat tangent plane** through `center_dir` at radial height
+/// `elevation_m` — a true plane, not a constant-radius spherical cap (see
+/// [`Self::plane_elevation_m`]). A flat pad matters at scale: anything built on
+/// the same footprint as a flat plane (e.g. the runway's flat asphalt slab and
+/// collider) stays coplanar with the ground, instead of the flat strip floating
+/// off a curved cap by the curvature drop (~1 m at the end of a 5 km runway).
 /// Outside the rectangle the flatten smoothstep-blends back to the natural
 /// terrain over `ramp_m` metres, so there is no cliff at the pad edge.
 ///
@@ -298,7 +303,10 @@ pub struct TerrainFlatten {
     pub half_across_m: f64,
     /// Width of the blend-to-terrain ramp outside the flat region, metres.
     pub ramp_m: f64,
-    /// Constant height (m above the reference radius) the pad is flattened to.
+    /// Radial height (m above the reference radius) of the pad **at its centre**.
+    /// Away from the centre the pad follows the flat tangent plane through this
+    /// point, so the level it flattens to is [`Self::plane_elevation_m`], not a
+    /// constant `elevation_m` everywhere.
     pub elevation_m: f64,
     /// Body reference radius (m), used to convert directions to tangent-plane
     /// offsets.
@@ -361,6 +369,26 @@ impl TerrainFlatten {
         }
         let t = 1.0 - dist / self.ramp_m;
         t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Radial height (m above the reference radius) of the **flat tangent plane**
+    /// the pad levels to, at body-fixed unit direction `dir`.
+    ///
+    /// The pad is a true flat plane — the tangent plane at `center_dir`, at
+    /// radial height `elevation_m` directly above the centre — not a
+    /// constant-radius spherical cap. A terrain point rendered at this radial
+    /// height lands exactly on that plane, so the flattened ground stays coplanar
+    /// with anything else built flat over the same footprint (the runway's flat
+    /// asphalt slab, collider, and parked-craft rest pose). Away from the centre
+    /// it rises above `elevation_m` by the curvature drop (~1 m at the end of a
+    /// 5 km pad on a 3,186 km body) — exactly the gap that left the flat runway
+    /// floating above a constant-`elevation_m` cap.
+    pub fn plane_elevation_m(&self, dir: DVec3) -> f64 {
+        // The plane is `{ P : P·center_dir = radius_m + elevation_m }`. A point in
+        // direction `dir` at radial height `h` has `P = dir·(radius_m + h)`, so
+        // `(radius_m + h)·cosθ = radius_m + elevation_m` where `cosθ = dir·center_dir`.
+        let cos_theta = dir.dot(self.center_dir).max(1e-6);
+        (self.radius_m + self.elevation_m) / cos_theta - self.radius_m
     }
 }
 
@@ -434,7 +462,11 @@ impl FlattenedSurface {
             let w = region.flatten.weight(dir);
             if w > best_w {
                 best_w = w;
-                best_elev = region.flatten.elevation_m;
+                // The flat *tangent plane* level at `dir`, not the constant centre
+                // `elevation_m` — so the levelled ground is parallel to (and a
+                // uniform asphalt-lift below) the flat runway slab built on it,
+                // instead of a curved cap the flat strip floats above.
+                best_elev = region.flatten.plane_elevation_m(dir);
             }
         }
         if best_w <= 0.0 {

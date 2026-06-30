@@ -53,15 +53,20 @@ use bevy::render::{
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
+use std::sync::Arc;
+
 use thalos_body_render::{
-    BakeParams, CanopyStyle, GrassClumpParams, GrassFieldParams, GrassMaterial, GrassMaterialPlugin,
-    GrassParams, GroundPatchMaterial, GroundPatchMaterialPlugin, IMPOSTOR_MAX_SPECIES,
-    ImpostorAtlasLayout, ImpostorParams, LIGHT_AT_1AU, ShadowCascadeBlock, TreeBakeMaterial,
-    TreeImpostorMaterial, TreeImpostorMaterialPlugin, TreeMaterial, TreeMaterialPlugin,
-    TreeMeshParams, VegInstance, build_foliage_atlas, build_foliage_material_atlas,
-    build_grass_clump_mesh, build_grass_field_mesh, build_tree_mesh, build_tree_mesh_data,
-    combine_impostor_tile_mesh, fallback_shadow_map, hemioct_decode, impostor_bake_rotation,
-    make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
+    BakeParams, CanopyStyle, GrassBladeLod, GrassClumpParams, GrassFieldParams, GrassMaterial,
+    GrassMaterialPlugin,
+    GrassParams, GrassProfile, GroundPatchMaterial, GroundPatchMaterialPlugin, IMPOSTOR_MAX_SPECIES,
+    ImpostorAtlasLayout, ImpostorParams, LIGHT_AT_1AU, RockMaterial, RockMaterialPlugin,
+    RockMeshData, RockMeshParams, ShadowCascadeBlock, TreeBakeMaterial, TreeImpostorMaterial,
+    TreeImpostorMaterialPlugin, TreeMaterial, TreeMaterialPlugin, TreeMeshParams, VegInstance,
+    build_foliage_atlas, build_foliage_material_atlas, build_grass_clump_mesh,
+    build_grass_field_mesh, build_rock_mesh, build_rock_mesh_data, build_tree_mesh,
+    build_tree_mesh_data, combine_impostor_tile_mesh, combine_rock_tile_mesh, fallback_shadow_map,
+    hemioct_decode, impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh,
+    tree_bounding_sphere,
 };
 
 const WIDTH: u32 = 1280;
@@ -74,12 +79,31 @@ const DWELL: u32 = 8;
 const TAIL: u32 = 24;
 const OUT_DIR: &str = "tools/preview/out";
 const OBJECT_SPACING: f32 = 40.0;
+/// Side length (m) of the scattered-pebble field diorama.
+const ROCK_FIELD_SIZE_M: f32 = 4.0;
 
 /// Sun direction (toward the star) shared by every object, so they light exactly
 /// like the game's vegetation. A side-key at ~36° elevation, offset well to the
 /// camera's side so it rakes form across the objects and throws their cast
 /// shadows *across* the visible ground rather than hiding them behind the plant.
 const SUN_DIR: Vec3 = Vec3::new(0.62, 0.46, -0.05);
+
+/// Resolve the diorama sun direction. Defaults to [`SUN_DIR`]; overridable for
+/// time-of-day experiments via `THALOS_PREVIEW_SUN_ELEV_DEG` (sun elevation in
+/// degrees, keeping the same horizontal azimuth) — e.g. `=85` puts the sun near
+/// the substellar noon overhead to reproduce the "washed-out at noon" surface.
+fn preview_sun_dir() -> Vec3 {
+    if let Ok(raw) = std::env::var("THALOS_PREVIEW_SUN_ELEV_DEG")
+        && let Ok(elev_deg) = raw.trim().parse::<f32>()
+    {
+        let elev = elev_deg.to_radians();
+        // Preserve the committed azimuth (mostly +X, slightly −Z) so shadows
+        // still rake across the visible ground.
+        let horiz = Vec3::new(SUN_DIR.x, 0.0, SUN_DIR.z).normalize_or_zero();
+        return (horiz * elev.cos() + Vec3::Y * elev.sin()).normalize();
+    }
+    SUN_DIR.normalize()
+}
 /// Surface sun flux in the same units the terrain `SceneLighting` carries. The
 /// game's exposure gain keeps the surface value ~`LIGHT_AT_1AU` regardless of the
 /// body's orbital distance (`rendering::lighting`), so that's the value here.
@@ -146,6 +170,7 @@ fn main() {
         TreeImpostorMaterialPlugin,
         GrassMaterialPlugin,
         GroundPatchMaterialPlugin,
+        RockMaterialPlugin,
         PreviewShadowPlugin,
     ))
     .run();
@@ -165,6 +190,11 @@ enum AssetKind {
     TreeImpostor,
     GrassClump(GrassClumpParams),
     GrassField(GrassFieldParams),
+    /// A single procedural pebble / rock (`RockMaterial`), for shape iteration.
+    Rock(RockMeshParams),
+    /// A scattered patch of mixed pebbles among grass — the in-game look, where
+    /// the stones get partly covered by the blades.
+    RockField,
 }
 
 /// Camera angle a preview is framed from.
@@ -194,6 +224,10 @@ impl Preview {
     fn patch_size_m(&self) -> f32 {
         match self.kind {
             AssetKind::Tree(_) | AssetKind::TreeImpostor => (self.distance * 1.8).clamp(6.0, 24.0),
+            // A single pebble wants only a small ground tile under it; the field
+            // wants the whole scattered patch.
+            AssetKind::Rock(_) => (self.distance * 1.6).clamp(1.0, 6.0),
+            AssetKind::RockField => ROCK_FIELD_SIZE_M,
             _ => (self.distance * 2.4).clamp(3.0, 40.0),
         }
     }
@@ -305,22 +339,98 @@ fn objects() -> Vec<Preview> {
             name: "grass_clump_top",
             kind: AssetKind::GrassClump(clump),
             view: ViewKind::Top,
-            focus_y: clump.height_m * 0.45,
+            focus_y: clump.profile.height_m * 0.45,
             distance: 1.6,
         },
         Preview {
             name: "grass_clump_side",
             kind: AssetKind::GrassClump(clump),
             view: ViewKind::Side,
-            focus_y: clump.height_m * 0.5,
+            focus_y: clump.profile.height_m * 0.5,
             distance: 1.6,
         },
         Preview {
             name: "grass_clump_3q",
             kind: AssetKind::GrassClump(clump),
             view: ViewKind::ThreeQuarter,
-            focus_y: clump.height_m * 0.5,
+            focus_y: clump.profile.height_m * 0.5,
             distance: 1.5,
+        },
+        // The two named grass *types* the in-game distribution blends between,
+        // side-on so thickness/length/fluffiness read directly: short & thick &
+        // fluffy vs. tall & thin & wispy.
+        {
+            let c = GrassClumpParams {
+                profile: GrassProfile::fluffy_short(),
+                ..GrassClumpParams::default()
+            };
+            Preview {
+                name: "grass_clump_fluffy_short",
+                kind: AssetKind::GrassClump(c),
+                view: ViewKind::Side,
+                focus_y: GrassProfile::fluffy_short().height_m * 0.5,
+                distance: 1.3,
+            }
+        },
+        {
+            let c = GrassClumpParams {
+                profile: GrassProfile::wispy_tall(),
+                ..GrassClumpParams::default()
+            };
+            Preview {
+                name: "grass_clump_wispy_tall",
+                kind: AssetKind::GrassClump(c),
+                view: ViewKind::Side,
+                focus_y: GrassProfile::wispy_tall().height_m * 0.5,
+                distance: 2.0,
+            }
+        },
+        {
+            // The spaceport-lawn type: short, thick, near-upright. The managed
+            // ground cover forced inside a base's `ScatterTreatment::Lawn`
+            // footprint (`GRASS_PROFILE_LAWN` in `game::rendering::grass`).
+            let c = GrassClumpParams {
+                profile: GrassProfile::lawn(),
+                ..GrassClumpParams::default()
+            };
+            Preview {
+                name: "grass_clump_lawn",
+                kind: AssetKind::GrassClump(c),
+                view: ViewKind::Side,
+                focus_y: GrassProfile::lawn().height_m * 0.5,
+                distance: 0.9,
+            }
+        },
+        {
+            // A carpet of the lawn type — the spaceport ground from a grazing
+            // eye-line (`_3q`) and from overhead (`_top`). Higher clump density
+            // since each lawn tuft is small; reads as kept turf, not wild meadow.
+            let field = GrassFieldParams {
+                profile: GrassProfile::lawn(),
+                clumps_per_m2: 40.0,
+                ..GrassFieldParams::default()
+            };
+            Preview {
+                name: "grass_field_lawn_3q",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::ThreeQuarter,
+                focus_y: field.profile.height_m * 0.5,
+                distance: 2.6,
+            }
+        },
+        {
+            let field = GrassFieldParams {
+                profile: GrassProfile::lawn(),
+                clumps_per_m2: 40.0,
+                ..GrassFieldParams::default()
+            };
+            Preview {
+                name: "grass_field_lawn_top",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::Top,
+                focus_y: 0.0,
+                distance: 3.2,
+            }
         },
         // A field of fountain clumps — the real test of "fluffy" and "looks good
         // from above". `_top` is the aerial regime (aircraft overhead), `_3q` a
@@ -341,7 +451,7 @@ fn objects() -> Vec<Preview> {
                 name: "grass_field_3q",
                 kind: AssetKind::GrassField(field),
                 view: ViewKind::ThreeQuarter,
-                focus_y: field.height_m * 0.5,
+                focus_y: field.profile.height_m * 0.5,
                 distance: 4.0,
             }
         },
@@ -351,27 +461,199 @@ fn objects() -> Vec<Preview> {
                 name: "grass_field_side",
                 kind: AssetKind::GrassField(field),
                 view: ViewKind::Side,
-                focus_y: field.height_m * 0.55,
+                focus_y: field.profile.height_m * 0.55,
                 distance: 3.0,
             }
         },
         {
-            // Dry windswept prairie: golden straw colour + a baked wind lean.
+            // Dry windswept prairie: golden straw colour, the taller wispy type,
+            // and a baked wind lean.
             let field = GrassFieldParams {
                 color: Vec3::new(0.150, 0.115, 0.034),
                 wind_lean: 0.45,
-                height_m: 0.42,
+                profile: GrassProfile::wispy_tall(),
                 ..GrassFieldParams::default()
             };
             Preview {
                 name: "grass_field_dry_3q",
                 kind: AssetKind::GrassField(field),
                 view: ViewKind::ThreeQuarter,
-                focus_y: field.height_m * 0.5,
+                focus_y: field.profile.height_m * 0.5,
                 distance: 4.0,
             }
         },
+        {
+            // Clump-CARD field: the far/mid-band billboard tuft representation (one
+            // crossed-quad pair per clump with a procedural tuft alpha) — the
+            // vertex-cheap LOD. Lower density (cards are wider) + a far-ring profile.
+            let field = GrassFieldParams {
+                // In-game far-ring density, so the from-distance coverage reads true.
+                clumps_per_m2: 2.5,
+                profile: GrassProfile::default().scaled(2.8, 1.2, 1.0),
+                lod: GrassBladeLod::Card,
+                ..GrassFieldParams::default()
+            };
+            Preview {
+                name: "grass_field_card_far",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::ThreeQuarter,
+                focus_y: 0.5,
+                // Far back: the cards are a 160 m+ distance LOD, so judge them at
+                // distance (the 4 m close-up is the wrong test). Patch auto-sizes to
+                // ~40 m, so the field recedes from ~25 m to ~65 m here.
+                distance: 45.0,
+            }
+        },
+        // --- Rocks / pebbles ---
+        // A single stylized pebble, framed close from three-quarter + side so the
+        // plane-cut facets, sharp edges, and baked cavity-AO read.
+        Preview {
+            name: "pebble_3q",
+            kind: AssetKind::Rock(pebble()),
+            view: ViewKind::ThreeQuarter,
+            focus_y: 0.06,
+            distance: 0.85,
+        },
+        Preview {
+            name: "pebble_side",
+            kind: AssetKind::Rock(pebble()),
+            view: ViewKind::Side,
+            focus_y: 0.07,
+            distance: 0.85,
+        },
+        // A bigger, blockier, more heavily-faceted stone (angular boulder).
+        Preview {
+            name: "rock_angular",
+            kind: AssetKind::Rock(RockMeshParams {
+                radius_m: 0.34,
+                axes: Vec3::new(1.0, 0.74, 0.9),
+                cuts: 18,
+                cut_depth: (0.66, 0.95),
+                color: Vec3::new(0.46, 0.44, 0.42),
+                seed: 0x9A_17_03,
+                subdivisions: 3,
+                ..RockMeshParams::default()
+            }),
+            view: ViewKind::ThreeQuarter,
+            focus_y: 0.12,
+            distance: 1.2,
+        },
+        // The in-game look: a scattered patch of mixed pebbles in a meadow, so
+        // the grass partly covers the smaller stones (`pebbles among grass`).
+        Preview {
+            name: "rock_field_3q",
+            kind: AssetKind::RockField,
+            view: ViewKind::ThreeQuarter,
+            focus_y: 0.05,
+            distance: 2.2,
+        },
+        Preview {
+            name: "rock_field_top",
+            kind: AssetKind::RockField,
+            view: ViewKind::Top,
+            focus_y: 0.0,
+            distance: 2.2,
+        },
     ]
+}
+
+/// A representative small, plane-cut faceted, light pebble for the single-stone
+/// shots (matches the dominant in-game species, at hero tessellation).
+fn pebble() -> RockMeshParams {
+    RockMeshParams {
+        radius_m: 0.11,
+        axes: Vec3::new(1.0, 0.60, 0.84),
+        color: Vec3::new(0.50, 0.47, 0.42),
+        seed: 0x7E_BB_1E,
+        subdivisions: 3,
+        ..RockMeshParams::default()
+    }
+}
+
+/// The small library of pebble species the scattered field mixes — small,
+/// faceted, light natural stone, the same as the game driver scatters (mostly
+/// small chips; the field samples them ~uniformly, so most entries are small).
+fn rock_field_species() -> Vec<RockMeshParams> {
+    let base = RockMeshParams {
+        subdivisions: 2,
+        ..RockMeshParams::default()
+    };
+    vec![
+        RockMeshParams {
+            radius_m: 0.050,
+            axes: Vec3::new(1.0, 0.62, 0.86),
+            color: Vec3::new(0.50, 0.47, 0.42),
+            seed: 0x11,
+            subdivisions: 1,
+            cuts: 8,
+            ..base
+        },
+        RockMeshParams {
+            radius_m: 0.075,
+            axes: Vec3::new(1.0, 0.58, 0.82),
+            color: Vec3::new(0.52, 0.46, 0.37),
+            seed: 0x12,
+            ..base
+        },
+        RockMeshParams {
+            radius_m: 0.11,
+            axes: Vec3::new(1.0, 0.58, 0.84),
+            color: Vec3::new(0.44, 0.45, 0.47),
+            seed: 0x22,
+            ..base
+        },
+        RockMeshParams {
+            radius_m: 0.16,
+            axes: Vec3::new(1.0, 0.60, 0.88),
+            color: Vec3::new(0.48, 0.45, 0.41),
+            seed: 0x33,
+            ..base
+        },
+        RockMeshParams {
+            radius_m: 0.24,
+            axes: Vec3::new(1.0, 0.70, 0.90),
+            color: Vec3::new(0.46, 0.44, 0.42),
+            seed: 0x44,
+            cuts: 16,
+            ..base
+        },
+    ]
+}
+
+/// Build the scattered-pebble field as one batched mesh (the same combiner the
+/// game uses), via a small deterministic hashed scatter over the patch.
+fn rock_field_mesh() -> Mesh {
+    let species: Vec<Option<Arc<RockMeshData>>> = rock_field_species()
+        .iter()
+        .map(|p| Some(Arc::new(build_rock_mesh_data(p))))
+        .collect();
+
+    let half = ROCK_FIELD_SIZE_M * 0.5 - 0.2;
+    let n = 80usize;
+    let h = |i: usize, salt: u64| -> f32 {
+        let mut x = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt.wrapping_mul(0xD1B5_4A32);
+        x ^= x >> 31;
+        x = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        x ^= x >> 29;
+        (x & 0xFFFFFF) as f32 / 0xFFFFFF as f32
+    };
+    let mut instances = Vec::with_capacity(n);
+    for i in 0..n {
+        let species_idx = (h(i, 0x5) * species.len() as f32) as u16;
+        instances.push(VegInstance {
+            species: species_idx.min(species.len() as u16 - 1),
+            root_offset_body_m: Vec3::new(
+                (h(i, 0x1) * 2.0 - 1.0) * half,
+                0.0,
+                (h(i, 0x2) * 2.0 - 1.0) * half,
+            ),
+            up_body: Vec3::Y,
+            yaw: h(i, 0x3) * std::f32::consts::TAU,
+            scale: 0.7 + 0.8 * h(i, 0x4),
+            tilt: h(i, 0x6) * 0.5,
+        });
+    }
+    combine_rock_tile_mesh(&instances, &species).unwrap_or_else(|| build_rock_mesh(&pebble()))
 }
 
 /// The placed objects, shared by the camera/capture/orbit systems.
@@ -387,6 +669,7 @@ struct DioramaMaterials {
     ground: Handle<GroundPatchMaterial>,
     grass: Handle<GrassMaterial>,
     tree: Handle<TreeMaterial>,
+    rock: Handle<RockMaterial>,
 }
 
 /// World focus point of object `i` (its spot along +X at its framing height).
@@ -420,7 +703,7 @@ fn frame_transform(obj: &Preview, index: usize) -> Transform {
 /// ground, grass, and trees light from one source exactly like the game.
 fn veg_params() -> GrassParams {
     GrassParams {
-        sun_dir: SUN_DIR.normalize().extend(SUN_FLUX),
+        sun_dir: preview_sun_dir().extend(SUN_FLUX),
         wind: Vec4::ZERO,
         // Always full size (no clipmap fade): near edge well below any distance,
         // far edge well above.
@@ -441,6 +724,7 @@ fn setup_scene(
     mut tree_materials: ResMut<Assets<TreeMaterial>>,
     mut grass_materials: ResMut<Assets<GrassMaterial>>,
     mut ground_materials: ResMut<Assets<GroundPatchMaterial>>,
+    mut rock_materials: ResMut<Assets<RockMaterial>>,
     impostor_rig: Res<ImpostorRig>,
 ) {
     let params = veg_params();
@@ -470,6 +754,15 @@ fn setup_scene(
     });
     // One shared sky-model-lit ground material (receives the tree shadows).
     let ground_material = ground_materials.add(GroundPatchMaterial {
+        params,
+        sun_shadow_map_0: fallback.clone(),
+        sun_shadow_map_1: fallback.clone(),
+        sun_shadow_map_2: fallback.clone(),
+        ..default()
+    });
+    // One shared rock material (vertex-coloured stone, same sky model). Casts
+    // and receives the cascade just like the trees.
+    let rock_material = rock_materials.add(RockMaterial {
         params,
         sun_shadow_map_0: fallback.clone(),
         sun_shadow_map_1: fallback.clone(),
@@ -556,6 +849,35 @@ fn setup_scene(
                     transform,
                 ));
             }
+            AssetKind::Rock(params) => {
+                // A single stone on the bare ground patch (no grass, so the
+                // shape reads), tagged to cast its own shadow.
+                commands.spawn((
+                    Mesh3d(meshes.add(build_rock_mesh(params))),
+                    MeshMaterial3d(rock_material.clone()),
+                    transform,
+                    RenderLayers::from_layers(&[0, CASTER_LAYER]),
+                ));
+            }
+            AssetKind::RockField => {
+                // Grass carpet over the whole patch so the stones get partly
+                // covered (the in-game look), plus the scattered-pebble mesh.
+                let carpet = GrassFieldParams {
+                    size_m: patch,
+                    ..GrassFieldParams::default()
+                };
+                commands.spawn((
+                    Mesh3d(meshes.add(build_grass_field_mesh(&carpet))),
+                    MeshMaterial3d(grass_material.clone()),
+                    transform,
+                ));
+                commands.spawn((
+                    Mesh3d(meshes.add(rock_field_mesh())),
+                    MeshMaterial3d(rock_material.clone()),
+                    transform,
+                    RenderLayers::from_layers(&[0, CASTER_LAYER]),
+                ));
+            }
         }
     }
 
@@ -563,6 +885,7 @@ fn setup_scene(
         ground: ground_material,
         grass: grass_material,
         tree: tree_material,
+        rock: rock_material,
     });
     commands.insert_resource(Scene { objects });
 }
@@ -1214,12 +1537,13 @@ fn update_preview_shadow(
     mut ground_materials: ResMut<Assets<GroundPatchMaterial>>,
     mut grass_materials: ResMut<Assets<GrassMaterial>>,
     mut tree_materials: ResMut<Assets<TreeMaterial>>,
+    mut rock_materials: ResMut<Assets<RockMaterial>>,
 ) {
     let (Some(mut rig), Some(mats)) = (rig, mats) else {
         return;
     };
 
-    let sun_dir = SUN_DIR.normalize();
+    let sun_dir = preview_sun_dir();
     let center = focus.center;
     let eye = center + sun_dir * SHADOW_BACK_M;
     let up = if sun_dir.dot(Vec3::Y).abs() > 0.99 {
@@ -1260,6 +1584,12 @@ fn update_preview_shadow(
         m.sun_shadow_map_2 = fallback.clone();
     }
     if let Some(m) = tree_materials.get_mut(&mats.tree) {
+        m.shadow = block;
+        m.sun_shadow_map_0 = image.clone();
+        m.sun_shadow_map_1 = fallback.clone();
+        m.sun_shadow_map_2 = fallback.clone();
+    }
+    if let Some(m) = rock_materials.get_mut(&mats.rock) {
         m.shadow = block;
         m.sun_shadow_map_0 = image;
         m.sun_shadow_map_1 = fallback.clone();

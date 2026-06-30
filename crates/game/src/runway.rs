@@ -7,14 +7,22 @@
 //! aircraft state on the first `AppState::Running` frame, once the terrain
 //! height source is resident.
 //!
-//! **The terrain itself is flattened into a pad; the runway sits flush on it.**
+//! **The terrain itself is flattened into a wide basin; the runway sits flush on
+//! it.** The basin is one level area the whole spaceport shares — the runway near
+//! one edge, and a launch complex (two pads, tank farms, flame diverters, a VAB
+//! and hangars, authored by [`crate::base_editor::spawn_default_base`]) filling
+//! the rest — offset toward the complex side so the flattened ground isn't wasted
+//! on the empty side of the strip.
 //! The runway centre is a **fixed body-fixed location** (constant lat/lon, see
 //! [`fixed_runway_site`]) — not an auto-chosen flattest/dry/sunlit site, which
 //! could land on the night side. The scenario also seats the world at a
 //! **morning boot epoch** ([`RUNWAY_MORNING_EPOCH_S`]) so the fixed site is lit
 //! by a low, rising sun instead of the high noon sun the epoch-0 sub-stellar
 //! point gives it. A single fixed elevation
-//! `E = max(natural terrain over the pad) + margin` is then chosen.
+//! `E = mean(natural terrain over the basin)` is then chosen — levelling to the
+//! *mean* balances cut against fill, so the wide basin sinks into rising ground
+//! and fills hollows by roughly equal amounts instead of becoming an all-fill
+//! plateau towering over the surroundings.
 //! A [`thalos_terrain::TerrainFlatten`] pad is installed via the body's shared
 //! [`crate::rendering::ground_terrain::TerrainFlattenRegistry`] handle: the
 //! terrain tile provider reads it as it bakes, so the *rendered* ground — and,
@@ -78,17 +86,54 @@ const RUNWAY_HALF_LENGTH_M: f64 = RUNWAY_LENGTH_M * 0.5;
 const RUNWAY_WIDTH_M: f64 = 90.0;
 const RUNWAY_HALF_WIDTH_M: f64 = RUNWAY_WIDTH_M * 0.5;
 
-/// The flat terrain pad is levelled to this height above the highest natural
-/// terrain across the pad footprint, so nothing pokes through the paving.
-const RUNWAY_PLATFORM_MARGIN_M: f64 = 0.4;
+/// Paved strip footprint half-extents `(half_along, half_across)` in metres,
+/// along the takeoff heading and across it. Consumed by the grass scatter layer
+/// to clear blades off the paving (the [`StructureKind::Runway`](crate::structures::StructureKind::Runway)
+/// site carries only its anchor/heading, not its size).
+pub fn runway_footprint() -> (f64, f64) {
+    (RUNWAY_HALF_LENGTH_M, RUNWAY_HALF_WIDTH_M)
+}
+
 /// Flat margin levelled around the painted strip (the "shoulder" of the pad).
 /// The terrain inside `runway + this` is flattened to `E`.
 const RUNWAY_PAD_MARGIN_M: f64 = 50.0;
-/// Width of the graded ramp that blends the flat pad back to natural terrain.
-const RUNWAY_PAD_RAMP_M: f64 = 150.0;
+/// The base is one wide flat **basin** the whole spaceport sits inside: the
+/// runway near one edge, and a launch complex (two pads with clearing, tank
+/// farms, flame diverters, a VAB and hangars — see
+/// [`crate::base_editor::spawn_default_base`]) filling the rest. Everything
+/// drapes coplanar on the basin at its single elevation `E`.
+///
+/// Half-length of the basin along the runway (the strip plus an apron at each
+/// end). The 5 km runway dominates, so the complex (laid out within ≲1 km of
+/// the centre) has room to spare along this axis.
+const BASIN_HALF_ALONG_M: f64 = RUNWAY_HALF_LENGTH_M + 200.0;
+/// Half-width of the basin across the runway. Wide enough to clear the launch
+/// complex laid out beside the strip; the basin is *offset* (below) toward that
+/// side, so the runway sits near one edge and the complex fills the width.
+const BASIN_HALF_ACROSS_M: f64 = 720.0;
+/// How far the basin centre is offset across the runway, toward the launch
+/// complex side (`heading × center_dir`, matching `spawn_default_base`'s `+off`
+/// direction). Keeps the runway just inside the near edge and the flattened
+/// area from being wasted on the empty side of the strip.
+const BASIN_OFFSET_ACROSS_M: f64 = 540.0;
+/// Wide blend from the basin back to natural terrain. The basin levels to the
+/// *mean* terrain over its footprint (balanced cut/fill — see
+/// `finish_runway_spawn`), so the edge height is only ~half the basin's relief;
+/// this broad ramp then fades that into the surrounding ground so it reads as a
+/// graded basin, not a plateau with a wall around it.
+const BASIN_RAMP_M: f64 = 500.0;
 /// Asphalt strip sits this far above the flat terrain pad so the paving reads
-/// as a surface on the ground (and never z-fights the flattened tiles).
+/// as a surface on the ground (and never z-fights the flattened tiles). The
+/// strip's edge then drops back to the ground as a [`RUNWAY_SKIRT_DEPTH_M`]
+/// skirt, so this lift shows as a curb rather than a see-through floating lip.
 const RUNWAY_ASPHALT_LIFT_M: f64 = 0.12;
+/// The paved strip's perimeter drops this far (m) as a vertical skirt that
+/// buries into the levelled terrain. Without it the asphalt lift above shows as
+/// a floating edge with grass visible underneath; the skirt fills that gap with
+/// a curb whose lower edge sits below the (now flat, parallel) terrain plane, so
+/// only the short above-ground band reads. Generous enough to clear the basin's
+/// slight cut/fill and any tile-streaming height jitter.
+const RUNWAY_SKIRT_DEPTH_M: f64 = 0.6;
 /// Markings sit just above the asphalt to avoid z-fighting.
 const RUNWAY_MARKING_LIFT_M: f64 = 0.17;
 
@@ -205,8 +250,10 @@ const SEA_LEVEL_M: f32 = 0.0;
 const SITE_FREEBOARD_M: f32 = 50.0;
 
 /// Footprint grid sampled to find the platform elevation (max/min terrain).
-const FOOTPRINT_SAMPLES_LEN: usize = 40;
-const FOOTPRINT_SAMPLES_W: usize = 5;
+/// Denser across than the old runway-only pad, since the basin is now wide
+/// enough that a coarse across-sampling could step over a local rise.
+const FOOTPRINT_SAMPLES_LEN: usize = 60;
+const FOOTPRINT_SAMPLES_W: usize = 24;
 
 // ---------------------------------------------------------------------------
 // Orientation markers (raised edge posts)
@@ -433,54 +480,86 @@ fn finish_runway_spawn(
         );
     }
 
-    // Flat pad half-extents: the painted strip plus the levelled shoulder.
-    let pad_half_along = RUNWAY_HALF_LENGTH_M + RUNWAY_PAD_MARGIN_M;
-    let pad_half_across = RUNWAY_HALF_WIDTH_M + RUNWAY_PAD_MARGIN_M;
+    // The base is one wide flat basin the spaceport sits inside, *offset* toward
+    // the launch-complex side of the runway (`heading × center_dir`, the same
+    // `+off` direction `spawn_default_base` lays the complex along) so the runway
+    // sits near the near edge and the complex fills the width — no flattened area
+    // wasted on the empty side of the strip.
+    let complex_across = heading_tangent.cross(center_dir).normalize();
+    let basin_center_dir =
+        (center_dir * body_radius_m + complex_across * BASIN_OFFSET_ACROSS_M).normalize();
+    // The flatten's across axis at the (offset) basin centre — what
+    // `apply_structure_flatten` re-derives from the basin's anchor/heading, so
+    // the elevation sampling below uses the same rectangle the flatten installs.
+    let basin_across = basin_center_dir.cross(heading_tangent).normalize();
+    let basin_center_h = hs
+        .sample_height_m(basin_center_dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
+        .unwrap_or(center_h as f32) as f64;
 
-    // Flat pad elevation: above the highest natural terrain across the whole pad
-    // (computed from natural terrain, *before* the flatten is installed below) so
-    // the levelled ground never has to cut through a peak inside the pad.
-    let (max_h, min_h) = footprint_extremes(
+    // Basin elevation: the **mean** natural terrain across the whole basin
+    // (sampled from natural terrain, *before* the flatten is installed below).
+    // Levelling to the mean balances cut against fill, so the basin sinks into
+    // rising ground and fills hollows by roughly equal amounts instead of
+    // becoming an all-fill plateau towering over its surroundings (which is what
+    // levelling to the max produced). The wide `BASIN_RAMP_M` then fades the
+    // remaining ~half-relief edge step smoothly into the natural terrain. Because
+    // the flatten forces `E` everywhere inside the basin, a natural rise that was
+    // above the mean is simply cut down — nothing pokes through.
+    let (max_h, min_h, mean_h) = footprint_stats(
         hs,
-        center_dir,
+        basin_center_dir,
         heading_tangent,
-        across,
-        pad_half_along,
-        pad_half_across,
+        basin_across,
+        BASIN_HALF_ALONG_M,
+        BASIN_HALF_ACROSS_M,
         body_radius_m,
-        center_h,
+        basin_center_h,
     );
-    let elevation_m = max_h + RUNWAY_PLATFORM_MARGIN_M;
+    let elevation_m = mean_h;
+    // A basin wide enough to span the coast could average out below the reference
+    // radius even when the runway centre is dry; flag it rather than silently
+    // sinking the flat ground under the water renderer.
+    if elevation_m <= SEA_LEVEL_M as f64 {
+        warn!(
+            "runway: basin mean {:.0} m is at/below sea level (terrain {:.0}..{:.0} m) — \
+             the flattened basin may sit in water; move the site or shrink BASIN_HALF_ACROSS_M",
+            elevation_m, min_h, max_h
+        );
+    }
 
-    // Register the runway as a terrain-anchored structure and install its flat
-    // pad through the shared structures path (`crate::structures`). The terrain
-    // provider reads the flatten handle as it bakes tiles, so the rendered
-    // ground — and, via the GPU-atlas height mirror, the collider and CPU height
-    // queries — level out to `elevation_m` across the pad, smoothstep-blending
-    // back to natural terrain over the ramp. Done before placing the aircraft /
-    // moving the camera so the tiles that stream in at the site bake flattened
-    // from the start. A future building registers the same way and gets the same
-    // flattening — the runway is just the first `StructureKind`.
-    let structure_id = structure_registry.register(
+    // Register the **basin** as a `BaseSite` and install its flatten through the
+    // shared structures path (`crate::structures`). The terrain provider reads
+    // the flatten handle as it bakes tiles, so the rendered ground — and, via the
+    // GPU-atlas height mirror, the collider and CPU height queries — level out to
+    // `elevation_m` across the basin, smoothstep-blending back to natural terrain
+    // over the ramp. Done before placing the aircraft / moving the camera so the
+    // tiles that stream in bake flattened from the start.
+    let basin_id = structure_registry.register(
         body_id,
-        center_dir,
+        basin_center_dir,
         heading_tangent,
         crate::structures::StructurePlacement::FlattenTo {
             elevation_m,
-            half_along_m: pad_half_along,
-            half_across_m: pad_half_across,
-            ramp_m: RUNWAY_PAD_RAMP_M,
+            half_along_m: BASIN_HALF_ALONG_M,
+            half_across_m: BASIN_HALF_ACROSS_M,
+            ramp_m: BASIN_RAMP_M,
         },
-        crate::structures::StructureKind::Runway,
+        crate::structures::StructureKind::BaseSite,
         None,
     );
-    if let Some(structure) = structure_registry.get(structure_id).copied() {
-        crate::structures::apply_structure_flatten(
-            &structure,
-            body_radius_m,
-            &mut flatten_registry,
-        );
+    if let Some(basin) = structure_registry.get(basin_id).copied() {
+        crate::structures::apply_structure_flatten(&basin, body_radius_m, &mut flatten_registry);
     }
+    // The runway is the first structure on the basin — it drapes on the level
+    // ground (the basin provides the flatten), at the basin's elevation `E`.
+    structure_registry.register(
+        body_id,
+        center_dir,
+        heading_tangent,
+        crate::structures::StructurePlacement::Drape,
+        crate::structures::StructureKind::Runway,
+        Some(basin_id),
+    );
 
     let site = RunwaySite {
         body_id,
@@ -500,7 +579,7 @@ fn finish_runway_spawn(
     let lat_deg = center_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     let lon_deg = center_dir.z.atan2(center_dir.x).to_degrees();
     info!(
-        "runway: {} on {} at lat {:.1}°, lon {:.1}° — flat pad at {:.0} m (terrain {:.0}..{:.0} m), {:.0} m × {:.0} m",
+        "runway: {} on {} at lat {:.1}°, lon {:.1}° — basin levelled to mean {:.0} m (terrain {:.0}..{:.0} m), {:.0} m × {:.0} m",
         if matches!(*situation, SpawnSituation::Runway) {
             "parked"
         } else {
@@ -538,6 +617,21 @@ fn finish_runway_spawn(
         &body_state,
     );
     spawn_runway_collider(&mut commands, &frame, &body_state);
+
+    // Author the rest of the default base on the basin: launchpads + support
+    // buildings (coplanar with the runway at `E`) and their connecting tarmac.
+    crate::base_editor::spawn_default_base(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut structure_registry,
+        root.entity,
+        body_id,
+        basin_id,
+        center_dir,
+        heading_tangent,
+        body_radius_m + elevation_m,
+    );
 
     match *situation {
         SpawnSituation::Runway => {
@@ -677,10 +771,11 @@ fn parse_site_override(raw: &str) -> Option<(f64, f64, f64)> {
     Some((lat, lon, heading))
 }
 
-/// Max/min terrain height over the flat-pad footprint (the painted strip plus
-/// the levelled shoulder), sampled at fine LOD.
+/// Max / min / mean natural terrain height over the basin footprint, sampled on
+/// a regular grid at fine LOD. The mean is the level the basin flattens to
+/// (balanced cut/fill); max/min are kept for the log / sanity checks.
 #[allow(clippy::too_many_arguments)]
-fn footprint_extremes(
+fn footprint_stats(
     hs: &dyn HeightSource,
     center_dir: DVec3,
     heading: DVec3,
@@ -689,10 +784,12 @@ fn footprint_extremes(
     half_across_m: f64,
     body_radius_m: f64,
     center_h: f64,
-) -> (f64, f64) {
+) -> (f64, f64, f64) {
     let center_point = center_dir * (body_radius_m + center_h);
     let mut max_h = center_h;
     let mut min_h = center_h;
+    let mut sum_h = 0.0;
+    let mut count = 0u32;
     for i in 0..=FOOTPRINT_SAMPLES_LEN {
         let along = -half_along_m + 2.0 * half_along_m * (i as f64 / FOOTPRINT_SAMPLES_LEN as f64);
         for j in 0..=FOOTPRINT_SAMPLES_W {
@@ -703,10 +800,13 @@ fn footprint_extremes(
                 let h = h as f64;
                 max_h = max_h.max(h);
                 min_h = min_h.min(h);
+                sum_h += h;
+                count += 1;
             }
         }
     }
-    (max_h, min_h)
+    let mean_h = if count > 0 { sum_h / count as f64 } else { center_h };
+    (max_h, min_h, mean_h)
 }
 
 // ---------------------------------------------------------------------------
@@ -790,10 +890,12 @@ fn spawn_runway_geometry(
 ) {
     // The terrain itself is flattened to `E` across the pad (see the
     // `TerrainFlatten` installed in `finish_runway_spawn`), so the runway is just
-    // a paved strip sitting flush on the levelled ground — no skirt or runoff
-    // geometry. The asphalt is lifted a few cm so it reads as paving on the
-    // grass and never z-fights the flattened tiles.
+    // a paved strip sitting on the levelled ground. The asphalt is lifted a few
+    // cm so it reads as paving and never z-fights the flattened tiles; a thin
+    // edge skirt (no graded runoff) drops that lift back into the terrain so the
+    // strip meets the ground with a curb instead of a floating lip.
     let top = meshes.add(build_top_mesh(frame));
+    let skirt = meshes.add(build_skirt_mesh(frame));
     let asphalt = flat_runway_material(materials, Color::srgb(0.055, 0.055, 0.062), 0.95);
 
     // --- Markings (white, one mesh) ---
@@ -812,7 +914,7 @@ fn spawn_runway_geometry(
     let runway_entity = commands
         .spawn((
             Mesh3d(top),
-            MeshMaterial3d(asphalt),
+            MeshMaterial3d(asphalt.clone()),
             Transform {
                 translation: local,
                 rotation: orientation.as_quat(),
@@ -841,6 +943,17 @@ fn spawn_runway_geometry(
         NotShadowCaster,
         ChildOf(runway_entity),
         Name::new("Runway Markings"),
+    ));
+
+    commands.spawn((
+        Mesh3d(skirt),
+        MeshMaterial3d(asphalt.clone()),
+        Transform::IDENTITY,
+        Visibility::Inherited,
+        RenderLayers::layer(SHIP_LAYER),
+        NotShadowCaster,
+        ChildOf(runway_entity),
+        Name::new("Runway Edge Skirt"),
     ));
 
     spawn_runway_posts(commands, meshes, materials, frame, runway_entity);
@@ -874,6 +987,57 @@ fn build_top_mesh(frame: &RunwayFrame) -> Mesh {
             let d = c + 1;
             indices.extend_from_slice(&[a, c, b, b, c, d]);
         }
+    }
+    build_mesh(positions, normals, uvs, indices)
+}
+
+/// A thin vertical skirt around the paved strip's perimeter, dropping from the
+/// asphalt edge (`RUNWAY_ASPHALT_LIFT_M`) down `RUNWAY_SKIRT_DEPTH_M` into the
+/// terrain. The strip top is lifted a few cm off the levelled ground so it reads
+/// as paving and never z-fights the tiles; without this skirt that lift shows as
+/// a floating lip with grass visible under the edge. The skirt fills it with a
+/// curb — its lower edge buries below the (now flat, parallel) terrain plane, so
+/// only the short above-ground band is visible. Four flat quads suffice: the
+/// strip is a true flat plane, so its perimeter is an exact rectangle.
+fn build_skirt_mesh(frame: &RunwayFrame) -> Mesh {
+    let half_l = RUNWAY_HALF_LENGTH_M;
+    let half_w = RUNWAY_HALF_WIDTH_M;
+    let top = RUNWAY_ASPHALT_LIFT_M;
+    let bot = RUNWAY_ASPHALT_LIFT_M - RUNWAY_SKIRT_DEPTH_M;
+    // Perimeter corners (along, across), counter-clockwise around the strip.
+    let corners = [
+        (-half_l, -half_w),
+        (half_l, -half_w),
+        (half_l, half_w),
+        (-half_l, half_w),
+    ];
+    let mut positions = Vec::with_capacity(16);
+    let mut normals = Vec::with_capacity(16);
+    let mut uvs = Vec::with_capacity(16);
+    let mut indices = Vec::with_capacity(24);
+    for i in 0..4 {
+        let (a0, c0) = corners[i];
+        let (a1, c1) = corners[(i + 1) % 4];
+        let (top0, up) = frame.level(a0, c0, top);
+        let (top1, _) = frame.level(a1, c1, top);
+        let (bot0, _) = frame.level(a0, c0, bot);
+        let (bot1, _) = frame.level(a1, c1, bot);
+        // Outward face normal (edge × up). The asphalt material is double-sided,
+        // so the sign only affects shading, not visibility.
+        let outward = (top1 - top0).cross(up).normalize_or_zero();
+        let n = [outward.x as f32, outward.y as f32, outward.z as f32];
+        let base = positions.len() as u32;
+        for (pt, uv) in [
+            (top0, [0.0, 0.0]),
+            (top1, [1.0, 0.0]),
+            (bot0, [0.0, 1.0]),
+            (bot1, [1.0, 1.0]),
+        ] {
+            positions.push([pt.x as f32, pt.y as f32, pt.z as f32]);
+            normals.push(n);
+            uvs.push(uv);
+        }
+        indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
     }
     build_mesh(positions, normals, uvs, indices)
 }
@@ -1170,8 +1334,27 @@ pub(crate) fn craft_ground_clearance(
     mesh_q: &Query<(&GlobalTransform, &Mesh3d)>,
     meshes: &Assets<Mesh>,
 ) -> Option<f64> {
+    // The craft frame is `+Z` dorsal (up), so the lowest visual point is the
+    // greatest extent along `-Z`.
+    craft_extent_below(root_entity, root_gt, children_q, mesh_q, meshes, Vec3::NEG_Z)
+}
+
+/// How far the craft's lowest visual point sits below its origin **along the
+/// craft-local `down` direction** — generalises [`craft_ground_clearance`] so a
+/// vertically-spawned craft (e.g. on a launchpad, nose `+Y` up) can rest on its
+/// engine end (`down = -Y`) instead of its belly (`down = -Z`). Returns `None`
+/// if no descendant mesh is ready.
+pub(crate) fn craft_extent_below(
+    root_entity: Entity,
+    root_gt: &GlobalTransform,
+    children_q: &Query<&Children>,
+    mesh_q: &Query<(&GlobalTransform, &Mesh3d)>,
+    meshes: &Assets<Mesh>,
+    down: Vec3,
+) -> Option<f64> {
     let root_inv = root_gt.affine().inverse();
-    let mut min_z = f32::INFINITY;
+    let down = Vec3A::from(down);
+    let mut max_ext = f32::NEG_INFINITY;
     let mut found = false;
     let mut stack: Vec<Entity> = Vec::new();
     if let Ok(c) = children_q.get(root_entity) {
@@ -1188,7 +1371,7 @@ pub(crate) fn craft_ground_clearance(
                 for sy in [-1.0f32, 1.0] {
                     for sz in [-1.0f32, 1.0] {
                         let corner = Vec3A::new(c.x + sx * h.x, c.y + sy * h.y, c.z + sz * h.z);
-                        min_z = min_z.min(local.transform_point3a(corner).z);
+                        max_ext = max_ext.max(local.transform_point3a(corner).dot(down));
                         found = true;
                     }
                 }
@@ -1198,7 +1381,7 @@ pub(crate) fn craft_ground_clearance(
             stack.extend(c.iter());
         }
     }
-    found.then(|| (-min_z as f64).max(0.0))
+    found.then(|| (max_ext as f64).max(0.0))
 }
 
 /// Park the aircraft **landed** on the runway, resting on its gear, KSP-style —

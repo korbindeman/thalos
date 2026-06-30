@@ -159,6 +159,7 @@ pub fn update(
     throttle: Res<ThrottleState>,
     velocity_frame: Res<VelocityFrameState>,
     target: Res<TargetBody>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
     mut vel_q: Query<&mut Text, (With<VelocityText>, Without<VelocityLabel>)>,
     mut label_q: Query<&mut Text, (With<VelocityLabel>, Without<VelocityText>)>,
@@ -177,7 +178,7 @@ pub fn update(
 
     if let Ok(mut t) = vel_q.single_mut() {
         let s = match basis {
-            Some(b) => format::speed(b.speed),
+            Some(b) => format::speed(b.speed, units.system),
             None => "—".to_string(),
         };
         if t.0 != s {

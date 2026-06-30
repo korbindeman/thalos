@@ -33,6 +33,8 @@ mod pipeline;
 #[cfg(feature = "playground")]
 mod playground_material;
 mod rendered_height;
+mod rock_material;
+mod rock_mesh;
 mod scatter;
 mod sky_material;
 mod synthetic;
@@ -65,9 +67,12 @@ pub use rendered_height::{
     TerrainPatchBasis, TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch,
     build_rendered_terrain_patch_from_source,
 };
+pub use rock_material::{RockMaterial, RockMaterialPlugin};
+pub use rock_mesh::{RockMeshData, RockMeshParams, build_rock_mesh, build_rock_mesh_data};
 pub use scatter::{
-    PlacementSample, VegInstance, VegLayer, VegScatterInput, VegScatterTile, VegSpeciesPlacement,
-    build_scatter_tile, clump_field, combine_impostor_tile_mesh, combine_tree_tile_mesh,
+    PlacementSample, ScatterClass, ScatterRegion, ScatterTreatment, VegInstance, VegLayer,
+    VegScatterInput, VegScatterTile, VegSpeciesPlacement, build_scatter_tile, classify_scatter,
+    clump_field, combine_impostor_tile_mesh, combine_rock_tile_mesh, combine_tree_tile_mesh,
     placement_gate,
 };
 pub use sky_material::BodySkyMaterial;
@@ -88,9 +93,9 @@ pub use tree_mesh::{
 };
 pub use vegetation::{
     GRASS_TILE_SIZE_M, GrassBladeLod, GrassClumpParams, GrassFieldParams, GrassMaterial,
-    GrassMaterialPlugin, GrassParams, GrassTileBuildInput, GrassTileKey, GrassTileMesh,
-    build_grass_clump_mesh, build_grass_field_mesh, build_grass_tile_mesh, grass_tile_frame,
-    grass_tile_key, grass_tiles_per_side,
+    GrassMaterialPlugin, GrassParams, GrassProfile, GrassTileBuildInput, GrassTileKey,
+    GrassTileMesh, build_grass_clump_mesh, build_grass_field_mesh, build_grass_tile_mesh,
+    grass_tile_frame, grass_tile_key, grass_tiles_per_side,
 };
 pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 
@@ -119,8 +124,17 @@ impl Plugin for ThalosTerrainPlugin {
         app.add_plugins(MaterialPlugin::<BodyWaterMaterial>::default());
         // Grass blades + scattered trees/shrubs render through the regular
         // forward pipeline too — decoration meshes, not UDLOD geometry.
+        // Grass is in the depth prepass (it ships a matching `grass_prepass.wgsl`,
+        // so the main color pass early-Z-rejects the heavy blade overdraw). Trees
+        // and rocks opt OUT via `Material::enable_prepass` (their vertex displaces —
+        // wind / per-tree + per-rock scale-fade — and they have no matching prepass
+        // shader yet, so a standard rest-pose prepass would mismatch the main depth
+        // and flicker). Impostors are already prepass-safe (degenerate POSITION →
+        // standard prepass draws nothing). Adding tree/rock prepass shaders later
+        // brings them into the early-Z too.
         app.add_plugins(MaterialPlugin::<GrassMaterial>::default());
         app.add_plugins(MaterialPlugin::<TreeMaterial>::default());
+        app.add_plugins(MaterialPlugin::<RockMaterial>::default());
         // Far-band tree impostors render through the forward pipeline too; the
         // bake material is rendered only by the startup off-screen bake cameras.
         app.add_plugins(MaterialPlugin::<TreeImpostorMaterial>::default());
@@ -130,6 +144,7 @@ impl Plugin for ThalosTerrainPlugin {
         water_material::embed_body_water_shader(app);
         vegetation::embed_grass_shader(app);
         tree_material::embed_tree_shader(app);
+        rock_material::embed_rock_shader(app);
         tree_impostor::embed_tree_impostor_shaders(app);
         #[cfg(feature = "playground")]
         playground_material::embed_playground_shader(app);

@@ -34,9 +34,10 @@ mod ui;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_physics_local::HeightSourceRegistry;
+use thalos_world::BodyId;
 
 use crate::rendering::{SimulationState, SolarSystemState};
-use crate::structures::{StructurePlacement, StructureId, StructureRegistry};
+use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
 use crate::view::ViewMode;
 
 pub use place::BaseBuildState;
@@ -90,6 +91,133 @@ impl Plugin for BaseEditorPlugin {
             .add_plugins(ui::BaseEditorUiPlugin)
             .add_systems(Update, apply_open_state);
     }
+}
+
+/// Runway-edge bounding radius used as the runway's connection node, so the
+/// authored tarmac meets the runway's side rather than its centreline.
+const RUNWAY_EDGE_M: f64 = 18.0;
+
+/// Author the **default base**: a launch complex laid out beside the runway on
+/// the shared flat basin (everything coplanar — `Drape` at `pad_r`). Two large
+/// launchpads with clearing around them, each flanked by a flame diverter and a
+/// small tank farm; a VAB and a pair of hangars set back along the far edge;
+/// blockhouses and an operations building near the strip. A tarmac MST links the
+/// runway, pads, big buildings and blockhouses (the satellite tanks/diverters
+/// stay off the road network). Called by the runway scenario after it installs
+/// the basin BaseSite. `pad_r = radius_m + E`.
+///
+/// Layout is in runway-frame `(along, off)` metres from the runway centre, with
+/// `+off` = the launch-complex side (`heading × center_dir`) — the same side the
+/// basin is offset toward in [`crate::runway`], so the complex falls inside the
+/// flattened basin.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_default_base(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    registry: &mut StructureRegistry,
+    root: Entity,
+    body_id: BodyId,
+    basin_site_id: StructureId,
+    center_dir: DVec3,
+    heading: DVec3,
+    pad_r: f64,
+) {
+    let mats = place::BaseMaterials::create(materials);
+    let across = heading.cross(center_dir).normalize();
+    let dir = |along: f64, off: f64| (center_dir * pad_r + heading * along + across * off).normalize();
+
+    let launchpad = |r: f32| StructureKind::Launchpad { radius_m: r };
+    let building = |hx: f32, hz: f32, h: f32| StructureKind::Building {
+        half_x_m: hx,
+        half_z_m: hz,
+        height_m: h,
+    };
+    let tank = |r: f32, h: f32| StructureKind::Tank {
+        radius_m: r,
+        height_m: h,
+    };
+
+    // Pads sit ~600 m off the centreline, 1.7 km apart, with a wide blast-clear
+    // ring — well off the strip. Big buildings (VAB, hangars) line the far edge
+    // of the basin; ops/blockhouses sit near the strip.
+    const PAD_ALONG: f64 = 850.0;
+    const PAD_OFF: f64 = 600.0;
+
+    // Road structures: linked by the tarmac MST (runway ↔ pads ↔ buildings).
+    let road: &[(f64, f64, StructureKind)] = &[
+        // Two large launch pads with clearing.
+        (PAD_ALONG, PAD_OFF, launchpad(50.0)),
+        (-PAD_ALONG, PAD_OFF, launchpad(50.0)),
+        // Operations / terminal building near the runway centre.
+        (0.0, 300.0, building(16.0, 12.0, 12.0)),
+        // A blockhouse beside each pad (between strip and pad).
+        (PAD_ALONG, 330.0, building(10.0, 10.0, 8.0)),
+        (-PAD_ALONG, 330.0, building(10.0, 10.0, 8.0)),
+        // VAB-scale assembly building, set back on the far edge.
+        (0.0, 1040.0, building(68.0, 46.0, 96.0)),
+        // Two long hangars flanking it.
+        (520.0, 980.0, building(58.0, 24.0, 26.0)),
+        (-520.0, 980.0, building(58.0, 24.0, 26.0)),
+    ];
+
+    // Satellite structures: placed but kept off the road network (they cluster
+    // around their pad). Flame diverters just outboard of each pad, plus a small
+    // tank farm beyond.
+    let satellites: &[(f64, f64, StructureKind)] = &[
+        // Flame diverters / trenches (low, wide concrete) outboard of each pad.
+        (PAD_ALONG, 712.0, building(14.0, 44.0, 4.0)),
+        (-PAD_ALONG, 712.0, building(14.0, 44.0, 4.0)),
+        // Propellant tank farm beyond each pad (three tanks).
+        (PAD_ALONG - 42.0, 845.0, tank(9.0, 26.0)),
+        (PAD_ALONG, 875.0, tank(9.0, 26.0)),
+        (PAD_ALONG + 42.0, 845.0, tank(9.0, 26.0)),
+        (-PAD_ALONG + 42.0, 845.0, tank(9.0, 26.0)),
+        (-PAD_ALONG, 875.0, tank(9.0, 26.0)),
+        (-PAD_ALONG - 42.0, 845.0, tank(9.0, 26.0)),
+    ];
+
+    let mut place_one = |along: f64, off: f64, kind: StructureKind| {
+        place::place_structure(
+            commands,
+            meshes,
+            &mats,
+            registry,
+            root,
+            body_id,
+            Some(basin_site_id),
+            dir(along, off),
+            heading,
+            across,
+            pad_r,
+            kind,
+            0.0,
+        );
+    };
+
+    // Node 0 is the runway itself (runway centre), so the tarmac links the
+    // complex to the runway edge.
+    let mut nodes: Vec<(f64, f64, f64)> = vec![(0.0, 0.0, RUNWAY_EDGE_M)];
+    for &(along, off, kind) in road {
+        place_one(along, off, kind);
+        nodes.push((along, off, place::kind_bounding_m(&kind)));
+    }
+    for &(along, off, kind) in satellites {
+        place_one(along, off, kind);
+    }
+
+    connections::spawn_authored(
+        commands,
+        meshes,
+        &mats,
+        root,
+        body_id,
+        basin_site_id,
+        center_dir,
+        heading,
+        pad_r,
+        &nodes,
+    );
 }
 
 /// Ray-vs-sphere intersection for a sphere centred at the origin; returns the

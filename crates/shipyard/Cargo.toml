@@ -12,6 +12,10 @@ serde = { version = "1.0", features = ["derive"] }
 ron = "0.12"
 thalos_input = { path = "../input" }
 thalos_celestial = { path = "../celestial" }
+# INTERIM (Phase 4a, docs/architecture.md): the craft hull material moved to the
+# render crate; this re-exports it through `material.rs` so the editor core keeps
+# compiling. A backwards edge to be removed by the rendering-decoupling follow-up.
+thalos_body_render = { path = "../body_render" }
 
 [[example]]
 name = "roundtrip"

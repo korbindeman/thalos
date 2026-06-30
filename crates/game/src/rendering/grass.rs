@@ -30,6 +30,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DVec3, Vec3, Vec4};
@@ -38,18 +39,22 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, GrassBladeLod, GrassMaterial, GrassTileBuildInput, GrassTileKey, GrassTileMesh,
-    LIGHT_AT_1AU, TerrainShadingStyle, build_grass_tile_mesh, fallback_shadow_map, grass_tile_frame,
-    grass_tile_key, grass_tiles_per_side,
+    AU_M, GrassBladeLod, GrassMaterial, GrassProfile, GrassTileBuildInput, GrassTileKey,
+    GrassTileMesh, LIGHT_AT_1AU, ScatterRegion, ScatterTreatment, TerrainShadingStyle,
+    build_grass_tile_mesh, fallback_shadow_map, grass_tile_frame, grass_tile_key,
+    grass_tiles_per_side,
 };
 use thalos_physics_local::HeightSourceRegistry;
+use thalos_terrain::TerrainFlatten;
 use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
+use crate::graphics_settings::GraphicsSettings;
 use crate::freecam::{FreeCam, scatter_view_center};
-use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
+use crate::rendering::ground_terrain::terrain_shading_style_for;
+use crate::structures::{StructureKind, StructurePlacement, StructureRegistry, StructureSite};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::{CameraExposure, PlayerShip};
@@ -66,10 +71,11 @@ struct GrassRing {
     outer_m: f64,
     /// Candidate (placement-point) density per m² before gates.
     density_per_m2: f32,
-    /// Blades fanned per accepted point. Coverage = density × clump, but only
-    /// `density` pays the placement gate — so near rings get a thick carpet
-    /// cheaply, far rings stay at 1 (a single wide clump card).
-    blades_per_clump: u32,
+    /// Blades-per-clump LOD multiplier in `(0, 1]` applied to the grass profile's
+    /// blade count. Coverage = density × (profile blades × clump_scale), but only
+    /// `density` pays the placement gate — so near rings get a thick fluffy carpet
+    /// cheaply, far rings thin each tuft and lean on wider blades.
+    clump_scale: f32,
     /// Blade width multiplier (constant-coverage rule: density ↓ ⇒ width ↑).
     width_scale: f32,
     /// Blade height multiplier.
@@ -92,9 +98,15 @@ const GRASS_RINGS: [GrassRing; 3] = [
     GrassRing {
         tile_size_m: 25.0,
         inner_m: 0.0,
-        outer_m: 60.0,
-        density_per_m2: 24.0,
-        blades_per_clump: 5,
+        // Full curved blades only out to 25 m — the immediate foreground where blade
+        // detail actually reads. This was 0–60 m, but the cost is VERTEX-bound and the
+        // Full blade is the most expensive (7 verts), so shrinking it to 25 m is an
+        // ~80 % area cut on the priciest geometry; the cheap Wide ring covers 25 m on.
+        outer_m: 25.0,
+        // Each accepted point grows a full fluffy fountain tuft (~14–18 blades), so
+        // the carpet reads thick from fewer, denser clumps rather than many spikes.
+        density_per_m2: 14.0,
+        clump_scale: 1.0,
         width_scale: 1.0,
         height_scale: 1.0,
         blade_lod: GrassBladeLod::Full,
@@ -103,27 +115,127 @@ const GRASS_RINGS: [GrassRing; 3] = [
     },
     GrassRing {
         tile_size_m: 50.0,
-        inner_m: 60.0,
-        outer_m: 160.0,
-        density_per_m2: 11.0,
-        blades_per_clump: 4,
-        width_scale: 1.3,
-        height_scale: 1.05,
-        blade_lod: GrassBladeLod::Full,
+        inner_m: 25.0,
+        // Wide-blade band shortened 160 → 110 m: it's the largest remaining vertex
+        // sink, and the clump CARDS are validated to read as a green grass surface at
+        // distance (preview `grass_field_card_far`), so hand off to them sooner. Cheap
+        // 3-vert Wide blade, lower density + wider blades (constant-coverage).
+        outer_m: 110.0,
+        density_per_m2: 4.0,
+        clump_scale: 0.5,
+        width_scale: 2.0,
+        height_scale: 1.1,
+        blade_lod: GrassBladeLod::Wide,
         forest_cull: 0.35,
     },
     GrassRing {
+        // Reach restored to 340 m / 3.5 per m² now that the depth prepass gives the
+        // foliage early-Z: the grazing-horizon overdraw this band caused is rejected
+        // before shading, so reaching further is affordable again (it was trimmed to
+        // 270 m as a pre-prepass stopgap). The durable path to the true horizon is
+        // still efficient drawing (instancing/indirect + clump-card billboards).
+        // Far band → clump CARDS (one crossed-quad billboard tuft per clump, ~8
+        // verts vs ~100): the cheapest representation, for the band where blades are
+        // tiny anyway. The procedural tuft alpha reads coarse up close but is
+        // sub-pixel at 160 m+; the terrain albedo carries beyond. (If it reads poorly
+        // at distance in-game, switch `blade_lod` back to `Wide` — one line.)
         tile_size_m: 100.0,
-        inner_m: 160.0,
+        inner_m: 110.0,
         outer_m: 340.0,
-        density_per_m2: 5.0,
-        blades_per_clump: 3,
-        width_scale: 2.4,
-        height_scale: 1.25,
-        blade_lod: GrassBladeLod::Wide,
+        density_per_m2: 2.5,
+        clump_scale: 0.4,
+        width_scale: 2.8,
+        height_scale: 1.2,
+        blade_lod: GrassBladeLod::Card,
         forest_cull: 0.7,
     },
 ];
+
+/// The two grass *types* the meadow distributes per clump (blended by the
+/// landcover moisture field): thick short fluffy grass on the drier ground,
+/// longer wispier grass on the wetter. This is the single place to reshape the
+/// in-game grass look — thickness, length, and fluffiness all live in these two
+/// [`GrassProfile`]s; later bodies can carry their own pair.
+const GRASS_PROFILE_DRY: GrassProfile = GrassProfile::fluffy_short();
+const GRASS_PROFILE_LUSH: GrassProfile = GrassProfile::wispy_tall();
+
+/// The grass *type* grown on a base's grassy ground (its [`StructureKind::BaseSite`]
+/// lawn) — short, thick, manicured. Overrides the moisture-blended meadow type
+/// inside the lawn footprint; retune the spaceport-lawn look here.
+const GRASS_PROFILE_LAWN: GrassProfile = GrassProfile::lawn();
+
+/// Placement-density multiplier for a lawn over its ring's wild density. A lawn
+/// force-accepts every candidate (no gate thinning), so a denser grid is what
+/// closes the patchy gaps; scoped to lawn tiles, so wild grass is unaffected.
+const GRASS_LAWN_DENSITY_MULT: f32 = 1.6;
+
+/// Outward margin added to a paved/built structure's footprint before clearing
+/// grass (metres), so blades stop a touch short of a hard edge instead of
+/// fringing right against the paving.
+const STRUCTURE_CLEAR_MARGIN_M: f64 = 2.0;
+/// Blend ramp on a structure's clearing footprint (metres) — short, so the lawn
+/// runs almost to the structure edge.
+const STRUCTURE_CLEAR_RAMP_M: f64 = 3.0;
+
+/// Map one terrain-anchored structure to its building-terrain scatter footprint:
+/// a [`StructureKind::BaseSite`] becomes a grass [`ScatterTreatment::Lawn`] over
+/// its levelled area; a runway, building, launchpad, or tank becomes a
+/// [`ScatterTreatment::Clear`] over its paved/built footprint (plus a small
+/// margin). Returns `None` for a kind with no surface footprint.
+fn site_scatter_region(site: &StructureSite, body_radius_m: f64) -> Option<ScatterRegion> {
+    let across = site.anchor_dir.cross(site.heading_tangent).normalize();
+    // `elevation_m` is irrelevant to `weight()` — only the rectangle matters.
+    let rect = |half_along: f64, half_across: f64, ramp: f64| {
+        TerrainFlatten::new(
+            site.anchor_dir,
+            site.heading_tangent,
+            across,
+            half_along,
+            half_across,
+            ramp,
+            0.0,
+            body_radius_m,
+        )
+    };
+    let clear = |half_along: f64, half_across: f64| ScatterRegion {
+        footprint: rect(
+            half_along + STRUCTURE_CLEAR_MARGIN_M,
+            half_across + STRUCTURE_CLEAR_MARGIN_M,
+            STRUCTURE_CLEAR_RAMP_M,
+        ),
+        treatment: ScatterTreatment::Clear,
+    };
+    Some(match site.kind {
+        // The base's flattened ground is the lawn (grass grows on it); its
+        // footprint is the flatten rectangle the basin levelled.
+        StructureKind::BaseSite => {
+            let StructurePlacement::FlattenTo {
+                half_along_m,
+                half_across_m,
+                ramp_m,
+                ..
+            } = site.placement
+            else {
+                return None;
+            };
+            ScatterRegion {
+                footprint: rect(half_along_m, half_across_m, ramp_m),
+                treatment: ScatterTreatment::Lawn,
+            }
+        }
+        StructureKind::Runway => {
+            let (half_along_m, half_across_m) = crate::runway::runway_footprint();
+            clear(half_along_m, half_across_m)
+        }
+        StructureKind::Building {
+            half_x_m, half_z_m, ..
+        } => clear(half_x_m as f64, half_z_m as f64),
+        // A round pad/tank clears its bounding square — a slightly generous
+        // clearing under a disc, which reads fine against grass.
+        StructureKind::Launchpad { radius_m } => clear(radius_m as f64, radius_m as f64),
+        StructureKind::Tank { radius_m, .. } => clear(radius_m as f64, radius_m as f64),
+    })
+}
 
 /// Fade band half-width for a ring's near/far cross-fade.
 fn ring_band_m(ring: &GrassRing) -> f32 {
@@ -276,7 +388,8 @@ fn drive_grass_tiles(
     solar: Res<SolarSystemState>,
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
-    mut flatten_registry: ResMut<TerrainFlattenRegistry>,
+    structures: Res<StructureRegistry>,
+    graphics: Res<GraphicsSettings>,
     freecam: Res<FreeCam>,
     ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     mut commands: Commands,
@@ -284,6 +397,27 @@ fn drive_grass_tiles(
     let Some(states) = solar.states.as_deref() else {
         return;
     };
+
+    let despawn_all = |grass: &mut GrassTiles, commands: &mut Commands| {
+        for (_, tile) in grass.tiles.drain() {
+            if let Some(entity) = tile.entity {
+                commands.entity(entity).despawn();
+            }
+        }
+        grass.in_flight.clear();
+    };
+
+    // Grass disabled in graphics settings: park the clipmap — despawn any live
+    // tiles and build nothing (the terrain albedo still carries the grass colour,
+    // so the ground reads green). Mirrors the clouds toggle's parked path.
+    if !graphics.grass {
+        if grass.body.is_some() {
+            despawn_all(&mut grass, &mut commands);
+            grass.body = None;
+        }
+        return;
+    }
+
     let cam_pos = scatter_view_center(
         &freecam,
         ship_cam_q.single().ok(),
@@ -307,15 +441,6 @@ fn drive_grass_tiles(
             best = Some((id, alt));
         }
     }
-
-    let despawn_all = |grass: &mut GrassTiles, commands: &mut Commands| {
-        for (_, tile) in grass.tiles.drain() {
-            if let Some(entity) = tile.entity {
-                commands.entity(entity).despawn();
-            }
-        }
-        grass.in_flight.clear();
-    };
 
     let Some((body_id, _)) = best else {
         if grass.body.is_some() {
@@ -436,14 +561,24 @@ fn drive_grass_tiles(
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    // Water disabled until the generator grows a sea level (terrain rewrite
-    // Slice 1), so no sea-level cull for now.
-    let sea_level_m = f32::MIN;
-    let flatten_exclusion = flatten_registry
-        .handle(body_id)
-        .read()
-        .ok()
-        .and_then(|guard| thalos_terrain::nearest_flatten(&guard, cam_dir));
+    // Sea level is the project datum: the constant 0 m (= reference radius), the
+    // shoreline the bimodal continent/ocean generator (Slice 1) puts at height 0.
+    // Grass requires `height > sea_level + 1 m`, so the seabed stays bare.
+    let sea_level_m = 0.0;
+
+    // Building-terrain scatter regions: the base's grassy ground reads as a
+    // managed lawn (thick short grass) and its paved/built footprints (runway,
+    // launchpads, buildings, tanks) clear the blades. Derived each frame from
+    // the structure registry, so authored and player-placed bases both apply;
+    // empty off-base, so wild terrain is untouched. Shared (`Arc`) into every
+    // tile build dispatched this frame.
+    let scatter_regions: Arc<Vec<ScatterRegion>> = Arc::new(
+        structures
+            .sites_on(body_id)
+            .iter()
+            .filter_map(|site| site_scatter_region(site, radius_m))
+            .collect(),
+    );
 
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();
@@ -475,12 +610,16 @@ fn drive_grass_tiles(
             radius_m,
             sea_level_m,
             blades_per_m2: ring.density_per_m2,
-            blades_per_clump: ring.blades_per_clump,
+            profile_dry: GRASS_PROFILE_DRY,
+            profile_lush: GRASS_PROFILE_LUSH,
             blade_lod: ring.blade_lod,
             width_scale: ring.width_scale,
             height_scale: ring.height_scale,
+            clump_scale: ring.clump_scale,
             seed: GRASS_SEED,
-            flatten_exclusion,
+            scatter_regions: Arc::clone(&scatter_regions),
+            lawn_profile: GRASS_PROFILE_LAWN,
+            lawn_density_per_m2: ring.density_per_m2 * GRASS_LAWN_DENSITY_MULT,
             forest_cull: ring.forest_cull,
         };
         let revision = height_source.revision();
@@ -547,27 +686,36 @@ fn finalize_grass_tiles(
         let center_world = body_state.position + orientation * tile.center_surface_body_m;
         let (cell, local) = real_space_grid().translation_to_grid(center_world);
         let material = ring_materials[rk.ring as usize].clone();
-        let entity = commands
-            .spawn((
-                Mesh3d(meshes.add(tile.mesh)),
-                MeshMaterial3d(material),
-                Transform {
-                    translation: local,
-                    rotation: orientation.as_quat(),
-                    scale: Vec3::ONE,
-                },
-                cell,
-                Visibility::Inherited,
-                RenderLayers::layer(SHIP_LAYER),
-                NotShadowCaster,
-                ChildOf(root.entity),
-                GrassTileVisual {
-                    body_id,
-                    center_surface_body: tile.center_surface_body_m,
-                },
-                Name::new("Grass Tile"),
-            ))
-            .id();
+        // Explicit local-space AABB so the tile is **frustum-culled**. The mesh is
+        // `RENDER_WORLD`-only, so Bevy never auto-computes an `Aabb` for it (see
+        // `docs/vegetation.md`) — without this, every tile in the full 360° ring
+        // around the camera runs its (now per-vertex-lit, so heavier) vertex
+        // shader every frame, including the ~⅔ behind/beside the view. Rest-pose
+        // bound; the shader's ≤6 cm wind sway is far inside the frustum margin.
+        let aabb = tile.mesh.compute_aabb();
+        let mut tile_cmd = commands.spawn((
+            Mesh3d(meshes.add(tile.mesh)),
+            MeshMaterial3d(material),
+            Transform {
+                translation: local,
+                rotation: orientation.as_quat(),
+                scale: Vec3::ONE,
+            },
+            cell,
+            Visibility::Inherited,
+            RenderLayers::layer(SHIP_LAYER),
+            NotShadowCaster,
+            ChildOf(root.entity),
+            GrassTileVisual {
+                body_id,
+                center_surface_body: tile.center_surface_body_m,
+            },
+            Name::new("Grass Tile"),
+        ));
+        if let Some(aabb) = aabb {
+            tile_cmd.insert(aabb);
+        }
+        let entity = tile_cmd.id();
         grass.tiles.insert(
             rk,
             BuiltTile {
@@ -659,6 +807,7 @@ fn update_grass_material(
     ship: Query<&GlobalTransform, With<PlayerShip>>,
     ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
     freecam: Res<FreeCam>,
+    origin: Res<crate::rendering::RenderOrigin>,
     sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<GrassMaterial>>,
 ) {
@@ -726,6 +875,18 @@ fn update_grass_material(
     let anchor = match (freecam.active, ship.iter().next(), cam_render) {
         (false, Some(ship_gt), Some(cam)) => {
             let off = ship_gt.translation() - cam;
+            Vec4::new(off.x, off.y, off.z, 1.0)
+        }
+        (false, None, Some(cam)) => {
+            // EVA (no PlayerShip): pin the fade to the CANONICAL player position
+            // (this-frame, f64-derived: ship_state − render origin), NOT the
+            // camera — whose big_space cell lags a frame, km-scale at the
+            // surface's ~260 m/s co-rotation, which collapsed the blades the
+            // instant the sim ran. Same origin-invariant (player − camera) offset
+            // the ship arm uses; see `scatter_view_center`'s note on the lag.
+            let player_render =
+                (sim.simulation.ship_state().position - origin.position).as_vec3();
+            let off = player_render - cam;
             Vec4::new(off.x, off.y, off.z, 1.0)
         }
         _ => Vec4::ZERO,

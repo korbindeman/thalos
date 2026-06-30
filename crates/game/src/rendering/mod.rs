@@ -19,6 +19,7 @@ mod lighting;
 mod map_terrain;
 mod materials;
 pub(crate) mod real_space;
+mod rocks;
 mod scene_depth;
 mod spawn;
 pub(crate) mod sun_shadow;
@@ -35,8 +36,8 @@ use ground_terrain::{
     update_body_terrain_atmosphere,
 };
 use lighting::{
-    sync_film_grain_to_exposure, update_camera_exposure, update_solid_planet_params,
-    update_sun_light,
+    sync_film_grain_to_exposure, update_camera_exposure, update_moon_light,
+    update_solid_planet_params, update_sun_light,
 };
 use materials::{
     LastCloudBandUpdate, update_cloud_bands, update_gas_giant_params, update_ring_params,
@@ -88,6 +89,7 @@ impl Plugin for RenderingPlugin {
             .add_plugins(clouds::CloudsRenderPlugin)
             .add_plugins(grass::GrassRenderPlugin)
             .add_plugins(vegetation::VegetationRenderPlugin)
+            .add_plugins(rocks::RockScatterPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())
@@ -135,7 +137,12 @@ impl Plugin for RenderingPlugin {
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),
                     update_real_space_body_positions.after(sync_solar_system_state),
-                    update_sun_light.after(sync_solar_system_state),
+                    // F1: the Bevy sun is a projection of the spine's heliocentric
+                    // flux, so it must read the per-frame exposure gain first.
+                    update_sun_light
+                        .after(sync_solar_system_state)
+                        .after(update_camera_exposure),
+                    update_moon_light.after(sync_solar_system_state),
                     update_camera_exposure.after(sync_solar_system_state),
                     sync_film_grain_to_exposure.after(update_camera_exposure),
                     // Unified per-body render-LOD: one pass toggles

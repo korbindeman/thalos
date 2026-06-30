@@ -7,10 +7,12 @@
 //! so an open settings tab doesn't churn the file).
 //!
 //! The settings menu's Graphics tab is the sole writer; render systems read.
-//! Today the only knob is the volumetric-cloud toggle, consumed by
+//! Knobs: the volumetric-cloud toggle, consumed by
 //! `rendering::clouds::drive_clouds` — when off it parks the cloud raymarch the
 //! same way an absent cloud body does, so the sky composites with no cloud
-//! layer at zero GPU cost.
+//! layer at zero GPU cost; the grass toggle, consumed by
+//! `rendering::grass::drive_grass_tiles` — when off it parks the grass clipmap
+//! (no tiles built, live tiles despawned); and the MSAA level.
 
 use std::path::Path;
 
@@ -95,6 +97,10 @@ pub struct GraphicsSettings {
     /// Render volumetric clouds. When off, the cloud raymarch is parked (no
     /// GPU work) and the body sky composites without a cloud layer.
     pub clouds: bool,
+    /// Render the near-camera grass-blade decoration layer. When off, the grass
+    /// clipmap is parked (no tiles built, live tiles despawned); the terrain
+    /// albedo still carries the grass colour, so the ground reads green.
+    pub grass: bool,
     /// Multisample anti-aliasing level for the main 3D view. `Off` keeps SMAA;
     /// a multisampled level replaces it. See [`MsaaSetting`].
     pub msaa: MsaaSetting,
@@ -104,6 +110,7 @@ impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
             clouds: true,
+            grass: true,
             // Default off so the first run keeps the verified SMAA path; the
             // MSAA depth-resolve path is opt-in from the Graphics tab until it
             // has been runtime-verified.

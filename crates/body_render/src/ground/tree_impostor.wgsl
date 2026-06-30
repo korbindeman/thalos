@@ -18,7 +18,7 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
-#import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage}
+#import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage, object_aerial_recession}
 #import thalos::foliage::foliage_hue_tint
 
 // Mirror of GrassParams (shared with grass.wgsl / tree.wgsl) — field order
@@ -253,6 +253,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     s.ambient_scale = 0.8;
     s.ambient_bleed = 0.5;
     let view_dir = normalize(view.world_position - in.world_position);
-    let lit = shade_foliage(s, view_dir, up, sun_dir, sky, 1.0);
+    var lit = shade_foliage(s, view_dir, up, sun_dir, sky, 1.0);
+    // Far-band impostors live where the recession is strongest — melt them into
+    // the air so distant groves read as blue-grey masses, not crisp cards.
+    lit = object_aerial_recession(lit, sky, in.world_position, view.world_position);
     return vec4<f32>(lit, 1.0);
 }

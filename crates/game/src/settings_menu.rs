@@ -28,6 +28,7 @@ use thalos_input::settings::{
 
 use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
 use crate::hud::theme::{HudTheme, panel_frame};
+use crate::units_settings::{UnitSystem, UnitsSettings};
 use crate::ui_widgets::{
     ScrollableColumn, SliderFormat, TextField, UiButton, UiCheckbox, UiCycle, UiSlider,
     spawn_button, spawn_checkbox_row, spawn_cycle_row, spawn_slider_row, spawn_text_field,
@@ -59,6 +60,7 @@ enum Tab {
     #[default]
     Window,
     Graphics,
+    Units,
     Keyboard,
     Mouse,
     Controller,
@@ -66,9 +68,10 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 7] = [
         Tab::Window,
         Tab::Graphics,
+        Tab::Units,
         Tab::Keyboard,
         Tab::Mouse,
         Tab::Controller,
@@ -79,6 +82,7 @@ impl Tab {
         match self {
             Tab::Window => "Window",
             Tab::Graphics => "Graphics",
+            Tab::Units => "Units",
             Tab::Keyboard => "Keyboard",
             Tab::Mouse => "Mouse",
             Tab::Controller => "Controller",
@@ -125,9 +129,15 @@ struct ResetWindowControl;
 #[derive(Component)]
 struct CloudsControl;
 #[derive(Component)]
+struct GrassControl;
+#[derive(Component)]
 struct MsaaControl;
 #[derive(Component)]
 struct ResetGraphicsControl;
+
+// Units tab
+#[derive(Component)]
+struct UnitsControl;
 
 // HOTAS tab
 #[derive(Component)]
@@ -175,6 +185,7 @@ impl Plugin for SettingsMenuPlugin {
                     rebuild_tab_body,
                     apply_window_controls,
                     apply_graphics_controls,
+                    apply_units_controls,
                     apply_hotas_controls,
                 ),
             );
@@ -359,6 +370,7 @@ fn rebuild_tab_body(
     window: Res<WindowSettings>,
     overrides: Res<WindowSettingsOverrides>,
     graphics: Res<GraphicsSettings>,
+    units: Res<UnitsSettings>,
     input: Res<InputSettings>,
     monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
     body: Query<(Entity, Option<&Children>), With<SettingsTabBody>>,
@@ -386,6 +398,7 @@ fn rebuild_tab_body(
     commands.entity(body_entity).with_children(|b| match menu.tab {
         Tab::Window => build_window_tab(b, &theme, &window, &overrides, &monitors),
         Tab::Graphics => build_graphics_tab(b, &theme, &graphics),
+        Tab::Units => build_units_tab(b, &theme, &units),
         Tab::Keyboard => build_binding_tab(b, &theme, &input, BindingKind::Keyboard),
         Tab::Mouse => build_binding_tab(b, &theme, &input, BindingKind::Mouse),
         Tab::Controller => build_binding_tab(b, &theme, &input, BindingKind::Controller),
@@ -526,6 +539,15 @@ fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settin
 
     spacer(b);
 
+    spawn_checkbox_row(b, theme, "Grass blades", settings.grass, GrassControl);
+    note(
+        b,
+        theme,
+        "Off parks the grass clipmap (no blades built); the ground still reads green from the terrain.",
+    );
+
+    spacer(b);
+
     let index = MsaaSetting::ALL
         .iter()
         .position(|m| *m == settings.msaa)
@@ -535,12 +557,31 @@ fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settin
     note(
         b,
         theme,
-        "MSAA smooths geometry edges; any level replaces the SMAA post pass.",
+        "MSAA smooths geometry edges and (via alpha-to-coverage) tree-leaf edges; \
+         any level replaces the SMAA post pass.",
     );
 
     spacer(b);
     spawn_button(b, theme, ResetGraphicsControl, "Reset to defaults", 11.0, 26.0);
     note(b, theme, "Saved to user/graphics.ron.");
+}
+
+// ── Units tab ─────────────────────────────────────────────────────────────────────
+
+fn build_units_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings: &UnitsSettings) {
+    let index = UnitSystem::ALL
+        .iter()
+        .position(|s| *s == settings.system)
+        .unwrap_or(0);
+    let options = UnitSystem::ALL.iter().map(|s| s.label().to_string()).collect();
+    spawn_cycle_row(b, theme, "Measurement", options, index, UnitsControl);
+    note(
+        b,
+        theme,
+        "Imperial shows altitude in feet, speed in knots, vertical speed in ft/min, \
+         and mass in pounds. Internal physics stays SI; this only affects the readouts.",
+    );
+    note(b, theme, "Saved to user/units.ron.");
 }
 
 // ── Binding-list tabs ───────────────────────────────────────────────────────────
@@ -896,12 +937,18 @@ fn apply_graphics_controls(
     mut settings: ResMut<GraphicsSettings>,
     mut menu: ResMut<SettingsMenu>,
     clouds_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
+    grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GrassControl>)>,
     msaa_q: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
     reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
 ) {
     for checkbox in &clouds_q {
         if settings.clouds != checkbox.checked {
             settings.clouds = checkbox.checked;
+        }
+    }
+    for checkbox in &grass_q {
+        if settings.grass != checkbox.checked {
+            settings.grass = checkbox.checked;
         }
     }
     for cycle in &msaa_q {
@@ -915,6 +962,19 @@ fn apply_graphics_controls(
         if matches!(interaction, Interaction::Pressed) {
             *settings = GraphicsSettings::default();
             menu.dirty();
+        }
+    }
+}
+
+fn apply_units_controls(
+    mut settings: ResMut<UnitsSettings>,
+    units_q: Query<&UiCycle, (Changed<UiCycle>, With<UnitsControl>)>,
+) {
+    for cycle in &units_q {
+        if let Some(&system) = UnitSystem::ALL.get(cycle.index)
+            && settings.system != system
+        {
+            settings.system = system;
         }
     }
 }

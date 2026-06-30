@@ -831,10 +831,28 @@ those seams without touching it.
 
 **Shape.** A camera-local set of body-fixed *grass tiles* (~25 m tangent
 squares on a self-contained cube-sphere lattice, `GRASS_TILE_SIZE_M`). Each
-tile is one batched `Mesh` of up to a few thousand tapered five-vertex blade
-strips, built on `AsyncComputeTaskPool` and anchored exactly like the runway:
-a root-grid big_space child re-posed in f64 every frame, vertices stored as
-small offsets from the tile's surface centre. No GPU instancing in v1.
+tile is one batched `Mesh` built on `AsyncComputeTaskPool` and anchored exactly
+like the runway: a root-grid big_space child re-posed in f64 every frame,
+vertices stored as small offsets from the tile's surface centre. No GPU
+instancing in v1. Each accepted placement point grows a **fountain tussock** —
+a sunflower-spread fan of curved, tapered blades that arch radially outward and
+bow over toward the rim, closing into a rounded fluffy dome (rather than a spray
+of separated spikes). The near rings use the 7-vertex curved blade; the far ring
+a cheap 3-vertex wide card.
+
+**Tunable grass types.** The clump shape is a `GrassProfile` (in
+`vegetation.rs`): blade **length** (`height_m`), **thickness** (`width_m`),
+**fluffiness** (`blades_per_clump`, plus the fountain `droop`/`dome` shaping),
+and footprint `radius_m`. Two named presets bracket the range —
+`GrassProfile::fluffy_short()` (short, thick, dense, droopy) and
+`GrassProfile::wispy_tall()` (tall, thin, upright). The in-game meadow
+**distributes types per clump**: `grass.rs` carries a `(profile_dry,
+profile_lush)` pair and `build_grass_tile_mesh` blends between them by the
+landcover moisture field, so drier ground grows thick short grass and wetter
+ground longer wispy grass. The clipmap rings then apply LOD scalars
+(`width_scale`/`height_scale`/`clump_scale`) on top to hold coverage as
+per-blade density drops outward. Preview any profile headlessly with `just
+preview` (`grass_clump_*`, `grass_field_*`).
 
 **Placement = the terrain shader's own grass gate.** Blades sample the body's
 registered `HeightSource` (GPU-atlas mirror with CPU fallback — the collider's
