@@ -176,7 +176,7 @@ fn spawn_status_bar(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Text::new(""),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -201,7 +201,7 @@ fn spawn_status_bar(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 Text::new("PENDING — click a node or surface"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_accent),

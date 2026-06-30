@@ -131,7 +131,7 @@ fn spawn_altitude(p: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Text::new("ALTITUDE"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_subtitle),
@@ -171,7 +171,7 @@ fn spawn_orbital_info(p: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 Text::new("ORBITAL"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_subtitle),
@@ -197,7 +197,7 @@ fn label_cell(theme: &HudTheme, label_text: &str) -> impl Bundle {
         Text::new(label_text.to_string()),
         TextFont {
             font: theme.font.clone(),
-            font_size: 14.0,
+            font_size: FontSize::Px(14.0),
             ..default()
         },
         TextColor(theme.text_label_alt),
@@ -213,7 +213,7 @@ fn value_cell(theme: &HudTheme) -> impl Bundle {
         Text::new("—"),
         TextFont {
             font: theme.font.clone(),
-            font_size: 14.0,
+            font_size: FontSize::Px(14.0),
             ..default()
         },
         TextColor(theme.text_primary),
@@ -229,7 +229,7 @@ fn countdown_cell(theme: &HudTheme) -> impl Bundle {
         Text::new("—"),
         TextFont {
             font: theme.font.clone(),
-            font_size: 12.0,
+            font_size: FontSize::Px(12.0),
             ..default()
         },
         TextColor(theme.text_dim),

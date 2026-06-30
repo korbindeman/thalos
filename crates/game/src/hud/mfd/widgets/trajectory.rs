@@ -206,7 +206,7 @@ pub(crate) fn update(
     let Ok(canvas) = canvas_q.single() else {
         return;
     };
-    let Some(material) = materials.get_mut(canvas) else {
+    let Some(mut material) = materials.get_mut(canvas) else {
         return;
     };
 

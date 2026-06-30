@@ -211,7 +211,7 @@ pub(super) fn update_shroud_transparency(
 
     for (entity, mesh_mat) in shrouds.iter() {
         let target_alpha: f32 = if hovered.contains(&entity) { 0.18 } else { 1.0 };
-        let Some(mat) = ship_materials.get_mut(&mesh_mat.0) else {
+        let Some(mut mat) = ship_materials.get_mut(&mesh_mat.0) else {
             continue;
         };
         let srgba = mat.base.base_color.to_srgba();

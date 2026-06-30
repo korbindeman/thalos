@@ -7,11 +7,12 @@
 //! a fragment shader, and our forked `thalos_udlod` does not queue into
 //! `Opaque3dPrepass`, so the standard prepass-depth texture is terrain-blind.
 //!
-//! Workaround: insert a render-graph node between [`Node3d::MainOpaquePass`]
-//! and [`Node3d::MainTransparentPass`] that `copy_texture_to_texture`s the
-//! main pass's `ViewDepthTexture` into an [`Image`] we own. Materials bind
-//! that `Image` via `AsBindGroup` and sample it as `texture_depth_2d` from
-//! WGSL. One extra full-screen depth copy per frame; trivial cost.
+//! Workaround: a render-pass system ([`copy_scene_depth`]) ordered in the
+//! `Core3d` schedule between the opaque and transparent main passes
+//! `copy_texture_to_texture`s the main pass's `ViewDepthTexture` into an
+//! [`Image`] we own. Materials bind that `Image` via `AsBindGroup` and sample
+//! it as `texture_depth_2d` from WGSL. One extra full-screen depth copy per
+//! frame; trivial cost.
 //!
 //! When the ship camera runs MSAA the main-pass depth is multisampled and a
 //! single-sample `copy_texture_to_texture` is illegal, so this node instead
@@ -23,20 +24,21 @@
 use crate::camera::ShipCamera;
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
 use bevy::camera::Camera;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+// Bevy 0.19: render passes are systems in the `Core3d` schedule. The depth copy
+// is ordered inside the `MainPass` set, after the opaque pass and before the
+// transparent pass (was: the `Node3d::MainOpaquePass → … → MainTransparentPass`
+// graph edges).
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::ecs::prelude::*;
-use bevy::ecs::query::QueryItem;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::{
     RenderApp, RenderStartup,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
-    render_graph::{
-        NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-    },
     render_resource::{binding_types::*, *},
-    renderer::RenderContext,
+    renderer::{RenderContext, RenderDevice, ViewQuery},
     texture::GpuImage,
     view::ViewDepthTexture,
 };
@@ -53,99 +55,95 @@ pub struct SceneDepthImage {
     pub handle: Handle<Image>,
 }
 
-#[derive(RenderLabel, Hash, PartialEq, Eq, Debug, Clone)]
-struct CopySceneDepth;
+/// Copy the main pass depth into [`SceneDepthImage`] so the atmosphere pass can
+/// sample it. Ported from the former `CopySceneDepthNode` (`ViewNode`) to a
+/// Bevy 0.19 render-pass **system**.
+///
+/// The `ViewQuery` filters to the ship-camera view via the extracted
+/// `ShipCamera` marker and auto-skips views that lack it (map camera, light /
+/// shadow views, picking sub-cameras) — important because they may have
+/// different depth formats / sample counts / usage flags.
+fn copy_scene_depth(
+    view: ViewQuery<(&'static ViewDepthTexture, &'static ShipCamera)>,
+    scene_depth: Option<Res<SceneDepthImage>>,
+    render_assets: Res<RenderAssets<GpuImage>>,
+    msaa_resolve: Option<Res<MsaaDepthResolve>>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    mut ctx: RenderContext,
+) {
+    let (depth, _ship) = view.into_inner();
 
-#[derive(Default)]
-struct CopySceneDepthNode;
+    let Some(scene_depth) = scene_depth else {
+        return;
+    };
+    let Some(dest) = render_assets.get(&scene_depth.handle) else {
+        return;
+    };
 
-impl ViewNode for CopySceneDepthNode {
-    // Filter to the ship-camera view via the extracted `ShipCamera`
-    // marker. Other render-world views (map camera, future light /
-    // shadow views, picking sub-cameras) lack the marker and the node
-    // doesn't fire for them — important because they may have different
-    // depth formats / sample counts / usage flags.
-    type ViewQuery = (&'static ViewDepthTexture, &'static ShipCamera);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (depth, _ship): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let Some(scene_depth) = world.get_resource::<SceneDepthImage>() else {
-            return Ok(());
-        };
-        let render_assets = world.resource::<RenderAssets<GpuImage>>();
-        let Some(dest) = render_assets.get(&scene_depth.handle) else {
-            return Ok(());
-        };
-
-        // Resize is async: skip frames where source and destination disagree
-        // on size. The next frame's `resize_scene_depth_image` call (or the
-        // following one) will close the gap.
-        let src_size = depth.texture.size();
-        let dst_size = dest.texture.size();
-        if src_size.width != dst_size.width || src_size.height != dst_size.height {
-            return Ok(());
-        }
-
-        // MSAA path: the source depth is multisampled, so a single-sample copy
-        // is illegal. Resolve sample 0 into the destination with a depth-only
-        // fullscreen pass instead. Skipped silently until the resolve pipeline
-        // has compiled (the next frame closes the gap).
-        if depth.texture.sample_count() > 1 {
-            let Some(resolve) = world.get_resource::<MsaaDepthResolve>() else {
-                return Ok(());
-            };
-            let pipeline_cache = world.resource::<PipelineCache>();
-            let Some(pipeline) = pipeline_cache.get_render_pipeline(resolve.pipeline_id) else {
-                return Ok(());
-            };
-            let layout = pipeline_cache.get_bind_group_layout(&resolve.layout);
-            let bind_group = render_context.render_device().create_bind_group(
-                Some("msaa_depth_resolve_bind_group"),
-                &layout,
-                &BindGroupEntries::single(depth.view()),
-            );
-
-            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                label: Some("msaa_depth_resolve_pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &dest.texture_view,
-                    // The fullscreen triangle writes every pixel with
-                    // `depth_compare: Always`, so the clear value is overwritten
-                    // everywhere — only `store` matters.
-                    depth_ops: Some(Operations {
-                        load: LoadOp::Clear(0.0),
-                        store: StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_render_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-            return Ok(());
-        }
-
-        // MSAA-off path: both single-sample, so a straight copy is cheapest.
-        // (Other render-world views — shadow cascades, light views — never
-        // reach here; the node is filtered to the ship camera.)
-        if depth.texture.sample_count() != dest.texture.sample_count() {
-            return Ok(());
-        }
-        render_context.command_encoder().copy_texture_to_texture(
-            depth.texture.as_image_copy(),
-            dest.texture.as_image_copy(),
-            src_size,
-        );
-        Ok(())
+    // Resize is async: skip frames where source and destination disagree
+    // on size. The next frame's `resize_scene_depth_image` call (or the
+    // following one) will close the gap.
+    let src_size = depth.texture.size();
+    let dst_size = dest.texture.size();
+    if src_size.width != dst_size.width || src_size.height != dst_size.height {
+        return;
     }
+
+    // MSAA path: the source depth is multisampled, so a single-sample copy
+    // is illegal. Resolve sample 0 into the destination with a depth-only
+    // fullscreen pass instead. Skipped silently until the resolve pipeline
+    // has compiled (the next frame closes the gap).
+    if depth.texture.sample_count() > 1 {
+        let Some(resolve) = msaa_resolve else {
+            return;
+        };
+        let Some(pipeline) = pipeline_cache.get_render_pipeline(resolve.pipeline_id) else {
+            return;
+        };
+        let layout = pipeline_cache.get_bind_group_layout(&resolve.layout);
+        let bind_group = render_device.create_bind_group(
+            Some("msaa_depth_resolve_bind_group"),
+            &layout,
+            &BindGroupEntries::single(depth.view()),
+        );
+
+        let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("msaa_depth_resolve_pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &dest.texture_view,
+                // The fullscreen triangle writes every pixel with
+                // `depth_compare: Always`, so the clear value is overwritten
+                // everywhere — only `store` matters.
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(0.0),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            // Added by wgpu 29 / bevy 0.19.
+            multiview_mask: None,
+        });
+        pass.set_render_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+        return;
+    }
+
+    // MSAA-off path: both single-sample, so a straight copy is cheapest.
+    // (Other render-world views — shadow cascades, light views — never
+    // reach here; the system is filtered to the ship camera.)
+    if depth.texture.sample_count() != dest.texture.sample_count() {
+        return;
+    }
+    ctx.command_encoder().copy_texture_to_texture(
+        depth.texture.as_image_copy(),
+        dest.texture.as_image_copy(),
+        src_size,
+    );
 }
 
 pub struct SceneDepthPlugin;
@@ -157,17 +155,13 @@ impl Plugin for SceneDepthPlugin {
             .add_systems(Update, resize_scene_depth_image);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app
-                .add_systems(RenderStartup, init_msaa_depth_resolve)
-                .add_render_graph_node::<ViewNodeRunner<CopySceneDepthNode>>(Core3d, CopySceneDepth)
-                .add_render_graph_edges(
-                    Core3d,
-                    (
-                        Node3d::MainOpaquePass,
-                        CopySceneDepth,
-                        Node3d::MainTransparentPass,
-                    ),
-                );
+            render_app.add_systems(RenderStartup, init_msaa_depth_resolve).add_systems(
+                Core3d,
+                copy_scene_depth
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_opaque_pass_3d)
+                    .before(main_transparent_pass_3d),
+            );
         }
     }
 }
@@ -199,7 +193,8 @@ fn init_msaa_depth_resolve(
     let pipeline_id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
         label: Some("msaa_depth_resolve_pipeline".into()),
         layout: vec![layout.clone()],
-        push_constant_ranges: vec![],
+        // 0.19 replaced `push_constant_ranges` with `immediate_size: u32`.
+        immediate_size: 0,
         vertex: VertexState {
             shader: shader.clone(),
             shader_defs: vec![],
@@ -210,8 +205,9 @@ fn init_msaa_depth_resolve(
         // Depth-only: no color targets, always write the resolved sample.
         depth_stencil: Some(DepthStencilState {
             format: TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare: CompareFunction::Always,
+            // wgpu 29 made these `Option` on DepthStencilState.
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
             stencil: StencilState::default(),
             bias: DepthBiasState::default(),
         }),
@@ -277,7 +273,7 @@ fn resize_scene_depth_image(
     if viewport.x == 0 || viewport.y == 0 {
         return;
     }
-    let Some(image) = images.get_mut(&scene_depth.handle) else {
+    let Some(mut image) = images.get_mut(&scene_depth.handle) else {
         return;
     };
     if image.size() != viewport {

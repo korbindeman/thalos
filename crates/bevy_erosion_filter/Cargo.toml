@@ -1,0 +1,23 @@
+# Vendored fork of `bevy_erosion_filter` 0.1.2 (MIT) — a GPU/CPU erosion
+# noise filter (WGSL port of Rune Skovbo Johansen's erosion noise).
+#
+# Vendored into the workspace for the same reason as `big_space`: upstream
+# targets Bevy 0.18 / glam 0.30 and has not been updated for 0.19, but it is a
+# tiny, stable crate (a pure-glam `cpu` module + a one-line shader-library
+# plugin). Owning it keeps it off the Bevy-bump critical path. The `bevy`
+# feature stays optional so `thalos_terrain` can use the pure `cpu` module
+# with `default-features = false` and pull no Bevy crate (CI-guarded boundary).
+[package]
+name = "bevy_erosion_filter"
+version = "0.1.2"
+edition = "2024"
+description = "GPU/CPU erosion noise filter for Bevy (vendored fork for Thalos)"
+license = "MIT"
+
+[features]
+bevy = ["dep:bevy"]
+default = ["bevy"]
+
+[dependencies]
+bevy = { version = "0.19", default-features = false, features = ["bevy_render", "bevy_asset"], optional = true }
+glam = "0.32"

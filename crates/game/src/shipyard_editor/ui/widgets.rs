@@ -55,7 +55,7 @@ pub fn spawn_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size,
+                    font_size: FontSize::Px(font_size),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -188,7 +188,7 @@ pub fn spawn_slider_row(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -232,7 +232,7 @@ pub fn spawn_slider_row(
                 Text::new(""),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),

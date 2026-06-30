@@ -122,7 +122,8 @@ impl TerrainData {
         let atlas_sampler = device.create_sampler(&SamplerDescriptor {
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
+            // wgpu 29 split the mipmap filter into its own `MipmapFilterMode`.
+            mipmap_filter: MipmapFilterMode::Linear,
             anisotropy_clamp: 16, // Todo: make this customisable
             ..default()
         });
@@ -204,18 +205,22 @@ impl TerrainData {
         let mut live = Vec::new();
         for (terrain, transform, previous_transform) in terrains.iter() {
             live.push(terrain);
+            // Bevy 0.19/glam: `Affine3: From<&Affine3A>` was removed; convert
+            // by value (drop the `&`).
             let mesh_transforms = MeshTransforms {
-                world_from_local: (&transform.affine()).into(),
+                world_from_local: transform.affine().into(),
                 flags: 0,
-                previous_world_from_local: (&previous_transform
+                previous_world_from_local: previous_transform
                     .map(|t| t.0)
-                    .unwrap_or(transform.affine()))
+                    .unwrap_or(transform.affine())
                     .into(),
             };
+            // 0.19 added `morph_descriptor_index` before `tag` in MeshUniform::new.
             let mesh_uniform = MeshUniform::new(
                 &mesh_transforms,
                 0,
                 MaterialBindGroupSlot(0),
+                None,
                 None,
                 None,
                 None,
@@ -254,11 +259,9 @@ impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetTerrainBindGroup<I> {
         terrain_data: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let data = terrain_data
-            .into_inner()
-            .get(&item.main_entity().id())
-            .unwrap();
-
+        let Some(data) = terrain_data.into_inner().get(&item.main_entity().id()) else {
+            return RenderCommandResult::Skip;
+        };
         pass.set_bind_group(I, &data.terrain_bind_group, &[]);
         RenderCommandResult::Success
     }

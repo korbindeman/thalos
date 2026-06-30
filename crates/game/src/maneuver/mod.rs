@@ -158,16 +158,16 @@ impl Plugin for ManeuverPlugin {
                     update_selected_node_view.after(sync_node_delta_v),
                     manage_arrow_handles
                         .after(update_selected_node_view)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
                     update_arrow_transforms
                         .after(manage_arrow_handles)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
                     manage_node_markers
                         .after(update_selected_node_view)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
                     update_snap_indicator
                         .after(maneuver_input)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
                 )
                     .run_if(crate::pause_menu::not_game_paused)
                     .before(crate::SimStage::Physics),

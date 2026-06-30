@@ -200,7 +200,7 @@ impl Plugin for MfdPlugin {
                     .after(crate::SimStage::Sync)
                     .run_if(
                         crate::photo_mode::not_in_photo_mode
-                            .and(crate::shipyard_editor::editor_closed),
+                            .and_then(crate::shipyard_editor::editor_closed),
                     ),
             );
     }
@@ -308,7 +308,7 @@ fn spawn_tab(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, action: Mf
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),

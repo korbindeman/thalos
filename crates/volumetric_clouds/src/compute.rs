@@ -6,14 +6,15 @@ use bevy::{
         Extract, Render, RenderApp, RenderSystems,
         extract_resource::ExtractResourcePlugin,
         render_asset::RenderAssets,
-        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
             AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
             BindGroupLayoutEntries, CachedComputePipelineId, CachedPipelineState,
             ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, ShaderStages,
             binding_types::uniform_buffer,
         },
-        renderer::{RenderContext, RenderDevice, RenderQueue},
+        // Bevy 0.19 replaced the node-based render graph with systems scheduled
+        // in the root `RenderGraph` schedule (see `renderer::RenderGraphSystems`).
+        renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
         texture::GpuImage,
     },
 };
@@ -178,7 +179,8 @@ impl FromWorld for CloudsPipeline {
                 uniform_bind_group_layout.clone(),
                 texture_bind_group_layout.clone(),
             ],
-            push_constant_ranges: Vec::new(),
+            // 0.19 replaced `push_constant_ranges` with `immediate_size: u32`.
+            immediate_size: 0,
             shader: shader.clone(),
             shader_defs: vec![],
             entry_point: Some(Cow::from("init")),
@@ -190,7 +192,8 @@ impl FromWorld for CloudsPipeline {
                 uniform_bind_group_layout.clone(),
                 texture_bind_group_layout.clone(),
             ],
-            push_constant_ranges: Vec::new(),
+            // 0.19 replaced `push_constant_ranges` with `immediate_size: u32`.
+            immediate_size: 0,
             shader,
             shader_defs: vec![],
             entry_point: Some(Cow::from("update")),
@@ -205,133 +208,125 @@ impl FromWorld for CloudsPipeline {
     }
 }
 
+#[derive(Default, Clone, Copy)]
 enum CloudsState {
+    #[default]
     Loading,
     Init,
     Update,
 }
 
-struct CloudsNode {
-    state: CloudsState,
-}
-
-impl Default for CloudsNode {
-    fn default() -> Self {
-        Self {
-            state: CloudsState::Loading,
-        }
-    }
-}
-
-impl Node for CloudsNode {
-    fn update(&mut self, world: &mut World) {
-        let pipeline = world.resource::<CloudsPipeline>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-
-        // if the corresponding pipeline has loaded, transition to the next stage
-        match self.state {
-            CloudsState::Loading => {
-                if let CachedPipelineState::Ok(_) =
-                    pipeline_cache.get_compute_pipeline_state(pipeline.init_pipeline)
-                {
-                    self.state = CloudsState::Init;
-                }
+/// The cloud compute dispatch, ported from the former `CloudsNode`
+/// (`render_graph::Node`) to a Bevy 0.19 render-graph **system**.
+///
+/// Scheduled in `RenderGraphSystems::Begin`, which is chained before
+/// `RenderGraphSystems::Render` (where `camera_driver` records the per-view
+/// passes that sample the cloud textures) — preserving the old
+/// `add_node_edge(CloudsLabel, CameraDriverLabel)` ordering so the sky pass
+/// reads this frame's clouds. The node's two phases collapse into one system:
+/// the `Local<CloudsState>` carries the Loading→Init→Update transition that
+/// used to live in `Node::update`, and `RenderContext` (a SystemParam in 0.19)
+/// supplies the command encoder.
+#[expect(clippy::too_many_arguments)]
+fn run_clouds_compute(
+    mut ctx: RenderContext,
+    mut state: Local<CloudsState>,
+    pipeline: Res<CloudsPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    texture_bind_group: Option<Res<CloudsImageBindGroup>>,
+    uniform_bind_group: Option<Res<CloudsUniformBindGroup>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    clouds_image: Option<Res<CloudsImage>>,
+) {
+    // Advance the pipeline-load state machine (was `Node::update`).
+    match *state {
+        CloudsState::Loading => {
+            if let CachedPipelineState::Ok(_) =
+                pipeline_cache.get_compute_pipeline_state(pipeline.init_pipeline)
+            {
+                *state = CloudsState::Init;
             }
+        }
+        CloudsState::Init => {
+            if let CachedPipelineState::Ok(_) =
+                pipeline_cache.get_compute_pipeline_state(pipeline.update_pipeline)
+            {
+                *state = CloudsState::Update;
+            }
+        }
+        CloudsState::Update => {}
+    }
+
+    // The bind groups are inserted by the prepare systems each frame; bail if
+    // they (or the cloud images) aren't ready yet.
+    let (Some(texture_bind_group), Some(uniform_bind_group), Some(clouds_image)) =
+        (texture_bind_group, uniform_bind_group, clouds_image)
+    else {
+        return;
+    };
+
+    {
+        let mut pass = ctx
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor::default());
+
+        pass.set_bind_group(0, &uniform_bind_group.0, &[]);
+        pass.set_bind_group(1, &texture_bind_group.0, &[]);
+
+        match *state {
+            CloudsState::Loading => {}
             CloudsState::Init => {
-                if let CachedPipelineState::Ok(_) =
-                    pipeline_cache.get_compute_pipeline_state(pipeline.update_pipeline)
-                {
-                    self.state = CloudsState::Update;
-                }
+                let init_pipeline = pipeline_cache
+                    .get_compute_pipeline(pipeline.init_pipeline)
+                    .unwrap();
+                pass.set_pipeline(init_pipeline);
+                pass.dispatch_workgroups(IMAGE_SIZE / WORKGROUP_SIZE, IMAGE_SIZE / WORKGROUP_SIZE, 1);
             }
-            CloudsState::Update => {}
-        }
-    }
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let texture_bind_group = &world.resource::<CloudsImageBindGroup>().0;
-        let uniform_bind_group = &world.resource::<CloudsUniformBindGroup>().0;
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pipeline = world.resource::<CloudsPipeline>();
-
-        {
-            let mut pass = render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor::default());
-
-            pass.set_bind_group(0, uniform_bind_group, &[]);
-            pass.set_bind_group(1, texture_bind_group, &[]);
-
-            match self.state {
-                CloudsState::Loading => {}
-                CloudsState::Init => {
-                    let init_pipeline = pipeline_cache
-                        .get_compute_pipeline(pipeline.init_pipeline)
-                        .unwrap();
-                    pass.set_pipeline(init_pipeline);
-                    pass.dispatch_workgroups(
-                        IMAGE_SIZE / WORKGROUP_SIZE,
-                        IMAGE_SIZE / WORKGROUP_SIZE,
-                        1,
-                    );
-                }
-                CloudsState::Update => {
-                    let update_pipeline = pipeline_cache
-                        .get_compute_pipeline(pipeline.update_pipeline)
-                        .unwrap();
-                    pass.set_pipeline(update_pipeline);
-                    pass.dispatch_workgroups(
-                        IMAGE_SIZE / WORKGROUP_SIZE,
-                        RENDER_HEIGHT / WORKGROUP_SIZE,
-                        1,
-                    );
-                }
-            }
-        }
-
-        // Snapshot this frame's output into the history textures the next
-        // frame reads (same-pixel accumulation, motion reprojection, the
-        // saved camera rows). A separate history copy keeps the raymarch from
-        // ever reading the texture it is writing — in-pass history reads race
-        // across workgroups and showed as coherent streak artifacts.
-        if matches!(self.state, CloudsState::Update) {
-            let gpu_images = world.resource::<RenderAssets<GpuImage>>();
-            let clouds_image = world.resource::<CloudsImage>();
-            let pairs = [
-                (
-                    &clouds_image.cloud_render_image,
-                    &clouds_image.history_image,
-                ),
-                (
-                    &clouds_image.cloud_distance_image,
-                    &clouds_image.history_distance_image,
-                ),
-            ];
-            for (src, dst) in pairs {
-                let (Some(src), Some(dst)) = (gpu_images.get(src), gpu_images.get(dst)) else {
-                    continue;
-                };
-                render_context.command_encoder().copy_texture_to_texture(
-                    src.texture.as_image_copy(),
-                    dst.texture.as_image_copy(),
-                    src.texture.size(),
+            CloudsState::Update => {
+                let update_pipeline = pipeline_cache
+                    .get_compute_pipeline(pipeline.update_pipeline)
+                    .unwrap();
+                pass.set_pipeline(update_pipeline);
+                pass.dispatch_workgroups(
+                    IMAGE_SIZE / WORKGROUP_SIZE,
+                    RENDER_HEIGHT / WORKGROUP_SIZE,
+                    1,
                 );
             }
         }
-        Ok(())
+    }
+
+    // Snapshot this frame's output into the history textures the next
+    // frame reads (same-pixel accumulation, motion reprojection, the
+    // saved camera rows). A separate history copy keeps the raymarch from
+    // ever reading the texture it is writing — in-pass history reads race
+    // across workgroups and showed as coherent streak artifacts.
+    if matches!(*state, CloudsState::Update) {
+        let pairs = [
+            (
+                &clouds_image.cloud_render_image,
+                &clouds_image.history_image,
+            ),
+            (
+                &clouds_image.cloud_distance_image,
+                &clouds_image.history_distance_image,
+            ),
+        ];
+        for (src, dst) in pairs {
+            let (Some(src), Some(dst)) = (gpu_images.get(src), gpu_images.get(dst)) else {
+                continue;
+            };
+            ctx.command_encoder().copy_texture_to_texture(
+                src.texture.as_image_copy(),
+                dst.texture.as_image_copy(),
+                src.texture.size(),
+            );
+        }
     }
 }
 
 /// A plugin for the compute shader which renders clouds.
 pub(crate) struct CloudsComputePlugin;
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct CloudsLabel;
 
 impl Plugin for CloudsComputePlugin {
     fn build(&self, app: &mut App) {
@@ -348,9 +343,12 @@ impl Plugin for CloudsComputePlugin {
             prepare_uniforms_bind_group.in_set(RenderSystems::PrepareResources),
         );
 
-        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
-        render_graph.add_node(CloudsLabel, CloudsNode::default());
-        render_graph.add_node_edge(CloudsLabel, bevy::render::graph::CameraDriverLabel);
+        // Bevy 0.19: the former `CloudsNode` is now a system in the root
+        // `RenderGraph` schedule. `Begin` is chained before `Render` (where
+        // `camera_driver` runs), so the dispatch records before the per-view
+        // sky pass that samples the cloud textures — matching the old
+        // `add_node_edge(CloudsLabel, CameraDriverLabel)`.
+        render_app.add_systems(RenderGraph, run_clouds_compute.in_set(RenderGraphSystems::Begin));
 
         render_app.add_systems(
             ExtractSchedule,

@@ -24,6 +24,7 @@
 //! shipyard editor's staging preview and this live HUD share one derivation.
 //! This module is the ECS layer that feeds them from live part entities.
 
+use bevy::ecs::resource::IsResource;
 use bevy::ecs::world::EntityRef;
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -275,7 +276,11 @@ fn attach_subtree(root: Entity, children: &HashMap<Entity, Vec<Entity>>) -> Vec<
 // Live inertia recompute
 // ---------------------------------------------------------------------------
 
-type PartQuery<'w, 's> = Query<'w, 's, EntityRef<'static>, (With<Part>, Without<EditorPart>)>;
+// `Without<IsResource>` (bevy 0.19): resources are components now, so a broad
+// `EntityRef` query conservatively conflicts with this system's resource access
+// (B0001). Excluding resource entities makes the access disjoint.
+type PartQuery<'w, 's> =
+    Query<'w, 's, EntityRef<'static>, (With<Part>, Without<EditorPart>, Without<IsResource>)>;
 
 /// Recompute the ship's aggregate moment of inertia and reaction-wheel
 /// torque from the live parts and push them into [`ShipParameters`]. Skips

@@ -112,8 +112,8 @@ impl Material for StarsMaterial {
         // planets occlude stars without any magic offset. Never write
         // depth — stars must not occlude one another or later geometry.
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
-            depth.depth_compare = CompareFunction::GreaterEqual;
+            depth.depth_write_enabled = Some(false);
+            depth.depth_compare = Some(CompareFunction::GreaterEqual);
         }
 
         Ok(())
@@ -277,7 +277,7 @@ fn update_stars_brightness(
     let gain = exposure.gain.max(1.0e-3);
     let brightness = StarsParams::BASE_BRIGHTNESS / gain * visibility.0;
     for handle in &handles {
-        if let Some(material) = materials.get_mut(&handle.0) {
+        if let Some(mut material) = materials.get_mut(&handle.0) {
             material.params.brightness = brightness;
         }
     }
@@ -408,8 +408,8 @@ impl Material for GalaxyMaterial {
         // See `StarsMaterial::specialize` — same reverse-Z far-plane
         // treatment.
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
-            depth.depth_compare = CompareFunction::GreaterEqual;
+            depth.depth_write_enabled = Some(false);
+            depth.depth_compare = Some(CompareFunction::GreaterEqual);
         }
         Ok(())
     }
@@ -448,7 +448,7 @@ fn update_galaxy_uniform(
     let brightness = GalaxyParams::BASE_BRIGHTNESS / gain * visibility.0;
 
     for handle in &handles {
-        if let Some(material) = materials.get_mut(&handle.0) {
+        if let Some(mut material) = materials.get_mut(&handle.0) {
             material.params.pixel_radius_scale = px_per_rad;
             material.params.brightness = brightness;
         }

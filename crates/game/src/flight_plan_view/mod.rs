@@ -39,9 +39,9 @@ impl Plugin for FlightPlanViewPlugin {
                     ghost::sync_ghost_bodies,
                     ghost::update_ghost_transforms,
                     render::render_trajectory
-                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
                     markers::manage_trajectory_markers
-                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
                 )
                     .chain()
                     .after(crate::solar_system_state::sync_solar_system_state)

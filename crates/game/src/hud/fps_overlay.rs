@@ -25,7 +25,7 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                 Text::new("FPS --"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 13.0,
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),

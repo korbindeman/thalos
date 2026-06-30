@@ -8,4 +8,4 @@ edition.workspace = true
 # Full default-feature Bevy: this is a Bevy-consumer crate (like body_render /
 # game), not one of the CI-guarded pure-Rust libraries. The game already pulls
 # full Bevy, so feature unification makes this cost nothing extra in the graph.
-bevy = { version = "0.18" }
+bevy = { version = "0.19" }

@@ -258,7 +258,7 @@ pub(in crate::maneuver) fn update_arrow_transforms(
             1.0
         };
 
-        if let Some(mat) = material_assets.get_mut(&visual.material) {
+        if let Some(mut mat) = material_assets.get_mut(&visual.material) {
             let c = visual.base_color * opacity * brightness;
             mat.base_color = LinearRgba::new(c.red, c.green, c.blue, opacity).into();
             mat.emissive = LinearRgba::new(c.red, c.green, c.blue, opacity);
@@ -327,7 +327,7 @@ pub(in crate::maneuver) fn update_arrow_transforms(
         let mut spheres = children_set.p2();
         for (entity, mut transform, sphere_visual) in &mut spheres {
             let is_hovered = hovered_entities.contains(&entity);
-            if let Some(mat) = material_assets.get_mut(&sphere_visual.material) {
+            if let Some(mut mat) = material_assets.get_mut(&sphere_visual.material) {
                 if is_hovered {
                     mat.base_color = Color::srgb(1.0, 1.0, 0.5);
                     mat.emissive = LinearRgba::from(Color::srgb(0.8, 0.7, 0.2));

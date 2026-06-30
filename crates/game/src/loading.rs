@@ -341,7 +341,7 @@ fn spawn_loading_screen(
     if !existing.is_empty() {
         return;
     }
-    let font: Handle<Font> = asset_server.load("fonts/FiraCode-Regular.ttf");
+    let font = FontSource::Handle(asset_server.load::<Font>("fonts/FiraCode-Regular.ttf"));
 
     commands
         .spawn((
@@ -375,11 +375,11 @@ fn spawn_loading_screen(
                 Text::new("THALOS"),
                 TextFont {
                     font: font.clone(),
-                    font_size: 56.0,
+                    font_size: FontSize::Px(56.0),
                     ..default()
                 },
                 TextColor(ACCENT),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 Name::new("LoadingTitle"),
             ));
 
@@ -421,11 +421,11 @@ fn spawn_loading_screen(
                 Text::new("Preparing…"),
                 TextFont {
                     font: font.clone(),
-                    font_size: 13.0,
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(TEXT_DIM),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 Name::new("LoadingStatusText"),
             ));
 
@@ -435,11 +435,11 @@ fn spawn_loading_screen(
                 Text::new(""),
                 TextFont {
                     font,
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(TEXT_FAINT),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 Name::new("LoadingStepCounter"),
             ));
         });

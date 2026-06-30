@@ -4,26 +4,28 @@
 //! end of the main post stack. Animated, luma-weighted, monochromatic.
 
 use bevy::core_pipeline::FullscreenShader;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+// Bevy 0.19: the node-based render graph became systems in the `Core3d`
+// schedule, ordered by `Core3dSystems` sets. Film grain runs after the whole
+// `PostProcess` set and before `upscaling` (was: the `Node3d`
+// CAS → FilmGrain → EndMainPassPostProcessing edges, whose CAS / end-marker
+// nodes no longer exist).
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::ecs::query::QueryItem;
-use bevy::image::BevyDefault;
 use bevy::prelude::*;
 use bevy::render::{
     Render, RenderApp, RenderStartup, RenderSystems,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
-    render_graph::{
-        NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-    },
     render_resource::{
         BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
         CachedRenderPipelineId, ColorTargetState, ColorWrites, DynamicUniformBuffer, FilterMode,
-        FragmentState, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-        RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
-        ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat,
-        TextureSampleType,
+        FragmentState, MipmapFilterMode, Operations, PipelineCache, RenderPassColorAttachment,
+        RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+        SamplerDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline,
+        SpecializedRenderPipelines, TextureFormat, TextureSampleType,
         binding_types::{sampler, texture_2d, uniform_buffer},
     },
-    renderer::{RenderContext, RenderDevice, RenderQueue},
+    renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
+    sync_component::SyncComponent,
     view::{ExtractedView, ViewTarget},
 };
 use bevy::shader::Shader;
@@ -89,6 +91,14 @@ pub struct ExtractedFilmGrain {
     time: f32,
 }
 
+// 0.19: `ExtractComponent` now requires `SyncComponent` (the component must be
+// synced to the render world). The derive macro emits this automatically; our
+// hand-written `ExtractComponent` impl needs it spelled out. `Target = Self`
+// matches the trait's intended default.
+impl SyncComponent for FilmGrain {
+    type Target = Self;
+}
+
 impl ExtractComponent for FilmGrain {
     type QueryData = (&'static FilmGrain, &'static FilmGrainState);
     type QueryFilter = ();
@@ -138,12 +148,6 @@ struct FilmGrainPipelineKey {
 #[derive(Component)]
 struct FilmGrainPipelineId(CachedRenderPipelineId);
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct FilmGrainLabel;
-
-#[derive(Default)]
-struct FilmGrainNode;
-
 pub(crate) struct FilmGrainPlugin;
 
 impl Plugin for FilmGrainPlugin {
@@ -167,14 +171,24 @@ impl Plugin for FilmGrainPlugin {
                 (prepare_film_grain_pipelines, prepare_film_grain_uniforms)
                     .in_set(RenderSystems::Prepare),
             )
-            .add_render_graph_node::<ViewNodeRunner<FilmGrainNode>>(Core3d, FilmGrainLabel)
-            .add_render_graph_edges(
+            // 0.19: render-pass system in the `Core3d` schedule. It must be the
+            // LAST effect *inside* the `PostProcess` set: after the AA/effect
+            // chain (chromatic-aberration → tonemapping → SMAA → `cas`, so
+            // `.after(cas)` covers all of them — `cas` is `.after(smaa)`), so the
+            // scene is fully processed before grain; but still *in* `PostProcess`,
+            // because the UI overlay + `upscaling` are ordered `.after(PostProcess)`
+            // and read the parity-tracked `ViewTarget` main texture. Ordering film
+            // grain only `.after(tonemapping)` left it mid-chain (SMAA/CAS flipped
+            // the ping-pong after it → the scene's two-state flicker); ordering it
+            // `.after(PostProcess)` put its `post_process_write()` flip in the same
+            // bucket as the UI/upscaling consumers → raced them (the UI/lens-flare
+            // flicker). `.in_set(PostProcess).after(cas)` is the one position that
+            // satisfies both — matching the 0.18 `CAS → FilmGrain → end` node order.
+            .add_systems(
                 Core3d,
-                (
-                    Node3d::ContrastAdaptiveSharpening,
-                    FilmGrainLabel,
-                    Node3d::EndMainPassPostProcessing,
-                ),
+                film_grain_pass
+                    .in_set(Core3dSystems::PostProcess)
+                    .after(bevy::anti_alias::contrast_adaptive_sharpening::cas),
             );
     }
 }
@@ -198,7 +212,8 @@ fn init_film_grain_pipeline(
     );
 
     let sampler = render_device.create_sampler(&SamplerDescriptor {
-        mipmap_filter: FilterMode::Linear,
+        // wgpu 29 split the mipmap filter into its own `MipmapFilterMode`.
+        mipmap_filter: MipmapFilterMode::Linear,
         min_filter: FilterMode::Linear,
         mag_filter: FilterMode::Linear,
         ..default()
@@ -271,11 +286,8 @@ fn prepare_film_grain_pipelines(
             &pipeline_cache,
             &pipeline,
             FilmGrainPipelineKey {
-                texture_format: if view.hdr {
-                    ViewTarget::TEXTURE_FORMAT_HDR
-                } else {
-                    TextureFormat::bevy_default()
-                },
+                // 0.19: `ExtractedView::hdr` → `target_format` (HDR = Rgba16Float).
+                texture_format: view.target_format,
             },
         );
         commands.entity(entity).insert(FilmGrainPipelineId(id));
@@ -304,59 +316,59 @@ fn prepare_film_grain_uniforms(
     buffer.0.write_buffer(&render_device, &render_queue);
 }
 
-impl ViewNode for FilmGrainNode {
-    type ViewQuery = (
+/// Film-grain post-process pass, ported from the former `FilmGrainNode`
+/// (`ViewNode`) to a Bevy 0.19 render-pass **system**. The `ViewQuery` fetches
+/// the current view's components and auto-skips views that lack them (the map
+/// camera, light/shadow views), so the pass only runs on cameras carrying
+/// `FilmGrain`.
+fn film_grain_pass(
+    view: ViewQuery<(
         &'static ViewTarget,
         &'static FilmGrainPipelineId,
         &'static ExtractedFilmGrain,
         &'static FilmGrainUniformOffset,
+    )>,
+    pipeline_cache: Res<PipelineCache>,
+    pipeline_res: Res<FilmGrainPipeline>,
+    uniforms: Res<FilmGrainUniformBuffer>,
+    render_device: Res<RenderDevice>,
+    mut ctx: RenderContext,
+) {
+    let (view_target, pipeline_id, _grain, offset) = view.into_inner();
+
+    let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_id.0) else {
+        return;
+    };
+    let Some(binding) = uniforms.0.binding() else {
+        return;
+    };
+
+    let post_process = view_target.post_process_write();
+
+    let bind_group = render_device.create_bind_group(
+        Some("film_grain_bind_group"),
+        &pipeline_cache.get_bind_group_layout(&pipeline_res.layout),
+        &BindGroupEntries::sequential((post_process.source, &pipeline_res.sampler, binding)),
     );
 
-    fn run<'w>(
-        &self,
-        _: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (view_target, pipeline_id, _grain, offset): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pipeline_res = world.resource::<FilmGrainPipeline>();
-        let uniforms = world.resource::<FilmGrainUniformBuffer>();
+    let mut pass = ctx
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("film_grain_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: post_process.destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            // Added by wgpu 29 / bevy 0.19.
+            multiview_mask: None,
+        });
 
-        let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_id.0) else {
-            return Ok(());
-        };
-        let Some(binding) = uniforms.0.binding() else {
-            return Ok(());
-        };
-
-        let post_process = view_target.post_process_write();
-
-        let bind_group = render_context.render_device().create_bind_group(
-            Some("film_grain_bind_group"),
-            &pipeline_cache.get_bind_group_layout(&pipeline_res.layout),
-            &BindGroupEntries::sequential((post_process.source, &pipeline_res.sampler, binding)),
-        );
-
-        let mut pass = render_context
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("film_grain_pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: post_process.destination,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations::default(),
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[offset.0]);
-        pass.draw(0..3, 0..1);
-
-        Ok(())
-    }
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_group, &[offset.0]);
+    pass.draw(0..3, 0..1);
 }

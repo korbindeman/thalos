@@ -75,7 +75,7 @@ fn spawn_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 13.0,
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -88,7 +88,7 @@ fn subtitle(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
         Text::new(content),
         TextFont {
             font: theme.font.clone(),
-            font_size: 11.0,
+            font_size: FontSize::Px(11.0),
             ..default()
         },
         TextColor(theme.text_subtitle),

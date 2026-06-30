@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use thalos_terrain::StaticSurfaceData;
 
@@ -306,13 +306,13 @@ pub struct PlanetMaterial {
     #[sampler(7)]
     pub roughness: Handle<Image>,
     #[storage(8, read_only)]
-    pub craters: Handle<ShaderStorageBuffer>,
+    pub craters: Handle<ShaderBuffer>,
     #[storage(9, read_only)]
-    pub cell_index: Handle<ShaderStorageBuffer>,
+    pub cell_index: Handle<ShaderBuffer>,
     #[storage(10, read_only)]
-    pub feature_ids: Handle<ShaderStorageBuffer>,
+    pub feature_ids: Handle<ShaderBuffer>,
     #[storage(11, read_only)]
-    pub radial_features: Handle<ShaderStorageBuffer>,
+    pub radial_features: Handle<ShaderBuffer>,
     #[uniform(12)]
     pub atmosphere: AtmosphereBlock,
     // Cloud-cover cubemap (R8Unorm). Produced by
@@ -322,9 +322,9 @@ pub struct PlanetMaterial {
     #[sampler(14)]
     pub cloud_cover: Handle<Image>,
     #[storage(15, read_only)]
-    pub ice_caps: Handle<ShaderStorageBuffer>,
+    pub ice_caps: Handle<ShaderBuffer>,
     #[storage(16, read_only)]
-    pub active_dunes: Handle<ShaderStorageBuffer>,
+    pub active_dunes: Handle<ShaderBuffer>,
     #[texture(17, dimension = "cube")]
     #[sampler(18)]
     pub active_dune_height: Handle<Image>,
@@ -362,7 +362,7 @@ impl Material for PlanetMaterial {
         // later transparent items (stars, galaxies, rings, halo pass)
         // test correctly against the planet surface.
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = true;
+            depth.depth_write_enabled = Some(true);
         }
         Ok(())
     }
@@ -384,22 +384,22 @@ pub struct PlanetHaloMaterial {
     #[sampler(7)]
     pub roughness: Handle<Image>,
     #[storage(8, read_only)]
-    pub craters: Handle<ShaderStorageBuffer>,
+    pub craters: Handle<ShaderBuffer>,
     #[storage(9, read_only)]
-    pub cell_index: Handle<ShaderStorageBuffer>,
+    pub cell_index: Handle<ShaderBuffer>,
     #[storage(10, read_only)]
-    pub feature_ids: Handle<ShaderStorageBuffer>,
+    pub feature_ids: Handle<ShaderBuffer>,
     #[storage(11, read_only)]
-    pub radial_features: Handle<ShaderStorageBuffer>,
+    pub radial_features: Handle<ShaderBuffer>,
     #[uniform(12)]
     pub atmosphere: AtmosphereBlock,
     #[texture(13, dimension = "cube")]
     #[sampler(14)]
     pub cloud_cover: Handle<Image>,
     #[storage(15, read_only)]
-    pub ice_caps: Handle<ShaderStorageBuffer>,
+    pub ice_caps: Handle<ShaderBuffer>,
     #[storage(16, read_only)]
-    pub active_dunes: Handle<ShaderStorageBuffer>,
+    pub active_dunes: Handle<ShaderBuffer>,
     #[texture(17, dimension = "cube")]
     #[sampler(18)]
     pub active_dune_height: Handle<Image>,
@@ -459,7 +459,7 @@ impl Material for PlanetHaloMaterial {
             // The rim must depth-test against opaque foreground objects,
             // but it must not write depth: stars and galaxies draw at the
             // reverse-Z far plane and should remain visible behind the halo.
-            depth.depth_write_enabled = false;
+            depth.depth_write_enabled = Some(false);
         }
         Ok(())
     }

@@ -94,7 +94,7 @@ pub(super) fn update_gas_giant_params(
             if !want {
                 continue;
             }
-            let Some(mat) = materials.get_mut(handle) else {
+            let Some(mut mat) = materials.get_mut(handle) else {
                 continue;
             };
             mat.params.radius = (body.radius_m * scale) as f32;
@@ -201,7 +201,7 @@ fn write_ring_params(
     let Ok(body) = body_query.get(parent) else {
         return;
     };
-    let Some(mat) = materials.get_mut(&handle) else {
+    let Some(mut mat) = materials.get_mut(&handle) else {
         return;
     };
 

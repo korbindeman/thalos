@@ -130,7 +130,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Text::new("INSPECTOR"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 12.0,
+                font_size: FontSize::Px(12.0),
                 ..default()
             },
             TextColor(theme.text_subtitle),
@@ -233,7 +233,7 @@ pub(super) fn rebuild_inspector(
                 Text::new("(no selection)"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -289,7 +289,7 @@ pub(super) fn rebuild_inspector(
             Text::new(kind),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 12.0,
+                font_size: FontSize::Px(12.0),
                 ..default()
             },
             TextColor(theme.text_accent),
@@ -299,7 +299,7 @@ pub(super) fn rebuild_inspector(
             Text::new(""),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 9.5,
+                font_size: FontSize::Px(9.5),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -576,7 +576,7 @@ pub(super) fn rebuild_inspector(
                     Text::new("RESOURCES"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 10.0,
+                        font_size: FontSize::Px(10.0),
                         ..default()
                     },
                     TextColor(theme.text_subtitle),

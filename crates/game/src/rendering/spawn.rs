@@ -785,7 +785,7 @@ pub(super) fn spawn_bodies(
         DirectionalLight {
             illuminance: 10_000.0,
             color: Color::WHITE,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         // The ship is the only shadow caster — every body mesh is tagged
@@ -823,7 +823,7 @@ pub(super) fn spawn_bodies(
         DirectionalLight {
             illuminance: 0.0,
             color: Color::WHITE,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::coords::SHIP_LAYER]),

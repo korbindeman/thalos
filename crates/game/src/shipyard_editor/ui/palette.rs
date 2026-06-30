@@ -61,7 +61,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, catal
             Text::new("PARTS"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 12.0,
+                font_size: FontSize::Px(12.0),
                 ..default()
             },
             TextColor(theme.text_subtitle),
@@ -100,7 +100,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, catal
                             Text::new(category.to_ascii_uppercase()),
                             TextFont {
                                 font: theme.font.clone(),
-                                font_size: 10.0,
+                                font_size: FontSize::Px(10.0),
                                 ..default()
                             },
                             TextColor(theme.text_accent),
@@ -123,7 +123,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, catal
                     Text::new("SAVED SHIPS"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 10.0,
+                        font_size: FontSize::Px(10.0),
                         ..default()
                     },
                     TextColor(theme.text_accent),
@@ -174,7 +174,7 @@ fn spawn_part_button(
             Text::new(entry.display_name()),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_primary),
@@ -183,7 +183,7 @@ fn spawn_part_button(
             Text::new(palette_part_summary(entry)),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 9.0,
+                font_size: FontSize::Px(9.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -256,7 +256,7 @@ pub(super) fn rebuild_saved_ships(
                 Text::new("(none)"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -296,7 +296,7 @@ pub(super) fn rebuild_saved_ships(
                     Text::new(saved.name.clone()),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 10.0,
+                        font_size: FontSize::Px(10.0),
                         ..default()
                     },
                     TextColor(theme.text_primary),

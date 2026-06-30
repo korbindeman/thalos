@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 
 /// GPU resources consumed by a single [`crate::PlanetMaterial`].
 ///
@@ -24,18 +24,18 @@ pub struct PlanetTextures {
 
     // --- Layer 2: feature SSBOs -------------------------------------------
     /// `array<Crater>` — mid-frequency discrete craters.
-    pub craters: Handle<ShaderStorageBuffer>,
+    pub craters: Handle<ShaderBuffer>,
     /// `array<CellRange>` — one entry per ico cell, `(start, count)` into
     /// `feature_ids`.
-    pub cell_index: Handle<ShaderStorageBuffer>,
+    pub cell_index: Handle<ShaderBuffer>,
     /// `array<u32>` — concatenated crater indices referenced by cells.
-    pub feature_ids: Handle<ShaderStorageBuffer>,
+    pub feature_ids: Handle<ShaderBuffer>,
     /// `array<RadialFeature>` — feature-local radial volcano detail.
-    pub radial_features: Handle<ShaderStorageBuffer>,
+    pub radial_features: Handle<ShaderBuffer>,
     /// `array<IceCap>` — dynamic seasonal cap overlays rendered by the
     /// impostor shader over static terrain.
-    pub ice_caps: Handle<ShaderStorageBuffer>,
+    pub ice_caps: Handle<ShaderBuffer>,
     /// `array<DuneSea>` — dynamic active dune overlays rendered by the
     /// impostor shader over static terrain.
-    pub active_dunes: Handle<ShaderStorageBuffer>,
+    pub active_dunes: Handle<ShaderBuffer>,
 }

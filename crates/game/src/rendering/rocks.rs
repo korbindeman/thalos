@@ -645,7 +645,7 @@ fn update_rock_material(
     let Some(body_state) = states.get(body_id) else {
         return;
     };
-    let Some(material) = materials.get_mut(&library.material) else {
+    let Some(mut material) = materials.get_mut(&library.material) else {
         return;
     };
 

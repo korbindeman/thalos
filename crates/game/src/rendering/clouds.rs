@@ -300,7 +300,7 @@ fn sync_cloud_weather_map(
     if *last == Some((body_id, state.version)) {
         return;
     }
-    let Some(image) = images.get_mut(&coverage.handle) else {
+    let Some(mut image) = images.get_mut(&coverage.handle) else {
         return;
     };
     image.data = Some(generate_coverage_map(&state));

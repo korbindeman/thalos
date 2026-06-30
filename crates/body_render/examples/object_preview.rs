@@ -29,24 +29,22 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{
     ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode,
 };
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+// Bevy 0.19: render passes are systems in the `Core3d` schedule.
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::prelude::*;
+use bevy::camera::Hdr;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use bevy::render::view::Hdr;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::render::{
     RenderApp,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
-    render_graph::{
-        NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-    },
-    renderer::RenderContext,
+    renderer::{RenderContext, ViewQuery},
     texture::GpuImage,
     view::ViewDepthTexture,
 };
@@ -1386,44 +1384,36 @@ struct ShadowFocus {
     center: Vec3,
 }
 
-#[derive(RenderLabel, Hash, PartialEq, Eq, Debug, Clone)]
-struct CopyShadowDepth;
+/// Copy the shadow cascade's rendered depth into the shadow map. Ported from the
+/// former `CopyShadowDepthNode` (`ViewNode`) to a Bevy 0.19 render-pass system;
+/// the `ViewQuery` filters to the cascade view and auto-skips the main camera.
+fn copy_shadow_depth(
+    view: ViewQuery<(&'static ViewDepthTexture, &'static ShadowCascadeCam)>,
+    shadow: Option<Res<ShadowImage>>,
+    render_assets: Res<RenderAssets<GpuImage>>,
+    mut ctx: RenderContext,
+) {
+    let (depth, _cam) = view.into_inner();
 
-#[derive(Default)]
-struct CopyShadowDepthNode;
-
-impl ViewNode for CopyShadowDepthNode {
-    type ViewQuery = (&'static ViewDepthTexture, &'static ShadowCascadeCam);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (depth, _cam): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let Some(shadow) = world.get_resource::<ShadowImage>() else {
-            return Ok(());
-        };
-        let render_assets = world.resource::<RenderAssets<GpuImage>>();
-        let Some(dest) = render_assets.get(&shadow.handle) else {
-            return Ok(());
-        };
-        let src_size = depth.texture.size();
-        let dst_size = dest.texture.size();
-        if src_size.width != dst_size.width
-            || src_size.height != dst_size.height
-            || depth.texture.sample_count() != dest.texture.sample_count()
-        {
-            return Ok(());
-        }
-        render_context.command_encoder().copy_texture_to_texture(
-            depth.texture.as_image_copy(),
-            dest.texture.as_image_copy(),
-            src_size,
-        );
-        Ok(())
+    let Some(shadow) = shadow else {
+        return;
+    };
+    let Some(dest) = render_assets.get(&shadow.handle) else {
+        return;
+    };
+    let src_size = depth.texture.size();
+    let dst_size = dest.texture.size();
+    if src_size.width != dst_size.width
+        || src_size.height != dst_size.height
+        || depth.texture.sample_count() != dest.texture.sample_count()
+    {
+        return;
     }
+    ctx.command_encoder().copy_texture_to_texture(
+        depth.texture.as_image_copy(),
+        dest.texture.as_image_copy(),
+        src_size,
+    );
 }
 
 struct PreviewShadowPlugin;
@@ -1436,16 +1426,13 @@ impl Plugin for PreviewShadowPlugin {
             .add_systems(Startup, setup_shadow_rig);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app
-                .add_render_graph_node::<ViewNodeRunner<CopyShadowDepthNode>>(Core3d, CopyShadowDepth)
-                .add_render_graph_edges(
-                    Core3d,
-                    (
-                        Node3d::MainOpaquePass,
-                        CopyShadowDepth,
-                        Node3d::MainTransparentPass,
-                    ),
-                );
+            render_app.add_systems(
+                Core3d,
+                copy_shadow_depth
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_opaque_pass_3d)
+                    .before(main_transparent_pass_3d),
+            );
         }
     }
 }
@@ -1571,25 +1558,25 @@ fn update_preview_shadow(
     rig.block = block;
 
     let (image, fallback) = (rig.image.clone(), rig.fallback.clone());
-    if let Some(m) = ground_materials.get_mut(&mats.ground) {
+    if let Some(mut m) = ground_materials.get_mut(&mats.ground) {
         m.shadow = block;
         m.sun_shadow_map_0 = image.clone();
         m.sun_shadow_map_1 = fallback.clone();
         m.sun_shadow_map_2 = fallback.clone();
     }
-    if let Some(m) = grass_materials.get_mut(&mats.grass) {
+    if let Some(mut m) = grass_materials.get_mut(&mats.grass) {
         m.shadow = block;
         m.sun_shadow_map_0 = image.clone();
         m.sun_shadow_map_1 = fallback.clone();
         m.sun_shadow_map_2 = fallback.clone();
     }
-    if let Some(m) = tree_materials.get_mut(&mats.tree) {
+    if let Some(mut m) = tree_materials.get_mut(&mats.tree) {
         m.shadow = block;
         m.sun_shadow_map_0 = image.clone();
         m.sun_shadow_map_1 = fallback.clone();
         m.sun_shadow_map_2 = fallback.clone();
     }
-    if let Some(m) = rock_materials.get_mut(&mats.rock) {
+    if let Some(mut m) = rock_materials.get_mut(&mats.rock) {
         m.shadow = block;
         m.sun_shadow_map_0 = image;
         m.sun_shadow_map_1 = fallback.clone();

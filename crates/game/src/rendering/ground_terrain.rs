@@ -1358,7 +1358,7 @@ pub(super) fn update_body_terrain_atmosphere(
         })
         .unwrap_or_else(|_| sim.simulation.ship_state().position);
     for (terrain, mat_handle) in &terrain_q {
-        let Some(mat) = terrain_materials.get_mut(mat_handle) else {
+        let Some(mut mat) = terrain_materials.get_mut(mat_handle) else {
             continue;
         };
         mat.scene =
@@ -1427,7 +1427,7 @@ pub(super) fn update_body_terrain_atmosphere(
     // motion of the body itself.
     let wave_time = time.elapsed_secs();
     for (water, mat_handle) in &water_q {
-        let Some(mat) = water_materials.get_mut(mat_handle) else {
+        let Some(mut mat) = water_materials.get_mut(mat_handle) else {
             continue;
         };
         mat.scene = build_terrain_scene_lighting(water.body_id, states, &occluders, exposure.gain);
@@ -1447,7 +1447,7 @@ pub(super) fn update_body_terrain_atmosphere(
         let Some(extra) = sky_by_body.get(&sky.body_id) else {
             continue;
         };
-        let Some(mat) = sky_materials.get_mut(mat_handle) else {
+        let Some(mut mat) = sky_materials.get_mut(mat_handle) else {
             continue;
         };
         mat.atmosphere_extra = *extra;

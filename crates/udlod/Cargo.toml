@@ -9,11 +9,11 @@ readme = "README.md"
 authors = ["Kurt Kühnert <kurt@kuehnert.dev>", "Korbin de Man <korbindeman4@gmail.com>"]
 
 [dependencies]
-bevy = "0.18"
+bevy = "0.19"
 ndarray = "0.17"
 itertools = "0.14"
 bitflags = "2.11"
 bytemuck = "1.25"
 anyhow = "1.0"
 async-channel = "2.5"
-big_space = "0.12"
+big_space = { workspace = true }

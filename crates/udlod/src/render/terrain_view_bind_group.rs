@@ -361,11 +361,12 @@ impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetTerrainViewBindGroup<
         terrain_view_data: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let data = terrain_view_data
+        let Some(data) = terrain_view_data
             .into_inner()
             .get(&(item.main_entity().id(), view.id()))
-            .unwrap();
-
+        else {
+            return RenderCommandResult::Skip;
+        };
         pass.set_bind_group(I, &data.terrain_view_bind_group, &[]);
         RenderCommandResult::Success
     }
@@ -390,9 +391,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawTerrainCommand {
             .into_inner()
             .get(&(item.main_entity().id(), view.id()))
             .unwrap();
-
         pass.draw_indirect(&data.indirect_buffer, 0);
-
         RenderCommandResult::Success
     }
 }

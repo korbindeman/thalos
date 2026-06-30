@@ -97,7 +97,7 @@ pub fn spawn_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size,
+                    font_size: FontSize::Px(font_size),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -217,7 +217,7 @@ pub fn spawn_slider_row(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -261,7 +261,7 @@ pub fn spawn_slider_row(
                 Text::new(""),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -388,7 +388,7 @@ pub fn spawn_checkbox_row(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -499,7 +499,7 @@ pub fn spawn_cycle_row(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -528,7 +528,7 @@ pub fn spawn_cycle_row(
                         Text::new(current),
                         TextFont {
                             font: theme.font.clone(),
-                            font_size: 11.0,
+                            font_size: FontSize::Px(11.0),
                             ..default()
                         },
                         TextColor(theme.text_primary),
@@ -576,7 +576,7 @@ fn spawn_cycle_arrow(
                 Text::new(glyph),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 13.0,
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -717,7 +717,7 @@ pub fn spawn_text_field(
                 Text::new(initial),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),

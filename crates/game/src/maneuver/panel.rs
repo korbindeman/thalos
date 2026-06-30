@@ -134,7 +134,7 @@ fn spawn_header(panel: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     Text::new("Delete"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 10.0,
+                        font_size: FontSize::Px(10.0),
                         ..default()
                     },
                     TextColor(theme.text_primary),
@@ -176,7 +176,7 @@ fn spawn_axis_row(col: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, axis: Dv
             Text::new(label.to_string()),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -189,7 +189,7 @@ fn spawn_axis_row(col: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, axis: Dv
             Text::new(""),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_primary),
@@ -217,7 +217,7 @@ fn text(
         Text::new(content.to_string()),
         TextFont {
             font: theme.font.clone(),
-            font_size: size,
+            font_size: FontSize::Px(size),
             ..default()
         },
         TextColor(color),

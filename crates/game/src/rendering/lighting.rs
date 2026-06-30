@@ -254,7 +254,7 @@ pub(super) fn update_solid_planet_params(
                 materials.get(handle),
                 Some(mat) if mat.params.radius != radius || mat.params.scene != scene
             );
-            if dirty && let Some(mat) = materials.get_mut(handle) {
+            if dirty && let Some(mut mat) = materials.get_mut(handle) {
                 mat.params.radius = radius;
                 mat.params.scene = scene;
             }

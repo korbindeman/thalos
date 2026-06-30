@@ -157,7 +157,7 @@ fn setup(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             illuminance: 8000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(10.0, 20.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -1176,7 +1176,7 @@ impl Material for StarsMaterial {
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
+            depth.depth_write_enabled = Some(false);
         }
         Ok(())
     }
@@ -1239,7 +1239,7 @@ impl Material for GalaxyMaterial {
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
+            depth.depth_write_enabled = Some(false);
         }
         Ok(())
     }
@@ -1319,7 +1319,7 @@ fn update_galaxy_uniform(
     let px_per_rad = window.resolution.physical_height() as f32 / p.fov;
 
     for handle in &handles {
-        if let Some(mat) = materials.get_mut(&handle.0) {
+        if let Some(mut mat) = materials.get_mut(&handle.0) {
             mat.params.pixel_radius_scale = px_per_rad;
         }
     }

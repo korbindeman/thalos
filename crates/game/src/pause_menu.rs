@@ -139,7 +139,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                             Text::new("PAUSED"),
                             TextFont {
                                 font: theme.font.clone(),
-                                font_size: 15.0,
+                                font_size: FontSize::Px(15.0),
                                 ..default()
                             },
                             TextColor(theme.text_accent),
@@ -149,7 +149,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                             Text::new("THALOS v0"),
                             TextFont {
                                 font: theme.font.clone(),
-                                font_size: 10.0,
+                                font_size: FontSize::Px(10.0),
                                 ..default()
                             },
                             TextColor(theme.text_dim),
@@ -218,7 +218,7 @@ fn spawn_menu_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),

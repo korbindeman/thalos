@@ -116,7 +116,7 @@ impl Plugin for DebugPlugin {
         .add_systems(Startup, configure_craft_collider_gizmos)
         .add_systems(
             Update,
-            toggle_debug_hitboxes.run_if(not_game_paused.and(not_in_photo_mode)),
+            toggle_debug_hitboxes.run_if(not_game_paused.and_then(not_in_photo_mode)),
         )
         // PostUpdate after big_space's transform propagation: this system
         // anchors gizmos to the PlayerShip `GlobalTransform`, which under
@@ -130,7 +130,7 @@ impl Plugin for DebugPlugin {
         .add_systems(
             bevy::app::PostUpdate,
             draw_debug_hitboxes
-                .run_if(not_game_paused.and(not_in_photo_mode))
+                .run_if(not_game_paused.and_then(not_in_photo_mode))
                 .after(bevy::transform::TransformSystems::Propagate),
         )
         .add_systems(
@@ -139,7 +139,7 @@ impl Plugin for DebugPlugin {
                 update_debug_surface_teleport_cursor,
                 commit_debug_surface_teleport.after(update_debug_surface_teleport_cursor),
             )
-                .run_if(not_game_paused.and(not_in_photo_mode).and(in_map_view))
+                .run_if(not_game_paused.and_then(not_in_photo_mode).and_then(in_map_view))
                 .after(crate::SimStage::Camera),
         );
     }

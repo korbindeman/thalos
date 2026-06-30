@@ -506,7 +506,7 @@ fn update_lens_flare(
         let pos = (sun_screen + to_center * ghost.axis_t) * inv_ui;
         node.left = Val::Px(pos.x - ghost.size_px * 0.5);
         node.top = Val::Px(pos.y - ghost.size_px * 0.5);
-        if let Some(m) = tex_materials.get_mut(&handle.0) {
+        if let Some(mut m) = tex_materials.get_mut(&handle.0) {
             m.tint = tint_for(ghost);
         }
     }
@@ -517,7 +517,7 @@ fn update_lens_flare(
         let pos = (sun_screen + to_center * ghost.axis_t) * inv_ui;
         node.left = Val::Px(pos.x - ghost.size_px * 0.5);
         node.top = Val::Px(pos.y - ghost.size_px * 0.5);
-        if let Some(m) = halo_materials.get_mut(&handle.0) {
+        if let Some(mut m) = halo_materials.get_mut(&handle.0) {
             m.tint = tint_for(ghost);
             m.params = Vec4::new(axis_dir.x, axis_dir.y, halo.crescent, halo.thickness);
         }

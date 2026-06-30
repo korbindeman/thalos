@@ -15,16 +15,9 @@ use crate::{
 };
 use bevy::{
     prelude::*,
-    render::{
-        render_graph::{self, RenderLabel},
-        render_resource::*,
-        renderer::RenderContext,
-    },
+    render::render_resource::*,
     shader::ShaderDefVal,
 };
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct TilingPrepassLabel;
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -184,7 +177,8 @@ impl SpecializedComputePipeline for TilingPrepassPipelines {
         ComputePipelineDescriptor {
             label: Some("tiling_prepass_pipeline".into()),
             layout,
-            push_constant_ranges: default(),
+            // 0.19 replaced `push_constant_ranges` with `immediate_size: u32`.
+            immediate_size: 0,
             shader,
             shader_defs,
             entry_point,
@@ -193,34 +187,15 @@ impl SpecializedComputePipeline for TilingPrepassPipelines {
     }
 }
 
-pub struct TilingPrepassNode;
-
-impl render_graph::Node for TilingPrepassNode {
-    fn run<'w>(
-        &self,
-        _graph: &mut render_graph::RenderGraphContext,
-        _context: &mut RenderContext<'w>,
-        _world: &'w World,
-    ) -> Result<(), render_graph::NodeRunError> {
-        // The GPU compute prepass (`prepare_root` → `refine_tiles` ×N →
-        // `prepare_render`) is no longer dispatched. The draw set is now
-        // produced on the CPU by [`TileTree::compute_draw_set`] with
-        // explicit 2:1 LOD-gap enforcement across cube-face neighbours —
-        // the GPU predicate was per-tile-independent and could emit
-        // gap-≥-2 jumps at face seams, which show up as elevation shears
-        // because the CDLOD morph only spans one LOD.
-        //
-        // `TerrainViewData::prepare` uploads the CPU draw set into the
-        // same `final_tile_buffer` the vertex shader reads, and sets the
-        // `indirect_buffer` (vertex_count, instance_count) for
-        // `draw_indirect`. The compute pipelines and bind groups remain
-        // wired so we can bisect against this path by un-no-op-ing the
-        // dispatches; once the new approach beds in, the WGSL prepass
-        // files and the temporary-tiles / parameters buffers can be
-        // removed.
-        Ok(())
-    }
-}
+// The former `TilingPrepassNode` (a `render_graph::Node`) was removed in the
+// Bevy 0.19 port: it was already a no-op because the GPU compute prepass
+// (`prepare_root` → `refine_tiles` ×N → `prepare_render`) was superseded by
+// the CPU draw-set computation in `TileTree::compute_draw_set` (explicit 2:1
+// LOD-gap enforcement across cube-face neighbours — the GPU predicate was
+// per-tile-independent and emitted gap-≥-2 jumps at face seams, which read as
+// elevation shears because the CDLOD morph only spans one LOD). The compute
+// pipelines / bind groups below stay wired so the dispatch path can be
+// reinstated as a `Core3d`-schedule render-pass system if we bisect back to it.
 
 pub(crate) fn queue_tiling_prepass(
     debug: Option<Res<DebugTerrain>>,

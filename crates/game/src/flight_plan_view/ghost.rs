@@ -192,7 +192,7 @@ pub(super) fn update_ghost_lifecycle(
         // Update material alpha during blend.
         if let GhostPhase::Blending { progress } = ghost.phase
             && let Ok((_, mat_handle, _)) = ghosts.get_mut(entity)
-            && let Some(mat) = materials.get_mut(&mat_handle.0)
+            && let Some(mut mat) = materials.get_mut(&mat_handle.0)
         {
             let alpha = 0.35 * (1.0 - progress);
             mat.base_color = mat.base_color.with_alpha(alpha);

@@ -1128,7 +1128,7 @@ pub(super) fn update_part_shader_params(
     >,
 ) {
     for (nodes, handle, tank, fuselage, dec, adapter) in parts.iter() {
-        let Some(mat) = ship_materials.get_mut(&handle.0) else {
+        let Some(mut mat) = ship_materials.get_mut(&handle.0) else {
             continue;
         };
         let params =
@@ -1167,7 +1167,7 @@ pub(super) fn update_part_shader_highlight(
         } else {
             Vec3::ONE
         };
-        if let Some(mat) = ship_materials.get_mut(&mesh_mat.0)
+        if let Some(mut mat) = ship_materials.get_mut(&mesh_mat.0)
             && (mat.extension.params.tint - target).length_squared() > 1.0e-6
         {
             mat.extension.params.tint = target;

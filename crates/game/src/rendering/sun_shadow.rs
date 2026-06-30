@@ -32,8 +32,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
 use bevy::camera::{Camera, ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::ecs::query::QueryItem;
+// Bevy 0.19: render passes are systems in the `Core3d` schedule (was the
+// `Node3d::MainOpaquePass → … → MainTransparentPass` graph edges).
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::image::Image;
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -42,11 +44,8 @@ use bevy::render::{
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
-    render_graph::{
-        NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-    },
     render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
-    renderer::RenderContext,
+    renderer::{RenderContext, ViewQuery},
     texture::GpuImage,
     view::ViewDepthTexture,
 };
@@ -141,74 +140,67 @@ pub struct SunShadowCascade {
 /// it can't use a `Local`; an atomic keeps it lock-free across the pass.
 static COPY_DIAG_FRAME: AtomicU64 = AtomicU64::new(0);
 
-#[derive(RenderLabel, Hash, PartialEq, Eq, Debug, Clone)]
-struct CopySunShadowDepth;
+/// Copy each shadow cascade's rendered depth into its own depth map. Ported
+/// from the former `CopySunShadowDepthNode` (`ViewNode`) to a Bevy 0.19
+/// render-pass **system**. The `ViewQuery` filters to cascade views via
+/// `SunShadowCascade` and auto-skips the main ship-camera view.
+fn copy_sun_shadow_depth(
+    view: ViewQuery<(&'static ViewDepthTexture, &'static SunShadowCascade)>,
+    shadow: Option<Res<SunShadowImage>>,
+    render_assets: Res<RenderAssets<GpuImage>>,
+    mut ctx: RenderContext,
+) {
+    let (depth, cascade) = view.into_inner();
 
-#[derive(Default)]
-struct CopySunShadowDepthNode;
-
-impl ViewNode for CopySunShadowDepthNode {
-    type ViewQuery = (&'static ViewDepthTexture, &'static SunShadowCascade);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (depth, cascade): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        // ~once/sec at 60 fps, cascade 0 only — diagnostics, never per-frame.
-        let n = COPY_DIAG_FRAME.fetch_add(1, Ordering::Relaxed);
-        let diag = |s: &str| {
-            if cascade.index == 0 && n % (60 * CASCADE_COUNT as u64) == 0 {
-                log_shadow_state(s);
-            }
-        };
-
-        let Some(shadow) = world.get_resource::<SunShadowImage>() else {
-            diag("{\"copy\":\"no_resource\"}");
-            return Ok(());
-        };
-        let Some(handle) = shadow.handles.get(cascade.index as usize) else {
-            return Ok(());
-        };
-        let render_assets = world.resource::<RenderAssets<GpuImage>>();
-        let Some(dest) = render_assets.get(handle) else {
-            diag("{\"copy\":\"no_dest_gpuimage\"}");
-            return Ok(());
-        };
-
-        let src_size = depth.texture.size();
-        let dst_size = dest.texture.size();
-        if src_size.width != dst_size.width || src_size.height != dst_size.height {
-            diag(&format!(
-                "{{\"copy\":\"size_mismatch\",\"src\":[{},{}],\"dst\":[{},{}]}}",
-                src_size.width, src_size.height, dst_size.width, dst_size.height,
-            ));
-            return Ok(());
+    // ~once/sec at 60 fps, cascade 0 only — diagnostics, never per-frame.
+    let n = COPY_DIAG_FRAME.fetch_add(1, Ordering::Relaxed);
+    let diag = |s: &str| {
+        if cascade.index == 0 && n % (60 * CASCADE_COUNT as u64) == 0 {
+            log_shadow_state(s);
         }
-        if depth.texture.sample_count() != dest.texture.sample_count() {
-            diag(&format!(
-                "{{\"copy\":\"sample_mismatch\",\"src\":{},\"dst\":{}}}",
-                depth.texture.sample_count(),
-                dest.texture.sample_count(),
-            ));
-            return Ok(());
-        }
+    };
 
-        // Plain full-texture copy into this cascade's own depth map — the exact
-        // known-good single-map copy, one per cascade.
-        render_context.command_encoder().copy_texture_to_texture(
-            depth.texture.as_image_copy(),
-            dest.texture.as_image_copy(),
-            src_size,
-        );
+    let Some(shadow) = shadow else {
+        diag("{\"copy\":\"no_resource\"}");
+        return;
+    };
+    let Some(handle) = shadow.handles.get(cascade.index as usize) else {
+        return;
+    };
+    let Some(dest) = render_assets.get(handle) else {
+        diag("{\"copy\":\"no_dest_gpuimage\"}");
+        return;
+    };
+
+    let src_size = depth.texture.size();
+    let dst_size = dest.texture.size();
+    if src_size.width != dst_size.width || src_size.height != dst_size.height {
         diag(&format!(
-            "{{\"copy\":\"ok\",\"size\":[{},{}],\"cascades\":{}}}",
-            src_size.width, src_size.height, CASCADE_COUNT,
+            "{{\"copy\":\"size_mismatch\",\"src\":[{},{}],\"dst\":[{},{}]}}",
+            src_size.width, src_size.height, dst_size.width, dst_size.height,
         ));
-        Ok(())
+        return;
     }
+    if depth.texture.sample_count() != dest.texture.sample_count() {
+        diag(&format!(
+            "{{\"copy\":\"sample_mismatch\",\"src\":{},\"dst\":{}}}",
+            depth.texture.sample_count(),
+            dest.texture.sample_count(),
+        ));
+        return;
+    }
+
+    // Plain full-texture copy into this cascade's own depth map — the exact
+    // known-good single-map copy, one per cascade.
+    ctx.command_encoder().copy_texture_to_texture(
+        depth.texture.as_image_copy(),
+        dest.texture.as_image_copy(),
+        src_size,
+    );
+    diag(&format!(
+        "{{\"copy\":\"ok\",\"size\":[{},{}],\"cascades\":{}}}",
+        src_size.width, src_size.height, CASCADE_COUNT,
+    ));
 }
 
 /// Mirror the live sun-shadow cascade (`SunShadowState`, owned by the rig) into
@@ -249,19 +241,13 @@ impl Plugin for SunShadowPlugin {
             );
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app
-                .add_render_graph_node::<ViewNodeRunner<CopySunShadowDepthNode>>(
-                    Core3d,
-                    CopySunShadowDepth,
-                )
-                .add_render_graph_edges(
-                    Core3d,
-                    (
-                        Node3d::MainOpaquePass,
-                        CopySunShadowDepth,
-                        Node3d::MainTransparentPass,
-                    ),
-                );
+            render_app.add_systems(
+                Core3d,
+                copy_sun_shadow_depth
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_opaque_pass_3d)
+                    .before(main_transparent_pass_3d),
+            );
         }
     }
 }

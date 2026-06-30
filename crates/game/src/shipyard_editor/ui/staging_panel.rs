@@ -42,7 +42,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Text::new("STAGING"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 12.0,
+                font_size: FontSize::Px(12.0),
                 ..default()
             },
             TextColor(theme.text_subtitle),
@@ -136,7 +136,7 @@ pub(super) fn rebuild_staging(
             Text::new(header),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 10.0,
+                font_size: FontSize::Px(10.0),
                 ..default()
             },
             TextColor(theme.text_primary),
@@ -166,7 +166,7 @@ pub(super) fn rebuild_staging(
                         Text::new(stage),
                         TextFont {
                             font: theme.font.clone(),
-                            font_size: 10.0,
+                            font_size: FontSize::Px(10.0),
                             ..default()
                         },
                         TextColor(theme.text_accent),
@@ -175,7 +175,7 @@ pub(super) fn rebuild_staging(
                         Text::new(dv),
                         TextFont {
                             font: theme.font.clone(),
-                            font_size: 10.0,
+                            font_size: FontSize::Px(10.0),
                             ..default()
                         },
                         TextColor(theme.text_primary),
@@ -208,7 +208,7 @@ pub(super) fn rebuild_staging(
                         Text::new(label),
                         TextFont {
                             font: theme.font.clone(),
-                            font_size: 8.5,
+                            font_size: FontSize::Px(8.5),
                             ..default()
                         },
                         TextColor(theme.text_dim),

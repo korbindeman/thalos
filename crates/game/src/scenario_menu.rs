@@ -140,7 +140,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                     Text::new("VESSEL DESTROYED"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 18.0,
+                        font_size: FontSize::Px(18.0),
                         ..default()
                     },
                     TextColor(theme.text_warn),
@@ -150,7 +150,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                     Text::new(""),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(theme.text_dim),
@@ -239,7 +239,7 @@ fn spawn_scenario_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),

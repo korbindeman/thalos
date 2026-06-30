@@ -295,7 +295,7 @@ impl Plugin for GameInputPlugin {
         // Private gilrs instance for raw HOTAS axes (see `crate::joystick`).
         // Absent if the platform backend fails to start; HOTAS axes then no-op.
         if let Some(joysticks) = init_joysticks() {
-            app.insert_non_send_resource(joysticks);
+            app.insert_non_send(joysticks);
         }
     }
 }

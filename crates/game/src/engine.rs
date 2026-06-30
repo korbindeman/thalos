@@ -99,7 +99,7 @@ fn update_engine_tint(
             let Ok(handle) = visuals.get(child) else {
                 continue;
             };
-            let Some(mat) = materials.get_mut(&handle.0) else {
+            let Some(mut mat) = materials.get_mut(&handle.0) else {
                 continue;
             };
             // Skip the write when the color is already there so we

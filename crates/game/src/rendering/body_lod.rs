@@ -179,7 +179,7 @@ pub(super) fn sync_body_icons(
                     if icon_tf.scale != target_scale {
                         icon_tf.scale = target_scale;
                     }
-                    if let Some(mat) = std_materials.get_mut(&mat_handle.0) {
+                    if let Some(mut mat) = std_materials.get_mut(&mat_handle.0) {
                         let current = mat.base_color.alpha();
                         if (current - icon_alpha).abs() > 1e-3 {
                             mat.base_color.set_alpha(icon_alpha);

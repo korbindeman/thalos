@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 use rayon::prelude::*;
 
 use thalos_terrain::cubemap::{CubemapFace, face_uv_to_dir};
@@ -373,16 +373,16 @@ pub struct PreparedPlanetBake {
     pub roughness: Image,
     pub active_dune_height: Image,
     pub active_dune_albedo: Image,
-    pub craters: ShaderStorageBuffer,
-    pub cell_index: ShaderStorageBuffer,
-    pub feature_ids: ShaderStorageBuffer,
-    pub radial_features: ShaderStorageBuffer,
-    pub ice_caps: ShaderStorageBuffer,
-    pub active_dunes: ShaderStorageBuffer,
+    pub craters: ShaderBuffer,
+    pub cell_index: ShaderBuffer,
+    pub feature_ids: ShaderBuffer,
+    pub radial_features: ShaderBuffer,
+    pub ice_caps: ShaderBuffer,
+    pub active_dunes: ShaderBuffer,
 }
 
 /// Off-thread half of the bake: synthesise dune overlays, copy cubemap
-/// bytes into `Image` structs, and pack SSBOs into `ShaderStorageBuffer`s.
+/// bytes into `Image` structs, and pack SSBOs into `ShaderBuffer`s.
 /// All work is pure CPU on the caller's thread — no asset-storage access.
 pub fn prepare_planet_bake(
     surface: &PlanetSurface,
@@ -564,7 +564,7 @@ pub fn prepare_planet_bake(
 pub fn upload_prepared_bake(
     prep: PreparedPlanetBake,
     images: &mut Assets<Image>,
-    storage_buffers: &mut Assets<ShaderStorageBuffer>,
+    storage_buffers: &mut Assets<ShaderBuffer>,
 ) -> PlanetTextures {
     PlanetTextures {
         albedo: images.add(prep.albedo),
@@ -589,7 +589,7 @@ pub fn bake_from_planet_surface(
     surface: &PlanetSurface,
     state: &DynamicSurfaceState,
     images: &mut Assets<Image>,
-    storage_buffers: &mut Assets<ShaderStorageBuffer>,
+    storage_buffers: &mut Assets<ShaderBuffer>,
 ) -> PlanetTextures {
     let prep = prepare_planet_bake(surface, state);
     upload_prepared_bake(prep, images, storage_buffers)
@@ -817,7 +817,7 @@ pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
     create_cubemap_image(&blank, TextureFormat::R8Unorm, images)
 }
 
-/// Pack a slice of Pod data into a [`ShaderStorageBuffer`] without
+/// Pack a slice of Pod data into a [`ShaderBuffer`] without
 /// touching the asset storage. Pair with [`Assets::add`] on the main
 /// thread.
 ///
@@ -830,7 +830,7 @@ pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
 /// zeroed data.
 fn storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(
     data: &[T],
-) -> ShaderStorageBuffer {
+) -> ShaderBuffer {
     let bytes: Vec<u8> = if data.is_empty() {
         // One zeroed element keeps the binding valid; shader loops read 0
         // elements because the accompanying count/range is zero.
@@ -838,5 +838,5 @@ fn storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(
     } else {
         bytemuck::cast_slice(data).to_vec()
     };
-    ShaderStorageBuffer::new(&bytes, RenderAssetUsages::RENDER_WORLD)
+    ShaderBuffer::new(&bytes, RenderAssetUsages::RENDER_WORLD)
 }

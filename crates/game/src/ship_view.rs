@@ -1253,7 +1253,7 @@ fn update_ship_part_shader_params(
     >,
 ) {
     for (nodes, handle, tank, fuselage, dec, adapter) in parts.iter() {
-        let Some(mat) = ship_materials.get_mut(&handle.0) else {
+        let Some(mut mat) = ship_materials.get_mut(&handle.0) else {
             continue;
         };
         let params = ship_part_params(

@@ -113,7 +113,7 @@ fn setup_overlay(mut commands: Commands, theme: Res<HudTheme>) {
                 Text::new("SURFACE BASE EDITOR"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 13.0,
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(theme.text_accent),
@@ -130,7 +130,7 @@ fn setup_overlay(mut commands: Commands, theme: Res<HudTheme>) {
                 Text::new(""),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -173,7 +173,7 @@ fn spawn_palette_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),

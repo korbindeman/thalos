@@ -101,8 +101,8 @@ impl Material for BodySkyMaterial {
             // The terrain atmosphere pass renders on every pixel and clips
             // the raymarch with sampled scene depth instead of via
             // depth-compare. Disable both depth write and depth test.
-            depth.depth_write_enabled = false;
-            depth.depth_compare = CompareFunction::Always;
+            depth.depth_write_enabled = Some(false);
+            depth.depth_compare = Some(CompareFunction::Always);
         }
         Ok(())
     }

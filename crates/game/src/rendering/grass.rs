@@ -893,7 +893,7 @@ fn update_grass_material(
     };
 
     for (idx, handle) in grass.materials.iter().enumerate() {
-        let Some(material) = materials.get_mut(handle) else {
+        let Some(mut material) = materials.get_mut(handle) else {
             continue;
         };
         let (near, far, band) = ring_fade(idx);

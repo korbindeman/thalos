@@ -383,12 +383,12 @@ fn main() {
             Update,
             (
                 SimStage::Physics
-                    .run_if(pause_menu::not_game_paused.and(shipyard_editor::editor_closed)),
+                    .run_if(pause_menu::not_game_paused.and_then(shipyard_editor::editor_closed)),
                 SimStage::Sync.run_if(shipyard_editor::editor_closed),
                 SimStage::Camera.run_if(
                     pause_menu::not_game_paused
-                        .and(shipyard_editor::editor_closed)
-                        .and(base_editor::base_editor_closed),
+                        .and_then(shipyard_editor::editor_closed)
+                        .and_then(base_editor::base_editor_closed),
                 ),
             )
                 .chain(),
@@ -409,7 +409,8 @@ fn main() {
                     ..default()
                 })
                 .set(RenderPlugin {
-                    render_creation: RenderCreation::Automatic(wgpu_settings),
+                    // 0.19: RenderCreation::Automatic takes a Box<WgpuSettings>.
+                    render_creation: RenderCreation::Automatic(Box::new(wgpu_settings)),
                     ..default()
                 })
                 .set(AssetPlugin {

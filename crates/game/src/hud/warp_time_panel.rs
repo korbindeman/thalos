@@ -203,7 +203,7 @@ fn spawn_pause_button(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 Text::new("▶"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 16.0,
+                    font_size: FontSize::Px(16.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -255,7 +255,7 @@ fn spawn_time_readout(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
 fn text_font(theme: &HudTheme, size: f32) -> TextFont {
     TextFont {
         font: theme.font.clone(),
-        font_size: size,
+        font_size: FontSize::Px(size),
         ..default()
     }
 }
@@ -281,7 +281,7 @@ fn spawn_time_mode_button(parent: &mut ChildSpawnerCommands<'_>, theme: &HudThem
                 Text::new(TimeDisplayMode::default().pill_label()),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(theme.text_subtitle),
@@ -314,7 +314,7 @@ fn spawn_warp_button(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, in
                 Text::new("▶"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -327,7 +327,7 @@ fn spawn_warp_amount_label(parent: &mut ChildSpawnerCommands<'_>, theme: &HudThe
         Text::new(label.to_string()),
         TextFont {
             font: theme.font.clone(),
-            font_size: 12.0,
+            font_size: FontSize::Px(12.0),
             ..default()
         },
         TextColor(theme.text_accent),
@@ -341,7 +341,7 @@ fn subtitle(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
         Text::new(content),
         TextFont {
             font: theme.font.clone(),
-            font_size: 11.0,
+            font_size: FontSize::Px(11.0),
             ..default()
         },
         TextColor(theme.text_subtitle),

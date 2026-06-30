@@ -39,7 +39,6 @@ use bevy::{
         prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass},
     },
     ecs::system::SystemChangeTick,
-    image::BevyDefault,
     pbr::{
         MaterialPlugin, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, SetMaterialBindGroup,
         SetMeshViewBindGroup,
@@ -51,7 +50,7 @@ use bevy::{
             SetItemPipeline, ViewBinnedRenderPhases,
         },
         render_resource::*,
-        view::{ExtractedView, RenderVisibleEntities, ViewTarget},
+        view::{ExtractedView, RenderVisibleEntities},
         Render, RenderApp, RenderStartup, RenderSystems,
     },
     shader::{ShaderDefVal, ShaderRef},
@@ -366,7 +365,8 @@ where
         RenderPipelineDescriptor {
             label: Some("terrain_pipeline".into()),
             layout,
-            push_constant_ranges: default(),
+            // 0.19 replaced `push_constant_ranges` with `immediate_size: u32`.
+            immediate_size: 0,
             vertex: VertexState {
                 shader: self.vertex_shader.clone(),
                 entry_point: Some("vertex".into()),
@@ -389,12 +389,15 @@ where
                 targets: vec![Some(ColorTargetState {
                     // Match the view's color target format. `ViewTarget` picks
                     // `Rgba16Float` whenever the camera has `Hdr` enabled and
-                    // `Rgba8UnormSrgb` (== `bevy_default`) otherwise; queue_terrain
+                    // `Rgba8UnormSrgb` otherwise; queue_terrain
                     // sets the `HDR` flag from `ExtractedView::hdr`.
                     format: if key.flags.contains(TerrainPipelineFlags::HDR) {
-                        ViewTarget::TEXTURE_FORMAT_HDR
+                        // 0.19 deprecated ViewTarget::TEXTURE_FORMAT_HDR.
+                        TextureFormat::Rgba16Float
                     } else {
-                        TextureFormat::bevy_default()
+                        // Bevy 0.19 deprecated `TextureFormat::bevy_default()`;
+                        // the SDR view target is `Rgba8UnormSrgb`.
+                        TextureFormat::Rgba8UnormSrgb
                     },
                     blend: Some(BlendState::REPLACE),
                     write_mask: ColorWrites::ALL,
@@ -402,8 +405,9 @@ where
             }),
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::Greater,
+                // wgpu 29 made these optional on DepthStencilState.
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::Greater),
                 stencil: StencilState {
                     front: StencilFaceState::IGNORE,
                     back: StencilFaceState::IGNORE,
@@ -467,7 +471,9 @@ pub(crate) fn queue_terrain<M: Material>(
         Has<MotionVectorPrepass>,
         Has<DeferredPrepass>,
     )>,
-    change_tick: SystemChangeTick,
+    // Unused since 0.19 dropped the change-tick arg from `BinnedRenderPhase::add`;
+    // kept in the signature as the queue system's param list is otherwise fixed.
+    _change_tick: SystemChangeTick,
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
 {
@@ -489,7 +495,12 @@ pub(crate) fn queue_terrain<M: Material>(
             continue;
         };
 
-        for &(render_entity, main_entity) in visible_entities.iter::<TileAtlas>() {
+        // 0.19: `RenderVisibleEntities::iter::<QF>()` → `get::<QF>()` returning
+        // the per-class list, iterated via `iter_visible()` (yields refs).
+        let Some(visible) = visible_entities.get::<TileAtlas>() else {
+            continue;
+        };
+        for (&render_entity, &main_entity) in visible.iter_visible() {
             let Some(material_instance) = render_material_instances.instances.get(&main_entity)
             else {
                 continue;
@@ -524,7 +535,9 @@ pub(crate) fn queue_terrain<M: Material>(
                 flags |= TerrainPipelineFlags::SPHERICAL;
             }
 
-            if view.hdr {
+            // 0.19: `ExtractedView::hdr` → `target_format`; HDR views render
+            // to `Rgba16Float`.
+            if view.target_format == TextureFormat::Rgba16Float {
                 flags |= TerrainPipelineFlags::HDR;
             }
 
@@ -547,20 +560,20 @@ pub(crate) fn queue_terrain<M: Material>(
                 pipeline,
                 draw_function,
                 material_bind_group_index: Some(*material.binding.group),
-                vertex_slab: default(),
-                index_slab: None,
+                // 0.19 merged vertex_slab/index_slab into `slabs: MeshSlabs`.
+                slabs: default(),
                 lightmap_slab: None,
             };
             let bin_key = Opaque3dBinKey {
                 asset_id: material_instance.asset_id,
             };
+            // 0.19 dropped the trailing change-tick arg from `add`.
             opaque_phase.add(
                 batch_set_key,
                 bin_key,
                 (render_entity, main_entity),
                 InputUniformIndex::default(),
                 BinnedRenderPhaseType::NonMesh,
-                change_tick.this_run(),
             );
         }
     }
@@ -592,10 +605,30 @@ where
             render_app
                 .init_resource::<SpecializedRenderPipelines<TerrainRenderPipeline<M>>>()
                 .add_render_command::<Opaque3d, DrawTerrain>()
-                .add_systems(RenderStartup, init_terrain_render_pipeline::<M>)
+                // Bevy 0.19 moved `MeshPipelineViewLayouts` creation from
+                // `MeshRenderPlugin::finish` into the `RenderStartup` system
+                // `init_mesh_pipeline_view_layouts`, and 0.19 validates
+                // `Res<T>` at fetch time (panics if absent). Order our init
+                // after it so the resource exists when we read it.
+                .add_systems(
+                    RenderStartup,
+                    init_terrain_render_pipeline::<M>
+                        .after(bevy::pbr::init_mesh_pipeline_view_layouts),
+                )
+                // Bevy 0.19: `queue_material_meshes` (in `QueueMeshes`) DEQUEUES
+                // material entities flagged for re-specialization from the binned
+                // phase (it removes the entity from *all* bins). Our terrain
+                // material is mutated every frame, so it is flagged every frame.
+                // If our `queue_terrain` runs inside `QueueMeshes` unordered, that
+                // dequeue can land *after* our add and silently drop the terrain
+                // (it's never re-added because it has no `Mesh3d`). Running after
+                // the whole `QueueMeshes` set — but before `PhaseSort` — makes our
+                // add final, so the terrain's `NonMesh` bin survives to render.
                 .add_systems(
                     Render,
-                    queue_terrain::<M>.in_set(RenderSystems::QueueMeshes),
+                    queue_terrain::<M>
+                        .after(RenderSystems::QueueMeshes)
+                        .before(RenderSystems::PhaseSort),
                 );
         }
     }

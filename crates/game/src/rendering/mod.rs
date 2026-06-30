@@ -182,7 +182,7 @@ impl Plugin for RenderingPlugin {
                     draw_orbits
                         .after(recompute_orbit_trails)
                         .after(update_render_origin)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and(crate::view::in_map_view)),
+                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
                     sync_body_icons.run_if(crate::view::in_map_view),
                     double_click_focus_system
                         .after(update_ship_position)

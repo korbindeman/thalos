@@ -15,8 +15,8 @@ thalos_physics_local = { path = "../physics_local" }
 thalos_celestial = { path = "../celestial" }
 thalos_shipyard = { path = "../shipyard" }
 thalos_volumetric_clouds = { path = "../volumetric_clouds" }
-bevy = { version = "0.18", features = ["wayland", "jpeg"] }
-big_space = { version = "0.12", features = ["i64"] }
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+big_space = { workspace = true }
 # Persisted user settings (user/settings.ron — window mode, vsync, UI scale).
 ron = "0.12"
 serde = { version = "1.0", features = ["derive"] }

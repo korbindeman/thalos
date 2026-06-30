@@ -251,7 +251,7 @@ fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
                             Text::new("SETTINGS"),
                             TextFont {
                                 font: theme.font.clone(),
-                                font_size: 15.0,
+                                font_size: FontSize::Px(15.0),
                                 ..default()
                             },
                             TextColor(theme.text_accent),
@@ -693,7 +693,7 @@ fn binding_row(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, action: &str,
             Text::new(action.to_string()),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 10.0,
+                font_size: FontSize::Px(10.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -702,7 +702,7 @@ fn binding_row(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, action: &str,
             Text::new(value.to_string()),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 10.0,
+                font_size: FontSize::Px(10.0),
                 ..default()
             },
             TextColor(theme.text_primary),
@@ -741,7 +741,7 @@ fn build_hotas_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings:
                 Text::new("Name:"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -794,7 +794,7 @@ fn build_hotas_axis_row(
             Text::new(axis.to_string()),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_primary),
@@ -808,7 +808,7 @@ fn build_hotas_axis_row(
             Text::new("code"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 10.0,
+                font_size: FontSize::Px(10.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -864,7 +864,7 @@ fn build_hotas_axis_empty(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, ax
             Text::new(axis.to_string()),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -1083,7 +1083,7 @@ fn section_header(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, text: &str
         Text::new(text.to_string()),
         TextFont {
             font: theme.font.clone(),
-            font_size: 10.0,
+            font_size: FontSize::Px(10.0),
             ..default()
         },
         TextColor(theme.text_subtitle),
@@ -1095,7 +1095,7 @@ fn note(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, text: &str) {
         Text::new(text.to_string()),
         TextFont {
             font: theme.font.clone(),
-            font_size: 9.0,
+            font_size: FontSize::Px(9.0),
             ..default()
         },
         TextColor(theme.text_dim),
@@ -1121,7 +1121,7 @@ fn pinned_row(
             Text::new(label.to_string()),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -1134,7 +1134,7 @@ fn pinned_row(
             Text::new(format!("{value}  (pinned by {env_var})")),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),

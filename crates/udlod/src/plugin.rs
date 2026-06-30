@@ -6,7 +6,7 @@ use crate::{
         terrain_view_bind_group::TerrainViewData,
         tiling_prepass::{
             init_tiling_prepass_pipelines, queue_tiling_prepass, TilingPrepassItem,
-            TilingPrepassLabel, TilingPrepassNode, TilingPrepassPipelines,
+            TilingPrepassPipelines,
         },
     },
     shaders::{load_terrain_shaders, InternalShaders},
@@ -19,10 +19,7 @@ use crate::{
 };
 use bevy::{
     prelude::*,
-    render::{
-        graph::CameraDriverLabel, render_graph::RenderGraph, render_resource::*, Render, RenderApp,
-        RenderStartup, RenderSystems,
-    },
+    render::{render_resource::*, Render, RenderApp, RenderStartup, RenderSystems},
 };
 
 /// The plugin for the terrain renderer.
@@ -89,11 +86,12 @@ impl Plugin for TerrainPlugin {
     fn finish(&self, app: &mut App) {
         load_terrain_shaders(app);
 
-        let mut render_graph = app
-            .sub_app_mut(RenderApp)
-            .world_mut()
-            .resource_mut::<RenderGraph>();
-        render_graph.add_node(TilingPrepassLabel, TilingPrepassNode);
-        render_graph.add_node_edge(TilingPrepassLabel, CameraDriverLabel);
+        // Bevy 0.19 replaced the node-based render graph with render-pass
+        // systems. The former `TilingPrepassNode` was already a no-op (the GPU
+        // tiling prepass was superseded by the CPU draw-set computation in
+        // `TileTree::compute_draw_set`), so it is not ported — there is no GPU
+        // work to schedule. The compute pipelines / bind groups remain wired
+        // (`queue_tiling_prepass`) so the dispatch path can be reinstated as a
+        // `Core3d`-schedule system if we ever bisect back to it.
     }
 }

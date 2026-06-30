@@ -12,7 +12,8 @@ use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::post_process::effect_stack::ChromaticAberration;
 use bevy::prelude::*;
-use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection, Hdr, Msaa};
+use bevy::camera::Hdr;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection, Msaa};
 
 use crate::impostor::film_grain::FilmGrain;
 

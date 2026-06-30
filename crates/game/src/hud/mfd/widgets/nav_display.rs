@@ -169,7 +169,7 @@ pub(crate) fn build(
             Text::new("—"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),
@@ -209,7 +209,7 @@ pub(crate) fn update(
     let Ok(canvas) = canvas_q.single() else {
         return;
     };
-    let Some(material) = materials.get_mut(canvas) else {
+    let Some(mut material) = materials.get_mut(canvas) else {
         return;
     };
 

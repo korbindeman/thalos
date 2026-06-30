@@ -401,7 +401,7 @@ fn update_map_terrain(
 
     // Scene lighting: star direction + flux are scale-invariant; skip eclipse
     // occluders on the map schematic (empty list).
-    if let Some(mat) = materials.get_mut(mat_handle) {
+    if let Some(mut mat) = materials.get_mut(mat_handle) {
         mat.scene = build_terrain_scene_lighting(terrain.body_id, states, &[], exposure.gain);
     }
 

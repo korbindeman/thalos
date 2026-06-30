@@ -434,7 +434,7 @@ fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
                 Text::new("AUTOPILOT"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_subtitle),
@@ -461,7 +461,7 @@ fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
                     Text::new("MNVR"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(theme.text_primary),
@@ -507,7 +507,7 @@ fn spawn_maneuver_panel(commands: &mut Commands, theme: &HudTheme) {
                     Text::new("MANEUVER"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 11.0,
+                        font_size: FontSize::Px(11.0),
                         ..default()
                     },
                     TextColor(theme.text_subtitle),
@@ -542,7 +542,7 @@ fn spawn_maneuver_panel(commands: &mut Commands, theme: &HudTheme) {
                                 Text::new("WARP"),
                                 TextFont {
                                     font: theme.font.clone(),
-                                    font_size: 10.0,
+                                    font_size: FontSize::Px(10.0),
                                     ..default()
                                 },
                                 TextColor(theme.text_primary),
@@ -573,7 +573,7 @@ fn spawn_maneuver_panel(commands: &mut Commands, theme: &HudTheme) {
                                 Text::new("×"),
                                 TextFont {
                                     font: theme.font.clone(),
-                                    font_size: 12.0,
+                                    font_size: FontSize::Px(12.0),
                                     ..default()
                                 },
                                 TextColor(theme.text_dim),
@@ -630,7 +630,7 @@ fn spawn_maneuver_readout<M: Component + Copy>(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -639,7 +639,7 @@ fn spawn_maneuver_readout<M: Component + Copy>(
                 Text::new("—"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -676,7 +676,7 @@ fn spawn_assist_button(
                 Text::new(kind.label()),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 13.0,
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(if kind.available() {

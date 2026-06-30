@@ -196,7 +196,7 @@ pub fn update(
         let commanded = throttle.commanded.clamp(0.0, 1.0) as f32;
         let effective = throttle.effective.clamp(0.0, 1.0) as f32;
         if (bar.commanded - commanded).abs() > 0.002 || (bar.effective - effective).abs() > 0.002 {
-            if let Some(material) = throttle_materials.get_mut(material_node) {
+            if let Some(mut material) = throttle_materials.get_mut(material_node) {
                 material.levels.x = commanded;
                 material.levels.y = effective;
             }

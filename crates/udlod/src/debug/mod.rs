@@ -290,7 +290,8 @@ fn finish_loading_images(
 ) {
     loading_images.0.retain(|&(id, dimension, format)| {
         if asset_server.load_state(id).is_loaded() {
-            let image = images.get_mut(id).unwrap();
+            // 0.19: `Assets::get_mut` returns `AssetMut` (DerefMut); bind `mut`.
+            let mut image = images.get_mut(id).unwrap();
             image.texture_descriptor.dimension = dimension;
             image.texture_descriptor.format = format;
 

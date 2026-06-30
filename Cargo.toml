@@ -14,6 +14,8 @@ members = [
     "crates/udlod",
     "crates/physics_local",
     "crates/volumetric_clouds",
+    "crates/big_space",
+    "crates/bevy_erosion_filter",
 ]
 
 [workspace.package]
@@ -22,6 +24,9 @@ edition = "2024"
 
 [workspace.dependencies]
 thalos_udlod = { path = "crates/udlod" }
+# Vendored fork (crates/big_space). i64 cell precision is the workspace-wide
+# choice; consumers inherit it via `big_space = { workspace = true }`.
+big_space = { path = "crates/big_space", features = ["i64"] }
 
 # Shared dev defaults stay portable. Platform-specific compiler/linker
 # tuning belongs in local, ignored Cargo config; see `docs/tooling.md`.

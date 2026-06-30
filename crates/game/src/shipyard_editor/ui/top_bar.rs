@@ -61,7 +61,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Text::new("SHIPYARD"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 15.0,
+                font_size: FontSize::Px(15.0),
                 ..default()
             },
             TextColor(theme.text_accent),
@@ -90,7 +90,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 Text::new(""),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -103,7 +103,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Text::new(""),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),

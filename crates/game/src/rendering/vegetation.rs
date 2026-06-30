@@ -29,7 +29,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DVec3, Vec2, Vec3A};
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
+use bevy::camera::Hdr;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
@@ -1252,7 +1252,7 @@ fn update_tree_material(
     // Mesh material (ring 0 only): its trees are all in the near band, so once the
     // atlas is baked it never actually fades; pre-bake, the LOD3 far band fades
     // out near the mesh-only reach so its edge isn't a hard ring.
-    if let Some(material) = materials.get_mut(&library.material) {
+    if let Some(mut material) = materials.get_mut(&library.material) {
         let (near, far, band) = if bake.ready {
             tree_ring_fade(0)
         } else {
@@ -1273,7 +1273,7 @@ fn update_tree_material(
 
     // One impostor material per clipmap ring, each with its own cross-fade band.
     for (idx, handle) in library.impostor_materials.iter().enumerate() {
-        let Some(material) = impostor_materials.get_mut(handle) else {
+        let Some(mut material) = impostor_materials.get_mut(handle) else {
             continue;
         };
         let (near, far, band) = tree_ring_fade(idx);

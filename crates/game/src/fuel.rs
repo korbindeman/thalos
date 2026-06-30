@@ -32,6 +32,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use bevy::ecs::resource::IsResource;
 use bevy::ecs::world::EntityRef;
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
@@ -286,7 +287,11 @@ pub fn handle_throttle_input(
 /// craft's mass/propulsion). [`EntityRef`] lets the per-part mass come from the
 /// single [`live_part_dry_mass_kg`] enumeration in `thalos_shipyard`, so no part
 /// kind is silently dropped from the flight mass.
-type PartQuery<'w, 's> = Query<'w, 's, EntityRef<'static>, (With<Part>, Without<EditorPart>)>;
+// `Without<IsResource>` (bevy 0.19): resources are components now, so a broad
+// `EntityRef` query conservatively conflicts with this system's resource access
+// (B0001). Excluding resource entities makes the access disjoint.
+type PartQuery<'w, 's> =
+    Query<'w, 's, EntityRef<'static>, (With<Part>, Without<EditorPart>, Without<IsResource>)>;
 
 fn surface_multiplier(_surface_mount: Option<&SurfaceMount>) -> f64 {
     // KSP symmetry: each mirror counterpart is its own part, counted once.

@@ -19,10 +19,10 @@ thalos_terrain = { path = "../terrain" }
 thalos_world = { path = "../world" }
 thalos_texgen = { path = "../texgen" }
 thalos_udlod = { workspace = true }
-bevy = { version = "0.18", features = ["wayland", "jpeg"] }
-bevy_erosion_filter = "0.1.2"
-big_space = { version = "0.12", features = ["i64"] }
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+bevy_erosion_filter = { path = "../bevy_erosion_filter" }
+big_space = { workspace = true }
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.30.10"
+glam = "0.32"
 rayon = "1.12"
 anyhow = "1.0"

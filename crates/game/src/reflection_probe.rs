@@ -202,11 +202,13 @@ fn refresh_cubemap(
         return;
     }
 
-    let Some(image) = images.get_mut(&probe.cubemap) else {
+    // 0.19: `Assets::get_mut` returns `AssetMut` (DerefMut); `&mut image`
+    // deref-coerces to the `&mut Image` `paint_cubemap` expects.
+    let Some(mut image) = images.get_mut(&probe.cubemap) else {
         return;
     };
 
-    paint_cubemap(image, &env);
+    paint_cubemap(&mut image, &env);
     timer.last_painted = Some(env);
 }
 

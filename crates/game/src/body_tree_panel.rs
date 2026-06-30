@@ -124,7 +124,7 @@ fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
                 Text::new("CELESTIAL BODIES"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 10.0,
+                    font_size: FontSize::Px(10.0),
                     ..default()
                 },
                 TextColor(theme.text_subtitle),
@@ -317,7 +317,7 @@ fn spawn_body_row(
                 Text::new(name),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -355,7 +355,7 @@ fn spawn_drop_button(row: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, body_
             Text::new("drop"),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 9.0,
+                font_size: FontSize::Px(9.0),
                 ..default()
             },
             TextColor(theme.text_primary),
@@ -381,7 +381,7 @@ fn spawn_ship_row(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, name: &str
                 Text::new(name.to_string()),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 11.0,
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -407,7 +407,7 @@ fn spawn_minor_toggle(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, collap
             Text::new(format!("{glyph} Minor bodies")),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 11.0,
+                font_size: FontSize::Px(11.0),
                 ..default()
             },
             TextColor(theme.text_dim),

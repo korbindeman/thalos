@@ -170,7 +170,7 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>) {
                     Text::new("THALOS"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 56.0,
+                        font_size: FontSize::Px(56.0),
                         ..default()
                     },
                     TextColor(theme.text_accent),
@@ -180,7 +180,7 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>) {
                     Text::new(concat!("pre-alpha  v", env!("CARGO_PKG_VERSION"))),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 11.0,
+                        font_size: FontSize::Px(11.0),
                         ..default()
                     },
                     TextColor(theme.text_dim),
@@ -209,7 +209,7 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>) {
                     Text::new("START SCENARIO"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 11.0,
+                        font_size: FontSize::Px(11.0),
                         ..default()
                     },
                     TextColor(theme.text_dim),
@@ -278,7 +278,7 @@ fn spawn_menu_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(theme.text_primary),
@@ -288,7 +288,7 @@ fn spawn_menu_button(
                     Text::new(desc),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 10.0,
+                        font_size: FontSize::Px(10.0),
                         ..default()
                     },
                     TextColor(theme.text_dim),

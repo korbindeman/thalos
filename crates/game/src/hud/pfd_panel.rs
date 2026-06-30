@@ -314,7 +314,7 @@ fn spawn_horizon(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     Text::new(""),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(HUD_AMBER_DIM),
@@ -370,7 +370,7 @@ fn spawn_rung(shift: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, pitch_deg:
                         Text::new(format!("{pitch_deg}")),
                         TextFont {
                             font: theme.font.clone(),
-                            font_size: 11.0,
+                            font_size: FontSize::Px(11.0),
                             ..default()
                         },
                         TextColor(color),
@@ -497,7 +497,7 @@ fn spawn_speed_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     Text::new(""),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(HUD_AMBER),
@@ -559,7 +559,7 @@ fn spawn_alt_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     Text::new(""),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(HUD_AMBER),
@@ -624,7 +624,7 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     Text::new(""),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 11.0,
+                        font_size: FontSize::Px(11.0),
                         ..default()
                     },
                     TextColor(HUD_AMBER),
@@ -672,7 +672,7 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 Text::new("V/S"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(HUD_AMBER_DIM),
@@ -725,7 +725,7 @@ fn spawn_value_box(
             Text::new("—"),
             TextFont {
                 font: theme.font.clone(),
-                font_size,
+                font_size: FontSize::Px(font_size),
                 ..default()
             },
             TextColor(HUD_AMBER),
@@ -761,7 +761,7 @@ fn spawn_tape_labels(
                     Text::new("—"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(color),
@@ -789,7 +789,7 @@ fn spawn_heading_readout(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme
                 Text::new("HDG —"),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 14.0,
+                    font_size: FontSize::Px(14.0),
                     ..default()
                 },
                 TextColor(HUD_AMBER),
@@ -814,7 +814,7 @@ fn spawn_annunciators(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             Text::new(label),
             TextFont {
                 font: theme.font.clone(),
-                font_size: 14.0,
+                font_size: FontSize::Px(14.0),
                 ..default()
             },
             TextColor(color),
@@ -856,7 +856,7 @@ pub fn setup_toggle(mut commands: Commands, theme: Res<HudTheme>, anchor: Res<To
                     Text::new("NAV"),
                     TextFont {
                         font: theme.font.clone(),
-                        font_size: 11.0,
+                        font_size: FontSize::Px(11.0),
                         ..default()
                     },
                     TextColor(theme.text_subtitle),
@@ -894,7 +894,7 @@ fn spawn_toggle_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: 13.0,
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),

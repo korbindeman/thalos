@@ -8,7 +8,10 @@ use bevy::prelude::*;
 
 #[derive(Resource, Clone)]
 pub struct HudTheme {
-    pub font: Handle<Font>,
+    /// 0.19: `TextFont.font` is a `FontSource` (cosmic-text → parley); the
+    /// shared HUD font is stored as `FontSource::Handle` so every panel's
+    /// `font: theme.font.clone()` keeps working.
+    pub font: FontSource,
     pub panel_bg: Color,
     pub panel_bg_alt: Color,
     pub panel_border: Color,
@@ -28,7 +31,7 @@ pub struct HudTheme {
 
 pub fn init_theme(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(HudTheme {
-        font: asset_server.load("fonts/FiraCode-Regular.ttf"),
+        font: FontSource::Handle(asset_server.load("fonts/FiraCode-Regular.ttf")),
         panel_bg: Color::srgba(0.055, 0.055, 0.050, 0.86),
         panel_bg_alt: Color::srgba(0.085, 0.080, 0.070, 0.84),
         panel_border: Color::srgba(0.46, 0.43, 0.36, 0.66),
@@ -75,7 +78,7 @@ pub fn label(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
         Text::new(content),
         TextFont {
             font: theme.font.clone(),
-            font_size: 11.0,
+            font_size: FontSize::Px(11.0),
             ..default()
         },
         TextColor(theme.text_dim),
@@ -88,7 +91,7 @@ pub fn emphasis(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
         Text::new(content),
         TextFont {
             font: theme.font.clone(),
-            font_size: 18.0,
+            font_size: FontSize::Px(18.0),
             ..default()
         },
         TextColor(theme.text_primary),
