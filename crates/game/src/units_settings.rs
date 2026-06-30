@@ -1,25 +1,17 @@
-//! Persisted measurement-unit preference (metric vs imperial).
+//! Measurement-unit preference (metric vs imperial).
 //!
-//! [`UnitsSettings`] is the file-backed unit-system preference, stored as RON at
-//! [`SETTINGS_PATH`] (gitignored). It is loaded once when [`UnitsSettingsPlugin`]
-//! builds and saved whenever its value actually changes ([`save_units_settings`]
-//! value-compares against the last write, so an open settings tab doesn't churn
-//! the file).
+//! [`UnitsSettings`] is the unit-system preference. It is persisted (alongside
+//! window + graphics) by [`crate::settings`] as the `units` section of the
+//! unified `settings.ron`; this module owns only the resource + its `Reflect`
+//! registration, not the file IO.
 //!
 //! SI is always the internal/simulation unit; this preference only affects how
 //! the HUD *displays* distances, speeds, and masses. The settings menu's Units
 //! tab is the sole writer; the HUD formatters in [`crate::hud::format`] read it
 //! and dispatch on [`UnitSystem`].
 
-use std::path::Path;
-
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-
-/// Where unit settings persist, relative to the working directory the game
-/// already loads `assets/` from. Gitignored; recreated with defaults if missing
-/// or unparseable.
-pub const SETTINGS_PATH: &str = "user/units.ron";
 
 // ── Unit system ─────────────────────────────────────────────────────────────────
 
@@ -71,52 +63,15 @@ impl Default for UnitsSettings {
     }
 }
 
-// ── Load / save ─────────────────────────────────────────────────────────────────
-
-/// Read persisted unit settings (defaults on first run or parse failure).
-fn load() -> UnitsSettings {
-    match std::fs::read_to_string(SETTINGS_PATH) {
-        Ok(source) => ron::from_str::<UnitsSettings>(&source).unwrap_or_else(|err| {
-            warn!("Failed to parse {SETTINGS_PATH}: {err}; using unit-settings defaults.");
-            UnitsSettings::default()
-        }),
-        Err(_) => UnitsSettings::default(), // first run
-    }
-}
-
-fn save(settings: &UnitsSettings) {
-    let path = Path::new(SETTINGS_PATH);
-    let result = (|| -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let body = ron::ser::to_string_pretty(settings, ron::ser::PrettyConfig::default())
-            .map_err(std::io::Error::other)?;
-        std::fs::write(path, body)
-    })();
-    if let Err(err) = result {
-        warn!("Failed to save unit settings to {SETTINGS_PATH}: {err}");
-    }
-}
-
-// ── Plugin / systems ────────────────────────────────────────────────────────────
+// ── Plugin ──────────────────────────────────────────────────────────────────────
 
 pub struct UnitsSettingsPlugin;
 
 impl Plugin for UnitsSettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<UnitsSettings>()
-            .insert_resource(load())
-            .add_systems(Update, save_units_settings);
-    }
-}
-
-/// Persist the settings whenever their value differs from the last write.
-/// Value-compared (not change-detected) so the Units tab — which dereferences
-/// the `ResMut` every frame it renders — doesn't rewrite the file each frame.
-fn save_units_settings(settings: Res<UnitsSettings>, mut last_saved: Local<Option<UnitsSettings>>) {
-    if last_saved.as_ref() != Some(&*settings) {
-        save(&settings);
-        *last_saved = Some(*settings);
+        // The resource is inserted in `main()` from the unified `settings.ron`
+        // and persisted by `crate::settings::AppSettingsPlugin`; this plugin
+        // only registers the type for the reflection / debug-UI path.
+        app.register_type::<UnitsSettings>();
     }
 }

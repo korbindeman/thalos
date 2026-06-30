@@ -1,10 +1,9 @@
-//! Persisted graphics / rendering settings.
+//! Graphics / rendering settings.
 //!
-//! [`GraphicsSettings`] is the file-backed graphics preference set, stored as
-//! RON at [`SETTINGS_PATH`] (gitignored). It is loaded once when
-//! [`GraphicsSettingsPlugin`] builds and saved whenever its value actually
-//! changes ([`save_graphics_settings`] value-compares against the last write,
-//! so an open settings tab doesn't churn the file).
+//! [`GraphicsSettings`] is the graphics preference set. It is persisted
+//! (alongside window + units) by [`crate::settings`] as the `graphics` section
+//! of the unified `settings.ron`; this module owns only the resource + its
+//! `Reflect` registration, not the file IO.
 //!
 //! The settings menu's Graphics tab is the sole writer; render systems read.
 //! Knobs: the volumetric-cloud toggle, consumed by
@@ -14,16 +13,9 @@
 //! `rendering::grass::drive_grass_tiles` — when off it parks the grass clipmap
 //! (no tiles built, live tiles despawned); and the MSAA level.
 
-use std::path::Path;
-
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use serde::{Deserialize, Serialize};
-
-/// Where graphics settings persist, relative to the working directory the game
-/// already loads `assets/` from. Gitignored; recreated with defaults if missing
-/// or unparseable.
-pub const SETTINGS_PATH: &str = "user/graphics.ron";
 
 // ── Resource ───────────────────────────────────────────────────────────────────
 
@@ -86,7 +78,8 @@ impl MsaaSetting {
     }
 }
 
-/// User graphics/rendering preferences, persisted to [`SETTINGS_PATH`].
+/// User graphics/rendering preferences. Persisted as the `graphics` section of
+/// [`crate::settings`]'s unified file.
 ///
 /// Writer: the settings menu's Graphics tab. Everything else reads.
 /// `Reflect`-registered (for a future in-game debug UI).
@@ -119,55 +112,15 @@ impl Default for GraphicsSettings {
     }
 }
 
-// ── Load / save ─────────────────────────────────────────────────────────────────
-
-/// Read persisted graphics settings (defaults on first run or parse failure).
-fn load() -> GraphicsSettings {
-    match std::fs::read_to_string(SETTINGS_PATH) {
-        Ok(source) => ron::from_str::<GraphicsSettings>(&source).unwrap_or_else(|err| {
-            warn!("Failed to parse {SETTINGS_PATH}: {err}; using graphics-settings defaults.");
-            GraphicsSettings::default()
-        }),
-        Err(_) => GraphicsSettings::default(), // first run
-    }
-}
-
-fn save(settings: &GraphicsSettings) {
-    let path = Path::new(SETTINGS_PATH);
-    let result = (|| -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let body = ron::ser::to_string_pretty(settings, ron::ser::PrettyConfig::default())
-            .map_err(std::io::Error::other)?;
-        std::fs::write(path, body)
-    })();
-    if let Err(err) = result {
-        warn!("Failed to save graphics settings to {SETTINGS_PATH}: {err}");
-    }
-}
-
-// ── Plugin / systems ────────────────────────────────────────────────────────────
+// ── Plugin ──────────────────────────────────────────────────────────────────────
 
 pub struct GraphicsSettingsPlugin;
 
 impl Plugin for GraphicsSettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<GraphicsSettings>()
-            .insert_resource(load())
-            .add_systems(Update, save_graphics_settings);
-    }
-}
-
-/// Persist the settings whenever their value differs from the last write.
-/// Value-compared (not change-detected) so the Graphics tab — which dereferences
-/// the `ResMut` every frame it renders — doesn't rewrite the file each frame.
-fn save_graphics_settings(
-    settings: Res<GraphicsSettings>,
-    mut last_saved: Local<Option<GraphicsSettings>>,
-) {
-    if last_saved.as_ref() != Some(&*settings) {
-        save(&settings);
-        *last_saved = Some(settings.clone());
+        // The resource is inserted in `main()` from the unified `settings.ron`
+        // and persisted by `crate::settings::AppSettingsPlugin`; this plugin
+        // only registers the type for the reflection / debug-UI path.
+        app.register_type::<GraphicsSettings>();
     }
 }

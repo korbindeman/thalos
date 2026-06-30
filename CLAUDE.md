@@ -844,31 +844,43 @@ Key modules:
   derived from the `StructureRegistry` by `rendering::grass` and honoured by the
   grass tile builder (the seam future base trees/props extend). See
   `docs/base_building.md` *Ground scatter*.
-- `window_settings` — persisted window/display preferences (mode, windowed
-  resolution, vsync, fullscreen monitor, user UI scale), stored as RON at the
-  gitignored `user/settings.ron` and edited live from the settings menu's
-  Window tab (`settings_menu`). Loaded in `main()` before the app so the
-  initial window honours it; `THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE` /
-  `THALOS_VSYNC` are *session overrides* (they win for the run, grey out
-  their UI control, and never leak into the file), and `THALOS_SCALE` stays a
-  pure env diagnostic. `apply_window_settings` pushes settings onto the
-  primary `Window` (value-compared) and writes back windowed drag-resizes so
-  they persist; `apply_ui_scale` (which absorbed the former
+- `settings` — **unified settings persistence**. All user preferences live in
+  one `settings.ron` (`AppSettings { window, graphics, units }` — a section per
+  domain). Storage location switches on build profile (Bevy 0.19's
+  `bevy::platform::dirs::preferences_dir`): **debug** keeps it project-local at
+  the gitignored `user/settings.ron` (easy to inspect/reset during dev),
+  **release** uses the OS app-data dir `<preferences_dir>/thalos/settings.ron`.
+  `settings::load()` runs in `main()` before the app (the window section shapes
+  the initial `Window`) and **migrates the legacy per-domain files**
+  (`user/{settings,graphics,units}.ron`) on first run — a sectioned vs flat-RON
+  heuristic disambiguates the new unified file from the old window-only
+  `settings.ron` at the same path. Each domain still gets its **own Bevy
+  resource** (`WindowSettings`/`GraphicsSettings`/`UnitsSettings`, inserted in
+  `main()`) so every consumer is unchanged; `AppSettingsPlugin`'s one autosave
+  watches all three and rewrites the file when any value changes (value-compared,
+  so an open settings tab doesn't churn it). The per-domain modules below own
+  only their resource + runtime behaviour, not the file IO.
+- `window_settings` — window/display preferences (mode, windowed resolution,
+  vsync, fullscreen monitor, user UI scale; the `window` section). Edited live
+  from the settings menu's Window tab (`settings_menu`).
+  `THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE` / `THALOS_VSYNC` are *session
+  overrides* (`overrides_from_env`: they win for the run, grey out their UI
+  control, never persist), and `THALOS_SCALE` stays a pure env diagnostic.
+  `apply_window_settings` pushes settings onto the primary `Window`
+  (value-compared) and writes back windowed drag-resizes (the unified autosave
+  persists them); `apply_ui_scale` (which absorbed the former
   `compensate_fractional_ui_scale`) multiplies the user UI scale into the
   fractional-HiDPI crisp-text snap and drives `UiScale`. Caveat: runtime mode
-  switches recreate the swapchain, which the
-  known flaky Windows driver path (generic surface-acquire panic in Bevy's
-  `prepare_windows`) can turn into a crash — pre-existing platform issue,
-  newly reachable at runtime.
-- `graphics_settings` — persisted graphics/rendering preferences, stored as RON
-  at the gitignored `user/graphics.ron` and edited live from the settings menu's
-  Graphics tab (`settings_menu`). Loaded when `GraphicsSettingsPlugin` builds;
-  `save_graphics_settings` value-compares against the last write so an open tab
-  doesn't churn the file. Today the only knob is the **volumetric-cloud toggle**
-  (`GraphicsSettings::clouds`), read by `rendering::clouds::drive_clouds` — when
-  off it parks the cloud raymarch via the existing no-cloud-body path (`ActiveCloudBody = None`
-  → blank fallback bound onto `BodySkyMaterial`), so the sky renders clear at
-  near-zero GPU cost. Add new render knobs here as fields + a control in
+  switches recreate the swapchain, which the known flaky Windows driver path
+  (generic surface-acquire panic in Bevy's `prepare_windows`) can turn into a
+  crash — pre-existing platform issue, newly reachable at runtime.
+- `graphics_settings` — graphics/rendering preferences (the `graphics` section),
+  edited live from the settings menu's Graphics tab (`settings_menu`). Knobs:
+  the **volumetric-cloud toggle** (`GraphicsSettings::clouds`), read by
+  `rendering::clouds::drive_clouds` — when off it parks the cloud raymarch via
+  the no-cloud-body path (`ActiveCloudBody = None` → blank fallback bound onto
+  `BodySkyMaterial`), so the sky renders clear at near-zero GPU cost; the grass
+  toggle; and the MSAA level. Add new render knobs here as fields + a control in
   `show_graphics_tab`.
 
 Systems run in `SimStage` order: `Physics → Sync → Camera`

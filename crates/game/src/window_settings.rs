@@ -1,25 +1,23 @@
-//! Persisted window / display settings.
+//! Window / display settings.
 //!
-//! [`WindowSettings`] is the file-backed user preference set — window mode,
-//! windowed resolution, vsync, fullscreen monitor, UI scale — stored as RON at
-//! [`SETTINGS_PATH`] (gitignored). [`load`] reads it in `main()` before the
-//! Bevy app exists so the initial [`Window`] honours it. The
-//! `THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE` / `THALOS_VSYNC` env vars
-//! become *session overrides* ([`WindowSettingsOverrides`]): they win for the
-//! running session and disable their control in the settings UI, but are
-//! never written back to the file. (`THALOS_SCALE` stays a pure env knob — it
-//! pins the window scale-factor override, a diagnostic lever distinct from
-//! the user-facing UI scale here.)
+//! [`WindowSettings`] is the user preference set — window mode, windowed
+//! resolution, vsync, fullscreen monitor, UI scale. It is persisted (alongside
+//! graphics + units) by [`crate::settings`] as the `window` section of the
+//! unified `settings.ron`; this module owns only the runtime behaviour, not the
+//! file IO. The `THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE` / `THALOS_VSYNC`
+//! env vars become *session overrides* ([`WindowSettingsOverrides`], from
+//! [`overrides_from_env`]): they win for the running session and disable their
+//! control in the settings UI, but are never written back. (`THALOS_SCALE`
+//! stays a pure env knob — it pins the window scale-factor override, a
+//! diagnostic lever distinct from the user-facing UI scale here.)
 //!
 //! Writers of `WindowSettings`: the settings menu's Window tab (user edits, in
 //! `crate::settings_menu`) and [`apply_window_settings`] (which writes back
 //! OS-side window resizes in windowed mode so a drag-resized size sticks).
 //! `apply_window_settings` pushes the effective settings onto the primary
 //! `Window` each frame — value-compared, so untouched frames mark nothing
-//! changed for `bevy_winit` — and saves the file whenever the resource's
-//! value actually changed.
-
-use std::path::Path;
+//! changed for `bevy_winit`. Persistence is the unified autosave's job
+//! (`crate::settings::AppSettingsPlugin`).
 
 use bevy::prelude::*;
 use bevy::window::{
@@ -27,11 +25,6 @@ use bevy::window::{
     WindowResolution,
 };
 use serde::{Deserialize, Serialize};
-
-/// Where user settings persist, relative to the working directory the game
-/// already loads `assets/` from. Gitignored; recreated with defaults if
-/// missing or unparseable.
-pub const SETTINGS_PATH: &str = "user/settings.ron";
 
 pub(crate) const UI_SCALE_MIN: f32 = 0.5;
 pub(crate) const UI_SCALE_MAX: f32 = 2.0;
@@ -47,7 +40,8 @@ pub(crate) const RESOLUTION_PRESETS: &[(u32, u32)] = &[
 
 // ── Resources ─────────────────────────────────────────────────────────────────
 
-/// User window/display preferences, persisted to [`SETTINGS_PATH`].
+/// User window/display preferences. Persisted as the `window` section of
+/// [`crate::settings`]'s unified file.
 ///
 /// Writers: the settings menu's Window tab and `apply_window_settings`'s
 /// windowed drag-resize write-back. Everything else reads.
@@ -100,32 +94,23 @@ pub struct WindowSettingsOverrides {
     pub vsync: Option<bool>,
 }
 
-// ── Load / save ───────────────────────────────────────────────────────────────
-
-/// Read persisted settings (defaults on first run or parse failure) plus the
-/// env-var session overrides. Called from `main()` before the app is built so
-/// [`initial_window`] can honour both.
-pub fn load() -> (WindowSettings, WindowSettingsOverrides) {
-    let mut settings = match std::fs::read_to_string(SETTINGS_PATH) {
-        Ok(source) => match ron::from_str::<WindowSettings>(&source) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                // Pre-LogPlugin, so eprintln. The next save overwrites the bad file.
-                eprintln!(
-                    "Failed to parse {SETTINGS_PATH}: {err}; using window-settings defaults."
-                );
-                WindowSettings::default()
-            }
-        },
-        Err(_) => WindowSettings::default(), // first run
-    };
-    settings.ui_scale = settings.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
-    settings.resolution.0 = settings.resolution.0.max(320);
-    settings.resolution.1 = settings.resolution.1.max(240);
-    (settings, overrides_from_env())
+impl WindowSettings {
+    /// Clamp loaded values into supported ranges (UI scale, minimum window
+    /// size). Applied by [`crate::settings::load`] after reading the file.
+    pub fn sanitized(mut self) -> Self {
+        self.ui_scale = self.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+        self.resolution.0 = self.resolution.0.max(320);
+        self.resolution.1 = self.resolution.1.max(240);
+        self
+    }
 }
 
-fn overrides_from_env() -> WindowSettingsOverrides {
+// ── Env-var session overrides ───────────────────────────────────────────────────
+
+/// Compute the env-var session overrides (`THALOS_WINDOW_MODE` /
+/// `THALOS_WINDOW_SIZE` / `THALOS_VSYNC`). Called from `main()` before the app
+/// is built so [`initial_window`] can honour them; never persisted.
+pub fn overrides_from_env() -> WindowSettingsOverrides {
     let mode = std::env::var("THALOS_WINDOW_MODE").ok().map(|value| {
         match value.trim().to_ascii_lowercase().as_str() {
             "windowed" | "window" => WindowModeSetting::Windowed,
@@ -168,21 +153,6 @@ fn parse_window_size(value: &str) -> Option<(u32, u32)> {
     let width = width.trim().parse().ok()?;
     let height = height.trim().parse().ok()?;
     Some((width, height))
-}
-
-fn save(settings: &WindowSettings) {
-    let path = Path::new(SETTINGS_PATH);
-    let result = (|| -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let body = ron::ser::to_string_pretty(settings, ron::ser::PrettyConfig::default())
-            .map_err(std::io::Error::other)?;
-        std::fs::write(path, body)
-    })();
-    if let Err(err) = result {
-        warn!("Failed to save window settings to {SETTINGS_PATH}: {err}");
-    }
 }
 
 // ── Initial window ────────────────────────────────────────────────────────────
@@ -268,7 +238,6 @@ fn apply_window_settings(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     monitors: Query<(Entity, &Monitor)>,
     mut in_flight: Local<Option<InFlightResolution>>,
-    mut last_saved: Local<Option<WindowSettings>>,
 ) {
     let Ok(mut window) = windows.single_mut() else {
         return;
@@ -346,14 +315,10 @@ fn apply_window_settings(
                 *in_flight = Some(InFlightResolution::new(settings.resolution));
             }
         } else if in_flight.is_none() && current != settings.resolution && current != (0, 0) {
-            // The user resized the OS window — remember the dragged size.
+            // The user resized the OS window — remember the dragged size. The
+            // unified autosave (`crate::settings`) persists the change.
             settings.resolution = current;
         }
-    }
-
-    if last_saved.as_ref() != Some(&*settings) {
-        save(&settings);
-        *last_saved = Some(settings.clone());
     }
 }
 

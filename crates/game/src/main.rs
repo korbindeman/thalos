@@ -35,6 +35,7 @@ mod rendering;
 mod runway;
 mod scenario_menu;
 mod screenshot;
+mod settings;
 mod settings_menu;
 mod ship_view;
 mod shipyard_editor;
@@ -360,11 +361,14 @@ fn main() {
     // ------------------------------------------------------------------
     // 5. Build and run the Bevy app.
     // ------------------------------------------------------------------
-    // Persisted window/display preferences (user/settings.ron) + the
-    // THALOS_WINDOW_MODE / THALOS_WINDOW_SIZE / THALOS_VSYNC session
-    // overrides; loaded before the app so the initial window honours them.
-    let (win_settings, win_overrides) = window_settings::load();
-    let window = window_settings::initial_window(&win_settings, &win_overrides);
+    // Unified persisted preferences (window + graphics + units) from one
+    // settings.ron (project-local in debug, OS app-data in release; see
+    // `crate::settings`), plus the THALOS_WINDOW_MODE / THALOS_WINDOW_SIZE /
+    // THALOS_VSYNC session overrides. Loaded before the app so the initial
+    // window honours them.
+    let app_settings = settings::load();
+    let win_overrides = window_settings::overrides_from_env();
+    let window = window_settings::initial_window(&app_settings.window, &win_overrides);
     let wgpu_settings = wgpu_settings_from_env();
 
     App::new()
@@ -394,8 +398,14 @@ fn main() {
                 .chain(),
         )
         .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
-        .insert_resource(win_settings)
+        // The three settings sections become three separate resources (so every
+        // consumer is unchanged); `settings::AppSettingsPlugin` persists them
+        // back to the one file. Window must be inserted here (pre-app) since it
+        // shaped the initial window above.
+        .insert_resource(app_settings.window)
         .insert_resource(win_overrides)
+        .insert_resource(app_settings.graphics)
+        .insert_resource(app_settings.units)
         .insert_resource(
             InputSettings::load_from_path("assets/input.ron")
                 .expect("Failed to load input bindings from assets/input.ron"),
@@ -539,15 +549,19 @@ fn main() {
         .add_plugins(NavballPlugin)
         .add_plugins(PhotoModePlugin)
         .add_plugins(ScreenshotPlugin)
+        // Unified persistence: one settings.ron with window/graphics/units
+        // sections, autosaved when any resource changes (see `crate::settings`).
+        .add_plugins(settings::AppSettingsPlugin)
         // Applies WindowSettings to the live window (mode / vsync / monitor /
         // windowed size) and folds the user UI scale into the fractional-HiDPI
-        // crisp-text compensation. Persists edits to user/settings.ron.
+        // crisp-text compensation.
         .add_plugins(window_settings::WindowSettingsPlugin)
-        // Persisted graphics preferences (user/graphics.ron) — e.g. the
-        // volumetric-cloud toggle read by `rendering::clouds::drive_clouds`.
+        // Graphics preferences — e.g. the volumetric-cloud toggle read by
+        // `rendering::clouds::drive_clouds`. (Registers the type; the resource
+        // is inserted above and persisted by `AppSettingsPlugin`.)
         .add_plugins(graphics_settings::GraphicsSettingsPlugin)
-        // Persisted measurement-unit preference (user/units.ron) — metric vs
-        // imperial, read by the HUD formatters in `hud::format`.
+        // Measurement-unit preference — metric vs imperial, read by the HUD
+        // formatters in `hud::format`.
         .add_plugins(units_settings::UnitsSettingsPlugin)
         .add_plugins(ViewPlugin)
         .add_plugins(ShipViewPlugin)
