@@ -28,6 +28,7 @@ use thalos_celestial::generate::{DefaultGenParams, generate_default};
 
 use crate::rendering::CameraExposure;
 use crate::solar_system_state::{SimulationState, SolarSystemState};
+use crate::view::ViewMode;
 
 /// Uniform buffer for the stars shader. Matches the `StarsParams`
 /// struct in `assets/shaders/stars.wgsl`.
@@ -181,11 +182,26 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 ///   horizon (astronomical night),
 /// * disabled above the Kármán line (orbit keeps the full starfield) and on
 ///   airless bodies (no atmosphere to scatter → starry daytime sky).
+///
+/// This models a *surface observer* standing under a lit sky, so it applies
+/// only to the ship view. The map camera is a god's-eye orbital view with no
+/// such observer — it always keeps the full backdrop. Because the two views
+/// are a mutually-exclusive toggle (only one camera active) and the shared
+/// star/galaxy `brightness` uniform is rewritten every frame, forcing the
+/// factor to 1 while in map view is enough: the ship view still gets the
+/// suppression on the frames it's active.
 fn update_atmospheric_star_visibility(
+    view: Res<ViewMode>,
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     mut visibility: ResMut<CelestialBackdropVisibility>,
 ) {
+    // The map view has no surface observer — never dim its backdrop.
+    if *view == ViewMode::Map {
+        visibility.0 = 1.0;
+        return;
+    }
+
     // sin of sun elevation thresholds: full backdrop at/below astronomical
     // twilight (−18°), fully suppressed at/above the horizon (0°).
     const SIN_ASTRONOMICAL_TWILIGHT: f32 = -0.309; // sin(-18°)

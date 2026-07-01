@@ -48,7 +48,7 @@
 
 use std::sync::Arc;
 
-use bevy::camera::visibility::RenderLayers;
+use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
 use bevy::light::NotShadowCaster;
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -60,12 +60,12 @@ use thalos_body_render::udlod::prelude::{
 };
 use thalos_body_render::{
     AtmosphereBlock, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow,
-    CASCADE_COUNT, PipelineTileProvider, SceneLighting, rendered_height_range,
+    CASCADE_COUNT, MapOceanMaterial, MapOceanParams, PipelineTileProvider, SceneLighting,
+    rendered_height_range,
 };
 use thalos_terrain::{ProceduralSurface, SurfaceQuery};
 use thalos_world::BodyId;
 
-use super::SCREEN_MARKER_RADIUS;
 use super::ground_terrain::{
     TerrainTier, body_terrain_view_config, build_terrain_config, build_terrain_scene_lighting,
     pin_root_tiles, terrain_shading_style_for,
@@ -74,7 +74,7 @@ use super::transforms::surface_body_to_world_orientation_f64;
 use super::types::{
     BodyMesh, CameraExposure, CelestialBody, SimulationState, SolarSystemState, TidallyLocked,
 };
-use crate::camera::{CameraFocus, CameraFocusTarget, MapCamera};
+use crate::camera::{CameraFocus, MapCamera};
 use crate::coords::{MAP_LAYER, MAP_SCALE};
 use crate::view::ViewMode;
 
@@ -87,6 +87,18 @@ use crate::view::ViewMode;
 /// stray position still lands in cell zero. (The whole system spans ~1e7 units
 /// origin-relative; 1e9 is far beyond that.)
 pub const MAP_TERRAIN_CELL_SIZE: f32 = 1.0e9;
+
+/// Master switch for map-view UDLOD terrain. Currently **off**: the map shows
+/// the baked impostor billboard (real continents + oceans) at every distance
+/// instead of streaming terrain (see [`wanted_map_body`]). While off, the two
+/// support systems ([`setup_map_grid`] / [`attach_map_camera`]) are **not**
+/// scheduled — they spawn a non-`BigSpace` `Grid` root and add a `CellCoord` to
+/// the top-level map camera, both of which big_space's debug hierarchy
+/// validator flags as malformed top-level spatial entities. `manage_map_terrain`
+/// already tolerates their absence (`Option<Res<MapGridRoot>>` + a
+/// `With<CellCoord>` camera filter), so nothing needs them while parked. Flip
+/// this to `true` (and restore [`wanted_map_body`]) to re-enable.
+const MAP_TERRAIN_ENABLED: bool = false;
 
 /// The dedicated (non-`BigSpace`) `Grid` root that parents map-view terrain, so
 /// `Grids::parent_grid` resolves a `Grid` for it without dragging in a second
@@ -103,11 +115,26 @@ struct MapBodyTerrain {
     body_id: BodyId,
 }
 
+/// Marker on the map-view ocean, spawned alongside the map terrain for ocean
+/// bodies. A fullscreen [`MapOceanMaterial`] quad that ray-traces a perfect
+/// sphere at sea level and writes true depth, so it depth-sorts against the
+/// terrain (land occludes it, seabed sits behind it) with an exact analytic
+/// waterline — no mesh, no facets, no z-fight.
+#[derive(Component, Debug)]
+struct MapBodyWater {
+    body_id: BodyId,
+}
+
+/// Deep-water tint for the map ocean; matches the ship path's
+/// `FALLBACK_WATER_COLOR_DEPTH`. xyz = linear RGB, w = min optical depth (m).
+const MAP_WATER_COLOR_DEPTH: [f32; 4] = [0.012, 0.040, 0.090, 120.0];
+
 /// Tracks the single resident map-terrain entity and which body it renders, so
 /// the planner can re-target it when the camera focus changes.
 #[derive(Resource, Default)]
 struct MapTerrainState {
     entity: Option<Entity>,
+    water_entity: Option<Entity>,
     body_id: Option<BodyId>,
 }
 
@@ -115,8 +142,24 @@ pub struct MapTerrainPlugin;
 
 impl Plugin for MapTerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<MapTerrainState>()
-            .add_systems(
+        app.init_resource::<MapTerrainState>().add_systems(
+            Update,
+            (
+                manage_map_terrain,
+                update_map_terrain.after(manage_map_terrain),
+                hide_focused_map_impostor
+                    .after(update_map_terrain)
+                    .after(super::body_lod::sync_body_icons),
+            )
+                .in_set(crate::SimStage::Sync),
+        );
+
+        // The grid-root + map-camera-`CellCoord` support entities are only
+        // needed when map terrain actually streams; while it is parked they
+        // would only trip big_space's debug hierarchy validator. See
+        // [`MAP_TERRAIN_ENABLED`].
+        if MAP_TERRAIN_ENABLED {
+            app.add_systems(
                 Startup,
                 (
                     setup_map_grid,
@@ -127,16 +170,9 @@ impl Plugin for MapTerrainPlugin {
             )
             .add_systems(
                 Update,
-                (
-                    attach_map_camera,
-                    manage_map_terrain,
-                    update_map_terrain.after(manage_map_terrain),
-                    hide_focused_map_impostor
-                        .after(update_map_terrain)
-                        .after(super::body_lod::sync_body_icons),
-                )
-                    .in_set(crate::SimStage::Sync),
+                attach_map_camera.in_set(crate::SimStage::Sync),
             );
+        }
     }
 }
 
@@ -174,23 +210,14 @@ fn attach_map_camera(
 /// The body the map should render terrain for this frame: the camera-focus body
 /// when it is a procedural-terrain body zoomed in past the icon dot. `None`
 /// outside map view, when nothing is focused, or when the body is still a dot.
-fn wanted_map_body(view: &ViewMode, focus: &CameraFocus, sim: &SimulationState) -> Option<BodyId> {
-    if *view != ViewMode::Map {
-        return None;
-    }
-    let CameraFocusTarget::Body(body_id) = focus.target else {
-        return None;
-    };
-    let body = sim.system.bodies.get(body_id)?;
-    if !body.terrain.is_some() {
-        return None;
-    }
-    // Same screen-size rule as the ship view: terrain replaces the billboard
-    // once the body's rendered radius exceeds the icon dot. The MAP_SCALE
-    // cancels (`radius_m * s > distance * s * SCREEN_MARKER_RADIUS`), so the
-    // threshold is the metre orbit distance directly.
-    let swap_distance = body.radius_m / SCREEN_MARKER_RADIUS as f64;
-    (focus.distance < swap_distance).then_some(body_id)
+fn wanted_map_body(_view: &ViewMode, _focus: &CameraFocus, _sim: &SimulationState) -> Option<BodyId> {
+    // Map view now shows the baked impostor billboard (real continents + oceans
+    // from `bake_impostor_albedo_cube`) at every distance, instead of streaming
+    // UDLOD terrain — that read as patchy/half-loaded at whole-planet distance.
+    // Returning `None` keeps the map terrain (and its ocean) unspawned, so the
+    // impostor billboard stays visible. Re-enable (with a tight, close-zoom
+    // threshold) if the map ever wants walk-in terrain detail.
+    None
 }
 
 /// SystemParam-free spawn/despawn planner: spawns one map terrain entity for the
@@ -204,6 +231,8 @@ fn manage_map_terrain(
     root: Option<Res<MapGridRoot>>,
     map_camera_q: Query<Entity, (With<MapCamera>, With<CellCoord>)>,
     mut materials: ResMut<Assets<BodyTerrainMaterial>>,
+    mut ocean_materials: ResMut<Assets<MapOceanMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
     mut state: ResMut<MapTerrainState>,
     sun_shadow: Res<super::sun_shadow::SunShadowImage>,
@@ -223,9 +252,12 @@ fn manage_map_terrain(
         return;
     };
 
-    // Despawn / unregister the previous map terrain, if any.
+    // Despawn / unregister the previous map terrain (+ its ocean), if any.
     if let Some(entity) = state.entity.take() {
         tile_trees.remove(&(entity, map_camera));
+        commands.entity(entity).despawn();
+    }
+    if let Some(entity) = state.water_entity.take() {
         commands.entity(entity).despawn();
     }
     state.body_id = None;
@@ -245,7 +277,64 @@ fn manage_map_terrain(
     {
         state.entity = Some(entity);
         state.body_id = Some(body_id);
+        // Ocean bodies get an analytic map-scale ocean alongside the terrain.
+        state.water_entity = spawn_map_water(
+            body_id,
+            &sim,
+            root.entity,
+            &mut meshes,
+            &mut ocean_materials,
+            &mut commands,
+        );
     }
+}
+
+/// Spawn the map-scale ocean for `body_id`, or `None` for a body with no
+/// hydrosphere. A fullscreen [`MapOceanMaterial`] quad (the `solid_planet`
+/// billboard trick) that ray-traces a perfect sphere at `(radius + sea_level) ×
+/// MAP_SCALE` and writes true depth. Parented under the map `Grid` root; its
+/// transform (posed each frame by [`update_map_terrain`]) carries only the
+/// sphere centre — the quad itself is fullscreen. Depth-sorts against the
+/// terrain, so land occludes it and the seabed sits behind it.
+fn spawn_map_water(
+    body_id: BodyId,
+    sim: &SimulationState,
+    map_root: Entity,
+    meshes: &mut Assets<Mesh>,
+    ocean_materials: &mut Assets<MapOceanMaterial>,
+    commands: &mut Commands,
+) -> Option<Entity> {
+    let body = sim.system.bodies.get(body_id)?;
+    let sea_level_m = body.terrain.ocean_sea_level_m()?;
+    let ocean_radius = ((body.radius_m as f32 + sea_level_m) * MAP_SCALE as f32).max(0.001);
+
+    // Fullscreen clip-space quad (corners at ±1). The shader ignores it for the
+    // quad but reads the entity transform for the sphere centre.
+    let quad = meshes.add(Rectangle::new(2.0, 2.0));
+
+    let material = MapOceanMaterial {
+        params: MapOceanParams {
+            radius: ocean_radius,
+            color_depth: Vec4::from_array(MAP_WATER_COLOR_DEPTH),
+            scene: SceneLighting::default(),
+        },
+    };
+
+    let entity = commands
+        .spawn((
+            Mesh3d(quad),
+            MeshMaterial3d(ocean_materials.add(material)),
+            RenderLayers::layer(MAP_LAYER),
+            NoFrustumCulling,
+            NotShadowCaster,
+            Visibility::Hidden,
+            ChildOf(map_root),
+            Name::new(format!("{} Map Ocean", body.name)),
+            MapBodyWater { body_id },
+        ))
+        .id();
+
+    Some(entity)
 }
 
 /// Spawn one map-scale UDLOD terrain entity for `body_id`, parented under the
@@ -362,7 +451,10 @@ fn spawn_map_terrain(
 fn update_map_terrain(
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
-    bodies: Query<(&CelestialBody, &Transform, Option<&TidallyLocked>), Without<MapBodyTerrain>>,
+    bodies: Query<
+        (&CelestialBody, &Transform, Option<&TidallyLocked>),
+        (Without<MapBodyTerrain>, Without<MapBodyWater>),
+    >,
     mut terrain_q: Query<
         (
             &MapBodyTerrain,
@@ -372,9 +464,19 @@ fn update_map_terrain(
             &TileAtlas,
             &MeshMaterial3d<BodyTerrainMaterial>,
         ),
-        Without<CelestialBody>,
+        (Without<CelestialBody>, Without<MapBodyWater>),
+    >,
+    mut water_q: Query<
+        (
+            &MapBodyWater,
+            &mut Transform,
+            &mut Visibility,
+            &MeshMaterial3d<MapOceanMaterial>,
+        ),
+        (Without<CelestialBody>, Without<MapBodyTerrain>),
     >,
     mut materials: ResMut<Assets<BodyTerrainMaterial>>,
+    mut ocean_materials: ResMut<Assets<MapOceanMaterial>>,
 ) {
     let Some(states) = cache.states.as_ref() else {
         return;
@@ -406,13 +508,29 @@ fn update_map_terrain(
     }
 
     // Reveal once the pinned root tiles are ready (no void-sphere flash).
-    let want = if atlas.pinned_tiles_ready() {
+    let tiles_ready = atlas.pinned_tiles_ready();
+    let want = if tiles_ready {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
     if *vis != want {
         *vis = want;
+    }
+
+    let body_translation = body_tf.translation;
+
+    // Map ocean: the quad transform carries only the sphere centre (the shader
+    // reads it via the model matrix); refresh lighting and reveal in lockstep so
+    // the sea never shows before/without the seabed underneath it.
+    if let Ok((water, mut w_transform, mut w_vis, w_mat_handle)) = water_q.single_mut() {
+        w_transform.translation = body_translation;
+        if let Some(mut mat) = ocean_materials.get_mut(w_mat_handle) {
+            mat.params.scene = build_terrain_scene_lighting(water.body_id, states, &[], exposure.gain);
+        }
+        if *w_vis != want {
+            *w_vis = want;
+        }
     }
 }
 

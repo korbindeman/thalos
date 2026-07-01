@@ -43,6 +43,11 @@ impl Plugin for PlanetLightingPlugin {
         bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/landcover.wgsl");
+        // Shared analytic-ocean shading (wave normals + GGX water BRDF +
+        // depth-graded subsurface), imported by the `BodySky` fullscreen pass to
+        // ray-trace the planet ocean as a smooth math sphere. See
+        // `shaders/water.wgsl`.
+        bevy::shader::load_shader_library!(app, "shaders/water.wgsl");
         // Shared cascaded sun-shadow sampler, imported by the terrain, tree,
         // grass, and ground-patch materials (one copy instead of four). See
         // `shaders/shadow.wgsl`.

@@ -25,12 +25,15 @@ pub const PHYSICS_QUERY_TILE_LOD_M: f32 = 0.5;
 const THALOS_NAME: &str = "Thalos";
 const DEBUG_DROP_KEY: KeyCode = KeyCode::F9;
 
-/// Position discontinuity above which a take-translation handoff is treated
-/// as a bug in debug builds. A healthy handoff residual is the distance
-/// Avian's integrator drifts from the snap source in one step (`~|accel|·dt²`,
-/// sub-centimetre). The frame-skew / SOI-race failure the snap guards against
-/// produces `~|relative_velocity|·dt` (~100 m at Thalos LEO), so 2 m cleanly
-/// separates the two regimes.
+/// Position discontinuity above which a take-translation handoff is logged as
+/// anomalous (see [`snap::readback_local_craft`]). A healthy handoff residual
+/// is the distance Avian's integrator drifts from the snap source in one step
+/// (`~|accel|·dt²`, sub-centimetre). The frame-skew / SOI-race failure the snap
+/// guards against produces `~|relative_velocity|·dt` (~100 m at Thalos LEO), so
+/// 2 m cleanly separates the two regimes. Non-fatal: a *landed* craft released
+/// onto a ballistic `OnRails` arc can legitimately land in between (it gains
+/// real surface-relative velocity before the backend takes translation), so
+/// exceeding this only emits a warning — the read-back state installs anyway.
 const HANDOFF_RESIDUAL_TOLERANCE_M: f64 = 2.0;
 
 pub struct GameLocalPhysicsPlugin;

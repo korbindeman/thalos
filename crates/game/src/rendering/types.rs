@@ -6,7 +6,9 @@
 
 use bevy::prelude::*;
 use std::collections::HashMap;
-use thalos_body_render::{GasGiantMaterial, RingMaterial, SolidPlanetMaterial};
+use thalos_body_render::{
+    GasGiantMaterial, RingMaterial, SolidPlanetHaloMaterial, SolidPlanetMaterial,
+};
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 
@@ -124,6 +126,11 @@ pub(super) struct BodyIcon;
 pub struct SolidPlanetMaterials {
     pub map: Handle<SolidPlanetMaterial>,
     pub ship: Handle<SolidPlanetMaterial>,
+    /// Map-layer atmosphere rim companion, present only for bodies with a
+    /// `terrestrial_atmosphere`. Drawn as a premultiplied sibling billboard
+    /// outside the solid disc; kept in lockstep with `map` (radius + scene
+    /// lighting) by `update_solid_planet_params`. `None` for airless bodies.
+    pub map_halo: Option<Handle<SolidPlanetHaloMaterial>>,
 }
 
 /// Material handles for a [`GasGiantMaterial`] body.

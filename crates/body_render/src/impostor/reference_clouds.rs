@@ -91,6 +91,15 @@ pub fn load_reference_cloud_sources(
     mut clouds: ResMut<ReferenceClouds>,
 ) {
     for spec in REFERENCE_CLOUD_IMAGES {
+        // These are optional, hand-dropped reference textures that are *not*
+        // committed to the repo. Skip any that aren't present so a missing file
+        // degrades silently to a blank cloud cover (see
+        // `cloud_cover_image_for_body`) instead of the asset server logging a
+        // "Path not found" error every boot. The asset root is CWD-relative
+        // `assets/` (the game's `AssetPlugin` and `main.rs` both resolve there).
+        if !std::path::Path::new("assets").join(spec.path).exists() {
+            continue;
+        }
         clouds.entries.insert(
             spec.body_name.to_string(),
             ReferenceCloudEntry {

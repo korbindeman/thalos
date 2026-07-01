@@ -1,8 +1,10 @@
 pub mod bake;
 mod film_grain;
 mod gas_giant;
+mod map_ocean;
 mod material;
 pub mod post_stack;
+mod proc_impostor;
 mod reference_clouds;
 mod rings;
 pub mod shader_types;
@@ -17,6 +19,8 @@ pub use film_grain::FilmGrain;
 pub use gas_giant::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,
 };
+pub use map_ocean::{MapOceanMaterial, MapOceanParams};
+pub use proc_impostor::{bake_impostor_albedo_cube, blank_impostor_cube};
 pub use material::{
     PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle,
     PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetWaterParams,
@@ -31,7 +35,7 @@ pub use rings::{
     ring_plane_normal,
 };
 pub use shader_types::{GpuCellRange, GpuCrater, GpuDuneSea, GpuIceCap, GpuRadialFeature};
-pub use solid_planet::{SolidPlanetMaterial, SolidPlanetParams};
+pub use solid_planet::{SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams};
 pub use texture::PlanetTextures;
 
 use bevy::prelude::*;
@@ -54,6 +58,8 @@ impl Plugin for PlanetRenderingPlugin {
             MaterialPlugin::<GasGiantMaterial>::default(),
             MaterialPlugin::<RingMaterial>::default(),
             MaterialPlugin::<SolidPlanetMaterial>::default(),
+            MaterialPlugin::<SolidPlanetHaloMaterial>::default(),
+            MaterialPlugin::<MapOceanMaterial>::default(),
             film_grain::FilmGrainPlugin,
         ));
     }

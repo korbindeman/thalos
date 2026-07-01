@@ -47,6 +47,18 @@ pub struct BodySkyExtra {
     /// bounds by the screen-space `textureLoad` (→ opaque black sky) if
     /// composited. Zero on bodies with no active cloud layer.
     pub cloud_band_radii: Vec4,
+    /// Analytic ocean parameters for `body_sky.wgsl`. The sky pass ray-traces a
+    /// math sphere at `ocean.x` and shades it as water wherever that hit sits in
+    /// front of the opaque seabed/terrain in the scene-depth buffer — smooth at
+    /// every scale, with no mesh. x = ocean sphere radius in render units
+    /// (`planet_radius + sea_level_m`; render space is 1 unit = 1 m on
+    /// SHIP_LAYER, so this is just metres). y = enable flag (1 on ocean bodies,
+    /// 0 disables the whole branch). zw reserved.
+    pub ocean: Vec4,
+    /// Deep-water linear-RGB tint (xyz) + minimum optical-depth scale (w),
+    /// matching the impostor water BRDF fallback so the ground↔impostor handoff
+    /// stays consistent. Only read when `ocean.y >= 0.5`.
+    pub ocean_color_depth: Vec4,
 }
 
 impl Default for BodySkyExtra {
@@ -56,6 +68,8 @@ impl Default for BodySkyExtra {
             planet_center_radius: Vec4::ZERO,
             world_to_body_orientation: Vec4::new(0.0, 0.0, 0.0, 1.0),
             cloud_band_radii: Vec4::ZERO,
+            ocean: Vec4::ZERO,
+            ocean_color_depth: Vec4::ZERO,
         }
     }
 }

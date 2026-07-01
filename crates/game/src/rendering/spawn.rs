@@ -29,8 +29,9 @@ use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_body_render::{
     AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, GpuAtlasMirrorHeightSource,
     MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial,
-    RingParams, SceneLighting, SolidPlanetMaterial, SolidPlanetParams, bake_multi_scatter_lut,
-    build_ring_mesh, cloud_cover_image_for_body,
+    RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams,
+    bake_impostor_albedo_cube, bake_multi_scatter_lut, blank_impostor_cube, build_ring_mesh,
+    cloud_cover_image_for_body,
 };
 use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
 use thalos_physics_canonical::canonical::Epoch;
@@ -156,6 +157,33 @@ fn blank_cloud_distance(images: &mut Assets<Image>) -> Handle<Image> {
     images.add(image)
 }
 
+/// 1×1 blank multi-scatter LUT (`Rgba16Float` `(0,0,0,1)`) bound by
+/// [`SolidPlanetMaterial`] on airless bodies. Their vacuum atmosphere makes the
+/// shader's `atmosphere_scattering_active` gate skip the sample entirely, so the
+/// contents are never read — but the binding must still be a valid texture, and
+/// it must match the real LUT's bind-group layout (`Rgba16Float`, linear).
+fn blank_multi_scatter_lut(images: &mut Assets<Image>) -> Handle<Image> {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::ImageSampler;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+    // Rgba16Float (0.0, 0.0, 0.0, 1.0): f16 0.0 = 0x0000, 1.0 = 0x3C00, LE bytes.
+    let data = vec![0, 0, 0, 0, 0, 0, 0x00, 0x3C];
+    let mut image = Image::new(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba16Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.sampler = ImageSampler::linear();
+    images.add(image)
+}
+
 pub(super) fn spawn_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -164,6 +192,7 @@ pub(super) fn spawn_bodies(
     mut gas_giant_materials: ResMut<Assets<GasGiantMaterial>>,
     mut ring_materials: ResMut<Assets<RingMaterial>>,
     mut solid_planet_materials: ResMut<Assets<SolidPlanetMaterial>>,
+    mut solid_planet_halo_materials: ResMut<Assets<SolidPlanetHaloMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
     sim: Res<SimulationState>,
     real_root: Res<RealSpaceRoot>,
@@ -185,6 +214,13 @@ pub(super) fn spawn_bodies(
     // volumetric cloud textures are bound per-frame for the active cloud body.
     let blank_cloud = blank_cloud_layer(&mut images);
     let blank_cloud_dist = blank_cloud_distance(&mut images);
+    // 1×1 fallback impostor cube for solid-colour bodies (they use the flat
+    // `albedo`, gated by `albedo.w < 0.5`, and never sample it).
+    let blank_impostor = images.add(blank_impostor_cube());
+    // 1×1 blank multi-scatter LUT for airless `SolidPlanetMaterial` impostors
+    // (their vacuum atmosphere gate skips the sample; the binding just needs to
+    // be a valid, layout-matching texture).
+    let blank_ms_lut = blank_multi_scatter_lut(&mut images);
     commands.insert_resource(BlankCloudTextures {
         layer: blank_cloud.clone(),
         distance: blank_cloud_dist.clone(),
@@ -229,25 +265,31 @@ pub(super) fn spawn_bodies(
             .as_ref()
             .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
             .unwrap_or_default();
+        // Bake the multi-scatter LUT once from the static atmosphere block, and
+        // share it across this body's `BodySky` fullscreen pass AND its
+        // solid-planet impostor (map + ship). SHIP_SCALE == 1 (1 render unit =
+        // 1 m), so the body's solid radius in render units is just `radius_m`;
+        // this must match the units of `ship_atmosphere.atmos_geom.x` (already
+        // scaled by `inv_m` in `from_terrestrial`), which it does at SHIP_SCALE.
+        // The LUT is scale-invariant (a function of normalized altitude + sun
+        // angle), so this SHIP_SCALE bake is reused unchanged for the MAP_SCALE
+        // disc impostor. Airless bodies bind the shared 1×1 blank.
+        let planet_radius_render = (body.radius_m * SHIP_SCALE) as f32;
+        let multi_scatter_lut = if ship_atmosphere.atmos_geom.z > 0.0 {
+            build_multi_scatter_lut(&ship_atmosphere, planet_radius_render, &mut images)
+        } else {
+            blank_ms_lut.clone()
+        };
         if ship_atmosphere.atmos_geom.z > 0.0 {
             let (sky_cloud_cover, _) =
                 cloud_cover_image_for_body(&body.name, &reference_clouds, &mut images);
-
-            // Bake the multi-scatter LUT once from the static atmosphere block.
-            // SHIP_SCALE == 1 (1 render unit = 1 m), so the body's solid radius
-            // in render units is just `radius_m`; this must match the units of
-            // `ship_atmosphere.atmos_geom.x` (already scaled by `inv_m` in
-            // `from_terrestrial`), which it does at SHIP_SCALE.
-            let planet_radius_render = (body.radius_m * SHIP_SCALE) as f32;
-            let multi_scatter_lut =
-                build_multi_scatter_lut(&ship_atmosphere, planet_radius_render, &mut images);
 
             let sky_material = BodySkyMaterial {
                 atmosphere: ship_atmosphere,
                 atmosphere_extra: BodySkyExtra::default(),
                 scene_depth: scene_depth.handle.clone(),
                 cloud_cover: sky_cloud_cover,
-                multi_scatter_lut,
+                multi_scatter_lut: multi_scatter_lut.clone(),
                 cloud_layer: blank_cloud.clone(),
                 cloud_distance: blank_cloud_dist.clone(),
             };
@@ -408,25 +450,50 @@ pub(super) fn spawn_bodies(
             // billboard is tagged `RealSpaceImpostor` so `sync_body_render_lod`
             // hides it whenever the ground-LOD terrain is resident.
             let albedo_linear = Color::srgb(r, g, b).to_linear();
+            // Procedural body: bake a low-frequency impostor albedo cube
+            // (continents + oceans) from the runtime surface. `albedo.w = 1`
+            // tells the shader to sample the cube (by the body-fixed normal, set
+            // per frame in `update_solid_planet_params`) instead of the flat
+            // colour; the xyz colour stays as the planetshine tint fallback.
             let albedo = Vec4::new(
                 albedo_linear.red,
                 albedo_linear.green,
                 albedo_linear.blue,
-                0.0,
+                1.0,
             );
+            let impostor_surface = ProceduralSurface::new(body.radius_m as f32, body.id as u32);
+            let impostor_cube = images.add(bake_impostor_albedo_cube(&impostor_surface, 256));
+            // Map-scale atmosphere optics for the rim glow + on-disc aerial
+            // perspective. Airless procedural bodies have no
+            // `terrestrial_atmosphere` → vacuum block → the shader early-outs.
+            // The ship-layer impostor stays vacuum here: the in-context `BodySky`
+            // fullscreen pass owns the ship-view atmosphere once terrain is
+            // resident, and the far-impostor atmosphere is a Slice-6 concern.
+            let map_atmosphere = body
+                .terrestrial_atmosphere
+                .as_ref()
+                .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / MAP_SCALE) as f32))
+                .unwrap_or_default();
             let map_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
                     radius: render_radius,
                     albedo,
                     scene: SceneLighting::default(),
+                    atmosphere: map_atmosphere,
+                    ..default()
                 },
+                albedo_cube: impostor_cube.clone(),
+                multi_scatter_lut: multi_scatter_lut.clone(),
             });
             let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
                     radius: ship_render_radius,
                     albedo,
                     scene: SceneLighting::default(),
+                    ..default()
                 },
+                albedo_cube: impostor_cube.clone(),
+                multi_scatter_lut: multi_scatter_lut.clone(),
             });
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),
@@ -449,9 +516,39 @@ pub(super) fn spawn_bodies(
                 RealSpaceImpostor { body_id: body.id },
                 ChildOf(real_body_entity),
             ));
+
+            // Atmosphere rim glow on the map disc, for bodies that have one.
+            // Premultiplied sibling billboard outside the solid silhouette;
+            // `update_solid_planet_params` keeps its params in lockstep.
+            let map_halo = if map_atmosphere.atmos_geom.z > 0.0 {
+                let halo_mat = solid_planet_halo_materials.add(SolidPlanetHaloMaterial {
+                    params: SolidPlanetParams {
+                        radius: render_radius,
+                        albedo,
+                        scene: SceneLighting::default(),
+                        atmosphere: map_atmosphere,
+                        ..default()
+                    },
+                });
+                commands.spawn((
+                    Mesh3d(billboard_mesh.clone()),
+                    MeshMaterial3d(halo_mat.clone()),
+                    BodyMesh,
+                    bevy::camera::visibility::RenderLayers::layer(MAP_LAYER),
+                    NoFrustumCulling,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                    ChildOf(body_entity),
+                ));
+                Some(halo_mat)
+            } else {
+                None
+            };
+
             commands.entity(body_entity).insert(SolidPlanetMaterials {
                 map: map_mat,
                 ship: ship_mat,
+                map_halo,
             });
 
             // Register the runtime surface for (a) the near-surface height
@@ -595,19 +692,27 @@ pub(super) fn spawn_bodies(
                 0.0,
             );
 
+            // Non-procedural solid bodies (asteroids, airless moons) have no
+            // terrestrial atmosphere → vacuum block → no rim, no aerial tint.
             let map_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
                     radius: render_radius,
                     albedo,
                     scene: SceneLighting::default(),
+                    ..default()
                 },
+                albedo_cube: blank_impostor.clone(),
+                multi_scatter_lut: multi_scatter_lut.clone(),
             });
             let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
                     radius: ship_render_radius,
                     albedo,
                     scene: SceneLighting::default(),
+                    ..default()
                 },
+                albedo_cube: blank_impostor.clone(),
+                multi_scatter_lut: multi_scatter_lut.clone(),
             });
 
             let body_entity = commands
@@ -659,6 +764,7 @@ pub(super) fn spawn_bodies(
             commands.entity(body_entity).insert(SolidPlanetMaterials {
                 map: map_mat,
                 ship: ship_mat,
+                map_halo: None,
             });
 
             body_entity

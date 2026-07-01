@@ -210,12 +210,25 @@ pub(crate) fn readback_local_craft(
             let canonical = sim.simulation.craft_state().translation;
             let position_residual_m = (translation.position - canonical.position).length();
             let velocity_residual_m_s = (translation.velocity - canonical.velocity).length();
-            debug_assert!(
-                position_residual_m < HANDOFF_RESIDUAL_TOLERANCE_M,
-                "Avian↔canonical take-translation handoff position discontinuity: \
-                 {position_residual_m:.3} m (tolerance {HANDOFF_RESIDUAL_TOLERANCE_M} m) — \
-                 snap/readback body-frame skew or SOI race"
-            );
+            // A residual above tolerance means snap and readback disagreed on
+            // the body frame at the take — conversion drift, a stale
+            // `body_state`, an SOI race, or (legitimately) a *landed* craft
+            // released onto a ballistic `OnRails` arc that built up real
+            // surface-relative velocity before the backend took translation.
+            // That last case is a benign one-frame reconciliation: the
+            // read-back state installs normally below and the sim recovers next
+            // frame. This is observability, not an invariant, so surface it
+            // loudly but never crash the session. (Previously a `debug_assert!`
+            // — it killed the whole debug build on the edge case of throttling
+            // up a craft dropped onto raw terrain; release builds, where the
+            // assert compiled out, already survived it.)
+            if position_residual_m >= HANDOFF_RESIDUAL_TOLERANCE_M {
+                warn!(
+                    "Avian↔canonical take-translation handoff position discontinuity: \
+                     {position_residual_m:.3} m (tolerance {HANDOFF_RESIDUAL_TOLERANCE_M} m) — \
+                     snap/readback body-frame skew, SOI race, or ballistic-release velocity"
+                );
+            }
             diagnostics.last_handoff_kind = "TookTranslation".to_string();
             diagnostics.last_handoff_sim_time_s = sim.simulation.sim_time();
             diagnostics.position_residual_m = position_residual_m;

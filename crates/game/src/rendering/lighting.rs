@@ -4,8 +4,8 @@
 
 use bevy::prelude::*;
 use thalos_body_render::{
-    AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, SceneLighting, SolidPlanetMaterial,
-    StarLight,
+    AU_M, FilmGrain, LIGHT_AT_1AU, MAX_ECLIPSE_OCCLUDERS, SceneLighting, SolidPlanetHaloMaterial,
+    SolidPlanetMaterial, StarLight,
 };
 use thalos_physics_canonical::types::BodyStates;
 
@@ -184,6 +184,7 @@ pub(super) fn collect_occluders<'a>(
 pub(super) fn update_solid_planet_params(
     query: Query<(&CelestialBody, &SolidPlanetMaterials)>,
     mut materials: ResMut<Assets<SolidPlanetMaterial>>,
+    mut halo_materials: ResMut<Assets<SolidPlanetHaloMaterial>>,
     cache: Res<SolarSystemState>,
     origin: Res<RenderOrigin>,
     sim: Res<SimulationState>,
@@ -219,9 +220,19 @@ pub(super) fn update_solid_planet_params(
 
     for (body, mats) in &query {
         let body_def = &body_defs[body.body_id];
-        for (handle, occluders, scale, want) in [
-            (&mats.map, map_slice, MAP_SCALE, do_map),
-            (&mats.ship, ship_slice, SHIP_SCALE, do_ship),
+        // World→body-fixed rotation for sampling the impostor albedo cube, so it
+        // co-rotates with the planet's spin. Identity for solid-colour bodies
+        // (they ignore it). Scale-invariant, so one value serves both views.
+        let orientation = states
+            .get(body.body_id)
+            .map(|s| {
+                let q = s.orientation.inverse().as_quat().normalize();
+                Vec4::new(q.x, q.y, q.z, q.w)
+            })
+            .unwrap_or(Vec4::new(0.0, 0.0, 0.0, 1.0));
+        for (handle, occluders, scale, want, halo) in [
+            (&mats.map, map_slice, MAP_SCALE, do_map, mats.map_halo.as_ref()),
+            (&mats.ship, ship_slice, SHIP_SCALE, do_ship, None),
         ] {
             if !want {
                 continue;
@@ -248,15 +259,33 @@ pub(super) fn update_solid_planet_params(
                 }
             }
 
+            // Atmosphere rim companion (map only): same radius + scene as the
+            // body disc; the static atmosphere block is left untouched. Updated
+            // before the body material so `scene` is still available to move
+            // into it below (`SceneLighting` is Clone, not Copy).
+            if let Some(halo_handle) = halo {
+                let halo_dirty = matches!(
+                    halo_materials.get(halo_handle),
+                    Some(m) if m.params.radius != radius || m.params.scene != scene
+                );
+                if halo_dirty && let Some(mut m) = halo_materials.get_mut(halo_handle) {
+                    m.params.radius = radius;
+                    m.params.scene = scene.clone();
+                }
+            }
+
             // Peek before mutating; `get_mut` re-uploads the uniform even
             // on identical writes.
             let dirty = matches!(
                 materials.get(handle),
-                Some(mat) if mat.params.radius != radius || mat.params.scene != scene
+                Some(mat) if mat.params.radius != radius
+                    || mat.params.scene != scene
+                    || mat.params.orientation != orientation
             );
             if dirty && let Some(mut mat) = materials.get_mut(handle) {
                 mat.params.radius = radius;
                 mat.params.scene = scene;
+                mat.params.orientation = orientation;
             }
         }
     }

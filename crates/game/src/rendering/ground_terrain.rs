@@ -39,7 +39,7 @@ use thalos_shipyard::{
     jet_nacelle_length, wing_panel_frame,
 };
 use thalos_terrain::{
-    FlattenHandle, FlattenedSurface, PlanetSurface, ProceduralSurface, SurfaceQuery, flatten_handle,
+    FlattenHandle, FlattenedSurface, ProceduralSurface, SurfaceQuery, flatten_handle,
 };
 use thalos_world::{BodyDefinition, BodyId};
 
@@ -759,57 +759,35 @@ const WATER_MESH_SUBDIVISIONS: u32 = 7;
 /// 3 Mm) on the bodies we currently ship.
 const WATER_SURFACE_EPSILON_M: f32 = 2.0;
 
-/// Temporary kill switch for ground-LOD water. The impostor path still renders
-/// its inline water BRDF outside the terrain handoff.
-const TERRAIN_PATH_WATER_ENABLED: bool = false;
-
-/// Default deep-water tint when the bake omits an explicit
-/// `WaterAppearance`. Matches `PlanetWaterParams::from_static_surface`'s
-/// fallback so the impostor and ground-LOD paths agree.
+/// Default deep-water tint for the runtime ground-LOD water shell. The
+/// `ProceduralSurface` generator carries no per-body `WaterAppearance` (that
+/// lived on the dead baked pipeline), so every ocean body uses this until a
+/// procedural water-appearance is authored. Matches the impostor water BRDF's
+/// fallback so the two paths agree across the LOD swap. xyz = deep-water linear
+/// RGB; w = minimum optical depth (metres).
 const FALLBACK_WATER_COLOR_DEPTH: [f32; 4] = [0.012, 0.040, 0.090, 120.0];
 
-/// Spawn the per-body water sphere. No-op when the baked surface has no
-/// `sea_level_m` (airless bodies); otherwise creates a single icosphere
-/// entity parented to the body's grid, hidden at start so
-/// `sync_body_render_lod` can flip it in step with [`BodyTerrain`].
-// 0b-1: water is disabled until the generator grows a sea level (Slice 1);
-// this is rewritten/removed then. Uncalled for now.
+/// Spawn the per-body ocean shell: a single icosphere at
+/// `body.radius_m + sea_level_m + ε`, parented to the body's grid and hidden at
+/// start so [`sync_body_render_lod`] can flip it in step with [`BodyTerrain`].
+///
+/// **Superseded** by the analytic ray-traced ocean in `body_sky.wgsl`: a
+/// faceted icosphere sags tens of metres below the true sphere at planet scale
+/// (flat triangle chords), so the seabed punches through everywhere but the
+/// vertices. The analytic sphere is smooth at every scale. Retained dormant
+/// until the analytic path is screenshot-verified, then removed.
 #[allow(dead_code)]
 pub(crate) fn spawn_body_water(
     commands: &mut Commands,
     body: &BodyDefinition,
-    surface: &PlanetSurface,
+    sea_level_m: f32,
     ship_parent_entity: Entity,
     meshes: &mut Assets<Mesh>,
     water_materials: &mut Assets<BodyWaterMaterial>,
-) -> Option<Entity> {
-    if !TERRAIN_PATH_WATER_ENABLED {
-        return None;
-    }
-
-    let baked = &surface.static_surface;
-    let sea_level_m = baked.sea_level_m?;
-
+) -> Entity {
     let water_radius_m = (body.radius_m as f32 + sea_level_m + WATER_SURFACE_EPSILON_M).max(1.0);
 
-    let color_depth = baked
-        .water_appearance
-        .map(|w| {
-            Vec4::new(
-                w.color_depth[0],
-                w.color_depth[1],
-                w.color_depth[2],
-                w.color_depth[3],
-            )
-        })
-        .unwrap_or_else(|| {
-            Vec4::new(
-                FALLBACK_WATER_COLOR_DEPTH[0],
-                FALLBACK_WATER_COLOR_DEPTH[1],
-                FALLBACK_WATER_COLOR_DEPTH[2],
-                FALLBACK_WATER_COLOR_DEPTH[3],
-            )
-        });
+    let color_depth = Vec4::from_array(FALLBACK_WATER_COLOR_DEPTH);
 
     let mesh = meshes.add(
         Sphere::new(water_radius_m)
@@ -823,7 +801,9 @@ pub(crate) fn spawn_body_water(
         // xyz populated each frame by `update_body_terrain_atmosphere` from
         // the body's render-space grid origin; w is constant.
         planet_center_radius: Vec4::new(0.0, 0.0, 0.0, water_radius_m),
-        time: Vec4::ZERO,
+        // x = 1 → metre-scale waves on (this is the surface/SHIP_SCALE path; the
+        // map ocean sets x = 0). w = wave-scroll time, written per frame.
+        time: Vec4::new(1.0, 0.0, 0.0, 0.0),
     };
     let material = BodyWaterMaterial {
         scene: SceneLighting::default(),
@@ -851,7 +831,7 @@ pub(crate) fn spawn_body_water(
         sea_level_m,
     );
 
-    Some(water_entity)
+    water_entity
 }
 
 /// Unified per-body render-LOD visibility.
@@ -1274,6 +1254,18 @@ pub(super) fn update_body_terrain_atmosphere(
         occluders.push((i, *pos, body.radius_m as f32));
     }
 
+    // Camera position in heliocentric inertial coords (f64), reconstructed from
+    // the ship camera's big_space cell + local translation so it stays
+    // f64-precise at planet radius. Used both for the analytic-ocean camera
+    // altitude below and the flat-mode debug checker's `view_phase` further down.
+    let camera_inertial = ship_cam_q
+        .single()
+        .map(|(cell, transform)| {
+            DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64) * REAL_SPACE_CELL_SIZE_M as f64
+                + transform.translation.as_dvec3()
+        })
+        .unwrap_or_else(|_| sim.simulation.ship_state().position);
+
     // Per-body sky data: sun direction, flux, planet center, radius.
     let mut sky_by_body: std::collections::HashMap<BodyId, BodySkyExtra> =
         std::collections::HashMap::with_capacity(sim.system.bodies.len());
@@ -1325,6 +1317,36 @@ pub(super) fn update_body_terrain_atmosphere(
         } else {
             Vec4::ZERO
         };
+        // Analytic ocean: a math sphere at `planet_radius + sea_level_m` shaded
+        // as water inside the BodySky pass (see `body_sky.wgsl`). Render space on
+        // SHIP_LAYER is 1 unit = 1 m, so the radius is just metres. Sea level is
+        // 0 for runtime procedural oceans (shoreline pinned at the reference
+        // radius); `None` (airless / ancient-dry) disables the branch.
+        let (ocean, ocean_color_depth) = match body.terrain.ocean_sea_level_m() {
+            Some(sea_level_m) => {
+                // w = camera height above the sea sphere, computed in f64 so the
+                // shader's ray-sphere intersection is stable at planet radius
+                // (an f32 `b² − c` there catastrophically cancels → the surface
+                // jitters as the camera moves). The shader rebuilds the near root
+                // from this precise altitude instead.
+                let sea_r = body.radius_m + sea_level_m as f64;
+                let cam_alt_sea =
+                    ((camera_inertial - body_state.position).length() - sea_r) as f32;
+                (
+                    // x = ocean radius (m), y = enable, z = wall-clock wave-scroll
+                    // time (real seconds — sim time pauses at warp-pause and runs
+                    // fast under warp), w = camera altitude above sea.
+                    Vec4::new(
+                        planet_radius + sea_level_m,
+                        1.0,
+                        time.elapsed_secs(),
+                        cam_alt_sea,
+                    ),
+                    Vec4::from_array(FALLBACK_WATER_COLOR_DEPTH),
+                )
+            }
+            None => (Vec4::ZERO, Vec4::ZERO),
+        };
         sky_by_body.insert(
             i,
             BodySkyExtra {
@@ -1337,26 +1359,19 @@ pub(super) fn update_body_terrain_atmosphere(
                 ),
                 world_to_body_orientation: Vec4::new(q.x, q.y, q.z, q.w),
                 cloud_band_radii,
+                ocean,
+                ocean_color_depth,
             },
         );
     }
 
-    // Camera position in heliocentric inertial coords (f64), reconstructed from
-    // the ship camera's big_space cell + local translation so it stays
-    // f64-precise at planet radius. The flat-mode debug checker's `view_phase`
-    // is the camera's body-fixed position mod-(2 × cell_size) per axis; it must
-    // reference the *actual* render camera — the same `view.world_position` the
-    // shader differences fragments against — not the craft. Using the craft
-    // position slides the checker across the surface whenever the camera orbits
-    // a stationary player, because the phase reference and the shader's camera
-    // reference then disagree by the orbit offset.
-    let camera_inertial = ship_cam_q
-        .single()
-        .map(|(cell, transform)| {
-            DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64) * REAL_SPACE_CELL_SIZE_M as f64
-                + transform.translation.as_dvec3()
-        })
-        .unwrap_or_else(|_| sim.simulation.ship_state().position);
+    // `camera_inertial` (f64) was computed above the sky-data loop — the render
+    // camera's heliocentric position, the same `view.world_position` the shader
+    // differences fragments against. The flat-mode debug checker's `view_phase`
+    // (below) must reference it, not the craft: using the craft position slides
+    // the checker across the surface whenever the camera orbits a stationary
+    // player, because the phase reference and the shader's camera reference then
+    // disagree by the orbit offset.
     for (terrain, mat_handle) in &terrain_q {
         let Some(mut mat) = terrain_materials.get_mut(mat_handle) else {
             continue;

@@ -472,7 +472,10 @@ fn try_spawn(
         sun_shadow_maps,
     );
 
-    // 0b-1: water is disabled until the generator grows a sea level (Slice 1).
+    // Ocean is no longer a terrain-parented mesh: it is rendered analytically as
+    // a ray-traced sphere inside the body's `BodySky` fullscreen pass (see
+    // `body_sky.wgsl`), which is smooth at every scale and reads the seabed depth
+    // for shallow/deep colour. No per-body water entity is spawned here.
     Some(ResidencyEntry {
         terrain,
         water: None,

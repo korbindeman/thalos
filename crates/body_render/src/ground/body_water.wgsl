@@ -204,8 +204,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_dir = normalize(view.world_position - hit_ws);
     let view_dist = distance(view.world_position, hit_ws);
 
+    // `time.x` gates the metre-scale wave normals: 1 = on (ship/surface scale),
+    // 0 = off (map scale, where 1 render unit = 1000 km, so the wave fade — keyed
+    // on "metres" of view distance — misfires and the noise domain collapses;
+    // from map distance a smooth glinting sphere is what you'd see anyway).
     let t = water_params.time.w;
-    let n = wave_normal(hit_ws, geo_n, t, view_dist);
+    var n = geo_n;
+    if water_params.time.x >= 0.5 {
+        n = wave_normal(hit_ws, geo_n, t, view_dist);
+    }
 
     let n_dot_v = max(dot(n, view_dir), 0.0);
     let f0 = 0.02;

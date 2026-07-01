@@ -29,6 +29,7 @@
     rotate_around_y,
 }
 #import thalos::lighting::SCENE_FLUX_SCALE
+#import thalos::water::shade_ocean
 
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3 (group 2 is the
 // material-indices storage buffer used by the bindless material allocator).
@@ -39,6 +40,8 @@ struct SkyAtmosExtra {
     planet_center_radius:      vec4<f32>,  // xyz = planet center (render-space), w = radius
     world_to_body_orientation: vec4<f32>,  // render-space direction -> body-local cubemap direction
     cloud_band_radii:          vec4<f32>,  // x = cloud base radius, y = cloud top radius (render units), z = airlight ratio, w = cloud-composite-enable flag (1 = bind live clouds)
+    ocean:                     vec4<f32>,  // x = ocean sphere radius (render units = m), y = enable (>=0.5), z = wave-scroll time (s), w = camera height above sea (m, CPU f64-precise)
+    ocean_color_depth:         vec4<f32>,  // xyz = deep-water linear-RGB tint, w = min optical-depth scale
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 
@@ -520,6 +523,51 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         surface_dist = fallback_t_surface;
     }
 
+    // ── Analytic ocean ────────────────────────────────────────────────────
+    // Ray-trace a math sphere at sea level and treat its surface as water
+    // wherever it sits in FRONT of the opaque seabed/terrain (`scene_t`). This
+    // is the smooth replacement for the meshed water shell: no facets, no sag,
+    // identical from orbit to sea level.
+    //
+    // Numerical stability at planet radius is the whole ballgame here. The naive
+    // `oc·oc − r_sea²` (two ~R² terms) and the near root `−b − √disc` (two ~R
+    // terms) both catastrophically cancel in f32, so the surface jitters by
+    // metres as the camera moves. Instead we take the camera's EXACT height
+    // above the sea `h` from the CPU (f64-computed), form `c_sea = h·(2r+h)`
+    // with no cancellation, and recover the near root from `t_near·t_far = c_sea`
+    // (Vieta) using the well-conditioned far root `t_far = −b + √disc`.
+    var water_here = false;
+    var t_ocean = 0.0;
+    var ocean_column_m = 0.0;
+    if sky_atmos_extra.ocean.y >= 0.5 {
+        let r_sea = sky_atmos_extra.ocean.x;
+        let h = sky_atmos_extra.ocean.w;              // camera height above sea (m)
+        let up = normalize(oc);                        // planet-centre → camera, unit
+        let mu = dot(up, ray_dir);
+        let cam_r = r_sea + h;
+        let c_sea = h * (2.0 * r_sea + h);             // = cam_r² − r_sea², cancellation-free
+        let b_sea = cam_r * mu;
+        let disc_sea = b_sea * b_sea - c_sea;
+        if disc_sea > 0.0 {
+            let sq_sea = sqrt(disc_sea);
+            let t_far = -b_sea + sq_sea;                // sum of positives when looking down (mu<0)
+            if t_far > 0.0 {
+                // Vieta near root: same sign as t_far, no large-cancellation.
+                let t_near = c_sea / t_far;
+                t_ocean = select(t_far, t_near, t_near > 0.0);
+                if t_ocean > 0.0 && t_ocean <= scene_t {
+                    water_here = true;
+                    ocean_column_m = max(scene_t - t_ocean, 0.0);
+                    // Integrate the air column to the WATER surface, not the
+                    // seabed behind it, so aerial perspective lands on the water.
+                    t_exit = min(t_exit, t_ocean);
+                    surface_fade = 1.0;
+                    surface_dist = t_ocean;
+                }
+            }
+        }
+    }
+
     if t_exit <= t_enter {
         discard;
     }
@@ -557,16 +605,33 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // leaving near ground at its tuned look. Physical extinction is untouched.
     // Gated to bodies with an atmosphere (airlight_ratio > 0) so airless
     // surfaces (Mira) are never veiled toward a black/near-zero in-scatter.
-    let aerial_near = 8000.0;
-    let aerial_far = 70000.0;
+    // Air-mass driver. The veil must scale with how much air the view ray
+    // actually traverses to reach the surface, NOT the Euclidean camera→surface
+    // distance. `view_tau` is the mean optical depth the integrator already
+    // accumulated over `[t_enter, t_exit]` (recovered from its transmittance):
+    // a thin vertical column at nadir-from-orbit, a long slant column at the
+    // limb or along a low horizontal flight path. Keying on distance instead
+    // saturated the ramp for the WHOLE disc the moment the camera left the
+    // atmosphere — veiling even the crisp nadir uniformly (the "washed out from
+    // orbit" bug). The tau thresholds are calibrated to the old distance ramp at
+    // sea level (`view_tau ≈ 0.30` at the 8 km onset, `≈ 2.40` at the 70 km full
+    // veil), so the on-surface look is unchanged and only altitude re-grades it.
+    let mean_trans = (scatter.transmittance.x + scatter.transmittance.y + scatter.transmittance.z) / 3.0;
+    let view_tau = -log(clamp(mean_trans, 1.0e-4, 1.0));
+    let aerial_tau_near = 0.30;
+    let aerial_tau_far = 2.40;
     let aerial_max = 0.72;
     let aerial = select(
         0.0,
-        smoothstep(aerial_near, aerial_far, surface_dist)
+        smoothstep(aerial_tau_near, aerial_tau_far, view_tau)
             * aerial_max
             * clamp(surface_fade, 0.0, 1.0),
         airlight_ratio > 0.0,
     );
+    // `surface_dist` is retained for readability of the hit-classification branches
+    // above but no longer drives the veil (air mass does). Phony-assign so naga
+    // doesn't flag it unused.
+    _ = surface_dist;
 
     let base_surface_airlight = mix(1.0, airlight_ratio, clamp(surface_fade, 0.0, 1.0));
     let surface_airlight = max(base_surface_airlight, aerial);
@@ -664,7 +729,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // inside `integrate_atmosphere`. Alpha is the mean opacity over the three
     // channels — the standard `Premultiplied` blend dims what was drawn
     // behind (terrain albedo, impostor surface, stars).
-    let mean_trans = (scatter.transmittance.x + scatter.transmittance.y + scatter.transmittance.z) / 3.0;
+    // `mean_trans` computed above (drives the air-mass aerial veil).
     let physical_opacity = clamp(1.0 - mean_trans, 0.0, 1.0);
 
     // Perceptual sky-luminance opacity boost. The dst-attenuation factor of
@@ -702,5 +767,43 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // cloud cores hide the sky behind them, then add the cloud's own premult
     // in-scatter on top. `1 - cloud.opacity` already folds in the depth
     // suppression above.
-    return vec4(scatter.in_scatter * (1.0 - cloud.opacity) + cloud.premul_rgb, combined_opacity);
+    let sky_rgb = scatter.in_scatter * (1.0 - cloud.opacity) + cloud.premul_rgb;
+
+    // Analytic ocean composite. Water occludes the seabed already in the
+    // framebuffer, so we supply its radiance here and output fully opaque
+    // (alpha = 1, the framebuffer seabed contributes 0). The surface is dimmed
+    // by air transmittance `(1 − opacity)` (physical + aerial veil, mirroring
+    // how terrain in the framebuffer is attenuated) and by clouds in front of
+    // it. The in-scatter / clouds were already integrated to the water surface
+    // (`t_exit = t_ocean`).
+    if water_here {
+        let hit_ws = cam_pos + t_ocean * ray_dir;
+        let geo_n = normalize(hit_ws - planet_center);
+        let sun_flux_scaled = sky_atmos_extra.sun_dir_flux.w * SCENE_FLUX_SCALE;
+        let water = shade_ocean(
+            hit_ws,
+            geo_n,
+            -ray_dir,
+            t_ocean,
+            sky_atmos_extra.ocean.z,
+            sky_atmos_extra.sun_dir_flux.xyz,
+            sun_flux_scaled,
+            sky_atmos_extra.ocean_color_depth,
+            ocean_column_m,
+        );
+        let surf_trans = (1.0 - opacity) * (1.0 - cloud.opacity);
+        // Feather the shoreline. Right at the waterline the seabed/terrain sits
+        // within a metre of sea level and the grass blades straddle it, so a hard
+        // water/land test dithers on the blade-height band. Ramp water coverage
+        // over the first few metres of depth: the seabed framebuffer shows through
+        // (partial alpha) in the shallowest sliver, giving a soft wet edge and
+        // letting clear shallows read their bed. Deeper than the band it is fully
+        // opaque water.
+        let shore_cov = clamp(ocean_column_m / 3.0, 0.0, 1.0);
+        let out_rgb = sky_rgb + water * surf_trans * shore_cov;
+        let out_a = mix(combined_opacity, 1.0, shore_cov);
+        return vec4(out_rgb, out_a);
+    }
+
+    return vec4(sky_rgb, combined_opacity);
 }

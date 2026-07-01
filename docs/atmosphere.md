@@ -297,6 +297,49 @@ atmospheres still haze more). Transmittance/extinction is left untouched,
 so distance still fades contrast the same way — only the additive veil is
 dimmed.
 
+**Aerial veil driver: air mass, not Euclidean distance.** The artistic
+distance-haze veil in `body_sky.wgsl` (the additive-strength + opacity boost
+that lets *distant* terrain desaturate toward the haze colour, on top of the
+absolute airlight above) is keyed on the **view-path optical depth** the
+integrator already accumulates — `view_tau = -log(mean(transmittance))` — not on
+raw camera→surface distance. Distance is a fine proxy for air mass *inside* the
+atmosphere but decouples from it the moment the camera climbs out: from orbit
+every surface pixel is hundreds of km away, so a distance-keyed ramp saturated
+to full veil across the entire disc and washed even the crisp nadir (the terrain
+"looks super washed out from orbit" bug). Optical depth is the physically honest
+driver — a thin vertical column at nadir-from-orbit (near-clear), a long slant
+column at the limb or along a low horizontal flight path (full veil). The tau
+thresholds (`aerial_tau_near ≈ 0.30`, `aerial_tau_far ≈ 2.40`) are calibrated to
+the old distance ramp *at sea level* (its 8 km onset / 70 km full-veil paths), so
+the on-surface look is unchanged and altitude simply re-grades it correctly.
+
+**Impostor path.** The distant billboard (`solid_planet.wgsl`,
+`SolidPlanetMaterial` body pass) previously added the in-scatter at full sky-dome
+`strength`, so a terrestrial planet washed pale-blue from map/orbit distance
+(continents vanished); cutting it to near-zero then made the planet read airless
+(a hairline rim over a crisp disc). It now (1) runs the **full multi-scatter
+integral** — `integrate_atmosphere_multiscatter` with the same per-body `ms_lut`
+`BodySkyMaterial` binds (scale-invariant, so the SHIP_SCALE bake is reused for
+the MAP_SCALE disc; airless bodies bind a 1×1 blank the gate never samples) — so
+the *diffuse* second-order blue fill that makes a planet-from-space look
+atmospheric is physical, not faked; and (2) keeps a `DISC_AIRLIGHT_FRACTION`
+(shader const, `0.15`) of that in-scatter as the single overall airlight dial,
+leaving physical transmittance and the separate rim-halo pass untouched. The
+in-scatter is air-mass graded by chord length, so the sub-observer point stays
+subtle while the limb glows — a real blue veil over the whole disc.
+
+`DISC_AIRLIGHT_FRACTION` (and the ground's `aerial_perspective_strength`) are
+still fudge factors: they exist only because surface radiance and airlight aren't
+in a consistent exposure/flux scale (the in-scatter over-contributes even at the
+physically "correct" `strength: 1`). The **F1/F2 unification foundation** (one
+flux, one exposure) is what lets the physical `strength ≈ 1` be correct at every
+altitude and retires the fraction entirely. Reference lineage (KSP2, KSA /
+Blackrack's Scatterer): Bruneton/Hillaire precomputed scattering — transmittance
++ multi-scatter + sky-view + aerial-perspective LUTs, geometry-aware
+(altitude/view-zenith/sun-zenith), never distance fog. This project already runs
+the Hillaire-lite single + multi-scatter machinery on both the ground and (now)
+the impostor.
+
 This is the **clear-weather visibility knob weather will later drive**
 (lower = clearer, higher = hazier/humid); it is the natural seam for a
 future per-region visibility field. `AtmosphereTuning` also carries

@@ -41,6 +41,31 @@ impl TerrainConfig {
             Self::Ocean(_) => "Ocean".to_string(),
         }
     }
+
+    /// Sea-level datum — metres above the body's reference radius — at which a
+    /// liquid ocean surface should be rendered, or `None` for a body with no
+    /// current hydrosphere (airless, ancient-dry).
+    ///
+    /// The runtime [`crate::ProceduralSurface`] generator pins the shoreline at
+    /// the reference radius (height 0), so an ocean-bearing feature body floods
+    /// at the constant **0 m** datum: the authored ocean fraction is a
+    /// generation *intent* that shapes how much land sits above that line, not a
+    /// separate sea level. The flat-water [`OceanTerrainConfig`] placeholder
+    /// keeps its own authored `sea_level_m`.
+    ///
+    /// This is the renderer's single source of truth for "does this body have an
+    /// ocean, and where is its surface" — both the in-game ground-LOD water
+    /// shell and (later) the orbital impostor read it.
+    pub fn ocean_sea_level_m(&self) -> Option<f32> {
+        match self {
+            Self::None => None,
+            Self::Feature(config) => match config.environment.hydrosphere {
+                HydrosphereSpec::OceanFraction(fraction) if fraction > 0.0 => Some(0.0),
+                _ => None,
+            },
+            Self::Ocean(config) => Some(config.sea_level_m),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
