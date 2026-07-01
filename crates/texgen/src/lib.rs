@@ -464,8 +464,9 @@ struct BarkH {
 /// mirror, no repeating landmark.
 fn bark_height(x: f32, y: f32, seed: u64) -> BarkH {
     // Gentle wander so the grain bows organically up the stem (not ruler-straight).
-    // Periodic so it doesn't break the wrap.
-    let xw = x + (grad_noise_per(x, 0.005, y, 0.013, seed ^ 0xA11) - 0.5) * 12.0;
+    // Periodic so it doesn't break the wrap. Kept small so the grain stays mostly
+    // VERTICAL — a larger warp smeared the lines into a diagonal band up close.
+    let xw = x + (grad_noise_per(x, 0.005, y, 0.013, seed ^ 0xA11) - 0.5) * 5.0;
 
     // Vertical GRAIN: x-freq sets the line width (chunky, not hairline), very low
     // y-freq → long striations. Two layers — a dominant chunky band plus a finer
@@ -494,10 +495,11 @@ fn draw_bark(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
             let (fx, fy) = (x as f32, y as f32);
             let h = bark_height(fx, fy, seed);
 
-            // Value modulation only: grain darkens its recessed side + lightens the
-            // raised side, broad adds gentle large-scale light/dark. A touch more
-            // depth for richness, while staying one consistent brown.
-            let v = (1.0 + 0.22 * h.line + 0.11 * h.broad).clamp(0.5, 1.3);
+            // Value modulation only: the fine vertical GRAIN carries the read
+            // (stronger, so crisp lines run up the stem), while the broad
+            // undulation is kept subtle so it doesn't pool into a diagonal blotch
+            // up close. Stays one consistent brown.
+            let v = (1.0 + 0.30 * h.line + 0.05 * h.broad).clamp(0.5, 1.3);
             let col = [BARK_BROWN[0] * v, BARK_BROWN[1] * v, BARK_BROWN[2] * v];
 
             let idx = (oy + y) * SIZE + (ox + x);

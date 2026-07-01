@@ -7,8 +7,8 @@
 
 use bevy::prelude::*;
 
-use crate::material::ShipPartMaterial;
-use crate::{CatalogId, NodeId, PartParams};
+use thalos_shipyard::material::ShipPartMaterial;
+use thalos_shipyard::{CatalogId, NodeId, PartParams};
 
 use super::files::SavedShip;
 
@@ -76,7 +76,7 @@ pub struct EditorState {
     /// A pending surface-mount placement: `(host part, world hit point,
     /// mount kind)`. Consumed by `process_commands` which derives the
     /// mount-kind-specific `(station, angle)` pair.
-    pub place_surface_at: Option<(Entity, Vec3, crate::SurfaceMountKind)>,
+    pub place_surface_at: Option<(Entity, Vec3, thalos_shipyard::SurfaceMountKind)>,
     pub delete_selected: bool,
     pub set_as_root: bool,
     pub save_requested: bool,
@@ -129,7 +129,7 @@ pub struct PreviewSig {
     pub params: PartParams,
 }
 
-/// Monotonic source of [`crate::SymmetryGroup`] ids for newly stamped groups.
+/// Monotonic source of [`thalos_shipyard::SymmetryGroup`] ids for newly stamped groups.
 #[derive(Resource, Default)]
 pub struct NextSymmetryId(pub u32);
 
@@ -233,7 +233,7 @@ pub struct PartBody(pub Entity);
 /// Per-part `ShipPartMaterial` asset handle, cached on the part entity
 /// so it survives child rebuilds (e.g. resizing a tank despawns and
 /// respawns the body, but the material asset — and its tint state — is
-/// stable). Used by any part that carries [`crate::PartMaterial`] — tanks and
+/// stable). Used by any part that carries [`thalos_shipyard::PartMaterial`] — tanks and
 /// decouplers today.
 #[derive(Component, Clone)]
 pub struct PartShaderHandle(pub Handle<ShipPartMaterial>);

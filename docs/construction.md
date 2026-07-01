@@ -22,16 +22,18 @@ and what is still on paper.
 
 ### Landed — the in-game shipyard editor (core/front-end split)
 
-The interactive editor is no longer a single egui binary. The editing
-machinery was extracted into **`thalos_shipyard::editor`**
-(`ShipEditorCorePlugin`) — UI-framework-agnostic: the `EditorState`
-command/state hub every front-end reads/writes, attach-node + surface-mount
-placement with the KSP linked-symmetry stamping, live mesh rebuilds and the
-build-frame transform solve, selection/hover highlight, the tank-resize
-handle, the placement-preview ghost, interstage shrouds, and blueprint
-save/load against `ships/*.ron`. Two front-ends drive that core:
+The interactive editor lives with its sole consumer, the game, at
+**`thalos_game::shipyard_editor`**. The editing machinery is a
+UI-framework-agnostic `core` submodule (`ShipEditorCorePlugin`) — the
+`EditorState` command/state hub the front-end reads/writes, attach-node +
+surface-mount placement with the KSP linked-symmetry stamping, live mesh
+rebuilds and the build-frame transform solve, selection/hover highlight, the
+tank-resize handle, the placement-preview ghost, interstage shrouds, and
+blueprint save/load against `ships/*.ron`. It reads the `thalos_shipyard`
+construction model (parts, blueprints, geometry, sizing/stats/staging) — which
+carries no editor or UI. The front-end:
 
-- **In-game (primary)** — `thalos_game::shipyard_editor`, native Bevy UI in
+- **In-game editor** — `thalos_game::shipyard_editor`, native Bevy UI in
   the game's `HudTheme` style. A **separate scene** (not an `AppState`): a
   `SimClock` pause source whose `editor_closed` run condition also gates the
   three `SimStage` sets + the HUD update systems, so **no game logic runs
@@ -59,14 +61,15 @@ save/load against `ships/*.ron`. Two front-ends drive that core:
   shared craft-build core (startup + relaunch). Runway relaunch is deferred:
   the runway is a one-shot terrain-aware startup placement, not yet
   re-runnable.
-- **Standalone (secondary)** — the egui binary (`just shipyard`), now a thin
-  shell: app assembly, orbit camera, celestial backdrop, and egui panels
-  over the same core.
+
+(There is no longer a standalone editor binary — the old egui `just shipyard`
+tool was deleted when the editor moved into the game; the project's player UI
+is native Bevy UI, not egui.)
 
 **The world-partition rule that makes this safe:** the editor's build and
 the player's flight craft are assembled from the *same* part components in
 the *same* ECS `World`. Every editor-owned entity carries
-`thalos_shipyard::editor::EditorPart`; every iterating core query filters
+`thalos_game::shipyard_editor::core::EditorPart`; every iterating core query filters
 `With<EditorPart>`, and every game system that aggregates part components
 for the flight craft (fuel/propulsion, staging topology, inertia, gear
 wheels, part colliders, ship visuals) filters `Without<EditorPart>`. Any

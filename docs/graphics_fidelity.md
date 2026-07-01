@@ -185,9 +185,9 @@ IBL that B builds). See §7 for the rationale.
 | ID | Foundation step | Status | Effort | Sprint |
 |---|---|---|---|---|
 | **F1** | One `terminator(elev, alt)` helper + Bevy sun/moon/ambient driven as a *projection* of `SceneLighting` + heliocentric hull flux. Retires 3 terminators → 1 and the flat-lux bug. `rendering/lighting.rs` becomes sole writer. | ✅ | Med | THIS |
-| **F2** | One EV100 luminance-metered exposure authority; stop the distance-gain × histogram fight. | ☐ | Med | THIS |
+| **F2** | One exposure authority: **keep the artist `CameraExposure` distance curve, freeze/remove the Bevy `AutoExposure` histogram** (+ a fixed global-exposure baseline). Stops the distance-gain × histogram fight. *(Chose this over EV100 luminance metering — Q3.)* | ✅ | Med | THIS |
 | **F3** | Hillaire-style **sky-view LUT** built from the existing `integrate_atmosphere` (multi-scatter LUT already exists, so the pattern is in-codebase). | ☐ | Med-High | THIS |
-| **F4** | Integrate the LUT → 9 SH coeffs feeding **both** the spine ambient *and* the `StandardMaterial` ambient from one physical source. Deletes the hand-tuned `GlobalAmbientLight`. *(Prototypable on the current analytic sky before F3 lands.)* | ☐ | Med | THIS |
+| **F4** | Integrate the LUT → 9 SH coeffs feeding **both** the spine ambient *and* the `StandardMaterial` ambient from one physical source. Deletes the hand-tuned `GlobalAmbientLight`. *(Prototypable on the current analytic sky before F3 lands.)* | ◐ | Med | THIS | **Sub-step A landed (compile+clippy clean 2026-07-01, awaiting screenshot):** `reflection_probe.rs` now paints the env cubemap from the **atmosphere-derived surface sky** (CPU mirror of `compute_surface_sky`) blended by altitude into the orbital model, feeding the existing `GeneratedEnvironmentMapLight` — so the metallic hull reflects the real sky-dome + ground, and dielectric structures get real sky ambient (Bevy prefilters the cube → diffuse ≈ SH + specular). **Sub-step B pending:** retire `GlobalAmbientLight` once A verifies |
 | **F5** | Screen-space AO pass → `ThalosSurface.occlusion` (and the Bevy ambient). **Ship with F4** — sky-IBL ambient is flat in crevices without AO. | ☐ | Med | THIS |
 | **F6** | Shadow-rig unification: stamp craft + structures onto `SHADOW_CASTER_LAYER`; make the `StandardMaterial` path sample `thalos::shadow`. Now everything casts + receives one shadow. | ◐ | Low-Med | THIS |
 | **F7** | Metallic conductor branch in `surface_brdf` + **one shared view-level scene+atmosphere bind group** + roughness-mip prefiltered env from the F3 LUT. | ☐ | High | next |
@@ -229,7 +229,7 @@ each group.
 | ID | Item | Status | Effort | Sprint | Notes |
 |---|---|---|---|---|---|
 | W9 | Lighting-input unification (= F1): one terminator, `SceneLighting`-driven Bevy lights, heliocentric hull flux | ◐ | Med | THIS | compile+clippy clean 2026-06-30; sun→heliocentric flux (`LUX_PER_SPINE_FLUX`), `surface_daylight` helper unifies sun+moon terminators. **Awaiting noon screenshot to tune the calibration constant** |
-| W10 | Single EV100 exposure (= F2) | ☐ | Med | THIS | ends the gain×histogram compounding |
+| W10 | Single exposure authority (= F2) | ✅ | Med | THIS | **runtime-verified 2026-07-01** (runway surface A/B unchanged, as predicted — AutoExposure was ~neutral there, nothing propping it up). Model: *keep the artist `CameraExposure` distance curve, remove `AutoExposure`* (not EV100 metering). Retired the Bevy `AutoExposure` histogram (`post_stack.rs`) + the `tune_auto_exposure` vacuum/surface preset blend (`camera.rs`); brightness now = `CameraExposure` input gain × fixed `color_grading.exposure` baseline (`GLOBAL_EXPOSURE_STOPS`). Confirmed the exact split via Bevy 0.19 source: `AutoExposure`→`color_grading.exposure` (global tonemap multiply, all surfaces), `Exposure`→`view.exposure` (PBR hull only). **Next:** noon calibration (nudge `GLOBAL_EXPOSURE_STOPS`), then the airlight fudges (`DISC_AIRLIGHT_FRACTION` / `aerial_perspective_strength`) can retire on a consistent exposure |
 | — | Moonlight onto ground + hull (`moonlight_radiance` + `MoonLight`) | ◐ | — | THIS | moon **night-gate** now shares F1's `surface_daylight` terminator; two moon models still to fully merge |
 
 ## 4.2 Shadows — the one-world shadow model
@@ -263,7 +263,7 @@ Two layers deliver "objects aren't lit when terrain/things block the sun":
 
 | ID | Item | Status | Effort | Sprint | Notes / source |
 |---|---|---|---|---|---|
-| W7 | **Atmosphere → SH ambient → prefiltered env** (= F3+F4): one environment for spine ambient + `StandardMaterial` ambient + hull specular | ☐ | Med-High | THIS | Hillaire 2020 / Frostbite. Replaces the CPU-painted `reflection_probe.rs`. Keystone — resolves three divergences |
+| W7 | **Atmosphere → SH ambient → prefiltered env** (= F3+F4): one environment for spine ambient + `StandardMaterial` ambient + hull specular | ◐ | Med-High | THIS | Hillaire 2020 / Frostbite. **Sub-step A landed** (2026-07-01, awaiting screenshot): the CPU-painted `reflection_probe.rs` no longer paints a *fake* orbital-only env — it paints the **atmosphere-derived surface sky** (blue dome + warm ground + reddened sun, CPU mirror of `compute_surface_sky`) blended by altitude into the orbital planet-disc, feeding the existing `GeneratedEnvironmentMapLight` prefilter (diffuse ≈ SH + specular). So the metallic hull reflects the world it's in and dielectric structures get real sky ambient. **Next:** retire `GlobalAmbientLight` (Sub-step B), then the formal Hillaire sky-view LUT (F3) can replace the analytic sky as the SH source, and a GPU cubemap-render can replace the CPU paint. Keystone — resolves three divergences |
 | W19 | Water onto `shade_surface WATER` (sky/sun reflection) + re-enable ground-LOD water | ☐ | Med | next (F9) | retires 3 hand-calibrated water BRDFs; `TERRAIN_PATH_WATER_ENABLED=false` today |
 | — | Screen-space reflections (SSR) | ☐ | Med | later | only if env-map reflections read too static on water/hull |
 
@@ -366,8 +366,9 @@ Rendering splits into two concerns on a **state-in / pixels-out** boundary
   follow-up AFTER the foundation lands**, so the full mechanism set is extracted
   once. *(The craft **hull material** already moved here — `body_render::craft`,
   Phase 4a in `docs/architecture.md` — which is what unblocks F6b: the hull can now
-  sample `thalos::shadow`. The editor-core material-application split + standalone
-  `ship_editor` relocation are the deferred Phase-4a follow-up.)*
+  sample `thalos::shadow`. The editor itself has since moved out of
+  `thalos_shipyard` into `thalos_game::shipyard_editor`; the remaining Phase-4a
+  follow-up is the material-application split + dependency flip.)*
 - **Drivers — "what to shade this frame":** systems that read `SolarSystemState` /
   `CraftState` / `Simulation` → fill uniforms, decide LOD swaps, spawn bodies,
   anchor grass/clouds/shadow in f64. Inherently sim-coupled (~90% of

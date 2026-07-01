@@ -41,8 +41,13 @@ Status of in-flight work (now tracked by substrate in the doc's §4):
 - **Landcover + palette / aerial recession / moonlight** ◐ — in `thalos::lighting`
   / `thalos::landcover`; awaiting screenshots. Moonlight converges into F1 (the
   two moon models become one); aerial recession folds inside `shade_surface`.
-- **Lighting-input unification (F1), exposure (F2), sky-view-LUT→IBL (F3/F4), AO
-  (F5), shadow-rig unification (F6)** ☐ — this sprint's foundation.
+- **Lighting-input unification (F1)** ✅ and **exposure (F2)** ☑ — F2 retired the
+  Bevy `AutoExposure` histogram + its vacuum/surface preset blend, so
+  `CameraExposure`'s input distance-gain is the sole brightness authority (plus a
+  fixed `color_grading.exposure` baseline, `GLOBAL_EXPOSURE_STOPS` in
+  `post_stack.rs`); compile-landed, awaiting a noon screenshot to calibrate.
+  **sky-view-LUT→IBL (F3/F4), AO (F5), shadow-rig unification (F6)** ☐ — the rest
+  of this sprint's foundation.
 - **Terrain tiling-material detail, hull/structure spine port, LOD chain** ☐ — next.
 
 ### Shared shader library rule
@@ -86,8 +91,6 @@ just preview              # headless procedural-object gallery → PNGs in
 just preview-window       # interactive variant of `just preview`: a window with
                           #   an orbit camera (drag/scroll, ←/→ cycle, S = shot).
                           #   User-run (opens a window).
-just shipyard             # standalone egui ship editor (secondary front-end
-                          #   over the same thalos_shipyard::editor core)
 just build                # cargo build --workspace
 just test                 # cargo test -p thalos_physics_canonical
 just clippy               # cargo clippy --workspace
@@ -379,7 +382,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   `bevy` feature is optional so `thalos_terrain` uses the pure-glam `cpu` module with
   `default-features = false` and pulls no Bevy crate (the no-Bevy CI guard still
   holds); `thalos_body_render` uses the `bevy` feature for the shader-library plugin.
-- **`thalos_shipyard`** — parametric ship editor (ECS attach tree, RON blueprints). The interactive editor is split **core/front-end**: `thalos_shipyard::editor` (`ShipEditorCorePlugin`) owns all UI-agnostic editing behaviour — `EditorState` command/state hub, attach-node + surface-mount placement, KSP linked symmetry, live mesh rebuilds, tank-resize handle, placement-preview ghost, shrouds, blueprint save/load against `ships/*.ron` — and two front-ends drive it: the **in-game Bevy-UI editor** (`thalos_game::shipyard_editor`, the primary) and the standalone egui binary (`just shipyard`, secondary). Every editor-owned entity carries the `EditorPart` marker and every core query filters on it; host systems that aggregate the same part components for the *flight* craft (fuel, staging, gear, ship visuals, colliders) must filter `Without<EditorPart>` — that marker is the only thing separating the build world from the flying craft in the same ECS `World`. Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
+- **`thalos_shipyard`** — parametric ship **construction model** (ECS attach tree, RON blueprints): part components + catalog, resources, blueprint (de)serialization + spawn, attach nodes / surface mounts / KSP linked symmetry, parametric sizing + mass/capacity recompute, stats / staging, and the geometry mesh builders (cockpit / engine / fuselage / gear / wing) shared with the game's flight-craft rendering. It owns *what a craft is*; it does **not** own the interactive editor or any UI. The **editor application** lives with its sole consumer, the game, at `thalos_game::shipyard_editor` — a UI-agnostic `core` submodule (`ShipEditorCorePlugin`: `EditorState` command/state hub, placement, live mesh rebuilds, tank-resize handle, placement-preview ghost, shrouds, blueprint save/load against `ships/*.ron`) plus the native Bevy-UI front-end (scene + panels). There is no standalone editor binary (the old egui `just shipyard` tool was deleted). Every editor-owned entity carries the `EditorPart` marker (defined in `shipyard_editor::core`) and every core query filters on it; host systems that aggregate the same part components for the *flight* craft (fuel, staging, gear, ship visuals, colliders) must filter `Without<EditorPart>` — that marker is the only thing separating the build world from the flying craft in the same ECS `World`. Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
 - **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
   (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
   layer (Perlin-Worley atlas + 3-D Worley detail, dual-lobe HG; compute →
@@ -778,8 +781,10 @@ Key modules:
 - `flight_plan_view/` — Renders the trajectory branch stack as
   on-screen tracks.
 - `camera` — KSP-style orbit camera.
-- `shipyard_editor/` — the **in-game ship editor** (primary front-end over
-  `thalos_shipyard::editor`'s `ShipEditorCorePlugin`). A **separate scene**,
+- `shipyard_editor/` — the **in-game ship editor**: the UI-agnostic editor
+  logic in the `core` submodule (`ShipEditorCorePlugin`, moved here from the
+  former `thalos_shipyard::editor`) plus its native Bevy-UI front-end (`scene`
+  + `ui`), over the `thalos_shipyard` construction model. A **separate scene**,
   not an `AppState`: `ShipyardEditor::open` is a `SimClock` pause source, and
   the three `SimStage` sets (Physics/Sync/Camera) + the HUD update systems are
   gated on `shipyard_editor::editor_closed` (configured in `main.rs` /
@@ -953,11 +958,14 @@ quantities (flux, temperature, SED) — never pre-baked RGB.
 
 ### Shipyard crate (`crates/shipyard/`)
 
-Parametric ship editor. Bevy + egui. The full next-gen construction model
-(planes/ships/stations from one Module primitive) is specced in
-`docs/construction.md`; **Slices 1–2 (parametric wing, wing-pylon jet nacelle,
-and scalar intake flow) plus visually-actuating control surfaces have landed**
-— see that doc's §0 for the status boundary.
+Parametric ship **construction model** (Bevy, no UI). Owns *what a craft is* —
+parts, resources, blueprints, attach tree, sizing/stats/staging, geometry mesh
+builders — not the editor (that's `thalos_game::shipyard_editor`, see the Game
+crate section). The full next-gen construction model (planes/ships/stations from
+one Module primitive) is specced in `docs/construction.md`; **Slices 1–2
+(parametric wing, wing-pylon jet nacelle, and scalar intake flow) plus
+visually-actuating control surfaces have landed** — see that doc's §0 for the
+status boundary.
 
 - `AttachNode` / `Ship` — ECS tree structure for ship assembly
 - `Part` trait — `CommandPod`, `Engine`, `AirIntake`, `FuelTank`,

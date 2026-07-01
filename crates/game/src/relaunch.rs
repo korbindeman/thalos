@@ -26,7 +26,7 @@
 //!    rebuild both on the following frames.
 //!
 //! The launched craft is a plain blueprint spawn — its parts carry **no**
-//! [`thalos_shipyard::editor::EditorPart`] marker, so they enter the flight
+//! [`crate::shipyard_editor::core::EditorPart`] marker, so they enter the flight
 //! aggregations the editor's persistent build is filtered out of. The
 //! editor's build is left untouched (hidden), so the design survives flying.
 

@@ -49,18 +49,45 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 > **clipmap**: ring 0 keeps the near/mid mesh cascade + natural-size impostor
 > band; coarse **impostor-only grove rings** (tile 500/1000/2000 m) carry the
 > forest to **~22 km**. Each coarse ring scatters `1/spacing_scale²` as many
-> trees (a coarser Poisson grid via `VegScatterInput::spacing_scale`) and
-> enlarges each impostor `grove_scale×` (`combine_impostor_tile_mesh`'s new
-> `grove_scale`), holding ground coverage roughly constant — so reach grows ~5×
-> at a *bounded* (and net-lower) quad count vs. the old all-200 m-tiles band.
-> Rings cross-fade through their shared boundary via per-ring impostor materials
-> (own `time_fade`), mirroring the grass clipmap. AGL build ceiling raised
-> (2.5→6 km) so climbing aircraft keep the forest. Compile-/clippy-/test-green;
-> awaits a `just game` screenshot + frame-timing pass to tune ring distances,
-> `grove_scale` (lumpiness vs. coverage), and the AGL ceiling. Driver:
-> `game/src/rendering/vegetation.rs` (`TREE_RINGS`). **Still needs the correlated
-> forest-albedo handoff** (§9 / Phase 1d) so the ~22 km geometry edge melts into
-> forest-colored ground rather than flat green — that is the immediate follow-up.
+> trees (a coarser Poisson grid via `VegScatterInput::spacing_scale`) to bound
+> the quad count — so reach grows ~5× at a *bounded* (and net-lower) quad count
+> vs. the old all-200 m-tiles band. Rings cross-fade through their shared boundary
+> via per-ring impostor materials (own `time_fade`), mirroring the grass clipmap.
+> AGL build ceiling raised (2.5→6 km) so climbing aircraft keep the forest. Driver:
+> `game/src/rendering/vegetation.rs` (`TREE_RINGS`).
+>
+> **Trees stay natural-size at every LOD (`grove_scale = 1`, 2026-07-01).** The
+> coarse rings originally *enlarged* each impostor `grove_scale×` (2.5/5/10) to
+> hold coverage while decimating count — the constant-coverage rule. That reads
+> wrong for trees (individually resolvable → giant trees + a size snap at every
+> ring boundary as you approach). The enlargement is removed: every ring draws
+> trees at their true bounding-sphere size, and the coarse rings carry coverage
+> through `spacing_scale`/`keep_fraction` decimation plus the terrain albedo, not
+> by fattening survivors (see §5.1).
+>
+> **Cross-ring positional correspondence — shared grid near (2026-07-01).** With
+> the sizes consistent, the next artifact surfaced: trees "appearing from nothing"
+> at the medium ring and a near tree vanishing before a different close one
+> appears. Cause: **each ring used an independent Poisson grid** (`spacing_scale`
+> coarsens the grid → *different* tree positions), so a ring handoff wasn't a
+> tree changing representation — it was one whole grid of trees dissolving into a
+> different grid. Invisible for grass (sub-pixel blades) but glaring for discrete
+> trees; it also violated the §14 "root identical at every LOD" invariant. Fix:
+> **ring 1 now shares ring 0's grid** (`spacing_scale = 1`) and renders a
+> **nested subset** of it (`VegScatterInput::keep_fraction`, a deterministic
+> per-cell hash gate applied before the height gate), so its trees are exactly
+> ring 0's at the same spots — the 2.4 km handoff keeps each shared tree in place
+> and only the density-delta *infill* fades in. Rings 2–3 (≥ 6 km, sub-pixel /
+> below the eye-line horizon) keep cheap coarse independent grids. The ring fade
+> also switched from *overlap-full* to a **complementary cross-fade** (fixed
+> `TREE_FADE_BAND_M`, scales sum ~1 at a boundary) so a shared tree isn't
+> double-drawn. `keep_fraction` on ring 1 is the handoff dial (→1 = no infill
+> pop, denser mid-field). *Residual:* the scale-fade still breathes a shared tree
+> to ~½ size mid-band (a few px at 2.4 km); a true fix is an opacity cross-fade,
+> deferred. **Still needs the correlated forest-albedo handoff** (§9 / Phase 1d)
+> so the ~22 km geometry edge melts into forest-colored ground — the immediate
+> follow-up — and a **near-mesh quality pass** ("close trees read poorly": flat
+> leaf-cluster cards / thin canopy — a mesh/atlas art task, §10).
 >
 > No silent rewrites — when a phase lands, fold its notes here and update the
 > roadmap.
@@ -368,6 +395,19 @@ A far "blade" is not a blade — it is a **clump** representing N blades, wider
 and shorter, so one clump card at 300 m hides as much ground as 20 blades did
 up close. The builder drives both `density` and `clump_scale` from the tile's
 LOD ring.
+
+**This rule applies only to *unresolvable* elements (grass).** It depends on the
+individual element being sub-pixel, so the eye reads only aggregate coverage and
+can't tell a fat clump card from the blades it replaces. **Trees break that
+assumption:** an individual tree stays resolvable to well past the near rings, so
+growing it to hold coverage just makes a visibly *giant* tree, and its apparent
+size snaps at every ring boundary as the grow factor steps (2026-07-01: this was
+the "far impostors look huge and shrink as you approach" report). So the tree
+cascade holds `grove_scale = 1` on every clipmap ring — trees keep their true
+size at every LOD — and the coarse rings carry coverage by density
+(`spacing_scale`, decimated only gently) plus the forest-tinted terrain albedo
+underneath, **not** by enlarging the survivors. Grass keeps the enlarge-to-hold
+rule; trees (and any future individually-resolvable scatter) do not.
 
 ### 5.2 Per-layer cascades
 

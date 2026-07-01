@@ -60,55 +60,96 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 /// covering ground distances `[inner_m, outer_m]` from the player.
 ///
 /// **Ring 0** is the fine near/mid band — full mesh-LOD trees (`lod_for_dist`)
-/// plus the natural-size octahedral impostor far band. **Rings ≥ 1** are coarse,
-/// **impostor-only grove** rings: they scatter `1/spacing_scale²` as many trees
-/// (a coarser Poisson grid) and enlarge each impostor `grove_scale×`, so ground
-/// *coverage* stays roughly constant while the quad count per tile does not — the
-/// constant-coverage rule. That is what carries the forest many km out at a
-/// bounded cost, handing off (eventually) to the terrain albedo.
+/// plus the natural-size octahedral impostor far band. **Rings ≥ 1** are
+/// **impostor-only** rings carrying the forest out to ~22 km, handing off
+/// (eventually) to the terrain albedo. Every ring draws trees at *natural size*
+/// (`grove_scale = 1`; see the size-consistency note below).
+///
+/// **Placement: shared grid near, coarse grid far.** A ring covers `[inner_m,
+/// outer_m]` and controls its tree set two ways:
+/// - `spacing_scale` — the Poisson-grid coarsening (`1` = the authored
+///   `TREE_SPACING_M` grid). Two rings with the same `spacing_scale` share the
+///   *same* grid → the same tree sits at the *same* world position in both.
+/// - `keep_fraction` — a nested-subset thinning (`1` = keep all) applied after
+///   elimination. A ring with a smaller fraction renders a strict subset of the
+///   trees a finer, same-grid ring keeps.
+///
+/// **Why:** a discrete, *individually resolvable* tree can't cross-fade between
+/// two *independent* grids without the whole forest visibly dissolving (one grid
+/// of trees shrinking away while a different grid grows in — the "trees appear
+/// from nothing in between" report). So **ring 1 shares ring 0's grid**
+/// (`spacing_scale = 1`) and only *thins* it (`keep_fraction < 1`): the trees it
+/// draws are exactly ring 0's, at the same spots, so the 2.4 km handoff keeps
+/// each shared tree in place and only the density-delta *infill* fades in on
+/// approach. Rings 2–3 (≥ 6 km, where an 8 m tree is ~1 px and below the eye-line
+/// horizon) keep cheap **coarse independent** grids — a dissolve out there is
+/// invisible, and a full-density grid on a 2 km tile is ~16× the placement cost.
+///
+/// **Size consistency (`grove_scale = 1` everywhere).** The constant-coverage
+/// rule (grow a far element to stand in for the clump it replaces — see
+/// `docs/vegetation.md` §5.1) is right for *grass* (a blade is never resolvable)
+/// but wrong for trees (enlarging a resolvable tree just makes a giant tree and
+/// snaps its size at each ring boundary). `grove_scale` is kept as a knob but
+/// stays 1.
 struct TreeRing {
     tile_size_m: f64,
     inner_m: f64,
     outer_m: f64,
+    /// Poisson-grid coarsening (`1` = shared with the authored fine grid).
     spacing_scale: f32,
+    /// Nested-subset thinning (`1` = keep every survivor). Only meaningful
+    /// against a same-`spacing_scale` ring, whose trees it strictly subsets.
+    keep_fraction: f32,
     grove_scale: f32,
 }
 
 /// The tree clipmap. Ring 0 reproduces the near/mid mesh cascade + the near
-/// natural-size impostor band; the coarse rings carry impostor groves out to
-/// ~22 km. Tile sizes grow ~2× per ring so each ring is a thin annulus of a few
-/// hundred tiles, and `spacing_scale ≈ grove_scale ≈ tile_size / 200` keeps both
-/// the per-tile instance count and the ground coverage roughly constant across
-/// rings (so the far band costs little more than the near one while reaching far
-/// further). Tune from screenshots + frame timings.
+/// natural-size impostor band; ring 1 shares ring 0's grid (thinned) so the
+/// 2.4 km handoff is positionally stable; rings 2–3 carry cheap coarse impostors
+/// out to ~22 km. Tile sizes grow ~2× per ring so each is a thin annulus.
+///
+/// **Tuning knobs:** `keep_fraction` on ring 1 is the near-far handoff dial —
+/// toward `1.0` fewer trees "appear from nothing" on approach (all shared with
+/// ring 0) but the mid-field is denser (more impostor quads); lower thins it.
+/// `spacing_scale` on rings 2–3 is the far-density/perf knob. Tune from
+/// screenshots + frame timings.
 const TREE_RINGS: [TreeRing; 4] = [
     TreeRing {
         tile_size_m: 200.0,
         inner_m: 0.0,
         outer_m: 2400.0,
         spacing_scale: 1.0,
+        keep_fraction: 1.0,
         grove_scale: 1.0,
     },
     TreeRing {
+        // Shares ring 0's grid (spacing 1) and thins to a nested subset, so every
+        // tree it draws is one of ring 0's at the identical spot — the 2.4 km
+        // handoff keeps them in place instead of dissolving grids.
         tile_size_m: 500.0,
         inner_m: 2400.0,
         outer_m: 6000.0,
-        spacing_scale: 2.5,
-        grove_scale: 2.5,
+        spacing_scale: 1.0,
+        keep_fraction: 0.5,
+        grove_scale: 1.0,
     },
     TreeRing {
+        // ≥ 6 km: coarse independent grid is fine (trees ~sub-pixel / below the
+        // eye-line horizon, so a grid dissolve here is invisible and cheap).
         tile_size_m: 1000.0,
         inner_m: 6000.0,
         outer_m: 12000.0,
-        spacing_scale: 5.0,
-        grove_scale: 5.0,
+        spacing_scale: 2.5,
+        keep_fraction: 1.0,
+        grove_scale: 1.0,
     },
     TreeRing {
         tile_size_m: 2000.0,
         inner_m: 12000.0,
         outer_m: 22000.0,
-        spacing_scale: 10.0,
-        grove_scale: 10.0,
+        spacing_scale: 4.0,
+        keep_fraction: 1.0,
+        grove_scale: 1.0,
     },
 ];
 
@@ -117,36 +158,36 @@ const TREE_RINGS: [TreeRing; 4] = [
 /// skipped entirely until the atlas is ready (a second or two into the session).
 const TREE_MESH_ONLY_REACH_M: f64 = 2200.0;
 
-/// Fade-band half-width for a ring's near/far cross-fade (m), scaled from the
-/// ring span and clamped — like the grass clipmap rings.
-fn tree_ring_band_m(r: &TreeRing) -> f32 {
-    (((r.outer_m - r.inner_m) as f32) * 0.10).clamp(80.0, 600.0)
+/// Half-width of the ring cross-fade (m), fixed so it is identical on both sides
+/// of every shared boundary (that is what makes adjacent rings *complementary* —
+/// see [`tree_ring_fade`]). Also used as the build look-ahead margin.
+const TREE_FADE_BAND_M: f32 = 300.0;
+
+/// Fade band for a ring — a fixed handoff width. (Kept as a function of the ring
+/// for the build-margin call sites; the value no longer depends on span.)
+fn tree_ring_band_m(_r: &TreeRing) -> f32 {
+    TREE_FADE_BAND_M
 }
 
 /// Near/far/band fade edges for a ring (ground distance, m), packed into
-/// `GrassParams.time_fade`. The shader grows each instance from zero across
+/// `GrassParams.time_fade`. The shader scale-fades each instance across
 /// `[near, far]`: `fade_in = smoothstep(near-band, near+band, d)`,
-/// `fade_out = 1 - smoothstep(far-band, far+band, d)`.
+/// `fade_out = 1 - smoothstep(far-band, far+band, d)`, `scale ∝ fade_in·fade_out`.
 ///
-/// **Overlap-full handoff** (the fix for the gap/dip bands between rings): a
-/// ring stays *full* through both its inner and outer nominal edges and fades
-/// only in the overlap zone where its neighbour is already full —
-/// `near = inner - band` (full by `inner`), `far = outer + band` (full until
-/// `outer`). So at every shared boundary `B = outer_N = inner_{N+1}` **both**
-/// rings are full (a thin band of harmless overdraw) instead of both being at
-/// half scale (a coverage dip that reads as a sparse ring). A coarse ring thus
-/// only fades to nothing once the finer ring is at full coverage over it — it
-/// "disappears only when the new one is ready". Ring 0 is full to the camera
-/// (`near = -∞`).
+/// **Complementary cross-fade.** `near = inner_m`, `far = outer_m`, with the
+/// *same* band on both sides of a shared boundary `B = outer_N = inner_{N+1}`.
+/// At `B`, ring `N`'s `fade_out` and ring `N+1`'s `fade_in` are the same
+/// smoothstep mirrored, so their scales sum to ~1: a tree shared across the
+/// boundary (same grid — see [`TreeRing`]) hands off from one ring's card to the
+/// next without doubling (the old *overlap-full* handoff would draw a shared tree
+/// at full scale in *both* rings) and without a coverage dip (the shared tree is
+/// ~full the whole way; only the density-delta infill grows in). Ring 0 is full
+/// to the camera (`near = -∞`); the outermost ring's `far` fades the cascade to
+/// nothing at its edge.
 fn tree_ring_fade(idx: usize) -> (f32, f32, f32) {
     let r = &TREE_RINGS[idx];
-    let band = tree_ring_band_m(r);
-    let near = if idx == 0 {
-        -1.0e9
-    } else {
-        r.inner_m as f32 - band
-    };
-    (near, r.outer_m as f32 + band, band)
+    let near = if idx == 0 { -1.0e9 } else { r.inner_m as f32 };
+    (near, r.outer_m as f32, TREE_FADE_BAND_M)
 }
 
 /// Pre-bake fade edges for the mesh material (the LOD3 far band fades out near
@@ -911,7 +952,7 @@ fn drive_veg_tiles(
         }
         let ring = &TREE_RINGS[rk.ring as usize];
         let lat = lattices[rk.ring as usize];
-        // Far rings tolerate coarser terrain (their groves are huge), so the
+        // Far rings tolerate coarser terrain (their tiles are large), so the
         // residency threshold scales with tile size (mirrors the grass gate).
         let texel_limit = ((ring.tile_size_m * 0.5) as f32).max(TREE_MAX_TERRAIN_TEXEL_M);
         if let Some(guard) = &mirror_guard {
@@ -933,11 +974,12 @@ fn drive_veg_tiles(
             sea_level_m,
             flatten_exclusion,
             spacing_scale: ring.spacing_scale,
+            keep_fraction: ring.keep_fraction,
         };
         let revision = height_source.revision();
         let task = if want_impostor {
-            // Impostor band: one billboard quad per tree, enlarged `grove_scale×`
-            // (coarse rings) to hold coverage at a bounded quad count.
+            // Impostor band: one natural-size (`grove_scale = 1`) billboard quad
+            // per tree; count is bounded by the ring's spacing/keep decimation.
             let atlas_species = library.atlas_species.clone();
             let grove = ring.grove_scale;
             pool.spawn(async move {

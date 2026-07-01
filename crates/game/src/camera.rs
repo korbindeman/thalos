@@ -1,7 +1,6 @@
 use bevy::anti_alias::smaa::{Smaa, SmaaPreset};
 use bevy::camera::visibility::RenderLayers;
 use bevy::math::{DQuat, DVec3};
-use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use big_space::prelude::CellCoord;
@@ -9,10 +8,8 @@ use thalos_body_render::HeightSource;
 use thalos_body_render::space_camera_post_stack;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::types::BodyState;
-use thalos_physics_local::{HeightSourceRegistry, LocalCraftBody};
+use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::{BodyDefinition, BodyId};
-
-use crate::aero::AeroReadout;
 
 /// `tile_lod_m` passed to `rendered_height_m` for the camera boom's
 /// ray-vs-terrain check. The boom rarely runs in tight sub-metre proximity
@@ -47,7 +44,7 @@ impl Plugin for CameraPlugin {
             // `SkyRenderPlugin` draws stars additively on top.
             .insert_resource(ClearColor(Color::BLACK))
             .add_systems(Startup, spawn_camera)
-            .add_systems(Update, (apply_graphics_msaa, tune_auto_exposure))
+            .add_systems(Update, apply_graphics_msaa)
             .add_systems(
                 Update,
                 (
@@ -508,85 +505,16 @@ fn apply_graphics_msaa(
     }
 }
 
-// AutoExposure metering presets, blended by local atmospheric density so the
-// ship camera meters the scene it is actually in. The post stack ships the
-// VACUUM preset (most of the frame is black void, so the histogram filter
-// ignores the dark half and the EV range is wide). Inside a daylit atmosphere
-// the frame is full of bright terrain + sky instead, so that preset meters
-// against the wrong assumption — it leaves the histogram void-biased, so the
-// SURFACE preset re-centres the filter on the (now meaningful) dark/mid end and
-// eases the adaptation speed for smoother flight. We lerp between them on
-// `density`, so a descent from orbit transitions continuously rather than
-// snapping.
-//
-// `range` is the *histogram domain* in EV-100, NOT a clamp on the applied
-// exposure: pixels brighter than the high edge all pile into the top bin (their
-// true brightness is undercounted), and pixels darker than the low edge are
-// ignored. The SURFACE high edge was once tightened to +2, which backfired at
-// the substellar noon — the bright sunlit ground + sky sit well above +2, so
-// the histogram metered the scene as far dimmer than it was, AutoExposure
-// applied too little downward exposure, and the daylit surface stayed
-// over-bright and washed flat (AgX then rolls the bright result toward white).
-// The high edge is kept wide (matches the vacuum +6) so those bright daylit
-// pixels bin at their true value and metering pulls the noon scene down to
-// neutral. The low edge stays at −2 so a low-sun scene (few pixels above +2)
-// meters and reads exactly as before — this widening is noon-targeted.
-//
-// Tunable: the band edges are deliberately in absolute kg/m³ rather than tied
-// to a body's sea-level density — adjust against a `just game cruise` capture.
-const AE_VAC_RANGE: (f32, f32) = (-4.0, 6.0);
-const AE_VAC_FILTER: (f32, f32) = (0.30, 0.95);
-const AE_VAC_SPEED: (f32, f32) = (2.0, 1.0); // (brighten, darken)
-const AE_SURF_RANGE: (f32, f32) = (-2.0, 6.0);
-const AE_SURF_FILTER: (f32, f32) = (0.18, 0.85);
-const AE_SURF_SPEED: (f32, f32) = (1.5, 1.2);
-/// Density band (kg/m³) over which metering blends vacuum → surface. Below the
-/// low edge is pure vacuum metering; above the high edge is pure surface.
-const AE_DENSITY_LO: f64 = 0.05;
-const AE_DENSITY_HI: f64 = 0.50;
-
-/// Blend the ship camera's `AutoExposure` between the vacuum and surface presets
-/// based on the craft's current atmospheric density (`AeroReadout`). Falls back
-/// to the vacuum preset when there is no aero-bearing craft (e.g. on-foot EVA —
-/// a later pass can give the controller its own density readout).
-fn tune_auto_exposure(
-    craft: Query<&AeroReadout, With<LocalCraftBody>>,
-    mut cameras: Query<&mut AutoExposure, With<ShipCamera>>,
-) {
-    let density = craft.iter().next().map(|r| r.density_kgm3).unwrap_or(0.0);
-    let raw = ((density - AE_DENSITY_LO) / (AE_DENSITY_HI - AE_DENSITY_LO)).clamp(0.0, 1.0) as f32;
-    let t = raw * raw * (3.0 - 2.0 * raw); // smoothstep
-
-    let lerp = |a: f32, b: f32| a + (b - a) * t;
-    let range = (
-        lerp(AE_VAC_RANGE.0, AE_SURF_RANGE.0),
-        lerp(AE_VAC_RANGE.1, AE_SURF_RANGE.1),
-    );
-    let filter = (
-        lerp(AE_VAC_FILTER.0, AE_SURF_FILTER.0),
-        lerp(AE_VAC_FILTER.1, AE_SURF_FILTER.1),
-    );
-    let speed_brighten = lerp(AE_VAC_SPEED.0, AE_SURF_SPEED.0);
-    let speed_darken = lerp(AE_VAC_SPEED.1, AE_SURF_SPEED.1);
-    let new_range = range.0..=range.1;
-    let new_filter = filter.0..=filter.1;
-
-    for mut ae in &mut cameras {
-        // Skip identical writes so a steady scene (deep space, level cruise)
-        // doesn't re-flag the component changed every frame.
-        if ae.range == new_range
-            && ae.filter == new_filter
-            && ae.speed_brighten == speed_brighten
-            && ae.speed_darken == speed_darken
-        {
-            continue;
-        }
-        ae.range = new_range.clone();
-        ae.filter = new_filter.clone();
-        ae.speed_brighten = speed_brighten;
-        ae.speed_darken = speed_darken;
-    }
-}
+// Auto-exposure was retired here in graphics-fidelity F2: the ship camera used
+// to blend a Bevy `AutoExposure` histogram between vacuum and surface presets by
+// atmospheric density (`tune_auto_exposure`), which was a *second* exposure
+// authority — it wrote a global `color_grading.exposure` at tonemap on top of
+// the distance gain `CameraExposure` already applies at every surface's flux /
+// illuminance input, so the two compounded and the hull/terrain brightness ratio
+// floated. Brightness is now governed solely by `CameraExposure`'s input gain
+// (the artist distance curve) plus the fixed global-exposure baseline in
+// `thalos_body_render`'s `space_camera_post_stack`. See
+// `docs/graphics_fidelity.md` §3 (F2).
 
 // ---------------------------------------------------------------------------
 // Systems

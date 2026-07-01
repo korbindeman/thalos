@@ -6,21 +6,11 @@ edition.workspace = true
 
 [dependencies]
 bevy = "0.19"
-bevy_egui = "0.40"
 glam = { version = "0.32", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.12"
-thalos_input = { path = "../input" }
-thalos_celestial = { path = "../celestial" }
 # INTERIM (Phase 4a, docs/architecture.md): the craft hull material moved to the
-# render crate; this re-exports it through `material.rs` so the editor core keeps
-# compiling. A backwards edge to be removed by the rendering-decoupling follow-up.
+# render crate; this re-exports it through `material.rs` (used by `appearance.rs`
+# + the game's ship view / editor). A backwards edge to be removed by the
+# rendering-decoupling follow-up.
 thalos_body_render = { path = "../body_render" }
-
-[[example]]
-name = "roundtrip"
-path = "examples/roundtrip.rs"
-
-[[bin]]
-name = "ship_editor"
-path = "src/bin/ship_editor.rs"

@@ -11,7 +11,7 @@
 //! - **Bottom** — status line + pending-part hint.
 //!
 //! Everything drives the editor core exactly like the standalone egui
-//! binary does: by reading and writing `thalos_shipyard::editor::EditorState`.
+//! binary does: by reading and writing `crate::shipyard_editor::core::EditorState`.
 
 mod inspector;
 mod palette;
@@ -22,7 +22,7 @@ pub mod widgets;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
-use thalos_shipyard::editor::{CollectQuery, EditorPart, EditorState, collect_blueprint};
+use crate::shipyard_editor::core::{CollectQuery, EditorPart, EditorState, collect_blueprint};
 use thalos_shipyard::{
     Attachment, PartCatalog, PartParams, Ship, ShipBlueprint, ShipStats, StageSummary,
     SurfaceMount, SymmetryGroup,

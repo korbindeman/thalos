@@ -53,7 +53,7 @@ pub(crate) fn spawn_player_avian_body(
     parts: PartColliderQuery,
     gear_q: Query<
         (&Gear, &SurfaceMount),
-        (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
+        (With<Part>, Without<crate::shipyard_editor::core::EditorPart>),
     >,
     host_nodes: Query<&AttachNodes>,
 ) {

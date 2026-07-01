@@ -31,7 +31,7 @@ pub(crate) type PartColliderQuery<'w, 's> = Query<
     ),
     // The in-game shipyard editor's build shares these components; it must
     // never contribute colliders, wheels, or clearance to the flight craft.
-    (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
+    (With<Part>, Without<crate::shipyard_editor::core::EditorPart>),
 >;
 
 pub(crate) fn build_ship_collider_primitives(

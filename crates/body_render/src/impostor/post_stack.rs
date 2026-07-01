@@ -8,7 +8,6 @@ use bevy::anti_alias::{
     smaa::{Smaa, SmaaPreset},
 };
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::post_process::effect_stack::ChromaticAberration;
 use bevy::prelude::*;
@@ -18,9 +17,18 @@ use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection, 
 use crate::impostor::film_grain::FilmGrain;
 
 /// Components to attach to a `Camera3d` entity for the space post stack:
-/// HDR + TonyMcMapface tonemap, subtle bloom, auto exposure metered against
-/// the lit planet face (voids ignored), conservative color grading, SMAA,
-/// CAS sharpening, mild chromatic aberration, and exposure-driven film grain.
+/// HDR + AgX tonemap, subtle bloom, conservative color grading, SMAA, CAS
+/// sharpening, mild chromatic aberration, and exposure-driven film grain.
+///
+/// **No auto-exposure** (graphics-fidelity F2 — `docs/graphics_fidelity.md` §3).
+/// The Bevy `AutoExposure` histogram was retired because it was a second
+/// exposure authority compounding with `CameraExposure`: it wrote a global
+/// `color_grading.exposure` at tonemap on top of the distance gain
+/// `CameraExposure` already applies at every surface's flux/illuminance input.
+/// Brightness is now governed *solely* by that input gain (the artist distance
+/// curve), plus the fixed global-exposure baseline in
+/// [`space_camera_color_grading`]. This is what lets the hull, terrain, and sky
+/// track one exposure instead of the histogram floating the whole buffer.
 pub fn space_camera_post_stack() -> impl Bundle {
     (
         // The game renders many shader impostors, thin line overlays, and UI
@@ -53,21 +61,6 @@ pub fn space_camera_post_stack() -> impl Bundle {
             composite_mode: BloomCompositeMode::Additive,
             ..Bloom::NATURAL
         },
-        // Vacuum scene: most of frame is pure black, so ignore the lower
-        // half of the histogram — meter against the lit planet face rather
-        // than the void.
-        // Upper bound is deliberately tight (was 12). Beyond ~6 EV, the
-        // metering would drag dim outer-system bodies back to mid-gray on
-        // top of `CameraExposure`'s manual gain — two compensations
-        // compounding. Capping the headroom here lets deep space stay
-        // visibly underexposed and sensor-limited instead.
-        AutoExposure {
-            range: -4.0..=6.0,
-            filter: 0.30..=0.95,
-            speed_brighten: 2.0,
-            speed_darken: 1.0,
-            ..default()
-        },
         ContrastAdaptiveSharpening {
             enabled: true,
             sharpening_strength: 0.3,
@@ -85,12 +78,24 @@ pub fn space_camera_post_stack() -> impl Bundle {
     )
 }
 
+/// Fixed global exposure baseline, in EV stops applied at tonemap
+/// (`color_grading.exposure`). This is the single knob that replaced the
+/// retired `AutoExposure` histogram (graphics-fidelity F2): a constant, not a
+/// per-frame metered value, so the scene no longer auto-adapts. `0.0` = identity
+/// (the raw scene radiance already carries `CameraExposure`'s distance gain at
+/// the input). Nudge **negative** if the substellar-noon surface reads too hot,
+/// **positive** to lift a dim scene. Tune from a `just game runway` / `orbit`
+/// screenshot.
+const GLOBAL_EXPOSURE_STOPS: f32 = 0.0;
+
 fn space_camera_color_grading() -> ColorGrading {
     ColorGrading {
         global: ColorGradingGlobal {
             // Stay close to Bevy's neutral defaults. Larger section changes
             // visibly band planet terminators after tonemapping.
             post_saturation: 0.995,
+            // Fixed exposure baseline (F2) — replaces the AutoExposure float.
+            exposure: GLOBAL_EXPOSURE_STOPS,
             ..default()
         },
         // Keep the shadow enrichment that helps Thalos read, but make it

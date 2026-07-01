@@ -15,7 +15,6 @@ pub mod attach;
 pub mod blueprint;
 pub mod catalog;
 pub mod cockpit_mesh;
-pub mod editor;
 pub mod engine_mesh;
 pub mod fuselage_mesh;
 pub mod gear_mesh;

@@ -3,8 +3,8 @@
 //! ECS access — so both the egui binary and the in-game Bevy UI render the
 //! same catalog the same way.
 
-use crate::blueprint::default_params_for;
-use crate::{CatalogEntry, PartParams};
+use thalos_shipyard::blueprint::default_params_for;
+use thalos_shipyard::{CatalogEntry, PartParams};
 
 /// Stable ordering inside each palette category. Within each kind, callers
 /// sort by display name.

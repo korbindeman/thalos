@@ -258,6 +258,30 @@ fn objects() -> Vec<Preview> {
             focus_y: 4.4,
             distance: 16.0,
         },
+        // The mesh LOD chain of the SAME broadleaf, framed identically to
+        // `tree_broadleaf` (LOD0) so the LOD steps can be compared for coverage /
+        // leaf size — they should read as the same tree, just cheaper, not sparser.
+        Preview {
+            name: "tree_broadleaf_lod1",
+            kind: AssetKind::Tree(TreeMeshParams { lod: 1, ..broadleaf() }),
+            view: ViewKind::ThreeQuarter,
+            focus_y: 4.4,
+            distance: 16.0,
+        },
+        Preview {
+            name: "tree_broadleaf_lod2",
+            kind: AssetKind::Tree(TreeMeshParams { lod: 2, ..broadleaf() }),
+            view: ViewKind::ThreeQuarter,
+            focus_y: 4.4,
+            distance: 16.0,
+        },
+        Preview {
+            name: "tree_broadleaf_lod3",
+            kind: AssetKind::Tree(TreeMeshParams { lod: 3, ..broadleaf() }),
+            view: ViewKind::ThreeQuarter,
+            focus_y: 4.4,
+            distance: 16.0,
+        },
         // The SAME broadleaf as its far-band octahedral impostor, framed
         // identically — the mesh↔impostor parity check. `tree_broadleaf.png` and
         // `tree_broadleaf_impostor.png` should read as the same tree (colour +

@@ -1,5 +1,5 @@
-//! In-game shipyard editor — the native Bevy-UI front-end over
-//! `thalos_shipyard::editor` (`ShipEditorCorePlugin`).
+//! In-game shipyard editor — the native Bevy-UI front-end over the
+//! [`core`] editor logic (`ShipEditorCorePlugin`).
 //!
 //! The editor is a **modal pause mode**, following the pause-menu /
 //! scenario-menu pattern: [`ShipyardEditor::open`] is a sim-clock pause
@@ -20,10 +20,11 @@
 //! `pause_menu::handle_escape_input`'s priority chain).
 //!
 //! The build world is partitioned from the flight ship by the
-//! `EditorPart` marker — see `thalos_shipyard::editor` docs. Build state
-//! persists across open/close (entities are hidden, not despawned), so a
-//! design in progress survives flying around in between.
+//! `EditorPart` marker — see the [`core`] docs. Build state persists across
+//! open/close (entities are hidden, not despawned), so a design in progress
+//! survives flying around in between.
 
+pub mod core;
 pub mod scene;
 pub mod ui;
 
@@ -31,7 +32,8 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
 use thalos_input::shipyard::ShipyardInputPlugin;
-use thalos_shipyard::editor::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
+
+use self::core::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
 
 use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
 use crate::coords::EDITOR_LAYER;

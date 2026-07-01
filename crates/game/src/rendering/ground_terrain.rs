@@ -31,7 +31,7 @@ use thalos_body_render::{
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
-use thalos_shipyard::editor::EditorPart;
+use crate::shipyard_editor::core::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, CommandPod, Decoupler, Engine, EngineGeometry, FuelTank,
     Fuselage, JetNacelleMount, Part, PodGeometry, SurfaceMount, SurfaceMountKind, Wing,

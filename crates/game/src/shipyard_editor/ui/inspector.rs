@@ -10,7 +10,7 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
-use thalos_shipyard::editor::{EditorPart, EditorState, inspector_params, symmetry_edit_target};
+use crate::shipyard_editor::core::{EditorPart, EditorState, inspector_params, symmetry_edit_target};
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, CatalogRef, CommandPod, Decoupler, Engine, FuelTank, Fuselage,
     Gear, PartCatalog, PartResources, Resource, ResourcePool, SymmetryGroup, Wing,

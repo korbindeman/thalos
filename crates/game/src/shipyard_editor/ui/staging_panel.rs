@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
 use thalos_shipyard::Resource;
-use thalos_shipyard::editor::{format_delta_v, format_mass_kg};
+use crate::shipyard_editor::core::{format_delta_v, format_mass_kg};
 
 use crate::hud::theme::{HudTheme, panel_frame};
 

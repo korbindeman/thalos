@@ -6,12 +6,13 @@
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::input::gestures::PinchGesture;
+use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use thalos_input::shipyard::ShipyardInputIntent;
-use thalos_shipyard::editor::{
+use crate::shipyard_editor::core::{
     BuildOrientation, CLICK_THRESHOLD_PX, EditorState, EditorUiGate, EditorViewCamera,
     TankResizeArrow, TankResizeDrag,
 };
@@ -89,6 +90,17 @@ fn setup_editor_scene(
             shadow_maps_enabled: true,
             ..default()
         },
+        // Match the world `SunLight`'s cascade count. A bare `DirectionalLight`
+        // would default to 4 cascades, and Bevy 0.19's
+        // `check_dir_light_mesh_visibility` shares one thread-queue across
+        // lights/frames — a 4-vs-2 disagreement over-indexes it and panics
+        // (this was the shipyard-open UI-drag crash). See
+        // `crate::rendering::SHADOW_CASCADE_COUNT`.
+        CascadeShadowConfigBuilder {
+            num_cascades: crate::rendering::SHADOW_CASCADE_COUNT,
+            ..default()
+        }
+        .build(),
         layer.clone(),
         Transform::from_xyz(10.0, 20.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         EditorSceneEntity,

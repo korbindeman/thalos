@@ -5,16 +5,15 @@ contexts owned by `thalos_input`. Raw Bevy input should remain only for
 spatial data and UI internals: cursor position, ray projection, Bevy
 picking hover/click/drag events, native-UI text-field input
 (`thalos_game::ui_widgets`), and shipyard pinch gestures. (The game UI is
-native Bevy UI; `bevy_egui` is no longer a `thalos_game` dependency — only
-the standalone `just shipyard` binary uses egui.)
+native Bevy UI; `bevy_egui` is no longer a dependency anywhere in the
+workspace.)
 
 ## Crate Boundary
 
 `thalos_input` is a Bevy-facing workspace crate shared by:
 
-- `thalos_game`
+- `thalos_game` (including its in-game shipyard editor's `ShipyardContext`)
 - `thalos_body_editor`
-- `thalos_shipyard`'s `ship_editor` binary
 
 The crate owns:
 

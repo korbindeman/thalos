@@ -57,6 +57,7 @@ const SALT_YAW: u64 = 0x05;
 const SALT_SCALE: u64 = 0x06;
 const SALT_TILT: u64 = 0x07;
 const SALT_SPECIES: u64 = 0x08;
+const SALT_THIN: u64 = 0x09;
 
 /// How far beyond a flatten pad's ramp the forest stays cleared (metres). The
 /// tree/shrub density fades from 0 at the pad edge to full over this margin, so
@@ -327,11 +328,21 @@ pub struct VegScatterInput {
     pub flatten_exclusion: Option<TerrainFlatten>,
     /// Poisson-grid coarsening factor for the clipmap (`1.0` = the species'
     /// authored `min_spacing_m`). Coarse far rings pass `> 1` to scatter fewer,
-    /// wider-spaced plants — the *decimation* half of the constant-coverage rule
-    /// — so a 2 km impostor tile holds a bounded instance count. Each placed
-    /// plant is then enlarged by the driver's `grove_scale` to hold ground
-    /// coverage. `< 1` is clamped to 1 (never denser than authored).
+    /// wider-spaced plants — a *different, coarser* grid — so a 2 km impostor tile
+    /// holds a bounded instance count. `< 1` is clamped to 1 (never denser than
+    /// authored). Rings that must share positions with a finer ring (see
+    /// `keep_fraction`) keep this at `1.0` and thin instead.
     pub spacing_scale: f32,
+    /// Nested-subset thinning fraction in `[0, 1]` (`1.0` = keep every survivor).
+    /// Applied *after* Poisson elimination as a deterministic per-cell hash gate,
+    /// so a ring with a smaller fraction renders a strict **subset** of a finer
+    /// ring's trees **at the identical positions** — provided both share the grid
+    /// (`spacing_scale = 1`). That is what makes the near↔far handoff keep each
+    /// tree *in place* (only the density-delta infill fades in on approach)
+    /// instead of dissolving one independent grid into another. Evaluated before
+    /// the height gate, so a decimated ring doesn't pay the gate for thinned-out
+    /// candidates.
+    pub keep_fraction: f32,
 }
 
 /// One Poisson candidate: the body-global cell `(face, ci, cj)` hashes to a
@@ -509,6 +520,18 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
 
                 let dir = cand.dir;
                 let key = TileKey { face, x: ci, y: cj };
+
+                // Nested-subset thinning (before the height gate). A pure hash of
+                // the *global* cell → a coarse ring (small `keep_fraction`) drops
+                // the same cells every finer ring keeps, so its trees are a strict
+                // subset at identical positions. The finer ring only *adds* the
+                // dropped ("infill") trees on approach; the shared ones never move.
+                if input.keep_fraction < 1.0
+                    && veg_hash(input.seed, key, grid_id, 1, SALT_THIN) >= input.keep_fraction as f64
+                {
+                    continue;
+                }
+
                 let rng = |salt: u64| veg_hash(input.seed, key, grid_id, 0, salt);
 
                 // Draw the species at this point (weighted), spatially stable.
@@ -746,11 +769,14 @@ pub fn combine_rock_tile_mesh(
 /// or `None` for species without an impostor (shrubs) — those instances are
 /// skipped.
 ///
-/// `grove_scale` enlarges every billboard (the *coverage* half of the
-/// constant-coverage rule): a coarse clipmap ring scatters `1/grove²` as many
-/// trees (`spacing_scale = grove_scale`) and grows each impostor `grove×` so one
-/// card stands in for a clump of trees and ground coverage stays roughly
-/// constant out to the horizon. `1.0` = natural size (the near impostor band).
+/// `grove_scale` enlarges every billboard. It is retained as a knob but the
+/// driver passes `1.0` (natural size) on **every** ring: the constant-coverage
+/// trick of growing a far element to stand in for the clump it replaces is right
+/// for grass (a blade is never individually resolvable) but wrong for trees,
+/// where a resolvable tree grown `grove×` reads as a giant tree and snaps size at
+/// each ring boundary. Far coverage is carried by density (`spacing_scale`) + the
+/// forest-tinted terrain albedo instead. `1.0` = natural size; see the
+/// `TreeRing` docs in `game::rendering::vegetation`.
 ///
 /// Returns `None` if nothing was emitted.
 pub fn combine_impostor_tile_mesh(
@@ -1080,6 +1106,7 @@ mod tests {
             sea_level_m: 0.0,
             flatten_exclusion: None,
             spacing_scale: 1.0,
+            keep_fraction: 1.0,
         };
         let a = build_scatter_tile(&input).expect("flat land scatters trees");
         let b = build_scatter_tile(&input).expect("flat land scatters trees");
@@ -1108,6 +1135,7 @@ mod tests {
             sea_level_m: 0.0,
             flatten_exclusion: None,
             spacing_scale: 1.0,
+            keep_fraction: 1.0,
         };
         assert!(build_scatter_tile(&input).is_none());
     }
@@ -1123,6 +1151,7 @@ mod tests {
             sea_level_m: 0.0,
             flatten_exclusion: None,
             spacing_scale: 1.0,
+            keep_fraction: 1.0,
         }
     }
 

@@ -37,7 +37,7 @@ use bevy::ecs::world::EntityRef;
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::Epoch;
-use thalos_shipyard::editor::EditorPart;
+use crate::shipyard_editor::core::EditorPart;
 use thalos_shipyard::{
     AirIntake, AmbientIntakeKind, Attachment, Engine, EngineActivation, FuelCrossfeed, G0,
     IntakeCapture, Part, PartResources, Resource, SurfaceMount, live_part_dry_mass_kg,

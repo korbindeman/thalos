@@ -238,7 +238,7 @@ pub(crate) fn gear_contact_geometry(
     parts: &PartColliderQuery,
     gear_q: &Query<
         (&Gear, &SurfaceMount),
-        (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
+        (With<Part>, Without<crate::shipyard_editor::core::EditorPart>),
     >,
     host_nodes: &Query<&AttachNodes>,
 ) -> Option<(f64, usize)> {
@@ -257,7 +257,7 @@ pub(crate) fn gear_contact_geometry(
 pub(crate) fn build_wheel_set(
     gear_q: &Query<
         (&Gear, &SurfaceMount),
-        (With<Part>, Without<thalos_shipyard::editor::EditorPart>),
+        (With<Part>, Without<crate::shipyard_editor::core::EditorPart>),
     >,
     host_nodes: &Query<&AttachNodes>,
     positions: &HashMap<Entity, DVec3>,

@@ -9,7 +9,7 @@ use bevy::window::PrimaryWindow;
 
 use thalos_input::shipyard::ShipyardInputIntent;
 
-use crate::{
+use thalos_shipyard::{
     AttachNodes, CatalogEntry, EngineGeometry, Part, PartCatalog, PartParams, SurfaceMount,
     SurfaceMountKind, SymmetryGroup, SymmetryRole, Wing, wing_panel_frame,
 };

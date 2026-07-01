@@ -172,6 +172,7 @@ fn push_conifer(b: &mut TreeMeshData, params: &TreeMeshParams) {
             NEEDLE_CELL,
             params.canopy_color * ao,
             wind,
+            false, // needle sprays are already elongated; single quad
         );
     }
 }
@@ -223,7 +224,16 @@ fn push_trunk(b: &mut TreeMeshData, params: &TreeMeshParams, segments: u32) {
     let bands = (h / (cell_w * 2.6)).round().clamp(1.0, 8.0) as u32;
 
     let ring_y = |j: u32| h * j as f32 / bands as f32;
-    let ring_r = |j: u32| base_r + (top_r - base_r) * (j as f32 / bands as f32);
+    // Root flare: the base swells into a buttress that decays over the lowest
+    // ~18 % of the stem, so the trunk meets the ground like a tree instead of a
+    // pole planted in the grass.
+    let flare = |j: u32| -> f32 {
+        let t = j as f32 / bands as f32; // 0 base .. 1 top
+        let k = (1.0 - t / 0.18).max(0.0);
+        1.0 + 0.55 * k * k
+    };
+    let ring_r =
+        |j: u32| (base_r + (top_r - base_r) * (j as f32 / bands as f32)) * flare(j);
     // Trunk darkens slightly toward the base (an AO nudge; the bark fragment takes
     // colour from the texture, but the tint is kept for any vertex-colour consumer).
     let ring_col = |j: u32| params.trunk_color * (0.85 + 0.15 * j as f32 / bands as f32);
@@ -394,6 +404,7 @@ fn push_skin_card(
         cell,
         params.canopy_color * ao,
         wind,
+        params.lod <= 1, // cross-quad cards at near LODs
     );
 }
 
@@ -445,6 +456,7 @@ fn push_lobe_card(
         cell,
         params.canopy_color * ao,
         wind,
+        params.lod <= 1, // cross-quad cards at near LODs
     );
 }
 
@@ -491,8 +503,11 @@ fn push_broadleaf_canopy(b: &mut TreeMeshData, params: &TreeMeshParams) {
     let (n_main, depth_max, seg, cluster_cards, fill, shell) = match params.lod {
         0 => (4u32, 2u32, 6u32, 14u32, 3u32, 14u32),
         1 => (3, 1, 5, 10, 2, 8),
-        2 => (3, 0, 4, 7, 0, 5),
-        _ => (1, 0, 3, 5, 0, 0),
+        2 => (3, 0, 4, 7, 0, 6),
+        // Last mesh LOD before the impostor: a small but complete crown (a shell
+        // of a few big cards) so it isn't a bald skeleton — the big `card_scale`
+        // makes these cover.
+        _ => (2, 0, 3, 6, 0, 5),
     };
 
     let ctx = BroadleafCtx {
@@ -658,6 +673,20 @@ fn push_foliage_cluster(
     seed: u64,
 ) {
     let bright = 0.88 + 0.12 * hash01(seed, 3);
+    // Constant-coverage on the mesh LOD chain: coarser LODs place FEWER cards
+    // (the `cluster_cards` / `shell` counts drop), so each card GROWS to keep the
+    // canopy covered instead of thinning to a sparse, small-leaved blob on the
+    // first LOD step. (This is exactly what the `Round` canopy's `sz` already
+    // does; the broadleaf previously kept a constant card size and just dropped
+    // counts — the "leaves shrink and it goes sparse right after the close LOD"
+    // report.) Cross-quads run one LOD further too (through LOD2) so the volume
+    // doesn't collapse to edge-on slivers before the impostor takes over.
+    let card_scale = match params.lod {
+        0 => 1.0,
+        1 => 1.3,
+        2 => 1.6,
+        _ => 2.0,
+    };
     for i in 0..cards {
         let s = seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let dir = fib_dir(i, cards, s);
@@ -669,11 +698,7 @@ fn push_foliage_cluster(
         let face = (n_out + rand_unit(s, 3) * 0.32).normalize_or(n_out);
         let n_light = (n_out + Vec3::Y * 0.24 + rand_unit(s, 4) * 0.20).normalize_or(n_out);
         let roll = hash01(s, 5) * TAU;
-        // Full-size cards so the clusters overlap into opaque coverage (no
-        // see-through to the branches). The airy, broken silhouette comes from
-        // the leaf-cluster card's own tapered, detached-leaf edge — not from
-        // shrinking or removing cards.
-        let size = radius * (0.95 + 0.45 * hash01(s, 6));
+        let size = radius * card_scale * (0.9 + 0.4 * hash01(s, 6));
         let cell = LEAF_CELL_FIRST + (hash_u(s, 7) % LEAF_CELL_COUNT.max(1));
         push_leaf_card(
             b,
@@ -685,6 +710,7 @@ fn push_foliage_cluster(
             cell,
             params.canopy_color * ao,
             wind,
+            params.lod <= 2, // cross-quad cards through the mid LODs
         );
     }
 }
@@ -733,10 +759,17 @@ fn ortho_basis(axis: Vec3) -> (Vec3, Vec3) {
     (t, bi)
 }
 
-/// One leaf-cluster card: a quad centred at `pos`, in the plane spanned by a
-/// `face`-derived (rolled) basis, but carrying `light_normal` (the crown-outward
-/// normal) so it shades as part of a soft sphere. Two-sided (the material culls
-/// nothing). Corners map to the atlas cell's four UV corners.
+/// One leaf-cluster card centred at `pos`, carrying `light_normal` (the
+/// crown-outward normal) so it shades as part of a soft sphere. Two-sided (the
+/// material culls nothing). Corners map to the atlas cell's four UV corners.
+///
+/// When `cross` is set the card is a **2-quad cross** (a billboard cloud): a
+/// second quad perpendicular to the first, sharing the card's `tr` spine. A
+/// single flat quad reads as a paper-thin *sliver* whenever its face turns
+/// edge-on to the camera — the "streaky wisps poking out of the canopy" tell up
+/// close; the cross always presents a leaf face from any horizontal angle, so the
+/// canopy reads as leafy volume. Near LODs cross; far LODs (where the impostor
+/// takes over and edge-on never shows) stay single-quad to save triangles.
 #[allow(clippy::too_many_arguments)]
 fn push_leaf_card(
     b: &mut TreeMeshData,
@@ -748,6 +781,7 @@ fn push_leaf_card(
     cell: u32,
     tint: Vec3,
     wind: f32,
+    cross: bool,
 ) {
     let up_ref = if face.y.abs() > 0.95 {
         Vec3::X
@@ -760,18 +794,41 @@ fn push_leaf_card(
     let tr = t * cr + bi * sr;
     let br = -t * sr + bi * cr;
     let h = size * 0.5;
-    let corners = [
-        pos - tr * h - br * h,
-        pos + tr * h - br * h,
-        pos + tr * h + br * h,
-        pos - tr * h + br * h,
-    ];
-    let start = b.positions.len() as u32;
-    for (k, p) in corners.iter().enumerate() {
-        b.push_vert(*p, light_normal, tint, wind, leaf_code(cell, k as u32));
+
+    // One quad spanned by in-plane axes `(au, av)`, corners → the cell's UV corners.
+    let mut quad = |au: Vec3, av: Vec3| {
+        let corners = [
+            pos - au * h - av * h,
+            pos + au * h - av * h,
+            pos + au * h + av * h,
+            pos - au * h + av * h,
+        ];
+        let start = b.positions.len() as u32;
+        for (k, p) in corners.iter().enumerate() {
+            b.push_vert(*p, light_normal, tint, wind, leaf_code(cell, k as u32));
+        }
+        b.indices
+            .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    };
+    if cross {
+        // Near-vertical cross: two perpendicular quads sharing a mostly-upright
+        // spine, so from any ground-level / oblique angle at least one quad
+        // presents a face — killing the "flat card edge-on → thin sliver poking
+        // out of the canopy" tell. The spine LEANS a little (per-card, via `roll`)
+        // off true vertical so the remaining edge-on slivers don't all line up
+        // into vertical streaks across the canopy. The outward `light_normal`
+        // still drives the soft-dome shading, independent of the quad geometry.
+        let u1 = Vec3::new(cr, 0.0, sr); // horizontal lean direction (per card)
+        let u2 = Vec3::new(-sr, 0.0, cr); // perpendicular horizontal
+        let spine = (Vec3::Y + u1 * 0.25).normalize_or(Vec3::Y);
+        let w1 = spine.cross(u2).normalize_or(u1); // ⟂ spine, in the lean plane
+        quad(u2, spine);
+        quad(w1, spine);
+    } else {
+        // Far LOD: a single outward-facing card (the impostor takes over before
+        // edge-on slivers would read).
+        quad(tr, br);
     }
-    b.indices
-        .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
 }
 
 /// A roughly uniform unit vector, for per-card facing scatter.

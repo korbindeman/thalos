@@ -40,7 +40,8 @@ use bevy::render::render_resource::{
 };
 
 use crate::camera::OrbitCamera;
-use crate::rendering::SimulationState;
+use crate::rendering::{CameraExposure, SimulationState};
+use thalos_body_render::{AU_M, LIGHT_AT_1AU};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -71,6 +72,60 @@ const ENV_COS_EPS: f32 = 1.0e-4;
 /// [`GeneratedEnvironmentMapLight`]. 1.0 matches scene luminance;
 /// bump if reflections read too dark on polished metals.
 const PROBE_INTENSITY: f32 = 1.0;
+
+/// Bright HDR gain for the reflected sun disc, in scene-flux units. `flux ≈ 10`
+/// at the homeworld → ~30 (matching the old flat sun_color), but now scaling
+/// with heliocentric distance + exposure so a far/dim sun reflects dimmer.
+const SUN_DISC_GAIN: f32 = 3.0;
+
+// ── CPU mirror of the spine surface-sky (graphics-fidelity F3/F4) ─────────────
+// The reflection cubemap is CPU-painted (the GPU cubemap-render path is blocked —
+// see docs/atmosphere.md), so the surface sky it reflects must be evaluated on the
+// CPU. These constants + `cpu_surface_sky` are a hand-kept mirror of the spine's
+// WGSL `compute_surface_sky` (`shading/shaders/lighting.wgsl`), so the metallic
+// hull reflects the SAME blue sky-dome / warm ground the terrain is lit by, and
+// dielectric structures get that sky as ambient — one atmosphere-derived
+// environment. Keep in lockstep when the spine's `SURFACE_*` constants change.
+const SCENE_FLUX_SCALE: f32 = 0.5;
+const SURFACE_SKY_SCALE: f32 = 0.15;
+const SURFACE_SKY_CHROMA_GAIN: f32 = 8.0;
+const SURFACE_GROUND_ALBEDO: Vec3 = Vec3::new(0.10, 0.085, 0.055);
+const SURFACE_GROUND_SCALE: f32 = 0.10;
+const SURFACE_NIGHT_AMBIENT: Vec3 = Vec3::new(0.008, 0.010, 0.014);
+
+fn vec3_exp(v: Vec3) -> Vec3 {
+    Vec3::new(v.x.exp(), v.y.exp(), v.z.exp())
+}
+
+/// Resolved surface-sky radiances (scene-flux units) — mirror of the spine's
+/// `SurfaceSky`. `sun_color` is the reddened direct-beam tint.
+struct SurfaceSkyCpu {
+    sky_radiance: Vec3,
+    ground_radiance: Vec3,
+    sun_color: Vec3,
+}
+
+/// CPU mirror of `compute_surface_sky`: blue sky-dome (up) + warm ground-bounce
+/// (down) + the reddened direct-beam tint, from the vertical Rayleigh optical
+/// depth `tau_zenith`, artistic `strength`, sun elevation, and per-fragment flux.
+fn cpu_surface_sky(tau_zenith: Vec3, strength: f32, sun_elev: f32, flux: f32) -> SurfaceSkyCpu {
+    let scene_radiance = flux.max(0.0) * SCENE_FLUX_SCALE;
+    let day = smoothstep_f32(-0.15, 0.12, sun_elev);
+    let sun_up = sun_elev.clamp(0.0, 1.0);
+    let tau_eff = tau_zenith.max(Vec3::ZERO) * strength.max(0.0);
+    let airmass = (1.0 / (sun_up + 0.10)).clamp(1.0, 8.0);
+    let sun_color = vec3_exp(-tau_eff * (airmass - 1.0));
+    let sky_chroma = Vec3::ONE - vec3_exp(-tau_eff * SURFACE_SKY_CHROMA_GAIN);
+    let sky_strength = scene_radiance * SURFACE_SKY_SCALE * day * (0.35 + 0.65 * sun_up);
+    let sky_radiance = sky_chroma * sky_strength + SURFACE_NIGHT_AMBIENT;
+    let ground_radiance =
+        SURFACE_GROUND_ALBEDO * (scene_radiance * SURFACE_GROUND_SCALE * sun_up) + SURFACE_NIGHT_AMBIENT;
+    SurfaceSkyCpu {
+        sky_radiance,
+        ground_radiance,
+        sun_color,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -177,6 +232,7 @@ fn refresh_cubemap(
     probe: Option<Res<ReflectionProbe>>,
     mut images: ResMut<Assets<Image>>,
     sim: Option<Res<SimulationState>>,
+    exposure: Option<Res<CameraExposure>>,
 ) {
     let Some(probe) = probe else { return };
 
@@ -191,9 +247,10 @@ fn refresh_cubemap(
     // isn't available yet (early frames) fall back to sensible
     // defaults so we still paint *something* — a static gradient is
     // better than an all-black cubemap that would read as "no IBL".
+    let gain = exposure.as_deref().map(|e| e.gain).unwrap_or(1.0);
     let env = sim
         .as_deref()
-        .map(derive_environment)
+        .map(|s| derive_environment(s, gain))
         .unwrap_or_else(default_environment);
 
     if let Some(last) = timer.last_painted
@@ -219,6 +276,8 @@ fn env_changed_meaningfully(last: &EnvParams, new: &EnvParams) -> bool {
     last.sun_dir.dot(new.sun_dir) < ENV_DIR_DOT_MIN
         || last.planet_dir.dot(new.planet_dir) < ENV_DIR_DOT_MIN
         || (last.planet_cos - new.planet_cos).abs() > ENV_COS_EPS
+        || last.up.dot(new.up) < ENV_DIR_DOT_MIN
+        || (last.surface_blend - new.surface_blend).abs() > ENV_COS_EPS
 }
 
 #[derive(Clone, Copy)]
@@ -228,9 +287,11 @@ struct EnvParams {
     /// Cosine half-angle of the sun disc. Sun is drawn where
     /// `dot(view, sun_dir) > sun_cos`.
     sun_cos: f32,
-    /// Solar disc luminance.
-    sun_color: Vec3,
-    /// Unit vector from ship toward planet centre.
+    /// HDR sun-disc radiance (reddened + day-gated near the surface, white in
+    /// space, blended by `surface_blend`). Drives the hull's specular highlight.
+    sun_disc_radiance: Vec3,
+    // ── Orbital / space model (used where `surface_blend < 1`) ──
+    /// Unit vector from ship toward the dominant body centre.
     planet_dir: Vec3,
     /// Cosine half-angle of the planet disc from the ship. Planet is
     /// drawn where `dot(view, planet_dir) > planet_cos`.
@@ -240,72 +301,135 @@ struct EnvParams {
     /// Dim ambient fill for the starfield (below the sun, behind the
     /// planet's horizon ring).
     starfield_tint: Vec3,
+    // ── Surface-sky model (used where `surface_blend > 0`) ──
+    /// Local radial up (away from the dominant body centre).
+    up: Vec3,
+    /// Blue sky-dome radiance filling the upper hemisphere (scene-flux units).
+    sky_radiance: Vec3,
+    /// Warm ground-bounce radiance filling the lower hemisphere.
+    ground_radiance: Vec3,
+    /// 0 = pure space (planet disc + stars), 1 = pure surface (sky-dome +
+    /// ground). Ramps across the Kármán line with altitude.
+    surface_blend: f32,
 }
 
 fn default_environment() -> EnvParams {
     EnvParams {
         sun_dir: Vec3::X,
         sun_cos: (1.0_f32 - 1.0e-4).max(0.999),
-        sun_color: Vec3::splat(30.0),
+        sun_disc_radiance: Vec3::splat(30.0),
         planet_dir: Vec3::NEG_Y,
         planet_cos: 0.5, // ~60° half-angle — low orbit fills a lot of sky
         planet_color: Vec3::new(0.25, 0.35, 0.55),
         starfield_tint: Vec3::splat(0.02),
+        up: Vec3::Y,
+        sky_radiance: Vec3::ZERO,
+        ground_radiance: Vec3::ZERO,
+        surface_blend: 0.0,
     }
 }
 
-/// Pull sun/planet directions from the current simulation state. For
-/// now: sun = origin of the system, planet = focus body (Thalos).
-/// When ships get coupled in, this should key off the ship's world
-/// position rather than the sim homeworld.
-fn derive_environment(sim: &SimulationState) -> EnvParams {
-    // For this first pass, use heliocentric state at t=0. The visible
-    // effect of orbital motion on reflections is tiny over typical
-    // session time scales; this keeps the first-cut code minimal.
-    // Once ships are rendered, replace `ship_pos` with the real ship
-    // world position.
+/// Derive the reflection environment from the current sim state + camera
+/// exposure gain. Under a terrestrial-atmosphere body it paints the *surface
+/// sky* — blue sky-dome above the local horizon, warm ground-bounce below, a
+/// reddened sun disc — the same environment the terrain is lit by; out in space
+/// it fades (by altitude across the Kármán line) into the orbital model (a lit
+/// planet disc over a dim starfield). `gain` matches the scene's `CameraExposure`
+/// so the reflected radiances share its exposure and dim with distance.
+///
+/// (This is the atmosphere-derived env-map keystone of graphics-fidelity F3/F4:
+/// the metallic hull now reflects the world it is actually in, and dielectric
+/// structures pick up the real sky as ambient — replacing the old fake orbital-
+/// only paint. The eventual upgrade is a GPU cubemap render of the actual scene;
+/// see `docs/atmosphere.md`.)
+fn derive_environment(sim: &SimulationState, gain: f32) -> EnvParams {
     let ship_pos = sim.simulation.ship_state().position;
-    let home_id = sim
-        .system
-        .name_to_id
-        .get("Thalos")
-        .copied()
-        .unwrap_or_else(|| {
-            sim.system
-                .bodies
-                .iter()
-                .find(|b| b.parent.is_some())
-                .map(|b| b.id)
-                .unwrap_or(0)
-        });
+    let epoch = thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time());
 
-    let sim_time = sim.simulation.sim_time();
-    let planet_state = sim.ephemeris.state(
-        home_id,
-        thalos_physics_canonical::canonical::Epoch(sim_time),
-    );
-    let sun_state = sim
-        .ephemeris
-        .state(0, thalos_physics_canonical::canonical::Epoch(sim_time));
-
-    let to_planet = (planet_state.position - ship_pos).as_vec3();
+    // Sun (star index 0): direction + heliocentric flux in the SAME units the
+    // spine gives every surface (`build_scene_lighting`: LIGHT_AT_1AU·(AU/d)²·gain).
+    let sun_state = sim.ephemeris.state(0, epoch);
     let to_sun = (sun_state.position - ship_pos).as_vec3();
+    let sun_dir = to_sun.try_normalize().unwrap_or(Vec3::X);
+    let helio_d_m = (ship_pos - sun_state.position).length().max(1.0);
+    let au_over_d = (AU_M / helio_d_m) as f32;
+    let flux = LIGHT_AT_1AU * au_over_d * au_over_d * gain;
 
-    // Planet angular radius from the ship: asin(r / d). The cubemap
-    // paints the disc as `dot(view, planet_dir) > cos(angular_radius)`.
-    let planet_radius_m = sim.system.bodies[home_id].radius_m as f32;
+    // Body the ship is bound to. In the star's SOI there is none → pure space.
+    let dominant = sim.simulation.dominant_body();
+    let planet_id = if dominant != 0 {
+        dominant
+    } else {
+        sim.system.name_to_id.get("Thalos").copied().unwrap_or(0)
+    };
+
+    // Orbital planet-disc model (space fallback). Angular radius asin(r / d);
+    // the cubemap paints the disc where `dot(view, planet_dir) > cos(radius)`.
+    let planet_state = sim.ephemeris.state(planet_id, epoch);
+    let to_planet = (planet_state.position - ship_pos).as_vec3();
+    let planet_radius_m = sim
+        .system
+        .bodies
+        .get(planet_id)
+        .map(|b| b.radius_m as f32)
+        .unwrap_or(1.0);
     let planet_dist_m = to_planet.length().max(planet_radius_m * 1.0001);
     let planet_ang = (planet_radius_m / planet_dist_m).clamp(0.0, 0.999).asin();
     let planet_cos = planet_ang.cos();
+    let planet_dir = to_planet.try_normalize().unwrap_or(Vec3::NEG_Y);
+
+    // Surface-sky model — only meaningful under a terrestrial-atmosphere body.
+    let mut up = -planet_dir;
+    let mut sky_radiance = Vec3::ZERO;
+    let mut ground_radiance = Vec3::ZERO;
+    let mut sun_disc_radiance = Vec3::splat(flux * SUN_DISC_GAIN);
+    let mut surface_blend = 0.0_f32;
+
+    if dominant != 0
+        && let Some(body) = sim.system.bodies.get(dominant)
+        && let Some(atmos) = body.terrestrial_atmosphere.as_ref()
+    {
+        let center = sim.ephemeris.state(dominant, epoch).position;
+        let radial = (ship_pos - center).as_vec3();
+        let dist = radial.length();
+        if dist > 1.0 {
+            up = radial / dist;
+        }
+        let altitude = (dist - body.radius_m as f32).max(0.0);
+        let karman = atmos.karman_line_m.max(1.0);
+        // Full surface sky below the Kármán line, fading to pure space a few
+        // Kármán heights up.
+        surface_blend = 1.0 - smoothstep_f32(karman, karman * 4.0, altitude);
+        if surface_blend > 0.0 {
+            let (tau, strength) = atmos
+                .scattering
+                .as_ref()
+                .map(|sc| (Vec3::from_array(sc.vertical_optical_depth), sc.strength))
+                .unwrap_or((Vec3::ZERO, 0.0));
+            let sun_elev = up.dot(sun_dir);
+            let sky = cpu_surface_sky(tau, strength, sun_elev, flux);
+            sky_radiance = sky.sky_radiance;
+            ground_radiance = sky.ground_radiance;
+            // Reddened, day-gated sun disc for the surface regime, blended toward
+            // the white orbital disc by altitude.
+            let day = smoothstep_f32(-0.15, 0.12, sun_elev);
+            let surface_sun = sky.sun_color * (flux * SUN_DISC_GAIN * day);
+            sun_disc_radiance = sun_disc_radiance.lerp(surface_sun, surface_blend);
+        }
+    }
 
     EnvParams {
-        sun_dir: to_sun.try_normalize().unwrap_or(Vec3::X),
-        sun_cos: (0.9995_f32).max(0.999),
-        sun_color: Vec3::splat(30.0),
-        planet_dir: to_planet.try_normalize().unwrap_or(Vec3::NEG_Y),
+        sun_dir,
+        sun_cos: 0.9995_f32.max(0.999),
+        sun_disc_radiance,
+        planet_dir,
         planet_cos,
         planet_color: Vec3::new(0.25, 0.35, 0.55),
         starfield_tint: Vec3::splat(0.015),
+        up,
+        sky_radiance,
+        ground_radiance,
+        surface_blend,
     }
 }
 
@@ -364,32 +488,41 @@ fn face_dir(face: usize, u: f32, v: f32) -> Vec3 {
 }
 
 fn sample_environment(env: &EnvParams, dir: Vec3) -> Vec3 {
-    // Start with a very dim starfield so reflections never read as
-    // pure black. A real star catalog bake would go here later.
-    let mut col = env.starfield_tint;
+    // Surface hemisphere: warm ground bounce below the local horizon, blue
+    // sky-dome above — the same split the terrain's sky ambient uses.
+    let w_up = (0.5 + 0.5 * dir.dot(env.up)).clamp(0.0, 1.0);
+    let surface_col = env.ground_radiance.lerp(env.sky_radiance, w_up);
 
-    // Planet disc: lit by the sun, simple Lambert falloff along the
-    // terminator so the reflection reads as a lit hemisphere rather
-    // than a flat circle.
+    // Space: lit planet disc over a dim starfield.
+    let orbital_col = orbital_sample(env, dir);
+
+    // Blend the base environment by altitude (surface ↔ space).
+    let mut col = orbital_col.lerp(surface_col, env.surface_blend);
+
+    // Sun disc (both regimes): the HDR hot spot that gives polished metal its
+    // specular highlight. Sits on top of whatever was below.
+    if dir.dot(env.sun_dir) > env.sun_cos {
+        col = env.sun_disc_radiance;
+    }
+
+    col
+}
+
+/// Orbital (space) base radiance for a direction: a sun-lit planet disc with a
+/// soft terminator over a dim starfield. Used where `surface_blend < 1`.
+fn orbital_sample(env: &EnvParams, dir: Vec3) -> Vec3 {
+    let mut col = env.starfield_tint;
     let planet_dot = dir.dot(env.planet_dir);
     if planet_dot > env.planet_cos {
         let point_on_planet = dir - env.planet_dir * planet_dot;
         let normal = -(env.planet_dir - point_on_planet * (1.0 - env.planet_cos))
             .normalize_or(-env.planet_dir);
         let lit = env.sun_dir.dot(normal).max(0.0);
-        // Soft limb gradient + Lambert term. The 0.15 floor keeps the
-        // night side visible as a slightly-bluish disc rather than a
-        // hole.
+        // Soft limb gradient + Lambert term. The 0.15 floor keeps the night
+        // side visible as a slightly-bluish disc rather than a hole.
         let limb = smoothstep_f32(env.planet_cos, env.planet_cos + 0.02, planet_dot);
         col = env.planet_color * (lit * 0.85 + 0.15) * limb + col * (1.0 - limb);
     }
-
-    // Sun disc: HDR hot spot. Sits on top of whatever was below.
-    let sun_dot = dir.dot(env.sun_dir);
-    if sun_dot > env.sun_cos {
-        col = env.sun_color;
-    }
-
     col
 }
 

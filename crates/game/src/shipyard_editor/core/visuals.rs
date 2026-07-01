@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use thalos_input::shipyard::ShipyardInputIntent;
 
-use crate::material::{ShipPartExtension, ShipPartMaterial};
-use crate::{
+use thalos_shipyard::material::{ShipPartExtension, ShipPartMaterial};
+use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CatalogEntry, CommandPod, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, MaterialKind, Part, PartCatalog,
     PartMaterial, PodGeometry, Ship, SurfaceMount, SurfaceMountKind, Wing,
@@ -232,10 +232,10 @@ pub fn engine_visual_profile(diameter: f32) -> (f32, f32, f32) {
 }
 
 // `ship_part_params` (part dims → material uniform) is shared with the flight
-// view; it now lives in `crate::appearance` (re-exported at the crate root) so
+// view; it now lives in `thalos_shipyard::appearance` (re-exported at the crate root) so
 // the two no longer drift. Re-exported here so `editor::ship_part_params` (the
 // existing path consumers use) keeps resolving.
-pub use crate::ship_part_params;
+pub use thalos_shipyard::ship_part_params;
 
 type VisualQuery<'w, 's> = Query<
     'w,
@@ -761,7 +761,7 @@ pub(super) fn update_node_pin_style(
         .map(|a| (a.parent, a.parent_node.clone()))
         .collect();
     let pending_uses_nodes = state.pending.as_ref().is_some_and(|p| {
-        !matches!(p.params, crate::PartParams::Wing { .. })
+        !matches!(p.params, thalos_shipyard::PartParams::Wing { .. })
             && !catalog.resolve(&p.catalog_id).is_ok_and(|entry| {
                 matches!(
                     entry,
@@ -1288,7 +1288,7 @@ pub(super) fn update_placement_preview(
         // Only body-skin footprint parts get a preview (gear, wings).
         if !matches!(
             pending.params,
-            crate::PartParams::Wing { .. } | crate::PartParams::Gear { .. }
+            thalos_shipyard::PartParams::Wing { .. } | thalos_shipyard::PartParams::Gear { .. }
         ) {
             return None;
         }
@@ -1351,7 +1351,7 @@ pub(super) fn update_placement_preview(
         // no ghost entity to carry it yet).
         let mesh = if preview.sig.as_ref() != Some(&sig) || preview.entity.is_none() {
             let m = match &pending.params {
-                crate::PartParams::Gear {
+                thalos_shipyard::PartParams::Gear {
                     strut_length,
                     wheel_radius,
                 } => {
@@ -1372,7 +1372,7 @@ pub(super) fn update_placement_preview(
                     };
                     build_gear_mesh(&g, angle, parent_radius)
                 }
-                crate::PartParams::Wing {
+                thalos_shipyard::PartParams::Wing {
                     span,
                     root_chord,
                     tip_chord,

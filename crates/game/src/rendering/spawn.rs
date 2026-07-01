@@ -897,9 +897,11 @@ pub(super) fn spawn_bodies(
         // The ship is the only shadow caster — every body mesh is tagged
         // `NotShadowCaster` / `NotShadowReceiver`. A ~10 m caster doesn't
         // need a 100 km cascade chain; two cascades sized for the ship's
-        // local neighbourhood keep the shadow pass cheap.
+        // local neighbourhood keep the shadow pass cheap. The count is the
+        // shared `SHADOW_CASCADE_COUNT` (see its doc for the Bevy bug that
+        // requires every directional light to agree on it).
         CascadeShadowConfigBuilder {
-            num_cascades: 2,
+            num_cascades: super::SHADOW_CASCADE_COUNT,
             minimum_distance: 0.1,
             maximum_distance: 500.0,
             first_cascade_far_bound: 30.0,
@@ -932,6 +934,17 @@ pub(super) fn spawn_bodies(
             shadow_maps_enabled: false,
             ..default()
         },
+        // Shadows are off, so this cascade config is never actually sampled —
+        // but a bare `DirectionalLight` silently gets Bevy's default 4-cascade
+        // config, which would mismatch `SunLight`'s count the moment someone
+        // flips `shadow_maps_enabled` on. Pin it to `SHADOW_CASCADE_COUNT` so
+        // that future change can't reintroduce the `check_dir_light_mesh_visibility`
+        // over-index panic (see the constant's doc).
+        CascadeShadowConfigBuilder {
+            num_cascades: super::SHADOW_CASCADE_COUNT,
+            ..default()
+        }
+        .build(),
         bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::coords::SHIP_LAYER]),
         Transform::default(),
         MoonLight,

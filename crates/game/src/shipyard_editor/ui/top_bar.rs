@@ -5,7 +5,7 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
 use thalos_shipyard::Ship;
-use thalos_shipyard::editor::{
+use crate::shipyard_editor::core::{
     BuildOrientation, EditorPart, EditorState, PlacementSnap, SymmetryMode, format_delta_v,
     format_mass_kg,
 };

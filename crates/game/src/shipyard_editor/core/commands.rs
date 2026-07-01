@@ -5,7 +5,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::collections::{HashMap, VecDeque};
 
-use crate::{
+use thalos_shipyard::{
     Adapter, AttachNodes, Attachment, BuildLayout, CatalogEntry, CatalogRef, Connection, Decoupler,
     EngineGeometry, FuelTank, Fuselage, Gear, Part, PartBlueprint, PartCatalog, PartParams,
     PartResources, Ship, ShipBlueprint, SurfaceConnection, SurfaceMount, SurfaceMountKind,
@@ -134,7 +134,7 @@ pub fn collect_blueprint(
         };
         // Persist amounts only — capacities are recomputed from the
         // catalog at load time.
-        let resources: HashMap<crate::Resource, f32> =
+        let resources: HashMap<thalos_shipyard::Resource, f32> =
             res.pools.iter().map(|(r, p)| (*r, p.amount)).collect();
         part_blueprints.push(PartBlueprint {
             catalog_id: cat_ref.id.clone(),

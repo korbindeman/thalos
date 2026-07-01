@@ -139,15 +139,24 @@ way.
     craft hull *receiving* the shared sun-shadow cascade** (graphics-fidelity
     F6b/F7 — `docs/graphics_fidelity.md`), since `thalos::shadow` + the metallic
     BRDF branch now live alongside the material.
-  - **Interim debt:** `thalos_shipyard` *temporarily* depends on
-    `thalos_body_render` — the editor core still *uses* the material, re-exported
-    through the `shipyard::material` shim. This is a backwards edge (construction
-    shouldn't pull in the render stack), removed by the follow-up.
-  - **Deferred follow-up:** (1) move material *application* out of the editor core
-    (`editor::visuals` / `editor::shrouds` attach `ShipPartMaterial` + sync uniforms
-    today) into a render-side appearance plugin the front-ends drive; (2) **flip the
-    dependency** to the clean `body_render → shipyard` direction — render reads the
-    construction model to shade it, exactly as it already reads `thalos_world` to
-    shade bodies — and drop the interim edge; (3) relocate the standalone
-    `ship_editor` binary out of the crate; (4) drop `bevy_egui` + `thalos_celestial`
-    from `thalos_shipyard`.
+  - **Done (2026-07-01):** the editor was slimmed *out* of `thalos_shipyard`
+    entirely. The `editor/` module (`ShipEditorCorePlugin` + placement / visuals /
+    commands / shrouds / state) moved into its sole consumer, the game, at
+    `thalos_game::shipyard_editor::core`; the standalone egui `ship_editor` binary
+    was **deleted** (superseded by the native-UI in-game editor). This retired
+    follow-up items (3) relocate the binary and (4) drop `bevy_egui` +
+    `thalos_celestial` from `thalos_shipyard`. `thalos_shipyard` is now the
+    construction *model* only (parts / blueprints / geometry / sizing / stats /
+    staging), with deps `bevy`, `glam`, `serde`, `ron`, `thalos_body_render`.
+  - **Interim debt (still open):** `thalos_shipyard` *temporarily* depends on
+    `thalos_body_render` — `appearance.rs` (and the game's ship-view / editor)
+    still *uses* the material, re-exported through the `shipyard::material` shim.
+    This is a backwards edge (construction shouldn't pull in the render stack),
+    removed by the remaining follow-up.
+  - **Deferred follow-up (remaining):** (1) move material *application* out of the
+    editor core (`shipyard_editor::core::visuals` / `::shrouds` attach
+    `ShipPartMaterial` + sync uniforms today) into a render-side appearance plugin
+    the front-end drives; (2) **flip the dependency** to the clean
+    `body_render → shipyard` direction — render reads the construction model to shade
+    it, exactly as it already reads `thalos_world` to shade bodies — and drop the
+    interim edge.

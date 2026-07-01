@@ -38,9 +38,9 @@ pub struct ShipyardInputPlugin;
 
 impl Plugin for ShipyardInputPlugin {
     fn build(&self, app: &mut App) {
-        // The game adds this plugin alongside `GameInputPlugin`, which already
-        // registers `EnhancedInputPlugin`; the standalone ship_editor binary
-        // adds it alone. Guard so both hosts work.
+        // The game adds this plugin (for its in-game shipyard editor) alongside
+        // `GameInputPlugin`, which already registers `EnhancedInputPlugin`. Guard
+        // so it works whether or not `EnhancedInputPlugin` is already present.
         if !app.is_plugin_added::<EnhancedInputPlugin>() {
             app.add_plugins(EnhancedInputPlugin);
         }

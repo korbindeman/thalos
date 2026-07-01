@@ -157,7 +157,7 @@ fn enable_cruise_engines(
     mut lit: Local<Option<Entity>>,
     situation: Res<SpawnSituation>,
     ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
-    mut activations: Query<&mut EngineActivation, Without<thalos_shipyard::editor::EditorPart>>,
+    mut activations: Query<&mut EngineActivation, Without<crate::shipyard_editor::core::EditorPart>>,
 ) {
     if !matches!(*situation, SpawnSituation::Cruise) {
         return;
@@ -401,7 +401,7 @@ fn finish_runway_spawn(
     // landing gear at the loaded static-sag equilibrium.
     gear_geometry: (
         crate::local_physics::PartColliderQuery,
-        Query<(&Gear, &SurfaceMount), (With<Part>, Without<thalos_shipyard::editor::EditorPart>)>,
+        Query<(&Gear, &SurfaceMount), (With<Part>, Without<crate::shipyard_editor::core::EditorPart>)>,
         Query<&AttachNodes>,
         Res<crate::local_physics::GearTuning>,
     ),
@@ -693,7 +693,7 @@ fn enable_runway_engines(
     situation: Res<SpawnSituation>,
     site: Option<Res<RunwaySite>>,
     ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
-    mut activations: Query<&mut EngineActivation, Without<thalos_shipyard::editor::EditorPart>>,
+    mut activations: Query<&mut EngineActivation, Without<crate::shipyard_editor::core::EditorPart>>,
 ) {
     if !situation.is_runway() || site.is_none() {
         return;

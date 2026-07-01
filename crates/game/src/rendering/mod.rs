@@ -29,6 +29,21 @@ mod transforms;
 mod types;
 mod vegetation;
 
+/// Cascade count shared by **every** game `DirectionalLight` that can cast
+/// shadows (the world `SunLight`, the shipyard editor's key light, and the
+/// otherwise-shadowless `MoonLight`).
+///
+/// Bevy 0.19's `check_dir_light_mesh_visibility` reuses one
+/// `Local<Parallel<Vec<Vec<Entity>>>>` thread-queue across frames *and* across
+/// lights, resizing each participating worker's slot to the current light's
+/// cascade count. If two shadow-casting directional lights disagree on that
+/// count, a worker truncated by the smaller-cascade light and then skipped by
+/// the larger-cascade light's `par_iter` gets over-indexed at collection —
+/// panicking with `index out of bounds` (observed as a 2-vs-4 mismatch between
+/// `SunLight` and the shipyard key light). Keeping one count everywhere makes
+/// the thread-queue slots uniform so the over-index can never happen.
+pub const SHADOW_CASCADE_COUNT: usize = 2;
+
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
 use ground_terrain::{

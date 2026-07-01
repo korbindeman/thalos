@@ -1,5 +1,5 @@
-//! Auto-generated interstage shrouds: cones wrapping a [`crate::Shroudable`]
-//! engine above a [`crate::ShroudProvider`] (decoupler). Editor-only visuals —
+//! Auto-generated interstage shrouds: cones wrapping a [`thalos_shipyard::Shroudable`]
+//! engine above a [`thalos_shipyard::ShroudProvider`] (decoupler). Editor-only visuals —
 //! they are not part of the persisted blueprint.
 
 use bevy::picking::Pickable;
@@ -8,8 +8,8 @@ use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::material::{ShipPartExtension, ShipPartMaterial, ShipPartParams};
-use crate::{
+use thalos_shipyard::material::{ShipPartExtension, ShipPartMaterial, ShipPartParams};
+use thalos_shipyard::{
     AttachNodes, Attachment, Engine, ShroudProvider, Shroudable, stainless_steel_base,
 };
 

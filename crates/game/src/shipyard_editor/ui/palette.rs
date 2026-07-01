@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
 use thalos_shipyard::blueprint::default_params_for;
-use thalos_shipyard::editor::{
+use crate::shipyard_editor::core::{
     EditorState, PendingPart, SavedShip, kind_order, palette_category_label,
     palette_category_order, palette_part_summary,
 };

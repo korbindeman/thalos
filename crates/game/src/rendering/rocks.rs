@@ -483,6 +483,7 @@ fn drive_rock_tiles(
             sea_level_m,
             flatten_exclusion,
             spacing_scale: 1.0,
+            keep_fraction: 1.0,
         };
         let meshes = library.meshes.clone();
         let revision = height_source.revision();

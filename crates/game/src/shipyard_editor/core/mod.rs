@@ -7,9 +7,10 @@
 //! tank-resize handle, placement-preview ghost, interstage shrouds, and
 //! blueprint save/load against `ships/*.ron`.
 //!
-//! Two front-ends drive this core today:
-//! - the standalone egui binary (`thalos_shipyard --bin ship_editor`), and
-//! - the in-game Bevy-UI editor (`thalos_game::shipyard_editor`).
+//! This is the editor logic proper; its 2D UI + camera front-end is the
+//! sibling [`crate::shipyard_editor`] module (native Bevy UI). It reads the
+//! [`thalos_shipyard`] construction model and is intentionally kept separate
+//! from it — the crate owns *what a craft is*, this owns *editing one*.
 //!
 //! A front-end's contract:
 //! - add [`ShipEditorCorePlugin`] (plus `MeshPickingPlugin`, a
@@ -26,8 +27,7 @@
 //! ship) must filter its own part aggregations `Without<EditorPart>`.
 
 // Editor systems are query-heavy Bevy systems; the arg-count and
-// type-complexity ceilings fight the natural shape (same allowance the
-// pre-extraction editor binary carried at file level).
+// type-complexity ceilings fight the natural shape.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 pub mod commands;
@@ -42,8 +42,8 @@ pub mod visuals;
 use bevy::picking::mesh_picking::MeshPickingPlugin;
 use bevy::prelude::*;
 
-use crate::ShipyardPlugin;
-use crate::sizing::propagate_node_sizes;
+use thalos_shipyard::ShipyardPlugin;
+use thalos_shipyard::sizing::propagate_node_sizes;
 
 pub use commands::{CollectQuery, collect_blueprint};
 pub use debug_log::SelectionLog;
@@ -71,33 +71,33 @@ pub use visuals::{
     VisualSpec, engine_visual_profile, host_top_diameter, ship_part_params, visual_spec,
 };
 
-/// The current [`crate::PartParams`] of a selected part, read back from its
+/// The current [`thalos_shipyard::PartParams`] of a selected part, read back from its
 /// kind components. Front-end inspectors use this to compute live resource
-/// capacities (`crate::resource_capacity_for`) for the selection.
+/// capacities (`thalos_shipyard::resource_capacity_for`) for the selection.
 pub fn inspector_params(
-    dec: Option<&crate::Decoupler>,
-    adapter: Option<&crate::Adapter>,
-    tank: Option<&crate::FuelTank>,
-    fuselage: Option<&crate::Fuselage>,
-    wing: Option<&crate::Wing>,
-    gear: Option<&crate::Gear>,
-) -> crate::PartParams {
+    dec: Option<&thalos_shipyard::Decoupler>,
+    adapter: Option<&thalos_shipyard::Adapter>,
+    tank: Option<&thalos_shipyard::FuelTank>,
+    fuselage: Option<&thalos_shipyard::Fuselage>,
+    wing: Option<&thalos_shipyard::Wing>,
+    gear: Option<&thalos_shipyard::Gear>,
+) -> thalos_shipyard::PartParams {
     if let Some(d) = dec {
-        crate::PartParams::Decoupler {
+        thalos_shipyard::PartParams::Decoupler {
             diameter: d.diameter,
         }
     } else if let Some(a) = adapter {
-        crate::PartParams::Adapter {
+        thalos_shipyard::PartParams::Adapter {
             diameter: a.diameter,
             target_diameter: a.target_diameter,
         }
     } else if let Some(t) = tank {
-        crate::PartParams::Tank {
+        thalos_shipyard::PartParams::Tank {
             diameter: t.diameter,
             length: t.length,
         }
     } else if let Some(f) = fuselage {
-        crate::PartParams::Fuselage {
+        thalos_shipyard::PartParams::Fuselage {
             length: f.length,
             max_width: f.max_width,
             max_height: f.max_height,
@@ -111,7 +111,7 @@ pub fn inspector_params(
             tail_bluntness: f.tail_bluntness,
         }
     } else if let Some(w) = wing {
-        crate::PartParams::Wing {
+        thalos_shipyard::PartParams::Wing {
             span: w.span,
             root_chord: w.root_chord,
             tip_chord: w.tip_chord,
@@ -122,12 +122,12 @@ pub fn inspector_params(
             control_surfaces: w.control_surfaces.clone(),
         }
     } else if let Some(g) = gear {
-        crate::PartParams::Gear {
+        thalos_shipyard::PartParams::Gear {
             strut_length: g.strut_length,
             wheel_radius: g.wheel_radius,
         }
     } else {
-        crate::PartParams::None
+        thalos_shipyard::PartParams::None
     }
 }
 

@@ -138,6 +138,18 @@ const SEABED_FADE_LO_M: f64 = -1_500.0;
 /// mesas at the waterline.
 const SHELF_BREACH_CAP_M: f64 = 14.0;
 
+/// Elevation half-width (m about sea level) of the coastal band in which the
+/// LOD-aware relief cascade is faded out, so the **shoreline is the crossing of
+/// the LOD-invariant macro (continent) field**, not of the relief on a near-flat
+/// coast. Without this the waterline wandered kilometres between the coarse LOD a
+/// coast is drawn at from orbit and the fine LOD up close (the relief octaves
+/// fade in/out with camera distance, and a gentle coast turns a few metres of
+/// height change into kilometres of horizontal shift — see
+/// `examples/coastline_lod.rs`). Wider → a broader smooth foreshore but a more
+/// rock-steady waterline; on a flat coast the smoothed apron is ~`COAST_BAND_M /
+/// slope` wide, which is where the pinning is needed most.
+const COAST_BAND_M: f64 = 60.0;
+
 /// Rolling hills layer: mid wavelength, land-masked, LOD-aware octaves.
 const HILLS_WL_M: f64 = 6_000.0;
 const HILLS_AMP_M: f64 = 420.0;
@@ -730,17 +742,36 @@ fn hypsometric_height(c: f64) -> f64 {
     }
 }
 
-/// Add relief to the macro base, soft-limiting how far **sub-sea** relief may
-/// breach the surface. Land (`macro_h >= 0`) and any point that stays below sea
-/// level pass through unchanged; only a sub-sea point whose relief would lift it
-/// above 0 is saturated toward [`SHELF_BREACH_CAP_M`], so shallow shelves read
-/// as low islets / beaches rather than a field of flat-topped waterline mesas.
+/// Add relief to the macro base, keeping the **shoreline a property of the
+/// LOD-invariant macro field** and the **ocean a single connected body**.
+///
+/// Two rules, both about the sea-level crossing:
+///
+/// 1. **Coastal fade.** The relief cascade ([`ProceduralSurface::
+///    height_and_orogeny`]) is LOD-aware (its octaves fade with camera distance),
+///    so if it defined the waterline the coast would move as you fly in — badly,
+///    because a gentle coast turns a few metres of LOD height wobble into
+///    kilometres of horizontal shift. So relief is faded to zero as the macro
+///    surface approaches the waterline (over [`COAST_BAND_M`]): near the shore
+///    `h → macro_h`, whose zero crossing is LOD-invariant. Relief resumes at full
+///    strength inland/offshore, so coastal hills and the seabed keep their texture.
+///
+/// 2. **No sea on land, no land in the sea.** Macro **land** (`macro_h >= 0`) is
+///    floored at the waterline: relief may not carve an isolated basin below sea
+///    level, so the ocean stays the single connected body the macro field defines
+///    (closed land basins are future inland lakes, not sea — deferred). Macro
+///    **seabed** may breach only up to [`SHELF_BREACH_CAP_M`] (low skerries /
+///    beaches), never a field of flat-topped waterline mesas.
 fn combine_macro_and_relief(macro_h: f64, relief: f64) -> f64 {
-    let h = macro_h + relief;
-    if macro_h >= 0.0 || h <= 0.0 {
-        return h;
+    let coast_fade = smoothstep(0.0, COAST_BAND_M, macro_h.abs());
+    let h = macro_h + relief * coast_fade;
+    if macro_h >= 0.0 {
+        h.max(0.0)
+    } else if h <= 0.0 {
+        h
+    } else {
+        SHELF_BREACH_CAP_M * (1.0 - (-h / SHELF_BREACH_CAP_M).exp())
     }
-    SHELF_BREACH_CAP_M * (1.0 - (-h / SHELF_BREACH_CAP_M).exp())
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
-use thalos_shipyard::editor::EditorPart;
+use crate::shipyard_editor::core::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial,
@@ -198,7 +198,7 @@ pub(crate) fn load_blueprint_from_path(path: &str) -> Option<ShipBlueprint> {
 /// Shared by the startup [`spawn_player_ship`] and the editor's Launch
 /// relaunch ([`crate::relaunch::finish_relaunch`]). The caller has already
 /// set the canonical craft **state** (where it flies); this sets **what**
-/// it is. The spawned parts carry no [`thalos_shipyard::editor::EditorPart`]
+/// it is. The spawned parts carry no [`crate::shipyard_editor::core::EditorPart`]
 /// marker, so — unlike the editor's build — they enter the flight
 /// aggregations (fuel, staging, inertia, colliders).
 pub(crate) fn build_player_ship(
@@ -503,7 +503,7 @@ fn sync_view_mode_changed(
 }
 
 // ---------------------------------------------------------------------------
-// Part mesh + material rebuild (ported from ship_editor)
+// Part mesh + material rebuild (shares the mesh builders with the shipyard editor)
 // ---------------------------------------------------------------------------
 
 struct VisualSpec {

@@ -23,11 +23,8 @@ game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_g
 game mode=env_var_or_default("THALOS_SPAWN", "menu"):
     {{game_command}} -- {{mode}}
 
-# Standalone egui ship editor — the secondary front-end over the shared
-# editor core (`thalos_shipyard::editor`). The primary, Bevy-UI editor is
-# integrated in the game: `just game shipyard`.
-shipyard:
-    cargo run -p thalos_shipyard --bin ship_editor
+# The ship editor is the in-game Bevy-UI editor: `just game shipyard`
+# (or the pause menu's SHIPYARD button). There is no standalone editor binary.
 
 # Headless procedural-object gallery: renders each object (trees, conifer,
 # shrub; rocks etc. later) to a PNG under tools/preview/out/, then exits. No
