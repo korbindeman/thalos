@@ -18,12 +18,14 @@
 mod atmosphere;
 mod lighting;
 mod multi_scatter;
+mod sky_view;
 
 pub use atmosphere::{AtmosphereBlock, CLOUD_BAND_COUNT};
 pub use lighting::{MAX_ECLIPSE_OCCLUDERS, MAX_STARS, SceneLighting, StarLight};
 pub use multi_scatter::{
-    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, bake_multi_scatter_lut,
+    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, MultiScatterLut, bake_multi_scatter_lut,
 };
+pub use sky_view::{SKY_VIEW_LUT_HEIGHT, SKY_VIEW_LUT_WIDTH, SkyViewLut};
 
 use bevy::prelude::*;
 

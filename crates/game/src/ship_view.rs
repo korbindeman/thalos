@@ -34,6 +34,8 @@ use thalos_shipyard::{
     landing_gear_base, pod_visual_profile, stainless_steel_base,
 };
 
+use thalos_body_render::{ShadowedStandardMaterial, shadowed};
+
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
 use crate::rendering::{CelestialBody, PlayerShip, ShipMarker, SimulationState, SolarSystemState};
@@ -658,13 +660,14 @@ type VisualQuery<'w, 's> = Query<
 
 /// Spawn (or respawn) the body mesh child for each part whose attach
 /// layout just changed. Parts with [`PartMaterial`] use [`ShipPartMaterial`]
-/// for the procedural stainless finish; the remainder fall back to a plain
-/// `StandardMaterial`.
+/// for the procedural stainless finish; the remainder fall back to a
+/// [`ShadowedStandardMaterial`] (stock PBR + the shared sun-shadow receive,
+/// F6 — a bare `StandardMaterial` would opt out of the one shadow world).
 fn rebuild_ship_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut std_materials: ResMut<Assets<ShadowedStandardMaterial>>,
     parts: VisualQuery,
     stale: Query<(), With<PartVisual>>,
 ) {
@@ -734,7 +737,7 @@ fn rebuild_ship_visuals(
             // CommandPod and Engine have no `PartMaterial` yet: give them the
             // same stainless-steel base finish as the fuel tank so the whole
             // craft reads as one material (no procedural seam shader on these).
-            let mat = std_materials.add(stainless_steel_base());
+            let mat = std_materials.add(shadowed(stainless_steel_base()));
             commands
                 .spawn((
                     Mesh3d(mesh),
@@ -757,7 +760,7 @@ fn rebuild_ship_visuals(
 fn rebuild_ship_wing_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut std_materials: ResMut<Assets<ShadowedStandardMaterial>>,
     wings: Query<
         (Entity, &Wing, &SurfaceMount, Option<&Children>),
         (
@@ -785,11 +788,11 @@ fn rebuild_ship_wing_visuals(
             mount.angle,
         );
         let mesh = meshes.add(build_wing_mesh(wing, mount.angle, parent_radius));
-        let mat = std_materials.add(StandardMaterial {
+        let mat = std_materials.add(shadowed(StandardMaterial {
             double_sided: true,
             cull_mode: None,
             ..stainless_steel_base()
-        });
+        }));
         let body = commands
             .spawn((
                 Mesh3d(mesh),
@@ -807,11 +810,11 @@ fn rebuild_ship_wing_visuals(
         let side_sign = if mount.angle.sin() >= 0.0 { 1.0 } else { -1.0 };
         for surface in &wing.control_surfaces {
             let built = build_control_surface_mesh(wing, surface, mount.angle, parent_radius);
-            let mat = std_materials.add(StandardMaterial {
+            let mat = std_materials.add(shadowed(StandardMaterial {
                 double_sided: true,
                 cull_mode: None,
                 ..stainless_steel_base()
-            });
+            }));
             let cs = commands
                 .spawn((
                     Mesh3d(meshes.add(built.mesh)),
@@ -870,7 +873,7 @@ fn animate_ship_control_surfaces(
 fn rebuild_ship_nacelle_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut std_materials: ResMut<Assets<ShadowedStandardMaterial>>,
     engines: Query<
         (Entity, &Engine, &SurfaceMount, Option<&Children>),
         (
@@ -920,7 +923,7 @@ fn rebuild_ship_nacelle_visuals(
                 chord_fraction: mount.angle,
             },
         ));
-        let mat = std_materials.add(stainless_steel_base());
+        let mat = std_materials.add(shadowed(stainless_steel_base()));
         let body = commands
             .spawn((
                 Mesh3d(mesh),
@@ -943,7 +946,7 @@ fn rebuild_ship_nacelle_visuals(
 fn rebuild_ship_gear_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut std_materials: ResMut<Assets<ShadowedStandardMaterial>>,
     gears: Query<
         (Entity, &Gear, &SurfaceMount, Option<&Children>),
         (
@@ -971,11 +974,11 @@ fn rebuild_ship_gear_visuals(
             mount.angle,
         );
         let mesh = meshes.add(build_gear_mesh(gear, mount.angle, parent_radius));
-        let mat = std_materials.add(StandardMaterial {
+        let mat = std_materials.add(shadowed(StandardMaterial {
             double_sided: true,
             cull_mode: None,
             ..landing_gear_base()
-        });
+        }));
         let body = commands
             .spawn((
                 Mesh3d(mesh),

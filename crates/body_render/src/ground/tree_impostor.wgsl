@@ -20,6 +20,7 @@
 }
 #import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage, object_aerial_recession}
 #import thalos::foliage::foliage_hue_tint
+#import thalos::shadow::is_ortho_projection
 
 // Mirror of GrassParams (shared with grass.wgsl / tree.wgsl) — field order
 // load-bearing.
@@ -106,8 +107,17 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let tangent_w = t0 * cw + b0 * sw;
     let bitangent_w = -t0 * sw + b0 * cw;
 
-    // View direction (object→camera) in the tree frame.
-    let view_w = normalize(view.world_position - base_w);
+    // View direction (object→camera) in the tree frame. In the sun-shadow
+    // CASTER pass (orthographic cascade camera) every "view ray" is parallel
+    // to the light, so use the camera's backward axis (object → sun) instead
+    // of the eye-relative direction — the card then faces the SUN and the
+    // octahedral atlas is sampled from the sun's angle, casting the right
+    // canopy silhouette regardless of where the tree sits in the cascade box.
+    let ortho_caster = is_ortho_projection(view.clip_from_view);
+    var view_w = normalize(view.world_position - base_w);
+    if (ortho_caster) {
+        view_w = normalize(view.world_from_view[2].xyz);
+    }
     let d_local = vec3<f32>(
         dot(view_w, tangent_w),
         dot(view_w, up_w),
@@ -141,7 +151,9 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let band = max(tree.time_fade.w, 1.0);
     let fade_in = smoothstep(near_edge - band, near_edge + band, inst_dist);
     let fade_out = 1.0 - smoothstep(far_edge - band, far_edge + band, inst_dist);
-    let grow = fade_in * fade_out;
+    // Caster pass: the fade reference is wrong-camera there (see tree.wgsl) —
+    // cast at full scale; the depth map is a silhouette union.
+    let grow = select(fade_in * fade_out, 1.0, ortho_caster);
     half = half * grow;
 
     let c = in.uv0 * 2.0 - 1.0;

@@ -59,9 +59,8 @@ use thalos_body_render::udlod::prelude::{
     TerrainBundle, TerrainViewComponents, TileAtlas, TileProvider, TileTree,
 };
 use thalos_body_render::{
-    AtmosphereBlock, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow,
-    CASCADE_COUNT, MapOceanMaterial, MapOceanParams, PipelineTileProvider, SceneLighting,
-    rendered_height_range,
+    AtmosphereBlock, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, CASCADE_COUNT,
+    MapOceanMaterial, MapOceanParams, PipelineTileProvider, SceneLighting, rendered_height_range,
 };
 use thalos_terrain::{ProceduralSurface, SurfaceQuery};
 use thalos_world::BodyId;
@@ -406,7 +405,6 @@ fn spawn_map_terrain(
         atmosphere,
         scene: SceneLighting::default(),
         extras: BodyTerrainExtras {
-            craft_shadow: BodyTerrainShadow::default(),
             debug: BodyTerrainDebug::default(),
             // z = 1.0 flags "distant schematic" so the terrain shader renders the
             // specular matte — at map distance the undersampled baked normal makes
@@ -418,6 +416,8 @@ fn spawn_map_terrain(
         sun_shadow_map_0: sun_shadow_maps[0].clone(),
         sun_shadow_map_1: sun_shadow_maps[1].clone(),
         sun_shadow_map_2: sun_shadow_maps[2].clone(),
+        // Orbital map terrain never runs SSAO (inspection.w stays 0); white fallback.
+        ao: Handle::default(),
     };
 
     let entity = commands

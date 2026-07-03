@@ -1,10 +1,11 @@
 //! Cascaded sun-aligned shadow maps for ground vegetation + terrain.
 //!
 //! The UDLOD terrain pass is a custom pipeline and does **not** receive Bevy's
-//! cascaded shadow maps — it shades in its own shader and historically received
-//! shadows only through the analytic craft proxy (`BodyTerrainShadow`), which
-//! can't represent thousands of scattered trees, so the forest read as a flat,
-//! unshadowed carpet.
+//! cascaded shadow maps — it shades in its own shader. (It historically received
+//! shadows only through an analytic craft proxy (`BodyTerrainShadow`), which
+//! couldn't represent thousands of scattered trees; that proxy is now retired —
+//! the craft casts into this rig like everything else, so its shadow has one
+//! definition.)
 //!
 //! This module renders a self-managed **cascaded** directional shadow map:
 //!
@@ -24,8 +25,10 @@
 //!
 //! Centring on the craft (near the ground) — not the camera — keeps the shadowed
 //! area put as the view orbits, and keeps each cascade's orthographic depth range
-//! shallow regardless of how high the view camera is. Gated off above a
-//! camera-altitude limit so it costs nothing in orbit.
+//! shallow regardless of how high the view camera is. Above a camera-altitude
+//! limit the ground-projected set collapses to a single craft-centred cascade
+//! (craft self-shadow in orbit — stock Bevy CSM is off, this is the one shadow
+//! world).
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,9 +71,12 @@ pub const SHADOW_CASTER_LAYER: usize = 8;
 /// the near cascade and ~2.0 m for the far one — crisper cliff and ridge shadows.
 const SHADOW_MAP_SIZE: u32 = 4096;
 
-/// Half-width (m) of each cascade's orthographic box, near→far. Centred on the
-/// craft; cascade 0 is tight + crisp, the last reaches out to cover the whole
-/// mesh-tree band (~2.2 km swap) with margin.
+/// BASELINE half-width (m) of each cascade's orthographic box, near→far,
+/// at/below [`SHADOW_REFERENCE_ALTITUDE_M`]. Centred on the craft; cascade 0 is
+/// tight + crisp, the last reaches out to cover the whole mesh-tree band
+/// (~2.2 km swap) with margin. Above the reference altitude the whole set
+/// scales ∝ camera altitude (see [`SHADOW_MAX_FOOTPRINT_SCALE`]) so coverage
+/// tracks the visible footprint.
 const CASCADE_HALF_EXTENTS_M: [f32; CASCADE_COUNT] = [400.0, 1500.0, 4000.0];
 
 /// Per-cascade orthographic far plane (m). Only needs to bracket terrain relief +
@@ -78,19 +84,67 @@ const CASCADE_HALF_EXTENTS_M: [f32; CASCADE_COUNT] = [400.0, 1500.0, 4000.0];
 /// Orthographic depth is linear, so clip-space bias = metres / `(far − near)`.
 const CASCADE_FARS_M: [f32; CASCADE_COUNT] = [1500.0, 5000.0, 12000.0];
 
-/// Per-cascade depth-compare bias in **metres**. Larger for coarser far cascades
-/// to fight acne; small for the crisp near cascade so canopy detail survives.
-const CASCADE_BIAS_M: [f32; CASCADE_COUNT] = [0.6, 2.5, 10.0];
+// Depth bias / receiver offset are no longer authored here: the shared sampler
+// (`thalos::shadow`) derives them per cascade from the texel size published in
+// `params.y` — texel-proportional with a hard absolute cap (`BIAS_MAX_M` /
+// `NORMAL_OFFSET_MAX_M` in `shadow.wgsl`). The cap is the load-bearing part: a
+// bias larger than a caster's height along the light ERASES its shadow, and
+// per-cascade hand constants (the old 10 m far-cascade bias vs ~10 m trees) —
+// let alone footprint-scaled ones — did exactly that, which is why far/zoomed
+// shadow coverage looked dead while near cascades were fine.
 
-/// How far back along the sun the ortho cameras sit above the region centre.
-/// Irrelevant to an orthographic footprint, but it IS the distance
-/// `tree.wgsl`'s scale-fade sees, so it's kept small.
+/// Base up-sun eye offset of the ortho cameras above the region centre. The
+/// real offset adds the per-cascade ground slack (`half / tanθ` — see the
+/// up-sun depth-slack note in `update_sun_shadow_camera`), without which the
+/// near plane clips everything more than ~this far up-sun of the craft out of
+/// the shadow world. (The caster shaders bypass their camera-anchored fades in
+/// the ortho pass, so a large eye distance is harmless to them.)
 const SHADOW_BACK_DISTANCE_M: f32 = 150.0;
 const SHADOW_NEAR_M: f32 = 0.5;
 
-/// Disable the whole rig above this camera altitude (AGL, m). Shadows are a
-/// ground-level effect; rendering cascades from orbit is pure waste.
-const SHADOW_MAX_ALTITUDE_M: f32 = 6000.0;
+/// Per-cascade MINIMUM half-extents (m), keyed to the vegetation caster band:
+/// the tree rings (`TREE_RINGS` in `rendering/vegetation.rs`) place casting
+/// tree entities out to 22 km from the craft — beyond that nothing exists to
+/// cast, so shadows "running out" inside that band is a coverage bug, not a
+/// content limit. Cascade 0 keeps its small footprint-scaled box (crisp craft
+/// / near-field shadows); cascade 1 always spans the mesh + near-impostor
+/// rings (~6 km); cascade 2 always spans the whole band, so existing casters
+/// never outrun shadow coverage regardless of where the camera sits. The
+/// footprint scale still grows any of them further when the vantage demands it.
+const CASCADE_MIN_HALF_M: [f32; CASCADE_COUNT] = [0.0, 6_500.0, 23_500.0];
+
+/// Depth margin (m) bracketing terrain relief above/below the centre's tangent
+/// plane. With band-wide boxes, casters on hills inside the box sit well above
+/// the plane and would otherwise fall in front of the near plane at high sun —
+/// the vertical cousin of the up-sun ground slack.
+const SHADOW_RELIEF_MARGIN_M: f32 = 4_000.0;
+
+/// Lower clamp on sin(sun elevation) for the up-sun ground-slack term. Below
+/// this (~4°) the along-sun ground reach diverges toward the horizon; shadows
+/// there are horizon-length streaks and the terminator is about to end them
+/// anyway.
+const SHADOW_MIN_SUN_SIN: f32 = 0.07;
+
+/// Hard cap (m) on the per-cascade up-sun ground slack, bounding the ortho
+/// depth range at extreme footprint scales (Depth32Float is linear over
+/// `far − near`; keep the range sane).
+const SHADOW_SLACK_MAX_M: f32 = 80_000.0;
+
+/// Above this camera altitude (AGL, m) the rig drops the ground-projected
+/// cascade set and switches to **craft-local mode**: cascade 0 only, centred on
+/// the craft, far cascades parked. With stock Bevy CSM disabled (F6 — one
+/// shadow world) the craft must keep shadowing *itself* in orbit, so the rig
+/// never fully turns off while a craft exists. High: by here the whole surface
+/// scene is far sub-pixel; below it the FOOTPRINT SCALING keeps ground shadows
+/// alive at any zoom (the old 6 km hard cut made every shadow in the world
+/// vanish the moment the camera boomed out — the "shadows only at some
+/// distances" bug).
+const SHADOW_MAX_ALTITUDE_M: f32 = 50_000.0;
+
+/// Cap for the view footprint scale. At 32× the far cascade reaches 128 km and
+/// the near cascade's texel is ~6 m — coarse, but shadows that far from the
+/// vantage are a few pixels tall anyway; beyond the cap they'd be sub-pixel.
+const SHADOW_MAX_FOOTPRINT_SCALE: f32 = 32.0;
 
 /// Default shadow darkening strength (0 = off, 1 = black). Higher values give
 /// hard cliff/ridge contrast; ambient fill keeps shadowed ground from going pure black.
@@ -368,7 +422,9 @@ fn log_shadow_state(line: &str) {
 }
 
 /// Aim every cascade camera down the sun over the craft and publish their
-/// transforms. Disables the rig away from a vegetated surface / from orbit.
+/// transforms. Near the surface: three ground-projected cascades. In orbit /
+/// high flight: one craft-centred cascade (self-shadow only). Fully disabled
+/// only when there is no terrain body / camera / states at all.
 #[allow(clippy::type_complexity)]
 fn update_sun_shadow_camera(
     sim: Res<SimulationState>,
@@ -377,7 +433,10 @@ fn update_sun_shadow_camera(
     ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
     origin: Res<crate::rendering::RenderOrigin>,
     focus_override: Res<ShadowFocusOverride>,
-    mut shadow_cams: Query<(&mut Transform, &mut Camera, &SunShadowCascade), Without<ShipCamera>>,
+    mut shadow_cams: Query<
+        (&mut Transform, &mut Camera, &mut Projection, &SunShadowCascade),
+        Without<ShipCamera>,
+    >,
     mut state: ResMut<SunShadowState>,
     mut frame: Local<u64>,
 ) {
@@ -423,9 +482,12 @@ fn update_sun_shadow_camera(
         body_dbg = format!("{active_id:?}");
         // The base editor's god view (override active) bypasses the gate: it can
         // boom out several km but is always inspecting the near-surface base.
-        if focus_override.center_world.is_none() && altitude > SHADOW_MAX_ALTITUDE_M {
-            reason = "too_high";
-            break 'resolve;
+        // Off-surface, don't disable — switch to craft-local self-shadow mode
+        // (see `SHADOW_MAX_ALTITUDE_M`).
+        let craft_local =
+            focus_override.center_world.is_none() && altitude > SHADOW_MAX_ALTITUDE_M;
+        if craft_local {
+            reason = "craft_local";
         }
         let (Some(star), Some(body_state)) = (states.first(), states.get(active_id)) else {
             reason = "no_state";
@@ -467,26 +529,91 @@ fn update_sun_shadow_camera(
         let up_radial = if r > 1.0e-3 { (radial / r).as_vec3() } else { Vec3::Y };
         let player_alt = (r - body_radius_m as f64) as f32;
         let player_render = (player_inertial - origin.position).as_vec3();
-        let center = player_render - up_radial * player_alt;
+        // Craft-local mode centres the (single) cascade on the craft itself —
+        // projecting to a ground point tens/hundreds of km below would throw
+        // the box away from the only caster that matters up here.
+        let center = if craft_local {
+            player_render
+        } else {
+            player_render - up_radial * player_alt
+        };
         let up = if sun_dir.dot(Vec3::Y).abs() > 0.99 {
             Vec3::Z
         } else {
             Vec3::Y
         };
-        // Base light rotation — identical for every cascade (only the
-        // texel-snapped translation differs). Looks down the sun over `center`.
-        let base_look =
-            Transform::from_translation(center + sun_dir * SHADOW_BACK_DISTANCE_M).looking_at(center, up);
+        // View footprint scale: the cascade set stays CENTRED on the craft
+        // (this-frame canonical anchor — camera transforms lag a frame here and
+        // crawl; see the centring note below), but it must COVER whatever
+        // ground the camera is looking at from ANY vantage. Two view terms
+        // size it: the camera↔craft separation (orbit the camera to the far
+        // side of the base and the visible foreground is that far from the
+        // craft — with a craft-sized box, shadows existed only from some
+        // angles), plus a foreground extent that grows with camera altitude.
+        // Everything scales together: extents, depth range, back distance
+        // (the sampler's bias/offset derive from the published texel size and
+        // are hard-capped, so a wider box coarsens shadows instead of erasing
+        // them). Craft-local mode keeps the baseline — the craft is metres
+        // across regardless of altitude.
+        let footprint = if craft_local {
+            1.0
+        } else {
+            let cam_dist = (cam_pos - player_render).length();
+            let required_half_m = cam_dist + altitude.max(0.0) * 2.0;
+            (required_half_m / CASCADE_HALF_EXTENTS_M[CASCADE_COUNT - 1])
+                .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE)
+        };
+        // ── Up-sun depth slack ────────────────────────────────────────────────
+        // The cascade box is square in the LIGHT plane, but its intersection
+        // with the GROUND stretches along the sun azimuth as the sun drops: a
+        // ground point `d` up-sun of the centre sits at ray-depth
+        // `back − d·cosθ`, so with a small fixed `back` everything beyond
+        // ~`back/cosθ` up-sun of the craft fell in front of the NEAR PLANE —
+        // clipped out of the depth map AND out of the receiver test. Result:
+        // shadows existed only on the down-sun side of the craft (a hard
+        // directional boundary through the base — "inconsistent by angle").
+        // Push the eye up-sun by the box's ground reach along the azimuth
+        // (`half/tanθ`, overbounded by dropping a cosθ) and extend the far
+        // plane by twice that so the down-sun extreme + terrain relief still
+        // fit. Clamped: below ~4° sun the reach diverges (and shadows are
+        // horizon-length anyway), and a hard cap bounds the depth range at
+        // extreme footprints.
+        let sin_elev = sun_dir.dot(up_radial).clamp(SHADOW_MIN_SUN_SIN, 1.0);
+        let ground_slack = |half: f32| -> f32 {
+            let cos_elev = (1.0 - sin_elev * sin_elev).max(0.0).sqrt();
+            (half * cos_elev / sin_elev).min(SHADOW_SLACK_MAX_M)
+        };
+        // Rotation is shared by every cascade (only translation differs); any
+        // eye distance yields the same rotation.
+        let base_look = Transform::from_translation(center + sun_dir * SHADOW_BACK_DISTANCE_M)
+            .looking_at(center, up);
         let light_right = base_look.rotation * Vec3::X;
         let light_up = base_look.rotation * Vec3::Y;
         let eye_dbg = center + sun_dir * SHADOW_BACK_DISTANCE_M;
         let sun_dbg = sun_dir;
 
+        // Craft-local mode runs only the crisp near cascade; the far cascades'
+        // matrices are zeroed (the shader's `clip.w <= 0` skip sentinel) and
+        // their cameras deactivated, so their stale depth maps are never read.
+        let active_cascades = if craft_local { 1 } else { CASCADE_COUNT };
         let mut block = ShadowCascadeBlock::default();
         let mut looks = [Transform::IDENTITY; CASCADE_COUNT];
+        let mut halves = [0.0_f32; CASCADE_COUNT];
+        let mut fars = [0.0_f32; CASCADE_COUNT];
         for i in 0..CASCADE_COUNT {
-            let half = CASCADE_HALF_EXTENTS_M[i];
-            let far = CASCADE_FARS_M[i];
+            if i >= active_cascades {
+                block.view_proj[i] = Mat4::ZERO;
+                continue;
+            }
+            let half = (CASCADE_HALF_EXTENTS_M[i] * footprint).max(CASCADE_MIN_HALF_M[i]);
+            // Up-sun eye offset + far plane bracket this cascade's whole
+            // ground footprint along the sun azimuth (see the slack note) plus
+            // terrain relief above/below the tangent plane.
+            let slack = ground_slack(half) + SHADOW_RELIEF_MARGIN_M;
+            let back = SHADOW_BACK_DISTANCE_M * footprint + slack;
+            let far = CASCADE_FARS_M[i] * footprint + 2.0 * slack;
+            halves[i] = half;
+            fars[i] = far;
             // Texel-snap the cascade centre to ITS shadow-map grid in the light
             // plane, so the ortho frustum slides in whole-texel steps and shadow
             // edges stop crawling as the camera moves (stable CSM). Each cascade
@@ -497,19 +624,40 @@ fn update_sun_shadow_camera(
             let snap = ((cr / texel).round() * texel - cr) * light_right
                 + ((cu / texel).round() * texel - cu) * light_up;
             let center_i = center + snap;
-            let eye_i = center_i + sun_dir * SHADOW_BACK_DISTANCE_M;
+            let eye_i = center_i + sun_dir * back;
             let look_i = Transform::from_translation(eye_i).looking_at(center_i, up);
             block.view_proj[i] = cascade_clip_from_view(half, far) * look_i.to_matrix().inverse();
-            // Orthographic z is linear → clip-space bias = metres / (far − near).
-            block.params[i] = Vec4::new(CASCADE_BIAS_M[i] / (far - SHADOW_NEAR_M), 0.0, 0.0, 0.0);
+            // x = clip units per metre of light-space depth (orthographic z is
+            // linear), y = texel size in world metres — the shared sampler
+            // derives its capped, texel-proportional bias + receiver offset
+            // from these (see the bias model note in `shadow.wgsl`).
+            block.params[i] = Vec4::new(1.0 / (far - SHADOW_NEAR_M), texel, 0.0, 0.0);
             looks[i] = look_i;
         }
-        block.gate = Vec4::new(SHADOW_STRENGTH, CASCADE_COUNT as f32, 0.0, 0.0);
+        block.gate = Vec4::new(SHADOW_STRENGTH, active_cascades as f32, 0.0, 0.0);
+        // Sun direction (toward the sun) drives the sampler's slope-scaled bias.
+        block.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
         state.block = block;
 
-        for (mut tf, mut cam, cascade) in &mut shadow_cams {
-            *tf = looks[cascade.index as usize];
-            cam.is_active = true;
+        for (mut tf, mut cam, mut proj, cascade) in &mut shadow_cams {
+            let idx = cascade.index as usize;
+            let on = idx < active_cascades;
+            if on {
+                *tf = looks[idx];
+                // Keep the LIVE camera projection in lockstep with the
+                // hand-built `block.view_proj` — the spawn-time projection only
+                // covers the unscaled baseline footprint.
+                *proj = Projection::Orthographic(OrthographicProjection {
+                    scaling_mode: ScalingMode::Fixed {
+                        width: halves[idx] * 2.0,
+                        height: halves[idx] * 2.0,
+                    },
+                    near: SHADOW_NEAR_M,
+                    far: fars[idx],
+                    ..OrthographicProjection::default_3d()
+                });
+            }
+            cam.is_active = on;
         }
 
         if log_now {
@@ -535,7 +683,7 @@ fn update_sun_shadow_camera(
         return;
     }
 
-    for (_tf, mut cam, _cascade) in &mut shadow_cams {
+    for (_tf, mut cam, _proj, _cascade) in &mut shadow_cams {
         cam.is_active = false;
     }
     state.block.gate.x = 0.0;

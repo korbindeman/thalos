@@ -20,7 +20,7 @@
 }
 #import thalos::lighting::{compute_surface_sky, FoliageSurface, shade_foliage, SurfaceSky, object_aerial_recession, sun_daylight}
 #import thalos::foliage::{foliage_base_albedo, foliage_hue_tint}
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor, is_ortho_projection}
 
 struct TreeParams {
     // xyz = unit direction toward the star (world render space), w = sun flux
@@ -151,7 +151,13 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let band = max(tree.time_fade.w, 1.0);
     let fade_in = smoothstep(near_edge - band, near_edge + band, inst_dist);
     let fade_out = 1.0 - smoothstep(far_edge - band, far_edge + band, inst_dist);
-    let grow = fade_in * fade_out;
+    // In the sun-shadow CASTER pass (orthographic cascade camera) the fade
+    // reference above reconstructs the craft from the WRONG camera — the
+    // cascade eye, not the player view — so `grow` collapsed every caster to
+    // zero once the two cameras diverged (shadows vanished as the camera
+    // boomed away). Casters render at full scale instead: the depth map is a
+    // silhouette union, so mesh + impostor rings overlapping is harmless.
+    let grow = select(fade_in * fade_out, 1.0, is_ortho_projection(view.clip_from_view));
     let local = base + (in.position - base) * grow;
     var world_pos =
         mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local, 1.0)).xyz;

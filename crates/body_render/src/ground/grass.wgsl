@@ -18,7 +18,7 @@
 }
 #import thalos::lighting::{compute_surface_sky, SurfaceSky, FoliageSurface, shade_foliage, object_aerial_recession}
 #import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
-#import thalos::grass_displace::{grass_blade_world_pos, grass_tuft_alpha}
+#import thalos::grass_displace::grass_blade_world_pos
 
 struct GrassParams {
     // xyz = unit direction toward the star (world render space), w = sun flux
@@ -52,6 +52,16 @@ struct GrassParams {
 @group(3) @binding(3) var sun_shadow_map_1: texture_depth_2d;
 @group(3) @binding(4) var sun_shadow_map_2: texture_depth_2d;
 
+// Baked grass clump-card atlas (thalos_texgen::grass_card_atlas): variant cells
+// side by side; A = coverage, RGB = tint modulation (linear, encoded ÷ the
+// range below). Sampled only on CARD quads (far/mid rings).
+@group(3) @binding(5) var grass_card_atlas: texture_2d<f32>;
+@group(3) @binding(6) var grass_card_sampler: sampler;
+
+// Mirrors thalos_texgen::GRASS_CARD_VARIANTS / GRASS_CARD_RGB_SCALE.
+const GRASS_CARD_VARIANTS: f32 = 4.0;
+const GRASS_CARD_RGB_SCALE: f32 = 1.35;
+
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
@@ -81,9 +91,10 @@ struct VertexOutput {
     @location(4) @interpolate(flat) sky0: vec4<f32>, // sun_color.rgb, sun_scale
     @location(5) @interpolate(flat) sky1: vec4<f32>, // sky_radiance.rgb
     @location(6) @interpolate(flat) sky2: vec4<f32>, // ground_radiance.rgb
-    // Clump-card data: x = across-card fraction, y = height fraction, z = 1 on a
-    // CARD (far/mid rings) → the fragment paints the procedural tuft alpha and
-    // discards the gaps; 0 on a solid blade. (`root.w` carries the card flag.)
+    // Clump-card data: x = across-card fraction, y = height fraction, z = 1 +
+    // atlas variant on a CARD (far/mid rings) → the fragment samples the baked
+    // card atlas and discards the gaps; 0 on a solid blade. (`root.w` carries
+    // the card flag + variant.)
     @location(7) card: vec3<f32>,
 }
 
@@ -138,21 +149,33 @@ fn vertex(in: VertexInput) -> VertexOutput {
     out.sky0 = vec4<f32>(sky.sun_color, sky.sun_scale);
     out.sky1 = vec4<f32>(sky.sky_radiance, 0.0);
     out.sky2 = vec4<f32>(sky.ground_radiance, 0.0);
-    // For a card: uv.x = height, uv.y = across; root.w = 1 marks it. Blades carry
-    // root.w = 0 → card.z = 0 → fragment treats them as solid (no tuft discard).
+    // For a card: uv.x = height, uv.y = across; root.w = 1 + variant marks it.
+    // Blades carry root.w = 0 → card.z = 0 → fragment treats them as solid (no
+    // atlas discard).
     out.card = vec3<f32>(in.uv.y, in.uv.x, in.root.w);
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Clump cards (far/mid rings) carry a procedural grass-tuft alpha — discard the
-    // gaps between blades so a single quad reads as a tuft. Blades (card.z = 0) are
-    // solid and skip this. Matches the prepass discard so the depth lines up.
+    // Clump cards (far/mid rings) sample the baked card atlas — a painted cluster
+    // of layered blades — discarding the gaps so a single quad reads as a slice of
+    // meadow, and modulating the per-clump tint by the texel (root-dark → bright
+    // tips, per-blade hue drift — the same ramp the blade vertex colours carry).
+    // Blades (card.z = 0) are solid and skip this. `textureSampleLevel` (the atlas
+    // is mip-free) keeps the sample legal in non-uniform control flow.
+    var albedo = in.color.rgb;
     if in.card.z > 0.5 {
-        if grass_tuft_alpha(in.card.x, in.card.y) < 0.5 {
+        let variant = clamp(floor(in.card.z - 0.5), 0.0, GRASS_CARD_VARIANTS - 1.0);
+        let uv = vec2<f32>(
+            (variant + clamp(in.card.x, 0.0, 1.0)) / GRASS_CARD_VARIANTS,
+            1.0 - clamp(in.card.y, 0.0, 1.0),
+        );
+        let texel = textureSampleLevel(grass_card_atlas, grass_card_sampler, uv, 0.0);
+        if texel.a < 0.5 {
             discard;
         }
+        albedo *= texel.rgb * GRASS_CARD_RGB_SCALE;
     }
 
     // Reconstruct the per-draw-constant sky the vertex shader integrated once.
@@ -173,7 +196,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let up = grass.sky_up.xyz;
     let sun_dir = grass.sun_dir.xyz;
     var s: FoliageSurface;
-    s.albedo = in.color.rgb;
+    s.albedo = albedo;
     s.normal_ws = n;
     s.translucency = 0.0;
     s.ambient_scale = 1.0;

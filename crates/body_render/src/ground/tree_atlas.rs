@@ -30,6 +30,15 @@ pub fn build_foliage_material_atlas() -> Image {
     upload(thalos_texgen::foliage_material_atlas(), TextureFormat::Rgba8Unorm)
 }
 
+/// Build the **grass clump-card atlas** as a GPU `Image`, ready to bind on
+/// `GrassMaterial` — the baked blade-cluster texture the far-band crossed-quad
+/// cards sample (see [`thalos_texgen::grass_card_atlas`]). **Linear**
+/// (`Rgba8Unorm`, NOT sRGB): RGB is a tint *modulation* the shader multiplies
+/// over the per-clump landcover colour, A is coverage.
+pub fn build_grass_card_atlas() -> Image {
+    upload(thalos_texgen::grass_card_atlas(), TextureFormat::Rgba8Unorm)
+}
+
 /// Upload a CPU [`thalos_texgen::TextureData`] into a filterable, clamped,
 /// mip-free GPU `Image` in the given format.
 fn upload(tex: thalos_texgen::TextureData, format: TextureFormat) -> Image {

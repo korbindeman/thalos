@@ -22,6 +22,7 @@ pub(crate) mod real_space;
 mod rocks;
 mod scene_depth;
 mod spawn;
+pub(crate) mod ssao;
 pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
 mod trails;
@@ -98,6 +99,7 @@ pub struct RenderingPlugin;
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(SceneDepthPlugin)
+            .add_plugins(ssao::SsaoPlugin)
             .add_plugins(sun_shadow::SunShadowPlugin)
             .add_plugins(TerrainResidencyPlugin)
             .add_plugins(map_terrain::MapTerrainPlugin)

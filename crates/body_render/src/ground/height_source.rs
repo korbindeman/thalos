@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use bevy::math::{DVec2, UVec2, Vec2, Vec3};
+use bevy::math::{DVec2, DVec3, UVec2, Vec2, Vec3};
 use bevy::prelude::*;
 use thalos_terrain::SurfaceQuery;
 use thalos_udlod::math::{Coordinate, TerrainModel, TileCoordinate};
@@ -39,6 +39,93 @@ pub trait HeightSource: Send + Sync {
         let _ = (center_dir, max_resolution);
         None
     }
+}
+
+/// Ground-distance march stations for [`horizon_sun_visibility`], metres from
+/// the receiver toward the sun azimuth. Geometric spacing: dense close in
+/// (nearby ridge / dune rims dominate low-sun occlusion), sparse far out
+/// (large-relief mountains). ~30 km reach covers any relief that can
+/// meaningfully shade a surface point on a Thalos-scale body.
+const HORIZON_MARCH_STATIONS_M: [f64; 10] = [
+    150.0, 270.0, 490.0, 880.0, 1_600.0, 2_900.0, 5_200.0, 9_400.0, 17_000.0, 30_000.0,
+];
+
+/// Angular softness (radians) of the horizon crossing — roughly the sun's
+/// angular diameter, so the terminator a mountain sweeps over a parked craft
+/// fades in rather than hard-cutting.
+const HORIZON_SOFT_EDGE_RAD: f64 = 0.012;
+
+/// Terrain **horizon-angle sun visibility** at a body-fixed point (graphics
+/// fidelity W12, object-side v1): marches the body's [`HeightSource`] along the
+/// sun's ground azimuth and compares the steepest occluding elevation angle
+/// against the sun's elevation. Returns 1 fully sunlit → 0 fully occluded.
+///
+/// This is the object-world complement of the terrain shader's own
+/// height-atlas self-shadow march (`terrain_self_shadow` in
+/// `body_terrain.wgsl`): the terrain darkens its valleys per-fragment there,
+/// and this term lets the *objects standing in the valley* (craft, structures,
+/// EVA — everything lit by the sun `DirectionalLight`) fall into the same
+/// mountain shadow, at unlimited range beyond the cascade rig.
+///
+/// Pure body-local f64 math over the live height source — no bake, warp-safe
+/// (a pure function of the instantaneous sun direction).
+///
+/// `point_bf_m` is the receiver's body-fixed position (metres from the body
+/// centre); `sun_dir_bf` the body-fixed unit direction toward the sun.
+pub fn horizon_sun_visibility(
+    point_bf_m: DVec3,
+    sun_dir_bf: DVec3,
+    radius_m: f64,
+    source: &dyn HeightSource,
+) -> f32 {
+    let r = point_bf_m.length();
+    if r <= 1.0 || radius_m <= 1.0 {
+        return 1.0;
+    }
+    let up = point_bf_m / r;
+    let sun_up = up.dot(sun_dir_bf).clamp(-1.0, 1.0);
+    let sun_elev = sun_up.asin();
+    // Well below the geometric horizon the day/night gate already owns the
+    // darkening; well above any plausible relief slope nothing can occlude.
+    if sun_elev < -0.05 {
+        return 0.0;
+    }
+    if sun_elev > 0.5 {
+        return 1.0;
+    }
+    // Ground azimuth toward the sun. Degenerate (sun overhead) ⇒ visible.
+    let tangent = sun_dir_bf - up * sun_up;
+    let tl = tangent.length();
+    if tl < 1.0e-6 {
+        return 1.0;
+    }
+    let tangent = tangent / tl;
+
+    let mut max_occluder_elev = f64::NEG_INFINITY;
+    for d in HORIZON_MARCH_STATIONS_M {
+        let arc = d / radius_m;
+        let dir_k = (up * arc.cos() + tangent * arc.sin()).normalize();
+        // LOD hint scales with distance — far stations only need coarse relief.
+        let lod_m = (d * 0.02).max(1.0) as f32;
+        let h = source
+            .sample_height_m(dir_k.as_vec3(), lod_m)
+            .unwrap_or(0.0)
+            .max(0.0) as f64; // ocean surface occludes at the 0 m datum
+        let ground = dir_k * (radius_m + h);
+        let rel = ground - point_bf_m;
+        let rl = rel.length();
+        if rl < 1.0 {
+            continue;
+        }
+        let elev = (rel.dot(up) / rl).clamp(-1.0, 1.0).asin();
+        max_occluder_elev = max_occluder_elev.max(elev);
+    }
+    if !max_occluder_elev.is_finite() {
+        return 1.0;
+    }
+    // Soft crossing around the occluder horizon.
+    let t = (sun_elev - max_occluder_elev) / (2.0 * HORIZON_SOFT_EDGE_RAD) + 0.5;
+    t.clamp(0.0, 1.0) as f32
 }
 
 pub struct CpuPipelineHeightSource {

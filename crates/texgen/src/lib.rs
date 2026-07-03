@@ -540,65 +540,182 @@ fn draw_bark_material(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
     }
 }
 
-// ── Grass billboard texture ──────────────────────────────────────────────────
+// ── Grass clump-card atlas ───────────────────────────────────────────────────
+//
+// The far-band grass representation: instead of a fountain of blade strips, the
+// game draws two crossed quads per clump and samples this atlas — the classic
+// baked grass-card technique (paint a whole cluster of blades once, splat it on
+// a card). Two layers per cell give the card depth: a dim, packed background
+// understory behind sharp, bright foreground blades — so it reads as a slice of
+// meadow, not a fence of stripes.
+//
+// The RGB channels store a **modulation**, not a colour: the grass shader
+// multiplies the decoded texel (× [`GRASS_CARD_RGB_SCALE`]) over the per-clump
+// landcover tint, so cards track the terrain palette exactly like the near
+// blade meshes (whose vertex colours carry the same root-dark → tip-light ramp
+// + per-blade hue/value jitter this texture bakes). Upload as **linear**
+// (`Rgba8Unorm`), not sRGB. A is straight coverage alpha (shader discards
+// below 0.5).
 
-/// Width of the grass billboard texture.
-pub const GRASS_TEX_W: u32 = 256;
-/// Height of the grass billboard texture.
-pub const GRASS_TEX_H: u32 = 256;
+/// Card variants in the atlas, side by side left → right. Each card picks one
+/// by clump hash so neighbouring cards differ.
+pub const GRASS_CARD_VARIANTS: u32 = 4;
+/// Pixels per card cell — ~2:1 wide, matching the card quad's world aspect.
+pub const GRASS_CARD_CELL_W: u32 = 512;
+pub const GRASS_CARD_CELL_H: u32 = 256;
+/// The atlas RGB stores `modulation / GRASS_CARD_RGB_SCALE` so the per-blade
+/// hue/value jitter that peaks above 1.0 survives u8 encoding; the shader
+/// multiplies the decoded texel back up. Mirrored as a literal in `grass.wgsl`.
+pub const GRASS_CARD_RGB_SCALE: f32 = 1.35;
 
-/// Generate a **multi-blade grass billboard** texture (sRGBA8, straight alpha):
-/// a row of thin tapered blades rooted at the bottom and fanning up — mostly
-/// upright with a shared slight lean and some per-blade variation, so a tuft
-/// reads as "facing the same direction with variation" rather than a chaotic
-/// bush. Mapped onto the vertical cross-quad grass billboards (reads from any
-/// horizontal angle); the transparent background alpha-tests away between blades.
-pub fn grass_blades() -> TextureData {
-    let (w, h) = (GRASS_TEX_W as usize, GRASS_TEX_H as usize);
-    let mut px = vec![[0.0f32; 4]; w * h];
-    let (fw, fh) = (w as f32, h as f32);
-    let root_y = fh * 0.985;
-    let seed = 0x9B_1A_DEu64;
-
-    const NB: u32 = 15;
-    // Shared prevailing lean (px the tip drifts sideways) — blades mostly face
-    // one way; per-blade variance is added on top.
-    let common_lean = fw * 0.07;
-    for i in 0..NB {
-        let s = seed ^ (i as u64).wrapping_mul(GOLD);
-        // Roots spread across the width (evenly seeded + jittered) so blades
-        // start at distinct spots, not all stacked.
-        let frac = (i as f32 + 0.5) / NB as f32;
-        let rx = fw * (0.10 + 0.80 * frac) + (hash01(s, 1) - 0.5) * fw * 0.045;
-        let height = fh * (0.52 + 0.42 * hash01(s, 2));
-        // Mostly the shared lean, ± per-blade variation (a few drift the other
-        // way for naturalness).
-        let lean = common_lean * (0.4 + hash01(s, 3)) + (hash01(s, 4) - 0.5) * fw * 0.12;
-        let bow = (hash01(s, 5) - 0.5) * fw * 0.06;
-        let base_w = fw * (0.011 + 0.010 * hash01(s, 6));
-        stamp_blade(&mut px, w, h, rx, root_y, height, lean, bow, base_w, s);
-    }
-
-    let mut rgba = vec![0u8; w * h * 4];
-    for (i, p) in px.iter().enumerate() {
-        rgba[i * 4] = to_u8(p[0]);
-        rgba[i * 4 + 1] = to_u8(p[1]);
-        rgba[i * 4 + 2] = to_u8(p[2]);
-        rgba[i * 4 + 3] = to_u8(p[3]);
+/// Generate the grass clump-card atlas (**linear** RGBA8 — modulation + straight
+/// coverage alpha, see the module comment above). Deterministic.
+pub fn grass_card_atlas() -> TextureData {
+    let (cw, ch) = (GRASS_CARD_CELL_W as usize, GRASS_CARD_CELL_H as usize);
+    let aw = cw * GRASS_CARD_VARIANTS as usize;
+    let mut rgba = vec![0u8; aw * ch * 4];
+    for variant in 0..GRASS_CARD_VARIANTS {
+        let cell = draw_grass_card_cell(variant as u64 * 6151 + 17);
+        for y in 0..ch {
+            for x in 0..cw {
+                let p = cell[y * cw + x];
+                let idx = (y * aw + variant as usize * cw + x) * 4;
+                rgba[idx] = to_u8(p[0]);
+                rgba[idx + 1] = to_u8(p[1]);
+                rgba[idx + 2] = to_u8(p[2]);
+                rgba[idx + 3] = to_u8(p[3]);
+            }
+        }
     }
     TextureData {
-        width: w as u32,
-        height: h as u32,
+        width: aw as u32,
+        height: ch as u32,
         rgba,
     }
 }
 
+/// Paint one card cell (straight-alpha scratch, `GRASS_CARD_CELL_W × _H`):
+/// background understory first, foreground blades over it, then a left/right
+/// edge fade so the two crossed quads of a card blend where they meet.
+fn draw_grass_card_cell(seed: u64) -> Vec<[f32; 4]> {
+    let (w, h) = (GRASS_CARD_CELL_W as usize, GRASS_CARD_CELL_H as usize);
+    let mut px = vec![[0.0f32; 4]; w * h];
+    let (fw, fh) = (w as f32, h as f32);
+    // Roots just below the bottom edge so the base row is dense to the edge
+    // (the card sits on the ground; a gap under the roots would float it).
+    let root_y = fh * 1.02;
+    // Per-variant prevailing lean, so different cards read as differently
+    // wind-combed patches rather than four copies of one tuft.
+    let common_lean = (hash01(seed, 90) - 0.5) * fw * 0.16;
+
+    // Background understory: dim, slightly wider blades drawn first — the dark
+    // packed mass the bright blades read against (the reference-card depth cue).
+    for i in 0..52u32 {
+        let s = seed ^ 0x00B1_ADE5 ^ (i as u64).wrapping_mul(GOLD);
+        let frac = (i as f32 + 0.5) / 52.0;
+        let rx = fw * frac + (hash01(s, 1) - 0.5) * fw * 0.05;
+        let height = fh * (0.38 + 0.42 * hash01(s, 2));
+        let lean = common_lean * (0.4 + hash01(s, 3)) + (hash01(s, 4) - 0.5) * fw * 0.20;
+        let bow = (hash01(s, 5) - 0.5) * fw * 0.07;
+        let base_w = fw * (0.009 + 0.008 * hash01(s, 6));
+        // Slightly dimmed ramp: reads as shadowed depth behind the bright
+        // blades, but stays close to the near-blade root value (0.62) so the
+        // minified average doesn't sink below the terrain albedo (a too-dark
+        // understory shows as a dark far-grass band in-game).
+        let v = 0.85 + 0.25 * hash01(s, 7);
+        let hue = (hash01(s, 8) - 0.5) * 0.10;
+        stamp_card_blade(&mut px, w, h, rx, root_y, height, lean, bow, base_w, |t| {
+            let val = (0.44 + 0.32 * t) * v / GRASS_CARD_RGB_SCALE;
+            [val * (1.0 + hue), val, val * (1.0 - hue)]
+        });
+    }
+
+    // Foreground blades: sharp, full modulation ramp — root-dark → bright tip,
+    // matching the near blade meshes' vertex ramp (0.62 → 1.0) with the same
+    // per-blade hue drift + value jitter `push_grass_blade` applies.
+    for i in 0..34u32 {
+        let s = seed ^ 0x0F0E_60A2 ^ (i as u64).wrapping_mul(GOLD);
+        let frac = (i as f32 + 0.5) / 34.0;
+        let rx = fw * frac + (hash01(s, 1) - 0.5) * fw * 0.06;
+        let height = fh * (0.55 + 0.42 * hash01(s, 2));
+        let lean = common_lean * (0.5 + hash01(s, 3)) + (hash01(s, 4) - 0.5) * fw * 0.16;
+        let bow = (hash01(s, 5) - 0.5) * fw * 0.08;
+        let base_w = fw * (0.008 + 0.007 * hash01(s, 6));
+        let v = 0.86 + 0.24 * hash01(s, 7);
+        let hue = (hash01(s, 8) - 0.5) * 0.12;
+        stamp_card_blade(&mut px, w, h, rx, root_y, height, lean, bow, base_w, |t| {
+            // The near-blade vertex ramp: 0.62 at the root → 1.0 at the tip.
+            let val = (0.62 + 0.38 * t.powf(0.85)) * v / GRASS_CARD_RGB_SCALE;
+            [val * (1.0 + hue), val, val * (1.0 - hue)]
+        });
+    }
+
+    // The `over` compositing above blended blades onto a *black* transparent
+    // background, so partially-covered texels carry black-darkened RGB — and
+    // bilinear filtering near edges mixes fully-transparent black texels in.
+    // Both show up as dark fringes / a dark cast once the card is minified at
+    // distance. Un-premultiply the RGB back out of the coverage, then bleed
+    // colour a few texels into the transparent surround.
+    for p in px.iter_mut() {
+        if p[3] > 1.0e-3 {
+            let inv = 1.0 / p[3];
+            p[0] *= inv;
+            p[1] *= inv;
+            p[2] *= inv;
+        }
+    }
+    for _ in 0..6 {
+        let snap = px.clone();
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if snap[i][3] > 2.0e-2 {
+                    continue;
+                }
+                let (mut acc, mut n) = ([0.0f32; 3], 0.0f32);
+                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    let q = snap[ny as usize * w + nx as usize];
+                    // Any texel that already carries colour (covered, or filled
+                    // by an earlier dilation pass) contributes.
+                    if q[0] + q[1] + q[2] > 1.0e-4 {
+                        acc[0] += q[0];
+                        acc[1] += q[1];
+                        acc[2] += q[2];
+                        n += 1.0;
+                    }
+                }
+                if n > 0.0 && px[i][0] + px[i][1] + px[i][2] <= 1.0e-4 {
+                    px[i][0] = acc[0] / n;
+                    px[i][1] = acc[1] / n;
+                    px[i][2] = acc[2] / n;
+                }
+            }
+        }
+    }
+
+    // Left/right edge fade (alpha only, after the un-premultiply so it doesn't
+    // re-darken RGB): neighbouring crossed quads blend instead of showing hard
+    // quad borders.
+    for y in 0..h {
+        for x in 0..w {
+            let fx = (x as f32 + 0.5) / fw;
+            let edge = smooth01((fx / 0.05).min(1.0)) * smooth01(((1.0 - fx) / 0.05).min(1.0));
+            px[y * w + x][3] *= edge;
+        }
+    }
+    px
+}
+
 /// Rasterize one curved tapered grass blade: a quadratic Bézier from the root
 /// `(rx, ry)` to the tip `(rx + lean, ry - height)` with a perpendicular `bow`,
-/// stamped as overlapping soft discs whose radius tapers root → tip, coloured
-/// deep-green at the root fading to a lighter tip.
+/// stamped as overlapping soft discs whose radius tapers root → tip. `color`
+/// maps the along-blade fraction `t` (0 root → 1 tip) to the disc colour.
 #[allow(clippy::too_many_arguments)]
-fn stamp_blade(
+fn stamp_card_blade(
     px: &mut [[f32; 4]],
     w: usize,
     h: usize,
@@ -608,7 +725,7 @@ fn stamp_blade(
     lean: f32,
     bow: f32,
     base_w: f32,
-    seed: u64,
+    color: impl Fn(f32) -> [f32; 3],
 ) {
     let tip_x = rx + lean;
     let tip_y = ry - height;
@@ -626,9 +743,7 @@ fn stamp_blade(
         let bx = omt * omt * rx + 2.0 * omt * t * cx + t * t * tip_x;
         let by = omt * omt * ry + 2.0 * omt * t * cy + t * t * tip_y;
         let bw = (base_w * omt.powf(0.6)).max(0.5);
-        // Deep green at the root → lighter toward the tip.
-        let ct = (0.12 + 0.72 * t).clamp(0.0, 1.0);
-        stamp_disk(px, w, h, bx, by, bw, leaf_palette(ct, seed));
+        stamp_disk(px, w, h, bx, by, bw, color(t));
     }
 }
 

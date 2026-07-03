@@ -35,9 +35,16 @@ review). The doc is now organised around two ideas, not a flat task list:
 
 Status of in-flight work (now tracked by substrate in the doc's §4):
 
-- **Shadows** ✅ — cascaded sun-shadow via `thalos::shadow`; terrain/trees/grass/
-  rocks receive, trees+rocks cast. *Next:* craft/structures as casters+receivers
-  (the core "everything interacts" fix), stable CSM, terrain horizon self-shadow.
+- **Shadows** ☑ — **one shadow world landed 2026-07-02** (F6, compile-clean,
+  awaiting screenshots): everything casts into + receives the `thalos::shadow`
+  rig — the `StandardMaterial` universe (structures/runway/plain parts/EVA) via
+  the new `ShadowedStandardMaterial`, hull via `ship_part.wgsl`; **stock Bevy
+  CSM on the sun is disabled**; the analytic terrain craft-shadow proxy is
+  deleted; stable CSM (receiver normal-offset + slope-scaled bias); a craft-local
+  single-cascade mode keeps hull self-shadow in orbit; W12 v1 (CPU horizon march
+  dims the sun on objects parked behind terrain). *Next:* screenshot tuning,
+  per-fragment horizon term for spine materials, PCSS (W18), cloud shadows (W2).
+  See `docs/shadow_unification_prompt.md` for the full status block.
 - **Landcover + palette / aerial recession / moonlight** ◐ — in `thalos::lighting`
   / `thalos::landcover`; awaiting screenshots. Moonlight converges into F1 (the
   two moon models become one); aerial recession folds inside `shade_surface`.
@@ -46,8 +53,9 @@ Status of in-flight work (now tracked by substrate in the doc's §4):
   `CameraExposure`'s input distance-gain is the sole brightness authority (plus a
   fixed `color_grading.exposure` baseline, `GLOBAL_EXPOSURE_STOPS` in
   `post_stack.rs`); compile-landed, awaiting a noon screenshot to calibrate.
-  **sky-view-LUT→IBL (F3/F4), AO (F5), shadow-rig unification (F6)** ☐ — the rest
-  of this sprint's foundation.
+  **sky-view-LUT→IBL (F3/F4), AO (F5)** ◐ and **shadow-rig unification (F6)** ☑
+  (landed 2026-07-02, see the Shadows bullet) — the rest of this sprint's
+  foundation.
 - **Terrain tiling-material detail, hull/structure spine port, LOD chain** ☐ — next.
 
 ### Shared shader library rule
@@ -62,7 +70,7 @@ the shared libraries, never re-implement lighting/palette locally:
 | `thalos::shadow` | `ShadowCascadeBlock`, `sun_shadow_factor` |
 | `thalos::landcover` | `vegetation_color`, `forest_coverage` (CPU mirror: `ground/landcover.rs`) |
 | `thalos::foliage` | foliage albedo model (near mesh + impostor bake) |
-| `thalos::grass_displace` | `grass_blade_world_pos`, `grass_tuft_alpha` (shared with depth-prepass) |
+| `thalos::grass_displace` | `grass_blade_world_pos` |
 
 When a palette or BRDF constant moves, it moves in one place.
 

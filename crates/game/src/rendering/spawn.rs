@@ -885,36 +885,33 @@ pub(super) fn spawn_bodies(
 
     // Directional light simulating sunlight. Direction is updated per-frame
     // by `update_sun_light` to point from the star toward the camera focus body.
-    // Using a DirectionalLight with cascaded shadow maps instead of a PointLight
-    // because Bevy's point light can't handle solar-system-scale distances.
+    //
+    // **Stock Bevy CSM is OFF** (F6 — one shadow world): every surface that used
+    // to receive Bevy's cascades (hull via `ShipPartMaterial`, structures /
+    // runway / plain parts / EVA via `ShadowedStandardMaterial`) now samples the
+    // custom `thalos::shadow` rig (`rendering::sun_shadow`) — the same cascades
+    // the terrain / trees / grass / rocks read — so the sun light only *lights*.
+    // Re-enabling `shadow_maps_enabled` would create a second, disagreeing
+    // shadow definition; don't.
     commands.spawn((
         DirectionalLight {
             illuminance: 10_000.0,
             color: Color::WHITE,
-            shadow_maps_enabled: true,
+            shadow_maps_enabled: false,
             ..default()
         },
-        // The ship is the only shadow caster — every body mesh is tagged
-        // `NotShadowCaster` / `NotShadowReceiver`. A ~10 m caster doesn't
-        // need a 100 km cascade chain; two cascades sized for the ship's
-        // local neighbourhood keep the shadow pass cheap. The count is the
-        // shared `SHADOW_CASCADE_COUNT` (see its doc for the Bevy bug that
-        // requires every directional light to agree on it).
+        // Shadows are off, but a bare `DirectionalLight` silently gets Bevy's
+        // default 4-cascade config; pin the shared `SHADOW_CASCADE_COUNT` so a
+        // future flip of `shadow_maps_enabled` can't reintroduce the
+        // `check_dir_light_mesh_visibility` over-index panic (see its doc).
         CascadeShadowConfigBuilder {
             num_cascades: super::SHADOW_CASCADE_COUNT,
-            minimum_distance: 0.1,
-            maximum_distance: 500.0,
-            first_cascade_far_bound: 30.0,
-            overlap_proportion: 0.2,
+            ..default()
         }
         .build(),
-        // The light must share a render layer with its shadow *casters*:
-        // `check_dir_light_mesh_visibility` intersects the light's layers
-        // with each mesh's before adding it to the cascade lists, and the
-        // craft's part visuals are re-stamped onto SHIP_LAYER every frame
-        // by `view::propagate_view_render_layers` (the `HideInMapView`
-        // subtree stamp). Without SHIP_LAYER here the craft never enters
-        // the shadow map and casts nothing on the runway or itself.
+        // Shares SHIP_LAYER so the light *illuminates* the craft subtree (the
+        // part visuals are re-stamped onto SHIP_LAYER every frame by
+        // `view::propagate_view_render_layers`).
         bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::coords::SHIP_LAYER]),
         Transform::default(),
         SunLight,

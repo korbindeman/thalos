@@ -239,7 +239,7 @@ fn register_eva_visual(
         (With<PlayerControllerBody>, With<LocalCraftBody>),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<thalos_body_render::ShadowedStandardMaterial>>,
     mut focus: ResMut<CameraFocus>,
 ) {
     if state.active.is_some() {
@@ -265,12 +265,14 @@ fn register_eva_visual(
         PLAYER_RADIUS_M as f32,
         PLAYER_CAPSULE_SEGMENT_M as f32,
     ));
-    let material = materials.add(StandardMaterial {
+    // Shadow-receiving material (F6): the EVA suit stands in the same one
+    // shadow world as the terrain/craft — a tree or hangar shades the player.
+    let material = materials.add(thalos_body_render::shadowed(StandardMaterial {
         base_color: Color::srgb(0.92, 0.84, 0.64),
         perceptual_roughness: 0.8,
         metallic: 0.0,
         ..default()
-    });
+    }));
     let visual_entity = commands
         .spawn((
             Mesh3d(mesh),

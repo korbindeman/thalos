@@ -639,7 +639,29 @@ CPU-authored cubemap, rewritten every `REFRESH_INTERVAL` seconds
   changed; Bevy's runtime filter pipeline re-prefilters diffuse +
   specular mips downstream.
 
-Lives in `crates/game/src/reflection_probe.rs`. ~300 lines.
+Under a terrestrial atmosphere the painter blends by altitude (across
+the Kármán line) from that orbital model into a **surface sky**: the
+lower hemisphere is a warm analytic terrain ground-bounce, and the
+**upper hemisphere is the physical `SkyViewLut`** (graphics-fidelity
+**F3**) — a CPU raymarch of the *same* single + multiple-scattering
+model the terrain shades through (`integrate_atmosphere_multiscatter`,
+sharing the `body_render::shading::multi_scatter` primitives), baked
+into a small `(azimuth-from-sun × view-zenith)` LUT for the current sun
+direction + altitude and sampled per cubemap texel. This replaced a
+hand-kept analytic `cpu_surface_sky` that had to be mirrored against the
+spine's WGSL `compute_surface_sky` by hand — so the metallic hull and
+dielectric structures now reflect the real atmosphere-derived sky, with
+no CPU/WGSL drift hazard. `PHYSICAL_SKY_SCALE` (=1.0, the physical
+baseline) is the one calibration dial. The multi-scatter LUT the bake
+needs is static per body, so it is cached (keyed by body id) and only
+the view-dependent sky-view LUT rebakes on a sun/altitude shift.
+
+F4 will project this same LUT to SH ambient for the terrain and
+`StandardMaterial` paths (the probe already consumes it for the hull),
+retiring the hand-tuned `GlobalAmbientLight`.
+
+Lives in `crates/game/src/reflection_probe.rs`; the sky-view LUT
+mechanism in `crates/body_render/src/shading/sky_view.rs`.
 
 ### Why not render the actual scene into the cubemap
 

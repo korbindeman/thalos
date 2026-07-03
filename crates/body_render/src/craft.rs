@@ -137,6 +137,54 @@ impl MaterialExtension for ShipPartExtension {
     }
 }
 
+/// Generic sun-shadow-receiving `StandardMaterial`: stock PBR plus the shared
+/// `thalos::shadow` cascade receive, with no procedural detail layer.
+///
+/// This is what closes the F6 "structures receive" gap: every surface-world
+/// mesh that used a bare `StandardMaterial` (base buildings / pads / tanks,
+/// the runway paving + posts, the tarmac, plain craft parts — pods, engines,
+/// wings, nacelles, gear — and the EVA capsule) uses this instead, so it
+/// receives the SAME cascade the terrain / trees / craft cast into. With that
+/// in place the stock Bevy CSM on the sun light is disabled entirely — one
+/// shadow world.
+pub type ShadowedStandardMaterial = ExtendedMaterial<StandardMaterial, ShadowReceiveExtension>;
+
+/// The receive-only extension behind [`ShadowedStandardMaterial`]. Bindings
+/// mirror [`ShipPartExtension`]'s shadow half (uniform 100, depth maps
+/// 101–103); driven per-frame from [`CraftShadowMaps`] by
+/// [`apply_craft_shadow`], exactly like the hull.
+#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
+pub struct ShadowReceiveExtension {
+    #[uniform(100)]
+    pub shadow: ShadowCascadeBlock,
+    #[texture(101, sample_type = "depth")]
+    pub sun_shadow_map_0: Handle<Image>,
+    #[texture(102, sample_type = "depth")]
+    pub sun_shadow_map_1: Handle<Image>,
+    #[texture(103, sample_type = "depth")]
+    pub sun_shadow_map_2: Handle<Image>,
+}
+
+impl MaterialExtension for ShadowReceiveExtension {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/shadowed_standard.wgsl".into()
+    }
+
+    fn deferred_fragment_shader() -> ShaderRef {
+        "shaders/shadowed_standard.wgsl".into()
+    }
+}
+
+/// Wrap a base `StandardMaterial` into the shadow-receiving material with the
+/// default (fallback) shadow state — `apply_craft_shadow` patches the live
+/// cascade in each frame.
+pub fn shadowed(base: StandardMaterial) -> ShadowedStandardMaterial {
+    ShadowedStandardMaterial {
+        base,
+        extension: ShadowReceiveExtension::default(),
+    }
+}
+
 // ── Craft render plugin + sun-shadow receiving ────────────────────────────────
 
 /// Live sun-shadow cascade for craft materials — the hull/gear *receiving* side.
@@ -175,6 +223,7 @@ impl Plugin for CraftRenderPlugin {
             app.add_plugins(crate::shading::PlanetLightingPlugin);
         }
         app.add_plugins(MaterialPlugin::<ShipPartMaterial>::default())
+            .add_plugins(MaterialPlugin::<ShadowedStandardMaterial>::default())
             .init_resource::<CraftShadowMaps>()
             .add_systems(Startup, setup_craft_shadow_fallback)
             .add_systems(PostUpdate, apply_craft_shadow);
@@ -202,10 +251,22 @@ fn setup_craft_shadow_fallback(mut images: ResMut<Assets<Image>>, mut maps: ResM
 }
 
 /// Fan the current [`CraftShadowMaps`] (real cascade in-game, fallback elsewhere)
-/// onto every craft material so the hull/gear receive the shared sun-shadow
+/// onto every craft material AND every generic [`ShadowedStandardMaterial`]
+/// (structures, runway, plain parts) so they all receive the shared sun-shadow
 /// cascade. Per-frame, like the terrain material update.
-fn apply_craft_shadow(maps: Res<CraftShadowMaps>, mut materials: ResMut<Assets<ShipPartMaterial>>) {
+fn apply_craft_shadow(
+    maps: Res<CraftShadowMaps>,
+    mut materials: ResMut<Assets<ShipPartMaterial>>,
+    mut shadowed_materials: ResMut<Assets<ShadowedStandardMaterial>>,
+) {
     for (_, mat) in materials.iter_mut() {
+        let ext = &mut mat.extension;
+        ext.shadow = maps.block;
+        ext.sun_shadow_map_0 = maps.images[0].clone();
+        ext.sun_shadow_map_1 = maps.images[1].clone();
+        ext.sun_shadow_map_2 = maps.images[2].clone();
+    }
+    for (_, mat) in shadowed_materials.iter_mut() {
         let ext = &mut mat.extension;
         ext.shadow = maps.block;
         ext.sun_shadow_map_0 = maps.images[0].clone();

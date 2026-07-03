@@ -74,67 +74,6 @@ impl Default for BodySkyExtra {
     }
 }
 
-/// Maximum number of procedural craft parts projected onto terrain.
-///
-/// Sized for an airliner-class craft: a fuselage loft contributes three
-/// tapered segments (nose / barrel / tail) and each podded nacelle one.
-/// Excess parts are ignored rather than growing the terrain material's
-/// uniform every frame. Must match `MAX_TERRAIN_SHADOW_CASTERS` (and the
-/// two array lengths) in `body_terrain.wgsl`.
-pub const MAX_TERRAIN_SHADOW_CASTERS: usize = 24;
-
-/// Maximum number of thin planform-quad casters (lifting surfaces). Must
-/// match `MAX_TERRAIN_SHADOW_QUADS` (and the four array lengths) in
-/// `body_terrain.wgsl`. The Meridian uses 5 (two wings, two tailplanes,
-/// one fin).
-pub const MAX_TERRAIN_SHADOW_QUADS: usize = 8;
-
-/// Local player-vessel shadow proxy consumed by `body_terrain.wgsl`.
-///
-/// This is intentionally analytic rather than Bevy CSM state: the terrain
-/// pass is a custom UDLOD pipeline and the stock cascades are camera-sized,
-/// which makes tiny near-field craft shadows slide and vanish with zoom.
-///
-/// Two caster primitives: tapered capsule segments for bodies of revolution
-/// (tanks, fuselage barrels, nacelles), and thin planform quads for lifting
-/// surfaces — a wing modelled as a capsule reads chord-*thick* from the
-/// side, throwing an enormous slab at low sun, while the quad projects the
-/// true trapezoid at any sun angle and vanishes edge-on.
-#[derive(Clone, Copy, ShaderType)]
-pub struct BodyTerrainShadow {
-    /// x = strength, y = minimum penumbra width in metres,
-    /// z = max receiver distance, w = valid capsule caster count.
-    pub params: Vec4,
-    /// x = valid quad caster count, yzw reserved.
-    pub quad_params: Vec4,
-    /// xyz = part top/near endpoint in render-space metres, w = endpoint radius.
-    pub caster_a_radius: [Vec4; MAX_TERRAIN_SHADOW_CASTERS],
-    /// xyz = part bottom/far endpoint in render-space metres, w = endpoint radius.
-    pub caster_b_radius: [Vec4; MAX_TERRAIN_SHADOW_CASTERS],
-    /// Planform quad corners in render-space metres (w unused), wound
-    /// root-leading → tip-leading → tip-trailing → root-trailing so
-    /// consecutive corners trace the outline.
-    pub quad_a: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
-    pub quad_b: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
-    pub quad_c: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
-    pub quad_d: [Vec4; MAX_TERRAIN_SHADOW_QUADS],
-}
-
-impl Default for BodyTerrainShadow {
-    fn default() -> Self {
-        Self {
-            params: Vec4::ZERO,
-            quad_params: Vec4::ZERO,
-            caster_a_radius: [Vec4::ZERO; MAX_TERRAIN_SHADOW_CASTERS],
-            caster_b_radius: [Vec4::ZERO; MAX_TERRAIN_SHADOW_CASTERS],
-            quad_a: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
-            quad_b: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
-            quad_c: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
-            quad_d: [Vec4::ZERO; MAX_TERRAIN_SHADOW_QUADS],
-        }
-    }
-}
-
 /// Body-fixed phase/debug parameters consumed by `body_terrain.wgsl`.
 ///
 /// Production terrain uses these fields to anchor shader-synthesized albedo
@@ -232,12 +171,19 @@ pub const CASCADE_COUNT: usize = 3;
 pub struct ShadowCascadeBlock {
     /// Render-space → cascade clip (Bevy reverse-z orthographic), one per cascade.
     pub view_proj: [Mat4; CASCADE_COUNT],
-    /// Per cascade: x = depth bias (clip units), yzw reserved.
+    /// Per cascade: x = clip units per metre of light-space depth
+    /// (`1 / (far − near)`), y = shadow-map texel size in world metres. The
+    /// sampler derives its capped texel-proportional bias + receiver
+    /// normal-offset from these (stable-CSM W6 — see the bias model note in
+    /// `shadow.wgsl`). zw reserved.
     pub params: [Vec4; CASCADE_COUNT],
     /// x = strength (0 ⇒ skip), y = active cascade count, zw reserved. Named
     /// `gate` (not `config`) because `body_terrain.wgsl` `#import`s a udlod
     /// global called `config`, and a matching field name collides in naga_oil.
     pub gate: Vec4,
+    /// xyz = normalized render-space direction toward the sun (drives the
+    /// slope-scaled bias in `sun_shadow_factor_nrm`), w reserved.
+    pub sun_dir: Vec4,
 }
 
 impl Default for ShadowCascadeBlock {
@@ -246,6 +192,7 @@ impl Default for ShadowCascadeBlock {
             view_proj: [Mat4::IDENTITY; CASCADE_COUNT],
             params: [Vec4::ZERO; CASCADE_COUNT],
             gate: Vec4::ZERO,
+            sun_dir: Vec4::ZERO,
         }
     }
 }
@@ -264,11 +211,11 @@ impl Default for ShadowCascadeBlock {
 /// three terrain-only knobs collapse here.
 #[derive(Clone, Copy, ShaderType)]
 pub struct BodyTerrainExtras {
-    pub craft_shadow: BodyTerrainShadow,
     pub debug: BodyTerrainDebug,
     /// x = fullbright albedo output, y = surface shading style
     /// ([`TerrainShadingStyle::shader_flag`]: 0 = vegetated, 1 = regolith),
-    /// zw reserved.
+    /// z = distant-schematic flag (1 = orbital map terrain: matte specular, no
+    /// valley AO), w = SSAO enable (1 = sample+apply the `ao` map — graphics F5).
     pub inspection: Vec4,
     /// Cascaded sun-shadow transforms + per-cascade compare params (see
     /// [`ShadowCascadeBlock`]). Packed here rather than as its own `#[uniform]`
@@ -279,7 +226,6 @@ pub struct BodyTerrainExtras {
 impl Default for BodyTerrainExtras {
     fn default() -> Self {
         Self {
-            craft_shadow: BodyTerrainShadow::default(),
             debug: BodyTerrainDebug::default(),
             inspection: Vec4::ZERO,
             shadow: ShadowCascadeBlock::default(),
@@ -318,6 +264,15 @@ pub struct BodyTerrainMaterial {
     pub sun_shadow_map_1: Handle<Image>,
     #[texture(5, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    /// Half-res screen-space AO (`rendering::ssao`'s `AoImage`, R8Unorm; 1 =
+    /// unoccluded), multiplied into the ambient occlusion term only — graphics F5.
+    /// Default handle binds the white fallback (no AO); the game patches the live
+    /// AO image on the surface terrain and gates sampling via
+    /// `extras.inspection.w` (0 skips it — orbital map terrain, or before the pass
+    /// is valid). Sampled bilinear at the fragment's screen UV (1-frame latency).
+    #[texture(6)]
+    #[sampler(7)]
+    pub ao: Handle<Image>,
 }
 
 impl Material for BodyTerrainMaterial {

@@ -20,6 +20,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use thalos_body_render::{ShadowedStandardMaterial, shadowed};
 use thalos_world::BodyId;
 
 use crate::SimStage;
@@ -51,7 +52,7 @@ struct ConnectionVisual {
 #[derive(Resource, Default)]
 struct ConnectionsState {
     built: Option<(StructureId, u32)>,
-    material: Option<Handle<StandardMaterial>>,
+    material: Option<Handle<ShadowedStandardMaterial>>,
 }
 
 pub(super) struct BaseEditorConnectionsPlugin;
@@ -81,7 +82,7 @@ fn rebuild_connections(
     sim: Res<SimulationState>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<ShadowedStandardMaterial>>,
     mut state: ResMut<ConnectionsState>,
     existing: Query<(Entity, &ConnectionVisual)>,
     root: Res<RealSpaceRoot>,
@@ -152,12 +153,14 @@ fn rebuild_connections(
     let material = state
         .material
         .get_or_insert_with(|| {
-            materials.add(StandardMaterial {
+            // Shadow-receiving (F6): the tarmac darkens under structures and
+            // the craft like the flattened ground it paves over.
+            materials.add(shadowed(StandardMaterial {
                 base_color: Color::srgb(0.14, 0.14, 0.16),
                 perceptual_roughness: 0.92,
                 metallic: 0.0,
                 ..default()
-            })
+            }))
         })
         .clone();
 

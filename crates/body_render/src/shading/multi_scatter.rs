@@ -49,66 +49,142 @@ const BAKE_SPHERE_DIRECTIONS: usize = 32;
 pub const MULTI_SCATTER_LUT_WIDTH: u32 = 32;
 pub const MULTI_SCATTER_LUT_HEIGHT: u32 = 32;
 
-/// Bake the multi-scatter LUT for one body's atmosphere.
+/// CPU multi-scatter LUT: the row-major `(width × height)` grid of estimated
+/// isotropic incoming radiance (per unit sun flux × strength) indexed by
+/// `(μ_s = cos sun-zenith, h = altitude)`.
 ///
-/// Output layout: row-major `(width × height)` cells, RGBA f32 per cell in
-/// little-endian byte order, ready to be handed straight to `Image::new` with
-/// `TextureFormat::Rgba32Float`. Each cell stores the estimated isotropic
-/// incoming radiance (per unit sun flux × strength) at the cell's (μ_s, h)
-/// coordinate; alpha is unused (set to 1.0).
+/// This is the CPU-side twin of the GPU `Rgba16Float` texture sampled by
+/// `integrate_atmosphere_multiscatter` in `atmosphere.wgsl`. The GPU path uploads
+/// [`to_rgba32f_bytes`](MultiScatterLut::to_rgba32f_bytes) (repacked to f16 by the
+/// game); the CPU sky-view raymarch ([`crate::SkyViewLut`]) samples the same cells
+/// directly via [`sample`](MultiScatterLut::sample) so both stay physically
+/// identical.
+#[derive(Clone)]
+pub struct MultiScatterLut {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major `width × height` radiance cells (scene-flux-independent — the
+    /// stored value is per unit sun flux). Row `j` is altitude `((j+0.5)/height)·h_top`;
+    /// column `i` is `μ_s = (i+0.5)/width · 2 − 1`.
+    pub cells: Vec<Vec3>,
+    /// Atmosphere top altitude the LUT was baked at (render units), for the
+    /// `h → v` mapping in [`sample`](MultiScatterLut::sample).
+    pub h_top: f32,
+}
+
+impl MultiScatterLut {
+    /// Bake the multi-scatter LUT for one body's atmosphere.
+    ///
+    /// `planet_radius_render` is the body's solid radius in the same render units
+    /// as `atmos.atmos_geom.x` — i.e., post-`AtmosphereBlock::from_terrestrial`
+    /// scaling. Caller is responsible for using the same `meters_per_render_unit`
+    /// when building the atmosphere block and when supplying the planet radius
+    /// here, or the LUT will be sampled at the wrong scale. (The integral is
+    /// scale-invariant, so any consistent unit works — see `bake_multi_scatter_lut`.)
+    pub fn bake(
+        atmos: &AtmosphereBlock,
+        planet_radius_render: f32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let h_top = atmos.atmos_geom.x;
+        let h_r = atmos.rayleigh_beta_h.w.max(1e-3);
+        let h_m = atmos.atmos_geom.y.max(1e-3);
+        let beta_r = Vec3::new(
+            atmos.rayleigh_beta_h.x,
+            atmos.rayleigh_beta_h.y,
+            atmos.rayleigh_beta_h.z,
+        );
+        let beta_m = atmos.mie_beta_g.x;
+        let g = atmos.mie_beta_g.w;
+        let atmos_top_r = planet_radius_render + h_top;
+
+        let mut cells = Vec::with_capacity((width * height) as usize);
+        for j in 0..height {
+            let v = (j as f32 + 0.5) / height as f32;
+            let h = v * h_top;
+            for i in 0..width {
+                let u = (i as f32 + 0.5) / width as f32;
+                let mu_s = u * 2.0 - 1.0;
+                cells.push(bake_cell(
+                    mu_s,
+                    h,
+                    planet_radius_render,
+                    atmos_top_r,
+                    beta_r,
+                    beta_m,
+                    h_r,
+                    h_m,
+                    g,
+                ));
+            }
+        }
+        Self {
+            width,
+            height,
+            cells,
+            h_top,
+        }
+    }
+
+    /// Bilinear sample at `(μ_s, h_norm)` with clamp-to-edge, mirroring the GPU
+    /// `textureSampleLevel` in `integrate_atmosphere_multiscatter`:
+    /// `u = μ_s·0.5 + 0.5`, `v = h_norm` (both in `[0, 1]`).
+    pub fn sample(&self, mu_s: f32, h_norm: f32) -> Vec3 {
+        let u = (mu_s * 0.5 + 0.5).clamp(0.0, 1.0);
+        let v = h_norm.clamp(0.0, 1.0);
+        bilinear_clamp(&self.cells, self.width, self.height, u, v)
+    }
+
+    /// Repack to RGBA f32 little-endian bytes, ready for `Image::new` with
+    /// `TextureFormat::Rgba32Float`. Each cell is `(x, y, z, 1.0)`; alpha unused.
+    pub fn to_rgba32f_bytes(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(self.cells.len() * 4 * 4);
+        for c in &self.cells {
+            data.extend_from_slice(&c.x.to_le_bytes());
+            data.extend_from_slice(&c.y.to_le_bytes());
+            data.extend_from_slice(&c.z.to_le_bytes());
+            data.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        data
+    }
+}
+
+/// Bake the multi-scatter LUT to RGBA f32 bytes (the GPU-texture path).
 ///
-/// `planet_radius_render` is the body's solid radius in the same render units
-/// as `atmos.atmos_geom.x` — i.e., post-`AtmosphereBlock::from_terrestrial`
-/// scaling. Caller is responsible for using the same `meters_per_render_unit`
-/// when building the atmosphere block and when supplying the planet radius
-/// here, or the LUT will be sampled at the wrong scale.
+/// Thin wrapper over [`MultiScatterLut::bake`] + [`MultiScatterLut::to_rgba32f_bytes`],
+/// preserved so the existing GPU-upload call site (`rendering::spawn`) is unchanged.
+/// See [`MultiScatterLut`] for the byte layout and scale contract.
 pub fn bake_multi_scatter_lut(
     atmos: &AtmosphereBlock,
     planet_radius_render: f32,
     width: u32,
     height: u32,
 ) -> Vec<u8> {
-    let h_top = atmos.atmos_geom.x;
-    let h_r = atmos.rayleigh_beta_h.w.max(1e-3);
-    let h_m = atmos.atmos_geom.y.max(1e-3);
-    let beta_r = Vec3::new(
-        atmos.rayleigh_beta_h.x,
-        atmos.rayleigh_beta_h.y,
-        atmos.rayleigh_beta_h.z,
-    );
-    let beta_m = atmos.mie_beta_g.x;
-    let g = atmos.mie_beta_g.w;
-    let atmos_top_r = planet_radius_render + h_top;
+    MultiScatterLut::bake(atmos, planet_radius_render, width, height).to_rgba32f_bytes()
+}
 
-    let cell_count = (width * height) as usize;
-    let mut data = Vec::with_capacity(cell_count * 4 * 4);
-
-    for j in 0..height {
-        let v = (j as f32 + 0.5) / height as f32;
-        let h = v * h_top;
-        for i in 0..width {
-            let u = (i as f32 + 0.5) / width as f32;
-            let mu_s = u * 2.0 - 1.0;
-
-            let l_ms = bake_cell(
-                mu_s,
-                h,
-                planet_radius_render,
-                atmos_top_r,
-                beta_r,
-                beta_m,
-                h_r,
-                h_m,
-                g,
-            );
-
-            data.extend_from_slice(&l_ms.x.to_le_bytes());
-            data.extend_from_slice(&l_ms.y.to_le_bytes());
-            data.extend_from_slice(&l_ms.z.to_le_bytes());
-            data.extend_from_slice(&1.0f32.to_le_bytes());
-        }
+/// Bilinear lookup into a row-major `width × height` `Vec3` grid with
+/// clamp-to-edge addressing, at normalized `(u, v) ∈ [0, 1]²`. Matches a GPU
+/// `linear` sampler with clamp-to-edge: texel centers at `(i+0.5)/w, (j+0.5)/h`.
+fn bilinear_clamp(cells: &[Vec3], width: u32, height: u32, u: f32, v: f32) -> Vec3 {
+    if cells.is_empty() {
+        return Vec3::ZERO;
     }
-    data
+    let w = width.max(1);
+    let h = height.max(1);
+    let fx = (u * w as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+    let fy = (v * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+    let x0 = fx.floor() as u32;
+    let y0 = fy.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let tx = fx - x0 as f32;
+    let ty = fy - y0 as f32;
+    let at = |x: u32, y: u32| cells[(y * w + x) as usize];
+    let top = at(x0, y0).lerp(at(x1, y0), tx);
+    let bot = at(x0, y1).lerp(at(x1, y1), tx);
+    top.lerp(bot, ty)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -178,7 +254,11 @@ fn fibonacci_sphere(i: usize, n: usize) -> Vec3 {
     Vec3::new(theta.cos() * r, y, theta.sin() * r)
 }
 
-fn compute_t_exit(p: Vec3, dir: Vec3, planet_r: f32, atmos_top_r: f32) -> f32 {
+/// Distance from `p` along unit `dir` to the first exit of the atmosphere shell,
+/// clipped to a planet-surface hit if the ray enters the solid sphere first.
+/// Center is the origin. Returns `< 0` when `dir` never enters the shell.
+/// Shared with the sky-view raymarch ([`crate::SkyViewLut`]).
+pub(crate) fn compute_t_exit(p: Vec3, dir: Vec3, planet_r: f32, atmos_top_r: f32) -> f32 {
     let b = p.dot(dir);
     let c_a = p.length_squared() - atmos_top_r * atmos_top_r;
     let disc_a = b * b - c_a;
@@ -294,8 +374,12 @@ fn single_scatter_integral(
     }
 }
 
+/// Per-channel optical depth `τ = β_R·∫ρ_R + β_M·∫ρ_M` from `p` toward the sun
+/// (center at the origin), with a planet-occlusion test that saturates `τ` when
+/// the sun is below `p`'s local horizon. CPU twin of `sun_optical_depth` in
+/// `atmosphere.wgsl`; shared with the sky-view raymarch ([`crate::SkyViewLut`]).
 #[allow(clippy::too_many_arguments)]
-fn sun_optical_depth(
+pub(crate) fn sun_optical_depth(
     p: Vec3,
     sun_dir: Vec3,
     planet_r: f32,

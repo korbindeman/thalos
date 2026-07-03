@@ -1,9 +1,10 @@
 // Ground-LOD terrain shader for procedural bodies.
 //
 // Reads height, albedo, and roughness from the thalos_udlod attachment
-// atlases (group 1), ray-tests a local craft-shadow proxy, and shades by a
-// per-body surface style (see `TerrainShadingStyle` in body_material.rs,
-// carried in `terrain_extras.inspection.y`):
+// atlases (group 1), receives the shared cascaded sun-shadow rig
+// (`thalos::shadow`), and shades by a per-body surface style (see
+// `TerrainShadingStyle` in body_material.rs, carried in
+// `terrain_extras.inspection.y`):
 //
 //   * Vegetated (Thalos): rough-dielectric BRDF (Oren–Nayar diffuse +
 //     Cook–Torrance GGX specular; see the BRDF block below) over the
@@ -32,35 +33,8 @@
 // Shared vegetated-ground colour + moisture field, also mirrored CPU-side by
 // `ground/landcover.rs` so the grass blades read the exact same green.
 #import thalos::landcover::{moisture_at, macro_variation, vegetation_color}
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
-
-// Must match `MAX_TERRAIN_SHADOW_CASTERS` / `MAX_TERRAIN_SHADOW_QUADS` in
-// `body_material.rs`.
-const MAX_TERRAIN_SHADOW_CASTERS: u32 = 24u;
-const MAX_TERRAIN_SHADOW_QUADS: u32 = 8u;
-
-// Penumbra growth per metre of caster height: the star's angular diameter
-// (~0.6 deg), so contact shadows are crisp and high shadows soften out the
-// way a real sun shadow does.
-const SHADOW_PENUMBRA_PER_M: f32 = 0.011;
-
-struct BodyTerrainShadow {
-    // x = strength, y = minimum penumbra width in metres,
-    // z = max receiver distance, w = valid capsule caster count.
-    params: vec4<f32>,
-    // x = valid quad caster count, yzw reserved.
-    quad_params: vec4<f32>,
-    // xyz = part top/near endpoint in render-space metres, w = endpoint radius.
-    caster_a_radius: array<vec4<f32>, 24>,
-    // xyz = part bottom/far endpoint in render-space metres, w = endpoint radius.
-    caster_b_radius: array<vec4<f32>, 24>,
-    // Thin planform quads (lifting surfaces), corners in render-space metres
-    // wound root-LE -> tip-LE -> tip-TE -> root-TE; w unused.
-    quad_a: array<vec4<f32>, 8>,
-    quad_b: array<vec4<f32>, 8>,
-    quad_c: array<vec4<f32>, 8>,
-    quad_d: array<vec4<f32>, 8>,
-}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm}
+#import bevy_pbr::mesh_view_bindings::view
 
 // Debug overlay: see `BodyTerrainDebug` in `body_material.rs` for the
 // layout. `view_phase.xyz` carries the camera's body-fixed position
@@ -77,7 +51,7 @@ struct BodyTerrainDebug {
 // Material bind group (group 3 in thalos_udlod's pipeline layout:
 //   0 = view, 1 = terrain, 2 = terrain-view, 3 = material).
 //
-// Slot 2 packs craft shadow + debug + inspection into one buffer; see
+// Slot 2 packs debug + inspection + the sun-shadow cascade into one buffer; see
 // `BodyTerrainExtras` in `body_material.rs` for the slot-budget rationale
 // (Metal vertex stage caps at 16 buffers and AsBindGroup forces vertex
 // visibility on every `#[uniform(N)]`).
@@ -85,7 +59,6 @@ struct BodyTerrainDebug {
 // The depth maps are SEPARATE `texture_depth_2d` bindings (one per cascade).
 
 struct BodyTerrainExtras {
-    craft_shadow: BodyTerrainShadow,
     debug: BodyTerrainDebug,
     inspection: vec4<f32>,
     shadow: ShadowCascadeBlock,
@@ -99,6 +72,25 @@ struct BodyTerrainExtras {
 @group(3) @binding(3) var sun_shadow_map_0: texture_depth_2d;
 @group(3) @binding(4) var sun_shadow_map_1: texture_depth_2d;
 @group(3) @binding(5) var sun_shadow_map_2: texture_depth_2d;
+// Half-res screen-space AO (`rendering::ssao`), multiplied into the AMBIENT
+// occlusion only (graphics F5). Bound to the white fallback when unset (no AO);
+// `terrain_extras.inspection.w == 0` skips sampling entirely (map terrain / airless).
+@group(3) @binding(6) var ao_tex: texture_2d<f32>;
+@group(3) @binding(7) var ao_samp: sampler;
+
+// Sample the screen-space AO for this fragment. `frag_coord` is the framebuffer
+// pixel coordinate (`FragmentInput.clip_position.xy`); dividing by the actual
+// viewport size gives the [0,1] screen UV the half-res AO target spans. (An
+// earlier version derived the viewport as `2 × textureDimensions(ao_tex)`, which
+// mis-registers by up to a texel on odd-sized windows — a subtle banding source.)
+// Returns 1.0 (unoccluded) when SSAO is disabled for this material.
+fn screen_space_ao(frag_coord: vec2<f32>) -> f32 {
+    if terrain_extras.inspection.w < 0.5 {
+        return 1.0;
+    }
+    let uv = frag_coord / max(view.viewport.zw, vec2<f32>(1.0));
+    return textureSampleLevel(ao_tex, ao_samp, uv, 0.0).r;
+}
 
 // Blend the atlas-derived macro height normal into the smooth geometric normal.
 // Height is sampled through decode-then-filter RG16 interpolation in
@@ -297,189 +289,6 @@ fn sample_material_masks(tile: AtlasTile) -> vec4<f32> {
 #else
     return textureSampleLevel(attachment3_atlas, atlas_sampler, uv, tile.index, 0.0);
 #endif
-}
-
-fn tapered_segment_shadow(
-    hit_ws: vec3<f32>,
-    sun_dir_ws: vec3<f32>,
-    a_radius: vec4<f32>,
-    b_radius: vec4<f32>,
-) -> f32 {
-    let radius_a = max(a_radius.w, 0.0);
-    let radius_b = max(b_radius.w, 0.0);
-    if max(radius_a, radius_b) <= 0.0 {
-        return 1.0;
-    }
-
-    // Cast a ray from the terrain fragment toward the star. Each procedural
-    // ship part is represented as the projected silhouette of its visual
-    // frustum/cylinder endpoints on the plane perpendicular to that sun ray.
-    // This keeps the shadow anchored in world space and gives tanks, adapters,
-    // pods, and engines separate tapered silhouettes instead of one whole-ship
-    // capsule blob.
-    let delta_a = a_radius.xyz - hit_ws;
-    let delta_b = b_radius.xyz - hit_ws;
-    let ray_t_a = dot(delta_a, sun_dir_ws);
-    let ray_t_b = dot(delta_b, sun_dir_ws);
-    let proj_a = delta_a - sun_dir_ws * ray_t_a;
-    let proj_b = delta_b - sun_dir_ws * ray_t_b;
-    let segment = proj_b - proj_a;
-    let segment_len2 = dot(segment, segment);
-
-    var h = 0.0;
-    var closest = proj_a;
-    var radius = max(radius_a, radius_b);
-    var ray_t = min(ray_t_a, ray_t_b);
-    if segment_len2 > 1.0e-6 {
-        h = clamp(dot(-proj_a, segment) / segment_len2, 0.0, 1.0);
-        closest = proj_a + segment * h;
-        radius = mix(radius_a, radius_b, h);
-        ray_t = mix(ray_t_a, ray_t_b, h);
-    } else {
-        closest = 0.5 * (proj_a + proj_b);
-        ray_t = 0.5 * (ray_t_a + ray_t_b);
-    }
-
-    if ray_t <= 0.0 || ray_t > terrain_extras.craft_shadow.params.z {
-        return 1.0;
-    }
-
-    let silhouette_distance = length(closest);
-    // Penumbra widens with caster height (solar angular diameter) so contact
-    // shadows stay crisp while a high overflight softens out.
-    let penumbra = max(
-        terrain_extras.craft_shadow.params.y,
-        max(radius * 0.18, ray_t * SHADOW_PENUMBRA_PER_M),
-    );
-    let coverage = 1.0 - smoothstep(radius, radius + penumbra, silhouette_distance);
-    let fade = 1.0 - smoothstep(terrain_extras.craft_shadow.params.z * 0.75, terrain_extras.craft_shadow.params.z, ray_t);
-    return 1.0 - terrain_extras.craft_shadow.params.x * coverage * fade;
-}
-
-// Distance from `p` to the segment `a`-`b`, all in the 2-D silhouette plane.
-fn segment_distance_2d(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-    let ab = b - a;
-    let h = clamp(dot(p - a, ab) / max(dot(ab, ab), 1.0e-8), 0.0, 1.0);
-    return length(p - a - ab * h);
-}
-
-fn cross_2d(a: vec2<f32>, b: vec2<f32>) -> f32 {
-    return a.x * b.y - a.y * b.x;
-}
-
-// Shadow factor for one thin planform quad (a lifting surface). The four
-// corners are projected along the sun ray onto the plane through the
-// terrain fragment; coverage is a signed-distance test against the
-// projected outline, so the silhouette is the true planform at any sun
-// angle — a wing edge-on to the sun casts (almost) nothing instead of the
-// chord-thick slab a capsule proxy would throw.
-fn planform_quad_shadow(
-    hit_ws: vec3<f32>,
-    sun_dir_ws: vec3<f32>,
-    qa: vec4<f32>,
-    qb: vec4<f32>,
-    qc: vec4<f32>,
-    qd: vec4<f32>,
-) -> f32 {
-    let delta_a = qa.xyz - hit_ws;
-    let delta_b = qb.xyz - hit_ws;
-    let delta_c = qc.xyz - hit_ws;
-    let delta_d = qd.xyz - hit_ws;
-    let t_a = dot(delta_a, sun_dir_ws);
-    let t_b = dot(delta_b, sun_dir_ws);
-    let t_c = dot(delta_c, sun_dir_ws);
-    let t_d = dot(delta_d, sun_dir_ws);
-    let ray_t = 0.25 * (t_a + t_b + t_c + t_d);
-    if ray_t <= 0.0 || ray_t > terrain_extras.craft_shadow.params.z {
-        return 1.0;
-    }
-
-    // 2-D basis on the plane perpendicular to the sun ray.
-    var basis_x = cross(sun_dir_ws, vec3(0.0, 1.0, 0.0));
-    if dot(basis_x, basis_x) < 1.0e-6 {
-        basis_x = cross(sun_dir_ws, vec3(1.0, 0.0, 0.0));
-    }
-    basis_x = normalize(basis_x);
-    let basis_y = cross(sun_dir_ws, basis_x);
-
-    let pa = vec2(dot(delta_a, basis_x), dot(delta_a, basis_y));
-    let pb = vec2(dot(delta_b, basis_x), dot(delta_b, basis_y));
-    let pc = vec2(dot(delta_c, basis_x), dot(delta_c, basis_y));
-    let pd = vec2(dot(delta_d, basis_x), dot(delta_d, basis_y));
-
-    // The fragment projects to the origin. Signed distance to the quad
-    // outline: winding-independent inside test via the two triangles, edge
-    // distance for the magnitude.
-    let origin = vec2(0.0, 0.0);
-    let edge_distance = min(
-        min(segment_distance_2d(origin, pa, pb), segment_distance_2d(origin, pb, pc)),
-        min(segment_distance_2d(origin, pc, pd), segment_distance_2d(origin, pd, pa)),
-    );
-    let s1 = cross_2d(pb - pa, origin - pa);
-    let s2 = cross_2d(pc - pb, origin - pb);
-    let s3 = cross_2d(pd - pc, origin - pc);
-    let s4 = cross_2d(pa - pd, origin - pd);
-    let all_neg = s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0 && s4 <= 0.0;
-    let all_pos = s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0 && s4 >= 0.0;
-    var signed_distance = edge_distance;
-    if all_neg || all_pos {
-        signed_distance = -edge_distance;
-    }
-
-    let penumbra = max(
-        terrain_extras.craft_shadow.params.y,
-        ray_t * SHADOW_PENUMBRA_PER_M,
-    );
-    let coverage = 1.0 - smoothstep(-0.5 * penumbra, 0.5 * penumbra, signed_distance);
-    let fade = 1.0 - smoothstep(terrain_extras.craft_shadow.params.z * 0.75, terrain_extras.craft_shadow.params.z, ray_t);
-    return 1.0 - terrain_extras.craft_shadow.params.x * coverage * fade;
-}
-
-fn local_craft_shadow(hit_ws: vec3<f32>, sun_dir_ws: vec3<f32>) -> f32 {
-    let caster_count = min(
-        u32(max(terrain_extras.craft_shadow.params.w, 0.0)),
-        MAX_TERRAIN_SHADOW_CASTERS,
-    );
-    let quad_count = min(
-        u32(max(terrain_extras.craft_shadow.quad_params.x, 0.0)),
-        MAX_TERRAIN_SHADOW_QUADS,
-    );
-    if caster_count == 0u && quad_count == 0u {
-        return 1.0;
-    }
-
-    var shadow = 1.0;
-    for (var i = 0u; i < MAX_TERRAIN_SHADOW_CASTERS; i = i + 1u) {
-        if i >= caster_count {
-            break;
-        }
-        shadow = min(
-            shadow,
-            tapered_segment_shadow(
-                hit_ws,
-                sun_dir_ws,
-                terrain_extras.craft_shadow.caster_a_radius[i],
-                terrain_extras.craft_shadow.caster_b_radius[i],
-            ),
-        );
-    }
-    for (var i = 0u; i < MAX_TERRAIN_SHADOW_QUADS; i = i + 1u) {
-        if i >= quad_count {
-            break;
-        }
-        shadow = min(
-            shadow,
-            planform_quad_shadow(
-                hit_ws,
-                sun_dir_ws,
-                terrain_extras.craft_shadow.quad_a[i],
-                terrain_extras.craft_shadow.quad_b[i],
-                terrain_extras.craft_shadow.quad_c[i],
-                terrain_extras.craft_shadow.quad_d[i],
-            ),
-        );
-    }
-    return shadow;
 }
 
 // ── Terrain self-shadowing (render-time horizon march) ─────────────────────
@@ -1312,11 +1121,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     }
     let view_dir = normalize(info.view_vector);
 
-    // Render-time shadowing: the local craft proxy (analytic ship-part
-    // silhouettes) combined with a terrain self-shadow horizon march over the
-    // resident height atlas. Both fade only the direct sun term; the sky fill
-    // below stands in for skylight reaching shadowed ground.
-    let craft_shadow = local_craft_shadow(hit_ws, sun_dir_ws);
+    // Render-time shadowing: the shared cascaded sun-shadow rig (craft, trees,
+    // rocks, structures — one shadow world) combined with a terrain self-shadow
+    // horizon march over the resident height atlas. Both fade only the direct
+    // sun term; the sky fill below stands in for skylight reaching shadowed
+    // ground.
     var self_shadow = 1.0;
     // Skip the height-atlas self-shadow march on the orbital map: at planetary
     // distance it samples the height atlas sub-pixel and its result shifts as the
@@ -1324,14 +1133,17 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     if (!debug_on && !distant_schematic) {
         self_shadow = terrain_self_shadow(tile, geo_normal, sun_dir_ws);
     }
-    // Tree/craft directional shadows from the sun-shadow map fold into the same
-    // direct-sun gate as the analytic craft proxy and the self-shadow march.
-    // `tree_shadow` is kept separate so it can also bleed into the ambient term
-    // (canopy AO) below — terrain self-shadow must not, so it's excluded there.
-    let tree_shadow = sun_shadow_factor(
-        hit_ws, terrain_extras.shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
+    // Tree/craft/structure directional shadows from the sun-shadow rig fold into
+    // the same direct-sun gate as the self-shadow march. `tree_shadow` is kept
+    // separate so it can also bleed into the ambient term (canopy AO) below —
+    // terrain self-shadow must not, so it's excluded there. Normal-aware sampler
+    // (stable-CSM): the coarse relief normal drives the receiver offset +
+    // slope-scaled bias; the detail-mapped normal would wobble the offset.
+    let tree_shadow = sun_shadow_factor_nrm(
+        hit_ws, height_n, terrain_extras.shadow,
+        sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
     );
-    let external_shadow = craft_shadow * self_shadow * tree_shadow;
+    let external_shadow = self_shadow * tree_shadow;
 
     // Surface lighting. The shading normal is pulled most of the way toward the
     // relief normal but kept anchored to the geometric normal so steep micro-
@@ -1430,7 +1242,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // high surrounding terrain blocks the sky hemisphere — mul onto cavity so
         // both small-scale hollows and large-scale valleys compound correctly.
         let valley_ao = select(terrain_valley_ao(tile), 1.0, distant_schematic);
-        surf.occlusion = clamp(material.occlusion * cavity * valley_ao, 0.0, 1.0);
+        // Screen-space AO (F5) compounds with the analytic cavity/valley terms —
+        // it adds the object-vs-terrain contact occlusion (ship in a valley, base
+        // of a building) the analytic terms can't see. Ambient-only, like the rest.
+        let ssao = screen_space_ao(input.clip_position.xy);
+        surf.occlusion = clamp(material.occlusion * cavity * valley_ao * ssao, 0.0, 1.0);
 
         // Canopy AO: a tree/object shadow bleeds into the ambient too (a canopy
         // overhead blocks the sky, not only the sun), so shadowed ground reads.
@@ -1444,5 +1260,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
 
     var output: FragmentOutput;
     output.color = vec4<f32>(lit, albedo.a);
+    // F5 diagnostic (`THALOS_SSAO=show`, inspection.w = 2): paint the raw AO
+    // value so artifacts can be attributed to the AO pass vs its application.
+    if terrain_extras.inspection.w >= 1.5 {
+        let ao_raw = screen_space_ao(input.clip_position.xy);
+        output.color = vec4<f32>(vec3<f32>(ao_raw), albedo.a);
+    }
     return output;
 }

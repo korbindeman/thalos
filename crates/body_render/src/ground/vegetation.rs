@@ -121,10 +121,13 @@ pub enum GrassBladeLod {
     /// instead of a fountain of blades (~100 verts). The far/mid bands are
     /// **vertex-bound** (the cost is blade vertex throughput, not fragment
     /// overdraw — a depth prepass didn't help), so one billboard tuft per clump is
-    /// the lever there. The grass shader paints a procedural tuft alpha across the
-    /// card (`thalos::grass_displace::grass_tuft_alpha`) and discards the gaps, so
-    /// it reads as grass at distance; the card reuses the blade displacement (it
-    /// sways + fade-shrinks like a tall blade). See `docs/vegetation.md` §6.
+    /// the lever there. The grass shader samples the **baked card atlas**
+    /// ([`thalos_texgen::grass_card_atlas`], bound as
+    /// [`GrassMaterial::card_atlas`]) across the card — a painted cluster of
+    /// layered blades, the classic grass-card technique — discarding the gaps
+    /// and modulating the per-clump tint, so it reads as real grass at distance;
+    /// the card reuses the blade displacement (it sways + fade-shrinks like a
+    /// tall blade). See `docs/vegetation.md` §6.
     Card,
 }
 
@@ -694,23 +697,42 @@ fn emit_grass_clump(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
 /// standing for the whole clump, instead of a fountain of blades (~100 verts) — the
 /// vertex-count cut the far/mid bands need. The card reuses the blade displacement:
 /// `uv.x` is the height fraction (so it sways at the top and fade-shrinks toward its
-/// base like a tall blade), `uv.y` is the across-card fraction, and `root.w = 1`
-/// marks it a CARD so the shader paints a procedural grass-tuft alpha across it and
-/// discards the gaps (`thalos::grass_displace::grass_tuft_alpha`). Lit with the
-/// terrain-up normal like the blades, so it matches the ground. Returns 1.
+/// base like a tall blade), `uv.y` is the across-card fraction, and `root.w = 1 +
+/// variant` marks it a CARD so the shader samples the baked card atlas
+/// ([`GrassMaterial::card_atlas`], variant column `root.w − 1`) across it and
+/// discards the gaps. Lit with the terrain-up normal like the blades, so it
+/// matches the ground. Returns 1.
 fn emit_grass_card(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
+    let key = GrassTileKey {
+        face: 0,
+        x: 0,
+        y: 0,
+    };
+    let rng = |salt: u64| blade_hash(spec.seed, key, 0, salt) as f32;
     let p = spec.profile;
-    let hw = (p.radius_m * 2.4).max(0.08); // wide patch — a slice of lawn, not a spike
-    let h = (p.height_m * 0.85).max(0.04); // short, so it reads as a carpet
+    // Per-card size jitter — uniform cards read as a mowed hedge; the painted
+    // tips only vary *within* a card, so the card quads themselves must vary too.
+    let hw = (p.radius_m * 2.4 * (0.88 + rng(22) * 0.30)).max(0.08); // a slice of meadow
+    // Tall enough that the atlas's ragged blade tips read (the painted blades
+    // top out well below the cell edge, so the *visual* height is ~0.8 of this).
+    let h = (p.height_m * 1.15 * (0.84 + rng(23) * 0.36)).max(0.06);
     let up = spec.up;
     let base = spec.origin;
     let tint = spec.color;
-    // Root = the card base; the fade shrinks the card toward it. w = 1 → CARD.
-    let root_attr = [base.x, base.y, base.z, 1.0];
-    // Two crossed quads (along `right` and `fwd`) so the tuft reads from any
-    // horizontal angle without per-frame billboarding.
-    for across in [spec.right, spec.fwd] {
-        let across = across.normalize_or(spec.right);
+    // Root = the card base; the fade shrinks the card toward it. w = 1 + variant
+    // → CARD sampling atlas column `variant` (a per-clump hash, so neighbouring
+    // cards differ).
+    let variant = (blade_hash(spec.seed, key, 0, 21)
+        * thalos_texgen::GRASS_CARD_VARIANTS as f64) as u32
+        % thalos_texgen::GRASS_CARD_VARIANTS;
+    let root_attr = [base.x, base.y, base.z, 1.0 + variant as f32];
+    // Two crossed quads, spun by a per-clump azimuth — every clump sharing the
+    // tile's tangent axes lines the crosses up into visible rows.
+    let az = rng(24) * std::f32::consts::TAU;
+    let (sin_az, cos_az) = az.sin_cos();
+    let spun_right = (spec.right * cos_az + spec.fwd * sin_az).normalize_or(spec.right);
+    let spun_fwd = (spec.fwd * cos_az - spec.right * sin_az).normalize_or(spec.fwd);
+    for across in [spun_right, spun_fwd] {
         let start = buf.positions.len() as u32;
         // BL, BR, TR, TL — uv = (height_frac, across_frac).
         let corners = [
@@ -1121,6 +1143,14 @@ pub struct GrassMaterial {
     pub sun_shadow_map_1: Handle<Image>,
     #[texture(4, sample_type = "depth", visibility(vertex, fragment))]
     pub sun_shadow_map_2: Handle<Image>,
+    /// Baked grass clump-card atlas (see
+    /// [`build_grass_card_atlas`](crate::ground::build_grass_card_atlas)) the
+    /// far-band CARD quads sample: A = coverage (discard), RGB = a modulation
+    /// over the per-clump tint. Like the shadow maps, the binding needs a valid
+    /// image at creation — every construction site must set it.
+    #[texture(5)]
+    #[sampler(6)]
+    pub card_atlas: Handle<Image>,
 }
 
 impl Material for GrassMaterial {

@@ -48,14 +48,14 @@ mod vegetation;
 mod water_material;
 
 pub use body_material::{
-    BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, BodyTerrainShadow,
-    CASCADE_COUNT, MAX_TERRAIN_SHADOW_CASTERS, MAX_TERRAIN_SHADOW_QUADS, ShadowCascadeBlock,
-    TerrainShadingStyle,
+    BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, CASCADE_COUNT,
+    ShadowCascadeBlock, TerrainShadingStyle,
 };
 pub use ground_patch::{GroundPatchMaterial, GroundPatchMaterialPlugin};
 pub use height_source::{
     ConstantHeightSource, CpuPipelineHeightSource, GpuAtlasHeightMirror,
     GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, GpuAtlasMirrorHeightSource, HeightSource,
+    horizon_sun_visibility,
 };
 pub use landcover::{LandcoverSample, sample_landcover};
 pub use pipeline::{
@@ -81,6 +81,7 @@ pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_s
 pub use tile_synthesis_pool::tile_synthesis_pool;
 pub use tree_atlas::{
     ATLAS_N, BARK_CELL_COUNT, BARK_CELL_FIRST, build_foliage_atlas, build_foliage_material_atlas,
+    build_grass_card_atlas,
 };
 pub use tree_impostor::{
     BakeParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout, ImpostorParams, TreeBakeMaterial,
@@ -124,14 +125,14 @@ impl Plugin for ThalosTerrainPlugin {
         app.add_plugins(MaterialPlugin::<BodyWaterMaterial>::default());
         // Grass blades + scattered trees/shrubs render through the regular
         // forward pipeline too — decoration meshes, not UDLOD geometry.
-        // Grass is in the depth prepass (it ships a matching `grass_prepass.wgsl`,
-        // so the main color pass early-Z-rejects the heavy blade overdraw). Trees
-        // and rocks opt OUT via `Material::enable_prepass` (their vertex displaces —
-        // wind / per-tree + per-rock scale-fade — and they have no matching prepass
-        // shader yet, so a standard rest-pose prepass would mismatch the main depth
-        // and flicker). Impostors are already prepass-safe (degenerate POSITION →
-        // standard prepass draws nothing). Adding tree/rock prepass shaders later
-        // brings them into the early-Z too.
+        // None of the decoration materials run a depth prepass today (the grass
+        // prepass experiment was removed — the band is vertex-bound, so early-Z
+        // didn't pay). Trees and rocks opt OUT explicitly via
+        // `Material::enable_prepass` (their vertex displaces — wind / per-tree +
+        // per-rock scale-fade — and they have no matching prepass shader, so a
+        // standard rest-pose prepass would mismatch the main depth and flicker).
+        // Impostors are already prepass-safe (degenerate POSITION → standard
+        // prepass draws nothing).
         app.add_plugins(MaterialPlugin::<GrassMaterial>::default());
         app.add_plugins(MaterialPlugin::<TreeMaterial>::default());
         app.add_plugins(MaterialPlugin::<RockMaterial>::default());

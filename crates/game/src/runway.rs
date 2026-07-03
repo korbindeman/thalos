@@ -44,12 +44,11 @@
 
 use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::RenderLayers;
-use bevy::light::NotShadowCaster;
 use bevy::math::{DMat3, DQuat, DVec3, Vec3, Vec3A};
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
-use thalos_body_render::{HeightSource, TerrainPatchBasis};
+use thalos_body_render::{HeightSource, ShadowedStandardMaterial, TerrainPatchBasis, shadowed};
 use thalos_physics_canonical::body_fixed::{
     body_fixed_pose_from_inertial, body_fixed_surface_velocity,
 };
@@ -64,6 +63,7 @@ use thalos_world::{BodyId, StateVector};
 use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
+use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
@@ -407,7 +407,7 @@ fn finish_runway_spawn(
     ),
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<ShadowedStandardMaterial>>,
 ) {
     if !placement.pending || !situation.is_runway() {
         return;
@@ -865,24 +865,26 @@ fn build_mesh(
 }
 
 fn flat_runway_material(
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<ShadowedStandardMaterial>,
     color: Color,
     rough: f32,
-) -> Handle<StandardMaterial> {
-    materials.add(StandardMaterial {
+) -> Handle<ShadowedStandardMaterial> {
+    // Shadow-receiving (F6): the runway paving darkens under the craft, the
+    // posts, and the base structures like the terrain around it does.
+    materials.add(shadowed(StandardMaterial {
         base_color: color,
         perceptual_roughness: rough,
         metallic: 0.0,
         double_sided: true,
         cull_mode: None,
         ..default()
-    })
+    }))
 }
 
 fn spawn_runway_geometry(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<ShadowedStandardMaterial>,
     frame: &RunwayFrame,
     swap_radius_m: f32,
     parent: Entity,
@@ -922,8 +924,10 @@ fn spawn_runway_geometry(
             },
             cell,
             Visibility::Inherited,
-            RenderLayers::layer(SHIP_LAYER),
-            NotShadowCaster,
+            // Also on the caster layer: the paved strip writes into the custom
+            // sun-shadow cascade (F6 — "runway cast"), so its curb lip shadows
+            // and it occludes the ground under it consistently at low sun.
+            RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
             ChildOf(parent),
             RunwayVisual {
                 body_id: frame.body_id,
@@ -939,8 +943,9 @@ fn spawn_runway_geometry(
         MeshMaterial3d(paint),
         Transform::IDENTITY,
         Visibility::Inherited,
+        // Receive-only: the paint is coplanar with the casting top mesh, so
+        // adding it as a second caster would just double-write the same depth.
         RenderLayers::layer(SHIP_LAYER),
-        NotShadowCaster,
         ChildOf(runway_entity),
         Name::new("Runway Markings"),
     ));
@@ -950,8 +955,7 @@ fn spawn_runway_geometry(
         MeshMaterial3d(asphalt.clone()),
         Transform::IDENTITY,
         Visibility::Inherited,
-        RenderLayers::layer(SHIP_LAYER),
-        NotShadowCaster,
+        RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
         ChildOf(runway_entity),
         Name::new("Runway Edge Skirt"),
     ));
@@ -1165,14 +1169,14 @@ fn push_marking_strip(
     }
 }
 
-fn post_material(color: Color) -> StandardMaterial {
-    StandardMaterial {
+fn post_material(color: Color) -> ShadowedStandardMaterial {
+    shadowed(StandardMaterial {
         base_color: color,
         emissive: color.to_linear() * 0.25,
         perceptual_roughness: 0.6,
         metallic: 0.0,
         ..default()
-    }
+    })
 }
 
 /// Raised edge posts at regular intervals down both sides — the 3D references
@@ -1181,7 +1185,7 @@ fn post_material(color: Color) -> StandardMaterial {
 fn spawn_runway_posts(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<ShadowedStandardMaterial>,
     frame: &RunwayFrame,
     parent: Entity,
 ) {
@@ -1224,8 +1228,9 @@ fn spawn_runway_posts(
                     scale: Vec3::ONE,
                 },
                 Visibility::Inherited,
-                RenderLayers::layer(SHIP_LAYER),
-                NotShadowCaster,
+                // Casts into the sun-shadow rig: edge posts throw the small
+                // grounding shadows that sell the strip as solid (F6).
+                RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
                 ChildOf(parent),
                 Name::new("Runway Post"),
             ));

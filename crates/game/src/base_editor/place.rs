@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use thalos_body_render::{ShadowedStandardMaterial, shadowed};
 use thalos_physics_canonical::body_fixed::{body_fixed_pose_from_inertial, body_fixed_surface_velocity};
 use thalos_physics_canonical::canonical::{AuthorityMode, TranslationalState};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
@@ -117,55 +118,61 @@ impl Default for BaseBuildState {
 
 /// Structure materials, created once at startup and shared by the editor and
 /// the authored default base (so they look identical and there's one source).
+/// [`ShadowedStandardMaterial`] so every structure RECEIVES the shared
+/// sun-shadow cascade (F6 — the hangar darkens under the craft's shadow and
+/// vice versa); they all cast via `SHADOW_CASTER_LAYER` at spawn.
 #[derive(Resource)]
 pub(super) struct BaseMaterials {
-    building: Handle<StandardMaterial>,
-    pad: Handle<StandardMaterial>,
-    ring: Handle<StandardMaterial>,
-    tank: Handle<StandardMaterial>,
-    pub(super) tarmac: Handle<StandardMaterial>,
+    building: Handle<ShadowedStandardMaterial>,
+    pad: Handle<ShadowedStandardMaterial>,
+    ring: Handle<ShadowedStandardMaterial>,
+    tank: Handle<ShadowedStandardMaterial>,
+    pub(super) tarmac: Handle<ShadowedStandardMaterial>,
 }
 
 impl BaseMaterials {
     /// Build the shared structure materials. Used by the startup init and by the
     /// authored default base ([`super::spawn_default_base`]).
-    pub(super) fn create(materials: &mut Assets<StandardMaterial>) -> Self {
+    pub(super) fn create(materials: &mut Assets<ShadowedStandardMaterial>) -> Self {
         Self {
-            building: materials.add(StandardMaterial {
+            building: materials.add(shadowed(StandardMaterial {
                 base_color: Color::srgb(0.62, 0.64, 0.68),
                 perceptual_roughness: 0.85,
                 metallic: 0.0,
                 ..default()
-            }),
-            pad: materials.add(StandardMaterial {
+            })),
+            pad: materials.add(shadowed(StandardMaterial {
                 base_color: Color::srgb(0.10, 0.10, 0.12),
                 perceptual_roughness: 0.9,
                 metallic: 0.0,
                 ..default()
-            }),
-            ring: materials.add(StandardMaterial {
+            })),
+            ring: materials.add(shadowed(StandardMaterial {
                 base_color: Color::srgb(0.95, 0.78, 0.15),
                 perceptual_roughness: 0.6,
                 metallic: 0.0,
                 ..default()
-            }),
-            tank: materials.add(StandardMaterial {
+            })),
+            tank: materials.add(shadowed(StandardMaterial {
                 base_color: Color::srgb(0.80, 0.82, 0.85),
                 perceptual_roughness: 0.35,
                 metallic: 0.5,
                 ..default()
-            }),
-            tarmac: materials.add(StandardMaterial {
+            })),
+            tarmac: materials.add(shadowed(StandardMaterial {
                 base_color: Color::srgb(0.14, 0.14, 0.16),
                 perceptual_roughness: 0.92,
                 metallic: 0.0,
                 ..default()
-            }),
+            })),
         }
     }
 }
 
-fn init_base_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn init_base_materials(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<ShadowedStandardMaterial>>,
+) {
     let mats = BaseMaterials::create(&mut materials);
     commands.insert_resource(mats);
 }

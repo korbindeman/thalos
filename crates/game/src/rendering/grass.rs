@@ -41,8 +41,8 @@ use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::{
     AU_M, GrassBladeLod, GrassMaterial, GrassProfile, GrassTileBuildInput, GrassTileKey,
     GrassTileMesh, LIGHT_AT_1AU, ScatterRegion, ScatterTreatment, TerrainShadingStyle,
-    build_grass_tile_mesh, fallback_shadow_map, grass_tile_frame, grass_tile_key,
-    grass_tiles_per_side,
+    build_grass_card_atlas, build_grass_tile_mesh, fallback_shadow_map, grass_tile_frame,
+    grass_tile_key, grass_tiles_per_side,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_terrain::TerrainFlatten;
@@ -748,6 +748,9 @@ fn ensure_ring_materials(
             [fb.clone(), fb.clone(), fb]
         }
     };
+    // The baked clump-card atlas the far ring's CARD quads sample; one image
+    // shared across the ring materials.
+    let card_atlas = images.add(build_grass_card_atlas());
     grass.materials = (0..GRASS_RINGS.len())
         .map(|idx| {
             let (near, far, band) = ring_fade(idx);
@@ -759,6 +762,7 @@ fn ensure_ring_materials(
                 sun_shadow_map_0: maps[0].clone(),
                 sun_shadow_map_1: maps[1].clone(),
                 sun_shadow_map_2: maps[2].clone(),
+                card_atlas: card_atlas.clone(),
                 ..default()
             })
         })

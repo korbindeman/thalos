@@ -41,7 +41,10 @@ use bevy::render::render_resource::{
 
 use crate::camera::OrbitCamera;
 use crate::rendering::{CameraExposure, SimulationState};
-use thalos_body_render::{AU_M, LIGHT_AT_1AU};
+use thalos_body_render::{
+    AU_M, AtmosphereBlock, LIGHT_AT_1AU, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH,
+    MultiScatterLut, SkyViewLut,
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -51,14 +54,26 @@ use thalos_body_render::{AU_M, LIGHT_AT_1AU};
 /// CPU write cost (each refresh touches 6 × 256² = ~400k texels).
 const PROBE_SIZE: u32 = 256;
 
-/// Seconds between cubemap refreshes. The painted content is "vaguely
-/// lit hemisphere with a sun disc" — geometric, not detailed — so
-/// reflection content changes slowly even at 1× warp. Low rates here
-/// matter because each refresh marks the cubemap asset changed, which
-/// re-triggers Bevy's diffuse+specular IBL prefilter convolution
-/// (`prepare_generated_environment_map_bind_groups`) — that prefilter
-/// is the dominant cost downstream of the CPU paint.
-const REFRESH_INTERVAL: f32 = 5.0;
+/// **Real** seconds between considering a cubemap refresh. This bounds how
+/// stale the reflected sky + the published [`SkyAmbient`] can be in *real* time —
+/// under high warp a single interval can span sim-hours of sun motion, so the
+/// painted time-of-day lags by up to one interval after a warp change. 2 s keeps
+/// that window short; the repaint itself (LUT bake + 256²×6 CPU paint) is a few
+/// ms, and the change-gate below still skips repaints when nothing moved.
+const REFRESH_INTERVAL: f32 = 2.0;
+/// Refresh interval while warping fast (sim time racing): tighter, so the
+/// painted time-of-day tracks the fast-moving sun with less visible desync.
+/// The change-gate still suppresses repaints that wouldn't change anything.
+const REFRESH_INTERVAL_WARP: f32 = 0.5;
+/// Warp factor above which [`REFRESH_INTERVAL_WARP`] applies.
+const WARP_FAST_THRESHOLD: f64 = 50.0;
+
+/// Sim-seconds of clock drift that force a repaint even when the direction
+/// gates don't fire. Catches time-of-day creep the four direction thresholds
+/// can miss (and any state change they don't encode) — the sun moves ~0.5°/min
+/// of sim time on a 12 h day, so 120 sim-s keeps the painted sky within a
+/// degree of the real one at any warp factor.
+const REPAINT_SIM_DRIFT_S: f64 = 120.0;
 
 /// Below these thresholds the env hasn't moved enough for a re-paint to
 /// produce a visibly different cubemap, so we skip the `images.get_mut`
@@ -78,50 +93,61 @@ const PROBE_INTENSITY: f32 = 1.0;
 /// with heliocentric distance + exposure so a far/dim sun reflects dimmer.
 const SUN_DISC_GAIN: f32 = 3.0;
 
-// ── CPU mirror of the spine surface-sky (graphics-fidelity F3/F4) ─────────────
+// ── Physical surface sky (graphics-fidelity F3) ───────────────────────────────
 // The reflection cubemap is CPU-painted (the GPU cubemap-render path is blocked —
-// see docs/atmosphere.md), so the surface sky it reflects must be evaluated on the
-// CPU. These constants + `cpu_surface_sky` are a hand-kept mirror of the spine's
-// WGSL `compute_surface_sky` (`shading/shaders/lighting.wgsl`), so the metallic
-// hull reflects the SAME blue sky-dome / warm ground the terrain is lit by, and
-// dielectric structures get that sky as ambient — one atmosphere-derived
-// environment. Keep in lockstep when the spine's `SURFACE_*` constants change.
+// see docs/atmosphere.md), so the sky it reflects is evaluated on the CPU. The
+// *sky* upper hemisphere is now the physical `SkyViewLut` (a raymarch of the same
+// single+multi-scatter model the terrain shades through), replacing the former
+// hand-kept `cpu_surface_sky` analytic mirror of the WGSL `compute_surface_sky` —
+// so the metallic hull reflects the SAME atmosphere-derived sky the terrain is
+// lit by (one atmosphere, one environment), with no CPU/WGSL drift hazard to keep
+// in lockstep. The two terms the sky raymarch does NOT provide — a warm terrain
+// ground-bounce (lower hemisphere) and the direct-beam sun-disc reddening — stay
+// analytic below (`surface_ground_sun`).
 const SCENE_FLUX_SCALE: f32 = 0.5;
-const SURFACE_SKY_SCALE: f32 = 0.15;
-const SURFACE_SKY_CHROMA_GAIN: f32 = 8.0;
 const SURFACE_GROUND_ALBEDO: Vec3 = Vec3::new(0.10, 0.085, 0.055);
 const SURFACE_GROUND_SCALE: f32 = 0.10;
 const SURFACE_NIGHT_AMBIENT: Vec3 = Vec3::new(0.008, 0.010, 0.014);
+
+/// Sky-view LUT resolution baked for the reflection probe. Smaller than the GPU
+/// reference (Hillaire 192×108) because Bevy prefilters the cubemap into diffuse
+/// SH + rough specular, which blurs away fine sky detail anyway; keeps the
+/// per-repaint CPU raymarch cost bounded (~48×64 view rays every refresh).
+const PROBE_SKY_LUT_W: u32 = 48;
+const PROBE_SKY_LUT_H: u32 = 64;
+
+/// Calibration gain from the physically-raymarched `SkyViewLut` radiance (already
+/// in scene-flux units) into the reflected sky. `1.0` is the physical baseline;
+/// nudge from a `just game runway` / `landing` screenshot if the reflected sky
+/// reads too bright/dim against the terrain it is meant to match.
+const PHYSICAL_SKY_SCALE: f32 = 1.0;
 
 fn vec3_exp(v: Vec3) -> Vec3 {
     Vec3::new(v.x.exp(), v.y.exp(), v.z.exp())
 }
 
-/// Resolved surface-sky radiances (scene-flux units) — mirror of the spine's
-/// `SurfaceSky`. `sun_color` is the reddened direct-beam tint.
-struct SurfaceSkyCpu {
-    sky_radiance: Vec3,
+/// The two surface-sky terms the `SkyViewLut` raymarch does not produce: the warm
+/// terrain ground-bounce filling the lower hemisphere, and the reddened
+/// direct-beam sun tint for the sun disc.
+struct SurfaceGroundSun {
     ground_radiance: Vec3,
     sun_color: Vec3,
 }
 
-/// CPU mirror of `compute_surface_sky`: blue sky-dome (up) + warm ground-bounce
-/// (down) + the reddened direct-beam tint, from the vertical Rayleigh optical
-/// depth `tau_zenith`, artistic `strength`, sun elevation, and per-fragment flux.
-fn cpu_surface_sky(tau_zenith: Vec3, strength: f32, sun_elev: f32, flux: f32) -> SurfaceSkyCpu {
+/// Analytic warm ground-bounce (lower hemisphere) + reddened direct-beam sun
+/// tint, from the vertical Rayleigh optical depth `tau_zenith`, artistic
+/// `strength`, sun elevation, and per-fragment flux. The *sky* itself is the
+/// physical `SkyViewLut`; these are the terrain-bounce and direct-disc terms it
+/// does not model.
+fn surface_ground_sun(tau_zenith: Vec3, strength: f32, sun_elev: f32, flux: f32) -> SurfaceGroundSun {
     let scene_radiance = flux.max(0.0) * SCENE_FLUX_SCALE;
-    let day = smoothstep_f32(-0.15, 0.12, sun_elev);
     let sun_up = sun_elev.clamp(0.0, 1.0);
     let tau_eff = tau_zenith.max(Vec3::ZERO) * strength.max(0.0);
     let airmass = (1.0 / (sun_up + 0.10)).clamp(1.0, 8.0);
     let sun_color = vec3_exp(-tau_eff * (airmass - 1.0));
-    let sky_chroma = Vec3::ONE - vec3_exp(-tau_eff * SURFACE_SKY_CHROMA_GAIN);
-    let sky_strength = scene_radiance * SURFACE_SKY_SCALE * day * (0.35 + 0.65 * sun_up);
-    let sky_radiance = sky_chroma * sky_strength + SURFACE_NIGHT_AMBIENT;
-    let ground_radiance =
-        SURFACE_GROUND_ALBEDO * (scene_radiance * SURFACE_GROUND_SCALE * sun_up) + SURFACE_NIGHT_AMBIENT;
-    SurfaceSkyCpu {
-        sky_radiance,
+    let ground_radiance = SURFACE_GROUND_ALBEDO * (scene_radiance * SURFACE_GROUND_SCALE * sun_up)
+        + SURFACE_NIGHT_AMBIENT;
+    SurfaceGroundSun {
         ground_radiance,
         sun_color,
     }
@@ -131,11 +157,28 @@ fn cpu_surface_sky(tau_zenith: Vec3, strength: f32, sun_elev: f32, flux: f32) ->
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Physical sky-fill ambient published from the F3 sky-view LUT, consumed by
+/// `rendering::lighting::update_sun_light` to drive the surface-regime
+/// `GlobalAmbientLight` (graphics-fidelity **F4** — replacing the hand-tuned flat
+/// day-ambient constant). `surface_irradiance` is the cosine-weighted
+/// hemispherical sky irradiance in scene-flux units (the SH DC term); it already
+/// encodes time-of-day + sun elevation + atmosphere. `surface_blend` is the same
+/// altitude ramp the env cubemap uses (1 = on the surface, 0 = space), so the
+/// consumer can fade physical sky ambient against the unchanged space stand-in.
+///
+/// **Sole writer:** [`refresh_cubemap`] (this module).
+#[derive(Resource, Default, Clone, Copy)]
+pub struct SkyAmbient {
+    pub surface_irradiance: Vec3,
+    pub surface_blend: f32,
+}
+
 pub struct ReflectionProbePlugin;
 
 impl Plugin for ReflectionProbePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ProbeRefreshTimer>()
+            .init_resource::<SkyAmbient>()
             .add_systems(Startup, setup_probe)
             .add_systems(Update, (attach_env_map_to_main_camera, refresh_cubemap));
     }
@@ -158,6 +201,14 @@ struct ProbeRefreshTimer {
     /// change-detection gate to skip painting when the env hasn't
     /// shifted enough to produce a visibly different cubemap.
     last_painted: Option<EnvParams>,
+    /// Sim time (s) of the last paint — repaints are forced once the sim clock
+    /// drifts by [`REPAINT_SIM_DRIFT_S`] so warp can't leave the painted
+    /// time-of-day hours behind the world's.
+    last_paint_sim_time: f64,
+    /// Cached multi-scatter LUT keyed by dominant body id. The LUT depends only
+    /// on the (static) atmosphere, so it is baked once per body and reused across
+    /// sun/altitude changes; only the view-dependent `SkyViewLut` rebakes.
+    ms_cache: Option<(usize, MultiScatterLut)>,
 }
 
 impl Default for ProbeRefreshTimer {
@@ -166,6 +217,8 @@ impl Default for ProbeRefreshTimer {
             elapsed: REFRESH_INTERVAL, // force an update on frame 1
             first_fill_done: false,
             last_painted: None,
+            last_paint_sim_time: f64::NEG_INFINITY,
+            ms_cache: None,
         }
     }
 }
@@ -233,11 +286,23 @@ fn refresh_cubemap(
     mut images: ResMut<Assets<Image>>,
     sim: Option<Res<SimulationState>>,
     exposure: Option<Res<CameraExposure>>,
+    mut sky_ambient: ResMut<SkyAmbient>,
 ) {
     let Some(probe) = probe else { return };
 
+    // Tighter cadence while warping fast, so the painted time-of-day tracks the
+    // racing sun instead of visibly desyncing until warp stops.
+    let interval = if sim
+        .as_deref()
+        .map(|s| s.simulation.warp.speed() > WARP_FAST_THRESHOLD)
+        .unwrap_or(false)
+    {
+        REFRESH_INTERVAL_WARP
+    } else {
+        REFRESH_INTERVAL
+    };
     timer.elapsed += time.delta_secs();
-    if timer.first_fill_done && timer.elapsed < REFRESH_INTERVAL {
+    if timer.first_fill_done && timer.elapsed < interval {
         return;
     }
     timer.elapsed = 0.0;
@@ -247,16 +312,105 @@ fn refresh_cubemap(
     // isn't available yet (early frames) fall back to sensible
     // defaults so we still paint *something* — a static gradient is
     // better than an all-black cubemap that would read as "no IBL".
+    //
+    // `gain == 0` means `CameraExposure` hasn't had its first update yet (this
+    // system can run before `update_camera_exposure` during boot). A paint at
+    // gain 0 scales flux — and with it the whole sky LUT, sun disc, and the
+    // published `SkyAmbient` — to zero, and because the change-gate below only
+    // watches *directions* (which are correct in that black paint), nothing
+    // would ever trigger a repaint: the black environment sticks. Defer instead.
     let gain = exposure.as_deref().map(|e| e.gain).unwrap_or(1.0);
-    let env = sim
+    if gain <= 0.0 {
+        return;
+    }
+    let (env, sky_inputs) = sim
         .as_deref()
         .map(|s| derive_environment(s, gain))
-        .unwrap_or_else(default_environment);
+        .unwrap_or_else(|| (default_environment(), None));
 
+    // Repaint when the env geometry moved, OR when the sim clock drifted (warp:
+    // the sun can cross hours of sky between real-time ticks with the ship's
+    // direction gates barely moving — see `REPAINT_SIM_DRIFT_S`).
+    let sim_time = sim
+        .as_deref()
+        .map(|s| s.simulation.sim_time())
+        .unwrap_or(f64::NEG_INFINITY);
+    let sim_drifted = (sim_time - timer.last_paint_sim_time).abs() > REPAINT_SIM_DRIFT_S;
     if let Some(last) = timer.last_painted
         && !env_changed_meaningfully(&last, &env)
+        && !sim_drifted
     {
         return;
+    }
+
+    // Bake the physical sky-view LUT for the current sun/altitude (surface
+    // regime only). The multi-scatter LUT it needs is static per body, so cache
+    // it and rebake only the view-dependent sky LUT.
+    let sky_inputs_dbg = sky_inputs; // Copy, kept for the diagnostics log below.
+    let sky_lut = sky_inputs.map(|si| {
+        let ms_hit = matches!(&timer.ms_cache, Some((id, _)) if *id == si.body_id);
+        if !ms_hit {
+            let ms = MultiScatterLut::bake(
+                &si.atmos,
+                si.planet_radius_m,
+                MULTI_SCATTER_LUT_WIDTH,
+                MULTI_SCATTER_LUT_HEIGHT,
+            );
+            timer.ms_cache = Some((si.body_id, ms));
+        }
+        let ms = &timer.ms_cache.as_ref().expect("ms cache just populated").1;
+        SkyViewLut::bake(
+            &si.atmos,
+            si.planet_radius_m,
+            si.altitude_m,
+            si.sun_dir,
+            si.up,
+            si.flux,
+            ms,
+            PROBE_SKY_LUT_W,
+            PROBE_SKY_LUT_H,
+        )
+    });
+
+    // Publish the physical sky-fill ambient (F4): the sky-view LUT's hemispherical
+    // irradiance + the altitude blend, for `update_sun_light` to drive the
+    // surface `GlobalAmbientLight`. Zero irradiance out in space (no sky).
+    *sky_ambient = SkyAmbient {
+        surface_irradiance: sky_lut
+            .as_ref()
+            .map(|l| l.ambient_sky_irradiance())
+            .unwrap_or(Vec3::ZERO),
+        surface_blend: env.surface_blend,
+    };
+    // Calibration signal for the F3/F4 physical-sky path (repaint cadence only,
+    // ~every 5 s): the raw irradiance driving the surface ambient. Grep
+    // `thalos::sky` in the console when judging hull/structure brightness.
+    let irr = sky_ambient.surface_irradiance;
+    info!(
+        target: "thalos::sky",
+        "sky irradiance ({:.3}, {:.3}, {:.3}) lum {:.3} | surface_blend {:.2} | sun_disc ({:.1}, {:.1}, {:.1})",
+        irr.x, irr.y, irr.z,
+        0.2126 * irr.x + 0.7152 * irr.y + 0.0722 * irr.z,
+        env.surface_blend,
+        env.sun_disc_radiance.x, env.sun_disc_radiance.y, env.sun_disc_radiance.z,
+    );
+    // The radiances actually painted into the reflection cubemap (what the hull's
+    // IBL diffuse + specular see): the F3 physical sky at the zenith and at the
+    // horizon, plus the analytic ground bounce. Differential for "hull too dark":
+    // the pre-F3 analytic sky sat around 0.2–0.4 at this scene flux. The `inputs`
+    // tail is the raw geometry the probe evaluated — compare its `sun_elev`
+    // against the lighting system's log line to catch the two systems diverging.
+    if let (Some(lut), Some(si)) = (sky_lut.as_ref(), sky_inputs_dbg) {
+        let zen = lut.sample(env.up) * PHYSICAL_SKY_SCALE;
+        let hor = lut.sample(env.up.any_orthonormal_vector()) * PHYSICAL_SKY_SCALE;
+        info!(
+            target: "thalos::sky",
+            "env paint: sky zenith ({:.3}, {:.3}, {:.3}) horizon ({:.3}, {:.3}, {:.3}) ground ({:.3}, {:.3}, {:.3}) | inputs: sun_elev {:.3} alt {:.0} m flux {:.2} body {} t {:.0} s",
+            zen.x, zen.y, zen.z, hor.x, hor.y, hor.z,
+            env.ground_radiance.x, env.ground_radiance.y, env.ground_radiance.z,
+            si.up.dot(si.sun_dir), si.altitude_m, si.flux, si.body_id,
+            sim.as_deref().map(|s| s.simulation.sim_time()).unwrap_or(f64::NAN),
+        );
     }
 
     // 0.19: `Assets::get_mut` returns `AssetMut` (DerefMut); `&mut image`
@@ -265,19 +419,47 @@ fn refresh_cubemap(
         return;
     };
 
-    paint_cubemap(&mut image, &env);
+    paint_cubemap(&mut image, &env, sky_lut.as_ref());
     timer.last_painted = Some(env);
+    timer.last_paint_sim_time = sim_time;
 }
 
 /// `true` when at least one of the env params has shifted enough that
 /// re-painting will produce a visibly different cubemap. Used as the
 /// asset-changed gate in [`refresh_cubemap`].
 fn env_changed_meaningfully(last: &EnvParams, new: &EnvParams) -> bool {
+    // Sun/up drift also gates the sky-view LUT rebake (the LUT is a function of
+    // sun direction + local zenith), so this same threshold keeps the reflected
+    // sky in step without a separate gate.
     last.sun_dir.dot(new.sun_dir) < ENV_DIR_DOT_MIN
         || last.planet_dir.dot(new.planet_dir) < ENV_DIR_DOT_MIN
         || (last.planet_cos - new.planet_cos).abs() > ENV_COS_EPS
         || last.up.dot(new.up) < ENV_DIR_DOT_MIN
         || (last.surface_blend - new.surface_blend).abs() > ENV_COS_EPS
+        // Sun-disc radiance is the one field that encodes flux × day × reddening,
+        // so brightness-only changes (exposure gain, terminator crossing) repaint
+        // even when every direction is static (a parked craft).
+        || (last.sun_disc_radiance - new.sun_disc_radiance).length()
+            > 0.02 * last.sun_disc_radiance.length().max(0.1)
+}
+
+/// Inputs for baking the physical [`SkyViewLut`] (surface regime only). `atmos`
+/// is built in **meters** (`meters_per_render_unit = 1`); the integral is
+/// scale-invariant, so meters is the natural unit for the sim-side quantities.
+#[derive(Clone, Copy)]
+struct SkyLutInputs {
+    atmos: AtmosphereBlock,
+    /// Dominant body id, the key for the cached multi-scatter LUT.
+    body_id: usize,
+    planet_radius_m: f32,
+    altitude_m: f32,
+    /// World-space unit vector toward the sun.
+    sun_dir: Vec3,
+    /// World-space local radial up (away from the body centre).
+    up: Vec3,
+    /// Scene-flux sun irradiance (`LIGHT_AT_1AU·(AU/d)²·gain`); sets the LUT's
+    /// radiance units so it shares the scene exposure.
+    flux: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -304,9 +486,8 @@ struct EnvParams {
     // ── Surface-sky model (used where `surface_blend > 0`) ──
     /// Local radial up (away from the dominant body centre).
     up: Vec3,
-    /// Blue sky-dome radiance filling the upper hemisphere (scene-flux units).
-    sky_radiance: Vec3,
-    /// Warm ground-bounce radiance filling the lower hemisphere.
+    /// Warm ground-bounce radiance filling the lower hemisphere. The *upper*
+    /// hemisphere (sky) comes from the physical `SkyViewLut` passed alongside.
     ground_radiance: Vec3,
     /// 0 = pure space (planet disc + stars), 1 = pure surface (sky-dome +
     /// ground). Ramps across the Kármán line with altitude.
@@ -323,7 +504,6 @@ fn default_environment() -> EnvParams {
         planet_color: Vec3::new(0.25, 0.35, 0.55),
         starfield_tint: Vec3::splat(0.02),
         up: Vec3::Y,
-        sky_radiance: Vec3::ZERO,
         ground_radiance: Vec3::ZERO,
         surface_blend: 0.0,
     }
@@ -337,12 +517,16 @@ fn default_environment() -> EnvParams {
 /// planet disc over a dim starfield). `gain` matches the scene's `CameraExposure`
 /// so the reflected radiances share its exposure and dim with distance.
 ///
+/// Returns the painted `EnvParams` plus, in the surface regime, the
+/// [`SkyLutInputs`] the caller uses to bake the physical [`SkyViewLut`] for the
+/// upper hemisphere (`None` out in space).
+///
 /// (This is the atmosphere-derived env-map keystone of graphics-fidelity F3/F4:
 /// the metallic hull now reflects the world it is actually in, and dielectric
-/// structures pick up the real sky as ambient — replacing the old fake orbital-
-/// only paint. The eventual upgrade is a GPU cubemap render of the actual scene;
-/// see `docs/atmosphere.md`.)
-fn derive_environment(sim: &SimulationState, gain: f32) -> EnvParams {
+/// structures pick up the real sky as ambient. The sky is now the physical
+/// sky-view LUT (F3); the eventual upgrade is a GPU cubemap render of the actual
+/// scene; see `docs/atmosphere.md`.)
+fn derive_environment(sim: &SimulationState, gain: f32) -> (EnvParams, Option<SkyLutInputs>) {
     let ship_pos = sim.simulation.ship_state().position;
     let epoch = thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time());
 
@@ -380,10 +564,10 @@ fn derive_environment(sim: &SimulationState, gain: f32) -> EnvParams {
 
     // Surface-sky model — only meaningful under a terrestrial-atmosphere body.
     let mut up = -planet_dir;
-    let mut sky_radiance = Vec3::ZERO;
     let mut ground_radiance = Vec3::ZERO;
     let mut sun_disc_radiance = Vec3::splat(flux * SUN_DISC_GAIN);
     let mut surface_blend = 0.0_f32;
+    let mut sky_inputs = None;
 
     if dominant != 0
         && let Some(body) = sim.system.bodies.get(dominant)
@@ -407,18 +591,31 @@ fn derive_environment(sim: &SimulationState, gain: f32) -> EnvParams {
                 .map(|sc| (Vec3::from_array(sc.vertical_optical_depth), sc.strength))
                 .unwrap_or((Vec3::ZERO, 0.0));
             let sun_elev = up.dot(sun_dir);
-            let sky = cpu_surface_sky(tau, strength, sun_elev, flux);
-            sky_radiance = sky.sky_radiance;
-            ground_radiance = sky.ground_radiance;
+            // Analytic ground-bounce (lower hemisphere) + reddened direct sun.
+            let gs = surface_ground_sun(tau, strength, sun_elev, flux);
+            ground_radiance = gs.ground_radiance;
             // Reddened, day-gated sun disc for the surface regime, blended toward
             // the white orbital disc by altitude.
             let day = smoothstep_f32(-0.15, 0.12, sun_elev);
-            let surface_sun = sky.sun_color * (flux * SUN_DISC_GAIN * day);
+            let surface_sun = gs.sun_color * (flux * SUN_DISC_GAIN * day);
             sun_disc_radiance = sun_disc_radiance.lerp(surface_sun, surface_blend);
+
+            // Physical sky (upper hemisphere): bake the sky-view LUT in meters.
+            if strength > 0.0 {
+                sky_inputs = Some(SkyLutInputs {
+                    atmos: AtmosphereBlock::from_terrestrial(atmos, 1.0),
+                    body_id: dominant,
+                    planet_radius_m: body.radius_m as f32,
+                    altitude_m: altitude,
+                    sun_dir,
+                    up,
+                    flux,
+                });
+            }
         }
     }
 
-    EnvParams {
+    let env = EnvParams {
         sun_dir,
         sun_cos: 0.9995_f32.max(0.999),
         sun_disc_radiance,
@@ -427,15 +624,16 @@ fn derive_environment(sim: &SimulationState, gain: f32) -> EnvParams {
         planet_color: Vec3::new(0.25, 0.35, 0.55),
         starfield_tint: Vec3::splat(0.015),
         up,
-        sky_radiance,
         ground_radiance,
         surface_blend,
-    }
+    };
+    (env, sky_inputs)
 }
 
 /// Write Rgba16Float pixels into the cubemap. Layer order matches
-/// WGPU / D3D: +X, -X, +Y, -Y, +Z, -Z.
-fn paint_cubemap(image: &mut Image, env: &EnvParams) {
+/// WGPU / D3D: +X, -X, +Y, -Y, +Z, -Z. `sky_lut` is the physical upper-hemisphere
+/// sky sampled per direction in the surface regime (`None` out in space).
+fn paint_cubemap(image: &mut Image, env: &EnvParams, sky_lut: Option<&SkyViewLut>) {
     let size = PROBE_SIZE as i32;
     let inv_size = 1.0 / size as f32;
     const FACE_COUNT: usize = 6;
@@ -458,7 +656,7 @@ fn paint_cubemap(image: &mut Image, env: &EnvParams) {
                 let v = (y as f32 + 0.5) * inv_size * 2.0 - 1.0;
                 let dir = face_dir(face, u, v);
 
-                let color = sample_environment(env, dir);
+                let color = sample_environment(env, dir, sky_lut);
 
                 let texel_off = ((y * size + x) * 4) as usize * 2;
                 write_rgba16f(&mut face_data[texel_off..texel_off + 8], color);
@@ -487,11 +685,15 @@ fn face_dir(face: usize, u: f32, v: f32) -> Vec3 {
     raw.normalize()
 }
 
-fn sample_environment(env: &EnvParams, dir: Vec3) -> Vec3 {
-    // Surface hemisphere: warm ground bounce below the local horizon, blue
-    // sky-dome above — the same split the terrain's sky ambient uses.
+fn sample_environment(env: &EnvParams, dir: Vec3, sky_lut: Option<&SkyViewLut>) -> Vec3 {
+    // Surface hemisphere: warm ground bounce below the local horizon, the
+    // physical sky-view LUT above (with a small night-ambient floor so the sky
+    // doesn't go pure black once the sun sets and the LUT returns ~0).
     let w_up = (0.5 + 0.5 * dir.dot(env.up)).clamp(0.0, 1.0);
-    let surface_col = env.ground_radiance.lerp(env.sky_radiance, w_up);
+    let sky_radiance = sky_lut
+        .map(|l| l.sample(dir) * PHYSICAL_SKY_SCALE + SURFACE_NIGHT_AMBIENT)
+        .unwrap_or(SURFACE_NIGHT_AMBIENT);
+    let surface_col = env.ground_radiance.lerp(sky_radiance, w_up);
 
     // Space: lit planet disc over a dim starfield.
     let orbital_col = orbital_sample(env, dir);

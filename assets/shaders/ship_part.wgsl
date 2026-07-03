@@ -46,7 +46,7 @@
 // terrain / trees cast into (graphics-fidelity F6b). Registered by
 // `body_render::shading::PlanetLightingPlugin` (pulled in defensively by
 // `CraftRenderPlugin`, so this resolves even in the standalone editor).
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm}
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
@@ -347,9 +347,12 @@ fn fragment(
     out.color = apply_pbr_lighting(pbr_input);
     // Receive the shared sun-shadow cascade (terrain relief, trees, other craft,
     // structures): walk the cascades at this fragment's render-space position and
-    // attenuate the lit hull toward `CRAFT_SHADOW_FLOOR` in shadow.
-    let craft_shadow_f = sun_shadow_factor(
+    // attenuate the lit hull toward `CRAFT_SHADOW_FLOOR` in shadow. The geometric
+    // world normal (not the rivet-perturbed N) drives the stable-CSM receiver
+    // offset + slope-scaled bias.
+    let craft_shadow_f = sun_shadow_factor_nrm(
         pbr_input.world_position.xyz,
+        normalize(pbr_input.world_normal),
         craft_shadow,
         craft_shadow_map_0,
         craft_shadow_map_1,

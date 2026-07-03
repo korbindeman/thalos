@@ -60,7 +60,8 @@ use thalos_body_render::{
     ImpostorAtlasLayout, ImpostorParams, LIGHT_AT_1AU, RockMaterial, RockMaterialPlugin,
     RockMeshData, RockMeshParams, ShadowCascadeBlock, TreeBakeMaterial, TreeImpostorMaterial,
     TreeImpostorMaterialPlugin, TreeMaterial, TreeMaterialPlugin, TreeMeshParams, VegInstance,
-    build_foliage_atlas, build_foliage_material_atlas, build_grass_clump_mesh,
+    build_foliage_atlas, build_foliage_material_atlas, build_grass_card_atlas,
+    build_grass_clump_mesh,
     build_grass_field_mesh, build_rock_mesh, build_rock_mesh_data, build_tree_mesh,
     build_tree_mesh_data, combine_impostor_tile_mesh, combine_rock_tile_mesh, fallback_shadow_map,
     hemioct_decode, impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh,
@@ -526,6 +527,24 @@ fn objects() -> Vec<Preview> {
                 distance: 45.0,
             }
         },
+        {
+            // The same card field from close-mid range: the wrong regime in-game
+            // (cards start at 110 m), but the right one for judging the baked
+            // card-atlas texture itself — blade layering, tip raggedness, tint.
+            let field = GrassFieldParams {
+                clumps_per_m2: 2.5,
+                profile: GrassProfile::default().scaled(2.8, 1.2, 1.0),
+                lod: GrassBladeLod::Card,
+                ..GrassFieldParams::default()
+            };
+            Preview {
+                name: "grass_field_card_mid",
+                kind: AssetKind::GrassField(field),
+                view: ViewKind::ThreeQuarter,
+                focus_y: 0.3,
+                distance: 10.0,
+            }
+        },
         // --- Rocks / pebbles ---
         // A single stylized pebble, framed close from three-quarter + side so the
         // plane-cut facets, sharp edges, and baked cavity-AO read.
@@ -772,6 +791,7 @@ fn setup_scene(
         sun_shadow_map_0: fallback.clone(),
         sun_shadow_map_1: fallback.clone(),
         sun_shadow_map_2: fallback.clone(),
+        card_atlas: images.add(build_grass_card_atlas()),
         ..default()
     });
     // One shared sky-model-lit ground material (receives the tree shadows).
@@ -1375,8 +1395,6 @@ const SHADOW_NEAR_M: f32 = 0.1;
 const SHADOW_FAR_M: f32 = 220.0;
 /// How far back along the sun the ortho camera sits above the object.
 const SHADOW_BACK_M: f32 = 90.0;
-/// Depth-compare bias in metres (orthographic z is linear).
-const SHADOW_BIAS_M: f32 = 0.18;
 /// Darkening strength (0 = off, 1 = black).
 const SHADOW_STRENGTH: f32 = 0.7;
 
@@ -1572,13 +1590,21 @@ fn update_preview_shadow(
     let view = look.to_matrix().inverse();
     let mut block = ShadowCascadeBlock::default();
     block.view_proj[0] = cascade_clip_from_view(SHADOW_HALF_EXTENT_M, SHADOW_FAR_M) * view;
-    // Orthographic z is linear → clip-space bias = metres / (far − near).
-    block.params[0] = Vec4::new(SHADOW_BIAS_M / (SHADOW_FAR_M - SHADOW_NEAR_M), 0.0, 0.0, 0.0);
+    // x = clip units per metre of light-space depth, y = texel size (m) —
+    // the shared sampler derives its capped texel-proportional bias/offset
+    // from these (see `shadow.wgsl`); `sun_dir` feeds the slope term.
+    block.params[0] = Vec4::new(
+        1.0 / (SHADOW_FAR_M - SHADOW_NEAR_M),
+        (2.0 * SHADOW_HALF_EXTENT_M) / SHADOW_MAP_SIZE as f32,
+        0.0,
+        0.0,
+    );
     // Park the unused cascades: a zero view-proj makes `clip.w <= 0`, so the
     // shader's `cascade_factor` returns its skip sentinel and never samples them.
     block.view_proj[1] = Mat4::ZERO;
     block.view_proj[2] = Mat4::ZERO;
     block.gate = Vec4::new(SHADOW_STRENGTH, 1.0, 0.0, 0.0);
+    block.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
     rig.block = block;
 
     let (image, fallback) = (rig.image.clone(), rig.fallback.clone());

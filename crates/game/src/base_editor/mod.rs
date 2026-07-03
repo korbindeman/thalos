@@ -114,7 +114,7 @@ const RUNWAY_EDGE_M: f64 = 18.0;
 pub(crate) fn spawn_default_base(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<thalos_body_render::ShadowedStandardMaterial>,
     registry: &mut StructureRegistry,
     root: Entity,
     body_id: BodyId,

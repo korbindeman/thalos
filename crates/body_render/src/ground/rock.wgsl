@@ -21,7 +21,7 @@
     SceneLighting, ThalosSurface, SurfaceSky, shade_surface, compute_surface_sky,
     SURFACE_DIELECTRIC, object_aerial_recession,
 }
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor, is_ortho_projection}
 
 // Reuses the `GrassParams` field layout (sun / sky / fade / anchor); only wind
 // is unused for rocks.
@@ -96,7 +96,9 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let band = max(rock.time_fade.w, 1.0);
     let fade_in = smoothstep(near_edge - band, near_edge + band, inst_dist);
     let fade_out = 1.0 - smoothstep(far_edge - band, far_edge + band, inst_dist);
-    let grow = fade_in * fade_out;
+    // Sun-shadow caster pass (orthographic cascade camera): the fade reference
+    // above is wrong-camera there (see tree.wgsl) — cast at full scale.
+    let grow = select(fade_in * fade_out, 1.0, is_ortho_projection(view.clip_from_view));
     let local = base + (in.position - base) * grow;
     let world_pos =
         mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local, 1.0)).xyz;
