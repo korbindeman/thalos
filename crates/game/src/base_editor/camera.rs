@@ -27,7 +27,7 @@ pub(super) struct BaseEditorCameraPlugin;
 
 impl Plugin for BaseEditorCameraPlugin {
     fn build(&self, app: &mut App) {
-        // `GodViewOrbit` and the shadow-focus clear live in `god_view::GodViewPlugin`.
+        // `GodViewOrbit` lives in `god_view::GodViewPlugin`.
         app.add_systems(
             Update,
             (reset_orbit_on_open, drive_base_editor_camera)
@@ -62,7 +62,6 @@ fn drive_base_editor_camera(
     mut orbit: ResMut<GodViewOrbit>,
     root_grid: Query<&Grid, With<BigSpace>>,
     mut camera: Query<(&mut Transform, &mut CellCoord), With<ShipCamera>>,
-    mut shadow_focus: ResMut<crate::rendering::sun_shadow::ShadowFocusOverride>,
 ) {
     // Always drain the input streams so they don't pile up across frames.
     let drag: Vec2 = motion.read().map(|m| m.delta).sum();
@@ -95,6 +94,5 @@ fn drive_base_editor_camera(
         root_grid,
         &mut transform,
         &mut cell,
-        &mut shadow_focus,
     );
 }

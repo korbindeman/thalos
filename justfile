@@ -17,7 +17,9 @@ game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_g
 # Thalos surface runway), `just game runway-approach` (short final lined up
 # with that runway), `just game cruise` (Meridian at ~15,000 ft flying
 # level), `just game shipyard` (straight into the in-game ship editor —
-# also reachable via the pause menu's SHIPYARD button). `THALOS_AUTO_RUN=1`
+# also reachable via the pause menu's SHIPYARD button), `just game hub`
+# (straight into the space-center hub over the spaceport, no craft — the
+# PLAY path without the start screen). `THALOS_AUTO_RUN=1`
 # also skips the start screen (agents keep a one-shot launch flow).
 # Set a persistent default with THALOS_SPAWN in `.env.just`.
 game mode=env_var_or_default("THALOS_SPAWN", "menu"):
@@ -43,8 +45,10 @@ preview-window:
 # Headless screenshot: boots the game off-screen (no window), builds the world
 # for the preset, poses the camera, and writes a PNG to tools/screenshots/, then
 # exits — agent-runnable like `just preview`, but of a whole composed scene.
-# `just screenshot` does the spaceport aerial; override the framing without
-# recompiling via env vars, e.g. (PowerShell):
+# `just screenshot` does the spaceport aerial; `just screenshot hub` captures
+# the space-center hub exactly as PLAY presents it (spaceport built, no craft
+# placed — the regression probe for view-anchored surface detail). Override
+# the framing without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
 # Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP.
 screenshot preset="spaceport-aerial":

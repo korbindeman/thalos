@@ -154,6 +154,13 @@ const SHADOW_MAX_FOOTPRINT_SCALE: f32 = 32.0;
 /// frame the camera moved — re-rasterizing every shadow edge = global shimmer.
 const SHADOW_FOOTPRINT_SHRINK_FRACTION: f32 = 0.42;
 
+/// Cap on the footprint's look-reach term, in multiples of camera AGL. The
+/// cascade covers the ground point the camera looks at out to this many × AGL
+/// from the nadir; 4.0 fully covers the god view's shallowest pitch
+/// (15° → reach ≈ 3.73 × AGL) while keeping a horizon-grazing flight camera
+/// from demanding tens of km of shadow box.
+const SHADOW_LOOK_REACH_MAX_AGL: f32 = 4.0;
+
 /// Re-anchor distance for the texel-snap's body-fixed reference point. The
 /// snap phase is computed relative to a point that CO-ROTATES with the body
 /// (see the snap note in `update_sun_shadow_camera`); once the cascade centre
@@ -182,34 +189,6 @@ pub struct SunShadowState {
     pub images: [Handle<Image>; CASCADE_COUNT],
     /// Per-cascade transforms + compare params + `config.x` strength gate.
     pub block: ShadowCascadeBlock,
-}
-
-/// The active god-view focus, in the physics inertial frame (same frame as
-/// `ship_state().position`), or `None` when no god-view mode is driving. It is
-/// the single shared "look at *this* surface point, not the player craft" signal
-/// that keeps two subsystems coherent while the camera is decoupled from the
-/// craft:
-///
-/// - the **sun-shadow cascade** centres here (and bypasses the camera-altitude
-///   gate) — so the god view follows the panned focus across the whole base
-///   instead of leaving shadows in a box around the (possibly off-screen or
-///   orbiting) craft;
-/// - the **surface scatter** (grass / trees / rocks) centres here too, via
-///   [`scatter_view_center`](crate::freecam::scatter_view_center) — so vegetation
-///   builds around what the camera is looking at rather than the craft, which in
-///   the space-center hub is an unused placeholder up in orbit.
-///
-/// `None` ⇒ both centre on the craft (shadows gate as normal).
-///
-/// **Writers:** the god-view consumers via
-/// [`drive_god_view`](crate::god_view::drive_god_view) — the base editor
-/// (`base_editor::camera`) and the space-center hub (`space_center::camera`) —
-/// each frame while open, plus the headless spaceport screenshot preset
-/// (`screenshot::pose_camera`); cleared by `god_view::clear_shadow_focus` when
-/// every god-view mode is closed.
-#[derive(Resource, Default)]
-pub struct ShadowFocusOverride {
-    pub center_world: Option<DVec3>,
 }
 
 /// Marker + cascade index on each orthographic sun-shadow camera. Extracted so
@@ -306,7 +285,6 @@ impl Plugin for SunShadowPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractResourcePlugin::<SunShadowImage>::default())
             .add_plugins(ExtractComponentPlugin::<SunShadowCascade>::default())
-            .init_resource::<ShadowFocusOverride>()
             .add_systems(Startup, setup_sun_shadow)
             .add_systems(
                 Update,
@@ -461,7 +439,7 @@ fn update_sun_shadow_camera(
     bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
     ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
     origin: Res<crate::rendering::RenderOrigin>,
-    focus_override: Res<ShadowFocusOverride>,
+    view_anchor: Res<crate::rendering::view_anchor::ViewAnchor>,
     height_sources: Res<thalos_physics_local::HeightSourceRegistry>,
     mut shadow_cams: Query<
         (&mut Transform, &mut Camera, &mut Projection, &SunShadowCascade),
@@ -514,12 +492,11 @@ fn update_sun_shadow_camera(
         };
         altitude_m = altitude;
         body_dbg = format!("{active_id:?}");
-        // The base editor's god view (override active) bypasses the gate: it can
-        // boom out several km but is always inspecting the near-surface base.
         // Off-surface, don't disable — switch to craft-local self-shadow mode
-        // (see `SHADOW_MAX_ALTITUDE_M`).
-        let craft_local =
-            focus_override.center_world.is_none() && altitude > SHADOW_MAX_ALTITUDE_M;
+        // (see `SHADOW_MAX_ALTITUDE_M`). The gate is the CAMERA's altitude, so
+        // any near-surface view (flight, god view, freecam) keeps ground
+        // shadows regardless of where the craft is.
+        let craft_local = altitude > SHADOW_MAX_ALTITUDE_M;
         if craft_local {
             reason = "craft_local";
         }
@@ -535,28 +512,27 @@ fn update_sun_shadow_camera(
             Vec3::Y
         };
 
-        // Centre the cascades on the ground point BELOW THE CAMERA, so the crisp
-        // near cascade follows the player as they move/fly. Centring on the
-        // (possibly parked, possibly distant) craft instead smeared you into the
-        // coarse far cascade — or out of coverage entirely — the moment you
-        // walked or flew away from it. `up_radial` is the local vertical (the
-        // direction of a huge vector, so f32-precise); `altitude` carries the
-        // small big_space cancellation error, which only nudges the box height.
-        // Centre on the CANONICAL player position (this-frame, f64-derived from
-        // ship_state − render origin), NOT the ShipCamera GlobalTransform — whose
-        // big_space cell lags a frame (km-scale at the surface's ~260 m/s
-        // co-rotation), which made the cascade crawl the instant the sim ran. The
-        // casters (tree tiles) + receivers render at THIS-frame body orientation,
-        // so the cascade centre must use a this-frame reference too. (The same
-        // camera lag is documented on `scatter_view_center`.) The radial + altitude
-        // come from the canonical state as well, so the ground projection stays
-        // coherent.
-        // Centre on the base editor's god-view focus when it is driving (so the
-        // cascade follows the panned view across the whole base), else the
-        // canonical craft. Both are in the physics inertial frame; the focus point
-        // already sits on the ground so its projection below is ~a no-op.
-        let player_inertial = focus_override
-            .center_world
+        // Centre the cascades on the ground point BELOW THE VIEW, so the crisp
+        // near cascade follows whatever the camera is doing — flight, god view,
+        // freecam — with no craft anchoring. `up_radial` is the local vertical
+        // (the direction of a huge vector, so f32-precise); `altitude` carries
+        // the small big_space cancellation error, which only nudges the box
+        // height.
+        //
+        // The centre must be a THIS-FRAME inertial point: the casters (tree
+        // tiles) + receivers render at this-frame body orientation, and reading
+        // the ShipCamera GlobalTransform directly (one frame stale, km-scale at
+        // the surface's ~260 m/s co-rotation × warp) made the cascade crawl the
+        // instant the sim ran. The `ViewAnchor` solves exactly this: the camera
+        // pose resolved BODY-FIXED at a coherent epoch, re-projected here with
+        // this frame's body state (see `rendering::view_anchor`). Craft-local
+        // mode (high orbit) genuinely is about the craft-as-caster, so it keeps
+        // the canonical craft state; the anchor also falls back to the craft
+        // when it is unresolved or resolved against another body.
+        let player_inertial = view_anchor
+            .resolved
+            .filter(|a| !craft_local && a.body == active_id)
+            .map(|a| a.cam_world(body_state))
             .unwrap_or_else(|| sim.simulation.ship_state().position);
         let radial = player_inertial - body_state.position;
         let r = radial.length();
@@ -596,25 +572,36 @@ fn update_sun_shadow_camera(
         } else {
             Vec3::Y
         };
-        // View footprint scale: the cascade set stays CENTRED on the craft
-        // (this-frame canonical anchor — camera transforms lag a frame here and
-        // crawl; see the centring note below), but it must COVER whatever
-        // ground the camera is looking at from ANY vantage. Two view terms
-        // size it: the camera↔craft separation (orbit the camera to the far
-        // side of the base and the visible foreground is that far from the
-        // craft — with a craft-sized box, shadows existed only from some
-        // angles), plus a foreground extent that grows with camera altitude.
-        // Everything scales together: extents, depth range, back distance
-        // (the sampler's bias/offset derive from the published texel size and
-        // are hard-capped, so a wider box coarsens shadows instead of erasing
-        // them). Craft-local mode keeps the baseline — the craft is metres
-        // across regardless of altitude.
+        // View footprint scale: the cascade set is centred on the ground below
+        // the camera, but it must COVER whatever ground the camera is *looking
+        // at* from ANY vantage. Three view terms size it: any camera↔anchor
+        // separation (≈0 now that the centre is the view anchor itself), the
+        // ground reach of the camera's look direction (a boomed-out god view
+        // at shallow pitch inspects ground several × AGL away from the nadir —
+        // clamped, or a horizon-grazing look would demand tens of km), plus a
+        // foreground extent that grows with camera altitude. Everything scales
+        // together: extents, depth range, back distance (the sampler's
+        // bias/offset derive from the published texel size and are hard-capped,
+        // so a wider box coarsens shadows instead of erasing them). Craft-local
+        // mode keeps the baseline — the craft is metres across regardless of
+        // altitude.
         let footprint = if craft_local {
             1.0
         } else {
             let cam_dist = (cam_pos - player_render).length();
             let cam_agl = (altitude - terrain_h as f32).max(0.0);
-            let required_half_m = cam_dist + cam_agl * 2.0;
+            let fwd = cam_xform
+                .affine()
+                .transform_vector3(Vec3::NEG_Z)
+                .normalize_or_zero();
+            let down = (-fwd).dot(up_radial).max(0.0);
+            let horiz = (1.0 - down * down).max(0.0).sqrt();
+            let look_reach = if down > 1.0e-3 {
+                (cam_agl * horiz / down).min(cam_agl * SHADOW_LOOK_REACH_MAX_AGL)
+            } else {
+                cam_agl * SHADOW_LOOK_REACH_MAX_AGL
+            };
+            let required_half_m = cam_dist + look_reach + cam_agl * 2.0;
             let raw = (required_half_m / CASCADE_HALF_EXTENTS_M[CASCADE_COUNT - 1])
                 .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
             // QUANTIZE to power-of-two steps with shrink hysteresis: a

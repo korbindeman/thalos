@@ -18,7 +18,7 @@ use crate::rendering::{SimulationState, SolarSystemState};
 use crate::spawn::Homeworld;
 use crate::structures::StructureRegistry;
 
-use super::{SpaceCenter, hub_context, space_center_open};
+use super::{SpaceCenter, hub_context};
 
 pub(super) struct SpaceCenterCameraPlugin;
 
@@ -30,9 +30,21 @@ impl Plugin for SpaceCenterCameraPlugin {
         // `drive_camera` is chained after it and gated to run only while open.
         app.add_systems(
             Update,
-            (reset_orbit_on_open, drive_camera.run_if(space_center_open)).chain(),
+            (reset_orbit_on_open, drive_camera.run_if(hub_owns_camera)).chain(),
         );
     }
+}
+
+/// Run condition for [`drive_camera`]: the hub is open **and** we are not in
+/// headless-screenshot mode. When `ScreenshotConfig` is present the capture
+/// driver ([`crate::screenshot`]) owns the camera pose — running the hub drive
+/// too would race it (ambiguous Update ordering) for the same `ShipCamera`
+/// transform.
+fn hub_owns_camera(
+    sc: Option<Res<SpaceCenter>>,
+    screenshot: Option<Res<crate::screenshot::ScreenshotConfig>>,
+) -> bool {
+    screenshot.is_none() && sc.map(|s| s.open).unwrap_or(false)
 }
 
 /// Fresh establishing view whenever the hub *opens* (the closed→open edge).
@@ -77,7 +89,6 @@ fn drive_camera(
     mut orbit: ResMut<GodViewOrbit>,
     root_grid: Query<&Grid, With<BigSpace>>,
     mut camera: Query<(&mut Transform, &mut CellCoord), With<ShipCamera>>,
-    mut shadow_focus: ResMut<crate::rendering::sun_shadow::ShadowFocusOverride>,
     mut diag_frames: Local<u32>,
 ) {
     // Always drain the input streams so they don't pile up across frames.
@@ -114,7 +125,6 @@ fn drive_camera(
         root_grid,
         &mut transform,
         &mut cell,
-        &mut shadow_focus,
     );
 
     // DIAGNOSTIC (remove once the hub view is verified): periodic snapshot of

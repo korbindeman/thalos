@@ -85,11 +85,6 @@ pub fn base_editor_open(editor: Option<Res<BaseEditor>>) -> bool {
     editor.map(|e| e.open).unwrap_or(false)
 }
 
-/// Run condition: the base editor is closed.
-pub fn base_editor_closed(editor: Option<Res<BaseEditor>>) -> bool {
-    editor.map(|e| !e.open).unwrap_or(true)
-}
-
 pub struct BaseEditorPlugin;
 
 impl Plugin for BaseEditorPlugin {

@@ -101,6 +101,17 @@ pub enum StructurePlacement {
         half_along_m: f64,
         half_across_m: f64,
         ramp_m: f64,
+        /// Rectangle-centre offset from `anchor_dir` (metres, along
+        /// `heading_tangent` / `anchor_dir × heading_tangent`). The levelled
+        /// **plane** stays tangent at `anchor_dir` — only the rectangle shifts —
+        /// so an asymmetric footprint (the spaceport basin, pushed toward its
+        /// secondary runway) shares one ground plane with everything anchored
+        /// at the site centre. Anchoring the plane at the offset rect centre
+        /// instead tilts the ground ~`offset/R` against the pavement: at 500 m
+        /// offset on Thalos that buried the core apron's far strip under
+        /// decimetres of terrain (the "dark serrated fringe" bug).
+        rect_offset_along_m: f64,
+        rect_offset_across_m: f64,
     },
     /// Sit on the natural (un-flattened) surface — the structure's own geometry
     /// conforms to the terrain. No terrain modification.
@@ -228,6 +239,8 @@ pub fn apply_structure_flatten(
         half_along_m,
         half_across_m,
         ramp_m,
+        rect_offset_along_m,
+        rect_offset_across_m,
     } = site.placement
     else {
         return;
@@ -242,7 +255,8 @@ pub fn apply_structure_flatten(
         ramp_m,
         elevation_m,
         body_radius_m,
-    );
+    )
+    .with_rect_offset(rect_offset_along_m, rect_offset_across_m);
     if let Ok(mut guard) = flatten_registry.handle(site.body_id).write() {
         let region = FlattenRegion {
             id: site.id.0,

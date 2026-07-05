@@ -32,6 +32,7 @@ mod trails;
 mod transforms;
 mod types;
 mod vegetation;
+pub(crate) mod view_anchor;
 
 /// Cascade count shared by **every** game `DirectionalLight` that can cast
 /// shadows (the world `SunLight`, the shipyard editor's key light, and the
@@ -101,7 +102,8 @@ pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(SceneDepthPlugin)
+        app.add_plugins(view_anchor::ViewAnchorPlugin)
+            .add_plugins(SceneDepthPlugin)
             .add_plugins(ssao::SsaoPlugin)
             .add_plugins(sun_shadow::SunShadowPlugin)
             .add_plugins(TerrainResidencyPlugin)
@@ -134,12 +136,16 @@ impl Plugin for RenderingPlugin {
                 ),
             )
             // World spawn is keyed to `WorldState::Live`, not `Startup`: a
-            // scenario boot inserts `Live` so this fires on the first frame
-            // (after `Startup`, so `setup_big_space` / `setup_scene_depth_image`
-            // commands — which `spawn_bodies` reads — are already flushed); a
-            // bare menu boot stays `Absent` and spawns nothing until the menu
-            // starts a scenario. The chain gives `focus_camera_on_homeworld` a
-            // sync point so it sees the bodies `spawn_bodies` just queued. The
+            // scenario boot QUEUES `Live` from a `Startup` system (never
+            // `insert_state(Live)` at build — Bevy runs the initial
+            // `StateTransition` BEFORE `PreStartup`, which would fire this
+            // chain before `setup_big_space` / `setup_scene_depth_image`
+            // commands — which `spawn_bodies` reads — are flushed; see
+            // `main.rs`). The queued transition applies at the first regular
+            // `StateTransition`, same frame, after `Startup`. A bare menu boot
+            // stays `Absent` and spawns nothing until the menu starts a
+            // scenario. The chain gives `focus_camera_on_homeworld` a sync
+            // point so it sees the bodies `spawn_bodies` just queued. The
             // player ship gets its BigSpace attach from the per-frame
             // `attach_player_ship_to_big_space` pass below, same as
             // relaunch-built craft.

@@ -6,7 +6,7 @@ use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider, canonical::Epoch, simulation::Simulation,
     types::BodyStates,
 };
-use thalos_terrain::{DynamicSurfaceState, PlanetSurface};
+use thalos_terrain::DynamicSurfaceState;
 use thalos_world::{BodyId, SolarSystemDefinition};
 
 use crate::SimStage;
@@ -131,17 +131,10 @@ impl SolarSystemState {
         }
     }
 
-    // Forward environment-install API, ready for spawn-time wiring: the
-    // dynamic-surface slot pairs with the terrain rewrite's runtime overlays
-    // and `install_cloud_band_state` lights up the `update_cloud_bands` drift
+    // Forward environment-install API, ready for spawn-time wiring:
+    // `install_cloud_band_state` lights up the `update_cloud_bands` drift
     // loop the moment a body is given cloud bands. Kept symmetric with the live
     // `install_cloud_weather`.
-    #[allow(dead_code)]
-    pub fn install_dynamic_surface_state(&mut self, body_id: BodyId, state: DynamicSurfaceState) {
-        self.ensure_body_capacity(body_id + 1);
-        self.environment[body_id].dynamic_surface = Some(state);
-    }
-
     #[allow(dead_code)]
     pub fn install_cloud_band_state(&mut self, body_id: BodyId, state: CloudBandEnvironmentState) {
         self.ensure_body_capacity(body_id + 1);
@@ -153,23 +146,6 @@ impl SolarSystemState {
         self.environment[body_id].cloud_weather = Some(state);
     }
 
-    /// Return the dynamic-surface state for `body_id`, falling back to a
-    /// freshly seeded state matching the surface's authored layers when the
-    /// bake hasn't installed runtime state yet. This is the canonical companion
-    /// to [`thalos_body_render::rendered_height_m`]; pair it with
-    /// `TerrainSurfaceRegistry::get` so every height query sees the same
-    /// dynamic overlays that the renderer baked into its atlas.
-    #[allow(dead_code)]
-    pub fn dynamic_surface_for(
-        &self,
-        body_id: BodyId,
-        surface: &PlanetSurface,
-    ) -> DynamicSurfaceState {
-        self.environment
-            .get(body_id)
-            .and_then(|env| env.dynamic_surface.clone())
-            .unwrap_or_else(|| DynamicSurfaceState::for_layers(&surface.dynamic_layers))
-    }
 }
 
 pub fn sync_solar_system_state(

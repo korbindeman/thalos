@@ -94,11 +94,6 @@ pub fn space_center_open(sc: Option<Res<SpaceCenter>>) -> bool {
     sc.map(|s| s.open).unwrap_or(false)
 }
 
-/// Run condition: the hub is closed.
-pub fn space_center_closed(sc: Option<Res<SpaceCenter>>) -> bool {
-    sc.map(|s| !s.open).unwrap_or(true)
-}
-
 pub struct SpaceCenterPlugin;
 
 impl Plugin for SpaceCenterPlugin {

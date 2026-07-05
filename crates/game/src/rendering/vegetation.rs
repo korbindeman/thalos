@@ -46,13 +46,12 @@ use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
-use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
-use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::{ShadowFocusOverride, SunShadowState};
-use crate::rendering::types::{CameraExposure, PlayerShip};
+use crate::rendering::sun_shadow::SunShadowState;
+use crate::rendering::types::CameraExposure;
+use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Clipmap rings ──────────────────────────────────────────────────────────────
@@ -712,9 +711,9 @@ fn species_lod_for(library: &SpeciesLibrary, lod: usize) -> Vec<Option<Arc<TreeM
         .collect()
 }
 
-/// Pick the active vegetated body and keep the scatter-tile set around the
-/// player's ground point. Centred on the canonical player state (same epoch as
-/// `solar.states`), like the grass driver.
+/// Keep the scatter-tile set around the **view anchor** (the render camera,
+/// resolved body-fixed — see [`crate::rendering::view_anchor`]): trees exist
+/// around whatever the camera is, flight or god view, with no craft anchoring.
 #[allow(clippy::too_many_arguments)]
 fn drive_veg_tiles(
     mut veg: ResMut<VegTiles>,
@@ -724,44 +723,15 @@ fn drive_veg_tiles(
     height_sources: Res<HeightSourceRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     bake: Res<ImpostorBake>,
-    freecam: Res<FreeCam>,
-    scatter_focus: Res<ShadowFocusOverride>,
-    game_ctx: Option<Res<State<crate::game_context::GameContext>>>,
-    ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
+    anchor: Res<ViewAnchor>,
     mut commands: Commands,
     mut diag: Local<u32>,
 ) {
     let Some(library) = library else {
         return;
     };
-    let Some(states) = solar.states.as_deref() else {
+    if solar.states.is_none() {
         return;
-    };
-    let focus_some = scatter_focus.center_world.is_some();
-    let camera_decoupled = crate::game_context::god_view_active(game_ctx.as_deref());
-    let cam_pos = scatter_view_center(
-        &freecam,
-        ship_cam_q.single().ok(),
-        scatter_focus.center_world,
-        camera_decoupled,
-        sim.simulation.ship_state().position,
-    );
-
-    // Active body: nearest vegetated, terrain-backed body (grass driver's rule).
-    let mut best: Option<(BodyId, f64)> = None;
-    for (id, body) in sim.system.bodies.iter().enumerate() {
-        if terrain_shading_style_for(body) != TerrainShadingStyle::Vegetated
-            || !height_sources.contains(id)
-        {
-            continue;
-        }
-        let Some(state) = states.get(id) else {
-            continue;
-        };
-        let alt = (cam_pos - state.position).length() - body.radius_m;
-        if best.is_none_or(|(_, best_alt)| alt < best_alt) {
-            best = Some((id, alt));
-        }
     }
 
     let despawn_all = |veg: &mut VegTiles, commands: &mut Commands| {
@@ -773,13 +743,21 @@ fn drive_veg_tiles(
         veg.in_flight.clear();
     };
 
-    let Some((body_id, _)) = best else {
+    // Active body: the anchor's (nearest terrain-backed) body, when vegetated.
+    let anchored = anchor.resolved.filter(|a| {
+        sim.system
+            .bodies
+            .get(a.body)
+            .is_some_and(|b| terrain_shading_style_for(b) == TerrainShadingStyle::Vegetated)
+    });
+    let Some(view) = anchored else {
         if veg.body.is_some() {
             despawn_all(&mut veg, &mut commands);
             veg.body = None;
         }
         return;
     };
+    let body_id = view.body;
     if veg.body != Some(body_id) {
         despawn_all(&mut veg, &mut commands);
         veg.body = Some(body_id);
@@ -790,24 +768,15 @@ fn drive_veg_tiles(
             .collect();
     }
 
-    let body = &sim.system.bodies[body_id];
-    let radius_m = body.radius_m;
-    let state = &states[body_id];
+    let radius_m = view.radius_m;
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
     let mirror = height_sources.gpu_mirror(body_id);
 
-    let cam_body = state.orientation.inverse() * (cam_pos - state.position);
-    let cam_r = cam_body.length();
-    if cam_r <= 0.0 {
-        return;
-    }
-    let cam_dir = cam_body / cam_r;
-    let ground_h = height_source
-        .sample_height_m(cam_dir.as_vec3(), TREE_GROUND_LOD_M)
-        .unwrap_or(0.0) as f64;
-    let agl = cam_r - (radius_m + ground_h);
+    let cam_dir = view.cam_dir;
+    let ground_h = view.ground_h_m;
+    let agl = view.agl_m;
     // DIAGNOSTIC (remove once base-view vegetation is verified): why do trees not
     // build in the no-ship god-view? Report the scatter centre state each ~1.5 s.
     *diag = diag.wrapping_add(1);
@@ -826,8 +795,7 @@ fn drive_veg_tiles(
             / 1000.0;
         info!(
             target: "thalos::veg",
-            "veg drive: focus_override={focus_some} decoupled={camera_decoupled} \
-             body={body_id} ground_h_m={ground_h:.0} agl_m={agl:.0} tiles={} \
+            "veg drive: body={body_id} ground_h_m={ground_h:.0} agl_m={agl:.0} tiles={} \
              nonempty={nonempty} nearest_tree_km={nearest_tree_km:.2} \
              in_flight={} bake_ready={}",
             veg.tiles.len(),
@@ -1248,9 +1216,7 @@ fn update_tree_material(
     time: Res<Time>,
     exposure: Res<CameraExposure>,
     bake: Res<ImpostorBake>,
-    ship: Query<&GlobalTransform, With<PlayerShip>>,
-    ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
-    freecam: Res<FreeCam>,
+    anchor: Res<ViewAnchor>,
     sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
     mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
@@ -1272,9 +1238,18 @@ fn update_tree_material(
     let flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
 
     let t = time.elapsed_secs();
-    let up = (sim.simulation.ship_state().position - body_state.position)
-        .normalize_or_zero()
-        .as_vec3();
+    // Local vertical at the VIEW (the tiles exist around the view anchor, so
+    // the sky/wind vertical must match — the craft may be on the far side of
+    // the planet).
+    let up = anchor
+        .resolved
+        .filter(|a| a.body == body_id)
+        .map(|a| (body_state.orientation * a.cam_dir).as_vec3())
+        .unwrap_or_else(|| {
+            (sim.simulation.ship_state().position - body_state.position)
+                .normalize_or_zero()
+                .as_vec3()
+        });
     let seed = if up.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
     let east = seed.cross(up).normalize_or_zero();
     let north = up.cross(east);
@@ -1295,21 +1270,13 @@ fn update_tree_material(
     let sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
     let sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
-    // Fade reference = the player craft, passed as an OFFSET from the camera
-    // (`ship − camera`) so the shader rebuilds it in the current frame's render
-    // origin (`view.world_position + offset`). An absolute anchor is one frame
-    // stale and jumps a whole cell across a big_space floating-origin recentre
-    // while the parked craft co-rotates through space, popping fade-band
-    // instances in/out; the offset is origin-invariant so the recentre cancels
-    // (same fix as `rendering::grass`). EVA / freecam → offset 0 = camera.
-    let cam_render = ship_cam.iter().next().map(|gt| gt.translation());
-    let anchor = match (freecam.active, ship.iter().next(), cam_render) {
-        (false, Some(ship_gt), Some(cam)) => {
-            let off = ship_gt.translation() - cam;
-            Vec4::new(off.x, off.y, off.z, 1.0)
-        }
-        _ => Vec4::ZERO,
-    };
+    // Fade reference = the VIEW (`view.world_position` in the shader, offset 0):
+    // the scale-fade is a per-instance LOD keyed by slant distance from the eye,
+    // matching the build driver's slant-keyed LOD pick. Offset 0 is inherently
+    // origin-invariant and this-frame-exact — the former craft-anchored offset
+    // was a workaround for the main-world camera transform lagging a frame,
+    // which the shader's own view position doesn't.
+    let anchor = Vec4::ZERO;
 
     // Each material carries the shared lighting + ITS clipmap ring's cross-fade
     // band: `time_fade = (time, near_edge, far_edge, band)`. The shader grows each

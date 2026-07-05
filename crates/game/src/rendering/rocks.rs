@@ -38,13 +38,12 @@ use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
-use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
-use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::{ShadowFocusOverride, SunShadowState};
-use crate::rendering::types::{CameraExposure, PlayerShip};
+use crate::rendering::sun_shadow::SunShadowState;
+use crate::rendering::types::CameraExposure;
+use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
@@ -294,8 +293,8 @@ fn setup_rock_library(
 /// stays bounded (most stones are the cheap small/faceted LOD).
 const ROCK_SPACING_M: f32 = 1.25;
 
-/// Pick the active vegetated body and keep the near rock-tile set around the
-/// player's ground point. Centred on the canonical player state, like grass.
+/// Keep the near rock-tile set around the **view anchor** (the render camera,
+/// resolved body-fixed — see [`crate::rendering::view_anchor`]), like grass.
 #[allow(clippy::too_many_arguments)]
 fn drive_rock_tiles(
     mut rocks: ResMut<RockTiles>,
@@ -304,41 +303,14 @@ fn drive_rock_tiles(
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
-    freecam: Res<FreeCam>,
-    scatter_focus: Res<ShadowFocusOverride>,
-    game_ctx: Option<Res<State<crate::game_context::GameContext>>>,
-    ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
+    anchor: Res<ViewAnchor>,
     mut commands: Commands,
 ) {
     let Some(library) = library else {
         return;
     };
-    let Some(states) = solar.states.as_deref() else {
+    if solar.states.is_none() {
         return;
-    };
-    let cam_pos = scatter_view_center(
-        &freecam,
-        ship_cam_q.single().ok(),
-        scatter_focus.center_world,
-        crate::game_context::god_view_active(game_ctx.as_deref()),
-        sim.simulation.ship_state().position,
-    );
-
-    // Active body: nearest vegetated, terrain-backed body (the grass rule).
-    let mut best: Option<(BodyId, f64)> = None;
-    for (id, body) in sim.system.bodies.iter().enumerate() {
-        if terrain_shading_style_for(body) != TerrainShadingStyle::Vegetated
-            || !height_sources.contains(id)
-        {
-            continue;
-        }
-        let Some(state) = states.get(id) else {
-            continue;
-        };
-        let alt = (cam_pos - state.position).length() - body.radius_m;
-        if best.is_none_or(|(_, best_alt)| alt < best_alt) {
-            best = Some((id, alt));
-        }
     }
 
     let despawn_all = |rocks: &mut RockTiles, commands: &mut Commands| {
@@ -350,13 +322,22 @@ fn drive_rock_tiles(
         rocks.in_flight.clear();
     };
 
-    let Some((body_id, _)) = best else {
+    // Active body: the view anchor's (nearest terrain-backed) body, when
+    // vegetated — rocks follow the VIEW, see `rendering::view_anchor`.
+    let anchored = anchor.resolved.filter(|a| {
+        sim.system
+            .bodies
+            .get(a.body)
+            .is_some_and(|b| terrain_shading_style_for(b) == TerrainShadingStyle::Vegetated)
+    });
+    let Some(view) = anchored else {
         if rocks.body.is_some() {
             despawn_all(&mut rocks, &mut commands);
             rocks.body = None;
         }
         return;
     };
+    let body_id = view.body;
     if rocks.body != Some(body_id) {
         despawn_all(&mut rocks, &mut commands);
         rocks.body = Some(body_id);
@@ -364,9 +345,7 @@ fn drive_rock_tiles(
         rocks.lattice = Some(TileLattice::for_body(radius_m, ROCK_TILE_SIZE_M));
     }
 
-    let body = &sim.system.bodies[body_id];
-    let radius_m = body.radius_m;
-    let state = &states[body_id];
+    let radius_m = view.radius_m;
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
@@ -375,16 +354,8 @@ fn drive_rock_tiles(
         return;
     };
 
-    let cam_body = state.orientation.inverse() * (cam_pos - state.position);
-    let cam_r = cam_body.length();
-    if cam_r <= 0.0 {
-        return;
-    }
-    let cam_dir = cam_body / cam_r;
-    let ground_h = height_source
-        .sample_height_m(cam_dir.as_vec3(), ROCK_GROUND_LOD_M)
-        .unwrap_or(0.0) as f64;
-    let agl = cam_r - (radius_m + ground_h);
+    let cam_dir = view.cam_dir;
+    let agl = view.agl_m;
     if agl > ROCK_DESPAWN_AGL_M {
         if !rocks.tiles.is_empty() || !rocks.in_flight.is_empty() {
             despawn_all(&mut rocks, &mut commands);
@@ -625,7 +596,7 @@ fn update_rock_transforms(
 
 /// Per-frame rock shading on the single shared [`RockMaterial`]: sun direction +
 /// flux, the shared `thalos::lighting` sky inputs, the live sun-shadow cascade,
-/// and the craft-anchored scale-fade. Mirrors `rendering::grass::update_grass_material`.
+/// and the view-anchored scale-fade. Mirrors `rendering::grass::update_grass_material`.
 #[allow(clippy::too_many_arguments)]
 fn update_rock_material(
     library: Option<Res<RockLibrary>>,
@@ -634,10 +605,7 @@ fn update_rock_material(
     sim: Res<SimulationState>,
     time: Res<Time>,
     exposure: Res<CameraExposure>,
-    ship: Query<&GlobalTransform, With<PlayerShip>>,
-    ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
-    freecam: Res<FreeCam>,
-    origin: Res<crate::rendering::RenderOrigin>,
+    anchor: Res<ViewAnchor>,
     sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<RockMaterial>>,
 ) {
@@ -661,9 +629,16 @@ fn update_rock_material(
     let flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
     let sun = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux);
 
-    let up = (sim.simulation.ship_state().position - body_state.position)
-        .normalize_or_zero()
-        .as_vec3();
+    // Local vertical at the VIEW (the tiles exist around the view anchor).
+    let up = anchor
+        .resolved
+        .filter(|a| a.body == body_id)
+        .map(|a| (body_state.orientation * a.cam_dir).as_vec3())
+        .unwrap_or_else(|| {
+            (sim.simulation.ship_state().position - body_state.position)
+                .normalize_or_zero()
+                .as_vec3()
+        });
     let sky_up = Vec4::new(up.x, up.y, up.z, 0.0);
 
     let (tau, strength) = sim
@@ -676,22 +651,10 @@ fn update_rock_material(
         .unwrap_or((Vec3::ZERO, 0.0));
     let sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
-    // Fade reference = the player craft, as a camera-relative OFFSET so the
-    // shader rebuilds it in the current render origin (origin-invariant across
-    // big_space recentres). Same logic as `rendering::grass`.
-    let cam_render = ship_cam.iter().next().map(|gt| gt.translation());
-    let anchor = match (freecam.active, ship.iter().next(), cam_render) {
-        (false, Some(ship_gt), Some(cam)) => {
-            let off = ship_gt.translation() - cam;
-            Vec4::new(off.x, off.y, off.z, 1.0)
-        }
-        (false, None, Some(cam)) => {
-            let player_render = (sim.simulation.ship_state().position - origin.position).as_vec3();
-            let off = player_render - cam;
-            Vec4::new(off.x, off.y, off.z, 1.0)
-        }
-        _ => Vec4::ZERO,
-    };
+    // Fade reference = the VIEW (`view.world_position` in the shader, offset 0):
+    // the scale-fade is a per-instance LOD keyed by distance from the eye —
+    // origin-invariant and this-frame-exact (same as `rendering::grass`).
+    let anchor = Vec4::ZERO;
 
     let (near, far, band) = rock_fade();
     material.params.sun_dir = sun;

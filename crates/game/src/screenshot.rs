@@ -41,8 +41,10 @@ use thalos_physics_local::HeightSourceRegistry;
 
 use crate::camera::ShipCamera;
 use crate::loading::AppState;
-use crate::rendering::sun_shadow::ShadowFocusOverride;
+use crate::rendering::ground_terrain::BodyTerrain;
 use crate::rendering::{SimulationState, SolarSystemState};
+use thalos_body_render::renderer_tile_lod_m_at;
+use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 use crate::space_center::{HubContext, hub_context};
 use crate::spawn::{Homeworld, SpawnSituation};
 use crate::structures::StructureRegistry;
@@ -126,6 +128,15 @@ pub enum ScreenshotPreset {
     /// scenario, which builds the whole spaceport + settles the terrain behind
     /// the loading screen.
     SpaceportAerial,
+    /// The space-center hub exactly as PLAY presents it: a clean start with the
+    /// spaceport built but **no craft placed** — the canonical placeholder craft
+    /// stays in orbit while the camera god-views the base. Boots the `hub`
+    /// route (`just game hub`), i.e. the orbit scenario + `HubSpaceportBuild` +
+    /// the hub opening on reveal. This is the regression probe for
+    /// view-anchored surface detail: the camera is maximally decoupled from the
+    /// craft, so anything anchored to the craft (scatter, shadows) goes missing
+    /// here first.
+    Hub,
 }
 
 impl ScreenshotPreset {
@@ -134,6 +145,7 @@ impl ScreenshotPreset {
             // Truthy / unnamed → the default preset.
             "" | "1" | "true" | "yes" | "on" | "spaceport" | "spaceport-aerial" | "aerial"
             | "base" => Self::SpaceportAerial,
+            "hub" | "space-center" | "spacecenter" | "play" => Self::Hub,
             other => {
                 eprintln!(
                     "  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial."
@@ -147,7 +159,18 @@ impl ScreenshotPreset {
     pub fn spawn_situation(self) -> SpawnSituation {
         match self {
             Self::SpaceportAerial => SpawnSituation::Runway,
+            // The hub is the PLAY path: the placeholder parking orbit plus the
+            // spaceport build (armed by `main.rs` via `boots_hub`).
+            Self::Hub => SpawnSituation::ShipOrbit,
         }
+    }
+
+    /// Whether this preset boots the space-center hub route (spaceport built
+    /// with no craft placed, hub opened on reveal) — `main.rs` arms
+    /// `HubSpaceportBuild` + `OpenSpaceCenterOnStart` for it, exactly like the
+    /// start screen's PLAY.
+    pub fn boots_hub(self) -> bool {
+        matches!(self, Self::Hub)
     }
 
     fn defaults(self) -> ScreenshotConfig {
@@ -161,6 +184,19 @@ impl ScreenshotPreset {
                 elevation_deg: 42.0,
                 distance_m: 4200.0,
                 warmup_frames: 180,
+                tail_frames: 24,
+            },
+            // Matches the hub's establishing view (`HUB_ESTABLISHING_DISTANCE_M`)
+            // so the capture shows what PLAY shows.
+            Self::Hub => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/hub.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 35.0,
+                elevation_deg: 42.0,
+                distance_m: 4000.0,
+                warmup_frames: 240,
                 tail_frames: 24,
             },
         }
@@ -283,8 +319,82 @@ impl Plugin for HeadlessScreenshotPlugin {
                 drive_headless_screenshot
                     .after(crate::SimStage::Camera)
                     .run_if(in_state(AppState::Running)),
+            )
+            // Diagnostic transect across the spaceport basin (headless runs
+            // only): resident tile LOD + rendered height vs the basin plane.
+            .add_systems(
+                Update,
+                probe_apron_lod.run_if(in_state(AppState::Running)),
             );
     }
+}
+
+/// Diagnostic: for each probe offset across the basin (metres from the pad
+/// centre along `center_dir × heading`), log the resident tile texel size and
+/// the height-mirror sample relative to the basin elevation `E`, plus the tile
+/// tree's view distance to the pad. Reads the same surfaces the renderer draws,
+/// so a paving/terrain height fight shows up as numbers instead of guesswork —
+/// this transect is what pinned the 2026-07 "dark serrated apron fringe" to the
+/// basin flatten's plane being tangent at the offset rect centre instead of the
+/// runway centre. Headless-only (the plugin is added only under
+/// `THALOS_SCREENSHOT`), one line per ~4 s.
+fn probe_apron_lod(
+    mut frame: Local<u32>,
+    sim: Res<SimulationState>,
+    site: Option<Res<crate::runway::RunwaySite>>,
+    tile_trees: Res<TerrainViewComponents<TileTree>>,
+    terrains: Query<(Entity, &BodyTerrain, &TileAtlas)>,
+    camera_q: Query<Entity, With<ShipCamera>>,
+    height_sources: Res<HeightSourceRegistry>,
+) {
+    *frame += 1;
+    if *frame % 240 != 0 {
+        return;
+    }
+    let Some(site) = site else { return };
+    let Some((terrain_entity, _, atlas)) =
+        terrains.iter().find(|(_, t, _)| t.body_id == site.body_id)
+    else {
+        return;
+    };
+    let Some(camera) = camera_q.iter().next() else { return };
+    let Some(tree) = tile_trees.get(&(terrain_entity, camera)) else {
+        return;
+    };
+    let r = sim.system.bodies[site.body_id].radius_m + site.elevation_m;
+    let across = site.center_dir.cross(site.heading_tangent).normalize();
+    let pad = site.center_dir * r;
+    let view_dist_km = (tree.view_position() - pad).length() / 1000.0;
+    let hs = height_sources.get(site.body_id);
+    let offs = [-1200.0f64, -560.0, -520.0, -470.0, -350.0, 0.0, 350.0, 470.0, 520.0, 560.0, 1200.0];
+    let lods: Vec<String> = offs
+        .iter()
+        .map(|off| {
+            let dir = (site.center_dir * r + across * *off).normalize();
+            let p = dir * r;
+            let lod = match renderer_tile_lod_m_at(atlas, tree, p) {
+                Some(m) => format!("{m:.1}"),
+                None => "none".to_string(),
+            };
+            // Height relative to the basin plane elevation E, from the GPU-atlas
+            // height mirror (the same surface the renderer draws).
+            let dh = hs
+                .as_ref()
+                .map(|h| {
+                    h.sample_height_m(dir.as_vec3(), 1.0)
+                        .map(|hm| format!("{:+.2}", hm as f64 - site.elevation_m))
+                        .unwrap_or_else(|| "?".into())
+                })
+                .unwrap_or_else(|| "?".into());
+            format!("{off:+.0}m:[{lod}|{dh}]")
+        })
+        .collect();
+    info!(
+        target: "thalos::screenshot",
+        "apron probe: view->pad {:.2} km | off:[texel_m|dh_m] {}",
+        view_dist_km,
+        lods.join(" ")
+    );
 }
 
 /// Create the off-screen render target the ship camera will draw into.
@@ -370,7 +480,6 @@ fn drive_headless_screenshot(
     homeworld: Res<Homeworld>,
     root_grid: Query<&Grid, With<BigSpace>>,
     mut camera: Query<(&mut Transform, &mut CellCoord), With<ShipCamera>>,
-    mut shadow_focus: ResMut<ShadowFocusOverride>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -393,7 +502,7 @@ fn drive_headless_screenshot(
     let Ok((mut transform, mut cell)) = camera.single_mut() else {
         return;
     };
-    pose_camera(&cfg, &ctx, root, &mut transform, &mut cell, &mut shadow_focus);
+    pose_camera(&cfg, &ctx, root, &mut transform, &mut cell);
 
     if driver.captured {
         driver.tail += 1;
@@ -429,17 +538,15 @@ fn drive_headless_screenshot(
 }
 
 /// Place the ship camera at the god-view pose defined by `cfg` around `ctx`'s
-/// focus, and steer the sun-shadow cascade to the same focus so the whole base
-/// is shadowed (not just the parked craft). Mirrors
-/// [`crate::god_view::drive_god_view`], minus the input handling and pitch clamp
-/// (so near-top-down elevations are reachable).
+/// focus. Mirrors [`crate::god_view::drive_god_view`], minus the input handling
+/// and pitch clamp (so near-top-down elevations are reachable). Detail systems
+/// (scatter, shadows) follow the camera via `rendering::view_anchor`.
 fn pose_camera(
     cfg: &ScreenshotConfig,
     ctx: &HubContext,
     root: &Grid,
     transform: &mut Transform,
     cell: &mut CellCoord,
-    shadow_focus: &mut ShadowFocusOverride,
 ) {
     let up = ctx.up_world;
     // Tangent basis on the local horizon (east / north), robust near the poles.
@@ -457,8 +564,6 @@ fn pose_camera(
     let offset_dir = horiz * elev.cos() + up * elev.sin();
 
     let focus = ctx.center_world;
-    shadow_focus.center_world = Some(focus);
-
     let camera_world = focus + offset_dir * cfg.distance_m;
     let to_focus = (focus - camera_world).normalize();
     // At (near) top-down the look direction is anti-parallel to `up`, which makes

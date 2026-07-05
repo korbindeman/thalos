@@ -52,50 +52,6 @@ impl Default for FreeCam {
     }
 }
 
-/// Inertial (heliocentric, f64) position that surface-scatter clipmaps (grass,
-/// trees, rocks) should center on.
-///
-/// The rule is **follow the view, not the craft**. Normally the ship camera
-/// orbits the player, so the canonical player state (`fallback`) is the steadiest
-/// proxy for the view centre — the camera's big_space cell lags a frame (km-scale
-/// at orbital speed), so reading the craft avoids clipmap churn. But whenever the
-/// camera is *decoupled* from the craft the craft is the wrong reference: it may
-/// be parked elsewhere, or — in the space-center hub — an unused placeholder up in
-/// orbit, which strands the scatter far from where the camera is actually looking
-/// and leaves the viewed surface bare. Two decoupled cases, in priority order:
-///
-/// - `focus_override` — a god-view mode (space-center hub / base editor) or the
-///   headless spaceport screenshot points the camera at a surface focus. This is
-///   the exact ground point being framed (the same
-///   [`ShadowFocusOverride`](crate::rendering::sun_shadow::ShadowFocusOverride)
-///   the sun-shadow cascade follows), so it's the best centre — on the surface,
-///   AGL ≈ 0, and it tracks the WASD pan.
-/// - `camera_decoupled` — a god-view mode is open **or** the debug freecam is
-///   active, but no explicit focus was supplied. Fall back to the camera's own
-///   inertial position (reconstructed f64-precise from its big_space cell + local
-///   translation) so the scatter still follows the view rather than the craft.
-///   This is the safety net that makes the base view render even if the focus
-///   plumbing is ever missed.
-pub fn scatter_view_center(
-    freecam: &FreeCam,
-    ship_cam: Option<(&CellCoord, &Transform)>,
-    focus_override: Option<DVec3>,
-    camera_decoupled: bool,
-    fallback: DVec3,
-) -> DVec3 {
-    if let Some(center) = focus_override {
-        return center;
-    }
-    if (camera_decoupled || freecam.active)
-        && let Some((cell, transform)) = ship_cam
-    {
-        return DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
-            * crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M as f64
-            + transform.translation.as_dvec3();
-    }
-    fallback
-}
-
 const FREECAM_DEFAULT_SPEED_M_S: f64 = 100.0;
 const FREECAM_MIN_SPEED_M_S: f64 = 1.0;
 const FREECAM_MAX_SPEED_M_S: f64 = 1.0e7;

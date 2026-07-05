@@ -1,78 +1,27 @@
 #![enable(implicit_some)]
 (
-    terrain: Feature((
-        seed: 1007,
-        body_age_gyr: 4.3,
-        archetype: ColdDesertFormerlyWet,
-        composition: BasalticSilicate,
-        environment: (
-            stellar_flux_earth: 0.33,
-            atmosphere: ThinCo2(pressure_bar: 0.015),
-            hydrosphere: AncientLost,
-            ice_inventory: Moderate,
-        ),
-        intent: [
-            ReadAsFirstInterplanetarySurfaceWorld,
-            ForgivingLandingTerrain,
-            VisibleAncientWaterStory,
-            RustDustAndEvaporites,
-        ],
-        projection: ColdDesert((
-            relief_scale_m: 1.0,
-            volcanic_dark_strength: 1.0,
-            pale_basin_strength: 1.0,
-            channel_strength: 1.0,
-            dune_strength: 1.0,
-            base_crater_count: 90000,
-            crater_age_bias: 3.2,
-            archive_crater_age_bias: 4.2,
-            forced_young_count: 2,
-            min_crater_radius_m: 800.0,
-            max_crater_radius_m: 90000.0,
-            cubemap_bake_threshold_m: 1200.0,
-        )),
-        ice_caps: [
-            (
-                edge_latitude_deg: 62.0,
-                solid_latitude_deg: 63.4,
-                edge_noise_deg: 5.0,
-                edge_sharpness: 0.96,
-                noise_frequency: 2.8,
-                max_thickness_m: 140.0,
-                albedo_linear: (0.90, 0.94, 0.96),
-                dust_albedo_linear: (0.58, 0.56, 0.50),
-                albedo_strength: 0.90,
-                roughness: 0.44,
-                roughness_strength: 0.90,
-            ),
-        ],
-        authored_features: [
-            Megabasin((
-                id: "vaelen.impact_basin_archive.southern_pale_megabasin",
-                parent: "vaelen.impact_basin_archive",
-                center_dir: (-0.28, -0.74, 0.61),
-                radius_km: 360.0,
-                depth_km: 3.8,
-                lock: Placement,
-            )),
-            Megabasin((
-                id: "vaelen.impact_basin_archive.western_dark_basin",
-                parent: "vaelen.impact_basin_archive",
-                center_dir: (-0.92, -0.10, -0.38),
-                radius_km: 245.0,
-                depth_km: 3.2,
-                lock: Placement,
-            )),
-            Megabasin((
-                id: "vaelen.impact_basin_archive.northeast_buried_basin",
-                parent: "vaelen.impact_basin_archive",
-                center_dir: (0.66, 0.31, -0.68),
-                radius_km: 285.0,
-                depth_km: 3.4,
-                lock: Placement,
-            )),
-        ],
-    )),
+    // Terrain generation is DISABLED for Vaelen — it renders as a solid-colour
+    // placeholder impostor (the `TerrainConfig::None` path in
+    // `rendering::spawn::spawn_bodies`), like every body that ships without a
+    // per-body terrain block. Omitting the `terrain` field here yields
+    // `TerrainConfig::None` after the parse fold in `thalos_world::parsing`.
+    //
+    // There is no Vaelen-specific surface generator yet. The old
+    // `Feature(ColdDesertFormerlyWet)` block did NOT actually author Vaelen's
+    // ground: the runtime `ProceduralSurface` is keyed only by radius + body id
+    // and ignores the `TerrainConfig`, so Vaelen was sharing Thalos's Earth-like
+    // continent/ocean generator ("Earth's terrain"). The Feature block only
+    // flipped Vaelen into the procedural branch. When a real generator lands,
+    // re-enable a `terrain:` entry here. Design intent for that day: a cold,
+    // rust-dusted desert world that was once wet — ancient outflow channels,
+    // evaporite basins, polar ice caps, buried impact basins. Full old config
+    // is in git history.
+    //
+    // The authored atmosphere below is retained (tuned cold-desert optics) but
+    // does NOT render while Vaelen is a placeholder: the ship-view `BodySky`
+    // pass only becomes visible once ground-LOD terrain is resident (see
+    // `sync_body_render_lod`), and the placeholder map disc draws no rim halo.
+    // It lights up again when terrain returns.
     terrestrial_atmosphere: Some((
         // Kármán line at 60 km — thinner shell than Thalos's 80 km,
         // matching the thinner physical column. Still well above the

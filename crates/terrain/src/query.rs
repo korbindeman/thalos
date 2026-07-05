@@ -301,6 +301,18 @@ pub struct TerrainFlatten {
     pub half_along_m: f64,
     /// Half-width of the flat region along `tangent_across`, metres.
     pub half_across_m: f64,
+    /// Rectangle-centre offset from `center_dir` along `tangent_along`, metres.
+    /// The **plane** stays tangent at `center_dir` (see
+    /// [`Self::plane_elevation_m`]); only the levelled rectangle shifts within
+    /// it. Lets an asymmetric footprint (the spaceport basin, offset toward its
+    /// secondary runway) share one plane with everything built at the anchor —
+    /// anchoring the plane at the rectangle centre instead would tilt the ground
+    /// ~`offset/R` relative to the pavement and bury/float it by decimetres at
+    /// the far structures. Set via [`Self::with_rect_offset`], default `0`.
+    pub offset_along_m: f64,
+    /// Rectangle-centre offset along `tangent_across`, metres. See
+    /// [`Self::offset_along_m`].
+    pub offset_across_m: f64,
     /// Width of the blend-to-terrain ramp outside the flat region, metres.
     pub ramp_m: f64,
     /// Radial height (m above the reference radius) of the pad **at its centre**.
@@ -341,8 +353,25 @@ impl TerrainFlatten {
             ramp_m,
             elevation_m,
             radius_m,
+            offset_along_m: 0.0,
+            offset_across_m: 0.0,
             cos_max,
         }
+    }
+
+    /// Offset the levelled rectangle within the tangent plane (metres along
+    /// `tangent_along` / `tangent_across`) without moving the plane's anchor.
+    /// See [`Self::offset_along_m`].
+    pub fn with_rect_offset(mut self, offset_along_m: f64, offset_across_m: f64) -> Self {
+        self.offset_along_m = offset_along_m;
+        self.offset_across_m = offset_across_m;
+        // Re-derive the angular reject for the shifted rectangle.
+        let reach_along = offset_along_m.abs() + self.half_along_m;
+        let reach_across = offset_across_m.abs() + self.half_across_m;
+        let reach =
+            ((reach_along * reach_along + reach_across * reach_across).sqrt() + self.ramp_m).max(0.0);
+        self.cos_max = (reach / self.radius_m.max(1.0)).atan().cos();
+        self
     }
 
     /// Blend weight in `[0, 1]` at body-fixed unit direction `dir`: `1` inside
@@ -357,8 +386,9 @@ impl TerrainFlatten {
         // small relative to the radius the chord matches the arc to well under a
         // millimetre, so the simple projection is exact enough.
         let offset = (dir - self.center_dir) * self.radius_m;
-        let along = offset.dot(self.tangent_along).abs() - self.half_along_m;
-        let across = offset.dot(self.tangent_across).abs() - self.half_across_m;
+        let along = (offset.dot(self.tangent_along) - self.offset_along_m).abs() - self.half_along_m;
+        let across =
+            (offset.dot(self.tangent_across) - self.offset_across_m).abs() - self.half_across_m;
         if along <= 0.0 && across <= 0.0 {
             return 1.0;
         }

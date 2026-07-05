@@ -199,6 +199,9 @@ fn confirm_site(
             half_along_m: SITE_HALF_M,
             half_across_m: SITE_HALF_M,
             ramp_m: SITE_RAMP_M,
+            // Editor sites level a rectangle centred on their anchor.
+            rect_offset_along_m: 0.0,
+            rect_offset_across_m: 0.0,
         },
         StructureKind::BaseSite,
         None,

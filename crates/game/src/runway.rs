@@ -133,11 +133,14 @@ const BASIN_HALF_ALONG_M: f64 = RUNWAY_HALF_LENGTH_M + 400.0;
 /// and the launch complex (~1.1 km off to the `-across` side) with a green
 /// margin, so both runways sit fully inside cleared, flattened ground.
 const BASIN_HALF_ACROSS_M: f64 = 1900.0;
-/// The basin is offset toward the airside (the `+across` / secondary-runway
-/// side, i.e. **negative** along `complex_across`): the angled secondary fans
-/// much further out on that side than the launch complex does on its side, so
-/// a centred basin would waste half a kilometre of flattening behind the pads.
-const BASIN_OFFSET_ACROSS_M: f64 = -500.0;
+/// The basin **rectangle** is offset toward the airside (`+across` =
+/// `center_dir × heading`, the secondary-runway side): the angled secondary
+/// fans much further out on that side than the launch complex does on its
+/// side, so a centred rectangle would waste half a kilometre of flattening
+/// behind the pads. This is a rect offset within the plane tangent at the
+/// runway centre (`StructurePlacement::FlattenTo::rect_offset_across_m`), not
+/// a moved anchor — see the basin registration in [`build_spaceport`].
+const BASIN_RECT_OFFSET_ACROSS_M: f64 = 500.0;
 /// Wide blend from the basin back to natural terrain. The basin levels to the
 /// *mean* terrain over its footprint (balanced cut/fill — see
 /// `finish_runway_spawn`), so the edge height is only ~half the basin's relief;
@@ -609,19 +612,24 @@ pub(crate) fn build_spaceport(
         );
     }
 
-    // The base is one wide flat basin the spaceport sits inside, centred on the
-    // primary runway (`BASIN_OFFSET_ACROSS_M = 0`): the secondary runway sits off
-    // to the `+across` side and the launch/airport complex to the `-across`
-    // (`+off`) side, so the basin straddles both. `complex_across` (`+off`) is
-    // kept for the (currently zero) offset and matches `spawn_default_base`'s
-    // `+off` layout direction.
-    let complex_across = heading_tangent.cross(center_dir).normalize();
-    let basin_center_dir =
-        (center_dir * body_radius_m + complex_across * BASIN_OFFSET_ACROSS_M).normalize();
-    // The flatten's across axis at the (offset) basin centre — what
-    // `apply_structure_flatten` re-derives from the basin's anchor/heading, so
-    // the elevation sampling below uses the same rectangle the flatten installs.
-    let basin_across = basin_center_dir.cross(heading_tangent).normalize();
+    // The base is one wide flat basin the spaceport sits inside. The basin site
+    // is **anchored at the primary runway centre** — the flatten's level plane
+    // is tangent there, the same plane every paving mesh / runway slab /
+    // collider is built in (`RunwayFrame`, `connections::site_anchor`) — while
+    // its *rectangle* is pushed `BASIN_OFFSET_ACROSS_M` toward the secondary-
+    // runway side (the V fans much further out there than the launch complex
+    // does behind the pads). The offset must be a rect offset within the shared
+    // plane, never a moved anchor: a plane tangent at the offset centre tilts
+    // ~`offset/R` against the pavement — at 500 m that rose past the
+    // connections' 0.12 m lift ~350 m out and buried the core apron's far strip
+    // (the "dark serrated fringe" bug).
+    let basin_across = center_dir.cross(heading_tangent).normalize();
+    // Where the offset rectangle actually is — the elevation sampling below
+    // must average the ground the flatten will level, not the anchor's
+    // surroundings.
+    let basin_center_dir = (center_dir * body_radius_m
+        + basin_across * BASIN_RECT_OFFSET_ACROSS_M)
+        .normalize();
     let basin_center_h = hs
         .sample_height_m(basin_center_dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
         .unwrap_or(center_h as f32) as f64;
@@ -666,13 +674,18 @@ pub(crate) fn build_spaceport(
     // tiles that stream in bake flattened from the start.
     let basin_id = structure_registry.register(
         body_id,
-        basin_center_dir,
+        // Anchored at the runway centre — the flatten plane must be tangent
+        // where the pavement is built (see the basin comment above); the
+        // rectangle alone is pushed toward the secondary.
+        center_dir,
         heading_tangent,
         crate::structures::StructurePlacement::FlattenTo {
             elevation_m,
             half_along_m: BASIN_HALF_ALONG_M,
             half_across_m: BASIN_HALF_ACROSS_M,
             ramp_m: BASIN_RAMP_M,
+            rect_offset_along_m: 0.0,
+            rect_offset_across_m: BASIN_RECT_OFFSET_ACROSS_M,
         },
         crate::structures::StructureKind::BaseSite,
         None,

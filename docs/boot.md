@@ -76,8 +76,11 @@ warning rather than hanging (a stalled bake task or placement).
 
 Shown when no scenario is named: bare `just game` (the justfile default
 mode is now `menu`), `THALOS_SPAWN=menu`, or a bare `cargo run`. Skipped
-by: an explicit scenario, `just game shipyard`, and **`THALOS_AUTO_RUN`**
-(truthy) — agents keep a one-shot launch into orbit.
+by: an explicit scenario, `just game shipyard`, `just game hub` (the PLAY
+route without the menu: orbit placeholder + `HubSpaceportBuild` +
+`OpenSpaceCenterOnStart` armed at build, and `register_boot_steps` appends
+the PLACEMENT step — the headless `hub` screenshot preset rides this), and
+**`THALOS_AUTO_RUN`** (truthy) — agents keep a one-shot launch into orbit.
 
 **A bare menu boot defers the world** (`loading::WorldState`, default
 `Absent`): no celestial bodies, player ship, or star-field are spawned, no
@@ -87,9 +90,12 @@ The world-spawn systems (`rendering::spawn_bodies` +
 `focus_camera_on_homeworld`, `ship_view::spawn_player_ship`,
 `sky_render::dispatch_sky_generation`) are registered on
 `OnEnter(WorldState::Live)` instead of `Startup`; a `just game <scenario>`
-boot inserts `Live` at build, so the same chain fires on the first frame's
-state transition (after `Startup`, still behind the loading screen) and the
-scenario boot is unchanged. While the menu is up, `WinitSettings` is
+boot **queues** `Live` from a `Startup` system (never `insert_state(Live)`
+at build — Bevy fires the *initial* `StateTransition` before `PreStartup`,
+which would run the world-spawn chain before `Startup`'s resources like
+`RealSpaceRoot` exist and panic every spawn system), so the same chain
+fires at the first regular state transition (same frame, after `Startup`,
+still behind the loading screen) and the scenario boot is unchanged. While the menu is up, `WinitSettings` is
 swapped to reactive mode (~30 Hz idle / instant on input), so an idle menu
 costs near-zero CPU/GPU; the continuous game loop is restored on exit.
 `WorldState` is **one-way** — the world is never torn down; a menu

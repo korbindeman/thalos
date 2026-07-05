@@ -49,15 +49,14 @@ use thalos_terrain::TerrainFlatten;
 use thalos_world::BodyId;
 
 use crate::SimStage;
-use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::graphics_settings::GraphicsSettings;
-use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::structures::{StructureKind, StructurePlacement, StructureRegistry, StructureSite};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::{ShadowFocusOverride, SunShadowState};
-use crate::rendering::types::{CameraExposure, PlayerShip};
+use crate::rendering::sun_shadow::SunShadowState;
+use crate::rendering::types::CameraExposure;
+use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 // ── Clipmap rings ─────────────────────────────────────────────────────────────
@@ -213,13 +212,19 @@ fn site_scatter_region(site: &StructureSite, body_radius_m: f64) -> Option<Scatt
                 half_along_m,
                 half_across_m,
                 ramp_m,
+                rect_offset_along_m,
+                rect_offset_across_m,
                 ..
             } = site.placement
             else {
                 return None;
             };
             ScatterRegion {
-                footprint: rect(half_along_m, half_across_m, ramp_m),
+                // The lawn covers the levelled rectangle, offsets included
+                // (the basin rect is pushed off its anchor toward the
+                // secondary runway).
+                footprint: rect(half_along_m, half_across_m, ramp_m)
+                    .with_rect_offset(rect_offset_along_m, rect_offset_across_m),
                 treatment: ScatterTreatment::Lawn,
             }
         }
@@ -391,13 +396,10 @@ impl Plugin for GrassRenderPlugin {
     }
 }
 
-/// Pick the active grass body and keep the clipmap tile set around the player's
-/// ground point: dispatch builds for missing tiles (nearest first across all
-/// rings), despawn tiles beyond each ring's reach.
-///
-/// Centered on the **canonical player state**, not the camera (the canonical
-/// position is at the same epoch as `solar.states`; the camera's big_space cell
-/// lags a frame — kilometre-scale at orbital speed).
+/// Pick the active grass body and keep the clipmap tile set around the **view
+/// anchor** (the render camera, resolved body-fixed at a coherent epoch — see
+/// [`crate::rendering::view_anchor`]): dispatch builds for missing tiles
+/// (nearest first across all rings), despawn tiles beyond each ring's reach.
 #[allow(clippy::too_many_arguments)]
 fn drive_grass_tiles(
     mut grass: ResMut<GrassTiles>,
@@ -406,15 +408,12 @@ fn drive_grass_tiles(
     height_sources: Res<HeightSourceRegistry>,
     structures: Res<StructureRegistry>,
     graphics: Res<GraphicsSettings>,
-    freecam: Res<FreeCam>,
-    scatter_focus: Res<ShadowFocusOverride>,
-    game_ctx: Option<Res<State<crate::game_context::GameContext>>>,
-    ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
+    anchor: Res<ViewAnchor>,
     mut commands: Commands,
 ) {
-    let Some(states) = solar.states.as_deref() else {
+    if solar.states.is_none() {
         return;
-    };
+    }
 
     let despawn_all = |grass: &mut GrassTiles, commands: &mut Commands| {
         for (_, tile) in grass.tiles.drain() {
@@ -436,39 +435,22 @@ fn drive_grass_tiles(
         return;
     }
 
-    let cam_pos = scatter_view_center(
-        &freecam,
-        ship_cam_q.single().ok(),
-        scatter_focus.center_world,
-        crate::game_context::god_view_active(game_ctx.as_deref()),
-        sim.simulation.ship_state().position,
-    );
-
-    // Active body: nearest vegetated, terrain-backed body (the clouds driver's
-    // selection rule, narrowed to bodies that can grow grass).
-    let mut best: Option<(BodyId, f64)> = None;
-    for (id, body) in sim.system.bodies.iter().enumerate() {
-        if terrain_shading_style_for(body) != TerrainShadingStyle::Vegetated
-            || !height_sources.contains(id)
-        {
-            continue;
-        }
-        let Some(state) = states.get(id) else {
-            continue;
-        };
-        let alt = (cam_pos - state.position).length() - body.radius_m;
-        if best.is_none_or(|(_, best_alt)| alt < best_alt) {
-            best = Some((id, alt));
-        }
-    }
-
-    let Some((body_id, _)) = best else {
+    // Active body: the view anchor's (nearest terrain-backed) body, when it can
+    // grow grass. Grass exists around the VIEW — see `rendering::view_anchor`.
+    let anchored = anchor.resolved.filter(|a| {
+        sim.system
+            .bodies
+            .get(a.body)
+            .is_some_and(|b| terrain_shading_style_for(b) == TerrainShadingStyle::Vegetated)
+    });
+    let Some(view) = anchored else {
         if grass.body.is_some() {
             despawn_all(&mut grass, &mut commands);
             grass.body = None;
         }
         return;
     };
+    let body_id = view.body;
     if grass.body != Some(body_id) {
         despawn_all(&mut grass, &mut commands);
         grass.body = Some(body_id);
@@ -479,24 +461,14 @@ fn drive_grass_tiles(
             .collect();
     }
 
-    let body = &sim.system.bodies[body_id];
-    let radius_m = body.radius_m;
-    let state = &states[body_id];
+    let radius_m = view.radius_m;
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
     let mirror = height_sources.gpu_mirror(body_id);
 
-    let cam_body = state.orientation.inverse() * (cam_pos - state.position);
-    let cam_r = cam_body.length();
-    if cam_r <= 0.0 {
-        return;
-    }
-    let cam_dir = cam_body / cam_r;
-    let ground_h = height_source
-        .sample_height_m(cam_dir.as_vec3(), 25.0)
-        .unwrap_or(0.0) as f64;
-    let agl = cam_r - (radius_m + ground_h);
+    let cam_dir = view.cam_dir;
+    let agl = view.agl_m;
     grass.agl_m = agl;
     if agl > GRASS_DESPAWN_AGL_M {
         if !grass.tiles.is_empty() || !grass.in_flight.is_empty() {
@@ -841,10 +813,7 @@ fn update_grass_material(
     sim: Res<SimulationState>,
     time: Res<Time>,
     exposure: Res<CameraExposure>,
-    ship: Query<&GlobalTransform, With<PlayerShip>>,
-    ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
-    freecam: Res<FreeCam>,
-    origin: Res<crate::rendering::RenderOrigin>,
+    anchor: Res<ViewAnchor>,
     sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<GrassMaterial>>,
 ) {
@@ -869,11 +838,18 @@ fn update_grass_material(
 
     // Wind: tangent to the surface under the camera, veering slowly. Render
     // space is inertial-axis-aligned, so the world-space tangent basis comes
-    // straight from the camera's world up.
+    // straight from the view anchor's local vertical (the blades exist around
+    // the view; the craft may be elsewhere entirely).
     let t = time.elapsed_secs();
-    let up = (sim.simulation.ship_state().position - body_state.position)
-        .normalize_or_zero()
-        .as_vec3();
+    let up = anchor
+        .resolved
+        .filter(|a| a.body == body_id)
+        .map(|a| (body_state.orientation * a.cam_dir).as_vec3())
+        .unwrap_or_else(|| {
+            (sim.simulation.ship_state().position - body_state.position)
+                .normalize_or_zero()
+                .as_vec3()
+        });
     let seed = if up.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
     let east = seed.cross(up).normalize_or_zero();
     let north = up.cross(east);
@@ -900,34 +876,12 @@ fn update_grass_material(
         .unwrap_or((Vec3::ZERO, 0.0));
     let sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
-    // Fade reference = the player craft, passed as an OFFSET from the camera
-    // (`ship − camera`) so the shader can rebuild it in the current frame's
-    // render origin (`view.world_position + offset`). An absolute anchor is one
-    // frame stale and breaks across big_space floating-origin recentres — it
-    // jumps a whole cell while the parked craft co-rotates through space,
-    // popping fade-band tiles in/out (see `grass.wgsl`). The offset is
-    // origin-invariant, so the recentre cancels. EVA has no PlayerShip and
-    // freecam flies free of the player → offset 0 = fade around the camera.
-    let cam_render = ship_cam.iter().next().map(|gt| gt.translation());
-    let anchor = match (freecam.active, ship.iter().next(), cam_render) {
-        (false, Some(ship_gt), Some(cam)) => {
-            let off = ship_gt.translation() - cam;
-            Vec4::new(off.x, off.y, off.z, 1.0)
-        }
-        (false, None, Some(cam)) => {
-            // EVA (no PlayerShip): pin the fade to the CANONICAL player position
-            // (this-frame, f64-derived: ship_state − render origin), NOT the
-            // camera — whose big_space cell lags a frame, km-scale at the
-            // surface's ~260 m/s co-rotation, which collapsed the blades the
-            // instant the sim ran. Same origin-invariant (player − camera) offset
-            // the ship arm uses; see `scatter_view_center`'s note on the lag.
-            let player_render =
-                (sim.simulation.ship_state().position - origin.position).as_vec3();
-            let off = player_render - cam;
-            Vec4::new(off.x, off.y, off.z, 1.0)
-        }
-        _ => Vec4::ZERO,
-    };
+    // Fade reference = the VIEW (`view.world_position` in the shader, offset 0):
+    // blade density is a per-instance LOD keyed by distance from the eye. Offset
+    // 0 is inherently origin-invariant and this-frame-exact — the former craft-
+    // anchored offset worked around the main-world camera transform lagging a
+    // frame, which the shader's own view position doesn't (see `grass.wgsl`).
+    let anchor = Vec4::ZERO;
 
     for (idx, handle) in grass.materials.iter().enumerate() {
         let Some(mut material) = materials.get_mut(handle) else {

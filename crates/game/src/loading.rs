@@ -356,12 +356,20 @@ impl Plugin for LoadingScreenPlugin {
 fn register_boot_steps(
     situation: Res<SpawnSituation>,
     dest: Res<LoadDestination>,
+    hub_build: Res<crate::space_center::HubSpaceportBuild>,
     mut tracker: ResMut<LoadingTracker>,
 ) {
     if dest.0 == AppState::MainMenu {
         tracker.begin(Vec::new());
     } else {
-        tracker.begin(steps_for(*situation, true));
+        let mut steps = steps_for(*situation, true);
+        // A hub boot (`just game hub` / the headless hub preset) builds the
+        // spaceport behind this same pass (`space_center::finish_hub_spaceport`
+        // completes PLACEMENT), mirroring the start screen's PLAY.
+        if hub_build.pending {
+            steps.push(StepDesc::new(step::PLACEMENT, "Building spaceport", 1.0));
+        }
+        tracker.begin(steps);
     }
 }
 

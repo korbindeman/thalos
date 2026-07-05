@@ -21,9 +21,6 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::prelude::{CellCoord, Grid};
 
-use crate::base_editor::base_editor_closed;
-use crate::rendering::sun_shadow::ShadowFocusOverride;
-use crate::space_center::space_center_closed;
 
 /// Gizmo group for the god-view overlays (launch-point highlights, base-editor
 /// placement ghosts, space-center hover outlines). The **default** gizmo group
@@ -121,11 +118,11 @@ pub struct GodViewInput {
 }
 
 /// Place the ship camera at the god-view defined by `orbit` around `focus`.
-/// Right-drag orbits, scroll zooms, WASD pans the focus across the ground. Also
-/// drives the sun-shadow cascade to follow the focus (not the parked craft), so
-/// building shadows render across the whole base and persist when the camera
-/// booms out. Ungated by `SimStage` — the caller runs it while the mode pauses
-/// the sim.
+/// Right-drag orbits, scroll zooms, WASD pans the focus across the ground.
+/// Ungated by `SimStage` — the caller runs it while the mode pauses the sim.
+/// Every view-dependent detail system (scatter, shadow cascade) follows the
+/// camera by itself via [`crate::rendering::view_anchor`] — no per-mode focus
+/// plumbing.
 #[allow(clippy::too_many_arguments)]
 pub fn drive_god_view(
     focus: GodViewFocus,
@@ -135,7 +132,6 @@ pub fn drive_god_view(
     root_grid: &Grid,
     transform: &mut Transform,
     cell: &mut CellCoord,
-    shadow_focus: &mut ShadowFocusOverride,
 ) {
     if !input.over_ui && input.orbit_held && input.drag != Vec2::ZERO {
         orbit.yaw -= input.drag.x * ORBIT_SENSITIVITY;
@@ -180,7 +176,6 @@ pub fn drive_god_view(
     }
 
     let focus_center = focus.center_world + orbit.pan_world;
-    shadow_focus.center_world = Some(focus_center);
     let offset_dir = horiz * pitch.cos() + up * pitch.sin();
     let camera_pos_world = focus_center + offset_dir * orbit.distance as f64;
     let to_focus = (focus_center - camera_pos_world).normalize();
@@ -196,18 +191,6 @@ impl Plugin for GodViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GodViewOrbit>()
             .init_gizmo_group::<GodViewGizmos>()
-            .add_systems(Startup, configure_god_view_gizmos)
-            .add_systems(
-                Update,
-                clear_shadow_focus.run_if(base_editor_closed.and_then(space_center_closed)),
-            );
-    }
-}
-
-/// Drop the cascade-centre override when no god-view mode is active, so the
-/// sun-shadow cascade reverts to craft-centred + the altitude gate.
-fn clear_shadow_focus(mut shadow_focus: ResMut<ShadowFocusOverride>) {
-    if shadow_focus.center_world.is_some() {
-        shadow_focus.center_world = None;
+            .add_systems(Startup, configure_god_view_gizmos);
     }
 }

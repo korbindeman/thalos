@@ -12,7 +12,38 @@ it, explain why the existing approach falls short, and update this
 file (and the relevant spec under `docs/`) so the next agent inherits
 the new shape, not the old one. No silent rewrites.
 
-## Current focus: graphics fidelity
+## Current focus: architecture & code quality
+
+The active sprint is a **consolidation pass**: the feature push (surface bases,
+space-center hub, launch flows, GPU grass, shadow unification) left behind
+sloppily hacked seams that now generate a steady stream of bugs — parallel
+mechanisms for the same job, copy-pasted flows that drift apart, and
+single-craft / single-site assumptions baked into what should be N-ary systems.
+The goal is to go over every feature area and give it a **proper, unified
+system**: one canonical way to do each thing, DRY across similar features, and
+natural support for any N instances. The plan lives in
+`docs/architecture_cleanup.md`. Guiding rules for this sprint:
+
+- **One canonical path per operation.** Spawning/placing/teleporting a craft,
+  opening/closing a game mode, placing a structure on terrain — each gets a
+  single shared core that every entry point routes through. No parallel
+  near-copies; if a new entry point needs a variation, it parameterizes the
+  core, it does not fork it.
+- **N by default.** New and reworked systems must not assume "the one craft",
+  "the one runway", "the one base". Where a hard single-instance assumption is
+  kept for now (e.g. `Simulation`'s one canonical craft), it is kept knowingly,
+  behind an accessor, and recorded in the plan doc — not implied by a bare
+  resource.
+- **Finish the in-flight unifications before adding parallel machinery.** The
+  `GameContext` sub-state (docs/ui_flow.md) and `CraftRegime`
+  (docs/regimes.md) migrations exist precisely to kill boolean/state sprawl —
+  new modes and regime consumers go through them, and completing their
+  remaining phases outranks new features.
+- **Delete dead code on contact.** The removed bake pipeline's remains and any
+  superseded path you touch get deleted in the same change, not left "for
+  reference".
+
+## Secondary focus: graphics fidelity
 
 The active sprint is pushing toward MSFS/KSP2-tier visuals. The full plan is in
 `docs/graphics_fidelity.md` (restructured 2026-06-30 around a full architecture
@@ -90,6 +121,9 @@ just game cruise          # Meridian at ~15,000 ft, level cruise over dry land
 just game shipyard        # open straight into the in-game ship editor
                           #   (also: the pause menu's SHIPYARD button
                           #    from any running mode)
+just game hub             # straight into the space-center hub over the
+                          #   spaceport (the PLAY path minus the start
+                          #   screen: base built, no craft placed)
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just preview              # headless procedural-object gallery → PNGs in
                           #   tools/preview/out/ (trees/shrub, grass, rocks/
@@ -209,9 +243,12 @@ ringed by trees) is the planned next phase.
 screenshot` (`crate::screenshot::HeadlessScreenshotPlugin`, activated by the
 `THALOS_SCREENSHOT` env var). This boots the **real game binary** with no window
 and no winit (a `ScheduleRunnerPlugin` frame loop, same as `just preview`),
-builds the world for a named **preset** (today `spaceport-aerial`, which boots
-the `runway` scenario so the whole spaceport + settled terrain come up behind the
-loading screen), poses the *actual* `ShipCamera` at a scripted god-view over the
+builds the world for a named **preset** (`spaceport-aerial`, which boots the
+`runway` scenario so the whole spaceport + settled terrain + parked aircraft come
+up behind the loading screen; and `hub`, which boots the `just game hub` route —
+the space-center view exactly as PLAY presents it, craft left in orbit — the
+regression probe for view-anchored surface detail), poses the *actual*
+`ShipCamera` at a scripted god-view over the
 pad — reusing the real camera keeps the scene-depth / atmosphere / SSAO /
 sun-shadow render graph coupled — hides the HUD, renders one frame off-screen to
 `tools/screenshots/*.png`, and exits. So an agent can now see the composed
@@ -805,6 +842,19 @@ Key modules:
     `4 × radius`. Also spawns the always-on `BodySky` fullscreen
     quad per body (rebranded from the deprecated "sky dome" — now
     handles halo, sky, and aerial perspective in one pass).
+  - `view_anchor` — the **one per-frame answer to "where is the view?"**
+    for every view-dependent detail system. `ViewAnchor` (sole writer
+    `update_view_anchor`, top of `SimStage::Sync` before
+    `sync_solar_system_state`) resolves the `ShipCamera`'s big_space pose
+    against the nearest terrain-backed body, **body-fixed at a coherent
+    epoch** (previous-frame pose paired with previous-frame body states, so
+    re-projection with the current frame's `BodyState` is exact under
+    co-rotation × warp — see the module doc). Surface scatter (trees /
+    grass / GPU grass / rocks) and the sun-shadow cascade centre all read
+    it; **nothing view-dependent may anchor to the player craft or a mode
+    flag** — new camera modes (god views, freecam, screenshot rigs) get
+    correct detail with zero per-mode plumbing. Replaced
+    `scatter_view_center` + `ShadowFocusOverride`.
 - `ghost_bodies` — Renders ghost planet positions during time warp
   preview.
 - `sky_render` — Renders procedural sky from `thalos_celestial`

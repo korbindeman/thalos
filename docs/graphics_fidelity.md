@@ -125,6 +125,19 @@ Concretely, the invariants every surface must satisfy:
    terrain the air has already hazed.
 6. **Reflections reflect the real world.** Water and the hull reflect the actual
    sky/sun/terrain (driven from the atmosphere), not a fiction pinned to `t=0`.
+7. **One view anchor — detail exists around the camera, not the craft.**
+   Every view-dependent detail system (terrain streaming, scatter clipmaps for
+   trees/grass/rocks, the sun-shadow cascade centre) is a function of **the
+   render view**, so the same world renders consistently from any camera —
+   flight orbit, freecam, god-view hub/base-editor, headless screenshot rig —
+   with zero per-mode plumbing. The single authority is
+   `rendering::view_anchor::ViewAnchor` (the camera pose resolved body-fixed at
+   a coherent epoch; sole writer, all detail drivers read it). The player craft
+   is just an object *in* the world; nothing may anchor detail to it. Landed
+   2026-07-05, replacing the per-driver `scatter_view_center` fallback chain +
+   `ShadowFocusOverride`. Regression probe: `just screenshot hub` (camera at
+   the base, craft in orbit — anything craft-anchored goes missing there
+   first).
 
 Today, items 1–6 hold *within* the spine (terrain ↔ vegetation ↔ rock), partially
 for water, and **almost none of them hold for crafts/structures** (which only get

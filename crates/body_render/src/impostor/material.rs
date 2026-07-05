@@ -7,7 +7,6 @@ use bevy::render::render_resource::{
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
-use thalos_terrain::StaticSurfaceData;
 
 /// Re-export so existing call sites resolve unchanged. The canonical home for
 /// `CLOUD_BAND_COUNT` / `MAX_ECLIPSE_OCCLUDERS` is now `crate::shading`.
@@ -97,47 +96,11 @@ pub struct PlanetWaterParams {
     pub color_depth: Vec4,
 }
 
-impl PlanetWaterParams {
-    pub fn from_static_surface(body: &StaticSurfaceData) -> Self {
-        if let Some(water) = body.water_appearance {
-            Self {
-                color_depth: Vec4::new(
-                    water.color_depth[0],
-                    water.color_depth[1],
-                    water.color_depth[2],
-                    water.color_depth[3],
-                ),
-            }
-        } else {
-            Self {
-                color_depth: Vec4::new(0.012, 0.040, 0.090, 120.0),
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct PlanetCoastlineParams {
     pub warp_amp_radians: f32,
     pub jitter_amp_m: f32,
     pub seed: u32,
-}
-
-impl PlanetCoastlineParams {
-    pub fn from_static_surface(body: &StaticSurfaceData) -> Self {
-        let seed = (body.detail_params.seed as u32)
-            ^ ((body.detail_params.seed >> 32) as u32)
-            ^ 0xC0A5_711E_u32;
-
-        Self {
-            // Coastline shape is baked into the terrain cubemap. Keep the
-            // runtime material from adding high-frequency shoreline fuzz
-            // that makes editor/runtime diverge from the bake.
-            warp_amp_radians: 0.0,
-            jitter_amp_m: 0.0,
-            seed,
-        }
-    }
 }
 
 impl Default for PlanetParams {

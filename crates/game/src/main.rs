@@ -290,6 +290,14 @@ fn main() {
     let headless = screenshot_config.is_some();
 
     let open_shipyard = matches!(request.as_str(), "shipyard" | "editor" | "vab") && !headless;
+    // `just game hub` boots straight into the space-center hub: the PLAY path
+    // without the start screen — placeholder parking orbit, spaceport built
+    // behind the loading pass (no craft placed), hub opened on reveal. The
+    // headless `hub` screenshot preset rides the same route.
+    let boot_hub = matches!(request.as_str(), "hub" | "space-center" | "spacecenter")
+        || screenshot_config
+            .as_ref()
+            .is_some_and(|cfg| cfg.preset.boots_hub());
     let auto_run = spawn::AutoRun::from_env();
     // Bare launch → start screen, behind the boot load of the placeholder
     // parking-orbit world. `THALOS_AUTO_RUN` skips the menu (straight into
@@ -298,7 +306,7 @@ fn main() {
     let menu_boot = wants_menu && !open_shipyard && !auto_run.enabled && !headless;
     let situation = if let Some(cfg) = &screenshot_config {
         cfg.preset.spawn_situation()
-    } else if open_shipyard || wants_menu {
+    } else if open_shipyard || wants_menu || boot_hub {
         SpawnSituation::ShipOrbit
     } else {
         SpawnSituation::from_request(&spawn_request)
@@ -517,6 +525,12 @@ fn main() {
         // during `Loading` would gate off the very systems that complete the
         // load (see `OpenShipyardOnStart`).
         .insert_resource(shipyard_editor::OpenShipyardOnStart(open_shipyard))
+        // `just game hub` / the headless hub preset: build the spaceport (no
+        // craft) behind the boot loading pass and open the space-center hub on
+        // reveal — the same arming the start screen's PLAY does at runtime.
+        // `register_boot_steps` adds the PLACEMENT step when the build is armed.
+        .insert_resource(space_center::HubSpaceportBuild { pending: boot_hub })
+        .insert_resource(space_center::OpenSpaceCenterOnStart(boot_hub))
         // Where the boot load reveals to: the start screen for a bare
         // launch, straight into the scenario otherwise.
         .insert_resource(loading::LoadDestination(if menu_boot {
@@ -526,15 +540,25 @@ fn main() {
         }))
         // A bare menu boot defers the world entirely: no bodies, ship, or sky
         // are spawned until the menu starts a scenario (see
-        // `loading::WorldState`). Scenario boots insert `Live`, which fires
-        // the same `OnEnter(WorldState::Live)` world-spawn chain on the first
-        // frame — identical to the old Startup timing, one frame later,
-        // behind the loading screen either way.
-        .insert_state(if menu_boot {
-            loading::WorldState::Absent
-        } else {
-            loading::WorldState::Live
-        })
+        // `loading::WorldState`). Every boot starts `Absent`; a scenario boot
+        // queues `Live` from a `Startup` system rather than inserting the
+        // `Live` state at build: Bevy runs the *initial* `StateTransition`
+        // BEFORE `PreStartup` (see `bevy_app::main_schedule`), so a
+        // build-inserted `Live` fires the `OnEnter(WorldState::Live)`
+        // world-spawn chain before `Startup` has inserted its resources
+        // (`RealSpaceRoot` etc.) — every spawn system panics on missing
+        // resources. Queued from `Startup`, the transition applies at the
+        // first regular `StateTransition` — same frame, after the `Startup`
+        // command flush, behind the loading screen.
+        .insert_state(loading::WorldState::Absent)
+        .add_systems(
+            Startup,
+            move |mut next: ResMut<NextState<loading::WorldState>>| {
+                if !menu_boot {
+                    next.set(loading::WorldState::Live);
+                }
+            },
+        )
         // Every spawn situation starts paused (warp 0×); `THALOS_AUTO_RUN`
         // resumes to 1× as soon as the loading screen clears (for agents).
         .insert_resource(auto_run)

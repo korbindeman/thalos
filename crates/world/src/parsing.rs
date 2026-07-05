@@ -277,10 +277,15 @@ fn parse_hex_color(hex: &str) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thalos_terrain::{BodyArchetype, TerrainConfig};
+    use thalos_terrain::TerrainConfig;
 
     #[test]
-    fn mira_uses_feature_terrain_when_loaded_from_asset() {
+    fn mira_renders_as_placeholder_without_terrain() {
+        // Terrain generation is intentionally disabled for Mira (no per-body
+        // generator yet), so it must parse to `TerrainConfig::None` — the
+        // discriminator `rendering::spawn` reads to route Mira to the
+        // solid-colour placeholder impostor instead of the Earth-like
+        // `ProceduralSurface`.
         let system_source = include_str!("../../../assets/solar_system.ron");
         let mira_details = include_str!("../../../assets/bodies/mira.ron");
 
@@ -291,16 +296,18 @@ mod tests {
             load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
         let mira = system.body_by_name("Mira").expect("Mira exists");
 
-        match &mira.terrain {
-            TerrainConfig::Feature(config) => {
-                assert_eq!(config.archetype, BodyArchetype::AirlessImpactMoon);
-            }
-            other => panic!("Mira should use feature terrain, got {other:?}"),
-        }
+        assert!(
+            matches!(mira.terrain, TerrainConfig::None),
+            "Mira should have no procedural terrain (placeholder), got {:?}",
+            mira.terrain
+        );
     }
 
     #[test]
-    fn vaelen_uses_feature_terrain_when_loaded_from_asset() {
+    fn vaelen_renders_as_placeholder_without_terrain() {
+        // See `mira_renders_as_placeholder_without_terrain`. Vaelen is likewise a
+        // placeholder until a real generator exists; its retained
+        // `terrestrial_atmosphere` must not resurrect procedural terrain.
         let system_source = include_str!("../../../assets/solar_system.ron");
         let vaelen_details = include_str!("../../../assets/bodies/vaelen.ron");
 
@@ -311,41 +318,11 @@ mod tests {
             load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
         let vaelen = system.body_by_name("Vaelen").expect("Vaelen exists");
 
-        match &vaelen.terrain {
-            TerrainConfig::Feature(config) => {
-                assert_eq!(config.archetype, BodyArchetype::ColdDesertFormerlyWet);
-            }
-            other => panic!("Vaelen should use feature terrain, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn airless_bodies_use_feature_terrain() {
-        let system_source = include_str!("../../../assets/solar_system.ron");
-        let mira_details = include_str!("../../../assets/bodies/mira.ron");
-        let vaelen_details = include_str!("../../../assets/bodies/vaelen.ron");
-
-        let mut details = HashMap::new();
-        details.insert("Mira".to_string(), mira_details);
-        details.insert("Vaelen".to_string(), vaelen_details);
-
-        let system =
-            load_solar_system_with_bodies(system_source, &details).expect("parse solar_system.ron");
-
-        for name in ["Mira", "Vaelen"] {
-            let body = system.body_by_name(name).expect("body exists");
-            match &body.terrain {
-                TerrainConfig::Feature(config) => {
-                    assert!(matches!(
-                        config.archetype,
-                        BodyArchetype::AirlessImpactMoon | BodyArchetype::ColdDesertFormerlyWet
-                    ));
-                }
-                other => {
-                    panic!("{name} should use feature terrain, got {other:?}")
-                }
-            }
-        }
+        assert!(
+            matches!(vaelen.terrain, TerrainConfig::None),
+            "Vaelen should have no procedural terrain (placeholder), got {:?}",
+            vaelen.terrain
+        );
     }
 
     #[test]

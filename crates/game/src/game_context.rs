@@ -86,16 +86,6 @@ pub fn flight_or_no_context(ctx: Option<Res<State<GameContext>>>) -> bool {
         .unwrap_or(true)
 }
 
-/// `true` in the two god-view overlay contexts — the space-center hub and the
-/// in-world base editor — where the camera booms around a surface focus decoupled
-/// from any craft. Surface scatter (grass / trees / rocks) reads this to follow
-/// the view instead of the (possibly parked, possibly orbiting-placeholder)
-/// craft. Absent sub-state (Loading / MainMenu) → `false`.
-pub fn god_view_active(ctx: Option<&State<GameContext>>) -> bool {
-    ctx.map(|c| matches!(*c.get(), GameContext::SpaceCenter | GameContext::BaseEditor))
-        .unwrap_or(false)
-}
-
 /// `true` while a modal context (hub / VAB / base editor) freezes the sim.
 /// Absent sub-state → `false` (Loading is not paused; MainMenu pauses via its
 /// own `AppState` check in `sim_clock`).

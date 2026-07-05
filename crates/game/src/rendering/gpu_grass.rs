@@ -44,15 +44,14 @@ use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
-use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
-use crate::freecam::{FreeCam, scatter_view_center};
 use crate::graphics_settings::GraphicsSettings;
 use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::rendering::grass::grass_scatter_regions;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::{ShadowFocusOverride, SunShadowState};
-use crate::rendering::types::{CameraExposure, PlayerShip};
+use crate::rendering::sun_shadow::SunShadowState;
+use crate::rendering::types::CameraExposure;
+use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 use crate::structures::StructureRegistry;
 
@@ -157,17 +156,14 @@ fn drive_gpu_grass(
     height_sources: Res<HeightSourceRegistry>,
     structures: Res<StructureRegistry>,
     graphics: Res<GraphicsSettings>,
-    freecam: Res<FreeCam>,
-    scatter_focus: Res<ShadowFocusOverride>,
-    game_ctx: Option<Res<State<crate::game_context::GameContext>>>,
-    ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
+    view_anchor: Res<ViewAnchor>,
     time: Res<Time>,
     mut visuals: Query<&mut GpuGrassVisual>,
     mut commands: Commands,
 ) {
-    let Some(states) = solar.states.as_deref() else {
+    if solar.states.is_none() {
         return;
-    };
+    }
     if !graphics.grass || !graphics.gpu_grass {
         if state.body.is_some() {
             park(&mut state, &mut commands);
@@ -175,58 +171,33 @@ fn drive_gpu_grass(
         return;
     }
 
-    let cam_pos = scatter_view_center(
-        &freecam,
-        ship_cam_q.single().ok(),
-        scatter_focus.center_world,
-        crate::game_context::god_view_active(game_ctx.as_deref()),
-        sim.simulation.ship_state().position,
-    );
-
-    // Active body: nearest vegetated, terrain-backed (the CPU grass rule).
-    let mut best: Option<(BodyId, f64)> = None;
-    for (id, body) in sim.system.bodies.iter().enumerate() {
-        if terrain_shading_style_for(body) != TerrainShadingStyle::Vegetated
-            || !height_sources.contains(id)
-        {
-            continue;
-        }
-        let Some(body_state) = states.get(id) else {
-            continue;
-        };
-        let alt = (cam_pos - body_state.position).length() - body.radius_m;
-        if best.is_none_or(|(_, best_alt)| alt < best_alt) {
-            best = Some((id, alt));
-        }
-    }
-    let Some((body_id, _)) = best else {
+    // Active body: the view anchor's (nearest terrain-backed) body, when it can
+    // grow grass. The field follows the VIEW — see `rendering::view_anchor`.
+    let anchored = view_anchor.resolved.filter(|a| {
+        sim.system
+            .bodies
+            .get(a.body)
+            .is_some_and(|b| terrain_shading_style_for(b) == TerrainShadingStyle::Vegetated)
+    });
+    let Some(view) = anchored else {
         if state.body.is_some() {
             park(&mut state, &mut commands);
         }
         return;
     };
+    let body_id = view.body;
     if state.body != Some(body_id) {
         park(&mut state, &mut commands);
         state.body = Some(body_id);
     }
 
-    let body = &sim.system.bodies[body_id];
-    let radius_m = body.radius_m;
-    let body_state = &states[body_id];
+    let radius_m = view.radius_m;
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
 
-    let cam_body = body_state.orientation.inverse() * (cam_pos - body_state.position);
-    let cam_r = cam_body.length();
-    if cam_r <= 0.0 {
-        return;
-    }
-    let ground_dir = cam_body / cam_r;
-    let ground_h = height_source
-        .sample_height_m(ground_dir.as_vec3(), 25.0)
-        .unwrap_or(0.0) as f64;
-    state.agl_m = cam_r - (radius_m + ground_h);
+    let ground_dir = view.cam_dir;
+    state.agl_m = view.agl_m;
 
     // High above the field: keep the entity (cheap when hidden by the material
     // update below) but don't chase the ground with window rebuilds.
@@ -497,10 +468,7 @@ fn update_gpu_grass_material(
     sim: Res<SimulationState>,
     time: Res<Time>,
     exposure: Res<CameraExposure>,
-    ship: Query<&GlobalTransform, With<PlayerShip>>,
-    ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
-    freecam: Res<FreeCam>,
-    origin: Res<crate::rendering::RenderOrigin>,
+    view_anchor: Res<ViewAnchor>,
     sun_shadow: Option<Res<SunShadowState>>,
     height_sources: Res<HeightSourceRegistry>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
@@ -537,9 +505,16 @@ fn update_gpu_grass_material(
     material.params.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, flux);
 
     let t = time.elapsed_secs();
-    let up = (sim.simulation.ship_state().position - body_state.position)
-        .normalize_or_zero()
-        .as_vec3();
+    // Local vertical at the VIEW (the field exists around the view anchor).
+    let up = view_anchor
+        .resolved
+        .filter(|a| a.body == body_id)
+        .map(|a| (body_state.orientation * a.cam_dir).as_vec3())
+        .unwrap_or_else(|| {
+            (sim.simulation.ship_state().position - body_state.position)
+                .normalize_or_zero()
+                .as_vec3()
+        });
     let seed = if up.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
     let east = seed.cross(up).normalize_or_zero();
     let north = up.cross(east);
@@ -561,19 +536,12 @@ fn update_gpu_grass_material(
         .unwrap_or((Vec3::ZERO, 0.0));
     material.params.sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
-    let cam_render = ship_cam.iter().next().map(|gt| gt.translation());
-    material.params.anchor = match (freecam.active, ship.iter().next(), cam_render) {
-        (false, Some(ship_gt), Some(cam)) => {
-            let off = ship_gt.translation() - cam;
-            Vec4::new(off.x, off.y, off.z, 1.0)
-        }
-        (false, None, Some(cam)) => {
-            let player_render = (sim.simulation.ship_state().position - origin.position).as_vec3();
-            let off = player_render - cam;
-            Vec4::new(off.x, off.y, off.z, 1.0)
-        }
-        _ => Vec4::ZERO,
-    };
+    // Fade reference = the VIEW (`view.world_position` in the shader, offset 0):
+    // blade density is a per-instance LOD keyed by distance from the eye. Offset
+    // 0 is origin-invariant and this-frame-exact — the former craft-anchored
+    // offset worked around the main-world camera transform lagging a frame,
+    // which the shader's own view position doesn't.
+    material.params.anchor = Vec4::ZERO;
 
     // ── Window / lattice registration ────────────────────────────────────────
     material.params.frame_east = Vec4::new(
